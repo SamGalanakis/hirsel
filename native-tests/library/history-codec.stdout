@@ -1,0 +1,9 @@
+ok group round trip
+ok group flips and truncations classified
+ok group decoding canonical
+ok head round trip
+ok head flips and truncations classified
+ok leaf cuts match the reference
+ok trees read back and classify damage
+ok equal states give equal roots
+ok chain rules

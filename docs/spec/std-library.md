@@ -4218,6 +4218,17 @@ fn store.compact[S](mut s: store.Store[S]) -> Result[(), store.StoreError] uses 
 fn store.close[S](take store: store.Store[S]) -> Result[(), store.StoreError] uses {store}
 ```
 
+**History format.** `std@1/history` is the codec of the
+[history format](storage.md#history-format) the store cutover writes: `encode_group` and
+the streaming `group_writer`/`add_commit`/`finish_group` (each commit's bytes copied once
+into one buffer, the definition table and count added at the cut), `decode_group`
+against the digest that names the group, `follow` for the chain rules across groups,
+`build_tree` and the streaming `tree_builder` for content-cut checkpoint nodes,
+`check_level` to validate a checkpoint level by level from `root_expect`, and
+`encode_head`/`decode_head`. Decoders refuse with
+`history.Fault = Corrupt() | Unsupported(found: Bytes)`: `Unsupported` carries the magic
+of a record in another format version, recognised before any digest or sum is checked.
+
 `std@1/store` is an embedded, transactional, ordered key-value store written in Hirsel
 over an explicit `Backend[S]` function dictionary and owned backend state `S`. The store
 cutover replaces `Backend[S]`, `StoreFaults` and `Injected` with the authority seam of

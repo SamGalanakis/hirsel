@@ -1,0 +1,1287 @@
+// The history format of a place's store (docs/spec/storage.md STORE-11,
+// "History format"): commit groups chained by SHA-256 digests, checkpoint
+// trees of content-cut nodes, and the head record. Every integer is
+// fixed-width little-endian and every byte string is a u32 length and its
+// bytes. One format version per magic; a reader that meets another magic
+// refuses, and there is no second reader.
+//
+// Decoders check, they never repair: a group is checked against the digest
+// that names it, a node against the digest its parent names, a head record
+// against its own sum. Any failure is `Error(())`, which the engine reports as
+// `Corrupt(name)` and which removes nothing. Only the local log's frame layer
+// can call a record torn; nothing here does.
+
+/// One write of a commit: a put (op 1) or a delete (op 2).
+pub type Write = Put(key: Bytes, value: Bytes) | Delete(key: Bytes)
+
+/// An entry a group's commits ran: definition path, signature fingerprint,
+/// code hash and runtime contract revision (RUN-3, RUN-8). Commits refer to it by index.
+pub type Def {
+  path: Bytes,
+  fingerprint: Bytes,
+  code: Bytes,
+  revision: Bytes,
+}
+
+/// The call stream, position and request digest a transaction arrived with
+/// (STORE-12).
+pub type Arrival {
+  identity: Bytes,
+  position: u64,
+  digest: Bytes,
+}
+
+/// A transaction's call record (STORE-2, STORE-4): its entry, call
+/// information, arrival, argument bytes and canonical outcome bytes.
+pub type Call {
+  def: u32,
+  at: i64,
+  seed: u64,
+  caller: Bytes,
+  arrival: Option[Arrival],
+  args: Bytes,
+  outcome: Bytes,
+}
+
+/// One journal record of a run at the place (STORE-18).
+pub type Record {
+  kind: u8,
+  payload: Bytes,
+}
+
+/// A checkpoint descriptor: the checkpoint's version (a group's last), that
+/// group's digest, the root node, the number of tree levels, and the state's
+/// entry count and key and value bytes.
+pub type Descriptor {
+  version: u64,
+  digest: Bytes,
+  root: Bytes,
+  height: u8,
+  entries: u64,
+  bytes: u64,
+}
+
+/// The checkpoint node bounds a store records in its genesis.
+pub type Bounds {
+  node_min: u32,
+  node_mean: u32,
+  node_max: u32,
+}
+
+/// A named pin of a retained version (STORE-8).
+pub type Pin {
+  name: Bytes,
+  version: u64,
+}
+
+/// A commit the engine makes on its own behalf.
+pub type Engine = Genesis(
+  key_bytes: u32,
+  value_bytes: u32,
+  transaction_bytes: u32,
+  range_rows: u32,
+  bounds: Bounds
+) | Claim(epoch: u64, attempt: Bytes, identity: Bytes) | Checkpoint(Descriptor) | Retain(
+  floor: u64,
+  pins: List[Pin],
+  checkpoints: List[Descriptor]
+) | Fork(identity: Bytes, origin: Bytes, at: u64) | StreamFence(Bytes) | StreamPurge(
+  Bytes
+) | Library(name: Bytes, payload: Bytes)
+
+/// What a commit records besides its writes: kind 1, 2 or 3.
+pub type Body = Transaction(Call) | Engine(Engine) | Run(run: Bytes, records: List[Record])
+
+pub type Commit {
+  body: Body,
+  writes: List[Write],
+}
+
+/// The commits of one advance. `first` is the version of its first commit.
+pub type Group {
+  prev: Bytes,
+  first: u64,
+  epoch: u64,
+  commits: List[Commit],
+  defs: List[Def],
+}
+
+/// What a reader trusts after the groups it has checked: the last group's
+/// digest and version, the writer epoch, and the store identity.
+pub type Tip {
+  digest: Bytes,
+  last: u64,
+  epoch: u64,
+  identity: Bytes,
+}
+
+/// The mutable record naming the history's end on one backend.
+pub type Head {
+  identity: Bytes,
+  epoch: u64,
+  attempt: Bytes,
+  end: u64,
+  digest: Bytes,
+  checkpoint: Option[Descriptor],
+  locator: Bytes,
+  retain: Bytes,
+  origin: Option[(Bytes, u64)],
+}
+
+/// One checkpoint node: a leaf of entries, or an index of children with
+/// each child's first key, digest and leaf entry count.
+pub type Node = Leaf(List[(Bytes, Bytes)]) | Index(level: u8, children: List[Child])
+
+pub type Child {
+  first: Bytes,
+  digest: Bytes,
+  entries: u64,
+}
+
+/// A node a checkpoint reader still has to check: the digest that names it,
+/// its level, the first key it must start with (none for the root), the key
+/// every entry must stay below (none for the last), and its entry count.
+pub type Expect {
+  digest: Bytes,
+  level: u8,
+  first: Option[Bytes],
+  below: Option[Bytes],
+  entries: u64,
+}
+
+/// Why a record was refused. `Unsupported(found)` is a record of another
+/// format version: its magic is the record's family with other version
+/// digits, carried as found. Anything else that fails a check is
+/// `Corrupt()`. Either refuses the open; neither removes or cuts anything.
+pub type Fault = Corrupt() | Unsupported(found: Bytes)
+
+const GROUP_MAGIC: Bytes = b"HSHIST01"
+
+const NODE_MAGIC: Bytes = b"HSNODE01"
+
+const HEAD_MAGIC: Bytes = b"HSHEAD01"
+
+/// The bytes of a group before its first commit: magic, prev, first, epoch
+/// and count.
+pub const GROUP_HEADER: u64 = 60
+
+/// The bytes of a node before its first entry: magic, level and count.
+pub const NODE_HEADER: u64 = 13
+
+const MAX_PINS: u64 = 1024
+
+const MAX_PIN_NAME: u64 = 255
+
+/// The default checkpoint node bounds: 256 KiB, 1 MiB and 4 MiB.
+pub fn default_bounds() -> Bounds uses {} {
+  Bounds(node_min: 262144, node_mean: 1048576, node_max: 4194304)
+}
+
+/// The SHA-256 of `data`, as 32 bytes.
+pub fn digest(data: Bytes) -> unique Bytes uses {} {
+  bytes.from_inline(sha256.digest(data))
+}
+
+/// Thirty-two zero bytes: the `prev` of a history's first group.
+pub fn zero_digest() -> Bytes uses {} {
+  bytes.from_list(zeros(32))
+}
+
+fn zeros(n: u64) -> List[u8] uses {} {
+  let mut out: List[u8] = []
+  for _ in 0u64..n {
+    list.push(mut out, 0)
+  }
+  out
+}
+
+/// The reader's state before a history's first group.
+pub fn origin_tip() -> Tip uses {} {
+  Tip(digest: zero_digest(), last: 0, epoch: 0, identity: b"")
+}
+
+// ---------------------------------------------------------------- encoding
+
+fn put_u8(mut out: List[u8], value: u8) -> () uses {} {
+  list.push(mut out, value)
+}
+
+fn put_u32(mut out: List[u8], value: u32) -> () uses {} {
+  for i in 0u32..4 {
+    list.push(mut out, int.truncate(value >> i * 8))
+  }
+}
+
+fn put_u64(mut out: List[u8], value: u64) -> () uses {} {
+  for i in 0u64..8 {
+    list.push(mut out, int.truncate(value >> i * 8))
+  }
+}
+
+fn put_len(mut out: List[u8], n: u64) -> () uses {} {
+  put_u32(mut out, int.narrow(n))
+}
+
+fn put_bytes(mut out: List[u8], data: Bytes) -> () uses {} {
+  put_len(mut out, bytes.len(data))
+  bytes.append(mut out, data)
+}
+
+// A fixed-width field: its bytes, with no length.
+fn put_fixed(mut out: List[u8], data: Bytes) -> () uses {} {
+  bytes.append(mut out, data)
+}
+
+fn set_u32(mut out: List[u8], at: u64, value: u32) -> () uses {} {
+  for i in 0u64..4 {
+    out[at + i] = int.truncate(value >> int.truncate(i * 8))
+  }
+}
+
+/// An encoder of one group into one buffer: the header, then each commit as
+/// it is added, then the definition table; the count is patched at the end,
+/// so every commit's bytes are copied once.
+pub opaque type GroupWriter: () uses {} {
+  out: List[u8],
+  count: u32,
+}
+
+pub fn group_writer(prev: Bytes, first: u64, epoch: u64) -> GroupWriter uses {} {
+  let mut out: List[u8] = []
+  put_fixed(mut out, GROUP_MAGIC)
+  put_fixed(mut out, prev)
+  put_u64(mut out, first)
+  put_u64(mut out, epoch)
+  put_u32(mut out, 0)
+  GroupWriter(out: take out, count: 0)
+}
+
+/// Appends one commit. Writes must strictly ascend by key.
+pub fn add_commit(mut w: GroupWriter, c: Commit) -> () uses {} {
+  encode_body(mut w.out, c.body)
+  put_u32(mut w.out, int.narrow(list.len(c.writes)))
+  for x in c.writes {
+    match x {
+      Put(key: k, value: v) => {
+        put_u8(mut w.out, 1)
+        put_bytes(mut w.out, k)
+        put_bytes(mut w.out, v)
+      },
+      Delete(key: k) => {
+        put_u8(mut w.out, 2)
+        put_bytes(mut w.out, k)
+      },
+    }
+  }
+  w.count += 1
+}
+
+/// The commits added so far.
+pub fn writer_count(w: GroupWriter) -> u32 uses {} {
+  w.count
+}
+
+/// The encoded bytes so far, without the definition table.
+pub fn writer_bytes(w: GroupWriter) -> u64 uses {} {
+  list.len(w.out)
+}
+
+/// Appends the definition table and returns the group's bytes and digest.
+pub fn finish_group(take w: GroupWriter, defs: List[Def]) -> (Bytes, Bytes) uses {} {
+  let GroupWriter(out: start, count: count) = take w
+  let mut out = take start
+  put_len(mut out, list.len(defs))
+  for d in defs {
+    put_bytes(mut out, d.path)
+    put_bytes(mut out, d.fingerprint)
+    put_fixed(mut out, d.code)
+    put_bytes(mut out, d.revision)
+  }
+  set_u32(mut out, GROUP_HEADER - 4, count)
+  let data = bytes.from_list(take out)
+  let d = digest(data)
+  (take data, take d)
+}
+
+/// A group's bytes and digest.
+pub fn encode_group(g: Group) -> (Bytes, Bytes) uses {} {
+  let mut w = group_writer(g.prev, g.first, g.epoch)
+  for c in g.commits {
+    add_commit(mut w, c)
+  }
+  finish_group(take w, g.defs)
+}
+
+fn encode_body(mut out: List[u8], b: Body) -> () uses {} {
+  match b {
+    Transaction(call) => {
+      put_u8(mut out, 1)
+      put_u32(mut out, call.def)
+      put_u64(mut out, int.truncate(call.at))
+      put_u64(mut out, call.seed)
+      put_bytes(mut out, call.caller)
+      match call.arrival {
+        None() => put_u8(mut out, 0),
+        Some(a) => {
+          put_u8(mut out, 1)
+          put_fixed(mut out, a.identity)
+          put_u64(mut out, a.position)
+          put_fixed(mut out, a.digest)
+        },
+      }
+      put_bytes(mut out, call.args)
+      put_bytes(mut out, call.outcome)
+    },
+    Engine(e) => {
+      put_u8(mut out, 2)
+      let mut payload: List[u8] = []
+      let op = encode_engine(mut payload, e)
+      put_u8(mut out, op)
+      put_bytes(mut out, bytes.view_list(payload))
+    },
+    Run(run: run, records: records) => {
+      put_u8(mut out, 3)
+      put_fixed(mut out, run)
+      put_len(mut out, list.len(records))
+      for r in records {
+        put_u8(mut out, r.kind)
+        put_bytes(mut out, r.payload)
+      }
+    },
+  }
+}
+
+fn encode_engine(mut out: List[u8], e: Engine) -> u8 uses {} {
+  match e {
+    Genesis(
+      key_bytes: k,
+      value_bytes: v,
+      transaction_bytes: t,
+      range_rows: r,
+      bounds: b
+    ) => {
+      put_u32(mut out, k)
+      put_u32(mut out, v)
+      put_u32(mut out, t)
+      put_u32(mut out, r)
+      put_u32(mut out, b.node_min)
+      put_u32(mut out, b.node_mean)
+      put_u32(mut out, b.node_max)
+      1
+    },
+    Claim(epoch: epoch, attempt: attempt, identity: identity) => {
+      put_u64(mut out, epoch)
+      put_fixed(mut out, attempt)
+      put_fixed(mut out, identity)
+      2
+    },
+    Checkpoint(d) => {
+      put_descriptor(mut out, Some(copy d))
+      3
+    },
+    Retain(floor: floor, pins: pins, checkpoints: checkpoints) => {
+      put_u64(mut out, floor)
+      put_len(mut out, list.len(pins))
+      for p in pins {
+        put_bytes(mut out, p.name)
+        put_u64(mut out, p.version)
+      }
+      put_len(mut out, list.len(checkpoints))
+      for d in checkpoints {
+        put_descriptor(mut out, Some(copy d))
+      }
+      4
+    },
+    Fork(identity: identity, origin: origin, at: at) => {
+      put_fixed(mut out, identity)
+      put_fixed(mut out, origin)
+      put_u64(mut out, at)
+      5
+    },
+    StreamFence(identity) => {
+      put_u8(mut out, 1)
+      put_fixed(mut out, identity)
+      6
+    },
+    StreamPurge(identity) => {
+      put_u8(mut out, 2)
+      put_fixed(mut out, identity)
+      6
+    },
+    Library(name: name, payload: payload) => {
+      put_bytes(mut out, name)
+      put_bytes(mut out, payload)
+      7
+    },
+  }
+}
+
+// A descriptor, all zeros for none.
+fn put_descriptor(mut out: List[u8], d: Option[Descriptor]) -> () uses {} {
+  match d {
+    None() => {
+      for _ in 0u64..89 {
+        list.push(mut out, 0)
+      }
+    },
+    Some(x) => {
+      put_u64(mut out, x.version)
+      put_fixed(mut out, x.digest)
+      put_fixed(mut out, x.root)
+      put_u8(mut out, x.height)
+      put_u64(mut out, x.entries)
+      put_u64(mut out, x.bytes)
+    },
+  }
+}
+
+/// A claim group: the one commit a provider appends to claim the history,
+/// after the group whose digest and last version `tip` names. The claim's
+/// epoch is one above the tip's; the first claim mints `identity`.
+pub fn claim_group(tip: Tip, attempt: Bytes, identity: Bytes) -> (Bytes, Bytes) uses {} {
+  let epoch = tip.epoch + 1
+  let mut w = group_writer(tip.digest, tip.last + 1, epoch)
+  add_commit(
+    mut w,
+    Commit(
+      body: Engine(Claim(epoch: epoch, attempt: unique attempt, identity: unique identity)),
+      writes: []
+    )
+  )
+  finish_group(take w, [])
+}
+
+// ---------------------------------------------------------------- decoding
+
+// A cursor over a record's bytes. Every read checks the bounds first.
+type Cursor {
+  at: u64,
+  end: u64,
+}
+
+fn get_u8(data: Bytes, mut c: Cursor) -> Result[u8, ()] uses {} {
+  if c.at >= c.end {
+    return Error(())
+  }
+  let b = data[c.at]
+  c.at += 1
+  Ok(b)
+}
+
+fn get_u32(data: Bytes, mut c: Cursor) -> Result[u32, ()] uses {} {
+  if c.end - c.at < 4 {
+    return Error(())
+  }
+  let mut value: u32 = 0
+  for i in 0u64..4 {
+    let b: u32 = int.widen(data[c.at + i])
+    value = value | b << int.truncate(i * 8)
+  }
+  c.at += 4
+  Ok(value)
+}
+
+fn get_u64(data: Bytes, mut c: Cursor) -> Result[u64, ()] uses {} {
+  if c.end - c.at < 8 {
+    return Error(())
+  }
+  let mut value: u64 = 0
+  for i in 0u64..8 {
+    let b: u64 = int.widen(data[c.at + i])
+    value = value | b << i * 8
+  }
+  c.at += 8
+  Ok(value)
+}
+
+fn get_fixed(data: Bytes, mut c: Cursor, n: u64) -> Result[Bytes, ()] uses {} {
+  if c.end - c.at < n {
+    return Error(())
+  }
+  let part = unique bytes.slice(data, c.at, c.at + n)
+  c.at += n
+  Ok(take part)
+}
+
+fn get_bytes(data: Bytes, mut c: Cursor) -> Result[Bytes, ()] uses {} {
+  let n: u64 = int.widen(get_u32(data, mut c)?)
+  get_fixed(data, mut c, n)
+}
+
+fn magic(data: Bytes, mut c: Cursor, expected: Bytes) -> Result[(), ()] uses {} {
+  let m = get_fixed(data, mut c, 8)?
+  if m != expected {
+    return Error(())
+  }
+  Ok(())
+}
+
+// The format check every record passes first: its magic is this version's,
+// or of the same family with other version digits (unsupported), or neither
+// (corrupt). It precedes the digest or sum, so a record of a later format is
+// never reported as damage.
+fn format(data: Bytes, expected: Bytes) -> Result[(), Fault] uses {} {
+  if bytes.len(data) < 8 {
+    return Error(Corrupt())
+  }
+  let found = bytes.slice(data, 0, 8)
+  if found == expected {
+    return Ok(())
+  }
+  if bytes.slice(found, 0, 6) == bytes.slice(expected, 0, 6) {
+    return Error(Unsupported(found: unique found))
+  }
+  Error(Corrupt())
+}
+
+// A failed field check inside a record of this version.
+fn corrupt[T](take r: Result[T, ()]) -> Result[T, Fault] uses {} {
+  match take r {
+    Ok(x) => Ok(take x),
+    Error(()) => Error(Corrupt()),
+  }
+}
+
+fn get_descriptor(data: Bytes, mut c: Cursor) -> Result[Option[Descriptor], ()] uses {} {
+  let version = get_u64(data, mut c)?
+  let d = get_fixed(data, mut c, 32)?
+  let root = get_fixed(data, mut c, 32)?
+  let height = get_u8(data, mut c)?
+  let entries = get_u64(data, mut c)?
+  let total = get_u64(data, mut c)?
+  if version == 0 {
+    // None is all zeros, nothing else.
+    if height != 0 || entries != 0 || total != 0 || d != zero_digest() || root != zero_digest() {
+      return Error(())
+    }
+    return Ok(None())
+  }
+  if height == 0 {
+    return Error(())
+  }
+  Ok(
+    Some(
+      Descriptor(
+        version: version,
+        digest: take d,
+        root: take root,
+        height: height,
+        entries: entries,
+        bytes: total
+      )
+    )
+  )
+}
+
+/// Decodes the group `data` named by `expected`, checking the digest, every
+/// field, the format's rules inside one group and that nothing follows it.
+/// Chain rules across groups are `follow`'s.
+pub fn decode_group(data: Bytes, expected: Bytes) -> Result[Group, Fault] uses {} {
+  format(data, GROUP_MAGIC)?
+  if digest(data) != expected {
+    return Error(Corrupt())
+  }
+  corrupt(group_fields(data))
+}
+
+fn group_fields(data: Bytes) -> Result[Group, ()] uses {} {
+  let mut c = Cursor(at: 0, end: bytes.len(data))
+  magic(data, mut c, GROUP_MAGIC)?
+  let prev = get_fixed(data, mut c, 32)?
+  let first = get_u64(data, mut c)?
+  let epoch = get_u64(data, mut c)?
+  let count: u64 = int.widen(get_u32(data, mut c)?)
+  if first == 0 || count == 0 {
+    return Error(())
+  }
+  // `first + count - 1` must not overflow.
+  let Some(_) = int.checked_add(first, count) else {
+    return Error(())
+  }
+  let mut commits: List[Commit] = []
+  let mut uses_def: u32 = 0
+  let mut any_def = false
+  for i in 0u64..count {
+    let version = first + i
+    let body = get_body(data, mut c)?
+    // Version 1 is the first claim and version 2 the genesis; a claim is
+    // alone in its group.
+    match body {
+      Engine(Claim(epoch: e, ..)) => {
+        if count != 1 || e != epoch {
+          return Error(())
+        }
+      },
+      Engine(Genesis(..)) => {
+        if version != 2 {
+          return Error(())
+        }
+      },
+      Transaction(call) => {
+        any_def = true
+        if call.def >= uses_def {
+          uses_def = call.def + 1
+        }
+        if version <= 2 {
+          return Error(())
+        }
+      },
+      _ => {
+        if version <= 2 {
+          return Error(())
+        }
+      },
+    }
+    if version == 1 {
+      let Engine(Claim(..)) = body else {
+        return Error(())
+      }
+    }
+    if version == 2 {
+      let Engine(Genesis(..)) = body else {
+        return Error(())
+      }
+    }
+    let writes = get_writes(data, mut c)?
+    list.push(mut commits, Commit(body: take body, writes: take writes))
+  }
+  let ndefs: u64 = int.widen(get_u32(data, mut c)?)
+  let mut defs: List[Def] = []
+  for _ in 0u64..ndefs {
+    let path = get_bytes(data, mut c)?
+    let fingerprint = get_bytes(data, mut c)?
+    let code = get_fixed(data, mut c, 32)?
+    let revision = get_bytes(data, mut c)?
+    list.push(
+      mut defs,
+      Def(path: take path, fingerprint: take fingerprint, code: take code, revision: take revision)
+    )
+  }
+  if c.at != c.end {
+    return Error(())
+  }
+  if any_def {
+    let used: u64 = int.widen(uses_def)
+    if used > ndefs {
+      return Error(())
+    }
+  }
+  Ok(Group(prev: take prev, first: first, epoch: epoch, commits: take commits, defs: take defs))
+}
+
+fn get_writes(data: Bytes, mut c: Cursor) -> Result[List[Write], ()] uses {} {
+  let n: u64 = int.widen(get_u32(data, mut c)?)
+  let mut out: List[Write] = []
+  let mut last: Option[Bytes] = None()
+  for _ in 0u64..n {
+    let op = get_u8(data, mut c)?
+    let k = get_bytes(data, mut c)?
+    if let Some(prior) = last {
+      if !(prior < k) {
+        return Error(())
+      }
+    }
+    last = Some(copy k)
+    if op == 1 {
+      let v = get_bytes(data, mut c)?
+      list.push(mut out, Put(key: take k, value: take v))
+    } else if op == 2 {
+      list.push(mut out, Delete(key: take k))
+    } else {
+      return Error(())
+    }
+  }
+  Ok(take out)
+}
+
+fn get_body(data: Bytes, mut c: Cursor) -> Result[Body, ()] uses {} {
+  let kind = get_u8(data, mut c)?
+  if kind == 1 {
+    let def = get_u32(data, mut c)?
+    let at: i64 = int.truncate(get_u64(data, mut c)?)
+    let seed = get_u64(data, mut c)?
+    let caller = get_bytes(data, mut c)?
+    let tag = get_u8(data, mut c)?
+    let arrival: Option[Arrival] = if tag == 0 {
+      None()
+    } else if tag == 1 {
+      let identity = get_fixed(data, mut c, 32)?
+      let position = get_u64(data, mut c)?
+      let request = get_fixed(data, mut c, 32)?
+      Some(Arrival(identity: take identity, position: position, digest: take request))
+    } else {
+      return Error(())
+    }
+    let args = get_bytes(data, mut c)?
+    let outcome = get_bytes(data, mut c)?
+    return Ok(
+      Transaction(
+        Call(
+          def: def,
+          at: at,
+          seed: seed,
+          caller: take caller,
+          arrival: take arrival,
+          args: take args,
+          outcome: take outcome
+        )
+      )
+    )
+  }
+  if kind == 2 {
+    let op = get_u8(data, mut c)?
+    let payload = get_bytes(data, mut c)?
+    let e = decode_engine(op, payload)?
+    return Ok(Engine(take e))
+  }
+  if kind == 3 {
+    let run = get_fixed(data, mut c, 16)?
+    let n: u64 = int.widen(get_u32(data, mut c)?)
+    let mut records: List[Record] = []
+    for _ in 0u64..n {
+      let k = get_u8(data, mut c)?
+      let p = get_bytes(data, mut c)?
+      list.push(mut records, Record(kind: k, payload: take p))
+    }
+    return Ok(Run(run: take run, records: take records))
+  }
+  Error(())
+}
+
+fn decode_engine(op: u8, data: Bytes) -> Result[Engine, ()] uses {} {
+  let mut c = Cursor(at: 0, end: bytes.len(data))
+  let e: Engine = if op == 1 {
+    let k = get_u32(data, mut c)?
+    let v = get_u32(data, mut c)?
+    let t = get_u32(data, mut c)?
+    let r = get_u32(data, mut c)?
+    let b = Bounds(
+      node_min: get_u32(data, mut c)?,
+      node_mean: get_u32(data, mut c)?,
+      node_max: get_u32(data, mut c)?
+    )
+    if !bounds_fit(k, v, b) {
+      return Error(())
+    }
+    Genesis(key_bytes: k, value_bytes: v, transaction_bytes: t, range_rows: r, bounds: b)
+  } else if op == 2 {
+    let epoch = get_u64(data, mut c)?
+    let attempt = get_fixed(data, mut c, 16)?
+    let identity = get_fixed(data, mut c, 32)?
+    if epoch == 0 {
+      return Error(())
+    }
+    Claim(epoch: epoch, attempt: take attempt, identity: take identity)
+  } else if op == 3 {
+    let Some(d) = get_descriptor(data, mut c)? else {
+      return Error(())
+    }
+    Checkpoint(take d)
+  } else if op == 4 {
+    let floor = get_u64(data, mut c)?
+    let n: u64 = int.widen(get_u32(data, mut c)?)
+    if n > MAX_PINS {
+      return Error(())
+    }
+    let mut pins: List[Pin] = []
+    let mut last: Option[Bytes] = None()
+    for _ in 0u64..n {
+      let name = get_bytes(data, mut c)?
+      let version = get_u64(data, mut c)?
+      if bytes.len(name) > MAX_PIN_NAME {
+        return Error(())
+      }
+      if let Some(prior) = last {
+        if !(prior < name) {
+          return Error(())
+        }
+      }
+      last = Some(copy name)
+      list.push(mut pins, Pin(name: take name, version: version))
+    }
+    let m: u64 = int.widen(get_u32(data, mut c)?)
+    let mut checkpoints: List[Descriptor] = []
+    for _ in 0u64..m {
+      let Some(d) = get_descriptor(data, mut c)? else {
+        return Error(())
+      }
+      list.push(mut checkpoints, take d)
+    }
+    Retain(floor: floor, pins: take pins, checkpoints: take checkpoints)
+  } else if op == 5 {
+    let identity = get_fixed(data, mut c, 32)?
+    let origin = get_fixed(data, mut c, 32)?
+    let at = get_u64(data, mut c)?
+    Fork(identity: take identity, origin: take origin, at: at)
+  } else if op == 6 {
+    let which = get_u8(data, mut c)?
+    let identity = get_fixed(data, mut c, 32)?
+    if which == 1 {
+      StreamFence(take identity)
+    } else if which == 2 {
+      StreamPurge(take identity)
+    } else {
+      return Error(())
+    }
+  } else if op == 7 {
+    let name = get_bytes(data, mut c)?
+    let payload = get_bytes(data, mut c)?
+    Library(name: take name, payload: take payload)
+  } else {
+    return Error(())
+  }
+  if c.at != c.end {
+    return Error(())
+  }
+  Ok(take e)
+}
+
+/// Checks that `g`, whose digest is `d`, follows `tip`, and returns the tip
+/// after it: `prev` is the tip's digest, `first` is one above its last
+/// version, a claim group raises the epoch by one, every other group keeps
+/// it, nothing precedes the first claim, and every claim names the store
+/// identity, which the first claim and a fork set.
+pub fn follow(tip: Tip, g: Group, d: Bytes) -> Result[Tip, ()] uses {} {
+  if g.prev != tip.digest || g.first != tip.last + 1 {
+    return Error(())
+  }
+  let mut identity = unique tip.identity
+  for x in g.commits {
+    match x.body {
+      Engine(Fork(identity: id, ..)) => {
+        identity = unique id
+      },
+      _ => {},
+    }
+  }
+  match g.commits[0].body {
+    Engine(Claim(identity: id, ..)) => {
+      if g.epoch != tip.epoch + 1 {
+        return Error(())
+      }
+      if bytes.len(identity) == 0 {
+        identity = unique id
+      } else if id != identity {
+        return Error(())
+      }
+    },
+    _ => {
+      if g.epoch != tip.epoch || tip.epoch == 0 {
+        return Error(())
+      }
+    },
+  }
+  Ok(
+    Tip(
+      digest: unique d,
+      last: g.first + list.len(g.commits) - 1,
+      epoch: g.epoch,
+      identity: take identity
+    )
+  )
+}
+
+// ---------------------------------------------------------------- checkpoints
+
+/// Whether node bounds can hold every entry the limits admit, and let index
+/// levels shrink: `node_min <= node_mean <= node_max`, a positive mean, the
+/// largest leaf entry fits a node, and two of the largest index entries do.
+pub fn bounds_fit(key_bytes: u32, value_bytes: u32, b: Bounds) -> bool uses {} {
+  let k: u64 = int.widen(key_bytes)
+  let v: u64 = int.widen(value_bytes)
+  let max: u64 = int.widen(b.node_max)
+  b.node_mean > 0 && b.node_min <= b.node_mean && b.node_mean <= b.node_max && NODE_HEADER + 8 + k + v <= max && NODE_HEADER + 2 * (
+    44 + k
+  ) <= max
+}
+
+// One level of a tree under construction.
+type Level {
+  out: List[u8],
+  count: u32,
+  size: u64,
+  first: Bytes,
+  entries: u64,
+  emitted: u64,
+}
+
+/// A checkpoint under construction: add the state's entries in ascending
+/// key order, then `finish_tree`.
+pub opaque type TreeBuilder: () uses {} {
+  bounds: Bounds,
+  levels: List[Level],
+  nodes: List[(Bytes, Bytes)],
+  entries: u64,
+  bytes: u64,
+}
+
+/// A finished checkpoint: its nodes (digest and bytes, children before
+/// parents), root, height, entry count and key and value bytes.
+pub type Tree {
+  nodes: List[(Bytes, Bytes)],
+  root: Bytes,
+  height: u8,
+  entries: u64,
+  bytes: u64,
+}
+
+pub fn tree_builder(b: Bounds) -> TreeBuilder uses {} {
+  TreeBuilder(bounds: b, levels: [], nodes: [], entries: 0, bytes: 0)
+}
+
+fn new_level(level: u8) -> Level uses {} {
+  let mut out: List[u8] = []
+  put_fixed(mut out, NODE_MAGIC)
+  put_u8(mut out, level)
+  put_u32(mut out, 0)
+  Level(out: take out, count: 0, size: NODE_HEADER, first: b"", entries: 0, emitted: 0)
+}
+
+// The content cut after an entry of `size` bytes keyed by `key`.
+fn cut_here(key: Bytes, size: u64, mean: u32) -> bool uses {} {
+  let h = sha256.digest(key)
+  let mut x: u64 = 0
+  for i in 0u64..4 {
+    let b: u64 = int.widen(h[i])
+    x = x | b << i * 8
+  }
+  let m: u64 = int.widen(mean)
+  // x * mean < size * 2^32, with size below 2^32.
+  x * m < size << 32
+}
+
+/// Adds the next entry of the state, whose key is above every earlier one.
+pub fn add_entry(mut t: TreeBuilder, key: Bytes, value: Bytes) -> () uses {} {
+  let mut entry: List[u8] = []
+  put_bytes(mut entry, key)
+  put_bytes(mut entry, value)
+  t.entries += 1
+  t.bytes += bytes.len(key) + bytes.len(value)
+  push_entry(mut t, 0, key, bytes.view_list(entry), 1)
+}
+
+// Adds an encoded entry, first key `key`, covering `leaves` leaf entries, to
+// level `l`, cutting before it when it would pass `node_max` and after it
+// by content once the node holds `node_min` bytes (and, above the leaves, at
+// least two entries).
+fn push_entry(mut t: TreeBuilder, l: u64, key: Bytes, entry: Bytes, leaves: u64) -> () uses {} {
+  if list.len(t.levels) <= l {
+    list.push(mut t.levels, new_level(int.narrow(l)))
+  }
+  let size = bytes.len(entry)
+  let max: u64 = int.widen(t.bounds.node_max)
+  if t.levels[l].count > 0 && t.levels[l].size + size > max {
+    emit(mut t, l)
+  }
+  if t.levels[l].count == 0 {
+    t.levels[l].first = unique key
+  }
+  bytes.append(mut t.levels[l].out, entry)
+  t.levels[l].count += 1
+  t.levels[l].size += size
+  t.levels[l].entries += leaves
+  let min: u64 = int.widen(t.bounds.node_min)
+  let enough = l == 0 || t.levels[l].count >= 2
+  if enough && t.levels[l].size >= min && cut_here(key, size, t.bounds.node_mean) {
+    emit(mut t, l)
+  }
+}
+
+// Closes the pending node of level `l` and adds its index entry above.
+fn emit(mut t: TreeBuilder, l: u64) -> () uses {} {
+  let level: u8 = int.narrow(l)
+  let done = replace(mut t.levels[l], new_level(level))
+  let Level(out: body, count: count, size: _, first: first, entries: entries, emitted: emitted) = take done
+  t.levels[l].emitted = emitted + 1
+  let mut out = take body
+  set_u32(mut out, 9, count)
+  let data = bytes.from_list(take out)
+  let d = digest(data)
+  let mut entry: List[u8] = []
+  put_bytes(mut entry, first)
+  put_fixed(mut entry, d)
+  put_u64(mut entry, entries)
+  list.push(mut t.nodes, (copy d, take data))
+  push_entry(mut t, l + 1, first, bytes.view_list(entry), entries)
+}
+
+/// Finishes the tree: each level's pending node is closed, lowest first,
+/// until a level has closed exactly one node, the root. An empty state is
+/// one empty leaf.
+pub fn finish_tree(take t: TreeBuilder) -> Tree uses {} {
+  let mut b = take t
+  if list.len(b.levels) == 0 {
+    list.push(mut b.levels, new_level(0))
+  }
+  let mut l: u64 = 0
+  while true {
+    if b.levels[l].emitted == 0 {
+      // Everything at this level is in its pending node: the root, closed
+      // with no entry above it.
+      let level: u8 = int.narrow(l)
+      let done = replace(mut b.levels[l], new_level(level))
+      let Level(out: body, count: count, ..) = take done
+      let mut out = take body
+      set_u32(mut out, 9, count)
+      let data = bytes.from_list(take out)
+      let d = digest(data)
+      list.push(mut b.nodes, (take d, take data))
+      return tree_of(take b, l)
+    }
+    if b.levels[l].count > 0 {
+      emit(mut b, l)
+    }
+    if b.levels[l].emitted == 1 {
+      // This level's one node is the root; the level above holds only its
+      // entry and is dropped. No node was written after it.
+      return tree_of(take b, l)
+    }
+    l += 1
+  }
+  tree_of(take b, l)
+}
+
+fn tree_of(take b: TreeBuilder, l: u64) -> Tree uses {} {
+  let last = list.len(b.nodes) - 1
+  let (root, _) = copy b.nodes[last]
+  let TreeBuilder(nodes: nodes, entries: entries, bytes: total, ..) = take b
+  Tree(nodes: take nodes, root: take root, height: int.narrow(l + 1), entries: entries, bytes: total)
+}
+
+/// Builds the checkpoint of `entries`, ascending by key.
+pub fn build_tree(entries: List[(Bytes, Bytes)], b: Bounds) -> Tree uses {} {
+  let mut t = tree_builder(b)
+  for (k, v) in entries {
+    add_entry(mut t, k, v)
+  }
+  finish_tree(take t)
+}
+
+/// The descriptor of `tree` as the checkpoint of the group whose last
+/// version is `version` and whose digest is `d`.
+pub fn descriptor(tree: Tree, version: u64, d: Bytes) -> Descriptor uses {} {
+  Descriptor(
+    version: version,
+    digest: unique d,
+    root: unique tree.root,
+    height: tree.height,
+    entries: tree.entries,
+    bytes: tree.bytes
+  )
+}
+
+/// The root a checkpoint reader starts from.
+pub fn root_expect(d: Descriptor) -> Expect uses {} {
+  Expect(
+    digest: unique d.root,
+    level: d.height - 1,
+    first: None(),
+    below: None(),
+    entries: d.entries
+  )
+}
+
+/// What one checked level of a checkpoint yields: the nodes of the level
+/// below to read next, or, at the leaves, the state's entries.
+pub type Step = Next(List[Expect]) | Leaves(List[(Bytes, Bytes)])
+
+/// Checks one level of a checkpoint: `blobs[i]` holds the bytes read for
+/// `expects[i]`, all of one level, in key order. Each node must have the
+/// digest, level, first key, key bound and entry count its parent named,
+/// strictly ascending keys and nothing after its last entry.
+pub fn check_level(expects: List[Expect], blobs: List[Bytes]) -> Result[Step, Fault] uses {} {
+  if list.len(expects) != list.len(blobs) || list.len(expects) == 0 {
+    return Error(Corrupt())
+  }
+  for b in blobs {
+    format(b, NODE_MAGIC)?
+  }
+  corrupt(level_fields(expects, blobs))
+}
+
+fn level_fields(expects: List[Expect], blobs: List[Bytes]) -> Result[Step, ()] uses {} {
+  let level = expects[0].level
+  let mut next: List[Expect] = []
+  let mut leaves: List[(Bytes, Bytes)] = []
+  for i in 0u64..list.len(expects) {
+    let e = expects[i]
+    let data = blobs[i]
+    if e.level != level || digest(data) != e.digest {
+      return Error(())
+    }
+    let mut c = Cursor(at: 0, end: bytes.len(data))
+    magic(data, mut c, NODE_MAGIC)?
+    if get_u8(data, mut c)? != level {
+      return Error(())
+    }
+    let count: u64 = int.widen(get_u32(data, mut c)?)
+    let root = match e.first {
+      None() => true,
+      Some(_) => false,
+    }
+    // Only the root of an empty state is empty, and a root index has two
+    // children or more.
+    if count == 0 && !(root && level == 0 && e.entries == 0) {
+      return Error(())
+    }
+    if root && level > 0 && count < 2 {
+      return Error(())
+    }
+    let mut last: Option[Bytes] = None()
+    let mut keys: List[Bytes] = []
+    let mut children: List[(Bytes, u64)] = []
+    for _ in 0u64..count {
+      let k = get_bytes(data, mut c)?
+      if let Some(prior) = last {
+        if !(prior < k) {
+          return Error(())
+        }
+      }
+      if let Some(below) = e.below {
+        if !(k < below) {
+          return Error(())
+        }
+      }
+      last = Some(copy k)
+      if level == 0 {
+        let v = get_bytes(data, mut c)?
+        list.push(mut leaves, (copy k, take v))
+      } else {
+        let child = get_fixed(data, mut c, 32)?
+        let n = get_u64(data, mut c)?
+        list.push(mut children, (take child, n))
+      }
+      list.push(mut keys, take k)
+    }
+    if c.at != c.end {
+      return Error(())
+    }
+    if count > 0 {
+      if let Some(f) = e.first {
+        if keys[0] != f {
+          return Error(())
+        }
+      }
+    }
+    if level == 0 {
+      if count != e.entries {
+        return Error(())
+      }
+    } else {
+      let mut total: u64 = 0
+      for j in 0u64..count {
+        let (child, n) = copy children[j]
+        let Some(t) = int.checked_add(total, n) else {
+          return Error(())
+        }
+        if n == 0 {
+          return Error(())
+        }
+        total = t
+        let below: Option[Bytes] = if j + 1 < count {
+          Some(copy keys[j + 1])
+        } else {
+          unique e.below
+        }
+        list.push(
+          mut next,
+          Expect(
+            digest: take child,
+            level: level - 1,
+            first: Some(copy keys[j]),
+            below: take below,
+            entries: n
+          )
+        )
+      }
+      if total != e.entries {
+        return Error(())
+      }
+    }
+  }
+  if level == 0 {
+    Ok(Leaves(take leaves))
+  } else {
+    Ok(Next(take next))
+  }
+}
+
+// ---------------------------------------------------------------- head record
+
+/// The head record's bytes, ending with the SHA-256 of everything before it.
+pub fn encode_head(h: Head) -> Bytes uses {} {
+  let mut out: List[u8] = []
+  put_fixed(mut out, HEAD_MAGIC)
+  put_fixed(mut out, h.identity)
+  put_u64(mut out, h.epoch)
+  put_fixed(mut out, h.attempt)
+  put_u64(mut out, h.end)
+  put_fixed(mut out, h.digest)
+  put_descriptor(mut out, copy h.checkpoint)
+  put_bytes(mut out, h.locator)
+  put_bytes(mut out, h.retain)
+  match h.origin {
+    None() => put_u8(mut out, 0),
+    Some((identity, at)) => {
+      put_u8(mut out, 1)
+      put_fixed(mut out, identity)
+      put_u64(mut out, at)
+    },
+  }
+  let sum = digest(bytes.view_list(out))
+  put_fixed(mut out, sum)
+  bytes.from_list(take out)
+}
+
+/// Decodes a head record, refusing a wrong magic, sum or field, or any byte
+/// after the sum.
+pub fn decode_head(data: Bytes) -> Result[Head, Fault] uses {} {
+  format(data, HEAD_MAGIC)?
+  corrupt(head_fields(data))
+}
+
+fn head_fields(data: Bytes) -> Result[Head, ()] uses {} {
+  let total = bytes.len(data)
+  if total < 40 {
+    return Error(())
+  }
+  if digest(bytes.slice(data, 0, total - 32)) != bytes.slice(data, total - 32, total) {
+    return Error(())
+  }
+  let mut c = Cursor(at: 0, end: total - 32)
+  magic(data, mut c, HEAD_MAGIC)?
+  let identity = get_fixed(data, mut c, 32)?
+  let epoch = get_u64(data, mut c)?
+  let attempt = get_fixed(data, mut c, 16)?
+  let end = get_u64(data, mut c)?
+  let d = get_fixed(data, mut c, 32)?
+  let checkpoint = get_descriptor(data, mut c)?
+  let locator = get_bytes(data, mut c)?
+  let retain = get_bytes(data, mut c)?
+  let tag = get_u8(data, mut c)?
+  let origin: Option[(Bytes, u64)] = if tag == 0 {
+    None()
+  } else if tag == 1 {
+    let o = get_fixed(data, mut c, 32)?
+    let at = get_u64(data, mut c)?
+    Some((take o, at))
+  } else {
+    return Error(())
+  }
+  if c.at != c.end {
+    return Error(())
+  }
+  Ok(
+    Head(
+      identity: take identity,
+      epoch: epoch,
+      attempt: take attempt,
+      end: end,
+      digest: take d,
+      checkpoint: take checkpoint,
+      locator: take locator,
+      retain: take retain,
+      origin: take origin
+    )
+  )
+}

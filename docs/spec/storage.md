@@ -711,7 +711,7 @@ Authority      // opaque capability: copyable, sendable; not data
 Claim          // opaque: affine, neither copyable nor sendable; valid for one authority
 Claimed        = { claim: Claim, end: u64 }
 Advanced       = Advanced(end: u64) | Fenced() | Refused(AuthorityError) | Undecided(AuthorityError)
-AuthorityError = Io(FileError) | Status(u16) | Unreachable() | Unsupported()
+AuthorityError = Io(FileError) | Status(u16) | Unreachable()
 
 fn io.authority(rt: Io, name: String) -> Result[Authority, GrantError]
 fn authority.levels(a: Authority) -> List[Level]
@@ -822,7 +822,7 @@ floor.
   claims one replace succeeds. The head names every segment and checkpoint the retained
   history needs, with its digest, so recovery reads the head and the objects it names. An
   object-storage entry whose endpoint does not honour create-if-absent and conditional
-  replace refuses every claim with `Refused(Unsupported())`; `objects.s3@1` uses
+  replace refuses every claim with `Unsupported(Conditional())`; `objects.s3@1` uses
   `If-None-Match: *` and `If-Match`.
 - **Memory** keeps the history in the host process for tests and scratch stores.
 - **Simulated.** `authority.sim@1` represents a log or object storage by the same rules
@@ -865,7 +865,7 @@ authority.
 **Limits.** `key_bytes` 4096, `value_bytes` 1048576, `transaction_bytes` 16777216 and
 `range_rows` 10000 by default. They are store state, fixed when the store is created and
 recorded by its Genesis commit. A creation whose largest group the format could not frame
-within `authority.max_entry` (**Bounds** below) refuses with `Refused(Unsupported())`, so
+within `authority.max_entry` (**Bounds** below) refuses with `Unsupported(Size(..))`, so
 no commit within the limits is undecidable for size. A refused limit has no effect and is
 definite, never `Unknown(..)`. A deterministic bound on the work one body may do, equal
 on every engine, is **Reserved**. It must charge every core operation by its operands, as
@@ -895,14 +895,17 @@ records the commit.
 
 Every integer is fixed-width little-endian. `H(x)` is SHA-256. A **byte string** is a
 `u32` length followed by that many bytes. There is one format version, named by the
-magic at the start of every record; a reader that meets another magic refuses the open
-with `Corrupt(..)` naming the magic and the object, removes nothing and writes
-nothing. A format change is a new magic and a cutover, never a second reader.
+magic at the start of every record: six bytes naming the record's family (`HSHIST`,
+`HSNODE`, `HSHEAD`) and two version digits. A reader checks the magic before any digest
+or sum. A magic of the record's family with other version digits refuses the open with
+`Unsupported(Format(found, object))`, carrying the magic found; any other magic is
+corruption. Either refusal removes nothing, cuts nothing and writes nothing. A format
+change is a new magic and a cutover, never a second reader.
 
 **Groups.** The history is a chain of **groups**, each the commits of one advance:
 
 ```text
-group  = "HSHIST01" prev:[32] first:u64 epoch:u64 defs:u32 count:u32 def* commit*
+group  = "HSHIST01" prev:[32] first:u64 epoch:u64 count:u32 commit* defs:u32 def*
 def    = path:bytes fingerprint:bytes code:[32] revision:bytes
 commit = kind:u8 body writes
 writes = n:u32 { op:u8 key:bytes [value:bytes if op = 1] }*
@@ -913,11 +916,18 @@ writes = n:u32 { op:u8 key:bytes [value:bytes if op = 1] }*
 writer epoch of the head that wrote it. The definition table names each distinct entry
 the group's commits ran (its identity: definition path, signature fingerprint and code
 hash, with the runtime contract revision, [RUN-8](runners.md#run-8-identity-and-arrival)) once, and commits refer to it by index.
+The table follows the commits, so a writer encodes each commit once into the group's
+buffer as it is ordered and appends the table and the count when it cuts the group.
 A write is a put (`op` 1) or a delete (`op` 2); keys strictly ascend, so a key occurs
 once. The SHA-256 of a commit's `writes` bytes is its write-set digest; it is derived,
-never stored. A group is valid only if every field decodes, nothing follows its last
-commit, `first` is one above the previous group's last version, `epoch` is at least the
-previous group's, and every index and op is in range. The digest chain is the history's
+never stored. A group is valid only if every field decodes, nothing follows its
+definition table, it holds at least one commit, every index and op is in range, version
+1 is a Claim and version 2 the Genesis, and no Transaction or Run commit and no other
+engine operation is at version 1 or 2. It **follows** the previous group when `prev` is
+that group's digest, `first` is one above its last version, and either it is a claim
+group whose `epoch` is one above the previous group's and whose claim names the
+history's identity (the first claim mints it), or it is not a claim group and has the
+previous group's `epoch`. The digest chain is the history's
 integrity: a reader that trusts a digest trusts every group before it.
 
 Commit kinds:
@@ -932,8 +942,8 @@ Every kind ends with its `writes`. Engine operations and their payloads:
 
 | Op | Payload |
 |---|---|
-| 1 Genesis | `identity:[32]`, the limits `key_bytes value_bytes transaction_bytes range_rows` and the checkpoint node bounds `node_min node_mean node_max`, each `u32`. It is commit 1 and nowhere else. |
-| 2 Claim | `epoch:u64 attempt:[16]`: a claim, one above the previous epoch, with the claimant's random attempt identity. It is the last commit of its group, and that group and every later one carry its epoch until the next claim. |
+| 1 Genesis | The limits `key_bytes value_bytes transaction_bytes range_rows` and the checkpoint node bounds `node_min node_mean node_max`, each `u32`; the bounds must hold the limits (**Checkpoints** below). It is commit 2, after the first claim, and nowhere else. |
+| 2 Claim | `epoch:u64 attempt:[16] identity:[32]`: a claim, one above the previous epoch, with the claimant's random attempt identity and the history's identity. It is alone in its group, whose `epoch` is its own, and every later group carries that epoch until the next claim. Commit 1 is the first claim, which mints the identity; every later claim repeats it. |
 | 3 Checkpoint | A checkpoint descriptor (below). |
 | 4 Retain | The whole retention state ([STORE-8](#store-8-versions-snapshots-and-forks)): `floor:u64`, `n:u32` pins `{ name:bytes version:u64 }` sorted by name, at most 1024 with names of at most 255 bytes, then `m:u32` checkpoint descriptors that retained versions rely on. |
 | 5 Fork | `identity:[32] origin:[32] at:u64`: the first commit of a fork, at version `at + 1`. Its group's `prev` is the digest of the origin's group that holds `at`, and that group's commits above `at` are not the fork's. |
@@ -956,11 +966,15 @@ size(e) * 2^32`, and always before an entry that would take it past `node_max`; 
 levels are cut the same way over their own entries until one root remains. Equal state
 gives equal nodes on every machine, a node shared by two versions or two forks is one
 object, and a change rewrites only the nodes whose range it touched and their ancestors.
-The defaults are 256 KiB, 1 MiB and 4 MiB; `node_max` is at least the largest entry the
-limits allow and at most the backend's object cap. A **descriptor** is
+The defaults are 256 KiB, 1 MiB and 4 MiB. Bounds **hold** limits when `0 < node_mean`,
+`node_min <= node_mean <= node_max`, the largest leaf entry the limits allow fits a node
+(`13 + 8 + key_bytes + value_bytes <= node_max`) and so do two of the largest index entries
+(`13 + 2 * (44 + key_bytes) <= node_max`), so every level above the leaves has fewer
+nodes than the one below; `node_max` is at most the backend's object cap. A root index
+has at least two children, and a node is empty only as the root of an empty state. A **descriptor** is
 `version:u64 digest:[32] root:[32] height:u8 entries:u64 bytes:u64`: the checkpoint's
-version (always a group's last), the digest of that group, the root node and the tree's
-shape. A checkpoint counts only once a Checkpoint commit after its version records its
+version (always a group's last), the digest of that group, the root node, the number
+of levels (1 for a lone leaf), the number of entries, and their key and value bytes. A checkpoint counts only once a Checkpoint commit after its version records its
 descriptor, so the chain authenticates it; its nodes are put before that commit.
 Validating one reads its nodes from the root, checks each against the digest its parent
 named, the keys' order and the descriptor's counts, and requires that the first group
@@ -1001,7 +1015,7 @@ only finds candidates: every object is checked against the digest that names it.
 **Bounds.** `transaction_bytes` bounds one encoded commit, its call record and outcome
 included, so whether a transaction fits depends only on its run. Creating a store whose
 `transaction_bytes` plus 8 KiB of group and definition overhead exceeds
-`authority.max_entry` refuses with `Refused(Unsupported())`, and a group is cut before it would exceed that, so
+`authority.max_entry` refuses with `Unsupported(Size(..))`, and a group is cut before it would exceed that, so
 every commit the limits admit fits in one advance. The frame's `u32` length bounds a
 local group at 4 GiB.
 
@@ -1206,7 +1220,9 @@ TxError      = NoTable() | TableExists() | Schema(SchemaError) | Migrating() | R
              | OutOfScope() | InvalidInput() | Limit(TxLimit) | Storage(StoreError)
 SchemaError  = KeyMismatch() | ValueMismatch() | Renamed(stored: String, expected: String)
 StoreError   = Storage(AuthorityError) | Refused(AuthorityError) | Corrupt(String) | Fenced()
-             | Closed() | NoLevel() | Foreign() | InvalidInput()
+             | Closed() | Unsupported(Unsupported) | NoLevel() | Foreign() | InvalidInput()
+Unsupported  = Format(found: Bytes, object: String) | Size(needed: u64, max_entry: u64)
+             | Conditional()
 TxLimit      = KeyBytes() | ValueBytes() | TransactionBytes() | RangeRows()
 ```
 
@@ -1221,7 +1237,12 @@ error from the authority, a full medium included; `Refused(e)` that the authorit
 a request before it had any effect; `Corrupt(name)` that the named part of the history or
 object failed a checksum, decoding or structural check, or is missing; `Fenced()` that a
 later writer claimed the store; `Closed()` that the store closed earlier. Each of these
-closes the store. `NoLevel()` (no declared level covers the one asked for), `Foreign()` (a
+closes the store. `Unsupported(..)` is definite and has no effect: `Format(found,
+object)` that the named record is in another history format version, whose magic it
+carries (an open, which refuses and removes nothing); `Size(needed, max_entry)` that a
+creation's limits need groups larger than the authority's largest entry; `Conditional()`
+that an object-storage endpoint does not honour create-if-absent and conditional
+replace. `NoLevel()` (no declared level covers the one asked for), `Foreign()` (a
 ticket of another store) and `InvalidInput()` are definite, have no effect and leave the
 store open.
 No outcome reports a conflict or an exhausted retry ([STORE-2](#store-2-transactions)).

@@ -966,6 +966,12 @@
       ]
     },
     {
+      "path": "history.hir",
+      "module": [
+        "history"
+      ]
+    },
+    {
       "path": "store.hir",
       "module": [
         "store"

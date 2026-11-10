@@ -1,0 +1,570 @@
+// oracle: expected-stdout
+// oracle-reason: thousands of random groups, every single-bit flip and truncation of each, and random checkpoint trees exceed the interpreter budget; each law's oracle is the storage spec's History format, checked in-program.
+// Laws of std@1/history (docs/spec/storage.md STORE-11, History format):
+// 1. a group decodes back to exactly its encoding, under its digest;
+// 2. every single-bit flip and every truncation of a group, a head record
+//    and a checkpoint node is refused (each is named by a digest or sum);
+// 3. a decoder accepts only canonical bytes: whatever it accepts under the
+//    flipped bytes' own digest re-encodes to those same bytes;
+// 4. leaves are cut exactly where a flat reference of the cut rule cuts,
+//    the tree reads back to its state, and equal states give equal roots;
+// 5. the chain rules: prev, first, claim epochs and the store identity.
+
+fn random_bytes(mut g: prng.Generator, max: u64) -> Bytes {
+  let n = prng.u64(mut g) % (max + 1)
+  prng.bytes(mut g, n)
+}
+
+fn fixed(mut g: prng.Generator, n: u64) -> Bytes {
+  prng.bytes(mut g, n)
+}
+
+// Writes with strictly ascending, distinct keys.
+fn random_writes(mut g: prng.Generator) -> List[history.Write] {
+  let n = prng.u64(mut g) % 5
+  let mut keys: List[Bytes] = []
+  for _ in 0u64..n {
+    let k = random_bytes(mut g, 6)
+    let mut seen = false
+    for x in keys {
+      if x == k {
+        seen = true
+      }
+    }
+    if !seen {
+      list.push(mut keys, take k)
+    }
+  }
+  let sorted = sort_bytes(take keys)
+  let mut out: List[history.Write] = []
+  for k in sorted {
+    if prng.u64(mut g) % 3 == 0 {
+      list.push(mut out, Delete(key: unique k))
+    } else {
+      list.push(mut out, Put(key: unique k, value: random_bytes(mut g, 8)))
+    }
+  }
+  out
+}
+
+fn sort_bytes(take xs: List[Bytes]) -> List[Bytes] {
+  let mut v = take xs
+  let n = list.len(v)
+  for i in 1u64..n {
+    let mut j = i
+    while j > 0 && v[j] < v[j - 1] {
+      let a = copy v[j - 1]
+      v[j - 1] = copy v[j]
+      v[j] = take a
+      j -= 1
+    }
+  }
+  v
+}
+
+fn random_descriptor(mut g: prng.Generator) -> history.Descriptor {
+  history.Descriptor(
+    version: 1u64 + prng.u64(mut g) % 1000,
+    digest: fixed(mut g, 32),
+    root: fixed(mut g, 32),
+    height: int.truncate(1u64 + prng.u64(mut g) % 4),
+    entries: prng.u64(mut g) % 100,
+    bytes: prng.u64(mut g) % 10000
+  )
+}
+
+// A commit that may appear at a version above 2.
+fn random_commit(mut g: prng.Generator, defs: u32) -> history.Commit {
+  let pick = prng.u64(mut g) % 8
+  let body: history.Body = if pick < 3 && defs > 0 {
+    let arrival: Option[history.Arrival] = if prng.u64(mut g) % 2 == 0 {
+      None()
+    } else {
+      Some(history.Arrival(identity: fixed(mut g, 32), position: prng.u64(mut g), digest: fixed(mut g, 32)))
+    }
+    let d: u32 = int.truncate(prng.u64(mut g) % int.widen(defs))
+    Transaction(
+      history.Call(
+        def: d,
+        at: int.truncate(prng.u64(mut g)),
+        seed: prng.u64(mut g),
+        caller: random_bytes(mut g, 10),
+        arrival: take arrival,
+        args: random_bytes(mut g, 12),
+        outcome: random_bytes(mut g, 12)
+      )
+    )
+  } else if pick == 3 {
+    let mut records: List[history.Record] = []
+    for _ in 0u64..prng.u64(mut g) % 3 {
+      list.push(mut records, history.Record(kind: int.truncate(prng.u64(mut g) % 6), payload: random_bytes(mut g, 9)))
+    }
+    Run(run: fixed(mut g, 16), records: take records)
+  } else if pick == 4 {
+    Engine(Checkpoint(random_descriptor(mut g)))
+  } else if pick == 5 {
+    let mut names: List[Bytes] = []
+    for _ in 0u64..prng.u64(mut g) % 3 {
+      let name = random_bytes(mut g, 5)
+      let mut seen = false
+      for x in names {
+        if x == name {
+          seen = true
+        }
+      }
+      if !seen {
+        list.push(mut names, take name)
+      }
+    }
+    let mut pins: List[history.Pin] = []
+    for name in sort_bytes(take names) {
+      list.push(mut pins, history.Pin(name: unique name, version: prng.u64(mut g)))
+    }
+    let mut checkpoints: List[history.Descriptor] = []
+    for _ in 0u64..prng.u64(mut g) % 2 {
+      list.push(mut checkpoints, random_descriptor(mut g))
+    }
+    Engine(Retain(floor: prng.u64(mut g), pins: take pins, checkpoints: take checkpoints))
+  } else if pick == 6 {
+    if prng.u64(mut g) % 2 == 0 {
+      Engine(StreamFence(fixed(mut g, 32)))
+    } else {
+      Engine(StreamPurge(fixed(mut g, 32)))
+    }
+  } else {
+    Engine(Library(name: random_bytes(mut g, 6), payload: random_bytes(mut g, 10)))
+  }
+  history.Commit(body: take body, writes: random_writes(mut g))
+}
+
+fn random_group(mut g: prng.Generator) -> history.Group {
+  let ndefs: u32 = int.truncate(prng.u64(mut g) % 3)
+  let mut defs: List[history.Def] = []
+  for _ in 0u32..ndefs {
+    list.push(mut defs, history.Def(path: random_bytes(mut g, 8), fingerprint: random_bytes(mut g, 8), code: fixed(mut g, 32), revision: random_bytes(mut g, 4)))
+  }
+  let count = 1u64 + prng.u64(mut g) % 4
+  let mut commits: List[history.Commit] = []
+  for _ in 0u64..count {
+    list.push(mut commits, random_commit(mut g, ndefs))
+  }
+  history.Group(
+    prev: fixed(mut g, 32),
+    first: 3u64 + prng.u64(mut g) % 100000,
+    epoch: 1u64 + prng.u64(mut g) % 9,
+    commits: take commits,
+    defs: take defs
+  )
+}
+
+fn genesis_group(mut g: prng.Generator, prev: Bytes) -> history.Group {
+  let b = history.default_bounds()
+  history.Group(
+    prev: unique prev,
+    first: 2,
+    epoch: 1,
+    commits: [
+      history.Commit(
+        body: Engine(
+          Genesis(
+            key_bytes: 4096,
+            value_bytes: 1048576,
+            transaction_bytes: 16777216,
+            range_rows: 10000,
+            bounds: b
+          )
+        ),
+        writes: random_writes(mut g)
+      )
+    ],
+    defs: []
+  )
+}
+
+fn flip(data: Bytes, bit: u64) -> Bytes {
+  let mut out: List[u8] = []
+  bytes.append(mut out, data)
+  let i = bit / 8
+  let mask: u8 = int.truncate(1u64 << bit % 8)
+  out[i] = out[i] ^ mask
+  bytes.from_list(take out)
+}
+
+// The refusal the format names for a record changed at byte `at` (none for
+// a truncation): a change to the two version digits of the magic is another
+// format version, carried as found; anything else is corruption.
+fn classified[T](r: Result[T, history.Fault], changed: Bytes, at: Option[u64]) -> bool {
+  let version = match at {
+    Some(i) => i == 6 || i == 7,
+    None() => false,
+  }
+  match r {
+    Ok(_) => false,
+    Error(Unsupported(found: f)) => version && f == bytes.slice(changed, 0, 8),
+    Error(Corrupt()) => !version,
+  }
+}
+
+// Law 1 and 3 on a group's bytes; law 2 on every flip and truncation.
+fn group_laws(data: Bytes, d: Bytes, damage: bool) -> (bool, bool, bool) {
+  let round = match history.decode_group(data, d) {
+    Ok(back) => {
+      let (again, d2) = history.encode_group(back)
+      again == data && d2 == d
+    },
+    Error(_) => false,
+  }
+  let mut refused = true
+  let mut canonical = true
+  let n: u64 = if damage {
+    bytes.len(data)
+  } else {
+    0
+  }
+  for bit in 0u64..n * 8 {
+    let bad = flip(data, bit)
+    if !classified(history.decode_group(bad, d), bad, Some(bit / 8)) {
+      refused = false
+    }
+    let own = history.digest(bad)
+    if let Ok(x) = history.decode_group(bad, own) {
+      let (again, _) = history.encode_group(x)
+      if again != bad {
+        canonical = false
+      }
+    }
+  }
+  for cut in 0u64..n {
+    let short = bytes.slice(data, 0, cut)
+    if !classified(history.decode_group(short, d), short, None()) {
+      refused = false
+    }
+    let own = history.digest(short)
+    if let Ok(x) = history.decode_group(short, own) {
+      let (again, _) = history.encode_group(x)
+      if again != short {
+        canonical = false
+      }
+    }
+  }
+  (round, refused, canonical)
+}
+
+fn random_head(mut g: prng.Generator) -> history.Head {
+  let checkpoint: Option[history.Descriptor] = if prng.u64(mut g) % 2 == 0 {
+    None()
+  } else {
+    Some(random_descriptor(mut g))
+  }
+  let origin: Option[(Bytes, u64)] = if prng.u64(mut g) % 2 == 0 {
+    None()
+  } else {
+    Some((fixed(mut g, 32), prng.u64(mut g)))
+  }
+  history.Head(
+    identity: fixed(mut g, 32),
+    epoch: prng.u64(mut g),
+    attempt: fixed(mut g, 16),
+    end: prng.u64(mut g),
+    digest: fixed(mut g, 32),
+    checkpoint: take checkpoint,
+    locator: random_bytes(mut g, 12),
+    retain: random_bytes(mut g, 20),
+    origin: take origin
+  )
+}
+
+// A random state, ascending by distinct key.
+fn random_state(mut g: prng.Generator, n: u64) -> List[(Bytes, Bytes)] {
+  let mut keys: List[Bytes] = []
+  for i in 0u64..n {
+    let mut k: List[u8] = []
+    // Distinct keys: a big-endian index after a random prefix byte.
+    list.push(mut k, int.truncate(prng.u64(mut g) % 4))
+    for j in 0u64..4 {
+      list.push(mut k, int.truncate(i >> (24 - j * 8)))
+    }
+    list.push(mut keys, bytes.from_list(take k))
+  }
+  let sorted = sort_bytes(take keys)
+  let mut out: List[(Bytes, Bytes)] = []
+  for k in sorted {
+    list.push(mut out, (unique k, random_bytes(mut g, 40)))
+  }
+  out
+}
+
+// The cut rule over a flat list, written from the spec: the leaf entry
+// counts of every node, in order.
+fn reference_leaves(entries: List[(Bytes, Bytes)], b: history.Bounds) -> List[u64] {
+  let mut counts: List[u64] = []
+  let mut size: u64 = 13
+  let mut count: u64 = 0
+  let max: u64 = int.widen(b.node_max)
+  let min: u64 = int.widen(b.node_min)
+  let mean: u64 = int.widen(b.node_mean)
+  for (k, v) in entries {
+    let e = 8 + bytes.len(k) + bytes.len(v)
+    if count > 0 && size + e > max {
+      list.push(mut counts, count)
+      size = 13
+      count = 0
+    }
+    size += e
+    count += 1
+    let h = bytes.sha256(k)
+    let x: u64 = int.widen(h[0]) + (int.widen(h[1]) << 8) + (int.widen(h[2]) << 16) + (int.widen(h[3]) << 24)
+    if size >= min && x * mean < e * 4294967296 {
+      list.push(mut counts, count)
+      size = 13
+      count = 0
+    }
+  }
+  if count > 0 || list.len(counts) == 0 {
+    list.push(mut counts, count)
+  }
+  counts
+}
+
+fn lookup(nodes: List[(Bytes, Bytes)], d: Bytes) -> Bytes {
+  for (k, v) in nodes {
+    if k == d {
+      return unique v
+    }
+  }
+  b""
+}
+
+// Reads a tree back level by level; returns the leaf counts and entries.
+fn read_tree(tree: history.Tree, d: history.Descriptor) -> Result[(List[u64], List[(Bytes, Bytes)]), history.Fault] {
+  let mut expects: List[history.Expect] = [history.root_expect(d)]
+  while true {
+    let mut blobs: List[Bytes] = []
+    for e in expects {
+      list.push(mut blobs, lookup(tree.nodes, e.digest))
+    }
+    match history.check_level(expects, blobs)? {
+      Next(below) => {
+        expects = take below
+      },
+      Leaves(entries) => {
+        let mut counts: List[u64] = []
+        for e in expects {
+          list.push(mut counts, e.entries)
+        }
+        return Ok((take counts, take entries))
+      },
+    }
+  }
+  Error(Corrupt())
+}
+
+fn report(stdout: Stdout, name: String, ok: bool) -> () {
+  let _ = out.print(stdout, if ok {
+    f"ok {name}\n"
+  } else {
+    f"FAIL {name}\n"
+  })
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
+  let stdout = io.stdout(rt)?
+  let mut g = prng.seed(681)
+
+  // Laws 1-3 on random groups.
+  let mut round = true
+  let mut refused = true
+  let mut canonical = true
+  // Every group round trips; every flip and truncation of the first 12 is
+  // classified, which keeps the run within the launch timeout.
+  for i in 0u64..300 {
+    let grp = random_group(mut g)
+    let (data, d) = history.encode_group(grp)
+    let (r, f, c) = group_laws(data, d, i < 12)
+    round = round && r
+    refused = refused && f
+    canonical = canonical && c
+  }
+  // The claim and genesis groups that start every history.
+  let identity = fixed(mut g, 32)
+  let (claim, claim_digest) = history.claim_group(history.origin_tip(), fixed(mut g, 16), identity)
+  let (r1, f1, c1) = group_laws(claim, claim_digest, true)
+  let (genesis, genesis_digest) = history.encode_group(genesis_group(mut g, claim_digest))
+  let (r2, f2, k2) = group_laws(genesis, genesis_digest, true)
+  report(stdout, "group round trip", round && r1 && r2)
+  report(stdout, "group flips and truncations classified", refused && f1 && f2)
+  report(stdout, "group decoding canonical", canonical && c1 && k2)
+
+  // Law 2 on head records.
+  let mut head_round = true
+  let mut head_refused = true
+  for i in 0u64..100 {
+    let h = random_head(mut g)
+    let data = history.encode_head(h)
+    match history.decode_head(data) {
+      Ok(back) => {
+        head_round = head_round && history.encode_head(back) == data
+      },
+      Error(_) => {
+        head_round = false
+      },
+    }
+    let damaged: u64 = if i < 10 {
+      bytes.len(data)
+    } else {
+      0
+    }
+    for bit in 0u64..damaged * 8 {
+      let bad = flip(data, bit)
+      if !classified(history.decode_head(bad), bad, Some(bit / 8)) {
+        head_refused = false
+      }
+    }
+    for cut in 0u64..damaged {
+      let short = bytes.slice(data, 0, cut)
+      if !classified(history.decode_head(short), short, None()) {
+        head_refused = false
+      }
+    }
+  }
+  report(stdout, "head round trip", head_round)
+  report(stdout, "head flips and truncations classified", head_refused)
+
+  // Law 4 on random states under small bounds.
+  let bounds = history.Bounds(node_min: 64, node_mean: 256, node_max: 512)
+  let mut cuts = true
+  let mut reads = true
+  let mut equal = true
+  for round_index in 0u64..60 {
+    // The first state is small: every bit of its tree is flipped.
+    let n: u64 = if round_index == 0 {
+      40
+    } else {
+      prng.u64(mut g) % 400
+    }
+    let state = random_state(mut g, n)
+    let tree = history.build_tree(state, bounds)
+    let mut total: u64 = 0
+    for (k, v) in state {
+      total += bytes.len(k) + bytes.len(v)
+    }
+    let d = history.descriptor(tree, 7, fixed(mut g, 32))
+    match read_tree(tree, d) {
+      Ok((counts, entries)) => {
+        cuts = cuts && counts == reference_leaves(state, bounds)
+        reads = reads && entries == state && tree.entries == n && tree.bytes == total
+      },
+      Error(_) => {
+        reads = false
+      },
+    }
+    let again = history.build_tree(state, bounds)
+    equal = equal && again.root == tree.root && list.len(again.nodes) == list.len(tree.nodes)
+    // Every bit flip of every node of the small tree is classified.
+    if round_index == 0 {
+      for i in 0u64..list.len(tree.nodes) {
+        let (nd, data) = copy tree.nodes[i]
+        for bit in 0u64..bytes.len(data) * 8 {
+          let mut changed = copy tree
+          let bad = flip(data, bit)
+          changed.nodes[i] = (copy nd, copy bad)
+          if !classified(read_tree(changed, d), bad, Some(bit / 8)) {
+            reads = false
+          }
+        }
+      }
+    }
+  }
+  // An empty state is one empty leaf.
+  let empty: List[(Bytes, Bytes)] = []
+  let none = history.build_tree(empty, bounds)
+  let none_d = history.descriptor(none, 2, fixed(mut g, 32))
+  reads = reads && list.len(none.nodes) == 1 && none.height == 1 && match read_tree(none, none_d) {
+    Ok((counts, entries)) => list.len(entries) == 0 && counts == [0u64],
+    Error(_) => false,
+  }
+  report(stdout, "leaf cuts match the reference", cuts)
+  report(stdout, "trees read back and classify damage", reads)
+  report(stdout, "equal states give equal roots", equal)
+
+  // Law 5: a chain of claim, genesis and later groups, and its breaks.
+  let mut chain = true
+  let Ok(claim_group) = history.decode_group(claim, claim_digest) else {
+    report(stdout, "chain rules", false)
+    return Ok(())
+  }
+  let Ok(tip1) = history.follow(history.origin_tip(), claim_group, claim_digest) else {
+    report(stdout, "chain rules", false)
+    return Ok(())
+  }
+  chain = chain && tip1.epoch == 1 && tip1.last == 1 && tip1.identity == identity
+  let Ok(gen) = history.decode_group(genesis, genesis_digest) else {
+    report(stdout, "chain rules", false)
+    return Ok(())
+  }
+  let Ok(tip2) = history.follow(tip1, gen, genesis_digest) else {
+    report(stdout, "chain rules", false)
+    return Ok(())
+  }
+  chain = chain && tip2.last == 2 && tip2.epoch == 1
+  // A later claim raises the epoch; another identity or a skipped epoch is
+  // refused, as is a group that changes the epoch without a claim, a wrong
+  // prev or a gap in versions.
+  let (c2data, c2digest) = history.claim_group(tip2, fixed(mut g, 16), identity)
+  let Ok(claim2) = history.decode_group(c2data, c2digest) else {
+    report(stdout, "chain rules", false)
+    return Ok(())
+  }
+  chain = chain && match history.follow(tip2, claim2, c2digest) {
+    Ok(t) => t.epoch == 2 && t.last == 3,
+    Error(()) => false,
+  }
+  let (other, other_digest) = history.claim_group(tip2, fixed(mut g, 16), fixed(mut g, 32))
+  let Ok(o) = history.decode_group(other, other_digest) else {
+    report(stdout, "chain rules", false)
+    return Ok(())
+  }
+  chain = chain && is_error(history.follow(tip2, o, other_digest))
+  let mut skipped = copy tip2
+  skipped.epoch = 0
+  chain = chain && is_error(history.follow(skipped, claim2, c2digest))
+  let mut later = random_group(mut g)
+  later.prev = copy tip2.digest
+  later.first = 3
+  later.epoch = 1
+  let (ld, ldd) = history.encode_group(later)
+  let Ok(lg) = history.decode_group(ld, ldd) else {
+    report(stdout, "chain rules", false)
+    return Ok(())
+  }
+  chain = chain && !is_error(history.follow(tip2, lg, ldd))
+  let mut raised = copy later
+  raised.epoch = 2
+  let (rd, rdd) = history.encode_group(raised)
+  let Ok(rg) = history.decode_group(rd, rdd) else {
+    report(stdout, "chain rules", false)
+    return Ok(())
+  }
+  chain = chain && is_error(history.follow(tip2, rg, rdd))
+  let mut gap = copy later
+  gap.first = 4
+  let (gd, gdd) = history.encode_group(gap)
+  let Ok(gg) = history.decode_group(gd, gdd) else {
+    report(stdout, "chain rules", false)
+    return Ok(())
+  }
+  chain = chain && is_error(history.follow(tip2, gg, gdd))
+  chain = chain && is_error(history.follow(tip1, lg, ldd))
+  // Nothing but a claim precedes the first claim: a genesis at version 2
+  // after no claim does not follow the origin.
+  chain = chain && is_error(history.follow(history.origin_tip(), gen, genesis_digest))
+  report(stdout, "chain rules", chain)
+  Ok(())
+}
+
+fn is_error(r: Result[history.Tip, ()]) -> bool {
+  match r {
+    Ok(_) => false,
+    Error(()) => true,
+  }
+}

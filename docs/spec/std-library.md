@@ -5805,6 +5805,7 @@ fn table.delete[K: key + serializable, V: serializable](mut tx: store.Tx, t: tab
 fn table.range[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], from: store.RangeBound[K], to: store.RangeBound[K], limit: u64, order: store.ScanOrder) -> Result[List[(K, V)], store.TxError]
 fn table.history(mut tx: store.Tx, name: String) -> Result[List[table.SchemaEntry], store.TxError]
 fn table.rename(mut tx: store.Tx, name: String, from: String, to: String) -> Result[(), store.TxError]
+fn table.migrate[J: key + serializable, A: serializable, K: key + serializable, B: serializable, E: serializable, S](within: Scope, mut s: store.Store[S], from: table.Table[J, A], to: table.Table[K, B], f: Entry[fn(c: (), key: J, old: A) -> Result[(K, B), E]], batch: u64) -> Result[u64, table.MigrateError[E]]
 fn table.scope[K: key + serializable, V: serializable](t: table.Table[K, V], access: store.Access) -> store.KeyScope
 fn table.scope_keys[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], from: store.RangeBound[K], to: store.RangeBound[K], access: store.Access) -> Result[store.KeyScope, store.TxError]
 ```
@@ -5836,10 +5837,16 @@ Failures are `store.TxError` and `store.SchemaError`
 ([Stores](#stores)); they and the history records are serializable. An operation's refusal leaves
 the transaction running with no changes from that operation.
 
-`table.migrate` is not implemented yet: it needs pure Entry invocation and
-code identity support. Until then a write to a table never returns
-`Migrating()`. Opening a store discards every pending migration's mark and
-shadow rows, in commits within the store limits.
+`migrate` rewrites every row through the pure row entry `f`, run with
+`runner.apply`, in batches of `batch` rows per transaction, checking `within`
+for cancellation between them, and installs the rows and the target schema in
+one last transaction, recording `Migrated(runner.entry_id(f))` in the history.
+`MigrateError` is `Failed(E) | Faulted(Failure) | Collision | Table(store.TxError)
+| Canceled(CancelCause)`; on any of them the migration is discarded and the
+table is unchanged. The install must fit one commit: a table whose rows exceed
+`transaction_bytes` returns `Table(Limit(..))`. While a migration runs, writes
+to the table return `Migrating()`. Opening a store discards the mark and shadow
+rows a process crash left behind, in commits within the store limits.
 
 A table has one key order, the byte order of its encoded keys under the key
 layout of its creation or its latest migration. Reordering the fields of a

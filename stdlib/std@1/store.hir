@@ -481,9 +481,10 @@ pub fn open_backend[S](take state: S, take backend: Backend[S], config: StoreCon
   }
 }
 
-// The typed-table library's pending migrations (STORE-9): one mark per table
+// The typed-table library's running migrations (STORE-9): one mark per table
 // under the first prefix, the rows written so far under the second. Opening a
-// store discards every pending migration by deleting both in one commit.
+// store discards what a process crash left of a migration, shadow rows first,
+// in commits within the store limits.
 fn migration_marks() -> Bytes uses {} {
   b"hirsel.migrations/"
 }

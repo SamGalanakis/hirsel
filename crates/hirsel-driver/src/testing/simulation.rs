@@ -21,9 +21,8 @@ pub fn observe_tir(
         ));
     }
     crate::tir_execution::refuse_foreign_interpretation(input)?;
-    if !simulation.runners.is_empty() {
-        simulation.callees = std::sync::Arc::new(input.callees.clone());
-    }
+    // Entry identities serve `runner.entry_id` and `runner.apply` as well as runner calls.
+    simulation.callees = std::sync::Arc::new(input.callees.clone());
     let mut runtime = (*input.runtime).clone();
     runtime.checked = if checked {
         // A computed checked runtime always names arena.with (MEM-4); a product

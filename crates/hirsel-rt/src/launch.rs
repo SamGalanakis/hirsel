@@ -2136,7 +2136,13 @@ pub(crate) unsafe fn execute(
         match harness_text("HIRSEL_RT_CALLEES")? {
             Some(text) => hirsel_run_schema::parse_callees(&text)
                 .map_err(|error| format!("the callee facts: {error}"))?,
-            None => Default::default(),
+            // Entry identities serve `runner.entry_id` and `runner.apply` as well as
+            // runner calls, so a run without runners reads the program's own facts.
+            None => program
+                .callees
+                .as_ref()
+                .map(|metadata| metadata.facts.clone())
+                .unwrap_or_default(),
         }
     };
     // net.script@2 peers serve the root Net's world; the rules alone decide policy.

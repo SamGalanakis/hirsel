@@ -1,8 +1,7 @@
 // rule: STORE-9
 // expect: run
 // A crash at each storage write of a migration leaves either the old table,
-// after reopening discards the pending migration, or the migrated one. Runs
-// as a module of std, which keeps the engine private.
+// after reopening discards the pending migration, or the migrated one.
 @serializable
 type Item {
   label: String,
@@ -15,7 +14,7 @@ type Priced {
   cents: u64,
 }
 
-fn price(key: u32, old: Item) -> Result[(u32, Priced), ()] {
+fn price(c: (), key: u32, old: Item) -> Result[(u32, Priced), ()] {
   Ok((key, Priced(label: unique old.label, cents: int.widen(old.count) * 100)))
 }
 
@@ -72,14 +71,12 @@ fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
       Ok(opened_store) => opened_store,
       Error(_) => continue,
     }
-    match table.migrate_with(
+    match table.migrate(
       sc,
       mut faulty,
       items(),
       priced(),
       price,
-      "app.price",
-      "h",
       2
     ) {
       Ok(3) => {

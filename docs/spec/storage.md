@@ -4,8 +4,8 @@
 implementation is converging on it:
 
 - **Shipped and unchanged here:** the key encoding (STORE-6, `std@1/keys`); typed tables'
-  create, drop, get, put, delete and range, row epochs, storage identity and rename history
-  (STORE-5, STORE-7, STORE-9); the output gate over one durable version (STORE-2); the
+  create, drop, get, put, delete and range, row epochs, storage identity, rename history
+  and migrations (STORE-5, STORE-7, STORE-9); the output gate over one durable version (STORE-2); the
   call-stream decisions as `store.call` (STORE-12); and recording of a store's backend
   requests (STORE-10). `packages/s3@1` implements object-storage requests and grants.
 - **Shipped, removed by this part, and deleted at the cutover:** closure bodies for
@@ -629,11 +629,11 @@ Retain commit that released them is durable
 
 ```text
 SchemaEntry     = { epoch: u32, key_schema: String, value_schema: String, change: SchemaChange }
-SchemaChange    = Created() | Renamed(from: String, to: String) | Migrated(definition: String, code: String)
-MigrateError[E] = Failed(E) | Collision() | Table(TxError) | Canceled(CancelCause)
+SchemaChange    = Created() | Renamed(from: String, to: String) | Migrated(entry: EntryId)
+MigrateError[E] = Failed(E) | Faulted(Failure) | Collision() | Table(TxError) | Canceled(CancelCause)
 
 fn table.rename(mut tx: Tx, name: String, from: String, to: String) -> Result[(), TxError]
-fn table.migrate[J: key + serializable, A: serializable, K: key + serializable, B: serializable, E: serializable](within: Scope, mut s: Store, from: Table[J, A], to: Table[K, B], f: Entry[fn(key: J, old: A) -> Result[(K, B), E]], batch: u64) -> Result[u64, MigrateError[E]]
+fn table.migrate[J: key + serializable, A: serializable, K: key + serializable, B: serializable, E: serializable](within: Scope, mut s: Store, from: Table[J, A], to: Table[K, B], f: Entry[fn(c: (), key: J, old: A) -> Result[(K, B), E]], batch: u64) -> Result[u64, MigrateError[E]]
 ```
 
 Every table keeps its **schema history**: one entry per schema it has had, numbered from
@@ -649,32 +649,34 @@ spelling through the history. A rename that does not occur in the current schema
 `InvalidInput()`.
 
 **Migrations.** Any other change of a table's key or value schema is made only by
-`table.migrate`, whose `f` is a pure top-level function ([RUN-3](runners.md#run-3-entries))
-from an old row to a new one. `from` and `to` must name the same table, and `batch` must be
-between 1 and the store's `range_rows` limit, else `Table(InvalidInput())`. Then:
+`table.migrate`, whose `f` is an entry ([RUN-3](runners.md#run-3-entries)) from an old row
+to a new one. Its context is `()`: the context position states what an entry's body may
+touch, and `()` gives it nothing, which is how the type records that a row function is
+pure. `from` and `to` must name the same table, and `batch` must be between 1 and the
+store's `range_rows` limit, else `Table(InvalidInput())`. Then:
 
 1. A table whose current schema already matches `K` and `B` returns `Ok(0)`. Otherwise its
    current schema must match `J` and `A`, else `Table(Schema(..))`.
-2. One transaction marks the table as migrating, with the target descriptors, the identity
-   of `f` (its definition path and code hash, [RUN-8](runners.md#run-8-identity-and-arrival))
-   and a cursor. From then on writes to the table return `Migrating()`; reads through
-   `from` continue.
-3. Successive transactions each read up to `batch` rows after the cursor in key order,
-   apply `f` to each in order, write the results into a shadow table under the new
-   schema, and advance the cursor. Cancellation of `within` is checked between these
-   transactions.
+2. One transaction marks the table as migrating. Until the migration ends, writes to the
+   table return `Migrating()`; reads through `from` continue.
+3. Successive transactions each read up to `batch` rows after the last one migrated, in
+   key order, apply `f` to each in order through `runner.apply(f, (), key, old)`
+   ([RUN-3](runners.md#run-3-entries)), and write the results into a shadow table under
+   the new schema. Cancellation of `within` is checked between these transactions.
 4. One final transaction replaces the table's rows with the shadow's, appends the new
-   schema entry, clears the mark, and the call returns `Ok(n)` with the number of rows
-   migrated.
+   schema entry `Migrated(runner.entry_id(f))`, the identity of `f` (its path, signature
+   fingerprint and code hash, [RUN-8](runners.md#run-8-identity-and-arrival)), clears the
+   mark, and the call returns `Ok(n)` with the number of rows migrated.
 
-If `f` returns `Error(e)`, two rows map to the same new key, or the scope is cancelled,
-one transaction discards the shadow and the mark, and the call returns `Failed(e)`,
-`Collision()` or `Canceled(cause)`; the table is unchanged. A failure in `f` propagates and
-leaves the migration pending; a later `table.migrate` with the same `from`, `to` and `f`
-identity resumes it from its cursor, any other one returns `Table(Migrating())`, and
-opening the store discards every pending migration. Key migrations are allowed, since `f`
-maps the key too. Tooling may propose migrations for additive changes; the store applies
-none on its own.
+If `f` returns `Error(e)`, fails (`runner.apply` returns `Error(failure)`), two rows map to
+the same new key, `within` is cancelled, or a step's commit exceeds the store's limits,
+the migration is discarded and the call returns `Failed(e)`, `Faulted(failure)`,
+`Collision()`, `Canceled(cause)` or `Table(Limit(..))`; the table is unchanged. A discard
+removes the shadow rows and then the mark, in transactions that each fit the store's
+limits, so the table never accepts writes while shadow rows remain. Opening a store
+discards the mark and shadow rows a process crash left behind. Key migrations are allowed,
+since `f` maps the key too. Tooling may propose migrations for additive changes; the store
+applies none on its own.
 
 A migration is the only mechanism that maps stored data from one schema to another. It
 maps every typed table alike, the tables that hold parked runs included

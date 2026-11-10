@@ -5,7 +5,7 @@ pub opaque type Table[K: key + serializable, V: serializable]: copyable + data +
 }
 
 @serializable
-pub type SchemaChange = Created | Renamed(String, String) | Migrated(String, String)
+pub type SchemaChange = Created | Renamed(String, String) | Migrated(EntryId)
 
 @serializable
 pub type SchemaEntry {
@@ -17,7 +17,7 @@ pub type SchemaEntry {
 
 /// Why `table.migrate` returned without migrating; the table is unchanged.
 @serializable
-pub type MigrateError[E] = Failed(E) | Collision | Table(store.TxError) | Canceled(
+pub type MigrateError[E] = Failed(E) | Faulted(Failure) | Collision | Table(store.TxError) | Canceled(
   CancelCause
 )
 
@@ -65,18 +65,6 @@ type Epoch {
 type Catalog {
   epochs: List[Epoch],
   renames: List[(String, String)],
-}
-
-// A pending migration's mark: the target descriptors, the identity of its row
-// function, the last source key migrated and the rows migrated so far.
-@serializable
-type Pending {
-  key: Bytes,
-  value: Bytes,
-  definition: String,
-  code: String,
-  cursor: Option[Bytes],
-  count: u64,
 }
 
 fn corrupt() -> store.TxError uses {} {
@@ -587,9 +575,8 @@ fn settled[R, E](take r: Result[R, store.TxFailure[MigrateError[E]]]) -> Result[
   }
 }
 
-// The first transaction: refuse, finish at once, or mark the table (or find
-// the same migration pending, to resume from its cursor).
-type Start = Current | Marked(Catalog, Pending)
+// The first transaction: finish at once, or mark the table.
+type Start = Current | Marked(Catalog)
 
 fn start[
   J: key + serializable,
@@ -597,48 +584,27 @@ fn start[
   K: key + serializable,
   B: serializable,
   E: serializable
-](
-  mut tx: store.Tx,
-  from: Table[J, A],
-  to: Table[K, B],
-  definition: String,
-  code: String
-) -> Result[Start, MigrateError[E]] {
+](mut tx: store.Tx, from: Table[J, A], to: Table[K, B]) -> Result[Start, MigrateError[E]] {
   let name = table_name(from)
   let c = load_catalog(mut tx, name) ? Table
   if let Ok(()) = schemas(c, to) {
     return Ok(Current())
   }
   schemas(c, from) ? Table
-  let k: Option[K] = None()
-  let b: Option[B] = None()
-  let target_key = internal.table_schema.schema(k)
-  let target_value = internal.table_schema.schema(b)
-  if let Some(raw) = store.table_read(mut tx, mark_key(name)) {
-    let decoded: Result[Pending, DecodeError] = codec.decode(raw)
-    let Ok(p) = take decoded else {
-      return Error(Table(corrupt()))
-    }
-    if p.key != target_key || p.value != target_value || p.definition != definition || p.code != code {
-      return Error(Table(Migrating()))
-    }
-    return Ok(Marked(take c, take p))
-  }
-  let p = Pending(
-    key: take target_key,
-    value: take target_value,
-    definition: unique definition,
-    code: unique code,
-    cursor: None(),
-    count: 0
-  )
-  store.table_put(mut tx, mark_key(name), codec.encode(p)) ? Table
-  Ok(Marked(take c, take p))
+  store.table_put(mut tx, mark_key(name), b"") ? Table
+  Ok(Marked(take c))
+}
+
+// How far a migration has come: the last source key migrated and the rows
+// migrated so far.
+type Progress {
+  cursor: Option[Bytes],
+  count: u64,
 }
 
 // Applies `f` to up to `batch` rows after the cursor, in key order, writing
-// each result into the shadow under the target schema, and advances the mark.
-// Returns the advanced mark and whether rows may remain.
+// each result into the shadow under the target schema. Returns the advanced
+// progress and whether rows may remain.
 fn advance[
   J: key + serializable,
   A: serializable,
@@ -648,32 +614,29 @@ fn advance[
 ](
   mut tx: store.Tx,
   name: String,
-  c: Catalog,
-  f: fn(key: J, old: A) -> Result[(K, B), E] uses {},
-  p: Pending,
+  catalog: Catalog,
+  f: Entry[fn(c: (), key: J, old: A) -> Result[(K, B), E]],
+  p: Progress,
   batch: u64
-) -> Result[(Pending, bool), MigrateError[E]] {
-  let cursor: Option[Bytes] = match p.cursor {
-    Some(last) => Some(unique last),
-    None() => None(),
-  }
-  let mut mark = Pending(
-    key: unique p.key,
-    value: unique p.value,
-    definition: unique p.definition,
-    code: unique p.code,
-    cursor: take cursor,
-    count: p.count
-  )
+) -> Result[(Progress, bool), MigrateError[E]] {
+  let key_type: Option[K] = None()
+  let value_type: Option[B] = None()
+  let target_key = internal.table_schema.schema(key_type)
+  let target_value = internal.table_schema.schema(value_type)
   let prefix = row_prefix(name)
-  let low = match mark.cursor {
+  let low = match p.cursor {
     Some(last) => successor(last),
     None() => copy prefix,
   }
   let rows = store.table_range(mut tx, take low, keys.prefix_end(prefix), batch, Ascending()) ? Table
-  let stored = c.epochs[generation(c)].key
+  let stored = catalog.epochs[generation(catalog)].key
   let shadow = shadow_prefix(name)
-  let epoch = list.len(c.epochs)
+  let epoch = list.len(catalog.epochs)
+  let mut cursor: Option[Bytes] = match p.cursor {
+    Some(last) => Some(unique last),
+    None() => None(),
+  }
+  let mut count = p.count
   for (key, value) in rows {
     let payload = match keys.decode_payload(
       stored,
@@ -685,42 +648,45 @@ fn advance[
     let decoded: Result[J, DecodeError] = internal.table_schema.decode(
       stored,
       payload,
-      c.renames
+      catalog.renames
     )
     let old_key = match take decoded {
       Ok(k) => k,
       Error(_) => return Error(Table(corrupt())),
     }
-    let old: A = decode_value(c, value) ? Table
-    let (new_key, new_value) = match f(old_key, old) {
-      Ok(row) => row,
-      Error(e) => return Error(Failed(take e)),
+    let old: A = decode_value(catalog, value) ? Table
+    let (new_key, new_value) = match core@1/runner.apply(f, (), old_key, old) {
+      Ok(Ok(row)) => row,
+      Ok(Error(e)) => return Error(Failed(take e)),
+      Error(failure) => return Error(Faulted(take failure)),
     }
-    let target = concat(shadow, encoded_key(mark.key, new_key, []) ? Table)
+    let target = concat(shadow, encoded_key(target_key, new_key, []) ? Table)
     if let Some(_) = store.table_read(mut tx, copy target) {
       return Error(Collision())
     }
     let mut out: List[u8] = []
     internal.table_schema.little(mut out, epoch, 4)
-    let data = match internal.table_schema.encode(mark.value, new_value, []) {
+    let data = match internal.table_schema.encode(target_value, new_value, []) {
       Ok(data) => data,
       Error(_) => return Error(Table(corrupt())),
     }
     bytes.append(mut out, data)
     store.table_put(mut tx, take target, bytes.from_list(take out)) ? Table
-    mark.cursor = Some(unique key)
-    mark.count += 1
+    cursor = Some(unique key)
+    count += 1
   }
-  store.table_put(mut tx, mark_key(name), codec.encode(mark)) ? Table
-  Ok((take mark, list.len(rows) == batch))
+  Ok((Progress(cursor: take cursor, count: count), list.len(rows) == batch))
 }
 
 // The last transaction: the shadow's rows replace the table's, the target
 // schema becomes current, and the mark goes.
-fn install[E](mut tx: store.Tx, name: String, c: Catalog, p: Pending) -> Result[
-  (),
-  MigrateError[E]
-] {
+fn install[K: key + serializable, B: serializable, E](
+  mut tx: store.Tx,
+  to: Table[K, B],
+  c: Catalog,
+  entry: EntryId
+) -> Result[(), MigrateError[E]] {
+  let name = table_name(to)
   let prefix = row_prefix(name)
   for (key, _) in store.table_all(mut tx, copy prefix, keys.prefix_end(prefix), true) ? Table {
     store.table_delete(mut tx, unique key) ? Table
@@ -731,13 +697,15 @@ fn install[E](mut tx: store.Tx, name: String, c: Catalog, p: Pending) -> Result[
     store.table_delete(mut tx, unique key) ? Table
     store.table_put(mut tx, take live, unique value) ? Table
   }
+  let k: Option[K] = None()
+  let b: Option[B] = None()
   let mut next = Catalog(epochs: unique c.epochs, renames: [])
   list.push(
     mut next.epochs,
     Epoch(
-      key: unique p.key,
-      value: unique p.value,
-      change: Migrated(unique p.definition, unique p.code)
+      key: internal.table_schema.schema(k),
+      value: internal.table_schema.schema(b),
+      change: Migrated(unique entry)
     )
   )
   save(mut tx, name, next) ? Table
@@ -796,26 +764,24 @@ fn over_limit[R, E](r: Result[R, store.TxFailure[MigrateError[E]]]) -> Option[st
   }
 }
 
-// STORE-9's migration engine, internal to std until `table.migrate` applies
-// its row function as an Entry: migrates every row from schema (J, A) to
-// (K, B) with `f`, in batches of `batch` rows per transaction, checking
-// `within` for cancellation between them; writes to the table return `Migrating()` until the
-// last transaction installs the new rows and schema.
-fn migrate_with[
-  S,
+/// Migrates every row of a table from schema (J, A) to (K, B) with the pure
+/// row function `f`, in batches of `batch` rows per transaction, checking
+/// `within` for cancellation between them (STORE-9). The table is unchanged
+/// unless every row migrates: a row function's error, a failure in it, a key
+/// collision, cancellation or a refused commit discards the migration.
+pub fn migrate[
   J: key + serializable,
   A: serializable,
   K: key + serializable,
   B: serializable,
-  E: serializable
+  E: serializable,
+  S
 ](
   within: Scope,
   mut s: store.Store[S],
   from: Table[J, A],
   to: Table[K, B],
-  f: fn(key: J, old: A) -> Result[(K, B), E] uses {},
-  definition: String,
-  code: String,
+  f: Entry[fn(c: (), key: J, old: A) -> Result[(K, B), E]],
   batch: u64
 ) -> Result[u64, MigrateError[E]] {
   let name = table_name(from)
@@ -825,24 +791,24 @@ fn migrate_with[
   let begun = store.transact(
     mut s,
     fn(mut tx: store.Tx) -> Result[Start, MigrateError[E]] {
-      start(mut tx, from, to, definition, code)
+      start(mut tx, from, to)
     }
   )
-  let (c, first) = match settled(take begun)? {
+  let c = match settled(take begun)? {
     Current() => return Ok(0),
-    Marked(c, p) => (take c, take p),
+    Marked(c) => take c,
   }
-  let mut mark = take first
+  let mut progress = Progress(cursor: None(), count: 0)
   let mut more = true
   while more {
     if let Error(Canceled(cause)) = core@1/task.check_canceled(within) {
       let canceled: MigrateError[E] = Canceled(cause)
       return abandon(mut s, name, take canceled)
     }
-    let held = take mark
+    let held = take progress
     let stepped = store.transact(
       mut s,
-      fn(mut tx: store.Tx) -> Result[(Pending, bool), MigrateError[E]] {
+      fn(mut tx: store.Tx) -> Result[(Progress, bool), MigrateError[E]] {
         advance(mut tx, name, c, f, held, batch)
       }
     )
@@ -852,7 +818,7 @@ fn migrate_with[
     }
     match take stepped {
       Ok((next, rest)) => {
-        mark = take next
+        progress = take next
         more = rest
       },
       Error(Aborted(why)) => return abandon(mut s, name, take why),
@@ -862,10 +828,11 @@ fn migrate_with[
       },
     }
   }
+  let entry = core@1/runner.entry_id(f)
   let installed = store.transact(
     mut s,
     fn(mut tx: store.Tx) -> Result[(), MigrateError[E]] {
-      install(mut tx, name, c, mark)
+      install(mut tx, to, c, entry)
     }
   )
   // An install that does not fit one commit leaves the table as it was.
@@ -874,5 +841,5 @@ fn migrate_with[
     return abandon(mut s, name, take refused)
   }
   settled(take installed)?
-  Ok(mark.count)
+  Ok(progress.count)
 }

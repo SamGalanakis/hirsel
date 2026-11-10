@@ -617,10 +617,10 @@ fn run_observed(
         phase: Some(QueryKind::Signature),
         sources: error_sources.clone(),
     };
-    if !simulation.runners.is_empty() {
-        simulation.callees =
-            std::sync::Arc::new(crate::callee_facts(engine, &config.entry).map_err(query_error)?);
-    }
+    // Entry identities serve `runner.entry_id` and `runner.apply` as well as runner
+    // calls, so a run without runners carries them too, as `tir_execution` does.
+    simulation.callees =
+        std::sync::Arc::new(crate::callee_facts(engine, &config.entry).map_err(query_error)?);
     let signature = engine
         .item_signature(&config.entry)
         .map_err(query_error)?

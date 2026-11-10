@@ -1170,29 +1170,34 @@ impl Task {
                 .reach(root, &escapes)
                 .map_or(CodeReach::Safe, |r| CodeReach::Escapes(r.spelled())))
         };
-        let facts = |path: &DefPath| -> Result<Option<(CalleeFacts, CallForm)>, QueryError> {
+        // The identity of an Entry formed from `path`, which `runner.entry_id`,
+        // `runner.apply` and runner calls read.
+        let identity = |path: &DefPath| -> Result<CalleeFacts, QueryError> {
             let input = queries.input(path)?;
-            let signature = &input.signature;
-            let Ok(roots) = hirsel_engine_admission::entry_roots(
-                snapshot.types(),
-                signature,
-                hirsel_run_schema::LaunchKind::Call,
-            ) else {
-                return Ok(None);
-            };
             let code = hashes.get(path).ok_or_else(|| {
                 operational(format!("Run callable has no definition hash: {path}"))
             })?;
             let program = self.program(path)?;
+            Ok(CalleeFacts {
+                program: program.revision(path)?.digest(),
+                code: code.0,
+                fingerprint: input.signature.fingerprint.0,
+                reach: program
+                    .reach(path, &escapes)
+                    .map_or(CodeReach::Safe, |reach| CodeReach::Escapes(reach.spelled())),
+            })
+        };
+        let facts = |path: &DefPath| -> Result<Option<(CalleeFacts, CallForm)>, QueryError> {
+            let input = queries.input(path)?;
+            let Ok(roots) = hirsel_engine_admission::entry_roots(
+                snapshot.types(),
+                &input.signature,
+                hirsel_run_schema::LaunchKind::Call,
+            ) else {
+                return Ok(None);
+            };
             Ok(Some((
-                CalleeFacts {
-                    program: program.revision(path)?.digest(),
-                    code: code.0,
-                    fingerprint: signature.fingerprint.0,
-                    reach: program
-                        .reach(path, &escapes)
-                        .map_or(CodeReach::Safe, |reach| CodeReach::Escapes(reach.spelled())),
-                },
+                identity(path)?,
                 if roots.is_empty() {
                     CallForm::Compute
                 } else {
@@ -1219,10 +1224,14 @@ impl Task {
             for site in hirsel_proof_export::call_sites(&tir, &hashes)
                 .map_err(|p| operational(format!("call outside Run closure: {p}")))?
             {
+                // Every Entry the program can form, as `callee_facts` collects them.
                 if matches!(site.kind, hirsel_proof_export::CallSiteKind::Reference(_))
-                    && let Some((facts, _)) = facts(&site.callee)?
+                    && hirsel_engine_admission::identified_entry(
+                        snapshot.types(),
+                        &queries.input(&site.callee)?.signature,
+                    )
                 {
-                    callees.insert(site.callee.to_string(), facts);
+                    callees.insert(site.callee.to_string(), identity(&site.callee)?);
                 }
             }
         }

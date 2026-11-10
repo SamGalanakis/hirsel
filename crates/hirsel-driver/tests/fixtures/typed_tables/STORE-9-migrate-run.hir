@@ -1,8 +1,8 @@
 // rule: STORE-9
 // expect: run
 // A value and key migration rewrites every row under the new schema across
-// batches; a failing row function, a key collision or cancellation leaves the
-// table unchanged. Runs as a module of std, which keeps the engine private.
+// batches; a row function's error, a failure in it, a key collision or
+// cancellation leaves the table unchanged.
 @serializable
 type Item {
   label: String,
@@ -18,23 +18,34 @@ type Priced {
 @serializable
 type Rejected = Unpriced(u32)
 
-fn price(key: u32, old: Item) -> Result[(u32, Priced), Rejected] {
+fn price(c: (), key: u32, old: Item) -> Result[(u32, Priced), Rejected] {
   Ok((key, Priced(label: unique old.label, cents: int.widen(old.count) * 100)))
 }
 
 // Reverses key order, so the new rows sort the other way round.
-fn reverse(key: u32, old: Item) -> Result[(u64, Item), Rejected] {
+fn reverse(c: (), key: u32, old: Item) -> Result[(u64, Item), Rejected] {
   Ok((1000 - int.widen(key), unique old))
 }
 
-fn refuse_third(key: u32, old: Item) -> Result[(u32, Priced), Rejected] {
+fn refuse_third(c: (), key: u32, old: Item) -> Result[(u32, Priced), Rejected] {
   if key == 3 {
     return Error(Unpriced(key))
   }
-  price(key, old)
+  price(c, key, old)
 }
 
-fn collapse(key: u32, old: Item) -> Result[(u32, Priced), Rejected] {
+// Overflows on the third row: a failure, not an error.
+fn fault_third(c: (), key: u32, old: Item) -> Result[(u32, Priced), Rejected] {
+  let step: u8 = if key == 3 {
+    255
+  } else {
+    0
+  }
+  let overflowed = step + 1
+  price(c, key, old)
+}
+
+fn collapse(c: (), key: u32, old: Item) -> Result[(u32, Priced), Rejected] {
   Ok((7, Priced(label: unique old.label, cents: 0)))
 }
 
@@ -110,44 +121,48 @@ fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
   // A row function's error and a key collision discard the migration.
   test.check(
     t,
-    table.migrate_with(
+    table.migrate(
       sc,
       mut s,
       items(),
       priced(),
       refuse_third,
-      "app.refuse_third",
-      "h1",
       2
     ) == Error(Failed(Unpriced(3)))
   )
   test.check(t, no_leftovers(mut s) && unchanged(mut s))
   test.check(
     t,
-    table.migrate_with(sc, mut s, items(), priced(), collapse, "app.collapse", "h2", 2) == Error(
+    table.migrate(sc, mut s, items(), priced(), collapse, 2) == Error(
       Collision()
     )
   )
   test.check(t, no_leftovers(mut s) && unchanged(mut s))
+  // A failure in the row function is caught and discards the migration too.
+  let faulted = match table.migrate(sc, mut s, items(), priced(), fault_third, 2) {
+    Error(Faulted(caught)) => caught.rule == "SEM-1",
+    _ => false,
+  }
+  test.check(t, faulted && no_leftovers(mut s) && unchanged(mut s))
   // A scope cancelled before the first batch discards the mark it finds.
   test.check(t, canceled_before_first_batch(t))
   // Invalid arguments.
   let other: table.Table[u32, Priced] = table.named("other")
   test.check(
     t,
-    table.migrate_with(sc, mut s, items(), other, price, "app.price", "h3", 2) == Error(
+    table.migrate(sc, mut s, items(), other, price, 2) == Error(
       Table(InvalidInput())
     )
   )
   test.check(
     t,
-    table.migrate_with(sc, mut s, items(), priced(), price, "app.price", "h3", 0) == Error(
+    table.migrate(sc, mut s, items(), priced(), price, 0) == Error(
       Table(InvalidInput())
     )
   )
   test.check(
     t,
-    table.migrate_with(sc, mut s, items(), priced(), price, "app.price", "h3", 4097) == Error(
+    table.migrate(sc, mut s, items(), priced(), price, 4097) == Error(
       Table(InvalidInput())
     )
   )
@@ -155,28 +170,26 @@ fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
   let missing_priced: table.Table[u32, Priced] = table.named("missing")
   test.check(
     t,
-    table.migrate_with(sc, mut s, missing, missing_priced, price, "app.price", "h3", 2) == Error(
+    table.migrate(sc, mut s, missing, missing_priced, price, 2) == Error(
       Table(NoTable())
     )
   )
   // `from` must match the current schema.
   test.check(
     t,
-    table.migrate_with(
+    table.migrate(
       sc,
       mut s,
       reversed(),
       priced(),
       price_reversed,
-      "app.price_reversed",
-      "h4",
       2
     ) == Error(Table(Schema(KeyMismatch())))
   )
   // A value migration over three batches.
   test.check(
     t,
-    table.migrate_with(sc, mut s, items(), priced(), price, "app.price", "h3", 2) == Ok(
+    table.migrate(sc, mut s, items(), priced(), price, 2) == Ok(
       5
     )
   )
@@ -206,9 +219,9 @@ fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
         return Ok(false)
       }
       let history = table.history(mut tx, "items")?
+      let priced_by: Entry[fn(c: (), key: u32, old: Item) -> Result[(u32, Priced), Rejected]] = price
       if list.len(history) != 2 || history[1].epoch != 1 || history[1].change != Migrated(
-        "app.price",
-        "h3"
+        runner.entry_id(priced_by)
       ) || history[1].key_schema != history[0].key_schema || history[1].value_schema == history[0].value_schema {
         return Ok(false)
       }
@@ -221,7 +234,7 @@ fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
   // Already at the target schema: nothing to do.
   test.check(
     t,
-    table.migrate_with(sc, mut s, items(), priced(), price, "app.price", "h3", 2) == Ok(
+    table.migrate(sc, mut s, items(), priced(), price, 2) == Ok(
       0
     )
   )
@@ -231,14 +244,12 @@ fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
   let keyed_reversed: table.Table[u64, Item] = table.named("keyed")
   test.check(
     t,
-    table.migrate_with(
+    table.migrate(
       sc,
       mut s,
       keyed,
       keyed_reversed,
       reverse,
-      "app.reverse",
-      "h5",
       3
     ) == Ok(5)
   )
@@ -270,12 +281,12 @@ fn scenario(t: Test, sc: Scope) -> Result[(), store.StoreError] {
   Ok(())
 }
 
-fn price_reversed(key: u64, old: Item) -> Result[(u32, Priced), Rejected] {
+fn price_reversed(c: (), key: u64, old: Item) -> Result[(u32, Priced), Rejected] {
   Ok((7, Priced(label: unique old.label, cents: 0)))
 }
 
 // Objects held in memory: the cancelled child's store does no file Io, so
-// `migrate_with`'s check is the only place it observes cancellation.
+// `table.migrate`'s check is the only place it observes cancellation.
 type Memory {
   objects: List[(String, Bytes)],
 }
@@ -377,14 +388,12 @@ fn canceled_before_first_batch(t: Test) -> bool {
               if !seed(mut held, "items") {
                 return false
               }
-              let outcome = table.migrate_with(
+              let outcome = table.migrate(
                 inner,
                 mut held,
                 items(),
                 priced(),
                 price,
-                "app.price",
-                "h3",
                 2
               )
               let canceled = match outcome {

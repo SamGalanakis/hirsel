@@ -220,6 +220,16 @@ def native_tool_inputs():
         for name in ["arm", "qemu", "valgrind", "kit", "glibc_floor", "linker", "runtime-auditor"]
     }
 
+# An integration test crate (tests/) is test bodies over libraries that stay at
+# the checked O3 with assertions. Its own code is glue: at O0 it compiled 2.4x
+# faster (driver `it`, 131 s to 55 s on the pool) and its 60-shard sample ran no
+# slower (585 s against 636 s), with the same results. Unit test crates compile
+# the library itself and keep O3.
+def _test_crate_flags(crate_root):
+    if "/tests/" not in crate_root:
+        return []
+    return select({"root//tools/buck2:profile_checked": ["-Copt-level=0"], "DEFAULT": []})
+
 def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], runtime_archives = None, products = None, shards = 1, case_shards = {}, costs = None, opt_level = None, seeded = False, skips = [], consumer_cases = {}):
     """A libtest harness (`rustc --test`) and the test that runs it.
 
@@ -254,7 +264,7 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
         deps = deps,
         edition = edition,
         env = _compile_env(package_name, crate, version, build_script),
-        rustc_flags = _flags(manifest_dir, ["--test", _env_set("CARGO_TARGET_TMPDIR", _from_package(manifest_dir, TEST_TMPDIR))] + exes + EXECUTABLE_LINK_FLAGS, target = harness, opt_level = opt_level),
+        rustc_flags = _flags(manifest_dir, ["--test", _env_set("CARGO_TARGET_TMPDIR", _from_package(manifest_dir, TEST_TMPDIR))] + exes + EXECUTABLE_LINK_FLAGS, target = harness, opt_level = opt_level) + _test_crate_flags(crate_root),
         exec_compatible_with = _compile_constraints(harness),
         visibility = ["PUBLIC"],
     )

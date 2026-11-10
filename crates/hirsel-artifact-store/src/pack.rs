@@ -495,17 +495,15 @@ impl Store {
             self.durability,
         )?;
         match outcome {
-            index::CompactOutcome::Published { .. } => {
+            index::CompactOutcome::Published { growth, .. } => {
                 self.count(Counter::IndexMaintenancePublications, 1);
                 self.count(Counter::Publications, 2);
                 self.sync_strict_index()?;
                 state.maintenance_due = false;
                 state.index = self.load_index(state.depth == 0);
-                if let Some(pin) = &state.index {
-                    // Full backing/status allocation is a conservative upper
-                    // bound on the compacted file and bounded manifest bytes.
-                    self.record_growth(pin.generation.retained_bytes() + 420);
-                }
+                // Disk growth is the compacted layer and manifest net of the
+                // merged layers it unlinked, not the whole index again.
+                self.record_growth(growth);
                 Ok(Maintenance::Merged)
             }
             index::CompactOutcome::NotNeeded => {

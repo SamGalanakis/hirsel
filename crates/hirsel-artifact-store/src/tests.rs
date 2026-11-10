@@ -117,6 +117,33 @@ fn configured_disk_caps_include_index_growth_and_preserve_held_bytes() {
 }
 
 #[test]
+fn index_compaction_charges_its_net_growth_not_the_whole_index_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::rebuildable(dir.path().to_owned());
+    store.set_cache_cap(256 << 10);
+    let statistics = store.enable_statistics();
+    let requests = 400u32;
+    for n in 0..requests {
+        let request = store.request();
+        let payload = [n.to_le_bytes().as_slice(), &[0; 1020]].concat();
+        let reference = store.put(DOMAIN, &payload).unwrap();
+        store
+            .associate(Address(hash(&payload)), Action(hash(&payload)), reference)
+            .unwrap();
+        request.finish().unwrap();
+    }
+    let counters = statistics.snapshot().counters;
+    let report = store.collect(u64::MAX);
+    assert!(report.bytes <= 256 << 10, "{report:?}");
+    // About 1.4 KiB lands on disk per request, so the 256 KiB cap fills once
+    // and each scan then frees what a few requests wrote. Charging the whole
+    // index on every compaction instead crossed the cap on every request and
+    // rescanned every retained file (464 scans).
+    let scans = counters["GcScans"];
+    assert!(scans <= u64::from(requests) / 4, "{scans} scans");
+}
+
+#[test]
 fn legacy_large_batch_payloads_have_real_gc_ownership_until_finish() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::rebuildable(dir.path().to_owned());

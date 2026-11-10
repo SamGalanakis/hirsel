@@ -1318,9 +1318,13 @@ impl Store {
             })
             .unwrap_or_else(|old| old)
             .saturating_add(bytes);
+        // Growth past the cap trims to a low watermark: trimming back only to
+        // the cap leaves no headroom, so the next write would rescan every
+        // retained file again. One scan buys an eighth of the cap.
         let cap = self.cache_cap.load(Ordering::Relaxed);
         if cap != u64::MAX && estimate > cap {
-            self.collection_cap.fetch_min(cap, Ordering::Relaxed);
+            self.collection_cap
+                .fetch_min(cap - cap / 8, Ordering::Relaxed);
         }
     }
     fn run_scheduled_collection(&self) {

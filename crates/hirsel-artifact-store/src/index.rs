@@ -120,7 +120,9 @@ impl PreparedDelta {
     /// New staged bytes plus the largest bounded root replacement. This is
     /// conservative disk admission, without probing any existing file.
     pub(crate) fn admission_bytes(&self) -> u64 {
-        self.descriptor.as_ref().map_or(0, |d| d.len + 420)
+        self.descriptor
+            .as_ref()
+            .map_or(0, |d| d.len + MANIFEST_GROWTH)
     }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -151,7 +153,13 @@ pub(crate) enum CompactOutcome {
     NotNeeded,
     Deferred,
     Conflict,
-    Published { generation: ContentHash, layers: u8 },
+    /// `growth` bounds the bytes this compaction added to disk: the new layer
+    /// and manifest, net of the merged layers it unlinked.
+    Published {
+        generation: ContentHash,
+        layers: u8,
+        growth: u64,
+    },
 }
 
 fn invalid() -> io::Error {
@@ -405,6 +413,9 @@ impl Iterator for MergedEntries<'_> {
     }
 }
 
+/// Upper bound on a published manifest's size, as charged for index deltas.
+const MANIFEST_GROWTH: u64 = 420;
+
 pub(crate) fn compact(
     root: &Path,
     budget: MaintenanceBudget,
@@ -495,14 +506,17 @@ pub(crate) fn compact(
     // If newer inputs completely shadow older ones, the deterministic output
     // can be an already-listed, fully validated selected layer. Reuse its
     // immutable inode instead of deferring maintenance forever.
-    if !stage.install(root, descriptor)? && !reusable {
+    let installed = stage.install(root, descriptor)?;
+    if !installed && !reusable {
         return Ok(CompactOutcome::Deferred);
     }
     let generation = latest.publish(root, &stage, durability)?;
-    retire_unlisted(root, &latest, durability);
+    let retired = retire_unlisted(root, &latest, durability);
+    let added = if installed { descriptor.len } else { 0 } + MANIFEST_GROWTH;
     Ok(CompactOutcome::Published {
         generation,
         layers: latest.layers.len() as u8,
+        growth: added.saturating_sub(retired),
     })
 }
 
@@ -512,8 +526,8 @@ pub(crate) fn compact(
 /// existing pins keep their mapped inodes. The new root's rename is durable
 /// first, so a crash can never revert to a root naming an unlinked layer.
 /// Earlier crashes' leftovers are swept by the next compaction; a failure here
-/// only leaves orphans, never an unreadable root.
-fn retire_unlisted(root: &Path, latest: &Manifest, durability: Durability) {
+/// only leaves orphans, never an unreadable root. Returns the bytes unlinked.
+fn retire_unlisted(root: &Path, latest: &Manifest, durability: Durability) -> u64 {
     let directory = root.join("index");
     // Strict commit_staged already synced the directory after its rename.
     if durability != Durability::Strict
@@ -521,7 +535,7 @@ fn retire_unlisted(root: &Path, latest: &Manifest, durability: Durability) {
             .and_then(|d| d.sync_all())
             .is_err()
     {
-        return;
+        return 0;
     }
     let listed: Vec<_> = latest
         .layers
@@ -529,8 +543,9 @@ fn retire_unlisted(root: &Path, latest: &Manifest, durability: Durability) {
         .map(|d| storage::layer_path(root, *d))
         .collect();
     let Ok(entries) = std::fs::read_dir(&directory) else {
-        return;
+        return 0;
     };
+    let mut retired = 0;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(id) = name.to_str().and_then(|n| n.strip_prefix("L-")) else {
@@ -541,9 +556,13 @@ fn retire_unlisted(root: &Path, latest: &Manifest, durability: Durability) {
         }
         let path = entry.path();
         if !listed.contains(&path) {
-            let _ = std::fs::remove_file(path);
+            let len = entry.metadata().map_or(0, |meta| meta.len());
+            if std::fs::remove_file(path).is_ok() {
+                retired += len;
+            }
         }
     }
+    retired
 }
 
 #[cfg(test)]

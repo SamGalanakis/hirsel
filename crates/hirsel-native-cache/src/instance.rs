@@ -314,11 +314,16 @@ impl InstanceQueries {
             )
             .map_err(|rejected| {
                 format!(
-                    "native Value refused for {} body {} instance {:?}: {:?}",
+                    "native Value refused for {} body {} instance {:?}: {:?}{}",
                     key.instance.definition(),
                     key.instance.body(),
                     key.instance.digest(),
-                    rejected.violations
+                    rejected.violations,
+                    hirsel_lir::validate::describe_leaks(
+                        &rejected.unit,
+                        inputs.layouts,
+                        &rejected.violations
+                    )
                 )
             })?;
         let output = output.ok_or_else(|| {

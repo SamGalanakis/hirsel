@@ -2,7 +2,9 @@
 // expect: run
 // An owned nested match must retain conditional payload flags across tag observations.
 type S = Closed | Corrupt(String) | Other
+
 type E = Storage(S) | Limit(String) | Extra(String)
+
 fn describe(take v: Result[(), E]) -> String {
   match take v {
     Ok(_) => "ok",
@@ -13,6 +15,7 @@ fn describe(take v: Result[(), E]) -> String {
     _ => "other",
   }
 }
+
 pub fn main() -> Result[(), ()] {
   failure.check(describe(Ok(())) == "ok", Arithmetic())
   failure.check(describe(Error(Storage(Closed()))) == "closed", Arithmetic())

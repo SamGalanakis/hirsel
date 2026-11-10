@@ -1,25 +1,22 @@
 {
   "schema": 1,
   "package": {
-    "name": "std_names",
+    "name": "std",
     "version": "1"
   },
   "sources": [
     {
       "path": "LANG-4-std-duplicate-bad.hir",
       "module": []
-    }
-  ],
-  "dependencies": [
+    },
     {
-      "manifest": "../../packages/fixtures/std-collision-bad/hirsel.json",
-      "package": {
-        "name": "std",
-        "version": "1"
-      },
-      "expose": []
+      "path": "../../packages/fixtures/std-collision-bad/string.hir",
+      "module": [
+        "string"
+      ]
     }
   ],
+  "dependencies": [],
   "entry": {
     "module": [],
     "name": "main"

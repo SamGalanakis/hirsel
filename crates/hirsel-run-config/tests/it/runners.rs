@@ -129,7 +129,13 @@ fn provider_settings_refuse_with_valid_twins() {
     let mut modelless = node();
     modelless.as_object_mut().unwrap().remove("models");
     refused(modelless, "io.runners.models");
-    refused(with(node(), "models", json!("db@1")), "io.runners.models");
+    let db = with(node(), "models", json!("db@1"));
+    refused(db.clone(), "io.runners.head");
+    validate(&record(json!([with(db, "head", json!("probe@1/head"))]))).unwrap();
+    refused(
+        with(node(), "models", json!("unknown@1")),
+        "io.runners.models",
+    );
     let rate = |enable: u32, fire: u32| json!({"enable": enable, "fire": fire});
     validate(&record(json!([with(
         node(),
@@ -287,6 +293,10 @@ fn a_call_member_is_present_exactly_for_a_call_launch() {
         (call_record("main", Some(call("call", &instance))), "call"),
         (
             call_record("call", Some(call("transact", &instance))),
+            "call.form",
+        ),
+        (
+            call_record("call", Some(call("query", &instance))),
             "call.form",
         ),
         (

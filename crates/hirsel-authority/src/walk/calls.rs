@@ -2754,6 +2754,16 @@ impl Checker<'_> {
             );
             used = used.join(self.used(a.value));
         }
+        if expected.is_none() || self.inferred_initializer == Some(e) {
+            if let Some(inferred) = self.inferred_construction(root, &fields, &supplied) {
+                root = inferred;
+                self.set_ty(e, root);
+                let Some(placed) = self.constructor_fields(e, root) else {
+                    return false;
+                };
+                fields = placed;
+            }
+        }
         // a constructed value holds its parts' loans, so it lives
         // where their arena content lives, and each field is within it. The
         // owner is checked where it is kept (#79), as a tuple is. A
@@ -2994,6 +3004,49 @@ impl Checker<'_> {
     }
     /// A constructor's fields placed in its owner: a record's, or the
     /// selected variant's.
+    /// PROV-1: with no written expected type, H infers a generic construction's
+    /// type arguments from its fields' call-result templates, which state the
+    /// callee's unsubstituted brands. Each type argument instead takes the resolved
+    /// brands of the first supplied field H instantiated from it, as an inferred
+    /// sequence takes its first element's; every field is then kept against them.
+    fn inferred_construction(
+        &mut self,
+        root: TypeId,
+        fields: &[Field],
+        supplied: &BTreeMap<FieldId, ExprId>,
+    ) -> Option<TypeId> {
+        let mut row = self.t.get(root)?.clone();
+        let TypeKind::Named { arguments, .. } = &mut row.kind else {
+            return None;
+        };
+        let mut list: Vec<_> = arguments.iter().cloned().collect();
+        let mut taken = vec![false; list.len()];
+        for (field, part) in supplied {
+            let Some(declared) = fields.get(field.0 as usize).map(|f| f.ty) else {
+                continue;
+            };
+            let Some(resolved) = self.construction_part_type(*part) else {
+                continue;
+            };
+            for (argument, taken) in list.iter_mut().zip(&mut taken) {
+                if let GenericArgument::Type(ty) = argument
+                    && !*taken
+                    && *ty == declared
+                {
+                    *ty = resolved;
+                    *taken = true;
+                }
+            }
+        }
+        if !taken.contains(&true) {
+            return None;
+        }
+        *arguments = list.into();
+        let template = self.intern(row);
+        let branded = self.part_brands(root, template);
+        (branded != root).then_some(branded)
+    }
+
     pub(super) fn constructor_fields(&mut self, e: ExprId, root: TypeId) -> Option<Vec<Field>> {
         self.fields(root).or_else(|| {
             let call = self.call_row(e)?;

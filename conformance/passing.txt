@@ -4689,6 +4689,7 @@ conformance/PROV/PROV-1-branded-list-literal-element-bad.hir
 conformance/PROV/PROV-1-branded-list-literal-element-ok.hir
 conformance/PROV/PROV-1-branded-map-from-empty-bad.hir
 conformance/PROV/PROV-1-branded-map-from-empty-ok.hir
+conformance/PROV/PROV-1-branded-variant-call-result-ok.hir
 conformance/PROV/PROV-1-buffered-file-dir-bad.hir
 conformance/PROV/PROV-1-buffered-file-dir-ok.hir
 conformance/PROV/PROV-1-callable-parameter-brand-bad.hir
@@ -4916,6 +4917,7 @@ conformance/PROV/PROV-2-branch-union-bad.hir
 conformance/PROV/PROV-2-branch-union-ok.hir
 conformance/PROV/PROV-2-branded-comparison-bad.hir
 conformance/PROV/PROV-2-branded-comparison-ok.hir
+conformance/PROV/PROV-2-branded-variant-join-bad.hir
 conformance/PROV/PROV-2-call-substitution-bad.hir
 conformance/PROV/PROV-2-call-substitution-ok.hir
 conformance/PROV/PROV-2-callable-generic-relay-ok.hir

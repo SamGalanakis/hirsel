@@ -215,83 +215,76 @@ fn installed_std_compiles_without_its_source_files_and_never_checks_unused_items
         }
         assert!(InstalledPackage::verify_store(&products).is_err());
         std::fs::write(file, original).unwrap();
-        let consumed = installed
-            .definition(&path("math", "twice"))
-            .unwrap()
-            .ownership
-            .body;
-        let (_file, _original) = corrupt(consumed);
-        assert!(
-            compile().is_err(),
-            "corrupted demanded body must be rejected before decoding"
-        );
     });
 }
 
+/// A demanded installed body is verified against its address on its first
+/// use in a process. The damage is a well-formed foreign body (the same
+/// function returning a different value), so only that check can refuse it.
 #[test]
-fn missing_std_products_name_the_selected_root_without_source_fallback() {
+fn foreign_demanded_body_is_rejected_on_its_first_use() {
     hirsel_intern::jobs::with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
-        let missing = directory.path().join("missing.products");
-        let store =
-            DirStore::new(directory.path().join("cache")).with_read_only_root(missing.clone());
-        let error = store
-            .installed_package(
-                &PackageId {
-                    name: "std".into(),
-                    version: "1".into(),
-                },
-                ContentHash::default(),
-            )
-            .unwrap_err();
-        assert!(error.contains(missing.to_str().unwrap()), "{error}");
-        assert!(error.contains("missing"), "{error}");
-    });
-}
-
-#[test]
-fn loader_refuses_missing_installed_std_products_with_valid_sources() {
-    hirsel_intern::jobs::with_compiler_stack(|| {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(
-            directory.path().join("math.hir"),
-            "pub fn twice(x:u8)->u8{x+x}\n",
-        )
-        .unwrap();
-        let manifest = directory.path().join("std.json");
-        std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"std","version":"1"},"sources":[{"path":"math.hir","module":["math"]}],"dependencies":[]}"#).unwrap();
-        // Prove this std source package is valid before selecting it as an
-        // installed dependency whose explicit products root is missing.
-        COMPILER
-            .precompute_package(&manifest, &directory.path().join("valid.products"))
-            .unwrap();
-        let client = directory.path().join("client.json");
-        std::fs::write(
-            directory.path().join("client.hir"),
-            "pub fn main()->u8{std@1/math.twice(21u8)}\n",
-        )
-        .unwrap();
-        std::fs::write(&client, serde_json::json!({
-            "schema": 1,
-            "package": {"name": "client", "version": "1"},
-            "sources": [{"path": "client.hir", "module": []}],
-            "dependencies": [{"manifest": manifest, "package": {"name": "std", "version": "1"}, "expose": []}],
-            "entry": {"module": [], "name": "main"},
-        }).to_string()).unwrap();
-        let missing = directory.path().join("missing.products");
-        let compiler = COMPILER.with_config(CompileConfig {
-            store: Arc::new(
-                DirStore::new(directory.path().join("reader")).with_read_only_root(missing.clone()),
-            ),
-            ..Default::default()
-        });
-        let error = match compiler.load_program(&client) {
-            Ok(_) => {
-                panic!("loader compiled std sources despite the missing selected products root")
-            }
-            Err(error) => error.to_string(),
+        let package = PackageId {
+            name: "std".into(),
+            version: "1".into(),
         };
-        assert!(error.contains(missing.to_str().unwrap()), "{error}");
-        assert!(error.contains("missing"), "{error}");
+        let precompute = |name: &str, text: &str| {
+            let source_root = directory.path().join(format!("{name}-std"));
+            std::fs::create_dir(&source_root).unwrap();
+            let manifest = source_root.join("hirsel.json");
+            std::fs::write(source_root.join("math.hir"), text).unwrap();
+            std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"std","version":"1"},"sources":[{"path":"math.hir","module":["math"]}],"dependencies":[]}"#).unwrap();
+            let products = directory.path().join(name);
+            COMPILER.precompute_package(&manifest, &products).unwrap();
+            std::fs::remove_dir_all(&source_root).unwrap();
+            let body = DirStore::new(directory.path().join(format!("{name}-index")))
+                .with_read_only_root(products.clone())
+                .installed_package(&package, COMPILER.identity())
+                .unwrap()
+                .definition(&hirsel_syntax::DefPath(hirsel_syntax::ItemPath {
+                    package: package.clone(),
+                    modules: vec!["math".into()],
+                    name: "twice".into(),
+                }))
+                .unwrap()
+                .ownership
+                .body;
+            let store = hirsel_artifact_store::Store::new(products.clone());
+            let payload = store.get_owned(body).unwrap().to_vec();
+            (products, store.output_path(body), payload)
+        };
+        let (products, path, payload) = precompute("products", "pub fn twice(x:u8)->u8{x+x+0u8}\n");
+        let (_, _, foreign) = precompute("foreign", "pub fn twice(x:u8)->u8{x+x+1u8}\n");
+        assert_eq!(payload.len(), foreign.len());
+        assert_ne!(payload, foreign);
+        let compile = |name: &str| {
+            let config = CompileConfig {
+                store: Arc::new(
+                    DirStore::new(directory.path().join(name))
+                        .with_read_only_root(products.clone()),
+                ),
+                ..Default::default()
+            };
+            CompilerRequests::for_host(COMPILER, config).execute_request(&CompileRequest::source(
+                "pub fn main()->Result[(),()]{if std@1/math.twice(21u8)==42u8{Ok(())}else{Error(())}}\n",
+                &hirsel_engine::default_context(),
+                CompileOperation::Tir { definition: None },
+            ))
+        };
+        let original = std::fs::read(&path).unwrap();
+        let offset = original
+            .windows(payload.len())
+            .position(|bytes| bytes == payload)
+            .unwrap();
+        let mut damaged = original.clone();
+        damaged[offset..offset + foreign.len()].copy_from_slice(&foreign);
+        std::fs::write(&path, damaged).unwrap();
+        assert!(
+            compile("damaged").is_err(),
+            "a foreign demanded body must be rejected before decoding"
+        );
+        std::fs::write(&path, original).unwrap();
+        compile("restored").unwrap();
     });
 }

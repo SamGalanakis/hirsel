@@ -886,6 +886,12 @@ class Batch:
         pending = [members] if members else []
         while pending:
             group = pending.pop(0)
+            # A ticket withdrawn since the batch formed is not built again.
+            left = [member for member in group if member is not self.own]
+            if gone := set(left) - set(self.queue.live(left)):
+                say('withdrawn, so not checked again: ' + ', '.join(map(str, gone)))
+                if not (group := [member for member in group if member not in gone]):
+                    continue
             base = self.pushed
             tree, applied = self.apply(base, group)
             if not applied:

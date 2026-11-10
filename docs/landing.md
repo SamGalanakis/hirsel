@@ -181,6 +181,7 @@ far, and a green group is pushed at once. A red group splits into halves,
 checked in ticket order. A ticket is blamed only when a check of its
 change alone, on a green tree, is red; the culprit exits with that check's
 first error, and the rest land. A red that does not repeat blames nobody.
+A ticket withdrawn mid-batch leaves every group not yet checked.
 A batch of one is a single land.
 
 Every pushed tree has passed checks, reused only for row-only moves as above. Before the push, the

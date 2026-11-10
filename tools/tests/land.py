@@ -707,6 +707,21 @@ if not (root / 'release-build').exists():
         self.assertEqual(self.main_log()[:4], ['lane 3', 'lane 1', 'lane 0', 'red build'])
         self.assertEqual(self.queued(), [])
 
+    def test_a_ticket_withdrawn_during_a_red_check_is_not_built_again_in_the_bisect(self):
+        # Ticket 3505 was withdrawn mid-bisect, yet its group was built and failed again.
+        checks, lanes, lands, holder = self.batch_lanes(4, edits={2: ('red.txt', 'red\n')}, red='build',
+                                                        hold_build=True)
+        holder.unlink()
+        self.wait_for((checks / 'holding-build').exists)
+        lands[2][0].send_signal(signal.SIGTERM)
+        self.finish_land(lands[2], 128 + signal.SIGTERM)
+        (checks / 'release-build').touch()
+        outputs = [self.finish_land(land) for i, land in enumerate(lands) if i != 2]
+        # All four red; lanes 0-1 green and pushed; lane 3 alone green; lane 2 never again.
+        self.assertEqual(outputs[0].count('workspace build'), 3, outputs[0])
+        self.assertEqual(self.main_log()[:4], ['lane 3', 'lane 1', 'lane 0', 'hold first build'])
+        self.assertEqual(self.queued(), [])
+
     def test_a_conflict_in_the_middle_ticket_leaves_only_that_ticket(self):
         edits = {0: ('shared.txt', 'zero\n'), 1: ('shared.txt', 'one\n')}
         checks, lanes, lands, holder = self.batch_lanes(3, edits=edits)

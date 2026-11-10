@@ -494,26 +494,26 @@ impl<'a, 'input> Checker<'a, 'input> {
                         // relations has a global root, while the value built
                         // for it is as local as its parts. Flow checks each
                         // part against its selection and every other part
-                        // global; the shape below is still compared here.
-                        let expected = if self.result_cover(self.body.result).is_empty() {
-                            expected
+                        // global, so only the shape is compared here, as at
+                        // a call: a part's relation is flow's, whatever its
+                        // type.
+                        let actual = self.place_type(value.place);
+                        let (expected, actual) = if self.result_cover(self.body.result).is_empty() {
+                            (expected, actual)
                         } else {
-                            let mut row = store.get(expected).unwrap().clone();
-                            row.modes.relation = store
-                                .get(self.place_type(value.place))
+                            let mut row = store
+                                .get(hirsel_types::unique_rows::erase_result_parts(
+                                    store, expected,
+                                ))
                                 .unwrap()
-                                .modes
-                                .relation
                                 .clone();
-                            store.intern(row)
+                            row.modes.relation = store.get(actual).unwrap().modes.relation.clone();
+                            (
+                                store.intern(row),
+                                hirsel_types::unique_rows::erase_result_parts(store, actual),
+                            )
                         };
-                        self.storage_value_type_in(
-                            store,
-                            expected,
-                            self.place_type(value.place),
-                            value,
-                            "return",
-                        )
+                        self.storage_value_type_in(store, expected, actual, value, "return")
                     }
                 }
                 _ => (),
@@ -2068,6 +2068,10 @@ impl<'a, 'input> Checker<'a, 'input> {
         } else {
             expected
         };
+        // MODE-1: a part related as its root is is the part a declared row
+        // leaves unrelated (LANG-7): storage holding a selected result in a
+        // root that covers its parts is that row.
+        let actual = self.parts_as_root(target, actual);
         let laundered = value.usage == UseKind::Take
             && !self.placed(&target.get(expected).unwrap().modes.relation)
             && self.placed(&target.get(actual).unwrap().modes.relation);
@@ -2782,6 +2786,33 @@ impl<'a, 'input> Checker<'a, 'input> {
                 entity: "call result",
             });
         }
+    }
+
+    /// `ty` with the part relations its root relation already covers erased,
+    /// when it covers all of them: those parts are related as the root is.
+    fn parts_as_root(&self, store: &TypeInterner, ty: TypeId) -> TypeId {
+        fn covered(store: &TypeInterner, ty: TypeId, root: &Relation) -> bool {
+            let parts: Vec<TypeId> = match &store.get(ty).unwrap().kind {
+                TypeKind::Tuple(elements) => elements.to_vec(),
+                TypeKind::Named { arguments, .. } => arguments
+                    .iter()
+                    .filter_map(|a| match a {
+                        GenericArgument::Type(t) => Some(*t),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => vec![],
+            };
+            parts.into_iter().all(|part| {
+                store.get(part).unwrap().modes.relation.contained_in(root)
+                    && covered(store, part, root)
+            })
+        }
+        let root = &store.get(ty).unwrap().modes.relation;
+        if root.is_global() || !covered(store, ty, root) {
+            return ty;
+        }
+        hirsel_types::unique_rows::erase_result_parts(store, ty)
     }
 
     /// MODE-1: two function types' results select the same relations, the
@@ -3886,7 +3917,7 @@ impl<'a, 'input> Checker<'a, 'input> {
             p.projection.is_empty().then_some(p.root)
         };
         let mut writes: HashMap<hirsel_tir::LocalId, Vec<Write>> = HashMap::default();
-        let mut other = |writes: &mut HashMap<hirsel_tir::LocalId, Vec<Write>>, place: PlaceId| {
+        let other = |writes: &mut HashMap<hirsel_tir::LocalId, Vec<Write>>, place: PlaceId| {
             let root = self.body.places[place.0 as usize].root;
             writes.entry(root).or_default().push(Write::Other);
         };
@@ -3909,6 +3940,13 @@ impl<'a, 'input> Checker<'a, 'input> {
                     | InstructionKind::Snapshot { destination, .. } => {
                         other(&mut writes, *destination)
                     }
+                    // A mutable loan (a `mut` hand-back among them) may
+                    // write the whole value, as related as what writes it.
+                    InstructionKind::BeginLoan {
+                        place,
+                        mutable: true,
+                        ..
+                    } => other(&mut writes, *place),
                     _ => {}
                 }
             }

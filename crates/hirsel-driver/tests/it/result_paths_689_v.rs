@@ -72,19 +72,26 @@ fn ok_to_error(definition: &Definition) -> Definition {
 }
 
 /// A borrowed parameter returned as the global Error payload: Bytes being
-/// inert does not make a borrowed view of the caller's storage owned.
+/// inert does not make a borrowed view of the caller's storage owned. A
+/// generic part's relation is flow's too, whatever `T` is.
 #[test]
 fn result_paths_689_borrowed_error_payload_is_refused() {
     with_compiler_stack(|| {
-        let (engine, input) = prepared(
+        let mut accepted = vec![];
+        for source in [
             "fn good(xs: Bytes) -> Result[Bytes in xs, Bytes] { Ok(copy xs) }\npub fn main(){}",
-        );
-        let definition = named(&input, "good");
-        let mut forged = ok_to_error(&definition);
-        let found = violations(&engine, &input, &definition, &mut forged);
+            "fn good[T: copyable](xs: T) -> Result[T in xs, T] { Ok(copy xs) }\npub fn main(){}",
+        ] {
+            let (engine, input) = prepared(source);
+            let definition = named(&input, "good");
+            let mut forged = ok_to_error(&definition);
+            if violations(&engine, &input, &definition, &mut forged).is_empty() {
+                accepted.push(source);
+            }
+        }
         assert!(
-            !found.is_empty(),
-            "V accepted a borrowed Error payload under a global Error part"
+            accepted.is_empty(),
+            "V accepted a borrowed Error payload under a global Error part: {accepted:?}"
         );
     });
 }
@@ -285,15 +292,22 @@ fn result_paths_689_mixed_storage_keeps_error_relation() {
                 "",
                 "let w = whole(h)\n let mut r = get(h, 1)\n if c { r = w }",
             ),
-            // Review 704 (c): an entry value is a write the inventory sees.
+            // Review 704 (c): writes the inventory must also see: an entry
+            // value, a `mut` call's handback.
             (
                 "entry",
                 ", take w: Result[Option[Bytes], Failed] in h",
                 "let r = if c { get(h, 1) } else { take w }",
             ),
+            (
+                "handback",
+                "",
+                "let mut r = get(h, 1)\n if c { refill(h, mut r) }",
+            ),
         ] {
             let source = format!(
-                "{HOLDER}fn {name}(h: Holder, c: bool{params}) -> u64 {{ {body}\n match r {{ Ok(v) => size(v), Error(e) => esize(e) }} }}\npub fn main(){{}}"
+                "{HOLDER}fn refill(h: Holder, mut r: Result[Option[Bytes], Failed] in h) {{ }}\n\
+                 fn {name}(h: Holder, c: bool{params}) -> u64 {{ {body}\n match r {{ Ok(v) => size(v), Error(e) => esize(e) }} }}\npub fn main(){{}}"
             );
             let (engine, input) = prepared(&source);
             let definition = named(&input, name);

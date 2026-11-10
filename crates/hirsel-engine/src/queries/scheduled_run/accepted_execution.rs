@@ -509,7 +509,7 @@ impl FrontRunQueries {
             .map_err(|error| failure(error.to_string()))?;
         let batch = store.batch();
         let types = self.lower.signatures().types().clone();
-        let records = TypeRecords::new(types, Arc::new(store.clone()));
+        let records = TypeRecords::new(types.clone(), Arc::new(store.clone()));
         let snapshot = self.lower.signatures();
         let builtins: BTreeSet<_> = snapshot.execution_declarations().into_iter().collect();
         let mut paths = builtins.clone();
@@ -523,8 +523,14 @@ impl FrontRunQueries {
             source_anchors.insert(owner.clone());
             Some(owner)
         };
-        for path in paths {
+        let mut published = BTreeSet::new();
+        while let Some(path) = paths.pop_first() {
+            if !published.insert(path.clone()) {
+                continue;
+            }
             let (public, private) = snapshot.execution_declaration(&path)?;
+            let mut type_roots = hirsel_types::signature_types(&types, &public);
+            type_roots.extend(hirsel_types::signature_types(&types, &private));
             let private = (!Arc::ptr_eq(&public, &private)).then_some(private);
             let materialized = constants.contains(&path)
                 || (output.semantic.definitions().contains(&path)
@@ -548,6 +554,7 @@ impl FrontRunQueries {
                     .unwrap_or(false);
             let body = if executable {
                 let definition = self.lower.settled_definition(&path)?;
+                type_roots.extend(definition.types.iter().copied());
                 let bytes = records
                     .encode_tir(&definition, &mut bind_anchor)
                     .ok_or_else(|| failure(format!("body encoding {path}")))?;
@@ -570,6 +577,16 @@ impl FrontRunQueries {
             } else {
                 None
             };
+            for id in hirsel_types::closure(&types, type_roots).iter() {
+                let ty = types
+                    .get(*id)
+                    .ok_or_else(|| failure("missing runtime type row"))?;
+                if let hirsel_types::TypeKind::Named { definition, .. } = &ty.kind
+                    && !published.contains(definition.path())
+                {
+                    paths.insert(definition.path().clone());
+                }
+            }
             rows.push(Row {
                 builtin: builtins.contains(&path),
                 path,

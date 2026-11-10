@@ -702,3 +702,45 @@ fn malformed_grants_never_echo_rejected_or_neighboring_credentials() {
         assert!(detail.contains(" at line 1 column "), "{detail}");
     }
 }
+
+/// Request-indexed cuts (`crash_at`, `fail_at`, `lose_response_at`, `tear_at`) power-fail or
+/// refuse a chosen authority request. Only the simulated log, whose world is memory, may take
+/// them: a provider over real storage, or the simulated objects, refuses them before entry.
+/// Each grant is first admitted without the cut, so a refusal is the cut's.
+#[test]
+fn request_cuts_are_admitted_only_by_the_simulated_log() {
+    let admitted = |g: &serde_json::Value| {
+        let grant: AuthorityGrant = serde_json::from_value(g.clone()).unwrap();
+        let mut r = RunConfig::empty([0; 32], "probe@1/main".into(), LaunchKind::Main);
+        r.io = Some(IoGrants {
+            dirs: vec![mount("data", "/data", Access::ReadWrite)],
+            authorities: BTreeMap::from([("s".to_string(), grant)]),
+            ..IoGrants::default()
+        });
+        r.validated().is_ok()
+    };
+    let sim = |represent: &str, levels: &[&str]| {
+        serde_json::json!({"provider": "authority.sim@1", "floor": "cache", "seed": 1,
+            "represent": represent, "levels": levels, "faults": {}})
+    };
+    let cases = [
+        (sim("log", &["cache", "disk"]), true),
+        (sim("objects", &["cache"]), false),
+        (
+            serde_json::json!({"provider": "authority.memory@1", "floor": "memory"}),
+            false,
+        ),
+        (
+            serde_json::json!({"provider": "authority.log@1", "floor": "host", "mount": "data", "path": "s"}),
+            false,
+        ),
+    ];
+    for (base, takes) in cases {
+        assert!(admitted(&base), "{base}");
+        for cut in ["crash_at", "fail_at", "lose_response_at", "tear_at"] {
+            let mut g = base.clone();
+            g["faults"] = serde_json::json!({ cut: 3 });
+            assert_eq!(admitted(&g), takes, "{cut} in {base}");
+        }
+    }
+}

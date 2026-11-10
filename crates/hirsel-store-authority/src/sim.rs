@@ -12,6 +12,17 @@
 //! level; a barrier at a level makes everything appended durable at it and
 //! every weaker one. [`Sim::crash`] is a failure that levels from `k` up
 //! survive: every entry not durable at level `k` is lost.
+//!
+//! A log representation also cuts its history at a chosen request, for tests
+//! that must reach every seam call in turn. Its requests (claim, advance,
+//! durable, read, get, put and reclaim, on every handle of one history) are
+//! numbered from 1, and each of the faults [`CUTS`] names the request it
+//! fires at: `fail_at` refuses it before any effect; `lose_response_at` lets
+//! it take its whole effect and then answers that the history cannot be read,
+//! so the claim dies; `tear_at` is a power failure partway through it, which
+//! leaves its own append, if any, torn and so never in the history; and
+//! `crash_at` is a power failure right after its answer. A power failure
+//! loses everything not durable at the strongest level and ends every claim.
 
 use crate::group::{self, Tip};
 use crate::{
@@ -27,6 +38,8 @@ use std::sync::{Arc, Mutex};
 
 /// The faults the simulated log injects, each with a `fail_one_in` count.
 pub const FAULTS: [&str; 5] = ["barrier", "garbage", "lost_response", "refuse", "torn"];
+/// The simulated log's cuts, each naming the request (from 1) it fires at.
+pub const CUTS: [&str; 4] = ["crash_at", "fail_at", "lose_response_at", "tear_at"];
 /// The faults the simulated object storage injects.
 pub const OBJECT_FAULTS: [&str; 3] = ["incomplete_listing", "lost_response", "refuse"];
 
@@ -72,9 +85,9 @@ impl Config {
                 "sim `represent: objects` declares one level, as object storage does".into(),
             ));
         }
-        let known: &[&str] = match represent {
-            Represent::Log => &FAULTS,
-            Represent::Objects => &OBJECT_FAULTS,
+        let known: Vec<&str> = match represent {
+            Represent::Log => FAULTS.iter().chain(CUTS.iter()).copied().collect(),
+            Represent::Objects => OBJECT_FAULTS.to_vec(),
         };
         let faults = g.faults.clone().unwrap_or_default();
         if let Some(k) = faults.keys().find(|k| !known.contains(&k.as_str())) {
@@ -125,11 +138,66 @@ struct World {
     objects: BTreeMap<String, Vec<u8>>,
     draws: Draws,
     faults: BTreeMap<String, u64>,
+    /// Requests served so far, which number the cuts.
+    requests: u64,
     #[cfg(test)]
     bug: Option<Bug>,
 }
 
+/// Which cuts fire at one request.
+#[derive(Clone, Copy, Default)]
+struct Cut {
+    fail: bool,
+    lose: bool,
+    tear: bool,
+    crash: bool,
+}
+
 impl World {
+    /// Count a request and say which cuts fire at it.
+    fn cut(&mut self) -> Cut {
+        self.requests += 1;
+        let n = self.requests;
+        let at = |k: &str| self.faults.get(k) == Some(&n);
+        Cut {
+            fail: at("fail_at"),
+            lose: at("lose_response_at"),
+            tear: at("tear_at"),
+            crash: at("crash_at"),
+        }
+    }
+
+    /// A power failure: every entry not durable at the strongest level is lost
+    /// and every claim ends.
+    /// Lose everything not durable at `k`, as the simulated disk's crash does: the first
+    /// lost entry may survive as garbage or a torn prefix when those faults fire.
+    fn crash(&mut self, k: Level) {
+        let keep = self.durable[k.0 as usize];
+        let lost = self.entries.get(keep as usize).cloned();
+        self.entries.truncate(keep as usize);
+        self.torn = None;
+        for d in &mut self.durable {
+            *d = (*d).min(keep);
+        }
+        if let Some(lost) = lost {
+            if self.fault("garbage") {
+                let n = lost.len().max(1);
+                let garbage: Vec<u8> = (0..n).map(|_| self.draws.next() as u8).collect();
+                self.entries.push(garbage);
+            } else if self.fault("torn") {
+                let cut = (self.draws.next() % lost.len().max(1) as u64) as usize;
+                self.torn = Some(lost[..cut].to_vec());
+            }
+        }
+        // A crash ends every writer; the newest claim entry still fences them.
+        self.newest = None;
+    }
+
+    /// A power failure: the crash at the strongest level.
+    fn power_fail(&mut self) {
+        self.crash(Level(self.durable.len() as u8 - 1));
+    }
+
     fn fault(&mut self, name: &str) -> bool {
         let one_in = self.faults.get(name).copied().unwrap_or(0);
         one_in != 0 && self.draws.next().is_multiple_of(one_in)
@@ -162,6 +230,7 @@ impl Sim {
             objects: BTreeMap::new(),
             draws: Draws(config.seed),
             faults: config.faults,
+            requests: 0,
             #[cfg(test)]
             bug: None,
         };
@@ -192,48 +261,18 @@ impl Sim {
     /// at level `k` is lost. The first lost append may be left torn, or its
     /// place taken by garbage that recovery must refuse.
     pub fn crash(&self, k: Level) {
-        let mut w = self.world.lock().unwrap();
-        let keep = w.durable[k.0 as usize];
-        let lost = w.entries.get(keep as usize).cloned();
-        w.entries.truncate(keep as usize);
-        w.torn = None;
-        for d in &mut w.durable {
-            *d = (*d).min(keep);
-        }
-        if let Some(lost) = lost {
-            if w.fault("garbage") {
-                let n = lost.len().max(1);
-                let garbage: Vec<u8> = (0..n).map(|_| w.draws.next() as u8).collect();
-                w.entries.push(garbage);
-            } else if w.fault("torn") {
-                let cut = (w.draws.next() % lost.len().max(1) as u64) as usize;
-                w.torn = Some(lost[..cut].to_vec());
-            }
-        }
-        // A crash ends every writer; the newest claim entry still fences them.
-        w.newest = None;
-    }
-
-    #[cfg(test)]
-    fn has(&self, bug: Bug) -> bool {
-        self.world.lock().unwrap().bug == Some(bug)
+        self.world.lock().unwrap().crash(k);
     }
 }
 
-impl Authority for Sim {
-    fn levels(&self) -> &[String] {
-        &self.levels
-    }
-    fn floor(&self) -> Level {
-        self.floor
-    }
-    fn max_entry(&self) -> u64 {
-        MAX_ENTRY
-    }
-
-    fn claim(&mut self, attempt: [u8; 16], fresh: [u8; 32]) -> Result<Claimed, Error> {
+impl Sim {
+    fn claim_in(
+        &self,
+        w: &mut World,
+        attempt: [u8; 16],
+        fresh: [u8; 32],
+    ) -> Result<Claimed, Error> {
         let top = Level(self.levels.len() as u8 - 1);
-        let mut w = self.world.lock().unwrap();
         if w.fault("refuse") {
             return Err(Error::Refused(AuthorityError::Unreachable));
         }
@@ -261,12 +300,21 @@ impl Authority for Sim {
         Ok(Claimed { claim, end })
     }
 
-    fn advance(&mut self, c: &mut Claim, from: u64, entry: Vec<u8>, at: Level) -> Advanced {
+    fn advance_in(
+        &self,
+        w: &mut World,
+        c: &mut Claim,
+        from: u64,
+        entry: Vec<u8>,
+        at: Level,
+    ) -> Advanced {
         #[cfg(test)]
-        let (no_fence, no_barrier) = (self.has(Bug::NoFence), self.has(Bug::AckWithoutBarrier));
+        let (no_fence, no_barrier) = (
+            w.bug == Some(Bug::NoFence),
+            w.bug == Some(Bug::AckWithoutBarrier),
+        );
         #[cfg(not(test))]
         let (no_fence, no_barrier) = (false, false);
-        let mut w = self.world.lock().unwrap();
         if !no_fence
             && (!live(self.owner, c)
                 || w.newest != Some(c.attempt)
@@ -315,8 +363,7 @@ impl Authority for Sim {
         Advanced::Advanced(position)
     }
 
-    fn durable(&mut self, c: &mut Claim, at: Level) -> Result<u64, Error> {
-        let mut w = self.world.lock().unwrap();
+    fn durable_in(&self, w: &mut World, c: &mut Claim, at: Level) -> Result<u64, Error> {
         if !live(self.owner, c) || w.newest != Some(c.attempt) {
             c.dead = true;
             return Err(Error::Fenced);
@@ -337,12 +384,17 @@ impl Authority for Sim {
         Ok(c.durable[i])
     }
 
-    fn read(&mut self, from: u64, at: Level, max: u64) -> Result<Vec<Vec<u8>>, Error> {
+    fn read_in(
+        &self,
+        w: &mut World,
+        from: u64,
+        at: Level,
+        max: u64,
+    ) -> Result<Vec<Vec<u8>>, Error> {
         #[cfg(test)]
-        let no_barrier = self.has(Bug::ReadWithoutBarrier);
+        let no_barrier = w.bug == Some(Bug::ReadWithoutBarrier);
         #[cfg(not(test))]
         let no_barrier = false;
-        let mut w = self.world.lock().unwrap();
         if w.fault("refuse") {
             return Err(Error::Refused(AuthorityError::Unreachable));
         }
@@ -362,16 +414,14 @@ impl Authority for Sim {
         Ok(w.entries[start..stop].to_vec())
     }
 
-    fn get(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {
-        let mut w = self.world.lock().unwrap();
+    fn get_in(&self, w: &mut World, name: &str) -> Result<Option<Vec<u8>>, Error> {
         if w.fault("refuse") {
             return Err(Error::Refused(AuthorityError::Unreachable));
         }
         Ok(w.objects.get(name).cloned())
     }
 
-    fn put(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error> {
-        let mut w = self.world.lock().unwrap();
+    fn put_in(&self, w: &mut World, name: &str, data: Vec<u8>) -> Result<(), Error> {
         if w.fault("refuse") {
             return Err(Error::Refused(AuthorityError::Unreachable));
         }
@@ -385,14 +435,184 @@ impl Authority for Sim {
         }
     }
 
-    fn reclaim(&mut self, c: &mut Claim) -> Result<(), Error> {
-        let w = self.world.lock().unwrap();
+    fn reclaim_in(&self, w: &mut World, c: &mut Claim) -> Result<(), Error> {
         if !live(self.owner, c) || w.newest != Some(c.attempt) {
-            drop(w);
             c.dead = true;
             return Err(Error::Fenced);
         }
         Ok(())
+    }
+}
+
+/// What a request whose answer was lost, or cut short, is told: the history
+/// cannot be read.
+fn unreadable() -> AuthorityError {
+    AuthorityError::Unreachable
+}
+
+impl Authority for Sim {
+    fn levels(&self) -> &[String] {
+        &self.levels
+    }
+    fn floor(&self) -> Level {
+        self.floor
+    }
+    fn max_entry(&self) -> u64 {
+        MAX_ENTRY
+    }
+
+    fn claim(&mut self, attempt: [u8; 16], fresh: [u8; 32]) -> Result<Claimed, Error> {
+        let mut w = self.world.lock().unwrap();
+        let cut = w.cut();
+        let r = if cut.fail {
+            Err(Error::Refused(unreadable()))
+        } else if cut.tear {
+            w.power_fail();
+            Err(Error::Storage(unreadable()))
+        } else {
+            match self.claim_in(&mut w, attempt, fresh) {
+                // The claim entry is in the history; its claimant never learns it.
+                Ok(_) if cut.lose => Err(Error::Storage(unreadable())),
+                r => r,
+            }
+        };
+        if cut.crash {
+            w.power_fail();
+        }
+        r
+    }
+
+    fn advance(&mut self, c: &mut Claim, from: u64, entry: Vec<u8>, at: Level) -> Advanced {
+        let mut w = self.world.lock().unwrap();
+        let cut = w.cut();
+        let r = if cut.fail {
+            Advanced::Refused(unreadable())
+        } else if cut.tear {
+            w.power_fail();
+            c.dead = true;
+            Advanced::Undecided(unreadable())
+        } else {
+            match self.advance_in(&mut w, c, from, entry, at) {
+                Advanced::Advanced(_) if cut.lose => {
+                    c.dead = true;
+                    Advanced::Undecided(unreadable())
+                }
+                r => r,
+            }
+        };
+        if cut.crash {
+            w.power_fail();
+        }
+        r
+    }
+
+    fn durable(&mut self, c: &mut Claim, at: Level) -> Result<u64, Error> {
+        let mut w = self.world.lock().unwrap();
+        let cut = w.cut();
+        let r = if cut.fail {
+            Err(Error::Refused(unreadable()))
+        } else if cut.tear {
+            w.power_fail();
+            c.dead = true;
+            Err(Error::Storage(unreadable()))
+        } else {
+            match self.durable_in(&mut w, c, at) {
+                Ok(_) if cut.lose => {
+                    c.dead = true;
+                    Err(Error::Storage(unreadable()))
+                }
+                r => r,
+            }
+        };
+        if cut.crash {
+            w.power_fail();
+        }
+        r
+    }
+
+    fn read(&mut self, from: u64, at: Level, max: u64) -> Result<Vec<Vec<u8>>, Error> {
+        let mut w = self.world.lock().unwrap();
+        let cut = w.cut();
+        let r = if cut.fail {
+            Err(Error::Refused(unreadable()))
+        } else if cut.tear {
+            w.power_fail();
+            Err(Error::Storage(unreadable()))
+        } else {
+            match self.read_in(&mut w, from, at, max) {
+                Ok(_) if cut.lose => Err(Error::Storage(unreadable())),
+                r => r,
+            }
+        };
+        if cut.crash {
+            w.power_fail();
+        }
+        r
+    }
+
+    fn get(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {
+        let mut w = self.world.lock().unwrap();
+        let cut = w.cut();
+        let r = if cut.fail {
+            Err(Error::Refused(unreadable()))
+        } else if cut.tear {
+            w.power_fail();
+            Err(Error::Storage(unreadable()))
+        } else {
+            match self.get_in(&mut w, name) {
+                Ok(_) if cut.lose => Err(Error::Storage(unreadable())),
+                r => r,
+            }
+        };
+        if cut.crash {
+            w.power_fail();
+        }
+        r
+    }
+
+    fn put(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error> {
+        let mut w = self.world.lock().unwrap();
+        let cut = w.cut();
+        let r = if cut.fail {
+            Err(Error::Refused(unreadable()))
+        } else if cut.tear {
+            // Objects are put whole or not at all: a cut-short put made none.
+            w.power_fail();
+            Err(Error::Storage(unreadable()))
+        } else {
+            match self.put_in(&mut w, name, data) {
+                Ok(()) if cut.lose => Err(Error::Storage(unreadable())),
+                r => r,
+            }
+        };
+        if cut.crash {
+            w.power_fail();
+        }
+        r
+    }
+
+    fn reclaim(&mut self, c: &mut Claim) -> Result<(), Error> {
+        let mut w = self.world.lock().unwrap();
+        let cut = w.cut();
+        let r = if cut.fail {
+            Err(Error::Refused(unreadable()))
+        } else if cut.tear {
+            w.power_fail();
+            c.dead = true;
+            Err(Error::Storage(unreadable()))
+        } else {
+            match self.reclaim_in(&mut w, c) {
+                Ok(()) if cut.lose => {
+                    c.dead = true;
+                    Err(Error::Storage(unreadable()))
+                }
+                r => r,
+            }
+        };
+        if cut.crash {
+            w.power_fail();
+        }
+        r
     }
 }
 

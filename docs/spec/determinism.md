@@ -1110,7 +1110,14 @@ provider declares, [STORE-2](storage.md#store-2-transactions), such as `"host"` 
   exactly one for `"objects"`) and `faults`, a sorted object mapping each fault the
   simulated authority injects to a `fail_one_in` count (u64, 0 for never): for `"log"`
   `barrier`, `garbage`, `lost_response`, `refuse` and `torn`, for `"objects"`
-  `incomplete_listing`, `lost_response` and `refuse`.
+  `incomplete_listing`, `lost_response` and `refuse`. For `"log"`, `faults` may also
+  name **cuts**, each mapped to a request number `k` (the authority's requests counted
+  from 1, every seam operation one request): `fail_at` refuses request `k` with no
+  effect; `lose_response_at` applies it and answers undecided; `tear_at` crashes the
+  simulated disk before it and answers undecided; `crash_at` crashes the simulated disk
+  after it. A crash keeps exactly the durable prefix ([Simulated disk](#simulated-disk))
+  and an undecided answer to a claimed request ends that claim. No other provider or
+  representation takes a cut.
 
 A floor the provider does not declare, a level name that is not lowercase ASCII letters
 and digits starting with a letter, two entries over the same directory or object prefix,

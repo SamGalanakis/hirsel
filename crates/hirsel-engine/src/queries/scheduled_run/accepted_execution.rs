@@ -531,10 +531,13 @@ impl FrontRunQueries {
             if !published.insert(path.clone()) {
                 continue;
             }
-            let (public, private) = match self.lower.staged_instance_signature(&path)? {
-                Some(signature) => (signature.clone(), signature),
-                None => snapshot.execution_declaration(&path)?,
-            };
+            let (public, private) =
+                if let Some((closed, declaration)) = self.lower.settled_constant_header(&path)? {
+                    paths.insert(declaration.definition.path().clone());
+                    (closed.clone(), closed)
+                } else {
+                    snapshot.execution_declaration(&path)?
+                };
             let mut type_roots = hirsel_types::signature_types(&types, &public);
             type_roots.extend(hirsel_types::signature_types(&types, &private));
             // V checks declaration protocols even when their operations have
@@ -563,7 +566,7 @@ impl FrontRunQueries {
             let private = (!Arc::ptr_eq(&public, &private)).then_some(private);
             let materialized = constants.contains(&path)
                 || (output.semantic.definitions().contains(&path)
-                    && matches!(public.kind, SignatureKind::Const { .. }));
+                    && matches!(&public.kind, SignatureKind::Const { generics, .. } if generics.is_empty()));
             let header = records
                 .encode_record(&(public, private), &mut bind_anchor)
                 .ok_or_else(|| failure(format!("declaration encoding {path}")))?;

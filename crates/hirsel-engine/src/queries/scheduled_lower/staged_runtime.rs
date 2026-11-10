@@ -9,11 +9,26 @@ type Frame = (DefId, NameSite, Bindings, Option<Span>);
 pub(crate) type Selection = (QueryId, Option<Span>);
 
 impl FrontLowerQueries {
+    fn runtime_staged_summary(
+        &self,
+        path: &DefPath,
+        cx: &mut dyn QueryContext,
+    ) -> Result<FrontCheckedOutput, QueryError> {
+        let query = self.front.query(path).ok_or(QueryError::NotImplemented)?;
+        let selected = cx.read(query);
+        self.front.checked(selected.clone()).ok_or_else(|| {
+            self.front
+                .completed_error(path)
+                .or_else(|| selected.err().and_then(|r| self.front.runtime_error(r)))
+                .unwrap_or(QueryError::NotImplemented)
+        })
+    }
     pub(crate) fn runtime_staged_queries(
         &self,
         roots: impl IntoIterator<Item = DefPath>,
         working_limit: u64,
         retained_limit: u64,
+        cx: &mut dyn QueryContext,
     ) -> Result<Vec<Selection>, QueryError> {
         if self.staged.declarations.is_empty() {
             return Ok(Vec::new());
@@ -36,12 +51,8 @@ impl FrontLowerQueries {
             if matches!(signature.kind, hirsel_types::SignatureKind::Const { .. }) {
                 continue;
             }
-            let Some(generic) = self
-                .front
-                .with_settled_summary(&path, |s| s.frames[0].generic)
-            else {
-                continue;
-            };
+            let checked = self.runtime_staged_summary(&path, cx)?;
+            let generic = checked.summary.summary.frames[0].generic;
             if !generic {
                 push(
                     &mut pending,
@@ -72,8 +83,9 @@ impl FrontLowerQueries {
                 return Err(refused());
             }
             seen.insert(key);
-            self.front
-                .with_settled_summary(path.path(), |summary| -> Result<(), QueryError> {
+            self.runtime_staged_summary(path.path(), cx)
+                .and_then(|checked| {
+                    let summary = &checked.summary.summary;
                     let frames = &summary.frames;
                     let frame_of = |site: NameSite| {
                         frames.iter().position(|f| f.site == site).map(|i| i as u32)
@@ -202,8 +214,7 @@ impl FrontLowerQueries {
                         )?;
                     }
                     Ok(())
-                })
-                .ok_or_else(refused)??;
+                })?;
         }
         Ok(selected)
     }

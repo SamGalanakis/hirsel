@@ -577,6 +577,7 @@ impl Task {
                         roots,
                         self.queries.weight.scratch,
                         self.queries.weight.retained,
+                        cx,
                     ) {
                         Ok(selections) => {
                             self.publication = Publication::RuntimeStaged {

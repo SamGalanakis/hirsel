@@ -102,67 +102,6 @@ impl Staged {
     }
 }
 impl FrontLowerQueries {
-    pub(crate) fn staged_instance_signature(
-        &self,
-        path: &DefPath,
-    ) -> Result<Option<hirsel_types::SignatureRef>, QueryError> {
-        let invalid = |message: &str| {
-            QueryError::Operational(hirsel_types::OperationalFailure {
-                operation: "staged constant signature".into(),
-                message: format!("{path}: {message}"),
-            })
-        };
-        let Some(query) = self.staged.selected(path) else {
-            return Ok(None);
-        };
-        let selection = self
-            .staged
-            .selection(query)
-            .ok_or_else(|| invalid("staged constant selection disappeared"))?;
-        let declaration = self
-            .staged
-            .declarations
-            .get(&selection.declaration)
-            .ok_or_else(|| invalid("staged constant declaration disappeared"))?;
-        let hirsel_types::SignatureKind::Const { ty, generics } = &declaration.signature.kind
-        else {
-            return Err(invalid("staged declaration is not a constant"));
-        };
-        if selection.arguments.len() != generics.len()
-            || generics
-                .iter()
-                .any(|generic| !matches!(generic, hirsel_types::GenericParameter::Size { .. }))
-        {
-            return Err(invalid("staged constant signature arity"));
-        }
-        let arguments = selection
-            .arguments
-            .iter()
-            .map(|value| hirsel_types::GenericArgument::Size(hirsel_types::Size::Constant(*value)))
-            .collect::<Vec<_>>();
-        let types = self.namespace.snapshot.types();
-        let ty = hirsel_types::substitute(
-            types,
-            &self.memo,
-            *ty,
-            &hirsel_types::Substitution {
-                binder: Some(hirsel_types::GenericBinder::Bound(0)),
-                arguments: &arguments,
-                ..Default::default()
-            },
-        )
-        .map_err(|error| invalid(&format!("substitution: {error:?}")))?;
-        let mut signature = (*declaration.signature).clone();
-        signature.definition = selection.instance;
-        signature.kind = hirsel_types::SignatureKind::Const {
-            ty,
-            generics: Default::default(),
-        };
-        signature.fingerprint = hirsel_types::encoding::fingerprint(types, &signature, &[])
-            .map_err(|error| invalid(&format!("encoding: {error:?}")))?;
-        Ok(Some(Arc::new(signature)))
-    }
-
     /// Select a declared staged constant under its exact closed size actuals.
     /// This only interns its admitted Evaluate address. The caller requests
     /// the query on the ordinary runtime before reading a settled value.
@@ -282,6 +221,36 @@ impl FrontLowerQueries {
 }
 
 impl FrontLowerQueries {
+    /// A selected staged value has a closed link identity, rather than an
+    /// ordinary source declaration. Keep its typed header and the generic
+    /// declaration it instantiates together when publishing execution data.
+    pub(crate) fn settled_constant_header(
+        &self,
+        path: &DefPath,
+    ) -> Result<Option<(hirsel_types::SignatureRef, hirsel_types::SignatureRef)>, QueryError> {
+        let selection = self
+            .staged
+            .selections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .find(|selection| selection.instance.path() == path)
+            .cloned();
+        let Some(selection) = selection else {
+            return Ok(None);
+        };
+        let declaration = &self.staged.declarations[&selection.declaration];
+        let value = self.settled_constant(path, &[])?;
+        let signature = closed_constant_header(
+            self.namespace.snapshot.types(),
+            &self.memo,
+            &declaration.signature,
+            &selection.arguments,
+            &value,
+        )?;
+        Ok(Some((Arc::new(signature), declaration.signature.clone())))
+    }
+
     /// Lower and reopened descriptors record the exact staged selections they
     /// consumed. Native statics must demand their Evaluate products in this
     /// runtime before collecting values; a prior graph's completion is not one.
@@ -393,5 +362,101 @@ impl FrontLowerQueries {
             },
             retained,
         ))
+    }
+}
+
+fn closed_constant_header(
+    types: &hirsel_types::TypeInterner,
+    memo: &hirsel_types::TypeMemo,
+    declaration: &hirsel_types::Signature,
+    arguments: &[u64],
+    value: &Materialized,
+) -> Result<hirsel_types::Signature, QueryError> {
+    use hirsel_types::{GenericArgument, GenericBinder, GenericParameter, SignatureKind, Size};
+    let refused = || {
+        QueryError::Operational(hirsel_types::OperationalFailure {
+            operation: "closed constant publication".into(),
+            message: "selected value disagrees with its generic declaration".into(),
+        })
+    };
+    let SignatureKind::Const { ty, generics } = &declaration.kind else {
+        return Err(refused());
+    };
+    if generics.len() != arguments.len()
+        || !generics
+            .iter()
+            .all(|p| matches!(p, GenericParameter::Size { .. }))
+    {
+        return Err(refused());
+    }
+    let actuals = arguments
+        .iter()
+        .map(|n| GenericArgument::Size(Size::Constant(*n)))
+        .collect::<Vec<_>>();
+    let ty = hirsel_types::substitute(
+        types,
+        memo,
+        *ty,
+        &hirsel_types::Substitution {
+            binder: Some(GenericBinder::Bound(0)),
+            arguments: &actuals,
+            ..Default::default()
+        },
+    )
+    .map_err(|_| refused())?;
+    if ty != value.root.ty {
+        return Err(refused());
+    }
+    let mut signature = declaration.clone();
+    signature.definition = DefId::intern(&hirsel_tir::constant_instance_path(
+        declaration.definition.path(),
+        arguments,
+    ));
+    signature.kind = SignatureKind::Const {
+        ty,
+        generics: vec![].into(),
+    };
+    signature.fingerprint =
+        hirsel_types::encoding::fingerprint(types, &signature, &[]).map_err(|_| refused())?;
+    Ok(signature)
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    #[test]
+    fn selected_constant_publication_refuses_a_value_with_another_type() {
+        let types = hirsel_types::TypeInterner::new(None);
+        let memo = hirsel_types::TypeMemo::new();
+        let integer = types.intern(hirsel_types::Type::with_kind(
+            hirsel_types::TypeKind::Primitive(hirsel_types::Primitive::U64),
+        ));
+        let boolean = types.intern(hirsel_types::Type::boolean());
+        let declaration = hirsel_types::Signature {
+            definition: DefId::intern(&DefPath::core("staged")),
+            kind: hirsel_types::SignatureKind::Const {
+                ty: integer,
+                generics: vec![hirsel_types::GenericParameter::Size { name: "n".into() }].into(),
+            },
+            metadata: Default::default(),
+            fingerprint: ContentHash::default(),
+        };
+        let mut value = Materialized {
+            root: hirsel_tir::ValueNode {
+                ty: integer,
+                kind: hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(4)),
+            },
+        };
+        let header = closed_constant_header(&types, &memo, &declaration, &[2], &value).unwrap();
+        assert_eq!(
+            header.definition.path(),
+            &hirsel_tir::constant_instance_path(declaration.definition.path(), &[2])
+        );
+        assert!(
+            matches!(header.kind, hirsel_types::SignatureKind::Const { ty, ref generics } if ty == integer && generics.is_empty())
+        );
+        value.root.ty = boolean;
+        value.root.kind = hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Bool(true));
+        assert!(closed_constant_header(&types, &memo, &declaration, &[2], &value).is_err());
     }
 }

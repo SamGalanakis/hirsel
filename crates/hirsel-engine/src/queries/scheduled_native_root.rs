@@ -334,6 +334,34 @@ fn prepare(
             .ok_or(owner.errors.protocol)?;
         state.definition_done(output, owner)?;
     }
+    // Native preparation can precede the ordered Check root. Select its
+    // runtime comptime values explicitly rather than relying on Check work
+    // having happened while a dependency was suspended.
+    let staged = owner
+        .definitions
+        .lower()
+        .runtime_staged_queries(
+            state.selected.iter().cloned(),
+            cx.scratch_bytes(),
+            cx.scratch_bytes(),
+            cx,
+        )
+        .map_err(|error| owner.fail(error))?;
+    for (query, site) in staged {
+        if let Err(reference) = cx.read(query) {
+            return Err(owner
+                .definitions
+                .lower()
+                .staged_failure(query, reference, site)
+                .map(|error| owner.fail(error))
+                .unwrap_or(reference));
+        }
+        state
+            .charge
+            .grow(4 * std::mem::size_of::<QueryId>() as u64)
+            .map_err(|_| owner.errors.resource)?;
+        state.evaluated.push(query);
+    }
     while let Some(query) = owner
         .definitions
         .staged_static_query(&state.selected, &state.evaluated)

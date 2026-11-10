@@ -1454,13 +1454,14 @@ impl FrontBodyQueries {
     /// Materialize through the compact Check latch in the consumer's admitted
     /// continuation, without allocating another scheduler node.
     pub(crate) fn body_task(self: &Arc<Self>, definition: &DefPath) -> Option<Box<dyn QueryTask>> {
-        let query = self.query(definition)?;
+        let input = self.query(definition)?.address.0;
+        let query = self.body_query(definition)?;
         Some(Box::new(BodyTask {
             queries: self.clone(),
             query,
-            input: query.address.0,
+            input,
             materialize: true,
-            weight: self.inputs.get(&query.address.0)?.weight,
+            weight: self.inputs.get(&input)?.weight,
             terminal: None,
             demand: None,
             slot_admitted: false,

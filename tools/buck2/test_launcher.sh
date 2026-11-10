@@ -460,6 +460,19 @@ if [ -n "$shard" ]; then
   if "$filtered"; then
     [ "$index" -eq 1 ] || { echo "shard $shard: arguments select the cases; shard 1 runs them"; report_empty_partition; exit 0; }
   else
+    # Deal only the bodies this run executes. A case ignored in this mode
+    # would leave a shard holding only it running nothing, and the reporter
+    # refuses a zero-body run that is not an empty partition.
+    case " $* " in
+      *" --ignored "* | *" --include-ignored "*) ;;
+      *)
+        ignored="$(list_cases --ignored "$@")"
+        if [ -n "$ignored" ]; then
+          cases="$(printf '%s\n' "$cases" | awk -v ignored="$ignored" '
+            BEGIN { n = split(ignored, rows, "\n"); for (i = 1; i <= n; i++) skip[rows[i]] = 1 }
+            NF && !($0 in skip)')"
+        fi ;;
+    esac
     # Longest-first greedy assignment by measured seconds (HIRSEL_TEST_COSTS:
     # `case<TAB>seconds` rows, tools/buck2/test_costs.py). A case without a
     # row costs the mean of the measured ones (1 without any), so equal costs

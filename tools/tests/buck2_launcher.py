@@ -248,6 +248,21 @@ class LauncherReporting(LauncherFixture):
                 self.assertIn('root//:fixture-test-it', result.stderr)
                 self.assertIn('executed zero test bodies', result.stderr)
 
+    def test_an_unfiltered_shard_deals_only_the_bodies_its_run_executes(self):
+        # A shard whose deal held only a body ignored outside the full gate ran
+        # nothing and failed (hirsel-driver-test-it-shard-564).
+        self.env['CASES'] = json.dumps({'pool::full_gate_heap': True, 'pool::smoke': False})
+        for args, expected in [((), ['pool::smoke']),
+                               (('--include-ignored',), ['pool::full_gate_heap', 'pool::smoke'])]:
+            ran = []
+            for index in ('0', '1'):
+                with self.subTest(args=args, shard=index):
+                    self.env.update(TEST_TOTAL_SHARDS='2', TEST_SHARD_INDEX=index)
+                    result = self.run_report(args)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    ran += json.loads(self.observed.read_text())['cases']
+            self.assertCountEqual(ran, expected)
+
     def test_empty_partitions_and_discovery_keep_their_status(self):
         self.env['CASES'] = json.dumps({'pool::only': False})
         self.env.update(TEST_TOTAL_SHARDS='2', TEST_SHARD_INDEX='1')

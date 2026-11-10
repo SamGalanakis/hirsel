@@ -708,7 +708,7 @@ fn malformed_grants_never_echo_rejected_or_neighboring_credentials() {
 /// them: a provider over real storage, or the simulated objects, refuses them before entry.
 /// Each grant is first admitted without the cut, so a refusal is the cut's.
 #[test]
-fn request_cuts_are_admitted_only_by_the_simulated_log() {
+fn request_cuts_are_admitted_by_the_simulated_log_and_no_real_storage() {
     let admitted = |g: &serde_json::Value| {
         let grant: AuthorityGrant = serde_json::from_value(g.clone()).unwrap();
         let mut r = RunConfig::empty([0; 32], "probe@1/main".into(), LaunchKind::Main);
@@ -719,13 +719,12 @@ fn request_cuts_are_admitted_only_by_the_simulated_log() {
         });
         r.validated().is_ok()
     };
-    let sim = |represent: &str, levels: &[&str]| {
-        serde_json::json!({"provider": "authority.sim@1", "floor": "cache", "seed": 1,
-            "represent": represent, "levels": levels, "faults": {}})
-    };
     let cases = [
-        (sim("log", &["cache", "disk"]), true),
-        (sim("objects", &["cache"]), false),
+        (
+            serde_json::json!({"provider": "authority.sim@1", "floor": "cache", "seed": 1,
+                "represent": "log", "levels": ["cache", "disk"], "faults": {}}),
+            true,
+        ),
         (
             serde_json::json!({"provider": "authority.memory@1", "floor": "memory"}),
             false,

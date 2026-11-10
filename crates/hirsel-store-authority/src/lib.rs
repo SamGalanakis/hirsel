@@ -263,10 +263,24 @@ pub fn open(
                 .objects
                 .as_ref()
                 .expect("checked: objects@1 has its entry");
-            let store = hirsel_object_storage::open(entry)
-                .map_err(|e| ConfigError(format!("authority objects: {e}")))?;
             let level = g.level.clone().expect("checked: objects@1 names its level");
-            Box::new(objects::Objects::new(store, level, floor))
+            match hirsel_object_storage::provider(entry)
+                .map_err(|e| ConfigError(format!("authority objects: {e}")))?
+            {
+                hirsel_object_storage::Provider::Dir(store) => Box::new(objects::Objects::new(
+                    std::sync::Arc::new(store),
+                    level,
+                    floor,
+                )),
+                hirsel_object_storage::Provider::S3(store) => Box::new(objects::Objects::new(
+                    std::sync::Arc::new(store),
+                    level,
+                    floor,
+                )),
+                hirsel_object_storage::Provider::Sim(bucket) => {
+                    Box::new(sim::Client::new(bucket, level, floor))
+                }
+            }
         }
         _ => {
             let config = sim::Config::from_grant(g)?;

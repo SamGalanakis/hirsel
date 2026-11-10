@@ -1115,9 +1115,23 @@ provider declares, [STORE-2](storage.md#store-2-transactions), such as `"host"` 
   from 1, every seam operation one request): `fail_at` refuses request `k` with no
   effect; `lose_response_at` applies it and answers undecided; `tear_at` crashes the
   simulated disk before it and answers undecided; `crash_at` crashes the simulated disk
-  after it. A crash keeps exactly the durable prefix ([Simulated disk](#simulated-disk))
-  and an undecided answer to a claimed request ends that claim. No other provider or
-  representation takes a cut.
+  after it. A crash keeps exactly the durable prefix (the simulated disk, [Resource
+  footprints](#resource-footprints)) and an undecided answer to a claimed request ends
+  that claim.
+
+An `objects.sim@1` entry of `authority.objects@1` takes the same kind of cuts as members,
+each a request number `k` (the object requests counted from 1: every get, put, conditional
+replace, listing and delete, one per key): `fail_at` answers request `k` with a definite
+refusal and no effect; `lose_unapplied_at` loses it before its effect, unanswered;
+`lose_response_at` applies it and loses its reply; `crash_at` ends the client right
+after it, so every later request of that client fails with no effect, and the authority
+continues as a new client that keeps nothing of the old one and whose old claims are
+dead. An object write is whole or absent, so no cut tears one. The objects authority
+settles a head replace that got no success answer by reading the head again, and refuses
+an advance whose group put failed (the group, if written, is an orphan no head names), so
+what the store sees, refused before any effect or undecided, follows from where the request
+was cut and that read, not from the kind of failure. No other provider or representation takes a cut:
+`objects.dir@1` and `objects.s3@1` refuse the members.
 
 A floor the provider does not declare, a level name that is not lowercase ASCII letters
 and digits starting with a letter, two entries over the same directory or object prefix,

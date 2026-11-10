@@ -3,24 +3,28 @@
 // authorities: {"f1":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":1,"crash_at":1}},"f10":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":10,"crash_at":10}},"f11":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":11,"crash_at":11}},"f12":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":12,"crash_at":12}},"f13":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":13,"crash_at":13}},"f14":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":14,"crash_at":14}},"f15":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":15,"crash_at":15}},"f16":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":16,"crash_at":16}},"f17":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":17,"crash_at":17}},"f18":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":18,"crash_at":18}},"f19":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":19,"crash_at":19}},"f2":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":2,"crash_at":2}},"f20":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":20,"crash_at":20}},"f21":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":21,"crash_at":21}},"f22":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":22,"crash_at":22}},"f23":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":23,"crash_at":23}},"f24":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":24,"crash_at":24}},"f3":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":3,"crash_at":3}},"f4":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":4,"crash_at":4}},"f5":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":5,"crash_at":5}},"f6":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":6,"crash_at":6}},"f7":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":7,"crash_at":7}},"f8":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":8,"crash_at":8}},"f9":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"fail_at":9,"crash_at":9}}}
 // steps: 20000000
 // A store over a simulated log whose history is cut at each authority request in
-// turn; authority `fN` refuses request N, then fails the power. The history is fixed: open a new store, commit 1,
-// commit 2 and wait for it at disk, commit 3, compact, commit 4 as call-stream
-// position 1, commit 5 and wait for it at disk, commit 6, close. The floor is cache;
-// a power failure keeps only what is durable at disk.
+// turn; authority `fN` refuses request N, then fails the power. The floor is cache; a power failure keeps only
+// what is durable at disk.
+// The history is fixed: open a new store, commit 1, commit 2 and wait for it at
+// disk, commit 3, compact, commit 4 as call-stream position 1, commit 5 and wait
+// for it at disk, commit 6, close.
 // After each cut the store reopens and holds the state after some commit j, whole:
 // a, b and c are j and the keys x1 to xj are there, no others. j is at least the
-// last commit a disk wait, a compaction or the close acknowledged, and at most the
-// last commit whose transaction returned Ok or Unknown; a commit refused with
-// Storage(..) left nothing. A second reopen holds the same rows. Re-sending the
+// last commit an acknowledgement at disk, a compaction or the close covered, and at
+// most the last commit whose transaction returned Ok or Unknown; a commit refused
+// with Storage(..) left nothing. A second reopen holds the same rows. Re-sending the
 // call (position 1) applies commit 4 exactly once. A commit made after recovery and
-// waited for at disk survives a third reopen. Authority `fN` refuses request N: every
-// `fN` up to the history's last request stops the history and the one after lets it
-// finish, so the history has exactly that many requests and each `fN` cut a
-// request of the same deterministic history.
+// waited for at disk survives a third reopen. Authority `fN` refuses request N and
+// then crashes: every `fN` up to the history's last request stops the history and
+// the one after lets it finish, so the history has exactly that many requests and
+// each `fN` cut a request of the same deterministic history.
 // stdout: cuts: 0
 
 // The cut this case makes at each request.
 const KIND: String = "f"
+
+// Whether an Ok commit is acknowledged at disk (the floor is the strongest level).
+const ACKED_AT_FLOOR: bool = false
 
 // Commit j: a, b and c set to j, and xj added.
 fn step(mut tx: store.Tx, info: store.CallInfo, j: u8) -> Result[u8, store.TxError] {
@@ -76,6 +80,9 @@ fn commit(mut s: store.Store, mut k: Known, j: u8) -> bool {
   match r {
     Ok(_) => {
       k.high = j
+      if ACKED_AT_FLOOR {
+        k.low = j
+      }
       true
     },
     Error(Unknown(_)) => {
@@ -131,6 +138,9 @@ fn history(a: Authority, mut k: Known) -> () {
   match called {
     Ok(_) => {
       k.high = 4
+      if ACKED_AT_FLOOR {
+        k.low = 4
+      }
     },
     Error(Tx(Unknown(_))) => {
       k.high = 4

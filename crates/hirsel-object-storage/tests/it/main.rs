@@ -452,3 +452,64 @@ fn steady_state_requests_allocate_only_what_they_return() {
         assert_eq!((n, deleted), (0, Ok(())), "delete {i}");
     }
 }
+
+#[test]
+fn request_cuts_are_taken_by_the_simulated_objects_and_refused_by_real_storage() {
+    let dir = tempfile::tempdir().unwrap();
+    for cut in CUTS {
+        let sim = serde_json::json!({"provider": "objects.sim@1", cut: 3});
+        assert!(open(&sim).is_ok(), "{cut}");
+        for real in [
+            serde_json::json!({"provider": "objects.dir@1", "path": dir.path(), cut: 3}),
+            serde_json::json!({"provider": "objects.s3@1", cut: 3}),
+        ] {
+            let provider = real["provider"].as_str().unwrap().to_string();
+            assert_eq!(
+                open(&real).err(),
+                Some(format!("{provider} has no member {cut:?}"))
+            );
+        }
+    }
+}
+
+#[test]
+fn a_cut_fires_at_its_request_and_a_crash_holds_until_restart() {
+    let at = |cuts: Cuts| MemoryObjects::new().with_cuts(cuts);
+    // Request 2 of each: a put after a get.
+    let run = |o: &MemoryObjects| {
+        let _ = o.get("x");
+        let put = o.put_new("x", b"1");
+        (put, o.contents().contains_key("x"))
+    };
+    let refused = at(Cuts {
+        fail_at: Some(2),
+        ..Cuts::default()
+    });
+    assert!(matches!(run(&refused), (Err(StorageError::Io(_)), false)));
+    let dropped = at(Cuts {
+        lose_unapplied_at: Some(2),
+        ..Cuts::default()
+    });
+    assert!(matches!(
+        run(&dropped),
+        (Err(StorageError::Unavailable(_)), false)
+    ));
+    let lost = at(Cuts {
+        lose_response_at: Some(2),
+        ..Cuts::default()
+    });
+    assert!(matches!(
+        run(&lost),
+        (Err(StorageError::Unavailable(_)), true)
+    ));
+    let crashed = at(Cuts {
+        crash_at: Some(2),
+        ..Cuts::default()
+    });
+    assert!(matches!(run(&crashed), (Ok(Put::Created), true)));
+    assert!(crashed.put_new("y", b"2").is_err());
+    assert!(!crashed.contents().contains_key("y"));
+    assert!(crashed.restart());
+    assert!(!crashed.restart());
+    assert_eq!(crashed.put_new("y", b"2"), Ok(Put::Created));
+}

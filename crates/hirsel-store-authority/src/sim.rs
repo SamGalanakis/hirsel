@@ -758,3 +758,70 @@ impl ObjectStorage for Bucket {
         Self::respond(&mut w, ())
     }
 }
+
+/// `authority.objects@1` over `objects.sim@1`: the objects authority as a
+/// client of simulated objects whose crash cut restarts it. The restarted
+/// client keeps nothing of the old one, neither the history it followed nor
+/// its head's tag, and the old client's claims are dead, as a new process's
+/// would be.
+pub struct Client {
+    bucket: Arc<hirsel_object_storage::MemoryObjects>,
+    level: String,
+    floor: Level,
+    client: crate::objects::Objects,
+}
+
+impl Client {
+    pub fn new(bucket: hirsel_object_storage::MemoryObjects, level: String, floor: Level) -> Self {
+        let bucket = Arc::new(bucket);
+        let client = crate::objects::Objects::new(bucket.clone(), level.clone(), floor);
+        Client {
+            bucket,
+            level,
+            floor,
+            client,
+        }
+    }
+
+    /// The client serving a request: a new one after a crash.
+    fn serving(&mut self) -> &mut crate::objects::Objects {
+        if self.bucket.restart() {
+            self.client =
+                crate::objects::Objects::new(self.bucket.clone(), self.level.clone(), self.floor);
+        }
+        &mut self.client
+    }
+}
+
+impl Authority for Client {
+    fn levels(&self) -> &[String] {
+        self.client.levels()
+    }
+    fn floor(&self) -> Level {
+        self.floor
+    }
+    fn max_entry(&self) -> u64 {
+        self.client.max_entry()
+    }
+    fn claim(&mut self, attempt: [u8; 16], fresh: [u8; 32]) -> Result<Claimed, Error> {
+        self.serving().claim(attempt, fresh)
+    }
+    fn advance(&mut self, c: &mut Claim, from: u64, entry: Vec<u8>, at: Level) -> Advanced {
+        self.serving().advance(c, from, entry, at)
+    }
+    fn durable(&mut self, c: &mut Claim, at: Level) -> Result<u64, Error> {
+        self.serving().durable(c, at)
+    }
+    fn read(&mut self, from: u64, at: Level, max: u64) -> Result<Vec<Vec<u8>>, Error> {
+        self.serving().read(from, at, max)
+    }
+    fn get(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {
+        self.serving().get(name)
+    }
+    fn put(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error> {
+        self.serving().put(name, data)
+    }
+    fn reclaim(&mut self, c: &mut Claim) -> Result<(), Error> {
+        self.serving().reclaim(c)
+    }
+}

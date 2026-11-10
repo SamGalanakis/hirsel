@@ -1,0 +1,357 @@
+// rule: STORE-11
+// expect: run
+// authorities: {"f1":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":1,"crash_at":1}},"f10":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":10,"crash_at":10}},"f11":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":11,"crash_at":11}},"f12":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":12,"crash_at":12}},"f13":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":13,"crash_at":13}},"f14":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":14,"crash_at":14}},"f15":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":15,"crash_at":15}},"f16":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":16,"crash_at":16}},"f17":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":17,"crash_at":17}},"f18":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":18,"crash_at":18}},"f19":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":19,"crash_at":19}},"f2":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":2,"crash_at":2}},"f20":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":20,"crash_at":20}},"f21":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":21,"crash_at":21}},"f22":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":22,"crash_at":22}},"f23":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":23,"crash_at":23}},"f24":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":24,"crash_at":24}},"f3":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":3,"crash_at":3}},"f4":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":4,"crash_at":4}},"f5":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":5,"crash_at":5}},"f6":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":6,"crash_at":6}},"f7":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":7,"crash_at":7}},"f8":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":8,"crash_at":8}},"f9":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"fail_at":9,"crash_at":9}},"v1":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":1,"crash_at":1}},"v10":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":10,"crash_at":10}},"v11":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":11,"crash_at":11}},"v12":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":12,"crash_at":12}},"v13":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":13,"crash_at":13}},"v14":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":14,"crash_at":14}},"v15":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":15,"crash_at":15}},"v16":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":16,"crash_at":16}},"v17":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":17,"crash_at":17}},"v18":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":18,"crash_at":18}},"v19":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":19,"crash_at":19}},"v2":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":2,"crash_at":2}},"v20":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":20,"crash_at":20}},"v21":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":21,"crash_at":21}},"v22":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":22,"crash_at":22}},"v23":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":23,"crash_at":23}},"v24":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":24,"crash_at":24}},"v3":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":3,"crash_at":3}},"v4":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":4,"crash_at":4}},"v5":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":5,"crash_at":5}},"v6":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":6,"crash_at":6}},"v7":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":7,"crash_at":7}},"v8":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":8,"crash_at":8}},"v9":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1,"lose_response_at":9,"crash_at":9}}}
+// steps: 20000000
+// A store over authority.objects@1 on simulated objects (objects.sim@1), the
+// path an S3 bucket takes, whose client is cut at each object request in turn
+// (every get, put, conditional replace, listing and delete); authority `vN`
+// applies request N, loses its reply, then the client crashes. A crashed client restarts with nothing of the old one, and the old
+// one's claim is dead. The one level is disk and the floor, so an Ok commit is
+// acknowledged.
+// The history is fixed: open a new store, commit 1, commit 2 and wait for it at
+// disk, commit 3, compact, commit 4 as call-stream position 1, commit 5 and wait
+// for it at disk, commit 6, close.
+// After each cut the store reopens and holds the state after some commit j, whole:
+// a, b and c are j and the keys x1 to xj are there, no others. j is at least the
+// last commit an acknowledgement at disk, a compaction or the close covered, and at
+// most the last commit whose transaction returned Ok or Unknown; a commit refused
+// with Storage(..) left nothing. A second reopen holds the same rows. Re-sending the
+// call (position 1) applies commit 4 exactly once. A commit made after recovery and
+// waited for at disk survives a third reopen. Authority `fN` refuses request N and
+// then crashes: every `fN` up to the history's last request stops the history and
+// the one after lets it finish, so the history has exactly that many requests and
+// each `vN` cut a request of the same deterministic history.
+// stdout: cuts: 0
+
+// The cut this case makes at each request.
+const KIND: String = "v"
+
+// Whether an Ok commit is acknowledged at disk (the floor is the strongest level).
+const ACKED_AT_FLOOR: bool = true
+
+// Commit j: a, b and c set to j, and xj added.
+fn step(mut tx: store.Tx, info: store.CallInfo, j: u8) -> Result[u8, store.TxError] {
+  let v = bytes.from_list([j])
+  store.tx_put(mut tx, b"a", copy v)?
+  store.tx_put(mut tx, b"b", copy v)?
+  store.tx_put(mut tx, b"c", copy v)?
+  store.tx_put(mut tx, bytes.from_list([120u8, j]), copy v)?
+  Ok(j)
+}
+
+// Streams and request digests are 32 bytes: the SHA-256 of a name.
+fn d32(name: Bytes) -> Bytes {
+  bytes.from_inline(sha256.digest(name))
+}
+
+fn position_one() -> CallRequest {
+  CallRequest(
+    stream: d32(b"cuts"),
+    epoch: 1,
+    position: 1,
+    digest: d32(b"four"),
+    acknowledged: 0
+  )
+}
+
+pub type Failed = Check(String) | Store(store.StoreError)
+
+fn check(ok: bool, take what: String) -> Result[(), Failed] {
+  if ok {
+    Ok(())
+  } else {
+    Error(Check(what))
+  }
+}
+
+// What the history learned about its commits: `low`, the last commit a stronger
+// acknowledgement covers, and `high`, the last commit that may have happened.
+type Known {
+  low: u8,
+  high: u8,
+  finished: bool,
+}
+
+fn config() -> store.StoreConfig {
+  store.default_config()
+}
+
+// Commit j with `transact`: Ok and Unknown may have happened; Storage(..) did not.
+// True when the store is still open.
+fn commit(mut s: store.Store, mut k: Known, j: u8) -> bool {
+  let r: Result[u8, store.TxFailure[store.TxError]] = store.transact(mut s, step, j)
+  match r {
+    Ok(_) => {
+      k.high = j
+      if ACKED_AT_FLOOR {
+        k.low = j
+      }
+      true
+    },
+    Error(Unknown(_)) => {
+      k.high = j
+      false
+    },
+    _ => false,
+  }
+}
+
+// Waits for commit j at disk; true when acknowledged.
+fn strong(a: Authority, mut s: store.Store, mut k: Known, j: u8) -> bool {
+  let Some(disk) = authority.level(a, "disk") else {
+    return false
+  }
+  let t = store.ticket(s)
+  match store.durable(a, mut s, t, disk) {
+    Ok(()) => {
+      k.low = j
+      true
+    },
+    _ => false,
+  }
+}
+
+// The fixed history, stopping at the first failure.
+fn history(a: Authority, mut k: Known) -> () {
+  let Ok(opened) = store.open(a, config()) else {
+    return ()
+  }
+  let mut s = take opened
+  if !commit(mut s, mut k, 1) {
+    return ()
+  }
+  if !commit(mut s, mut k, 2) || !strong(a, mut s, mut k, 2) {
+    return ()
+  }
+  if !commit(mut s, mut k, 3) {
+    return ()
+  }
+  match store.compact(mut s) {
+    Ok(()) => {
+      k.low = 3
+    },
+    Error(_) => return (),
+  }
+  let called: Result[u8, store.CallFailure[store.TxError]] = store.call(
+    mut s,
+    position_one(),
+    step,
+    4u8
+  )
+  match called {
+    Ok(_) => {
+      k.high = 4
+      if ACKED_AT_FLOOR {
+        k.low = 4
+      }
+    },
+    Error(Tx(Unknown(_))) => {
+      k.high = 4
+      return ()
+    },
+    Error(_) => return (),
+  }
+  if !commit(mut s, mut k, 5) || !strong(a, mut s, mut k, 5) {
+    return ()
+  }
+  if !commit(mut s, mut k, 6) {
+    return ()
+  }
+  match store.close(take s) {
+    Ok(()) => {
+      k.low = 6
+      k.finished = true
+    },
+    Error(_) => (),
+  }
+}
+
+// Every user row of the store's state at its floor.
+fn rows(a: Authority, mut s: store.Store) -> Result[List[(Bytes, Bytes)], Failed] {
+  let snap = store.snapshot(a, mut s, authority.floor(a)) ? Store
+  let all: ordered_map.Bound[Bytes] = Unbounded()
+  let up: ordered_map.Direction = Ascending()
+  let mut user: List[(Bytes, Bytes)] = []
+  for (k, v) in store.range(snap, all, Unbounded(), up, 100) {
+    // The call stream's own rows are under the reserved prefix; the model is the user keys.
+    if !store.reserved(k) {
+      list.push(mut user, (copy k, copy v))
+    }
+  }
+  Ok(user)
+}
+
+// The rows after commit j.
+fn model(j: u8) -> List[(Bytes, Bytes)] {
+  let mut m: List[(Bytes, Bytes)] = []
+  if j == 0 {
+    return m
+  }
+  let v = bytes.from_list([j])
+  list.push(mut m, (b"a", copy v))
+  list.push(mut m, (b"b", copy v))
+  list.push(mut m, (b"c", copy v))
+  for i in 1u8..j + 1 {
+    list.push(mut m, (bytes.from_list([120u8, i]), bytes.from_list([i])))
+  }
+  m
+}
+
+fn first_a(r: List[(Bytes, Bytes)]) -> u64 {
+  let mut j: u64 = 0
+  for (k, v) in r {
+    if k == b"a" && bytes.len(v) == 1 {
+      j = int.widen(v[0])
+    }
+  }
+  j
+}
+
+// The commit the rows are the state after; 255 when they are no commit's.
+fn which(r: List[(Bytes, Bytes)]) -> u8 {
+  let mut j: u8 = 0
+  for (k, v) in r {
+    if k == b"a" && bytes.len(v) == 1 {
+      j = v[0]
+    }
+  }
+  if r == model(j) {
+    j
+  } else {
+    255
+  }
+}
+
+fn said(e: store.StoreError) -> String {
+  match e {
+    Storage(_) => "Storage",
+    Refused(_) => "Refused",
+    Corrupt(what) => f"Corrupt({what})",
+    Fenced => "Fenced",
+    Closed => "Closed",
+    Unsupported(_) => "Unsupported",
+    NoLevel => "NoLevel",
+    Foreign => "Foreign",
+    InvalidInput => "InvalidInput",
+  }
+}
+
+// Recovers the store a cut history left and checks it against `k`.
+fn recover(a: Authority, name: String, k: Known) -> Result[(), Failed] {
+  let first = store.open(a, config())
+  let mut s = match take first {
+    Ok(opened) => opened,
+    Error(e) => return Error(
+      Check(f"{name}: reopen refused {said(e)}, history {k.low}..{k.high}")
+    ),
+  }
+  let seen = rows(a, mut s)?
+  let j = which(seen)
+  check(
+    j != 255,
+    f"{name}: rows are no commit's state, a={first_a(seen)} rows={list.len(seen)} history {k.low}..{k.high}"
+  )?
+  check(
+    k.low <= j && j <= k.high,
+    f"{name}: recovered commit {j} outside {k.low}..{k.high}"
+  )?
+  // A second reopen fences the first and holds the same rows.
+  let Ok(second) = store.open(a, config()) else {
+    return Error(Check(f"{name}: second reopen refused"))
+  }
+  let mut again = take second
+  check(rows(a, mut again)? == seen, f"{name}: second reopen differs")?
+  // The call at position 1 has its effect once: recorded when commit 4 survived,
+  // run now when the history ended at 3.
+  let mut now = j
+  if j >= 3 {
+    let resent: Result[u8, store.CallFailure[store.TxError]] = store.call(
+      mut again,
+      position_one(),
+      step,
+      4u8
+    )
+    check(resent == Ok(4), f"{name}: resent call failed")?
+    if j == 3 {
+      now = 4
+    }
+    let after = which(rows(a, mut again)?)
+    check(after == now, f"{name}: recovered {j}, after the resent call {after}")?
+  }
+  // The recovered store takes a new commit and keeps it.
+  let made: Result[u8, store.TxFailure[store.TxError]] = store.transact(
+    mut again,
+    step,
+    9u8
+  )
+  check(made == Ok(9), f"{name}: commit after recovery failed")?
+  store.close(take again) ? Store
+  let Ok(third) = store.open(a, config()) else {
+    return Error(Check(f"{name}: third reopen refused"))
+  }
+  let mut last = take third
+  let kept = rows(a, mut last)?
+  let mut nine = false
+  let mut previous = true
+  for (key, v) in kept {
+    if key == b"a" {
+      nine = v == b"\x09"
+    }
+  }
+  for i in 1u8..now + 1 {
+    let mut found = false
+    for (key, _) in kept {
+      if key == bytes.from_list([120u8, i]) {
+        found = true
+      }
+    }
+    previous = previous && found
+  }
+  check(nine && previous, f"{name}: commit after recovery lost")?
+  Ok(())
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
+  let Ok(stdout) = io.stdout(rt) else {
+    return Error(Check("stdout"))
+  }
+  let mut failures: u64 = 0
+  let mut n: u64 = 1
+  let mut last = false
+  while !last {
+    // The refusing cut decides whether request n is in the history.
+    let Ok(f) = io.authority(rt, f"f{n}") else {
+      return Error(Check(f"f{n} not granted: the history is longer than the grants"))
+    }
+    let mut k = Known(low: 0, high: 0, finished: false)
+    history(f, mut k)
+    if k.finished {
+      // Cut n is past the history: it finished, and the cuts before it were each
+      // reached.
+      last = true
+      check(n > 1, "the first request was not cut")?
+    } else {
+      let name = f"{KIND}{n}"
+      let Ok(a) = io.authority(rt, name) else {
+        return Error(Check(f"{name} not granted"))
+      }
+      let mut cut = Known(low: 0, high: 0, finished: false)
+      if KIND == "f" {
+        cut = k
+      } else {
+        history(a, mut cut)
+      }
+      if let Error(e) = recover(a, name, cut) {
+        failures += 1
+        let line = match e {
+          Check(what) => what,
+          Store(_) => f"{name}: store error",
+        }
+        let _ = out.print(stdout, f"{line}\n")
+      }
+    }
+    n += 1
+  }
+  let _ = out.print(stdout, f"cuts: {failures}\n")
+  Ok(())
+}

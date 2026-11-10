@@ -7452,6 +7452,11 @@ conformance/STORE/STORE-11-crash-cuts-crash-run.hir
 conformance/STORE/STORE-11-crash-cuts-fail-run.hir
 conformance/STORE/STORE-11-crash-cuts-lose-run.hir
 conformance/STORE/STORE-11-crash-cuts-tear-run.hir
+conformance/STORE/STORE-11-objects-cuts-crash-run.hir
+conformance/STORE/STORE-11-objects-cuts-drop-run.hir
+conformance/STORE/STORE-11-objects-cuts-lose-run.hir
+conformance/STORE/STORE-11-objects-cuts-refuse-run.hir
+conformance/STORE/STORE-11-objects-cuts-vanish-run.hir
 conformance/STORE/STORE-12-call-row-limit-run.hir
 conformance/STORE/STORE-12-call-stream-run.hir
 conformance/STORE/STORE-12-serve-run.hir

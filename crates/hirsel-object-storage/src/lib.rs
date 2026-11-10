@@ -392,10 +392,55 @@ impl ObjectStorage for DirObjects {
 /// faulted write fails before or after its effect, as a lost reply does, so
 /// callers see both outcomes of an uncertain write; a faulted listing fails
 /// or returns every other key.
+///
+/// The objects also cut their client at a chosen request, for tests that must
+/// reach every request in turn ([`Cuts`]). Requests (each get, put, replace,
+/// listing and delete, one per key) are numbered from 1.
 #[derive(Debug, Default)]
 pub struct MemoryObjects {
     objects: Mutex<BTreeMap<String, Vec<u8>>>,
     faults: Mutex<Option<Faults>>,
+    cuts: Mutex<Cutting>,
+}
+
+/// The requests (numbered from 1) at which [`MemoryObjects`] cuts its client.
+/// An object write is whole or absent, so no cut tears one.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Cuts {
+    /// Answer a definite refusal ([`StorageError::Io`]), with no effect.
+    pub fail_at: Option<u64>,
+    /// Lose the request before it reaches the objects: no effect, and the
+    /// client hears [`StorageError::Unavailable`].
+    pub lose_unapplied_at: Option<u64>,
+    /// Take the request's effect and lose its reply: the client hears
+    /// [`StorageError::Unavailable`].
+    pub lose_response_at: Option<u64>,
+    /// The client dies right after the request: every later request fails
+    /// with no effect, uncounted, until [`MemoryObjects::restart`].
+    pub crash_at: Option<u64>,
+}
+
+/// The names of the [`Cuts`] members in an `objects.sim@1` entry.
+pub const CUTS: [&str; 4] = [
+    "crash_at",
+    "fail_at",
+    "lose_response_at",
+    "lose_unapplied_at",
+];
+
+#[derive(Debug, Default)]
+struct Cutting {
+    at: Cuts,
+    requests: u64,
+    down: bool,
+}
+
+/// What a cut does to one request.
+enum Fate {
+    /// Serve the request; answer it unless `lost`.
+    Serve { lost: bool },
+    /// No effect; answer this error.
+    Fail(fn(String) -> StorageError),
 }
 
 #[derive(Debug)]
@@ -431,13 +476,49 @@ impl MemoryObjects {
         }
         objects
     }
+    /// Objects that cut their client at the requests `at` names.
+    pub fn with_cuts(mut self, at: Cuts) -> Self {
+        self.cuts.get_mut().expect("cuts").at = at;
+        self
+    }
+    /// Start a new client after a crash: true when one had happened, and
+    /// requests are served again.
+    pub fn restart(&self) -> bool {
+        std::mem::take(&mut self.cuts.lock().expect("cuts").down)
+    }
+    /// Count a request and say what the cuts make of it.
+    fn fate(&self) -> Fate {
+        let mut c = self.cuts.lock().expect("cuts");
+        if c.down {
+            return Fate::Fail(StorageError::Unavailable);
+        }
+        c.requests += 1;
+        let (n, at) = (Some(c.requests), c.at);
+        c.down = at.crash_at == n;
+        if at.fail_at == n {
+            Fate::Fail(StorageError::Io)
+        } else if at.lose_unapplied_at == n {
+            Fate::Fail(StorageError::Unavailable)
+        } else {
+            Fate::Serve {
+                lost: at.lose_response_at == n,
+            }
+        }
+    }
     /// The next fault decision: None, or whether the faulted operation's
-    /// effect still happens.
-    fn fault(&self) -> Option<bool> {
+    /// effect still happens. A cut decides first.
+    fn fault(&self, operation: &str, key: &str) -> Result<Option<bool>, StorageError> {
+        match self.fate() {
+            Fate::Fail(error) => return Err(error(format!("cut at {operation} {key}"))),
+            Fate::Serve { lost: true } => return Ok(Some(true)),
+            Fate::Serve { lost: false } => {}
+        }
         let mut faults = self.faults.lock().expect("faults");
-        let faults = faults.as_mut()?;
+        let Some(faults) = faults.as_mut() else {
+            return Ok(None);
+        };
         let draw = faults.next();
-        (draw % faults.one_in == 0).then_some(draw & (1 << 63) != 0)
+        Ok((draw % faults.one_in == 0).then_some(draw & (1 << 63) != 0))
     }
     /// Replace an object's bytes, as a hostile or broken medium would.
     pub fn overwrite(&self, key: &str, bytes: Vec<u8>) {
@@ -459,7 +540,7 @@ fn unavailable(operation: &str, key: &str) -> StorageError {
 impl ObjectStorage for MemoryObjects {
     fn get_tagged(&self, key: &str) -> Result<Option<(Vec<u8>, Tag)>, StorageError> {
         check_key(key)?;
-        if self.fault().is_some() {
+        if self.fault("get", key)?.is_some() {
             return Err(unavailable("get", key));
         }
         Ok(self
@@ -476,7 +557,7 @@ impl ObjectStorage for MemoryObjects {
         condition: Condition,
     ) -> Result<Replaced, StorageError> {
         check_key(key)?;
-        let fault = self.fault();
+        let fault = self.fault("replace", key)?;
         if fault == Some(false) {
             return Err(unavailable("replace", key));
         }
@@ -498,7 +579,7 @@ impl ObjectStorage for MemoryObjects {
         }
     }
     fn list(&self, prefix: &str, after: &str) -> Result<Listing, StorageError> {
-        let fault = self.fault();
+        let fault = self.fault("list", prefix)?;
         if fault == Some(false) {
             return Err(unavailable("list", prefix));
         }
@@ -519,7 +600,7 @@ impl ObjectStorage for MemoryObjects {
     }
     fn delete(&self, key: &str) -> Result<(), StorageError> {
         check_key(key)?;
-        let fault = self.fault();
+        let fault = self.fault("delete", key)?;
         if fault == Some(false) {
             return Err(unavailable("delete", key));
         }
@@ -531,7 +612,7 @@ impl ObjectStorage for MemoryObjects {
     }
     fn put_new(&self, key: &str, bytes: &[u8]) -> Result<Put, StorageError> {
         check_key(key)?;
-        let fault = self.fault();
+        let fault = self.fault("put", key)?;
         if fault == Some(false) {
             return Err(unavailable("put", key));
         }
@@ -558,6 +639,23 @@ impl ObjectStorage for MemoryObjects {
 /// "request_timeout_ms": ..}` (`prefix`, `roots` and the timeouts optional; see
 /// [`S3Objects`]). Unknown members and providers are refused.
 pub fn open(entry: &serde_json::Value) -> Result<Arc<dyn ObjectStorage>, String> {
+    Ok(match provider(entry)? {
+        Provider::Dir(objects) => Arc::new(objects),
+        Provider::S3(objects) => Arc::new(objects),
+        Provider::Sim(objects) => Arc::new(objects),
+    })
+}
+
+/// The provider an object storage entry opens, by kind.
+pub enum Provider {
+    Dir(DirObjects),
+    S3(S3Objects),
+    /// Simulated objects, which a host may also cut and restart the client of.
+    Sim(MemoryObjects),
+}
+
+/// Open an object storage entry as [`open`] does, keeping the provider's kind.
+pub fn provider(entry: &serde_json::Value) -> Result<Provider, String> {
     let members = entry
         .as_object()
         .ok_or("an object storage entry is a JSON object")?;
@@ -567,12 +665,34 @@ pub fn open(entry: &serde_json::Value) -> Result<Arc<dyn ObjectStorage>, String>
         .ok_or("an object storage entry names its provider")?;
     let allowed: &[&str] = match provider {
         "objects.dir@1" => &["provider", "path"],
-        "objects.sim@1" => &["provider", "seed", "fail_one_in"],
         "objects.s3@1" => s3::MEMBERS,
+        "objects.sim@1" => &[
+            "provider",
+            "seed",
+            "fail_one_in",
+            "crash_at",
+            "fail_at",
+            "lose_response_at",
+            "lose_unapplied_at",
+        ],
         other => return Err(format!("unsupported object storage provider {other}")),
     };
     if let Some(unknown) = members.keys().find(|k| !allowed.contains(&k.as_str())) {
         return Err(format!("{provider} has no member {unknown:?}"));
+    }
+    if provider == "objects.dir@1" {
+        let path = members
+            .get("path")
+            .and_then(|p| p.as_str())
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .ok_or("objects.dir@1 path is an absolute directory")?;
+        return Ok(Provider::Dir(
+            DirObjects::open(path).map_err(|e| e.to_string())?,
+        ));
+    }
+    if provider == "objects.s3@1" {
+        return Ok(Provider::S3(S3Objects::open(members)?));
     }
     let uint = |name: &str| match members.get(name) {
         None => Ok(0),
@@ -580,22 +700,20 @@ pub fn open(entry: &serde_json::Value) -> Result<Arc<dyn ObjectStorage>, String>
             .as_u64()
             .ok_or_else(|| format!("{provider} {name} is an unsigned integer")),
     };
-    match provider {
-        "objects.dir@1" => {
-            let path = members
-                .get("path")
-                .and_then(|p| p.as_str())
-                .map(PathBuf::from)
-                .filter(|p| p.is_absolute())
-                .ok_or("objects.dir@1 path is an absolute directory")?;
-            Ok(Arc::new(DirObjects::open(path).map_err(|e| e.to_string())?))
-        }
-        "objects.s3@1" => Ok(Arc::new(S3Objects::open(members)?)),
-        _ => Ok(Arc::new(MemoryObjects::with_faults(
-            uint("seed")?,
-            uint("fail_one_in")?,
-        ))),
-    }
+    let request = |name: &str| match uint(name)? {
+        0 if members.contains_key(name) => Err(format!("{provider} {name} counts requests from 1")),
+        0 => Ok(None),
+        n => Ok(Some(n)),
+    };
+    let cuts = Cuts {
+        fail_at: request("fail_at")?,
+        lose_unapplied_at: request("lose_unapplied_at")?,
+        lose_response_at: request("lose_response_at")?,
+        crash_at: request("crash_at")?,
+    };
+    Ok(Provider::Sim(
+        MemoryObjects::with_faults(uint("seed")?, uint("fail_one_in")?).with_cuts(cuts),
+    ))
 }
 
 #[cfg(test)]

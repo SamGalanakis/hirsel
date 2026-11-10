@@ -70,6 +70,16 @@ fn campaign_output(
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("main.hir");
         std::fs::write(&path, source).unwrap();
+        let compiler = hirsel_front_phases::COMPILER;
+        let mut requests =
+            hirsel_requests::CompilerRequests::for_host(compiler.clone(), compiler.configuration());
+        requests
+            .execute(
+                &path,
+                hirsel_requests::CompileOperation::Tir { definition: None },
+            )
+            .unwrap();
+        drop(requests);
         std::fs::write(
             root.join("faults.json"),
             serde_json::to_vec_pretty(&fixture.file_faults).unwrap(),

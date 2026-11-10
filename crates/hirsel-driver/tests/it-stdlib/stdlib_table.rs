@@ -1,6 +1,6 @@
 //! Typed-table end-to-end scenarios exceed the corpus's 1M-step bound with
 //! the real durable store/checksum implementation. Keep them bounded here.
-//! Each runs on the interpreter and on native.
+//! Each runs on the interpreter and on native, but for the generation wrap.
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
@@ -44,9 +44,15 @@ fn run(name: &str, path: &Path, native: bool, steps: u64) {
             "{name}: {:?}",
             run.outcome
         );
-        if !native {
-            return;
-        }
+    });
+    if native {
+        run_native(name, path);
+    }
+}
+
+// Runs the fixture natively only.
+fn run_native(name: &str, path: &Path) {
+    with_compiler_stack(|| {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let outcome = native::run_path_native_backend_with_validation(
@@ -119,4 +125,11 @@ fn a_crash_mid_migration_or_drop_leaves_a_whole_table() {
     // position reopening and checking the table: one run per position.
     let name = "STORE-9-migrate-crash-run";
     run(name, &fixture(name), true, 128_000_000);
+}
+#[test]
+fn a_generation_number_is_reused_only_once_its_rows_are_gone() {
+    // The wrap takes 256 migrations, each decoding the whole schema history:
+    // about 15 minutes on the interpreter, so it runs natively only.
+    let name = "STORE-9-generation-reuse-run";
+    run_native(name, &fixture(name));
 }

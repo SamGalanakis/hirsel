@@ -711,6 +711,20 @@ migration; after, it deletes the replaced generation. Key migrations are allowed
 since `f` maps the key too. Tooling may propose migrations for additive changes; the store
 applies none on its own.
 
+A generation number is reused: the generation after 255 is 0, a migration retried after a
+discard writes the generation the discard deleted, and a table created after a drop starts
+again at generation 0. A number is written again only once every row of its earlier life is
+deleted. The store guarantees this: a generation becomes garbage in the transaction that
+orphans it (a migration's next generation when the migration starts, until its install; the
+replaced one at the install; the current one at a drop); the operation deletes it before it
+returns; any failure of that deletion, a `Limit(..)` included, closes the store
+([STORE-13](#store-13-failures)); and opening a store finishes every deletion before its
+first transaction, or fails. So while a store is open no garbage remains but the next
+generation of the migration that holds it. It is also checked where the number is chosen:
+the transaction that starts a migration and `create` read the generation they are about to
+write, and if a garbage record or any row remains under it they refuse with
+`Storage(Corrupt(..))` and write nothing.
+
 A migration is the only mechanism that maps stored data from one schema to another. It
 maps every typed table alike, the tables that hold parked runs included
 ([STORE-18](#store-18-runs-at-a-place)). When a change of code needs several tables to

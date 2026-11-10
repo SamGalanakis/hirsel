@@ -101,8 +101,8 @@ fn table_rows(name: String) -> Bytes uses {} {
 // One generation of a table's rows: the table's name, then the generation as
 // one byte, then each row's encoded key. A migration writes the next
 // generation, (g + 1) mod 256, and installs it by naming it in the catalog;
-// the replaced or abandoned one is deleted before any other transaction runs,
-// or by the next open, so no table holds rows under more than two.
+// the replaced or abandoned one is deleted before the operation returns, or by
+// the next open, so no table holds rows under more than two.
 fn rows_of(name: String, generation: u8) -> Bytes uses {} {
   let mut out: List[u8] = []
   bytes.append(mut out, b"hirsel.rows/")
@@ -208,6 +208,29 @@ fn checked[K: key + serializable, V: serializable](tx: store.Tx, t: Table[K, V])
   Ok(take c)
 }
 
+// Checks that generation `g` of a table holds nothing before it is written: a
+// number is reused after a wrap, a discard or a drop, and only once its earlier
+// life is deleted (STORE-9). Garbage left of that life refuses as corruption,
+// so no write lands among stale rows.
+fn unused(tx: store.Tx, name: String, g: u8) -> Result[(), store.TxError] {
+  let rows = rows_of(name, g)
+  let pending = store.garbage(copy rows)
+  store.admit_read(tx, pending)?
+  if let Some(_) = store.table_read(tx, take pending) {
+    return Error(reused())
+  }
+  let left = store.table_range(tx, copy rows, keys.prefix_end(rows), 1, Ascending())?
+  if list.len(left) != 0 {
+    return Error(reused())
+  }
+  Ok(())
+}
+
+fn reused() -> store.TxError uses {} {
+  let error: store.StoreError = Corrupt("typed table generation still holds rows")
+  Storage(take error)
+}
+
 fn save(mut tx: store.Tx, name: String, c: Catalog) -> Result[(), store.TxError] {
   store.table_put(mut tx, metadata_key(name), codec.encode(c))
 }
@@ -225,6 +248,7 @@ pub fn create[K: key + serializable, V: serializable](mut tx: store.Tx, t: Table
   if let Some(_) = store.table_read(tx, take catalog) {
     return Error(TableExists())
   }
+  unused(tx, table_name(t), 0)?
   let k: Option[K] = None()
   let v: Option[V] = None()
   let c = Catalog(
@@ -600,7 +624,9 @@ fn start[
   }
   schemas(c, from) ? Table
   let catalog = metadata_key(name)
-  let next = rows_of(name, next_generation(c.generation))
+  let generation = next_generation(c.generation)
+  unused(tx, name, generation) ? Table
+  let next = rows_of(name, generation)
   store.table_put(mut tx, store.garbage(next), store.restoring(catalog, codec.encode(c))) ? Table
   let marked = Catalog(
     epochs: unique c.epochs,

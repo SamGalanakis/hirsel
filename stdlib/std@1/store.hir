@@ -503,8 +503,17 @@ fn restoring(key: Bytes, value: Bytes) -> Bytes uses {} {
 // Carries out every garbage entry in key order: deletes the keys under its
 // prefix in commits within the store's limits, then, in one more commit,
 // removes the entry and puts back the key it restores. A crash between these
-// commits leaves the rest to the next call.
+// commits leaves the rest to the next call. A failure closes the store, so no
+// transaction runs while garbage remains that its deleter left: a generation
+// number is reused only once its garbage is gone (STORE-9).
 fn collect[S](mut s: Store[S]) -> Result[(), StoreError] {
+  match collect_all(mut s) {
+    Ok(()) => Ok(()),
+    Error(e) => Error(stop(mut s, take e)),
+  }
+}
+
+fn collect_all[S](mut s: Store[S]) -> Result[(), StoreError] {
   let (low, high) = prefix_bounds(b"hirsel.garbage/")
   while true {
     let mut t = serial(mut s)

@@ -464,3 +464,131 @@ fn constant_product(
     let value = products.lower.settled_constant(path, &[])?;
     Ok((products.front, products.lower, value))
 }
+
+#[test]
+fn unexecuted_lower_completion_requires_the_entire_private_universe() {
+    with_compiler_stack(|| {
+        use crate::staged_product_fixture::StagedProducts;
+        let source = "pub opaque type Hidden:plain uses {}{field:u32}\npub opaque type Unobserved:plain uses {}{other:u8}\nfn value[n:size]()->u64{comptime (n*n)}\n";
+        let path = definition("value");
+        for adapters_enabled in [false, true] {
+            for change in ["copied", "hidden", "unobserved"] {
+                let store = Arc::new(store::MemStore::default());
+                let mut writer = signature_session(store.clone(), source, true);
+                let mut products = StagedProducts::capture(&mut writer, 1).unwrap();
+                let request = products
+                    .runtime
+                    .request(&[products.lower.query(&path).unwrap()]);
+                products.runtime.wait(request).unwrap();
+                products.runtime.shutdown();
+                drop(products);
+                drop(writer);
+                let provider: Arc<dyn store::ResultStore> = if change == "copied" {
+                    let copied = Arc::new(store::MemStore::default());
+                    for (key, bytes) in store.take() {
+                        store::ResultStore::put(&*copied, &key, &bytes);
+                        store::ResultStore::put(&*store, &key, &bytes);
+                    }
+                    copied
+                } else {
+                    store
+                };
+                let text = match change {
+                    "hidden" => source.replace("field:u32", "field:u64"),
+                    "unobserved" => source.replace("other:u8", "other:u16"),
+                    _ => source.to_owned(),
+                };
+                let mut reader = signature_session(provider, &text, true);
+                if !adapters_enabled {
+                    reader.adapters.modes = None;
+                    reader.adapters.lowering = None;
+                }
+                let mut products = StagedProducts::capture(&mut reader, 1).unwrap();
+                let request = products
+                    .runtime
+                    .request(&[products.lower.query(&path).unwrap()]);
+                let restored = products.runtime.wait(request);
+                if adapters_enabled {
+                    restored.unwrap();
+                    assert!(
+                        products.lower.work(&path).lowerings > 0,
+                        "{change} must miss the old completion and lower afresh"
+                    );
+                } else {
+                    assert!(
+                        restored.is_err(),
+                        "{change} cannot restore completion authority"
+                    );
+                }
+                products.runtime.shutdown();
+            }
+        }
+    });
+}
+
+#[test]
+fn unexecuted_and_executed_lower_completion_subjects_do_not_alias() {
+    with_compiler_stack(|| {
+        use crate::staged_product_fixture::StagedProducts;
+        use hirsel_query_products::reads::ReadKey;
+        use hirsel_syntax::ContentHash;
+        let source = "fn value[n:size]()->u64{comptime (n*n)}\n";
+        let path = definition("value");
+        let store = Arc::new(store::MemStore::default());
+        let mut writer = signature_session(store.clone(), source, true);
+        let mut products = StagedProducts::capture(&mut writer, 1).unwrap();
+        let request = products
+            .runtime
+            .request(&[products.lower.query(&path).unwrap()]);
+        products.runtime.wait(request).unwrap();
+        products.runtime.shutdown();
+        drop(products);
+        drop(writer);
+        let mut reader = signature_session(store.clone(), source, true);
+        reader.adapters.modes = None;
+        reader.adapters.lowering = None;
+        let mut products = StagedProducts::capture(&mut reader, 1).unwrap();
+        let request = products
+            .runtime
+            .request(&[products.lower.query(&path).unwrap()]);
+        let reopened = products.runtime.wait(request).unwrap();
+        let output = products.lower.outcome(reopened[0].clone()).unwrap();
+        assert!(!output.executed);
+        assert!(
+            output.execution.is_none(),
+            "exact completion must not become execution evidence"
+        );
+        let contexts = output
+            .reads
+            .iter()
+            .filter_map(|(read, digest)| match read {
+                ReadKey::ValidationUniverse(package) => Some((package.id(), *digest)),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let current = |package: &hirsel_syntax::PackageId| contexts.get(package).copied();
+        let unexecuted = |subject: ContentHash| {
+            ContentHash::of_parts(
+                "hirsel.front.lower.unexecuted-completion.v1",
+                [subject.0.as_slice()],
+            )
+        };
+        let cache = store::ResultStore::verifier(&*store).unwrap();
+        let subject = output.execution_subject;
+        let exact = cache.execution(unexecuted(subject), current).unwrap();
+        assert!(
+            cache.execution(subject, current).is_none(),
+            "unexecuted completion cannot satisfy executed lookup"
+        );
+        let executed_subject = ContentHash::of_bytes(b"independent executed completion subject");
+        cache.publish_execution(executed_subject, &exact);
+        assert!(cache.execution(executed_subject, current).is_some());
+        assert!(
+            cache
+                .execution(unexecuted(executed_subject), current)
+                .is_none(),
+            "executed completion cannot satisfy unexecuted lookup"
+        );
+        products.runtime.shutdown();
+    });
+}

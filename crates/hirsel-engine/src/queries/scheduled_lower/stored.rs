@@ -1,6 +1,12 @@
 //! Ordinary durable variants for admitted Lower and constant producers.
 //! The variant index follows the front producer's exact-read lookup. V still
 //! validates every restored body and owns execution-reuse authority.
+//!
+//! An unexecuted declaration's V completion has a separate subject and binds
+//! the full original base universes. It reopens only at identical base digests,
+//! never through changed-context execution replay. It is only a restore gate;
+//! it does not become an Outcome execution receipt. Executed declarations keep
+//! their independent execution-receipt requirement and replay path.
 use super::*;
 use hirsel_engine_store::Entry;
 
@@ -15,6 +21,13 @@ fn stored_key(key: &EntryKey) -> EntryKey {
         ContentHash::of_parts("hirsel.front.lower-variants.v4", [key.0.0.as_slice()]),
         key.1,
         key.2,
+    )
+}
+
+fn unexecuted_subject(subject: ContentHash) -> ContentHash {
+    ContentHash::of_parts(
+        "hirsel.front.lower.unexecuted-completion.v1",
+        [subject.0.as_slice()],
     )
 }
 
@@ -150,6 +163,30 @@ impl FrontLowerQueries {
             && let Some(cache) = self.store.verifier()
         {
             cache.publish_execution(persistent::evaluation_subject(key, &reads, &bytes), receipt);
+        }
+        if !outcome.executed
+            && let Ok(Value::Lower(lower)) = &outcome.result
+            && let Some(accepted) = &lower.acceptance
+            && let Some(cache) = self.store.verifier()
+        {
+            let mut contexts = outcome
+                .reads
+                .iter()
+                .filter_map(|(read, digest)| match read {
+                    ReadKey::ValidationUniverse(package) => Some((package.id(), *digest)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            contexts.sort_unstable();
+            if let Some(completion) = hirsel_validate::ExecutionReceipt::compose(
+                &contexts,
+                std::slice::from_ref(accepted),
+            ) {
+                cache.publish_execution(
+                    unexecuted_subject(persistent::evaluation_subject(key, &reads, &bytes)),
+                    &completion,
+                );
+            }
         }
         self.remember_stored(id, key, descriptor, outcome);
         Some(())
@@ -522,7 +559,17 @@ impl FrontLowerQueries {
                     .as_ref(),
                 &reads,
             );
-        let execution = if self.verify == Verify::On && required {
+        let execution = if self.verify == Verify::On && required && !executed {
+            self.store
+                .verifier()?
+                .execution(unexecuted_subject(execution_subject), |package| {
+                    self.namespace
+                        .snapshot
+                        .validation_input_digest(package)
+                        .ok()
+                })?;
+            None
+        } else if self.verify == Verify::On && required {
             match self.store.verifier()?.execution_revalidated(
                 execution_subject,
                 self.namespace.snapshot.types().clone(),

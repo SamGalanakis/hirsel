@@ -7,7 +7,7 @@ const TWO_OPS: &str = r#"fn visible_scalar(m: Map[u64,List[u64]], take expected:
   if map.len(m) != list.len(expected) { return false }
   let mut i: u64 = 0
   for (k,v) in m {
-    if (k,v) != expected[i] { return false }
+    if (k,copy v) != expected[i] { return false }
     i += 1
   }
   let mut forward: Map[u64,List[u64]] = map.empty()

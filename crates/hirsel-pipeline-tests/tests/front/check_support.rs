@@ -18,6 +18,16 @@ pub fn path(name: &str) -> DefPath {
     })
 }
 
+pub fn signatures(types: Arc<hirsel_types::TypeInterner>) -> hirsel_validate::SignatureMap {
+    let mut signatures = hirsel_validate::SignatureMap::new(types);
+    signatures.extend_signatures(
+        hirsel_registry::BuiltinRegistry::shared()
+            .signatures()
+            .map(|signature| (**signature).clone()),
+    );
+    signatures
+}
+
 pub struct Provider(pub Vec<Definition>);
 impl TirProvider for Provider {
     fn constant(&mut self, _path: &DefPath) -> Result<hirsel_tir::MaterializedRef, QueryError> {

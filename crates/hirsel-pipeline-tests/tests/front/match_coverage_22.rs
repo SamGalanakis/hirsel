@@ -83,7 +83,7 @@ fn match_coverage_22_finite_source_truth_tables() {
         if ds.is_empty() {
             let lowered = engine.lower_to_tir(&path("main")).unwrap().value;
             let signature = engine.item_signature(&path("main")).unwrap().value;
-            let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
+            let mut signatures = crate::check_support::signatures(engine.types().clone());
             signatures.insert(signature.definition, (*signature).clone());
             if !case.domain.declaration().is_empty() {
                 let signature = engine.item_signature(&path("Choice")).unwrap().value;

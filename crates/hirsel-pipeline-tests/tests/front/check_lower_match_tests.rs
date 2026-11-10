@@ -20,15 +20,6 @@ fn engine(source: String) -> QueryEngine {
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     engine
 }
-fn signatures(engine: &QueryEngine) -> hirsel_validate::SignatureMap {
-    let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
-    signatures.extend_signatures(
-        hirsel_registry::BuiltinRegistry::shared()
-            .signatures()
-            .map(|signature| (**signature).clone()),
-    );
-    signatures
-}
 fn matrix_source(width: usize, rows: &[Vec<u8>]) -> String {
     let arms = rows
         .iter()
@@ -107,7 +98,7 @@ fn matrix_ir(width: usize, rows: &[Vec<u8>]) -> (Definition, hirsel_validate::Si
             target,
         });
     }
-    let mut signatures = signatures(&engine);
+    let mut signatures = crate::check_support::signatures(engine.types().clone());
     signatures.insert(signature.definition, (*signature).clone());
     (definition, signatures)
 }
@@ -286,7 +277,7 @@ fn guard_restarts_require_their_own_false_edge_and_preserve_earlier_coverage() {
     );
     let mut definition = (*source.lower_to_tir(&path("main")).unwrap().value).clone();
     let sig = source.item_signature(&path("main")).unwrap().value;
-    let mut signatures = signatures(&source);
+    let mut signatures = crate::check_support::signatures(source.types().clone());
     signatures.insert(sig.definition, (*sig).clone());
     hirsel_validate::assert_valid(&definition, signatures.types(), &signatures);
     let body = &definition.bodies[0];
@@ -344,7 +335,7 @@ fn binding_metadata_cannot_disguise_guard_takes_or_commit_borrows() {
         engine("fn main(take s:String)->u8 {match take s {x if x==\"yes\"=>1,_=>2}}".into());
     let definition = source.lower_to_tir(&path("main")).unwrap().value;
     let sig = source.item_signature(&path("main")).unwrap().value;
-    let mut signatures = signatures(&source);
+    let mut signatures = crate::check_support::signatures(source.types().clone());
     signatures.insert(sig.definition, (*sig).clone());
     hirsel_validate::assert_valid(&definition, signatures.types(), &signatures);
     let mut forged = (*definition).clone();
@@ -387,7 +378,7 @@ fn a_failed_guard_cannot_replace_the_value_covered_by_earlier_arms() {
         engine("fn main(b:bool)->u8 {match b {true=>1,false if false=>2,false=>3}}".into());
     let definition = source.lower_to_tir(&path("main")).unwrap().value;
     let sig = source.item_signature(&path("main")).unwrap().value;
-    let mut signatures = signatures(&source);
+    let mut signatures = crate::check_support::signatures(source.types().clone());
     signatures.insert(sig.definition, (*sig).clone());
     hirsel_validate::assert_valid(&definition, signatures.types(), &signatures);
     let mut forged = (*definition).clone();

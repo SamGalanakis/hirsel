@@ -22,3 +22,18 @@ error[MODE-1]: a local value cannot be stored into global storage: `src` is loca
   = help: 2. `unique src` (deep copy: allocates, costs O(size), and is not allowed under `@noalloc`)
   = note: `copy src` does not help: a copy shares the blocks of `src`, which stay local
   = note: this also fails: MODE-1: this operation requires a global value: `src` is local to the caller, but the result must be global
+error[MODE-7]: this use needs an owned value; write `copy` to share it: the value is local, but this needs an owned value
+ --> ../../conformance/MODE/MODE-1-global-store-bad.hir:11:17
+  11 |   owned.items = src
+     |                 ^^^ 
+ --> ../../conformance/MODE/MODE-1-global-store-bad.hir:11:17
+  11 |   owned.items = src
+     |                 ^^^ provided: this value is local here
+ --> ../../conformance/MODE/MODE-1-global-store-bad.hir:11:17
+  11 |   owned.items = src
+     |                 ^^^ required: taking moves the value out of its owner
+  = help: 1. write `copy src` here (no deep copy: it shares `src` by a count; needed because `src` is borrowed at this use: it is a part, an element, borrowed storage, or used again later)
+  = help: share the value by a count (replace with "copy ")
+ --> ../../conformance/MODE/MODE-1-global-store-bad.hir:11:17
+  11 |   owned.items = src
+     |                 ^ suggested replacement

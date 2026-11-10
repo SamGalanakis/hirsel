@@ -72,7 +72,7 @@ fn cleanup_obligation(taken: bool, reverse: bool, exit: Exit) -> bool {
 }
 
 fn validate_accepted(engine: &mut QueryEngine, nominal: bool) {
-    let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
+    let mut signatures = crate::check_support::signatures(engine.types().clone());
     for name in ["caller", "relay", "R"]
         .into_iter()
         .take(if nominal { 3 } else { 2 })

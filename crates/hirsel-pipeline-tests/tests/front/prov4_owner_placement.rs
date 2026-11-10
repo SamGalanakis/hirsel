@@ -35,7 +35,7 @@ fn lowered(
     // forged twins, independently of the producer's acceptance decision.
     engine.verify = Verify::Off;
     let definition = (*engine.lower_to_tir(&path).unwrap().value).clone();
-    let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
+    let mut signatures = crate::check_support::signatures(engine.types().clone());
     for name in names {
         let mut path = entry_path(&default_context());
         path.0.name = (*name).into();

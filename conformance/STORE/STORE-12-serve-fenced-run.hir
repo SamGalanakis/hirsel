@@ -1,6 +1,7 @@
 // rule: STORE-12
 // expect: run
 // runners: [{"name":"ledger","provider":"sim@1","node":"bank","models":"db@1","head":"application@1/head","grants":{"dirs":[],"authorities":{"place":{"provider":"authority.memory@1","floor":"memory"}}},"definitions":null}]
+// tasks: free
 // stdout: InDoubt(Abandoned) NotRun(Unreachable)
 // A head serves a store that a later claim of the same authority has fenced
 // (STORE-11). The first call the head takes cannot commit: its end is

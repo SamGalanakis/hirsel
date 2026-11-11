@@ -106,6 +106,9 @@ impl ResultStore for NativeStore {
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
         self.cache.put_content(domain, bytes)
     }
+    fn put_identified_content(&self, content: IdentifiedContent<'_>) -> Option<Reference> {
+        self.cache.put_identified_content(content)
+    }
     fn name(&self) -> &'static str {
         self.cache.name()
     }

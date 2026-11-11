@@ -1180,11 +1180,22 @@ impl Store {
     pub fn get(&self, reference: Reference) -> Option<Bytes> {
         Contents::get_content(self, reference).ok()
     }
+    /// The stored copy of already identified bytes, checked by comparing it
+    /// with them: equal bytes have their identity, so it is not hashed again.
+    pub fn get_identified(&self, content: IdentifiedContent<'_>) -> Option<Bytes> {
+        identified_container(self.raw_container(content.reference()).ok()?, content)
+    }
     /// Lease a standalone provider inode under a caller-owned private path.
     /// Small packed records and cross-filesystem links use the caller's spool.
     /// Rust 1.97.1 std fs.rs:2837-2880 hard_link retains the inode without copying it;
-    /// opening the link before checking binds validation to the retained inode.
-    pub fn hold_content(&self, reference: Reference, path: PathBuf) -> Option<HeldContent> {
+    /// opening the link before checking binds validation to the retained inode,
+    /// which is compared with the producer's identified bytes.
+    pub fn hold_content(
+        &self,
+        content: IdentifiedContent<'_>,
+        path: PathBuf,
+    ) -> Option<HeldContent> {
+        let reference = content.reference();
         if self.packs(reference.len) || reference.len > MAX_RECORD as u64 {
             return None;
         }
@@ -1200,9 +1211,13 @@ impl Store {
             if file.metadata().ok()?.len() != len as u64 {
                 return None;
             }
-            checked_content(
-                Arc::new(Region::map_file(Arc::new(file), len).ok()?),
-                reference,
+            let region = Arc::new(Region::map_file(Arc::new(file), len).ok()?);
+            identified_container(
+                Bytes {
+                    region,
+                    range: 0..len,
+                },
+                content,
             )?;
             Some(held)
         }
@@ -1630,6 +1645,21 @@ fn checked_association(bytes: &[u8], address: Address) -> Option<Association> {
     })
 }
 fn checked_container(bytes: Bytes, reference: Reference) -> Option<Bytes> {
+    verified_container(bytes, reference, |payload| {
+        reference.domain.output(payload) == reference.output
+    })
+}
+/// A container whose payload equals bytes already identified as `content`.
+fn identified_container(bytes: Bytes, content: IdentifiedContent<'_>) -> Option<Bytes> {
+    verified_container(bytes, content.reference(), |payload| {
+        payload == content.bytes()
+    })
+}
+fn verified_container(
+    bytes: Bytes,
+    reference: Reference,
+    payload_matches: impl FnOnce(&[u8]) -> bool,
+) -> Option<Bytes> {
     let checks = bytes.region.checks();
     let slot = checks
         .map(|checks| &checks.records[reference.output.0.0[0] as usize % checks.records.len()]);
@@ -1653,7 +1683,7 @@ fn checked_container(bytes: Bytes, reference: Reference) -> Option<Bytes> {
         || bytes.get(24..56)? != reference.output.0.0
         || bytes.get(56..64)? != [0; 8]
         || usize::try_from(reference.len).ok()?.checked_add(HEADER)? != bytes.len()
-        || reference.domain.output(&bytes[HEADER..]) != reference.output
+        || !payload_matches(&bytes[HEADER..])
     {
         return None;
     }

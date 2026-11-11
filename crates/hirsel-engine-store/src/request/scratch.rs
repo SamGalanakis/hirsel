@@ -324,7 +324,7 @@ impl ResultStore for ScratchStore {
                 .local_product_store()
                 .and_then(|store| {
                     store.hold_content(
-                        expected,
+                        content,
                         self.root
                             .path
                             .join(format!("provider-{}", files.entries.len())),

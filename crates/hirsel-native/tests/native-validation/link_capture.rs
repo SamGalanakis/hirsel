@@ -154,8 +154,65 @@ fn capture_descriptors_bind_invocation_and_require_the_entire_content_closure() 
     assert!(check_arguments(&["--oformat=elf64-x86-64".into(), "-nostdlib".into()]).is_ok());
 }
 
+/// Counts content reads, each of which hashes the bytes it returns.
+struct ReadCounting<'a> {
+    inner: DirStore,
+    reads: &'a std::sync::Mutex<BTreeMap<Reference, usize>>,
+}
+impl ReadCounting<'_> {
+    fn count(&self, reference: Reference) {
+        *self.reads.lock().unwrap().entry(reference).or_default() += 1;
+    }
+}
+impl ResultStore for ReadCounting<'_> {
+    fn admit_product_memory(&self, bytes: u64) -> Option<Arc<dyn Send + Sync>> {
+        self.inner.admit_product_memory(bytes)
+    }
+    fn retention_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        self.inner.retention_scope()
+    }
+    fn capability(&self) -> hirsel_engine_store::ProviderCapability {
+        self.inner.capability()
+    }
+    fn name(&self) -> &'static str {
+        "read-counting-test"
+    }
+    fn get(&self, key: &hirsel_engine_store::EntryKey) -> Option<hirsel_engine_store::Bytes> {
+        self.inner.get(key)
+    }
+    fn put(
+        &self,
+        key: &hirsel_engine_store::EntryKey,
+        value: &[u8],
+    ) -> hirsel_engine_store::WriteOutcome {
+        self.inner.put(key, value)
+    }
+    fn get_content(&self, reference: Reference) -> Option<hirsel_engine_store::Bytes> {
+        self.count(reference);
+        self.inner.get_content(reference)
+    }
+    fn read_product_content(
+        &self,
+        reference: Reference,
+    ) -> Result<hirsel_engine_store::Bytes, hirsel_engine_store::ProductArchiveError> {
+        self.count(reference);
+        self.inner.read_product_content(reference)
+    }
+    fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
+        self.inner.put_content(domain, bytes)
+    }
+    fn put_identified_content(
+        &self,
+        content: hirsel_engine_store::IdentifiedContent<'_>,
+    ) -> Option<Reference> {
+        self.inner.put_identified_content(content)
+    }
+}
+
 /// The dedicated linker-store-proof target supplies the packaged tool. This
 /// test is not selected by ordinary compiler tests, which need no capture tool.
+/// It also catches a process that re-reads (and so re-hashes) the frozen
+/// linker's bytes from the store for each capture, validation and link.
 #[test]
 #[ignore = "run through //tools/buck2/native-toolchain:linker-store-proof"]
 fn packaged_capture_replays_changed_inputs_without_originals() {
@@ -166,7 +223,11 @@ fn packaged_capture_replays_changed_inputs_without_originals() {
     let source = scratch.path().join("source with spaces");
     std::fs::create_dir(&source).unwrap();
     let store_root = scratch.path().join("products");
-    let store = DirStore::new(store_root.clone());
+    let reads = std::sync::Mutex::default();
+    let store = ReadCounting {
+        inner: DirStore::new(store_root.clone()),
+        reads: &reads,
+    };
     let run = |command: &mut Command| {
         let result = command
             .env_clear()
@@ -243,7 +304,10 @@ fn packaged_capture_replays_changed_inputs_without_originals() {
     let second = tool.capture(&store, &source, &args, LIMITS).unwrap();
     assert_ne!(first.reference(), second.reference());
     std::fs::remove_dir_all(&source).unwrap();
-    let reopened = DirStore::new(store_root);
+    let reopened = ReadCounting {
+        inner: DirStore::new(store_root),
+        reads: &reads,
+    };
     for (capture, exit) in [(first, 42), (second, 43)] {
         let capture = CapturedLink::from_reference(&reopened, capture.reference()).unwrap();
         let output = scratch.path().join(format!("program-{exit}"));
@@ -257,6 +321,17 @@ fn packaged_capture_replays_changed_inputs_without_originals() {
                 .unwrap()
                 .contains(".probe")
         );
+    }
+    // Two captures, two validations and two links: each tool chunk is read
+    // from the store at most once in this process.
+    let tool: ToolRecord = get_record(&reopened.inner, TOOL, tool.reference()).unwrap();
+    let reads = reads.lock().unwrap();
+    for file in tool.files {
+        let blob: BlobRecord = get_record(&reopened.inner, BLOB, file.bytes.into()).unwrap();
+        for chunk in blob.chunks {
+            let count = reads.get(&chunk.into()).copied().unwrap_or(0);
+            assert!(count <= 1, "{} chunk read {count} times", file.name);
+        }
     }
 }
 

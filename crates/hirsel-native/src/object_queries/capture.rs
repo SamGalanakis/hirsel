@@ -128,9 +128,9 @@ impl FrozenLinker {
             .ok_or("non-UTF8 linker working directory")?
             .to_string();
         let scratch = tempfile::tempdir().map_err(error)?;
-        let tool = self.materialize(store)?;
+        let tool = self.retain(store)?;
         let archive = scratch.path().join("inputs.tar");
-        let mut command = tool.command();
+        let mut command = tool.command(scratch.path())?;
         command
             .current_dir(&directory)
             .args(["--whole-archive", "--allow-multiple-definition"])
@@ -142,11 +142,12 @@ impl FrozenLinker {
             .arg("-o")
             .arg(scratch.path().join("unused-output"));
         if !fixed.is_empty() {
+            // Fixed files are platform content: the kit closure and selected
+            // platform inputs, read through their checked descriptors.
             let mut roots = Vec::new();
-            for (index, file) in fixed.iter().enumerate() {
-                let local = scratch.path().join("fixed").join(index.to_string());
-                materialize_link_input(store, file.bytes.clone().into(), &local, false)?;
-                roots.push(serde_json::json!({"type": "file", "name": file.name, "external-contents": local}));
+            for file in fixed {
+                let input = retain_link_input(store, file.bytes.clone().into(), false)?;
+                roots.push(serde_json::json!({"type": "file", "name": file.name, "external-contents": input.path()}));
             }
             let overlay = scratch.path().join("fixed.json");
             std::fs::write(
@@ -177,41 +178,22 @@ impl FrozenLinker {
         )?))
     }
 
-    fn materialize(self, store: &dyn ResultStore) -> Result<LocalTool, String> {
-        use std::os::fd::AsRawFd;
+    /// Every tool file is checked once per process and then executed through
+    /// its retained descriptor.
+    fn retain(self, store: &dyn ResultStore) -> Result<LocalTool, String> {
         let record: ToolRecord = get_record(store, TOOL, self.0)?;
         check_tool(&record.files)?;
-        let identity = self
-            .0
-            .output
-            .0
-            .0
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        let cache = std::env::var_os("HIRSEL_NATIVE_CACHE")
-            .map(PathBuf::from)
-            .unwrap_or_else(super::super::runtime_cache::default_directory)
-            .join("linker-v1")
-            .join(identity);
-        let directory = super::super::runtime_cache::private_directory(&cache).map_err(error)?;
-        // Pin this acquisition to its checked private directory. The child
-        // resolves the parent's descriptor while LocalTool holds it alive.
-        let root = PathBuf::from(format!(
-            "/proc/{}/fd/{}",
-            std::process::id(),
-            directory.as_raw_fd()
-        ));
-        for file in record.files {
-            // Identity selects the destination, never its integrity. Every
-            // acquisition checks all bytes against the selected product store;
-            // corrupt/missing materializations are atomically restored.
-            materialize_link_input(store, file.bytes.into(), &root.join(file.name), true)?;
-        }
-        Ok(LocalTool {
-            root,
-            _directory: directory,
-        })
+        let files = record
+            .files
+            .into_iter()
+            .map(|file| {
+                Ok((
+                    file.name,
+                    retain_link_input(store, file.bytes.into(), true)?,
+                ))
+            })
+            .collect::<Result<_, String>>()?;
+        Ok(LocalTool { files })
     }
 }
 
@@ -262,10 +244,12 @@ impl CapturedLink {
     /// not hide missing tool, archive or script content behind a cached image.
     pub fn validate(self, store: &dyn ResultStore) -> Result<(), String> {
         let record = self.record(store)?;
-        let tool: ToolRecord = get_record(store, TOOL, record.tool.into())?;
-        check_tool(&tool.files)?;
-        for file in tool.files.iter().chain(&record.files) {
-            validate_link_input(store, file.bytes.clone().into())?;
+        FrozenLinker(record.tool.into()).retain(store)?;
+        for file in &record.files {
+            let reference = file.bytes.clone().into();
+            if retained_link_input(reference).is_none() {
+                validate_link_input(store, reference)?;
+            }
         }
         Ok(())
     }
@@ -275,13 +259,21 @@ impl CapturedLink {
     pub fn link(self, store: &dyn ResultStore, output: &Path) -> Result<(), String> {
         let record = self.record(store)?;
         let scratch = tempfile::tempdir().map_err(error)?;
-        let tool = FrozenLinker(record.tool.into()).materialize(store)?;
+        let tool = FrozenLinker(record.tool.into()).retain(store)?;
         let mut roots = vec![serde_json::json!({
             "type": "directory", "name": record.directory, "contents": []
         })];
+        // Platform files this process already checked are read through their
+        // retained descriptors; program inputs get a private per-link copy.
         for (index, file) in record.files.into_iter().enumerate() {
-            let local = scratch.path().join("files").join(index.to_string());
-            materialize_link_input(store, file.bytes.into(), &local, false)?;
+            let reference = file.bytes.into();
+            let local = if let Some(input) = retained_link_input(reference) {
+                input.path()
+            } else {
+                let local = scratch.path().join("files").join(index.to_string());
+                materialize_link_input(store, reference, &local, false)?;
+                local
+            };
             roots.push(
                 serde_json::json!({"type": "file", "name": file.name, "external-contents": local}),
             );
@@ -300,7 +292,7 @@ impl CapturedLink {
         } else {
             std::env::current_dir().map_err(error)?.join(output)
         };
-        let mut command = tool.command();
+        let mut command = tool.command(scratch.path())?;
         command
             .current_dir(scratch.path())
             .args(record.arguments)
@@ -313,6 +305,17 @@ impl CapturedLink {
             return Err("linker produced no regular output".into());
         }
         Ok(())
+    }
+
+    /// Validate platform content (a kit closure) by retaining every file,
+    /// which each later capture and link of this process then reads.
+    fn retain_inputs(self, store: &dyn ResultStore) -> Result<CaptureRecord, String> {
+        let record = self.record(store)?;
+        FrozenLinker(record.tool.clone().into()).retain(store)?;
+        for file in &record.files {
+            retain_link_input(store, file.bytes.clone().into(), false)?;
+        }
+        Ok(record)
     }
 
     fn record(self, store: &dyn ResultStore) -> Result<CaptureRecord, String> {
@@ -501,8 +504,7 @@ impl FrozenLinkKit {
             record.digest.clone(),
         )
         .map_err(|e| e.to_string())?;
-        let captured = CapturedLink::from_reference(store, record.capture.into())?;
-        let captured = captured.record(store)?;
+        let captured = CapturedLink(record.capture.into()).retain_inputs(store)?;
         let files = captured.files;
         let relative = files
             .iter()
@@ -631,20 +633,28 @@ impl FrozenLinkKit {
 }
 
 struct LocalTool {
-    root: PathBuf,
-    _directory: std::fs::File,
+    files: Vec<(String, Arc<RetainedInput>)>,
 }
 impl LocalTool {
-    fn command(&self) -> Command {
+    /// The package layout as links in `scratch` to the checked descriptors,
+    /// which stay open while this tool is held.
+    fn command(&self, scratch: &Path) -> Result<Command, String> {
+        let root = scratch.join("tool");
+        for directory in ["bin", "lib"] {
+            std::fs::create_dir_all(root.join(directory)).map_err(error)?;
+        }
+        for (name, input) in &self.files {
+            std::os::unix::fs::symlink(input.path(), root.join(name)).map_err(error)?;
+        }
         // The package contains this exact loader and its resolved tool DSO
         // closure. Target-library loading is a separate host responsibility.
-        let mut command = Command::new(self.root.join("lib/ld-linux-x86-64.so.2"));
+        let mut command = Command::new(root.join("lib/ld-linux-x86-64.so.2"));
         command
             .env_clear()
             .arg("--library-path")
-            .arg(self.root.join("lib"))
-            .arg(self.root.join("bin/ld.lld"));
-        command
+            .arg(root.join("lib"))
+            .arg(root.join("bin/ld.lld"));
+        Ok(command)
     }
 }
 

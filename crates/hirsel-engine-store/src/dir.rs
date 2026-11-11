@@ -655,11 +655,8 @@ impl ResultStore for DirStore {
         content: super::IdentifiedContent<'_>,
     ) -> Option<super::Reference> {
         let store = self.publication_store()?;
-        let bytes = content.bytes();
         let reference = store.put_identified(content).ok()?;
-        if !store.get(reference).is_some_and(|stored| &*stored == bytes) {
-            return None;
-        }
+        store.get_identified(content)?;
         self.record_content(reference);
         Some(reference)
     }

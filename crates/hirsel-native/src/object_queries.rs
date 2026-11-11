@@ -14,8 +14,9 @@ use hirsel_engine_store::{Action, Address, Domain, Output, Reference};
 use hirsel_engine_store::{ResultStore, VerifyStore};
 use hirsel_lir::stage::ObjectArtifact;
 use hirsel_syntax::ContentHash;
+use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug)]
 pub struct CodegenKey {
@@ -791,13 +792,14 @@ pub fn store_link_input_reader(
         len = len
             .checked_add(buffer.len() as u64)
             .ok_or("native blob length overflow")?;
-        let reference = store
-            .put_content(CHUNK, &buffer)
-            .ok_or("native chunk publication failed")?;
-        if CHUNK.reference(&buffer) != Some(reference) {
-            return Err("native chunk content identity differs".into());
+        // Hash once; layered providers carry this identity without rehashing.
+        let content = CHUNK
+            .identify(&buffer)
+            .ok_or("native chunk exceeds the record bound")?;
+        if store.put_identified_content(content) != Some(content.reference()) {
+            return Err("native chunk publication failed".into());
         }
-        chunks.push(WireRef::from(reference));
+        chunks.push(WireRef::from(content.reference()));
     }
     put_record(store, BLOB, &BlobRecord { len, chunks })
 }
@@ -810,7 +812,93 @@ pub fn materialize_link_input(
     destination: &Path,
     executable: bool,
 ) -> Result<(), String> {
-    materialize_blob(store, reference, destination, executable)
+    materialize_blob(store, reference, destination, executable).map(drop)
+}
+
+/// A platform input's private copy, checked against the store once in this
+/// process and held open. Consumers execute or read exactly the checked inode
+/// through `path`; a rename of the materialized name cannot substitute
+/// another file. A same-user in-place write after the check stays possible,
+/// as for any private copy.
+pub(crate) struct RetainedInput(std::fs::File);
+impl RetainedInput {
+    /// The parent's descriptor, resolved by children while it holds it open.
+    pub(crate) fn path(&self) -> std::path::PathBuf {
+        use std::os::fd::AsRawFd;
+        format!("/proc/{}/fd/{}", std::process::id(), self.0.as_raw_fd()).into()
+    }
+}
+
+type Retained = BTreeMap<(Reference, bool), Arc<RetainedInput>>;
+static RETAINED: Mutex<Retained> = Mutex::new(BTreeMap::new());
+
+/// Materialize and check a platform input once per process. Later
+/// acquisitions of the same content share the checked descriptor, so its
+/// bytes are neither read from the store nor compared again. Only bounded
+/// platform content (tool, kit, selected platform files) is retained;
+/// per-program link inputs are copied per link.
+pub(crate) fn retain_link_input(
+    store: &dyn ResultStore,
+    reference: Reference,
+    executable: bool,
+) -> Result<Arc<RetainedInput>, String> {
+    let cache = std::env::var_os("HIRSEL_NATIVE_CACHE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(super::runtime_cache::default_directory)
+        .join("inputs-v1");
+    retain_link_input_in(&cache, store, reference, executable)
+}
+fn retain_link_input_in(
+    cache: &Path,
+    store: &dyn ResultStore,
+    reference: Reference,
+    executable: bool,
+) -> Result<Arc<RetainedInput>, String> {
+    let mut retained = RETAINED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(input) = retained.get(&(reference, executable)) {
+        // Earlier publication is no lease: this store must still name the
+        // blob, whose retained copy was checked against its chunk identities.
+        blob_record(store, reference)?;
+        return Ok(input.clone());
+    }
+    use std::os::fd::AsRawFd;
+    let directory = super::runtime_cache::private_directory(cache).map_err(error)?;
+    // Identity selects the destination, never its integrity: the copy is
+    // checked against the selected store, and restored if it differs.
+    let name = format!(
+        "{}{}",
+        reference
+            .output
+            .0
+            .0
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        if executable { ".x" } else { "" }
+    );
+    let destination = std::path::PathBuf::from(format!(
+        "/proc/{}/fd/{}",
+        std::process::id(),
+        directory.as_raw_fd()
+    ))
+    .join(name);
+    let input = Arc::new(RetainedInput(materialize_blob(
+        store,
+        reference,
+        &destination,
+        executable,
+    )?));
+    retained.insert((reference, executable), input.clone());
+    Ok(input)
+}
+
+/// The copy of `reference` this process already checked, in either mode.
+pub(crate) fn retained_link_input(reference: Reference) -> Option<Arc<RetainedInput>> {
+    let retained = RETAINED.lock().unwrap_or_else(|e| e.into_inner());
+    retained
+        .get(&(reference, false))
+        .or_else(|| retained.get(&(reference, true)))
+        .cloned()
 }
 
 /// Materialize a previously snapshotted input, never reopen its mutable path.
@@ -870,28 +958,29 @@ pub fn materialize_executable(
     if checked.executable != product.executable {
         return Err("executable descriptor mismatch".into());
     }
-    materialize_blob(store, product.executable, destination, true)
+    materialize_blob(store, product.executable, destination, true).map(drop)
 }
+/// Returns the descriptor through which the bytes were checked.
 fn materialize_blob(
     store: &dyn ResultStore,
     reference: Reference,
     destination: &Path,
     executable: bool,
-) -> Result<(), String> {
+) -> Result<std::fs::File, String> {
     use std::io::{Read, Write};
     let blob = blob_record(store, reference)?;
     if executable && blob.chunks.is_empty() {
         return Err("empty executable output".into());
     }
+    // The opened file's own bytes are hashed against each chunk identity, so
+    // the check covers exactly what its consumer reads, with no store read.
     let matches = |file: &mut std::fs::File| -> Result<bool, String> {
-        let mut buffer = vec![0; 64 << 10];
+        let mut buffer = vec![0; BLOB_CHUNK];
         for chunk in &blob.chunks {
-            let chunk = require(store, chunk.clone().into())?;
-            for part in chunk.chunks(buffer.len()) {
-                file.read_exact(&mut buffer[..part.len()]).map_err(error)?;
-                if buffer[..part.len()] != *part {
-                    return Ok(false);
-                }
+            let chunk: Reference = chunk.clone().into();
+            let part = &mut buffer[..usize::try_from(chunk.len).map_err(error)?];
+            if file.read_exact(part).is_err() || CHUNK.reference(part) != Some(chunk) {
+                return Ok(false);
             }
         }
         Ok(file.read(&mut buffer[..1]).map_err(error)? == 0)
@@ -913,7 +1002,7 @@ fn materialize_blob(
         && permissions(&file).map_err(error)?
         && matches(&mut file).unwrap_or(false)
     {
-        return Ok(());
+        return Ok(file);
     }
     let parent = destination.parent().ok_or("executable has no parent")?;
     std::fs::create_dir_all(parent).map_err(error)?;
@@ -923,7 +1012,7 @@ fn materialize_blob(
         std::process::id(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    let result = (|| -> Result<(), String> {
+    let result = (|| -> Result<std::fs::File, String> {
         let mut file = std::fs::File::options()
             .write(true)
             .create_new(true)
@@ -952,7 +1041,7 @@ fn materialize_blob(
         if !permissions(&file).map_err(error)? || !matches(&mut file).map_err(error)? {
             return Err("materialized native file failed readiness".into());
         }
-        Ok(())
+        Ok(file)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(temporary);
@@ -1110,6 +1199,41 @@ mod transport_tests {
         let empty = store_link_input(&store, b"").unwrap();
         assert!(materialize_link_input(&store, empty, &path, true).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"frozen linker input");
+    }
+
+    /// Bugs: a retained-copy memo keyed coarser than the content reference
+    /// serves one input for another; a consumer that reopens the materialized
+    /// name reads whatever was renamed there after the check.
+    #[test]
+    fn retained_inputs_read_their_own_checked_bytes_after_the_name_is_replaced() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DirStore::new(directory.path().join("products"));
+        let cache = directory.path().join("inputs-v1");
+        // The registry is per process: bytes unique to this run are fresh keys.
+        let unique = directory.path().to_str().unwrap().as_bytes();
+        let first = [b"first platform input ".as_slice(), unique].concat();
+        let second = [b"second platform input ".as_slice(), unique].concat();
+        let first_ref = store_link_input(&store, &first).unwrap();
+        let second_ref = store_link_input(&store, &second).unwrap();
+        let retained = retain_link_input_in(&cache, &store, first_ref, false).unwrap();
+        let other = retain_link_input_in(&cache, &store, second_ref, false).unwrap();
+        assert_eq!(std::fs::read(retained.path()).unwrap(), first);
+        assert_eq!(std::fs::read(other.path()).unwrap(), second);
+        let name = cache.join(
+            first_ref
+                .output
+                .0
+                .0
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+        );
+        let swapped = directory.path().join("swapped");
+        std::fs::write(&swapped, &second).unwrap();
+        std::fs::rename(&swapped, &name).unwrap();
+        let again = retain_link_input_in(&cache, &store, first_ref, false).unwrap();
+        assert_eq!(std::fs::read(again.path()).unwrap(), first);
+        assert_eq!(std::fs::read(&name).unwrap(), second);
     }
 }
 

@@ -418,11 +418,21 @@ pub struct Cuts {
     /// The client dies right after the request: every later request fails
     /// with no effect, uncounted, until [`MemoryObjects::restart`].
     pub crash_at: Option<u64>,
+    /// Hold the request's write back: the client hears
+    /// [`StorageError::Unavailable`] at once, and the write (its condition
+    /// checked then) takes effect just before request `defer_apply_at +
+    /// defer_for` is served, as an unanswered request that lands late does. A
+    /// read held back has no effect.
+    pub defer_apply_at: Option<u64>,
+    /// How many requests later a held-back write takes effect; 1 when absent.
+    pub defer_for: Option<u64>,
 }
 
 /// The names of the [`Cuts`] members in an `objects.sim@1` entry.
-pub const CUTS: [&str; 4] = [
+pub const CUTS: [&str; 6] = [
     "crash_at",
+    "defer_apply_at",
+    "defer_for",
     "fail_at",
     "lose_response_at",
     "lose_unapplied_at",
@@ -433,6 +443,52 @@ struct Cutting {
     at: Cuts,
     requests: u64,
     down: bool,
+    /// A held-back write and the request it takes effect before.
+    held: Option<(u64, Held)>,
+}
+
+/// A write a cut holds back.
+#[derive(Debug)]
+enum Held {
+    Put {
+        key: String,
+        bytes: Vec<u8>,
+    },
+    Replace {
+        key: String,
+        bytes: Vec<u8>,
+        condition: Condition,
+    },
+    Delete {
+        key: String,
+    },
+}
+
+impl Held {
+    fn apply(self, objects: &mut BTreeMap<String, Vec<u8>>) {
+        match self {
+            Held::Put { key, bytes } => {
+                objects.entry(key).or_insert(bytes);
+            }
+            Held::Replace {
+                key,
+                bytes,
+                condition,
+            } => {
+                let current = objects.get(&key).map(|b| content_tag(b));
+                let holds = match &condition {
+                    Condition::Absent => current.is_none(),
+                    Condition::Matches(tag) => current.as_ref() == Some(tag),
+                };
+                if holds {
+                    objects.insert(key, bytes);
+                }
+            }
+            Held::Delete { key } => {
+                objects.remove(&key);
+            }
+        }
+    }
 }
 
 /// What a cut does to one request.
@@ -441,6 +497,8 @@ enum Fate {
     Serve { lost: bool },
     /// No effect; answer this error.
     Fail(fn(String) -> StorageError),
+    /// Hold the write back until request `until`; answer Unavailable.
+    Defer { until: u64 },
 }
 
 #[derive(Debug)]
@@ -486,7 +544,8 @@ impl MemoryObjects {
     pub fn restart(&self) -> bool {
         std::mem::take(&mut self.cuts.lock().expect("cuts").down)
     }
-    /// Count a request and say what the cuts make of it.
+    /// Count a request and say what the cuts make of it. A held-back write
+    /// due before this request takes effect first.
     fn fate(&self) -> Fate {
         let mut c = self.cuts.lock().expect("cuts");
         if c.down {
@@ -494,8 +553,16 @@ impl MemoryObjects {
         }
         c.requests += 1;
         let (n, at) = (Some(c.requests), c.at);
+        if c.held.as_ref().is_some_and(|(until, _)| Some(*until) == n) {
+            let (_, write) = c.held.take().expect("held");
+            write.apply(&mut self.objects.lock().expect("objects"));
+        }
         c.down = at.crash_at == n;
-        if at.fail_at == n {
+        if at.defer_apply_at == n {
+            Fate::Defer {
+                until: c.requests + at.defer_for.unwrap_or(1),
+            }
+        } else if at.fail_at == n {
             Fate::Fail(StorageError::Io)
         } else if at.lose_unapplied_at == n {
             Fate::Fail(StorageError::Unavailable)
@@ -507,9 +574,22 @@ impl MemoryObjects {
     }
     /// The next fault decision: None, or whether the faulted operation's
     /// effect still happens. A cut decides first.
-    fn fault(&self, operation: &str, key: &str) -> Result<Option<bool>, StorageError> {
+    fn fault(
+        &self,
+        operation: &str,
+        key: &str,
+        write: impl FnOnce() -> Option<Held>,
+    ) -> Result<Option<bool>, StorageError> {
         match self.fate() {
             Fate::Fail(error) => return Err(error(format!("cut at {operation} {key}"))),
+            Fate::Defer { until } => {
+                if let Some(w) = write() {
+                    self.cuts.lock().expect("cuts").held = Some((until, w));
+                }
+                return Err(StorageError::Unavailable(format!(
+                    "cut at {operation} {key}: held back"
+                )));
+            }
             Fate::Serve { lost: true } => return Ok(Some(true)),
             Fate::Serve { lost: false } => {}
         }
@@ -540,7 +620,7 @@ fn unavailable(operation: &str, key: &str) -> StorageError {
 impl ObjectStorage for MemoryObjects {
     fn get_tagged(&self, key: &str) -> Result<Option<(Vec<u8>, Tag)>, StorageError> {
         check_key(key)?;
-        if self.fault("get", key)?.is_some() {
+        if self.fault("get", key, || None)?.is_some() {
             return Err(unavailable("get", key));
         }
         Ok(self
@@ -557,7 +637,13 @@ impl ObjectStorage for MemoryObjects {
         condition: Condition,
     ) -> Result<Replaced, StorageError> {
         check_key(key)?;
-        let fault = self.fault("replace", key)?;
+        let fault = self.fault("replace", key, || {
+            Some(Held::Replace {
+                key: key.into(),
+                bytes: bytes.to_vec(),
+                condition: condition.clone(),
+            })
+        })?;
         if fault == Some(false) {
             return Err(unavailable("replace", key));
         }
@@ -579,7 +665,7 @@ impl ObjectStorage for MemoryObjects {
         }
     }
     fn list(&self, prefix: &str, after: &str) -> Result<Listing, StorageError> {
-        let fault = self.fault("list", prefix)?;
+        let fault = self.fault("list", prefix, || None)?;
         if fault == Some(false) {
             return Err(unavailable("list", prefix));
         }
@@ -600,7 +686,7 @@ impl ObjectStorage for MemoryObjects {
     }
     fn delete(&self, key: &str) -> Result<(), StorageError> {
         check_key(key)?;
-        let fault = self.fault("delete", key)?;
+        let fault = self.fault("delete", key, || Some(Held::Delete { key: key.into() }))?;
         if fault == Some(false) {
             return Err(unavailable("delete", key));
         }
@@ -612,7 +698,12 @@ impl ObjectStorage for MemoryObjects {
     }
     fn put_new(&self, key: &str, bytes: &[u8]) -> Result<Put, StorageError> {
         check_key(key)?;
-        let fault = self.fault("put", key)?;
+        let fault = self.fault("put", key, || {
+            Some(Held::Put {
+                key: key.into(),
+                bytes: bytes.to_vec(),
+            })
+        })?;
         if fault == Some(false) {
             return Err(unavailable("put", key));
         }
@@ -674,6 +765,8 @@ pub fn provider(entry: &serde_json::Value) -> Result<Provider, String> {
             "fail_at",
             "lose_response_at",
             "lose_unapplied_at",
+            "defer_apply_at",
+            "defer_for",
         ],
         other => return Err(format!("unsupported object storage provider {other}")),
     };
@@ -710,6 +803,8 @@ pub fn provider(entry: &serde_json::Value) -> Result<Provider, String> {
         lose_unapplied_at: request("lose_unapplied_at")?,
         lose_response_at: request("lose_response_at")?,
         crash_at: request("crash_at")?,
+        defer_apply_at: request("defer_apply_at")?,
+        defer_for: request("defer_for")?,
     };
     Ok(Provider::Sim(
         MemoryObjects::with_faults(uint("seed")?, uint("fail_one_in")?).with_cuts(cuts),

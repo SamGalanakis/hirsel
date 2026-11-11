@@ -512,4 +512,28 @@ fn a_cut_fires_at_its_request_and_a_crash_holds_until_restart() {
     assert!(crashed.restart());
     assert!(!crashed.restart());
     assert_eq!(crashed.put_new("y", b"2"), Ok(Put::Created));
+    // A held-back write is unanswered and absent until just before request
+    // 2 + defer_for, and its condition is checked when it lands.
+    let held = at(Cuts {
+        defer_apply_at: Some(2),
+        defer_for: Some(2),
+        ..Cuts::default()
+    });
+    assert!(matches!(
+        run(&held),
+        (Err(StorageError::Unavailable(_)), false)
+    ));
+    assert!(held.get("x").unwrap().is_none());
+    assert_eq!(held.get("x").unwrap().as_deref(), Some(&b"1"[..]));
+    // Request 2 replaces x if it still holds 0; request 3 deletes x first.
+    let late = at(Cuts {
+        defer_apply_at: Some(2),
+        defer_for: Some(2),
+        ..Cuts::default()
+    });
+    assert_eq!(late.put_new("x", b"0"), Ok(Put::Created));
+    let zero = Condition::Matches(content_tag(b"0"));
+    assert!(late.replace("x", b"1", zero).is_err());
+    assert_eq!(late.delete("x"), Ok(()));
+    assert_eq!(late.get("x").unwrap(), None);
 }

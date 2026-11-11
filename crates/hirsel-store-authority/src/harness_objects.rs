@@ -17,7 +17,9 @@
 //!    listings omit, and every acknowledged entry is in it with its object;
 //! 4. no claim, read or recovery refuses the history as corrupt: nothing here
 //!    damages it;
-//! 5. a claim that died (`Fenced`, `Undecided`) is `Fenced` when used again.
+//! 5. a claim that died (`Fenced`, `Undecided`) is `Fenced` when used again;
+//! 6. an advance answered `Fenced` (nothing was appended) is not in the
+//!    recovered history.
 //!
 //! Each planted defect must break a law.
 //!
@@ -26,7 +28,10 @@
 //! drawing the same three faults from the same seed, each writer on its own
 //! provider handle and connections. Over S3 the turn passes before every
 //! provider call rather than every request, since a `get_many` sends its gets
-//! at once.
+//! at once. A third medium, the simulated bucket with late writes, holds back
+//! a seeded share of puts and replaces: the writer hears `Unavailable`, and
+//! the write lands (its condition checked then) just before a later request of
+//! any writer, as an unanswered request that arrives late does.
 
 use crate::group::{self, Tip};
 use crate::harness::{Rng, entry};
@@ -102,6 +107,8 @@ fn read_all(h: &mut Objects) -> Result<Vec<Vec<u8>>, String> {
 }
 
 type Ledger = Arc<Mutex<BTreeMap<u64, Vec<u8>>>>;
+/// The entries of advances answered `Fenced`.
+type Denied = Arc<Mutex<Vec<Vec<u8>>>>;
 type Hook = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
 
 /// Where a schedule's history lives.
@@ -109,6 +116,129 @@ type Hook = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
 enum Medium {
     Sim,
     S3,
+    /// The simulated bucket behind [`Late`].
+    Late,
+}
+
+/// A write [`Late`] holds back.
+enum HeldWrite {
+    Put(String, Vec<u8>),
+    Replace(String, Vec<u8>, Condition),
+}
+
+/// The simulated bucket, one handle shared by every writer, that holds back
+/// one put or replace in four: the caller hears `Unavailable` at once, and the
+/// write lands just before the call one to four calls later (or before
+/// recovery), whoever makes it.
+struct Late {
+    inner: Arc<Bucket>,
+    state: Mutex<(u64, Rng, Vec<(u64, HeldWrite)>)>,
+}
+
+impl Late {
+    /// Count a call and land the held writes now due; outside the lock, since
+    /// landing is a bucket request and may pass the turn.
+    fn call(&self) {
+        let due: Vec<HeldWrite> = {
+            let mut s = self.state.lock().unwrap();
+            s.0 += 1;
+            let now = s.0;
+            let (due, keep) = std::mem::take(&mut s.2)
+                .into_iter()
+                .partition(|(at, _)| *at <= now);
+            s.2 = keep;
+            due.into_iter().map(|(_, w)| w).collect()
+        };
+        for w in due {
+            self.land(w);
+        }
+    }
+
+    /// Land a held write, retrying past the bucket's own faults: a late write
+    /// lands exactly once or never, and here it lands.
+    fn land(&self, w: HeldWrite) {
+        for _ in 0..1000 {
+            let r = match &w {
+                HeldWrite::Put(k, b) => self.inner.put_new(k, b).map(|_| ()),
+                HeldWrite::Replace(k, b, c) => self.inner.replace(k, b, c.clone()).map(|_| ()),
+            };
+            match r {
+                // A lost response after the effect: landed.
+                Err(StorageError::Unavailable(e)) if e.contains("lost response") => return,
+                Err(_) => {}
+                Ok(()) => return,
+            }
+        }
+    }
+
+    /// Whether to hold this write back.
+    fn hold(&self, w: HeldWrite) -> Result<(), HeldWrite> {
+        let mut s = self.state.lock().unwrap();
+        if s.1.below(4) != 0 {
+            return Err(w);
+        }
+        let at = s.0 + 1 + s.1.below(4);
+        s.2.push((at, w));
+        Ok(())
+    }
+
+    /// Land every write still held.
+    fn flush(&self) {
+        let held = std::mem::take(&mut self.state.lock().unwrap().2);
+        for (_, w) in held {
+            self.land(w);
+        }
+    }
+}
+
+fn held_back() -> StorageError {
+    StorageError::Unavailable("simulated late write".into())
+}
+
+impl ObjectStorage for Late {
+    fn get_tagged(&self, key: &str) -> Result<Option<(Vec<u8>, Tag)>, StorageError> {
+        self.call();
+        self.inner.get_tagged(key)
+    }
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        self.call();
+        self.inner.get(key)
+    }
+    fn get_many(&self, keys: &[String]) -> Vec<Result<Option<Vec<u8>>, StorageError>> {
+        self.call();
+        self.inner.get_many(keys)
+    }
+    fn put_new(&self, key: &str, bytes: &[u8]) -> Result<Put, StorageError> {
+        self.call();
+        match self.hold(HeldWrite::Put(key.into(), bytes.to_vec())) {
+            Ok(()) => Err(held_back()),
+            Err(_) => self.inner.put_new(key, bytes),
+        }
+    }
+    fn replace(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        condition: Condition,
+    ) -> Result<Replaced, StorageError> {
+        self.call();
+        match self.hold(HeldWrite::Replace(
+            key.into(),
+            bytes.to_vec(),
+            condition.clone(),
+        )) {
+            Ok(()) => Err(held_back()),
+            Err(_) => self.inner.replace(key, bytes, condition),
+        }
+    }
+    fn list(&self, prefix: &str, after: &str) -> Result<Listing, StorageError> {
+        self.call();
+        self.inner.list(prefix, after)
+    }
+    fn delete(&self, key: &str) -> Result<(), StorageError> {
+        self.call();
+        self.inner.delete(key)
+    }
 }
 
 /// A provider handle that runs the scheduler hook before each call.
@@ -166,6 +296,7 @@ impl ObjectStorage for Turned {
 /// scheduler interleaves them with.
 struct Media {
     bucket: Option<Arc<Bucket>>,
+    late: Option<Arc<Late>>,
     fake: Option<(FakeS3, tempfile::TempDir)>,
     hook: Hook,
 }
@@ -173,7 +304,7 @@ struct Media {
 impl Media {
     fn new(medium: Medium, seed: u64, faults: BTreeMap<String, u64>) -> Media {
         match medium {
-            Medium::Sim => {
+            Medium::Sim | Medium::Late => {
                 let bucket = Arc::new(Bucket::new(seed, faults));
                 let hook: Hook = Arc::default();
                 let h = hook.clone();
@@ -183,14 +314,22 @@ impl Media {
                         f();
                     }
                 }));
+                let late = matches!(medium, Medium::Late).then(|| {
+                    Arc::new(Late {
+                        inner: bucket.clone(),
+                        state: Mutex::new((0, Rng(seed ^ 0x1a7e | 1), Vec::new())),
+                    })
+                });
                 Media {
                     bucket: Some(bucket),
+                    late,
                     fake: None,
                     hook,
                 }
             }
             Medium::S3 => Media {
                 bucket: None,
+                late: None,
                 fake: Some((FakeS3::start(seed, faults), tempfile::tempdir().unwrap())),
                 hook: Arc::default(),
             },
@@ -198,6 +337,9 @@ impl Media {
     }
 
     fn handle(&self) -> Arc<dyn ObjectStorage> {
+        if let Some(l) = &self.late {
+            return l.clone();
+        }
         match (&self.bucket, &self.fake) {
             (Some(b), _) => b.clone(),
             (_, Some((fake, dir))) => {
@@ -223,6 +365,7 @@ fn writer(
     store: Arc<dyn ObjectStorage>,
     bug: Option<Bug>,
     ledger: Ledger,
+    denied: Denied,
 ) -> Result<(), String> {
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9) ^ (me as u64 + 1) | 1);
     let mut h = Objects::new(store, "zone".into(), Level(0));
@@ -266,7 +409,10 @@ fn writer(
                         *tip = group::follow(tip, &e).unwrap();
                     }
                     Advanced::Refused(_) => {}
-                    Advanced::Fenced | Advanced::Undecided(_) => {
+                    answer @ (Advanced::Fenced | Advanced::Undecided(_)) => {
+                        if answer == Advanced::Fenced {
+                            denied.lock().unwrap().push(e.clone());
+                        }
                         // A dead claim stays dead: used again, it is fenced.
                         let from = c.end();
                         if h.advance(c, from, e, Level(0)) != Advanced::Fenced
@@ -333,15 +479,21 @@ fn schedule(
     let b = baton.clone();
     *media.hook.lock().unwrap() = Some(Arc::new(move || b.pass()));
     let ledger: Ledger = Arc::default();
+    let denied: Denied = Arc::default();
     let results: Vec<Result<(), String>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..writers)
             .map(|me| {
-                let (store, baton, ledger) = (media.handle(), baton.clone(), ledger.clone());
+                let (store, baton, ledger, denied) = (
+                    media.handle(),
+                    baton.clone(),
+                    ledger.clone(),
+                    denied.clone(),
+                );
                 s.spawn(move || {
                     ME.set(me);
                     baton.wait(me);
                     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        writer(me, seed, steps, store, bug, ledger)
+                        writer(me, seed, steps, store, bug, ledger, denied)
                     }))
                     .unwrap_or_else(|_| Err(format!("writer {me} panicked")));
                     baton.exit(me);
@@ -356,6 +508,9 @@ fn schedule(
     }
     // Recovery by a fresh handle, through the same faults.
     *media.hook.lock().unwrap() = None;
+    if let Some(l) = &media.late {
+        l.flush();
+    }
     let mut fresh = Objects::new(media.handle(), "zone".into(), Level(0));
     fresh.bug = bug;
     let all = read_all(&mut fresh).map_err(|e| format!("recovery: {e}"))?;
@@ -363,6 +518,14 @@ fn schedule(
         if all.get(*p as usize - 1) != Some(b) {
             return Err(format!(
                 "acknowledged position {p} is not in the recovered history"
+            ));
+        }
+    }
+    for e in denied.lock().unwrap().iter() {
+        if let Some(p) = all.iter().position(|a| a == e) {
+            return Err(format!(
+                "an advance answered Fenced is at position {} of the recovered history",
+                p + 1
             ));
         }
     }
@@ -390,6 +553,11 @@ fn every_planted_defect_breaks_the_object_storage_law() {
             "{bug:?} went unnoticed"
         );
     }
+}
+
+#[test]
+fn object_storage_law_holds_with_late_writes() {
+    assert_eq!(sweep(Medium::Late, None, 200), None);
 }
 
 #[test]

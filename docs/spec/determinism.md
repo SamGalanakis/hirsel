@@ -1123,10 +1123,12 @@ An `objects.sim@1` entry of `authority.objects@1` takes the same kind of cuts as
 each a request number `k` (the object requests counted from 1: every get, put, conditional
 replace, listing and delete, one per key): `fail_at` answers request `k` with a definite
 refusal and no effect; `lose_unapplied_at` loses it before its effect, unanswered;
-`lose_response_at` applies it and loses its reply; `crash_at` ends the client right
-after it, so every later request of that client fails with no effect, and the authority
-continues as a new client that keeps nothing of the old one and whose old claims are
-dead. An object write is whole or absent, so no cut tears one. The objects authority
+`lose_response_at` applies it and loses its reply; `defer_apply_at` loses it unanswered
+and holds its write back until just before request `k + defer_for` (`defer_for` 1 when
+absent), when the write lands with its condition checked then, as a request that arrives
+late does; `crash_at` ends the client right after it, so every later request of that
+client fails with no effect, and the authority continues as a new client that keeps
+nothing of the old one and whose old claims are dead. An object write is whole or absent, so no cut tears one. The objects authority
 settles a head replace that got no success answer by reading the head again, and refuses
 an advance whose group put failed (the group, if written, is an orphan no head names), so
 what the store sees, refused before any effect or undecided, follows from where the request

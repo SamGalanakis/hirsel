@@ -387,14 +387,21 @@ fn run_program_case_with_frame(
     let directory = tempfile::tempdir().unwrap();
     // The same admitted transport is selected before source or native work.
     // Its 24 MiB comes from dispatch's former 96 MiB; total stays 768 MiB.
+    // Like every production request, it carries content on request scratch,
+    // so the runtime archive is held on disk, not in the 24 MiB.
     let budget = hirsel_engine_admission::ProcessBudget::new(768 << 20);
     let backend = Arc::new(DiagnosedStore(store::DirStore::new(
         directory.path().join("products"),
     )));
-    let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
-        backend,
-        budget.reserve(24 << 20).unwrap(),
-    ));
+    let store: Arc<dyn ResultStore> = Arc::new(
+        store::RequestStore::with_scratch(
+            backend,
+            budget.reserve(24 << 20).unwrap(),
+            directory.path(),
+            1 << 30,
+        )
+        .unwrap(),
+    );
     let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
     let tools = hirsel_native::Toolchain::in_tree_with_products(
         &directory.path().join("runtime"),

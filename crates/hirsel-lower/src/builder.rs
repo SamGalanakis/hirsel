@@ -43,6 +43,14 @@ pub(super) struct LabelledBlock {
     pub exit: BlockId,
     pub exits: Vec<State>,
 }
+/// A drop chain with the live roots it was built from and the ownership epoch:
+/// each owned, non-plain live root by its `drop_key`, with the chain's head once
+/// that root's drop is linked.
+struct Drops {
+    live: super::live::Live,
+    epoch: usize,
+    chain: Vec<((u32, bool, u32), CleanupNodeId)>,
+}
 pub(super) struct Builder<'a, 'b> {
     pub input: &'b Input<'a>,
     pub decisions: &'b decisions::Decisions<'a>,
@@ -58,9 +66,9 @@ pub(super) struct Builder<'a, 'b> {
     plain_locals: Vec<bool>,
     /// Scope nesting depth of each local; cleanup releases nest by it (DROP-2).
     local_depth: Vec<u32>,
-    /// The greatest depth in `local_depth`.
-    max_depth: u32,
     cleanup_epoch: usize,
+    /// The drop chain of the last `cleanup`.
+    drops: Option<Drops>,
     pub roots: Vec<PlaceId>,
     pub loops: Vec<Loop>,
     pub blocks: Vec<LabelledBlock>,
@@ -155,8 +163,8 @@ impl<'a, 'b> Builder<'a, 'b> {
             owned: vec![],
             plain_locals: vec![],
             local_depth: vec![],
-            max_depth: 0,
             cleanup_epoch: 0,
+            drops: None,
             roots: vec![],
             loops: vec![],
             blocks: vec![],
@@ -524,7 +532,6 @@ impl<'a, 'b> Builder<'a, 'b> {
             scope = parent;
         }
         self.local_depth.push(depth);
-        self.max_depth = self.max_depth.max(depth);
         let place = self.place(root, vec![], ty);
         self.roots.push(place);
         place
@@ -723,13 +730,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         // Build in reverse execution order so old scopes remain shared suffixes:
         // an exit releases inner scopes first, each scope's temporaries before
         // its names (DROP-2).
-        let mut order: Vec<_> = slots
-            .iter()
-            .map(|&root| {
-                let temporary = self.body.locals[root as usize].storage == Storage::Temporary;
-                (self.local_depth[root as usize], temporary, root)
-            })
-            .collect();
+        let mut order: Vec<_> = slots.iter().map(|&root| self.drop_key(root)).collect();
         order.sort();
         for (_, _, root) in order {
             work::count(Counter::LoweringCleanupRootRows);
@@ -784,38 +785,68 @@ impl<'a, 'b> Builder<'a, 'b> {
             }
         }
     }
-    pub fn cleanup(&mut self) -> CleanupId {
+    /// Drops of the live owned roots that are not plain, built in reverse
+    /// execution order: outer scopes first, each scope's names before its
+    /// temporaries (DROP-2), so the chain releases inner scopes first. Only the
+    /// part from the first root whose membership changed since the last chain is
+    /// rebuilt; the nodes before it are the ones a whole rebuild would find
+    /// again, so the nodes created, and their order, are a whole rebuild's.
+    fn drop_chain(&mut self) -> Option<CleanupNodeId> {
         let live = self.state.live.clone();
-        let mut head = None;
-        // Reverse execution order: outer scopes first, each scope's names
-        // before its temporaries, so the chain releases inner scopes first.
-        for depth in 0..=self.max_depth {
-            for temporary in [false, true] {
-                head = live.compile(
-                    depth * 2 + temporary as u32,
-                    self.cleanup_epoch,
-                    head,
-                    &mut |root, parent| {
-                        if self.owned[root as usize]
-                            && !self.plain_locals[root as usize]
-                            && self.local_depth[root as usize] == depth
-                            && (self.body.locals[root as usize].storage == Storage::Temporary)
-                                == temporary
-                        {
-                            Some(self.cleanup_node(
-                                CleanupAction::Drop {
-                                    place: self.roots[root as usize],
-                                    if_live: true,
-                                },
-                                parent,
-                            ))
-                        } else {
-                            parent
-                        }
+        let (mut chain, changed) = match self.drops.take() {
+            // Ownership is the only input a slot's filter or key can change by.
+            Some(drops) if drops.epoch == self.cleanup_epoch => {
+                let changed = live.changed_since(&drops.live);
+                (drops.chain, changed)
+            }
+            _ => (vec![], live.changed_since(&Default::default())),
+        };
+        let mut changed: Vec<_> = changed
+            .into_iter()
+            .filter(|&root| self.owned[root as usize] && !self.plain_locals[root as usize])
+            .map(|root| self.drop_key(root))
+            .collect();
+        changed.sort();
+        if let Some(first) = changed.first() {
+            let at = chain.partition_point(|(key, _)| key < first);
+            let mut rebuilt: Vec<_> = chain[at..]
+                .iter()
+                .map(|(key, _)| *key)
+                .filter(|key| changed.binary_search(key).is_err())
+                .chain(changed.iter().copied().filter(|key| live.contains(&key.2)))
+                .collect();
+            rebuilt.sort();
+            chain.truncate(at);
+            let mut head = chain.last().map(|(_, node)| *node);
+            for key in rebuilt {
+                work::count(Counter::LoweringCleanupRootRows);
+                let node = self.cleanup_node(
+                    CleanupAction::Drop {
+                        place: self.roots[key.2 as usize],
+                        if_live: true,
                     },
+                    head,
                 );
+                head = Some(node);
+                chain.push((key, node));
             }
         }
+        let head = chain.last().map(|(_, node)| *node);
+        self.drops = Some(Drops {
+            live,
+            epoch: self.cleanup_epoch,
+            chain,
+        });
+        head
+    }
+    /// A root's place in a drop chain's build order: its scope depth, names
+    /// before temporaries, then root.
+    fn drop_key(&self, root: u32) -> (u32, bool, u32) {
+        let temporary = self.body.locals[root as usize].storage == Storage::Temporary;
+        (self.local_depth[root as usize], temporary, root)
+    }
+    pub fn cleanup(&mut self) -> CleanupId {
+        let mut head = self.drop_chain();
         for (loan, _) in self.state.loans.clone() {
             head = Some(self.cleanup_node(
                 CleanupAction::EndLoan {

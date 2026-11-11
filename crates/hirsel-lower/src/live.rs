@@ -1,30 +1,28 @@
-//! Ordered live roots are the primary cleanup input. Immutable radix nodes retain
-//! their compiled chain aggregate; a changed membership rebuilds only its path.
+//! Ordered live roots are the primary cleanup input. Radix nodes are immutable
+//! and shared between snapshots, so a changed membership rebuilds only its path
+//! and two snapshots differ only below the nodes they do not share.
 use hirsel_intern::work::{self, Counter};
-use hirsel_tir::CleanupNodeId;
-use std::{cell::RefCell, rc::Rc};
+use std::rc::Rc;
 const BITS: usize = 3;
 const WIDTH: usize = 1 << BITS;
-const HEIGHT: usize = 10; // Covers every u32 local ID.
+/// A tree's root sits at the least height whose capacity covers its greatest
+/// root (leaves are height 0); a tree only grows.
 #[derive(Clone, Default)]
 pub(super) struct Live {
     root: Option<Rc<Node>>,
+    height: usize,
+}
+/// The roots a node at `height` covers.
+fn capacity(height: usize) -> u64 {
+    1 << ((height + 1) * BITS)
 }
 struct Node {
     data: Data,
-    /// One memo per compilation pass key (scope depth and storage class).
-    compiled: RefCell<Vec<(u32, Compiled)>>,
     scopes: std::cell::OnceCell<(u32, u32)>,
 }
 enum Data {
     Branch([Option<Rc<Node>>; WIDTH]),
     Leaf([bool; WIDTH]),
-}
-#[derive(Clone, Copy)]
-struct Compiled {
-    epoch: usize,
-    parent: Option<CleanupNodeId>,
-    head: Option<CleanupNodeId>,
 }
 impl Clone for Node {
     fn clone(&self) -> Self {
@@ -38,12 +36,29 @@ impl Node {
     fn new(data: Data) -> Self {
         Self {
             data,
-            compiled: RefCell::new(vec![]),
             scopes: std::cell::OnceCell::new(),
         }
     }
 }
 impl Live {
+    /// The root node as the root of a tree of `height`, at least this one's.
+    fn lifted(&self, height: usize) -> Option<Rc<Node>> {
+        let mut node = self.root.clone();
+        for _ in self.height..height {
+            node = node.map(|node| {
+                let mut children: [Option<Rc<Node>>; WIDTH] = std::array::from_fn(|_| None);
+                children[0] = Some(node);
+                Rc::new(Node::new(Data::Branch(children)))
+            });
+        }
+        node
+    }
+    fn grow(&mut self, root: u32) {
+        while capacity(self.height) <= root as u64 {
+            self.root = self.lifted(self.height + 1);
+            self.height += 1;
+        }
+    }
     fn at(node: &Option<Rc<Node>>, height: usize, root: u32) -> bool {
         match node.as_deref().map(|node| &node.data) {
             None => false,
@@ -65,7 +80,6 @@ impl Live {
                 }))
             });
             let node = Rc::make_mut(node);
-            node.compiled = RefCell::new(vec![]);
             node.scopes = std::cell::OnceCell::new();
             match &mut node.data {
                 Data::Leaf(values) => {
@@ -88,13 +102,14 @@ impl Live {
         }
     }
     pub fn contains(&self, root: &u32) -> bool {
-        Self::at(&self.root, HEIGHT, *root)
+        (*root as u64) < capacity(self.height) && Self::at(&self.root, self.height, *root)
     }
     pub fn insert(&mut self, root: u32) -> bool {
         if self.contains(&root) {
             false
         } else {
-            Self::change(&mut self.root, HEIGHT, root, true);
+            self.grow(root);
+            Self::change(&mut self.root, self.height, root, true);
             true
         }
     }
@@ -102,7 +117,7 @@ impl Live {
         if !self.contains(root) {
             false
         } else {
-            Self::change(&mut self.root, HEIGHT, *root, false);
+            Self::change(&mut self.root, self.height, *root, false);
             true
         }
     }
@@ -139,7 +154,7 @@ impl Live {
     #[cfg(test)]
     pub fn roots_from(&self, start: u32) -> Vec<u32> {
         let mut roots = vec![];
-        Self::roots(&self.root, HEIGHT, 0, start as u64, &mut roots);
+        Self::roots(&self.root, self.height, 0, start as u64, &mut roots);
         roots
     }
     #[cfg(test)]
@@ -184,80 +199,11 @@ impl Live {
                 _ => unreachable!(),
             }
         }
-        merge(&mut self.root, &other.root);
-    }
-    pub fn compile(
-        &self,
-        pass: u32,
-        epoch: usize,
-        parent: Option<CleanupNodeId>,
-        action: &mut impl FnMut(u32, Option<CleanupNodeId>) -> Option<CleanupNodeId>,
-    ) -> Option<CleanupNodeId> {
-        fn visit(
-            node: &Option<Rc<Node>>,
-            height: usize,
-            base: u64,
-            pass: u32,
-            epoch: usize,
-            mut head: Option<CleanupNodeId>,
-            action: &mut impl FnMut(u32, Option<CleanupNodeId>) -> Option<CleanupNodeId>,
-        ) -> Option<CleanupNodeId> {
-            let Some(node) = node else {
-                return head;
-            };
-            let memo = node
-                .compiled
-                .borrow()
-                .iter()
-                .find(|(key, _)| *key == pass)
-                .map(|(_, compiled)| *compiled);
-            if let Some(old) = memo {
-                if old.epoch == epoch {
-                    if old.head == old.parent {
-                        return head;
-                    }
-                    if old.parent == head {
-                        return old.head;
-                    }
-                }
-            }
-            let parent = head;
-            match &node.data {
-                Data::Leaf(values) => {
-                    for (index, live) in values.iter().enumerate() {
-                        if *live {
-                            work::count(Counter::LoweringCleanupRootRows);
-                            head = action((base + index as u64) as u32, head);
-                        }
-                    }
-                }
-                Data::Branch(children) => {
-                    for (index, child) in children.iter().enumerate() {
-                        head = visit(
-                            child,
-                            height - 1,
-                            base + ((index as u64) << (height * BITS)),
-                            pass,
-                            epoch,
-                            head,
-                            action,
-                        );
-                    }
-                }
-            }
-            let compiled = Compiled {
-                epoch,
-                parent,
-                head,
-            };
-            let mut memo = node.compiled.borrow_mut();
-            match memo.iter_mut().find(|(key, _)| *key == pass) {
-                Some((_, old)) => *old = compiled,
-                None => memo.push((pass, compiled)),
-            }
-            head
-        }
-        visit(&self.root, HEIGHT, 0, pass, epoch, parent, action)
+        let height = self.height.max(other.height);
+        let mut root = self.lifted(height);
+        merge(&mut root, &other.lifted(height));
+        self.root = root;
+        self.height = height;
     }
     pub fn roots_in_scopes(&self, first: u32, end: u32, scope: &impl Fn(u32) -> u32) -> Vec<u32> {
         fn bounds(
@@ -337,8 +283,69 @@ impl Live {
             }
         }
         let mut roots = vec![];
-        visit(&self.root, HEIGHT, 0, first, end, scope, &mut roots);
+        visit(&self.root, self.height, 0, first, end, scope, &mut roots);
         roots
+    }
+    /// The roots live in exactly one of `self` and `previous`, ascending.
+    pub fn changed_since(&self, previous: &Self) -> Vec<u32> {
+        const NONE: Option<Rc<Node>> = None;
+        fn data(node: &Option<Rc<Node>>) -> Option<&Data> {
+            node.as_deref().map(|node| &node.data)
+        }
+        fn values(data: Option<&Data>) -> [bool; WIDTH] {
+            match data {
+                Some(Data::Leaf(values)) => *values,
+                None => [false; WIDTH],
+                _ => unreachable!(),
+            }
+        }
+        fn children(data: Option<&Data>) -> Option<&[Option<Rc<Node>>; WIDTH]> {
+            match data {
+                Some(Data::Branch(children)) => Some(children),
+                None => None,
+                _ => unreachable!(),
+            }
+        }
+        fn visit(
+            now: &Option<Rc<Node>>,
+            old: &Option<Rc<Node>>,
+            height: usize,
+            base: u64,
+            changed: &mut Vec<u32>,
+        ) {
+            match (now, old) {
+                (None, None) => return,
+                (Some(now), Some(old)) if Rc::ptr_eq(now, old) => return,
+                _ => {}
+            }
+            if height == 0 {
+                let (now, old) = (values(data(now)), values(data(old)));
+                for index in 0..WIDTH {
+                    if now[index] || old[index] {
+                        work::count(Counter::LoweringCleanupRootRows);
+                    }
+                    if now[index] != old[index] {
+                        changed.push((base + index as u64) as u32);
+                    }
+                }
+                return;
+            }
+            let (now, old) = (children(data(now)), children(data(old)));
+            for index in 0..WIDTH {
+                visit(
+                    now.map_or(&NONE, |children| &children[index]),
+                    old.map_or(&NONE, |children| &children[index]),
+                    height - 1,
+                    base + ((index as u64) << (height * BITS)),
+                    changed,
+                );
+            }
+        }
+        let mut changed = vec![];
+        let height = self.height.max(previous.height);
+        let (now, old) = (self.lifted(height), previous.lifted(height));
+        visit(&now, &old, height, 0, &mut changed);
+        changed
     }
     /// Exact ordered set difference, including old storage becoming live again.
     pub fn added_since(&self, previous: &Self) -> Vec<u32> {
@@ -386,7 +393,9 @@ impl Live {
             }
         }
         let mut added = vec![];
-        visit(&self.root, &previous.root, HEIGHT, 0, &mut added);
+        let height = self.height.max(previous.height);
+        let (now, old) = (self.lifted(height), previous.lifted(height));
+        visit(&now, &old, height, 0, &mut added);
         added
     }
 }
@@ -403,7 +412,7 @@ impl FromIterator<u32> for Live {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::BTreeSet;
     #[test]
     fn snapshots_ranges_and_unions_preserve_ordered_membership() {
         let ids = [0, 1, 7, 8, 63, 64, 511, 512, 4095, 4096, u32::MAX];
@@ -430,62 +439,6 @@ mod tests {
             ids.into_iter().filter(|root| *root < 512).collect()
         );
         assert_eq!(saved.iter().count(), ids.len());
-    }
-    #[test]
-    fn compiled_heads_preserve_lazy_node_order_after_edits_and_ownership_changes() {
-        let mut live = Live::default();
-        let mut named = BTreeSet::new();
-        let mut table = HashMap::new();
-        let mut nodes = vec![];
-        let mut expected_table = HashMap::new();
-        let mut expected_nodes = vec![];
-        let mut epoch = 0;
-        for step in 0..256u32 {
-            live.insert(step);
-            if step % 3 == 0 {
-                named.insert(step);
-                epoch += 1;
-            }
-            if step > 3 && step % 5 == 0 {
-                live.remove(&(step - 3));
-            }
-            if step > 0 && step % 7 == 0 {
-                named.insert(step - 1);
-                epoch += 1;
-            }
-            for _ in 0..2 {
-                let mut head = None;
-                for temporary in [false, true] {
-                    head = live.compile(temporary as u32, epoch, head, &mut |root, parent| {
-                        if (root % 2 == 0) == temporary && named.contains(&root) {
-                            Some(*table.entry((root, parent)).or_insert_with(|| {
-                                let id = CleanupNodeId(nodes.len() as u32);
-                                nodes.push((root, parent));
-                                id
-                            }))
-                        } else {
-                            parent
-                        }
-                    });
-                }
-                let mut expected = None;
-                for temporary in [false, true] {
-                    for root in live.iter() {
-                        if (root % 2 == 0) == temporary && named.contains(&root) {
-                            expected = Some(
-                                *expected_table.entry((root, expected)).or_insert_with(|| {
-                                    let id = CleanupNodeId(expected_nodes.len() as u32);
-                                    expected_nodes.push((root, expected));
-                                    id
-                                }),
-                            );
-                        }
-                    }
-                }
-                assert_eq!(head, expected);
-                assert_eq!(nodes, expected_nodes);
-            }
-        }
     }
 }
 

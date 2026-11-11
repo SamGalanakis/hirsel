@@ -488,6 +488,13 @@ source errors still exit 1. This warning is an operational resource failure,
 not a source-language error, and does not add a diagnostic to `--json` output.
 Task panics still propagate after workers have joined.
 
+Each worker's 128 MiB stack counts against the memory limit. A fan-out therefore
+reserves every worker's stack from the process allowance before starting it, and
+holds that charge until the worker joins. It starts only the workers whose stacks fit
+in what is free, so a busy process runs fewer workers instead of refusing. No warning
+is printed for this. Queries run one at a time on the compiler thread, so a request
+reserves one stack whatever `HIRSEL_JOBS` says.
+
 This follows Rust's fallible scoped-thread builder and explicit join contract
 ([Rust `scoped.rs:256–268,293–323`](https://github.com/rust-lang/rust/blob/a7c37f9f0ee5e93396106e9de20f4a86b4154e63/library/std/src/thread/scoped.rs#L256));
 the panic-payload controls follow

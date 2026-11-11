@@ -205,6 +205,7 @@ fn spawn_failure_finishes_every_task_once_in_input_order() {
         let calls: Vec<_> = (0..32).map(|_| AtomicUsize::new(0)).collect();
         let before = work::read(work::Counter::CacheValidationRows);
         let results = map_with_state_spawn(
+            hirsel_guard::admission::host_budget().0,
             Jobs::new(4),
             (0..32).collect(),
             |&i| i as u64,
@@ -251,6 +252,7 @@ fn spawn_failure_preserves_task_panic_and_drops_queued_tasks() {
         }
         let payload = catch_unwind(AssertUnwindSafe(|| {
             map_with_state_spawn(
+                hirsel_guard::admission::host_budget().0,
                 Jobs::new(4),
                 (0..32).map(|_| Task(&dropped)).collect(),
                 |_| 0,
@@ -281,6 +283,7 @@ fn spawn_failure_preserves_initializer_panic() {
         let attempts = AtomicUsize::new(0);
         let payload = catch_unwind(AssertUnwindSafe(|| {
             map_with_state_spawn(
+                hirsel_guard::admission::host_budget().0,
                 Jobs::new(4),
                 vec![(); 4],
                 |_| 0,
@@ -305,6 +308,7 @@ fn jobs_one_and_empty_frontiers_never_try_to_spawn() {
     let caller = std::thread::current().id();
     for (jobs, tasks) in [(Jobs::ONE, vec![(); 4]), (Jobs::new(4), vec![])] {
         let results = map_with_state_spawn(
+            hirsel_guard::admission::host_budget().0,
             jobs,
             tasks,
             |_| 0,
@@ -314,4 +318,32 @@ fn jobs_one_and_empty_frontiers_never_try_to_spawn() {
         );
         assert!(results.iter().all(|&id| id == caller));
     }
+}
+
+#[test]
+fn a_fan_out_starts_only_workers_whose_stacks_the_allowance_admits() {
+    // Room for one worker stack and a half: four jobs start one worker, which
+    // holds its stack's charge while it runs and returns it when joined.
+    let stack = COMPILER_STACK_BYTES as u64;
+    let budget = hirsel_guard::admission::ProcessBudget::new(stack + stack / 2);
+    let caller = std::thread::current().id();
+    let ran = map_with_state_spawn(
+        &budget,
+        Jobs::new(4),
+        vec![(); 4],
+        |_| 0,
+        || (),
+        |_, ()| (std::thread::current().id(), budget.reserved()),
+        || Ok(()),
+    );
+    let threads: std::collections::BTreeSet<_> = ran
+        .iter()
+        .map(|(thread, _)| format!("{thread:?}"))
+        .collect();
+    assert_eq!(threads.len(), 1);
+    assert!(
+        ran.iter()
+            .all(|(thread, held)| *thread != caller && *held == stack)
+    );
+    assert_eq!(budget.reserved(), 0);
 }

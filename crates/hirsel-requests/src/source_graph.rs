@@ -1327,7 +1327,6 @@ pub(super) fn install(
         &mut program.engine,
         &selection,
         shape,
-        config.jobs,
         limits,
         &host,
         loading,

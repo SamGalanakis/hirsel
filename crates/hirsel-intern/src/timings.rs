@@ -256,6 +256,14 @@ pub enum Count {
     NativeStackBytes,
     /// Maximum Ready row bytes retained for uncompleted native consumers.
     NativeReadyBytes,
+    /// Largest query runtime reservation a request admitted.
+    RuntimeBudgetBytes,
+    /// Maximum bytes the query runtime charged against that reservation at once.
+    RuntimeChargedBytes,
+    /// Largest snapshot reservation a request held when its graph finished loading.
+    SnapshotBudgetBytes,
+    /// Largest share of it that request kept for its source and Run owners.
+    SnapshotKeptBytes,
     ValueDecodes,
     ValueDecodeBytes,
     ValueRebinds,
@@ -308,7 +316,7 @@ pub enum Count {
 
 impl Count {
     /// Every count, in declaration order.
-    pub const ALL: [Count; 88] = [
+    pub const ALL: [Count; 92] = [
         Count::Definitions,
         Count::Units,
         Count::VRuns,
@@ -358,6 +366,10 @@ impl Count {
         Count::NativeWorkers,
         Count::NativeStackBytes,
         Count::NativeReadyBytes,
+        Count::RuntimeBudgetBytes,
+        Count::RuntimeChargedBytes,
+        Count::SnapshotBudgetBytes,
+        Count::SnapshotKeptBytes,
         Count::ValueDecodes,
         Count::ValueDecodeBytes,
         Count::ValueRebinds,
@@ -489,6 +501,10 @@ impl Count {
             Count::NativeWorkers => "native effective workers peak",
             Count::NativeStackBytes => "native worker stack reservation bytes peak",
             Count::NativeReadyBytes => "native retained Ready structural bytes peak",
+            Count::RuntimeBudgetBytes => "query runtime budget bytes",
+            Count::RuntimeChargedBytes => "query runtime charged bytes peak",
+            Count::SnapshotBudgetBytes => "snapshot reservation bytes",
+            Count::SnapshotKeptBytes => "snapshot kept bytes",
         }
     }
 }

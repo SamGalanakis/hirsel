@@ -25,7 +25,7 @@ impl Graph {
     }
     pub fn try_new(engine: &mut QueryEngine, jobs: Jobs) -> Result<Self, ToolError> {
         let (budget, cap) = host_budget();
-        let limits = host_limits(cap, jobs.get());
+        let limits = host_limits(cap);
         let mut loading = LoadingAdmission::reserve(budget, limits, 0).unwrap();
         let store = Arc::new(
             RequestStore::with_scratch_and_verifier_transport(
@@ -82,7 +82,6 @@ impl Graph {
                     storage: true,
                     ..Default::default()
                 },
-                jobs,
                 limits,
                 &BudgetHost(budget),
                 loading,

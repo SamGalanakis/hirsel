@@ -74,7 +74,7 @@ pub fn load(path: &Path, products: Option<&Path>) -> LoadedProgram {
                 .unwrap()
                 .join(format!("reader-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
             let (budget, cap) = hirsel_engine::requests::source_graph::host_budget();
-            let limits = hirsel_engine::requests::source_graph::host_limits(cap, 1);
+            let limits = hirsel_engine::requests::source_graph::host_limits(cap);
             std::sync::Arc::new(
                 store::RequestStore::with_scratch_and_verifier_transport(
                     std::sync::Arc::new(

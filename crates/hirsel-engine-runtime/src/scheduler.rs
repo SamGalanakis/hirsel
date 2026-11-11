@@ -173,6 +173,9 @@ fn drive(shared: &Arc<Mutex<State>>, request: u64) {
 }
 
 impl AdmittedRuntime {
+    /// Queries run on the driving compiler thread, one at a time, whatever
+    /// the configured jobs; request reservations are sized for this many.
+    pub const WORKERS: usize = 1;
     pub fn new(
         jobs: Jobs,
         reservation: hirsel_engine_admission::MemoryReservation,
@@ -188,6 +191,10 @@ impl AdmittedRuntime {
         stack: usize,
     ) -> std::io::Result<Self> {
         let budget = reservation.bytes();
+        hirsel_intern::timings::count_peak(
+            hirsel_intern::timings::Count::RuntimeBudgetBytes,
+            budget,
+        );
         let stack_bytes = stack as u64;
         if stack_bytes == 0 || budget < stack_bytes {
             return Err(std::io::Error::other(
@@ -210,7 +217,7 @@ impl AdmittedRuntime {
                 stopped: false,
                 started: false,
                 stats: RuntimeStats {
-                    workers: 1,
+                    workers: Self::WORKERS,
                     ..RuntimeStats::default()
                 },
                 observer: None,
@@ -441,6 +448,10 @@ impl State {
         self.stats.active = self.stack.len();
         self.stats.charged_bytes = self.charged;
         self.stats.peak_bytes = self.stats.peak_bytes.max(self.charged);
+        hirsel_intern::timings::count_peak(
+            hirsel_intern::timings::Count::RuntimeChargedBytes,
+            self.charged,
+        );
         let outcome = {
             self.stats.polls += 1;
             let elapsed_ns = self.elapsed();

@@ -87,11 +87,13 @@ pub fn map_with_state<T: Send, R: Send, S>(
     initialize: impl Fn() -> S + Sync,
     work: impl Fn(&mut S, T) -> R + Sync,
 ) -> Vec<R> {
-    map_with_state_spawn(jobs, tasks, cost, initialize, work, || Ok(()))
+    let (budget, _) = hirsel_guard::admission::host_budget();
+    map_with_state_spawn(budget, jobs, tasks, cost, initialize, work, || Ok(()))
 }
 
 // The gate injects an OS spawn error without consuming shared host threads.
 fn map_with_state_spawn<T: Send, R: Send, S>(
+    budget: &std::sync::Arc<hirsel_guard::admission::ProcessBudget>,
     jobs: Jobs,
     tasks: Vec<T>,
     cost: impl Fn(&T) -> u64 + Sync,
@@ -157,9 +159,16 @@ fn map_with_state_spawn<T: Send, R: Send, S>(
     };
     let mut wait = Some(crate::timings::wait());
     let mut on_caller = false;
+    // Each worker's stack counts against the process limit, so it is reserved
+    // from the host allowance until the worker is joined. A fan-out takes only
+    // what is free, never reclaiming: it may run inside a reclaimable owner.
+    let mut stacks = Vec::with_capacity(workers);
     let outcomes: Vec<_> = std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(workers);
         for _ in 0..workers {
+            let Ok(stack) = budget.reserve_once(COMPILER_STACK_BYTES as u64) else {
+                break;
+            };
             // Rust std's fallible Builder::spawn_scoped keeps ownership of every
             // successful handle. Stop at the first OS failure, then join them all.
             let spawned = before_spawn().and_then(|()| {
@@ -169,7 +178,10 @@ fn map_with_state_spawn<T: Send, R: Send, S>(
                     .spawn_scoped(scope, worker)
             });
             match spawned {
-                Ok(handle) => handles.push(handle),
+                Ok(handle) => {
+                    stacks.push(stack);
+                    handles.push(handle);
+                }
                 Err(error) => {
                     warn_spawn_failure(&error, handles.len().max(1));
                     break;
@@ -188,6 +200,7 @@ fn map_with_state_spawn<T: Send, R: Send, S>(
         }
     });
     drop(wait);
+    drop(stacks);
     let mut first = None;
     for outcome in outcomes {
         let (tally, panicked) = outcome.unwrap_or_else(|panic| resume_unwind(panic));

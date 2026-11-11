@@ -69,7 +69,7 @@ const PHASES: [&str; 22] = [
     "signature normalize",
     "link",
 ];
-const COUNTS: [&str; 70] = [
+const COUNTS: [&str; 74] = [
     "definitions",
     "units",
     "V runs",
@@ -119,6 +119,10 @@ const COUNTS: [&str; 70] = [
     "native effective workers peak",
     "native worker stack reservation bytes peak",
     "native retained Ready structural bytes peak",
+    "query runtime budget bytes",
+    "query runtime charged bytes peak",
+    "snapshot reservation bytes",
+    "snapshot kept bytes",
     "native Value decodes",
     "native Value decode bytes",
     "native Value rebinds",

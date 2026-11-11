@@ -35,7 +35,7 @@ impl CompilerRequests {
     /// actual graph reservations and refusal belong to request selection.
     pub fn for_host(compiler: Compiler, config: CompileConfig) -> Self {
         let (budget, cap) = host_budget();
-        let limits = host_limits(cap, config.jobs.get());
+        let limits = host_limits(cap);
         let mut selected = Self::new(compiler, config, budget.clone(), limits);
         selected.host_toolchain = true;
         selected
@@ -291,14 +291,11 @@ mod tests {
         let second = CompilerRequests::for_host(crate::COMPILER, CompileConfig::default());
         assert!(Arc::ptr_eq(first.budget(), second.budget()));
         let cap = hirsel_guard::DEFAULT_LIMIT;
-        for jobs in [1, 2, 4, 8, 16] {
-            let limits = host_limits(cap, jobs);
-            assert!(
-                limits.runtime_bytes + limits.snapshot_bytes + limits.transport_bytes
-                    <= cap - cap / 4
-            );
-        }
-        let zero = host_limits(0, 2);
+        let limits = host_limits(cap);
+        assert!(
+            limits.runtime_bytes + limits.snapshot_bytes + limits.transport_bytes <= cap - cap / 4
+        );
+        let zero = host_limits(0);
         assert_eq!(zero.snapshot_bytes + zero.transport_bytes, 0);
         assert!(
             hirsel_engine_admission::ProcessBudget::new(0)

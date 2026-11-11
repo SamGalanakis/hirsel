@@ -35,9 +35,11 @@ pub struct RequestLimits {
 pub fn host_budget() -> (&'static Arc<hirsel_engine_admission::ProcessBudget>, u64) {
     hirsel_guard::admission::host_budget()
 }
-pub fn host_limits(cap: u64, jobs: usize) -> RequestLimits {
+/// A request's executor holds the compiler stack of each query worker; a
+/// fan-out reserves its own workers' stacks while it runs (`jobs::map`).
+pub fn host_limits(cap: u64) -> RequestLimits {
     RequestLimits {
-        runtime_bytes: (jobs as u64)
+        runtime_bytes: (AdmittedRuntime::WORKERS as u64)
             .saturating_mul(hirsel_intern::jobs::COMPILER_STACK_BYTES as u64)
             .saturating_add(cap / 16),
         snapshot_bytes: cap / 8,
@@ -128,6 +130,14 @@ impl LoadingAdmission {
     /// charge, which producers then reserve from as they hold it.
     pub fn finish(mut self, plan: SnapshotPlan) -> Result<GraphAdmission, ToolError> {
         let refusal = || ToolError::Runtime("compiler snapshot footprint exceeds admission".into());
+        {
+            use hirsel_intern::timings::{Count, count_peak};
+            count_peak(Count::SnapshotBudgetBytes, self.snapshot.bytes());
+            count_peak(
+                Count::SnapshotKeptBytes,
+                plan.source.saturating_add(plan.run),
+            );
+        }
         let source = self.snapshot.split(plan.source).ok_or_else(refusal)?;
         let run = self.snapshot.split(plan.run).ok_or_else(refusal)?;
         Ok(GraphAdmission {
@@ -273,7 +283,6 @@ pub struct Plan {
 }
 struct PlanInputs<'a> {
     limits: RequestLimits,
-    jobs: Jobs,
     input_bytes: u64,
     definitions: &'a [DefPath],
     check_inventory: u64,
@@ -288,7 +297,6 @@ impl Plan {
     fn new(inputs: PlanInputs<'_>, host: &dyn SourceHost) -> Result<Self, ToolError> {
         let PlanInputs {
             limits,
-            jobs,
             input_bytes,
             definitions,
             check_inventory,
@@ -391,7 +399,7 @@ impl Plan {
         // root), half for a chain of nested Lower/Evaluate
         // bodies, such as a constant read by a constant read by a function.
         // A snapshot partition is not one task's executable memory allowance.
-        let workers = jobs.get() as u64;
+        let workers = AdmittedRuntime::WORKERS as u64;
         let scratch = working / (workers + 1);
         let suspended = working - workers * scratch;
         // A native request adds its source root to the root continuations and
@@ -473,7 +481,6 @@ struct SourcePlanning {
 struct SourcePlanner<'a> {
     selection: &'a SourceSelection,
     host: &'a dyn SourceHost,
-    jobs: Jobs,
     shape: SourceShape,
 }
 impl SourcePlanner<'_> {
@@ -508,7 +515,6 @@ impl SourcePlanner<'_> {
         Plan::new(
             PlanInputs {
                 limits,
-                jobs: self.jobs,
                 input_bytes: self.selection.input_bytes,
                 definitions,
                 check_inventory,
@@ -653,7 +659,6 @@ pub fn prepare_source_scope(
         &SourcePlanner {
             selection,
             host,
-            jobs,
             shape,
         },
         store,
@@ -708,7 +713,6 @@ pub fn install(
     engine: &mut QueryEngine,
     selection: &SourceSelection,
     shape: SourceShape,
-    jobs: Jobs,
     limits: RequestLimits,
     host: &dyn SourceHost,
     loading: LoadingAdmission,
@@ -727,7 +731,6 @@ pub fn install(
     let planner = SourcePlanner {
         selection,
         host,
-        jobs,
         shape,
     };
     let SourcePlanning {
@@ -1041,7 +1044,7 @@ impl QueryEngine {
     ) -> Result<CheckOutput, ToolError> {
         let (budget, cap) = host_budget();
         let jobs = self.jobs();
-        let limits = host_limits(cap, jobs.get());
+        let limits = host_limits(cap);
         let mut loading = LoadingAdmission::reserve(budget, limits, 0)?;
         let disk_bytes = limits
             .runtime_bytes
@@ -1174,7 +1177,6 @@ impl QueryEngine {
             self,
             selection,
             shape,
-            jobs,
             limits,
             &BudgetHost(budget),
             loading,

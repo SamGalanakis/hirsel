@@ -51,7 +51,7 @@ fn step(mut s: State, iteration: u64) {
   // Map iteration preserves first insertion; scan each distinct word once.
   for (word, count) in frequencies {
     if count > maximum {
-      best = word
+      best = copy word
       maximum = count
     }
   }

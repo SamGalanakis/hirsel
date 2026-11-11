@@ -456,6 +456,9 @@ fn partition(part: usize) {
                     );
                     failures.push(format!("{engine} observation: {observation:?}"))
                 }
+                hirsel_native_testing::Outcome::Parted { .. } => {
+                    unreachable!("differential runs whole campaigns")
+                }
                 hirsel_native_testing::Outcome::Unavailable(error) => {
                     let cell = history::native_error(&engine, error);
                     eprintln!(

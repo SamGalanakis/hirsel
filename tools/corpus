@@ -19,12 +19,18 @@ fails or none executed a case.
 
 `--heap-parts N` distributes the entire fault domain of explicitly selected
 heap+inject configurations. Every part checks the clean run; aggregation requires
-all parts, including matching partition metadata.
+all parts, including matching partition metadata. Without it, a case's action
+runs its heap+inject campaign whole up to sync.py's NATIVE_HEAP_PART_SITES
+fault sites; over that it checks the clean run and reports the campaign
+parted, and a second round runs each parted (case, configuration) as
+ceil(sites / NATIVE_HEAP_PART_SITES) heap parts of their own, every part
+required, so every site is injected and judged.
 
 `--native` runs the same selection through gate-native-full (`--full --filter`,
-the full gate's seed and request) as `//:gate-native-selected-shard-<i>`: even
-parts of the selected cases by ID times parts of each case's configurations
-(`hirsel.native_paths`, `_split`, `_parts`, `_configs`). By default those are
+the full gate's seed and request) as `//:gate-native-selected-shard-<i>`: one
+action per selected case by default, all its named configurations over one
+prepare and shared builds (`hirsel.native_paths`, `_split`, `_parts`,
+`_configs`; `--parts` splits a case's configurations). By default those are
 the per-push smoke configurations (`--config smoke`: the default passes on the
 heap executor and at O3 on x86-64 with the diagnostic and shipped archives),
 each run whether or not the case's rotating cover holds it. `--config NAME`
@@ -52,8 +58,8 @@ import conformance  # noqa: E402
 import event_logs  # noqa: E402
 from run_failures import first_error_line  # noqa: E402
 from sync import (CONFORMANCE_SLICE_PROGRAMS, NATIVE_CONFIG_SECONDS, NATIVE_COVER_PART_SECONDS,  # noqa: E402
-                  NATIVE_COVER_PARTS, NATIVE_HEAP_PART_SECONDS, NATIVE_SELECTED_SLICES, NATIVE_SLICE_SECONDS,
-                  SELECTED_SLICES)
+                  NATIVE_COVER_PARTS, NATIVE_HEAP_PART_SECONDS, NATIVE_HEAP_PART_SITES, NATIVE_SELECTED_SLICES,
+                  NATIVE_SLICE_SECONDS, SELECTED_SLICES)
 
 
 def cases(root):
@@ -194,36 +200,85 @@ def main():
 
 
 def native(prefixes, selected, args):
-    """The selection through gate-native-full's matrix, over path shards times configuration parts."""
+    """The selection through gate-native-full's matrix: one action per case (or
+    path shards times configuration parts), then the parted heap campaigns."""
     shards = max(1, min(args.slices or selected, NATIVE_SELECTED_SLICES // args.heap_parts, selected))
     # A named set gives each case at most that many configurations (smoke:
-    # three); a full-matrix cover is cut into at most NATIVE_COVER_PARTS parts.
+    # three), all in one action unless --parts splits them; a full-matrix
+    # cover is cut into at most NATIVE_COVER_PARTS parts.
     named = sum(3 if name == 'smoke' else 1 for name in args.config) or NATIVE_COVER_PARTS
-    parts = max(1, min(args.parts or named, named, NATIVE_SELECTED_SLICES // (shards * args.heap_parts)))
-    slices = shards * parts * args.heap_parts
-    # Estimated warm seconds of the heaviest slice (sync.py NATIVE_SLICE_SECONDS).
-    unit = (NATIVE_HEAP_PART_SECONDS if args.heap_parts > 1 else NATIVE_CONFIG_SECONDS if args.config
-            else NATIVE_COVER_PART_SECONDS)
-    estimate = math.ceil(selected / shards) * math.ceil(named / parts) * unit
+    parts = max(1, min(args.parts or (1 if args.config else named), named,
+                       NATIVE_SELECTED_SLICES // (shards * args.heap_parts)))
+    # Whole campaigns are bounded unless the caller chose the heap parts.
+    sites_max = NATIVE_HEAP_PART_SITES if args.heap_parts == 1 else None
+    heap = sites_max and any(name == 'smoke' or name.endswith('/heap+inject') for name in args.config)
+    # Estimated warm seconds of the heaviest slice (sync.py NATIVE_SLICE_SECONDS):
+    # a bounded heap campaign costs about one heap part.
+    if args.heap_parts > 1:
+        per_case = math.ceil(named / parts) * NATIVE_HEAP_PART_SECONDS
+    elif args.config:
+        per_case = math.ceil(named / parts) * NATIVE_CONFIG_SECONDS + (NATIVE_HEAP_PART_SECONDS if heap else 0)
+    else:
+        per_case = math.ceil(named / parts) * NATIVE_COVER_PART_SECONDS
+    estimate = math.ceil(selected / shards) * per_case
     if estimate > NATIVE_SLICE_SECONDS:
-        print(f'corpus: {selected} cases in {slices} slices would run about {estimate} s per slice, over '
-              f'{NATIVE_SLICE_SECONDS} s; narrow the selection or name fewer configurations', file=sys.stderr)
+        print(f'corpus: {selected} cases in {shards * parts * args.heap_parts} slices would run about {estimate} s '
+              f'per slice, over {NATIVE_SLICE_SECONDS} s; narrow the selection or name fewer configurations',
+              file=sys.stderr)
         return 2
     print(f'corpus: {selected} files in {shards} case parts x {parts} configuration parts x {args.heap_parts} heap fault parts', file=sys.stderr,
           flush=True)
     subprocess.run([sys.executable, str(ROOT / 'tools/buck2/sync.py'), '--if-stale'], cwd=ROOT, check=True)
+    status, problems, reports, attempts, cases, parted, expected = native_round(
+        prefixes, shards, parts, args.config, args.heap_parts, sites_max, 'corpus-native')
+    if parted:
+        # Each parted (case, configuration) as its own heap parts: every part
+        # checks the clean run and injects a disjoint share of the sites.
+        ids = sorted({row['case'] for row in parted})
+        configs = sorted({row['configuration'] for row in parted})
+        heap_parts = max(math.ceil(row['sites'] / NATIVE_HEAP_PART_SITES) for row in parted)
+        print(f'corpus: {len(parted)} heap campaigns over {NATIVE_HEAP_PART_SITES} sites, '
+              f'{len(ids)} cases x {heap_parts} heap fault parts', file=sys.stderr, flush=True)
+        if len(ids) * len(configs) * heap_parts > NATIVE_SELECTED_SLICES:
+            problems.append(f'parted campaigns need {len(ids) * len(configs) * heap_parts} slices, '
+                            f'over {NATIVE_SELECTED_SLICES}; narrow the selection')
+        else:
+            more = native_round(ids, len(ids), len(configs), configs, heap_parts, None, 'corpus-native-heap')
+            status = status or more[0]
+            problems += more[1]
+            reports += more[2]
+            attempts += more[3]
+            expected += more[6]
+    print(f'native: {cases} executable cases, {attempts} configuration attempts, {len(reports)} of {expected} slices')
+    for line in problems:
+        print(line)
+    if args.report_json:
+        args.report_json.write_text(json.dumps(dict(version=1, native=True, expected_slices=expected,
+                                                    reports=reports)) + '\n')
+    if not cases:
+        print('corpus: no executable case ran', file=sys.stderr)
+        return status or 1
+    return status or (1 if problems else 0)
+
+
+def native_round(prefixes, shards, parts, configs, heap_parts, sites_max, log):
+    """One buck2 test of shards x parts x heap_parts selected slices: its exit
+    status, problems, reports, configuration attempts, executable cases, parted
+    campaigns and slice count. A missing slice or heap part, or wrong part metadata, is
+    a problem."""
+    slices = shards * parts * heap_parts
     targets = [f'//:gate-native-selected-shard-{i}' for i in range(1, slices + 1)]
     config = ['-c', 'hirsel.full=true', '-c', 'hirsel.native_paths=' + '|'.join(prefixes),
               '-c', f'hirsel.native_paths_split={shards}', '-c', f'hirsel.native_paths_parts={parts}',
-              '-c', 'hirsel.native_paths_configs=' + '|'.join(args.config),
-              '-c', f'hirsel.native_paths_heap_parts={args.heap_parts}']
-    with event_logs.recorded('corpus-native') as event_log:
+              '-c', 'hirsel.native_paths_configs=' + '|'.join(configs),
+              '-c', f'hirsel.native_paths_heap_parts={heap_parts}',
+              '-c', f'hirsel.native_paths_heap_sites_max={sites_max or ""}']
+    with event_logs.recorded(log) as event_log:
         status = subprocess.call([str(conformance.BUCK2), 'test', *conformance.CONFIG, *config,
                                   '--event-log', str(event_log), *targets], cwd=ROOT)
         outputs = conformance.shard_outputs(event_log)
     attempts = cases = 0
-    reports = []
-    problems = []
+    reports, problems, parted = [], [], []
     for name, output in sorted(outputs.items()):
         start = output.find('\n{\n') + 1 if not output.startswith('{\n') else 0
         try:
@@ -236,10 +291,14 @@ def native(prefixes, selected, args):
             for line in output.splitlines()[-20:]:
                 print(f'{slice_name}: {line}')
             continue
-        if args.heap_parts > 1:
-            expected = {'index': (int(slice_name) - 1) // (shards * parts) + 1, 'count': args.heap_parts}
+        if heap_parts > 1:
+            expected = {'index': (int(slice_name) - 1) // (shards * parts) + 1, 'count': heap_parts}
             if report.get('heap_partition') != expected:
                 problems.append(f'{slice_name}: missing or incorrect heap partition: expected {expected}')
+        if sites_max:
+            if report.get('heap_sites_max') != sites_max or not isinstance(report.get('heap_parted'), list):
+                problems.append(f'{slice_name}: missing or incorrect heap site bound: expected {sites_max}')
+            parted += report.get('heap_parted') or []
         reports.append(report)
         attempts += report['configuration_attempts']
         if (int(slice_name) - 1) // shards == 0:
@@ -249,15 +308,9 @@ def native(prefixes, selected, args):
         for line in output.splitlines():
             if line.startswith('native: '):
                 print(f'{slice_name}: {line}')
-    print(f'native: {cases} executable cases, {attempts} configuration attempts, {len(outputs)} of {slices} slices')
-    for line in problems:
-        print(line)
-    if args.report_json:
-        args.report_json.write_text(json.dumps(dict(version=1, native=True, expected_slices=slices, reports=reports)) + '\n')
-    if len(outputs) != slices or not cases:
-        print('corpus: a slice did not report, or no executable case ran', file=sys.stderr)
-        return status or 1
-    return status or (1 if problems else 0)
+    if len(outputs) != slices:
+        problems.append(f'{len(outputs)} of {slices} slices reported')
+    return status, problems, reports, attempts, cases, parted, slices
 
 
 if __name__ == '__main__':

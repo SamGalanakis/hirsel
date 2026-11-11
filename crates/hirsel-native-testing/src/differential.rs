@@ -500,6 +500,10 @@ pub enum Outcome {
     Mismatch(Observation),
     /// A tool outcome: no observation was produced.
     Unavailable(NativeError),
+    /// heap+inject over a site bound (`Fixture::heap_campaign_sites_max`): the
+    /// clean run's observation equals the reference's, and its `sites` fault
+    /// sites are injected by campaign parts, not by this run.
+    Parted { sites: u64 },
 }
 
 /// Whether two pass selections build the same Ready program.
@@ -623,29 +627,46 @@ pub fn differential_ready<P: ReadyExecution>(
             .ready(&fixture_options(&configuration.options, fixture))
             .and_then(|ready| match configuration.engine {
                 Engine::Heap { campaign: true } => {
-                    crate::heap_campaign_in(ready.program(), entry, &ready.sites(), &world)
-                        .map(|run| run.observation)
+                    let (program, sites) = (ready.program(), &ready.sites());
+                    match fixture.heap_campaign_sites_max {
+                        Some(max) if world.campaign_partition.is_none() => {
+                            crate::run_heap_in(program, entry, sites, &world).and_then(|clean| {
+                                if clean.sites > max {
+                                    Ok((clean.observation, Some(clean.sites)))
+                                } else {
+                                    crate::heap_campaign_in(program, entry, sites, &world)
+                                        .map(|run| (run.observation, None))
+                                }
+                            })
+                        }
+                        _ => crate::heap_campaign_in(program, entry, sites, &world)
+                            .map(|run| (run.observation, None)),
+                    }
                 }
                 Engine::Heap { campaign: false } => {
                     crate::run_heap_in(ready.program(), entry, &ready.sites(), &world)
-                        .map(|run| run.observation)
+                        .map(|run| (run.observation, None))
                 }
                 Engine::Native {
                     opt,
                     partition,
                     runtime,
-                } => native(Backend::Llvm, opt, partition, runtime, &ready),
+                } => native(Backend::Llvm, opt, partition, runtime, &ready).map(|o| (o, None)),
                 Engine::Cranelift { partition, runtime } => native(
                     Backend::Cranelift,
                     OptLevel::None,
                     partition,
                     runtime,
                     &ready,
-                ),
+                )
+                .map(|o| (o, None)),
             });
         let outcome = match observed {
-            Ok(observation) if observation == *reference => Outcome::Agree,
-            Ok(observation) => Outcome::Mismatch(observation),
+            Ok((observation, Some(sites))) if observation == *reference => {
+                Outcome::Parted { sites }
+            }
+            Ok((observation, None)) if observation == *reference => Outcome::Agree,
+            Ok((observation, _)) => Outcome::Mismatch(observation),
             Err(error) => Outcome::Unavailable(error),
         };
         out.push((configuration.name(), outcome));

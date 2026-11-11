@@ -233,6 +233,7 @@ fn partition(group: &str) {
                 Outcome::Mismatch(actual) => {
                     errors.push(format!("{engine} observation mismatch: {actual:?}"))
                 }
+                Outcome::Parted { .. } => unreachable!("differential runs whole campaigns"),
                 Outcome::Unavailable(error) => {
                     errors.push(format!("{:?}", history::native_error(&engine, error)))
                 }

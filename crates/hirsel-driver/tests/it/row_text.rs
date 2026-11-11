@@ -412,6 +412,9 @@ fn exact10k_owned_and_direct_builders_keep_the_fixture_bytes() {
                     hirsel_native_testing::Outcome::Unavailable(e) => {
                         panic!("{builder}: {config}: {e}")
                     }
+                    hirsel_native_testing::Outcome::Parted { .. } => {
+                        unreachable!("differential runs whole campaigns")
+                    }
                     hirsel_native_testing::Outcome::Mismatch(actual) => panic!(
                         "{builder}: {config}: output length {}, sha256 {:x}, exit {:?}",
                         actual.output.len(),

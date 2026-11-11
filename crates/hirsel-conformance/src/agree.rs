@@ -281,7 +281,8 @@ impl Native {
         for ((name, outcome), configuration) in outcomes.into_iter().zip(matrix) {
             let class = crate::native::Class::of(configuration).name();
             let found = match &outcome {
-                Outcome::Agree => {
+                // agree runs whole campaigns: it sets no site bound.
+                Outcome::Agree | Outcome::Parted { .. } => {
                     self.stats.lock().unwrap().agreed += 1;
                     continue;
                 }

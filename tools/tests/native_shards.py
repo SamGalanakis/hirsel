@@ -40,6 +40,29 @@ class NativeShards(unittest.TestCase):
             outputs['gate-native-selected-shard-6'] = json.dumps(report, indent=2)
             self.assertEqual(corpus['native'](['conformance/STORE'], 2, args), 1)
 
+    def test_a_parted_campaign_passes_only_when_every_heap_part_reports(self):
+        # 148,802 sites over a 40,000-site bound: four parts of the one case.
+        corpus = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'corpus'))
+        args = SimpleNamespace(slices=None, parts=None, config=['smoke'], heap_parts=1, report_json=None)
+        case, name = 'conformance/STORE/STORE-11-checkpoint-run.hir', 'x86_64/regions/elide/reuse/flat-walk/heap+inject'
+        report = dict(configuration_attempts=3, baseline_executable=1, baseline_minus_native_unlisted=[],
+                      stale_exclusions=[])
+        first = {'gate-native-selected-shard-1': json.dumps(dict(
+            report, heap_sites_max=40_000, heap_parted=[dict(case=case, configuration=name, sites=148_802)]), indent=2)}
+        parts = {f'gate-native-selected-shard-{i}': json.dumps(dict(
+            report, configuration_attempts=1, heap_partition=dict(index=i, count=4)), indent=2) for i in range(1, 5)}
+        calls = []
+        for missing, expected in [(None, 0), ('gate-native-selected-shard-3', 1)]:
+            second = {k: v for k, v in parts.items() if k != missing}
+            with patch.object(corpus['event_logs'], 'recorded', return_value=contextlib.nullcontext(Path('/tmp/event'))), \
+                 patch.object(corpus['subprocess'], 'run'), \
+                 patch.object(corpus['subprocess'], 'call', side_effect=lambda command, **_: calls.append(command) or 0), \
+                 patch.object(corpus['conformance'], 'shard_outputs', side_effect=[first, second]), \
+                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(corpus['native'](['conformance/STORE/STORE-11-checkpoint-run'], 1, args), expected)
+        self.assertIn('hirsel.native_paths_heap_parts=4', calls[1])
+        self.assertIn(f'hirsel.native_paths={case}', calls[1])
+
     def test_corpus_refuses_a_selection_whose_slices_outrun_the_budget(self):
         # 100 cases under their full-matrix covers fit 512 slices only as five
         # parts per case: four cover sixteenths (about 924 s) per slice.

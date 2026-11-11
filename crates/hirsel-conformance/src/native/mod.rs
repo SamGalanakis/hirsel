@@ -66,13 +66,15 @@ impl Case {
         )
     }
 
-    /// Run one complete clean execution and a disjoint fault-campaign partition.
+    /// Run one complete clean execution and a disjoint fault-campaign
+    /// partition; without one, a campaign over `sites_max` sites is left to parts.
     pub fn run_heap_partition(
         &self,
         matrix: &[Configuration],
         toolchain: &Toolchain,
         dir: &Path,
         partition: Option<hirsel_native::HeapCampaignPartition>,
+        sites_max: Option<u64>,
     ) -> CaseResult {
         run_source_path(
             &self.id,
@@ -83,6 +85,7 @@ impl Case {
             dir,
             Probe {
                 heap_partition: partition,
+                heap_sites_max: sites_max,
                 ..Probe::default()
             },
         )
@@ -139,6 +142,8 @@ impl Case {
 #[derive(Clone, Copy, Debug, Default)]
 struct Probe {
     heap_partition: Option<hirsel_native::HeapCampaignPartition>,
+    /// A whole campaign over this many sites is left to parts (`--heap-sites-max`).
+    heap_sites_max: Option<u64>,
     /// Every engine traces its `Shared` roots (`--trace-roots`).
     trace_roots: bool,
     /// Native executables migrate every suspension (`--migrate`).
@@ -325,9 +330,11 @@ fn mismatch_reason(actual: &Observation) -> String {
     format!("observed {} ({digest:016x})", summary.replace('\t', " "))
 }
 
+/// What an exclusion row would say about `outcome`; none for agreement, and
+/// none for a parted campaign, which its parts judge.
 pub fn exclusion(outcome: &Outcome) -> Option<Exclusion> {
     match outcome {
-        Outcome::Agree => None,
+        Outcome::Agree | Outcome::Parted { .. } => None,
         Outcome::Mismatch(actual) => Some(Exclusion {
             class: "known-bug".into(),
             reason: mismatch_reason(actual),
@@ -400,8 +407,24 @@ impl CaseResult {
     }
 
     /// Whether every configuration of `class` agreed.
+    /// Every configuration of `class` agreed, and none left its campaign to parts.
     pub fn passes(&self, class: Class) -> bool {
         self.exclusions(&[class]).is_empty()
+            && !self
+                .outcomes
+                .iter()
+                .any(|(_, c, outcome)| *c == class && matches!(outcome, Outcome::Parted { .. }))
+    }
+
+    /// The heap+inject configurations whose campaigns this run left to parts,
+    /// with their fault sites.
+    pub fn parted(&self) -> impl Iterator<Item = (&str, u64)> {
+        self.outcomes
+            .iter()
+            .filter_map(|(name, _, outcome)| match outcome {
+                Outcome::Parted { sites } => Some((name.as_str(), *sites)),
+                _ => None,
+            })
     }
 }
 
@@ -600,6 +623,7 @@ fn matrix_campaign<P: ReadyExecution>(
         dir,
         &hirsel_native::Fixture {
             heap_campaign_partition: probe.heap_partition,
+            heap_campaign_sites_max: probe.heap_sites_max,
             trace_roots: probe.trace_roots,
             migrate: probe.migrate,
             ..prepared.fixture(source)
@@ -630,6 +654,7 @@ fn test_matrix_campaign<P: ReadyExecution>(
         dir,
         &hirsel_native::Fixture {
             heap_campaign_partition: probe.heap_partition,
+            heap_campaign_sites_max: probe.heap_sites_max,
             trace_roots: probe.trace_roots,
             migrate: probe.migrate,
             ..Default::default()
@@ -1446,6 +1471,8 @@ pub fn judge_classes(
                 .outcomes
                 .iter()
                 .filter(|(_, class, _)| classes.contains(class))
+                // A parted campaign is judged, against its row, by its parts.
+                .filter(|(_, _, outcome)| !matches!(outcome, Outcome::Parted { .. }))
                 .map(|(name, _, _)| name.as_str()),
         );
         for configuration in ran {
@@ -1503,6 +1530,7 @@ pub fn render_matrix(results: &[CaseResult]) -> String {
                 Outcome::Agree => ("agree", String::new()),
                 Outcome::Mismatch(actual) => ("mismatch", actual.render().replace('\n', " | ")),
                 Outcome::Unavailable(error) => ("unavailable", reason(error)),
+                Outcome::Parted { sites } => ("parted", format!("{sites} fault sites")),
             };
             text.push_str(&format!("{}\t{name}\t{status}\t{detail}\n", result.id));
         }

@@ -329,6 +329,7 @@ impl Runner {
                     disagreement: String::new(),
                 },
                 Outcome::Unavailable(error) => native_error(&configuration, error),
+                Outcome::Parted { .. } => unreachable!("differential runs whole campaigns"),
             });
         }
         report

@@ -3,6 +3,10 @@
 pub struct Fixture {
     /// A disjoint part of H's fault campaign; every part still checks the full clean run.
     pub heap_campaign_partition: Option<hirsel_heapcheck::CampaignPartition>,
+    /// A whole campaign (no partition) whose clean run has more failure-capable
+    /// sites than this is not run here: the clean run is checked, and its sites
+    /// are left to `heap_campaign_partition` parts (`Outcome::Parted`).
+    pub heap_campaign_sites_max: Option<u64>,
     /// Closed CPU batches use the same explicit grant in every engine.
     pub cpu: Option<hirsel_run_schema::CpuGrant>,
     pub tasks_free: bool,
@@ -66,6 +70,7 @@ impl Default for Fixture {
     fn default() -> Self {
         Self {
             heap_campaign_partition: None,
+            heap_campaign_sites_max: None,
             cpu: None,
             tasks_free: false,
             args: vec![],

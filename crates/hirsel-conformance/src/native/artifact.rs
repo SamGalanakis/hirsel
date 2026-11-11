@@ -130,7 +130,7 @@ impl Probe for NativeProbe<'_> {
         match outcomes.into_iter().next()?.1 {
             Outcome::Agree => Some((reference.clone(), reference)),
             Outcome::Mismatch(actual) => Some((reference, actual)),
-            Outcome::Unavailable(_) => None,
+            Outcome::Unavailable(_) | Outcome::Parted { .. } => None,
         }
     }
 }

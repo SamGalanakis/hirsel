@@ -126,6 +126,7 @@ fn agree(name: &str, source: &str, configurations: &[Configuration]) -> Observat
                     program.reference.render()
                 ),
                 Outcome::Unavailable(error) => panic!("{name} under {configuration}: {error}"),
+                Outcome::Parted { .. } => unreachable!("differential runs whole campaigns"),
             }
         }
         program.reference

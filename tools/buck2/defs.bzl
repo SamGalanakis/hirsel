@@ -540,15 +540,20 @@ def selected_paths(key, index):
     `--case-part (index-1) % N + 1/N` (not the hash shard) and `--config-part (index-1) // N + 1/K` of each case's
     configurations, and `_configs=<name>|<name>`, run only those
     configurations. `_heap_parts=H` adds disjoint fault partitions, with each
-    --heap-part checking the complete clean run. None past the last slice."""
+    --heap-part checking the complete clean run; `_heap_sites_max=S` instead
+    leaves a whole campaign over S fault sites to such parts (`--heap-sites-max`).
+    None past the last slice."""
     slices = [part for part in read_root_config("hirsel", key, "").split(";") if part]
     split = int(read_root_config("hirsel", key + "_split", "1"))
     parts = int(read_root_config("hirsel", key + "_parts", "1"))
     heap_parts = int(read_root_config("hirsel", key + "_heap_parts", "1"))
+    sites_max = read_root_config("hirsel", key + "_heap_sites_max", "")
     configs = [name for name in read_root_config("hirsel", key + "_configs", "").split("|") if name]
-    if (parts > 1 or configs or heap_parts > 1) and key != "native_paths":
-        fail("only hirsel.native_paths takes _parts and _configs")
+    if (parts > 1 or configs or heap_parts > 1 or sites_max) and key != "native_paths":
+        fail("only hirsel.native_paths takes _parts, _configs and heap bounds")
     extra = [arg for name in configs for arg in ["--config", name]]
+    if sites_max:
+        extra = extra + ["--heap-sites-max", sites_max]
     if split > 1 or parts > 1 or heap_parts > 1:
         if key not in ["conformance_paths", "native_paths"]:
             fail("only hirsel.conformance_paths and hirsel.native_paths take a _split")

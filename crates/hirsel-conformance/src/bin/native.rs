@@ -34,7 +34,7 @@ use hirsel_native_testing::topology_matrix;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: native --std-compile [--filter MODULE] [--shard I/N] | --corpus [--seed N] [--shard I/N] | --bugs | --smoke [--filter TEXT]... | --sanitize [--filter TEXT]... | --cranelift [--clif] [--aarch64] [--filter TEXT]... [--shard I/N] | --cranelift-times [--filter TEXT]... | --trace-roots [--filter TEXT]... [--shard I/N] | --migrate [--filter TEXT]... [--shard I/N] | --full [--bless] [--filter TEXT]... [--shard I/N] [--engine heap|llvm|diagnostic|default|system] [--seed N] [--exhaustive] [--config NAME|smoke]... [--config-part K/N] [--case-part K/N] [--heap-part K/N] | --hash-sweep [--filter TEXT]... | --replay DIR | --reduce DIR\n\
+const USAGE: &str = "usage: native --std-compile [--filter MODULE] [--shard I/N] | --corpus [--seed N] [--shard I/N] | --bugs | --smoke [--filter TEXT]... | --sanitize [--filter TEXT]... | --cranelift [--clif] [--aarch64] [--filter TEXT]... [--shard I/N] | --cranelift-times [--filter TEXT]... | --trace-roots [--filter TEXT]... [--shard I/N] | --migrate [--filter TEXT]... [--shard I/N] | --full [--bless] [--filter TEXT]... [--shard I/N] [--engine heap|llvm|diagnostic|default|system] [--seed N] [--exhaustive] [--config NAME|smoke]... [--config-part K/N] [--case-part K/N] [--heap-part K/N | --heap-sites-max N] | --hash-sweep [--filter TEXT]... | --replay DIR | --reduce DIR\n\
                      options: [--case ID]... [--root PATH] [--jobs N] [--out DIR] [--hash-seed N]";
 
 fn main() -> ExitCode {
@@ -232,6 +232,13 @@ fn all_agree(what: &str, results: &[native::CaseResult]) -> bool {
                 }
                 Outcome::Unavailable(error) => {
                     eprintln!("{what}: {} under {name}: {error}", result.id);
+                    ok = false;
+                }
+                Outcome::Parted { sites } => {
+                    eprintln!(
+                        "{what}: {} under {name}: {sites} fault sites left to campaign parts",
+                        result.id
+                    );
                     ok = false;
                 }
             }
@@ -515,6 +522,7 @@ fn run() -> Result<bool, String> {
                         Shard::parse(&value).ok_or("--heap-part must be K/N with 1 <= K <= N")?,
                     );
                 }
+                Long("heap-sites-max") => configs.sites_max = Some(args.value()?.parse()?),
                 Long("case-part") => {
                     let value = args.value()?.string()?;
                     configs.cases = Some(
@@ -550,7 +558,10 @@ fn run() -> Result<bool, String> {
         return Err("--engine requires --full".into());
     }
     if !configs.is_all() && mode != "--full" {
-        return Err("--config, --config-part, --case-part and --heap-part require --full".into());
+        return Err(
+            "--config, --config-part, --case-part, --heap-part and --heap-sites-max require --full"
+                .into(),
+        );
     }
     if filter.1.is_some()
         && !matches!(
@@ -1133,11 +1144,18 @@ struct Chosen {
     part: Option<Shard>,
     cases: Option<Shard>,
     heap: Option<Shard>,
+    /// `--heap-sites-max N`: a heap+inject campaign over N fault sites is
+    /// left to `--heap-part`s, reported as `heap_parted` with its sites.
+    sites_max: Option<u64>,
 }
 
 impl Chosen {
     fn is_all(&self) -> bool {
-        self.names.is_empty() && self.part.is_none() && self.cases.is_none() && self.heap.is_none()
+        self.names.is_empty()
+            && self.part.is_none()
+            && self.cases.is_none()
+            && self.heap.is_none()
+            && self.sites_max.is_none()
     }
 
     /// This part's share of the selected cases.
@@ -1163,6 +1181,11 @@ impl Chosen {
                 }))
         {
             return Err("--heap-part requires named heap+inject configurations only".into());
+        }
+        if self.heap.is_some() && self.sites_max.is_some() {
+            return Err(
+                "--heap-sites-max bounds a whole campaign; a --heap-part is one part".into(),
+            );
         }
         for name in &self.names {
             if !matrix.iter().any(|c| Self::named(c, name)) {
@@ -1306,6 +1329,7 @@ fn full(
                 hirsel_native::HeapCampaignPartition::new(part.index, part.count)
                     .expect("validated shard")
             }),
+            configs.sites_max,
         )
     });
     let write = |name: &str, text: &str| {
@@ -1545,6 +1569,18 @@ fn full(
     let mut json = report.json();
     if let Some(part) = configs.heap {
         json["heap_partition"] = serde_json::json!({"index": part.index, "count": part.count});
+    }
+    if let Some(max) = configs.sites_max {
+        json["heap_sites_max"] = max.into();
+        json["heap_parted"] = results
+            .iter()
+            .flat_map(|r| {
+                r.parted().map(|(configuration, sites)| {
+                    serde_json::json!({"case": r.id, "configuration": configuration, "sites": sites})
+                })
+            })
+            .collect::<Vec<_>>()
+            .into();
     }
     json["seed"] = seed.into();
     json["exhaustive"] = exhaustive.into();

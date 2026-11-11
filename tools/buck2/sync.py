@@ -551,6 +551,12 @@ NATIVE_CONFIG_SECONDS = 16
 NATIVE_COVER_PARTS = 16
 NATIVE_COVER_PART_SECONDS = 231
 NATIVE_HEAP_PART_SECONDS = 450
+# A heap+inject campaign injects a fault at every failure-capable site of its
+# clean run, about 6 ms each (STORE-11-checkpoint-run: 148,802 sites, 916 s of
+# a 991 s smoke action on 2026-11-11). A whole campaign runs inside its case's
+# action up to this many sites; a larger one is left to ceil(sites / this)
+# heap parts, so one action holds about 240 s of faults.
+NATIVE_HEAP_PART_SITES = 40_000
 # The full native matrix (tools/main-runs) runs as shards of the baseline by
 # path hash, each case under its rotating pairwise cover, so each shard stays well
 # under its Buck2 timeout; gate-native-full stays whole for --bless and for a

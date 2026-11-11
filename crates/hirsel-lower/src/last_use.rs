@@ -130,25 +130,93 @@ struct Step {
     cursors: Vec<(PlaceId, BTreeSet<u32>)>,
 }
 
+/// A set of a body's place or loan IDs, one bit each, iterated ascending.
+#[derive(Clone, Default)]
+struct Bits(Vec<u64>);
+impl Bits {
+    fn insert(&mut self, id: u32) -> bool {
+        let (word, bit) = (id as usize / 64, 1 << (id % 64));
+        if word >= self.0.len() {
+            self.0.resize(word + 1, 0);
+        }
+        let new = self.0[word] & bit == 0;
+        self.0[word] |= bit;
+        new
+    }
+    fn remove(&mut self, id: u32) {
+        if let Some(word) = self.0.get_mut(id as usize / 64) {
+            *word &= !(1 << (id % 64));
+        }
+    }
+    fn contains(&self, id: u32) -> bool {
+        self.0
+            .get(id as usize / 64)
+            .is_some_and(|word| word & (1 << (id % 64)) != 0)
+    }
+    fn union(&mut self, other: &Self) {
+        if other.0.len() > self.0.len() {
+            self.0.resize(other.0.len(), 0);
+        }
+        for (word, other) in self.0.iter_mut().zip(&other.0) {
+            *word |= other;
+        }
+    }
+    fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        self.0.iter().enumerate().flat_map(|(index, &word)| {
+            let mut word = word;
+            std::iter::from_fn(move || {
+                (word != 0).then(|| {
+                    let bit = word.trailing_zeros();
+                    word &= word - 1;
+                    index as u32 * 64 + bit
+                })
+            })
+        })
+    }
+    /// The IDs in this set and not in `other`, ascending.
+    fn difference<'a>(&'a self, other: &'a Self) -> impl Iterator<Item = u32> + 'a {
+        self.iter().filter(|id| !other.contains(*id))
+    }
+}
+impl PartialEq for Bits {
+    fn eq(&self, other: &Self) -> bool {
+        let (short, long) = if self.0.len() <= other.0.len() {
+            (&self.0, &other.0)
+        } else {
+            (&other.0, &self.0)
+        };
+        short == &long[..short.len()] && long[short.len()..].iter().all(|word| *word == 0)
+    }
+}
+impl FromIterator<u32> for Bits {
+    fn from_iter<I: IntoIterator<Item = u32>>(ids: I) -> Self {
+        let mut bits = Self::default();
+        for id in ids {
+            bits.insert(id);
+        }
+        bits
+    }
+}
+
 /// What is needed at a point: loans needed through later accesses, and places
 /// whose installed content a later step reads before replacing it.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq)]
 struct Live {
-    loans: BTreeSet<u32>,
-    places: BTreeSet<u32>,
+    loans: Bits,
+    places: Bits,
 }
 impl Live {
     fn of(step: &Step) -> Self {
         Self {
-            loans: step.needs.clone(),
+            loans: step.needs.iter().copied().collect(),
             places: step.reads.iter().map(|place| place.0).collect(),
         }
     }
     fn after(successors: &[usize], live_in: &[Live]) -> Self {
         let mut live = Self::default();
         for next in successors {
-            live.loans.extend(&live_in[*next].loans);
-            live.places.extend(&live_in[*next].places);
+            live.loans.union(&live_in[*next].loans);
+            live.places.union(&live_in[*next].places);
         }
         live
     }
@@ -258,14 +326,26 @@ impl Builder<'_, '_> {
                 predecessors[n].push(block);
             }
         }
+        // A whole root's write replaces the content of every place on it.
+        let mut on_root = vec![vec![]; self.body.locals.len()];
+        for (id, place) in self.body.places.iter().enumerate() {
+            on_root[place.root.0 as usize].push(id as u32);
+        }
+        // The least fixed point does not depend on the visiting order; a
+        // block's successors first (postorder) needs the fewest visits.
         let mut live_in = vec![Live::default(); blocks];
-        let mut pending: VecDeque<_> = (0..blocks).rev().collect();
-        let mut queued = vec![true; blocks];
+        let mut pending: VecDeque<_> = postorder(self.body.entry.0 as usize, &successors).into();
+        let mut queued = vec![false; blocks];
+        for &block in &pending {
+            queued[block] = true;
+        }
+        pending.extend((0..blocks).rev().filter(|block| !queued[*block]));
+        queued.fill(true);
         while let Some(block) = pending.pop_front() {
             queued[block] = false;
             let mut live = Live::after(&successors[block], &live_in);
             for step in steps[block].iter().rev() {
-                self.live_before(&mut live, step);
+                self.live_before(&mut live, step, &on_root);
             }
             if live != live_in[block] {
                 live_in[block] = live;
@@ -279,8 +359,8 @@ impl Builder<'_, '_> {
         }
         // The loans needed at each block's entry and exit, against the content
         // there: an exit reads its successors' places through its own content.
-        let mut needed_in = vec![BTreeSet::new(); blocks];
-        let mut exits = vec![BTreeSet::new(); blocks];
+        let mut needed_in = vec![Bits::default(); blocks];
+        let mut exits = vec![Bits::default(); blocks];
         for block in 0..blocks {
             let Some(mut content) = entry[block].clone() else {
                 continue;
@@ -293,7 +373,7 @@ impl Builder<'_, '_> {
             let terminator = steps[block].last().unwrap();
             let mut exit = self.needed(&content, &Live::of(terminator));
             self.transfer_terminator(&mut content, block);
-            exit.extend(self.needed(&content, &Live::after(&successors[block], &live_in)));
+            exit.union(&self.needed(&content, &Live::after(&successors[block], &live_in)));
             exits[block] = exit;
         }
         // End each loan where it stops being needed. Ends of loans that are
@@ -309,19 +389,19 @@ impl Builder<'_, '_> {
             let mut live = Live::after(&successors[block], &live_in);
             for (index, step) in steps[block].iter().enumerate().rev() {
                 after[index] = live.clone();
-                self.live_before(&mut live, step);
+                self.live_before(&mut live, step, &on_root);
             }
             let span = self.body.blocks[block].span;
             let instructions = std::mem::take(&mut self.body.blocks[block].instructions);
             let mut output = Vec::with_capacity(instructions.len());
             let entry_failure = instructions.first().map_or(CleanupId(0), |i| i.on_failure);
             // Loans a predecessor still needed on another of its edges.
-            let incoming: BTreeSet<u32> = predecessors[block]
-                .iter()
-                .flat_map(|p| exits[*p].iter().copied())
-                .collect();
+            let mut incoming = Bits::default();
+            for previous in &predecessors[block] {
+                incoming.union(&exits[*previous]);
+            }
             // Child loans have later IDs, so they end first.
-            let ended: Vec<u32> = incoming.difference(&needed_in[block]).copied().collect();
+            let ended: Vec<u32> = incoming.difference(&needed_in[block]).collect();
             let mut content = entry[block].clone().unwrap();
             let cursors = self.cursor_holders(&content);
             // A loop body's iteration charge stays its first instruction (CT-4);
@@ -346,7 +426,9 @@ impl Builder<'_, '_> {
             }
             let mut before = needed_in[block].clone();
             for (index, mut instruction) in instructions.into_iter().enumerate() {
-                before.extend(steps[block][index].begins);
+                if let Some(loan) = steps[block][index].begins {
+                    before.insert(loan);
+                }
                 self.transfer_content(&mut content, &instruction.kind);
                 // The last instruction's successor is the terminator, which
                 // reads against the content before it, as here.
@@ -357,7 +439,7 @@ impl Builder<'_, '_> {
                 // through every later use, including destruction and loop
                 // feedback. Failure cleanup still ends all permissions.
                 match &mut instruction.kind {
-                    InstructionKind::EndLoan { loan, .. } if needed.contains(&loan.0) => {
+                    InstructionKind::EndLoan { loan, .. } if needed.contains(loan.0) => {
                         continue;
                     }
                     InstructionKind::RunCleanup(cleanup) => {
@@ -365,7 +447,7 @@ impl Builder<'_, '_> {
                     }
                     _ => {}
                 }
-                let ended: Vec<u32> = before.difference(&needed).copied().collect();
+                let ended: Vec<u32> = before.difference(&needed).collect();
                 let span = instruction.span;
                 let on_failure = if ended.is_empty() {
                     instruction.on_failure
@@ -442,61 +524,63 @@ impl Builder<'_, '_> {
         loans.reverse(); // cleanup_for prepends ends in creation order.
         self.cleanup_for(&slots, &loans)
     }
-    fn defer_live_loans(&mut self, cleanup: CleanupId, needed: &BTreeSet<u32>) -> CleanupId {
+    fn defer_live_loans(&mut self, cleanup: CleanupId, needed: &Bits) -> CleanupId {
         let actions: Vec<_> = self.body.cleanup_actions(cleanup).cloned().collect();
         if !actions.iter().any(|action| {
-            matches!(action, CleanupAction::EndLoan { loan, .. } if needed.contains(&loan.0))
+            matches!(action, CleanupAction::EndLoan { loan, .. } if needed.contains(loan.0))
         }) {
             return cleanup;
         }
         let mut head = None;
         for action in actions.into_iter().rev() {
-            if matches!(&action, CleanupAction::EndLoan { loan, .. } if needed.contains(&loan.0)) {
+            if matches!(&action, CleanupAction::EndLoan { loan, .. } if needed.contains(loan.0)) {
                 continue;
             }
             head = Some(self.cleanup_node(action, head));
         }
         self.cleanup_root(head)
     }
-    /// The places live before `step`, from those live after it.
-    fn live_before(&self, live: &mut Live, step: &Step) {
-        live.places.retain(|place| {
-            !step
-                .defines
-                .iter()
-                .any(|defined| self.replaces(*defined, PlaceId(*place)))
-        });
-        live.places.extend(step.reads.iter().map(|place| place.0));
-        if let Some(loan) = step.begins {
-            live.loans.remove(&loan);
+    /// The places live before `step`, from those live after it. Only a whole
+    /// root's write replaces all the content a read of a place on it uses: a
+    /// part's write keeps the rows of its ancestors, which a read of any part
+    /// below them still uses. `on_root` holds each root's places.
+    fn live_before(&self, live: &mut Live, step: &Step, on_root: &[Vec<u32>]) {
+        for defined in &step.defines {
+            let defined = &self.body.places[defined.0 as usize];
+            if defined.projection.is_empty() {
+                for place in &on_root[defined.root.0 as usize] {
+                    live.places.remove(*place);
+                }
+            }
         }
-        live.loans.extend(&step.needs);
-    }
-    /// Whether writing `defined` replaces all the content a read of `place`
-    /// uses. Only a whole root's write does: a part's write keeps the rows of
-    /// its ancestors, which a read of any part below them still uses.
-    fn replaces(&self, defined: PlaceId, place: PlaceId) -> bool {
-        let defined = &self.body.places[defined.0 as usize];
-        defined.projection.is_empty() && defined.root == self.body.places[place.0 as usize].root
+        for place in &step.reads {
+            live.places.insert(place.0);
+        }
+        if let Some(loan) = step.begins {
+            live.loans.remove(loan);
+        }
+        for loan in &step.needs {
+            live.loans.insert(*loan);
+        }
     }
     /// The loans `live` needs against `content`: its own loans and those the
     /// content of its places holds, each with whatever its source's content
     /// holds.
-    fn needed(&self, content: &Content, live: &Live) -> BTreeSet<u32> {
-        let mut pending: Vec<u32> = live.loans.iter().copied().collect();
-        for place in &live.places {
-            for loans in content.held(&self.body.places[*place as usize]) {
+    fn needed(&self, content: &Content, live: &Live) -> Bits {
+        let mut pending: Vec<u32> = live.loans.iter().collect();
+        for place in live.places.iter() {
+            for loans in content.held(&self.body.places[place as usize]) {
                 pending.extend(loans);
             }
         }
-        let mut needs = BTreeSet::new();
+        let mut needs = Bits::default();
         while let Some(loan) = pending.pop() {
             if !needs.insert(loan) {
                 continue;
             }
             let source = &self.body.places[self.loan_source(LoanId(loan)).0 as usize];
             for held in content.held(source) {
-                pending.extend(held.iter().filter(|l| !needs.contains(l)));
+                pending.extend(held.iter().filter(|l| !needs.contains(**l)));
             }
         }
         needs
@@ -843,6 +927,28 @@ impl Builder<'_, '_> {
         }
         content.set(&self.body.places[destination.0 as usize], held);
     }
+}
+
+/// The blocks reachable from `entry`, each after all its successors but those
+/// it reaches back through.
+fn postorder(entry: usize, successors: &[Vec<usize>]) -> Vec<usize> {
+    let mut order = Vec::with_capacity(successors.len());
+    let mut seen = vec![false; successors.len()];
+    seen[entry] = true;
+    let mut stack = vec![(entry, 0)];
+    while let Some((block, next)) = stack.last_mut() {
+        if let Some(&successor) = successors[*block].get(*next) {
+            *next += 1;
+            if !seen[successor] {
+                seen[successor] = true;
+                stack.push((successor, 0));
+            }
+        } else {
+            order.push(*block);
+            stack.pop();
+        }
+    }
+    order
 }
 
 fn rvalue_operands(rvalue: &Rvalue) -> Vec<&Operand> {

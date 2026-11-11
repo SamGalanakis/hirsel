@@ -240,7 +240,8 @@ hirsel build hello.hir --target aarch64-linux -o hello-arm64
 
 The edit loop's commands, `build --debug` and `run --native`, compile with
 Cranelift unless `--backend llvm` asks for LLVM; default and release builds use
-LLVM O2. `--lto` explicitly requests whole-module LLVM O2;
+LLVM O2, and so does a `serve --native` place head unless `--backend cranelift` asks for
+Cranelift. `--lto` explicitly requests whole-module LLVM O2;
 it cannot be combined with `--debug` or `--backend cranelift`. Combining
 `--release` with `--backend cranelift` is refused. The backends' own
 IR verifiers (LLVM's module verifier, Cranelift's `enable_verifier`) run only with

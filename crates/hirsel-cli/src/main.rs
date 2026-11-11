@@ -874,11 +874,12 @@ fn parse_command(args: Vec<OsString>) -> Result<Command, lexopt::Error> {
                 return Err("--backend requires --native".into());
             }
             match (file, host) {
-                // A native head is the edit loop's: Cranelift unless LLVM is asked for.
+                // A native head is a deployment's: it builds as `build --release` does, with
+                // LLVM unless Cranelift is asked for.
                 (Some(file), Some(host)) => Command::Serve {
                     file,
                     host,
-                    native: native.then(|| selected.unwrap_or(hirsel_native::Backend::Cranelift)),
+                    native: native.then(|| selected.unwrap_or(hirsel_native::Backend::Llvm)),
                 },
                 _ => return Err("serve requires a program and --host <json>".into()),
             }

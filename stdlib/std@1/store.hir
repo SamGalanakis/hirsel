@@ -189,7 +189,7 @@ type Kept {
 }
 
 // What a reader pin entry asks of the commit that records it.
-type PinOp = Acquire(token: Bytes, principal: String) | Release(token: Bytes)
+type PinOp = Acquire(token: Bytes, principal: String) | Release(token: Bytes) | Pin(name: Bytes, version: u64) | Unpin(name: Bytes)
 
 /// What a store's head states about one transaction (STORE-4), the same for
 /// every run of it: the caller's principal (empty for a local call), the
@@ -1409,31 +1409,86 @@ pub fn release_reader_pin(mut s: Store, id: Bytes) -> Result[bool, StoreError] {
   let Some(token) = take found else {
     return Ok(false)
   }
-  let r = retained(s, Release(token: take token), s.visible)?
-  let Retention(body: body, readers: readers, kept: kept) = take r
+  retain_by(mut s, Release(token: take token))?
+  Ok(true)
+}
+
+/// Pins version `v` under `name` (STORE-8), by a Retain commit the engine
+/// makes on its own behalf, durable at the strongest declared level before it
+/// returns: `store.at` reads a pinned version until it is unpinned. A name the
+/// store holds already moves to `v`. A name over 255 bytes, a 1025th name or
+/// a version below the floor is `InvalidInput()`, and a version the store no
+/// longer retains is `NotRetained()`, as `store.at` answers it.
+pub fn pin(a: Authority, mut s: Store, name: String, v: Version of a) -> Result[(), StoreError] {
+  if s.closed {
+    return Error(Closed())
+  }
+  let key = string.as_bytes(name)
+  if bytes.len(key) > history.MAX_PIN_NAME || v.version < s.retain_floor {
+    return Error(InvalidInput())
+  }
+  let mut held = false
+  for p in s.pins {
+    held = held || p.name == key
+  }
+  if !held && list.len(s.pins) >= history.MAX_PINS {
+    return Error(InvalidInput())
+  }
+  if !holds(s, v.version) {
+    return Error(NotRetained())
+  }
+  retain_by(mut s, Pin(name: copy key, version: v.version))
+}
+
+/// Removes the named pin `name` (STORE-8), by a Retain commit as `pin` makes:
+/// false when the store holds no pin of that name, which changes nothing.
+pub fn unpin(mut s: Store, name: String) -> Result[bool, StoreError] {
+  if s.closed {
+    return Error(Closed())
+  }
+  let key = string.as_bytes(name)
+  let mut held = false
+  for p in s.pins {
+    held = held || p.name == key
+  }
+  if !held {
+    return Ok(false)
+  }
+  retain_by(mut s, Unpin(name: copy key))?
+  Ok(true)
+}
+
+// Commits the retention state after `op` as the engine's own Retain, durable
+// at the strongest declared level before it returns.
+fn retain_by(mut s: Store, op: PinOp) -> Result[(), StoreError] {
+  let r = retained(s, op, s.visible)?
+  let Retention(body: body, pins: pins, readers: readers, kept: kept) = take r
   let t = serial(mut s)
   let _ = commit(mut s, take t, take body, None()) ? unreleased
+  s.pins = take pins
   s.readers = take readers
   s.kept = take kept
   let a = s.authority
   strongest(a, mut s) ? unreleased
-  Ok(true)
+  Ok(())
 }
 
 // The retention state after a reader pin entry's `op`, run at `base`, and
 // the Retain commit that records it.
 type Retention {
   body: history.Body,
+  pins: List[history.Pin],
   readers: ordered_map.OrderedMap[Bytes, Reading],
   kept: List[Kept],
 }
 
-// The retention state after `op`, run at `base`: the reader pins, the
-// checkpoints their versions rely on, and the Retain commit that records the
-// whole state (STORE-8). A principal longer than `MAX_PRINCIPAL` is refused,
-// never cut.
+// The retention state after `op`, run at `base`: the named and reader pins,
+// the checkpoints their versions rely on, and the Retain commit that records
+// the whole state (STORE-8). A principal longer than `MAX_PRINCIPAL` is
+// refused, never cut.
 fn retained(s: Store, op: PinOp, base: u64) -> Result[Retention, StoreError] uses {} {
   let mut readers = unique s.readers
+  let mut pins = unique s.pins
   match op {
     Acquire(token: token, principal: principal) => {
       let n = bytes.len(string.as_bytes(principal))
@@ -1445,8 +1500,34 @@ fn retained(s: Store, op: PinOp, base: u64) -> Result[Retention, StoreError] use
     Release(token: token) => {
       let _ = ordered_map.remove(mut readers, token)
     },
+    Pin(name: name, version: v) => {
+      let mut out: List[history.Pin] = []
+      let mut placed = false
+      for p in pins {
+        if !placed && compare_keys(name, p.name) <= 0 {
+          list.push(mut out, history.Pin(name: unique name, version: v))
+          placed = true
+        }
+        if p.name != name {
+          list.push(mut out, unique p)
+        }
+      }
+      if !placed {
+        list.push(mut out, history.Pin(name: unique name, version: v))
+      }
+      pins = take out
+    },
+    Unpin(name: name) => {
+      let mut out: List[history.Pin] = []
+      for p in pins {
+        if p.name != name {
+          list.push(mut out, unique p)
+        }
+      }
+      pins = take out
+    },
   }
-  let (table, kept) = relied(s, readers)
+  let (table, kept) = relied(s, readers, pins)
   let mut checkpoints: List[history.Descriptor] = []
   for k in kept {
     list.push(mut checkpoints, unique k.desc)
@@ -1454,7 +1535,7 @@ fn retained(s: Store, op: PinOp, base: u64) -> Result[Retention, StoreError] use
   let body: history.Body = Engine(
     Retain(
       floor: s.retain_floor,
-      pins: unique s.pins,
+      pins: copy pins,
       readers: take table,
       checkpoints: take checkpoints
     )
@@ -1462,6 +1543,7 @@ fn retained(s: Store, op: PinOp, base: u64) -> Result[Retention, StoreError] use
   Ok(
     Retention(
       body: take body,
+      pins: take pins,
       readers: take readers,
       kept: take kept
     )
@@ -1474,7 +1556,7 @@ fn retained(s: Store, op: PinOp, base: u64) -> Result[Retention, StoreError] use
 // version below every checkpoint relies on none: it replays from the genesis.
 // One sort, so a commit at a full table costs O(n log n), and the newest
 // checkpoint's nodes are listed at most once.
-fn relied(s: Store, readers: ordered_map.OrderedMap[Bytes, Reading]) -> (
+fn relied(s: Store, readers: ordered_map.OrderedMap[Bytes, Reading], pins: List[history.Pin]) -> (
   List[history.Reader],
   List[Kept]
 ) uses {} {
@@ -1494,22 +1576,9 @@ fn relied(s: Store, readers: ordered_map.OrderedMap[Bytes, Reading]) -> (
     }
     if list.len(holders) == 0 {
       ver = h.version
-      match relied_on(s, ver) {
-        Some(Older(k)) => {
-          let mut have = false
-          for x in kept {
-            have = have || x.desc.version == k.desc.version
-          }
-          if !have {
-            list.push(mut kept, take k)
-          }
-        },
-        Some(Newest(d)) => if !newest_kept {
-          newest_kept = true
-          list.push(mut kept, Kept(desc: take d, refs: made_refs(s.live)))
-        },
-        None() => {},
-      }
+      let (more, has) = keep(s, ver, take kept, newest_kept)
+      kept = take more
+      newest_kept = has
     }
     list.push(
       mut holders,
@@ -1519,7 +1588,77 @@ fn relied(s: Store, readers: ordered_map.OrderedMap[Bytes, Reading]) -> (
   if list.len(holders) > 0 {
     list.push(mut table, history.Reader(version: ver, holders: take holders))
   }
+  // A named pin's version relies on a checkpoint as a reader's does.
+  for p in pins {
+    let (more, has) = keep(s, p.version, take kept, newest_kept)
+    kept = take more
+    newest_kept = has
+  }
   (take table, take kept)
+}
+
+// Whether the store retains `v`: at or above its newest checkpoint, or held
+// by a reader or named pin (`retains` over the store's own tables).
+fn holds(s: Store, v: u64) -> bool uses {} {
+  match s.newest {
+    Some(n) if v >= n.version => return true,
+    None() => return true,
+    _ => {},
+  }
+  for (k, r) in reading_rows(s.readers) {
+    if r.version == v {
+      return true
+    }
+  }
+  for p in s.pins {
+    if p.version == v {
+      return true
+    }
+  }
+  false
+}
+
+// `kept`, oldest first, with the checkpoint a pinned version `v` relies on,
+// once, and whether it now holds the newest checkpoint.
+fn keep(s: Store, v: u64, take kept: List[Kept], newest_kept: bool) -> (List[Kept], bool) uses {} {
+  match relied_on(s, v) {
+    Some(Older(k)) => {
+      let mut have = false
+      for x in kept {
+        have = have || x.desc.version == k.desc.version
+      }
+      if have {
+        return (take kept, newest_kept)
+      }
+      (by_age(take kept, take k), newest_kept)
+    },
+    Some(Newest(d)) => {
+      if newest_kept {
+        return (take kept, true)
+      }
+      (by_age(take kept, Kept(desc: take d, refs: made_refs(s.live))), true)
+    },
+    None() => (take kept, newest_kept),
+  }
+}
+
+// `kept` with `k` placed by its checkpoint's version, oldest first.
+fn by_age(take kept: List[Kept], take k: Kept) -> List[Kept] uses {} {
+  let mut out: List[Kept] = []
+  let mut item = Some(take k)
+  for x in kept {
+    if let Some(n) = item {
+      if n.desc.version < x.desc.version {
+        list.push(mut out, unique n)
+        item = None()
+      }
+    }
+    list.push(mut out, unique x)
+  }
+  if let Some(n) = take item {
+    list.push(mut out, unique n)
+  }
+  take out
 }
 
 // One holder of a reader pin, as `relied` orders them.
@@ -1617,6 +1756,7 @@ type Past {
   groups: List[Placed],
   checkpoints: List[history.Descriptor],
   readers: List[history.Reader],
+  pins: List[history.Pin],
   roots: List[history.Descriptor],
   limits: Option[StoreLimits],
   last: u64,
@@ -1649,6 +1789,7 @@ fn survey(a: Authority) -> Result[Past, StoreError] {
     groups: [],
     checkpoints: [],
     readers: [],
+    pins: [],
     roots: [],
     limits: None(),
     last: 0
@@ -1703,8 +1844,9 @@ fn survey(a: Authority) -> Result[Past, StoreError] {
             )
           },
           Engine(Checkpoint(desc)) => list.push(mut past.checkpoints, copy desc),
-          Engine(Retain(readers: readers, checkpoints: checkpoints, ..)) => {
+          Engine(Retain(pins: pins, readers: readers, checkpoints: checkpoints, ..)) => {
             past.readers = copy readers
+            past.pins = copy pins
             past.roots = copy checkpoints
           },
           _ => {},
@@ -1730,13 +1872,18 @@ fn held_version(past: Past, token: Bytes) -> Option[u64] uses {} {
 }
 
 // Whether the history retains `v`: at or above its newest checkpoint, or held
-// by a reader pin, and durable at the strongest level.
+// by a named or reader pin, and durable at the strongest level.
 fn retains(past: Past, v: u64) -> bool uses {} {
   if v == 0 || v > past.last {
     return false
   }
   for r in past.readers {
     if r.version == v {
+      return true
+    }
+  }
+  for p in past.pins {
+    if p.version == v {
       return true
     }
   }
@@ -3858,7 +4005,8 @@ fn commit(mut s: Store, take t: Run, take body: history.Body, take def: Option[h
   s.visible += 1
   let made = s.visible
   if let Some(r) = take retention {
-    let Retention(readers: readers, kept: kept, ..) = take r
+    let Retention(pins: pins, readers: readers, kept: kept, ..) = take r
+    s.pins = take pins
     s.readers = take readers
     s.kept = take kept
     s.visible += 1

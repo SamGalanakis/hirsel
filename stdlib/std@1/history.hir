@@ -170,9 +170,11 @@ pub const NODE_HEADER: u64 = 13
 // digest), height, entries and bytes.
 const DESCRIPTOR_BYTES: u64 = 105
 
-const MAX_PINS: u64 = 1024
+/// The most named pins a Retain records.
+pub const MAX_PINS: u64 = 1024
 
-const MAX_PIN_NAME: u64 = 255
+/// The longest name a named pin records.
+pub const MAX_PIN_NAME: u64 = 255
 
 /// The most reader pin holders a Retain records, over all its versions.
 pub const MAX_HOLDERS: u64 = 1024

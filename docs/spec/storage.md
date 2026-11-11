@@ -661,7 +661,7 @@ fn store.at(a: Authority, v: Version of a) -> Result[Snapshot of a, StoreError]
 fn store.fork(from: Authority, v: Version of from, to: Authority) -> Result[(), StoreError]
 fn store.retain(a: Authority, mut s: Store, floor: Version of a) -> Result[(), StoreError]
 fn store.pin(a: Authority, mut s: Store, name: String, v: Version of a) -> Result[(), StoreError]
-fn store.unpin(mut s: Store, name: String) -> Result[(), StoreError]
+fn store.unpin(mut s: Store, name: String) -> Result[bool, StoreError]
 
 ReaderPin  // opaque: a 16-byte token; copyable, plain, sendable, serializable; no version
 PinError   = Limit() | Taken()
@@ -706,8 +706,8 @@ claiming it: a read "as of" that version, available to any holder of the authori
 any machine. A query runs against a snapshot on any task, in parallel with the store's
 transactions. Under `db.local@1` taking a snapshot of the head's state costs O(1).
 `store.at` reads `v` from the history durable at the strongest declared level: it is
-`NotRetained()` when `v` is below the newest checkpoint's version and no reader pin holds
-it, or when no commit up to `v` is durable there yet. It is optimistic and pins nothing:
+`NotRetained()` when `v` is below the newest checkpoint's version and no named or reader
+pin holds it, or when no commit up to `v` is durable there yet. It is optimistic and pins nothing:
 a snapshot that misses an object reads the history again, and is `NotRetained()` when `v`
 is no longer retained and `Corrupt(..)` when it still is. A snapshot is read whole when
 it opens, so it never fetches again.
@@ -731,8 +731,12 @@ keeps what reading it, forking it and re-executing from it need: a checkpoint at
 below it, the groups from that checkpoint on and the code their call records name.
 `store.retain` raises the floor and never lowers it: a floor at or below the current one
 changes nothing, and one above `D` of the strongest declared level waits for it.
-`store.pin` and `store.unpin` set and remove a pin; a pin below the floor returns
-`InvalidInput()`. Each is a commit the engine makes on its own behalf. Reclamation frees
+`store.pin` sets a pin, and moves a name the store holds already to the new version; a
+name over 255 bytes, a 1025th name or a version below the floor is `InvalidInput()`, and
+a version the store no longer retains is `NotRetained()`, as `store.at` answers it.
+`store.unpin` removes a pin and is `false` when no pin has the name, which changes
+nothing. Each is a commit the engine makes on its own behalf, durable at the strongest
+declared level before it returns, and `store.at` reads a pinned version. Reclamation frees
 only groups and nodes that no retained version and no fork reaches, and only after the
 Retain commit that released them is durable
 ([STORE-11](#store-11-engine-and-storage-seam)).

@@ -278,3 +278,10 @@ fn the_reader_pin_after_the_limit_is_refused() {
         .join("tests/fixtures/reader_pins/STORE-8-reader-pin-limit-run.hir");
     run("STORE-8-reader-pin-limit-run", &path, false, 2_000_000_000);
 }
+
+#[test]
+fn the_named_pin_after_the_limit_is_refused() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/reader_pins/STORE-8-named-pin-limit-run.hir");
+    run("STORE-8-named-pin-limit-run", &path, false, 2_000_000_000);
+}

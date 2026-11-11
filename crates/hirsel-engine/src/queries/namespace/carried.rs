@@ -15,12 +15,42 @@ use std::sync::Weak;
 pub(crate) struct ViewBase {
     pool: Arc<hirsel_engine_admission::ProcessBudget>,
     carried: Option<Carried>,
+    /// Views taken so far: the phase of the checked builds' sample.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    views: u64,
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    recheck: Recheck,
+}
+/// Which carried rows a checked build recomputes and compares.
+#[derive(Clone, Copy, PartialEq, Debug)]
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+pub(crate) enum Recheck {
+    /// One row in [`SAMPLE`], by path hash plus view ordinal: each path once
+    /// in every `SAMPLE` consecutive views, the same rows on every run.
+    Sampled,
+    /// Every carried row (`HIRSEL_CARRIED_ROW_RECHECK=every`).
+    Every,
+}
+const SAMPLE: u64 = 16;
+impl Recheck {
+    /// `HIRSEL_CARRIED_ROW_RECHECK`, read once per process.
+    pub(crate) fn of_process() -> Self {
+        static RECHECK: std::sync::OnceLock<Recheck> = std::sync::OnceLock::new();
+        *RECHECK.get_or_init(|| match std::env::var_os("HIRSEL_CARRIED_ROW_RECHECK") {
+            Some(value) if value == "every" => Recheck::Every,
+            _ => Recheck::Sampled,
+        })
+    }
 }
 /// The previous view's rows and the session constants every row read.
 pub(super) struct Carried {
     constants: Constants,
     catalog: Option<catalog::CatalogIdentity>,
     rows: HashMap<DefId, Row>,
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    view: u64,
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    recheck: Recheck,
     _charge: hirsel_engine_admission::MemoryReservation,
 }
 /// The reads every ordinary row shares.
@@ -60,14 +90,25 @@ fn same<T>(witness: &Weak<T>, current: &Arc<T>) -> bool {
 
 impl ViewBase {
     pub(crate) fn new(pool: Arc<hirsel_engine_admission::ProcessBudget>) -> Self {
+        Self::rechecking(pool, Recheck::of_process())
+    }
+    pub(crate) fn rechecking(
+        pool: Arc<hirsel_engine_admission::ProcessBudget>,
+        recheck: Recheck,
+    ) -> Self {
         Self {
             pool,
             carried: None,
+            views: 0,
+            recheck,
         }
     }
     /// The previous view's rows, if the reads every row shares are unchanged.
     pub(super) fn take(&mut self, engine: &QueryEngine) -> Option<Carried> {
+        self.views += 1;
         let mut carried = self.carried.take()?;
+        carried.view = self.views;
+        carried.recheck = self.recheck;
         if carried.constants != Constants::of(engine) {
             return None;
         }
@@ -88,11 +129,21 @@ impl ViewBase {
             constants: Constants::of(engine),
             catalog: Some(engine.catalog.identity()),
             rows: rows.0,
+            view: self.views,
+            recheck: self.recheck,
             _charge: charge,
         });
     }
 }
 impl Carried {
+    /// Whether a checked build recomputes and compares `path`'s carried row
+    /// in this view.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    pub(super) fn rechecks(&self, path: &DefPath) -> bool {
+        let hash = path.fingerprint().0;
+        let key = u64::from_le_bytes(hash[..8].try_into().expect("a content hash has 8 bytes"));
+        self.recheck == Recheck::Every || key.wrapping_add(self.view) % SAMPLE == 0
+    }
     /// The carried row of `id` when every read it made still holds.
     pub(super) fn reuse(&mut self, engine: &QueryEngine, id: DefId, path: &DefPath) -> Option<Row> {
         let row = self.rows.get(&id)?;

@@ -26,13 +26,21 @@ fn fixture(
     jobs: usize,
     run: impl FnOnce(&mut LoadedProgram, &Arc<hirsel_engine_admission::ProcessBudget>),
 ) {
+    fixture_in(Arc::new(MemStore::default()), source, jobs, run)
+}
+fn fixture_in(
+    store: Arc<dyn hirsel_engine_store::ResultStore>,
+    source: &str,
+    jobs: usize,
+    run: impl FnOnce(&mut LoadedProgram, &Arc<hirsel_engine_admission::ProcessBudget>),
+) {
     let directory = tempfile::tempdir().unwrap();
     let manifest = directory.path().join("hirsel.json");
     std::fs::write(directory.path().join("main.hir"), source).unwrap();
     std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"instance_front","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
     let compiler = COMPILER
         .with_config(CompileConfig {
-            store: Arc::new(MemStore::default()),
+            store,
             jobs: hirsel_intern::jobs::Jobs::new(jobs),
             hold_bytes: 0,
             ..Default::default()
@@ -641,6 +649,7 @@ fn bounded_instance_bootstrap_reuses_one_grant_and_refreshes_nested_final_univer
                 assert_eq!(generators.len(), 2);
                 let admission = FrontDemandAdmission {
                     carry: None,
+                    lower_carry: None,
                     jobs: hirsel_intern::jobs::Jobs::new(jobs),
                     weight: weight(),
                     max_reads: 64,
@@ -753,6 +762,7 @@ fn bounded_instance_bootstrap_refuses_short_metadata_before_body_work_or_registr
                         &generators,
                         FrontDemandAdmission {
                             carry: None,
+                            lower_carry: None,
                             jobs: hirsel_intern::jobs::Jobs::new(jobs),
                             weight: weight(),
                             max_reads: 64,
@@ -819,6 +829,7 @@ fn instance_bootstrap_failure(zero_depth: bool) {
                     &generators,
                     FrontDemandAdmission {
                         carry: None,
+                        lower_carry: None,
                         jobs: hirsel_intern::jobs::Jobs::new(jobs),
                         weight: weight(),
                         max_reads: 64,
@@ -905,6 +916,7 @@ fn instance_bootstrap_keeps_ordinary_failure_local_until_selected_front_demand()
                         &generators,
                         FrontDemandAdmission {
                             carry: None,
+                            lower_carry: None,
                             jobs: hirsel_intern::jobs::Jobs::new(jobs),
                             weight: weight(),
                             max_reads: 64,
@@ -1134,5 +1146,115 @@ fn source_requests_install_nested_instance_views_for_check_run_and_native_owners
             drop(ownership_output);
             assert_eq!(budget.reserved(), 0);
         }
+    });
+}
+
+/// A session's demand scopes share its Lower carry: after an edit, only the
+/// edited definition and its dependents are lowered again, and the carry then
+/// holds every product a scope without a carry computes.
+#[test]
+fn demand_views_relower_only_an_edited_definition_and_its_dependents() {
+    let source = |helper: &str| {
+        SOURCE.replace(
+            "  let info = type_shape.info(s)\n",
+            "  let info = type_shape.info(s)\n  let limit = comptime helper()\n",
+        ) + helper
+    };
+    // Only `helper`'s body changes: `make`'s key holds, the value it read does not.
+    let before = source("fn helper()->u8 uses {} {7u8}\n");
+    let after = source("fn helper()->u8 uses {} {8u8}\n");
+    // The carry's Lower rows after one scope: (definition name, write, subject).
+    let scope = |program: &mut LoadedProgram,
+                 budget: &Arc<hirsel_engine_admission::ProcessBudget>,
+                 carry: &Arc<LowerCarry>| {
+        let definitions = program.engine.front_source_roots();
+        let generators = program.engine.front_generator_roots(&definitions).unwrap();
+        let admission = FrontDemandAdmission {
+            carry: None,
+            lower_carry: Some(carry.clone()),
+            jobs: hirsel_intern::jobs::Jobs::new(1),
+            weight: weight(),
+            max_reads: 64,
+            runtime: budget.reserve(256 << 20).unwrap(),
+            request: budget.clone(),
+        };
+        program
+            .engine
+            .demand_front_scope(
+                &definitions,
+                &[program.entry.clone()],
+                &generators,
+                admission,
+                crate::scheduled_front::errors(),
+            )
+            .unwrap();
+        carry
+            .lower_rows()
+            .into_iter()
+            .map(|(path, write, subject)| (path.0.name.to_string(), write, subject))
+            .collect::<Vec<_>>()
+    };
+    let carry_budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
+    let new_carry = || {
+        LowerCarry::new(carry_budget.reserve(16 << 20).unwrap())
+            .ok()
+            .unwrap()
+    };
+    with_compiler_stack(|| {
+        let mut cold = Vec::new();
+        fixture(&after, 1, |program, budget| {
+            cold = scope(program, budget, &new_carry())
+        });
+        fixture(&before, 1, |program, budget| {
+            let carry = new_carry();
+            let first = scope(program, budget, &carry);
+            let mut lowered: Vec<_> = first.iter().map(|(name, _, _)| name.as_str()).collect();
+            lowered.sort();
+            assert_eq!(lowered, ["helper", "make"], "{first:?}");
+            let last = first.iter().map(|(_, write, _)| *write).max().unwrap();
+            let main = program.source_paths()[0].clone();
+            assert!(program.replace_source(&main, after.clone()).unwrap());
+            program.parse_sources().unwrap();
+            let second = scope(program, budget, &carry);
+            let mut relowered: Vec<_> = second
+                .iter()
+                .filter(|(_, write, _)| *write > last)
+                .map(|(name, _, _)| name.as_str())
+                .collect();
+            relowered.sort();
+            assert_eq!(relowered, ["helper", "make"], "{first:?}\n{second:?}");
+            let held: std::collections::BTreeSet<_> = second
+                .iter()
+                .map(|(name, _, subject)| (name.clone(), *subject))
+                .collect();
+            for (name, _, subject) in &cold {
+                assert!(
+                    held.contains(&(name.clone(), *subject)),
+                    "{name} equals a cold scope's"
+                );
+            }
+        });
+    });
+    // Another store has another verifier, which never saw the receipts the
+    // carried rows hold: its scope recomputes what executed instead of failing.
+    with_compiler_stack(|| {
+        let carry = new_carry();
+        let mut first = Vec::new();
+        fixture(&before, 1, |program, budget| {
+            first = scope(program, budget, &carry)
+        });
+        fixture(&before, 1, |program, budget| {
+            let second = scope(program, budget, &carry);
+            let held: std::collections::BTreeSet<_> = second
+                .iter()
+                .map(|(name, _, subject)| (name.clone(), *subject))
+                .collect();
+            for (name, _, subject) in &first {
+                assert!(
+                    held.contains(&(name.clone(), *subject)),
+                    "{name} under a second verifier"
+                );
+            }
+        });
     });
 }

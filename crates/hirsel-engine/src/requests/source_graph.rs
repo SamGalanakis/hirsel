@@ -679,6 +679,7 @@ pub fn prepare_source_scope(
             stop_on_error,
             FrontDemandAdmission {
                 carry: carry.map(|carry| carry.front.clone()),
+                lower_carry: carry.map(|carry| carry.lower.clone()),
                 jobs,
                 weight: plan.body,
                 max_reads: lower_reads(&definitions)?,

@@ -5,7 +5,7 @@ use crate::{NativeRecordContext, NativeRecords};
 use hirsel_engine_store::{Domain, EntryKey, Reference};
 mod carried;
 pub(in crate::queries) mod reopen;
-pub(crate) use carried::ViewBase;
+pub(crate) use carried::{Recheck, ViewBase};
 
 const GENERATION: Domain = Domain {
     kind: 0x4601_0008,
@@ -993,6 +993,9 @@ impl QueryEngine {
             let body = match reused {
                 Some(row) => {
                     #[cfg(debug_assertions)]
+                    if carried
+                        .as_ref()
+                        .is_some_and(|carried| carried.rechecks(path))
                     {
                         let (fresh, _) = self.namespace_body(path, None)?;
                         assert!(
@@ -1392,11 +1395,19 @@ mod tests {
     /// A row carried between views of one producer is served only while what
     /// it read holds: an edit recomputes the edited row, editing it back gives
     /// the first view's row again, and a path left out of a view is not
-    /// carried into the view that asks for it again. Checked builds also
-    /// recompute every carried row and compare it.
+    /// carried into the view that asks for it again. Checked builds recompute
+    /// and compare carried rows: every one, and the sample, which reaches each
+    /// path within sixteen views.
     #[test]
     fn carried_rows_follow_edits_reversals_and_removals() {
         hirsel_intern::jobs::with_compiler_stack(|| {
+            for recheck in [Recheck::Every, Recheck::Sampled] {
+                carried_rows_follow_edits(recheck);
+            }
+        });
+    }
+    fn carried_rows_follow_edits(recheck: Recheck) {
+        {
             let mut engine =
                 QueryEngine::new(default_environment(), crate::phases::engine_only_adapters())
                     .with_result_store(Arc::new(MemStore::default()));
@@ -1409,7 +1420,10 @@ mod tests {
             parse(&mut engine, "b.hir", "pub fn b()->u8{2u8}\n");
             let definitions = engine.source_paths();
             let [a, b] = [&definitions[0], &definitions[1]].map(DefId::intern);
-            let mut base = ViewBase::new(hirsel_engine_admission::ProcessBudget::new(8 << 20));
+            let mut base = ViewBase::rechecking(
+                hirsel_engine_admission::ProcessBudget::new(8 << 20),
+                recheck,
+            );
             let mut view = |engine: &mut QueryEngine, definitions: &[DefPath]| {
                 engine
                     .capture_namespace_after(definitions, &[], 8 << 20, Some(&mut base))
@@ -1421,6 +1435,15 @@ mod tests {
             let edited = view(&mut engine, &definitions);
             assert_ne!(row(&first, a).syntax, row(&edited, a).syntax);
             assert!(*row(&first, b) == *row(&edited, b));
+            // Sixteen views that each edit only `b` carry the edited `a`
+            // through every phase of the sample.
+            let mut previous = edited.clone();
+            for _ in 0..16 {
+                parse(&mut engine, "b.hir", "pub fn b()->u8{2u8}\n");
+                let next = view(&mut engine, &definitions);
+                assert!(*row(&previous, a) == *row(&next, a));
+                previous = next;
+            }
             parse(&mut engine, "a.hir", "pub fn a()->u8{1u8}\n");
             let reverted = view(&mut engine, &definitions);
             assert_eq!(row(&first, a).syntax, row(&reverted, a).syntax);
@@ -1442,7 +1465,7 @@ mod tests {
             engine.index_source(file, &context).unwrap();
             let duplicated = view(&mut engine, &definitions);
             assert!(*row(&returned, b) == *row(&duplicated, b));
-        });
+        }
     }
     #[test]
     fn namespace_installation_keeps_indexed_bodies_undemanded() {

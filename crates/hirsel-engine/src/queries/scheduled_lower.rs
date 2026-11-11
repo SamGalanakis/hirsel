@@ -3418,6 +3418,7 @@ impl QueryEngine {
         let demand_admission = if pending {
             Some(generation::demand::DemandAdmission {
                 carry: None,
+                lower_carry: None,
                 request: request.clone(),
             })
         } else {

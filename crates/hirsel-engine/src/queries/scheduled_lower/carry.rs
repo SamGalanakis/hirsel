@@ -15,6 +15,11 @@ struct Row {
     bindings: BTreeMap<hirsel_span::Anchor, (DefId, u32)>,
     types: std::sync::Weak<hirsel_types::TypeInterner>,
     type_rows: Option<Arc<hirsel_types::TypeInterner>>,
+    /// The verifier whose authority the row holds: an executed row's receipts
+    /// or a Lower row's verified output. Another verifier (another request's
+    /// store) never issued them and refuses them where it accepts generated
+    /// syntax, so the row is not offered there.
+    verifier: Option<std::sync::Weak<hirsel_validate::VerifierCache>>,
     charge: u64,
 }
 #[derive(Default)]
@@ -68,6 +73,22 @@ impl LowerCarry {
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+    /// Each carried Lower row: its definition, the write that produced it
+    /// (adoption never rewrites a row) and its execution subject.
+    pub fn lower_rows(&self) -> Vec<(DefPath, u64, ContentHash)> {
+        let rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+        rows.entries
+            .iter()
+            .filter(|((kind, _), _)| *kind == FRONT_LOWER_KIND)
+            .map(|(_, row)| {
+                (
+                    row.owner.path().clone(),
+                    row.generation,
+                    row.outcome.execution_subject,
+                )
+            })
+            .collect()
     }
     fn remember(&self, key: (u32, ContentHash), mut row: Row) {
         let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
@@ -307,6 +328,14 @@ impl FrontLowerQueries {
         if !valid {
             return;
         }
+        let verified =
+            matches!(&outcome.result, Ok(Value::Lower(lower)) if lower.local_verified.is_some());
+        let verifier = match self.store.verifier() {
+            Some(verifier) if verified || outcome.executed || outcome.execution.is_some() => {
+                Some(Arc::downgrade(&verifier))
+            }
+            _ => None,
+        };
         let Some(mut charge) = outcome.retained_bytes() else {
             return;
         };
@@ -354,6 +383,7 @@ impl FrontLowerQueries {
                 bindings,
                 types: Arc::downgrade(self.namespace.snapshot.types()),
                 type_rows,
+                verifier,
                 charge,
             },
         );
@@ -370,6 +400,14 @@ impl FrontLowerQueries {
             let rows = carry.rows.lock().unwrap_or_else(|e| e.into_inner());
             let row = rows.entries.get(&(id.kind, key.0))?;
             if row.text != key.1 || row.charge > self.weight.scratch {
+                return None;
+            }
+            if let Some(verifier) = &row.verifier
+                && !verifier
+                    .upgrade()
+                    .zip(self.store.verifier())
+                    .is_some_and(|(row, current)| Arc::ptr_eq(&row, &current))
+            {
                 return None;
             }
             row.clone()

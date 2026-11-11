@@ -9,11 +9,15 @@ use std::sync::{Mutex, Weak};
 
 pub(crate) struct DemandAdmission {
     pub carry: Option<Arc<FrontCarry>>,
+    pub lower_carry: Option<Arc<scheduled_lower::LowerCarry>>,
     pub request: Arc<hirsel_engine_admission::ProcessBudget>,
 }
 
 pub(crate) struct DemandProducer {
     carry: Option<Arc<FrontCarry>>,
+    /// Every view's Lower graph adopts these rows where their reads still
+    /// hold, so a definition whose inputs are unchanged lowers once.
+    lower_carry: Option<Arc<scheduled_lower::LowerCarry>>,
     adapters: SourcePhases,
     state: Mutex<State>,
     lower: scheduled_lower::LowerPartition,
@@ -200,6 +204,7 @@ impl DemandProducer {
             .map_err(|_| refused("producer owner metadata exceeds the request footprint"))?;
         let producer = Arc::new(Self {
             carry: admission.carry,
+            lower_carry: admission.lower_carry,
             adapters: engine.adapters.source_phases(),
             state: Mutex::new(State {
                 current: CurrentView::Initial(Arc::downgrade(&initial)),
@@ -1332,6 +1337,10 @@ impl DemandProducer {
             None,
             previous.as_deref(),
         )?;
+        if let Some(carry) = &self.lower_carry {
+            // As for Front: a carry the graph refuses leaves ordinary Lower.
+            let _ = lower.install_carry(carry.clone());
+        }
         lower.bind_demand(self)?;
         let charge = Self::take(&self.request, (3 * size_of::<DemandView>()) as u64)?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -1762,6 +1771,7 @@ mod tests {
                 initial,
                 DemandAdmission {
                     carry: None,
+                    lower_carry: None,
                     request: budget.clone(),
                 },
                 weight,

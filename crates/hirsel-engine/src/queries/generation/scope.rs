@@ -6,6 +6,7 @@ use hirsel_intern::jobs::Jobs;
 
 pub struct FrontDemandAdmission {
     pub carry: Option<Arc<FrontCarry>>,
+    pub lower_carry: Option<Arc<crate::queries::scheduled_lower::LowerCarry>>,
     pub jobs: Jobs,
     pub weight: MemoryWeight,
     pub max_reads: usize,
@@ -162,6 +163,7 @@ impl QueryEngine {
         }
         let FrontDemandAdmission {
             carry,
+            lower_carry,
             jobs,
             weight,
             max_reads,
@@ -181,7 +183,12 @@ impl QueryEngine {
                 // An optional carry miss leaves ordinary production active.
                 let _ = front.install_carry(carry.clone());
             }
-            self.front_lower_queries(definitions, front, weight, max_reads, &request, errors)
+            let lower =
+                self.front_lower_queries(definitions, front, weight, max_reads, &request, errors)?;
+            if let Some(carry) = &lower_carry {
+                let _ = lower.install_carry(carry.clone());
+            }
+            Ok(lower)
         })();
         self.bootstrap_active = previous;
         let initial = prepared.map_err(|error| {
@@ -192,6 +199,7 @@ impl QueryEngine {
             initial.clone(),
             demand::DemandAdmission {
                 carry: carry.clone(),
+                lower_carry,
                 request,
             },
             weight,

@@ -539,6 +539,26 @@ fn a_cut_fires_at_its_request_and_a_crash_holds_until_restart() {
     assert!(late.replace("x", b"1", zero).is_err());
     assert_eq!(late.delete("x"), Ok(()));
     assert_eq!(late.get("x").unwrap(), None);
+    // A stale get answers the bytes the key's latest write replaced; the next
+    // get, and a key its latest write created, answer as they are.
+    let stale = |at: u64| {
+        let o = MemoryObjects::new().with_cuts(Cuts {
+            stale_read_at: Some(at),
+            ..Cuts::default()
+        });
+        assert_eq!(o.put_new("x", b"0"), Ok(Put::Created));
+        let zero = Condition::Matches(content_tag(b"0"));
+        assert!(o.replace("x", b"1", zero).is_ok());
+        (o.get("x").unwrap(), o.get("x").unwrap())
+    };
+    assert_eq!(stale(3), (Some(b"0".to_vec()), Some(b"1".to_vec())));
+    assert_eq!(stale(4), (Some(b"1".to_vec()), Some(b"0".to_vec())));
+    let created = at(Cuts {
+        stale_read_at: Some(2),
+        ..Cuts::default()
+    });
+    assert_eq!(created.put_new("x", b"0"), Ok(Put::Created));
+    assert_eq!(created.get("x").unwrap(), Some(b"0".to_vec()));
 }
 
 #[test]

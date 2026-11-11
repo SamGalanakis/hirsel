@@ -444,7 +444,7 @@ impl ObjectStorage for DirObjects {
 /// listing and delete, one per key) are numbered from 1.
 #[derive(Debug, Default)]
 pub struct MemoryObjects {
-    objects: Mutex<BTreeMap<String, Vec<u8>>>,
+    objects: Mutex<Keyed>,
     faults: Mutex<Option<Faults>>,
     cuts: Mutex<Cutting>,
     foreign: Mutex<Option<Foreign>>,
@@ -482,6 +482,46 @@ pub struct Cuts {
     /// the claim [`MemoryObjects::on_claim`] installs runs first, its own
     /// requests counted, so a claim can land inside one advance.
     pub claim_at: Option<u64>,
+    /// A get of a key whose latest write replaced or deleted bytes answers
+    /// those bytes, as a cache or lagging replica serving the previous version
+    /// would; a key its latest write created reads as it is, and any other
+    /// request is served as usual.
+    pub stale_read_at: Option<u64>,
+}
+
+/// The objects, and the bytes each key's latest write replaced or deleted,
+/// which a stale read answers.
+#[derive(Debug, Default)]
+struct Keyed {
+    now: BTreeMap<String, Vec<u8>>,
+    before: BTreeMap<String, Vec<u8>>,
+}
+
+impl Keyed {
+    fn get(&self, key: &str) -> Option<&Vec<u8>> {
+        self.now.get(key)
+    }
+    fn contains_key(&self, key: &str) -> bool {
+        self.now.contains_key(key)
+    }
+    fn keys(&self) -> impl Iterator<Item = &String> {
+        self.now.keys()
+    }
+    fn insert(&mut self, key: String, bytes: Vec<u8>) {
+        match self.now.insert(key.clone(), bytes) {
+            Some(old) => self.before.insert(key, old),
+            None => self.before.remove(&key),
+        };
+    }
+    fn remove(&mut self, key: &str) {
+        if let Some(old) = self.now.remove(key) {
+            self.before.insert(key.into(), old);
+        }
+    }
+    /// What a stale get of `key` answers.
+    fn stale(&self, key: &str) -> Option<&Vec<u8>> {
+        self.before.get(key).or_else(|| self.now.get(key))
+    }
 }
 
 /// One request held back in transit. Request `at` is answered
@@ -499,12 +539,13 @@ pub struct Delay {
 
 /// The names of the request-number [`Cuts`] members in an `objects.sim@1`
 /// entry; `delays` is a list of `{"at": .., "lands": ..}`.
-pub const CUTS: [&str; 5] = [
+pub const CUTS: [&str; 6] = [
     "claim_at",
     "crash_at",
     "fail_at",
     "lose_response_at",
     "lose_unapplied_at",
+    "stale_read_at",
 ];
 
 #[derive(Debug, Default)]
@@ -535,10 +576,12 @@ enum Held {
 }
 
 impl Held {
-    fn apply(self, objects: &mut BTreeMap<String, Vec<u8>>) {
+    fn apply(self, objects: &mut Keyed) {
         match self {
             Held::Put { key, bytes } => {
-                objects.entry(key).or_insert(bytes);
+                if !objects.contains_key(&key) {
+                    objects.insert(key, bytes);
+                }
             }
             Held::Replace {
                 key,
@@ -564,7 +607,7 @@ impl Held {
 /// What a cut does to one request.
 enum Fate {
     /// Serve the request; answer it unless `lost`.
-    Serve { lost: bool },
+    Serve { lost: bool, stale: bool },
     /// No effect; answer this error.
     Fail(fn(String) -> StorageError),
     /// Hold the write back as the script's delay `delay` says; answer
@@ -657,6 +700,7 @@ impl MemoryObjects {
         } else {
             Fate::Serve {
                 lost: at.lose_response_at == n,
+                stale: at.stale_read_at == n,
             }
         };
         c.down = c.at.crash_at == n;
@@ -670,7 +714,16 @@ impl MemoryObjects {
         key: &str,
         write: impl FnOnce() -> Option<Held>,
     ) -> Result<Option<bool>, StorageError> {
-        match self.fate() {
+        Ok(self.decide(operation, key, write)?.0)
+    }
+    /// [`fault`](Self::fault)'s decision, and whether a read is stale.
+    fn decide(
+        &self,
+        operation: &str,
+        key: &str,
+        write: impl FnOnce() -> Option<Held>,
+    ) -> Result<(Option<bool>, bool), StorageError> {
+        let stale = match self.fate() {
             Fate::Fail(error) => return Err(error(format!("cut at {operation} {key}"))),
             Fate::Defer { delay } => {
                 if let Some(w) = write() {
@@ -682,26 +735,30 @@ impl MemoryObjects {
                     "cut at {operation} {key}: held back"
                 )));
             }
-            Fate::Serve { lost: true } => return Ok(Some(true)),
-            Fate::Serve { lost: false } => {}
-        }
+            Fate::Serve { lost: true, stale } => return Ok((Some(true), stale)),
+            Fate::Serve { lost: false, stale } => stale,
+        };
         let mut faults = self.faults.lock().expect("faults");
         let Some(faults) = faults.as_mut() else {
-            return Ok(None);
+            return Ok((None, stale));
         };
         let draw = faults.next();
-        Ok((draw % faults.one_in == 0).then_some(draw & (1 << 63) != 0))
+        Ok((
+            (draw % faults.one_in == 0).then_some(draw & (1 << 63) != 0),
+            stale,
+        ))
     }
     /// Replace an object's bytes, as a hostile or broken medium would.
     pub fn overwrite(&self, key: &str, bytes: Vec<u8>) {
         self.objects
             .lock()
             .expect("objects")
+            .now
             .insert(key.into(), bytes);
     }
     /// Every object, read past any fault.
     pub fn contents(&self) -> BTreeMap<String, Vec<u8>> {
-        self.objects.lock().expect("objects").clone()
+        self.objects.lock().expect("objects").now.clone()
     }
 }
 
@@ -712,15 +769,17 @@ fn unavailable(operation: &str, key: &str) -> StorageError {
 impl ObjectStorage for MemoryObjects {
     fn get_tagged(&self, key: &str) -> Result<Option<(Vec<u8>, Tag)>, StorageError> {
         check_key(key)?;
-        if self.fault("get", key, || None)?.is_some() {
+        let (fault, stale) = self.decide("get", key, || None)?;
+        if fault.is_some() {
             return Err(unavailable("get", key));
         }
-        Ok(self
-            .objects
-            .lock()
-            .expect("objects")
-            .get(key)
-            .map(|b| (b.clone(), content_tag(b))))
+        let objects = self.objects.lock().expect("objects");
+        let got = if stale {
+            objects.stale(key)
+        } else {
+            objects.get(key)
+        };
+        Ok(got.map(|b| (b.clone(), content_tag(b))))
     }
     fn replace(
         &self,
@@ -859,6 +918,7 @@ pub fn provider(entry: &serde_json::Value) -> Result<Provider, String> {
             "lose_unapplied_at",
             "delays",
             "claim_at",
+            "stale_read_at",
         ],
         other => return Err(format!("unsupported object storage provider {other}")),
     };
@@ -897,6 +957,7 @@ pub fn provider(entry: &serde_json::Value) -> Result<Provider, String> {
         crash_at: request("crash_at")?,
         delays: delays(provider, members.get("delays"))?,
         claim_at: request("claim_at")?,
+        stale_read_at: request("stale_read_at")?,
     };
     Ok(Provider::Sim(
         MemoryObjects::with_faults(uint("seed")?, uint("fail_one_in")?).with_cuts(cuts),

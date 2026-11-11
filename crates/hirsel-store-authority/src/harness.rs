@@ -46,7 +46,7 @@ pub(crate) fn window(
     let mut queued = Vec::new();
     for (i, (e, at)) in entries.iter().enumerate() {
         let expect = start + i as u64;
-        match a.submit(c, e.clone(), *at) {
+        match a.submit(c, e.clone(), &[], *at) {
             Ok(p) if p == expect => queued.push(p),
             Ok(p) => return Err(format!("submitted at {p}, not {expect}")),
             Err(Error::Fenced) => break,
@@ -74,7 +74,7 @@ pub(crate) fn window(
 
 /// Appends `e` alone at `at`: a submit and its wait.
 pub(crate) fn append(a: &mut dyn Authority, c: &mut Claim, e: Vec<u8>, at: Level) -> Advanced {
-    match a.submit(c, e, at) {
+    match a.submit(c, e, &[], at) {
         Ok(p) => a.wait(c, p),
         Err(Error::Refused(e)) => Advanced::Refused(e),
         Err(_) => Advanced::Fenced,
@@ -83,7 +83,8 @@ pub(crate) fn append(a: &mut dyn Authority, c: &mut Claim, e: Vec<u8>, at: Level
 
 /// Whether a dead claim stays dead: used again, it queues nothing and is fenced.
 pub(crate) fn stays_dead(a: &mut dyn Authority, c: &mut Claim, at: Level) -> bool {
-    a.submit(c, entry(0, 1), at) == Err(Error::Fenced) && a.durable(c, at) == Err(Error::Fenced)
+    a.submit(c, entry(0, 1), &[], at) == Err(Error::Fenced)
+        && a.durable(c, at) == Err(Error::Fenced)
 }
 
 /// The position a refusal names, when it names a history record.
@@ -234,9 +235,16 @@ fn schedule(seed: u64, steps: u32, levels: u8, bug: Option<Bug>) -> Result<(), S
                         .zip(window(&mut wr.sim, c, &entries, newest)?)
                 {
                     match answer {
-                        Advanced::Advanced(_) => {
-                            owe(&mut ledger, p, &Record::Appended(e.clone()), at.0, true)?
-                        }
+                        Advanced::Advanced(_) => owe(
+                            &mut ledger,
+                            p,
+                            &Record::Appended {
+                                payload: e.clone(),
+                                created: vec![],
+                            },
+                            at.0,
+                            true,
+                        )?,
                         _ => dead = true,
                     }
                 }

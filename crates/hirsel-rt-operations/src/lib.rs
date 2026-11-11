@@ -2550,6 +2550,7 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
             Physical::I64,
             Physical::I64,
             Physical::Pointer,
+            Physical::Pointer,
         ],
     },
     AbiExport {
@@ -2583,12 +2584,7 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
         symbol: "hirsel_rt_v2_authority_get",
         destination: true,
         result: Some((64, 8)),
-        parameters: &[
-            Physical::Pointer,
-            Physical::Pointer,
-            Physical::I64,
-            Physical::I64,
-        ],
+        parameters: &[Physical::Pointer, Physical::Pointer],
     },
     AbiExport {
         caller_site: false,
@@ -2598,8 +2594,7 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
         parameters: &[
             Physical::Pointer,
             Physical::Pointer,
-            Physical::I64,
-            Physical::I64,
+            Physical::Pointer,
             Physical::Pointer,
             Physical::I64,
             Physical::I64,

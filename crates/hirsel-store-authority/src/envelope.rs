@@ -3,10 +3,14 @@
 //! `Appended` record carries is the engine's payload, which no authority reads.
 //!
 //! ```text
-//! record   = "HSHIST03" prev:[32] position:u64 epoch:u64 kind:u8 body
+//! record   = "HSHIST04" prev:[32] position:u64 epoch:u64 kind:u8 body
 //! Claimed  = kind 1, body attempt:[16] identity:[32]
-//! Appended = kind 2, body payload (the rest of the record)
+//! Appended = kind 2, body count:u32 digest:[32]* payload
 //! ```
+//!
+//! An `Appended` record's inventory lists the digests of the objects the entry
+//! creates, whose lifetime and epoch are the record's own; the payload is the
+//! rest.
 //!
 //! `prev` is the SHA-256 of the record before, zeros at position 1. A
 //! `Claimed` record raises the epoch by one and names the store identity, which
@@ -15,13 +19,14 @@
 
 use sha2::{Digest, Sha256};
 
-const MAGIC: &[u8; 8] = b"HSHIST03";
+const MAGIC: &[u8; 8] = b"HSHIST04";
 /// The magic's family: other version digits are another format version.
 const FAMILY: &[u8; 6] = b"HSHIST";
 const HEADER: usize = 8 + 32 + 8 + 8 + 1;
 const CLAIMED: u8 = 1;
 const APPENDED: u8 = 2;
 const CLAIMED_BYTES: usize = HEADER + 16 + 32;
+const REF_BYTES: usize = 32;
 
 /// What a record says, without its chain fields.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -31,7 +36,11 @@ pub enum Record {
         attempt: [u8; 16],
         identity: [u8; 32],
     },
-    Appended(Vec<u8>),
+    Appended {
+        payload: Vec<u8>,
+        /// The objects the entry creates, each at the record's position and epoch.
+        created: Vec<crate::ObjectRef>,
+    },
 }
 
 /// The end of a followed history.
@@ -98,9 +107,31 @@ pub fn decode(b: &[u8]) -> Result<Record, Bad> {
             attempt: b[HEADER..HEADER + 16].try_into().unwrap(),
             identity: b[HEADER + 16..].try_into().unwrap(),
         }),
-        APPENDED if epoch > 0 => Ok(Record::Appended(b[HEADER..].to_vec())),
+        APPENDED if epoch > 0 => appended_body(u64_at(b, 40), epoch, &b[HEADER..]),
         _ => Err(Bad::Corrupt),
     }
+}
+
+/// An appended record's body at `position` in `epoch`: an inventory of
+/// digests, then the payload.
+fn appended_body(position: u64, epoch: u64, body: &[u8]) -> Result<Record, Bad> {
+    let count = u32::from_le_bytes(body.get(..4).ok_or(Bad::Corrupt)?.try_into().unwrap());
+    let refs = (count as usize)
+        .checked_mul(REF_BYTES)
+        .filter(|n| *n <= body.len() - 4)
+        .ok_or(Bad::Corrupt)?;
+    let created = body[4..4 + refs]
+        .chunks_exact(REF_BYTES)
+        .map(|d| crate::ObjectRef {
+            lifetime: position,
+            epoch,
+            digest: d.try_into().unwrap(),
+        })
+        .collect();
+    Ok(Record::Appended {
+        payload: body[4 + refs..].to_vec(),
+        created,
+    })
 }
 
 /// The record `b` and the tip after it, which must follow `tip`: `prev` is the
@@ -122,7 +153,7 @@ pub fn follow(tip: &Tip, b: &[u8]) -> Result<(Tip, Record), Bad> {
             }
             Some(*identity)
         }
-        Record::Appended(_) => {
+        Record::Appended { .. } => {
             if epoch != tip.epoch {
                 return Err(Bad::Corrupt);
             }
@@ -157,9 +188,19 @@ pub fn claimed(tip: &Tip, attempt: [u8; 16], fresh: [u8; 32]) -> Vec<u8> {
     out
 }
 
-/// The append record of `payload` after `tip`, in its epoch.
-pub fn appended(tip: &Tip, payload: &[u8]) -> Vec<u8> {
-    let mut out = header(tip, tip.epoch, APPENDED, payload.len());
+/// The append record of `payload` after `tip`, in its epoch, inventorying the
+/// objects of digests `created` at the record's position and epoch.
+pub fn appended(tip: &Tip, created: &[[u8; 32]], payload: &[u8]) -> Vec<u8> {
+    let mut out = header(
+        tip,
+        tip.epoch,
+        APPENDED,
+        4 + created.len() * REF_BYTES + payload.len(),
+    );
+    out.extend_from_slice(&(created.len() as u32).to_le_bytes());
+    for d in created {
+        out.extend_from_slice(d);
+    }
     out.extend_from_slice(payload);
     out
 }
@@ -231,7 +272,7 @@ mod tests {
     use super::*;
 
     fn hand_claim() -> Vec<u8> {
-        let mut b = b"HSHIST03".to_vec();
+        let mut b = b"HSHIST04".to_vec();
         b.extend([0; 32]);
         b.extend([1, 0, 0, 0, 0, 0, 0, 0]);
         b.extend([1, 0, 0, 0, 0, 0, 0, 0]);
@@ -241,12 +282,15 @@ mod tests {
         b
     }
 
+    /// An append at position 2 in epoch 1 creating one object.
     fn hand_append(prev: &[u8; 32]) -> Vec<u8> {
-        let mut b = b"HSHIST03".to_vec();
+        let mut b = b"HSHIST04".to_vec();
         b.extend(prev);
         b.extend([2, 0, 0, 0, 0, 0, 0, 0]);
         b.extend([1, 0, 0, 0, 0, 0, 0, 0]);
         b.push(2);
+        b.extend([1, 0, 0, 0]);
+        b.extend([0x93; 32]);
         b.extend(b"pay");
         b
     }
@@ -285,9 +329,19 @@ mod tests {
         );
         assert_eq!(tip1.digest, digest(&claim));
         let append = hand_append(&digest(&claim));
-        assert_eq!(appended(&tip1, b"pay"), append);
+        assert_eq!(appended(&tip1, &[[0x93; 32]], b"pay"), append);
         let (tip2, r2) = follow(&tip1, &append).unwrap();
-        assert_eq!(r2, Record::Appended(b"pay".to_vec()));
+        assert_eq!(
+            r2,
+            Record::Appended {
+                payload: b"pay".to_vec(),
+                created: vec![crate::ObjectRef {
+                    lifetime: 2,
+                    epoch: 1,
+                    digest: [0x93; 32]
+                }]
+            }
+        );
         assert_eq!(
             (tip2.end, tip2.epoch, tip2.identity),
             (2, 1, Some([0x92; 32]))
@@ -301,7 +355,7 @@ mod tests {
     fn records_that_break_a_chain_rule_are_refused() {
         let origin = Tip::origin();
         let (tip1, _) = follow(&origin, &claimed(&origin, [1; 16], [2; 32])).unwrap();
-        let (tip2, _) = follow(&tip1, &appended(&tip1, b"x")).unwrap();
+        let (tip2, _) = follow(&tip1, &appended(&tip1, &[], b"x")).unwrap();
         let doctored = |f: &dyn Fn(&mut Tip)| {
             let mut t = tip2.clone();
             f(&mut t);
@@ -309,14 +363,14 @@ mod tests {
         };
         let bad = [
             // Nothing before the first claim.
-            (origin.clone(), appended(&origin, b"x")),
+            (origin.clone(), appended(&origin, &[], b"x")),
             // Another prev, a skipped and a repeated position.
             (
                 tip2.clone(),
-                appended(&doctored(&|t| t.digest = [9; 32]), b"x"),
+                appended(&doctored(&|t| t.digest = [9; 32]), &[], b"x"),
             ),
-            (tip2.clone(), appended(&doctored(&|t| t.end = 3), b"x")),
-            (tip2.clone(), appended(&tip1, b"x")),
+            (tip2.clone(), appended(&doctored(&|t| t.end = 3), &[], b"x")),
+            (tip2.clone(), appended(&tip1, &[], b"x")),
             // A claim that skips an epoch or names another identity.
             (
                 tip2.clone(),
@@ -327,7 +381,10 @@ mod tests {
                 claimed(&doctored(&|t| t.identity = None), [3; 16], [4; 32]),
             ),
             // An append in another epoch.
-            (tip2.clone(), appended(&doctored(&|t| t.epoch = 2), b"x")),
+            (
+                tip2.clone(),
+                appended(&doctored(&|t| t.epoch = 2), &[], b"x"),
+            ),
         ];
         for (i, (tip, record)) in bad.iter().enumerate() {
             assert_eq!(
@@ -337,7 +394,7 @@ mod tests {
             );
         }
         // Each case's twin, built from the true tip, follows.
-        assert!(follow(&tip2, &appended(&tip2, b"x")).is_ok());
+        assert!(follow(&tip2, &appended(&tip2, &[], b"x")).is_ok());
         assert!(follow(&tip2, &claimed(&tip2, [3; 16], [4; 32])).is_ok());
     }
 
@@ -346,7 +403,7 @@ mod tests {
         let origin = Tip::origin();
         let c = claimed(&origin, [5; 16], [6; 32]);
         let (t1, _) = follow(&origin, &c).unwrap();
-        let a = appended(&t1, b"payload bytes");
+        let a = appended(&t1, &[[0x94; 32]], b"payload bytes");
         let (t2, _) = follow(&t1, &a).unwrap();
         let last = claimed(&t2, [7; 16], [0; 32]);
         let records = vec![c, a, last];

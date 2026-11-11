@@ -108,7 +108,8 @@ fn byte_descriptor_and_text_records_match_derivation_on_both_targets() {
 
 /// The runtime's own list descriptors are the derivation's, element for element, on both
 /// targets: `List[Bytes]` releases each owner; `List[Arrival]` closes each resource handle;
-/// `List[HistoryRecord]` releases the owners of each element's arm.
+/// `List[ObjectRef]` releases each digest's owner; `List[HistoryRecord]` releases the
+/// owners of each element's arm, its created list included.
 #[test]
 fn runtime_list_descriptors_match_derivation_on_both_targets() {
     use hirsel_layout::layout::{LayoutBuilder, OwnerRepresentation, Owners};
@@ -134,8 +135,11 @@ fn runtime_list_descriptors_match_derivation_on_both_targets() {
         let bytes = ty.p(Primitive::Bytes);
         let handle = ty.named(&arrival, vec![]);
         let u64 = ty.p(Primitive::U64);
-        let record = ty.variant(&[&[u64, bytes, bytes], &[bytes]]);
+        let object_ref = ty.record(&[u64, u64, bytes]);
+        let refs = ty.list(object_ref);
+        let record = ty.variant(&[&[u64, bytes, bytes], &[bytes, refs]]);
         for (element, runtime) in [
+            (object_ref, &OBJECT_REF_LIST_DESCRIPTOR.0),
             (bytes, &BYTES_LIST_DESCRIPTOR.0),
             (handle, &HANDLE_LIST_DESCRIPTOR.0),
             (record, &HISTORY_LIST_DESCRIPTOR.0),

@@ -52,12 +52,12 @@ pub type Record {
 }
 
 /// A checkpoint descriptor: the checkpoint's version (a group's last), that
-/// group's digest, the root node, the number of tree levels, and the state's
-/// entry count and key and value bytes.
+/// group's digest, the root node's object, the number of tree levels, and the
+/// state's entry count and key and value bytes.
 pub type Descriptor {
   version: u64,
   digest: Bytes,
-  root: Bytes,
+  root: ObjectRef,
   height: u8,
   entries: u64,
   bytes: u64,
@@ -76,7 +76,8 @@ pub type Pin {
   version: u64,
 }
 
-/// A commit the engine makes on its own behalf.
+/// A commit the engine makes on its own behalf. `Created()` writes nothing:
+/// its record inventories one batch of a checkpoint's fresh nodes.
 pub type Engine = Genesis(
   key_bytes: u32,
   value_bytes: u32,
@@ -89,7 +90,7 @@ pub type Engine = Genesis(
   checkpoints: List[Descriptor]
 ) | Fork(identity: Bytes, origin: Bytes, at: u64) | StreamFence(Bytes) | StreamPurge(
   Bytes
-) | Library(name: Bytes, payload: Bytes)
+) | Library(name: Bytes, payload: Bytes) | Created()
 
 /// What a commit records besides its writes: kind 1, 2 or 3.
 pub type Body = Transaction(Call) | Engine(Engine) | Run(run: Bytes, records: List[Record])
@@ -115,20 +116,20 @@ pub type Tip {
 }
 
 /// One checkpoint node: a leaf of entries, or an index of children with
-/// each child's first key, digest and leaf entry count.
+/// each child's first key, object and leaf entry count.
 pub type Node = Leaf(List[(Bytes, Bytes)]) | Index(level: u8, children: List[Child])
 
 pub type Child {
   first: Bytes,
-  digest: Bytes,
+  r: ObjectRef,
   entries: u64,
 }
 
-/// A node a checkpoint reader still has to check: the digest that names it,
+/// A node a checkpoint reader still has to check: the object that holds it,
 /// its level, the first key it must start with (none for the root), the key
 /// every entry must stay below (none for the last), and its entry count.
 pub type Expect {
-  digest: Bytes,
+  r: ObjectRef,
   level: u8,
   first: Option[Bytes],
   below: Option[Bytes],
@@ -141,15 +142,19 @@ pub type Expect {
 /// `Corrupt()`. Either refuses the open; neither removes or cuts anything.
 pub type Fault = Corrupt() | Unsupported(found: Bytes)
 
-const GROUP_MAGIC: Bytes = b"HSGRUP01"
+const GROUP_MAGIC: Bytes = b"HSGRUP02"
 
-const NODE_MAGIC: Bytes = b"HSNODE01"
+const NODE_MAGIC: Bytes = b"HSNODE02"
 
 /// The bytes of a group before its first commit: magic and count.
 pub const GROUP_HEADER: u64 = 12
 
 /// The bytes of a node before its first entry: magic, level and count.
 pub const NODE_HEADER: u64 = 13
+
+// A descriptor's encoded size: version, digest, root (lifetime, epoch,
+// digest), height, entries and bytes.
+const DESCRIPTOR_BYTES: u64 = 105
 
 const MAX_PINS: u64 = 1024
 
@@ -395,6 +400,7 @@ fn encode_engine(mut out: List[u8], e: Engine) -> u8 uses {} {
       put_bytes(mut out, payload)
       7
     },
+    Created() => 8,
   }
 }
 
@@ -402,19 +408,26 @@ fn encode_engine(mut out: List[u8], e: Engine) -> u8 uses {} {
 fn put_descriptor(mut out: List[u8], d: Option[Descriptor]) -> () uses {} {
   match d {
     None() => {
-      for _ in 0u64..89 {
+      for _ in 0u64..DESCRIPTOR_BYTES {
         list.push(mut out, 0)
       }
     },
     Some(x) => {
       put_u64(mut out, x.version)
       put_fixed(mut out, x.digest)
-      put_fixed(mut out, x.root)
+      put_ref(mut out, x.root)
       put_u8(mut out, x.height)
       put_u64(mut out, x.entries)
       put_u64(mut out, x.bytes)
     },
   }
+}
+
+// An object reference: lifetime, epoch and digest.
+fn put_ref(mut out: List[u8], r: ObjectRef) -> () uses {} {
+  put_u64(mut out, r.lifetime)
+  put_u64(mut out, r.epoch)
+  put_fixed(mut out, r.digest)
 }
 
 // ---------------------------------------------------------------- decoding
@@ -508,20 +521,39 @@ fn corrupt[T](take r: Result[T, ()]) -> Result[T, Fault] uses {} {
   }
 }
 
-fn get_descriptor(data: Bytes, mut c: Cursor) -> Result[Option[Descriptor], ()] uses {} {
-  let version = get_u64(data, mut c)?
+// An object reference: a record's position and a claim's epoch, both at
+// least 1, and a digest.
+fn get_ref(data: Bytes, mut c: Cursor) -> Result[ObjectRef, ()] uses {} {
+  let lifetime = get_u64(data, mut c)?
+  let epoch = get_u64(data, mut c)?
   let d = get_fixed(data, mut c, 32)?
-  let root = get_fixed(data, mut c, 32)?
+  if lifetime == 0 || epoch == 0 {
+    return Error(())
+  }
+  Ok(ObjectRef(lifetime: lifetime, epoch: epoch, digest: take d))
+}
+
+fn get_descriptor(data: Bytes, mut c: Cursor) -> Result[Option[Descriptor], ()] uses {} {
+  if c.end - c.at < DESCRIPTOR_BYTES {
+    return Error(())
+  }
+  let start = c.at
+  let version = get_u64(data, mut c)?
+  if version == 0 {
+    // None is all zeros, nothing else.
+    for i in start..start + DESCRIPTOR_BYTES {
+      if data[i] != 0 {
+        return Error(())
+      }
+    }
+    c.at = start + DESCRIPTOR_BYTES
+    return Ok(None())
+  }
+  let d = get_fixed(data, mut c, 32)?
+  let root = get_ref(data, mut c)?
   let height = get_u8(data, mut c)?
   let entries = get_u64(data, mut c)?
   let total = get_u64(data, mut c)?
-  if version == 0 {
-    // None is all zeros, nothing else.
-    if height != 0 || entries != 0 || total != 0 || d != zero_digest() || root != zero_digest() {
-      return Error(())
-    }
-    return Ok(None())
-  }
   if height == 0 {
     return Error(())
   }
@@ -750,6 +782,8 @@ fn decode_engine(op: u8, data: Bytes) -> Result[Engine, ()] uses {} {
     let name = get_bytes(data, mut c)?
     let payload = get_bytes(data, mut c)?
     Library(name: take name, payload: take payload)
+  } else if op == 8 {
+    Created()
   } else {
     return Error(())
   }
@@ -810,9 +844,13 @@ pub fn bounds_fit(key_bytes: u32, value_bytes: u32, b: Bounds) -> bool uses {} {
   let v: u64 = int.widen(value_bytes)
   let max: u64 = int.widen(b.node_max)
   b.node_mean > 0 && b.node_min <= b.node_mean && b.node_mean <= b.node_max && NODE_HEADER + 8 + k + v <= max && NODE_HEADER + 2 * (
-    44 + k
+    INDEX_ENTRY + k
   ) <= max
 }
+
+// An index entry's bytes besides its first key: the key's length, the child's
+// lifetime, epoch and digest, and its entry count.
+const INDEX_ENTRY: u64 = 60
 
 // One level of a tree under construction.
 type Level {
@@ -824,28 +862,59 @@ type Level {
   emitted: u64,
 }
 
+/// Where a checkpoint's nodes go. A node whose digest `live` holds reuses
+/// that object; any other is fresh, an object of the claim of `epoch`, in
+/// batches: the first batch's lifetime is `start`, each next one's one more,
+/// and a batch closes before a fresh node once it holds `refs` nodes or at
+/// least `bytes` bytes.
+pub type Placement {
+  live: ordered_map.OrderedMap[Bytes, ObjectRef],
+  epoch: u64,
+  start: u64,
+  refs: u64,
+  bytes: u64,
+}
+
 /// A checkpoint under construction: add the state's entries in ascending
 /// key order, then `finish_tree`.
 pub opaque type TreeBuilder: () uses {} {
   bounds: Bounds,
+  place: Placement,
   levels: List[Level],
-  nodes: List[(Bytes, Bytes)],
+  // The open batch, its bytes, and the closed batches before it.
+  batch: List[(ObjectRef, Bytes)],
+  batch_bytes: u64,
+  batches: List[List[(ObjectRef, Bytes)]],
+  refs: List[ObjectRef],
   entries: u64,
   bytes: u64,
 }
 
-/// A finished checkpoint: its nodes (digest and bytes, children before
-/// parents), root, height, entry count and key and value bytes.
+/// A finished checkpoint. `batches` holds its fresh nodes, children before
+/// parents, batch `i` at lifetime `start + i`: at least one batch, the last
+/// possibly empty, and only the last may be. `refs` names every node of the
+/// tree, reused or fresh, and `root` the root's.
 pub type Tree {
-  nodes: List[(Bytes, Bytes)],
-  root: Bytes,
+  batches: List[List[(ObjectRef, Bytes)]],
+  refs: List[ObjectRef],
+  root: ObjectRef,
   height: u8,
   entries: u64,
   bytes: u64,
 }
 
-pub fn tree_builder(b: Bounds) -> TreeBuilder uses {} {
-  TreeBuilder(bounds: b, levels: [], nodes: [], entries: 0, bytes: 0)
+pub fn tree_builder(b: Bounds, take p: Placement) -> TreeBuilder uses {} {
+  TreeBuilder(
+    bounds: b,
+    place: take p,
+    levels: [],
+    batch: [],
+    batch_bytes: 0,
+    batches: [],
+    refs: [],
+    entries: 0,
+    bytes: 0
+  )
 }
 
 fn new_level(level: u8) -> Level uses {} {
@@ -869,11 +938,13 @@ fn cut_here(key: Bytes, size: u64, mean: u32) -> bool uses {} {
   x * m < size << 32
 }
 
-/// Adds the next entry of the state, whose key is above every earlier one.
-/// `add_entry` over an owned builder, for a fold.
 /// The checkpoint tree of a whole state, its entries added in key order.
-pub fn checkpoint_tree(b: Bounds, state: ordered_map.OrderedMap[Bytes, Bytes]) -> Tree uses {} {
-  let start = tree_builder(b)
+pub fn checkpoint_tree(
+  b: Bounds,
+  take p: Placement,
+  state: ordered_map.OrderedMap[Bytes, Bytes]
+) -> Tree uses {} {
+  let start = tree_builder(b, take p)
   let built = ordered_map.fold_range(
     state,
     Unbounded(),
@@ -889,6 +960,7 @@ pub fn checkpoint_tree(b: Bounds, state: ordered_map.OrderedMap[Bytes, Bytes]) -
   finish_tree(take built)
 }
 
+/// Adds the next entry of the state, whose key is above every earlier one.
 pub fn add_entry(mut t: TreeBuilder, key: Bytes, value: Bytes) -> () uses {} {
   let mut entry: List[u8] = []
   put_bytes(mut entry, key)
@@ -925,21 +997,51 @@ fn push_entry(mut t: TreeBuilder, l: u64, key: Bytes, entry: Bytes, leaves: u64)
   }
 }
 
-// Closes the pending node of level `l` and adds its index entry above.
-fn emit(mut t: TreeBuilder, l: u64) -> () uses {} {
+// Closes level `l`'s pending node: its bytes and the object that holds them.
+fn close(mut t: TreeBuilder, l: u64) -> (ObjectRef, Bytes, u64) uses {} {
   let level: u8 = int.narrow(l)
   let done = replace(mut t.levels[l], new_level(level))
   let Level(out: body, count: count, size: _, first: first, entries: entries, emitted: emitted) = take done
   t.levels[l].emitted = emitted + 1
   let mut out = take body
   set_u32(mut out, 9, count)
-  let data = bytes.from_list(take out)
+  let r = place(mut t, bytes.from_list(take out))
+  (take r, take first, entries)
+}
+
+// The object for a closed node's bytes: the live one of its digest, or a
+// fresh one in the open batch, which closes first when it is full.
+fn place(mut t: TreeBuilder, take data: Bytes) -> ObjectRef uses {} {
   let d = digest(data)
+  let kept: Option[ObjectRef] = match ordered_map.get(t.place.live, d) {
+    Some(r) => Some(unique r),
+    None() => None(),
+  }
+  if let Some(r) = take kept {
+    list.push(mut t.refs, copy r)
+    return take r
+  }
+  let n = list.len(t.batch)
+  if n > 0 && (n >= t.place.refs || t.batch_bytes >= t.place.bytes) {
+    let full = replace(mut t.batch, [])
+    list.push(mut t.batches, take full)
+    t.batch_bytes = 0
+  }
+  let lifetime = t.place.start + list.len(t.batches)
+  let r = ObjectRef(lifetime: lifetime, epoch: t.place.epoch, digest: take d)
+  t.batch_bytes += bytes.len(data)
+  list.push(mut t.batch, (copy r, take data))
+  list.push(mut t.refs, copy r)
+  r
+}
+
+// Closes the pending node of level `l` and adds its index entry above.
+fn emit(mut t: TreeBuilder, l: u64) -> () uses {} {
+  let (r, first, entries) = close(mut t, l)
   let mut entry: List[u8] = []
   put_bytes(mut entry, first)
-  put_fixed(mut entry, d)
+  put_ref(mut entry, r)
   put_u64(mut entry, entries)
-  list.push(mut t.nodes, (copy d, take data))
   push_entry(mut t, l + 1, first, bytes.view_list(entry), entries)
 }
 
@@ -956,14 +1058,7 @@ pub fn finish_tree(take t: TreeBuilder) -> Tree uses {} {
     if b.levels[l].emitted == 0 {
       // Everything at this level is in its pending node: the root, closed
       // with no entry above it.
-      let level: u8 = int.narrow(l)
-      let done = replace(mut b.levels[l], new_level(level))
-      let Level(out: body, count: count, ..) = take done
-      let mut out = take body
-      set_u32(mut out, 9, count)
-      let data = bytes.from_list(take out)
-      let d = digest(data)
-      list.push(mut b.nodes, (take d, take data))
+      let _ = close(mut b, l)
       return tree_of(take b, l)
     }
     if b.levels[l].count > 0 {
@@ -971,7 +1066,7 @@ pub fn finish_tree(take t: TreeBuilder) -> Tree uses {} {
     }
     if b.levels[l].emitted == 1 {
       // This level's one node is the root; the level above holds only its
-      // entry and is dropped. No node was written after it.
+      // entry and is dropped. No node was closed after it.
       return tree_of(take b, l)
     }
     l += 1
@@ -980,15 +1075,23 @@ pub fn finish_tree(take t: TreeBuilder) -> Tree uses {} {
 }
 
 fn tree_of(take b: TreeBuilder, l: u64) -> Tree uses {} {
-  let last = list.len(b.nodes) - 1
-  let (root, _) = copy b.nodes[last]
-  let TreeBuilder(nodes: nodes, entries: entries, bytes: total, ..) = take b
-  Tree(nodes: take nodes, root: take root, height: int.narrow(l + 1), entries: entries, bytes: total)
+  let root = copy b.refs[list.len(b.refs) - 1]
+  let TreeBuilder(batch: open, batches: closed, refs: refs, entries: entries, bytes: total, ..) = take b
+  let mut batches = take closed
+  list.push(mut batches, take open)
+  Tree(
+    batches: take batches,
+    refs: take refs,
+    root: take root,
+    height: int.narrow(l + 1),
+    entries: entries,
+    bytes: total
+  )
 }
 
 /// Builds the checkpoint of `entries`, ascending by key.
-pub fn build_tree(entries: List[(Bytes, Bytes)], b: Bounds) -> Tree uses {} {
-  let mut t = tree_builder(b)
+pub fn build_tree(entries: List[(Bytes, Bytes)], b: Bounds, take p: Placement) -> Tree uses {} {
+  let mut t = tree_builder(b, take p)
   for (k, v) in entries {
     add_entry(mut t, k, v)
   }
@@ -1011,7 +1114,7 @@ pub fn descriptor(tree: Tree, version: u64, d: Bytes) -> Descriptor uses {} {
 /// The root a checkpoint reader starts from.
 pub fn root_expect(d: Descriptor) -> Expect uses {} {
   Expect(
-    digest: unique d.root,
+    r: unique d.root,
     level: d.height - 1,
     first: None(),
     below: None(),
@@ -1044,7 +1147,7 @@ fn level_fields(expects: List[Expect], blobs: List[Bytes]) -> Result[Step, ()] u
   for i in 0u64..list.len(expects) {
     let e = expects[i]
     let data = blobs[i]
-    if e.level != level || digest(data) != e.digest {
+    if e.level != level || digest(data) != e.r.digest {
       return Error(())
     }
     let mut c = Cursor(at: 0, end: bytes.len(data))
@@ -1067,7 +1170,7 @@ fn level_fields(expects: List[Expect], blobs: List[Bytes]) -> Result[Step, ()] u
     }
     let mut last: Option[Bytes] = None()
     let mut keys: List[Bytes] = []
-    let mut children: List[(Bytes, u64)] = []
+    let mut children: List[(ObjectRef, u64)] = []
     for _ in 0u64..count {
       let k = get_bytes(data, mut c)?
       if let Some(prior) = last {
@@ -1085,7 +1188,7 @@ fn level_fields(expects: List[Expect], blobs: List[Bytes]) -> Result[Step, ()] u
         let v = get_bytes(data, mut c)?
         list.push(mut leaves, (copy k, take v))
       } else {
-        let child = get_fixed(data, mut c, 32)?
+        let child = get_ref(data, mut c)?
         let n = get_u64(data, mut c)?
         list.push(mut children, (take child, n))
       }
@@ -1124,7 +1227,7 @@ fn level_fields(expects: List[Expect], blobs: List[Bytes]) -> Result[Step, ()] u
         list.push(
           mut next,
           Expect(
-            digest: take child,
+            r: take child,
             level: level - 1,
             first: Some(copy keys[j]),
             below: take below,

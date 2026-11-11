@@ -7,19 +7,36 @@
 //! authority and claim it named; [`serve`] performs it and [`Request::admits`] is the
 //! check every engine applies to an outcome, live or recorded.
 
-use crate::{Advanced, Authority, AuthorityError, Claim, Error, Level, Record};
+use crate::{Advanced, Authority, AuthorityError, Claim, Error, Level, ObjectRef, Record};
 
 /// A provider request. A level is its index among the authority's declared levels.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Request {
     Claim,
-    Submit { at: u8, payload: Vec<u8> },
-    Wait { position: u64 },
-    Durable { at: u8 },
+    Submit {
+        at: u8,
+        payload: Vec<u8>,
+        created: Vec<ObjectRef>,
+    },
+    Wait {
+        position: u64,
+    },
+    Durable {
+        at: u8,
+    },
     Reclaim,
-    Read { from: u64, at: u8, max: u64 },
-    Get { name: String },
-    Put { name: String, data: Vec<u8> },
+    Read {
+        from: u64,
+        at: u8,
+        max: u64,
+    },
+    Get {
+        r: ObjectRef,
+    },
+    Put {
+        r: ObjectRef,
+        data: Vec<u8>,
+    },
 }
 
 impl Request {
@@ -45,6 +62,7 @@ impl Request {
                 | Request::Wait { .. }
                 | Request::Durable { .. }
                 | Request::Reclaim
+                | Request::Put { .. }
         )
     }
 
@@ -83,10 +101,15 @@ impl Request {
         let mut w = Vec::new();
         match self {
             Request::Claim => w.push(0),
-            Request::Submit { at, payload } => {
-                w.push(7);
+            Request::Submit {
+                at,
+                payload,
+                created,
+            } => {
+                w.push(9);
                 w.push(*at);
                 bytes(&mut w, payload);
+                refs(&mut w, created);
             }
             Request::Wait { position } => {
                 w.push(8);
@@ -100,13 +123,13 @@ impl Request {
                 w.push(*at);
                 u64(&mut w, *max);
             }
-            Request::Get { name } => {
-                w.push(5);
-                bytes(&mut w, name.as_bytes());
+            Request::Get { r } => {
+                w.push(10);
+                object_ref(&mut w, r);
             }
-            Request::Put { name, data } => {
-                w.push(6);
-                bytes(&mut w, name.as_bytes());
+            Request::Put { r, data } => {
+                w.push(11);
+                object_ref(&mut w, r);
                 bytes(&mut w, data);
             }
         }
@@ -117,10 +140,12 @@ impl Request {
         let mut r = Reader(b);
         let q = match r.u8()? {
             0 => Request::Claim,
-            // 1 was an advance, before appends were split into submit and wait.
-            7 => Request::Submit {
+            // 1 was an advance, before appends were split into submit and wait;
+            // 7, 5 and 6 were submit, get and put before objects had references.
+            9 => Request::Submit {
                 at: r.u8()?,
                 payload: r.bytes()?.to_vec(),
+                created: r.refs()?,
             },
             8 => Request::Wait { position: r.u64()? },
             2 => Request::Durable { at: r.u8()? },
@@ -130,9 +155,9 @@ impl Request {
                 at: r.u8()?,
                 max: r.u64()?,
             },
-            5 => Request::Get { name: r.text()? },
-            6 => Request::Put {
-                name: r.text()?,
+            10 => Request::Get { r: r.object_ref()? },
+            11 => Request::Put {
+                r: r.object_ref()?,
                 data: r.bytes()?.to_vec(),
             },
             _ => return None,
@@ -173,15 +198,17 @@ pub fn serve(
                 c.end
             }))
         }
-        Request::Submit { at, payload } => {
-            Outcome::Position(p.submit(claim()?, payload, Level(at)))
-        }
+        Request::Submit {
+            at,
+            payload,
+            created,
+        } => Outcome::Position(p.submit(claim()?, payload, &created, Level(at))),
         Request::Wait { position } => Outcome::Advanced(p.wait(claim()?, position)),
         Request::Durable { at } => Outcome::Position(p.durable(claim()?, Level(at))),
         Request::Reclaim => Outcome::Unit(p.reclaim(claim()?)),
         Request::Read { from, at, max } => Outcome::Read(p.read(from, Level(at), max)),
-        Request::Get { name } => Outcome::Get(p.get(&name)),
-        Request::Put { name, data } => Outcome::Unit(p.put(&name, data)),
+        Request::Get { r } => Outcome::Get(p.get(r)),
+        Request::Put { r, data } => Outcome::Unit(p.put(claim()?, r, data)),
     };
     Ok((o, held))
 }
@@ -302,10 +329,25 @@ fn record(w: &mut Vec<u8>, e: &Record) {
             w.extend_from_slice(attempt);
             w.extend_from_slice(identity);
         }
-        Record::Appended(payload) => {
-            w.push(1);
+        // 1 was an appended record before it had an inventory.
+        Record::Appended { payload, created } => {
+            w.push(2);
             bytes(w, payload);
+            refs(w, created);
         }
+    }
+}
+
+fn object_ref(w: &mut Vec<u8>, r: &ObjectRef) {
+    u64(w, r.lifetime);
+    u64(w, r.epoch);
+    w.extend_from_slice(&r.digest);
+}
+
+fn refs(w: &mut Vec<u8>, all: &[ObjectRef]) {
+    u64(w, all.len() as u64);
+    for r in all {
+        object_ref(w, r);
     }
 }
 
@@ -383,9 +425,27 @@ impl<'a> Reader<'a> {
                 attempt: self.take(16)?.try_into().ok()?,
                 identity: self.take(32)?.try_into().ok()?,
             },
-            1 => Record::Appended(self.bytes()?.to_vec()),
+            2 => Record::Appended {
+                payload: self.bytes()?.to_vec(),
+                created: self.refs()?,
+            },
             _ => return None,
         })
+    }
+    fn object_ref(&mut self) -> Option<ObjectRef> {
+        Some(ObjectRef {
+            lifetime: self.u64()?,
+            epoch: self.u64()?,
+            digest: self.take(32)?.try_into().ok()?,
+        })
+    }
+    fn refs(&mut self) -> Option<Vec<ObjectRef>> {
+        let n = self.u64()?;
+        // Each reference is 48 bytes: a count past what remains is no list.
+        if n > (self.0.len() / 48) as u64 {
+            return None;
+        }
+        (0..n).map(|_| self.object_ref()).collect()
     }
     fn medium(&mut self) -> Option<AuthorityError> {
         Some(match self.u8()? {

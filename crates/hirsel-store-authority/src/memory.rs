@@ -108,11 +108,11 @@ impl Authority for Memory {
             .collect()
     }
 
-    fn get(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {
+    fn get_object(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {
         Ok(self.world.lock().unwrap().objects.get(name).cloned())
     }
 
-    fn put(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error> {
+    fn put_object(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error> {
         let mut w = self.world.lock().unwrap();
         match w.objects.get(name) {
             Some(old) if *old == data => Ok(()),

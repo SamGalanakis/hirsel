@@ -540,12 +540,12 @@ impl Authority for Objects {
         Ok(out)
     }
 
-    fn get(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {
+    fn get_object(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {
         let key = object_key(name)?;
         self.store.get(&key).map_err(|e| Error::Storage(failure(e)))
     }
 
-    fn put(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error> {
+    fn put_object(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error> {
         let key = object_key(name)?;
         match self.store.put_new(&key, &data) {
             Ok(Put::Created) => Ok(()),

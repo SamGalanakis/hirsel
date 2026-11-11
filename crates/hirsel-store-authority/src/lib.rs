@@ -34,6 +34,34 @@ pub use envelope::Record;
 pub use hirsel_run_schema::AuthorityGrant;
 use std::io::ErrorKind;
 
+/// An immutable object: the history position whose record creates it, the
+/// writer epoch that put it and the SHA-256 of its bytes. The authority names
+/// it; the engine never does. The epoch keeps a successor's object at a
+/// position a dead claim also put at distinct, equal bytes included.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ObjectRef {
+    pub lifetime: u64,
+    pub epoch: u64,
+    pub digest: [u8; 32],
+}
+
+impl ObjectRef {
+    /// The object's name, which each provider keeps under its own object
+    /// space: the lifetime and the epoch in 20 digits each, then the digest in
+    /// lowercase hex, separated by `-`.
+    pub fn name(&self) -> String {
+        let mut n = format!("{:020}-{:020}-", self.lifetime, self.epoch);
+        for b in self.digest {
+            n.push_str(&format!("{b:02x}"));
+        }
+        n
+    }
+}
+
+/// How far past the claim's next position a put may name a lifetime: the
+/// objects an entry creates are put before it is submitted.
+pub const PUT_AHEAD: u64 = 64;
+
 /// One of the authority's declared levels: an index into [`Authority::levels`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Level(pub u8);
@@ -181,19 +209,32 @@ pub trait Authority: Send {
     /// order. An entry after one not `Advanced` is never appended: it is
     /// `Fenced`, or `Undecided` when its own append may have had an effect.
     fn append(&mut self, c: &mut Claim, batch: &[Queued]) -> Vec<Advanced>;
-    /// Queue a record of `payload` at the claim's next position and return the
-    /// position, with no I/O. A dead claim is `Fenced` and a payload past
-    /// [`MAX_ENTRY`] refused; neither has an effect.
-    fn submit(&mut self, c: &mut Claim, payload: Vec<u8>, at: Level) -> Result<u64, Error> {
+    /// Queue a record of `payload` inventorying `created` at the claim's next
+    /// position and return the position, with no I/O. A dead claim is `Fenced`;
+    /// a payload that with 32 bytes per created object is past [`MAX_ENTRY`],
+    /// or a created object at another position or epoch, is refused; neither
+    /// has an effect.
+    fn submit(
+        &mut self,
+        c: &mut Claim,
+        payload: Vec<u8>,
+        created: &[ObjectRef],
+        at: Level,
+    ) -> Result<u64, Error> {
         if c.dead {
             return Err(Error::Fenced);
         }
-        if oversized(&payload) {
+        let tip = c.queued_tip();
+        let position = tip.end + 1;
+        if oversized(&payload, created.len())
+            || created
+                .iter()
+                .any(|r| r.lifetime != position || r.epoch != c.epoch)
+        {
             return Err(Error::Refused(AuthorityError::io(ErrorKind::InvalidInput)));
         }
-        let tip = c.queued_tip();
-        let record = envelope::appended(&tip, &payload);
-        let position = tip.end + 1;
+        let digests: Vec<[u8; 32]> = created.iter().map(|r| r.digest).collect();
+        let record = envelope::appended(&tip, &digests, &payload);
         c.queue.push(Queued {
             position,
             digest: envelope::digest(&record),
@@ -234,9 +275,39 @@ pub trait Authority: Send {
     /// Up to `max` records after `from` that are durable at `at`, each checked
     /// against the chain.
     fn read(&mut self, from: u64, at: Level, max: u64) -> Result<Vec<Record>, Error>;
-    fn get(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error>;
-    /// Create an immutable object if its name is free; equal bytes are success.
-    fn put(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error>;
+    /// The object `r`, `None` when absent; bytes whose digest is not `r`'s are
+    /// corrupt.
+    fn get(&mut self, r: ObjectRef) -> Result<Option<Vec<u8>>, Error> {
+        let name = r.name();
+        match self.get_object(&name)? {
+            Some(data) if envelope::digest(&data) != r.digest => Err(Error::Corrupt(name)),
+            got => Ok(got),
+        }
+    }
+    /// Create the immutable object `r` with `data` if it is absent; equal bytes
+    /// are success. Only a live claim puts, only in its own epoch, only with
+    /// `data` hashing to `r`'s digest and a lifetime from the claim's next
+    /// position to [`PUT_AHEAD`] past it: a position the claim can still submit
+    /// at. The bound is on positions, not bytes.
+    fn put(&mut self, c: &mut Claim, r: ObjectRef, data: Vec<u8>) -> Result<(), Error> {
+        if c.dead {
+            return Err(Error::Fenced);
+        }
+        let next = c.queued_tip().end + 1;
+        if envelope::digest(&data) != r.digest
+            || r.epoch != c.epoch
+            || r.lifetime < next
+            || r.lifetime > next + PUT_AHEAD
+        {
+            return Err(Error::Refused(AuthorityError::io(ErrorKind::InvalidInput)));
+        }
+        self.put_object(&r.name(), data)
+    }
+    /// The provider's object `name`, unchecked.
+    fn get_object(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error>;
+    /// Create the provider's object `name` if it is free; equal bytes are
+    /// success, other bytes `Corrupt(name)`.
+    fn put_object(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error>;
     /// Remove what no retained version needs, decided from the history alone.
     fn reclaim(&mut self, c: &mut Claim) -> Result<(), Error>;
 }
@@ -271,9 +342,10 @@ pub(crate) fn bad(b: envelope::Bad, position: u64) -> Error {
     }
 }
 
-/// Refuse a payload past [`MAX_ENTRY`] before any effect.
-pub(crate) fn oversized(payload: &[u8]) -> bool {
-    payload.len() as u64 > MAX_ENTRY
+/// Refuse an entry past [`MAX_ENTRY`] before any effect: its payload and 32
+/// bytes for each object it inventories.
+pub(crate) fn oversized(payload: &[u8], created: usize) -> bool {
+    payload.len() as u64 + 32 * created as u64 > MAX_ENTRY
 }
 
 /// The outcomes of a batch whose first `done` entries had `head` and whose
@@ -424,4 +496,73 @@ pub fn open(
             }
         }
     })
+}
+
+/// The object law (storage.md STORE-11, Objects; DECISIONS D3/D14), over the
+/// one implementation every provider shares: only a live claim puts, only
+/// bytes hashing to the reference's digest, only at a lifetime the claim can
+/// still submit at; a get checks the bytes it returns; an entry inventories
+/// only objects whose lifetime is its own position. Each refusal has no
+/// effect, and what is accepted reads back as written.
+#[cfg(test)]
+mod object_law {
+    use super::*;
+
+    #[test]
+    fn objects_are_put_only_at_a_claimable_lifetime_and_read_back_checked() {
+        let mut a = memory::Memory::new(Level(0));
+        let mut c = a.claim([1; 16], [2; 32]).unwrap().claim;
+        let refused = Err(Error::Refused(AuthorityError::io(ErrorKind::InvalidInput)));
+        let data = b"node".to_vec();
+        let at = |lifetime| ObjectRef {
+            lifetime,
+            epoch: 1,
+            digest: envelope::digest(b"node"),
+        };
+        // The claim record is at 1: the next position is 2.
+        assert_eq!(c.end(), 1);
+        for bad in [1, 2 + PUT_AHEAD + 1] {
+            assert_eq!(
+                a.put(&mut c, at(bad), data.clone()),
+                refused,
+                "lifetime {bad}"
+            );
+            assert_eq!(a.get(at(bad)), Ok(None));
+        }
+        let other_epoch = ObjectRef { epoch: 2, ..at(2) };
+        for wrong in [
+            ObjectRef {
+                digest: [0; 32],
+                ..at(2)
+            },
+            other_epoch,
+        ] {
+            assert_eq!(a.put(&mut c, wrong, data.clone()), refused);
+            assert_eq!(a.get(wrong), Ok(None));
+        }
+        assert_eq!(a.put(&mut c, at(2 + PUT_AHEAD), data.clone()), Ok(()));
+        assert_eq!(a.put(&mut c, at(2), data.clone()), Ok(()));
+        assert_eq!(a.get(at(2)), Ok(Some(data.clone())));
+        // Bytes under a reference's name that are not its bytes are corrupt.
+        a.put_object(&at(3).name(), b"other".to_vec()).unwrap();
+        assert_eq!(a.get(at(3)), Err(Error::Corrupt(at(3).name())));
+        // An entry inventories only objects at its own position.
+        for wrong in [at(3), other_epoch] {
+            let r = a.submit(&mut c, b"e".to_vec(), &[wrong], Level(0));
+            assert_eq!(r.map(|_| ()), refused);
+        }
+        let p = a.submit(&mut c, b"e".to_vec(), &[at(2)], Level(0)).unwrap();
+        assert_eq!(a.wait(&mut c, p), Advanced::Advanced(2));
+        assert_eq!(
+            a.read(0, Level(0), 8).unwrap()[1],
+            Record::Appended {
+                payload: b"e".to_vec(),
+                created: vec![at(2)]
+            }
+        );
+        // Position 2 is written: a put there could only be garbage.
+        assert_eq!(a.put(&mut c, at(2), data.clone()), refused);
+        c.dead = true;
+        assert_eq!(a.put(&mut c, at(3), data), Err(Error::Fenced));
+    }
 }

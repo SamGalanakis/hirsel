@@ -410,7 +410,10 @@ fn writer(
                 for ((e, _), (p, answer)) in
                     entries.iter().zip(window(&mut h, c, &entries, newest)?)
                 {
-                    let record = Record::Appended(e.clone());
+                    let record = Record::Appended {
+                        payload: e.clone(),
+                        created: vec![],
+                    };
                     match answer {
                         Advanced::Advanced(_) => {
                             let mut l = ledger.lock().unwrap();
@@ -774,7 +777,13 @@ fn an_append_whose_entry_is_at_its_position_under_a_later_claim_is_advanced() {
         let history = recovered(&bucket);
         for ((e, _), (p, answer)) in entries.iter().zip(all) {
             assert_eq!(answer, Advanced::Advanced(p), "k {k}, later {later}");
-            assert_eq!(history[p as usize - 1], Record::Appended(e.clone()));
+            assert_eq!(
+                history[p as usize - 1],
+                Record::Appended {
+                    payload: e.clone(),
+                    created: vec![]
+                }
+            );
         }
     }
 }
@@ -803,7 +812,10 @@ fn an_append_whose_position_holds_another_entry_is_fenced() {
         );
         s.land();
         assert!(
-            !recovered(&bucket).contains(&Record::Appended(e)),
+            !recovered(&bucket).contains(&Record::Appended {
+                payload: e,
+                created: vec![]
+            }),
             "held {held}"
         );
     }
@@ -825,7 +837,13 @@ fn an_append_whose_absence_is_unproved_is_undecided_across_retries() {
         Advanced::Undecided(_)
     ));
     s.land();
-    assert_eq!(recovered(&bucket)[from as usize], Record::Appended(e));
+    assert_eq!(
+        recovered(&bucket)[from as usize],
+        Record::Appended {
+            payload: e,
+            created: vec![]
+        }
+    );
 
     let bucket = Arc::new(Bucket::new(1, BTreeMap::new()));
     let s = Scripted::new(bucket.clone());
@@ -840,5 +858,11 @@ fn an_append_whose_absence_is_unproved_is_undecided_across_retries() {
         append(&mut h, &mut c, e.clone(), Level(0)),
         Advanced::Undecided(_)
     ));
-    assert_eq!(recovered(&bucket)[from as usize], Record::Appended(e));
+    assert_eq!(
+        recovered(&bucket)[from as usize],
+        Record::Appended {
+            payload: e,
+            created: vec![]
+        }
+    );
 }

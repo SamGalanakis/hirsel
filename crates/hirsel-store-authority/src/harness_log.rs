@@ -331,7 +331,10 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
                         .iter()
                         .zip(window(&mut wr.log, c, &entries, newest)?)
                 {
-                    let e = Record::Appended(e.clone());
+                    let e = Record::Appended {
+                        payload: e.clone(),
+                        created: vec![],
+                    };
                     match answer {
                         Advanced::Advanced(_) => owe(&mut run.ledger, p, &e, at.0)?,
                         Advanced::Refused(_) | Advanced::Fenced => {

@@ -4181,7 +4181,7 @@ entries, and all subsequent lookups retain the existing Dir confinement.
 ## Stores
 
 ```text
-StoreConfig { group_commits: u64, group_bytes: u64, limits: StoreLimits, nodes: history.Bounds }
+StoreConfig { group_commits: u64, group_bytes: u64, batch_bytes: u64, limits: StoreLimits, nodes: history.Bounds }
 StoreLimits { key_bytes: u64, value_bytes: u64, transaction_bytes: u64, range_rows: u64 }
 StoreError = Storage(AuthorityError) | Refused(AuthorityError) | Corrupt(String) | Fenced | Closed | Unsupported(Unsupported) | NoLevel | Foreign | InvalidInput
 Unsupported = Format(found: Bytes, object: String) | Size(needed: u64, max_entry: u64) | Conditional

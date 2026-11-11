@@ -4,6 +4,7 @@ ok group decoding canonical
 ok leaf cuts match the reference
 ok trees read back and classify damage
 ok equal states give equal roots
+ok live nodes reused, fresh ones batched
 ok commit rules
 ok wire vectors: calls, runs and definitions
 ok wire vectors: engine commits

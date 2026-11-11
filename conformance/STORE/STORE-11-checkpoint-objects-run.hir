@@ -1,0 +1,320 @@
+// rule: STORE-11
+// expect: run
+// authorities: {"batches":{"provider":"authority.memory@1","floor":"memory"},"batchesobjects":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1}},"listed":{"provider":"authority.memory@1","floor":"memory"},"unlisted":{"provider":"authority.memory@1","floor":"memory"}}
+// steps: 20000000
+// Every checkpoint node is hashed with the interpreted SHA-256, three checkpoints over two stores.
+// stdout: batches: one fresh node per batch, each but the last by a Created record
+// stdout: batches: the same state again reuses every node
+// stdout: batches: one write makes fewer fresh nodes than the first checkpoint
+// stdout: batches: reopened, both rows kept
+// stdout: batchesobjects: one fresh node per batch, each but the last by a Created record
+// stdout: batchesobjects: the same state again reuses every node
+// stdout: batchesobjects: one write makes fewer fresh nodes than the first checkpoint
+// stdout: batchesobjects: reopened, both rows kept
+// stdout: listed: opened, forged row kept
+// stdout: unlisted: corrupt history/5
+// A checkpoint's nodes are objects of the claim that publishes it, each inventoried by
+// one record of the publication, and a later checkpoint reuses the nodes the head
+// already holds. A store of nodes of 64 to 1024 bytes and checkpoint batches of 0
+// bytes, so each batch holds one fresh node, commits 60 rows and compacts three times,
+// over a local history (memory) and object storage (objects.sim@1): the first
+// publication is one Created record per fresh node but the last, which its Checkpoint
+// record inventories; a second compaction of the same state finds every node and
+// inventories none; after one write a third inventories some nodes, fewer than the
+// first (the changed leaf and its ancestors). A reopen recovers from the third
+// checkpoint, most of whose nodes the first one put, and holds the rows written.
+// A history's recovery reads a checkpoint's nodes only as inventoried: on a store of
+// one row, a later claim puts a one-leaf checkpoint of another row, its object of
+// the claim's next position, and submits its Checkpoint. When the record inventories
+// the leaf (listed) the store opens with that checkpoint's row; when it does not
+// (unlisted) the open is corruption of that record, position 5 (claim, Genesis, the
+// row's group, the second claim, the Checkpoint).
+pub type Failed = Failed(String)
+
+fn say(stdout: Stdout, line: String) -> Result[(), Failed] {
+  match out.print(stdout, f"{line}\n") {
+    Ok(_) => Ok(()),
+    Error(_) => Error(Failed("print")),
+  }
+}
+
+// Puts `count` keys of `key` bytes, `k` and then the key's index plus `k`, each
+// with a value of `value` bytes.
+fn put(mut tx: store.Tx, info: store.CallInfo, w: (u64, u64, u64)) -> Result[
+  (),
+  store.TxError
+] {
+  let (count, key, value) = w
+  for i in 0u64..count {
+    let mut k: List[u8] = []
+    for _ in 1u64..key {
+      list.push(mut k, 107)
+    }
+    list.push(mut k, int.truncate(107 + i))
+    let mut v: List[u8] = []
+    for _ in 0u64..value {
+      list.push(mut v, 118)
+    }
+    store.tx_put(mut tx, bytes.from_list(take k), bytes.from_list(take v))?
+  }
+  Ok(())
+}
+
+fn commits(mut s: store.Store, w: (u64, u64, u64)) -> bool {
+  let r: Result[(), store.TxFailure[store.TxError]] = store.transact(mut s, put, w)
+  r == Ok(())
+}
+
+// 8-byte keys, 16-byte values, nodes of 64 to 1024 bytes, one fresh node a batch.
+fn tight() -> store.StoreConfig {
+  let mut c = store.default_config()
+  c.limits.key_bytes = 8
+  c.limits.value_bytes = 16
+  c.limits.transaction_bytes = 4096
+  c.nodes = history.Bounds(node_min: 64, node_mean: 128, node_max: 1024)
+  c.batch_bytes = 0
+  c
+}
+
+// One publication: the Created records just before its Checkpoint record,
+// whether each record inventories at most one object, and how many objects
+// the publication inventories.
+pub type Publication {
+  batches: u64,
+  single: bool,
+  objects: u64,
+}
+
+fn publications(a: Authority) -> Result[List[Publication], Failed] {
+  let Ok(records) = authority.read(a, 0, authority.floor(a), 4096) else {
+    return Error(Failed("read"))
+  }
+  let mut out: List[Publication] = []
+  let mut batches: u64 = 0
+  let mut single = true
+  let mut objects: u64 = 0
+  for r in records {
+    let (entry, created) = match r {
+      Claimed(..) => {
+        batches = 0
+        single = true
+        objects = 0
+        continue
+      },
+      Appended(entry, created) => (copy entry, copy created),
+    }
+    let Ok(g) = history.decode_group(entry) else {
+      return Error(Failed("decode"))
+    }
+    let mut creates = false
+    let mut publishes = false
+    for c in g.commits {
+      match c.body {
+        Engine(Created()) => {
+          creates = true
+        },
+        Engine(Checkpoint(_)) => {
+          publishes = true
+        },
+        _ => {},
+      }
+    }
+    let n = list.len(created)
+    if publishes {
+      list.push(mut out, Publication(batches: batches, single: single && n <= 1, objects: objects + n))
+      batches = 0
+      single = true
+      objects = 0
+    } else if creates {
+      batches = batches + 1
+      single = single && n == 1
+      objects = objects + n
+    } else {
+      batches = 0
+      single = true
+      objects = 0
+    }
+  }
+  Ok(out)
+}
+
+fn batched(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
+  let Ok(a) = io.authority(rt, name) else {
+    return Error(Failed("authority"))
+  }
+  let Ok(made) = store.open(a, tight()) else {
+    return Error(Failed("open"))
+  }
+  let mut s = take made
+  // 30 keys of 8 bytes and 30 of 7, each with a 16-byte value: 1890 bytes of
+  // leaf entries, several leaves.
+  if !(commits(mut s, (30, 8, 16)) && commits(mut s, (30, 7, 16))) {
+    return Error(Failed("commit"))
+  }
+  let Ok(()) = store.compact(mut s) else {
+    return Error(Failed("compact"))
+  }
+  let Ok(()) = store.compact(mut s) else {
+    return Error(Failed("compact again"))
+  }
+  // `kkkkkkkk` again, with a 15-byte value.
+  if !commits(mut s, (1, 8, 15)) {
+    return Error(Failed("commit"))
+  }
+  let Ok(()) = store.compact(mut s) else {
+    return Error(Failed("compact a third time"))
+  }
+  let Ok(()) = store.close(take s) else {
+    return Error(Failed("close"))
+  }
+  let p = publications(a)?
+  if list.len(p) != 3 {
+    return say(stdout, f"{name}: {list.len(p)} checkpoints")
+  }
+  let (b0, one0, n0) = (p[0].batches, p[0].single, p[0].objects)
+  let (b1, n1) = (p[1].batches, p[1].objects)
+  let n2 = p[2].objects
+  if one0 && n0 > 2 && b0 + 1 == n0 {
+    say(stdout, f"{name}: one fresh node per batch, each but the last by a Created record")?
+  } else {
+    say(stdout, f"{name}: first checkpoint of {n0} objects in {b0} batches")?
+  }
+  if b1 == 0 && n1 == 0 {
+    say(stdout, f"{name}: the same state again reuses every node")?
+  } else {
+    say(stdout, f"{name}: the same state again made {n1} nodes")?
+  }
+  if n2 > 0 && n2 < n0 {
+    say(stdout, f"{name}: one write makes fewer fresh nodes than the first checkpoint")?
+  } else {
+    say(stdout, f"{name}: one write made {n2} of {n0}")?
+  }
+  let Ok(again) = store.open(a, store.default_config()) else {
+    return say(stdout, f"{name}: reopen refused")
+  }
+  let mut s2 = take again
+  let Ok(snap) = store.snapshot(a, mut s2, authority.floor(a)) else {
+    return Error(Failed("snapshot"))
+  }
+  let touched = match store.get(snap, b"kkkkkkkk") {
+    Some(v) => bytes.len(v) == 15,
+    None() => false,
+  }
+  let last = match store.get(snap, bytes.from_list([107u8, 107, 107, 107, 107, 107, 136])) {
+    Some(v) => bytes.len(v) == 16,
+    None() => false,
+  }
+  if touched && last {
+    say(stdout, f"{name}: reopened, both rows kept")
+  } else {
+    say(stdout, f"{name}: reopened, rows lost")
+  }
+}
+
+// An entry's payload: a group holding one engine commit.
+fn group(body: history.Engine) -> Bytes {
+  let (data, _) = history.encode_group(
+    history.Group(
+      commits: [history.Commit(body: Engine(copy body), writes: [])],
+      defs: []
+    )
+  )
+  data
+}
+
+fn forged(rt: Io, stdout: Stdout, name: String, listed: bool) -> Result[(), Failed] {
+  let Ok(a) = io.authority(rt, name) else {
+    return Error(Failed("authority"))
+  }
+  let Ok(made) = store.open(a, store.default_config()) else {
+    return Error(Failed("open"))
+  }
+  let mut s = take made
+  if !commits(mut s, (1, 1, 1)) {
+    return Error(Failed("commit"))
+  }
+  let Ok(()) = store.close(take s) else {
+    return Error(Failed("close"))
+  }
+  let Ok(claimed) = authority.claim(a) else {
+    return Error(Failed("claim"))
+  }
+  let mut c = take claimed
+  // The newest group's last version and digest, and the claim's epoch.
+  let Ok(records) = authority.read(a, 0, authority.floor(a), 64) else {
+    return Error(Failed("read"))
+  }
+  let mut version: u64 = 0
+  let mut last: (u64, Bytes) = (0, history.zero_digest())
+  let mut epoch: u64 = 0
+  for r in records {
+    match r {
+      Claimed(e, _, _) => {
+        version = version + 1
+        epoch = e
+      },
+      Appended(entry, _) => {
+        let Ok(g) = history.decode_group(entry) else {
+          return Error(Failed("decode"))
+        }
+        version = version + list.len(g.commits)
+        last = (version, history.digest(entry))
+      },
+    }
+  }
+  let place = history.Placement(
+    live: ordered_map.empty(store.compare_keys),
+    epoch: epoch,
+    start: claim.end(c) + 1,
+    refs: 64,
+    bytes: 67108864
+  )
+  let tree = history.build_tree([(b"forged", b"row")], history.default_bounds(), take place)
+  let mut refs: List[ObjectRef] = []
+  for batch in tree.batches {
+    for (r, node) in batch {
+      let Ok(()) = authority.put(a, mut c, r, copy node) else {
+        return Error(Failed("put"))
+      }
+      list.push(mut refs, copy r)
+    }
+  }
+  let created = if listed {
+    take refs
+  } else {
+    []
+  }
+  let (v, d) = take last
+  let entry = group(Checkpoint(history.descriptor(tree, v, d)))
+  let Ok(p) = authority.submit(a, mut c, take entry, take created, authority.floor(a)) else {
+    return Error(Failed("submit"))
+  }
+  let Advanced(_) = authority.wait(a, mut c, p) else {
+    return Error(Failed("append"))
+  }
+  match store.open(a, store.default_config()) {
+    Ok(opened) => {
+      let mut s2 = take opened
+      let Ok(snap) = store.snapshot(a, mut s2, authority.floor(a)) else {
+        return Error(Failed("snapshot"))
+      }
+      match store.get(snap, b"forged") {
+        Some(_) => say(stdout, f"{name}: opened, forged row kept"),
+        None() => say(stdout, f"{name}: opened, forged row lost"),
+      }
+    },
+    Error(Corrupt(object)) => say(stdout, f"{name}: corrupt {object}"),
+    Error(_) => say(stdout, f"{name}: refused"),
+  }
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
+  let Ok(stdout) = io.stdout(rt) else {
+    return Error(Failed("stdout"))
+  }
+  batched(rt, stdout, "batches")?
+  batched(rt, stdout, "batchesobjects")?
+  forged(rt, stdout, "listed", true)?
+  forged(rt, stdout, "unlisted", false)?
+  Ok(())
+}

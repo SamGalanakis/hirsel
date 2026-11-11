@@ -567,7 +567,7 @@ impl Authority for Log {
         Ok(out)
     }
 
-    fn get(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {
+    fn get_object(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {
         let path = self.object_path(name)?;
         match fs::read(path) {
             Ok(b) => Ok(Some(b)),
@@ -576,7 +576,7 @@ impl Authority for Log {
         }
     }
 
-    fn put(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error> {
+    fn put_object(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error> {
         let path = self.object_path(name)?;
         let parent = path.parent().unwrap().to_path_buf();
         fs::create_dir_all(&parent).map_err(|e| Error::Storage(io(e)))?;

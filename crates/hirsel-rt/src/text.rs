@@ -95,7 +95,7 @@ pub static BYTES_LIST_DESCRIPTOR: BytesListDescriptor = BytesListDescriptor(Layo
 /// # Safety
 /// `ctx` is a live run context.
 pub unsafe fn bytes_list_index(ctx: *mut TaskCtx) -> u32 {
-    unsafe { (*ctx).heap().layout_count() - 3 }
+    unsafe { (*ctx).heap().layout_count() - 4 }
 }
 
 /// The payload descriptor of a runtime list of resource handles (`inbox.take`'s
@@ -152,19 +152,70 @@ pub static HANDLE_LIST_DESCRIPTOR: HandleListDescriptor = HandleListDescriptor(L
 /// # Safety
 /// `ctx` is a live run context.
 pub unsafe fn handle_list_index(ctx: *mut TaskCtx) -> u32 {
-    unsafe { (*ctx).heap().layout_count() - 2 }
+    unsafe { (*ctx).heap().layout_count() - 3 }
 }
 
+/// The payload descriptor of a runtime `List[ObjectRef]` (an `Appended` record's created
+/// references): a sequence of 40-byte records whose drop program releases each digest's
+/// owner, highest index first. Its steps are the derivation's (`hirsel_lir::rt_program`).
+#[repr(transparent)]
+pub struct ObjectRefListDescriptor(pub Layout);
+// SAFETY: this immutable descriptor points only at the immutable steps below.
+unsafe impl Sync for ObjectRefListDescriptor {}
+static OBJECT_REF_LIST_STEPS: BytesListSteps = BytesListSteps([
+    crate::Step {
+        kind: crate::STEP_LOOP,
+        field: crate::WHOLE_VALUE,
+        variant: 0,
+        span: 1,
+        offset: 16,
+        stride: 40,
+        count: 0,
+        count_offset: 0,
+        layout: std::ptr::null(),
+    },
+    crate::Step {
+        kind: crate::STEP_RELEASE,
+        field: crate::WHOLE_VALUE,
+        variant: 0,
+        span: 0,
+        offset: 16,
+        stride: 24,
+        count: 0,
+        count_offset: crate::NO_OFFSET,
+        layout: std::ptr::null(),
+    },
+]);
+pub static OBJECT_REF_LIST_DESCRIPTOR: ObjectRefListDescriptor = ObjectRefListDescriptor(Layout {
+    magic: LAYOUT_MAGIC,
+    version: LAYOUT_VERSION,
+    size: 16,
+    align: 8,
+    finalizer: None,
+    steps: OBJECT_REF_LIST_STEPS.0.as_ptr(),
+    step_count: 2,
+    field_count: 0,
+    flags: LAYOUT_DYNAMIC
+        | crate::LAYOUT_LOGICAL_PER_ELEMENT
+        | crate::LAYOUT_SEQUENCE
+        | crate::release::LAYOUT_WIDE_CURSOR,
+    logical: 24,
+    logical_count: std::ptr::null(),
+    scan: std::ptr::null(),
+    scan_words: 0,
+});
+
 /// The payload descriptor of `authority.read`'s `List[HistoryRecord]`: a sequence of
-/// 64-byte variants, `Claimed(u64, Bytes, Bytes)` (tag 0) or `Appended(Bytes)` (tag 1),
-/// whose drop program releases each arm's byte owners, highest index first. Its steps are
+/// 64-byte variants, `Claimed(u64, Bytes, Bytes)` (tag 0) or `Appended(Bytes,
+/// List[ObjectRef])` (tag 1), whose drop program releases each arm's owners, highest index
+/// first. Its steps are
 /// the derivation's (`hirsel_lir::rt_program`).
 #[repr(transparent)]
 pub struct HistoryListDescriptor(pub Layout);
 // SAFETY: this immutable descriptor points only at the immutable steps below.
 unsafe impl Sync for HistoryListDescriptor {}
 #[repr(transparent)]
-struct HistoryListSteps([crate::Step; 6]);
+struct HistoryListSteps([crate::Step; 7]);
 // SAFETY: immutable steps with no layout pointers.
 unsafe impl Sync for HistoryListSteps {}
 static HISTORY_LIST_STEPS: HistoryListSteps = HistoryListSteps([
@@ -172,7 +223,7 @@ static HISTORY_LIST_STEPS: HistoryListSteps = HistoryListSteps([
         kind: crate::STEP_LOOP,
         field: crate::WHOLE_VALUE,
         variant: 0,
-        span: 5,
+        span: 6,
         offset: 16,
         stride: 64,
         count: 0,
@@ -216,8 +267,19 @@ static HISTORY_LIST_STEPS: HistoryListSteps = HistoryListSteps([
         kind: crate::STEP_TAG,
         field: crate::WHOLE_VALUE,
         variant: 1,
-        span: 1,
+        span: 2,
         offset: 0,
+        stride: 0,
+        count: 0,
+        count_offset: crate::NO_OFFSET,
+        layout: std::ptr::null(),
+    },
+    crate::Step {
+        kind: crate::STEP_RELEASE,
+        field: crate::WHOLE_VALUE,
+        variant: 0,
+        span: 0,
+        offset: 32,
         stride: 0,
         count: 0,
         count_offset: crate::NO_OFFSET,
@@ -242,7 +304,7 @@ pub static HISTORY_LIST_DESCRIPTOR: HistoryListDescriptor = HistoryListDescripto
     align: 8,
     finalizer: None,
     steps: HISTORY_LIST_STEPS.0.as_ptr(),
-    step_count: 6,
+    step_count: 7,
     field_count: 0,
     flags: LAYOUT_DYNAMIC
         | crate::LAYOUT_LOGICAL_PER_ELEMENT
@@ -254,11 +316,41 @@ pub static HISTORY_LIST_DESCRIPTOR: HistoryListDescriptor = HistoryListDescripto
     scan_words: 0,
 });
 
-/// The registry index of [`HISTORY_LIST_DESCRIPTOR`]: the last.
+/// The registry index of [`HISTORY_LIST_DESCRIPTOR`]: before the `List[ObjectRef]`.
 /// # Safety
 /// `ctx` is a live run context.
 pub unsafe fn history_list_index(ctx: *mut TaskCtx) -> u32 {
+    unsafe { (*ctx).heap().layout_count() - 2 }
+}
+
+/// The registry index of [`OBJECT_REF_LIST_DESCRIPTOR`]: the last.
+/// # Safety
+/// `ctx` is a live run context.
+pub unsafe fn object_ref_list_index(ctx: *mut TaskCtx) -> u32 {
     unsafe { (*ctx).heap().layout_count() - 1 }
+}
+
+/// A fresh `List[ObjectRef]` of `refs`, in order (`OBJECT_REF_LIST_DESCRIPTOR`).
+/// # Safety
+/// `ctx` is a live run context.
+pub unsafe fn allocate_object_ref_list(
+    ctx: *mut TaskCtx,
+    refs: &[hirsel_store_authority::ObjectRef],
+) -> *mut Header {
+    let count = u64::try_from(refs.len()).unwrap_or_else(|_| fault("list length overflow"));
+    unsafe {
+        let block = allocate_sequence(ctx, object_ref_list_index(ctx), count, 40, 8);
+        let first = payload(block).add(sequence_elements_offset(8) as usize);
+        for (index, r) in refs.iter().enumerate() {
+            let at = first.add(index * 40);
+            at.cast::<u64>().write(r.lifetime);
+            at.add(8).cast::<u64>().write(r.epoch);
+            at.add(16)
+                .cast::<Slice>()
+                .write_unaligned(allocate_bytes(ctx, &r.digest));
+        }
+        block
+    }
 }
 
 /// A fresh `List[Bytes]` holding a fresh Bytes of each of `items`, in order.
@@ -309,9 +401,12 @@ pub unsafe fn allocate_history_list(
                     slice(16, attempt);
                     slice(40, identity);
                 }
-                Record::Appended(payload) => {
+                Record::Appended { payload, created } => {
                     at.cast::<u32>().write(1);
                     slice(8, payload);
+                    at.add(32)
+                        .cast::<*mut Header>()
+                        .write_unaligned(allocate_object_ref_list(ctx, created));
                 }
             }
         }

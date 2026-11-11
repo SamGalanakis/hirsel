@@ -114,7 +114,7 @@ fn checkpoint_height(a: Authority) -> Result[u8, Failed] {
   }
   let mut height: u8 = 0
   for r in records {
-    if let Appended(entry) = r {
+    if let Appended(entry, _) = r {
       let Ok(g) = history.decode_group(entry) else {
         return Error(Failed("decode"))
       }
@@ -265,7 +265,7 @@ fn orphan(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
   }
   let mut c = take made
   let entry = group(StreamFence(sha256_name(b"orphan")))
-  match authority.submit(a, mut c, take entry, authority.floor(a)) {
+  match authority.submit(a, mut c, take entry, [], authority.floor(a)) {
     Ok(p) => match authority.wait(a, mut c, p) {
       Advanced(_) => {},
       _ => return Error(Failed("append")),
@@ -285,7 +285,7 @@ fn damaged(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
   let mut c = take made
   let whole = group(genesis_body())
   let cut = bytes.slice(whole, 0, bytes.len(whole) - 1)
-  match authority.submit(a, mut c, take cut, authority.floor(a)) {
+  match authority.submit(a, mut c, take cut, [], authority.floor(a)) {
     Ok(p) => match authority.wait(a, mut c, p) {
       Advanced(_) => {},
       _ => return Error(Failed("append")),
@@ -297,7 +297,7 @@ fn damaged(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
   }
   let mut c2 = take later
   let entry = group(StreamFence(sha256_name(b"damaged")))
-  match authority.submit(a, mut c2, take entry, authority.floor(a)) {
+  match authority.submit(a, mut c2, take entry, [], authority.floor(a)) {
     Ok(p) => match authority.wait(a, mut c2, p) {
       Advanced(_) => {},
       _ => return Error(Failed("append")),

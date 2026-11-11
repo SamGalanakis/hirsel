@@ -316,6 +316,11 @@ fn seam_requests(n: u64, text: &str, bytes: &[u8]) -> Vec<hirsel_rt::authority::
             W::Submit {
                 at: level,
                 payload: bytes.to_vec(),
+                created: vec![hirsel_store_authority::ObjectRef {
+                    lifetime: n,
+                    epoch: !n,
+                    digest: [n as u8; 32],
+                }],
             },
         ),
         provider(Some(!n), W::Wait { position: n }),
@@ -332,13 +337,21 @@ fn seam_requests(n: u64, text: &str, bytes: &[u8]) -> Vec<hirsel_rt::authority::
         provider(
             None,
             W::Get {
-                name: text.to_owned(),
+                r: hirsel_store_authority::ObjectRef {
+                    lifetime: n,
+                    epoch: !n,
+                    digest: [n as u8; 32],
+                },
             },
         ),
         provider(
             None,
             W::Put {
-                name: text.to_owned(),
+                r: hirsel_store_authority::ObjectRef {
+                    lifetime: n,
+                    epoch: !n,
+                    digest: [n as u8; 32],
+                },
                 data: bytes.to_vec(),
             },
         ),
@@ -401,8 +414,18 @@ fn seam_completions(n: u64, text: &str, bytes: &[u8]) -> Vec<Completion> {
                     attempt: [n as u8; 16],
                     identity: [!(n as u8); 32],
                 },
-                hirsel_store_authority::Record::Appended(bytes.to_vec()),
-                hirsel_store_authority::Record::Appended(vec![]),
+                hirsel_store_authority::Record::Appended {
+                    payload: bytes.to_vec(),
+                    created: vec![hirsel_store_authority::ObjectRef {
+                        lifetime: n,
+                        epoch: !n,
+                        digest: [!(n as u8); 32],
+                    }],
+                },
+                hirsel_store_authority::Record::Appended {
+                    payload: vec![],
+                    created: vec![],
+                },
             ])),
             claim: None,
         },

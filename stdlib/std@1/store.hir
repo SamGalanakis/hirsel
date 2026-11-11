@@ -27,12 +27,14 @@
 
 /// The engine's settings (STORE-1). A group advances once it holds
 /// `group_commits` commits or `group_bytes` encoded bytes, or when an outcome
-/// awaits it. The limits and the checkpoint node bounds `nodes` are recorded
+/// awaits it. A checkpoint's fresh nodes are put in batches of at most
+/// `batch_bytes` bytes and one node more (STORE-11). The limits and the checkpoint node bounds `nodes` are recorded
 /// by the store's Genesis commit when it is created; those an opener of an
 /// existing store passes are ignored.
 pub type StoreConfig {
   group_commits: u64,
   group_bytes: u64,
+  batch_bytes: u64,
   limits: StoreLimits,
   nodes: history.Bounds,
 }
@@ -276,6 +278,12 @@ pub opaque type Store: () uses {Authority} {
   // An empty access set whose lists keep the capacity an earlier run grew,
   // so a run records its reads without allocating once the store is warm.
   spare: AccessSet,
+  // The epoch of the store's claim, the objects the next submitted group
+  // inventories, and the newest checkpoint's nodes by digest: the objects a
+  // checkpoint may reuse.
+  epoch: u64,
+  created: List[ObjectRef],
+  live: ordered_map.OrderedMap[Bytes, ObjectRef],
   // The history's end position, and the newest group's digest and the version
   // of its last commit, which a checkpoint names.
   end: u64,
@@ -304,13 +312,14 @@ const GROUP_OVERHEAD: u64 = 8192
 // Entries read from the authority per request.
 const READ_BATCH: u64 = 1024
 
-/// Groups of up to 64 commits or 4 MiB, limits of 4096-byte keys, 1 MiB
+/// Groups of up to 64 commits or 4 MiB, checkpoint batches of 64 MiB, limits of 4096-byte keys, 1 MiB
 /// values, 16 MiB per transaction and 10000 rows per range, and the default
 /// checkpoint node bounds.
 pub fn default_config() -> StoreConfig uses {} {
   StoreConfig(
     group_commits: 64,
     group_bytes: 4194304,
+    batch_bytes: 67108864,
     limits: StoreLimits(
       key_bytes: 4096,
       value_bytes: 1048576,
@@ -418,6 +427,9 @@ pub fn open(a: Authority, config: StoreConfig) -> Result[Store, StoreError] {
     index: ordered_map.empty(compare_keys),
     visible: 0,
     spare: AccessSet(points: [], spans: []),
+    epoch: 0,
+    created: [],
+    live: ordered_map.empty(compare_keys),
     end: 0,
     digest: history.zero_digest(),
     group_last: 0,
@@ -453,6 +465,15 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
   let mut newest: (Bytes, u64) = (history.zero_digest(), 0)
   let mut checkpoint: Option[history.Descriptor] = None()
   let mut recorded: Option[(StoreLimits, history.Bounds)] = None()
+  let mut epoch: u64 = 0
+  // The objects of the run of Created records just read, from `run_first`,
+  // and the newest checkpoint's publication: its fresh objects by digest,
+  // from position `fresh_from` to its own, `fresh_at`.
+  let mut run: List[ObjectRef] = []
+  let mut run_first: Option[u64] = None()
+  let mut fresh: ordered_map.OrderedMap[Bytes, ObjectRef] = ordered_map.empty(compare_keys)
+  let mut fresh_from: u64 = 0
+  let mut fresh_at: u64 = 0
   let mut at: u64 = 0
   while at < end {
     let records = match authority.read(a, at, floor, READ_BATCH) {
@@ -467,12 +488,15 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
         break
       }
       at += 1
-      let e = match item {
-        Claimed(_, _, identity) => {
+      let (e, made) = match item {
+        Claimed(n, _, identity) => {
           tip = history.claimed(tip, identity)
+          epoch = n
+          run = []
+          run_first = None()
           continue
         },
-        Appended(e) => e,
+        Appended(e, made) => (copy e, copy made),
       }
       let g = match history.decode_group(e) {
         Ok(x) => x,
@@ -488,6 +512,8 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
       tip = take next
       let d = history.digest(e)
       newest = (copy d, tip.last)
+      let mut creates = false
+      let mut publishes = false
       for x in g.commits {
         match x.body {
           Engine(Genesis(
@@ -527,9 +553,44 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
             }
             since = take kept
             checkpoint = Some(copy desc)
+            publishes = true
+          },
+          Engine(Created()) => {
+            creates = true
           },
           _ => {},
         }
+      }
+      // A record inventories objects only to publish a checkpoint: a Created
+      // record's batch, named by the Checkpoint record that ends the run of
+      // Created records of one claim just before it, or its own last batch.
+      if publishes {
+        fresh = ordered_map.empty(compare_keys)
+        for r in run {
+          ordered_map.insert(mut fresh, copy r.digest, copy r)
+        }
+        for r in made {
+          ordered_map.insert(mut fresh, copy r.digest, copy r)
+        }
+        fresh_from = match run_first {
+          Some(p) => p,
+          None() => at,
+        }
+        fresh_at = at
+        run = []
+        run_first = None()
+      } else if creates {
+        if let None() = run_first {
+          run_first = Some(at)
+        }
+        for r in made {
+          list.push(mut run, copy r)
+        }
+      } else if list.len(made) > 0 {
+        return Error(stop(mut s, Corrupt(entry_name(at))))
+      } else {
+        run = []
+        run_first = None()
       }
       list.push(mut since, (take g, take d, first))
     }
@@ -537,7 +598,7 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
   let mut state: ordered_map.OrderedMap[Bytes, Bytes] = ordered_map.empty(compare_keys)
   let mut from: u64 = 0
   if let Some(desc) = checkpoint {
-    state = load_checkpoint(a, mut s, desc)?
+    state = load_checkpoint(a, mut s, desc, fresh, fresh_from, fresh_at)?
     from = desc.version
   }
   for (g, _, first) in since {
@@ -553,6 +614,7 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
   s.visible = tip.last
   s.identity = unique tip.identity
   s.seed_key = seed_key(s.identity)
+  s.epoch = epoch
   s.end = end
   let (newest_digest, newest_last) = take newest
   s.digest = take newest_digest
@@ -572,21 +634,38 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
 }
 
 // The state a checkpoint records, read level by level from its root, each
-// node checked against the digest its parent names.
-fn load_checkpoint(a: Authority, mut s: Store, desc: history.Descriptor) -> Result[
-  ordered_map.OrderedMap[Bytes, Bytes],
-  StoreError
-] {
+// node checked against the digest its parent names; it sets the store's live
+// objects to the checkpoint's nodes. The checkpoint was published from
+// position `from` to its own, `at`: a node of a lifetime in that range is
+// one of `fresh`, which those records inventory, and one of an earlier
+// lifetime is an object the head that published it had admitted.
+fn load_checkpoint(
+  a: Authority,
+  mut s: Store,
+  desc: history.Descriptor,
+  fresh: ordered_map.OrderedMap[Bytes, ObjectRef],
+  from: u64,
+  at: u64
+) -> Result[ordered_map.OrderedMap[Bytes, Bytes], StoreError] {
+  let mut live: ordered_map.OrderedMap[Bytes, ObjectRef] = ordered_map.empty(compare_keys)
   let mut expects = [history.root_expect(desc)]
   while true {
     let mut blobs: List[Bytes] = []
     for x in expects {
-      let name = node_name(x.digest)
-      match authority.get(a, copy name) {
+      let r = x.r
+      let listed = match ordered_map.get(fresh, r.digest) {
+        Some(f) => f == r,
+        None() => false,
+      }
+      if r.lifetime > at || r.lifetime >= from && !listed {
+        return Error(stop(mut s, Corrupt(entry_name(at))))
+      }
+      match authority.get(a, copy r) {
         Ok(Some(b)) => list.push(mut blobs, take b),
-        Ok(None()) => return Error(stop(mut s, Corrupt(take name))),
+        Ok(None()) => return Error(stop(mut s, Corrupt(entry_name(at)))),
         Error(e) => return Error(stop(mut s, seam(take e))),
       }
+      ordered_map.insert(mut live, copy r.digest, copy r)
     }
     match history.check_level(expects, blobs) {
       Ok(Next(more)) => {
@@ -597,12 +676,13 @@ fn load_checkpoint(a: Authority, mut s: Store, desc: history.Descriptor) -> Resu
         for (k, v) in entries {
           ordered_map.insert(mut state, unique k, unique v)
         }
+        s.live = take live
         return Ok(take state)
       },
       Error(Unsupported(found: found)) => return Error(
-        stop(mut s, Unsupported(Format(found: unique found, object: node_name(desc.root))))
+        stop(mut s, Unsupported(Format(found: unique found, object: entry_name(at))))
       ),
-      Error(Corrupt()) => return Error(stop(mut s, Corrupt(node_name(desc.root)))),
+      Error(Corrupt()) => return Error(stop(mut s, Corrupt(entry_name(at)))),
     }
   }
   Ok(ordered_map.empty(compare_keys))
@@ -657,18 +737,6 @@ fn genesis(a: Authority, mut s: Store, limits: StoreLimits, bounds: history.Boun
 // A history position as the name a refusal carries.
 fn entry_name(position: u64) -> String uses {} {
   f"history/{position}"
-}
-
-// A checkpoint node's object name: `n/` and its digest in lowercase hex.
-fn node_name(digest: Bytes) -> String uses {} {
-  let mut out: List[u8] = []
-  bytes.append(mut out, b"n/")
-  let digits = b"0123456789abcdef"
-  for b in digest {
-    list.push(mut out, digits[int.widen(b >> 4)])
-    list.push(mut out, digits[int.widen(b & 15)])
-  }
-  text.finish_valid(take out)
 }
 
 // The store error a seam error is (STORE-11).
@@ -954,30 +1022,84 @@ fn current(mut s: Store) -> ordered_map.OrderedMap[Bytes, Bytes] uses {} {
   share
 }
 
-/// Puts the nodes of a checkpoint of the state at V that are not already
-/// present and records its descriptor by a Checkpoint commit, so recovery
-/// applies only the commits after it (STORE-11). Every commit is first made
-/// durable at the strongest declared level.
+/// Puts the nodes of a checkpoint of the state at V that the newest
+/// checkpoint does not already hold and records its descriptor by a
+/// Checkpoint commit, so recovery applies only the commits after it
+/// (STORE-11). The fresh nodes go in batches, each put under the claim and
+/// then inventoried by its own record before the next is put: a Created
+/// commit for every batch but the last, which the Checkpoint's record
+/// inventories. Every commit is first made durable at the strongest declared
+/// level, and so is each of these.
 pub fn compact(mut s: Store) -> Result[(), StoreError] {
   if s.closed {
     return Error(Closed())
   }
   let a = s.authority
   strongest(a, mut s) ? unreleased
-  let tree = history.checkpoint_tree(copy s.bounds, s.index)
-  for (d, node) in tree.nodes {
-    if let Error(e) = authority.put(a, node_name(d), copy node) {
-      return Error(stop(mut s, seam(take e)))
-    }
-  }
   // The state at V is the state after the newest group: a claim since writes
-  // nothing.
-  let desc = history.descriptor(tree, s.group_last, s.digest)
-  let body: history.Body = Engine(Checkpoint(take desc))
-  let t = serial(mut s)
-  let _ = commit(mut s, take t, take body, None()) ? unreleased
-  strongest(a, mut s) ? unreleased
+  // nothing, and so do the Created commits.
+  let last = s.group_last
+  let group = copy s.digest
+  let placement = history.Placement(
+    // Every failure below closes the store; success sets the new live nodes.
+    live: replace(mut s.live, ordered_map.empty(compare_keys)),
+    epoch: s.epoch,
+    start: s.end + 1,
+    refs: batch_refs(s.max_entry),
+    bytes: s.config.batch_bytes
+  )
+  let tree = history.checkpoint_tree(copy s.bounds, take placement, s.index)
+  let n = list.len(tree.batches)
+  for i in 0u64..n {
+    let mut made: List[ObjectRef] = []
+    for (r, node) in tree.batches[i] {
+      put_node(a, mut s, r, copy node)?
+      list.push(mut made, copy r)
+    }
+    let body: history.Body = if i + 1 < n {
+      Engine(Created())
+    } else {
+      Engine(Checkpoint(history.descriptor(tree, last, group)))
+    }
+    s.created = take made
+    let t = serial(mut s)
+    let _ = commit(mut s, take t, take body, None()) ? unreleased
+    strongest(a, mut s) ? unreleased
+  }
+  let mut live: ordered_map.OrderedMap[Bytes, ObjectRef] = ordered_map.empty(compare_keys)
+  for r in tree.refs {
+    ordered_map.insert(mut live, copy r.digest, copy r)
+  }
+  s.live = take live
   Ok(())
+}
+
+// The objects one record inventories at most: what fits an entry of
+// `max_entry` bytes beside a group of an engine commit, 32 bytes each.
+fn batch_refs(max_entry: u64) -> u64 uses {} {
+  if max_entry > GROUP_OVERHEAD + 32 {
+    (max_entry - GROUP_OVERHEAD) / 32
+  } else {
+    1
+  }
+}
+
+// Puts a checkpoint node under the store's claim.
+fn put_node(a: Authority, mut s: Store, r: ObjectRef, take data: Bytes) -> Result[(), StoreError] {
+  let Some(held) = replace(mut s.claim, None()) else {
+    return Error(stop(mut s, Closed()))
+  }
+  let Some(narrowed) = claim.narrow(a, take held) else {
+    return Error(stop(mut s, Closed()))
+  }
+  let mut c = take narrowed
+  let put = authority.put(a, mut c, r, take data)
+  let back: Claim = take c
+  s.claim = Some(take back)
+  match take put {
+    Ok(()) => Ok(()),
+    Error(e) => Error(stop(mut s, seam(take e))),
+  }
 }
 
 /// Waits until every commit is durable at the strongest level the authority
@@ -2905,7 +3027,8 @@ fn submit(a: Authority, mut s: Store, at: Level of a, i: u64) -> Result[(), Unre
     return Error(Storage(stop(mut s, Closed())))
   }
   let mut c = take narrowed
-  let submitted = authority.submit(a, mut c, take entry, at)
+  let created = replace(mut s.created, [])
+  let submitted = authority.submit(a, mut c, take entry, created, at)
   // The annotation forgets the brand: the store holds its claim unbranded.
   let back: Claim = take c
   s.claim = Some(take back)

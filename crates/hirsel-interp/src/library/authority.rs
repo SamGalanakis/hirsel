@@ -19,7 +19,7 @@ use super::dispatch::{arg, bytes, error, none, ok, some, text, u32_value, u64_va
 use crate::{Error, OperationCall, OperationContext, OperationResult, Value, invalid};
 use hirsel_store_authority::wire::{self, Outcome};
 use hirsel_store_authority::{
-    Advanced, Authority, AuthorityError, Claim, Error as SeamError, Record,
+    Advanced, Authority, AuthorityError, Claim, Error as SeamError, ObjectRef, Record,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -96,6 +96,51 @@ fn result<T>(r: &Result<T, SeamError>, value: impl FnOnce(&T) -> Value) -> Value
     match r {
         Ok(v) => ok(value(v)),
         Err(e) => error(seam_error(e)),
+    }
+}
+
+/// An `ObjectRef` argument: its lifetime, epoch and digest, `None` when the digest is
+/// not 32 bytes, a reference that names no object.
+fn object_ref(v: &Value) -> Result<Option<ObjectRef>, Error> {
+    if let Value::Record { definition, fields } = v
+        && definition.is_core("ObjectRef")
+        && let [Some(lifetime), Some(epoch), Some(digest)] = fields.as_slice()
+    {
+        let lifetime = u64_arg(lifetime, "lifetime")?;
+        let epoch = u64_arg(epoch, "epoch")?;
+        return Ok(bytes(digest)?.try_into().ok().map(|digest| ObjectRef {
+            lifetime,
+            epoch,
+            digest,
+        }));
+    }
+    Err(invalid("ObjectRef representation"))
+}
+
+fn object_refs(v: &Value) -> Result<Option<Vec<ObjectRef>>, Error> {
+    super::collection::elements(v, hirsel_types::BuiltinType::List)?
+        .iter()
+        .map(object_ref)
+        .collect::<Result<Vec<_>, _>>()
+        .map(|all| all.into_iter().collect())
+}
+
+/// The answer to a request naming a reference that names no object: refused before
+/// any request, as the provider would refuse it.
+fn no_object() -> Value {
+    error(seam_error(&SeamError::Refused(AuthorityError::io(
+        std::io::ErrorKind::InvalidInput,
+    ))))
+}
+
+fn object_ref_value(r: &ObjectRef) -> Value {
+    Value::Record {
+        definition: (&hirsel_syntax::DefPath::core("ObjectRef")).into(),
+        fields: vec![
+            Some(u64_value(r.lifetime)),
+            Some(u64_value(r.epoch)),
+            Some(Value::Bytes(r.digest.to_vec())),
+        ],
     }
 }
 
@@ -284,9 +329,14 @@ impl Library {
         let name = || self.authority_name(arg(a, 0)?);
         Ok(Some(match op {
             "authority.claim" => wire::Request::Claim,
-            "authority.submit" => wire::Request::Submit {
-                at: self.level_of(&name()?, arg(a, 3)?)?,
-                payload: bytes(arg(a, 2)?)?.to_vec(),
+            // A reference that names no object is answered without the provider.
+            "authority.submit" => match object_refs(arg(a, 3)?)? {
+                Some(created) => wire::Request::Submit {
+                    at: self.level_of(&name()?, arg(a, 4)?)?,
+                    payload: bytes(arg(a, 2)?)?.to_vec(),
+                    created,
+                },
+                None => return Ok(None),
             },
             "authority.wait" => wire::Request::Wait {
                 position: u64_arg(arg(a, 2)?, "position")?,
@@ -300,12 +350,16 @@ impl Library {
                 at: self.level_of(&name()?, arg(a, 2)?)?,
                 max: u64_arg(arg(a, 3)?, "max")?,
             },
-            "authority.get" => wire::Request::Get {
-                name: text(arg(a, 1)?)?.to_string(),
+            "authority.get" => match object_ref(arg(a, 1)?)? {
+                Some(r) => wire::Request::Get { r },
+                None => return Ok(None),
             },
-            "authority.put" => wire::Request::Put {
-                name: text(arg(a, 1)?)?.to_string(),
-                data: bytes(arg(a, 2)?)?.to_vec(),
+            "authority.put" => match object_ref(arg(a, 2)?)? {
+                Some(r) => wire::Request::Put {
+                    r,
+                    data: bytes(arg(a, 3)?)?.to_vec(),
+                },
+                None => return Ok(None),
             },
             _ => return Ok(None),
         }))
@@ -450,12 +504,22 @@ impl Library {
                 let name = self.authority_name(arg(a, 0)?)?;
                 let (_, held) = self.claim_arg(&name, arg(a, 1)?)?;
                 let payload = bytes(arg(a, 2)?)?.to_vec();
-                let at = self.level_of(&name, arg(a, 3)?)?;
-                let r = wire::Request::Submit { at, payload };
-                let Outcome::Position(r) = self.request(&name, Some(&held), r, context)?.0 else {
-                    unreachable!("admitted")
-                };
-                result(&r, |p| u64_value(*p))
+                let at = self.level_of(&name, arg(a, 4)?)?;
+                match object_refs(arg(a, 3)?)? {
+                    Some(created) => {
+                        let r = wire::Request::Submit {
+                            at,
+                            payload,
+                            created,
+                        };
+                        let Outcome::Position(r) = self.request(&name, Some(&held), r, context)?.0
+                        else {
+                            unreachable!("admitted")
+                        };
+                        result(&r, |p| u64_value(*p))
+                    }
+                    None => no_object(),
+                }
             }
             "authority.wait" => {
                 let name = self.authority_name(arg(a, 0)?)?;
@@ -519,9 +583,13 @@ impl Library {
                                         Value::Bytes(identity.to_vec()),
                                     ],
                                 ),
-                                Record::Appended(payload) => {
-                                    variant(1, vec![Value::Bytes(payload.clone())])
-                                }
+                                Record::Appended { payload, created } => variant(
+                                    1,
+                                    vec![
+                                        Value::Bytes(payload.clone()),
+                                        list(created.iter().map(object_ref_value).collect()),
+                                    ],
+                                ),
                             })
                             .collect(),
                     )
@@ -529,16 +597,19 @@ impl Library {
             }
             "authority.get" | "authority.put" => {
                 let name = self.authority_name(arg(a, 0)?)?;
-                let object = text(arg(a, 1)?)?.to_string();
-                let r = if op == "authority.put" {
-                    wire::Request::Put {
-                        name: object,
-                        data: bytes(arg(a, 2)?)?.to_vec(),
-                    }
+                let (held, r) = if op == "authority.put" {
+                    let (_, held) = self.claim_arg(&name, arg(a, 1)?)?;
+                    let data = bytes(arg(a, 3)?)?.to_vec();
+                    let r = object_ref(arg(a, 2)?)?.map(|r| wire::Request::Put { r, data });
+                    (Some(held), r)
                 } else {
-                    wire::Request::Get { name: object }
+                    let r = object_ref(arg(a, 1)?)?.map(|r| wire::Request::Get { r });
+                    (None, r)
                 };
-                match self.request(&name, None, r, context)?.0 {
+                let Some(r) = r else {
+                    return Ok(OperationResult::returned(no_object()));
+                };
+                match self.request(&name, held.as_ref(), r, context)?.0 {
                     Outcome::Get(r) => result(&r, |v| {
                         v.as_ref()
                             .map_or_else(none, |b| some(Value::Bytes(b.clone())))

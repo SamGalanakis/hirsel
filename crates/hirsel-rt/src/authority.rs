@@ -17,7 +17,9 @@
 use crate::handles::Grant;
 use crate::io::{AdapterError, Completion, IoError, Request, State};
 use hirsel_store_authority::wire::{self, Outcome};
-use hirsel_store_authority::{Advanced, AuthorityError, AuthorityGrant, Error as SeamError};
+use hirsel_store_authority::{
+    Advanced, AuthorityError, AuthorityGrant, Error as SeamError, ObjectRef,
+};
 use std::collections::BTreeMap;
 
 /// A seam request, by the handles and words the program passed.
@@ -842,10 +844,10 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_claim(
     unsafe { provider(ctx, out, a.read(), None, wire::Request::Claim) }
 }
 
-/// `authority.submit(a, mut c, take payload, at) -> Result[u64, SeamError]`.
+/// `authority.submit(a, mut c, take payload, created, at) -> Result[u64, SeamError]`.
 /// # Safety
-/// Context bound; Authority, Claim and Level borrowed; the payload transfers one owner
-/// credit; out writable.
+/// Context bound; Authority, Claim, the `List[ObjectRef]` block and Level borrowed; the
+/// payload transfers one owner credit; out writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_rt_v2_authority_submit(
     ctx: *mut crate::TaskCtx,
@@ -856,6 +858,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_submit(
     owner: *mut crate::Header,
     start: u64,
     len: u64,
+    created: *mut crate::Header,
     at: *const u64,
 ) -> u8 {
     // SAFETY: this semantic entry owns its task until it suspends or returns.
@@ -865,9 +868,13 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_submit(
     unsafe {
         crate::release::hirsel_rt_v2_release(ctx, owner, (*owner).index(), std::ptr::null(), 0, 0)
     };
+    let Some(created) = (unsafe { object_refs(created) }) else {
+        return unsafe { no_object(ctx, out) };
+    };
     let request = wire::Request::Submit {
         at: (unsafe { at.read() } % 256) as u8,
         payload,
+        created,
     };
     unsafe { provider(ctx, out, a.read(), Some(c.read()), request) }
 }
@@ -971,41 +978,84 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_read(
     unsafe { provider(ctx, out, a.read(), None, request) }
 }
 
-/// `authority.get(a, name) -> Result[Option[Bytes], SeamError]`.
+/// `ObjectRef`: its lifetime at 0, epoch at 8 and digest Bytes at 16.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ObjectRefAbi {
+    pub lifetime: u64,
+    pub epoch: u64,
+    pub digest: crate::views::Slice,
+}
+
+impl ObjectRefAbi {
+    /// The reference, `None` when its digest is not 32 bytes: it names no object.
+    unsafe fn get(&self) -> Option<ObjectRef> {
+        let d = self.digest;
+        let digest = unsafe { crate::io::slice_bytes(d.owner, d.start, d.length) };
+        Some(ObjectRef {
+            lifetime: self.lifetime,
+            epoch: self.epoch,
+            digest: digest.try_into().ok()?,
+        })
+    }
+}
+
+/// A borrowed `List[ObjectRef]`: its count at 0, its 40-byte elements after.
+unsafe fn object_refs(list: *mut crate::Header) -> Option<Vec<ObjectRef>> {
+    let payload = crate::alloc::payload(list);
+    let count = unsafe { payload.cast::<u64>().read() };
+    let count = usize::try_from(count).unwrap_or_else(|_| crate::fault("ref count overflow"));
+    let first = crate::alloc::sequence_elements_offset(8) as usize;
+    (0..count)
+        .map(|index| unsafe {
+            let at = payload.add(first + index * size_of::<ObjectRefAbi>());
+            at.cast::<ObjectRefAbi>().read_unaligned().get()
+        })
+        .collect()
+}
+
+/// The answer to a request naming a reference that names no object: refused before any
+/// request, as the provider would refuse it.
+unsafe fn no_object(ctx: *mut crate::TaskCtx, out: *mut SeamResult) -> u8 {
+    let refused: Result<(), _> = Err(SeamError::Refused(AuthorityError::io(
+        std::io::ErrorKind::InvalidInput,
+    )));
+    unsafe { out.write(seam_result(ctx, &refused, |(), _| {})) };
+    crate::STATUS_OK
+}
+
+/// `authority.get(a, r) -> Result[Option[Bytes], SeamError]`.
 /// # Safety
-/// Context bound; Authority borrowed; the name a live String slice; out writable.
+/// Context bound; Authority and ObjectRef borrowed; out writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_rt_v2_authority_get(
     ctx: *mut crate::TaskCtx,
     _destination: *mut u8,
     out: *mut SeamResult,
     a: *const u64,
-    owner: *mut crate::Header,
-    start: u64,
-    len: u64,
+    r: *const ObjectRefAbi,
 ) -> u8 {
     // SAFETY: this semantic entry owns its task until it suspends or returns.
     let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
 
-    let request = wire::Request::Get {
-        name: unsafe { text(owner, start, len) },
+    let Some(r) = (unsafe { (*r).get() }) else {
+        return unsafe { no_object(ctx, out) };
     };
-    unsafe { provider(ctx, out, a.read(), None, request) }
+    unsafe { provider(ctx, out, a.read(), None, wire::Request::Get { r }) }
 }
 
-/// `authority.put(a, name, take data) -> Result[(), SeamError]`.
+/// `authority.put(a, mut c, r, take data) -> Result[(), SeamError]`.
 /// # Safety
-/// Context bound; Authority borrowed; the name a live String slice; the data transfers one
-/// owner credit; out writable.
+/// Context bound; Authority, Claim and ObjectRef borrowed; the data transfers one owner
+/// credit; out writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_rt_v2_authority_put(
     ctx: *mut crate::TaskCtx,
     _destination: *mut u8,
     out: *mut SeamResult,
     a: *const u64,
-    name_owner: *mut crate::Header,
-    name_start: u64,
-    name_len: u64,
+    c: *mut u64,
+    r: *const ObjectRefAbi,
     owner: *mut crate::Header,
     start: u64,
     len: u64,
@@ -1013,12 +1063,15 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_put(
     // SAFETY: this semantic entry owns its task until it suspends or returns.
     let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
 
-    let name = unsafe { text(name_owner, name_start, name_len) };
     let data = unsafe { crate::io::slice_bytes(owner, start, len) }.to_vec();
     unsafe {
         crate::release::hirsel_rt_v2_release(ctx, owner, (*owner).index(), std::ptr::null(), 0, 0)
     };
-    unsafe { provider(ctx, out, a.read(), None, wire::Request::Put { name, data }) }
+    let Some(r) = (unsafe { (*r).get() }) else {
+        return unsafe { no_object(ctx, out) };
+    };
+    let request = wire::Request::Put { r, data };
+    unsafe { provider(ctx, out, a.read(), Some(c.read()), request) }
 }
 
 /// `authority.reclaim(a, mut c) -> Result[(), SeamError]`.

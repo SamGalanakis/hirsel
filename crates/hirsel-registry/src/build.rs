@@ -228,7 +228,7 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         (
             "HistoryRecord",
             "",
-            "Claimed(u64,Bytes,Bytes)|Appended(Bytes)",
+            "Claimed(u64,Bytes,Bytes)|Appended(Bytes,List[ObjectRef])",
         ),
         ("GrantAccess", "", "Read()|ReadWrite()"),
         (
@@ -295,6 +295,7 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         ("Eq", "T", "equal: fn(T,T) -> bool uses {}"),
         ("Hasher", "T", "hash: fn(T,u64) -> u64 uses {}"),
         ("SourceSite", "", "definition: String,line: u64,column: u64"),
+        ("ObjectRef", "", "lifetime: u64,epoch: u64,digest: Bytes"),
         (
             "Failure",
             "",
@@ -1332,6 +1333,7 @@ fn serializable_core(name: &str, t: &mut TypeDefinition) {
             | "SeamError"
             | "Advanced"
             | "HistoryRecord"
+            | "ObjectRef"
             | "ExitStatus"
             | "ProcessOutput"
             | "PipelineOutput"

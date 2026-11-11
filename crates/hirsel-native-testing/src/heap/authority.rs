@@ -227,6 +227,37 @@ fn bits(v: &OpValue) -> Option<u64> {
         _ => None,
     }
 }
+/// An `ObjectRef` operand; `Some(None)` when its digest is not 32 bytes and it names no
+/// object, which the runtime refuses before any request.
+fn object_ref(v: &OpValue) -> Option<Option<hirsel_store_authority::ObjectRef>> {
+    let OpValue::Aggregate(fields) = v else {
+        return None;
+    };
+    let [lifetime, epoch, OpValue::Bytes(digest)] = fields.as_slice() else {
+        return None;
+    };
+    let (lifetime, epoch) = (bits(lifetime)?, bits(epoch)?);
+    Some(
+        digest
+            .as_slice()
+            .try_into()
+            .ok()
+            .map(|digest| hirsel_store_authority::ObjectRef {
+                lifetime,
+                epoch,
+                digest,
+            }),
+    )
+}
+fn object_refs(v: &OpValue) -> Option<Option<Vec<hirsel_store_authority::ObjectRef>>> {
+    let OpValue::Sequence(all) = v else {
+        return None;
+    };
+    all.iter()
+        .map(object_ref)
+        .collect::<Option<Vec<_>>>()
+        .map(|all| all.into_iter().collect())
+}
 fn handle(v: &OpValue) -> Option<u64> {
     match v {
         OpValue::Handle(h) => Some(*h),
@@ -330,15 +361,27 @@ impl Io {
                     }
                 }
                 ("authority", op, rest) => {
+                    let no_object = || {
+                        v(
+                            1,
+                            error(&Error::Refused(AuthorityError::io(
+                                std::io::ErrorKind::InvalidInput,
+                            ))),
+                        )
+                    };
                     let (claim, request) = match (op, rest) {
                         ("claim", []) => (None, wire::Request::Claim),
-                        ("submit", [c, OpValue::Bytes(payload), at]) => (
-                            Some(handle(c)?),
-                            wire::Request::Submit {
+                        ("submit", [c, OpValue::Bytes(payload), created, at]) => {
+                            let Some(created) = object_refs(created)? else {
+                                return Some(OpOutcome::Value(no_object()));
+                            };
+                            let request = wire::Request::Submit {
                                 at: level(at)?,
                                 payload: payload.clone(),
-                            },
-                        ),
+                                created,
+                            };
+                            (Some(handle(c)?), request)
+                        }
                         ("wait", [c, p]) => {
                             (Some(handle(c)?), wire::Request::Wait { position: bits(p)? })
                         }
@@ -353,19 +396,20 @@ impl Io {
                                 max: bits(max)?,
                             },
                         ),
-                        ("get", [n]) => (
-                            None,
-                            wire::Request::Get {
-                                name: text(n)?.into(),
-                            },
-                        ),
-                        ("put", [n, OpValue::Bytes(data)]) => (
-                            None,
-                            wire::Request::Put {
-                                name: text(n)?.into(),
-                                data: data.clone(),
-                            },
-                        ),
+                        ("get", [r]) => match object_ref(r)? {
+                            Some(r) => (None, wire::Request::Get { r }),
+                            None => return Some(OpOutcome::Value(no_object())),
+                        },
+                        ("put", [c, r, OpValue::Bytes(data)]) => match object_ref(r)? {
+                            Some(r) => (
+                                Some(handle(c)?),
+                                wire::Request::Put {
+                                    r,
+                                    data: data.clone(),
+                                },
+                            ),
+                            None => return Some(OpOutcome::Value(no_object())),
+                        },
                         ("reclaim", [c]) => (Some(handle(c)?), wire::Request::Reclaim),
                         _ => return None,
                     };
@@ -399,9 +443,26 @@ impl Io {
                                                 OpValue::ByteSequence(identity.to_vec()),
                                             ]),
                                         ),
-                                        Record::Appended(payload) => {
-                                            v(1, OpValue::ByteSequence(payload))
-                                        }
+                                        Record::Appended { payload, created } => v(
+                                            1,
+                                            OpValue::Aggregate(vec![
+                                                OpValue::ByteSequence(payload),
+                                                OpValue::Sequence(
+                                                    created
+                                                        .into_iter()
+                                                        .map(|r| {
+                                                            OpValue::Aggregate(vec![
+                                                                word(r.lifetime),
+                                                                word(r.epoch),
+                                                                OpValue::ByteSequence(
+                                                                    r.digest.to_vec(),
+                                                                ),
+                                                            ])
+                                                        })
+                                                        .collect(),
+                                                ),
+                                            ]),
+                                        ),
                                     })
                                     .collect(),
                             )
@@ -458,6 +519,7 @@ mod tests {
         let submit = wire::Request::Submit {
             at: 0,
             payload: b"second".to_vec(),
+            created: vec![],
         };
         assert_eq!(
             b.request(0, Some(40), submit, 41),
@@ -486,8 +548,8 @@ mod tests {
         assert!(b.clone().live().unwrap().claims.is_empty());
     }
 
-    // An actual authority.read returns a claim record and an append record, whose three
-    // byte buffers are materialized under H.
+    // An actual authority.read returns a claim record and an append record that names one
+    // created object, whose four byte buffers and created list are materialized under H.
     // Removing its release leaks that result; duplicating it releases twice.
     #[test]
     fn authority_read_buffers_detect_missing_and_duplicate_release() {
@@ -503,6 +565,11 @@ mod tests {
                 wire::Request::Submit {
                     at: 0,
                     payload: b"payload".to_vec(),
+                    created: vec![hirsel_store_authority::ObjectRef {
+                        lifetime: 2,
+                        epoch: 1,
+                        digest: [7; 32],
+                    }],
                 },
                 41,
             )
@@ -536,8 +603,40 @@ mod tests {
             r.scan = vec![ScanStep::SliceOwner { offset: 0 }];
             r.drop = vec![DropStep::Release { offset: 0 }];
             r.copy = CopyRecipe::Dup;
-            // HistoryRecord: Claimed(u64, Bytes, Bytes) | Appended(Bytes), 64 bytes.
-            let record = l.variant(&[&[word_layout, bytes, bytes], &[bytes]]);
+            // ObjectRef { lifetime, epoch, digest }, 40 bytes, and its List.
+            let object_ref = l.record(&[word_layout, word_layout, bytes]);
+            let refs = l.record(&[word_layout]);
+            let r = l.get_mut(refs);
+            r.kind = LayoutKind::Sequence {
+                element: object_ref,
+            };
+            r.size = SizeSpec::Dynamic(vec![
+                SizeTerm::Constant(16),
+                SizeTerm::ReadLength {
+                    offset: 0,
+                    scalar: ScalarKind::U64,
+                },
+                SizeTerm::Constant(40),
+                SizeTerm::Multiply,
+                SizeTerm::Add,
+            ]);
+            r.scan = vec![ScanStep::Sequence {
+                count_offset: 0,
+                offset: 16,
+                stride: 40,
+                element: object_ref,
+            }];
+            r.drop = vec![DropStep::ElementsReverse {
+                count_offset: 0,
+                offset: 16,
+                stride: 40,
+                element: object_ref,
+            }];
+            r.copy = CopyRecipe::NotCopyable;
+            let refs = l.block(refs);
+            // HistoryRecord: Claimed(u64, Bytes, Bytes) | Appended(Bytes, List[ObjectRef]),
+            // 64 bytes.
+            let record = l.variant(&[&[word_layout, bytes, bytes], &[bytes, refs]]);
             let sequence = l.record(&[word_layout]);
             let r = l.get_mut(sequence);
             r.kind = LayoutKind::Sequence { element: record };

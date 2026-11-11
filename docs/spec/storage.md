@@ -74,14 +74,16 @@ commits that were not yet durable. Holding a `Store` grants nothing outside its
 authority.
 
 ```text
-StoreConfig = { group_commits: u64, group_bytes: u64, limits: StoreLimits, nodes: Bounds }
+StoreConfig = { group_commits: u64, group_bytes: u64, batch_bytes: u64, limits: StoreLimits, nodes: Bounds }
 StoreLimits = { key_bytes: u64, value_bytes: u64, transaction_bytes: u64, range_rows: u64 }
 Bounds      = { node_min: u32, node_mean: u32, node_max: u32 }   // std@1/history
 ```
 
 `StoreConfig` holds the settings of the engine provider, `db.local@1`: the group bounds
-of [STORE-11](#store-11-engine-and-storage-seam), the limits and the checkpoint node bounds
-(STORE-11 **Checkpoints**; `default_config` gives the default bounds). A setting that can
+of [STORE-11](#store-11-engine-and-storage-seam), the bytes of fresh checkpoint nodes one
+creation batch holds (STORE-11 **Checkpoints**, 64 MiB by default; an opener's own, since
+it shapes which records inventory a node and never its bytes), the limits and the
+checkpoint node bounds (`default_config` gives the default bounds). A setting that can
 decide an outcome, a limit above all, or that shapes the stored objects, as the node bounds
 do, is recorded in the store when it is created and is the same for every run of every
 body; an opener cannot change it, and the limits and bounds it passes to an existing store
@@ -848,19 +850,20 @@ Advanced       = Advanced(u64) | Fenced() | Refused(AuthorityError) | Undecided(
 AuthorityError = Io(FileError) | Status(u16) | Unreachable()
 SeamError      = Storage(AuthorityError) | Refused(AuthorityError) | Corrupt(String) | Fenced()
                | Format(Bytes, String)
-HistoryRecord  = Claimed(u64, Bytes, Bytes) | Appended(Bytes)
+HistoryRecord  = Claimed(u64, Bytes, Bytes) | Appended(Bytes, List[ObjectRef])
+ObjectRef      = { lifetime: u64, epoch: u64, digest: Bytes }
 
 fn io.authority(rt: Io, name: String) -> Result[Authority, GrantError]
 fn authority.max_entry(a: Authority) -> u64
 fn authority.claim(a: Authority) -> Result[Claim of a, SeamError]
 fn claim.end(c: Claim) -> u64
 fn claim.narrow(a: Authority, take c: Claim) -> Option[Claim of a]
-fn authority.submit(a: Authority, mut c: Claim of a, take entry: Bytes, at: Level of a) -> Result[u64, SeamError]
+fn authority.submit(a: Authority, mut c: Claim of a, take entry: Bytes, created: List[ObjectRef], at: Level of a) -> Result[u64, SeamError]
 fn authority.wait(a: Authority, mut c: Claim of a, position: u64) -> Advanced
 fn authority.durable(a: Authority, mut c: Claim of a, at: Level of a) -> Result[u64, SeamError]
 fn authority.read(a: Authority, from: u64, at: Level of a, max: u64) -> Result[List[HistoryRecord], SeamError]
-fn authority.get(a: Authority, name: String) -> Result[Option[Bytes], SeamError]
-fn authority.put(a: Authority, name: String, take data: Bytes) -> Result[(), SeamError]
+fn authority.get(a: Authority, r: ObjectRef) -> Result[Option[Bytes], SeamError]
+fn authority.put(a: Authority, mut c: Claim of a, r: ObjectRef, take data: Bytes) -> Result[(), SeamError]
 fn authority.reclaim(a: Authority, mut c: Claim of a) -> Result[(), SeamError]
 ```
 
@@ -888,9 +891,10 @@ durability, and a cancellation never closes the store.
 and owns its framing and chain (**Records** below): a **claim record** is the authority's
 own, and an **appended record** carries one **entry**, bytes the engine passed to
 `authority.submit` and the authority never reads. `authority.read` returns each record as
-a `HistoryRecord`: `Claimed(epoch, attempt, identity)` or `Appended(entry)`. What an entry
-holds (a commit group) is the engine's format (below); commit versions are numbered by the
-engine, never by positions.
+a `HistoryRecord`: `Claimed(epoch, attempt, identity)` or `Appended(entry, created)`,
+where `created` is the record's **inventory**, the objects the record creates (**Objects**
+below). What an entry holds (a commit group) is the engine's format (below); commit
+versions are numbered by the engine, never by positions.
 
 **Claim.** `authority.claim` makes its caller the history's only writer. It reads the
 history to its end, settles a torn tail (see Recovery), and appends a claim record naming
@@ -902,11 +906,12 @@ record, ticket and frontier carries and which no other history uses, a fork's in
 The fence is the claim record itself: there is no fence object, so nothing that reclaims
 objects can remove one.
 
-**Append.** An append is split in two. `authority.submit(a, c, entry, at)` queues an
-appended record carrying `entry` at the claim's next position, one past the history's
-end or the last entry it queued, and returns that position with no request and no
-effect: a dead claim is `Fenced()` and an entry over `authority.max_entry` is
-`Refused(..)`. `authority.wait(a, c, p)` appends every entry the claim has queued, those
+**Append.** An append is split in two. `authority.submit(a, c, entry, created, at)`
+queues an appended record carrying `entry` and inventorying `created` at the claim's next
+position, one past the history's end or the last entry it queued, and returns that
+position with no request and no effect: a dead claim is `Fenced()`, and an entry that with
+32 bytes for each object it inventories is over `authority.max_entry`, or a created object
+of another position or epoch than the record's, is `Refused(..)`. `authority.wait(a, c, p)` appends every entry the claim has queued, those
 submitted after `p` too, in order, whole or nothing each, only while `c` is the claim of
 the newest claim record and the history ends where the first of them follows, with at
 most one barrier at the strongest level any of them names, and returns `p`'s outcome
@@ -953,10 +958,19 @@ it returns is the one the history holds. It needs no claim: followers and `store
 place, the declared level the grant names; `authority.max_entry` bounds the bytes of one
 entry.
 
-**Objects.** `authority.put` creates an immutable named object only if its name is free;
-an existing object with equal bytes is success, and one with other bytes is
-`Corrupt(name)`. `authority.get` reads one, `None` when it is absent. No object is ever
-replaced. Object names are the format's.
+**Objects.** An object is named by an `ObjectRef`: its **lifetime**, the position of the
+record that creates it, the writer epoch that put it, and the SHA-256 of its bytes. The
+authority turns a reference into the provider's name; the engine never names an object.
+`authority.put(a, c, r, data)` creates the immutable object `r` only if it is absent, and
+only under a live claim of `r`'s epoch, with `data` hashing to `r`'s digest and a lifetime
+from the claim's next position to 64 past it, a position the claim can still submit at;
+the bound is on positions, not bytes. An existing object with equal bytes is success; a
+dead claim is `Fenced()`; anything else is `Refused(..)` with no effect. `authority.get`
+reads one, `None` when it is absent, and bytes whose digest is not the reference's are
+`Corrupt(name)`. No object is ever replaced. The record at an object's lifetime
+inventories it, so whether a history created an object is read from the history alone,
+and because the epoch is in the name a successor never shares an object a dead claim put
+at the same position, equal bytes included.
 
 **Reclamation.** `authority.reclaim` removes only what no retained version needs, and
 decides it from the history alone: the floor and pins its retention entries record
@@ -1029,8 +1043,9 @@ snapshot costs no request.
 **History and derived objects.** The history is **authoritative**: only the head writes
 it. Every other object (a checkpoint of the state at a version, an index part) is
 **derived**: its bytes are a function of the history alone, in one canonical encoding,
-with no writer identity. Any machine that reads the history may put a derived object,
-and two that derive the same object write equal bytes. The history records the runtime
+with no writer identity, so any two machines that derive the same object derive equal
+bytes. Only the head puts one, under its claim, and the record that creates it
+inventories it (**Objects** below). The history records the runtime
 contract revision in force beside every code hash it names. Their bytes are declared
 under **History format** below.
 
@@ -1083,10 +1098,12 @@ demand, so that a store may exceed memory, changes cost and no outcome.
 fn store.compact(mut s: Store) -> Result[(), StoreError]
 ```
 
-`store.compact` puts the nodes of a checkpoint at the durable version's group end that are
-not already present, and records its descriptor by a Checkpoint commit, so recovery
-applies only the commits after it. A follower may put the same nodes; only the head
-records the commit.
+`store.compact` puts the nodes of a checkpoint at the durable version's group end that
+the head's current checkpoint does not already hold, and records its descriptor by a
+Checkpoint commit, so recovery applies only the commits after it. Its fresh nodes are put
+in **creation batches** (**Checkpoints** below), each inventoried by one record: every
+batch but the last by a record holding one Created commit, and the last by the record
+holding the Checkpoint commit.
 
 #### History format
 
@@ -1103,13 +1120,14 @@ change is a new magic and a cutover, never a second reader.
 **Records.** The authority owns the record at every position, whole:
 
 ```text
-record   = "HSHIST03" prev:[32] position:u64 epoch:u64 kind:u8 body
+record   = "HSHIST04" prev:[32] position:u64 epoch:u64 kind:u8 body
 claimed  = kind 1, body attempt:[16] identity:[32]
-appended = kind 2, body entry          // the rest of the record
+appended = kind 2, body count:u32 digest:[32]* entry   // entry: the rest of the record
 ```
 
 `prev` is `H(record)` of the record before, all zeros at position 1, and `position` is the
-record's own. A record **follows** the history when `prev` and `position` continue it and
+record's own. An appended record's digests are its inventory: each names the object of
+that digest at the record's position and epoch, so a reference costs the record 32 bytes. A record **follows** the history when `prev` and `position` continue it and
 either it is a claim record whose `epoch` is one above the previous record's and whose
 `identity` is the history's (the first claim record, at epoch 1, mints it), or it is an
 appended record with the previous record's `epoch` after at least one claim record. The
@@ -1123,7 +1141,7 @@ its frame's length and position.
 **Groups.** Each appended record's entry is one **group**, the commits of one submit:
 
 ```text
-group  = "HSGRUP01" count:u32 commit* defs:u32 def*
+group  = "HSGRUP02" count:u32 commit* defs:u32 def*
 def    = path:bytes fingerprint:bytes code:[32] revision:bytes
 commit = kind:u8 body writes
 writes = n:u32 { op:u8 key:bytes [value:bytes if op = 1] }*
@@ -1166,34 +1184,46 @@ Every kind ends with its `writes`. Engine operations and their payloads:
 | 5 Fork | `identity:[32] origin:[32] at:u64`: a fork of the history `origin` at its version `at`, naming the identity of the fork's own history. It comes after the Genesis. |
 | 6 Stream | `op:u8 identity:[32]`: a fence (1) or purge (2) of a call stream ([STORE-12](#store-12-transactions-at-a-runner)). |
 | 7 Library | `name:bytes payload:bytes`: a step a library records as its own, a migration's above all ([STORE-9](#store-9-schema-history-renames-and-migrations)). |
+| 8 Created | Empty: the record holding it creates the objects it inventories, one creation batch of a checkpoint a later record of the same epoch publishes (**Checkpoints** below). Any other payload is corruption. |
 
 **Checkpoints.** A checkpoint is the state at a group's last version as a tree of
-derived **nodes**, each named by the SHA-256 of its bytes:
+derived **nodes**, each an object named by its reference:
 
 ```text
-node  = "HSNODE01" level:u8 count:u32 entry*
-leaf  = key:bytes value:bytes                         // level 0
-index = first:bytes child:[32] entries:u64            // level > 0
+node  = "HSNODE02" level:u8 count:u32 entry*
+leaf  = key:bytes value:bytes                                       // level 0
+index = first:bytes lifetime:u64 epoch:u64 digest:[32] entries:u64 // level > 0
 ```
 
-Entries of a node strictly ascend by key (an index entry by its child's first key), and
+An index entry's `lifetime`, `epoch` and `digest` are its child's reference. Entries of
+a node strictly ascend by key (an index entry by its child's first key), and
 an empty state is one empty leaf. Leaves are cut by content: after entry `e`, once the
 node holds at least `node_min` bytes, when `u32le(H(key)[0..4]) * node_mean <
 size(e) * 2^32`, and always before an entry that would take it past `node_max`; index
 levels are cut the same way over their own entries until one root remains. Equal state
-gives equal nodes on every machine, a node shared by two versions or two forks is one
-object, and a change rewrites only the nodes whose range it touched and their ancestors.
+gives equal node contents on every machine. A checkpoint reuses the object of every node
+whose bytes a node of the head's current checkpoint has, so a change puts only the nodes
+whose range it touched and their ancestors; every other node is **fresh**, put by the
+claim that publishes the checkpoint at a lifetime of its own creation batch. Fresh nodes
+are put in order into batches, the first at the claim's next position; a batch closes
+before a fresh node once it holds the references one entry can inventory, or
+`batch_bytes` of nodes, so a dead claim leaves at most one open batch,
+`batch_bytes + node_max` bytes no record inventories.
 The defaults are 256 KiB, 1 MiB and 4 MiB. Bounds **hold** limits when `0 < node_mean`,
 `node_min <= node_mean <= node_max`, the largest leaf entry the limits allow fits a node
 (`13 + 8 + key_bytes + value_bytes <= node_max`) and so do two of the largest index entries
-(`13 + 2 * (44 + key_bytes) <= node_max`), so every level above the leaves has fewer
+(`13 + 2 * (60 + key_bytes) <= node_max`), so every level above the leaves has fewer
 nodes than the one below; `node_max` is at most the backend's object cap. A root index
 has at least two children, and a node is empty only as the root of an empty state. A **descriptor** is
-`version:u64 digest:[32] root:[32] height:u8 entries:u64 bytes:u64`: the checkpoint's
-version (always a group's last; a claim record since writes nothing, so the state after
-the newest group is the state at the head's version), the digest of that group, the root node, the number
+`version:u64 digest:[32] root_lifetime:u64 root_epoch:u64 root_digest:[32] height:u8 entries:u64 bytes:u64`:
+the checkpoint's version (always a group's last; a claim record since writes nothing, so
+the state after the newest group is the state at the head's version), the digest of that
+group, the root node's reference (no lifetime or epoch of 0), the number
 of levels (1 for a lone leaf), the number of entries, and their key and value bytes. A checkpoint counts only once a Checkpoint commit after its version records its
-descriptor, so the chain authenticates it; its nodes are put before that commit.
+descriptor, so the chain authenticates it; its nodes are put before that commit, and the
+record holding the commit, with the run of records holding a Created commit just before it
+in its epoch, inventories every fresh node. A record that inventories an object and holds
+neither a Created nor a Checkpoint commit is corruption.
 Validating one reads its nodes from the root, checks each against the digest its parent
 named, the keys' order and the descriptor's counts, and requires that the group whose
 last version is the descriptor's has the descriptor's digest.
@@ -1219,8 +1249,10 @@ head = "HSOBJH01" attempt:[16] end:u64 digest:[32] sum:[32]
 
 naming the newest claim's attempt, the history's end and the last record's digest; `sum`
 is the SHA-256 of everything before it. A wait puts each queued record, then replaces the
-head once, conditionally on the tag of the writer's own last replace. A node is `n/` followed by its
-hexadecimal digest. A record object no head's chain reaches, left by a writer fenced or
+head once, conditionally on the tag of the writer's own last replace. An object is `o/`
+followed by its lifetime and its epoch as 20 decimal digits each and its digest in
+lowercase hexadecimal, separated by `-`; on a local log it is the file of that name under
+`objects/`. A record object no head's chain reaches, left by a writer fenced or
 undecided before its head replace, is not history and is reclaimed. A listing only finds
 candidates: every object is checked against the digest that names it.
 
@@ -1242,7 +1274,10 @@ settles a torn tail, then reads, in order:
 2. each appended record's group in order, decoded and checked against the version rules,
    noting the newest Checkpoint commit;
 3. the checkpoint that commit names, nodes level by level, every leaf in parallel,
-   validated as above, and then the write sets of the commits after it, in order.
+   validated as above, and then the write sets of the commits after it, in order. A node
+   reference of a lifetime past the Checkpoint's record, or of a lifetime at or past the
+   first record of its publication that the publication does not inventory, is corruption
+   of that record, as is a missing or damaged node.
 
 Only the last frame of the last local segment can be **torn**: an incomplete final
 frame, which the claim cuts. Anything else that fails is **corruption**: a bad digest,
@@ -1255,7 +1290,8 @@ than guess. Recovery never runs a body.
 **Costs.** A local append copies each commit's bytes once into a reusable group buffer,
 hashes the group once for its digest, and the authority hashes the record once for the
 chain; it makes one write and, at `host`, one `fdatasync`. The record and its frame add
-65 bytes per group and the group 16 bytes plus its definition table. A commit adds about
+69 bytes per group, 32 per object it inventories, and the group 16 bytes plus its
+definition table. A commit adds about
 40 bytes plus its caller, argument, outcome and, per write, 9 bytes plus the key and
 value. A claim is one record of 105 bytes, 113 framed on a log. On object storage a wait of `k` groups is `k` puts
 and one conditional replace. Records are written once and never rewritten; a checkpoint
@@ -1942,7 +1978,7 @@ A store has one head, and the head is its only fenced role
 keys: there is no partition a program declares, no assignment of keys to machines and no
 commit protocol between owners. A **follower** is any machine that reads the history. It
 applies write sets as recovery does, serves queries and subscriptions at durable versions
-([STORE-16](#store-16-subscriptions)), puts derived objects, and may evaluate a
+([STORE-16](#store-16-subscriptions)), reads derived objects, and may evaluate a
 transaction ahead of the head.
 
 The head may commit a run a follower made on an older version only when that run's

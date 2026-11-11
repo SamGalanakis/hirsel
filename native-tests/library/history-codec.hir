@@ -11,6 +11,9 @@
 //    flip re-encodes to those same bytes;
 // 4. leaves are cut exactly where a flat reference of the cut rule cuts,
 //    the tree reads back to its state, and equal states give equal roots;
+//    a node whose digest the live objects hold is reused, every other one is
+//    fresh, in batches of consecutive lifetimes that close at the refs or
+//    bytes the placement allows;
 // 5. the rules across groups: a claim is one version, the history's first
 //    commit is its one Genesis, and a Fork names the claims' identity;
 // 6. vectors written by hand from the format: each decodes to exactly its
@@ -72,7 +75,7 @@ fn random_descriptor(mut g: prng.Generator) -> history.Descriptor {
   history.Descriptor(
     version: 1u64 + prng.u64(mut g) % 1000,
     digest: fixed(mut g, 32),
-    root: fixed(mut g, 32),
+    root: ObjectRef(lifetime: 1u64 + prng.u64(mut g) % 1000, epoch: 1u64 + prng.u64(mut g) % 9, digest: fixed(mut g, 32)),
     height: int.truncate(1u64 + prng.u64(mut g) % 4),
     entries: prng.u64(mut g) % 100,
     bytes: prng.u64(mut g) % 10000
@@ -114,7 +117,11 @@ fn random_commit(mut g: prng.Generator, defs: u32) -> history.Commit {
     }
     Run(run: fixed(mut g, 16), records: take records)
   } else if pick == 4 {
-    Engine(Checkpoint(random_descriptor(mut g)))
+    if prng.u64(mut g) % 2 == 0 {
+      Engine(Checkpoint(random_descriptor(mut g)))
+    } else {
+      Engine(Created())
+    }
   } else if pick == 5 {
     let mut names: List[Bytes] = []
     for _ in 0u64..prng.u64(mut g) % 3 {
@@ -298,22 +305,48 @@ fn reference_leaves(entries: List[(Bytes, Bytes)], b: history.Bounds) -> List[u6
   counts
 }
 
-fn lookup(nodes: List[(Bytes, Bytes)], d: Bytes) -> Bytes {
-  for (k, v) in nodes {
-    if k == d {
+fn lookup(nodes: List[(ObjectRef, Bytes)], d: Bytes) -> Bytes {
+  for (r, v) in nodes {
+    if r.digest == d {
       return unique v
     }
   }
   b""
 }
 
+// Every fresh node of a tree, batch after batch.
+fn fresh_nodes(tree: history.Tree) -> List[(ObjectRef, Bytes)] {
+  let mut out: List[(ObjectRef, Bytes)] = []
+  for batch in tree.batches {
+    for n in batch {
+      list.push(mut out, unique n)
+    }
+  }
+  out
+}
+
+// A placement with nothing live and no batch closing: every node is fresh at
+// lifetime 9 of epoch 3.
+fn fresh_place() -> history.Placement {
+  history.Placement(live: ordered_map.empty(store.compare_keys), epoch: 3, start: 9, refs: 1048576, bytes: 1099511627776)
+}
+
+// The live objects a tree leaves: each of its nodes by digest.
+fn live_of(tree: history.Tree) -> ordered_map.OrderedMap[Bytes, ObjectRef] {
+  let mut live: ordered_map.OrderedMap[Bytes, ObjectRef] = ordered_map.empty(store.compare_keys)
+  for r in tree.refs {
+    ordered_map.insert(mut live, unique r.digest, unique r)
+  }
+  live
+}
+
 // Reads a tree back level by level; returns the leaf counts and entries.
-fn read_tree(tree: history.Tree, d: history.Descriptor) -> Result[(List[u64], List[(Bytes, Bytes)]), history.Fault] {
+fn read_tree(nodes: List[(ObjectRef, Bytes)], d: history.Descriptor) -> Result[(List[u64], List[(Bytes, Bytes)]), history.Fault] {
   let mut expects: List[history.Expect] = [history.root_expect(d)]
   while true {
     let mut blobs: List[Bytes] = []
     for e in expects {
-      list.push(mut blobs, lookup(tree.nodes, e.digest))
+      list.push(mut blobs, lookup(nodes, e.r.digest))
     }
     match history.check_level(expects, blobs)? {
       Next(below) => {
@@ -361,7 +394,7 @@ fn sha(x: Bytes) -> Bytes {
 // A group's bytes from its count's bytes, commits and definitions.
 fn wire_group(count: Bytes, commits: List[Bytes], defs: Bytes) -> Bytes {
   let mut out: List[u8] = []
-  for p in [b"HSGRUP01", copy count] {
+  for p in [b"HSGRUP02", copy count] {
     bytes.append(mut out, p)
   }
   for c in commits {
@@ -466,13 +499,16 @@ fn v1_wire() -> Bytes {
   )
 }
 
-// A descriptor: version 0x4142434445464748, digest 32 x 0x61, root 32 x 0x62,
+// A descriptor: version 0x4142434445464748, digest 32 x 0x61, root of
+// lifetime 0x5152535455565758, epoch 0x6162636465666768 and digest 32 x 0x62,
 // height 2, entries 0x0102, bytes 0x030405.
 fn wire_descriptor() -> Bytes {
   cat(
     [
       b"\x48\x47\x46\x45\x44\x43\x42\x41",
       rep(97, 32),
+      b"\x58\x57\x56\x55\x54\x53\x52\x51",
+      b"\x68\x67\x66\x65\x64\x63\x62\x61",
       rep(98, 32),
       b"\x02",
       b"\x02\x01\x00\x00\x00\x00\x00\x00",
@@ -482,21 +518,28 @@ fn wire_descriptor() -> Bytes {
 }
 
 fn descriptor_value() -> history.Descriptor {
-  history.Descriptor(version: 4702394921427289928, digest: rep(97, 32), root: rep(98, 32), height: 2, entries: 258, bytes: 197637)
+  history.Descriptor(
+    version: 4702394921427289928,
+    digest: rep(97, 32),
+    root: ObjectRef(lifetime: 5859837686836516696, epoch: 7017280452245743464, digest: rep(98, 32)),
+    height: 2,
+    entries: 258,
+    bytes: 197637
+  )
 }
 
 // Engine commits: Checkpoint, Retain (floor 9, pins a=1 and bc=2, one
 // descriptor), StreamFence 32 x 0x71, StreamPurge 32 x 0x72, Genesis with the
 // default limits and bounds, Fork (identity 32 x 0x81, origin 32 x 0x82, at
-// 0x0102030405060708).
+// 0x0102030405060708), Created.
 fn v2_wire() -> Bytes {
   wire_group(
-    b"\x06\x00\x00\x00",
+    b"\x07\x00\x00\x00",
     [
-      cat([b"\x02\x03\x59\x00\x00\x00", wire_descriptor(), b"\x00\x00\x00\x00"]),
+      cat([b"\x02\x03\x69\x00\x00\x00", wire_descriptor(), b"\x00\x00\x00\x00"]),
       cat(
         [
-          b"\x02\x04\x84\x00\x00\x00",
+          b"\x02\x04\x94\x00\x00\x00",
           b"\x09\x00\x00\x00\x00\x00\x00\x00",
           b"\x02\x00\x00\x00",
           b"\x01\x00\x00\x00a\x01\x00\x00\x00\x00\x00\x00\x00",
@@ -509,7 +552,8 @@ fn v2_wire() -> Bytes {
       cat([b"\x02\x06\x21\x00\x00\x00\x01", rep(113, 32), b"\x00\x00\x00\x00"]),
       cat([b"\x02\x06\x21\x00\x00\x00\x02", rep(114, 32), b"\x00\x00\x00\x00"]),
       b"\x02\x01\x1c\x00\x00\x00\x00\x10\x00\x00\x00\x00\x10\x00\x00\x00\x00\x01\x10\x27\x00\x00\x00\x00\x04\x00\x00\x00\x10\x00\x00\x00\x40\x00\x00\x00\x00\x00",
-      cat([b"\x02\x05\x48\x00\x00\x00", rep(129, 32), rep(130, 32), V_AT, b"\x00\x00\x00\x00"])
+      cat([b"\x02\x05\x48\x00\x00\x00", rep(129, 32), rep(130, 32), V_AT, b"\x00\x00\x00\x00"]),
+      b"\x02\x08\x00\x00\x00\x00\x00\x00\x00\x00"
     ],
     b"\x00\x00\x00\x00"
   )
@@ -539,7 +583,8 @@ fn v2_value() -> history.Group {
         ),
         writes: []
       ),
-      history.Commit(body: Engine(Fork(identity: rep(129, 32), origin: rep(130, 32), at: 72623859790382856)), writes: [])
+      history.Commit(body: Engine(Fork(identity: rep(129, 32), origin: rep(130, 32), at: 72623859790382856)), writes: []),
+      history.Commit(body: Engine(Created()), writes: [])
     ],
     defs: []
   )
@@ -601,8 +646,9 @@ fn malformed_groups() -> List[(Bytes, Bytes)] {
       wire_group(b"\x05\x00\x00\x00", [wire_call(one, V_WRITES), V_CALL2, wire_run(), V_LIBRARY], defs),
       wire_group(four, [wire_call(one, V_WRITES), V_CALL2, wire_run(), V_LIBRARY], defs)
     ),
-    // A stream byte, a commit kind, an engine op (8, and 2, which no commit
-    // has: a claim is the authority's record) and a stream op out of range.
+    // A stream byte, a commit kind, an engine op (9, and 2, which no commit
+    // has: a claim is the authority's record), a Created with a payload and a
+    // stream op out of range.
     (
       plain([b"\x01\x00\x00\x00\x00\x05\x00\x00\x00\x00\x00\x00\x00\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x00\x01\x00\x00\x00o\x00\x00\x00\x00"]),
       plain([V_CALL2])
@@ -611,7 +657,8 @@ fn malformed_groups() -> List[(Bytes, Bytes)] {
       plain([cat([b"\x04", rep(65, 16), b"\x00\x00\x00\x00\x00\x00\x00\x00"])]),
       plain([cat([b"\x03", rep(65, 16), b"\x00\x00\x00\x00\x00\x00\x00\x00"])])
     ),
-    (plain([b"\x02\x08\x0c\x00\x00\x00\x02\x00\x00\x00nm\x02\x00\x00\x00pl\x00\x00\x00\x00"]), plain([V_LIBRARY])),
+    (plain([b"\x02\x09\x0c\x00\x00\x00\x02\x00\x00\x00nm\x02\x00\x00\x00pl\x00\x00\x00\x00"]), plain([V_LIBRARY])),
+    (plain([b"\x02\x08\x01\x00\x00\x00\x00\x00\x00\x00\x00"]), plain([b"\x02\x08\x00\x00\x00\x00\x00\x00\x00\x00"])),
     (
       plain([cat([b"\x02\x02\x38\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00", rep(145, 16), rep(146, 32), b"\x00\x00\x00\x00"])]),
       plain([V_LIBRARY])
@@ -643,30 +690,44 @@ fn decodes(wire: Bytes) -> bool {
   }
 }
 
-// The checkpoint of a("a" = 90 x 0x78) and ("b" = the same) under bounds of
-// 112 bytes, one entry's node: two leaves under one index root.
+// The checkpoint of ("a" = 90 x 0x78) and ("b" = the same) under node bounds
+// of 112, 112 and 135 bytes, one leaf entry's node and two index entries': two
+// leaves under one index root, each node an object of lifetime 9 and epoch 3.
 fn leaf(key: Bytes, extra: Bytes) -> Bytes {
-  cat([b"HSNODE01\x00\x01\x00\x00\x00", b"\x01\x00\x00\x00", copy key, b"\x5a\x00\x00\x00", rep(120, 90), copy extra])
+  cat([b"HSNODE02\x00\x01\x00\x00\x00", b"\x01\x00\x00\x00", copy key, b"\x5a\x00\x00\x00", rep(120, 90), copy extra])
 }
 
 fn index(first: Bytes, a: Bytes, na: Bytes, second: Bytes, b: Bytes) -> Bytes {
   cat(
     [
-      b"HSNODE01\x01\x02\x00\x00\x00",
+      b"HSNODE02\x01\x02\x00\x00\x00",
       b"\x01\x00\x00\x00",
       copy first,
+      V_LIFETIME,
+      V_EPOCH,
       sha(a),
       copy na,
       b"\x01\x00\x00\x00",
       copy second,
+      V_LIFETIME,
+      V_EPOCH,
       sha(b),
       b"\x01\x00\x00\x00\x00\x00\x00\x00"
     ]
   )
 }
 
+const V_LIFETIME: Bytes = b"\x09\x00\x00\x00\x00\x00\x00\x00"
+
+const V_EPOCH: Bytes = b"\x03\x00\x00\x00\x00\x00\x00\x00"
+
+// The object of lifetime 9 and epoch 3 holding `node`.
+fn at9(node: Bytes) -> ObjectRef {
+  ObjectRef(lifetime: 9, epoch: 3, digest: sha(node))
+}
+
 fn tree_descriptor(root: Bytes, entries: u64) -> history.Descriptor {
-  history.Descriptor(version: 7, digest: rep(1, 32), root: sha(root), height: 2, entries: entries, bytes: 182)
+  history.Descriptor(version: 7, digest: rep(1, 32), root: at9(root), height: 2, entries: entries, bytes: 182)
 }
 
 // Reads a two-level checkpoint from its root and leaves.
@@ -693,17 +754,17 @@ fn node_vectors() -> (bool, bool) {
   let one = b"\x01\x00\x00\x00\x00\x00\x00\x00"
   let root = index(b"a", la, one, b"b", lb)
   let state = [(b"a", rep(120, 90)), (b"b", rep(120, 90))]
-  // Encoding: the tree is exactly these three nodes.
-  let tree = history.build_tree(state, history.Bounds(node_min: 112, node_mean: 112, node_max: 112))
-  let mut encoded = tree.root == sha(root) && tree.height == 2 && list.len(tree.nodes) == 3
-  for (d, data) in tree.nodes {
-    encoded = encoded && d == sha(data) && (data == la || data == lb || data == root)
+  // Encoding: the tree is exactly these three nodes, one batch.
+  let tree = history.build_tree(state, history.Bounds(node_min: 112, node_mean: 112, node_max: 135), fresh_place())
+  let mut encoded = tree.root == at9(root) && tree.height == 2 && list.len(tree.batches) == 1 && list.len(tree.refs) == 3
+  for (r, data) in fresh_nodes(tree) {
+    encoded = encoded && r == at9(data) && (data == la || data == lb || data == root)
   }
   // Decoding: the root names each leaf's digest, first key, bound and count.
   let decoded = match history.check_level([history.root_expect(tree_descriptor(root, 2))], [copy root]) {
     Ok(Next(below)) => below == [
-      history.Expect(digest: sha(la), level: 0, first: Some(b"a"), below: Some(b"b"), entries: 1),
-      history.Expect(digest: sha(lb), level: 0, first: Some(b"b"), below: None(), entries: 1)
+      history.Expect(r: at9(la), level: 0, first: Some(b"a"), below: Some(b"b"), entries: 1),
+      history.Expect(r: at9(lb), level: 0, first: Some(b"b"), below: None(), entries: 1)
     ],
     _ => false,
   } && match read_two(tree_descriptor(root, 2), root, [copy la, copy lb]) {
@@ -797,13 +858,14 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
       prng.u64(mut g) % 400
     }
     let state = random_state(mut g, n)
-    let tree = history.build_tree(state, bounds)
+    let tree = history.build_tree(state, bounds, fresh_place())
+    let nodes = fresh_nodes(tree)
     let mut total: u64 = 0
     for (k, v) in state {
       total += bytes.len(k) + bytes.len(v)
     }
     let d = history.descriptor(tree, 7, fixed(mut g, 32))
-    match read_tree(tree, d) {
+    match read_tree(nodes, d) {
       Ok((counts, entries)) => {
         cuts = cuts && counts == reference_leaves(state, bounds)
         reads = reads && entries == state && tree.entries == n && tree.bytes == total
@@ -812,16 +874,16 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
         reads = false
       },
     }
-    let again = history.build_tree(state, bounds)
-    equal = equal && again.root == tree.root && list.len(again.nodes) == list.len(tree.nodes)
+    let again = history.build_tree(state, bounds, fresh_place())
+    equal = equal && again.root == tree.root && again.refs == tree.refs
     // Every bit flip of every node of the small tree is classified.
     if round_index == 0 {
-      for i in 0u64..list.len(tree.nodes) {
-        let (nd, data) = copy tree.nodes[i]
+      for i in 0u64..list.len(nodes) {
+        let (nd, data) = copy nodes[i]
         for bit in 0u64..bytes.len(data) * 8 {
-          let mut changed = copy tree
+          let mut changed = copy nodes
           let bad = flip(data, bit)
-          changed.nodes[i] = (copy nd, copy bad)
+          changed[i] = (copy nd, copy bad)
           if !classified(read_tree(changed, d), bad, Some(bit / 8)) {
             reads = false
           }
@@ -831,15 +893,16 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
   }
   // An empty state is one empty leaf.
   let empty: List[(Bytes, Bytes)] = []
-  let none = history.build_tree(empty, bounds)
+  let none = history.build_tree(empty, bounds, fresh_place())
   let none_d = history.descriptor(none, 2, fixed(mut g, 32))
-  reads = reads && list.len(none.nodes) == 1 && none.height == 1 && match read_tree(none, none_d) {
+  reads = reads && list.len(none.refs) == 1 && none.height == 1 && match read_tree(fresh_nodes(none), none_d) {
     Ok((counts, entries)) => list.len(entries) == 0 && counts == [0u64],
     Error(_) => false,
   }
   report(stdout, "leaf cuts match the reference", cuts)
   report(stdout, "trees read back and classify damage", reads)
   report(stdout, "equal states give equal roots", equal)
+  report(stdout, "live nodes reused, fresh ones batched", placement_laws(mut g, bounds))
 
   // Law 5: claims, the Genesis and later groups, and the groups that do not
   // follow.
@@ -895,6 +958,63 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
   report(stdout, "commit rules", chain)
   wire_vectors(stdout)
   Ok(())
+}
+
+// Law 4 on placement. A tree of a state whose every node is live is the same
+// tree with nothing fresh. After one changed value, the fresh nodes are fewer
+// than the tree's, at the placement's start, and every other node is the live
+// one of its digest. Batches capped at 2 refs, or at 0 bytes, hold as many
+// fresh nodes, at consecutive lifetimes from the start, each batch full but
+// the last, and the tree reads back from its root.
+fn placement_laws(mut g: prng.Generator, bounds: history.Bounds) -> bool {
+  let state = random_state(mut g, 300)
+  let first = history.build_tree(state, bounds, fresh_place())
+  let all = fresh_nodes(first)
+  let mut ok = list.len(all) > 4 && list.len(all) == list.len(first.refs)
+  let live = live_of(first)
+  let place = history.Placement(live: copy live, epoch: 4, start: 20, refs: 1048576, bytes: 1099511627776)
+  let same = history.build_tree(state, bounds, take place)
+  ok = ok && same.root == first.root && same.refs == first.refs && same.batches == [[]]
+  let mut changed = copy state
+  let (k, _) = copy changed[150]
+  changed[150] = (take k, b"changed")
+  let place2 = history.Placement(live: copy live, epoch: 4, start: 20, refs: 1048576, bytes: 1099511627776)
+  let next = history.build_tree(changed, bounds, take place2)
+  let made = fresh_nodes(next)
+  ok = ok && list.len(next.batches) == 1 && list.len(made) > 0 && list.len(made) < list.len(next.refs)
+  for (r, _) in made {
+    ok = ok && r.lifetime == 20 && r.epoch == 4
+  }
+  for r in next.refs {
+    let kept = match ordered_map.get(live, r.digest) {
+      Some(x) => x == r,
+      None() => false,
+    }
+    ok = ok && (kept || r.lifetime == 20)
+  }
+  for (refs, bytes_cap, size) in [(2u64, 1099511627776u64, 2u64), (1048576u64, 0u64, 1u64)] {
+    let place3 = history.Placement(live: ordered_map.empty(store.compare_keys), epoch: 3, start: 9, refs: refs, bytes: bytes_cap)
+    let capped = history.build_tree(state, bounds, take place3)
+    let nodes = fresh_nodes(capped)
+    let n = list.len(capped.batches)
+    ok = ok && list.len(nodes) == list.len(all)
+    for i in 0u64..n {
+      let b = copy capped.batches[i]
+      ok = ok && (list.len(b) == size || i + 1 == n && list.len(b) > 0 && list.len(b) <= size)
+      for (r, _) in b {
+        ok = ok && r.lifetime == 9 + i && r.epoch == 3
+      }
+    }
+    for (r, data) in nodes {
+      ok = ok && r.digest == sha(data)
+    }
+    let d = history.descriptor(capped, 7, rep(1, 32))
+    ok = ok && match read_tree(nodes, d) {
+      Ok((_, entries)) => entries == state,
+      Error(_) => false,
+    }
+  }
+  ok
 }
 
 fn is_error(r: Result[history.Tip, ()]) -> bool {

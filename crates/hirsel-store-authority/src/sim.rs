@@ -549,7 +549,7 @@ impl Authority for Sim {
         r
     }
 
-    fn get(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {
+    fn get_object(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {
         let mut w = self.world.lock().unwrap();
         let cut = w.cut();
         let r = if cut.fail {
@@ -569,7 +569,7 @@ impl Authority for Sim {
         r
     }
 
-    fn put(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error> {
+    fn put_object(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error> {
         let mut w = self.world.lock().unwrap();
         let cut = w.cut();
         let r = if cut.fail {
@@ -822,11 +822,11 @@ impl Authority for Client {
     fn read(&mut self, from: u64, at: Level, max: u64) -> Result<Vec<Record>, Error> {
         self.serving().read(from, at, max)
     }
-    fn get(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {
-        self.serving().get(name)
+    fn get_object(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {
+        self.serving().get_object(name)
     }
-    fn put(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error> {
-        self.serving().put(name, data)
+    fn put_object(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error> {
+        self.serving().put_object(name, data)
     }
     fn reclaim(&mut self, c: &mut Claim) -> Result<(), Error> {
         self.serving().reclaim(c)

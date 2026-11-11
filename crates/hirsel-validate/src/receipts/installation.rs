@@ -101,7 +101,26 @@ impl hirsel_artifact_store::Contents for Contents {
 }
 /// A fresh local verifier run whose rows can be registered only after its
 /// caller observes terminal successful Precompute and finishes publication.
-/// Failure or interruption leaves no installation authorization.
+///
+/// Cooperating precomputes of one root are serialized: `begin` takes the
+/// root's exclusive lock in private state and holds it until the installation
+/// drops, so root capture, product publication and registration of one run
+/// never interleave with another's. `finish` therefore registers the products
+/// this run published, unless a writer outside this protocol changed the root
+/// meanwhile; every registered row is still checked against current content
+/// and reads at each use, and a later change of the root's products is a miss.
+///
+/// Failure or interruption before `finish` registers nothing and deletes only
+/// this run's own generation. The root's previous registration stays, but it
+/// loads only while the root's products are unchanged, so a run that failed
+/// after publishing products leaves a safe miss: the next Check runs V and the
+/// next Precompute rebuilds. Once the registration is renamed into place its
+/// generation is never deleted, even if `finish` then reports an error.
+///
+/// Trust boundary: the private state directory is trusted to this user
+/// account. The registration MAC protects against writers of the output root,
+/// not against anyone who can read the generation's key. Missing or unsafe
+/// private state is a cold path.
 pub struct Installation {
     state: PathBuf,
     root: PathBuf,
@@ -110,6 +129,14 @@ pub struct Installation {
     rows: Arc<Rows>,
     cache: Arc<VerifierCache>,
     committed: bool,
+    /// The root's exclusive precompute lock, released when this drops.
+    _lock: fs::File,
+}
+#[cfg(test)]
+thread_local! {
+    /// Fail `finish` after its rename and before the directory sync.
+    pub(super) static FAIL_AFTER_RENAME: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 impl Installation {
     /// State survives disposable result, native and verifier cache clearing.
@@ -130,6 +157,8 @@ impl Installation {
         private_directory(state)?;
         let state = state.canonicalize()?;
         separate(&state, &root)?;
+        let lock = private_lock(&registration_path(&state, &root).with_extension("lock"))?;
+        lock.lock()?;
         let generation = hex(&random()?);
         let directory = state.join(&generation);
         private_directory(&directory)?;
@@ -150,6 +179,7 @@ impl Installation {
             rows,
             cache,
             committed: false,
+            _lock: lock,
         })
     }
     pub fn verifier(&self) -> Arc<VerifierCache> {
@@ -188,8 +218,13 @@ impl Installation {
         let temporary = directory.join("registration");
         private_write(&temporary, &bytes)?;
         fs::rename(temporary, registration_path(&self.state, &self.root))?;
-        fs::File::open(&self.state)?.sync_all()?;
+        // The visible registration names this generation from here on.
         self.committed = true;
+        #[cfg(test)]
+        if FAIL_AFTER_RENAME.with(std::cell::Cell::take) {
+            return Err(io::Error::other("injected failure after rename"));
+        }
+        fs::File::open(&self.state)?.sync_all()?;
         Ok(())
     }
     /// Pin an authenticated association map. Subsequent product publications
@@ -366,6 +401,19 @@ fn private_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = options.open(path)?;
     file.write_all(bytes)?;
     file.sync_all()
+}
+/// Open (creating if absent) a private lock file; a symlink is refused.
+fn private_lock(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    check_private(path)?;
+    Ok(file)
 }
 fn private_read(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
     check_private(path)?;

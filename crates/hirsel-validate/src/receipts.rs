@@ -3856,4 +3856,59 @@ mod tests {
             format!("{:?}", fresh.violations)
         );
     }
+    #[test]
+    fn a_failure_after_the_rename_keeps_the_generation_the_registration_names() {
+        let root = Directory::new();
+        let state = Directory::new();
+        let state = state.0.join("private");
+        let build = ContentHash::of_bytes(b"local verifier");
+        let f = Fixture::unit();
+        installation_products(&root.0, b"products");
+        let install = Installation::begin(&root.0, &state, build).unwrap();
+        assert!(
+            check(&f, &install.verifier(), build)
+                .0
+                .violations
+                .is_empty()
+        );
+        installation::FAIL_AFTER_RENAME.set(true);
+        assert!(install.finish().is_err());
+        // The renamed registration is visible, so its generation must survive.
+        let pinned = Installation::registered(&root.0, &state, build, Arc::default())
+            .expect("the visible registration names a kept generation");
+        assert!(!check(&f, &pinned, build).1);
+    }
+    #[test]
+    fn cooperating_precomputes_of_one_root_do_not_interleave() {
+        let root = Directory::new();
+        let state = Directory::new();
+        let state = state.0.join("private");
+        let build = ContentHash::of_bytes(b"local verifier");
+        let f = Fixture::unit();
+        let first = Installation::begin(&root.0, &state, build).unwrap();
+        let (began, second_began) = std::sync::mpsc::channel();
+        let second = {
+            let (root, state) = (root.0.clone(), state.clone());
+            std::thread::spawn(move || {
+                let second = Installation::begin(&root, &state, build).unwrap();
+                began.send(()).unwrap();
+                installation_products(&root, b"second products");
+                second.finish().unwrap();
+            })
+        };
+        installation_products(&root.0, b"first products");
+        assert!(check(&f, &first.verifier(), build).0.violations.is_empty());
+        // Between the first run's product publication and its registration,
+        // the second run has not captured the root.
+        assert!(
+            second_began
+                .recv_timeout(std::time::Duration::from_millis(500))
+                .is_err()
+        );
+        first.finish().unwrap();
+        assert!(Installation::registered(&root.0, &state, build, Arc::default()).is_some());
+        second_began.recv().unwrap();
+        second.join().unwrap();
+        assert!(Installation::registered(&root.0, &state, build, Arc::default()).is_some());
+    }
 }

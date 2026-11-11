@@ -864,11 +864,19 @@ history ends at `from`, and returns once the entry is durable at `at`:
   and no request the advance sent can still land.
 - `Refused(e)`: the request was refused before it had any effect.
 - `Undecided(e)`: whether the entry is in the history could not be read, or the entry is
-  in the history and the barrier for `at` failed. An unanswered request may land at any
-  later moment, so neither a later claim nor a retry's answer shows by itself that the
-  entry is absent: the provider settles by reading the history, the entry at `from + 1`
-  meaning `Advanced(from + 1)` even under a later claim, and returns `Undecided` when it
-  cannot read. A failed barrier is never retried into success.
+  in the history and the barrier for `at` failed. A failed barrier is never retried into
+  success.
+
+An unanswered request may land at any later moment, so neither a later claim nor a retry's
+answer shows by itself that the entry is absent. A provider that did not hear its append
+succeed settles it by reading the history at `p = from + 1`. Once any request of the
+advance went unanswered, that doubt holds for every retry:
+
+1. this entry at `p`: `Advanced(p)`, even when a later claim holds the history;
+2. another entry at `p`, under a later claim that no request of the advance can land
+   behind: `Fenced()`;
+3. nothing at `p` while the head is unchanged, or a history it cannot read: `Undecided`,
+   never `Fenced()`, and never `Refused` after a request went unanswered.
 
 After `Fenced()` or `Undecided(..)` the claim is dead: every later operation with it
 returns `Fenced()`. The engine closes the store, a waiting transaction returns

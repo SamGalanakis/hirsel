@@ -632,3 +632,198 @@ fn an_advance_is_two_requests_and_recovery_gets_each_group_once() {
     assert_eq!(all.len(), 21);
     assert_eq!(bucket.requests() - before, 1 + 1 + 21);
 }
+
+/// What a scripted head request does, in script order; an empty script passes.
+enum Act {
+    Pass,
+    /// Unanswered: the caller hears `Unavailable` and the write is held for
+    /// [`Scripted::land`].
+    Hold,
+    /// The head read fails.
+    Fail,
+    /// Run the closure (another writer's requests), then pass.
+    Before(Box<dyn FnOnce() + Send>),
+}
+
+/// The simulated bucket with a script for one writer's head requests: the H2
+/// cases (STORE-11's Advance outcome) built request by request.
+struct Scripted {
+    inner: Arc<Bucket>,
+    replaces: Mutex<std::collections::VecDeque<Act>>,
+    reads: Mutex<std::collections::VecDeque<Act>>,
+    held: Mutex<Vec<(Vec<u8>, Condition)>>,
+}
+
+impl Scripted {
+    fn new(inner: Arc<Bucket>) -> Arc<Scripted> {
+        Arc::new(Scripted {
+            inner,
+            replaces: Mutex::default(),
+            reads: Mutex::default(),
+            held: Mutex::default(),
+        })
+    }
+
+    /// Script the head requests from now on.
+    fn arm(&self, replaces: Vec<Act>, reads: Vec<Act>) {
+        *self.replaces.lock().unwrap() = replaces.into();
+        *self.reads.lock().unwrap() = reads.into();
+    }
+
+    /// Land every held replace, each under its own condition, as a late
+    /// request does.
+    fn land(&self) {
+        for (bytes, condition) in std::mem::take(&mut *self.held.lock().unwrap()) {
+            let _ = self.inner.replace("head", &bytes, condition);
+        }
+    }
+}
+
+impl ObjectStorage for Scripted {
+    fn get_tagged(&self, key: &str) -> Result<Option<(Vec<u8>, Tag)>, StorageError> {
+        if key == "head" {
+            match self.reads.lock().unwrap().pop_front() {
+                Some(Act::Fail) => return Err(StorageError::Unavailable("scripted".into())),
+                Some(Act::Before(f)) => f(),
+                _ => {}
+            }
+        }
+        self.inner.get_tagged(key)
+    }
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.get(key)
+    }
+    fn get_many(&self, keys: &[String]) -> Vec<Result<Option<Vec<u8>>, StorageError>> {
+        self.inner.get_many(keys)
+    }
+    fn put_new(&self, key: &str, bytes: &[u8]) -> Result<Put, StorageError> {
+        self.inner.put_new(key, bytes)
+    }
+    fn replace(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        condition: Condition,
+    ) -> Result<Replaced, StorageError> {
+        if key == "head" {
+            match self.replaces.lock().unwrap().pop_front() {
+                Some(Act::Hold) => {
+                    self.held.lock().unwrap().push((bytes.to_vec(), condition));
+                    return Err(held_back());
+                }
+                Some(Act::Before(f)) => f(),
+                _ => {}
+            }
+        }
+        self.inner.replace(key, bytes, condition)
+    }
+    fn list(&self, prefix: &str, after: &str) -> Result<Listing, StorageError> {
+        self.inner.list(prefix, after)
+    }
+    fn delete(&self, key: &str) -> Result<(), StorageError> {
+        self.inner.delete(key)
+    }
+}
+
+/// Writer A, claimed over `s`, about to advance from its claim with `e`.
+fn writer_a(s: &Arc<Scripted>) -> (Objects, Claim, Vec<u8>) {
+    let mut h = Objects::new(s.clone(), "zone".into(), Level(0));
+    let c = h.claim([1; 16], [7; 32]).unwrap().claim;
+    let tip = group::follow(&Tip::origin(), &read_all(&mut h).unwrap()[0]).unwrap();
+    (h, c, entry(&tip, 1, 1))
+}
+
+/// Writer B claims the bucket on its own handle.
+fn b_claims(bucket: &Arc<Bucket>) {
+    let mut b = Objects::new(bucket.clone(), "zone".into(), Level(0));
+    b.claim([2; 16], [7; 32]).unwrap();
+}
+
+fn recovered(bucket: &Arc<Bucket>) -> Vec<Vec<u8>> {
+    read_all(&mut Objects::new(bucket.clone(), "zone".into(), Level(0))).unwrap()
+}
+
+/// H2 case 1, our digest at p: A's first replace goes unanswered, its retry
+/// is answered with a mismatch because the late first replace landed and B
+/// then claimed. The chain holds A's entry at p, so A is `Advanced`, though
+/// the request that told it something was answered.
+#[test]
+fn an_advance_whose_entry_is_at_its_position_under_a_later_claim_is_advanced() {
+    let bucket = Arc::new(Bucket::new(1, BTreeMap::new()));
+    let s = Scripted::new(bucket.clone());
+    let (mut h, mut c, e) = writer_a(&s);
+    let (s2, b2) = (s.clone(), bucket.clone());
+    let lands_then_b_claims = Box::new(move || {
+        s2.land();
+        b_claims(&b2);
+    });
+    s.arm(vec![Act::Hold, Act::Before(lands_then_b_claims)], vec![]);
+    let from = c.end();
+    assert_eq!(
+        h.advance(&mut c, from, e.clone(), Level(0)),
+        Advanced::Advanced(from + 1)
+    );
+    assert_eq!(recovered(&bucket)[from as usize], e);
+}
+
+/// H2 case 2, another digest at p: B claims before A's replace (answered
+/// mismatch), or while A's replace is unanswered (that request, conditional
+/// on a tag the head has left for good, lands later with no effect). Both
+/// are `Fenced`, and A's entry is never in the history.
+#[test]
+fn an_advance_whose_position_holds_another_entry_is_fenced() {
+    for held in [false, true] {
+        let bucket = Arc::new(Bucket::new(1, BTreeMap::new()));
+        let s = Scripted::new(bucket.clone());
+        let (mut h, mut c, e) = writer_a(&s);
+        let b2 = bucket.clone();
+        let b_claims: Box<dyn FnOnce() + Send> = Box::new(move || b_claims(&b2));
+        if held {
+            s.arm(vec![Act::Hold], vec![Act::Before(b_claims)]);
+        } else {
+            s.arm(vec![Act::Before(b_claims)], vec![]);
+        }
+        let from = c.end();
+        assert_eq!(
+            h.advance(&mut c, from, e.clone(), Level(0)),
+            Advanced::Fenced,
+            "held {held}"
+        );
+        s.land();
+        assert!(!recovered(&bucket).contains(&e), "held {held}");
+    }
+}
+
+/// H2 case 3, p unproved: with the head unchanged (every replace unanswered)
+/// or unreadable after an unanswered replace, the answer is `Undecided`,
+/// never `Fenced` or `Refused`, and the doubt outlives a later answered
+/// mismatch: here the late replace lands, so A's entry is in the history.
+#[test]
+fn an_advance_whose_absence_is_unproved_is_undecided_across_retries() {
+    let bucket = Arc::new(Bucket::new(1, BTreeMap::new()));
+    let s = Scripted::new(bucket.clone());
+    let (mut h, mut c, e) = writer_a(&s);
+    s.arm(vec![Act::Hold, Act::Hold, Act::Hold], vec![]);
+    let from = c.end();
+    assert!(matches!(
+        h.advance(&mut c, from, e.clone(), Level(0)),
+        Advanced::Undecided(_)
+    ));
+    s.land();
+    assert_eq!(recovered(&bucket)[from as usize], e);
+
+    let bucket = Arc::new(Bucket::new(1, BTreeMap::new()));
+    let s = Scripted::new(bucket.clone());
+    let (mut h, mut c, e) = writer_a(&s);
+    let s2 = s.clone();
+    s.arm(
+        vec![Act::Hold, Act::Before(Box::new(move || s2.land()))],
+        vec![Act::Pass, Act::Fail],
+    );
+    let from = c.end();
+    assert!(matches!(
+        h.advance(&mut c, from, e.clone(), Level(0)),
+        Advanced::Undecided(_)
+    ));
+    assert_eq!(recovered(&bucket)[from as usize], e);
+}

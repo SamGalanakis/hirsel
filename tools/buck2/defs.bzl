@@ -957,10 +957,12 @@ def hirsel_runtime_archives(name, crate, crate_root, srcs, features, deps, featu
             configured = "{}-{}".format(library, triple.split("-")[0])
             native.configured_alias(name = configured, actual = ":" + library, platform = RUNTIME_TARGETS[triple])
             archives["{}/{}".format(triple, variant)] = ":" + configured
-    # Local training requires the host executor. Dependency compiles keep
-    # their own remote budget platforms.
+    # The pool runs the archive actions and the start-up training, so one
+    # training per compiler and runtime serves every checkout through the
+    # action cache (a local action's result is never shared). The training's
+    # pool fixture admits four workers in 2 GiB.
     _runtime_archives(name = name, archives = archives, capped = "tools/capped",
-                      exec_compatible_with = [budget_constraint("host")],
+                      exec_compatible_with = [budget_constraint(pool_budget_name(4, 2097152))],
                       visibility = ["PUBLIC"])
 
 def hirsel_tsan_runtime_archives(name):
@@ -1087,7 +1089,7 @@ def _runtime_archives_impl(ctx):
         )
         for name, dep in ctx.attrs._startup_tools.items():
             command.add("--" + name.replace("_", "-"), dep[DefaultInfo].default_outputs[0])
-        ctx.actions.run(command, category = "startup_order", local_only = True)
+        ctx.actions.run(command, category = "startup_order", env = {"HIRSEL_JOBS": "4"})
         for path in ctx.attrs.archives:
             order = ctx.actions.declare_output(path + "/startup.order")
             ctx.actions.run(cmd_args(

@@ -548,8 +548,15 @@ translate` resolves those host Rust names against each target archive in its own
 action, so one archive's order does not wait on the others. Section garbage
 collection is unchanged. The selected Link
 captures this file with its runtime inputs and hashes its contents into the build
-ID. Profile generation requests four CPUs and 2 GiB: the pool fixture admits four
-workers, though Valgrind serializes them onto about one core; no profile is checked in.
+ID. Profile generation runs on the pool with four CPUs and 2 GiB, so the action
+cache shares one training per compiler and runtime between checkouts: the pool
+fixture admits four workers, though Valgrind serializes them onto about one core;
+no profile is checked in. The training stops at 600 s, so a stalled child cannot hold
+its pool slot. The fixtures' own functions never rank. The trained order depends on
+the host only through the runtime's CPU-set probe (9 of 1380 symbols differ between
+a pool worker and a workstation), so one shared training serves every checkout. On the serial
+fixture the order halves start-up page faults (128 to 68 minor faults) and
+whole-process instructions, and cuts task-clock from 0.83 to 0.51 ms.
 `test-native-startup-layout` exercises profile identity, both target CRTs and
 link replay after the original profile has been removed.
 

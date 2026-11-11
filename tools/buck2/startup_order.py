@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import runpy
+import signal
 import subprocess
 import sys
 import tempfile
@@ -20,13 +21,29 @@ import time
 
 
 TRACE_RECORD = re.compile(r" ?[ILSM] +[0-9a-fA-F]+,[0-9]+$")
+# The fixtures' own functions (package `standalone`): their names hash the
+# compiler's output and occur in no other program, so they never rank.
+FIXTURE_SYMBOL = re.compile(r"_H1[0-9]+standalone")
+
+
+# A training takes under a minute; the whole action stops at this bound so a
+# stalled child cannot hold its pool slot (an RE stall of over 30 minutes
+# made it local-only in 0c09cb6d, and its cause was never found).
+DEADLINE = time.monotonic() + 600
 
 
 def run(command, environment, directory, stderr=None):
-    result = subprocess.run(
+    process = subprocess.Popen(
         list(map(str, command)), env=environment, cwd=directory,
-        stdout=subprocess.PIPE, stderr=stderr or subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=stderr or subprocess.PIPE, start_new_session=True,
     )
+    try:
+        stdout, errors = process.communicate(timeout=max(0, DEADLINE - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise RuntimeError(f"{command[0]} passed the training's 600 s deadline")
+    result = subprocess.CompletedProcess(process.args, process.returncode, stdout, errors)
     if result.returncode:
         if stderr:
             stderr.flush()
@@ -50,7 +67,7 @@ def symbols(llvm, binary, environment, directory, *options):
 def demangle(llvm, names, environment):
     return subprocess.check_output(
         [llvm / "bin/llvm-cxxfilt"], input=("\n".join(names) + "\n").encode(),
-        env=environment,
+        env=environment, timeout=max(0, DEADLINE - time.monotonic()),
     ).decode().splitlines()
 
 
@@ -108,6 +125,7 @@ def train(args):
         environment["LLVM_SYS_231_PREFIX"] = str(args.llvm)
         environment["LD_LIBRARY_PATH"] = str(args.llvm / "lib")
         environment["XDG_CACHE_HOME"] = str(directory / "cache")
+        environment["XDG_DATA_HOME"] = str(directory / "data")
         for shape, width in [("serial", 1), ("pool", pool_width)]:
             binary = directory / shape
             started = time.monotonic()
@@ -141,7 +159,8 @@ def train(args):
             if output != expected:
                 raise RuntimeError(f"{shape} startup fixture returned {output!r}")
             for name in trace_symbols(trace, rows):
-                selected.setdefault(name, len(selected))
+                if not FIXTURE_SYMBOL.match(name):
+                    selected.setdefault(name, len(selected))
         human = demangle(args.llvm, selected, environment)
     args.output.write_text("".join(f"{name}\t{readable}\n" for name, readable in zip(selected, human)))
 

@@ -23,6 +23,7 @@
 //! room reserved before them and run no destructor (design §5 Op sections).
 pub mod admission;
 pub mod scratch;
+mod thread;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -42,24 +43,12 @@ pub const SECTION_STATUS: i32 = 70;
 /// owner table's fast answer different from its full one (sysexits' `EX_SOFTWARE`).
 pub const ORACLE_STATUS: i32 = 70;
 
-#[cfg(debug_assertions)]
-thread_local! {
-    /// The Free recorder sections open on this thread.
-    static SECTIONS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
 /// A Free recorder section opens (`true`) or closes on the calling thread. In debug builds an
 /// allocation or free while one is open ends the process; release builds do nothing.
 #[inline]
 pub fn section(open: bool) {
     #[cfg(debug_assertions)]
-    SECTIONS.with(|open_here| {
-        open_here.set(if open {
-            open_here.get() + 1
-        } else {
-            open_here.get() - 1
-        })
-    });
+    thread::section(open);
     #[cfg(not(debug_assertions))]
     let _ = open;
 }
@@ -91,17 +80,17 @@ pub fn simulated_sections<T>(f: impl FnOnce() -> T) -> T {
 
 /// End a debug build that allocates or frees with a section open on this thread.
 #[inline]
-fn trap_section(size: usize) {
+fn trap_section(word: u32, size: usize) {
     // A recorder fault panics inside its section; the panic's own allocations are its report.
     #[cfg(debug_assertions)]
-    if SECTIONS.try_with(std::cell::Cell::get).unwrap_or(0) != 0
+    if thread::sections_open(word)
         && ARMED.try_with(std::cell::Cell::get).unwrap_or(true)
         && !std::thread::panicking()
     {
         trapped(size);
     }
     #[cfg(not(debug_assertions))]
-    let _ = size;
+    let _ = (word, size);
 }
 
 /// The trap's report, out of line: every allocation's frame stays as small as before.
@@ -142,34 +131,76 @@ const SETTING: u8 = 1;
 const SET: u8 = 2;
 static STATE: AtomicU8 = AtomicU8::new(UNSET);
 
+// An allocation or free on a set-up thread with no owner scope, no oracle and
+// no open section (thread word zero) goes straight to the inner allocator: a
+// free there only first asks the presence buckets. Everything else takes the
+// full path below.
 unsafe impl<A: GlobalAlloc> GlobalAlloc for Guarded<A> {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        limit_once();
-        trap_section(layout.size());
-        let reservation = admission::before_alloc(layout.size());
+        if thread::word() != 0 {
+            return unsafe { self.admit(layout, false) };
+        }
         let block = unsafe { self.0.alloc(layout) };
         if block.is_null() {
             exhausted(layout.size());
         }
-        admission::allocated(block as usize, reservation);
         block
     }
     #[inline]
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        limit_once();
-        trap_section(layout.size());
-        let reservation = admission::before_alloc(layout.size());
+        if thread::word() != 0 {
+            return unsafe { self.admit(layout, true) };
+        }
         let block = unsafe { self.0.alloc_zeroed(layout) };
+        if block.is_null() {
+            exhausted(layout.size());
+        }
+        block
+    }
+    #[inline]
+    unsafe fn realloc(&self, block: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        if thread::word() != 0 || admission::listed(block as usize) {
+            return unsafe { self.readmit(block, layout, size) };
+        }
+        let moved = unsafe { self.0.realloc(block, layout, size) };
+        if moved.is_null() {
+            exhausted(size);
+        }
+        moved
+    }
+    #[inline]
+    unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
+        if thread::word() != 0 || admission::listed(block as usize) {
+            return unsafe { self.release(block, layout) };
+        }
+        unsafe { self.0.dealloc(block, layout) }
+    }
+}
+
+impl<A: GlobalAlloc> Guarded<A> {
+    #[inline(never)]
+    unsafe fn admit(&self, layout: Layout, zeroed: bool) -> *mut u8 {
+        let word = thread::ready();
+        trap_section(word, layout.size());
+        let reservation = admission::before_alloc(layout.size());
+        let block = unsafe {
+            if zeroed {
+                self.0.alloc_zeroed(layout)
+            } else {
+                self.0.alloc(layout)
+            }
+        };
         if block.is_null() {
             exhausted(layout.size());
         }
         admission::allocated(block as usize, reservation);
         block
     }
-    #[inline]
-    unsafe fn realloc(&self, block: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        trap_section(size);
+    #[inline(never)]
+    unsafe fn readmit(&self, block: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        let word = thread::ready();
+        trap_section(word, size);
         let reservation = admission::reallocated(block as usize, layout.size(), size);
         let moved = unsafe { self.0.realloc(block, layout, size) };
         if moved.is_null() {
@@ -178,15 +209,15 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Guarded<A> {
         admission::allocated(moved as usize, reservation);
         moved
     }
-    #[inline]
-    unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
-        trap_section(layout.size());
+    #[inline(never)]
+    unsafe fn release(&self, block: *mut u8, layout: Layout) {
+        let word = thread::ready();
+        trap_section(word, layout.size());
         admission::deallocated(block as usize, layout.size());
         unsafe { self.0.dealloc(block, layout) }
     }
 }
 
-#[inline(always)]
 fn limit_once() {
     if STATE.load(Ordering::Acquire) != SET {
         set_limit();
@@ -589,6 +620,48 @@ mod tests {
             "{stderr}"
         );
         assert!(!String::from_utf8_lossy(&output.stdout).contains("unadmitted owner published"));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn section_child() {
+        if std::env::var_os(CHILD).is_none() {
+            return;
+        }
+        let alloc =
+            std::env::var_os("HIRSEL_GUARD_TEST_SECTION").is_some_and(|call| call == "alloc");
+        let held = std::hint::black_box(vec![1u8; 64]);
+        section(true);
+        if alloc {
+            drop(std::hint::black_box(vec![2u8; 64]));
+        } else {
+            drop(held);
+        }
+        section(false);
+        println!("section call returned");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn an_allocation_or_free_inside_a_section_ends_a_debug_build() {
+        for call in ["alloc", "free"] {
+            let output = child(
+                "tests::section_child",
+                &[("HIRSEL_GUARD_TEST_SECTION", call)],
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(
+                output.status.code(),
+                Some(SECTION_STATUS),
+                "{call}: {stderr}"
+            );
+            assert!(
+                stderr
+                    .contains("hirsel: 64 bytes allocated or freed inside a Free recorder section"),
+                "{call}: {stderr}"
+            );
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("returned"));
+        }
     }
 
     #[test]

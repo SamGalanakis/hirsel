@@ -5,7 +5,8 @@ use std::sync::{Arc, OnceLock};
 mod owners;
 pub use owners::{Owner, OwnerScope};
 pub(crate) use owners::{
-    allocated, allocator_installed, before_alloc, deallocated, oracle, reallocated,
+    allocated, allocator_installed, before_alloc, deallocated, listed, oracle, oracle_on,
+    reallocated,
 };
 
 pub const OWNERS: usize = 5;

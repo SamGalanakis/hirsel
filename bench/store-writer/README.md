@@ -12,8 +12,9 @@ sample per workload in each engine and Rust. It restricts affinity to two allowe
 CPUs, uses `tools/capped` with 2 GiB, and measures only one process at a time.
 The checked-in `workload.json` is the workload contract. `workload.hir` computes
 transfer data; `main.hir` adapts it to today's store API and imports the original
-ledger-service's table operations. Each group is one `store.transact` entry run; runner transport and
-`store.call` stream replay handling are excluded. Port that adapter when the store API changes.
+ledger-service's table operations. Each group is one run of the `transfers` transaction entry:
+`store.transact` on a store the process opens (local), or `runner.transact` on a `db` runner whose
+place serves the same entry (served). Port that adapter when the store API changes.
 
 Eight accounts start with 1,000,000 units each. Transfer i moves 1 + i mod 3 units
 from account i mod 8 to its successor, wrapping at 8. There are 512 successful
@@ -28,6 +29,22 @@ the durable commit, before sending the acknowledgment. There is no open-loop
 load or saturation claim. Both engines close and reopen before checking every
 balance against a separately computed per-account oracle and checking total
 conservation. The nonuniform amounts make the final balances nontrivial.
+
+The served engine calls the same entry over `remote.tls@1` (the repository's TLS test
+identities, crates/hirsel-rt/tests/it/tls-data) to a `hirsel serve --native` host. Its place's head
+is `main.hir`'s `head`: one store over the place's `db` authority with the local mode's
+configuration, serving the local mode's three entries. Served samples run in the `log-host` cell
+only (`authority.log@1`, floor `host`, `group_commits` 1): the transport is the same at every level. The host links the head with the `run --native` preset, LLVM at the release optimization
+level without scoped specialization. The caller runs interpreted, because native launch does not
+offer `remote.tls@1` runners yet. A served commit's `instructions_commit`, `cpu_us_commit`, log
+barriers and allocations are the head process's, counted by `perf stat` attached to it between the
+caller's markers, with the same barrier check as the local engines. Its allocation diagnostic
+probes the head's executable once it runs. `caller_*` and `host_*` give the caller's and the host's
+own instructions and task clock. Throughput and latency are the caller's, so they include the
+interpreted caller, TLS, the host's forwarding and the place link. A served store stays with its
+place: the oracle runs as a served transaction, without a close and recovery. `results.json`'s
+`served` gives each served cell's ratios to the local native and Rust cells of the same group and
+submitters.
 
 The Rust reference implements the same transfers and group/client counts with
 an in-memory balance array and 24 little-endian bytes per transfer, one
@@ -65,8 +82,8 @@ not block-device bytes or filesystem write amplification.
 
 Each sample runs one cell: one authority at one level its provider declares, set as the
 deployment floor, with `group_commits` 1, so each commit group is one advance. A cell
-names the failure an acknowledged commit survives, and the runner refuses a native or
-interpreter sample whose phase makes other kernel calls than the cell requires
+names the failure an acknowledged commit survives, and the runner refuses a native,
+served or interpreter sample whose phase makes other kernel calls than the cell requires
 (tracepoint counts; under `--profile`, the trace order too):
 
 | Cell | Authority, level | Survives | Per commit group |

@@ -1,7 +1,13 @@
-// Store adapter for the ledger workload. Each group is one transaction.
+// Store adapter for the ledger workload. Each group is one transaction, made
+// on a store this process opens (local) or by a `db@1` place's head (served).
 pub type Error = Grant(GrantError) | Clock(ClockError) | Output(
   OutputError
-) | Input(InputError) | Store(store.StoreError) | Tx(store.TxFailure[ledger.Refusal]) | Usage
+) | Input(InputError) | Store(store.StoreError) | Tx(store.TxFailure[ledger.Refusal]) | Run(
+  RunError[store.TxFailure[ledger.Refusal]]
+) | Usage
+
+// Where a mode's transactions commit: the local store, or the place behind a runner.
+type Writer = Local(store.Store) | Served(Runner)
 
 @serializable
 type Opening {
@@ -74,6 +80,56 @@ fn verify(mut tx: store.Tx, info: store.CallInfo, e: Expected) -> Result[
   Ok(total)
 }
 
+/// The served place's head: one store over the place's `db` authority, with
+/// the local mode's configuration, serving the local mode's entries.
+pub fn head(rt: Io, a: ()) -> Result[(), store.StoreError] {
+  let Ok(authority) = io.authority(rt, "db") else {
+    return Error(Corrupt("db"))
+  }
+  let Ok(inbox) = io.inbox(rt) else {
+    return Error(Corrupt("inbox"))
+  }
+  let mut config = store.default_config()
+  config.group_commits = 1
+  let mut s = store.open(authority, config)?
+  store.serve(
+    mut s,
+    take inbox,
+    [
+      store.served_transact(open_account),
+      store.served_transact(transfers),
+      store.served_transact(verify),
+    ]
+  )
+}
+
+/// One transaction of the entry `f` on `w`; the writer comes back with its outcome.
+fn commit[A: serializable](
+  take w: Writer,
+  f: Entry[fn(mut tx: store.Tx, info: store.CallInfo, a: A) -> Result[u64, ledger.Refusal]],
+  a: A
+) -> (Writer, Result[u64, Error]) {
+  match take w {
+    Local(db) => {
+      let mut s = take db
+      let committed = store.transact(mut s, f, a)
+      let outcome: Result[u64, Error] = match take committed {
+        Ok(n) => Ok(n),
+        Error(e) => Error(Tx(take e)),
+      }
+      (Local(take s), take outcome)
+    },
+    Served(r) => {
+      let called = runner.transact(r, f, a)
+      let outcome: Result[u64, Error] = match take called {
+        Ok(n) => Ok(n),
+        Error(e) => Error(Run(take e)),
+      }
+      (Served(r), take outcome)
+    },
+  }
+}
+
 type Request {
   first: u64,
   submitted: u64,
@@ -132,25 +188,34 @@ fn run(rt: Io, args: Args) -> Result[(), Error] {
   let input = io.stdin(rt) ? Grant
   let c = io.monotonic_clock(rt) ? Grant
   let tasks = io.tasks(rt) ? Grant
-  let a = io.authority(rt, "db") ? Grant
   let accounts = number(args, 0)
   let initial = number(args, 1)
   let count = number(args, 2)
   let amount = number(args, 3)
   let group = number(args, 4)
   let clients = number(args, 5)
+  let served = match arg.text(args, 6) {
+    Ok(mode) => mode == "served",
+    Error(_) => false,
+  }
   if accounts < 2 || group == 0 || clients == 0 || count == 0 || count % group != 0 || count % accounts != 0 {
     return Error(Usage())
   }
   let mut config = store.default_config()
   config.group_commits = 1
-  let mut db = store.open(a, config) ? Store
+  let mut db = if served {
+    Served(io.runner(rt, "db") ? Grant)
+  } else {
+    Local(store.open(io.authority(rt, "db") ? Grant, config) ? Store)
+  }
   for account in 0u64..accounts {
-    let _ = store.transact(
-      mut db,
+    let (next, opened) = commit(
+      take db,
       open_account,
       Opening(account: account, initial: initial)
-    ) ? Tx
+    )
+    db = take next
+    let _ = take opened?
   }
   // The host enables phase counters before releasing this input gate.
   out.print(output, "READY\n") ? Output
@@ -159,7 +224,7 @@ fn run(rt: Io, args: Args) -> Result[(), Error] {
   let start = now(c)
   let outcome = task.scope(
     tasks,
-    fn(scope: Scope) -> Result[(store.Store, List[u64]), Error] {
+    fn(scope: Scope) -> Result[(Writer, List[u64]), Error] {
       let mut writer = take db
       let mut rx = take receiver
       let mut latencies: List[u64] = []
@@ -187,14 +252,15 @@ fn run(rt: Io, args: Args) -> Result[(), Error] {
           },
         }
         let Request(first: first, submitted: submitted, reply: response) = take req
-        let committed = store.transact(
-          mut writer,
+        let (next, committed) = commit(
+          take writer,
           transfers,
           Group(first: first, size: group, accounts: accounts, amount: amount)
         )
+        writer = take next
         if let Error(e) = take committed {
           task.cancel_all(scope, take children)
-          return Error(Tx(take e))
+          return Error(take e)
         }
         let finished = now(c)
         list.push(mut latencies, finished - submitted)
@@ -215,16 +281,25 @@ fn run(rt: Io, args: Args) -> Result[(), Error] {
   let elapsed = now(c) - start
   out.print(output, "DONE\n") ? Output
   let _ = input.read_line(input) ? Input
-  let (committed_store, latencies) = take outcome?
-  store.close(take committed_store) ? Store
-  let mut recovered = store.open(a, config) ? Store
+  let (written, latencies) = take outcome?
+  // A local store closes and recovers; a served one stays with its place.
+  let reopened = match take written {
+    Local(s) => {
+      store.close(take s) ? Store
+      Local(store.open(io.authority(rt, "db") ? Grant, config) ? Store)
+    },
+    Served(r) => Served(r),
+  }
   // The oracle runs outside the timed phase.
-  let _ = store.transact(
-    mut recovered,
+  let (checked, verified) = commit(
+    take reopened,
     verify,
     Expected(accounts: accounts, initial: initial, count: count, amount: amount)
-  ) ? Tx
-  store.close(take recovered) ? Store
+  )
+  let _ = take verified?
+  if let Local(s) = take checked {
+    store.close(take s) ? Store
+  }
   out.print(output, f"elapsed {elapsed}\n") ? Output
   for latency in latencies {
     out.print(output, f"latency {latency}\n") ? Output

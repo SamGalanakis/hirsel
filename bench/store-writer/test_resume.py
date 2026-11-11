@@ -28,22 +28,25 @@ class ResumeTests(unittest.TestCase):
         self.cells = {}
         for group in [1, 8]:
             for clients in [1, 4]:
-                for kind in ['metal', 'native', 'interp']:
-                    self.cell(kind, group, clients)
-                    if kind == 'native':
-                        self.cell(kind, group, clients, allocations=True)
-        self.cell('raw', 1, 1, workload=dict(self.workload, groups=[1], submitters=[1]))
+                self.cell('metal', 'log-host', group, clients)
+                for cell in runner.CELLS:
+                    for kind in ['native', 'served', 'interp'] if cell == 'log-host' else ['native', 'interp']:
+                        self.cell(kind, cell, group, clients)
+                        if kind in ('native', 'served') and cell == 'log-host':
+                            self.cell(kind, cell, group, clients, allocations=True)
+        self.cell('raw', 'log-host', 1, 1, workload=dict(self.workload, groups=[1], submitters=[1]))
         for kind in ['native', 'interp']:
-            self.cell(kind, 1, 1, profile=True)
+            self.cell(kind, 'log-host', 1, 1, profile=True)
 
-    def cell(self, kind, group, clients, profile=False, allocations=False, workload=None):
+    def cell(self, kind, cell, group, clients, profile=False, allocations=False, workload=None):
         suffix = '-profile' if profile else '-allocations' if allocations else ''
-        path = self.out / f'{kind}-g{group}-c{clients}{suffix}' / 'result.json'
+        path = self.out / f'{kind}-{cell}-g{group}-c{clients}{suffix}' / 'result.json'
         path.parent.mkdir()
         row = dict(binding=dict(source_sha='measured-revision', workload=workload or self.workload,
-                                engine=kind, group=group, submitters=clients,
+                                engine=kind, cell=cell, group=group, submitters=clients,
                                 profile=profile, allocations=allocations),
-                   allocations_commit=None if kind == 'native' and not allocations else 12)
+                   allocations_commit=None if kind in ('native', 'served') and cell == 'log-host' and not allocations else 12,
+                   instructions_commit=100, transfers_s=1000)
         path.write_text(json.dumps(row))
         self.cells[path] = row
 
@@ -64,7 +67,7 @@ class ResumeTests(unittest.TestCase):
         self.resume()
         summary = json.loads((self.out / 'results.json').read_text())
         self.assertEqual(summary['source_sha'], 'measured-revision')
-        self.assertEqual(len(summary['rows']), 13)
+        self.assertEqual(len(summary['rows']), 41)
         for row in summary['rows']:
             self.assertEqual(row['binding']['source_sha'], 'measured-revision')
         self.assertEqual(summary['rows'][1]['allocations_commit'], 12)

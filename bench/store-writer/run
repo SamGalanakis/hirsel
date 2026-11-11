@@ -222,6 +222,33 @@ class Attached:
         return self.values
 
 
+class Profiled(Attached):
+    """`perf record` of user instructions with call stacks in one running process,
+    between `enable` and `disable` (a diagnostic: STORE_BENCH_RECORD set)."""
+    def __init__(self, pid, path):
+        self.control, self.ack = path.with_suffix('.control'), path.with_suffix('.ack')
+        os.mkfifo(self.control)
+        os.mkfifo(self.ack)
+        self.write, self.read = os.open(self.control, os.O_RDWR), os.open(self.ack, os.O_RDWR)
+        self.path, self.values = path, None
+        self.process = subprocess.Popen(['perf', 'record', '-q', '-e', 'instructions:u', '-c', '20000',
+            '--call-graph', 'dwarf,16384', '-p', str(pid), '-o', path, '-D', '-1',
+            f'--control=fifo:{self.control},{self.ack}'], stderr=subprocess.DEVNULL)
+
+    def finish(self):
+        if self.values is not None:
+            return self.values
+        if self.process.poll() is None:
+            self.process.send_signal(signal.SIGINT)
+        self.process.wait()
+        for fd in (self.write, self.read):
+            os.close(fd)
+        self.control.unlink()
+        self.ack.unlink()
+        self.values = {}
+        return self.values
+
+
 class Recorded(Attached):
     """`perf record` of uprobe `events` in one running process, between `enable` and
     `disable`; `finish` gives the events' names in the order they fired."""
@@ -475,6 +502,11 @@ def sample(kind, cell, group, submitters, workload, out, compiler, source_sha, p
                             for counter in attached:
                                 host.callback(counter.finish)
                                 counter.send('enable')
+                        if os.environ.get('STORE_BENCH_RECORD'):
+                            recorder = Profiled(head if served else pid, directory / 'record.data')
+                            attached.append(recorder)
+                            host.callback(recorder.finish)
+                            recorder.send('enable')
                         control('enable')
                         process.stdin.write('go\n')
                         process.stdin.flush()

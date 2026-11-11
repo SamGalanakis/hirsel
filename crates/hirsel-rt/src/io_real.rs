@@ -732,6 +732,22 @@ impl<S: Streams> RealCore<S> {
     }
     /// One unkeyed call: the concurrent service supplies its own footprint.
     pub(crate) fn call_once(&mut self, request: Request) -> Result<Completion, AdapterError> {
+        self.require_virtual_clock()?;
+        let _ = self.preflight(&request)?;
+        self.call_after_preflight(request)
+    }
+
+    /// `call_once` for a caller that ran `preflight` on `request` itself and has held the
+    /// request's key positions since: they pin every grant and handle `preflight` reads.
+    pub(crate) fn call_preflighted(
+        &mut self,
+        request: Request,
+    ) -> Result<Completion, AdapterError> {
+        self.require_virtual_clock()?;
+        self.call_after_preflight(request)
+    }
+
+    fn require_virtual_clock(&self) -> Result<(), AdapterError> {
         if self.state.timed_process {
             let virtual_clock = self
                 .cooperative
@@ -743,7 +759,10 @@ impl<S: Streams> RealCore<S> {
                 ));
             }
         }
-        let _ = self.preflight(&request)?;
+        Ok(())
+    }
+
+    fn call_after_preflight(&mut self, request: Request) -> Result<Completion, AdapterError> {
         // Close, split/join, TLS and new grants use this protocol. Invalidate
         // before any authority mutation, including failed or canceled operations.
         self.live_streams = [None; 2];

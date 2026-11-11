@@ -264,7 +264,7 @@ impl ConcurrentIo {
             self.tls_pem.lock().unwrap().remove(handle);
         }
         core.stage();
-        let result = core.call_once(request);
+        let result = core.call_preflighted(request);
         *observed = core.disk.observed_output.take();
         debug_assert!(
             core.disk.prefetched.is_none()

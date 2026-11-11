@@ -435,6 +435,14 @@ continue to consume the existing private representation records. Package version
 are distinct owners. LANG-13 still restricts destructuring a type with drop to its
 defining module, even within its package.
 
+Accepted execution products live under the compiler source/toolchain digest in
+`$XDG_DATA_HOME/hirsel/accepted-execution/`. That digest covers declaration and
+codec sources, so different encodings have separate physical indexes and index
+admission budgets. An unreadable cached product is a miss: the ordinary source
+path recomputes, validates and publishes it in its own directory. Replay still
+checks the resulting semantic revision before execution. Fresh publication
+failures remain producer errors.
+
 `export_native_input` retains a complete checked program selection in owned
 snapshots: the semantic closure (the program revision's) of every definition
 outside the dependency packages, so a dependency definition the program never

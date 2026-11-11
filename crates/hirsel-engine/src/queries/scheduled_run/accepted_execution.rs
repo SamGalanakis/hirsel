@@ -239,7 +239,7 @@ fn facts(value: Callee) -> CalleeFacts {
 fn failure(message: impl Into<String>) -> QueryError {
     operational(format!("accepted execution: {}", message.into()))
 }
-fn durable_store() -> Result<Store, QueryError> {
+fn durable_store(compiler: ContentHash) -> Result<Store, QueryError> {
     // The standard library also consults the account database on Unix when
     // sandboxed launchers omit HOME. Query caches and temporary directories
     // never own this retained data.
@@ -253,7 +253,17 @@ fn durable_store() -> Result<Store, QueryError> {
     if !base.is_absolute() {
         return Err(failure("durable data directory is relative"));
     }
-    Ok(Store::new(base.join("hirsel/accepted-execution/v1")))
+    // The source/toolchain digest includes the codecs and declarations. Each
+    // encoding owns its index admission instead of accumulating every compiler's
+    // records in one physical index.
+    let version: String = compiler
+        .0
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(Store::new(
+        base.join("hirsel/accepted-execution").join(version),
+    ))
 }
 fn index(revision: &[u8; 32], entry: &DefPath) -> Address {
     Address(ContentHash::of_parts(
@@ -501,7 +511,7 @@ impl FrontRunQueries {
             .operation
             .admitted_identity()
             .ok_or_else(|| failure("unadmitted capture"))?;
-        let store = durable_store()?;
+        let store = durable_store(identity.compiler)?;
         // Strict fsync alone still permits derivable index publications to be
         // skipped. Retain the entire closure and propagate every refusal.
         let _retention = store
@@ -1138,7 +1148,43 @@ pub fn import_execution_product(
     options: ContentHash,
     allowance: hirsel_engine_admission::MemoryReservation,
 ) -> Result<Option<Arc<AcceptedExecutionProduct>>, QueryError> {
-    let store = durable_store()?;
+    let store = durable_store(compiler)?;
+    match try_import_execution_product(
+        store,
+        revision,
+        entry,
+        observations,
+        imports,
+        compiler,
+        policy,
+        options,
+        allowance,
+    ) {
+        Ok(product) => Ok(product),
+        Err(_) => {
+            // A rejected cached import is a miss. The ordinary source path
+            // recomputes, validates and publishes under this compiler's digest;
+            // replay still checks the resulting semantic revision at launch.
+            crate::queries::operation_owner_trace(format_args!(
+                "accepted-execution lookup=miss entry={entry} reason=unreadable"
+            ));
+            Ok(None)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_import_execution_product(
+    store: Store,
+    revision: Option<[u8; 32]>,
+    entry: &DefPath,
+    observations: ContentHash,
+    imports: ContentHash,
+    compiler: ContentHash,
+    policy: ContentHash,
+    options: ContentHash,
+    allowance: hirsel_engine_admission::MemoryReservation,
+) -> Result<Option<Arc<AcceptedExecutionProduct>>, QueryError> {
     let inputs = input_index(entry, observations, imports, compiler, policy, options);
     let association = match revision {
         Some(revision) => store

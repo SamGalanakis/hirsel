@@ -1,3 +1,4 @@
+mod accepted_execution_compat;
 mod admission;
 mod agreement;
 mod ahead_native;

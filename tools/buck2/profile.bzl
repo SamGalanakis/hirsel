@@ -67,14 +67,19 @@ PANIC_ABORT = select({
 })
 
 # [profile.checked] inherits release, with the oracles' assertions and overflow
-# checks restored. Host code keeps its canonical dev configuration.
+# checks restored, at opt-level 1: the tests' compiler and libraries are rebuilt
+# on every lane edit and land, and O1 compiles them in 27% less CPU while the
+# tests run about 13% slower (pool-use-717). Shipped and timed code is release or
+# runtime, never checked. Host code keeps its canonical dev configuration.
+CHECKED_FLAGS = RELEASE_FLAGS + ["-Copt-level=1", "-Cdebug-assertions=yes", "-Coverflow-checks=yes"]
+
 def workspace_profile_flags(host_code = False):
     return select({
         "root//tools/buck2:profile_release": RELEASE_FLAGS,
         "root//tools/buck2:profile_runtime": RUNTIME_FLAGS,
         "root//tools/buck2:profile_dist": DIST_FLAGS,
         "root//tools/buck2:profile_profiling": RELEASE_FLAGS + ["-Cdebuginfo=line-tables-only", "-Cforce-frame-pointers=yes"],
-        "root//tools/buck2:profile_checked": RELEASE_FLAGS + ["-Cdebug-assertions=yes", "-Coverflow-checks=yes"],
+        "root//tools/buck2:profile_checked": CHECKED_FLAGS,
         "DEFAULT": [],
     }) + ([] if host_code else PANIC_ABORT)
 
@@ -85,6 +90,6 @@ def third_party_profile_flags(host_code = False):
         "root//tools/buck2:profile_runtime": RUNTIME_FLAGS,
         "root//tools/buck2:profile_dist": DIST_FLAGS,
         "root//tools/buck2:profile_profiling": RELEASE_FLAGS + ["-Cdebuginfo=line-tables-only", "-Cforce-frame-pointers=yes"],
-        "root//tools/buck2:profile_checked": RELEASE_FLAGS + ["-Cdebug-assertions=yes", "-Coverflow-checks=yes"],
+        "root//tools/buck2:profile_checked": CHECKED_FLAGS,
         "DEFAULT": ["-Copt-level=1"],
     }) + ([] if host_code else PANIC_ABORT)

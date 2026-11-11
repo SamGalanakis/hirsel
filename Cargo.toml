@@ -50,6 +50,7 @@ opt-level = 1
 # debug assertions and integer overflow checks while optimizing the compiler.
 [profile.checked]
 inherits = "release"
+opt-level = 1
 debug-assertions = true
 overflow-checks = true
 

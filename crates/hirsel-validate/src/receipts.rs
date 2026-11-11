@@ -2,6 +2,7 @@
 //! content can share the physical store but cannot publish through this API.
 mod universe;
 use crate::{SignatureLookup, VRead, Validation};
+mod adopt;
 mod execution_product;
 mod installation;
 mod outputs;
@@ -349,9 +350,12 @@ enum Backend {
         Arc<hirsel_artifact_store::Memory>,
     ),
     Directory(Store),
+    /// Host rows and contents, and for a Precompute's installation the
+    /// previous registered generation it may adopt V's own rows from.
     Hosted(
         Arc<dyn VerifierRows>,
         Arc<dyn hirsel_artifact_store::Contents>,
+        Option<Arc<installation::Rows>>,
     ),
     Registered(Arc<VerifierCache>, Arc<installation::Rows>),
     Transport(
@@ -506,7 +510,7 @@ impl VerifierCache {
     /// Keep rows, receipts and type records in the host's bounded storage.
     pub fn hosted<T: VerifierRows + 'static>(rows: Arc<T>) -> Self {
         Self(
-            Backend::Hosted(rows.clone(), rows),
+            Backend::Hosted(rows.clone(), rows, None),
             Mutex::default(),
             Arc::new(()),
             crate::FactTable::default(),
@@ -589,7 +593,7 @@ impl VerifierCache {
     }
     fn retain_fact(&self, bytes: u64) -> Result<Option<Arc<dyn Send + Sync>>, FactRefusal> {
         match &self.0 {
-            Backend::Transport(_, rows, _) | Backend::Hosted(rows, _) => rows.retain_fact(bytes),
+            Backend::Transport(_, rows, _) | Backend::Hosted(rows, ..) => rows.retain_fact(bytes),
             // The in-memory verifier is already an explicit unbounded owner.
             Backend::Memory(..) => Ok(Some(Arc::new(()))),
             Backend::Directory(_) | Backend::Registered(..) => Ok(None),
@@ -678,7 +682,7 @@ impl VerifierCache {
             Backend::Transport(selected, _, _) | Backend::Registered(selected, _) => {
                 selected.publication_batch()
             }
-            Backend::Hosted(rows, _) => rows.publication_batch(),
+            Backend::Hosted(rows, ..) => rows.publication_batch(),
             Backend::Memory(..) => None,
         }
     }
@@ -691,7 +695,7 @@ impl VerifierCache {
             Backend::Transport(selected, _, _) | Backend::Registered(selected, _) => {
                 selected.publication_request()
             }
-            Backend::Hosted(rows, _) => rows.publication_request(),
+            Backend::Hosted(rows, ..) => rows.publication_request(),
             _ => None,
         }
     }
@@ -739,7 +743,7 @@ impl VerifierCache {
                 store.touch(Address(key), association.reference);
                 (association.reference, bytes)
             }
-            Backend::Hosted(rows, contents) => {
+            Backend::Hosted(rows, contents, _) => {
                 let reference = rows.row(key)?;
                 (reference, contents.get_content(reference).ok()?)
             }
@@ -810,7 +814,7 @@ impl VerifierCache {
                     let _ = store.associate(Address(key), Action(key), reference);
                 }
             }
-            Backend::Hosted(rows, contents) => {
+            Backend::Hosted(rows, contents, _) => {
                 if let Some(reference) = contents.put_identified_content(content) {
                     rows.set_row(key, reference);
                 }
@@ -882,7 +886,7 @@ impl VerifierCache {
         match &self.0 {
             Backend::Memory(_, contents) => contents.clone(),
             Backend::Directory(store) => Arc::new(store.clone()),
-            Backend::Hosted(_, contents) => contents.clone(),
+            Backend::Hosted(_, contents, _) => contents.clone(),
             Backend::Transport(_, _, contents) => contents.clone(),
             Backend::Registered(local, installed) => Arc::new(installation::Contents {
                 local: local.contents(),
@@ -1135,7 +1139,7 @@ impl VerifierCache {
             + (replay.owners.len() * (3 * size_of::<(Anchor, (DefPath, u32))>() + 64)) as u64;
         let lease = match &self.0 {
             Backend::Memory(..) => Some(Arc::new(()) as Arc<dyn Send + Sync>),
-            Backend::Transport(_, rows, _) | Backend::Hosted(rows, _) => rows
+            Backend::Transport(_, rows, _) | Backend::Hosted(rows, ..) => rows
                 .retain_replay(&replay.archive, replay.overlay.as_ref(), metadata)
                 .map_err(|_| crate::FactError::Admission)?,
             Backend::Directory(_) | Backend::Registered(..) => None,
@@ -1189,6 +1193,15 @@ impl VerifierCache {
         use crate::FactError;
         hirsel_intern::work::count(hirsel_intern::work::Counter::ExecutionValidationRequests);
         hirsel_intern::timings::count(hirsel_intern::timings::Count::ExecutionValidationRequests);
+        if original.is_none()
+            && self
+                .row_content(execution_key(subject), EXECUTION_DOMAIN)
+                .is_none()
+        {
+            // A refused adoption leaves the miss below; V's full revalidation
+            // checks an adopted closure exactly as a current one.
+            let _ = self.adopt_execution(subject, &types, environment);
+        }
         let result = (|| {
             let record: ExecutionRecord = self
                 .load(execution_key(subject), EXECUTION_DOMAIN)
@@ -1899,8 +1912,17 @@ fn validate_with_receipt_in(
             [identity.0.as_slice(), policy.0.as_slice()],
         )
     });
+    // A current miss may find V's own receipt in the previous generation, only
+    // under V's frozen environment. It passes the same checks before adoption.
+    let mut staged = None;
     if let (Some(cache), Some(key), Some(identity)) = (cache, key, artifact.identity)
-        && let Some(receipt) = cache.load::<Receipt>(key, DOMAIN)
+        && let Some(receipt) = cache.load::<Receipt>(key, DOMAIN).or_else(|| {
+            signatures.stamp()?;
+            let mut staging = cache.staging()?;
+            let (_, receipt) = staging.record::<Receipt>(key, DOMAIN).ok()?;
+            staged = Some(staging);
+            Some(receipt)
+        })
         && receipt.artifact == identity
         && receipt.policy == policy
         && receipt.action == receipt_action(identity, policy, &receipt.reads)
@@ -1922,9 +1944,21 @@ fn validate_with_receipt_in(
                 break;
             }
         }
-        if holds {
+        let adopted = match staged.take() {
+            Some(mut staging) if holds => staging
+                .original(identity, policy, receipt.action)
+                .and_then(|()| cache.adopt(staging))
+                .is_ok(),
+            Some(_) => false,
+            None => {
+                if holds {
+                    cache.publish(original_receipt_key(receipt.action), DOMAIN, &receipt);
+                }
+                holds
+            }
+        };
+        if adopted {
             cache.retain_artifact(artifact, policy);
-            cache.publish(original_receipt_key(receipt.action), DOMAIN, &receipt);
             let accepted = accept(receipt.clone())?;
             reads.extend(receipt.reads);
             return Ok((Validation::default(), false, Some(accepted)));
@@ -3910,5 +3944,316 @@ mod tests {
         second_began.recv().unwrap();
         second.join().unwrap();
         assert!(Installation::registered(&root.0, &state, build, Arc::default()).is_some());
+    }
+
+    /// V's frozen environment over a fixture's signatures.
+    fn frozen(f: &Fixture) -> crate::ViewTable {
+        crate::ViewTable::new(
+            &session(),
+            f.signatures.values().cloned().map(Arc::new),
+            None,
+            &mut crate::ValidatedSignatures::default(),
+            None,
+        )
+        .unwrap()
+    }
+    /// V under that frozen environment: report, whether V ran, acceptance, reads.
+    fn frozen_check(
+        f: &Fixture,
+        cache: &VerifierCache,
+        policy: ContentHash,
+        views: &crate::ViewTable,
+    ) -> (Validation, bool, Option<AcceptedArtifact>, Vec<VRead>) {
+        let mut reads = vec![];
+        let (report, ran, accepted) = validate_with_receipt(
+            &artifact(f),
+            crate::SignatureInputs::Checked(views),
+            policy,
+            Some(cache),
+            &mut reads,
+        )
+        .unwrap();
+        (report, ran, accepted, reads)
+    }
+    /// The previous generation an installation's verifier may adopt from.
+    fn previous(install: &Installation) -> Arc<installation::Rows> {
+        let Backend::Hosted(_, _, Some(previous)) = &install.verifier().0 else {
+            panic!("no previous generation")
+        };
+        previous.clone()
+    }
+    /// A private root and state, with products published once and kept.
+    fn precompute_root() -> (Directory, Directory, std::path::PathBuf, ContentHash) {
+        let root = Directory::new();
+        let state = Directory::new();
+        let private = state.0.join("private");
+        installation_products(&root.0, b"products");
+        (
+            root,
+            state,
+            private,
+            ContentHash::of_bytes(b"local verifier"),
+        )
+    }
+    fn generations(state: &std::path::Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(state)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.is_dir())
+            .collect()
+    }
+    /// A Precompute whose receipt V issued in the previous generation adopts it
+    /// only after V's own checks, and the result is what a forced fresh V over
+    /// the same frozen inputs issues. The adopted closure stands alone.
+    #[test]
+    fn a_precompute_adopts_its_previous_generations_receipt_as_fresh_v_issues_it() {
+        let (root, _state, state, build) = precompute_root();
+        let f = Fixture::call();
+        let views = frozen(&f);
+        let first = Installation::begin(&root.0, &state, build).unwrap();
+        assert!(frozen_check(&f, &first.verifier(), build, &views).1);
+        first.finish().unwrap();
+        let old = generations(&state);
+
+        let second = Installation::begin(&root.0, &state, build).unwrap();
+        let (report, ran, accepted, reads) = frozen_check(&f, &second.verifier(), build, &views);
+        assert!(!ran, "the unchanged receipt is adopted");
+        let (fresh, fresh_ran, fresh_accepted, fresh_reads) =
+            frozen_check(&f, &VerifierCache::default(), build, &views);
+        assert!(fresh_ran && fresh.violations.is_empty() && report.violations.is_empty());
+        assert_eq!(accepted.unwrap(), fresh_accepted.unwrap());
+        assert_eq!(reads, fresh_reads);
+        second.finish().unwrap();
+
+        // The new generation holds the whole closure: reopen it with the old
+        // generation gone and empty fact tables.
+        for directory in old {
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+        let reopened = Installation::registered(&root.0, &state, build, Arc::default()).unwrap();
+        assert!(!frozen_check(&f, &reopened, build, &frozen(&f)).1);
+    }
+    /// Adoption runs V's ordinary hit checks first: a changed read, a missing
+    /// original-receipt association or a forged registration runs V, and the
+    /// fresh receipt is still retained for the next generation.
+    #[test]
+    fn a_previous_receipt_whose_checks_fail_is_not_adopted_and_v_runs() {
+        let (root, _state, state, build) = precompute_root();
+        let f = Fixture::call();
+        let first = Installation::begin(&root.0, &state, build).unwrap();
+        let (_, _, accepted, _) = frozen_check(&f, &first.verifier(), build, &frozen(&f));
+        first.finish().unwrap();
+        let action = accepted.unwrap().receipt;
+
+        // The callee's view changes; the artifact itself does not.
+        let mut changed = Fixture::call();
+        let callee = changed.signatures.get_mut(&path("callee")).unwrap();
+        *callee = crate::support::function_signature(
+            "callee",
+            vec![(
+                hirsel_types::PassingMode::Borrow,
+                hirsel_types::TypeKind::Primitive(hirsel_types::Primitive::String),
+            )],
+            hirsel_types::TypeKind::Tuple(vec![].into()),
+        );
+        assert_eq!(artifact(&changed).identity, artifact(&f).identity);
+        let install = Installation::begin(&root.0, &state, build).unwrap();
+        assert!(frozen_check(&changed, &install.verifier(), build, &frozen(&changed)).1);
+        drop(install);
+
+        let install = Installation::begin(&root.0, &state, build).unwrap();
+        previous(&install).forget(original_receipt_key(action));
+        let (report, ran, accepted, _) = frozen_check(&f, &install.verifier(), build, &frozen(&f));
+        assert!(ran && report.violations.is_empty() && accepted.is_some());
+        install.finish().unwrap();
+        let next = Installation::begin(&root.0, &state, build).unwrap();
+        assert!(!frozen_check(&f, &next.verifier(), build, &frozen(&f)).1);
+        next.finish().unwrap();
+
+        let path = installation::registration_path(
+            &state.canonicalize().unwrap(),
+            &root.0.canonicalize().unwrap(),
+        );
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[0] ^= 1;
+        std::fs::write(&path, bytes).unwrap();
+        let forged = Installation::begin(&root.0, &state, build).unwrap();
+        assert!(frozen_check(&f, &forged.verifier(), build, &frozen(&f)).1);
+    }
+    /// A definition output is adopted with its replay closure and original
+    /// receipt, equal to the output V published, and reopens on its own.
+    #[test]
+    fn a_precompute_adopts_a_previous_definition_output_with_its_closure() {
+        let (root, _state, state, build) = precompute_root();
+        let mut f = Fixture::unit();
+        owner_sig(&mut f, &[]);
+        let definition = Arc::new(f.definition.clone());
+        let views = frozen(&f);
+        let subject = ContentHash::of_bytes(b"complete lower output and action");
+        let publish = |cache: &VerifierCache| {
+            let (_, _, _, evidence) = validate_definition(
+                &definition,
+                session(),
+                |_| Some((path("main"), 0)),
+                &views as &dyn crate::CheckedEnvironment,
+                build,
+                Some(cache),
+            )
+            .unwrap();
+            cache
+                .publish_definition(
+                    subject,
+                    &definition,
+                    session(),
+                    build,
+                    &views as &dyn crate::CheckedEnvironment,
+                    &evidence.unwrap(),
+                    b"query metadata",
+                )
+                .unwrap()
+        };
+        let first = Installation::begin(&root.0, &state, build).unwrap();
+        let published = publish(&first.verifier());
+        first.finish().unwrap();
+        let old = generations(&state);
+
+        let second = Installation::begin(&root.0, &state, build).unwrap();
+        let get = |cache: &VerifierCache, views: &crate::ViewTable| {
+            cache.definition_output(
+                subject,
+                definition.path,
+                &session(),
+                build,
+                views as &dyn crate::CheckedEnvironment,
+            )
+        };
+        assert!(
+            second
+                .verifier()
+                .definition_output(subject, definition.path, &session(), build, &f.signatures)
+                .is_none(),
+            "a raw lookup adopts nothing"
+        );
+        let adopted = get(&second.verifier(), &views).expect("adopted output");
+        assert_eq!(adopted, published);
+        assert_eq!(
+            adopted,
+            publish(&VerifierCache::default()),
+            "forced fresh V agrees"
+        );
+        second.finish().unwrap();
+        for directory in old {
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+        let reopened = Installation::registered(&root.0, &state, build, Arc::default()).unwrap();
+        let output = get(&reopened, &frozen(&f)).expect("the closure stands alone");
+        assert!(
+            reopened
+                .read_definition(
+                    &output,
+                    session(),
+                    |_, _| Some(Anchor::default()),
+                    build,
+                    &f.signatures
+                )
+                .is_some()
+        );
+    }
+    /// Execution evidence is adopted with every artifact's original receipt
+    /// and replay closure, all or nothing: failing any one copy, including a
+    /// grandchild type component, or forging any one product, exposes nothing
+    /// and leaves a miss; the full closure then reopens on its own.
+    #[test]
+    fn execution_adoption_is_all_or_nothing_at_every_copy() {
+        let (root, _state, state, build) = precompute_root();
+        let mut f = Fixture::unit();
+        // A local of `((u8,),)`: its type closure reaches a grandchild.
+        let byte = session().intern(crate::support::ty(hirsel_types::TypeKind::Primitive(
+            hirsel_types::Primitive::U8,
+        )));
+        let inner = session().intern(crate::support::ty(hirsel_types::TypeKind::Tuple(
+            vec![byte].into(),
+        )));
+        f.slot(
+            hirsel_types::TypeKind::Tuple(vec![inner].into()),
+            hirsel_tir::Storage::Temporary,
+        );
+        owner_sig(&mut f, &[]);
+        f.body().blocks[0].span.anchor = Anchor::fresh();
+        let site = f.definition.bodies[0].blocks[0].span.anchor;
+        let views = frozen(&f);
+        let package = path("main").0.package;
+        let replay = CheckedReplay {
+            package: &package,
+            views: &views,
+        };
+        let first = Installation::begin(&root.0, &state, build).unwrap();
+        let (_, _, accepted, _) = frozen_check(&f, &first.verifier(), build, &views);
+        let receipt = ExecutionReceipt::compose(
+            &[(package.clone(), views.input_digest())],
+            &[accepted.unwrap()],
+        )
+        .unwrap();
+        let subject = receipt.identity().unwrap();
+        first.verifier().publish_execution(subject, &receipt);
+        first.finish().unwrap();
+        let old = generations(&state);
+        let closure = |cache: &VerifierCache| {
+            [
+                execution_key(subject),
+                original_receipt_key(receipt.artifacts[0].receipt),
+                replay_key(receipt.artifacts[0].artifact, build),
+            ]
+            .map(|key| match &cache.0 {
+                Backend::Hosted(rows, ..) => rows.row(key).is_some(),
+                _ => unreachable!(),
+            })
+        };
+        let revalidated = |cache: &VerifierCache| {
+            cache
+                .execution_revalidated(subject, session(), |_, _| Some(site), &replay)
+                .ok()
+                .flatten()
+        };
+
+        adopt::ADOPTED.with(|log| log.borrow_mut().clear());
+        adopt::TYPE_EDGES.with(|log| log.borrow_mut().clear());
+        let probe = Installation::begin(&root.0, &state, build).unwrap();
+        assert!(revalidated(&probe.verifier()).is_some());
+        drop(probe);
+        // The execution closure is the first adoption; V's revalidation then
+        // adopts its own receipt, whose refusal only makes V run fresh.
+        let copies = adopt::ADOPTED.with(|log| log.borrow()[0]);
+        let edges = adopt::TYPE_EDGES.with(|log| log.borrow().clone());
+        assert!(
+            edges
+                .iter()
+                .any(|&(_, child)| edges.iter().any(|&(parent, _)| parent == child)),
+            "the closure reaches a grandchild type component"
+        );
+        for n in 0..copies {
+            for fault in [&adopt::FAIL_COPY, &adopt::FORGE_COPY] {
+                let install = Installation::begin(&root.0, &state, build).unwrap();
+                fault.set(Some(n));
+                let result = revalidated(&install.verifier());
+                fault.set(None);
+                assert!(result.is_none(), "copy {n} refused: a miss");
+                assert_eq!(
+                    closure(&install.verifier()),
+                    [false; 3],
+                    "copy {n}: nothing exposed"
+                );
+            }
+        }
+
+        let install = Installation::begin(&root.0, &state, build).unwrap();
+        assert!(revalidated(&install.verifier()).is_some());
+        assert_eq!(closure(&install.verifier()), [true; 3]);
+        install.finish().unwrap();
+        for directory in old {
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+        let reopened = Installation::registered(&root.0, &state, build, Arc::default()).unwrap();
+        assert!(revalidated(&reopened).is_some(), "the closure stands alone");
     }
 }

@@ -1,7 +1,8 @@
 //! A repeated Precompute reuses its installation only when the root holds
 //! exactly what a fresh Precompute of the current inputs would publish, under
 //! V's own registration of those products. Any changed input or damaged state
-//! rebuilds; a hit writes nothing.
+//! rebuilds; a hit writes nothing. A changed compiler, policy or source also
+//! runs V; a rebuild of damaged state may adopt V's own rechecked verdicts.
 use hirsel_driver::CompilerRequestsExt;
 use hirsel_front_phases::COMPILER;
 use std::collections::BTreeMap;
@@ -127,8 +128,20 @@ fn precompute_reuses_only_an_identical_registered_installation() {
     std::fs::write(&source, SOURCE).unwrap();
     std::fs::write(f.manifest(), MANIFEST).unwrap();
     let a = f.root("a");
+    // A changed compiler, policy or source runs V again.
     let miss = |mode: &str, what: &str| {
         assert!(f.precompute(mode, &a) > 0, "{what} must rebuild and run V");
+    };
+    // Damaged products or registration rebuild: the root or V's state is
+    // written again. V may adopt its own earlier verdicts after rechecking
+    // them, so the V run count is not the oracle here.
+    let rebuild = |what: &str| {
+        let (products, state) = (files(&a), files(&f.state()));
+        f.precompute("default", &a);
+        assert!(
+            files(&a) != products || files(&f.state()) != state,
+            "{what} must rebuild"
+        );
     };
     let hit = |what: &str| {
         let (products, state) = (files(&a), files(&f.state()));
@@ -160,7 +173,7 @@ fn precompute_reuses_only_an_identical_registered_installation() {
         ("partial or corrupt package product", "damaged record"),
     ] {
         flip(&classify(needle).unwrap_or_else(|| panic!("a pack holding the {what}")));
-        miss("default", what);
+        rebuild(what);
         hit(&format!("after rebuilding a {what}"));
     }
 
@@ -174,7 +187,7 @@ fn precompute_reuses_only_an_identical_registered_installation() {
         .collect();
     assert_eq!(registrations.len(), 1);
     flip(&registrations[0]);
-    miss("default", "unloadable registration");
+    rebuild("unloadable registration");
     hit("after re-registering");
     for registration in files(&f.state()).into_keys() {
         if registration
@@ -184,7 +197,7 @@ fn precompute_reuses_only_an_identical_registered_installation() {
             std::fs::remove_file(registration).unwrap();
         }
     }
-    miss("default", "missing registration");
+    rebuild("missing registration");
     hit("after registering");
 
     miss("identity", "another compiler identity");
@@ -194,7 +207,7 @@ fn precompute_reuses_only_an_identical_registered_installation() {
     hit("restored settings");
 
     std::fs::write(f.manifest(), format!("{MANIFEST}\n")).unwrap();
-    miss("default", "a changed manifest");
+    rebuild("a changed manifest");
     hit("the changed manifest");
 
     // The edit run equals a cold Precompute of the edited tree.

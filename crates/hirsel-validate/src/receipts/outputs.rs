@@ -1274,15 +1274,29 @@ impl VerifierCache {
     /// selections and private execution before asking for this V-owned body.
     /// Here V checks local authority, its independent current environment and
     /// raw content integrity without decoding the Definition.
-    pub fn definition_output(
+    ///
+    /// A current miss may adopt V's own output from the previous generation,
+    /// only under V's frozen environment and after the same checks: the record,
+    /// its replay closure and its original receipt, all or nothing.
+    pub fn definition_output<'a>(
         &self,
         subject: ContentHash,
         owner: DefId,
         types: &TypeInterner,
         policy: ContentHash,
-        signatures: &dyn SignatureLookup,
+        signatures: impl Into<crate::SignatureInputs<'a>>,
     ) -> Option<VerifiedDefinitionOutput> {
-        let record: Record = self.load(key(subject, policy), RECEIPT)?;
+        let signatures = signatures.into();
+        let mut staged = None;
+        let record: Record = self.load(key(subject, policy), RECEIPT).or_else(|| {
+            let stamp = signatures.stamp()?;
+            let mut staging = self.staging()?;
+            let (_, record) = staging
+                .record::<Record>(key(subject, policy), RECEIPT)
+                .ok()?;
+            staged = Some((staging, stamp.types.clone()));
+            Some(record)
+        })?;
         if record.subject != subject
             || record.owner != owner
             || record.policy != policy
@@ -1290,9 +1304,17 @@ impl VerifierCache {
             || !record
                 .reads
                 .iter()
-                .all(|r| crate::input::read_holds_for_types(types, r, signatures))
+                .all(|r| crate::input::read_holds_for_types(types, r, signatures.lookup()))
         {
             return None;
+        }
+        if let Some((mut staging, types)) = staged {
+            if staging.replay(&types, record.artifact, policy).ok()? != record.reference {
+                return None;
+            }
+            let action = receipt_action(record.artifact, policy, &record.reads);
+            staging.original(record.artifact, policy, action).ok()?;
+            self.adopt(staging).ok()?;
         }
         self.contents().get_content(record.reference).ok()?;
         Some(VerifiedDefinitionOutput {

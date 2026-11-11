@@ -23,7 +23,8 @@ struct Registration {
     rows: BTreeMap<ContentHash, Reference>,
 }
 /// Issuance is private to VerifierCache::publish_bytes. Imported associations
-/// are never enumerated or adopted, including on repeated Precompute runs.
+/// are never enumerated. A Precompute adopts only V's own rows from the root's
+/// previous generation, each after V's checks at its hit site (adopt.rs).
 pub(super) struct Rows {
     store: Store,
     rows: Mutex<BTreeMap<ContentHash, Reference>>,
@@ -74,6 +75,16 @@ impl VerifierRows for Rows {
             self.overflow
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+}
+#[cfg(test)]
+impl Rows {
+    /// Drop one association, as a generation that never held it.
+    pub(super) fn forget(&self, key: ContentHash) {
+        self.rows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&key);
     }
 }
 pub(super) struct Contents {
@@ -170,7 +181,17 @@ impl Installation {
             writable: true,
         });
         rows.store.set_cache_cap(2 << 30);
-        let cache = Arc::new(VerifierCache::hosted(rows.clone()));
+        // The previous registration, read only under this lock and only while
+        // it still authenticates against the root's unchanged products. V may
+        // adopt its own rows from it (see adopt.rs); nothing else reads it.
+        let previous = Self::rows(&root, &state, verifier).ok();
+        let cache = Arc::new(VerifierCache(
+            Backend::Hosted(rows.clone(), rows.clone(), previous),
+            Mutex::default(),
+            Arc::new(()),
+            crate::FactTable::default(),
+            Mutex::default(),
+        ));
         Ok(Self {
             state,
             root,
@@ -244,6 +265,16 @@ impl Installation {
         verifier: ContentHash,
         local: Arc<VerifierCache>,
     ) -> io::Result<Arc<VerifierCache>> {
+        Ok(Arc::new(VerifierCache(
+            Backend::Registered(local, Self::rows(root, state, verifier)?),
+            Mutex::default(),
+            Arc::new(()),
+            crate::FactTable::default(),
+            Mutex::default(),
+        )))
+    }
+    /// The authenticated, read-only rows of the root's current registration.
+    fn rows(root: &Path, state: &Path, verifier: ContentHash) -> io::Result<Arc<Rows>> {
         check_private(state)?;
         let root = root.canonicalize()?;
         let state = state.canonicalize()?;
@@ -285,19 +316,12 @@ impl Installation {
         {
             return Err(invalid());
         }
-        let rows = Arc::new(Rows {
+        Ok(Arc::new(Rows {
             store: Store::new(directory.join("receipts")),
             rows: Mutex::new(registration.rows),
             overflow: false.into(),
             writable: false,
-        });
-        Ok(Arc::new(VerifierCache(
-            Backend::Registered(local, rows),
-            Mutex::default(),
-            Arc::new(()),
-            crate::FactTable::default(),
-            Mutex::default(),
-        )))
+        }))
     }
 }
 impl Drop for Installation {

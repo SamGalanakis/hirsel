@@ -177,6 +177,29 @@ index generation and private state path. Checks pin that map and still check
 current reads and every demanded content container. Copied product roots or
 registration files supply no authority. Missing, changed or corrupt state falls
 back to full local V. Registration failure leaves usable ordinary products.
+
+After a failed precompute: a safe miss and a rebuild. A precompute holds a
+private per-root lock from capturing the root through registration. A failed
+or interrupted run leaves the previous registration usable only while the
+root's MANIFEST is unchanged; otherwise checks miss and V runs. The next
+precompute into the root may adopt V's own rows from the previous registered
+generation. A row that misses in the new generation is first checked as a hit
+would be: exact identity, policy and every current read, against V's frozen
+environment. Only then is its whole closure (receipt and original-receipt
+association, definition record, replay record, checked body, overlay and
+every type component it reaches) copied into owned bytes, checked against
+its reference, decoded from those bytes and stored in the new generation. The
+rows become visible only after every member is stored under its expected
+reference. A missing or mismatching member makes the adoption fail and V
+runs; adoption never replaces V's fresh retention of the live artifact. View
+verdicts are not adopted. Execution evidence is adopted only under V's own
+frozen environment and is then revalidated in full.
+
+Trust boundary: the registration secret, the private state directory and the
+compiler build are trusted. Product roots, their MANIFEST and every stored
+content, including a previous generation's, are not: each is checked by
+reference and each row by its reads before use. A writer that changes a root
+outside the precompute lock can cause misses, not acceptance of unchecked work.
 Use fresh absolute `XDG_CACHE_HOME` and `XDG_STATE_HOME` directories with
 `HIRSEL_DAEMON=off` for a fresh-verifier reference check. Source snapshots are
 renewed from disk results after 64 edited revisions to bound retained history.

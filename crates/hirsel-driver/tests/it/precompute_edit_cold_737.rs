@@ -66,7 +66,8 @@ fn registered(
     found.unwrap()
 }
 
-fn precompute(directory: &Path, root: &Path) {
+/// One Precompute in a fresh process; returns how many full V runs it made.
+fn precompute(directory: &Path, root: &Path) -> u64 {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -82,26 +83,48 @@ fn precompute(directory: &Path, root: &Path) {
         .output()
         .unwrap();
     assert!(output.status.success(), "{}: {output:?}", root.display());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        // The harness may print the test name on the same line.
+        .find_map(|line| line.split_once("V runs: ").map(|(_, runs)| runs))
+        .unwrap_or_else(|| panic!("{}: {stdout}", root.display()))
+        .parse()
+        .unwrap()
+}
+
+fn fixture() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("pkg")).unwrap();
+    std::fs::write(directory.path().join("pkg/main.hir"), SOURCE).unwrap();
+    std::fs::write(directory.path().join("pkg/unchanged.hir"), UNCHANGED).unwrap();
+    std::fs::write(directory.path().join("pkg/hirsel.json"), MANIFEST).unwrap();
+    directory
 }
 
 #[test]
 fn an_edit_run_publishes_what_a_cold_run_of_the_same_tree_publishes() {
     if let Some(root) = std::env::var_os(CHILD) {
+        use hirsel_intern::timings::{self, Count};
         let manifest = PathBuf::from(std::env::var_os("HIRSEL_EDIT_COLD_737_MANIFEST").unwrap());
+        timings::enable();
         hirsel_intern::jobs::with_compiler_stack(|| {
             COMPILER
                 .precompute_package(&manifest, Path::new(&root))
                 .unwrap()
         });
+        let runs = timings::report()
+            .counts
+            .into_iter()
+            .find(|(count, _)| *count == Count::VRuns)
+            .unwrap()
+            .1;
+        println!("V runs: {runs}");
         return;
     }
-    let directory = tempfile::tempdir().unwrap();
+    let directory = fixture();
     let directory = directory.path();
-    std::fs::create_dir(directory.join("pkg")).unwrap();
     let source = directory.join("pkg/main.hir");
-    std::fs::write(&source, SOURCE).unwrap();
-    std::fs::write(directory.join("pkg/unchanged.hir"), UNCHANGED).unwrap();
-    std::fs::write(directory.join("pkg/hirsel.json"), MANIFEST).unwrap();
     let state = directory.join("state");
     let (a, b) = (directory.join("a"), directory.join("b"));
 
@@ -130,5 +153,27 @@ fn an_edit_run_publishes_what_a_cold_run_of_the_same_tree_publishes() {
         registered(&state, &a),
         original.1,
         "V rows after editing back"
+    );
+}
+
+/// V's verdict on a definition whose identity, policy and reads are unchanged
+/// is reused across precompute generations: after editing one body whose
+/// signature stays the same, only that definition is validated again. The
+/// hand-derived oracle: `second`'s body is the only changed artifact; `third`
+/// and `fourth` read `second`'s and `third`'s views, which the edit leaves
+/// alone, and `main`'s generated body does not mention `second`.
+#[test]
+fn an_edit_run_validates_only_the_edited_definition() {
+    let directory = fixture();
+    let directory = directory.path();
+    let a = directory.join("a");
+    let cold = precompute(directory, &a);
+    assert!(cold > 1, "the cold run validates every definition: {cold}");
+    let source = directory.join("pkg/main.hir");
+    std::fs::write(&source, SOURCE.replace("9u64", "8u64")).unwrap();
+    assert_eq!(
+        precompute(directory, &a),
+        1,
+        "edit run V runs (cold: {cold})"
     );
 }

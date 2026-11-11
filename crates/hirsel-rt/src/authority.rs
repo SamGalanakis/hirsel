@@ -505,13 +505,12 @@ unsafe fn seam_result<T>(
 }
 
 /// Issue `request` and convert its seam completion with `convert`.
+/// The ABI entry retains the scheduler role through request and output conversion.
 unsafe fn seam_call<T>(
     ctx: *mut crate::TaskCtx,
     request: SeamRequest,
     convert: impl FnOnce(&SeamCompletion) -> T,
 ) -> Option<T> {
-    // SAFETY: this semantic entry owns its task until it suspends or returns.
-    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
     let completion = unsafe { crate::io::capability_call(ctx, Request::Seam(request)) }.ok()?;
     Some(unsafe {
         crate::tasks::free::host::native::convert_result(ctx, completion, |c| {
@@ -616,6 +615,9 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_levels(
     out: *mut u64,
     a: *const u64,
 ) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
     let authority = unsafe { a.read() };
     match unsafe {
         seam_call(ctx, SeamRequest::Levels { authority }, |c| {
@@ -689,6 +691,9 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_level(
     start: u64,
     len: u64,
 ) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
     let request = SeamRequest::Level {
         authority: unsafe { a.read() },
         name: unsafe { text(owner, start, len) },
@@ -706,6 +711,9 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_floor(
     out: *mut u64,
     a: *const u64,
 ) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
     let authority = unsafe { a.read() };
     unsafe { word_call(ctx, out, SeamRequest::Floor { authority }) }
 }
@@ -719,6 +727,9 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_max_entry(
     out: *mut u64,
     a: *const u64,
 ) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
     let authority = unsafe { a.read() };
     unsafe { word_call(ctx, out, SeamRequest::MaxEntry { authority }) }
 }
@@ -733,6 +744,9 @@ pub unsafe extern "C" fn hirsel_rt_v2_level_name(
     out: *mut crate::views::Slice,
     l: *const u64,
 ) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
     let level = unsafe { l.read() };
     match unsafe {
         seam_call(ctx, SeamRequest::LevelName { level }, |c| match c {
@@ -759,6 +773,9 @@ pub unsafe extern "C" fn hirsel_rt_v2_level_narrow(
     a: *const u64,
     l: *const u64,
 ) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
     let request = SeamRequest::LevelNarrow {
         authority: unsafe { a.read() },
         level: unsafe { l.read() },
@@ -775,6 +792,9 @@ pub unsafe extern "C" fn hirsel_rt_v2_claim_end(
     out: *mut u64,
     c: *const u64,
 ) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
     let claim = unsafe { c.read() };
     unsafe { word_call(ctx, out, SeamRequest::ClaimEnd { claim }) }
 }
@@ -790,6 +810,9 @@ pub unsafe extern "C" fn hirsel_rt_v2_claim_narrow(
     a: *const u64,
     c: *mut u64,
 ) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
     let claim = unsafe { c.read() };
     // Erasing the transferred physical word makes accidental runtime reuse fail closed.
     unsafe { c.write(0) };
@@ -810,6 +833,9 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_claim(
     out: *mut SeamResult,
     a: *const u64,
 ) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
     unsafe { provider(ctx, out, a.read(), None, wire::Request::Claim) }
 }
 
@@ -830,6 +856,9 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_advance(
     len: u64,
     at: *const u64,
 ) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
     let entry = unsafe { crate::io::slice_bytes(owner, start, len) }.to_vec();
     unsafe {
         crate::release::hirsel_rt_v2_release(ctx, owner, (*owner).index(), std::ptr::null(), 0, 0)
@@ -889,6 +918,9 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_durable(
     c: *mut u64,
     at: *const u64,
 ) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
     let request = wire::Request::Durable {
         at: (unsafe { at.read() } % 256) as u8,
     };
@@ -908,6 +940,9 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_read(
     at: *const u64,
     max: u64,
 ) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
     let request = wire::Request::Read {
         from,
         at: (unsafe { at.read() } % 256) as u8,
@@ -929,6 +964,9 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_get(
     start: u64,
     len: u64,
 ) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
     let request = wire::Request::Get {
         name: unsafe { text(owner, start, len) },
     };
@@ -952,6 +990,9 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_put(
     start: u64,
     len: u64,
 ) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
     let name = unsafe { text(name_owner, name_start, name_len) };
     let data = unsafe { crate::io::slice_bytes(owner, start, len) }.to_vec();
     unsafe {
@@ -971,6 +1012,9 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_reclaim(
     a: *const u64,
     c: *mut u64,
 ) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
     unsafe { provider(ctx, out, a.read(), Some(c.read()), wire::Request::Reclaim) }
 }
 

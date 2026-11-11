@@ -547,6 +547,10 @@ fn files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
 }
 
 impl Graph {
+    pub fn defines(&self, key: &str) -> bool {
+        self.edges.contains_key(key)
+    }
+
     /// Direct guard coverage matters: a transitive guard in one branch does
     /// not protect the entry's other branches or its earlier shared reads.
     pub fn directly_calls(&self, start: &str, target: &str) -> bool {

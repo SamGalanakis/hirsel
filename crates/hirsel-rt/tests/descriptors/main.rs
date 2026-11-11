@@ -319,8 +319,8 @@ fn every_inline_effect_is_classified() {
 /// adds a Shared root. Each service is checked independently, so this does not permit
 /// a path to the scheduler, Io binding or an observable op. Ordered budget
 /// services may physically save a segment until head and retire existing logs;
-/// they cannot create an operation or a scheduling point for the allocation or
-/// refill itself. Their semantic-entry and whole-Run safety checks stay separate.
+/// they cannot create an operation or a scheduling point for allocation.
+/// Their semantic-entry and whole-Run safety checks stay separate.
 const PHYSICAL_BUDGET_SERVICES: &[&str] = &[
     "tasks::ordered::engine::reserve_allocation",
     "tasks::ordered::engine::at_head",
@@ -328,13 +328,9 @@ const PHYSICAL_BUDGET_SERVICES: &[&str] = &[
 
 // These save/adopt the same segment without publishing an operation. Their
 // role acquisition and forbidden semantic paths are checked independently.
-const PHYSICAL_AHEAD_SERVICES: &[&str] = &[
-    "tasks::ordered::ahead::barrier",
-    "tasks::ordered::ahead::refill",
-];
+const PHYSICAL_AHEAD_SERVICES: &[&str] = &["tasks::ordered::ahead::barrier"];
 
 const IDLE_BUDGET_SERVICES: &[&str] = &[
-    "tasks::ordered::engine::ahead_refill",
     "tasks::ordered::engine::host_segment_barrier",
     "tasks::ordered::engine::ahead_allocation",
 ];
@@ -367,7 +363,6 @@ fn ordered_budget_services_are_guarded_and_do_not_create_semantic_operations() {
     for (caller, service) in [
         ("alloc::ordered_reserve", PHYSICAL_BUDGET_SERVICES[0]),
         ("alloc::ordered_backing", PHYSICAL_BUDGET_SERVICES[0]),
-        ("budget::refill", PHYSICAL_BUDGET_SERVICES[1]),
     ] {
         assert!(
             graph.directly_calls(caller, service),
@@ -378,11 +373,14 @@ fn ordered_budget_services_are_guarded_and_do_not_create_semantic_operations() {
             "unguarded service: {caller}"
         );
     }
-    for caller in ["budget::charge_primitive"] {
-        assert!(
-            graph.directly_calls(caller, "budget::refill"),
-            "missing guarded refill path: {caller}"
-        );
+    // A deleted or renamed service must not make its reachability audit
+    // silently empty. CPU refill services were removed by 83ae6d49.
+    for service in PHYSICAL_BUDGET_SERVICES
+        .iter()
+        .chain(PHYSICAL_AHEAD_SERVICES)
+        .chain(IDLE_BUDGET_SERVICES)
+    {
+        assert!(graph.defines(service), "missing audited service: {service}");
     }
     let violations = budget_service_violations(graph);
     assert!(
@@ -589,7 +587,10 @@ fn physical_ahead_boundaries_preserve_the_other_audits() {
         .tempdir()
         .unwrap();
     let root = scratch.path();
-    for service in ["barrier", "refill"] {
+    for service in PHYSICAL_AHEAD_SERVICES
+        .iter()
+        .map(|name| name.rsplit("::").next().unwrap())
+    {
         for (local, body, locality_red, semantic_red, run_red) in [
             ("", "crate::tasks::scheduler();", false, false, false),
             ("crate::tasks::scheduler();", "", true, false, false),
@@ -641,7 +642,6 @@ fn physical_ahead_services_acquire_the_role_without_creating_operations() {
     let graph = source();
     assert!(graph.directly_calls(PHYSICAL_AHEAD_SERVICES[0], "tasks::role::enter"));
     assert!(graph.directly_calls(PHYSICAL_AHEAD_SERVICES[0], "pool::free::suspend_current"));
-    assert!(graph.directly_calls(PHYSICAL_AHEAD_SERVICES[1], PHYSICAL_AHEAD_SERVICES[0]));
     let violations = budget_service_violations(graph);
     assert!(
         violations.is_empty(),

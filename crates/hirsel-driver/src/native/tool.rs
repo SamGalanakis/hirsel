@@ -196,11 +196,16 @@ fn run_native(
             crate::requests::NativeRequest {
                 definition,
                 options: {
-                    let mut options = super::BuildProfile::run_options(
-                        backend,
-                        super::TargetSpec::x86_64_unknown_linux_gnu(),
-                        validation,
-                    );
+                    let target = super::TargetSpec::x86_64_unknown_linux_gnu();
+                    // A served place's head is a deployment, linked as `hirsel build
+                    // --release` links one (scoped specialization); Cranelift stays the
+                    // unoptimized debug loop.
+                    let mut options = match (place, backend) {
+                        (Some(_), super::Backend::Llvm) => super::BuildProfile::Release
+                            .options(backend, target, validation)
+                            .unwrap_or_else(|_| unreachable!("release admits LLVM")),
+                        _ => super::BuildProfile::run_options(backend, target, validation),
+                    };
                     options.passes.launch = run.record().inputs.clone();
                     options
                 },

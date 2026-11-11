@@ -65,7 +65,7 @@ def build(out):
         LLVM_SYS_231_PREFIX=str(ROOT / 'tools/buck2/toolchains/llvm-files'))
     run([ROOT / 'tools/capped', compiler, 'build', HERE / 'hirsel.json', '--release',
          '-o', out / 'native'], env=environment)
-    # `hirsel serve --native` links the place's head with the same inputs.
+    # `hirsel serve --native` links the place's head with the same inputs and preset.
     (out / 'toolchain.json').write_text(json.dumps({k: environment[k] for k in TOOLCHAIN_VARIABLES}))
     return compiler
 

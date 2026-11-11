@@ -192,10 +192,15 @@ impl Extent {
         owned: Option<(&[ProjectionStep<u64>], &[Vec<ProjectionStep<u64>>])>,
     ) -> Extent {
         self.unvacate(offset, size);
-        let mut moved = Extent::new(size);
+        if offset == 0 && size == self.len() && owned.is_none() {
+            return self.take_all(poison);
+        }
         let range = Self::range(offset, size);
-        Arc::make_mut(&mut moved.bytes).copy_from_slice(&self.bytes[range.clone()]);
-        Arc::make_mut(&mut moved.init).copy_from_slice(&self.init[range.clone()]);
+        let mut moved = Extent {
+            bytes: self.bytes[range.clone()].into(),
+            init: self.init[range.clone()].into(),
+            ..Extent::default()
+        };
         let cells: Vec<u64> = self
             .cells
             .range(offset..offset + size)
@@ -218,6 +223,26 @@ impl Extent {
             .iter_mut()
             .for_each(|b| *b = false);
         moved
+    }
+    /// `take` of the whole extent: the image keeps the buffers, which a fork
+    /// may share with its base, and the source gets fresh poisoned ones.
+    fn take_all(&mut self, poison: u8) -> Extent {
+        let len = self.bytes.len();
+        let cells = std::mem::take(&mut self.cells);
+        if let Some(edits) = &mut self.holder_edits {
+            edits.extend(cells.iter().map(|(&offset, cell)| CellEdit {
+                offset,
+                old: holder(cell),
+                new: None,
+            }));
+        }
+        Extent {
+            bytes: std::mem::replace(&mut self.bytes, vec![poison; len].into()),
+            init: std::mem::replace(&mut self.init, vec![false; len].into()),
+            cells,
+            resources: std::mem::take(&mut self.resources),
+            ..Extent::default()
+        }
     }
     /// A copy of `[offset, offset + size)` with offsets rebased to zero, with
     /// the resource tags at `owned` as in `take`.

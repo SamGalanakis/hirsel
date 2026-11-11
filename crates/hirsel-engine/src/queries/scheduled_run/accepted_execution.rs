@@ -1,7 +1,9 @@
 //! Durable source accepted execution. Root membership and local acceptance are
 //! separate from structural decoding and the ordinary V gate.
 use super::*;
+mod cache;
 use crate::NativeRecordSource;
+use cache::{EncodingStore, PublicationError};
 use hirsel_artifact_store::{Action, Address, Store};
 use hirsel_product_codec::{TypeRecords, decode_schema::Walk};
 use hirsel_tir::{DefinitionRef, MaterializedRef, TirProvider};
@@ -239,7 +241,7 @@ fn facts(value: Callee) -> CalleeFacts {
 fn failure(message: impl Into<String>) -> QueryError {
     operational(format!("accepted execution: {}", message.into()))
 }
-fn durable_store(compiler: ContentHash) -> Result<Store, QueryError> {
+fn durable_store(compiler: ContentHash) -> Result<Store, PublicationError> {
     // The standard library also consults the account database on Unix when
     // sandboxed launchers omit HOME. Query caches and temporary directories
     // never own this retained data.
@@ -251,7 +253,7 @@ fn durable_store(compiler: ContentHash) -> Result<Store, QueryError> {
         .or_else(|| home.map(|home| home.join(".local/share")))
         .ok_or_else(|| failure("durable data directory unavailable"))?;
     if !base.is_absolute() {
-        return Err(failure("durable data directory is relative"));
+        return Err(failure("durable data directory is relative").into());
     }
     // The source/toolchain digest includes the codecs and declarations. Each
     // encoding owns its index admission instead of accumulating every compiler's
@@ -261,9 +263,7 @@ fn durable_store(compiler: ContentHash) -> Result<Store, QueryError> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    Ok(Store::new(
-        base.join("hirsel/accepted-execution").join(version),
-    ))
+    cache::open(&base.join("hirsel/accepted-execution"), &version).map_err(PublicationError::Store)
 }
 fn index(revision: &[u8; 32], entry: &DefPath) -> Address {
     Address(ContentHash::of_parts(
@@ -303,10 +303,8 @@ fn profile(start: std::time::Instant, phase: &str) {
         start.elapsed().as_nanos()
     ));
 }
-fn put(store: &Store, domain: Domain, bytes: &[u8]) -> Result<Reference, QueryError> {
-    store
-        .put(domain, bytes)
-        .map_err(|error| failure(error.to_string()))
+fn put(store: &Store, domain: Domain, bytes: &[u8]) -> Result<Reference, PublicationError> {
+    store.put(domain, bytes).map_err(PublicationError::Store)
 }
 fn get(store: &Store, reference: Reference) -> Result<hirsel_artifact_store::Bytes, QueryError> {
     store
@@ -456,7 +454,7 @@ impl ExecutionProducts for Products {
 /// Native consumers retain only this durable locator. Interpreter consumers
 /// load through the same importer as replay on their first demand.
 pub(super) struct PublishedExecution {
-    directory: std::path::PathBuf,
+    store: Store,
     root: Reference,
     inputs: hirsel_validate::ExecutionProductInputs,
     revision: [u8; 32],
@@ -476,7 +474,7 @@ impl FrontRunOutput {
         }
         let admission = published.admission.clone();
         let execution = load(
-            &Store::new(published.directory.clone()),
+            &published.store,
             published.root,
             &published.inputs,
             published.admission.scratch,
@@ -507,19 +505,56 @@ impl FrontRunQueries {
         let Some(identity) = self.execution_identity.as_ref() else {
             return Ok(());
         };
+        let durable = durable_store(identity.compiler);
+        let result = match durable {
+            Ok(store) => match store.publication_has_headroom() {
+                Ok(true) => self.publish_execution_in(output, checked, store),
+                Ok(false) => Err(PublicationError::Store(std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    "accepted execution cache index admission is full",
+                ))),
+                Err(error) => Err(PublicationError::Store(error)),
+            },
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) if error.is_store_failure() => {
+                crate::queries::operation_owner_trace(format_args!(
+                    "accepted-execution cache=declined cause={error}"
+                ));
+                let temporary = Arc::new(
+                    tempfile::tempdir()
+                        .map_err(|error| PublicationError::Store(error).into_query())?,
+                );
+                let store = Store::new(temporary.path().to_path_buf()).retain_owner(temporary);
+                self.publish_execution_in(output, checked, store)
+                    .map_err(PublicationError::into_query)
+            }
+            Err(error) => Err(error.into_query()),
+        }
+    }
+    fn publish_execution_in(
+        &self,
+        output: &FrontRunOutput,
+        checked: &ProductRef,
+        store: Store,
+    ) -> Result<(), PublicationError> {
+        let identity = self
+            .execution_identity
+            .as_ref()
+            .expect("selected execution identity");
         let namespace = self
             .operation
             .admitted_identity()
             .ok_or_else(|| failure("unadmitted capture"))?;
-        let store = durable_store(identity.compiler)?;
         // Strict fsync alone still permits derivable index publications to be
         // skipped. Retain the entire closure and propagate every refusal.
-        let _retention = store
-            .retention_scope()
-            .map_err(|error| failure(error.to_string()))?;
+        let _retention = store.retention_scope().map_err(PublicationError::Store)?;
         let batch = store.batch();
         let types = self.lower.signatures().types().clone();
-        let records = TypeRecords::new(types.clone(), Arc::new(store.clone()));
+        let encoding_store = Arc::new(EncodingStore::new(store.clone()));
+        let records = TypeRecords::new(types.clone(), encoding_store.clone());
         let snapshot = self.lower.signatures();
         let builtins: BTreeSet<_> = snapshot.execution_declarations().into_iter().collect();
         let mut paths = builtins.clone();
@@ -577,9 +612,10 @@ impl FrontRunQueries {
             let materialized = constants.contains(&path)
                 || (output.semantic.definitions().contains(&path)
                     && matches!(&public.kind, SignatureKind::Const { generics, .. } if generics.is_empty()));
-            let header = records
-                .encode_record(&(public, private), &mut bind_anchor)
-                .ok_or_else(|| failure(format!("declaration encoding {path}")))?;
+            let header = encoding_store.required(
+                records.encode_record(&(public, private), &mut bind_anchor),
+                || format!("declaration encoding {path}"),
+            )?;
             let _header_charge = self.admit_decode(header.len() as u64)?;
             let header = put(&store, HEADER, &header)?;
             let executable = output.semantic.definitions().contains(&path)
@@ -597,9 +633,10 @@ impl FrontRunQueries {
             let body = if executable {
                 let definition = self.lower.settled_definition(&path)?;
                 type_roots.extend(definition.types.iter().copied());
-                let bytes = records
-                    .encode_tir(&definition, &mut bind_anchor)
-                    .ok_or_else(|| failure(format!("body encoding {path}")))?;
+                let bytes = encoding_store
+                    .required(records.encode_tir(&definition, &mut bind_anchor), || {
+                        format!("body encoding {path}")
+                    })?;
                 let _charge = self.admit_decode(bytes.len() as u64)?;
                 Some(put(
                     &store,
@@ -611,9 +648,10 @@ impl FrontRunQueries {
             };
             let constant = if materialized {
                 let value = self.lower.settled_constant(&path, &[])?;
-                let bytes = records
-                    .encode_record(&value, &mut bind_anchor)
-                    .ok_or_else(|| failure(format!("constant encoding {path}")))?;
+                let bytes = encoding_store
+                    .required(records.encode_record(&value, &mut bind_anchor), || {
+                        format!("constant encoding {path}")
+                    })?;
                 let _charge = self.admit_decode(bytes.len() as u64)?;
                 Some(put(&store, CONSTANT, &bytes)?)
             } else {
@@ -733,9 +771,10 @@ impl FrontRunQueries {
             product.constants.len(),
             product.sources.len()
         ));
-        let bytes = records
-            .encode_record(&product, |anchor| self.anchors.record_owner(anchor))
-            .ok_or_else(|| failure("root encoding"))?;
+        let bytes = encoding_store.required(
+            records.encode_record(&product, |anchor| self.anchors.record_owner(anchor)),
+            || "root encoding".to_owned(),
+        )?;
         let _charge = self.admit_decode(bytes.len() as u64)?;
         let root = put(&store, ROOT, &bytes)?;
         // The accepted live Check action attests this join. Archiving its
@@ -753,11 +792,11 @@ impl FrontRunQueries {
         let verifier = hirsel_validate::VerifierCache::directory_store(store.clone());
         verifier
             .publish_execution_product_durable(&product.inputs(), root, source_check)
-            .map_err(|e| failure(e.to_string()))?;
+            .map_err(PublicationError::Store)?;
         for body in product.rows.iter().filter_map(|row| row.body) {
             verifier
                 .publish_execution_product_durable(&product.inputs(), body, source_check)
-                .map_err(|e| failure(e.to_string()))?;
+                .map_err(PublicationError::Store)?;
         }
         let locator = Locator {
             namespace: product.namespace,
@@ -784,18 +823,19 @@ impl FrontRunQueries {
         );
         store
             .associate(address, Action(address.0), locator)
-            .map_err(|e| failure(e.to_string()))?;
+            .map_err(PublicationError::Store)?;
         let address = revision_input_index(&output.revision.digest(), address);
         store
             .associate(address, Action(address.0), locator)
-            .map_err(|e| failure(e.to_string()))?;
+            .map_err(PublicationError::Store)?;
         let address = index(&output.revision.digest(), &output.entry);
         store
             .associate(address, Action(address.0), locator)
-            .map_err(|e| failure(e.to_string()))?;
-        batch.finish().map_err(|e| failure(e.to_string()))?;
+            .map_err(PublicationError::Store)?;
+        batch.finish().map_err(PublicationError::Store)?;
         let inputs = product.inputs();
         let directory = store.root().to_path_buf();
+        let store = store.for_operation();
         // Publication and encoding are scratch. Release them before charging
         // the only allocation retained by native Run: its durable handle.
         drop(bytes);
@@ -804,7 +844,7 @@ impl FrontRunQueries {
         drop(records);
         drop(verifier);
         drop(_retention);
-        drop(store);
+
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(
             hirsel_engine_admission::retained_arc_bytes(
@@ -812,6 +852,10 @@ impl FrontRunQueries {
             ) as usize,
         );
         weight.add(directory.capacity());
+        weight.add(Store::fresh_metadata_bytes());
+        // Covers the shared File lease or the temporary-directory owner, its
+        // Arc header and its independent path backing.
+        weight.add(size_of::<tempfile::TempDir>() + 2 * size_of::<usize>() + directory.capacity());
         weight.path(&inputs.entry);
         let charge = self.admit_decode(weight.bytes())?;
         crate::queries::operation_owner_trace(format_args!(
@@ -819,7 +863,7 @@ impl FrontRunQueries {
             weight.bytes()
         ));
         let _ = output.accepted.set(Arc::new(PublishedExecution {
-            directory,
+            store,
             root,
             inputs,
             revision: output.revision.digest(),
@@ -1148,7 +1192,11 @@ pub fn import_execution_product(
     options: ContentHash,
     allowance: hirsel_engine_admission::MemoryReservation,
 ) -> Result<Option<Arc<AcceptedExecutionProduct>>, QueryError> {
-    let store = durable_store(compiler)?;
+    let store = match durable_store(compiler) {
+        Ok(store) => store,
+        Err(PublicationError::Store(_)) => return Ok(None),
+        Err(error) => return Err(error.into_query()),
+    };
     match try_import_execution_product(
         store,
         revision,

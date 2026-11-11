@@ -441,7 +441,14 @@ codec sources, so different encodings have separate physical indexes and index
 admission budgets. An unreadable cached product is a miss: the ordinary source
 path recomputes, validates and publishes it in its own directory. Replay still
 checks the resulting semantic revision before execution. Fresh publication
-failures remain producer errors.
+failures preserve their physical I/O cause. A durable cache write that fails,
+including index admission at capacity, retries into request-owned temporary
+backing; execution readers retain that backing until they finish. The cache
+can decline a publication without changing the build result. An index headroom
+check avoids repeated writes of unreachable segments into a full cache. On use, a locked
+`last-used` marker protects the active directory. Best-effort startup cleanup
+removes same-user sibling directories unused for seven days; unmarked
+directories, including legacy `v1`, start that grace period when first seen.
 
 `export_native_input` retains a complete checked program selection in owned
 snapshots: the semantic closure (the program revision's) of every definition

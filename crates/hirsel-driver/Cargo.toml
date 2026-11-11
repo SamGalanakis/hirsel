@@ -67,6 +67,7 @@ object = { version = "=0.40.0", default-features = false, features = ["archive",
 sha2 = "0.10"
 
 [dev-dependencies]
+hirsel-artifact-store = { path = "../hirsel-artifact-store", features = ["test-support"] }
 hirsel-registry = { path = "../hirsel-registry" }
 hirsel-candidate = { path = "../hirsel-candidate" }
 bincode = "=1.3.3"

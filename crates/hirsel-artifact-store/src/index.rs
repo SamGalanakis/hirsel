@@ -572,3 +572,60 @@ mod policy_tests;
 #[cfg(test)]
 #[path = "index/tests/mod.rs"]
 mod tests;
+
+/// A cache may decline early rather than install another unindexed segment.
+/// This reserves room for one bounded pack delta; races still use publication's
+/// authoritative admission check and the caller's optional-cache fallback.
+pub(crate) fn publication_has_headroom(root: &Path) -> io::Result<bool> {
+    let manifest = Manifest::read(root)?;
+    let rows = manifest
+        .layers
+        .iter()
+        .try_fold(0_u64, |n, d| n.checked_add(d.rows))
+        .ok_or_else(invalid)?;
+    let bytes = manifest
+        .layers
+        .iter()
+        .try_fold(0_u64, |n, d| n.checked_add(d.len))
+        .ok_or_else(invalid)?;
+    Ok(rows + 1024 <= MAX_ROWS as u64 && bytes + (128 << 10) <= MAX_BYTES as u64)
+}
+
+/// A valid, capacity-sized routing index for cache-admission integration tests.
+/// Missing payloads are ordinary misses; no synthetic record is trusted.
+#[cfg(feature = "test-support")]
+pub(crate) fn seed_full_index(root: &Path) -> io::Result<usize> {
+    std::fs::create_dir_all(root)?;
+    if root.join("index/MANIFEST").exists() {
+        return Err(io::ErrorKind::AlreadyExists.into());
+    }
+    let mut entries: Vec<_> = (0..MAX_ROWS)
+        .map(|n| Entry {
+            key: Key {
+                kind: KeyKind::Content,
+                digest: ContentHash::of_parts("hirsel.index.capacity-test", [&n.to_le_bytes()[..]]),
+            },
+            location: Location {
+                segment: ContentHash::default(),
+                offset: 64,
+                len: 8,
+            },
+        })
+        .collect();
+    entries.sort_unstable_by_key(|entry| entry.key);
+    let bytes = format::encode_layer(&entries)?;
+    let descriptor = Descriptor {
+        id: ContentHash::of_parts("hirsel.artifact.index-layer.v36", [&bytes[..]]),
+        rows: entries.len() as u64,
+        len: bytes.len() as u64,
+    };
+    let stage = Stage::new(root, Durability::Rebuildable)?;
+    stage.write("layer", &bytes)?;
+    stage.install(root, descriptor)?;
+    Manifest {
+        number: 0,
+        layers: vec![descriptor],
+    }
+    .publish(root, &stage, Durability::Rebuildable)?;
+    Ok(entries.len())
+}

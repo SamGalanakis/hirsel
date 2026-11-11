@@ -803,6 +803,7 @@ impl Bytes {
 #[derive(Clone)]
 pub struct Store {
     root: PathBuf,
+    owner: Option<Arc<dyn Send + Sync>>,
     durability: Durability,
     packed: Arc<std::sync::Mutex<pack::State>>,
     statistics: Arc<std::sync::OnceLock<Arc<Statistics>>>,
@@ -928,6 +929,34 @@ impl Store {
             ..self.clone()
         }
     }
+    /// Whether this cache has headroom for another bounded index publication.
+    /// False is permission to decline caching, never a semantic refusal.
+    pub fn publication_has_headroom(&self) -> io::Result<bool> {
+        index::publication_has_headroom(&self.root)
+    }
+    /// Fixed heap metadata of a fresh operation, excluding the root path and
+    /// caller-owned backing. No pinned index or region is retained yet.
+    pub fn fresh_metadata_bytes() -> usize {
+        let header = 2 * size_of::<usize>();
+        size_of::<std::sync::Mutex<pack::State>>()
+            + size_of::<std::sync::Mutex<RegionCache>>()
+            + size_of::<std::sync::OnceLock<Arc<Statistics>>>()
+            + 3 * size_of::<AtomicU64>()
+            + 6 * header
+    }
+    /// Fill a new routing index to its actual production row bound.
+    #[cfg(feature = "test-support")]
+    pub fn seed_full_index_for_test(&self) -> io::Result<usize> {
+        index::seed_full_index(&self.root)
+    }
+    /// Retain caller-owned backing or a directory lease through every clone.
+    pub fn retain_owner(mut self, owner: Arc<dyn Send + Sync>) -> Self {
+        self.owner = Some(match self.owner.take() {
+            Some(previous) => Arc::new((previous, owner)),
+            None => owner,
+        });
+        self
+    }
     pub fn new(root: PathBuf) -> Self {
         Self::with_durability(root, Durability::Strict)
     }
@@ -949,6 +978,7 @@ impl Store {
     fn with_durability(root: PathBuf, durability: Durability) -> Self {
         Self {
             root,
+            owner: None,
             durability,
             packed: Arc::default(),
             statistics: Arc::default(),

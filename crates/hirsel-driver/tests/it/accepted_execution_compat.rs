@@ -134,3 +134,99 @@ fn incompatible_execution_records_recompute_in_each_compilers_own_store() {
         }
     });
 }
+
+#[test]
+fn full_execution_cache_preserves_the_cold_build_result() {
+    hirsel_intern::jobs::with_compiler_stack(|| {
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = directory.path().join("hirsel.json");
+        std::fs::write(
+            directory.path().join("main.hir"),
+            "pub fn main()->Result[(),()]{if 6u64*7u64==42u64 {Ok(())} else {Error(())}}",
+        )
+        .unwrap();
+        std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"cache_capacity","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
+        let mut results = Vec::new();
+        for full in [false, true] {
+            let identity = ContentHash::of_parts(
+                "hirsel.cache-capacity.test",
+                [
+                    directory.path().as_os_str().as_encoded_bytes(),
+                    &[u8::from(full)],
+                ],
+            );
+            if full {
+                let version: String = identity
+                    .0
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                let root = std::path::PathBuf::from(std::env::var_os("XDG_DATA_HOME").unwrap())
+                    .join("hirsel/accepted-execution")
+                    .join(version);
+                let store = hirsel_artifact_store::Store::new(root);
+                store.seed_full_index_for_test().unwrap();
+                // This is the real physical admission boundary, not a simulated
+                // codec error or a lowered row limit.
+                let retention = store.retention_scope().unwrap();
+                let reference = store.put(
+                    hirsel_artifact_store::Domain {
+                        kind: 91,
+                        schema: 1,
+                    },
+                    b"new row",
+                );
+                assert!(
+                    reference.is_err(),
+                    "the seeded store must actually refuse publication"
+                );
+                drop(retention);
+            }
+            let config = CompileConfig::for_memory_cap(None);
+            let compiler =
+                Compiler::new(FrontPhases::shared, identity.0).with_config(config.clone());
+            let mut requests = CompilerRequests::for_host(compiler.clone(), config);
+            let (_, frozen) = observe_inputs(
+                requests.input_limits(),
+                requests.capture_attempts(),
+                |inputs| compiler.load_check_package_inputs(&manifest, inputs, true),
+            )
+            .unwrap();
+            let output = requests
+                .execute_request(&CompileRequest {
+                    path: manifest.clone(),
+                    operation: CompileOperation::Tir { definition: None },
+                    inputs: CompileInputs::Frozen(frozen),
+                })
+                .unwrap();
+            let CompileResult::Tir(input) = &output.result else {
+                panic!("expected executable TIR")
+            };
+            drop(requests);
+            let launched = hirsel_interp::library::launch_with_runtime(
+                &mut input.provider(),
+                &input.sources,
+                &input.signature,
+                &hirsel_tir::RunConfiguration {
+                    entry: input.entry.clone(),
+                    hash_seed: 0,
+                    inputs: vec![],
+                },
+                hirsel_interp::library::SimulationConfig::default(),
+                hirsel_interp::Limits::default(),
+                &input.runtime,
+            )
+            .unwrap();
+            let hirsel_interp::Outcome::Returned { exit_code, .. } = launched.execution.outcome
+            else {
+                panic!("expected normal return")
+            };
+            results.push(exit_code);
+        }
+        assert_eq!(
+            results,
+            [0, 0],
+            "a full optional cache preserves the hand-derived cold result"
+        );
+    });
+}

@@ -36,6 +36,7 @@ serde_json = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 bincode = "1.3.3"
 libc = { version = "0.2", default-features = false }
+tempfile = "3"
 
 [build-dependencies]
 hirsel-run-schema = { path = "../hirsel-run-schema" }
@@ -44,4 +45,3 @@ hirsel-run-schema = { path = "../hirsel-run-schema" }
 hirsel-query-products = { path = "../hirsel-query-products", features = ["test-support"] }
 hirsel-engine-runtime = { path = "../hirsel-engine-runtime", features = ["test-support"] }
 hirsel-engine-admission = { path = "../hirsel-engine-admission", features = ["test-alloc"] }
-tempfile = "3"

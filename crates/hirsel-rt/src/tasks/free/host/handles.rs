@@ -418,8 +418,7 @@ impl Handles {
             .ok_or_else(|| Stop::Diverged("missing process issue domains".into()))?;
         Ok(KeySet::new(
             keys.iter()
-                .map(|&key| (crate::io_keys::Key(key), Mode::Exclusive))
-                .collect(),
+                .map(|&key| (crate::io_keys::Key(key), Mode::Exclusive)),
         ))
     }
     pub(in crate::tasks::free) fn resource(&self, word: u64) -> Stopped<crate::io_keys::Key> {

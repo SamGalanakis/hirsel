@@ -29,6 +29,7 @@
 //! epochs not yet ended, so a long run's memory does not grow with its request count.
 
 use crate::io::Request;
+use smallvec::{SmallVec, smallvec};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -54,25 +55,30 @@ pub enum Mode {
 }
 
 /// The positions a transition takes, in key order; a key named twice keeps its strongest mode.
+/// Footprints are a few keys, held inline so deriving one allocates nothing.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct KeySet(Vec<(Key, Mode)>);
+pub struct KeySet(Keys);
+
+/// Inline room for a footprint's keys; a larger one (a spawn with many sinks) spills.
+pub type Keys = SmallVec<[(Key, Mode); 4]>;
 
 impl KeySet {
-    pub fn new(mut keys: Vec<(Key, Mode)>) -> KeySet {
-        keys.sort();
+    pub fn new(keys: impl IntoIterator<Item = (Key, Mode)>) -> KeySet {
+        let mut keys: Keys = keys.into_iter().collect();
+        keys.sort_unstable();
         // Exclusive sorts after Shared: keep the last entry of each key.
-        let mut out: Vec<(Key, Mode)> = Vec::with_capacity(keys.len());
-        for (key, mode) in keys {
-            match out.last_mut() {
-                Some(last) if last.0 == key => last.1 = last.1.max(mode),
-                _ => out.push((key, mode)),
+        keys.dedup_by(|next, kept| {
+            let same = next.0 == kept.0;
+            if same {
+                kept.1 = kept.1.max(next.1);
             }
-        }
-        KeySet(out)
+            same
+        });
+        KeySet(keys)
     }
     /// An adapter without keys: one key for all its requests.
     pub fn coupled() -> KeySet {
-        KeySet(vec![(COUPLED, Mode::Exclusive)])
+        KeySet(smallvec![(COUPLED, Mode::Exclusive)])
     }
     pub fn keys(&self) -> &[(Key, Mode)] {
         &self.0
@@ -267,7 +273,7 @@ impl Registry {
         let (key, Kind::Other) = self.identity(process)? else {
             return None;
         };
-        let mut keys = vec![(key, Mode::Exclusive), (NAMESPACE, Mode::Exclusive)];
+        let mut keys: Keys = smallvec![(key, Mode::Exclusive), (NAMESPACE, Mode::Exclusive)];
         keys.extend(self.sinks.iter().map(|&key| (key, Mode::Exclusive)));
         if self.unknown_storage {
             keys.push((COUPLED, Mode::Exclusive));
@@ -303,8 +309,8 @@ impl Registry {
     pub fn keys(&mut self, request: &Request) -> KeySet {
         use Mode::{Exclusive as X, Shared as S};
         use Request as R;
-        let mut keys = Vec::with_capacity(3);
-        let on = |registry: &Registry, keys: &mut Vec<(Key, Mode)>, handle: u64, mode: Mode| {
+        let mut keys = Keys::new();
+        let on = |registry: &Registry, keys: &mut Keys, handle: u64, mode: Mode| {
             let (key, kind) = registry.handle(handle);
             keys.push((key, mode));
             if let Kind::Half { stream } = kind {
@@ -596,7 +602,7 @@ pub struct KeyTable {
 /// A transition's positions: one epoch per key of its [`KeySet`], in key order.
 #[derive(Debug)]
 pub struct Positions {
-    held: Vec<(Key, Mode, u64, Arc<Cell>)>,
+    held: SmallVec<[(Key, Mode, u64, Arc<Cell>); 4]>,
     state: State,
     /// Some cell had a blocked waiter when these positions ended.
     wake: bool,
@@ -942,6 +948,43 @@ mod tests {
             deadline: None,
         });
         assert_eq!(wait.keys(), &[(child, Mode::Exclusive)]);
+    }
+
+    /// Bug: a footprint past the inline capacity (4 keys) drops, reorders or weakens a
+    /// key when it spills, so a spawn stops excluding a later sink's writer. Oracle: the
+    /// hand-derived key order of a spawn over four distinct sinks.
+    #[test]
+    fn a_footprint_past_its_inline_room_keeps_every_key_and_orders_each() {
+        let mut keys = registry();
+        let sinks: Vec<Key> = (0..4)
+            .map(|i| keys.sink(i + 1, Storage::Shared(i as usize + 1)))
+            .collect();
+        let process = keys.resource(7, Kind::Other);
+        let spawn = keys.keys(&R::ProcessSpawn {
+            process: 7,
+            command: hirsel_run_schema::Command {
+                program: "p".into(),
+                args: vec![],
+                directory: None,
+                env: None,
+                own_group: false,
+            },
+        });
+        let mut expected = vec![(NAMESPACE, Mode::Exclusive)];
+        expected.extend(sinks.iter().map(|&key| (key, Mode::Exclusive)));
+        expected.push((process, Mode::Exclusive));
+        expected.sort();
+        assert_eq!(spawn.keys(), &expected[..]);
+        // A duplicate named weaker first still keeps its strongest mode once spilled.
+        let mut named = vec![(sinks[3], Mode::Shared)];
+        named.extend(expected.iter().rev().copied());
+        assert_eq!(KeySet::new(named), spawn);
+        let table = KeyTable::default();
+        let spawned = table.take(&spawn);
+        let last = table.take(&KeySet::new([(sinks[3], Mode::Shared)]));
+        assert!(!last.ready(), "the spilled sink orders a later writer");
+        spawned.end();
+        assert!(last.ready());
     }
 
     #[test]

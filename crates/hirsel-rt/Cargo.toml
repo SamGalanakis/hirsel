@@ -41,6 +41,7 @@ libc = { version = "0.2", default-features = false }
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "=1.0.9"
 sha2 = "0.10"
+smallvec = { version = "1", features = ["const_generics", "const_new", "union"] }
 
 [dev-dependencies]
 base64 = "=0.22.1"

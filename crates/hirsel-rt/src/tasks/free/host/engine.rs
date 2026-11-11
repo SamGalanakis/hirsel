@@ -172,8 +172,7 @@ impl Codec {
                     .map(|keys| {
                         KeySet::new(
                             keys.iter()
-                                .map(|&key| (crate::io_keys::Key(key), Mode::Exclusive))
-                                .collect(),
+                                .map(|&key| (crate::io_keys::Key(key), Mode::Exclusive)),
                         )
                     })
                     .ok_or_else(|| Stop::Refused("missing process issue domains".into())),

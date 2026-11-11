@@ -1698,6 +1698,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "simdutf8",
+ "smallvec",
  "syn 2.0.119",
  "tempfile",
  "webpki-roots",

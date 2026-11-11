@@ -10,7 +10,7 @@ pub(crate) fn namespace_policy(keys: KeySet, coupled: bool) -> KeySet {
             .iter()
             .any(|(key, _)| *key == crate::io_keys::NAMESPACE)
     {
-        let mut keys = keys.keys().to_vec();
+        let mut keys: crate::io_keys::Keys = keys.keys().iter().copied().collect();
         keys.push((crate::io_keys::COUPLED, Mode::Exclusive));
         KeySet::new(keys)
     } else {
@@ -130,17 +130,17 @@ pub(in crate::tasks::free) fn request_keys_with_domains(
         }
         Ok(key)
     };
-    let keys = match request {
+    let keys: crate::io_keys::Keys = match request {
         R::RunnerCall(_)
         | R::RunnerPoll { .. }
         | R::RunnerCancel { .. }
         | R::CallReturn(_)
         | R::Stopped => {
-            vec![(crate::io_keys::PLACE, Mode::Exclusive)]
+            smallvec::smallvec![(crate::io_keys::PLACE, Mode::Exclusive)]
         }
         // As under cooperative tasks (io_keys): authorities share no finer key, so each
         // provider call orders against the whole seam.
-        R::Seam(_) => vec![(ROOT, Mode::Exclusive)],
+        R::Seam(_) => smallvec::smallvec![(ROOT, Mode::Exclusive)],
         R::MonotonicClock { io: 1 }
         | R::WallClock { io: 1 }
         | R::Process { io: 1 }
@@ -151,7 +151,7 @@ pub(in crate::tasks::free) fn request_keys_with_domains(
         | R::Tasks { io: 1 }
         | R::Net { io: 1 }
         | R::Stdout { io: 1 }
-        | R::Stderr { io: 1 } => vec![(ROOT, Mode::Shared)],
+        | R::Stderr { io: 1 } => smallvec::smallvec![(ROOT, Mode::Shared)],
         R::EnvGet { env, .. } | R::EnvNarrow { env, .. } => {
             if *env == crate::io::ENV_HANDLE {
                 if !initial_env {
@@ -162,7 +162,7 @@ pub(in crate::tasks::free) fn request_keys_with_domains(
             } else if identity(*env)?.1 != Kind::Other {
                 return Err(Stop::Diverged("native Env authority differs".into()));
             }
-            Vec::new()
+            crate::io_keys::Keys::new()
         }
         R::NetNarrow { net, .. } | R::Resolve { net, .. } => {
             net_ports(*net)?;
@@ -170,7 +170,7 @@ pub(in crate::tasks::free) fn request_keys_with_domains(
             if kind != Kind::Other {
                 return Err(Stop::Diverged("native Net resource kind differs".into()));
             }
-            vec![(key, Mode::Shared)]
+            smallvec::smallvec![(key, Mode::Shared)]
         }
         R::Connect { net, .. }
         | R::ConnectAddr { net, .. }
@@ -178,7 +178,7 @@ pub(in crate::tasks::free) fn request_keys_with_domains(
         | R::UdpBind { net, .. }
         | R::UnixConnect { net, .. }
         | R::UnixListen { net, .. } => {
-            let mut keys = vec![(net_ports(*net)?, Mode::Exclusive)];
+            let mut keys = smallvec::smallvec![(net_ports(*net)?, Mode::Exclusive)];
             match request {
                 R::UnixConnect { .. } => keys.push((NAMESPACE, Mode::Shared)),
                 R::UnixListen { .. } => keys.push((NAMESPACE, Mode::Exclusive)),
@@ -228,7 +228,7 @@ pub(in crate::tasks::free) fn request_keys_with_domains(
         } => {
             net_ports(*net)?;
             let (key, kind) = identity(*word)?;
-            let mut keys = vec![(key, Mode::Exclusive)];
+            let mut keys = smallvec::smallvec![(key, Mode::Exclusive)];
             match kind {
                 Kind::Other => {}
                 Kind::Half { stream } => keys.push((stream, Mode::Shared)),
@@ -242,7 +242,7 @@ pub(in crate::tasks::free) fn request_keys_with_domains(
         }
         R::NetJoin { net, read, write } => {
             net_ports(*net)?;
-            let mut keys = Vec::new();
+            let mut keys = crate::io_keys::Keys::new();
             for word in [*read, *write] {
                 let (key, kind) = identity(word)?;
                 keys.push((key, Mode::Exclusive));
@@ -261,7 +261,7 @@ pub(in crate::tasks::free) fn request_keys_with_domains(
             let Kind::Sink { file_backed } = kind else {
                 return Err(Stop::Diverged("native stream resource kind differs".into()));
             };
-            let mut keys = vec![(key, Mode::Exclusive)];
+            let mut keys = smallvec::smallvec![(key, Mode::Exclusive)];
             if file_backed {
                 keys.push((NAMESPACE, Mode::Shared));
             }
@@ -276,7 +276,7 @@ pub(in crate::tasks::free) fn request_keys_with_domains(
             if kind != Kind::Other {
                 return Err(Stop::Diverged("native scalar resource kind differs".into()));
             }
-            vec![(key, Mode::Exclusive)]
+            smallvec::smallvec![(key, Mode::Exclusive)]
         }
         R::TelemetryBegin { telemetry, .. }
         | R::TelemetryLog { telemetry, .. }
@@ -285,7 +285,7 @@ pub(in crate::tasks::free) fn request_keys_with_domains(
             if kind != Kind::Other {
                 return Err(Stop::Diverged("native telemetry kind differs".into()));
             }
-            vec![(key, Mode::Exclusive)]
+            smallvec::smallvec![(key, Mode::Exclusive)]
         }
         R::TelemetryEvent {
             telemetry, span, ..
@@ -297,7 +297,7 @@ pub(in crate::tasks::free) fn request_keys_with_domains(
             if provider.1 != Kind::Other || identity(*span)? != provider {
                 return Err(Stop::Diverged("native span resource differs".into()));
             }
-            vec![(provider.0, Mode::Exclusive)]
+            smallvec::smallvec![(provider.0, Mode::Exclusive)]
         }
         R::ProcessNarrow { process, .. } => {
             let (key, kind) = identity(*process)?;
@@ -305,7 +305,7 @@ pub(in crate::tasks::free) fn request_keys_with_domains(
                 return Err(Stop::Diverged("native process kind differs".into()));
             }
             process_keys(*process)?;
-            vec![(key, Mode::Shared)]
+            smallvec::smallvec![(key, Mode::Shared)]
         }
         R::ProcessRun {
             process,
@@ -363,7 +363,7 @@ pub(in crate::tasks::free) fn request_keys_with_domains(
             if kind != Kind::Other {
                 return Err(Stop::Diverged("native child kind differs".into()));
             }
-            vec![(key, Mode::Exclusive)]
+            smallvec::smallvec![(key, Mode::Exclusive)]
         }
         R::GroupWait { process, group, .. } => {
             process_keys(*process)?;
@@ -371,9 +371,9 @@ pub(in crate::tasks::free) fn request_keys_with_domains(
             if kind != Kind::Other {
                 return Err(Stop::Diverged("native group kind differs".into()));
             }
-            vec![(key, Mode::Exclusive)]
+            smallvec::smallvec![(key, Mode::Exclusive)]
         }
-        R::Directory { io: 1, .. } => vec![(NAMESPACE, Mode::Shared)],
+        R::Directory { io: 1, .. } => smallvec::smallvec![(NAMESPACE, Mode::Shared)],
         R::NarrowDir { directory, .. }
         | R::ReadOnlyDir { directory }
         | R::Open { directory, .. }
@@ -384,7 +384,7 @@ pub(in crate::tasks::free) fn request_keys_with_domains(
         | R::ReadDirPage { directory, .. }
         | R::Metadata { directory, .. } => {
             file(*directory)?;
-            vec![(NAMESPACE, Mode::Shared)]
+            smallvec::smallvec![(NAMESPACE, Mode::Shared)]
         }
         R::OpenAppend { directory, .. }
         | R::Create { directory, .. }
@@ -398,7 +398,7 @@ pub(in crate::tasks::free) fn request_keys_with_domains(
         | R::Rename { directory, .. }
         | R::SetPermissions { directory, .. } => {
             file(*directory)?;
-            vec![(NAMESPACE, Mode::Exclusive)]
+            smallvec::smallvec![(NAMESPACE, Mode::Exclusive)]
         }
         R::FileRead {
             directory,
@@ -446,14 +446,14 @@ pub(in crate::tasks::free) fn request_keys_with_domains(
             watcher: word,
         } => {
             file(*directory)?;
-            vec![(file(*word)?, Mode::Exclusive), (NAMESPACE, Mode::Shared)]
+            smallvec::smallvec![(file(*word)?, Mode::Exclusive), (NAMESPACE, Mode::Shared)]
         }
         R::Commit {
             directory,
             file: word,
         } => {
             file(*directory)?;
-            vec![
+            smallvec::smallvec![
                 (file(*word)?, Mode::Exclusive),
                 (NAMESPACE, Mode::Exclusive),
             ]
@@ -461,9 +461,13 @@ pub(in crate::tasks::free) fn request_keys_with_domains(
         R::Close { handle } => {
             let (key, kind) = identity(*handle)?;
             match kind {
-                Kind::File => vec![(key, Mode::Exclusive), (NAMESPACE, Mode::Shared)],
-                Kind::Other => vec![(key, Mode::Exclusive)],
-                Kind::Half { stream } => vec![(key, Mode::Exclusive), (stream, Mode::Shared)],
+                Kind::File => {
+                    smallvec::smallvec![(key, Mode::Exclusive), (NAMESPACE, Mode::Shared)]
+                }
+                Kind::Other => smallvec::smallvec![(key, Mode::Exclusive)],
+                Kind::Half { stream } => {
+                    smallvec::smallvec![(key, Mode::Exclusive), (stream, Mode::Shared)]
+                }
                 _ => return Err(Stop::Diverged("unadmitted native close resource".into())),
             }
         }

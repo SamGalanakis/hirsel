@@ -582,8 +582,7 @@ unsafe fn invoke_resolved(
                     created.process_keys.as_ref().map(|keys| {
                         KeySet::new(
                             keys.iter()
-                                .map(|&key| (crate::io_keys::Key(key), Mode::Exclusive))
-                                .collect(),
+                                .map(|&key| (crate::io_keys::Key(key), Mode::Exclusive)),
                         )
                     }),
                     created.net_ports.map(crate::io_keys::Key),

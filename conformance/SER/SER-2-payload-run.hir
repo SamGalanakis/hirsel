@@ -29,7 +29,7 @@ fn vector[T: serializable](t: Test, x: T, payload: Bytes) {
   let data = codec.encode_payload(x)
   test.check(t, data == payload)
   let none: Option[T] = None()
-  let decoded: Result[T, DecodeError] = codec.decode_payload(none, payload)
+  let decoded: unique Result[T, DecodeError] = codec.decode_payload(none, payload)
   match take decoded {
     Ok(y) => test.check(t, codec.encode_payload(y) == payload),
     Error(_) => test.check(t, false),

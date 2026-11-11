@@ -115,8 +115,9 @@ whole SER-1 schema, including explicit opt-in for user nominal types.
 payload of the envelope `codec.encode(value)` would produce: the version-1
 payload bytes with no magic, version, descriptor or length prefix.
 `codec.decode_payload[T: serializable](of: Option[T], data: Bytes) ->
-Result[T, DecodeError]` decodes such bytes as one payload of `T`; `of` only names
-`T` and is not read. It applies every payload validation below and rejects
+unique Result[T, DecodeError]` decodes such bytes as one payload of `T`; `of` only names
+`T` and is not read. The result owns fresh storage, shares no allocation with either
+argument and reconstructs no loans. It applies every payload validation below and rejects
 remaining bytes as `Trailing`. It never returns `Version` or `SchemaMismatch`,
 because the bytes carry no envelope or descriptor: the caller is responsible for
 knowing which schema wrote them, and a payload written under another schema

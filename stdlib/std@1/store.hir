@@ -2948,12 +2948,24 @@ fn gate(mut s: Store, upto: u64) -> Result[(), Unreleased] {
   release(mut s, upto)
 }
 
-// Waits until every commit up to `upto` is durable at the floor.
+// Waits until every commit up to `upto` is durable at the floor. Groups
+// already submitted are answered first, which needs no level: only a commit
+// still not durable then asks for the floor.
 fn release(mut s: Store, upto: u64) -> Result[(), Unreleased] {
   if upto <= s.durable[s.floor] {
     return Ok(())
   }
   let a = s.authority
+  let answerable = match s.pending {
+    Some(_) => false,
+    None() => !s.closed && list.len(s.submitted) > 0,
+  }
+  if answerable {
+    answer(a, mut s)?
+    if upto <= s.durable[s.floor] {
+      return Ok(())
+    }
+  }
   let at = authority.floor(a)
   let i = s.floor
   wait(a, mut s, at, i)
@@ -3072,10 +3084,18 @@ fn flush(mut s: Store) -> Result[(), Unreleased] {
   let a = s.authority
   let at = authority.floor(a)
   let i = s.floor
-  submit(a, mut s, at, i)?
+  let after = list.len(s.submitted) + pending_groups(s)
   match s.deferred {
-    Some(_) if list.len(s.submitted) < WINDOW => Ok(()),
-    _ => answer(a, mut s),
+    Some(_) if after < WINDOW => submit(a, mut s, at, i),
+    _ => advance(a, mut s, at, i),
+  }
+}
+
+// 1 while a group is pending, else 0.
+fn pending_groups(s: Store) -> u64 uses {} {
+  match s.pending {
+    Some(_) => 1,
+    None() => 0,
   }
 }
 
@@ -3130,8 +3150,28 @@ fn def_size(d: history.Def) -> u64 uses {} {
 // level. A refusal or a later claim leaves the group out of the history, and
 // an undecided append leaves it unknown; each closes the store.
 fn advance(a: Authority, mut s: Store, at: Level of a, i: u64) -> Result[(), Unreleased] {
-  submit(a, mut s, at, i)?
-  answer(a, mut s)
+  if pending_groups(s) == 0 {
+    return answer(a, mut s)
+  }
+  // One narrowing serves the submit and the wait.
+  let mut c = narrow_claim(a, mut s)?
+  submit_claimed(a, mut s, mut c, at, i)?
+  answer_claimed(a, mut s, mut c)?
+  let back: Claim = take c
+  s.claim = Some(take back)
+  Ok(())
+}
+
+// The store's claim, narrowed to `a` and taken from the store until it is put
+// back; a store with no live claim closes.
+fn narrow_claim(a: Authority, mut s: Store) -> Result[Claim of a, Unreleased] {
+  let Some(held) = replace(mut s.claim, None()) else {
+    return Error(Storage(stop(mut s, Closed())))
+  }
+  let Some(c) = claim.narrow(a, take held) else {
+    return Error(Storage(stop(mut s, Closed())))
+  }
+  Ok(take c)
 }
 
 // Submits the pending group at `at`, the level at index `i`, as the history's
@@ -3139,25 +3179,31 @@ fn advance(a: Authority, mut s: Store, at: Level of a, i: u64) -> Result[(), Unr
 // durable until it is answered. A dead claim or a refused group closes the
 // store with nothing appended.
 fn submit(a: Authority, mut s: Store, at: Level of a, i: u64) -> Result[(), Unreleased] {
+  if pending_groups(s) == 0 {
+    return Ok(())
+  }
+  let mut c = narrow_claim(a, mut s)?
+  submit_claimed(a, mut s, mut c, at, i)?
+  // The annotation forgets the brand: the store holds its claim unbranded.
+  let back: Claim = take c
+  s.claim = Some(take back)
+  Ok(())
+}
+
+// `submit` under `c`, the store's claim narrowed and taken from it.
+fn submit_claimed(a: Authority, mut s: Store, mut c: Claim of a, at: Level of a, i: u64) -> Result[
+  (),
+  Unreleased
+] {
   let Some(w) = replace(mut s.pending, None()) else {
     return Ok(())
   }
   let defs = replace(mut s.defs, [])
   s.defs_bytes = 0
   let (entry, d) = history.finish_group(take w, defs)
-  let Some(held) = replace(mut s.claim, None()) else {
-    return Error(Storage(stop(mut s, Closed())))
-  }
-  let Some(narrowed) = claim.narrow(a, take held) else {
-    return Error(Storage(stop(mut s, Closed())))
-  }
-  let mut c = take narrowed
   let created = replace(mut s.created, [])
   let retired = replace(mut s.retired, [])
   let submitted = authority.submit(a, mut c, take entry, created, retired, at)
-  // The annotation forgets the brand: the store holds its claim unbranded.
-  let back: Claim = take c
-  s.claim = Some(take back)
   let position = match take submitted {
     Ok(p) => p,
     Error(e) => return Error(Storage(stop(mut s, seam(take e)))),
@@ -3179,18 +3225,23 @@ fn submit(a: Authority, mut s: Store, at: Level of a, i: u64) -> Result[(), Unre
 // closes the store: a refused or fenced group is out of the history, an
 // undecided one unknown.
 fn answer(a: Authority, mut s: Store) -> Result[(), Unreleased] {
+  if list.len(s.submitted) == 0 {
+    forget(mut s)
+    return Ok(())
+  }
+  // One narrowing serves every group's wait.
+  let mut c = narrow_claim(a, mut s)?
+  answer_claimed(a, mut s, mut c)?
+  let back: Claim = take c
+  s.claim = Some(take back)
+  Ok(())
+}
+
+// `answer` under `c`, the store's claim narrowed and taken from it.
+fn answer_claimed(a: Authority, mut s: Store, mut c: Claim of a) -> Result[(), Unreleased] {
   let groups = replace(mut s.submitted, [])
   for g in groups {
-    let Some(held) = replace(mut s.claim, None()) else {
-      return Error(Storage(stop(mut s, Closed())))
-    }
-    let Some(narrowed) = claim.narrow(a, take held) else {
-      return Error(Storage(stop(mut s, Closed())))
-    }
-    let mut c = take narrowed
     let outcome = authority.wait(a, mut c, g.position)
-    let back: Claim = take c
-    s.claim = Some(take back)
     match outcome {
       Advanced(p) => {
         if p != g.position {

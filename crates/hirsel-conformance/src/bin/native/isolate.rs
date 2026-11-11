@@ -1,7 +1,8 @@
 //! Smoke and parity run complete cases in fresh processes. Dropping an engine
 //! does not release process-global intern tables or the allocator's arenas.
-//! Re-exec also frees LLVM state and the interpreter between cases, including
-//! between the smoke's compilation, replay and parity phases.
+//! Re-exec also frees LLVM state and the interpreter between cases. The jobs
+//! are shared out: `jobs` workers at most, each given its share, so a run of
+//! fewer cases than jobs spends the rest inside its cases.
 use hirsel_conformance::native::Case;
 use std::process::Command;
 use std::time::Duration;
@@ -19,18 +20,20 @@ pub(super) fn cases(cases: &[Case], jobs: usize) -> Result<Option<bool>, String>
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let workers = jobs.clamp(1, cases.len());
+    let share = (jobs / workers).max(1).to_string();
     let commands = cases
         .iter()
         .map(|case| {
             let mut command = Command::new(&exe);
             command
                 .args(&args)
-                .args(["--jobs", "1"])
+                .args(["--jobs", share.as_str()])
                 .env(WORKER_CASE, &case.id);
             command
         })
         .collect();
-    run(commands, jobs).map(Some)
+    run(commands, workers).map(Some)
 }
 
 /// Bounded fan-out; reap every worker and keep running after a case fails.

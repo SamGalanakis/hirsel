@@ -31,6 +31,8 @@ use hirsel_native_testing::Configuration;
 use hirsel_native_testing::Engine;
 use hirsel_native_testing::MATRIX_VERSION;
 use hirsel_native_testing::Outcome;
+use hirsel_native_testing::ReadyExecution;
+use hirsel_native_testing::ReadySupplier;
 use hirsel_native_testing::differential_ready;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -412,6 +414,45 @@ struct Prepared {
     callees: std::collections::BTreeMap<String, hirsel_run_schema::CalleeFacts>,
 }
 
+impl Prepared {
+    /// The case's fixture, with what the launcher found about its callees.
+    fn fixture(&self, source: &str) -> hirsel_native::Fixture {
+        hirsel_native::Fixture {
+            callees: self.callees.clone(),
+            ..crate::fixture(source).unwrap()
+        }
+    }
+    /// A campaign's result on this case: its outcomes, or why it could not run.
+    fn result(&self, id: &str, outcomes: Result<Outcomes, String>) -> CaseResult {
+        match outcomes {
+            Ok(outcomes) => CaseResult {
+                id: id.to_string(),
+                snapshot: None,
+                outcomes,
+                reference: Some(self.reference.clone()),
+                wall: Default::default(),
+            },
+            Err(reason) => CaseResult::failed(id, reason),
+        }
+    }
+}
+
+/// A campaign's outcome under each configuration, by name and engine class.
+type Outcomes = Vec<(String, Class, Outcome)>;
+
+impl CaseResult {
+    /// A case that could not be prepared or run, for `reason`.
+    fn failed(id: &str, reason: String) -> CaseResult {
+        CaseResult {
+            id: id.to_string(),
+            snapshot: Some(reason),
+            outcomes: Vec::new(),
+            reference: None,
+            wall: Default::default(),
+        }
+    }
+}
+
 fn checked(
     warm: Option<&str>,
     id: &str,
@@ -510,75 +551,157 @@ fn run_source_path(
     if source.lines().any(|line| line.trim() == "// expect: test") {
         return run_test_suite(id, source, path, matrix, toolchain, dir, probe);
     }
-    match checked_with_config(
-        None,
-        id,
-        source,
-        path,
-        matrix
-            .first()
-            .map(|c| c.options.launch.clone())
-            .unwrap_or_default(),
-        probe.trace_roots,
-    )
-    .and_then(|prepared| {
-        if prepared.compiled_only
-            && !matrix
-                .iter()
-                .any(|c| !matches!(c.engine, Engine::Heap { .. }))
-        {
-            Err("expected-stdout oracle requires a compiled native configuration".into())
-        } else {
-            Ok(prepared)
-        }
-    }) {
-        Err(reason) => CaseResult {
-            id: id.to_string(),
-            snapshot: Some(reason),
-            outcomes: Vec::new(),
-            reference: None,
-            wall: Default::default(),
-        },
-        Ok(Prepared {
-            input: validated,
-            entry,
-            reference,
-            compiled_only,
-            callees,
-        }) => {
-            let matrix: Vec<_> = matrix
-                .iter()
-                .filter(|c| !compiled_only || !matches!(c.engine, Engine::Heap { .. }))
-                .cloned()
-                .collect();
-            let outcomes = differential_ready(
-                &mut |options| validated.ready(options),
-                &entry,
-                &reference,
-                &matrix,
+    let launch = matrix
+        .first()
+        .map(|c| c.options.launch.clone())
+        .unwrap_or_default();
+    match checked_with_config(None, id, source, path, launch, probe.trace_roots) {
+        Err(reason) => CaseResult::failed(id, reason),
+        Ok(prepared) => {
+            let outcomes = matrix_campaign(
+                &mut |options| prepared.input.ready(options),
+                &prepared,
+                source,
+                matrix,
                 toolchain,
                 dir,
-                &hirsel_native::Fixture {
-                    heap_campaign_partition: probe.heap_partition,
-                    trace_roots: probe.trace_roots,
-                    migrate: probe.migrate,
-                    callees,
-                    ..crate::fixture(source).unwrap()
-                },
-            )
-            .into_iter()
-            .zip(&matrix)
-            .map(|((name, outcome), configuration)| (name, Class::of(configuration), outcome))
-            .collect();
-            CaseResult {
-                id: id.to_string(),
-                snapshot: None,
-                outcomes,
-                reference: Some(reference),
-                wall: Default::default(),
-            }
+                probe,
+            );
+            prepared.result(id, outcomes)
         }
     }
+}
+
+/// `matrix` on a prepared case. A compiled-only oracle skips the heap executor
+/// and needs a compiled configuration.
+fn matrix_campaign<P: ReadyExecution>(
+    ready: &mut ReadySupplier<'_, P>,
+    prepared: &Prepared,
+    source: &str,
+    matrix: &[Configuration],
+    toolchain: &Toolchain,
+    dir: &Path,
+    probe: Probe,
+) -> Result<Outcomes, String> {
+    let matrix: Vec<_> = matrix
+        .iter()
+        .filter(|c| !prepared.compiled_only || !matches!(c.engine, Engine::Heap { .. }))
+        .cloned()
+        .collect();
+    if prepared.compiled_only && matrix.is_empty() {
+        return Err("expected-stdout oracle requires a compiled native configuration".into());
+    }
+    Ok(differential_ready(
+        ready,
+        &prepared.entry,
+        &prepared.reference,
+        &matrix,
+        toolchain,
+        dir,
+        &hirsel_native::Fixture {
+            heap_campaign_partition: probe.heap_partition,
+            trace_roots: probe.trace_roots,
+            migrate: probe.migrate,
+            ..prepared.fixture(source)
+        },
+    )
+    .into_iter()
+    .zip(&matrix)
+    .map(|((name, outcome), configuration)| (name, Class::of(configuration), outcome))
+    .collect())
+}
+
+/// One test of a test corpus case under `matrix`, at the test's seed.
+fn test_matrix_campaign<P: ReadyExecution>(
+    ready: &mut ReadySupplier<'_, P>,
+    test: &hirsel_driver::testing::Test,
+    reference: &Observation,
+    matrix: &[Configuration],
+    toolchain: &Toolchain,
+    dir: &Path,
+    probe: Probe,
+) -> Outcomes {
+    differential_ready(
+        ready,
+        &test.entry,
+        reference,
+        &test_seeded(matrix, test),
+        toolchain,
+        dir,
+        &hirsel_native::Fixture {
+            heap_campaign_partition: probe.heap_partition,
+            trace_roots: probe.trace_roots,
+            migrate: probe.migrate,
+            ..Default::default()
+        },
+    )
+    .into_iter()
+    .zip(matrix)
+    .map(|((_, outcome), c)| (c.name(), Class::of(c), outcome))
+    .collect()
+}
+
+/// `matrix` launched at `test`'s seed.
+fn test_seeded(
+    matrix: &[Configuration],
+    test: &hirsel_driver::testing::Test,
+) -> Vec<Configuration> {
+    let mut configurations = matrix.to_vec();
+    for c in &mut configurations {
+        c.options.launch.test_seed = test.seed;
+    }
+    configurations
+}
+
+const REPLAY: &str = "x86_64/real-io-record-and-replay";
+
+/// Real-Io record and replay of `entry` under `launch`.
+fn replay_campaign<P: ReadyExecution>(
+    ready: &mut ReadySupplier<'_, P>,
+    entry: &hirsel_engine::DefPath,
+    reference: &Observation,
+    toolchain: &Toolchain,
+    dir: &Path,
+    launch: hirsel_native::LaunchInputs,
+    fixture: &hirsel_native::Fixture,
+) -> Outcomes {
+    vec![(
+        REPLAY.into(),
+        Class::Llvm,
+        hirsel_native_testing::real_io_replay_ready(
+            ready, entry, reference, toolchain, dir, launch, fixture,
+        ),
+    )]
+}
+
+/// The runner oracle of `entry` under `matrix`'s native configurations,
+/// cross-replaying tapes under the first.
+fn oracle_campaign<P: ReadyExecution>(
+    ready: &mut ReadySupplier<'_, P>,
+    entry: &hirsel_engine::DefPath,
+    matrix: &[Configuration],
+    toolchain: &Toolchain,
+    dir: &Path,
+    fixture: &hirsel_native::Fixture,
+) -> Outcomes {
+    matrix
+        .iter()
+        .filter(|c| !matches!(c.engine, Engine::Heap { .. }))
+        .enumerate()
+        .flat_map(|(index, configuration)| {
+            hirsel_native_testing::runner_oracle_ready(
+                ready,
+                entry,
+                std::slice::from_ref(configuration),
+                toolchain,
+                dir,
+                fixture,
+                index == 0,
+            )
+            .into_iter()
+            .map(|(name, outcome)| (name, Class::of(configuration), outcome))
+        })
+        .collect()
 }
 
 /// A test corpus case exercises every selected function in every configuration.
@@ -603,28 +726,7 @@ fn run_test_suite(
         probe.trace_roots,
         toolchain,
         |ready, test, reference, test_dir| {
-            let mut configurations = matrix.to_vec();
-            for c in &mut configurations {
-                c.options.launch.test_seed = test.seed;
-            }
-            hirsel_native_testing::differential_ready(
-                ready,
-                &test.entry,
-                reference,
-                &configurations,
-                toolchain,
-                test_dir,
-                &hirsel_native::Fixture {
-                    heap_campaign_partition: probe.heap_partition,
-                    trace_roots: probe.trace_roots,
-                    migrate: probe.migrate,
-                    ..Default::default()
-                },
-            )
-            .into_iter()
-            .zip(matrix)
-            .map(|((_, outcome), c)| (c.name(), Class::of(c), outcome))
-            .collect()
+            test_matrix_campaign(ready, test, reference, matrix, toolchain, test_dir, probe)
         },
     )
 }
@@ -839,60 +941,36 @@ pub fn replay_source_with_config(
             false,
             toolchain,
             |ready, test, reference, test_dir| {
-                let mut inputs = launch.clone();
-                inputs.test_seed = test.seed;
-                vec![(
-                    "x86_64/real-io-record-and-replay".into(),
-                    Class::Llvm,
-                    hirsel_native_testing::real_io_replay_ready(
-                        ready,
-                        &test.entry,
-                        reference,
-                        toolchain,
-                        test_dir,
-                        inputs,
-                        &hirsel_native::Fixture::default(),
-                    ),
-                )]
+                let launch = hirsel_native::LaunchInputs {
+                    test_seed: test.seed,
+                    ..launch.clone()
+                };
+                replay_campaign(
+                    ready,
+                    &test.entry,
+                    reference,
+                    toolchain,
+                    test_dir,
+                    launch,
+                    &Default::default(),
+                )
             },
         );
     }
     match checked_with_config(None, id, source, path, launch.clone(), false) {
-        Err(reason) => CaseResult {
-            id: id.to_string(),
-            snapshot: Some(reason),
-            outcomes: Vec::new(),
-            reference: None,
-            wall: Default::default(),
-        },
-        Ok(Prepared {
-            input: validated,
-            entry,
-            reference,
-            callees,
-            ..
-        }) => CaseResult {
-            id: id.to_string(),
-            snapshot: None,
-            outcomes: vec![(
-                "x86_64/real-io-record-and-replay".into(),
-                Class::Llvm,
-                hirsel_native_testing::real_io_replay_ready(
-                    &mut |options| validated.ready(options),
-                    &entry,
-                    &reference,
-                    toolchain,
-                    dir,
-                    launch,
-                    &hirsel_native::Fixture {
-                        callees,
-                        ..crate::fixture(source).unwrap()
-                    },
-                ),
-            )],
-            reference: Some(reference),
-            wall: Default::default(),
-        },
+        Err(reason) => CaseResult::failed(id, reason),
+        Ok(prepared) => {
+            let outcomes = replay_campaign(
+                &mut |options| prepared.input.ready(options),
+                &prepared.entry,
+                &prepared.reference,
+                toolchain,
+                dir,
+                launch,
+                &prepared.fixture(source),
+            );
+            prepared.result(id, Ok(outcomes))
+        }
     }
 }
 
@@ -910,39 +988,6 @@ pub fn oracle_source(
         .first()
         .map(|c| c.options.launch.clone())
         .unwrap_or_default();
-    let probe =
-        |validated: &source_request::Source,
-         entry: &hirsel_engine::DefPath,
-         matrix: &[Configuration],
-         dir: &Path,
-         callees: std::collections::BTreeMap<String, hirsel_run_schema::CalleeFacts>| {
-            let natives: Vec<_> = matrix
-                .iter()
-                .filter(|c| !matches!(c.engine, Engine::Heap { .. }))
-                .cloned()
-                .collect();
-            let fixture = hirsel_native::Fixture {
-                callees,
-                ..crate::fixture(source).unwrap()
-            };
-            natives
-                .iter()
-                .enumerate()
-                .flat_map(|(index, configuration)| {
-                    hirsel_native_testing::runner_oracle_ready(
-                        &mut |options| validated.ready(options),
-                        entry,
-                        std::slice::from_ref(configuration),
-                        toolchain,
-                        dir,
-                        &fixture,
-                        index == 0,
-                    )
-                    .into_iter()
-                    .map(|(name, outcome)| (name, Class::of(configuration), outcome))
-                })
-                .collect()
-        };
     if source.lines().any(|line| line.trim() == "// expect: test") {
         return visit_test_suite(
             id,
@@ -953,52 +998,202 @@ pub fn oracle_source(
             false,
             toolchain,
             |ready, test, _, test_dir| {
-                let mut configurations = matrix.to_vec();
-                for c in &mut configurations {
-                    c.options.launch.test_seed = test.seed;
-                }
-                configurations
-                    .iter()
-                    .filter(|configuration| !matches!(configuration.engine, Engine::Heap { .. }))
-                    .enumerate()
-                    .flat_map(|(index, configuration)| {
-                        hirsel_native_testing::runner_oracle_ready(
-                            ready,
-                            &test.entry,
-                            std::slice::from_ref(configuration),
-                            toolchain,
-                            test_dir,
-                            &hirsel_native::Fixture::default(),
-                            index == 0,
-                        )
-                        .into_iter()
-                        .map(|(name, outcome)| (name, Class::of(configuration), outcome))
-                    })
-                    .collect()
+                let matrix = test_seeded(matrix, test);
+                oracle_campaign(
+                    ready,
+                    &test.entry,
+                    &matrix,
+                    toolchain,
+                    test_dir,
+                    &Default::default(),
+                )
             },
         );
     }
     match checked_with_config(None, id, source, path, launch, false) {
-        Err(reason) => CaseResult {
+        Err(reason) => CaseResult::failed(id, reason),
+        Ok(prepared) => {
+            let outcomes = oracle_campaign(
+                &mut |options| prepared.input.ready(options),
+                &prepared.entry,
+                matrix,
+                toolchain,
+                dir,
+                &prepared.fixture(source),
+            );
+            prepared.result(id, Ok(outcomes))
+        }
+    }
+}
+
+/// One case's smoke campaigns, each judged on its own.
+pub struct Smoke {
+    pub matrix: CaseResult,
+    pub replay: CaseResult,
+    /// For a case the smoke also builds with Cranelift.
+    pub cranelift: Option<CaseResult>,
+    pub oracle: CaseResult,
+}
+
+impl Smoke {
+    /// Every campaign of `id` failing for `reason`.
+    pub fn failed(id: &str, reason: &str, cranelift: bool) -> Smoke {
+        let failed = || CaseResult::failed(id, reason.to_string());
+        Smoke {
+            matrix: failed(),
+            replay: failed(),
+            cranelift: cranelift.then(failed),
+            oracle: failed(),
+        }
+    }
+}
+
+/// One case's smoke campaigns: `matrix`; real-Io record and replay under its
+/// first launch inputs; `cranelift`, when given; and the runner oracle over its
+/// native configurations, cross-replaying tapes under the first. The case is
+/// checked and its reference run once, and the campaigns share every Ready
+/// program and emission (`Builds`), so nothing is built twice. A run's
+/// campaigns run on up to `jobs` threads; a test suite's run in turn. Must be
+/// called on a compiler stack.
+pub fn smoke_case(
+    case: &Case,
+    matrix: &[Configuration],
+    cranelift: Option<&Configuration>,
+    toolchain: &Toolchain,
+    dir: &Path,
+    jobs: usize,
+) -> Smoke {
+    let (id, source, path) = (case.id.as_str(), case.source.as_str(), case.path.as_deref());
+    let _progress = hirsel_intern::test_progress::enter("native-case", || id.to_string());
+    let launch = matrix
+        .first()
+        .map(|c| c.options.launch.clone())
+        .unwrap_or_default();
+    let cranelift = cranelift.map(std::slice::from_ref).unwrap_or_default();
+    // Each campaign launches in its own directory, as it did in its own run.
+    let campaigns = |dir: &Path| -> Result<[PathBuf; 4], String> {
+        let dirs = ["matrix", "replay", "cranelift", "oracle"].map(|campaign| dir.join(campaign));
+        for dir in &dirs {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        Ok(dirs)
+    };
+    if source.lines().any(|line| line.trim() == "// expect: test") {
+        let natives = matrix
+            .iter()
+            .filter(|c| !matches!(c.engine, Engine::Heap { .. }))
+            .count();
+        let result = visit_test_suite(
+            id,
+            source,
+            path,
+            dir,
+            launch.clone(),
+            false,
+            toolchain,
+            |ready, test, reference, test_dir| {
+                let builds = hirsel_native_testing::Builds::new(|options| ready(options));
+                let ready = &mut |options: &hirsel_native::Options| builds.ready(options);
+                let dirs = campaigns(test_dir).expect("test campaign scratch");
+                let probe = Probe::default();
+                let mut outcomes = test_matrix_campaign(
+                    ready, test, reference, matrix, toolchain, &dirs[0], probe,
+                );
+                let launch = hirsel_native::LaunchInputs {
+                    test_seed: test.seed,
+                    ..launch.clone()
+                };
+                outcomes.extend(replay_campaign(
+                    ready,
+                    &test.entry,
+                    reference,
+                    toolchain,
+                    &dirs[1],
+                    launch,
+                    &Default::default(),
+                ));
+                outcomes.extend(test_matrix_campaign(
+                    ready, test, reference, cranelift, toolchain, &dirs[2], probe,
+                ));
+                outcomes.extend(oracle_campaign(
+                    ready,
+                    &test.entry,
+                    &test_seeded(matrix, test),
+                    toolchain,
+                    &dirs[3],
+                    &Default::default(),
+                ));
+                outcomes
+            },
+        );
+        // Each test's outcomes are the campaigns' in order; split them back.
+        let mut outcomes = result.outcomes.into_iter();
+        let mut campaign = |count: usize| CaseResult {
             id: id.to_string(),
-            snapshot: Some(reason),
-            outcomes: Vec::new(),
-            reference: None,
+            snapshot: result.snapshot.clone(),
+            outcomes: outcomes.by_ref().take(count).collect(),
+            reference: result.reference.clone(),
             wall: Default::default(),
+        };
+        return Smoke {
+            matrix: campaign(matrix.len()),
+            replay: campaign(1),
+            cranelift: (!cranelift.is_empty()).then(|| campaign(cranelift.len())),
+            oracle: campaign(natives),
+        };
+    }
+    let prepared = match checked_with_config(None, id, source, path, launch.clone(), false) {
+        Err(reason) => return Smoke::failed(id, &reason, !cranelift.is_empty()),
+        Ok(prepared) => prepared,
+    };
+    let dirs = match campaigns(dir) {
+        Ok(dirs) => dirs,
+        Err(reason) => return Smoke::failed(id, &reason, !cranelift.is_empty()),
+    };
+    let builds = hirsel_native_testing::Builds::new(|options| prepared.input.ready(options));
+    let fixture = prepared.fixture(source);
+    let probe = Probe::default();
+    // The campaigns, costed by the native configurations each runs.
+    let campaigns = [matrix.len() + 1, 1, cranelift.len(), matrix.len()];
+    let tasks = (0..campaigns.len()).filter(|&c| campaigns[c] > 0).collect();
+    let mut outcomes = hirsel_intern::jobs::map(
+        hirsel_intern::jobs::Jobs::new(jobs),
+        tasks,
+        |&campaign| campaigns[campaign] as u64,
+        |campaign| {
+            let ready = &mut |options: &hirsel_native::Options| builds.ready(options);
+            let dir = &dirs[campaign];
+            match campaign {
+                0 => matrix_campaign(ready, &prepared, source, matrix, toolchain, dir, probe),
+                1 => Ok(replay_campaign(
+                    ready,
+                    &prepared.entry,
+                    &prepared.reference,
+                    toolchain,
+                    dir,
+                    launch.clone(),
+                    &fixture,
+                )),
+                2 => matrix_campaign(ready, &prepared, source, cranelift, toolchain, dir, probe),
+                _ => Ok(oracle_campaign(
+                    ready,
+                    &prepared.entry,
+                    matrix,
+                    toolchain,
+                    dir,
+                    &fixture,
+                )),
+            }
         },
-        Ok(Prepared {
-            input: validated,
-            entry,
-            reference,
-            callees,
-            ..
-        }) => CaseResult {
-            id: id.to_string(),
-            snapshot: None,
-            outcomes: probe(&validated, &entry, matrix, dir, callees),
-            reference: Some(reference),
-            wall: Default::default(),
-        },
+    )
+    .into_iter()
+    .map(|outcomes| prepared.result(id, outcomes));
+    let mut next = || outcomes.next().expect("one result per campaign");
+    Smoke {
+        matrix: next(),
+        replay: next(),
+        cranelift: (!cranelift.is_empty()).then(&mut next),
+        oracle: next(),
     }
 }
 
@@ -1022,7 +1217,30 @@ pub fn run_cases_with(
     jobs: usize,
     run: impl Fn(&Case, &Path) -> CaseResult + Sync,
 ) -> Vec<CaseResult> {
-    let run = &run;
+    run_each(
+        cases,
+        scratch,
+        jobs,
+        |case, dir| {
+            let started = std::time::Instant::now();
+            let mut result = run(case, dir);
+            result.wall = started.elapsed();
+            result
+        },
+        |case| CaseResult::failed(&case.id, "a native stage panicked".into()),
+    )
+}
+
+/// Run every case on `jobs` threads, each in its own scratch directory and on a
+/// compiler stack, in input order; a case whose run panics is `panicked`'s.
+pub fn run_each<R: Send>(
+    cases: &[Case],
+    scratch: &Path,
+    jobs: usize,
+    run: impl Fn(&Case, &Path) -> R + Sync,
+    panicked: impl Fn(&Case) -> R + Sync,
+) -> Vec<R> {
+    let (run, panicked) = (&run, &panicked);
     let next = std::sync::atomic::AtomicUsize::new(0);
     let results = std::sync::Mutex::new(Vec::new());
     std::thread::scope(|scope| {
@@ -1037,19 +1255,10 @@ pub fn run_cases_with(
                         let Some(case) = cases.get(index) else { break };
                         std::fs::write(dir.join("case.txt"), &case.id)
                             .expect("scratch case identity");
-                        let started = std::time::Instant::now();
-                        let mut result =
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                run(case, &dir)
-                            }))
-                            .unwrap_or_else(|_| CaseResult {
-                                id: case.id.clone(),
-                                snapshot: Some("a native stage panicked".into()),
-                                outcomes: Vec::new(),
-                                reference: None,
-                                wall: Default::default(),
-                            });
-                        result.wall = started.elapsed();
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            run(case, &dir)
+                        }))
+                        .unwrap_or_else(|_| panicked(case));
                         results.lock().unwrap().push((index, result));
                     }
                 });

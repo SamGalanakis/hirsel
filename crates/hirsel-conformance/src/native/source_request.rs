@@ -11,10 +11,9 @@ use hirsel_query_products::LoweringPolicy;
 use hirsel_requests::*;
 use hirsel_syntax::DefPath;
 use std::{
-    cell::RefCell,
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
 pub(crate) struct Source {
@@ -22,7 +21,8 @@ pub(crate) struct Source {
     inputs: FrozenInputs,
     text: Arc<str>,
     primary: PathBuf,
-    requests: RefCell<CompilerRequests>,
+    /// One request at a time; campaigns on other threads wait for it.
+    requests: Mutex<CompilerRequests>,
     pub entry: DefPath,
     _directory: Option<super::scratch::RunRoot>,
 }
@@ -90,12 +90,15 @@ impl Source {
             text: source.into(),
             primary,
             entry,
-            requests: RefCell::new(requests),
+            requests: Mutex::new(requests),
             _directory: directory,
         })
     }
+    fn requests(&self) -> MutexGuard<'_, CompilerRequests> {
+        self.requests.lock().unwrap_or_else(PoisonError::into_inner)
+    }
     pub fn warm(&self, text: &str) -> Result<(), ToolError> {
-        let mut requests = self.requests.borrow_mut();
+        let mut requests = self.requests();
         let inputs = self.inputs.replace_sources(
             &BTreeMap::from([(self.primary.clone(), Arc::<[u8]>::from(text.as_bytes()))]),
             requests.input_limits().bytes,
@@ -110,7 +113,7 @@ impl Source {
         Ok(())
     }
     fn execute(&self, operation: CompileOperation) -> Result<Arc<CompileOutput>, ToolError> {
-        self.requests.borrow_mut().execute_request(&CompileRequest {
+        self.requests().execute_request(&CompileRequest {
             path: self.path.clone(),
             inputs: self.inputs.clone().into(),
             operation,
@@ -188,7 +191,7 @@ impl Source {
         // The scratch file selects the package. Put the actual body in a named
         // source input before S0 so native sites retain the case's name, too.
         let (inputs, supplemental_sources) = if self._directory.is_some() {
-            let requests = self.requests.borrow();
+            let requests = self.requests();
             let inputs = self
                 .inputs
                 .replace_sources(
@@ -211,8 +214,7 @@ impl Source {
             (self.inputs.clone(), vec![])
         };
         let output = self
-            .requests
-            .borrow_mut()
+            .requests()
             .execute_request(&CompileRequest {
                 path: self.path.clone(),
                 inputs: inputs.into(),

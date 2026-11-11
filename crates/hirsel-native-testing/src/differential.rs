@@ -6,6 +6,7 @@
 use hirsel_engine::ValidatedNativeInput;
 use hirsel_lir::emission::OptLevel;
 use hirsel_lir::layout_types::TargetSpec;
+use hirsel_lir::stage::ObjectArtifact;
 use hirsel_native::Fixture;
 use hirsel_native::emit::Backend;
 use hirsel_native::link::Partition;
@@ -23,6 +24,7 @@ use hirsel_native::stages::StageName;
 use hirsel_native_batch::build;
 use hirsel_syntax::DefPath;
 use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 /// Bump when a configuration is added, removed or renamed: stored reports
 /// and mismatch artifacts name the matrix they ran.
@@ -34,13 +36,115 @@ pub const MATRIX_VERSION: u32 = 4;
 pub trait ReadyExecution {
     fn program(&self) -> &ReadyProgram;
     fn sites(&self) -> Sites<'_>;
+    /// The program's objects under `emission`, emitted afresh; a [`Built`] program
+    /// emits each once.
+    fn objects(&self, emission: Emission) -> Objects {
+        emit_backend_objects(
+            self.program(),
+            emission.backend,
+            emission.opt,
+            emission.partition,
+            emission.measurement,
+            None,
+        )
+        .map(Arc::from)
+    }
 }
-impl<T: ReadyExecution + ?Sized> ReadyExecution for std::sync::Arc<T> {
+impl<T: ReadyExecution + ?Sized> ReadyExecution for Arc<T> {
     fn program(&self) -> &ReadyProgram {
         self.as_ref().program()
     }
     fn sites(&self) -> Sites<'_> {
         self.as_ref().sites()
+    }
+    fn objects(&self, emission: Emission) -> Objects {
+        self.as_ref().objects(emission)
+    }
+}
+
+/// What one backend emission of a Ready program is made under: its backend,
+/// optimization level, partition and runtime measurement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Emission {
+    pub backend: Backend,
+    pub opt: OptLevel,
+    pub partition: Partition,
+    pub measurement: bool,
+}
+
+/// One emission's objects, shared by every link of them.
+pub type Objects = Result<Arc<[ObjectArtifact]>, NativeError>;
+
+/// A Ready program that emits each [`Emission`] once, however many
+/// configurations and campaigns link it; a caller asking for one another is
+/// emitting waits for it.
+pub struct Built<P> {
+    ready: P,
+    emitted: Mutex<Vec<(Emission, Arc<OnceLock<Objects>>)>>,
+}
+impl<P: ReadyExecution> ReadyExecution for Built<P> {
+    fn program(&self) -> &ReadyProgram {
+        self.ready.program()
+    }
+    fn sites(&self) -> Sites<'_> {
+        self.ready.sites()
+    }
+    fn objects(&self, emission: Emission) -> Objects {
+        let cell = {
+            let mut emitted = self.emitted.lock().unwrap_or_else(PoisonError::into_inner);
+            match emitted.iter().find(|(e, _)| *e == emission) {
+                Some((_, cell)) => cell.clone(),
+                None => {
+                    let cell = Arc::new(OnceLock::new());
+                    emitted.push((emission, cell.clone()));
+                    cell
+                }
+            }
+        };
+        cell.get_or_init(|| self.ready.objects(emission)).clone()
+    }
+}
+
+/// One case's builds: a Ready program per distinct pass options
+/// ([`same_options`]), built by `supply` the first time a campaign asks for it,
+/// with its emissions. Campaigns over the same `Builds` build nothing twice,
+/// and campaigns on several threads may share it: one build runs at a time,
+/// and a campaign asking for a program another is building waits for it.
+pub struct Builds<P, F> {
+    supply: Mutex<F>,
+    built: Mutex<Vec<(Options, Arc<OnceLock<BuiltReady<P>>>)>>,
+}
+type BuiltReady<P> = Result<Arc<Built<P>>, NativeError>;
+impl<P: ReadyExecution, F: FnMut(&Options) -> Result<P, NativeError>> Builds<P, F> {
+    pub fn new(supply: F) -> Self {
+        Builds {
+            supply: Mutex::new(supply),
+            built: Mutex::default(),
+        }
+    }
+    /// The program `options` builds; a failed build fails every request for it.
+    pub fn ready(&self, options: &Options) -> BuiltReady<P> {
+        let cell = {
+            let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
+            match built.iter().find(|(o, _)| same_options(o, options)) {
+                Some((_, cell)) => cell.clone(),
+                None => {
+                    let cell = Arc::new(OnceLock::new());
+                    built.push((options.clone(), cell.clone()));
+                    cell
+                }
+            }
+        };
+        cell.get_or_init(|| {
+            let mut supply = self.supply.lock().unwrap_or_else(PoisonError::into_inner);
+            (*supply)(options).map(|ready| {
+                Arc::new(Built {
+                    ready,
+                    emitted: Mutex::default(),
+                })
+            })
+        })
+        .clone()
     }
 }
 /// A harness program built over a validated snapshot.
@@ -473,32 +577,23 @@ pub fn differential_ready<P: ReadyExecution>(
         env: fixture.env.clone(),
         steps: fixture.steps,
     };
-    let mut built: Vec<(Options, Result<P, NativeError>)> = Vec::new();
-    type Objects = Result<Vec<hirsel_lir::stage::ObjectArtifact>, NativeError>;
-    let mut emitted: Vec<((usize, Backend, OptLevel, Partition), Objects)> = Vec::new();
+    let builds = Builds::new(|options: &Options| ready(options));
     let mut out = Vec::with_capacity(configurations.len());
     // Configurations that differ only by runtime archive share their objects.
-    let mut native = |backend: Backend,
-                      opt: OptLevel,
-                      partition: Partition,
-                      runtime: Runtime,
-                      index: usize,
-                      program: &ReadyProgram,
-                      sites: &Sites<'_>| {
+    let native = |backend: Backend,
+                  opt: OptLevel,
+                  partition: Partition,
+                  runtime: Runtime,
+                  ready: &Built<P>| {
+        let (program, sites) = (ready.program(), &ready.sites());
         let toolchain = &toolchain.with_runtime(runtime.build());
-        let key = (index, backend, opt, partition);
-        let at = match emitted.iter().position(|(k, _)| *k == key) {
-            Some(at) => at,
-            None => {
-                let measurement = toolchain.runtime_build.measurement;
-                let objects =
-                    emit_backend_objects(program, backend, opt, partition, measurement, None);
-                emitted.push((key, objects));
-                emitted.len() - 1
-            }
-        };
-        let objects = emitted[at].1.as_ref().map_err(Clone::clone)?;
-        let runnable = link_fixture_runnable(program, entry, objects, toolchain, dir, fixture)?;
+        let objects = ready.objects(Emission {
+            backend,
+            opt,
+            partition,
+            measurement: toolchain.runtime_build.measurement,
+        })?;
+        let runnable = link_fixture_runnable(program, entry, &objects, toolchain, dir, fixture)?;
         let target = &program.target;
         let diagnostic = runtime == Runtime::Diagnostic;
         let launched = hirsel_native::link::launch_fixture(
@@ -524,52 +619,29 @@ pub fn differential_ready<P: ReadyExecution>(
         Ok(observation)
     };
     for configuration in configurations {
-        let options = fixture_options(&configuration.options, fixture);
-        let index = match built.iter().position(|(o, _)| same_options(o, &options)) {
-            Some(index) => index,
-            None => {
-                let program = ready(&options);
-                built.push((options, program));
-                built.len() - 1
-            }
-        };
-        let observed = built[index]
-            .1
-            .as_ref()
-            .map_err(Clone::clone)
-            .and_then(|ready| {
-                let (program, sites) = (ready.program(), &ready.sites());
-                match configuration.engine {
-                    Engine::Heap { campaign: true } => {
-                        crate::heap_campaign_in(program, entry, sites, &world)
-                            .map(|run| run.observation)
-                    }
-                    Engine::Heap { campaign: false } => {
-                        crate::run_heap_in(program, entry, sites, &world).map(|run| run.observation)
-                    }
-                    Engine::Native {
-                        opt,
-                        partition,
-                        runtime,
-                    } => native(
-                        Backend::Llvm,
-                        opt,
-                        partition,
-                        runtime,
-                        index,
-                        program,
-                        sites,
-                    ),
-                    Engine::Cranelift { partition, runtime } => native(
-                        Backend::Cranelift,
-                        OptLevel::None,
-                        partition,
-                        runtime,
-                        index,
-                        program,
-                        sites,
-                    ),
+        let observed = builds
+            .ready(&fixture_options(&configuration.options, fixture))
+            .and_then(|ready| match configuration.engine {
+                Engine::Heap { campaign: true } => {
+                    crate::heap_campaign_in(ready.program(), entry, &ready.sites(), &world)
+                        .map(|run| run.observation)
                 }
+                Engine::Heap { campaign: false } => {
+                    crate::run_heap_in(ready.program(), entry, &ready.sites(), &world)
+                        .map(|run| run.observation)
+                }
+                Engine::Native {
+                    opt,
+                    partition,
+                    runtime,
+                } => native(Backend::Llvm, opt, partition, runtime, &ready),
+                Engine::Cranelift { partition, runtime } => native(
+                    Backend::Cranelift,
+                    OptLevel::None,
+                    partition,
+                    runtime,
+                    &ready,
+                ),
             });
         let outcome = match observed {
             Ok(observation) if observation == *reference => Outcome::Agree,
@@ -591,6 +663,7 @@ pub fn runner_oracle_ready<P: ReadyExecution>(
     fixture: &Fixture,
     tapes: bool,
 ) -> Vec<(String, Outcome)> {
+    let builds = Builds::new(|options: &Options| ready(options));
     let mut out = Vec::new();
     for configuration in configurations {
         let (backend, opt, partition, runtime) = match configuration.engine {
@@ -606,18 +679,16 @@ pub fn runner_oracle_ready<P: ReadyExecution>(
         };
         let toolchain = toolchain.with_runtime(runtime.build());
         let diagnostic = runtime == Runtime::Diagnostic;
-        let mut run = || -> Result<(), NativeError> {
-            let ready = ready(&fixture_options(&configuration.options, fixture))?;
+        let run = || -> Result<(), NativeError> {
+            let ready = builds.ready(&fixture_options(&configuration.options, fixture))?;
             let (program, sites) = (ready.program(), ready.sites());
             let target = &program.target;
-            let objects = emit_backend_objects(
-                program,
+            let objects = ready.objects(Emission {
                 backend,
                 opt,
                 partition,
-                toolchain.runtime_build.measurement,
-                None,
-            )?;
+                measurement: toolchain.runtime_build.measurement,
+            })?;
             let executable = Toolchain {
                 execution: hirsel_native::runner::Execution::Executable,
                 ..toolchain.clone()
@@ -824,14 +895,12 @@ pub fn real_io_replay_ready<P: ReadyExecution>(
         let target = options.target.clone();
         let ready = ready(&fixture_options(&options, fixture))?;
         let (program, sites) = (ready.program(), &ready.sites());
-        let objects = emit_backend_objects(
-            program,
-            Backend::Llvm,
-            OptLevel::Speed,
-            Partition::Whole,
-            toolchain.runtime_build.measurement,
-            None,
-        )?;
+        let objects = ready.objects(Emission {
+            backend: Backend::Llvm,
+            opt: OptLevel::Speed,
+            partition: Partition::Whole,
+            measurement: toolchain.runtime_build.measurement,
+        })?;
         let runnable = link_fixture_runnable(program, entry, &objects, toolchain, dir, fixture)?;
         let tape = dir.join("io-tape");
         let _ = std::fs::remove_file(&tape);

@@ -776,60 +776,57 @@ fn run() -> Result<bool, String> {
             {
                 return Ok(ok);
             }
-            let results = native::run_cases(
+            // Each case is checked and its reference run once, and its campaigns
+            // share every build: the matrix; real Io, recorded and replayed from
+            // its completion tape on simulated Io; Cranelift, for the cases it
+            // builds; and the runner oracle, every native configuration as a
+            // linked executable and as an image in its runner, byte for byte,
+            // with cross-replayed tapes under the first.
+            let toolchain = floor_toolchain(&matrix)?;
+            let cranelift = native::cranelift::cranelift(matrix[0].options.clone());
+            let mut alone = smoke_cranelift_cases(&root, &filter, &cases)?;
+            let both: std::collections::BTreeSet<String> =
+                alone.iter().map(|c| c.id.clone()).collect();
+            alone.retain(|c| !cases.iter().any(|case| case.id == c.id));
+            // Each case's campaigns share what the cases leave of the jobs.
+            let share = (jobs / cases.len().max(1)).max(1);
+            let smoke = native::run_each(
                 &cases,
-                &matrix,
-                &floor_toolchain(&matrix)?,
                 &native::scratch("smoke")?,
                 jobs,
+                |case, dir| {
+                    let cranelift = both.contains(&case.id).then_some(&cranelift);
+                    native::smoke_case(case, &matrix, cranelift, &toolchain, dir, share)
+                },
+                |case| {
+                    native::Smoke::failed(
+                        &case.id,
+                        "a native stage panicked",
+                        both.contains(&case.id),
+                    )
+                },
             );
+            let (mut results, mut replayed, mut compiled, mut oracle) =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            for case in smoke {
+                results.push(case.matrix);
+                replayed.push(case.replay);
+                compiled.extend(case.cranelift);
+                oracle.push(case.oracle);
+            }
+            // The fixed Cranelift control set outside the smoke list.
+            if !alone.is_empty() {
+                compiled.extend(native::run_cases(
+                    &alone,
+                    std::slice::from_ref(&cranelift),
+                    &toolchain,
+                    &native::scratch("smoke-cranelift")?,
+                    jobs,
+                ));
+            }
             let mut ok = all_agree("smoke", &results);
-            // Real Io: each case is recorded on real Io and replayed from its
-            // completion tape on simulated Io.
-            let toolchain = floor_toolchain(&matrix)?;
-            let replayed = native::run_cases_with(
-                &cases,
-                &native::scratch("smoke-replay")?,
-                jobs,
-                |case, dir| {
-                    native::replay_source_with_config(
-                        &case.id,
-                        &case.source,
-                        case.path.as_deref(),
-                        &toolchain,
-                        dir,
-                        matrix[0].options.launch.clone(),
-                    )
-                },
-            );
             ok &= all_agree("real Io replay", &replayed);
-            // A handful of cases as Cranelift executables.
-            let cranelift = [native::cranelift::cranelift(matrix[0].options.clone())];
-            let compiled = native::run_cases(
-                &smoke_cranelift_cases(&root, &filter, &cases)?,
-                &cranelift,
-                &toolchain,
-                &native::scratch("smoke-cranelift")?,
-                jobs,
-            );
             ok &= all_agree("cranelift", &compiled);
-            // The runner oracle: every case's native configurations, as linked executables and
-            // as images in their runners, byte for byte, with cross-replayed tapes on x86-64.
-            let oracle = native::run_cases_with(
-                &cases,
-                &native::scratch("smoke-oracle")?,
-                jobs,
-                |case, dir| {
-                    native::oracle_source(
-                        &case.id,
-                        &case.source,
-                        case.path.as_deref(),
-                        &matrix,
-                        &toolchain,
-                        dir,
-                    )
-                },
-            );
             ok &= all_agree("runner oracle", &oracle);
             ok &= runner_counts("native smoke");
             println!(

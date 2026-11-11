@@ -18,8 +18,8 @@ impl Root {
         parent: &Path,
     ) -> std::io::Result<Arc<Self>> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        hirsel_guard::scratch::sweep(parent, ".hirsel-request-");
-        let path = hirsel_guard::scratch::path(
+        crate::scratch::sweep(parent, ".hirsel-request-");
+        let path = crate::scratch::path(
             parent,
             ".hirsel-request-",
             NEXT.fetch_add(1, Ordering::Relaxed),

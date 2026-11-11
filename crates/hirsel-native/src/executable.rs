@@ -158,9 +158,9 @@ impl Scratch {
         next: &AtomicU64,
     ) -> Result<Self, NativeError> {
         use std::os::unix::fs::DirBuilderExt;
-        hirsel_guard::scratch::sweep(parent, "hirsel-build-");
+        hirsel_engine_store::scratch::sweep(parent, "hirsel-build-");
         loop {
-            let path = hirsel_guard::scratch::path(
+            let path = hirsel_engine_store::scratch::path(
                 parent,
                 "hirsel-build-",
                 next.fetch_add(1, Ordering::Relaxed),

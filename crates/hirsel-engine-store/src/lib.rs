@@ -24,6 +24,7 @@ mod dir;
 mod installed;
 mod remote;
 mod request;
+pub mod scratch;
 pub use dir::{DirStore, FORMAT, GcReport};
 pub use installed::InstalledSourceRecords;
 pub use installed::{

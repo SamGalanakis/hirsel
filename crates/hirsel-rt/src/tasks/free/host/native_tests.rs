@@ -228,9 +228,9 @@ fn native_clock_replay_requires_mapped_metadata_and_refuses_other_requests() {
 #[test]
 fn live_authority_floor_allocation_budget() {
     const CALLS: u64 = 1_000;
-    // The pending row, the Requests claim and two result boxes; amortized table
-    // growth adds a few across the batch.
-    const PER_CALL: u64 = 4;
+    // The Requests claim the stop sweep arbitrates is fresh per call; the pending row
+    // and result boxes reuse task-owned storage. Amortized table growth adds a few.
+    const PER_CALL: u64 = 2;
     const GROWTH: u64 = 64;
     let mut real = crate::io_real::RealIo::grant(&std::env::temp_dir()).unwrap();
     real.discard_history();
@@ -300,4 +300,93 @@ fn live_authority_floor_allocation_budget() {
     );
     assert_eq!(outcome.ended, Ok(STATUS_OK));
     assert_eq!(outcome.pending, 0);
+}
+
+/// Bug: reused slot storage carries a stopped operation's state into a delivery, or the
+/// abandoned slot is donated or leaked instead of released with its task. Oracle: a stop
+/// leaves the task for good (`stop::raise`), so the stopped call delivers nothing and the
+/// context's drop releases its slot exactly once.
+#[test]
+fn a_stop_after_reused_slots_delivers_nothing_and_releases_its_slot() {
+    let mut real = crate::io_real::RealIo::grant(&std::env::temp_dir()).unwrap();
+    real.discard_history();
+    let grant: hirsel_run_schema::AuthorityGrant = serde_json::from_value(serde_json::json!({
+        "provider": "authority.memory@1",
+        "floor": "memory",
+    }))
+    .unwrap();
+    real.set_authorities(
+        &std::collections::BTreeMap::from([("main".to_owned(), grant)]),
+        Some([0; 16]),
+    )
+    .unwrap();
+    let adapter: Arc<dyn crate::io_concurrent::ConcurrentAdapter> = Arc::new(
+        real.into_concurrent()
+            .unwrap_or_else(|_| panic!("Send authority")),
+    );
+    let mut admitted = Some(adapter.clone());
+    let live = Arc::new(std::sync::Mutex::new(None));
+    let seen = live.clone();
+    let delivered = Arc::new(AtomicU32::new(0));
+    let count = delivered.clone();
+    let mut run = crate::host::BodyRun::new(1, false);
+    run.free = true;
+    unsafe { run.use_physical_dispatch() };
+    let outcome = run.run(
+        move |ctx| unsafe { super::super::enable(ctx) },
+        move |ctx| unsafe {
+            let authority = {
+                let _role = role::Guard::new(ctx);
+                {
+                    let _segment = role::Segment::new(ctx);
+                    concurrent::Service::install(ctx, admitted.take().unwrap()).unwrap();
+                    native::enable(ctx);
+                }
+                *seen.lock().unwrap() = Some((*ctx).run_ref().free_io.get().unwrap().live.clone());
+                let request = crate::authority::SeamRequest::Project {
+                    io: 1,
+                    name: "main".into(),
+                };
+                match crate::io::capability_call(ctx, Request::Seam(request)) {
+                    Ok(Completion::Handle(Ok(handle))) => handle,
+                    other => panic!("io.authority: {other:?}"),
+                }
+            };
+            let mut out = u64::MAX;
+            for _ in 0..3 {
+                out = u64::MAX;
+                assert_eq!(
+                    crate::authority::hirsel_rt_v2_authority_floor(
+                        ctx,
+                        std::ptr::null_mut(),
+                        &mut out,
+                        &authority,
+                    ),
+                    STATUS_OK
+                );
+                assert!(out < 256);
+                count.fetch_add(1, Ordering::Release);
+            }
+            assert!((*ctx).live_host.is_none() && (*ctx).native_host_result.is_none());
+            (*ctx).run_ref().control.request_inside(Stop::Requested);
+            let mut stopped = u64::MAX;
+            crate::authority::hirsel_rt_v2_authority_floor(
+                ctx,
+                std::ptr::null_mut(),
+                &mut stopped,
+                &authority,
+            );
+            unreachable!("a stopped floor returned {stopped}");
+        },
+    );
+    assert_eq!(outcome.ended, Err(Stop::Requested));
+    assert_eq!(delivered.load(Ordering::Acquire), 3);
+    let live = live.lock().unwrap().take().unwrap();
+    // The stopped call's slot holds the live state; it went with its task's context.
+    assert_eq!(
+        Arc::strong_count(&live),
+        1,
+        "the stopped slot outlived its task"
+    );
+    assert_eq!(Arc::strong_count(&adapter), 1);
 }

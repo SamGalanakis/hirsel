@@ -237,6 +237,10 @@ pub struct TaskCtx {
     pub(crate) ownership_cleanup: *mut crate::ownership_trace::CleanupScope,
     pub(crate) resume_bindings: crate::continuation::binding::Bindings,
     pub(crate) ordered_inop_leave: Option<bool>,
+    /// Storage of the last completed live Free request's [`Self::live_host`] slot.
+    pub(crate) live_spare: Spare<crate::tasks::free::host::live::Pending>,
+    /// Storage of the last delivered [`Self::native_host_result`].
+    pub(crate) native_result_spare: Spare<Result<crate::io::Completion, ()>>,
     #[cfg(feature = "ownership-trace")]
     pub(crate) ownership_task: u64,
     #[cfg(feature = "ownership-trace")]
@@ -250,6 +254,45 @@ pub struct TaskCtx {
 }
 
 const _: () = assert!(std::mem::offset_of!(TaskCtx, view) == 0);
+
+/// A task-owned slot's storage kept from its last completed operation, so the next one
+/// refills it instead of allocating. It never holds a value: only [`Spare::unbox`], on a
+/// completed operation, donates storage, after moving the whole value out. An operation a
+/// stop abandons keeps its own box in its slot until the context drops.
+pub(crate) struct Spare<T>(Option<Box<std::mem::MaybeUninit<T>>>);
+
+impl<T> Default for Spare<T> {
+    fn default() -> Self {
+        Spare(None)
+    }
+}
+
+impl<T> Spare<T> {
+    /// Box a fully built `value`, in the kept storage when there is one.
+    pub(crate) fn boxed(&mut self, value: T) -> Box<T> {
+        match self.0.take() {
+            Some(storage) => {
+                let raw = Box::into_raw(storage).cast::<T>();
+                // SAFETY: the storage is a live allocation of T's layout holding no value;
+                // writing initializes it, and the Box takes it back.
+                unsafe {
+                    raw.write(value);
+                    Box::from_raw(raw)
+                }
+            }
+            None => Box::new(value),
+        }
+    }
+    /// Move a completed slot's value out and keep its storage.
+    pub(crate) fn unbox(&mut self, boxed: Box<T>) -> T {
+        let raw = Box::into_raw(boxed);
+        // SAFETY: `raw` came from a live Box<T>; its value is read exactly once and the
+        // allocation is kept as uninitialized storage of the same layout.
+        let value = unsafe { raw.read() };
+        self.0 = Some(unsafe { Box::from_raw(raw.cast()) });
+        value
+    }
+}
 pub const CTX_FOREGROUND_COUNT_OFFSET: usize = std::mem::offset_of!(TaskCtx, activations);
 pub const CTX_CLEANUP_COUNT_OFFSET: usize = CTX_FOREGROUND_COUNT_OFFSET + 2;
 pub const CTX_CLEANUP_MODE_OFFSET: usize = std::mem::offset_of!(TaskCtx, cleanup_depth);
@@ -583,6 +626,8 @@ impl TaskCtx {
             ownership_cleanup: std::ptr::null_mut(),
             resume_bindings: Default::default(),
             ordered_inop_leave: None,
+            live_spare: Spare::default(),
+            native_result_spare: Spare::default(),
             #[cfg(feature = "ownership-trace")]
             ownership_task: 0,
             #[cfg(feature = "ownership-trace")]

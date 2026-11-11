@@ -50,14 +50,15 @@ pub(super) unsafe fn request(
     let request = state.requests.prepare(token, request);
     assert!(unsafe { (*ctx).live_host.is_none() });
     unsafe {
-        (*ctx).live_host = Some(Box::new(Pending {
+        let pending = Pending {
             state,
             request,
             keys,
             positions: None,
             completion: None,
             job: None,
-        }));
+        };
+        (*ctx).live_host = Some((*ctx).live_spare.boxed(pending));
     }
     super::super::record::begin(ctx);
     let pending = unsafe { (*ctx).live_host.as_deref_mut().unwrap() } as *mut Pending;
@@ -152,7 +153,11 @@ pub(super) unsafe fn request(
         }
         state.requests.retire(token);
     }
-    let mut pending = unsafe { (*ctx).live_host.take().unwrap() };
+    // Completed: the slot's storage serves the task's next request.
+    let mut pending = unsafe {
+        let boxed = (*ctx).live_host.take().unwrap();
+        (*ctx).live_spare.unbox(boxed)
+    };
     let result = pending.completion.take().unwrap();
     native::observe_span(ctx, pending.request.buffers(), &result)?;
     Ok(result)

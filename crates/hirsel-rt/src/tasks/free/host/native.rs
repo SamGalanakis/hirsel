@@ -487,13 +487,16 @@ pub(crate) unsafe fn finish_result(
     parked: bool,
 ) -> Result<Completion, ()> {
     assert!(unsafe { (*ctx).native_host_result.is_none() });
-    unsafe { (*ctx).native_host_result = Some(Box::new(result)) };
+    unsafe { (*ctx).native_host_result = Some((*ctx).native_result_spare.boxed(result)) };
     if operation && !parked {
         unsafe { crate::tasks::yield_now(&mut *ctx) };
     } else if !operation {
         unsafe { crate::tasks::leave_home(ctx) };
     }
-    *unsafe { (*ctx).native_host_result.take().expect("a native delivery") }
+    unsafe {
+        let boxed = (*ctx).native_host_result.take().expect("a native delivery");
+        (*ctx).native_result_spare.unbox(boxed)
+    }
 }
 
 /// Keep host-owned payloads outside abandonable Rust frames while an ABI
@@ -510,7 +513,7 @@ pub(crate) unsafe fn convert_result<T>(
         return convert(&completion);
     }
     assert!(unsafe { (*ctx).native_host_result.is_none() });
-    unsafe { (*ctx).native_host_result = Some(Box::new(Ok(completion))) };
+    unsafe { (*ctx).native_host_result = Some((*ctx).native_result_spare.boxed(Ok(completion))) };
     let value = unsafe {
         (*ctx)
             .native_host_result
@@ -520,7 +523,10 @@ pub(crate) unsafe fn convert_result<T>(
             .unwrap()
     } as *const Completion;
     let converted = convert(unsafe { &*value });
-    drop(unsafe { (*ctx).native_host_result.take().unwrap() });
+    drop(unsafe {
+        let boxed = (*ctx).native_host_result.take().unwrap();
+        (*ctx).native_result_spare.unbox(boxed)
+    });
     converted
 }
 

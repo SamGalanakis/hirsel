@@ -385,6 +385,10 @@ pub struct QueryEngine {
     /// A host admits this engine's header partitions; before that, headers
     /// are charged to the engine rather than the standalone budget.
     pub(crate) headers_hosted: bool,
+    /// A header signature execution: it serves one demanded header and is
+    /// dropped, so materializing a definition installs only that definition's
+    /// items, not its whole file.
+    pub(crate) single_header: bool,
     signature_stack: Vec<DefPath>,
     recomputes: BTreeMap<(DefPath, QueryKind), usize>,
     /// Memos recorded (computed, not reused), by query kind.
@@ -761,6 +765,7 @@ impl QueryEngine {
             memo: Arc::new(hirsel_types::TypeMemo::new()),
             bootstrap_active: false,
             headers_hosted: false,
+            single_header: false,
             signature_stack: vec![],
             recomputes: BTreeMap::new(),
             recorded: BTreeMap::new(),

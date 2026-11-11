@@ -464,6 +464,12 @@ impl HeaderProducts {
         engine.inherit_source_records((*self.owners).clone());
         engine
     }
+    /// An execution that produces one header and is then dropped.
+    fn signature_execution(self: &Arc<Self>) -> QueryEngine {
+        let mut engine = self.execution();
+        engine.single_header = true;
+        engine
+    }
     pub(crate) fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }
@@ -603,7 +609,7 @@ impl HeaderProducts {
         if let Some(product) = cell.get() {
             return Some(Ok(product));
         }
-        let demanded = self.produce(&mut self.execution(), id);
+        let demanded = self.produce(&mut self.signature_execution(), id);
         match (cell.get(), demanded) {
             (Some(product), _) => Some(Ok(product)),
             (None, Err(error)) => Some(Err(error)),
@@ -625,7 +631,7 @@ impl HeaderProducts {
             }
             let mut working = None;
             let demanded = self.produce_with_working(
-                &mut self.execution(),
+                &mut self.signature_execution(),
                 id,
                 Some((&mut working, cx.scratch_bytes())),
             );
@@ -1527,7 +1533,7 @@ impl hirsel_validate::SignatureSource for RowSource {
         let headers = &self.0;
         let output = match headers.ready(id) {
             Some(product) => product.result.clone(),
-            None => headers.demand(&mut headers.execution(), id),
+            None => headers.demand(&mut headers.signature_execution(), id),
         };
         output.map(|output| output.value.clone())
     }

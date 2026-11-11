@@ -939,7 +939,20 @@ impl HeaderSources {
             }) {
                 return Ok(false);
             }
-            Self::install_items(engine, syntaxes);
+            // A single-header execution starts empty and is dropped after
+            // one demand: siblings it reads are installed when demanded.
+            // Longer-lived engines keep the whole file, so their item table
+            // changes once per file and not once per definition.
+            if siblings || !engine.single_header {
+                Self::install_items(engine, syntaxes);
+            } else {
+                let demanded: Vec<_> = syntaxes
+                    .iter()
+                    .filter(|syntax| syntax.item.definition == *path)
+                    .cloned()
+                    .collect();
+                Self::install_items(engine, &demanded);
+            }
             engine.declarations.place_product(&product.declarations);
         }
         // A closed specialization can share a written source owner without

@@ -2193,6 +2193,7 @@ mod region_width_tests {
             instance: digest,
             target: table.target,
             abi: FnAbiId(0),
+            charged: false,
         });
         unit.tables.regions = [true, false, true]
             .into_iter()

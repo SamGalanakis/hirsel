@@ -1638,6 +1638,7 @@ fn finalizer_transport_fixture() -> (
             definition: support::path("Res"),
             instance: support::hash("Res.drop"),
             abi: finalizer_abi,
+            charged: false,
         },
     )]));
     let ordinary = hirsel_rc::cleanup::lower(before.clone(), &table, &finalizers).unwrap();
@@ -3397,6 +3398,7 @@ fn compound_drop_fixture_with_layout(
             definition: support::path("Res"),
             instance: support::hash("Res.drop"),
             abi,
+            charged: false,
         },
     )]));
     if parent {
@@ -3407,6 +3409,7 @@ fn compound_drop_fixture_with_layout(
                 definition: support::path("Pair"),
                 instance: support::hash("Pair.drop"),
                 abi: parent_abi,
+                charged: false,
             },
         );
     }
@@ -3761,6 +3764,7 @@ fn ownership_trace_compound_failure_boundary_stays_before_independent_cleanup_sp
             definition: support::path("Res"),
             instance: support::hash("Res.drop"),
             abi,
+            charged: false,
         },
     )]));
     let (after, output, _) = hirsel_rc::cleanup::lower_observed(

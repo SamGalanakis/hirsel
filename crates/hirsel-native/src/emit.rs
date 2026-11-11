@@ -87,12 +87,22 @@ pub fn emit_glue(
             abi: unit.abi,
         });
     }
+    // A finalizer whose drop body also has a charged unit (STORE-11 energy).
+    let instances: std::collections::BTreeSet<_> =
+        program.summaries.iter().map(|s| s.instance).collect();
+    let charged_finalizers = program
+        .finalizers
+        .iter()
+        .filter(|(_, body)| instances.contains(&hirsel_lir::energy::charged_digest(**body)))
+        .map(|(&layout, _)| layout)
+        .collect();
     let inputs = GlueInputs {
         target: &program.target,
         layouts: &program.table,
         keys: &program.keys,
         registry: registry.clone(),
         finalizers: &program.finalizers,
+        charged_finalizers: &charged_finalizers,
         glue: &glue,
         failures: &failures,
         statics: &program.statics,

@@ -289,6 +289,9 @@ pub struct Instances {
     payload_sources: HashMap<InstanceId, Vec<hirsel_lir::sealed_payload_source::SourcePayload>>,
     receipt_sources: HashMap<InstanceId, hirsel_lir::sealed_payload_source::ReceiptSource>,
     lexical_keys: HashMap<InstanceId, InstanceKey>,
+    /// Charged instances by their uncharged instance, and the reverse.
+    charged: HashMap<InstanceId, InstanceId>,
+    uncharged: HashMap<InstanceId, InstanceId>,
     function_entries: BTreeMap<DefPath, BodyId>,
     producers: BTreeMap<DefPath, HashMap<(BodyId, hirsel_tir::LocalId), Option<Producer>>>,
 }
@@ -322,6 +325,8 @@ impl Instances {
             payload_sources: HashMap::new(),
             receipt_sources: HashMap::new(),
             lexical_keys: HashMap::new(),
+            charged: HashMap::new(),
+            uncharged: HashMap::new(),
             function_entries: BTreeMap::new(),
             producers: BTreeMap::new(),
         }
@@ -553,6 +558,72 @@ impl Instances {
         id: InstanceId,
     ) -> Option<&hirsel_lir::sealed_payload_source::ReceiptSource> {
         self.receipt_sources.get(&id)
+    }
+
+    /// The charged instance of `id` (STORE-11 energy), registered on first
+    /// demand: the same body, actuals and ABI under `InstanceKey::charged`.
+    /// Its import reads every table through `id` and emits the body's charges;
+    /// the uncharged instance emits none. A charged closure's parent is the
+    /// charged instance of its parent, which is the only code that forms it.
+    pub fn charge(&mut self, id: InstanceId) -> Result<InstanceId, InstanceError> {
+        let id = self.uncharged(id);
+        if let Some(&charged) = self.charged.get(&id) {
+            return Ok(charged);
+        }
+        if self.roles[id.index()].is_library() {
+            return Err(InstanceError::Malformed(
+                "a library body has no charged instance".into(),
+            ));
+        }
+        if self.views.len() >= MAX_INSTANCES {
+            return Err(InstanceError::Limit);
+        }
+        let role = match self.roles[id.index()] {
+            InstanceRole::Closure { parent } => InstanceRole::Closure {
+                parent: self.charge(parent)?,
+            },
+            ref role => role.clone(),
+        };
+        let mut view = self.views[id.index()].clone();
+        view.key = view.key.charged();
+        let charged = InstanceId(self.views.len() as u32);
+        if self.by_key.insert(view.key.clone(), charged).is_some() {
+            return Err(InstanceError::Malformed(
+                "a charged key already names an instance".into(),
+            ));
+        }
+        if let Some(lexical) = self.lexical_keys.get(&id).cloned() {
+            self.lexical_keys.insert(charged, lexical.charged());
+        }
+        self.views.push(view);
+        self.roles.push(role);
+        self.callables.push(self.callables[id.index()]);
+        self.abis.push(self.abis[id.index()]);
+        self.actuals.push(self.actuals[id.index()].clone());
+        self.environments.push(self.environments[id.index()]);
+        self.charged.insert(id, charged);
+        self.uncharged.insert(charged, id);
+        Ok(charged)
+    }
+
+    /// The uncharged instance of `id`: `id` itself unless it is charged.
+    pub fn uncharged(&self, id: InstanceId) -> InstanceId {
+        self.uncharged.get(&id).copied().unwrap_or(id)
+    }
+
+    /// Whether any instance is charged.
+    pub fn any_charged(&self) -> bool {
+        !self.charged.is_empty()
+    }
+
+    /// Whether `id` is a charged instance.
+    pub fn is_charged(&self, id: InstanceId) -> bool {
+        self.uncharged.contains_key(&id)
+    }
+
+    /// The charged instance of `id`, if one is registered.
+    pub fn charged_of(&self, id: InstanceId) -> Option<InstanceId> {
+        self.charged.get(&id).copied()
     }
 
     /// Match source-only closure identity to its independently reconstructed native

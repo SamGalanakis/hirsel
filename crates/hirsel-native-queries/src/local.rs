@@ -438,6 +438,7 @@ impl LocalReadyQueries {
                             definition,
                             instance,
                             abi: binding.abi(abi).ok_or("missing finalizer ABI")?,
+                            charged: false,
                         },
                     ))
                 })

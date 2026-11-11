@@ -73,6 +73,7 @@ impl Program {
                 &self.finalizers,
             ),
             finalizers: &self.finalizers,
+            charged_finalizers: &Default::default(),
             glue: &glue,
             failures: &failures,
             statics: &self.statics,

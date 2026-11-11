@@ -797,6 +797,9 @@ impl DemandInstances {
         receipt_roots: Option<Reference>,
     ) -> Result<Request, String> {
         let key = &instances.view(id).key;
+        // STORE-11 energy: a charged instance travels as its base's recipe and
+        // plan under its own key; the demanding worker charges the restored base.
+        let base = instances.uncharged(id);
         let (recipe, layouts) = if instances.roles[id.index()].is_library() {
             let recipe =
                 LibraryRecipe::capture(&engine.declarations().program, instances, id, table)?
@@ -817,7 +820,7 @@ impl DemandInstances {
             (
                 self.put(
                     SOURCE_RECIPE,
-                    &SourceRecipe::capture(instances, id)?.encode(&self.records, engine)?,
+                    &SourceRecipe::capture(instances, base)?.encode(&self.records, engine)?,
                 )?,
                 None,
             )
@@ -842,7 +845,7 @@ impl DemandInstances {
                 INSTANCE_PLAN,
                 &self
                     .records
-                    .encode(engine, &InstancePlan::capture(instances, id)?)
+                    .encode(engine, &InstancePlan::capture(instances, base)?)
                     .ok_or("native original plan encoding failed")?,
             )?,
         }))
@@ -957,10 +960,12 @@ impl DemandInstances {
                 .records
                 .decode(source, &bytes)
                 .ok_or("native original instance plan decoding failed")?;
+            // A charged request's plan is its uncharged base's (STORE-11 energy).
+            let lexical = request.lexical.bind()?;
             plan.register(
                 &declarations.program,
                 &declarations.context,
-                &request.lexical.bind()?,
+                &lexical.uncharged().unwrap_or(lexical),
                 request.source_definition().is_none(),
                 &mut layouts,
                 &mut instances,
@@ -1277,6 +1282,13 @@ impl DemandInstances {
             .get(key.instance.encoding())
             .cloned()
             .ok_or("native instance was not discovered")?;
+        // STORE-11 energy: a charged instance is its uncharged base's recipe,
+        // plan, source and receipts; the worker restores the base and charges it.
+        let base = key
+            .instance
+            .uncharged()
+            .unwrap_or_else(|| key.instance.clone());
+        let charged = base != key.instance;
         let mut receipt_roots = request.receipt_roots;
         let receipt_graph = if request.recipe.domain == SOURCE_RECIPE
             && (request.receipt_roots.is_some() || inputs.receipt_required())
@@ -1312,6 +1324,7 @@ impl DemandInstances {
             None
         };
         let lexical = request.lexical.bind()?;
+        let lexical = lexical.uncharged().unwrap_or(lexical);
         let selected_receipt = if let Some((graph, sources)) = &receipt_graph {
             self.receipt_sources.extend(sources.clone());
             let provider = inputs
@@ -1322,7 +1335,7 @@ impl DemandInstances {
                 graph,
                 &inputs.declarations().program,
                 &self.target,
-                |selected| selected == &key.instance,
+                |selected| selected == &base,
             )?);
             let mut matching = Vec::new();
             for selected in &graph.requests {
@@ -1342,7 +1355,7 @@ impl DemandInstances {
                 ));
             };
             let selected = *selected;
-            if selected.aware_key().unwrap_or(&lexical) != &key.instance {
+            if selected.aware_key().unwrap_or(&lexical) != &base {
                 return Err("native receipt request changed with current original source".into());
             }
             Some(selected)
@@ -1373,13 +1386,14 @@ impl DemandInstances {
         let mut operations = if request.recipe.domain == SOURCE_RECIPE {
             let selected = hirsel_lir::ir::Symbol {
                 kind: hirsel_lir::ir::SymbolKind::Function,
-                definition: key.instance.definition().clone(),
-                instance: Some(key.instance.digest()),
+                definition: base.definition().clone(),
+                instance: Some(base.digest()),
+                charged: false,
             };
             let (evidence, original) = inputs.source_invocations(
                 &request.key.definition,
                 &selected,
-                hirsel_tir::BodyId(key.instance.body()),
+                hirsel_tir::BodyId(base.body()),
             )?;
             original_source = original;
             let mut operations = inputs.declarations().program.operation_registry();
@@ -1407,7 +1421,7 @@ impl DemandInstances {
             receipts: Some(&self.receipt_sources),
             source: request
                 .source_definition()
-                .map(|_| (key.instance.definition(), key.instance.digest())),
+                .map(|_| (base.definition(), base.digest())),
             all_sources: false,
             pretransfer: None,
         };
@@ -1449,7 +1463,7 @@ impl DemandInstances {
             .transpose()?;
         let source = if request.recipe.domain == SOURCE_RECIPE {
             let recipe = SourceRecipe::decode(&self.records, inputs, &recipe_bytes)?;
-            if recipe.key()? != request.lexical.bind()? {
+            if recipe.key()? != lexical {
                 return Err("source recipe differs from demanded key".into());
             }
             let (original, source_input) = match original_source {
@@ -1458,7 +1472,7 @@ impl DemandInstances {
             };
             if let Some(input) = &source_input {
                 input
-                    .demand_body(&request.lexical.bind()?)
+                    .demand_body(&lexical)
                     .map_err(|e| format!("native original source: {e:?}"))?;
             }
             Some((recipe, original, source_input))
@@ -1549,7 +1563,7 @@ impl DemandInstances {
         plan.register(
             &inputs.declarations().program,
             &inputs.declarations().context,
-            &request.lexical.bind()?,
+            &lexical,
             request.source_definition().is_none(),
             &mut layouts,
             &mut instances,
@@ -1557,10 +1571,20 @@ impl DemandInstances {
         self.imports += 1;
         if let Some(expected) = self
             .seal_inventory
-            .get(&(key.instance.definition().clone(), key.instance.digest()))
+            .get(&(base.definition().clone(), base.digest()))
         {
+            if charged {
+                return Err("a charged instance of a sealed-source body (STORE-11 energy)".into());
+            }
             instances.bind_payload_sources(id, expected.payloads().to_vec());
         }
+        let id = if charged {
+            instances
+                .charge(id)
+                .map_err(|e| format!("native charged instance: {e:?}"))?
+        } else {
+            id
+        };
         let imported = hirsel_rc::import::import_instance(
             &inputs.declarations().program,
             &mut instances,
@@ -1585,6 +1609,27 @@ impl DemandInstances {
         for request in imported.required {
             hirsel_rc::library::instantiate(&mut layouts, &mut instances, request)
                 .map_err(|e| format!("native library registration: {e:?}"))?;
+        }
+        for callee in imported.charged {
+            instances
+                .charge(callee)
+                .map_err(|e| format!("native charged callee: {e:?}"))?;
+        }
+        if charged {
+            // A charged unit's cleanup calls charged finalizers, which this
+            // worker requests as it requests its callees.
+            let finalizers = instances
+                .ids()
+                .filter(|&other| {
+                    let role = &instances.roles[other.index()];
+                    role.is_finalizer() && !role.is_library() && !instances.is_charged(other)
+                })
+                .collect::<Vec<_>>();
+            for finalizer in finalizers {
+                instances
+                    .charge(finalizer)
+                    .map_err(|e| format!("native charged finalizer: {e:?}"))?;
+            }
         }
         // Root registration also selects callable relocations of registry
         // constants. A worker-local recipe restores only this instance, so
@@ -1682,7 +1727,7 @@ impl DemandInstances {
         let table = layouts.finish();
         let imported_unit = if let Some(expected) = self
             .seal_inventory
-            .get(&(key.instance.definition().clone(), key.instance.digest()))
+            .get(&(base.definition().clone(), base.digest()))
             .filter(|_| !instances.roles[id.index()].is_library())
         {
             let declarations =
@@ -1751,6 +1796,11 @@ impl DemandInstances {
         constant_reads.dedup();
         let action = self.action(inputs, &request, options, &selection_reads, &constant_reads)?;
         let finalizers = hirsel_rc::cleanup::Finalizers::planned(&instances, &table);
+        let finalizers = if charged {
+            finalizers.charged(&instances)
+        } else {
+            finalizers
+        };
         let reached_finalizers = finalizers.reached(&unit, &table);
         let templates = super::optimizer::TemplateFacts::of(
             &unit,

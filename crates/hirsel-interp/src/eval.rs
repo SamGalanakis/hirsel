@@ -2410,7 +2410,9 @@ pub(crate) fn execute_frames<O: crate::ownership_trace::Observer>(
             ..
         }) = instruction
         {
-            if let Some(budget) = limits.source {
+            if let Some(budget) = limits.source
+                && event.kind.counted()
+            {
                 if execution.charged == budget {
                     return Err(Error::Exhausted(Box::new(crate::Exhaustion {
                         budget,

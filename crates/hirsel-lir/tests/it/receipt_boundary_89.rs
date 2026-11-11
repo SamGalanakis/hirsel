@@ -414,6 +414,7 @@ fn fixture_passing(
                         kind: SymbolKind::Function,
                         definition: DefPath::core("map.insert"),
                         instance: Some(support::hash("independent primitive")),
+                        charged: false,
                     },
                     abi: id,
                 });

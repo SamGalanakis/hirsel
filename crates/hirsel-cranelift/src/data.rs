@@ -343,6 +343,26 @@ impl Emitter<'_> {
             ObjectSymbolKind::Function,
             Some(&finalizer.definition),
         );
+        let charged = if self.inputs.glue().charged_finalizers.contains(&layout) {
+            let name = symbol_name(
+                &finalizer.definition,
+                Some(&hirsel_lir::energy::charged_digest(*instance)),
+            );
+            let Ok(charged) = self.import_function(&name, &body_sig) else {
+                return Self::invalid_at(
+                    definition,
+                    format!("the charged drop body `{name}` does not take (context, self address)"),
+                );
+            };
+            self.manifested.import(
+                &name,
+                ObjectSymbolKind::Function,
+                Some(&finalizer.definition),
+            );
+            Some(charged)
+        } else {
+            None
+        };
         let mut sig = ir::Signature::new(self.call_conv);
         sig.params.extend([
             AbiParam::new(PTR),
@@ -352,7 +372,11 @@ impl Emitter<'_> {
         ]);
         sig.returns.push(AbiParam::new(types::I8).uext());
         let name = format!("hirsel.drop.{}", self.inputs.keys.key(layout).hex());
-        self.helper(&name, &sig, |_| Helper::Drop { body, caller_site })
+        self.helper(&name, &sig, |_| Helper::Drop {
+            body,
+            charged,
+            caller_site,
+        })
     }
 
     /// A static immortal block named `name` (exported from glue, else private): the
@@ -532,23 +556,45 @@ impl Emitter<'_> {
         self.constant("hirsel.mask", bytes, 8)
     }
 
-    /// `hirsel.drop.<layout>(ctx, self, anchor) -> i8`: the drop body's status.
+    /// `hirsel.drop.<layout>(ctx, self, anchor) -> i8`: the drop body's status. With a
+    /// `charged` instance, the running context picks it: the charged one inside a budget
+    /// (an allowance other than unbounded), else `body` (STORE-11 energy).
     pub(crate) fn define_drop_wrapper(
         &mut self,
         mut b: FunctionBuilder<'_>,
         body: FuncId,
+        charged: Option<FuncId>,
         caller_site: bool,
     ) {
         let entry = b.create_block();
         b.append_block_params_for_function_params(entry);
         b.switch_to_block(entry);
         let params = b.block_params(entry).to_vec();
-        let callee = self.module.declare_func_in_func(body, b.func);
         let args = if caller_site {
             vec![params[0], params[2], params[3], params[1]]
         } else {
             params[..2].to_vec()
         };
+        if let Some(charged) = charged {
+            let remaining = b.ins().load(
+                types::I64,
+                ir::MemFlagsData::new(),
+                params[0],
+                hirsel_lir::runtime_abi::CTX_ENERGY_OFFSET as i32,
+            );
+            let bounded = b
+                .ins()
+                .icmp_imm(ir::condcodes::IntCC::NotEqual, remaining, -1);
+            let (yes, no) = (b.create_block(), b.create_block());
+            b.ins().brif(bounded, yes, &[], no, &[]);
+            b.switch_to_block(yes);
+            let callee = self.module.declare_func_in_func(charged, b.func);
+            let call = b.ins().call(callee, &args);
+            let status = b.inst_results(call)[0];
+            b.ins().return_(&[status]);
+            b.switch_to_block(no);
+        }
+        let callee = self.module.declare_func_in_func(body, b.func);
         let call = b.ins().call(callee, &args);
         let status = b.inst_results(call)[0];
         b.ins().return_(&[status]);

@@ -97,6 +97,7 @@ fn empty(cx: &mut ImportCx<'_>, call: &CallShape<'_>) -> super::R<bool> {
         kind: SymbolKind::Type,
         definition: call.path.clone(),
         instance: None,
+        charged: false,
     });
     let result = cx.construct(layout, shape, ConstructorKind::Record(symbol), &values)?;
     cx.finish(call, result)?;
@@ -200,6 +201,7 @@ fn nominal(b: &mut Body<'_, '_>, name: &str) -> SymbolId {
         kind: SymbolKind::Type,
         definition: hirsel_syntax::DefPath::core(name),
         instance: None,
+        charged: false,
     })
 }
 pub(super) fn option(b: &mut Body<'_, '_>, value: Option<ValueId>) -> R<ValueId> {

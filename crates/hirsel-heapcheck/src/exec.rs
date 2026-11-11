@@ -2135,6 +2135,7 @@ impl<'p, S: Stage> Machine<'p, S> {
                     kind: SymbolKind::Function,
                     definition: self.unit(*code).header.definition.clone(),
                     instance: Some(self.unit(*code).header.instance),
+                    charged: self.unit(*code).header.charged,
                 })
             }
             LayoutKind::Inline { element, count } => {
@@ -3961,11 +3962,13 @@ impl<'p, S: Stage> Machine<'p, S> {
             }
             Inst::ReadStatic { result, symbol } => {
                 let sym = self.symbol(unit, symbol)?;
+                let data = hirsel_lir::statics::resolve(&self.program.statics, sym)
+                    .ok_or_else(|| err(V::Malformed, "no static data for symbol"))?;
                 let index = self
                     .program
                     .statics
                     .iter()
-                    .position(|s| &s.symbol == sym)
+                    .position(|s| s.symbol == data.symbol)
                     .ok_or_else(|| err(V::Malformed, "no static data for symbol"))?;
                 let root = self.static_blocks(index)?;
                 let held = self.program.statics[index].blocks[0].layout;
@@ -4262,6 +4265,9 @@ impl<'p, S: Stage> Machine<'p, S> {
                 }
                 self.bind(f, result, m)?;
             }
+            // STORE-11 "Energy": the heap model runs unmetered; a charge's
+            // failure edge is the native engines', checked by V.
+            Inst::Charge { .. } => {}
             Inst::Check { condition, failure } => {
                 let Val::Bits {
                     scalar: ScalarKind::Bool,
@@ -8760,6 +8766,7 @@ impl<'p, S: Stage> Machine<'p, S> {
                     kind: SymbolKind::Function,
                     definition: self.unit(code).header.definition.clone(),
                     instance: Some(self.unit(code).header.instance),
+                    charged: self.unit(code).header.charged,
                 }),
                 image @ Val::Image(_)
                     if matches!(self.record(layout)?.kind, LayoutKind::Slice { .. }) =>

@@ -234,9 +234,16 @@ pub(super) fn validate_bound(definition: &ReadDefinition<'_>, t: &TypeInterner) 
                                         }
                                     )
                             }
-                            hirsel_tir::SourceEventKind::Iteration => {
+                            hirsel_tir::SourceEventKind::Iteration
+                            | hirsel_tir::SourceEventKind::CountedIteration => {
                                 i != 0 || b == body.entry.0 as usize
                             }
+                            // A counted loop's entry charge precedes its
+                            // header; a body's entry charge opens its entry block.
+                            hirsel_tir::SourceEventKind::CountedEntry { .. } => {
+                                !matches!(block.terminator, Terminator::Goto(_))
+                            }
+                            hirsel_tir::SourceEventKind::Entry => b != body.entry.0 as usize,
                         };
                         if misplaced {
                             add(
@@ -248,6 +255,9 @@ pub(super) fn validate_bound(definition: &ReadDefinition<'_>, t: &TypeInterner) 
                                     index: event.source,
                                 },
                             );
+                        }
+                        for place in event.kind.reads() {
+                            refs.push((block_id, ins, "place", place.0));
                         }
                     }
                     InstructionKind::Defuse { place } => {

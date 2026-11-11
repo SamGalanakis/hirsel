@@ -290,6 +290,7 @@ mod tests {
             instance: hash,
             target: hash,
             abi: FnAbiId(0),
+            charged: false,
         }));
         let mut table = LayoutTable::new(&TargetSpec::x86_64_unknown_linux_gnu());
         table.layouts = vec![

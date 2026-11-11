@@ -341,7 +341,30 @@ impl InstanceKey {
             ),
         }
     }
+
+    /// The charged instance of this one (STORE-11 energy): the same body
+    /// compiled with its charges, for code that can run under a budget.
+    /// Its digest is a function of this key's digest alone, so a symbol of
+    /// the charged instance is named from the uncharged one's digest.
+    pub fn charged(&self) -> Self {
+        self.derived(CHARGED_DOMAIN, &[])
+    }
+
+    /// The uncharged instance this charged key was derived from, if it is one.
+    pub fn uncharged(&self) -> Option<Self> {
+        let mut atoms = InstanceAtoms(self.encoding());
+        if atoms.next().ok()? != b"hirsel.derived-instance.v1" {
+            return None;
+        }
+        let parent = atoms.next().ok()?;
+        if atoms.next().ok()? != CHARGED_DOMAIN.as_bytes() || !atoms.0.is_empty() {
+            return None;
+        }
+        Self::from_encoding(&self.definition, self.body, parent.to_vec()).ok()
+    }
 }
+
+pub use hirsel_lir::energy::{CHARGED_DOMAIN, charged_digest};
 
 #[cfg(test)]
 mod derived_tests;

@@ -634,15 +634,21 @@ impl InstanceTasks {
                 {
                     continue;
                 }
+                // A charged instance (STORE-11 energy) is selected through its base.
+                let base = key
+                    .instance
+                    .uncharged()
+                    .unwrap_or_else(|| key.instance.clone());
                 let symbol = hirsel_lir::ir::Symbol {
                     kind: hirsel_lir::ir::SymbolKind::Function,
                     definition: key.instance.definition().clone(),
-                    instance: Some(key.instance.digest()),
+                    instance: Some(base.digest()),
+                    charged: false,
                 };
                 let (evidence, _) = source.source_invocations(
                     key.instance.definition(),
                     &symbol,
-                    hirsel_tir::BodyId(key.instance.body()),
+                    hirsel_tir::BodyId(base.body()),
                 )?;
                 operations
                     .invocations
@@ -671,16 +677,19 @@ impl InstanceTasks {
             let Some(path) = (entry.request.source).then(|| key.instance.definition()) else {
                 continue;
             };
+            // A charged instance (STORE-11 energy) is selected through its base.
+            let base = key
+                .instance
+                .uncharged()
+                .unwrap_or_else(|| key.instance.clone());
             let selected = hirsel_lir::ir::Symbol {
                 kind: hirsel_lir::ir::SymbolKind::Function,
                 definition: key.instance.definition().clone(),
-                instance: Some(key.instance.digest()),
+                instance: Some(base.digest()),
+                charged: false,
             };
-            let (evidence, _) = source.source_invocations(
-                path,
-                &selected,
-                hirsel_tir::BodyId(key.instance.body()),
-            )?;
+            let (evidence, _) =
+                source.source_invocations(path, &selected, hirsel_tir::BodyId(base.body()))?;
             if let Some(previous) = registry.invocations.insert(
                 evidence.body.definition.clone(),
                 evidence.invocations.clone(),
@@ -688,7 +697,9 @@ impl InstanceTasks {
             {
                 return Err("source invocation inventories differ within the request".into());
             }
-            registry.invocation_bodies.push(evidence.body);
+            if !registry.invocation_bodies.contains(&evidence.body) {
+                registry.invocation_bodies.push(evidence.body);
+            }
         }
         registry
             .invocation_bodies
@@ -1220,15 +1231,21 @@ impl InstanceTasks {
                     .sources
                     .contains_key(key.instance.definition())
                 {
+                    // A charged instance (STORE-11 energy) is selected through its base.
+                    let base = key
+                        .instance
+                        .uncharged()
+                        .unwrap_or_else(|| key.instance.clone());
                     let symbol = hirsel_lir::ir::Symbol {
                         kind: hirsel_lir::ir::SymbolKind::Function,
                         definition: key.instance.definition().clone(),
-                        instance: Some(key.instance.digest()),
+                        instance: Some(base.digest()),
+                        charged: false,
                     };
                     let (evidence, _) = source.source_invocations(
                         key.instance.definition(),
                         &symbol,
-                        hirsel_tir::BodyId(key.instance.body()),
+                        hirsel_tir::BodyId(base.body()),
                     )?;
                     operations
                         .invocations

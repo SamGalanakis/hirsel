@@ -1035,7 +1035,7 @@ snapshot_enum!(InstructionKind {
     Snapshot { destination, value },
     Charge(e)
 } in Cx);
-snapshot_enum!(SourceEventKind { Call, Iteration } in Cx);
+snapshot_enum!(SourceEventKind { Call, Iteration, CountedIteration, CountedEntry { from, to, inclusive }, Entry } in Cx);
 snapshot_struct!(SourceEvent { kind, source } in Cx);
 snapshot_struct!(Instruction {
     kind,

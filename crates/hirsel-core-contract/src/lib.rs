@@ -182,6 +182,8 @@ pub struct RuleCode(pub String);
 /// Rules the runtime records itself, inside an export whose row names no rule, at fixed
 /// codes: `RUNTIME_RULE_BASE + i` is `RUNTIME_RULES[i]`. Per-program codes stay below it.
 pub const RUNTIME_RULE_BASE: u32 = 1 << 31;
+/// The rule an exhausted energy charge fails with (STORE-11 "Energy").
+pub const ENERGY_RULE: &str = "STORE-11";
 pub const RUNTIME_RULES: [&str; 3] = ["CAP-2", "LANG-9", "LANG-10"];
 
 /// The `FailureKind` ordinal (`Check`, `Contract`, `Depth`, `OutOfSpace`, `DeadMutex`) of a

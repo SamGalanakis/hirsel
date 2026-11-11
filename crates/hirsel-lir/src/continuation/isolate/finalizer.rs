@@ -107,10 +107,23 @@ impl FinalizerSource {
     }
 }
 
+/// The finalizer body of each layout as `unit` runs it. A finalizer with a
+/// charged instance (STORE-11 energy) has two units: a charged unit's frames
+/// run the charged one, any other unit's frames the uncharged one, as the drop
+/// wrapper picks them by the running context.
 pub(crate) fn sources(
     units: &[&ValidatedUnit<Ready>],
     table: &LayoutTable,
+    unit: ContentHash,
 ) -> std::collections::BTreeMap<LayoutId, ContentHash> {
+    let instances: std::collections::BTreeSet<ContentHash> =
+        units.iter().map(|u| u.unit().header.instance).collect();
+    let charged: std::collections::BTreeSet<ContentHash> = instances
+        .iter()
+        .map(|&i| crate::energy::charged_digest(i))
+        .filter(|c| instances.contains(c))
+        .collect();
+    let in_charged = charged.contains(&unit);
     let mut found = std::collections::BTreeMap::new();
     for (index, layout) in table.layouts.iter().enumerate() {
         let Some(finalizer) = &layout.finalizer else {
@@ -120,6 +133,7 @@ pub(crate) fn sources(
         let matching: Vec<_> = units
             .iter()
             .filter(|u| u.unit().header.definition == finalizer.definition)
+            .filter(|u| charged.contains(&u.unit().header.instance) == in_charged)
             .filter_map(|u| {
                 FinalizerSource::derive(units, table, id, u.unit().header.instance).ok()
             })

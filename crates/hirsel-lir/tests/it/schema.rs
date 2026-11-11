@@ -363,6 +363,7 @@ fn fixture_unit<S: Stage>(table: &LayoutTable) -> LirUnit<S> {
         instance: hash("f instance"),
         target: table.target,
         abi: FnAbiId(0),
+        charged: false,
     });
     let reprs = [
         (ValueRepr::Unit, 0),
@@ -557,6 +558,7 @@ fn fixture_unit<S: Stage>(table: &LayoutTable) -> LirUnit<S> {
         kind,
         definition: path(&format!("s{i}")),
         instance: (i % 2 == 0).then(|| hash("instance")),
+        charged: false,
     })
     .collect();
     t.constants = [
@@ -2312,6 +2314,7 @@ fn runtime_declarations_match_the_landed_c_header() {
             "CTX_CLEANUP_MODE_OFFSET",
             runtime_abi::CTX_CLEANUP_MODE_OFFSET,
         ),
+        ("CTX_ENERGY_OFFSET", runtime_abi::CTX_ENERGY_OFFSET),
         ("PAGE_OWNER_OFFSET", runtime_abi::PAGE_OWNER_OFFSET),
         (
             "PAGE_XTHREAD_FREE_OFFSET",

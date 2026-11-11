@@ -138,6 +138,7 @@ mod tests {
             instance: digest,
             target: digest,
             abi: FnAbiId(0),
+            charged: false,
         })
     }
     #[test]

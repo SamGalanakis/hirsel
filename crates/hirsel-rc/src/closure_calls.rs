@@ -123,6 +123,8 @@ pub struct CallableEntry {
     pub abi: FnAbiId,
     pub origin: UnitOrigin,
     pub op_free: bool,
+    /// Whether the original body is a charged instance (STORE-11 energy).
+    pub charged: bool,
     /// The original body's summary; empty for a member of the caller's own
     /// call-graph component, so no summary depends on its own fixpoint.
     pub fields: FieldSummary,
@@ -955,6 +957,7 @@ pub fn rewrite_window(
             kind: SymbolKind::Function,
             definition: entry.key.definition().clone(),
             instance: Some(digest),
+            charged: entry.charged,
         };
         let selected = symbol(unit, &selected);
         unit.tables.closures[closure].code.as_mut().unwrap().symbol = selected;
@@ -1099,6 +1102,7 @@ fn rewrite_seeded_instance(
                     kind: SymbolKind::Function,
                     definition: source.key.definition().clone(),
                     instance: Some(digest),
+                    charged: source.charged,
                 };
                 let u = &mut *unit;
                 u.tables.calls[call].callee = Callee::Direct(symbol(u, &target));
@@ -1125,6 +1129,7 @@ fn function(u: &LirUnit<Value>) -> Symbol {
         kind: SymbolKind::Function,
         definition: u.header.definition.clone(),
         instance: Some(u.header.instance),
+        charged: u.header.charged,
     }
 }
 
@@ -1198,6 +1203,7 @@ pub fn specialize_units(
                     abi: u.header.abi,
                     origin: u.header.origin,
                     op_free: op_free.get(&function(u)) == Some(&true),
+                    charged: u.header.charged,
                     fields: FieldSummary::default(),
                 },
             )
@@ -1248,6 +1254,7 @@ pub fn specialize_units(
             kind: SymbolKind::Function,
             definition: entry.key.definition().clone(),
             instance: Some(entry.key.digest()),
+            charged: entry.charged,
         }]
     };
     let mut finished = Vec::new();

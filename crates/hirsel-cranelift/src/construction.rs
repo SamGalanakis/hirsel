@@ -173,13 +173,7 @@ impl<'a> FnEmitter<'_, 'a, '_> {
         let Some(symbol) = self.unit.tables.symbols.get(symbol.index()) else {
             return self.invalid("a static outside the symbol table");
         };
-        let Some(data) = self
-            .em
-            .inputs
-            .unit()
-            .statics
-            .iter()
-            .find(|d| d.symbol == *symbol)
+        let Some(data) = hirsel_lir::statics::resolve(&self.em.inputs.unit().statics, symbol)
         else {
             return self.invalid("a static without its data");
         };
@@ -190,9 +184,11 @@ impl<'a> FnEmitter<'_, 'a, '_> {
         // Glue defines the blocks: their prefixes hold the program's descriptor indices.
         let definition = self.definition();
         let align = self.layout(held)?.align;
-        let block =
-            self.em
-                .glue_block(&hirsel_lir::glue::static_symbol(symbol), align, definition)?;
+        let block = self.em.glue_block(
+            &hirsel_lir::glue::static_symbol(&data.symbol),
+            align,
+            definition,
+        )?;
         let header = self.static_header(block);
         let ty = self.value_type(result)?;
         match (ty.repr, &self.layout(ty.layout)?.kind) {

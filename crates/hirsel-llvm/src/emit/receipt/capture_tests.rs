@@ -188,6 +188,7 @@ fn fixture(
         kind: SymbolKind::Function,
         definition: hirsel_syntax::DefPath::core("receipt_capture_entered"),
         instance: Some(hash),
+        charged: false,
     });
     let capture_values = (0..3)
         .map(|ordinal| CaptureValue {

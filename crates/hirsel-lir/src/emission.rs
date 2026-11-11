@@ -133,6 +133,9 @@ pub struct GlueInputs<'a> {
     pub registry: crate::descriptor_registry::DescriptorRegistry,
     /// Per layout with a user finalizer, the instance digest of its drop body's unit.
     pub finalizers: &'a BTreeMap<LayoutId, ContentHash>,
+    /// The layouts among `finalizers` whose drop body also has a charged
+    /// instance (STORE-11 energy), chosen at each drop by the running context.
+    pub charged_finalizers: &'a std::collections::BTreeSet<LayoutId>,
     /// What the program's units need from glue, merged.
     pub glue: &'a crate::glue::UnitGlue,
     /// Every rule's code: `glue::failure_codes` of `glue.failure_rules`.
@@ -791,6 +794,7 @@ mod tests {
                             kind: crate::ir::SymbolKind::Function,
                             definition: definition("source"),
                             instance: Some(identity),
+                            charged: false,
                         },
                         source_abi: crate::abi_types::FnAbiId(0),
                         source_environment: false,

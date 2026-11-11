@@ -1112,6 +1112,11 @@ pub const INLINE: &[Inline] = &[
         effect: "inline free's owner check: a block of another worker's heap goes to the runtime",
     },
     Inline {
+        word: "CTX_ENERGY_OFFSET",
+        locality: Local,
+        effect: "a charged unit's subtract and store on the task's own energy allowance",
+    },
+    Inline {
         word: "CTX_FOREGROUND_COUNT_OFFSET",
         locality: Local,
         effect: "a depth-leaf call's read-only room test of the task's foreground depth",

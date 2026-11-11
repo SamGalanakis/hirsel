@@ -722,6 +722,7 @@ fn static_data_is_an_explicit_immortal_record() {
             kind: SymbolKind::Constant,
             definition: path("ANSWER"),
             instance: None,
+            charged: false,
         },
         c.cell,
         42u64.to_le_bytes().to_vec(),

@@ -55,6 +55,7 @@ fn dispatch(tag: u32) -> Run {
             kind: SymbolKind::Constant,
             definition: path("FORGED"),
             instance: None,
+            charged: false,
         },
         variant,
         tag.to_le_bytes().to_vec(),

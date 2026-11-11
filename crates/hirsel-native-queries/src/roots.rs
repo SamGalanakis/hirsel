@@ -822,15 +822,18 @@ impl NativeRoots for RootProducts {
             {
                 return Err("mixed native semantic owner origins".into());
             }
-            if key.instance
-                == *snapshot
-                    .instances
-                    .admitted(key, &environment)?
-                    .0
-                    .facts
-                    .source
-                    .ready_source
-                    .origin()
+            // A charged twin (STORE-11 energy) shares its base's definition
+            // and is never the definition's own native entry.
+            if key.instance.uncharged().is_none()
+                && key.instance
+                    == *snapshot
+                        .instances
+                        .admitted(key, &environment)?
+                        .0
+                        .facts
+                        .source
+                        .ready_source
+                        .origin()
                 && self.source.functions().get(key.instance.definition())
                     == Some(&key.instance.body())
                 && functions

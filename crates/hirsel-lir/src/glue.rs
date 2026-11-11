@@ -71,7 +71,8 @@ pub fn codec_symbol(key: &CodecKey) -> String {
 /// immortal block.
 pub fn static_symbol(symbol: &Symbol) -> String {
     format!(
-        "hirsel.static.{}",
+        "hirsel.static.{}{}",
+        if symbol.charged { "charged." } else { "" },
         symbol_name(&symbol.definition, symbol.instance.as_ref())
     )
 }

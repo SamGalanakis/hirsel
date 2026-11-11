@@ -314,6 +314,7 @@ impl<'a> Cx<'a> {
                 kind: SymbolKind::Function,
                 definition: path,
                 instance: Some(self.instances.view(instance).key.digest()),
+                charged: false,
             },
             abi: self.instances.abis[instance.index()],
         })
@@ -375,6 +376,7 @@ impl<'c, 'a> Body<'c, 'a> {
             instance: key,
             target: table.target,
             abi: cx.abi,
+            charged: false,
         });
         unit.tables.task_domains = 1;
         unit.scopes.push(ScopeInfo { parent: None });

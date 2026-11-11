@@ -57,6 +57,7 @@ fn execute(source: &str, root: TypeKind, native: NativeType) {
         keys: &keys,
         registry,
         finalizers: &finalizers,
+        charged_finalizers: &Default::default(),
         glue: &glue,
         failures: &failures,
         statics: &h.statics,

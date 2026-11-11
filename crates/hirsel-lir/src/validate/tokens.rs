@@ -488,6 +488,10 @@ fn token_operands<S>(cx: &Cx<'_, S>, inst: &Inst) -> Vec<ValueId> {
             ..
         } => vec![left, right, addend],
         Inst::Check { condition, .. } => vec![condition],
+        Inst::Charge {
+            energy: crate::ir::Energy::Span { from, to, .. },
+            ..
+        } => vec![from, to],
         Inst::Read { reaching, .. } | Inst::Copy { reaching, .. } => vec![reaching],
         _ => Vec::new(),
     }

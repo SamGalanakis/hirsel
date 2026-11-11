@@ -699,11 +699,8 @@ fn unit_digest<S: crate::stage::Stage + Clone>(
             .symbols
             .get(symbol.index())
             .ok_or("a static outside the symbol table")?;
-        let data = inputs
-            .statics
-            .iter()
-            .find(|d| d.symbol == *symbol)
-            .ok_or("a static without its data")?;
+        let data =
+            crate::statics::resolve(&inputs.statics, symbol).ok_or("a static without its data")?;
         let mut data = data.clone();
         for block in &mut data.blocks {
             parts.push(inputs.keys.key(block.layout).0.0.to_vec());

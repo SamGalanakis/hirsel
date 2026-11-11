@@ -47,6 +47,7 @@ fn explicit_instance_import_keeps_source_invocations_without_program_bodies() {
             kind: SymbolKind::Function,
             definition: view.key.definition().clone(),
             instance: Some(view.key.digest()),
+            charged: false,
         };
         let evidence = hirsel_rc::invocations::bind_source(
             &bodies[view.key.definition()],

@@ -411,6 +411,7 @@ impl Importer<'_> {
                         SymbolKind::Function,
                         &direct.symbol.definition,
                         direct.symbol.instance,
+                        direct.symbol.charged,
                     );
                     (Callee::Direct(symbol), direct.abi)
                 } else if let Some(op) = self.program.operations.get(path).cloned() {
@@ -428,7 +429,7 @@ impl Importer<'_> {
                     let (symbol, abi) = self.direct(path, arguments)?;
                     (Callee::Direct(symbol), abi)
                 } else if let Some(abi) = self.foreign_abi(path)? {
-                    let symbol = self.symbol(SymbolKind::Function, path, None);
+                    let symbol = self.symbol(SymbolKind::Function, path, None, false);
                     (Callee::Direct(symbol), abi)
                 } else {
                     return unsupported(format!(
@@ -453,11 +454,12 @@ impl Importer<'_> {
                             InstanceError::MissingInstance(self.def.path.path().clone()).into()
                         );
                     };
-                    let digest = self.instances.view(instance).key.digest();
+                    let (digest, charged) = self.callee_digest(instance);
                     let code = self.symbol(
                         SymbolKind::Function,
                         &self.def.path.path().clone(),
                         Some(digest),
+                        charged,
                     );
                     Some((code, self.instances.abis[instance.index()]))
                 };

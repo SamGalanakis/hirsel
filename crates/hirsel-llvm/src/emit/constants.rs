@@ -117,7 +117,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         let Some(symbol) = self.unit.tables.symbols.get(symbol.index()) else {
             return self.invalid("a static outside the symbol table");
         };
-        let Some(data) = self.inputs.statics.iter().find(|d| d.symbol == *symbol) else {
+        let Some(data) = hirsel_lir::statics::resolve(&self.inputs.statics, symbol) else {
             return self.invalid("a static without its data");
         };
         let Some(root) = data.blocks.first() else {
@@ -126,7 +126,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         let held = root.layout;
         // Glue defines the blocks: their prefixes hold the program's descriptor indices. A
         // block names only blocks after it, so each is declared after its targets.
-        let name = hirsel_lir::glue::static_symbol(symbol);
+        let name = hirsel_lir::glue::static_symbol(&data.symbol);
         let mut headers: Vec<Option<Value<'m>>> = vec![None; data.blocks.len()];
         for (index, block) in data.blocks.iter().enumerate().rev() {
             let mut references = Vec::with_capacity(block.references.len());

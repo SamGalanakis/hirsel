@@ -186,9 +186,11 @@ pub(crate) enum Helper {
     Hash {
         layout: LayoutId,
     },
-    /// `hirsel.drop.<layout>`, calling the drop body `body`.
+    /// `hirsel.drop.<layout>`, calling the drop body `body`, or its charged
+    /// instance `charged` inside a budget (STORE-11 energy).
     Drop {
         body: FuncId,
+        charged: Option<FuncId>,
         caller_site: bool,
     },
     DropResume {
@@ -911,9 +913,11 @@ impl<'a> Emitter<'a> {
                 Helper::Hash { layout } => {
                     crate::compare::define_hasher(self, b, layout, definition)?
                 }
-                Helper::Drop { body, caller_site } => {
-                    self.define_drop_wrapper(b, body, caller_site)
-                }
+                Helper::Drop {
+                    body,
+                    charged,
+                    caller_site,
+                } => self.define_drop_wrapper(b, body, charged, caller_site),
                 Helper::DropResume { body, caller_site } => {
                     self.define_drop_resume_wrapper(b, body, caller_site)
                 }

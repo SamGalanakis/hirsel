@@ -354,6 +354,7 @@ fn sealed_data_callback_sum_is_independently_proved_by_v_and_c() {
         kind: hirsel_lir::ir::SymbolKind::Function,
         definition: imported.unit.header.definition.clone(),
         instance: Some(imported.unit.header.instance),
+        charged: imported.unit.header.charged,
     };
     let evidence = hirsel_rc::invocations::bind_source(
         definition,

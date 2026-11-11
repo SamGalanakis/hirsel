@@ -402,6 +402,7 @@ fn option_finalizer(variant: u8, failing: bool) {
             definition: finalizer_path,
             instance: finalizer.header.instance,
             abi: FnAbiId(1),
+            charged: false,
         },
     )]));
     let result = hirsel_rc::cleanup::lower(caller, &table, &finalizers);

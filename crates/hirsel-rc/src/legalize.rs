@@ -654,6 +654,7 @@ impl Lowering<'_> {
                 name: name.into(),
             }),
             instance: None,
+            charged: false,
         };
         let symbols = &mut self.ed.unit.tables.symbols;
         let index = symbols

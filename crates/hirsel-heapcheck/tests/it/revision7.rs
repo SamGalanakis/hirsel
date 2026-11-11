@@ -407,6 +407,7 @@ fn shared_write(set_len: bool, shared: bool, static_list: bool) -> Run {
             kind: SymbolKind::Constant,
             definition: path("XS"),
             instance: None,
+            charged: false,
         },
         s.payload,
         bytes,

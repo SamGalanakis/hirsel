@@ -188,6 +188,7 @@ impl AheadPlan {
                     kind: SymbolKind::Function,
                     definition: unit.header.definition.clone(),
                     instance: Some(unit.header.instance),
+                    charged: unit.header.charged,
                 },
             );
             if unit.header.definition.is_core("$native.cpu_worker") {

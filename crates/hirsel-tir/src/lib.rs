@@ -257,9 +257,10 @@ pub enum InstructionKind {
         destination: PlaceId,
         value: Operand,
     },
-    /// One unit of a compile-time evaluation's source budget (CT-4): the last
-    /// instruction before a source call's transfer, or the first of a loop
-    /// body iteration. It has no run-time effect and is not an execution step.
+    /// A source event (CT-4): the last instruction before a source call's
+    /// transfer, the first of a loop body iteration, or a native energy point
+    /// (STORE-11 "Energy"). It is not an execution step; an evaluation counts
+    /// it against its budget.
     Charge(SourceEvent),
 }
 /// The stable identity of a charged source event within its definition: the
@@ -276,6 +277,37 @@ pub enum SourceEventKind {
     Call,
     /// On an entered loop body iteration, before body work.
     Iteration,
+    /// An iteration of a `for` whose trip count is known on entry (an integer
+    /// range or an indexed collection) and whose body holds no other loop. The
+    /// interpreter counts it as `Iteration`; native code charges the loop once,
+    /// at its `CountedEntry`, instead.
+    CountedIteration,
+    /// The entry of such a loop: native code charges its trip count, the
+    /// integers from `from` to `to` (inclusive or not), there. Both places are
+    /// initialized integers of one type. The interpreter counts nothing here.
+    CountedEntry {
+        from: PlaceId,
+        to: PlaceId,
+        inclusive: bool,
+    },
+    /// The entry of a body that calls: native code charges one unit here when
+    /// the body is in a call cycle or calls an unknown or indirect target,
+    /// instead of at each call. The interpreter counts nothing here.
+    Entry,
+}
+impl SourceEventKind {
+    /// The places the event reads: a counted entry's endpoints.
+    pub fn reads(&self) -> impl Iterator<Item = PlaceId> {
+        match *self {
+            Self::CountedEntry { from, to, .. } => vec![from, to],
+            _ => vec![],
+        }
+        .into_iter()
+    }
+    /// Whether an evaluation counts the event (CT-4): calls and iterations.
+    pub fn counted(&self) -> bool {
+        matches!(self, Self::Call | Self::Iteration | Self::CountedIteration)
+    }
 }
 /// The charging rules' version: a cache keys evaluations by it (CT-4).
 pub const CHARGING_VERSION: u32 = 1;

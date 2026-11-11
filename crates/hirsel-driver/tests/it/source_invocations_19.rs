@@ -70,6 +70,7 @@ fn v_owned_invocations_match_original_source_and_survive_a_fresh_body_free_hit()
             instance: Some(hirsel_syntax::ContentHash::of_bytes(
                 b"independent selected instance",
             )),
+            charged: false,
         };
         let expected = hirsel_rc::invocations::source_instance(
             &program.types,

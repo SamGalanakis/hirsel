@@ -102,7 +102,7 @@ structure!(tir::TailSite {
 });
 structure!(tir::ScopedParameter { parameter, fields });
 variants!(tir::OriginBindingKind { Alias, Fresh });
-variants!(tir::SourceEventKind { Call, Iteration });
+variants!(tir::SourceEventKind { Call, Iteration, CountedIteration, CountedEntry { from, to, inclusive }, Entry });
 structure!(tir::SourceEvent { kind, source });
 variants!(tir::InstructionKind { Defuse { place }, BindOrigin { source, place, kind }, BindFields { source, fields }, EndOrigin(f0), StorageLive(f0), StorageDead { place, if_live }, EndScope(f0), Assign { destination, value }, Replace { destination, value, displaced, if_live }, BeginLoan { id, place, mutable, if_inactive }, EndLoan { loan, if_active }, Drop { place, if_live }, RunCleanup(f0), Check { condition, rule }, Snapshot { destination, value }, Charge(f0) });
 structure!(tir::Instruction {

@@ -1603,12 +1603,25 @@ impl<S: Stage> Checker<'_, '_, S> {
                     self.add(site, K::Type("check condition"));
                 }
             }
+            // STORE-11 "Energy": a span charge counts between two scalars of
+            // one integer kind; its failure edge is checked as any other's.
+            Inst::Charge {
+                energy: crate::ir::Energy::Span { from, to, .. },
+                ..
+            } => {
+                if !(self.scalar(from).is_some_and(|k| integer_bits(k).is_some())
+                    && self.same_type(from, to))
+                {
+                    self.add(site, K::Type("charge span"));
+                }
+            }
             Inst::StorageLive { .. }
             | Inst::StorageDead { .. }
             | Inst::EndScope { .. }
             | Inst::EndLoan { .. }
             | Inst::FrameEnter { .. }
             | Inst::FrameLeave
+            | Inst::Charge { .. }
             | Inst::Unavailable { .. } => {}
             Inst::Address { address, failure } => {
                 let info = &unit.addresses[address.index()];
@@ -4852,6 +4865,10 @@ pub(super) fn inst_operands<S>(cx: &Cx<'_, S>, inst: &Inst) -> Vec<(ValueId, Usa
             ..
         } => out.extend([op(left), op(right), op(addend)]),
         Inst::Check { condition, .. } => out.push(op(condition)),
+        Inst::Charge {
+            energy: crate::ir::Energy::Span { from, to, .. },
+            ..
+        } => out.extend([op(from), op(to)]),
         Inst::SliceView {
             value, start, end, ..
         } => out.extend([op(value), op(start), op(end)]),

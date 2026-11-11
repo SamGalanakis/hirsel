@@ -29,6 +29,7 @@ fn guard_query_refuses_missing_roots_and_repairs_malformed_cached_selections() {
         instance: hash,
         target: hash,
         abi: FnAbiId(0),
+        charged: false,
     });
     let equations = LocalDemandEquations::extract(&unit).unwrap();
     let owner = equations.owner().clone();

@@ -6296,8 +6296,21 @@ impl Checker<'_, '_> {
                     self.read(model, state, condition, report);
                     self.failure_cleanup(model, state, instruction.on_failure, report, true);
                 }
-                // An exhausted charge stops the evaluation without cleanup (CT-4).
-                InstructionKind::Charge(_) => {}
+                // An exhausted comptime charge stops the evaluation without
+                // cleanup (CT-4); an exhausted energy charge fails like a check
+                // (STORE-11), so its failure cleanup must be valid.
+                InstructionKind::Charge(event) => {
+                    for place in event.kind.reads() {
+                        let operand = Operand {
+                            place,
+                            usage: hirsel_types::UseKind::Copy,
+                        };
+                        self.read(model, state, &operand, report);
+                    }
+                    if !matches!(event.kind, hirsel_tir::SourceEventKind::Call) {
+                        self.failure_cleanup(model, state, instruction.on_failure, report, true);
+                    }
+                }
             }
         }
         self.site.instruction = None;

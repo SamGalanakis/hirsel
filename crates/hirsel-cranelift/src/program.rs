@@ -340,13 +340,18 @@ pub(crate) fn emit_glue(inputs: &GlueInputs<'_>) -> Emitted<ObjectArtifact> {
     for codec in &inputs.glue.codecs {
         emitter.codec(codec)?;
     }
+    let mut defined = std::collections::BTreeSet::new();
     for symbol in &inputs.glue.statics {
-        let Some(data) = inputs.statics.iter().find(|d| d.symbol == *symbol) else {
+        let Some(data) = hirsel_lir::statics::resolve(&inputs.statics, symbol) else {
             return Err(CodegenError::Invalid {
                 definition: symbol.definition.clone(),
                 what: "a static without its data".into(),
             });
         };
+        // A charged constant without a callable aliases its base's data.
+        if !defined.insert(static_symbol(&data.symbol)) {
+            continue;
+        }
         emitter.statics(data)?;
     }
     for (payload, data) in &inputs.glue.literals {

@@ -1015,6 +1015,7 @@ fn handmade_finalizer(library: bool, wrong_convention: bool) {
             definition: finalizer_path,
             instance: finalizer.header.instance,
             abi: FnAbiId(1),
+            charged: false,
         },
     )]));
     let result = hirsel_rc::cleanup::lower(caller, &table, &finalizers);
@@ -1271,6 +1272,7 @@ fn an_immortal_sequence_is_consumed_without_allocation_or_detach() {
         kind: SymbolKind::Constant,
         definition: path("static_fixture"),
         instance: None,
+        charged: false,
     };
     let mut layout = None;
     for unit in b

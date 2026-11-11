@@ -116,6 +116,7 @@ impl<S: Stage> UnitBuilder<S> {
             kind,
             definition,
             instance: None,
+            charged: false,
         };
         if let Some(i) = self.unit.tables.symbols.iter().position(|s| *s == symbol) {
             return SymbolId(i as u32);

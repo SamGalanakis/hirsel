@@ -31,6 +31,15 @@ impl Builder<'_, '_> {
         let run = self.block(span);
         let step = self.block(span);
         let exit = self.block(span);
+        self.charge(
+            hirsel_tir::SourceEventKind::CountedEntry {
+                from: counter.place,
+                to: end.place,
+                inclusive: plan.inclusive,
+            },
+            statement.0,
+            span,
+        );
         self.terminate(Terminator::Goto(header), span);
         self.revive_in_loop(span);
         let incoming = self.state.clone();
@@ -81,7 +90,11 @@ impl Builder<'_, '_> {
         });
         self.current = Some(run);
         self.state = incoming.clone();
-        self.charge(hirsel_tir::SourceEventKind::Iteration, statement.0, span);
+        self.charge(
+            hirsel_tir::SourceEventKind::CountedIteration,
+            statement.0,
+            span,
+        );
         let item = self.transport(
             Value {
                 checked_ty: None,
@@ -383,6 +396,23 @@ impl Builder<'_, '_> {
         let run = self.block(span);
         let step = self.block(span);
         let exit = self.block(span);
+        // A map's indices advance by its `advance` call, not by one, so its
+        // loop is not counted: it charges per iteration (STORE-11 "Energy").
+        let counted = !matches!(
+            &plan,
+            ForExecution::Indexed {
+                read: LoopRead::MapIndex { .. },
+                ..
+            }
+        );
+        if let Some((length, counter, _)) = indexed.as_ref().filter(|_| counted) {
+            let kind = hirsel_tir::SourceEventKind::CountedEntry {
+                from: counter.place,
+                to: length.place,
+                inclusive: false,
+            };
+            self.charge(kind, statement.0, span);
+        }
         self.terminate(Terminator::Goto(header), span);
         let parent = self.scope;
         let scope = ScopeId(self.body.scopes.len() as u32);
@@ -458,7 +488,15 @@ impl Builder<'_, '_> {
             self.terminate(Terminator::Goto(exit), span);
             self.current = Some(run);
             self.state = incoming.clone();
-            self.charge(hirsel_tir::SourceEventKind::Iteration, statement.0, span);
+            self.charge(
+                if counted {
+                    hirsel_tir::SourceEventKind::CountedIteration
+                } else {
+                    hirsel_tir::SourceEventKind::Iteration
+                },
+                statement.0,
+                span,
+            );
             self.project(
                 source.place,
                 Projection::Index(self.root(counter.place)),

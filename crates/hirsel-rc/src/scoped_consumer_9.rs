@@ -345,6 +345,7 @@ fn symbol(u: &mut Unit, target: &Unit) -> SymbolId {
         kind: SymbolKind::Function,
         definition: target.header.definition.clone(),
         instance: Some(target.header.instance),
+        charged: target.header.charged,
     };
     if let Some(i) = u.tables.symbols.iter().position(|p| p == &s) {
         return SymbolId(i as u32);

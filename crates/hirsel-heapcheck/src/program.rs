@@ -61,7 +61,44 @@ impl<S: Stage> Program<S> {
                 self.function(&function.symbol)?;
             }
         }
+        // STORE-11 energy: a charged instance selects its base's body; it is
+        // audited with its charges stripped, and only it may carry charges.
+        let charged: std::collections::BTreeSet<_> = self
+            .units
+            .iter()
+            .filter(|u| u.header.charged)
+            .map(|u| (&u.header.definition, u.header.instance))
+            .collect();
+        let twins: Vec<_> = self
+            .invocation_bodies
+            .iter()
+            .filter_map(|r| {
+                let instance = hirsel_lir::energy::charged_digest(r.instance);
+                charged.contains(&(&r.definition, instance)).then(|| {
+                    hirsel_lir::invocations::ReferenceBody {
+                        instance,
+                        ..r.clone()
+                    }
+                })
+            })
+            .collect();
+        let invocation_bodies = [self.invocation_bodies.as_slice(), &twins].concat();
         for unit in &self.units {
+            let stripped = if unit.header.charged {
+                hirsel_lir::energy::check(unit).map_err(|e| err(V::Malformed, e))?;
+                Some(hirsel_lir::energy::strip(unit).map_err(|e| err(V::Malformed, e))?)
+            } else if unit
+                .instructions
+                .iter()
+                .any(|i| matches!(i, hirsel_lir::ir::Inst::Charge { .. }))
+            {
+                return fail(
+                    V::Malformed,
+                    "an uncharged unit carries a charge (STORE-11 energy)",
+                );
+            } else {
+                None
+            };
             let abi = self
                 .layouts
                 .fn_abis
@@ -86,7 +123,7 @@ impl<S: Stage> Program<S> {
             crate::pretransfer::audit(unit, &self.layouts, &self.pretransfer_adapters)?;
             if !self.invocations.is_empty()
                 && (unit.header.origin == hirsel_lir::ir::UnitOrigin::Source
-                    || self.invocation_bodies.iter().any(|r| {
+                    || invocation_bodies.iter().any(|r| {
                         r.definition == unit.header.definition && r.instance == unit.header.instance
                     }))
             {
@@ -96,7 +133,7 @@ impl<S: Stage> Program<S> {
                     .ok_or_else(|| {
                         err(V::FrameImbalance, "source invocation reference is missing")
                     })?;
-                let mut bodies = self.invocation_bodies.iter().filter(|r| {
+                let mut bodies = invocation_bodies.iter().filter(|r| {
                     r.definition == unit.header.definition && r.instance == unit.header.instance
                 });
                 let selected = bodies.next().ok_or_else(|| {
@@ -109,15 +146,15 @@ impl<S: Stage> Program<S> {
                     return fail(V::FrameImbalance, "duplicate independent body selection");
                 }
                 crate::invocations::audit(
-                    unit,
+                    stripped.as_ref().unwrap_or(unit),
                     reference,
                     selected.body,
-                    &self.invocation_bodies,
+                    &invocation_bodies,
                     &self.layouts,
                 )?;
             }
             if unit.header.origin == hirsel_lir::ir::UnitOrigin::Library {
-                crate::invocations::audit_library(unit, &self.invocation_bodies, &self.layouts)?;
+                crate::invocations::audit_library(unit, &invocation_bodies, &self.layouts)?;
             }
             for plan in &unit.tables.structural {
                 plan.check(&self.layouts)
@@ -141,6 +178,7 @@ impl<S: Stage> Program<S> {
         let mut found = self.units.iter().enumerate().filter(|(_, u)| {
             u.header.definition == symbol.definition
                 && symbol.instance.is_none_or(|i| i == u.header.instance)
+                && symbol.charged == u.header.charged
         });
         match (found.next(), found.next()) {
             (Some((index, _)), None) => Ok(index),

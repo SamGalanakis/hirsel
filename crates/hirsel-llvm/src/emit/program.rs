@@ -488,6 +488,35 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
                 definition: Some(finalizer.definition.clone()),
                 abi: None,
             });
+        // STORE-11 energy: where the finalizer has a charged instance, the
+        // running context picks the instance at each drop: the charged one
+        // inside a budget (an allowance other than unbounded), else this one.
+        let charged = if self.inputs.charged_finalizers.contains(&layout) {
+            let name = symbol_name(
+                &finalizer.definition,
+                Some(&hirsel_lir::energy::charged_digest(*instance)),
+            );
+            let charged = match self.module.function(&name, body_ty) {
+                Ok(charged) => charged,
+                Err(_) => {
+                    return invalid(format!(
+                        "the charged drop body `{name}` does not take (context, self address)"
+                    ));
+                }
+            };
+            self.manifested
+                .imports
+                .entry(name.clone())
+                .or_insert_with(|| ObjectSymbol {
+                    name,
+                    kind: ObjectSymbolKind::Function,
+                    definition: Some(finalizer.definition.clone()),
+                    abi: None,
+                });
+            Some(charged)
+        } else {
+            None
+        };
         let ty = self
             .module
             .function_type(i8_ty, &[ptr, ptr, i64_ty, i64_ty]);
@@ -507,6 +536,31 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
             ]);
         }
         arguments.push(self.module.parameter(wrapper, 1));
+        if let Some(charged) = charged {
+            let context = self.module.parameter(wrapper, 0);
+            let at = builder.offset(
+                context,
+                self.module.const_int(
+                    i64_ty,
+                    u128::from(hirsel_lir::runtime_abi::CTX_ENERGY_OFFSET),
+                ),
+            );
+            let remaining = builder.load(i64_ty, at, 8);
+            let bounded = builder.icmp(
+                crate::context::IntPredicate::Ne,
+                remaining,
+                self.module.const_int(i64_ty, u128::from(u64::MAX)),
+            );
+            let (yes, no) = (
+                self.module.append_block(wrapper),
+                self.module.append_block(wrapper),
+            );
+            builder.cond_br(bounded, yes, no);
+            builder.position(yes);
+            let status = builder.call(charged, &arguments);
+            builder.ret(status);
+            builder.position(no);
+        }
         let status = builder.call(body, &arguments);
         builder.ret(status);
         Ok(wrapper.value)
@@ -866,10 +920,15 @@ pub fn emit_glue(inputs: &GlueInputs<'_>) -> Result<ObjectArtifact, CodegenError
         for codec in &inputs.glue.codecs {
             emitter.codec(codec)?;
         }
+        let mut defined = std::collections::BTreeSet::new();
         for symbol in &inputs.glue.statics {
-            let Some(data) = inputs.statics.iter().find(|d| d.symbol == *symbol) else {
+            let Some(data) = hirsel_lir::statics::resolve(&inputs.statics, symbol) else {
                 return invalid(format!("no static data for {}", symbol.definition));
             };
+            // A charged constant without a callable aliases its base's data.
+            if !defined.insert(static_symbol(&data.symbol)) {
+                continue;
+            }
             emitter.statics(data)?;
         }
         for (payload, data) in &inputs.glue.literals {

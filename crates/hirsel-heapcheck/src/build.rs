@@ -449,6 +449,7 @@ pub fn fixture_unit<S: Stage>(definition: DefPath) -> LirUnit<S> {
         instance: revision,
         target: ContentHash::of_bytes(b"unset"),
         abi: FnAbiId(0),
+        charged: false,
     });
     unit.tables.task_domains = 1;
     unit.scopes.push(ScopeInfo { parent: None });

@@ -15,6 +15,7 @@ fn empty(b: &mut Body<'_, '_>, layout: LayoutId, payload: LayoutId) -> ValueId {
         kind: SymbolKind::Constant,
         definition: crate::import::empty_sequence(),
         instance: Some(instance),
+        charged: false,
     });
     let result = b.fresh(layout);
     b.push(Inst::ReadStatic { result, symbol });

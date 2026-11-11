@@ -440,6 +440,7 @@ fn keyed_prefix_checks_direct_library_body_dispatch_too() {
         kind: SymbolKind::Function,
         definition: hirsel_syntax::DefPath::core("map.insert"),
         instance: None,
+        charged: false,
     });
     unit.tables.calls[0].callee = Callee::Direct(id);
     assert!(hirsel_lir::structural_access::check_key_order(&unit).is_ok());

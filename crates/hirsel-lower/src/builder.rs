@@ -294,6 +294,33 @@ impl<'a, 'b> Builder<'a, 'b> {
         Ok(this)
     }
     pub fn finish(mut self) -> Result<Body> {
+        // A body that calls carries an entry charge (STORE-11 "Energy"); native
+        // code keeps it only where the body can recurse or reach unknown code.
+        // A body without calls is bounded by its loops' charges.
+        let calls = self.body.blocks.iter().any(|b| {
+            b.instructions.iter().any(|i| {
+                matches!(i.kind, InstructionKind::Charge(e) if e.kind == hirsel_tir::SourceEventKind::Call)
+            })
+        });
+        let entry = self.body.entry.0 as usize;
+        if calls && entry < self.body.blocks.len() {
+            let block = &mut self.body.blocks[entry];
+            let (span, on_failure) = block
+                .instructions
+                .first()
+                .map_or((Span::default(), CleanupId(0)), |i| (i.span, i.on_failure));
+            block.instructions.insert(
+                0,
+                Instruction {
+                    kind: InstructionKind::Charge(hirsel_tir::SourceEvent {
+                        kind: hirsel_tir::SourceEventKind::Entry,
+                        source: 0,
+                    }),
+                    span,
+                    on_failure,
+                },
+            );
+        }
         self.end_loans_at_last_use();
         self.complete_loan_flow();
         // A semantic origin id is not a body parameter ordinal. Resolve only
@@ -806,6 +833,51 @@ impl<'a, 'b> Builder<'a, 'b> {
             InstructionKind::Charge(hirsel_tir::SourceEvent { kind, source }),
             span,
         );
+    }
+    /// Settles the energy points of the counted loop `source` (STORE-11
+    /// "Energy"): its one charge of the trip count at entry stands only when
+    /// nothing in its body charges but calls. A body holding another loop or
+    /// a body entry charges per iteration instead, like any loop, since a
+    /// charge at an inner entry keeps native code from hoisting the body's
+    /// invariant reads.
+    pub fn settle_counted(&mut self, source: u32) {
+        use hirsel_tir::SourceEventKind as E;
+        let is_entry = |i: &Instruction| {
+            matches!(i.kind, InstructionKind::Charge(e)
+                if matches!(e.kind, E::CountedEntry { .. }) && e.source == source)
+        };
+        let Some((entry_block, entry_index)) =
+            self.body.blocks.iter().enumerate().find_map(|(b, block)| {
+                block.instructions.iter().position(is_entry).map(|i| (b, i))
+            })
+        else {
+            return;
+        };
+        let Terminator::Goto(header) = self.body.blocks[entry_block].terminator else {
+            return;
+        };
+        let start = header.0 as usize;
+        let own = |e: &hirsel_tir::SourceEvent| e.kind == E::CountedIteration && e.source == source;
+        let other = self.body.blocks[start..].iter().any(|block| {
+            block.instructions.iter().any(
+                |i| matches!(&i.kind, InstructionKind::Charge(e) if e.kind != E::Call && !own(e)),
+            )
+        });
+        if !other {
+            return;
+        }
+        self.body.blocks[entry_block]
+            .instructions
+            .remove(entry_index);
+        for block in &mut self.body.blocks[start..] {
+            for i in &mut block.instructions {
+                if let InstructionKind::Charge(e) = &mut i.kind
+                    && own(e)
+                {
+                    e.kind = E::Iteration;
+                }
+            }
+        }
     }
     pub fn emit(&mut self, kind: InstructionKind, span: Span) {
         let on_failure = self.cleanup();

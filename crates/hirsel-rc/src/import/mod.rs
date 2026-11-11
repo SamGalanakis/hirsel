@@ -35,7 +35,9 @@
 mod payload_receipts;
 
 use crate::PassError;
-use crate::instance::{Actuals, InstanceError, InstanceId, Instances, Program, substitute};
+use crate::instance::{
+    Actuals, InstanceError, InstanceId, InstanceRole, Instances, Program, substitute,
+};
 use crate::library::builder::Layouts as _;
 use crate::normalize::{Declined, Facts, Home, LoopPlan, LoopSite, NormalizeError};
 use hirsel_core_contract::{OperationId, Passing};
@@ -251,12 +253,46 @@ pub fn lower_with_sources(
     // Importing a unit or building a library body may require further
     // library instances, which join the end of the list.
     let mut next = 0;
-    while next < instances.len() {
+    loop {
+        if next == instances.len() {
+            // Finalizers run in whatever context drops their value: once any
+            // code is charged, each source finalizer has a charged instance
+            // too, chosen by the running context at the drop (STORE-11).
+            if !instances.any_charged() {
+                break;
+            }
+            let finalizers: Vec<_> = instances
+                .ids()
+                .filter(|&id| {
+                    instances.roles[id.index()] == InstanceRole::Finalizer
+                        && !instances.is_charged(id)
+                        && instances.charged_of(id).is_none()
+                })
+                .collect();
+            if finalizers.is_empty() {
+                break;
+            }
+            for id in finalizers {
+                instances.charge(id).map_err(LowerError::Instance)?;
+            }
+        }
         let id = InstanceId(next as u32);
         next += 1;
         let definition = instances.view(id).key.definition().clone();
         let sites = discharge.sites(&definition);
         let key = (definition.clone(), instances.view(id).key.digest());
+        let base = (
+            definition.clone(),
+            instances.view(instances.uncharged(id)).key.digest(),
+        );
+        if instances.is_charged(id) && source.expectations.contains_key(&base) {
+            return Err(LowerError::Import(
+                id,
+                PassError::Unsupported(
+                    "a charged instance of a sealed-source body (STORE-11 energy)".into(),
+                ),
+            ));
+        }
         if let Some(expected) = source.expectations.get(&key) {
             instances.bind_payload_sources(id, expected.payloads().to_vec());
         }
@@ -286,6 +322,9 @@ pub fn lower_with_sources(
         for request in imported.required {
             crate::library::instantiate(&mut layouts, &mut instances, request)
                 .map_err(LowerError::Instance)?;
+        }
+        for callee in imported.charged {
+            instances.charge(callee).map_err(LowerError::Instance)?;
         }
         units.push(imported.unit);
     }
@@ -377,6 +416,9 @@ pub struct InstanceImport {
     pub declined: Vec<Declined>,
     pub required: Vec<crate::library::Request>,
     pub discharged: Option<DischargedUnit>,
+    /// Uncharged instances whose charged instance the unit names; the
+    /// caller registers each with `Instances::charge` (STORE-11 energy).
+    pub charged: Vec<InstanceId>,
 }
 
 pub fn import_instance(
@@ -396,10 +438,12 @@ pub fn import_instance(
             declined: Vec::new(),
             required: Vec::new(),
             discharged: None,
+            charged: Vec::new(),
         });
     }
-    let (plan, declined) =
-        plan_instance(program, instances, id, layouts).map_err(|e| LowerError::Normalize(id, e))?;
+    let (plan, declined) = plan_instance(program, instances, instances.uncharged(id), layouts)
+        .map_err(|e| LowerError::Normalize(id, e))?;
+    let mut charged = Vec::new();
     let none = BTreeSet::new();
     let reference = if sites.is_some() {
         Some(
@@ -410,6 +454,7 @@ pub fn import_instance(
                 plan.as_ref(),
                 &none,
                 layouts,
+                &mut Vec::new(),
                 &mut Vec::new(),
             )
             .map_err(|e| LowerError::Import(id, e))?,
@@ -426,6 +471,7 @@ pub fn import_instance(
         sites.unwrap_or(&none),
         layouts,
         &mut required,
+        &mut charged,
     )
     .map_err(|e| LowerError::Import(id, e))?;
     let discharged = reference.map(|reference| DischargedUnit {
@@ -445,6 +491,7 @@ pub fn import_instance(
         declined,
         required,
         discharged,
+        charged,
     })
 }
 
@@ -535,6 +582,7 @@ pub(crate) fn invocation_registry(
                 kind: SymbolKind::Function,
                 definition: unit.header.definition.clone(),
                 instance: Some(unit.header.instance),
+                charged: unit.header.charged,
             },
             view.body,
         )
@@ -542,7 +590,9 @@ pub(crate) fn invocation_registry(
         registry
             .invocations
             .insert(evidence.body.definition.clone(), evidence.invocations);
-        registry.invocation_bodies.push(evidence.body);
+        if !registry.invocation_bodies.contains(&evidence.body) {
+            registry.invocation_bodies.push(evidence.body);
+        }
     }
     bind_pretransfer_inventory(&mut registry, program, instances)
         .expect("independent adapter instance plan is valid");
@@ -632,6 +682,39 @@ pub fn nullary_variant() -> DefPath {
 /// each boxed nullary variant (its tag, at its payload layout).
 /// Static data read by one demanded native unit, using the same encoder as
 /// program assembly. The caller publishes content-named layout bindings.
+/// The callable a constant's function reference names: its path (an
+/// adapter's where it has one) and its instance.
+pub(crate) fn static_callable(
+    program: &Program,
+    instances: &Instances,
+    path: &DefPath,
+    arguments: &[hirsel_types::GenericArgument],
+) -> Result<(DefPath, InstanceId), crate::statics::StaticError> {
+    let actuals = Actuals {
+        binder: program.binders.get(path).copied(),
+        arguments: arguments.to_vec(),
+        outer: vec![],
+    };
+    let adapter = crate::library::keyed::request(program, path, arguments.to_vec())
+        .map_err(|e| crate::statics::StaticError(format!("static adapter: {e:?}")))?;
+    let callable_path = adapter.as_ref().map(|r| &r.path).unwrap_or(path);
+    let callable_actuals = adapter.as_ref().map(|r| &r.actuals).unwrap_or(&actuals);
+    let id = instances
+        .find(program, callable_path, callable_actuals)
+        .or_else(|error| {
+            if arguments.is_empty() {
+                instances
+                    .ids()
+                    .find(|id| instances.view(*id).key.definition() == path)
+                    .ok_or(error)
+            } else {
+                Err(error)
+            }
+        })
+        .map_err(|e| crate::statics::StaticError(format!("static callable instance: {e:?}")))?;
+    Ok((callable_path.clone(), id))
+}
+
 pub fn instance_statics(
     program: &Program,
     instances: &Instances,
@@ -673,7 +756,10 @@ fn statics(
                     };
                     nullary.insert(symbol.instance, (symbol.clone(), payload));
                 } else if symbol.kind == SymbolKind::Constant {
-                    read.insert(symbol.definition.clone(), symbol.clone());
+                    read.insert(
+                        (symbol.definition.clone(), symbol.instance, symbol.charged),
+                        symbol.clone(),
+                    );
                 }
             }
         }
@@ -703,59 +789,65 @@ fn statics(
         })
     });
     let nullary = nullary.collect::<Vec<_>>();
-    empty
-        .into_iter()
-        .chain(nullary)
-        .chain(read.into_values().map(|symbol| {
-            let definition = symbol.definition.clone();
-            let static_error = |e| LowerError::Static(definition.clone(), e);
-            let Some(value) = program.constants.get(&symbol.definition) else {
-                return Err(static_error(crate::statics::StaticError(
-                    "a constant without a materialized value".into(),
-                )));
-            };
-            crate::statics::encode_functions(
-                layouts,
-                &program.types,
-                symbol,
-                value,
-                &mut |path, arguments| {
-                    let actuals = Actuals {
-                        binder: program.binders.get(path).copied(),
-                        arguments: arguments.to_vec(),
-                        outer: vec![],
-                    };
-                    let adapter = crate::library::keyed::request(program, path, arguments.to_vec())
-                        .map_err(|e| {
-                            crate::statics::StaticError(format!("static adapter: {e:?}"))
-                        })?;
-                    let callable_path = adapter.as_ref().map(|r| &r.path).unwrap_or(path);
-                    let callable_actuals = adapter.as_ref().map(|r| &r.actuals).unwrap_or(&actuals);
-                    let id = instances
-                        .find(program, callable_path, callable_actuals)
-                        .or_else(|error| {
-                            if arguments.is_empty() {
-                                instances
-                                    .ids()
-                                    .find(|id| instances.view(*id).key.definition() == path)
-                                    .ok_or(error)
-                            } else {
-                                Err(error)
-                            }
-                        })
-                        .map_err(|e| {
-                            crate::statics::StaticError(format!("static callable instance: {e:?}"))
-                        })?;
-                    Ok(Symbol {
+    let mut constants = BTreeMap::new();
+    for symbol in read.into_values() {
+        let definition = symbol.definition.clone();
+        let charged = symbol.charged;
+        let static_error = |e| LowerError::Static(definition.clone(), e);
+        let Some(value) = program.constants.get(&symbol.definition) else {
+            return Err(static_error(crate::statics::StaticError(
+                "a constant without a materialized value".into(),
+            )));
+        };
+        let base = Symbol {
+            charged: false,
+            ..symbol.clone()
+        };
+        let mut data = crate::statics::encode_functions(
+            layouts,
+            &program.types,
+            symbol,
+            value,
+            &mut |path, arguments| {
+                let (callable_path, id) = static_callable(program, instances, path, arguments)?;
+                let digest = instances.view(id).key.digest();
+                if charged && !instances.roles[id.index()].is_library() {
+                    if instances.charged_of(id).is_none() {
+                        return Err(crate::statics::StaticError(
+                            "a charged constant's callable has no charged instance (STORE-11 energy)"
+                                .into(),
+                        ));
+                    }
+                    return Ok(Symbol {
                         kind: SymbolKind::Function,
-                        definition: callable_path.clone(),
-                        instance: Some(instances.view(id).key.digest()),
-                    })
-                },
-            )
-            .map_err(static_error)
-        }))
-        .collect()
+                        definition: callable_path,
+                        instance: Some(hirsel_lir::energy::charged_digest(digest)),
+                        charged: true,
+                    });
+                }
+                Ok(Symbol {
+                    kind: SymbolKind::Function,
+                    definition: callable_path,
+                    instance: Some(digest),
+                    charged: false,
+                })
+            },
+        )
+        .map_err(static_error)?;
+        // The charged copy of a constant holding no callable is an alias of
+        // the constant's own data (`statics::resolve`).
+        if charged && data.blocks.iter().all(|b| b.functions.is_empty()) {
+            data.symbol = base;
+        }
+        constants.entry(data.symbol.clone()).or_insert(data);
+    }
+    Ok(empty
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .chain(nullary.into_iter().collect::<Result<Vec<_>, _>>()?)
+        .chain(constants.into_values())
+        .collect())
 }
 
 /// The loop plan of one instance, with layout facts of its own types.
@@ -1305,7 +1397,16 @@ pub fn import(
     layouts: &mut LayoutBuilder<'_>,
     required: &mut Vec<crate::library::Request>,
 ) -> R<LirUnit<Value>> {
-    import_body(program, instances, id, plan, discharge, layouts, required)
+    import_body(
+        program,
+        instances,
+        id,
+        plan,
+        discharge,
+        layouts,
+        required,
+        &mut Vec::new(),
+    )
 }
 
 fn import_body(
@@ -1316,7 +1417,10 @@ fn import_body(
     discharge: &BTreeSet<Discharged>,
     layouts: &mut dyn crate::library::builder::Layouts,
     required: &mut Vec<crate::library::Request>,
+    charged_callees: &mut Vec<InstanceId>,
 ) -> R<LirUnit<Value>> {
+    let charged = instances.is_charged(id).then_some(id);
+    let id = instances.uncharged(id);
     let view = instances.view(id);
     let def: &tir::Definition = view.definition().map_err(InstanceError::from)?;
     let body = &def.bodies[view.body.0 as usize];
@@ -1329,6 +1433,9 @@ fn import_body(
         instances,
         layouts,
         id,
+        charged,
+        forming_entry: false,
+        charged_callees: Vec::new(),
         plan,
         discharge,
         source_anchors: tir::source_anchors(def),
@@ -1460,7 +1567,12 @@ fn import_body(
     for _ in 0..1000 {
         let used = im.pass(&entry)?;
         if converged(&used, &entry) {
-            return im.finish();
+            let mut callees = std::mem::take(&mut im.charged_callees);
+            let unit = im.finish()?;
+            callees.sort();
+            callees.dedup();
+            charged_callees.extend(callees);
+            return Ok(unit);
         }
         entry = used;
     }
@@ -1496,7 +1608,15 @@ struct Importer<'a> {
     program: &'a Program,
     instances: &'a Instances,
     layouts: &'a mut dyn crate::library::builder::Layouts,
+    /// The uncharged instance whose body this imports; every instance table
+    /// is read through it.
     id: InstanceId,
+    /// The charged instance this unit is, if it is one (STORE-11 energy).
+    charged: Option<InstanceId>,
+    /// Whether the function reference being imported forms a store entry.
+    forming_entry: bool,
+    /// Uncharged instances whose charged instance this unit names.
+    charged_callees: Vec<InstanceId>,
     plan: Option<&'a LoopPlan>,
     /// PS-13 sites of this definition that import without their check.
     discharge: &'a BTreeSet<Discharged>,

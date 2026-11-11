@@ -191,6 +191,7 @@ impl Importer<'_> {
             kind: SymbolKind::Function,
             definition: request.path.clone(),
             instance: Some(key.digest()),
+            charged: false,
         };
         self.required.push(request);
         Ok(crate::library::builder::Direct { symbol, abi })
@@ -393,11 +394,13 @@ impl Importer<'_> {
         kind: SymbolKind,
         definition: &DefPath,
         instance: Option<ContentHash>,
+        charged: bool,
     ) -> SymbolId {
         let s = Symbol {
             kind,
             definition: definition.clone(),
             instance,
+            charged,
         };
         if let Some(&id) = self.out.symbol_index.get(&s) {
             return id;

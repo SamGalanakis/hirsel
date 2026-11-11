@@ -155,6 +155,7 @@ fn option(b: &mut Body<'_, '_>, value: Option<ValueId>) -> ValueId {
         kind: SymbolKind::Type,
         definition: hirsel_syntax::DefPath::core("Option"),
         instance: None,
+        charged: false,
     });
     let fields = PoolRange::push(
         &mut b.ed.unit.pools.fields,

@@ -63,6 +63,8 @@ pub struct Finalizer {
     pub definition: DefPath,
     pub instance: ContentHash,
     pub abi: FnAbiId,
+    /// Whether this is the finalizer's charged instance (STORE-11 energy).
+    pub charged: bool,
 }
 
 /// Every resource layout's drop body, keyed by the resource's layout.
@@ -77,7 +79,7 @@ impl Finalizers {
         let mut out = BTreeMap::new();
         for id in instances.ids() {
             let role = &instances.roles[id.index()];
-            if !role.is_finalizer() {
+            if !role.is_finalizer() || instances.is_charged(id) {
                 continue;
             }
             let abi = instances.abis[id.index()];
@@ -96,8 +98,28 @@ impl Finalizers {
                     definition: view.key.definition().clone(),
                     instance: view.key.digest(),
                     abi,
+                    charged: instances.is_charged(id),
                 },
             );
+        }
+        Self(out)
+    }
+
+    /// The finalizers a charged unit's cleanup calls (STORE-11 energy): each
+    /// finalizer's charged instance where it has one, else the finalizer itself.
+    pub fn charged(&self, instances: &Instances) -> Self {
+        let mut out = self.0.clone();
+        for id in instances.ids() {
+            let Some(twin) = instances.charged_of(id) else {
+                continue;
+            };
+            let base = instances.view(id).key.digest();
+            for finalizer in out.values_mut() {
+                if finalizer.instance == base {
+                    finalizer.instance = instances.view(twin).key.digest();
+                    finalizer.charged = true;
+                }
+            }
         }
         Self(out)
     }
@@ -154,7 +176,7 @@ impl Finalizers {
     pub fn new<S: Stage>(instances: &Instances, units: &[LirUnit<S>]) -> Self {
         let mut out = BTreeMap::new();
         for id in instances.ids() {
-            if !instances.roles[id.index()].is_finalizer() {
+            if !instances.roles[id.index()].is_finalizer() || instances.is_charged(id) {
                 continue;
             }
             let unit = &units[id.index()];
@@ -169,6 +191,7 @@ impl Finalizers {
                     definition: unit.header.definition.clone(),
                     instance: unit.header.instance,
                     abi: instances.abis[id.index()],
+                    charged: unit.header.charged,
                 },
             );
         }
@@ -2720,6 +2743,7 @@ impl<R: Reporter> Lowering<'_, '_, R> {
                     kind: SymbolKind::Function,
                     definition: finalizer.definition.clone(),
                     instance: Some(finalizer.instance),
+                    charged: finalizer.charged,
                 };
                 let symbols = &mut self.ed.unit.tables.symbols;
                 let s = match symbols.iter().position(|s| *s == wanted) {

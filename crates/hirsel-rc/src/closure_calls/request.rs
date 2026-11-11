@@ -52,6 +52,8 @@ struct Seed {
     path: Vec<u32>,
     definition: DefPath,
     instance: Option<ContentHash>,
+    /// Whether the seed names its target's charged instance (STORE-11 energy).
+    charged: bool,
     abi: ContentHash,
     environment: bool,
 }
@@ -125,6 +127,7 @@ impl TaskCaptureRecipe {
                 path: Vec::new(),
                 definition: target.symbol.definition.clone(),
                 instance: target.symbol.instance,
+                charged: target.symbol.charged,
                 abi: LayoutKeys::new(table)
                     .fn_abi_of(table, target.abi)
                     .ok_or("missing task capture target ABI")?,
@@ -153,6 +156,7 @@ impl TaskCaptureRecipe {
                 kind: SymbolKind::Function,
                 definition: self.target.definition.clone(),
                 instance: self.target.instance,
+                charged: self.target.charged,
             },
             abi,
             environment: self.target.environment,
@@ -218,6 +222,7 @@ impl CallableRecipe {
                     path: seed.path.clone(),
                     definition: target.symbol.definition.clone(),
                     instance: target.symbol.instance,
+                    charged: target.symbol.charged,
                     abi: keys
                         .fn_abi_of(table, target.abi)
                         .ok_or("missing callable seed ABI")?,
@@ -266,6 +271,7 @@ impl CallableRecipe {
                         kind: SymbolKind::Function,
                         definition: seed.definition.clone(),
                         instance: seed.instance,
+                        charged: seed.charged,
                     },
                     // The key never encodes a table-local ABI id.
                     abi: hirsel_lir::FnAbiId(0),
@@ -298,6 +304,7 @@ impl CallableRecipe {
                             kind: SymbolKind::Function,
                             definition: seed.definition.clone(),
                             instance: seed.instance,
+                            charged: seed.charged,
                         },
                         abi: binding.abi(seed.abi).ok_or("missing callable seed ABI")?,
                         environment: seed.environment,

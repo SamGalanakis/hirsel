@@ -624,6 +624,7 @@ impl DemandInstances {
                         kind: SymbolKind::Function,
                         definition: original.instance.definition().clone(),
                         instance: Some(original.instance.digest()),
+                        charged: original.instance.uncharged().is_some(),
                     },
                     CallableEntry {
                         key: original.instance.clone(),
@@ -636,6 +637,7 @@ impl DemandInstances {
                             UnitOrigin::Library
                         },
                         op_free: interface.op_free,
+                        charged: original.instance.uncharged().is_some(),
                         fields,
                     },
                 );

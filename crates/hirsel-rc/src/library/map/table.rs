@@ -40,6 +40,7 @@ pub(super) fn entry_value(
         kind: SymbolKind::Type,
         definition: native_path("MapEntry"),
         instance: None,
+        charged: false,
     });
     construct(
         b,

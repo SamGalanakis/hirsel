@@ -185,6 +185,7 @@ pub fn keyed_adapter(
         kind: SymbolKind::Function,
         definition: view.key.definition().clone(),
         instance: Some(view.key.digest()),
+        charged: false,
     };
     Ok(AdapterReference {
         adapter: symbol(adapter),

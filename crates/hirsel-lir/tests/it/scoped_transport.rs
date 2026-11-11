@@ -632,6 +632,7 @@ fn linked_body_claims_cover_calls_and_closure_entries() {
             kind: SymbolKind::Function,
             definition: body.header.definition.clone(),
             instance: Some(body.header.instance),
+            charged: body.header.charged,
         });
         if closure {
             caller.tables.closures.push(ClosureSite {

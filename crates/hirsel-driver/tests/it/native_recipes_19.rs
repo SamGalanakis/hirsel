@@ -415,6 +415,7 @@ fn source_operations(
         kind: hirsel_lir::ir::SymbolKind::Function,
         definition: view.key.definition().clone(),
         instance: Some(view.key.digest()),
+        charged: false,
     };
     declarations
         .source_operations(view.key.definition(), &selected, view.body)

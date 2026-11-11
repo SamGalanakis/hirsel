@@ -375,7 +375,10 @@ impl EvaluationTask<'_> {
                         span: exhaustion.site,
                         message: match exhaustion.event.kind {
                             hirsel_tir::SourceEventKind::Call => "this call exceeds the budget",
-                            hirsel_tir::SourceEventKind::Iteration => {
+                            hirsel_tir::SourceEventKind::Iteration
+                            | hirsel_tir::SourceEventKind::CountedIteration
+                            | hirsel_tir::SourceEventKind::CountedEntry { .. }
+                            | hirsel_tir::SourceEventKind::Entry => {
                                 "this loop iteration exceeds the budget"
                             }
                         }

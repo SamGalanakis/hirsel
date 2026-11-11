@@ -853,6 +853,7 @@ fn ordinary_capture_174() -> (Program<Rc>, Config) {
         kind: SymbolKind::Function,
         definition: unit.header.definition.clone(),
         instance: Some(unit.header.instance),
+        charged: unit.header.charged,
     });
     let captures = PoolRange::push(
         &mut unit.pools.captures,

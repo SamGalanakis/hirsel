@@ -417,6 +417,20 @@ impl<'a, 'input> Checker<'a, 'input> {
                     InstructionKind::Check { condition, .. } => {
                         self.boolean(condition, "check condition")
                     }
+                    InstructionKind::Charge(hirsel_tir::SourceEvent {
+                        kind: hirsel_tir::SourceEventKind::CountedEntry { from, to, .. },
+                        ..
+                    }) => {
+                        let ty = self.place_type(*from);
+                        self.same(ty, self.place_type(*to), "counted loop endpoints");
+                        if !matches!(self.t.get(ty).unwrap().kind,
+                            TypeKind::Primitive(p) if integer(p))
+                        {
+                            self.error(ViolationKind::TypeMismatch {
+                                entity: "counted loop endpoints",
+                            });
+                        }
+                    }
                     _ => (),
                 }
             }

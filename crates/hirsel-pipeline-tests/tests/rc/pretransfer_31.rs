@@ -280,6 +280,7 @@ fn source_evidence_factory_31_uses_original_source_and_planned_instances() {
             kind: SymbolKind::Function,
             definition: view.key.definition().clone(),
             instance: Some(view.key.digest()),
+            charged: false,
         };
         let source = &program.definitions[&symbol.definition];
         let derive = |symbol: &Symbol, body| {

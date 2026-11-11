@@ -144,6 +144,7 @@ fn fixture_with_custody(
         instance: hash,
         target: table.target,
         abi: FnAbiId(0),
+        charged: false,
     });
     unit.scopes.push(ScopeInfo { parent: None });
     unit.types = vec![
@@ -235,6 +236,7 @@ fn fixture_with_custody(
         kind: SymbolKind::Function,
         definition: unit.header.definition.clone(),
         instance: Some(hash),
+        charged: false,
     });
     unit.blocks.push(Block {
         kind: BlockKind::Body,

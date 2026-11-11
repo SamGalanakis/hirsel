@@ -662,6 +662,7 @@ impl Builder<'_, '_> {
                     .cloned()
                 {
                     self.range_loop(id, pattern, plan, body, span, bodies)?;
+                    self.settle_counted(id.0);
                 } else if let Some(cursor) =
                     self.decisions.cursors.get(&id).first().copied().cloned()
                 {
@@ -674,6 +675,7 @@ impl Builder<'_, '_> {
                         span,
                         bodies,
                     )?;
+                    self.settle_counted(id.0);
                 } else if let Some((_, plan)) = self
                     .decisions
                     .protocols
@@ -695,6 +697,7 @@ impl Builder<'_, '_> {
                         span,
                         bodies,
                     )?;
+                    self.settle_counted(id.0);
                 } else {
                     return self.error(
                         span,

@@ -484,6 +484,10 @@ impl SourceMap {
             .ordinal = ordinal;
         Some(id)
     }
+    /// The shared handle of a file, for a witness that it is still this one.
+    pub fn file_handle(&self, id: FileId) -> Option<&std::sync::Arc<SourceFile>> {
+        self.files.get(id.0 as usize)
+    }
     pub fn file(&self, id: FileId) -> Option<&SourceFile> {
         self.files.get(id.0 as usize).map(AsRef::as_ref)
     }

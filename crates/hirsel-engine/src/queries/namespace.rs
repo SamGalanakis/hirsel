@@ -3,7 +3,9 @@
 use super::*;
 use crate::{NativeRecordContext, NativeRecords};
 use hirsel_engine_store::{Domain, EntryKey, Reference};
+mod carried;
 pub(in crate::queries) mod reopen;
+pub(crate) use carried::ViewBase;
 
 const GENERATION: Domain = Domain {
     kind: 0x4601_0008,
@@ -827,6 +829,66 @@ impl QueryEngine {
         }
         Ok(())
     }
+    /// One definition's namespace row; `true` when it is an ordinary,
+    /// unregistered declaration whose row a later view may carry.
+    fn namespace_body(
+        &mut self,
+        path: &DefPath,
+        registration: Option<&Arc<AcceptedFrontRegistration>>,
+    ) -> Result<(Arc<BodyInput>, bool), QueryError> {
+        let facts = self
+            .source_facts(path)
+            .ok_or_else(|| refused("missing declaration facts"))?;
+        let implementation = self
+            .implementation_hash(path)
+            .ok_or_else(|| refused("missing declaration identity"))?;
+        let site = self
+            .items
+            .get(path)
+            .and_then(|items| items.first())
+            .map(|syntax| syntax.item.name_span)
+            .or_else(|| self.catalog.site(path))
+            .or_else(|| self.captured_text(path).map(|text| text.site))
+            .ok_or_else(|| refused(&format!("missing declaration site for {path}")))?;
+        let generated = facts.generator && !facts.instance_bodied;
+        let mut ordinary = false;
+        let [modes, lower, evaluate] = match registration {
+            Some(accepted) => self.accepted_front_store_keys(accepted)?,
+            None if facts.generator && self.items.contains_key(path) => [
+                self.front_declaration_store_key(path, QueryKind::Modes)?,
+                self.front_declaration_store_key(path, QueryKind::Lower)?,
+                self.front_declaration_store_key(path, QueryKind::Evaluate)?,
+            ],
+            None => {
+                ordinary = true;
+                // The seed depends on the path, not the kind: one serves all three.
+                let seed = self.product_seed(path);
+                [QueryKind::Modes, QueryKind::Lower, QueryKind::Evaluate].map(|kind| {
+                    EntryKey::new(seed, path, implementation, kind, LoweringPolicy::Reachable)
+                })
+            }
+        };
+        let body = Arc::new(BodyInput {
+            syntax: ContentHash::of_parts(
+                "hirsel.namespace.syntax-input.v1",
+                [
+                    implementation.0.as_slice(),
+                    self.cited_value(path).0.as_slice(),
+                ],
+            ),
+            implementation,
+            executable: facts.executable,
+            generated,
+            queries: Some(Arc::new(BodyKeys {
+                implementation,
+                site,
+                modes,
+                lower,
+                evaluate,
+            })),
+        });
+        Ok((body, ordinary))
+    }
     pub(super) fn prepare_namespace_scope(&mut self) {
         let previous = self
             .snapshot
@@ -845,6 +907,17 @@ impl QueryEngine {
         definitions: &[DefPath],
         registrations: &[Arc<AcceptedFrontRegistration>],
         limit: u64,
+    ) -> Result<Arc<NamespaceCapture>, QueryError> {
+        self.capture_namespace_after(definitions, registrations, limit, None)
+    }
+    /// As `capture_namespace`, reusing each row of `base` whose witnesses
+    /// still hold and leaving in `base` this capture's rows for the next.
+    pub(crate) fn capture_namespace_after(
+        &mut self,
+        definitions: &[DefPath],
+        registrations: &[Arc<AcceptedFrontRegistration>],
+        limit: u64,
+        mut view_base: Option<&mut ViewBase>,
     ) -> Result<Arc<NamespaceCapture>, QueryError> {
         self.prepare_namespace_scope();
         let snapshot = self.signature_inputs();
@@ -908,24 +981,47 @@ impl QueryEngine {
                 .entry(DefId::intern(accepted.definition()))
                 .or_insert(accepted);
         }
+        let mut carried = view_base.as_deref_mut().and_then(|base| base.take(self));
+        let mut next = view_base.is_some().then(carried::Rows::default);
         for path in definitions {
-            let facts = self
-                .source_facts(path)
-                .ok_or_else(|| refused("missing declaration facts"))?;
-            let implementation = self
-                .implementation_hash(path)
-                .ok_or_else(|| refused("missing declaration identity"))?;
-            let site = self
-                .items
-                .get(path)
-                .and_then(|items| items.first())
-                .map(|syntax| syntax.item.name_span)
-                .or_else(|| self.catalog.site(path))
-                .or_else(|| self.captured_text(path).map(|text| text.site))
-                .ok_or_else(|| refused(&format!("missing declaration site for {path}")))?;
-            let registration = DefId::get(path).and_then(|id| registered.get(&id).copied());
-            let generated = facts.generator && !facts.instance_bodied;
-            if generated {
+            let id = DefId::intern(path);
+            let registration = registered.get(&id).copied();
+            let reused = carried
+                .as_mut()
+                .filter(|_| registration.is_none())
+                .and_then(|carried| carried.reuse(self, id, path));
+            let body = match reused {
+                Some(row) => {
+                    #[cfg(debug_assertions)]
+                    {
+                        let (fresh, _) = self.namespace_body(path, None)?;
+                        assert!(
+                            *fresh == **row.body(),
+                            "a carried namespace row for {path} differs from its recomputation"
+                        );
+                    }
+                    let body = row.body().clone();
+                    if let Some(next) = next.as_mut() {
+                        next.keep(id, row);
+                    }
+                    body
+                }
+                None => {
+                    let (body, ordinary) = self.namespace_body(path, registration)?;
+                    if let Some(next) = next.as_mut()
+                        && ordinary
+                    {
+                        next.offer(self, id, path, &body);
+                    }
+                    body
+                }
+            };
+            if body.generated {
+                let site = body
+                    .queries
+                    .as_ref()
+                    .ok_or_else(|| refused("missing declaration site"))?
+                    .site;
                 private_sources.insert(
                     (
                         DefId::intern(&generation::task::GeneratorInput::private_path(path)),
@@ -934,52 +1030,10 @@ impl QueryEngine {
                     site.anchor,
                 );
             }
-            let queries = {
-                let [modes, lower, evaluate] = match registration {
-                    Some(accepted) => self.accepted_front_store_keys(accepted)?,
-                    None if facts.generator && self.items.contains_key(path) => [
-                        self.front_declaration_store_key(path, QueryKind::Modes)?,
-                        self.front_declaration_store_key(path, QueryKind::Lower)?,
-                        self.front_declaration_store_key(path, QueryKind::Evaluate)?,
-                    ],
-                    None => {
-                        // The seed depends on the path, not the kind: one serves all three.
-                        let seed = self.product_seed(path);
-                        [QueryKind::Modes, QueryKind::Lower, QueryKind::Evaluate].map(|kind| {
-                            EntryKey::new(
-                                seed,
-                                path,
-                                implementation,
-                                kind,
-                                LoweringPolicy::Reachable,
-                            )
-                        })
-                    }
-                };
-                Some(Arc::new(BodyKeys {
-                    implementation,
-                    site,
-                    modes,
-                    lower,
-                    evaluate,
-                }))
-            };
-            bodies.insert(
-                DefId::intern(path),
-                Arc::new(BodyInput {
-                    syntax: ContentHash::of_parts(
-                        "hirsel.namespace.syntax-input.v1",
-                        [
-                            implementation.0.as_slice(),
-                            self.cited_value(path).0.as_slice(),
-                        ],
-                    ),
-                    implementation,
-                    executable: facts.executable,
-                    generated,
-                    queries,
-                }),
-            );
+            bodies.insert(id, body);
+        }
+        if let (Some(base), Some(next)) = (view_base, next) {
+            base.replace(self, next);
         }
         self.prepare_namespace_registrations(registrations)?;
         let snapshot = self.signature_inputs();
@@ -1334,6 +1388,61 @@ mod tests {
         }
         let definitions = engine.source_paths();
         (engine, definitions)
+    }
+    /// A row carried between views of one producer is served only while what
+    /// it read holds: an edit recomputes the edited row, editing it back gives
+    /// the first view's row again, and a path left out of a view is not
+    /// carried into the view that asks for it again. Checked builds also
+    /// recompute every carried row and compare it.
+    #[test]
+    fn carried_rows_follow_edits_reversals_and_removals() {
+        hirsel_intern::jobs::with_compiler_stack(|| {
+            let mut engine =
+                QueryEngine::new(default_environment(), crate::phases::engine_only_adapters())
+                    .with_result_store(Arc::new(MemStore::default()));
+            let context = default_context();
+            let mut parse = |engine: &mut QueryEngine, name: &str, text: &str| {
+                let file = engine.sources.add(name, text.into()).unwrap();
+                crate::DefinitionQueries::parse_file(engine, file, &context).unwrap();
+            };
+            parse(&mut engine, "a.hir", "pub fn a()->u8{1u8}\n");
+            parse(&mut engine, "b.hir", "pub fn b()->u8{2u8}\n");
+            let definitions = engine.source_paths();
+            let [a, b] = [&definitions[0], &definitions[1]].map(DefId::intern);
+            let mut base = ViewBase::new(hirsel_engine_admission::ProcessBudget::new(8 << 20));
+            let mut view = |engine: &mut QueryEngine, definitions: &[DefPath]| {
+                engine
+                    .capture_namespace_after(definitions, &[], 8 << 20, Some(&mut base))
+                    .unwrap()
+            };
+            let row = |capture: &NamespaceCapture, id| capture.bodies.get(&id).unwrap().clone();
+            let first = view(&mut engine, &definitions);
+            parse(&mut engine, "a.hir", "pub fn a()->u8{7u8}\n");
+            let edited = view(&mut engine, &definitions);
+            assert_ne!(row(&first, a).syntax, row(&edited, a).syntax);
+            assert!(*row(&first, b) == *row(&edited, b));
+            parse(&mut engine, "a.hir", "pub fn a()->u8{1u8}\n");
+            let reverted = view(&mut engine, &definitions);
+            assert_eq!(row(&first, a).syntax, row(&reverted, a).syntax);
+            assert_eq!(
+                row(&first, a).implementation,
+                row(&reverted, a).implementation
+            );
+            let without_b = view(&mut engine, &definitions[..1]);
+            assert!(without_b.bodies.get(&b).is_none());
+            parse(&mut engine, "b.hir", "pub fn b()->u8{9u8}\n");
+            let returned = view(&mut engine, &definitions);
+            assert_ne!(row(&first, b).syntax, row(&returned, b).syntax);
+            // A second header for `a`, indexed but not parsed, changes only
+            // its declaration row.
+            let file = engine
+                .sources
+                .add("again.hir", "pub fn a()->u8{5u8}\n".into())
+                .unwrap();
+            engine.index_source(file, &context).unwrap();
+            let duplicated = view(&mut engine, &definitions);
+            assert!(*row(&returned, b) == *row(&duplicated, b));
+        });
     }
     #[test]
     fn namespace_installation_keeps_indexed_bodies_undemanded() {

@@ -259,6 +259,14 @@ impl Catalog {
         })
     }
 
+    /// The file of each catalog candidate of `path`, in candidate order.
+    pub(super) fn candidate_files(&self, path: &DefPath) -> impl Iterator<Item = FileId> + '_ {
+        self.candidates
+            .get(path)
+            .into_iter()
+            .flatten()
+            .map(|candidate| candidate.file)
+    }
     pub(super) fn identity(&self) -> CatalogIdentity {
         CatalogIdentity {
             selected_installation: self.selected_installation,

@@ -26,6 +26,7 @@ pub(crate) struct DemandProducer {
     failure: Mutex<Option<FrontRegistrationBootstrapError>>,
     rounds: std::sync::atomic::AtomicUsize,
     staged: Mutex<BTreeSet<(DefId, ContentHash)>>,
+    base: Mutex<crate::queries::namespace::ViewBase>,
     _metadata: hirsel_engine_admission::MemoryReservation,
 }
 struct ScopeRequest {
@@ -210,6 +211,9 @@ impl DemandProducer {
                 staged_log: vec![],
             }),
             lower: scheduled_lower::LowerPartition::new(&admission.request),
+            base: Mutex::new(crate::queries::namespace::ViewBase::new(
+                admission.request.clone(),
+            )),
             request: admission.request,
             weight,
             max_reads,
@@ -1263,7 +1267,15 @@ impl DemandProducer {
                 }
             }
         }
-        let namespace = engine.capture_namespace(definitions, &refreshed, self.request.free())?;
+        let namespace = {
+            let mut base = self.base.lock().unwrap_or_else(|e| e.into_inner());
+            engine.capture_namespace_after(
+                definitions,
+                &refreshed,
+                self.request.free(),
+                Some(&mut base),
+            )?
+        };
         {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let existing = state

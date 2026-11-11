@@ -239,6 +239,8 @@ fn said(e: store.StoreError) -> String {
     NoLevel => "NoLevel",
     Foreign => "Foreign",
     InvalidInput => "InvalidInput",
+    NotRetained => "NotRetained",
+    PinReleased => "PinReleased",
   }
 }
 

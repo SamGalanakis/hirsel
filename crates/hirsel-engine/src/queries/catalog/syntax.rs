@@ -116,7 +116,7 @@ impl QueryEngine {
             .and_then(|key| self.source_record(&key, context))
             .is_some()
     }
-    fn parse_syntax_key(
+    pub(super) fn parse_syntax_key(
         &self,
         file: FileId,
         context: &FileContext,
@@ -292,7 +292,9 @@ impl QueryEngine {
         // An explicit parse may reproduce an already persisted source tree.
         // Equality is against the freshly validated canonical bytes, so corrupt
         // records are still replaced and recomputation checks above still run.
-        if store.get(&key).as_deref() != Some(bytes.as_slice()) {
+        if store.get(&key).as_deref() == Some(bytes.as_slice()) {
+            store.adopt(&key);
+        } else {
             store.put(&key, &bytes);
         }
         Ok(())

@@ -550,6 +550,7 @@ impl FrontRegistrationQueries {
         if persisted != variant.reads {
             return None;
         }
+        self.lower.store.adopt(&key);
         Some(Data {
             diagnostic_sources: None,
             definition: input.definition,

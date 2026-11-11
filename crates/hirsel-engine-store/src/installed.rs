@@ -12,7 +12,6 @@ pub use semantic::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 const PACKAGE: Domain = Domain {
     kind: 0x4600_0039,
@@ -220,21 +219,25 @@ mod tests {
                 .contains("compiler identity mismatch")
         );
         let row = store.lookup(address()).unwrap();
-        std::fs::remove_file(
-            store
-                .association_path(Address(ContentHash::of_bytes(b"row")))
-                .unwrap(),
-        )
-        .unwrap();
+        // The header alone defines the installation: the cache index row at
+        // the same address is never consulted, so losing it changes nothing.
+        let product = Address(ContentHash::of_bytes(b"row"));
+        let listed = InstalledPackage::open(&store, &package, compiler)
+            .unwrap()
+            .records
+            .lookup(product)
+            .unwrap();
+        std::fs::remove_file(store.association_path(product).unwrap()).unwrap();
+        InstalledPackage::verify_store(directory.path()).unwrap();
+        let installed = InstalledPackage::open(&store, &package, compiler).unwrap();
+        assert_eq!(installed.records.lookup(product), Some(listed));
+        // A listed row whose content is gone is partial, and a publication
+        // that would list it fails without replacing the current header.
+        let content = store.output_path(listed.reference);
+        let kept = std::fs::read(&content).unwrap();
+        std::fs::remove_file(&content).unwrap();
         let error = InstalledPackage::verify_store(directory.path()).unwrap_err();
         assert!(error.contains("partial"), "{error}");
-        let installed = InstalledPackage::open(&store, &package, compiler).unwrap();
-        assert!(
-            installed
-                .records
-                .lookup(Address(ContentHash::of_bytes(b"row")))
-                .is_none()
-        );
         let original_root = store.lookup(address()).unwrap();
         assert!(
             installed
@@ -264,6 +267,8 @@ mod tests {
                 .is_err()
         );
         assert_eq!(store.lookup(address()), Some(original_root));
+        std::fs::write(&content, kept).unwrap();
+        InstalledPackage::verify_store(directory.path()).unwrap();
         let path = store.output_path(row.reference);
         let mut damaged = std::fs::read(&path).unwrap();
         *damaged.last_mut().unwrap() ^= 1;
@@ -425,7 +430,8 @@ mod tests {
             }
         );
         assert_eq!(&*next.records.content(second).unwrap(), b"replacement");
-        // A separately damaged association cannot supply consumed metadata.
+        // A separately damaged index row cannot supply consumed metadata: the
+        // header's row is the one returned, and the installation stays valid.
         let path = writer.association_path(row).unwrap();
         let mut damaged = std::fs::read(&path).unwrap();
         let offset = damaged
@@ -434,10 +440,15 @@ mod tests {
             .unwrap();
         damaged[offset] ^= 1;
         std::fs::write(path, damaged).unwrap();
-        let corrupted =
-            InstalledPackage::open(&writer.for_operation(), &package, compiler).unwrap();
-        assert!(corrupted.records.lookup(row).is_none());
-        assert!(InstalledPackage::verify_store(directory.path()).is_err());
+        let reopened = InstalledPackage::open(&writer.for_operation(), &package, compiler).unwrap();
+        assert_eq!(
+            reopened.records.lookup(row),
+            Some(Association {
+                action,
+                reference: second
+            })
+        );
+        InstalledPackage::verify_store(directory.path()).unwrap();
     }
     #[test]
     fn installed_source_owner_keeps_published_references_without_query_cache_access() {
@@ -489,7 +500,15 @@ mod tests {
                 ))
                 .is_none()
         );
-        assert!(InstalledPackage::verify_store(directory.path()).is_err());
+        // A later run rewrites the cache index at the same address; the
+        // installation stays valid and keeps resolving its own row.
+        InstalledPackage::verify_store(directory.path()).unwrap();
+        let reopened = InstalledPackage::open(&store, &package, compiler)
+            .unwrap()
+            .package
+            .source_records()
+            .unwrap();
+        assert_eq!(&*reopened.get(&key).unwrap(), b"original source");
     }
     #[test]
     fn duplicate_content_checks_preserve_full_reference_identity() {
@@ -566,11 +585,8 @@ mod tests {
         let next = provider.for_operation().unwrap();
         next.installed_package(&package, compiler).unwrap();
         assert!(next.get_content(reference).is_some());
-        assert!(
-            InstalledPackage::verify_store(directory.path())
-                .unwrap_err()
-                .contains("partial")
-        );
+        // Restored content revalidates; the index row is not part of it.
+        InstalledPackage::verify_store(directory.path()).unwrap();
     }
 }
 
@@ -585,25 +601,25 @@ pub struct InstalledSource {
 
 #[derive(Debug)]
 /// One manifest generation and immutable, verified snapshots of demanded records.
+/// The header alone defines the installation: a row resolves to its listed
+/// content, checked on read, never through the root's mutable cache index.
+/// A later Precompute into the same root rewrites that index freely; this
+/// installation stays valid until the next header replaces it.
 pub(crate) struct InstalledRecords {
     pub(crate) root: PathBuf,
     store: hirsel_artifact_store::Store,
     // Keep the physical index generation pinned until this operation releases it.
     _scope: hirsel_artifact_store::Batch,
-    rows: Box<[(ContentHash, Association, OnceLock<Option<Association>>)]>,
+    rows: Box<[(ContentHash, Association)]>,
     contents: Box<[Reference]>,
 }
 impl InstalledRecords {
     pub(crate) fn lookup(&self, address: Address) -> Option<Association> {
         let index = self
             .rows
-            .binary_search_by_key(&address.0, |(key, _, _)| *key)
+            .binary_search_by_key(&address.0, |(key, _)| *key)
             .ok()?;
-        let (_, expected, checked) = &self.rows[index];
-        *checked.get_or_init(|| {
-            let row = self.store.lookup_owned(address)?;
-            (row == *expected).then_some(row)
-        })
+        Some(self.rows[index].1)
     }
     pub(crate) fn content(&self, reference: Reference) -> Option<Bytes> {
         self.contents.binary_search(&reference).ok()?;
@@ -767,11 +783,7 @@ impl InstalledPackage {
         records: &InstallationRecords,
     ) -> std::io::Result<()> {
         let mut records = records.clone();
-        // One index publication for every definition row; the fresh reads
-        // in check_records below observe the finished batch.
-        let batch = store.batch();
         self.index_definitions(store, &mut records)?;
-        batch.finish()?;
         self.rows = records
             .rows
             .iter()
@@ -783,7 +795,10 @@ impl InstalledPackage {
                 "package precomputation published no products",
             ));
         }
-        // Publish last, after fresh reads prove the complete installation exists.
+        // Publish last, after fresh reads prove the complete installation
+        // exists. The header's one association is the commit: until it
+        // lands, the previous header and every content it lists stay intact,
+        // since content is immutable and no row of it lives in the index.
         self.check_definitions().map_err(std::io::Error::other)?;
         self.check_records(store).map_err(std::io::Error::other)?;
         let bytes = bincode::serialize(&self).map_err(std::io::Error::other)?;
@@ -794,18 +809,14 @@ impl InstalledPackage {
         &self,
         store: &hirsel_artifact_store::Store,
     ) -> Result<hirsel_artifact_store::VerifiedRecords, String> {
+        // Rows are the header's; each must reach present, intact content.
         store
             .verify_records(
-                self.rows.iter().map(|&(address, action, reference)| {
-                    (
-                        Address(address),
-                        hirsel_artifact_store::Association {
-                            action: Action(action),
-                            reference,
-                        },
-                    )
-                }),
-                self.contents.iter().copied(),
+                std::iter::empty(),
+                self.contents
+                    .iter()
+                    .copied()
+                    .chain(self.rows.iter().map(|&(_, _, reference)| reference)),
             )
             .map_err(|error| format!("partial or corrupt package product content or row: {error}"))
     }
@@ -861,13 +872,32 @@ impl InstalledPackage {
         hirsel_intern::timings::count(hirsel_intern::timings::Count::InstalledPackageOpens);
         let read = || -> Result<OpenedInstallation, String> {
             let scope = store.batch();
-            let mut installed = Self::read(store)?;
+            let installed = Self::read(store)?;
             if installed.compiler != compiler {
                 return Err("stale installed package: compiler identity mismatch".into());
             }
             if installed.package != *package {
                 return Err("installed package identity mismatch".into());
             }
+            Self::attach(store, scope, installed)
+        };
+        read().map_err(|error| format!("installed products {}: {error}", store.root().display()))
+    }
+    /// The records of whatever installation `store`'s header names, for an
+    /// ordinary read-only reader that has not selected a package. Its rows
+    /// resolve only through this header, never through the root's index.
+    pub(crate) fn open_records(
+        store: &hirsel_artifact_store::Store,
+    ) -> Result<Arc<InstalledRecords>, String> {
+        let scope = store.batch();
+        Ok(Self::attach(store, scope, Self::read(store)?)?.records)
+    }
+    fn attach(
+        store: &hirsel_artifact_store::Store,
+        scope: hirsel_artifact_store::Batch,
+        mut installed: Self,
+    ) -> Result<OpenedInstallation, String> {
+        {
             let mut rows = BTreeMap::new();
             for &(address, action, reference) in &installed.rows {
                 let row = Association {
@@ -891,10 +921,7 @@ impl InstalledPackage {
                 root: store.root().to_owned(),
                 store: store.clone(),
                 _scope: scope,
-                rows: rows
-                    .into_iter()
-                    .map(|(key, row)| (key, row, OnceLock::new()))
-                    .collect(),
+                rows: rows.into_iter().collect(),
                 contents: contents.into_iter().collect(),
             });
             installed.sources_owner = Some(Arc::new(InstalledSourceRecords {
@@ -917,7 +944,6 @@ impl InstalledPackage {
                 package: Arc::new(installed),
                 records,
             })
-        };
-        read().map_err(|error| format!("installed products {}: {error}", store.root().display()))
+        }
     }
 }

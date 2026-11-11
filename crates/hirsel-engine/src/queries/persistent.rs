@@ -1263,6 +1263,7 @@ impl QueryEngine {
         } else {
             None
         };
+        store.adopt(&key);
         Some(Arc::new(Entry {
             memo: entry.memo.clone(),
             detail: record.detail,
@@ -1780,6 +1781,11 @@ impl QueryEngine {
                         .all(|(read, value)| self.observe(owner, read) == Some(*value))
             })
             .and_then(|_| entry.resolve(&*store, key));
+        if hit.is_some() {
+            // Every read held: this run uses the stored variant. A caller
+            // that rejects its payload recomputes, and that write replaces it.
+            store.adopt(key);
+        }
         if hit.is_none() {
             timings::count(Count::StoreMisses);
             match key.2 {

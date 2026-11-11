@@ -485,6 +485,19 @@ impl ResultStore for RequestStore {
             self.backend.demand(keys)
         }
     }
+    fn adopt(&self, key: &EntryKey) {
+        if self.persistence().retains() {
+            self.backend.adopt(key)
+        }
+    }
+    fn put_cache_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
+        // Read back through the backend only; the request transport never
+        // carries a hit's sidecar.
+        self.persistence()
+            .retains()
+            .then(|| self.backend.put_cache_content(domain, bytes))
+            .flatten()
+    }
     fn open_product_archive(
         &self,
         reference: Reference,

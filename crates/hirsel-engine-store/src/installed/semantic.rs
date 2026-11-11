@@ -160,7 +160,6 @@ impl InstalledPackage {
             };
             let address = key.address();
             let action = Action(reference.output.0);
-            store.associate(address, action, reference)?;
             records.rows.insert(address.0, (action, reference));
             let definition = InstalledDefinition {
                 key,

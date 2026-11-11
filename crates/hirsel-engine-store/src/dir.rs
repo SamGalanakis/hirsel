@@ -20,10 +20,105 @@ pub struct DirStore {
     verifier: std::sync::Arc<hirsel_validate::VerifierCache>,
     operation: bool,
     installed_capture: Option<Arc<Mutex<Option<super::installed::OpenedInstallation>>>>,
-    installation: Option<std::sync::Arc<std::sync::Mutex<super::installed::InstallationRecords>>>,
+    /// Each read-only root's installation header, opened once per operation.
+    /// A root without a valid header supplies no rows.
+    headers: Arc<
+        Mutex<std::collections::BTreeMap<PathBuf, Option<Arc<super::installed::InstalledRecords>>>>,
+    >,
+    installation: Option<std::sync::Arc<std::sync::Mutex<InstallationRecorder>>>,
     /// Set once `root` exists. Clones and operations share the answer, so a
     /// put no longer re-creates an existing directory.
     root_ready: Arc<std::sync::OnceLock<()>>,
+}
+
+/// What an installation producer adopted or wrote. Publication projects it
+/// to the installation: a function of the inputs, equal to a cold producer's.
+///
+/// Rows are published only for what this run's queries used: an entry it
+/// wrote or adopted after a hit's own checks (`ResultStore::adopt`), a product
+/// association it wrote, or one it looked up and then read checked content
+/// through. A lookup alone publishes nothing. Each entry is published holding
+/// only the variant for this run's key; other variants stay in the cache.
+#[derive(Debug, Default)]
+struct InstallationRecorder {
+    entries: std::collections::BTreeMap<
+        hirsel_syntax::ContentHash,
+        (EntryKey, super::Action, super::Reference),
+    >,
+    /// The row each address's last lookup returned, until adopted.
+    looked:
+        std::collections::BTreeMap<hirsel_syntax::ContentHash, (super::Action, super::Reference)>,
+    products:
+        std::collections::BTreeMap<hirsel_syntax::ContentHash, (super::Action, super::Reference)>,
+    /// Looked-up product associations, by the content whose read adopts them.
+    candidates: std::collections::BTreeMap<
+        hirsel_syntax::ContentHash,
+        Vec<(hirsel_syntax::ContentHash, super::Action, super::Reference)>,
+    >,
+    contents: std::collections::BTreeMap<hirsel_syntax::ContentHash, super::Reference>,
+    cache_only: std::collections::BTreeSet<hirsel_syntax::ContentHash>,
+}
+impl InstallationRecorder {
+    /// Project to one variant per entry. Query-record contents (entry blobs
+    /// and variant payloads) are listed only when a published row reaches
+    /// them, so rejected variants and superseded blobs never are.
+    fn project(
+        &self,
+        store: &hirsel_artifact_store::Store,
+    ) -> std::io::Result<super::installed::InstallationRecords> {
+        let mut rows = self.products.clone();
+        let mut reached = std::collections::BTreeSet::new();
+        let batch = store.batch();
+        for (address, &(key, action, blob)) in &self.entries {
+            let key = &key;
+            let bytes = store
+                .get_owned(blob)
+                .map_err(|_| std::io::Error::other("an adopted record's content is unreadable"))?;
+            // Whichever write path stored it, a query entry for this key is
+            // projected; any other record (`put`) is published as written.
+            let Some(entry) = super::Entry::decode_for(key, &bytes) else {
+                rows.insert(*address, (action, blob));
+                continue;
+            };
+            let variant = entry
+                .current(key)
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("an adopted entry has no current variant"))?;
+            reached.insert(variant.output);
+            // A stored one-variant entry is already this projection's content:
+            // every writer stores `encode_for`'s canonical frame.
+            if entry.variants.len() == 1 && blob.domain == super::entry_domain(key.2) {
+                rows.insert(*address, (entry.action(key), blob));
+                continue;
+            }
+            let entry = super::Entry {
+                variants: vec![variant],
+            };
+            let reference = store.put(super::entry_domain(key.2), &entry.encode_for(key))?;
+            rows.insert(*address, (entry.action(key), reference));
+        }
+        batch.finish()?;
+        reached.extend(rows.values().map(|(_, reference)| *reference));
+        let contents = self
+            .contents
+            .values()
+            .filter(|reference| {
+                !self.cache_only.contains(&reference.output.0)
+                    && !super::query_record_domain(reference.domain)
+            })
+            .chain(&reached)
+            .map(|reference| (reference.output.0, *reference))
+            .collect();
+        Ok(super::installed::InstallationRecords { rows, contents })
+    }
+}
+
+/// The action of a raw record written by `put`, never a query entry's.
+fn raw_action(key: &EntryKey) -> super::Action {
+    super::Action(hirsel_syntax::ContentHash::of_parts(
+        "hirsel.result.raw-action.v1",
+        [key.0.0.as_slice(), key.1.0.as_slice()],
+    ))
 }
 
 /// What a collection found and removed.
@@ -66,6 +161,7 @@ impl DirStore {
             cap: DEFAULT_CAP,
             operation: false,
             installed_capture: None,
+            headers: Arc::default(),
             installation: None,
             root_ready: Arc::default(),
         }
@@ -89,32 +185,49 @@ impl DirStore {
             .as_ref()
             .ok_or_else(|| std::io::Error::other("installation was not recorded"))?;
         let store = hirsel_artifact_store::Store::installation(self.root.clone());
-        let records = records.lock().unwrap_or_else(|error| error.into_inner());
+        let records = records
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .project(&store)?;
         package.publish(&store, &records)
     }
-    fn record_content(&self, reference: super::Reference) {
+    fn record(&self, change: impl FnOnce(&mut InstallationRecorder)) {
         if let Some(records) = &self.installation {
-            records
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .contents
-                .insert(reference.output.0, reference);
+            change(&mut records.lock().unwrap_or_else(|error| error.into_inner()));
         }
     }
-    fn record_row(
+    fn record_content(&self, reference: super::Reference) {
+        self.record(|records| {
+            if !records.cache_only.contains(&reference.output.0) {
+                records.contents.insert(reference.output.0, reference);
+            }
+            // A checked read of a looked-up association's content adopts it.
+            for (address, action, candidate) in records
+                .candidates
+                .remove(&reference.output.0)
+                .unwrap_or_default()
+            {
+                if candidate == reference {
+                    records.products.insert(address, (action, reference));
+                }
+            }
+        });
+    }
+    fn record_product(
         &self,
         address: super::Address,
         action: super::Action,
         reference: super::Reference,
     ) {
         self.record_content(reference);
-        if let Some(records) = &self.installation {
-            records
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .rows
-                .insert(address.0, (action, reference));
-        }
+        self.record(|records| {
+            records.products.insert(address.0, (action, reference));
+        });
+    }
+    fn record_lookup(&self, key: &EntryKey, row: super::Association) {
+        self.record(|records| {
+            records.looked.insert(key.0, (row.action, row.reference));
+        });
     }
     /// Read installed ordinary products with the same checked format. Writes,
     /// collection and verifier associations remain in this store's own root.
@@ -211,6 +324,7 @@ impl DirStore {
             verifier,
             operation: false,
             installed_capture: Some(Default::default()),
+            headers: Arc::default(),
             installation: None,
             root_ready: Arc::default(),
         })
@@ -228,6 +342,25 @@ impl DirStore {
             .iter()
             .map(|root| (true, root))
             .chain(self.read_only.iter().map(|root| (false, root)))
+    }
+    /// The installation a read-only root serves rows from: the captured
+    /// one when it is this root's, else the root's own header.
+    fn header(
+        &self,
+        store: &hirsel_artifact_store::Store,
+    ) -> Option<Arc<super::installed::InstalledRecords>> {
+        if let Some(records) = self
+            .installed_records()
+            .filter(|records| records.root == store.root())
+        {
+            return Some(records);
+        }
+        self.headers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .entry(store.root().to_owned())
+            .or_insert_with(|| super::InstalledPackage::open_records(store).ok())
+            .clone()
     }
     fn installed_records(&self) -> Option<Arc<super::installed::InstalledRecords>> {
         let captured = self
@@ -276,11 +409,13 @@ impl DirStore {
         let write = || -> std::io::Result<super::Reference> {
             let reference = store.put(super::entry_domain(key.2), value)?;
             store.associate(Address(key.0), action, reference)?;
-            self.record_row(Address(key.0), action, reference);
             Ok(reference)
         };
         match write().and_then(|reference| batch.finish().map(|()| reference)) {
             Ok(reference) if self.get(key).is_some_and(|stored| &*stored == value) => {
+                self.record(|records| {
+                    records.entries.insert(key.0, (*key, action, reference));
+                });
                 super::WriteOutcome::Stored(reference)
             }
             Ok(_) => super::WriteOutcome::Refused,
@@ -366,6 +501,7 @@ impl ResultStore for DirStore {
             cap: self.cap,
             operation: true,
             installed_capture: Some(Default::default()),
+            headers: Arc::default(),
             verifier_identity: None,
             installation: self.installation.clone(),
             root_ready: self.root_ready.clone(),
@@ -423,20 +559,19 @@ impl ResultStore for DirStore {
         // Keep the product index disjoint, as the byte providers do.
         let address = super::Address(super::product_association_key(address).0);
         let row = self.roots().find_map(|(local, store)| {
-            if !local
-                && let Some(records) = self
-                    .installed_records()
-                    .filter(|records| records.root == store.root())
-            {
-                return records.lookup(address);
-            }
             if local {
                 store.lookup(address)
             } else {
-                store.lookup_owned(address)
+                self.header(store)?.lookup(address)
             }
         })?;
-        self.record_row(address, row.action, row.reference);
+        self.record(|records| {
+            records
+                .candidates
+                .entry(row.reference.output.0)
+                .or_default()
+                .push((address.0, row.action, row.reference));
+        });
         Some(row)
     }
     fn associate_product(
@@ -462,7 +597,7 @@ impl ResultStore for DirStore {
         };
         let address = super::Address(super::product_association_key(address).0);
         let _ = store.associate(address, action, reference);
-        self.record_row(address, action, reference);
+        self.record_product(address, action, reference);
     }
     fn verifier(&self) -> Option<std::sync::Arc<hirsel_validate::VerifierCache>> {
         Some(self.verifier.clone())
@@ -530,11 +665,12 @@ impl ResultStore for DirStore {
     }
     fn get(&self, key: &EntryKey) -> Option<super::Bytes> {
         for (local, store) in self.roots() {
-            if !local
-                && let Some(records) = self
-                    .installed_records()
-                    .filter(|records| records.root == store.root())
-            {
+            if !local {
+                // A read-only root is an installation: its header is the only
+                // row source, and its listed content is checked on read.
+                let Some(records) = self.header(store) else {
+                    continue;
+                };
                 let Some(row) = records.lookup(hirsel_artifact_store::Address(key.0)) else {
                     continue;
                 };
@@ -542,26 +678,7 @@ impl ResultStore for DirStore {
                     continue;
                 }
                 let bytes = records.content(row.reference)?;
-                self.record_row(
-                    hirsel_artifact_store::Address(key.0),
-                    row.action,
-                    row.reference,
-                );
-                return Some(bytes);
-            }
-            if !local {
-                let Some(row) = store.lookup_owned(hirsel_artifact_store::Address(key.0)) else {
-                    continue;
-                };
-                if row.reference.domain != super::entry_domain(key.2) {
-                    continue;
-                }
-                let bytes = store.get_owned(row.reference).ok()?;
-                self.record_row(
-                    hirsel_artifact_store::Address(key.0),
-                    row.action,
-                    row.reference,
-                );
+                self.record_lookup(key, row);
                 return Some(bytes);
             }
             let Some(opened) = store.lookup_open(hirsel_artifact_store::Address(key.0)) else {
@@ -591,24 +708,31 @@ impl ResultStore for DirStore {
             if local {
                 store.touch(hirsel_artifact_store::Address(key.0), previous.reference);
             }
-            self.record_row(
-                hirsel_artifact_store::Address(key.0),
-                previous.action,
-                previous.reference,
-            );
+            self.record_lookup(key, previous);
             return Some(bytes);
         }
         None
     }
     fn put(&self, key: &EntryKey, value: &[u8]) -> crate::WriteOutcome {
-        self.publish(
-            key,
-            super::Action(hirsel_syntax::ContentHash::of_parts(
-                "hirsel.result.raw-action.v1",
-                [key.0.0.as_slice(), key.1.0.as_slice()],
-            )),
-            value,
-        )
+        self.publish(key, raw_action(key), value)
+    }
+    fn adopt(&self, key: &EntryKey) {
+        self.record(|records| {
+            if let Some((action, reference)) = records.looked.get(&key.0).copied() {
+                records.entries.insert(key.0, (*key, action, reference));
+            }
+        });
+    }
+    fn put_cache_content(&self, domain: super::Domain, bytes: &[u8]) -> Option<super::Reference> {
+        let store = self.publication_store()?;
+        let reference = store.put(domain, bytes).ok()?;
+        if !store.get(reference).is_some_and(|stored| &*stored == bytes) {
+            return None;
+        }
+        self.record(|records| {
+            records.cache_only.insert(reference.output.0);
+        });
+        Some(reference)
     }
     fn put_query(
         &self,
@@ -853,11 +977,97 @@ mod tests {
             assert_eq!(product.action, action);
             assert_eq!(product.reference, variant.output);
             assert_eq!(&*reopened.get_content(product.reference).unwrap(), b"body");
+            crate::tests::install(
+                directory.path(),
+                &[key.0, crate::product_association_key(address).0],
+                &[variant.output],
+            );
             let installed = DirStore::new(directory.path().join("local"))
                 .with_read_only_root(directory.path().to_owned());
             assert_eq!(Entry::load(&installed, &key), entry);
             assert_eq!(installed.lookup_product(address), Some(product));
         }
+    }
+
+    /// The header alone defines an installation, so its mutable index may be
+    /// rewritten by a later run. Bug: a reader resolving a row through that
+    /// index would serve another row's valid, same-kind content. Oracle: the
+    /// content each row was installed with.
+    #[test]
+    fn an_index_row_pointing_at_another_rows_content_never_serves_it() {
+        use crate::{Action, Address, Domain, InstalledPackage, ResultStore};
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("installed");
+        let seed = DirStore::new(root.clone());
+        let key = |name: &str| {
+            EntryKey::new(
+                Default::default(),
+                &hirsel_syntax::DefPath::core(name),
+                Default::default(),
+                hirsel_query_products::QueryKind::Signature,
+                hirsel_query_products::LoweringPolicy::Reachable,
+            )
+        };
+        let (first, second) = (key("altered-first"), key("altered-second"));
+        seed.put(&first, b"first record");
+        seed.put(&second, b"second record");
+        let domain = Domain {
+            kind: 123,
+            schema: 1,
+        };
+        let product = Address(hirsel_syntax::ContentHash::of_bytes(b"first product"));
+        let other = Address(hirsel_syntax::ContentHash::of_bytes(b"second product"));
+        for (address, bytes) in [(product, b"first bytes"), (other, b"other bytes")] {
+            let reference = seed.put_content(domain, bytes).unwrap();
+            seed.associate_written_product(address, Action(address.0), reference);
+        }
+        let (product_row, other_row) = (
+            crate::product_association_key(product).0,
+            crate::product_association_key(other).0,
+        );
+        crate::tests::install(&root, &[first.0, second.0, product_row, other_row], &[]);
+        let store = hirsel_artifact_store::Store::new(root.clone());
+        let installed = store.lookup(Address(product_row)).unwrap();
+        let state = directory.path().join("state");
+        let identity = hirsel_syntax::ContentHash::of_bytes(b"compiler");
+        hirsel_validate::Installation::begin(&root, &state, identity)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let registered = || {
+            hirsel_validate::Installation::registered(&root, &state, identity, Default::default())
+        };
+        assert!(registered().is_some());
+
+        // Each row's index entry now names the other row's content.
+        for (row, from) in [(first.0, second.0), (product_row, other_row)] {
+            let replacement = store.lookup(Address(from)).unwrap();
+            store
+                .associate(Address(row), replacement.action, replacement.reference)
+                .unwrap();
+        }
+
+        let package = hirsel_syntax::PackageId {
+            name: "seed".into(),
+            version: "1".into(),
+        };
+        let reader =
+            DirStore::new(directory.path().join("local")).with_read_only_root(root.clone());
+        let operation = reader.for_operation().unwrap();
+        operation.installed_package(&package, identity).unwrap();
+        for reader in [&reader as &dyn ResultStore, &*operation] {
+            assert_eq!(&*reader.get(&first).unwrap(), b"first record");
+            assert_eq!(
+                reader.lookup_product(product).unwrap().reference,
+                installed.reference
+            );
+        }
+        let opened = InstalledPackage::open(&store, &package, identity).unwrap();
+        assert_eq!(opened.records.lookup(Address(product_row)), Some(installed));
+        InstalledPackage::verify_store(&root).unwrap();
+        // V's rows never resolve through the index, and its registration
+        // binds the index it accepted: a changed index is not that root.
+        assert!(registered().is_none());
     }
 
     #[test]
@@ -878,6 +1088,7 @@ mod tests {
             verifier: std::sync::Arc::new(verifier),
             operation: false,
             installed_capture: None,
+            headers: Arc::default(),
             installation: None,
             root_ready: Arc::default(),
         };

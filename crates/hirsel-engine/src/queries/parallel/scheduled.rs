@@ -2282,6 +2282,7 @@ impl BodyTask {
         };
         queries.install_outcome(self.input, cached, self.weight.scratch);
         queries.store_adoptions.fetch_add(1, Relaxed);
+        queries.store.adopt(&input.key);
         timings::count(Count::StoreHits);
         timings::count(Count::StoreModeHits);
         match terminal {

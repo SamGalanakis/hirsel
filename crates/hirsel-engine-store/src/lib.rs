@@ -290,6 +290,15 @@ pub trait ResultStore: Send + Sync {
     }
     fn get(&self, key: &EntryKey) -> Option<Bytes>;
     fn put(&self, key: &EntryKey, value: &[u8]) -> WriteOutcome;
+    /// The caller accepted `key`'s current variant from its last `get` after
+    /// that query's own checks. An installation producer publishes exactly
+    /// the variants it adopted or wrote, never one a lookup only touched.
+    fn adopt(&self, _key: &EntryKey) {}
+    /// Content a later hit may read back but no product row references, such
+    /// as a hit's own verifier sidecar. An installation never lists it.
+    fn put_cache_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
+        self.put_content(domain, bytes)
+    }
     /// Prevent reclamation of the complete transported closure through the
     /// held operation. Unsupported providers refuse Complete publication.
     fn retention_scope(&self) -> Option<Box<dyn Send + Sync>>;
@@ -657,6 +666,14 @@ fn entry_domain(kind: QueryKind) -> Domain {
         schema: FORMAT,
     }
 }
+/// Whether `domain` holds a query entry or a query variant's payload. An
+/// installation lists such content only where a published row reaches it.
+fn query_record_domain(domain: Domain) -> bool {
+    let kinds = QueryKind::SemanticBody as u32 + 1;
+    (domain.schema == FORMAT && domain.kind.checked_sub(256).is_some_and(|k| k < kinds))
+        || (domain.schema == product_domain(QueryKind::Lex).schema
+            && domain.kind.checked_sub(16).is_some_and(|k| k < kinds))
+}
 /// Ordinary phase-result domain, shared by producers and retaining providers.
 pub fn product_domain(kind: QueryKind) -> Domain {
     Domain {
@@ -766,7 +783,7 @@ impl VariantRef {
         let output = store.put_content(product_domain(key.2), bytes)?;
         Some(Self::for_output(key, reads, output))
     }
-    fn for_output(key: &EntryKey, reads: Reads, output: Reference) -> Self {
+    pub fn for_output(key: &EntryKey, reads: Reads, output: Reference) -> Self {
         let mut variant = Self {
             inputs: key.1,
             reads,

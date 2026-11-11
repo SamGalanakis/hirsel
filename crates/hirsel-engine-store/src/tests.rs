@@ -32,6 +32,44 @@ fn variant(sig: &str, payload: &str) -> VariantRef {
     .unwrap();
     VariantRef::publish(&MemStore::default(), &key("a"), reads, payload.as_bytes()).unwrap()
 }
+/// Publish an installation header over `root` listing the rows its index
+/// holds now at `addresses`, plus `contents`. A read-only root serves only
+/// what its header lists.
+pub(crate) fn install(root: &std::path::Path, addresses: &[ContentHash], contents: &[Reference]) {
+    let store = hirsel_artifact_store::Store::new(root.to_owned());
+    let mut records = crate::installed::InstallationRecords::default();
+    for address in addresses {
+        let row = store.lookup(Address(*address)).unwrap();
+        records.rows.insert(*address, (row.action, row.reference));
+        records
+            .contents
+            .insert(row.reference.output.0, row.reference);
+    }
+    for reference in contents {
+        records.contents.insert(reference.output.0, *reference);
+    }
+    let package = PackageId {
+        name: "seed".into(),
+        version: "1".into(),
+    };
+    crate::installed::InstalledPackage::new(
+        ContentHash::of_bytes(b"compiler"),
+        package.clone(),
+        b"manifest".to_vec(),
+        vec![crate::installed::InstalledSource {
+            path: "/absent/seed.hir".into(),
+            logical: "seed@1/seed.hir".into(),
+            context: hirsel_syntax::FileContext {
+                package,
+                modules: vec![],
+            },
+            text: String::new(),
+        }],
+        vec![],
+    )
+    .publish(&store, &records)
+    .unwrap();
+}
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "hirsel-store-{name}-{}-{:?}",
@@ -580,6 +618,7 @@ fn directory_packaged_roots_are_read_only_and_local_corruption_does_not_mask_the
     };
     let reference = seed.put_content(content_domain, b"shared product").unwrap();
     seed.put(&query, b"ordinary query index");
+    install(&packaged, &[query.0], &[reference]);
     fn contents(root: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
         let mut pending = vec![root.to_path_buf()];
         let mut files = vec![];
@@ -727,6 +766,7 @@ fn explicit_directory_selection_keeps_installed_products_without_forwarding_auth
         Some(reference)
     );
     seed.put(&query, b"installed index");
+    install(&packaged, &[query.0], &[reference]);
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "tests::explicit_directory_selection_keeps_installed_products_without_forwarding_authority", "--nocapture"])
         .env(CHILD, &local)
@@ -783,6 +823,7 @@ fn disabled_writable_cache_keeps_installed_products_and_never_publishes() {
         Some(reference)
     );
     seed.put(&query, b"installed index");
+    install(&packaged, &[query.0], &[reference]);
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",

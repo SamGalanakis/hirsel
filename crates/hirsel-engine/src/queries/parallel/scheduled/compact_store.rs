@@ -74,6 +74,35 @@ fn address(key: Key) -> hirsel_artifact_store::Address {
 fn storage_key(key: &EntryKey) -> EntryKey {
     EntryKey(address(key.0).0, key.1, QueryKind::Summary)
 }
+/// The rows a cold run publishes beside a compact record: the Modes entry and
+/// its body association. A hit takes them from the store only when the Modes
+/// entry's current variant is this record's body under the same reads; any
+/// other state is a miss, so the run recomputes and publishes them itself.
+fn hit_body(
+    store: &dyn ResultStore,
+    key: &EntryKey,
+    record: &Record,
+) -> Option<Option<(hirsel_artifact_store::Action, Reference)>> {
+    let Some(body) = record.body else {
+        return Some(None);
+    };
+    let entry = hirsel_engine_store::Entry::load(store, key);
+    let variant = entry.current(key)?;
+    (variant.output == body && variant.reads == record.reads)
+        .then(|| Some((variant.action(key), variant.output)))
+}
+/// Publish a checked compact hit's rows from the previous installation.
+fn adopt_hit(
+    store: &dyn ResultStore,
+    key: &EntryKey,
+    body: Option<(hirsel_artifact_store::Action, Reference)>,
+) {
+    store.adopt(&storage_key(key));
+    if let Some((action, reference)) = body {
+        store.adopt(key);
+        store.associate_written_product(hirsel_artifact_store::Address(key.0), action, reference);
+    }
+}
 fn load_record(
     store: &dyn ResultStore,
     key: &EntryKey,
@@ -146,6 +175,7 @@ pub(in crate::queries) fn load_publication(
     {
         return None;
     }
+    let body = hit_body(&*store, &key, &record)?;
     let records = engine.type_records()?;
     let requirement = records.record_requirement::<carry::Facts>(record.facts.into())?;
     if requirement.required_bytes().checked_add(index_bytes)?
@@ -168,6 +198,7 @@ pub(in crate::queries) fn load_publication(
         return None;
     }
     let checked = facts.checked?;
+    adopt_hit(&*store, &key, body);
     engine.adopt_publication(
         path,
         persistent::PublicationRecord {
@@ -331,9 +362,16 @@ impl BodyTask {
         {
             return None;
         }
+        let body = hit_body(&*queries.store, &input.key, &record)?;
         let reads = Arc::new(record.reads);
         let facts = self.decode_facts(&record.facts, &reads)?;
         let completed = self.install_cached_facts(cx, record.body, reads.clone(), facts)?;
+        // A failed outcome publishes its failure record, not the body.
+        adopt_hit(
+            &*queries.store,
+            &input.key,
+            body.filter(|_| completed.is_ok()),
+        );
         if completed.is_ok() {
             let required = queries
                 .records
@@ -388,7 +426,7 @@ mod tests {
             hirsel_engine_store::VerifyStore::Off,
             hirsel_engine_store::VerifyStore::Recompute,
         ] {
-            for fault in 0..11 {
+            for fault in 0..12 {
                 let store = Arc::new(DecodeStore::default());
                 let mut engine =
                     QueryEngine::new(crate::default_environment(), PhaseAdapters::default())
@@ -494,6 +532,22 @@ mod tests {
                 let mut entry = hirsel_engine_store::Entry::default();
                 entry.insert(variant);
                 store.put(&storage, &entry.encode_for(&storage));
+                // The Modes entry a cold run writes beside the record; without
+                // it (fault 11) the hit cannot publish the record's body row.
+                if fault != 11 {
+                    let mut modes = hirsel_engine_store::Entry::default();
+                    modes.insert(hirsel_engine_store::VariantRef::for_output(
+                        &key,
+                        record.reads.clone(),
+                        record.body.unwrap(),
+                    ));
+                    store.put_query(
+                        QueryKind::Modes,
+                        &key,
+                        modes.action(&key),
+                        &modes.encode_for(&key),
+                    );
+                }
                 assert!(store.get_content(record.body.unwrap()).is_none());
                 store
                     .refuse

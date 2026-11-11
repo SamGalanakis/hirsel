@@ -998,6 +998,12 @@ impl QueryEngine {
         if self.verify_store == hirsel_engine_store::VerifyStore::Off
             && let Some(record) = cached
         {
+            // Valid heads for this exact source and context are what a
+            // recomputation would write, so the operation publishes them.
+            self.result_store
+                .as_ref()
+                .unwrap()
+                .adopt(key.as_ref().unwrap());
             self.adopt_heads(file, context, record.heads);
             self.indexed_sources
                 .insert(file, (context.clone(), environment));
@@ -1410,6 +1416,10 @@ impl QueryEngine {
         }
         if !restored {
             self.store_parse_syntax(file, &context, &output)?;
+        } else if let Some(store) = &self.result_store {
+            // A restored record passed every check a recomputation's equality
+            // gets, so it is part of this operation's installation.
+            store.adopt(&self.parse_syntax_key(file, &context).unwrap());
         }
         for syntax in &output.value.items {
             let mut add = |item: Arc<ItemSyntax>| {

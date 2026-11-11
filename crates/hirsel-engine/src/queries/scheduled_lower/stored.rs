@@ -274,7 +274,11 @@ impl FrontLowerQueries {
             {
                 let owner = successor.owner().clone();
                 let actual = owner.id(path, id.kind)?;
-                return Some(self.forward_capture(id, actual, owner, query_reads));
+                let forwarded = self.forward_capture(id, actual, owner, query_reads);
+                if forwarded.is_ok() {
+                    self.store.adopt(&storage);
+                }
+                return Some(forwarded);
             }
         }
         // A candidate may name staged headers that are absent from the written
@@ -334,7 +338,11 @@ impl FrontLowerQueries {
             if let Some(successor) = successor {
                 let owner = successor.owner().clone();
                 let actual = owner.id(path, id.kind)?;
-                return Some(self.forward_capture(id, actual, owner, query_reads));
+                let forwarded = self.forward_capture(id, actual, owner, query_reads);
+                if forwarded.is_ok() {
+                    self.store.adopt(&storage);
+                }
+                return Some(forwarded);
             }
         }
         let variant = entry.resolve(&*self.store, &storage)?;
@@ -491,7 +499,7 @@ impl FrontLowerQueries {
                     )
                     && let Some((authority, bytes)) = cache.compact_definition_output(&output)
                     && bytes.len() as u64 <= self.weight.scratch
-                    && let Some(metadata) = self.store.put_content(LOWER_VERIFICATION, &bytes)
+                    && let Some(metadata) = self.store.put_cache_content(LOWER_VERIFICATION, &bytes)
                 {
                     verified = Some(StoredVerification {
                         authority,
@@ -611,6 +619,7 @@ impl FrontLowerQueries {
                         action: hirsel_artifact_store::Action(execution_subject),
                         observations: None,
                     };
+                    self.store.adopt(&storage);
                     return Some(self.publish(
                         id,
                         key,
@@ -652,6 +661,8 @@ impl FrontLowerQueries {
         // length was bounded by this task's scratch partition above; detach
         // that payload before its archive takes a settled retention lease.
         let descriptor = descriptor.to_vec().into();
+        // The stored variant passed every check a hit needs: publish it.
+        self.store.adopt(&storage);
         Some(self.publish(
             id,
             key,

@@ -304,6 +304,7 @@ mod cpu_reference_142;
 mod precompute_requests_152;
 mod precompute_zstd_152;
 mod precompute_defaults_152;
+mod precompute_edit_cold_737;
 mod precompute_compact_152;
 mod private_result_139;
 mod request_source_overlay_152;

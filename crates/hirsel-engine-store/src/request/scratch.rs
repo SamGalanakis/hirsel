@@ -278,6 +278,12 @@ impl ResultStore for ScratchStore {
     fn demand(&self, keys: &[EntryKey]) {
         self.selected.demand(keys);
     }
+    fn adopt(&self, key: &EntryKey) {
+        self.selected.adopt(key);
+    }
+    fn put_cache_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
+        self.selected.put_cache_content(domain, bytes)
+    }
     fn lookup_product(&self, address: Address) -> Option<Association> {
         self.selected.lookup_product(address)
     }

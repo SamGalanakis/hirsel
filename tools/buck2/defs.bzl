@@ -15,7 +15,7 @@ CARGO_TARGET_TMPDIR and CARGO_BIN_EXE_<name>.
 load(":platforms.bzl", "CLIPPY_REQUEST", "PRECHECK_REQUEST", "PROBE_CPUS", "budget_constraint", "compile_request", "doctest_properties", "dist_compile_request", "pool_budget_name", "test_budget_name", "test_executor", "test_request", "test_memory_limit")
 load(":test_requirements.bzl", "EXACT_CASE_CPUS", "EXACT_TEST_CPUS", "ISOLATED_TEST_CASES", "REPLAY_CELL_CPUS", "REPLAY_TEST_BINARY")
 load(":exec_sizes.bzl", "COMPILE_CLASSES", "COMPILE_REQUESTS")
-load(":profile.bzl", "SHIPPED_RUNTIME_VARIANTS", "TEST_RUNTIME_FLAGS", "runtime_profile_flags", "workspace_profile_flags")
+load(":profile.bzl", "OPTIMIZED_RUNTIME_VARIANTS", "TEST_RUNTIME_FLAGS", "runtime_profile_flags", "workspace_profile_flags")
 load("@prelude//linking:link_info.bzl", "ArchiveLinkable", "LinkStrategy", "ObjectsLinkable")
 load("@prelude//rust:link_info.bzl", "RustLinkInfo", "dfs_dedupe_by_label")
 
@@ -916,7 +916,7 @@ def hirsel_runtime_archives(name, crate, crate_root, srcs, features, deps, featu
     """Every runtime archive the native pipeline links.
 
     Panic-abort release code with cold-crate size overrides, fat LTO for the
-    shipped variants and none for test-only ones (profile.bzl): one
+    shipped and timed variants and none for test-only ones (profile.bzl): one
     staticlib per feature subset for each target triple, and per
     solo variant for its listed triples, laid out
     as `<triple>/<features or default>/libhirsel_rt.a` (debug-stripped) and
@@ -950,7 +950,7 @@ def hirsel_runtime_archives(name, crate, crate_root, srcs, features, deps, featu
             deps = deps + extra,
             edition = edition,
             env = _cargo_env(package_name, crate, version),
-            rustc_flags = _flags(manifest_dir, target = library) + ([] if variant in SHIPPED_RUNTIME_VARIANTS else TEST_RUNTIME_FLAGS),
+            rustc_flags = _flags(manifest_dir, target = library) + ([] if variant in OPTIMIZED_RUNTIME_VARIANTS else TEST_RUNTIME_FLAGS),
             exec_compatible_with = _compile_constraints(library),
         )
         for triple in triples:

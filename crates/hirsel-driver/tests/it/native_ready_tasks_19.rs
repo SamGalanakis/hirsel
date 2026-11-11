@@ -65,7 +65,7 @@ impl QueryContext for Refused {
 #[test]
 fn native_ready_tasks_reuse_specialized_callable_dependencies_without_materialization() {
     ready_case_inner_mutation(
-        "fn other()->u64{9u64}\nfn apply(f:fn()->u64 uses {})->u64 uses {f}{f()}\npub fn main()->u64{apply(other)}",
+        APPLY_OTHER,
         false,
         false,
         false,
@@ -74,7 +74,65 @@ fn native_ready_tasks_reuse_specialized_callable_dependencies_without_materializ
         0,
         0,
         1,
+        Rerun::Same,
     );
+}
+const APPLY_OTHER: &str = "fn other()->u64{9u64}\nfn apply(f:fn()->u64 uses {})->u64 uses {f}{f()}\npub fn main()->u64{apply(other)}";
+/// A reused callable scope must not outlive a changed original it specializes.
+#[test]
+fn native_ready_tasks_respecialize_after_a_specialized_dependency_changes() {
+    ready_case_inner_mutation(
+        APPLY_OTHER,
+        false,
+        false,
+        false,
+        hirsel_native::Validation::Ready,
+        store::VerifyStore::Off,
+        0,
+        0,
+        1,
+        Rerun::Edit(&APPLY_OTHER.replace("{9u64}", "{8u64}")),
+    );
+}
+/// A stored specialization C no longer accepts is specialized again.
+#[test]
+fn native_ready_tasks_respecialize_a_corrupted_stored_specialization() {
+    ready_case_inner_mutation(
+        APPLY_OTHER,
+        false,
+        false,
+        false,
+        hirsel_native::Validation::Ready,
+        store::VerifyStore::Off,
+        0,
+        0,
+        1,
+        Rerun::CorruptSpecializedBody,
+    );
+}
+#[derive(Clone, Copy, PartialEq)]
+enum Rerun<'a> {
+    Same,
+    Edit(&'a str),
+    CorruptSpecializedBody,
+}
+/// Flip one byte of stored content wherever its bytes lie under `dir`.
+fn flip_stored_byte(dir: &std::path::Path, content: &[u8]) {
+    let mut flipped = 0;
+    let mut pending = vec![dir.join("products")];
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            pending.extend(std::fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+            continue;
+        }
+        let mut bytes = std::fs::read(&path).unwrap();
+        if let Some(at) = bytes.windows(content.len()).position(|w| w == content) {
+            bytes[at + content.len() / 2] ^= 0x01;
+            std::fs::write(&path, bytes).unwrap();
+            flipped += 1;
+        }
+    }
+    assert!(flipped > 0, "stored content not found under {dir:?}");
 }
 const ADAPTER_SOURCE: &str = r#"
 fn other(x:u64)->u64 { 10u64/x }
@@ -208,6 +266,7 @@ fn ready_case_inner(
         ownership,
         u8::from(missing_inventory),
         0,
+        Rerun::Same,
     );
 }
 
@@ -222,14 +281,25 @@ fn ready_case_inner_mutation(
     ownership: u8,
     mutation: u8,
     expected_specializations: usize,
+    rerun: Rerun,
 ) {
     with_compiler_stack(|| {
         let dir = tempfile::tempdir().unwrap();
+        let oracle_dir = tempfile::tempdir().unwrap();
         let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-        let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
-            Arc::new(store::DirStore::new(dir.path().join("products"))),
-            transport.reserve(64 << 20).unwrap(),
-        ));
+        // Each run is a new build over the same product directory, as a
+        // second process would be: nothing it reads is held from the first.
+        let open = |dir: &std::path::Path| -> Arc<dyn ResultStore> {
+            Arc::new(
+                store::RequestStore::with_scratch(
+                    Arc::new(store::DirStore::new(dir.join("products"))),
+                    transport.reserve(24 << 20).unwrap(),
+                    dir,
+                    1 << 30,
+                )
+                .unwrap(),
+            )
+        };
         let target = hirsel_lir::TargetSpec::x86_64_unknown_linux_gnu();
         let policy =
             hirsel_syntax::ContentHash::of_bytes(b"native demand task current source control");
@@ -238,15 +308,41 @@ fn ready_case_inner_mutation(
         let recompute = validation == hirsel_native::Validation::EveryStage;
         let recompute_instances = recompute || verify_store == store::VerifyStore::Recompute;
         let mut expected = None;
-        for fresh in [false, true] {
+        let mut specialized_bodies: Vec<Vec<u8>> = Vec::new();
+        // A changed rerun is compared with a cold build of the same input in
+        // an empty directory, never with what the reusing run itself produced.
+        let runs: &[(bool, bool)] = match rerun {
+            Rerun::Same => &[(false, false), (true, false)],
+            _ => &[(false, true), (false, false), (true, false)],
+        };
+        for &(fresh, oracle) in runs {
+            let current = if oracle || fresh {
+                match rerun {
+                    Rerun::Edit(edited) => edited,
+                    _ => source,
+                }
+            } else {
+                source
+            };
+            if fresh && rerun == Rerun::CorruptSpecializedBody {
+                assert!(!specialized_bodies.is_empty());
+                for body in &specialized_bodies {
+                    flip_stored_byte(dir.path(), body);
+                }
+            }
+            let store = open(if oracle {
+                oracle_dir.path()
+            } else {
+                dir.path()
+            });
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
                 .with_result_store(store.clone());
             let file = engine
                 .sources
-                .add("settled-demand.hir", source.into())
+                .add("settled-demand.hir", current.into())
                 .unwrap();
             engine.parse_file(file, &default_context()).unwrap();
-            if fresh {
+            if fresh && !matches!(rerun, Rerun::Edit(_)) {
                 engine.adapters.lowering = None;
             }
             let facts = crate::native_front_fixture::products(&mut engine, &[]).unwrap();
@@ -766,7 +862,9 @@ fn ready_case_inner_mutation(
             });
             assert_eq!(ready.len(), 1);
             let transformations = ready_tasks.ready_transformations.load(Ordering::Relaxed);
-            if adapter && !fresh {
+            if fresh && rerun != Rerun::Same {
+                // A changed rerun is checked against its cold oracle below.
+            } else if adapter && !fresh {
                 assert!(transformations > 0);
             } else {
                 assert_eq!(transformations, u64::from(!fresh || recompute));
@@ -805,18 +903,44 @@ fn ready_case_inner_mutation(
                 .collect::<Vec<_>>();
             if fresh {
                 assert_eq!(expected.as_ref(), Some(&outputs));
-                if recompute_instances {
-                    assert_eq!(tasks.imports.load(Ordering::Relaxed), original_count as u64);
-                    assert!(tasks.source_body_demands.load(Ordering::Relaxed) > 0);
-                    assert_ne!(trace.totals(), Default::default());
-                } else {
-                    assert_eq!(tasks.imports.load(Ordering::Relaxed), 0);
-                    assert_eq!(tasks.source_body_demands.load(Ordering::Relaxed), 0);
-                    assert_eq!(trace.totals(), Default::default());
+                match rerun {
+                    Rerun::Same if recompute_instances => {
+                        assert_eq!(tasks.imports.load(Ordering::Relaxed), original_count as u64);
+                        assert!(tasks.source_body_demands.load(Ordering::Relaxed) > 0);
+                        assert_ne!(trace.totals(), Default::default());
+                    }
+                    Rerun::Same => {
+                        assert_eq!(tasks.imports.load(Ordering::Relaxed), 0);
+                        assert_eq!(tasks.source_body_demands.load(Ordering::Relaxed), 0);
+                        assert_eq!(trace.totals(), Default::default());
+                    }
+                    // The cold oracle of the edited source is the check.
+                    Rerun::Edit(_) => {}
+                    Rerun::CorruptSpecializedBody => {
+                        // Originals still hit; the refused specialization is
+                        // read and rewritten again from them.
+                        assert_eq!(tasks.imports.load(Ordering::Relaxed), 0);
+                        assert_ne!(trace.totals(), Default::default());
+                    }
                 }
             } else {
                 assert_eq!(tasks.imports.load(Ordering::Relaxed), original_count as u64);
-                expected = Some(outputs);
+                if oracle || rerun == Rerun::Same {
+                    expected = Some(outputs);
+                } else if rerun == Rerun::CorruptSpecializedBody {
+                    specialized_bodies = completed
+                        .iter()
+                        .filter(|(key, _)| {
+                            completed.iter().any(|(original, _)| {
+                                key.instance != original.instance
+                                    && key.instance.is_same_or_derived_from(&original.instance)
+                            })
+                        })
+                        .map(|(_, output)| {
+                            store.get_content(output.product.value).unwrap().to_vec()
+                        })
+                        .collect();
+                }
             }
         }
     });
@@ -834,6 +958,7 @@ fn original_inventory_mutation(mutation: u8) {
         0,
         mutation,
         0,
+        Rerun::Same,
     );
 }
 #[test]

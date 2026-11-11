@@ -172,6 +172,35 @@ fn select_invocations(
     }
     Ok(())
 }
+/// Every specialized product of one scope is published under this action. It
+/// names everything the rewrite reads besides the current environment, which
+/// C's own lookup checks: each original's accepted product, the specializing
+/// setting and the compiler. Any changed original changes every product's subject.
+fn callable_action(
+    originals: &[(InstanceAddress, StoredInstance)],
+    options: &hirsel_native::Options,
+) -> Result<Action, String> {
+    let bytes = serde_json::to_vec(&(
+        hirsel_compiler_identity::COMPILER_IDENTITY.as_slice(),
+        originals
+            .iter()
+            .map(|(_, stored)| {
+                stored
+                    .product
+                    .product
+                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
+                    .map(|archive| archive.reference())
+                    .map_err(|e| e.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        options.scoped_specialization,
+    ))
+    .map_err(|e| e.to_string())?;
+    Ok(Action(ContentHash::of_parts(
+        "hirsel.native.callable-scope-action.v1",
+        [bytes.as_slice()],
+    )))
+}
 fn resize(lease: &mut Option<Arc<window::WindowRead>>, bytes: u64) -> Result<(), String> {
     if let Some(lease) = lease {
         Arc::get_mut(lease)
@@ -220,6 +249,157 @@ impl DemandInstances {
             .transpose()?;
         Ok((request, charge))
     }
+    /// A whole scope published earlier under this action, admitted again
+    /// without decoding or rewriting a Value. The stored closure is walked from
+    /// the originals through each product's discovery requests; every request
+    /// is an original's request under a key derived from it; and C's lookup
+    /// accepts each product under the current environment, as for any hit.
+    /// An ordinary association never accepts anything by itself. Anything
+    /// absent or different is a miss and the scope is specialized again.
+    #[allow(clippy::too_many_arguments)]
+    fn stored_callables(
+        &self,
+        originals: &[(InstanceAddress, StoredInstance)],
+        action: Action,
+        options: &hirsel_native::Options,
+        manifest: &hirsel_core_contract::Manifest,
+        invocation_records: &BTreeMap<hirsel_syntax::DefPath, Reference>,
+        structural_reference: bool,
+        operations: &mut hirsel_layout::operation::OperationRegistry,
+        source: &mut impl FnMut(
+            &InstanceAddress,
+            &mut hirsel_layout::operation::OperationRegistry,
+        ) -> Result<(), String>,
+    ) -> Result<Option<PublishedCallables>, String> {
+        let original_request = |origin: usize, key: &InstanceKey| -> Option<Request> {
+            let mut request = self
+                .requests
+                .get(originals[origin].0.instance.encoding())?
+                .clone();
+            Arc::make_mut(&mut request.0).key = Arc::new(NamedKey::of(key));
+            Some(request)
+        };
+        // Each selected key, with the original it specializes and its request.
+        let mut selected = BTreeMap::new();
+        for (origin, (key, _)) in originals.iter().enumerate() {
+            let Some(request) = original_request(origin, &key.instance) else {
+                return Ok(None);
+            };
+            selected.insert(key.instance.encoding().to_vec(), (origin, request));
+        }
+        let mut publisher = self.queries.callable();
+        let mut pending = originals
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect::<VecDeque<_>>();
+        let mut candidates = BTreeMap::new();
+        while let Some(key) = pending.pop_front() {
+            if candidates.contains_key(key.instance.encoding()) {
+                continue;
+            }
+            if candidates.len() >= originals.len() + hirsel_rc::closure_calls::MAX_SPECIALIZATIONS {
+                return Ok(None);
+            }
+            let Some(product) = publisher.candidate(&key) else {
+                return Ok(None);
+            };
+            if product.product.action != action {
+                return Ok(None);
+            }
+            let Ok(discovery) = self.descriptor(&key, &product) else {
+                return Ok(None);
+            };
+            for request in discovery.requests {
+                let Ok(dependency) = request.key.bind() else {
+                    return Ok(None);
+                };
+                match selected.get(&request.key.encoding) {
+                    Some((_, previous)) if *previous != request => return Ok(None),
+                    Some(_) => {}
+                    None => {
+                        let Some(origin) = originals.iter().position(|(original, _)| {
+                            original.instance.definition() == dependency.definition()
+                                && original.instance.body() == dependency.body()
+                                && dependency.is_same_or_derived_from(&original.instance)
+                        }) else {
+                            return Ok(None);
+                        };
+                        if original_request(origin, &dependency).as_ref() != Some(&request) {
+                            return Ok(None);
+                        }
+                        selected.insert(request.key.encoding.clone(), (origin, request));
+                    }
+                }
+                pending.push_back(self.address(dependency));
+            }
+            candidates.insert(key.instance.encoding().to_vec(), (key, product));
+        }
+        let mut rows = BTreeMap::new();
+        for (encoding, (key, candidate)) in candidates {
+            let (origin, request) = &selected[&encoding];
+            let (original, stored) = &originals[*origin];
+            select_invocations(
+                self,
+                original,
+                invocation_records,
+                structural_reference,
+                operations,
+            )?;
+            if source(&key, operations).is_err() {
+                return Ok(None);
+            }
+            let adapters = stored.adapters(self)?;
+            let environment = NativeEnvironment {
+                target: &self.target,
+                manifest,
+                operations,
+                discharge: Some(&options.discharge),
+            };
+            let Ok(scoped) = self.operations_input(&key, &adapters, request, &environment) else {
+                return Ok(None);
+            };
+            let Some(product) = publisher.lookup(
+                &key,
+                action,
+                &NativeEnvironment {
+                    operations: &scoped,
+                    ..environment
+                },
+            )?
+            else {
+                return Ok(None);
+            };
+            if product.product != candidate.product {
+                return Ok(None);
+            }
+            let Ok(output) = self.decode_completed(&key, product, adapters) else {
+                return Ok(None);
+            };
+            rows.insert(
+                key.address(hirsel_native::query_model::CALLABLE_VALUE_KIND)
+                    .0,
+                self.json(&Row {
+                    key: NamedKey::of(&key.instance),
+                    origin: NamedKey::of(&original.instance),
+                    request: request.clone(),
+                    output: StoredInstance::capture(self.store.as_ref(), &output)?.record()?,
+                })?,
+            );
+        }
+        let mut w = hirsel_query_products::retained::MetadataWeight::default();
+        w.map(&rows, |_, _, _| ());
+        let index = self
+            .window
+            .as_ref()
+            .map(|window| window.read_for("published-index", w.bytes()))
+            .transpose()?;
+        Ok(Some(PublishedCallables {
+            records: rows,
+            _index: index,
+            target: self.target.digest(),
+            policy: self.policy,
+        }))
+    }
     pub(crate) fn specialize_callables(
         &mut self,
         options: &hirsel_native::Options,
@@ -239,6 +419,24 @@ impl DemandInstances {
         invocation_weight.map(&invocation_records, |w, path, _| w.path(path));
         let mut originals = self.completed_inputs()?;
         originals.sort_by(|a, b| a.0.canonical_cmp(&b.0));
+        let action = callable_action(&originals, options)?;
+        if self.verify_store != hirsel_engine_store::VerifyStore::Recompute
+            && options.validation != hirsel_native::Validation::EveryStage
+            && let Some(published) = self.stored_callables(
+                &originals,
+                action,
+                options,
+                manifest,
+                &invocation_records,
+                structural_reference,
+                &mut operations,
+                &mut source,
+            )?
+        {
+            self.requests.clear();
+            self.completed.clear();
+            return Ok(published);
+        }
         // The original request snapshot has finished discovery and receipt
         // comparison. Keep ordinary addressed requests, reopen one at its next
         // consumer, and release the duplicate decoded maps before window work.
@@ -958,14 +1156,6 @@ impl DemandInstances {
                         .collect::<Result<Vec<_>, _>>()?,
                 ),
             };
-            let action = Action(ContentHash::of_parts(
-                "hirsel.native.callable-window-action.v1",
-                [
-                    row.value.output.0.0.as_slice(),
-                    discovery.output.0.0.as_slice(),
-                    hirsel_compiler_identity::COMPILER_IDENTITY.as_slice(),
-                ],
-            ));
             let inputs = Inputs {
                 memo: Default::default(),
                 target: &self.target,

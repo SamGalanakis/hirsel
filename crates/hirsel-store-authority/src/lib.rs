@@ -164,6 +164,8 @@ pub struct Claim {
     /// published it, and that publication's revision.
     pub(crate) sweep: Sweep,
     pub(crate) revision: u64,
+    /// What the records up to the claim's last walk leave live.
+    pub(crate) live: reclaim::Live,
 }
 
 /// An entry [`Authority::submit`] queued: its record, built on the record
@@ -219,6 +221,7 @@ impl Claim {
             settled: Vec::new(),
             sweep: Sweep::default(),
             revision: 0,
+            live: reclaim::Live::default(),
         }
     }
 }

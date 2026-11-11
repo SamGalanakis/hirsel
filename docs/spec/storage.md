@@ -1049,8 +1049,11 @@ and cannot read stops it with nothing more removed: nothing is removable by defa
 The same call removes the provider's own garbage below `S` (**Providers** below). A call
 first deletes, in record order, the retirements of the records after its continuation up
 to `S`, then, once per claim, walks the provider's listing from the continuation's cursor
-for the other two cases: a claim of another epoch than the cursor's starts the walk at the
-listing's start, and once a claim's walk reached the listing's end, its later calls only
+and removes what any of the three cases removes. An object of lifetime at most `S` stays
+only while the records up to `S` leave it live, created by one and retired by none, so an
+object a late put re-created after its retirement was deleted is removed again. A claim
+reads those records once for its walks and holds what they leave live. A claim of
+another epoch than the cursor's starts the walk at the listing's start, and once a claim's walk reached the listing's end, its later calls only
 delete retirements. Garbage that appears after a claim's walk (a failed publication, a
 put no record followed) waits for the next claim's. It makes at most `budget` provider
 requests, record reads, listing pages, deletes and the continuation's publication

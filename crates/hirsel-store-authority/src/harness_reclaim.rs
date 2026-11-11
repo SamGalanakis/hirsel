@@ -174,10 +174,11 @@ fn reclaimed(h: &mut Objects, c: &mut Claim) {
 /// Schedule 1. A's PUT of r is delayed and its retry succeeds; record 2
 /// inventories r and the live object k. Record 3 retires r and reclamation
 /// deletes it; then the delayed PUT lands and r is back. Safe by R1: r stays
-/// retired, so no later version needs it, and a successor's reclamation keeps
-/// k, which no record retired.
+/// retired, so no later version needs it. A successor's walk removes r again,
+/// though R1 has passed record 3 and record 2 inventories r, and keeps k,
+/// which no record retired.
 #[test]
-fn a_late_put_of_a_retired_object_needs_nothing_back() {
+fn a_late_put_of_a_retired_object_is_removed_again() {
     let b = bucket();
     let t = Transit::new(b.clone());
     let (mut h, mut c) = claimed(t.clone(), 1);
@@ -195,6 +196,10 @@ fn a_late_put_of_a_retired_object_needs_nothing_back() {
     assert!(holds(&b, &r), "the late PUT brings r back");
     let (mut h2, mut c2) = claimed(b.clone(), 2);
     reclaimed(&mut h2, &mut c2);
+    assert!(
+        !holds(&b, &r),
+        "the re-created retired object is removed again"
+    );
     assert_eq!(
         h2.get(k),
         Ok(Some(b"k".to_vec())),

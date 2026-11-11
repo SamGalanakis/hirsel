@@ -10,14 +10,17 @@
 //!
 //! A call first deletes the retirements of the records after the continuation's
 //! `scanned` up to `S`, then, once per epoch, sweeps the provider's listing from
-//! its cursor for R2 and R3 garbage. Where it stopped is the [`Sweep`] the
+//! its cursor and removes what any rule removes: an object of lifetime at most
+//! `S` stays only while it is [`Live`] at `S`, so a late put that re-creates an
+//! object after R1 deleted it is removed again (R1), as is one no record
+//! inventories (R2). Where it stopped is the [`Sweep`] the
 //! provider publishes, fenced, so a takeover continues it and a stale publisher
 //! never moves it back. Once a claim's sweep has reached the listing's end, its
 //! later calls only delete retirements: garbage made after the sweep waits for
 //! the next claim's.
 
 use crate::{AuthorityError, Claim, Error, ObjectRef, Record};
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io::ErrorKind;
 
 /// Where a store's reclamation stands. A claim loads it and a takeover
@@ -36,6 +39,16 @@ pub struct Sweep {
     pub sweeping: u64,
     /// The epoch whose sweep reached the listing's end, 0 before any did.
     pub swept: u64,
+}
+
+/// The objects the records up to `upto` leave live: created by one and
+/// retired by none. A claim builds it from the records its reclaim calls read
+/// and keeps it in memory, so each record is read once per claim, and a
+/// takeover builds its own.
+#[derive(Debug, Default)]
+pub(crate) struct Live {
+    upto: u64,
+    refs: HashSet<ObjectRef>,
 }
 
 /// What one [`crate::Authority::reclaim`] call left.
@@ -100,7 +113,8 @@ pub(crate) fn run(
     }
     let mut w = c.sweep.clone();
     let mut left = budget - 1;
-    let outcome = step(sp, c.epoch, s, &mut w, &mut left)?;
+    let epoch = c.epoch;
+    let outcome = step(sp, epoch, s, &mut w, &mut c.live, &mut left)?;
     if w != c.sweep {
         sp.publish(c, &w)?;
         c.sweep = w;
@@ -113,6 +127,7 @@ fn step(
     epoch: u64,
     s: u64,
     w: &mut Sweep,
+    live: &mut Live,
     left: &mut u64,
 ) -> Result<Reclaimed, Error> {
     // R1: the retirements of every record up to S.
@@ -138,7 +153,7 @@ fn step(
             w.index = 0;
         }
     }
-    // R2 and R3: what no record up to S inventories, once per epoch.
+    // R1, R2 and R3 over the listing, once per epoch.
     if w.swept == epoch {
         return Ok(Reclaimed::Done);
     }
@@ -146,7 +161,31 @@ fn step(
         w.sweeping = epoch;
         w.cursor.clear();
     }
-    let mut inventory: HashMap<u64, Vec<ObjectRef>> = HashMap::new();
+    // Live(S), from the records this claim has not read for it yet.
+    if live.upto > s {
+        *live = Live::default();
+    }
+    while live.upto < s {
+        if !spend(left) {
+            return Ok(Reclaimed::More);
+        }
+        let records = sp.records(live.upto, (s - live.upto).min(READ_BATCH))?;
+        if records.is_empty() {
+            return Err(Error::Corrupt(format!("history entry {}", live.upto + 1)));
+        }
+        for record in records {
+            if let Record::Appended {
+                created, retired, ..
+            } = &record
+            {
+                live.refs.extend(created.iter().copied());
+                for r in retired {
+                    live.refs.remove(r);
+                }
+            }
+            live.upto += 1;
+        }
+    }
     loop {
         if !spend(left) {
             return Ok(Reclaimed::More);
@@ -158,25 +197,7 @@ fn step(
                 Found::Garbage => true,
                 Found::Object(r) if r.lifetime == 0 => false,
                 Found::Object(r) if r.lifetime > s => r.epoch < epoch,
-                Found::Object(r) => {
-                    if !inventory.contains_key(&r.lifetime) {
-                        if !spend(left) {
-                            return Ok(Reclaimed::More);
-                        }
-                        let created = match sp.records(r.lifetime - 1, 1)?.pop() {
-                            Some(Record::Appended { created, .. }) => created,
-                            Some(Record::Claimed { .. }) => Vec::new(),
-                            None => {
-                                return Err(Error::Corrupt(format!(
-                                    "history entry {}",
-                                    r.lifetime
-                                )));
-                            }
-                        };
-                        inventory.insert(r.lifetime, created);
-                    }
-                    !inventory[&r.lifetime].contains(&r)
-                }
+                Found::Object(r) => !live.refs.contains(&r),
             };
             if gone && !remove(sp, &key, left)? {
                 return Ok(Reclaimed::More);

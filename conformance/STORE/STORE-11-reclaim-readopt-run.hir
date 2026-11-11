@@ -1,0 +1,201 @@
+// rule: STORE-11
+// expect: run
+// authorities: {"store":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1}}}
+// steps: 20000000
+// Every checkpoint node is hashed with the interpreted SHA-256, three checkpoints and a reopen.
+// stdout: store: the second checkpoint retires nodes, each one removed
+// stdout: store: the first state again puts its retired leaf fresh
+// stdout: store: reopened, the rows of the first state kept
+// Campaign 1 (5a), I1: admission adopts only a reference no record has retired.
+// A store of nodes of 64 to 1024 bytes over object storage commits 60 rows and
+// compacts; one write changes `kkkkkkkk` and a second compaction retires the
+// changed leaf and its ancestors, which reclamation then deletes. Writing the
+// first value back gives the state of the first checkpoint again, and the
+// changed leaf its first bytes. A third compaction must not reuse the retired
+// leaf, though its bytes are equal: it puts it fresh, at its own lifetime, and
+// its records inventory it (storage.md STORE-11: once r is retired, equal bytes are put
+// fresh). A reopen recovers from it the rows of the first state. An admission that took a
+// retired reference would name deleted objects, and recovery refuses a
+// checkpoint naming a retired node as corrupt.
+pub type Failed = Failed(String)
+
+fn say(stdout: Stdout, line: String) -> Result[(), Failed] {
+  match out.print(stdout, f"{line}\n") {
+    Ok(_) => Ok(()),
+    Error(_) => Error(Failed("print")),
+  }
+}
+
+// Puts `count` keys of `key` bytes, `k` and then the key's index plus `k`, each
+// with a value of `value` bytes.
+fn put(mut tx: store.Tx, info: store.CallInfo, w: (u64, u64, u64)) -> Result[
+  (),
+  store.TxError
+] {
+  let (count, key, value) = w
+  for i in 0u64..count {
+    let mut k: List[u8] = []
+    for _ in 1u64..key {
+      list.push(mut k, 107)
+    }
+    list.push(mut k, int.truncate(107 + i))
+    let mut v: List[u8] = []
+    for _ in 0u64..value {
+      list.push(mut v, 118)
+    }
+    store.tx_put(mut tx, bytes.from_list(take k), bytes.from_list(take v))?
+  }
+  Ok(())
+}
+
+fn commits(mut s: store.Store, w: (u64, u64, u64)) -> bool {
+  let r: Result[(), store.TxFailure[store.TxError]] = store.transact(mut s, put, w)
+  r == Ok(())
+}
+
+// 8-byte keys, 16-byte values, nodes of 64 to 1024 bytes, one fresh node a batch.
+fn tight() -> store.StoreConfig {
+  let mut c = store.default_config()
+  c.limits.key_bytes = 8
+  c.limits.value_bytes = 16
+  c.limits.transaction_bytes = 4096
+  c.nodes = history.Bounds(node_min: 64, node_mean: 128, node_max: 1024)
+  c.batch_bytes = 0
+  c
+}
+
+// Every record's created and retired objects, in history order, each list
+// one record's.
+fn inventory(a: Authority) -> Result[
+  (List[List[ObjectRef]], List[List[ObjectRef]]),
+  Failed
+] {
+  let Ok(records) = authority.read(a, 0, authority.floor(a), 4096) else {
+    return Error(Failed("read"))
+  }
+  let mut made: List[List[ObjectRef]] = []
+  let mut gone: List[List[ObjectRef]] = []
+  for r in records {
+    match r {
+      Claimed(..) => {},
+      Appended(_, created, retired) => {
+        list.push(mut made, copy created)
+        list.push(mut gone, copy retired)
+      },
+    }
+  }
+  Ok((take made, take gone))
+}
+
+fn same(r: ObjectRef, x: ObjectRef) -> bool {
+  r.lifetime == x.lifetime && r.epoch == x.epoch && r.digest == x.digest
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
+  let Ok(stdout) = io.stdout(rt) else {
+    return Error(Failed("stdout"))
+  }
+  let name = "store"
+  let Ok(a) = io.authority(rt, name) else {
+    return Error(Failed("authority"))
+  }
+  let Ok(made) = store.open(a, tight()) else {
+    return Error(Failed("open"))
+  }
+  let mut s = take made
+  // 30 keys of 8 bytes and 30 of 7, each with a 16-byte value: several leaves.
+  if !(commits(mut s, (30, 8, 16)) && commits(mut s, (30, 7, 16))) {
+    return Error(Failed("commit"))
+  }
+  let Ok(()) = store.compact(mut s) else {
+    return Error(Failed("compact"))
+  }
+  // `kkkkkkkk` with a 15-byte value, then compacted: its leaf and ancestors
+  // are retired.
+  if !commits(mut s, (1, 8, 15)) {
+    return Error(Failed("commit"))
+  }
+  let Ok(()) = store.compact(mut s) else {
+    return Error(Failed("compact again"))
+  }
+  let (made2, gone2) = inventory(a)?
+  let second = list.len(made2)
+  let mut retired: List[ObjectRef] = []
+  for x in gone2 {
+    for r in x {
+      list.push(mut retired, copy r)
+    }
+  }
+  let mut removed = true
+  for r in retired {
+    removed = removed && match authority.get(a, copy r) {
+      Ok(None()) => true,
+      _ => false,
+    }
+  }
+  if list.len(retired) > 0 && removed {
+    say(stdout, f"{name}: the second checkpoint retires nodes, each one removed")?
+  } else {
+    say(stdout, f"{name}: retired {list.len(retired)}, removed {removed}")?
+  }
+  // The first value back: the first checkpoint's state again.
+  if !commits(mut s, (1, 8, 16)) {
+    return Error(Failed("commit"))
+  }
+  let Ok(()) = store.compact(mut s) else {
+    return say(stdout, f"{name}: third compaction refused")
+  }
+  let Ok(()) = store.close(take s) else {
+    return Error(Failed("close"))
+  }
+  let (made3, _) = inventory(a)?
+  // The third publication's fresh nodes: every retired node again, each
+  // under a new reference, so no created reference is a retired one.
+  let mut fresh: List[ObjectRef] = []
+  let mut i = second
+  while i < list.len(made3) {
+    for r in made3[i] {
+      list.push(mut fresh, copy r)
+    }
+    i += 1
+  }
+  // The changed leaf's first bytes recur; its ancestors name the fresh leaf,
+  // so theirs differ from the retired ones.
+  let mut recurs = false
+  for r in retired {
+    for x in fresh {
+      recurs = recurs || x.digest == r.digest && !same(copy x, copy r)
+    }
+  }
+  if recurs {
+    say(stdout, f"{name}: the first state again puts its retired leaf fresh")?
+  } else {
+    say(
+      stdout,
+      f"{name}: the first state again put {list.len(fresh)} nodes, none a retired leaf"
+    )?
+  }
+  let Ok(again) = store.open(a, store.default_config()) else {
+    return say(stdout, f"{name}: reopen refused")
+  }
+  let mut s2 = take again
+  let Ok(snap) = store.snapshot(a, mut s2, authority.floor(a)) else {
+    return Error(Failed("snapshot"))
+  }
+  let touched = match store.get(snap, b"kkkkkkkk") {
+    Some(v) => bytes.len(v) == 16,
+    None() => false,
+  }
+  let last = match store.get(
+    snap,
+    bytes.from_list([107u8, 107, 107, 107, 107, 107, 136])
+  ) {
+    Some(v) => bytes.len(v) == 16,
+    None() => false,
+  }
+  if touched && last {
+    say(stdout, f"{name}: reopened, the rows of the first state kept")
+  } else {
+    say(stdout, f"{name}: reopened, rows lost")
+  }
+}

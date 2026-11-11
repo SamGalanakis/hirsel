@@ -24,6 +24,8 @@ mod harness;
 mod harness_log;
 #[cfg(test)]
 mod harness_objects;
+#[cfg(test)]
+mod harness_reclaim;
 pub mod log;
 pub mod memory;
 pub mod objects;

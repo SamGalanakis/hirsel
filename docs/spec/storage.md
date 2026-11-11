@@ -401,6 +401,7 @@ CallInfo   // opaque: copyable, data, key, inert, sendable; minted only by the e
 fn call_info.caller(c: CallInfo) -> String
 fn call_info.at(c: CallInfo) -> i64
 fn call_info.seed(c: CallInfo) -> u64
+fn call_info.id(c: CallInfo) -> Option[Bytes]
 ```
 
 A store's head mints one `CallInfo` for each transaction it orders, before any run of it,
@@ -421,16 +422,35 @@ trust it as the place's statement of:
   from the store identity and the transaction's place in the order and never from state
   another run of the body could see differently. The default is predictable and never
   protects a secret; a head may draw it from `random.system@1` instead.
+- `id`: the transaction's **call id**, 32 bytes: `H("hirsel.call.v1", identity, version)`,
+  where `H` is the history format's length-framed SHA-256, `version` is the commit
+  version as a little-endian `u64` and `identity` is the identity in force at it: the
+  store's own for its own commits, and its origin's for the versions a fork shares with
+  it, as following the history finds it at each Fork commit. Every run of the transaction
+  gets the same id, after a crash, wherever its head runs and on re-execution
+  ([STORE-15](#store-15-evaluation-and-re-execution)), which derives it the same way from
+  the record's version. It is unique among the committed transactions of a history and of
+  its forks, whose own commits are under their own identities. A run that does not commit
+  records nothing, and the transaction that next commits takes its version and so its id;
+  the reuse is safe because only a committed run's writes and outgoing calls take effect.
+  The id reveals no version or count to anyone without the store identity. A body names
+  what it asks of another place or the outside world by it, so a retry there is
+  recognised; the engine mints no keys for outside effects and retries nothing.
+
+`seed` is not the call id: it is eight bytes, too few to be unique across stores, and a
+head may draw it from `random.system@1`, so it need not name the transaction or the
+store.
 
 The recorded call information is the deciding run's. `CallInfo` is the only way time,
 randomness or caller identity enter a body, and it does so as recorded data.
 
 A query is not ordered, so its call information holds only its caller: `at` and `seed`
-are 0. A query's outcome is then a function of its entry, its argument, its caller and
-the state at its version, and of nothing that changes when a commit leaves its access set
-alone ([STORE-14](#store-14-tracked-access)), which subscriptions and result caches rely
-on; a query that depends on time takes it as an argument
-([STORE-16](#store-16-subscriptions)).
+are 0 and `id` is `None()`. A query's outcome is then a function of its entry, its
+argument, its caller and the state at its version, and of nothing that changes when a
+commit leaves its access set alone ([STORE-14](#store-14-tracked-access)), which
+subscriptions and result caches rely on; a query that depends on time takes it as an
+argument ([STORE-16](#store-16-subscriptions)). A query gets no id: a per-call id would
+be an input outside that function, and a query sends nothing a retry could repeat.
 
 ### STORE-5: Tables
 

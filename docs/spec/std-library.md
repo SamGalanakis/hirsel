@@ -4213,6 +4213,7 @@ fn store.call[A: serializable, R: serializable, E: serializable](mut s: store.St
 fn call_info.caller(c: store.CallInfo) -> String uses {}
 fn call_info.at(c: store.CallInfo) -> i64 uses {}
 fn call_info.seed(c: store.CallInfo) -> u64 uses {}
+fn call_info.id(c: store.CallInfo) -> Option[Bytes] uses {}
 fn store.tx_get(tx: store.Tx, key: Bytes) -> Result[Option[Bytes], store.TxError] requires !store.reserved(key)
 fn store.tx_put(mut tx: store.Tx, take key: Bytes, take value: Bytes) -> Result[(), store.TxError] requires !store.reserved(key)
 fn store.tx_delete(mut tx: store.Tx, take key: Bytes) -> Result[(), store.TxError] requires !store.reserved(key)
@@ -4295,8 +4296,8 @@ the run discards them and returns `Faulted(f)`, records nothing, and leaves the 
 usable. Each commit records its call: the entry's index in its group's definition table,
 the call information, the argument bytes and the outcome bytes. `query` runs `f` the same
 way through `runner.apply` on a `Snapshot`, with a borrowed `Tx`, through which no write
-can be made, and a `CallInfo` with no time or seed (a query is not ordered).
-`call_info.caller`, `at` and `seed` read a `CallInfo`. A commit with a key over
+can be made, and a `CallInfo` with no time, seed or id (a query is not ordered).
+`call_info.caller`, `at`, `seed` and `id` read a `CallInfo`. A commit with a key over
 `limits.key_bytes`, a value over `limits.value_bytes`, or an encoded commit, its call
 record and outcome included, over `limits.transaction_bytes` returns `Limit(..)` with no
 effect. A storage failure before the commit's group advanced is `Storage(e)`; one whose

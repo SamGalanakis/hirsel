@@ -138,12 +138,16 @@ pub opaque type Snapshot: copyable uses {} {
 /// What a store's head states about one transaction (STORE-4), the same for
 /// every run of it: the caller's principal (empty for a local call), the
 /// commit-order time (0: this head has no clock) and a seed fixed when the
-/// transaction is ordered. A query is not ordered: its time and seed are 0.
-/// Only the store mints one; `call_info` reads it.
+/// transaction is ordered, and the call's id. A query is not ordered: its time
+/// and seed are 0 and it has no id. Only the store mints one; `call_info`
+/// reads it.
 pub opaque type CallInfo: copyable + data + inert uses {} {
   caller: String,
   at: i64,
   seed: u64,
+  // `call_id` of the identity in force and the commit version; empty for a
+  // query.
+  id: Bytes,
 }
 
 /// What one run of a body read (STORE-14), over byte keys. `points` holds
@@ -1108,7 +1112,7 @@ pub fn query[A: serializable, R: serializable, E: serializable](
     points: recorder.new(),
     spans: recorder.new()
   )
-  let info = CallInfo(caller: "", at: 0, seed: 0)
+  let info = CallInfo(caller: "", at: 0, seed: 0, id: b"")
   let returned = runner.apply(f, tx, info, argument)
   let Tx(txn: _, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
   let _: List[Bytes] = recorder.finish(take read_points)
@@ -1142,7 +1146,34 @@ fn fresh_argument[A: serializable](a: A) -> Result[A, DecodeError] uses {} {
 // The call information of the next transaction `s` orders (STORE-4): no
 // caller for a local call, no clock, and a seed from its place in the order.
 fn ordered(s: Store) -> CallInfo uses {} {
-  CallInfo(caller: "", at: 0, seed: order_seed(s.visible + 1))
+  CallInfo(
+    caller: "",
+    at: 0,
+    seed: order_seed(s.visible + 1),
+    id: call_id(s.identity, s.visible + 1)
+  )
+}
+
+// A transaction's id (STORE-4): `H("hirsel.call.v1", identity, at)`,
+// length-framed SHA-256 over the store identity in force at the commit and the
+// commit version `at` as a little-endian u64. A fork's commits above its fork point
+// carry the fork's identity; those at or below it, the origin's.
+fn call_id(identity: Bytes, at: u64) -> Bytes uses {} {
+  let mut v: List[u8] = []
+  for i in 0u64..8 {
+    list.push(mut v, int.truncate(at >> i * 8))
+  }
+  let mut out: List[u8] = []
+  for part in [b"hirsel.call.v1", copy identity, bytes.from_list(take v)] {
+    let n = bytes.len(part)
+    for i in 0u64..8 {
+      list.push(mut out, int.truncate(n >> i * 8))
+    }
+    for i in 0u64..n {
+      list.push(mut out, part[i])
+    }
+  }
+  history.digest(bytes.from_list(take out))
 }
 
 // splitmix64's finalizer: distinct versions give well-spread seeds.
@@ -1626,7 +1657,7 @@ fn serve_one(mut s: Store, entries: List[Served], take request: Arrived) -> Call
     points: recorder.new(),
     spans: recorder.new()
   )
-  let evaluated = body(tx, CallInfo(caller: copy request.caller, at: 0, seed: 0), request.argument)
+  let evaluated = body(tx, CallInfo(caller: copy request.caller, at: 0, seed: 0, id: b""), request.argument)
   let Tx(txn: _, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
   let _: List[Bytes] = recorder.finish(take read_points)
   let _: List[Span] = recorder.finish(take read_spans)
@@ -1725,7 +1756,12 @@ fn serve_transact(
     discard(mut s, take t)
     return released_end(mut s, base, NotRun(Denied()))
   }
-  let seed = order_seed(s.visible + 1)
+  let info = CallInfo(
+    caller: copy caller,
+    at: 0,
+    seed: order_seed(s.visible + 1),
+    id: call_id(s.identity, s.visible + 1)
+  )
   let mut tx = Tx(
     txn: take t,
     limits: s.limits,
@@ -1735,7 +1771,7 @@ fn serve_transact(
   )
   // The row read decides the request, so the run read it.
   recorder.append(tx.points, copy key)
-  let evaluated = body(mut tx, CallInfo(caller: copy caller, at: 0, seed: seed), argument)
+  let evaluated = body(mut tx, info, argument)
   let Tx(txn: ran, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
   let mut done = take ran
   done.access = AccessSet(
@@ -1758,7 +1794,6 @@ fn serve_transact(
     (outcome, Failed(failed))
   }
   let def = entry_def(served.entry)
-  let info = CallInfo(caller: copy caller, at: 0, seed: seed)
   let expected = copy_to(heap, entry.code)
   match record(
     mut s,

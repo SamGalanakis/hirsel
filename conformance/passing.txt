@@ -7512,6 +7512,7 @@ conformance/STORE/STORE-3-table-scope-denied-run.hir
 conformance/STORE/STORE-3-table-scope-run.hir
 conformance/STORE/STORE-3-tx-escape-bad.hir
 conformance/STORE/STORE-3-tx-escape-ok.hir
+conformance/STORE/STORE-4-call-id-run.hir
 conformance/STORE/STORE-6-function-key-bad.hir
 conformance/STORE/STORE-6-function-key-ok.hir
 conformance/STORE/STORE-6-generic-key-bad.hir

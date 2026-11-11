@@ -1,0 +1,91 @@
+// rule: STORE-4
+// expect: run
+// authorities: {"a":{"provider":"authority.memory@1","floor":"memory"},"b":{"provider":"authority.memory@1","floor":"memory"}}
+// call_info.id names a committed transaction: 32 bytes, different for each
+// commit of a store, and different between two stores at the same version,
+// so it depends on the store identity and not only on the version (a fork's
+// later calls are such a store). A run that aborts commits nothing, and the
+// transaction that next commits takes its version and so its id. A reopened
+// store keeps its identity, so the two stores' ids still differ there. A
+// query is not ordered and has no id.
+@serializable
+type Stop = Stopped(Bytes) | Db(store.TxError)
+
+// Commits a write and returns its id.
+fn stamp(mut tx: store.Tx, info: store.CallInfo, n: u64) -> Result[Bytes, Stop] {
+  let Some(id) = call_info.id(info) else {
+    return Ok(b"")
+  }
+  store.tx_put(mut tx, b"last", copy id) ? Db
+  Ok(id)
+}
+
+// Aborts, returning the id it ran under.
+fn refuse(mut tx: store.Tx, info: store.CallInfo, n: u64) -> Result[Bytes, Stop] {
+  let Some(id) = call_info.id(info) else {
+    return Error(Stopped(b""))
+  }
+  Error(Stopped(id))
+}
+
+// Whether the query has an id.
+fn has_id(tx: store.Tx, info: store.CallInfo, n: u64) -> Result[bool, Stop] {
+  Ok(call_info.id(info) != None())
+}
+
+pub type Failed = Check | Store(store.StoreError)
+
+fn check(ok: bool) -> Result[(), Failed] {
+  if ok {
+    Ok(())
+  } else {
+    Error(Check())
+  }
+}
+
+fn committed(mut s: store.Store) -> Result[Bytes, Failed] {
+  let r: Result[Bytes, store.TxFailure[Stop]] = store.transact(mut s, stamp, 0u64)
+  match take r {
+    Ok(id) => {
+      check(bytes.len(id) == 32)?
+      Ok(take id)
+    },
+    Error(_) => Error(Check()),
+  }
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
+  let Ok(a) = io.authority(rt, "a") else {
+    return Error(Check())
+  }
+  let Ok(b) = io.authority(rt, "b") else {
+    return Error(Check())
+  }
+  let mut sa = store.open(a, store.default_config()) ? Store
+  let mut sb = store.open(b, store.default_config()) ? Store
+  let a1 = committed(mut sa)?
+  let b1 = committed(mut sb)?
+  // The same version of two stores.
+  check(a1 != b1)?
+  let aborted: Result[Bytes, store.TxFailure[Stop]] = store.transact(
+    mut sa,
+    refuse,
+    0u64
+  )
+  let a2 = committed(mut sa)?
+  check(a2 != a1)?
+  check(aborted == Error(Aborted(Stopped(copy a2))))?
+  let snap = store.snapshot(a, mut sa, authority.floor(a)) ? Store
+  check(store.query(take snap, has_id, 0u64) == Ok(false))?
+  store.close(take sa) ? Store
+  store.close(take sb) ? Store
+  let mut ra = store.open(a, store.default_config()) ? Store
+  let mut rb = store.open(b, store.default_config()) ? Store
+  // b committed once less than a, so its second commit here shares a3's
+  // version.
+  let a3 = committed(mut ra)?
+  let _ = committed(mut rb)?
+  let b3 = committed(mut rb)?
+  check(a3 != a1 && a3 != a2 && a3 != b3)?
+  Ok(())
+}

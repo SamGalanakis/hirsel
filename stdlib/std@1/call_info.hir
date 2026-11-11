@@ -15,3 +15,16 @@ pub fn at(c: store.CallInfo) -> i64 uses {} {
 pub fn seed(c: store.CallInfo) -> u64 uses {} {
   c.seed
 }
+
+/// The call's id: 32 bytes, the same for every run of the transaction, after
+/// a crash, on re-execution and wherever its head runs, and different for every
+/// other committed transaction of the store and of its forks. A run that does
+/// not commit shares its id with the transaction that next commits at its
+/// version. `None()` for a query, which is not ordered.
+pub fn id(c: store.CallInfo) -> Option[Bytes] uses {} {
+  if bytes.len(c.id) == 0 {
+    None()
+  } else {
+    Some(unique c.id)
+  }
+}

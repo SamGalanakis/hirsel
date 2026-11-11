@@ -7496,6 +7496,7 @@ conformance/STORE/STORE-11-crash-cuts-tear-run.hir
 conformance/STORE/STORE-11-energy-drop-run.hir
 conformance/STORE/STORE-11-energy-grant-bad.hir
 conformance/STORE/STORE-11-energy-run.hir
+conformance/STORE/STORE-11-energy-tail-run.hir
 conformance/STORE/STORE-11-fence-cuts-crash-run.hir
 conformance/STORE/STORE-11-fence-cuts-fail-run.hir
 conformance/STORE/STORE-11-fence-cuts-lose-run.hir

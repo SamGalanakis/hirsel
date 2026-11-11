@@ -78,40 +78,7 @@ pub fn check<S: crate::stage::Stage>(unit: &crate::ir::LirUnit<S>) -> Result<(),
         ));
     }
     let n = unit.blocks.len();
-    let successors = |b: usize| -> Result<Vec<usize>, String> {
-        unit.terminators
-            .get(b)
-            .ok_or("charged unit block has no terminator")?
-            .normal_edges(&unit.pools)
-            .into_iter()
-            .map(|e| {
-                unit.tables
-                    .edges
-                    .get(e.index())
-                    .map(|edge| edge.target.index())
-                    .filter(|&t| t < n)
-                    .ok_or_else(|| "charged unit edge outside table".to_owned())
-            })
-            .collect()
-    };
-    let forward = (0..n).map(successors).collect::<Result<Vec<_>, _>>()?;
-    let instructions = unit
-        .blocks
-        .iter()
-        .map(|block| {
-            block
-                .instructions
-                .get(&unit.instructions)
-                .ok_or("charged unit block instructions outside table")
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let holds = |b: usize, f: &dyn Fn(&Energy) -> bool| {
-        instructions[b]
-            .iter()
-            .any(|i| matches!(i, Inst::Charge { energy, .. } if f(energy)))
-    };
-    let all = vec![true; n];
-    let cyclic = cycles(&forward, &all).1;
+    let (forward, instructions) = graph(unit)?;
 
     // Entry: on the straight path, before any transfer or cycle.
     let transfers = transfers(unit)?;
@@ -177,10 +144,33 @@ pub fn check<S: crate::stage::Stage>(unit: &crate::ir::LirUnit<S>) -> Result<(),
         }
     }
 
-    // No cycle avoids every charge, and every iteration charge is on a
-    // cycle, except that a counted loop's single charge
-    // (`Span`) at its entry pays for its back edge when the loop's shape
-    // proves the amount bounds its iterations (`counted_loop`).
+    cycles_paid(unit, true)
+}
+
+/// Whether no cycle of `unit` avoids every charge it emits, where its `Entry`
+/// charge is emitted only when `entry` is set (STORE-11 energy). A backend
+/// that drops an `Entry` charge keeps it whenever this refuses the unit
+/// without it: in a self-tail loop the entry charge is the loop's only one.
+///
+/// Every iteration charge is on a cycle, and every other cycle passes a
+/// block holding an emitted `Iteration` or `Entry` charge, except that a
+/// counted loop's single charge (`Span`) at its entry pays for its back edge
+/// when the loop's shape proves the amount bounds its iterations
+/// (`counted_loop`).
+pub fn cycles_paid<S: crate::stage::Stage>(
+    unit: &crate::ir::LirUnit<S>,
+    entry: bool,
+) -> Result<(), String> {
+    use crate::ir::{Energy, Inst};
+    let fail = |what: String| Err(format!("{what} (STORE-11 energy)"));
+    let n = unit.blocks.len();
+    let (forward, instructions) = graph(unit)?;
+    let holds = |b: usize, f: &dyn Fn(&Energy) -> bool| {
+        instructions[b]
+            .iter()
+            .any(|i| matches!(i, Inst::Charge { energy, .. } if f(energy)))
+    };
+    let cyclic = cycles(&forward, &vec![true; n]).1;
     let mut paid = Vec::new();
     for (b, block) in instructions.iter().enumerate() {
         for inst in block.iter() {
@@ -220,12 +210,52 @@ pub fn check<S: crate::stage::Stage>(unit: &crate::ir::LirUnit<S>) -> Result<(),
         .collect::<Vec<Vec<usize>>>();
     // The charge points cut: a cycle through a charged block pays every trip.
     let alive: Vec<bool> = (0..n)
-        .map(|b| !holds(b, &|e| matches!(e, Energy::Iteration | Energy::Entry)))
+        .map(|b| {
+            !holds(b, &|e| {
+                matches!(e, Energy::Iteration) || (entry && matches!(e, Energy::Entry))
+            })
+        })
         .collect();
     if let Some(b) = cycles(&unpaid, &alive).1.iter().position(|&c| c) {
         return fail(format!("the loop at block {b} has no charge"));
     }
     Ok(())
+}
+
+/// Each block's normal successors and its instructions.
+#[allow(clippy::type_complexity)]
+fn graph<S: crate::stage::Stage>(
+    unit: &crate::ir::LirUnit<S>,
+) -> Result<(Vec<Vec<usize>>, Vec<&[crate::ir::Inst]>), String> {
+    let n = unit.blocks.len();
+    let successors = |b: usize| -> Result<Vec<usize>, String> {
+        unit.terminators
+            .get(b)
+            .ok_or("charged unit block has no terminator")?
+            .normal_edges(&unit.pools)
+            .into_iter()
+            .map(|e| {
+                unit.tables
+                    .edges
+                    .get(e.index())
+                    .map(|edge| edge.target.index())
+                    .filter(|&t| t < n)
+                    .ok_or_else(|| "charged unit edge outside table".to_owned())
+            })
+            .collect()
+    };
+    let forward = (0..n).map(successors).collect::<Result<Vec<_>, _>>()?;
+    let instructions = unit
+        .blocks
+        .iter()
+        .map(|block| {
+            block
+                .instructions
+                .get(&unit.instructions)
+                .ok_or_else(|| "charged unit block instructions outside table".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((forward, instructions))
 }
 
 /// The edge a `Span { from, to, inclusive }` charge in block `entry` pays

@@ -954,8 +954,10 @@ fn lower<T>(
         let counter_units =
             hirsel_lir::invocations::room::counter_units(units.iter().map(|u| u.unit()));
         // STORE-11 "Energy": a body keeps its entry charge when it is in a call
-        // cycle or calls a target outside this module or indirectly. Any other
-        // body's work is bounded by its loops' charges and its callees'.
+        // cycle, calls a target outside this module or indirectly, or has a
+        // control-flow cycle that no other emitted charge pays for (a self-tail
+        // loop, whose call became a jump back to the entry). Any other body's
+        // work is bounded by its loops' charges and its callees'.
         let entry_charged: BTreeSet<ContentHash> = {
             let all: Vec<_> = units.iter().map(|u| u.unit()).collect();
             let known: BTreeSet<_> = all.iter().map(|u| u.header.instance).collect();
@@ -970,7 +972,7 @@ fn lower<T>(
                     Callee::Indirect(_) => true,
                     Callee::Operation(_) => false,
                 });
-                if open {
+                if open || hirsel_lir::energy::cycles_paid(*unit, false).is_err() {
                     set.insert(unit.header.instance);
                 }
             }

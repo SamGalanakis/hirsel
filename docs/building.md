@@ -617,10 +617,12 @@ intentional accesses can appear too. The report keeps at most 16 distinct source
 pairs; a passing test emits no candidates. Hirsel remains data-race-free (CONC-4).
 
 `--sim-points` optionally adds a suspension before each `atomic.store`
-call and after each root release, including aggregate cleanup. Choose either name
-or both, comma-separated. Atomic operations already suspend after the operation;
-the extra store point explores its entry too. These simulator-only points can
-explore interleavings outside ordinary cooperative suspension points. Both flags
+call (`atomic-store`), after each root release, including aggregate cleanup
+(`root-release`), and after each store authority request that reaches its provider
+(`seam`), so tasks holding stores of one authority interleave request by request.
+Choose any of the names, comma-separated. Atomic operations already suspend after the
+operation; the extra store point explores its entry too. These simulator-only points can
+explore interleavings outside ordinary cooperative suspension points. The points
 are off by default, require interpreted tests, and are included in the printed
 replay command. The same seed **and point settings** reproduce the run. Diagnostics
 and point markers stay outside semantic observations and Io tapes.

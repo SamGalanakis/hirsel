@@ -1,0 +1,340 @@
+// The whole-place simulation's history generator (STORE-2, STORE-11, STORE-12):
+// callers, each a task with its own store over the one authority `w`, call
+// entries on their own call streams while the run's scheduler passes the turn
+// at every seam request. Every choice comes from the seed in the first argument.
+// The program checks nothing: it prints the history it saw, one event a line,
+// and place_sim.rs checks that history alone.
+//
+// Events:
+//   opening C N               caller C's op N opens a store
+//   open C N KEY=VALUE...     caller C's open at op N read these rows (a fresh
+//                             read)
+//   noopen C N                that open was refused
+//   inv C N KEY POS           op N invokes call position POS writing key KEY
+//   ok C N S                  it committed as call S (the `seq` it wrote)
+//   unk C N                   its outcome is unknown
+//   fail C N                  it failed with no effect
+//   final KEY=VALUE...        the rows a last open recovered once every caller
+//                             ended (in the served scenario, before any query)
+//   nofinal N                 its attempt N was refused
+// A call by C at op N that applies as the S-th writes `v<C>.<N>@<S>` under the
+// shared `k<KEY>` and under its own `p<C>.<N>`, adds one to `n<C>`, and sets
+// `seq` to S.
+
+// Each caller's ops, unless the second argument names fewer (a shrunk replay).
+const OPS: u64 = 5
+
+const KEYS: u64 = 2
+
+fn mix(x: u64) -> u64 {
+  let mut z = int.wrapping_add(x, 0x9e3779b97f4a7c15u64)
+  z = int.wrapping_mul(z ^ z >> 30, 0xbf58476d1ce4e5b9u64)
+  z = int.wrapping_mul(z ^ z >> 27, 0x94d049bb133111ebu64)
+  z ^ z >> 31
+}
+
+fn text_bytes(take s: String) -> Bytes {
+  copy string.as_bytes(s)
+}
+
+// The number a row holds, 0 for none.
+fn number(row: Option[Bytes]) -> u64 {
+  let Some(b) = row else {
+    return 0
+  }
+  let Some(t) = string.view_bytes(b) else {
+    return 0
+  }
+  match u64.parse(t) {
+    Ok(n) => n,
+    Error(_) => 0,
+  }
+}
+
+fn d32(take name: String) -> Bytes {
+  bytes.from_inline(sha256.digest(text_bytes(take name)))
+}
+
+// The call one op makes: caller, op and shared key.
+@serializable
+type Op {
+  caller: u64,
+  op: u64,
+  key: u64,
+}
+
+@serializable
+pub type Short = Db(store.TxError)
+
+// Commits are numbered by `seq`, which every call reads and advances, so the
+// number orders the applied calls as versions do.
+fn apply(mut tx: store.Tx, info: store.CallInfo, o: Op) -> Result[u64, Short] {
+  let seq = number(store.tx_get(tx, b"seq") ? Db) + 1
+  let value = text_bytes(f"v{o.caller}.{o.op}@{seq}")
+  store.tx_put(mut tx, text_bytes(f"k{o.key}"), copy value) ? Db
+  store.tx_put(mut tx, text_bytes(f"p{o.caller}.{o.op}"), copy value) ? Db
+  let count = text_bytes(f"n{o.caller}")
+  let have = number(store.tx_get(tx, copy count) ? Db)
+  store.tx_put(mut tx, take count, text_bytes(f"{have + 1}")) ? Db
+  store.tx_put(mut tx, b"seq", text_bytes(f"{seq}")) ? Db
+  Ok(seq)
+}
+
+// Every user row of the store at its floor, as `KEY=VALUE` words.
+fn rows(a: Authority, mut s: store.Store) -> Option[String] {
+  let Ok(snap) = store.snapshot(a, mut s, authority.floor(a)) else {
+    return None()
+  }
+  let mut line = ""
+  for (k, value) in store.range(snap, Unbounded(), Unbounded(), Ascending(), 1000) {
+    if !store.reserved(k) {
+      let Some(key) = string.view_bytes(k) else {
+        return None()
+      }
+      let Some(text) = string.view_bytes(value) else {
+        return None()
+      }
+      line = f"{line} {key}={text}"
+    }
+  }
+  Some(line)
+}
+
+fn say(stdout: Stdout, take line: String) -> () {
+  let _ = out.print(stdout, f"{line}\n")
+}
+
+// One caller's ops. A call position whose outcome is unknown is resent, with
+// the same op, until it has an outcome; one that failed with no effect is
+// reused by the next op. A caller reopens after any failure, its store's
+// claim being likely dead, and otherwise at random.
+fn caller(a: Authority, stdout: Stdout, seed: u64, ops: u64, c: u64) -> () {
+  let mut draw = mix(seed * 31 + c)
+  let mut held: Option[store.Store] = None()
+  let mut holding = false
+  let mut position: u64 = 1
+  let mut pending: Option[Op] = None()
+  for n in 0u64..ops {
+    draw = mix(draw)
+    let reopen = draw % 4 == 0
+    if reopen || !holding {
+      if let Some(old) = replace(mut held, None()) {
+        let _ = store.close(take old)
+      }
+      holding = false
+      say(stdout, f"opening {c} {n}")
+      match store.open(a, store.default_config()) {
+        Ok(opened) => {
+          let mut s = take opened
+          match rows(a, mut s) {
+            Some(line) => say(stdout, f"open {c} {n}{line}"),
+            None() => say(stdout, f"noopen {c} {n}"),
+          }
+          held = Some(take s)
+          holding = true
+        },
+        Error(_) => say(stdout, f"noopen {c} {n}"),
+      }
+    }
+    if let Some(h) = replace(mut held, None()) {
+      let mut s = take h
+      let mut resent = false
+      let o = match replace(mut pending, None()) {
+        Some(o) => {
+          resent = true
+          o
+        },
+        None() => Op(caller: c, op: n, key: draw / 4 % KEYS),
+      }
+      say(stdout, f"inv {c} {o.op} {o.key} {position}")
+      let req = CallRequest(
+        stream: d32(f"stream {c}"),
+        epoch: 1,
+        position: position,
+        digest: d32(f"op {c}.{o.op}"),
+        acknowledged: position - 1
+      )
+      let r: Result[u64, store.CallFailure[Short]] = store.call(
+        mut s,
+        req,
+        apply,
+        copy o
+      )
+      match r {
+        Ok(seq) => {
+          say(stdout, f"ok {c} {o.op} {seq}")
+          position += 1
+        },
+        Error(Tx(Unknown(_))) => {
+          say(stdout, f"unk {c} {o.op}")
+          pending = Some(copy o)
+          holding = false
+        },
+        Error(_) => {
+          say(stdout, f"fail {c} {o.op}")
+          if resent {
+            pending = Some(copy o)
+          }
+          holding = false
+        },
+      }
+      held = Some(take s)
+    }
+  }
+  if let Some(s) = replace(mut held, None()) {
+    let _ = store.close(take s)
+  }
+}
+
+// The rows a query reads: those the served scenario's one call writes.
+fn read(tx: store.Tx, info: store.CallInfo, a: u64) -> Result[String, Short] {
+  let mut line = ""
+  for key in ["k0", "n9", "p9.0", "seq"] {
+    if let Some(v) = store.tx_get(tx, text_bytes(copy key)) ? Db {
+      let Some(text) = string.view_bytes(v) else {
+        return Ok(line)
+      }
+      line = f"{line} {key}={text}"
+    }
+  }
+  Ok(line)
+}
+
+// The served scenario (FOR-SAM 63): the head opens the store it serves, then
+// a successor's call commits and is acknowledged as caller 9's op 0, and a
+// last open reads the final rows; only then does the head serve, with the
+// store the successor fenced.
+pub fn head(rt: Io, a: ()) -> Result[(), store.StoreError] {
+  let Ok(stdout) = io.stdout(rt) else {
+    return Error(Corrupt("stdout"))
+  }
+  let Ok(place) = io.authority(rt, "place") else {
+    return Error(Corrupt("place"))
+  }
+  let Ok(inbox) = io.inbox(rt) else {
+    return Error(Corrupt("inbox"))
+  }
+  let mut served = store.open(place, store.default_config())?
+  let mut successor = store.open(place, store.default_config())?
+  say(stdout, "inv 9 0 0 1")
+  let req = CallRequest(
+    stream: d32("stream 9"),
+    epoch: 1,
+    position: 1,
+    digest: d32("op 9.0"),
+    acknowledged: 0
+  )
+  let r: Result[u64, store.CallFailure[Short]] = store.call(
+    mut successor,
+    req,
+    apply,
+    Op(caller: 9, op: 0, key: 0)
+  )
+  match r {
+    Ok(seq) => say(stdout, f"ok 9 0 {seq}"),
+    Error(_) => say(stdout, "fail 9 0"),
+  }
+  store.close(take successor)?
+  let mut last = store.open(place, store.default_config())?
+  match rows(place, mut last) {
+    Some(line) => say(stdout, f"final{line}"),
+    None() => say(stdout, "nofinal 0"),
+  }
+  store.close(take last)?
+  store.serve(mut served, take inbox, [store.served_query(read)])
+}
+
+// Caller 8 queries the head. The first query is answered only once the head
+// serves, so the successor's call was acknowledged before the second began.
+fn querier(rt: Io, stdout: Stdout) -> Result[(), GrantError] {
+  let place = io.runner(rt, "head")?
+  let _: Result[String, RunError[store.TxFailure[Short]]] = runner.query(
+    place,
+    read,
+    0u64
+  )
+  say(stdout, "opening 8 0")
+  let r: Result[String, RunError[store.TxFailure[Short]]] = runner.query(
+    place,
+    read,
+    0u64
+  )
+  match r {
+    Ok(line) => say(stdout, f"open 8 0{line}"),
+    Error(_) => say(stdout, "noopen 8 0"),
+  }
+  Ok(())
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
+  let stdout = io.stdout(rt)?
+  if arg.text(args, 0) == Ok("served") {
+    return querier(rt, stdout)
+  }
+  let tasks = io.tasks(rt)?
+  let seed: u64 = match arg.text(args, 0) {
+    Ok(t) => match u64.parse(t) {
+      Ok(n) => n,
+      Error(_) => 0,
+    },
+    Error(_) => 0,
+  }
+  let ops: u64 = match arg.text(args, 1) {
+    Ok(t) => match u64.parse(t) {
+      Ok(n) => n,
+      Error(_) => OPS,
+    },
+    Error(_) => OPS,
+  }
+  say(stdout, f"seed {seed}")
+  let Ok(a) = io.authority(rt, "w") else {
+    say(stdout, "w not granted")
+    return Ok(())
+  }
+  task.scope(
+    tasks,
+    fn(sc: Scope) {
+      let first = task.async(
+        sc,
+        fn() {
+          caller(a, stdout, seed, ops, 0)
+        }
+      )
+      let second = task.async(
+        sc,
+        fn() {
+          caller(a, stdout, seed, ops, 1)
+        }
+      )
+      let third = task.async(
+        sc,
+        fn() {
+          caller(a, stdout, seed, ops, 2)
+        }
+      )
+      task.await(sc, take first)
+      task.await(sc, take second)
+      task.await(sc, take third)
+    }
+  )
+  // The cut may fall on the last open's own requests; one fault a run, so
+  // the next attempt is clean.
+  for attempt in 0u64..2 {
+    match store.open(a, store.default_config()) {
+      Ok(opened) => {
+        let mut s = take opened
+        match rows(a, mut s) {
+          Some(line) => {
+            say(stdout, f"final{line}")
+            let _ = store.close(take s)
+            return Ok(())
+          },
+          None() => say(stdout, f"nofinal {attempt}"),
+        }
+        let _ = store.close(take s)
+      },
+      Error(_) => say(stdout, f"nofinal {attempt}"),
+    }
+  }
+  Ok(())
+}

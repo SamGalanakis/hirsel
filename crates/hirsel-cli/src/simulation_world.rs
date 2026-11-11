@@ -82,10 +82,11 @@ pub(crate) fn decode(value: serde_json::Value) -> Result<hirsel_engine::Simulati
                     .as_str()
                     .and_then(hirsel_driver::testing::SimulationDebug::parse_points)
                     .ok_or(
-                        "sim_points: expected root-release, atomic-store, or both comma-separated",
+                        "sim_points: expected root-release, atomic-store or seam, comma-separated",
                     )?;
                 config.debug.root_releases = points.root_releases;
                 config.debug.atomic_stores = points.atomic_stores;
+                config.debug.seam_calls = points.seam_calls;
             }
             "scheduler" => {
                 config.scheduler = Some(

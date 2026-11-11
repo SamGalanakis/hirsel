@@ -5,6 +5,7 @@ mod bitset_7;
 mod hex_builder_5;
 mod numeric_native;
 mod package_s3;
+mod place_sim;
 mod reference_vectors;
 mod source_std_cache;
 mod stdlib_aead_vectors;

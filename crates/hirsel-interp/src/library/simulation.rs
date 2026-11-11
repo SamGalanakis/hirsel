@@ -46,6 +46,9 @@ pub struct FileMetadata {
 pub enum SchedulePoint {
     RootRelease,
     AtomicStore,
+    /// After each seam call that reaches a provider, so tasks holding stores of
+    /// one authority interleave request by request (STORE-11).
+    Seam,
 }
 
 /// Opt-in tooling; excluded from run identity, semantic observations and Io tapes.
@@ -54,6 +57,7 @@ pub struct SimulationDebug {
     pub races: bool,
     pub root_releases: bool,
     pub atomic_stores: bool,
+    pub seam_calls: bool,
     /// Cancel the calling task, as `task.cancel` would, just after the run's k-th seam
     /// call that reaches a provider (claim, advance, durable, read, get, put, reclaim):
     /// the cancellation sweep over a commit's Io points (STORE-3, STORE-11).
@@ -67,6 +71,7 @@ impl SimulationDebug {
             match name {
                 "root-release" if !debug.root_releases => debug.root_releases = true,
                 "atomic-store" if !debug.atomic_stores => debug.atomic_stores = true,
+                "seam" if !debug.seam_calls => debug.seam_calls = true,
                 _ => return None,
             }
         }
@@ -76,6 +81,7 @@ impl SimulationDebug {
         [
             self.root_releases.then_some("root-release"),
             self.atomic_stores.then_some("atomic-store"),
+            self.seam_calls.then_some("seam"),
         ]
         .into_iter()
         .flatten()
@@ -86,6 +92,7 @@ impl SimulationDebug {
         match point {
             SchedulePoint::RootRelease => self.root_releases,
             SchedulePoint::AtomicStore => self.atomic_stores,
+            SchedulePoint::Seam => self.seam_calls,
         }
     }
 }

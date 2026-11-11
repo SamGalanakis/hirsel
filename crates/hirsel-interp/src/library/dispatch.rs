@@ -2278,6 +2278,7 @@ primary_operations! { library, call, context, name, a, value;
         if result.is_ok() && matches!(name, "authority.claim" | "authority.advance" | "authority.durable" | "authority.read" | "authority.get" | "authority.put" | "authority.reclaim") {
             library.authorities.seam_calls += 1;
             if library.simulation.config.debug.cancel_at_seam == Some(library.authorities.seam_calls) { library.tasks.cancel_current(); }
+            if library.simulation_point(super::simulation::SchedulePoint::Seam) { context.trace.push(crate::TraceEvent::SimulationPoint(super::simulation::SchedulePoint::Seam)); }
         }
         return result.map(Some);
     },

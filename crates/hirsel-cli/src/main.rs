@@ -103,7 +103,7 @@ Run matching tests; the default engine is the interpreter.
   --scheduler         One schedule: fifo@1, random@1 or pct@1, with :seed
   --explore <n>       Explore n schedules; random@1 or pct@1 without :seed
   --race              Detect races in interpreted tests
-  --sim-points        Interpreter points: root-release,atomic-store (either or both)
+  --sim-points        Interpreter points: root-release,atomic-store,seam (any of them)
   --bless             Update test snapshots
   --bench             Run benchmarks; excludes bless, max-steps, scheduler, explore
   --bench-time <ms>   Positive benchmark target time; requires --bench
@@ -492,9 +492,10 @@ fn parse_command(args: Vec<OsString>) -> Result<Command, lexopt::Error> {
                         points_seen = true;
                         let points = args.value()?;
                         let points = points.to_str().and_then(hirsel_driver::testing::SimulationDebug::parse_points)
-                            .ok_or("--sim-points requires root-release, atomic-store, or both comma-separated")?;
+                            .ok_or("--sim-points requires root-release, atomic-store or seam, comma-separated")?;
                         simulation_debug.root_releases = points.root_releases;
                         simulation_debug.atomic_stores = points.atomic_stores;
+                        simulation_debug.seam_calls = points.seam_calls;
                     }
                     Long("scheduler") if scheduler.is_none() => {
                         scheduler = Some(

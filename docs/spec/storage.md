@@ -1187,19 +1187,25 @@ engine accepts a body far under its budget and refuses one far over it does not.
 for core operations by the size of their operands are **Reserved**: until they exist, one
 host operation costs what its call costs, whatever its size. A compiled body is admitted
 only when its charges pay for every trip: no cycle of its control flow avoids every
-charge (with each block that charges cut, the flow is acyclic, a counted loop's edge back
-excepted, which its entry charge pays), and when it calls any other body, its one entry
-charge precedes the first call on every path.
+charge, and when it calls any other body, its one entry charge precedes the first call on
+every path. Control flow here includes failure: an operation's failure enters cleanup, and
+a catch can resume ordinary code from it. A charge pays only for what leaves after it, so
+a failure out of a charge, or out of anything before it, has paid nothing; with every such
+paid transfer cut the flow is acyclic, a counted loop's edge back excepted, which its entry
+charge pays.
 
 Scopes nest: a scope opened inside another is granted at most what the enclosing scope
-has left, and on leaving, everything it spent is charged to the enclosing scope. Code
-outside any scope, a compute entry's or a run's own, runs unbounded. A finalizer is
-charged to the scope of the code that drops its value. A charge the meter cannot pay fails
-with `FailureKind.OutOfEnergy`, and the scope has **run out**: it is granted once a cleanup
-**reserve** of 10^6 units, so the failure unwinds and its finalizers run
-([FAIL-3](failure.md#fail-3-what-runs)). The reserve is never renewed: when it too runs
-out, the meter stays at 0, every later charge in the scope fails at once, so each later
-finalizer fails as FAIL-3 orders, and the fields of every value are still released. A body
+has left, and what any scope spends, every scope around it has spent. Code outside any
+scope, a compute entry's or a run's own, runs unbounded. A finalizer is charged to the
+scope of the code that drops its value. A charge the meter cannot pay fails with
+`FailureKind.OutOfEnergy`, and the scope has **run out**, and with it every scope around
+it: the open scopes are granted once a cleanup **reserve** of 10^6 units, so the failure
+unwinds and its finalizers run ([FAIL-3](failure.md#fail-3-what-runs)). A scope opened
+after that holds at most what is left of the reserve. The reserve is never renewed, by
+the scope that ran out or any scope opened inside it: when it too runs out, the meter
+stays at 0, every later charge in those scopes fails at once, so each later finalizer
+fails as FAIL-3 orders, and the fields of every value are still released. Each scope that
+was open when the scope inside it ran out reports that it ran out too. A body
 that ran out ends `Limit(Energy())` whatever it returned, even when it caught the failure
 and returned `Ok`: a transaction commits none of its writes, and what it returned is
 dropped within a reserve of its own. A served call's stream records that end. Without

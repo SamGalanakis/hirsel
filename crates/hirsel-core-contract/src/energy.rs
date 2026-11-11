@@ -3,10 +3,15 @@
 //! `u64` the caller owns (`TaskCtx.energy` natively), and `u64::MAX` means
 //! outside any budget. `energy.enter` opens a scope and `energy.leave` closes
 //! the innermost one. An exhausted charge calls [`Scopes::exhaust`].
+//!
+//! The open scopes form one chain. What any of them spends is spent by every
+//! scope around it, and when one runs out they all have: the chain is granted
+//! one cleanup reserve, which nothing inside it renews.
 
-/// Energy granted once to a scope that ran out, so its cleanup can run
-/// (failure.md FAIL-3). It is never renewed: a second exhaustion leaves the
-/// meter at zero, so every later charge in the scope fails at once.
+/// Energy granted once to a chain of scopes that ran out, so its cleanup can
+/// run (failure.md FAIL-3). It is never renewed: a second exhaustion, in the
+/// scope that ran out or in any scope opened inside it, leaves the meter at
+/// zero, so every later charge in the chain fails at once.
 pub const RESERVE: u64 = 1_000_000;
 
 /// `FailureKind.OutOfEnergy`'s ordinal (`failure_kind(ENERGY_RULE)`).
@@ -19,21 +24,15 @@ pub struct Used {
     pub exhausted: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct Spend {
-    /// The scope ran out and holds its cleanup reserve.
-    exhausted: bool,
-    /// The reserve ran out too.
-    drained: bool,
-}
-
 #[derive(Clone, Copy, Debug)]
 struct Scope {
     serial: u64,
-    /// The enclosing allowance and its state, restored minus what this scope spent.
-    outer: u64,
-    outer_spend: Spend,
-    allowance: u64,
+    /// The chain's spending when the scope opened.
+    start: u64,
+    /// The chain's spending at which the scope's allowance is gone.
+    limit: u64,
+    /// The scope opened after the chain ran out, inside its reserve.
+    in_reserve: bool,
 }
 
 /// The open scopes of one task, innermost last.
@@ -41,7 +40,13 @@ struct Scope {
 pub struct Scopes {
     open: Vec<Scope>,
     serial: u64,
-    spend: Spend,
+    /// Units the chain has spent, as of the last call. Between calls only
+    /// compiled charges move the meter, and only down.
+    spent: u64,
+    /// The meter as of the last call.
+    last: u64,
+    /// Once the chain has run out: the spending at which its reserve is gone.
+    reserve: Option<u64>,
 }
 
 /// `energy.leave` was given a scope that is not the innermost open one.
@@ -51,53 +56,87 @@ pub struct NotInnermost;
 impl Scopes {
     /// Opens a scope of `budget` inside the current allowance `meter` and
     /// returns its token. A scope never holds more than its enclosing scope has
-    /// left, so what it spends can always be charged to the enclosing scope.
+    /// left, and a scope opened after the chain ran out holds only what is
+    /// left of the reserve and is out of energy itself.
     pub fn enter(&mut self, meter: &mut u64, budget: u64) -> u64 {
+        self.sync(*meter);
+        let left = if self.open.is_empty() {
+            self.spent = 0;
+            self.reserve = None;
+            u64::MAX
+        } else {
+            self.bound() - self.spent
+        };
+        // `u64::MAX` is outside any budget, which no open scope's meter is.
+        let allowance = budget.min(left).min(u64::MAX - 1);
         self.serial += 1;
-        let allowance = budget.min(*meter);
         self.open.push(Scope {
             serial: self.serial,
-            outer: *meter,
-            outer_spend: std::mem::take(&mut self.spend),
-            allowance,
+            start: self.spent,
+            limit: self.spent + allowance,
+            in_reserve: self.reserve.is_some(),
         });
-        *meter = allowance;
+        self.set(meter);
         self.serial
     }
 
-    /// Closes the scope `token`, which must be the innermost open one. The
-    /// enclosing allowance is restored minus everything the scope spent, its
-    /// cleanup reserve included; outside any budget it stays unbounded.
+    /// Closes the scope `token`, which must be the innermost open one, and
+    /// reports what it and the scopes inside it spent, reserve included, and
+    /// whether the chain ran out while it was open or before.
     pub fn leave(&mut self, meter: &mut u64, token: u64) -> Result<Used, NotInnermost> {
         if self.open.last().is_none_or(|s| s.serial != token) {
             return Err(NotInnermost);
         }
+        self.sync(*meter);
         let scope = self.open.pop().unwrap();
-        let units = match (self.spend.exhausted, self.spend.drained) {
-            (false, _) => scope.allowance - *meter,
-            (true, false) => scope.allowance.saturating_add(RESERVE - *meter),
-            (true, true) => scope.allowance.saturating_add(RESERVE),
+        let used = Used {
+            units: self.spent - scope.start,
+            exhausted: self.reserve.is_some(),
         };
-        let exhausted = self.spend.exhausted;
-        self.spend = scope.outer_spend;
-        *meter = if scope.outer == u64::MAX {
-            u64::MAX
+        if self.open.is_empty() {
+            *meter = u64::MAX;
         } else {
-            scope.outer.saturating_sub(units)
-        };
-        Ok(Used { units, exhausted })
+            self.set(meter);
+        }
+        Ok(used)
     }
 
-    /// A charge found the meter short: the scope has run out. The first time,
-    /// it is granted the cleanup reserve; after that the meter stays at zero.
+    /// A charge found the meter short: the chain has run out and spent all it
+    /// had. The first time it is granted the reserve; after that the meter
+    /// stays at zero.
     pub fn exhaust(&mut self, meter: &mut u64) {
-        if self.spend.exhausted {
-            self.spend.drained = true;
-            *meter = 0;
-        } else {
-            self.spend.exhausted = true;
-            *meter = RESERVE;
+        if self.open.is_empty() {
+            return;
         }
+        self.spent = self.bound();
+        self.reserve = Some(match self.reserve {
+            None => self.spent.saturating_add(RESERVE),
+            Some(_) => self.spent,
+        });
+        self.set(meter);
+    }
+
+    /// The spending at which the innermost scope's allowance is gone: its
+    /// own limit, every enclosing limit being as large, until the chain runs
+    /// out; then the reserve's, or a smaller scope opened inside the reserve.
+    fn bound(&self) -> u64 {
+        let innermost = self.open.last().expect("an open scope");
+        match self.reserve {
+            None => innermost.limit,
+            Some(reserve) if innermost.in_reserve => innermost.limit.min(reserve),
+            Some(reserve) => reserve,
+        }
+    }
+
+    fn sync(&mut self, meter: u64) {
+        if !self.open.is_empty() {
+            self.spent += self.last.saturating_sub(meter);
+        }
+    }
+
+    fn set(&mut self, meter: &mut u64) {
+        *meter = self.bound() - self.spent;
+        self.last = *meter;
     }
 }
 
@@ -144,28 +183,47 @@ mod tests {
     }
 
     #[test]
-    fn an_exhausted_inner_scope_spends_its_reserve_from_the_outer_and_leaves_it_running() {
+    fn an_inner_scope_that_runs_out_runs_out_its_enclosing_scope() {
+        // Energy attack 753 finding 5: outer 10, inner 10, a charge of 11
+        // fails, cleanup spends 20 of the reserve, both scopes leave.
+        let (mut s, mut m) = (Scopes::default(), u64::MAX);
+        let outer = s.enter(&mut m, 10);
+        let inner = s.enter(&mut m, 10);
+        assert!(!charge(&mut s, &mut m, 11));
+        assert!(charge(&mut s, &mut m, 20));
+        let ran_out = Used {
+            units: 30,
+            exhausted: true,
+        };
+        assert_eq!(s.leave(&mut m, inner), Ok(ran_out));
+        // The outer scope holds what is left of the one reserve, not its own.
+        assert_eq!(m, RESERVE - 20);
+        assert_eq!(s.leave(&mut m, outer), Ok(ran_out));
+        assert_eq!(m, u64::MAX);
+    }
+
+    #[test]
+    fn no_scope_inside_a_chain_that_ran_out_renews_its_reserve() {
         let (mut s, mut m) = (Scopes::default(), u64::MAX);
         let outer = s.enter(&mut m, 2_000_000);
         let inner = s.enter(&mut m, 50);
         assert!(!charge(&mut s, &mut m, 51));
-        assert_eq!(m, RESERVE);
-        assert!(charge(&mut s, &mut m, 10));
-        assert_eq!(
-            s.leave(&mut m, inner),
-            Ok(Used {
-                units: 60,
-                exhausted: true
-            })
-        );
-        assert_eq!(m, 2_000_000 - 60);
-        // The outer scope did not run out: its next shortfall grants its own reserve.
-        assert!(charge(&mut s, &mut m, 1));
+        assert!(s.leave(&mut m, inner).unwrap().exhausted);
+        // Back in the outer scope, a second shortfall drains the reserve
+        // the inner one was granted: the meter stays at zero.
+        assert!(!charge(&mut s, &mut m, RESERVE + 1));
+        assert_eq!(m, 0);
+        // A scope opened now holds nothing, and its shortfall grants none.
+        let late = s.enter(&mut m, 100);
+        assert_eq!(m, 0);
+        assert!(!charge(&mut s, &mut m, 1));
+        assert_eq!(m, 0);
+        assert!(s.leave(&mut m, late).unwrap().exhausted);
         assert_eq!(
             s.leave(&mut m, outer),
             Ok(Used {
-                units: 61,
-                exhausted: false
+                units: 50 + RESERVE,
+                exhausted: true
             })
         );
     }

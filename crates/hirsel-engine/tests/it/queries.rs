@@ -1812,10 +1812,15 @@ fn scheduled_scc_split_merge_and_durable_reopen_agree_with_cold_solve() {
         let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         // Directory retention is disk-backed. Fund live transport from the
         // same process budget as the Front, growth and runtime reservations.
-        let store = Arc::new(hirsel_engine_store::RequestStore::new(
-            open(),
-            budget.reserve(8 << 20).unwrap(),
-        ));
+        let store = Arc::new(
+            hirsel_engine_store::RequestStore::with_scratch(
+                open(),
+                budget.reserve(8 << 20).unwrap(),
+                &std::env::temp_dir(),
+                1 << 30,
+            )
+            .unwrap(),
+        );
         scheduled_scc_run_with_capacity(text, calls, store, jobs, 8 << 20, None, budget)
     };
     let cases: &[(&str, &[(&str, &[&str])])] = &[
@@ -1892,10 +1897,15 @@ fn scheduled_scc_stream_exceeds_8192_with_store_off_and_unchanged_inventory() {
     }
     text.push_str("fn main {}\n");
     let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    let store = Arc::new(hirsel_engine_store::RequestStore::new(
-        Arc::new(hirsel_engine_store::NoneStore),
-        transport.reserve(64 << 20).unwrap(),
-    ));
+    let store = Arc::new(
+        hirsel_engine_store::RequestStore::with_scratch(
+            Arc::new(hirsel_engine_store::NoneStore),
+            transport.reserve(64 << 20).unwrap(),
+            &std::env::temp_dir(),
+            1 << 30,
+        )
+        .unwrap(),
+    );
     assert_eq!(
         hirsel_engine_store::ResultStore::persistence(&*store),
         hirsel_engine_store::Persistence::Disabled
@@ -1916,10 +1926,15 @@ fn scheduled_scc_stream_exceeds_8192_with_store_off_and_unchanged_inventory() {
 #[test]
 fn scheduled_scc_store_off_edit_split_merge_and_reopen_agree_with_cold_solve() {
     let transport = hirsel_engine_admission::ProcessBudget::new(8 << 20);
-    let store = Arc::new(hirsel_engine_store::RequestStore::new(
-        Arc::new(hirsel_engine_store::NoneStore),
-        transport.reserve(8 << 20).unwrap(),
-    ));
+    let store = Arc::new(
+        hirsel_engine_store::RequestStore::with_scratch(
+            Arc::new(hirsel_engine_store::NoneStore),
+            transport.reserve(8 << 20).unwrap(),
+            &std::env::temp_dir(),
+            1 << 30,
+        )
+        .unwrap(),
+    );
     let cases: &[(&str, &[(&str, &[&str])])] = &[
         (
             "fn a {b}\nfn b {a}\nfn main {a}\n",

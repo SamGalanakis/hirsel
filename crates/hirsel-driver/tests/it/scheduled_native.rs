@@ -315,10 +315,15 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
             let selected = definitions.iter().cloned().collect::<BTreeSet<_>>();
             let mut cache = NativeDiscoveryCache::new(
                 scalar.engine.types().clone(),
-                Arc::new(store::RequestStore::new(
-                    Arc::new(MemStore::default()),
-                    budget.reserve(8 << 20).unwrap(),
-                )),
+                Arc::new(
+                    store::RequestStore::with_scratch(
+                        Arc::new(MemStore::default()),
+                        budget.reserve(8 << 20).unwrap(),
+                        &std::env::temp_dir(),
+                        1 << 30,
+                    )
+                    .unwrap(),
+                ),
             );
             let scalar_codec =
                 NativeRecords::new(scalar.engine.types().clone(), Arc::new(MemStore::default()));

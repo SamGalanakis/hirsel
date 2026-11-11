@@ -19,10 +19,15 @@ fn actual_root_rejects_changed_owner_policy_and_c_bound_ready_summary() {
         let selected: Arc<dyn ResultStore> =
             Arc::new(store::DirStore::new(directory.path().join("products")));
         let transport = hirsel_engine_admission::ProcessBudget::new(24 << 20);
-        let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
-            selected,
-            transport.reserve(24 << 20).unwrap(),
-        ));
+        let store: Arc<dyn ResultStore> = Arc::new(
+            store::RequestStore::with_scratch(
+                selected,
+                transport.reserve(24 << 20).unwrap(),
+                &std::env::temp_dir(),
+                1 << 30,
+            )
+            .unwrap(),
+        );
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
             .with_result_store(store.clone());
         let file = engine

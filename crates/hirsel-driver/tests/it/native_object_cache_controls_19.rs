@@ -107,10 +107,15 @@ fn compile_source(
     let physical = store.inner.local_product_store().unwrap();
     let request = physical.request();
     let transport_budget = hirsel_engine_admission::ProcessBudget::new(24 << 20);
-    let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
-        store,
-        transport_budget.reserve(24 << 20).unwrap(),
-    ));
+    let store: Arc<dyn ResultStore> = Arc::new(
+        store::RequestStore::with_scratch(
+            store,
+            transport_budget.reserve(24 << 20).unwrap(),
+            &std::env::temp_dir(),
+            1 << 30,
+        )
+        .unwrap(),
+    );
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
         .with_result_store(store.clone());
     let file = engine.sources.add(name, SOURCE.into()).unwrap();

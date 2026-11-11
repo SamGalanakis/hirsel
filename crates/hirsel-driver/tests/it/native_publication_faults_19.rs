@@ -139,10 +139,15 @@ fn compile_inspect(
     let physical = faults.disk.local_product_store().unwrap();
     let publication = physical.request();
     let budget = hirsel_engine_admission::ProcessBudget::new(24 << 20);
-    let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
-        faults,
-        budget.reserve(24 << 20).unwrap(),
-    ));
+    let store: Arc<dyn ResultStore> = Arc::new(
+        store::RequestStore::with_scratch(
+            faults,
+            budget.reserve(24 << 20).unwrap(),
+            &std::env::temp_dir(),
+            1 << 30,
+        )
+        .unwrap(),
+    );
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
         .with_result_store(store.clone());
     engine.verify = verify;

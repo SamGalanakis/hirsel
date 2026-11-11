@@ -1772,10 +1772,15 @@ mod dependency_tests {
     #[test]
     fn live_edges_need_no_transport_and_release_only_after_the_last_consumer() {
         let budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
-        let store = Arc::new(RequestStore::new(
-            Arc::new(NoTransport),
-            budget.reserve(64 << 10).unwrap(),
-        ));
+        let store = Arc::new(
+            RequestStore::with_scratch(
+                Arc::new(NoTransport),
+                budget.reserve(64 << 10).unwrap(),
+                &std::env::temp_dir(),
+                1 << 30,
+            )
+            .unwrap(),
+        );
         let producer = ProductRef::dependencies(value(store.as_ref(), Vec::new()));
         let child_charge = store.retained_bytes();
         let parent = ProductRef::dependencies(value(store.as_ref(), vec![producer.clone()]));
@@ -1821,25 +1826,49 @@ mod dependency_tests {
 
     #[test]
     fn live_edges_refuse_exhaustion_and_archive_only_with_explicit_working_admission() {
-        let tiny = hirsel_engine_admission::ProcessBudget::new(1);
-        let store = RequestStore::new(Arc::new(NoTransport), tiny.reserve(1).unwrap());
-        assert!(
+        // Fill a production scratch transport with live edges until one is
+        // refused: the refusal charges nothing and marks the request exhausted.
+        let tiny = hirsel_engine_admission::ProcessBudget::new(16 << 10);
+        let store = RequestStore::with_scratch(
+            Arc::new(NoTransport),
+            tiny.reserve(16 << 10).unwrap(),
+            &std::env::temp_dir(),
+            1 << 30,
+        )
+        .unwrap();
+        let edge = || {
             LiveDependencyProduct::new(
                 &store,
                 Address(ContentHash::default()),
                 Action(ContentHash::default()),
                 Domain { kind: 1, schema: 2 },
-                Vec::new()
+                Vec::new(),
             )
-            .is_err()
-        );
-        assert_eq!(store.retained_bytes(), 0);
+        };
+        let mut live = Vec::new();
+        let refused = loop {
+            assert!(live.len() < 16 << 10, "a live edge charges request memory");
+            let before = store.retained_bytes();
+            match edge() {
+                Ok(product) => live.push(product),
+                Err(_) => break before,
+            }
+        };
+        assert!(!live.is_empty());
+        assert_eq!(store.retained_bytes(), refused);
         assert!(store.exhausted());
+        drop(live);
         drop(store);
         assert_eq!(tiny.reserved(), 0);
 
         let budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
-        let store = RequestStore::new(Arc::new(NoTransport), budget.reserve(64 << 10).unwrap());
+        let store = RequestStore::with_scratch(
+            Arc::new(NoTransport),
+            budget.reserve(64 << 10).unwrap(),
+            &std::env::temp_dir(),
+            1 << 30,
+        )
+        .unwrap();
         let child = hirsel_engine_runtime::test_product(
             Address(ContentHash::of_bytes(b"child")),
             Action(ContentHash::of_bytes(b"child action")),

@@ -28,10 +28,15 @@ pub fn main()->Result[(),()] {let n=bump([1u32,2u32],1u64,3u32);Ok(())}
         .unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"proof_native","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
         let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-        let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
-            Arc::new(store::DirStore::new(directory.path().join("products"))),
-            transport.reserve(64 << 20).unwrap(),
-        ));
+        let store: Arc<dyn ResultStore> = Arc::new(
+            store::RequestStore::with_scratch(
+                Arc::new(store::DirStore::new(directory.path().join("products"))),
+                transport.reserve(64 << 20).unwrap(),
+                &std::env::temp_dir(),
+                1 << 30,
+            )
+            .unwrap(),
+        );
         let jobs = 1;
         let mut program = COMPILER
             .with_config(CompileConfig {

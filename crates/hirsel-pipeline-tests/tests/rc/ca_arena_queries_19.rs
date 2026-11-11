@@ -30,10 +30,13 @@ fn arena_query_graph_settles_local_equations_and_reuses_unchanged_components() {
         discharge: Some(&lowered.native_discharge),
     };
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    let store = hirsel_engine_store::RequestStore::new(
+    let store = hirsel_engine_store::RequestStore::with_scratch(
         std::sync::Arc::new(MemStore::default()),
         budget.reserve(64 << 20).unwrap(),
-    );
+        &std::env::temp_dir(),
+        1 << 30,
+    )
+    .unwrap();
     let mut nodes = Vec::new();
     for (index, unit) in lowered.units.iter().enumerate() {
         let key = &lowered.unit_keys[index];

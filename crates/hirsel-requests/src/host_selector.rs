@@ -619,10 +619,15 @@ mod tests {
             transport_bytes: 8192,
         };
         let mut loading = LoadingAdmission::reserve(&budget, limits, 0).unwrap();
-        let store = Arc::new(RequestStore::new(
-            Arc::new(NoneStore),
-            loading.take_transport(),
-        ));
+        let store = Arc::new(
+            RequestStore::with_scratch(
+                Arc::new(NoneStore),
+                loading.take_transport(),
+                &std::env::temp_dir(),
+                1 << 30,
+            )
+            .unwrap(),
+        );
         assert_eq!(budget.reserved(), 8320);
         assert!(budget.reserve(1).is_err());
         let record = store

@@ -30,10 +30,15 @@ pub(super) fn admitted_native_store(
     backend: std::sync::Arc<dyn hirsel_engine_store::ResultStore>,
 ) -> std::sync::Arc<dyn hirsel_engine_store::ResultStore> {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    std::sync::Arc::new(hirsel_engine_store::RequestStore::new(
-        backend,
-        budget.reserve(64 << 20).unwrap(),
-    ))
+    std::sync::Arc::new(
+        hirsel_engine_store::RequestStore::with_scratch(
+            backend,
+            budget.reserve(64 << 20).unwrap(),
+            &std::env::temp_dir(),
+            1 << 30,
+        )
+        .unwrap(),
+    )
 }
 
 /// A checked program with its frozen snapshot and reference observation.

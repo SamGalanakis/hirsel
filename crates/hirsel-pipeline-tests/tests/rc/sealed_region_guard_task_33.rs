@@ -29,10 +29,15 @@ impl QueryContext for Context {
 #[test]
 fn original_guard_task_waits_for_dependencies_and_keeps_its_existing_grant_with_output() {
     let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine_store::RequestStore::new(
-        Arc::new(MemStore::default()),
-        transport.reserve(64 << 20).unwrap(),
-    ));
+    let store: Arc<dyn ResultStore> = Arc::new(
+        hirsel_engine_store::RequestStore::with_scratch(
+            Arc::new(MemStore::default()),
+            transport.reserve(64 << 20).unwrap(),
+            &std::env::temp_dir(),
+            1 << 30,
+        )
+        .unwrap(),
+    );
     let domain = Domain {
         kind: INSTANCE_KIND,
         schema: 1,

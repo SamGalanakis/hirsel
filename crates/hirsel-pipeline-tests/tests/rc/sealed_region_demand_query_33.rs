@@ -34,10 +34,13 @@ fn guard_query_refuses_missing_roots_and_repairs_malformed_cached_selections() {
     let equations = LocalDemandEquations::extract(&unit).unwrap();
     let owner = equations.owner().clone();
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    let store = hirsel_engine_store::RequestStore::new(
+    let store = hirsel_engine_store::RequestStore::with_scratch(
         std::sync::Arc::new(MemStore::default()),
         budget.reserve(64 << 20).unwrap(),
-    );
+        &std::env::temp_dir(),
+        1 << 30,
+    )
+    .unwrap();
     let domain = Domain {
         kind: 0x4e00_0001,
         schema: 1,
@@ -115,10 +118,13 @@ fn guard_query_refuses_missing_roots_and_repairs_malformed_cached_selections() {
 #[test]
 fn original_scalar_guard_query_uses_only_metadata_and_rechecks_dependency_outputs() {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    let store = hirsel_engine_store::RequestStore::new(
+    let store = hirsel_engine_store::RequestStore::with_scratch(
         std::sync::Arc::new(MemStore::default()),
         budget.reserve(64 << 20).unwrap(),
-    );
+        &std::env::temp_dir(),
+        1 << 30,
+    )
+    .unwrap();
     let domain = Domain {
         kind: 0x4e00_0001,
         schema: 1,

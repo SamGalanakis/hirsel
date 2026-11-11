@@ -1028,11 +1028,29 @@ mod tests {
         );
         assert!(store.lookup_product(identity("key").0).is_none());
         assert!(!cache.path().join("key.a").exists());
-        let budget = hirsel_engine_admission::ProcessBudget::new(0);
-        let denied = hirsel_engine_store::RequestStore::new(
-            std::sync::Arc::new(hirsel_engine_store::NoneStore),
-            budget.reserve(0).unwrap(),
-        );
+        // A store admitted exactly its own scratch root and metadata, with
+        // nothing to spare: the smallest reservation that constructs.
+        let open = |bytes: u64| {
+            let budget = hirsel_engine_admission::ProcessBudget::new(bytes);
+            hirsel_engine_store::RequestStore::with_scratch(
+                std::sync::Arc::new(hirsel_engine_store::NoneStore),
+                budget.reserve(bytes).unwrap(),
+                &std::env::temp_dir(),
+                1 << 30,
+            )
+            .ok()
+        };
+        let (mut refused, mut admitted) = (0u64, 64u64 << 10);
+        assert!(open(refused).is_none() && open(admitted).is_some());
+        while admitted - refused > 1 {
+            let middle = refused + (admitted - refused) / 2;
+            if open(middle).is_some() {
+                admitted = middle;
+            } else {
+                refused = middle;
+            }
+        }
+        let denied = open(admitted).unwrap();
         assert!(
             publish(&denied, cache.path(), "key", |dir| {
                 let output = dir.join("runtime.a");

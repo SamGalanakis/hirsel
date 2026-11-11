@@ -911,10 +911,13 @@ mod tests {
         // Integrity ownership uses the existing transport grant once, and
         // source snapshots cannot keep that grant alive after the request.
         let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
-        let request = super::super::RequestStore::new(
+        let request = super::super::RequestStore::with_scratch(
             Arc::new(provider.clone()),
             budget.reserve(1 << 20).unwrap(),
-        );
+            &std::env::temp_dir(),
+            1 << 30,
+        )
+        .unwrap();
         let installed = request.installed_package(&package, compiler).unwrap();
         let charged = request.retained_bytes();
         assert!(charged >= installed.operation_metadata_bytes());
@@ -933,7 +936,7 @@ mod tests {
             assert_eq!(&*sources.get(&key).unwrap(), expected);
         }
         let refused =
-            super::super::RequestStore::new(Arc::new(provider), budget.reserve(0).unwrap());
+            super::super::RequestStore::in_memory(Arc::new(provider), budget.reserve(0).unwrap());
         assert!(refused.installed_package(&package, compiler).is_err());
         assert!(refused.exhausted());
     }
@@ -1194,10 +1197,15 @@ mod tests {
                     .unwrap(),
                 )
             } else if forwarded == 1 {
-                std::sync::Arc::new(crate::RequestStore::new(
-                    reader,
-                    budget.reserve(4096).unwrap(),
-                ))
+                std::sync::Arc::new(
+                    crate::RequestStore::with_scratch(
+                        reader,
+                        budget.reserve(4096).unwrap(),
+                        &std::env::temp_dir(),
+                        1 << 30,
+                    )
+                    .unwrap(),
+                )
             } else {
                 reader
             };

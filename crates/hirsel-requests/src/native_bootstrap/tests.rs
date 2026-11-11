@@ -50,10 +50,15 @@ fn native_emit_only_bootstrap_completes_actual_codegen_without_link_after_loader
 
 fn fixture_store() -> Arc<dyn ResultStore> {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    Arc::new(hirsel_engine_store::RequestStore::new(
-        Arc::new(MemStore::default()),
-        budget.reserve(64 << 20).unwrap(),
-    ))
+    Arc::new(
+        hirsel_engine_store::RequestStore::with_scratch(
+            Arc::new(MemStore::default()),
+            budget.reserve(64 << 20).unwrap(),
+            &std::env::temp_dir(),
+            1 << 30,
+        )
+        .unwrap(),
+    )
 }
 
 fn bootstrap_link_refusal(test_table: bool, emit_only: bool) {

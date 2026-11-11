@@ -67,10 +67,15 @@ fn request_result(forward: bool, take: bool, mutable: bool, result: bool) {
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let transport_budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-        let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
-            Arc::new(store::DirStore::new(directory.path().join("products"))),
-            transport_budget.reserve(64 << 20).unwrap(),
-        ));
+        let store: Arc<dyn ResultStore> = Arc::new(
+            store::RequestStore::with_scratch(
+                Arc::new(store::DirStore::new(directory.path().join("products"))),
+                transport_budget.reserve(64 << 20).unwrap(),
+                &std::env::temp_dir(),
+                1 << 30,
+            )
+            .unwrap(),
+        );
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
             .with_result_store(store.clone());
         let file = engine

@@ -640,10 +640,15 @@ fn keyed_value_import_retains_the_original_pretransfer_cleanup() {
     use hirsel_engine_store::ResultStore;
     with_compiler_stack(|| {
         let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-        let store: Arc<dyn store::ResultStore> = Arc::new(store::RequestStore::new(
-            Arc::new(store::MemStore::default()),
-            budget.reserve(64 << 20).unwrap(),
-        ));
+        let store: Arc<dyn store::ResultStore> = Arc::new(
+            store::RequestStore::with_scratch(
+                Arc::new(store::MemStore::default()),
+                budget.reserve(64 << 20).unwrap(),
+                &std::env::temp_dir(),
+                1 << 30,
+            )
+            .unwrap(),
+        );
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
             .with_result_store(store.clone());
         let file = engine.sources.add("keyed-edge.hir", "pub fn main()->u64 {let m:Map[u64,u64]=map.empty();let get:fn(Map[u64,u64],u64)->Option[u64]=map.get;match get(m,1u64) {Some(x)=>x,None=>0u64}}".into()).unwrap();

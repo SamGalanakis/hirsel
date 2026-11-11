@@ -202,10 +202,15 @@ fn native_catalogue_is_lazy_and_store_off_archives_require_export() {
             inner: Arc::new(NoneStore),
             syntax_writes: Mutex::default(),
         });
-        let store = Arc::new(RequestStore::new(
-            backend,
-            budget.reserve(16 << 20).unwrap(),
-        ));
+        let store = Arc::new(
+            RequestStore::with_scratch(
+                backend,
+                budget.reserve(16 << 20).unwrap(),
+                &std::env::temp_dir(),
+                1 << 30,
+            )
+            .unwrap(),
+        );
         assert_eq!(store.persistence(), Persistence::Disabled);
         let compiler = COMPILER
             .with_config(CompileConfig {

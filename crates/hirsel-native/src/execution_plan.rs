@@ -275,8 +275,13 @@ mod tests {
     #[test]
     fn local_plan_retains_observations_and_admission_without_transport() {
         let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
-        let store =
-            store::RequestStore::new(Arc::new(NoTransport), budget.reserve(1 << 20).unwrap());
+        let store = store::RequestStore::with_scratch(
+            Arc::new(NoTransport),
+            budget.reserve(1 << 20).unwrap(),
+            &std::env::temp_dir(),
+            1 << 30,
+        )
+        .unwrap();
         let owner = plan(&store, context());
         let charge = store.retained_bytes();
         assert!(charge > size_of::<ExecutionPlan>() as u64);
@@ -304,8 +309,13 @@ mod tests {
     #[test]
     fn explicit_plan_archive_round_trip_preserves_identity_without_native_authority() {
         let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
-        let store =
-            store::RequestStore::new(Arc::new(NoTransport), budget.reserve(1 << 20).unwrap());
+        let store = store::RequestStore::with_scratch(
+            Arc::new(NoTransport),
+            budget.reserve(1 << 20).unwrap(),
+            &std::env::temp_dir(),
+            1 << 30,
+        )
+        .unwrap();
         let live = product(plan(&store, context()));
         let archive_budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
         let mut scratch = archive_budget.reserve(64 << 10).unwrap();
@@ -447,14 +457,19 @@ mod tests {
 #[test]
 fn plan_admission_refuses_retained_capacity_before_publication() {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
-    let store = hirsel_engine_store::RequestStore::new(
+    let store = hirsel_engine_store::RequestStore::with_scratch(
         Arc::new(hirsel_engine_store::MemStore::default()),
         budget.reserve(64 << 10).unwrap(),
-    );
+        &std::env::temp_dir(),
+        1 << 30,
+    )
+    .unwrap();
+    // The scratch root keeps its own charge for the store's life.
+    let idle = store.retained_bytes();
     let ordinary = tests::plan(&store, tests::context());
-    assert!(store.retained_bytes() > 0);
+    assert!(store.retained_bytes() > idle);
     drop(ordinary);
-    assert_eq!(store.retained_bytes(), 0);
+    assert_eq!(store.retained_bytes(), idle);
     let target = hirsel_lir::TargetSpec::x86_64_unknown_linux_gnu();
     let root = tests::observed();
     let mut ahead = hirsel_lir::ahead::AheadPlan::default();
@@ -475,7 +490,7 @@ fn plan_admission_refuses_retained_capacity_before_publication() {
         result.is_err(),
         "spare plan capacity escaped retained admission"
     );
-    assert_eq!(store.retained_bytes(), 0);
+    assert_eq!(store.retained_bytes(), idle);
     drop(store);
     assert_eq!(budget.reserved(), 0);
 }

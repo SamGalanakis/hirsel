@@ -10,7 +10,13 @@ use std::cell::Cell;
 
 fn admitted(backend: Arc<dyn ResultStore>) -> hirsel_engine_store::RequestStore {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    hirsel_engine_store::RequestStore::new(backend, budget.reserve(64 << 20).unwrap())
+    hirsel_engine_store::RequestStore::with_scratch(
+        backend,
+        budget.reserve(64 << 20).unwrap(),
+        &std::env::temp_dir(),
+        1 << 30,
+    )
+    .unwrap()
 }
 
 const INPUT: Domain = Domain {

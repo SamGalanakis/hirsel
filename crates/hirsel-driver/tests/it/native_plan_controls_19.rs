@@ -22,10 +22,15 @@ fn bodyless_keyed_inventory_survives_cross_open_and_refuses_missing_metadata() {
             let selected = Arc::new(store::DirStore::new(directory.path().join("products")));
             let publication = selected.local_product_store().unwrap().request();
             let budget = hirsel_engine_admission::ProcessBudget::new(24 << 20);
-            let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
-                selected,
-                budget.reserve(24 << 20).unwrap(),
-            ));
+            let store: Arc<dyn ResultStore> = Arc::new(
+                store::RequestStore::with_scratch(
+                    selected,
+                    budget.reserve(24 << 20).unwrap(),
+                    &std::env::temp_dir(),
+                    1 << 30,
+                )
+                .unwrap(),
+            );
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
                 .with_result_store(store.clone());
             let file = engine.sources.add("plan.hir", source.into()).unwrap();

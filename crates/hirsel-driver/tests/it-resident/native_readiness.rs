@@ -38,10 +38,15 @@ impl NativeProducts for NoNative {
 const SCRIPT: &[u8] = b"#!/bin/sh\nprintf 'ready\\n'\nexit 0\n";
 fn fixture(store: Arc<dyn ResultStore>) -> LinkedProduct {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine_store::RequestStore::new(
-        store,
-        budget.reserve(64 << 20).unwrap(),
-    ));
+    let store: Arc<dyn ResultStore> = Arc::new(
+        hirsel_engine_store::RequestStore::with_scratch(
+            store,
+            budget.reserve(64 << 20).unwrap(),
+            &std::env::temp_dir(),
+            1 << 30,
+        )
+        .unwrap(),
+    );
     let manifest = store
         .put_content(
             Domain {

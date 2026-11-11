@@ -17,10 +17,15 @@ fn aware_inventory_import_preserves_dead_original_payload_and_rechecks_c_on_repl
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-        let store: Arc<dyn store::ResultStore> = Arc::new(store::RequestStore::new(
-            Arc::new(store::DirStore::new(directory.path().join("products"))),
-            budget.reserve(64 << 20).unwrap(),
-        ));
+        let store: Arc<dyn store::ResultStore> = Arc::new(
+            store::RequestStore::with_scratch(
+                Arc::new(store::DirStore::new(directory.path().join("products"))),
+                budget.reserve(64 << 20).unwrap(),
+                &std::env::temp_dir(),
+                1 << 30,
+            )
+            .unwrap(),
+        );
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
             .with_result_store(store.clone());
         let file = engine

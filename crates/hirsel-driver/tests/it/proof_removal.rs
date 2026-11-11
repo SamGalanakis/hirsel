@@ -899,10 +899,15 @@ fn native_discovery_reports_actual_removals_on_cold_and_body_free_fresh_hits() {
         };
         let dir = tempfile::tempdir().unwrap();
         let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-        let store: Arc<dyn store::ResultStore> = Arc::new(store::RequestStore::new(
-            Arc::new(store::DirStore::new(dir.path().to_path_buf())),
-            transport.reserve(64 << 20).unwrap(),
-        ));
+        let store: Arc<dyn store::ResultStore> = Arc::new(
+            store::RequestStore::with_scratch(
+                Arc::new(store::DirStore::new(dir.path().to_path_buf())),
+                transport.reserve(64 << 20).unwrap(),
+                &std::env::temp_dir(),
+                1 << 30,
+            )
+            .unwrap(),
+        );
         let mut expected = None;
         for mode in 0..3 {
             let mut producer = QueryEngine::new(default_environment(), compiler_adapters())

@@ -44,10 +44,15 @@ fn admitted_source_storage_root_matches_scalar_and_rejects_root_escape() {
             std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"storage","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
             for jobs in [1, 2] {
                 let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
-                let store = Arc::new(store::RequestStore::new(
-                    Arc::new(MemStore::default()),
-                    budget.reserve(16 << 20).unwrap(),
-                ));
+                let store = Arc::new(
+                    store::RequestStore::with_scratch(
+                        Arc::new(MemStore::default()),
+                        budget.reserve(16 << 20).unwrap(),
+                        &std::env::temp_dir(),
+                        1 << 30,
+                    )
+                    .unwrap(),
+                );
                 let mut program = COMPILER
                     .with_config(CompileConfig {
                         store: store.clone(),

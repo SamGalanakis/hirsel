@@ -49,10 +49,15 @@ fn import_engine_with_validation(
     validation: hirsel_native::Validation,
 ) -> (Bodies, u64, u64) {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
-        store,
-        budget.reserve(64 << 20).unwrap(),
-    ));
+    let store: Arc<dyn ResultStore> = Arc::new(
+        store::RequestStore::with_scratch(
+            store,
+            budget.reserve(64 << 20).unwrap(),
+            &std::env::temp_dir(),
+            1 << 30,
+        )
+        .unwrap(),
+    );
     let facts = crate::native_front_fixture::products(&mut engine, roots).unwrap();
     let declarations = NativeDeclarations::from_front(facts.clone()).unwrap();
     let reader = facts

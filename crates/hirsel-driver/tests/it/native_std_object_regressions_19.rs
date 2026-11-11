@@ -24,10 +24,15 @@ fn root(package: hirsel_syntax::PackageId, module: &str, name: &str) -> DefPath 
 fn ordinary_store_delete_has_one_consistent_entry_abi() {
     with_compiler_stack(|| {
         let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-        let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
-            Arc::new(store::MemStore::default()),
-            budget.reserve(64 << 20).unwrap(),
-        ));
+        let store: Arc<dyn ResultStore> = Arc::new(
+            store::RequestStore::with_scratch(
+                Arc::new(store::MemStore::default()),
+                budget.reserve(64 << 20).unwrap(),
+                &std::env::temp_dir(),
+                1 << 30,
+            )
+            .unwrap(),
+        );
         let mut config = COMPILER.configuration();
         config.store = store.clone();
         let mut package = COMPILER

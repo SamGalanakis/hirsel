@@ -53,10 +53,15 @@ fn native_discovery_cache_reuses_requirements_without_demanding_source_bodies() 
     }
     with_compiler_stack(|| {
         let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-        let store = Arc::new(store::RequestStore::new(
-            Arc::new(store::MemStore::default()),
-            budget.reserve(64 << 20).unwrap(),
-        ));
+        let store = Arc::new(
+            store::RequestStore::with_scratch(
+                Arc::new(store::MemStore::default()),
+                budget.reserve(64 << 20).unwrap(),
+                &std::env::temp_dir(),
+                1 << 30,
+            )
+            .unwrap(),
+        );
         let session = || {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
                 .with_result_store(store.clone());
@@ -166,10 +171,15 @@ fn native_discovery_cache_type_only_respects_forced_recomputation() {
     use std::sync::Arc;
     with_compiler_stack(|| {
         let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-        let store = Arc::new(store::RequestStore::new(
-            Arc::new(store::MemStore::default()),
-            budget.reserve(64 << 20).unwrap(),
-        ));
+        let store = Arc::new(
+            store::RequestStore::with_scratch(
+                Arc::new(store::MemStore::default()),
+                budget.reserve(64 << 20).unwrap(),
+                &std::env::temp_dir(),
+                1 << 30,
+            )
+            .unwrap(),
+        );
         let session = || {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
                 .with_result_store(store.clone());
@@ -227,10 +237,15 @@ fn native_discovery_cache_forced_lower_uses_fresh_verifier_output() {
     use std::sync::Arc;
     with_compiler_stack(|| {
         let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-        let store = Arc::new(store::RequestStore::new(
-            Arc::new(store::MemStore::default()),
-            budget.reserve(64 << 20).unwrap(),
-        ));
+        let store = Arc::new(
+            store::RequestStore::with_scratch(
+                Arc::new(store::MemStore::default()),
+                budget.reserve(64 << 20).unwrap(),
+                &std::env::temp_dir(),
+                1 << 30,
+            )
+            .unwrap(),
+        );
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
             .with_result_store(store.clone())
             .with_verify_store(store::VerifyStore::Recompute);

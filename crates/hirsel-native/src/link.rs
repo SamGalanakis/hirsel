@@ -362,12 +362,17 @@ impl Toolchain {
             None => {
                 let (budget, cap) = hirsel_engine::requests::source_graph::host_budget();
                 let bytes = (cap / 8).min(128 << 20);
-                std::sync::Arc::new(hirsel_engine_store::RequestStore::new(
-                    std::sync::Arc::new(hirsel_engine_store::NoneStore),
-                    budget
-                        .reserve(bytes)
-                        .map_err(|e| NativeError::new(StageName::Link, e.to_string()))?,
-                ))
+                std::sync::Arc::new(
+                    hirsel_engine_store::RequestStore::with_scratch(
+                        std::sync::Arc::new(hirsel_engine_store::NoneStore),
+                        budget
+                            .reserve(bytes)
+                            .map_err(|e| NativeError::new(StageName::Link, e.to_string()))?,
+                        &std::env::temp_dir(),
+                        cap,
+                    )
+                    .map_err(|e| NativeError::new(StageName::Link, e.to_string()))?,
+                )
             }
         };
         let store = products.as_ref();

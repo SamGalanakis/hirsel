@@ -19,10 +19,15 @@ use std::sync::Arc;
 #[test]
 fn original_scalar_selected_guard_reaches_every_production_ready_unit() {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine_store::RequestStore::new(
-        Arc::new(MemStore::default()),
-        budget.reserve(64 << 20).unwrap(),
-    ));
+    let store: Arc<dyn ResultStore> = Arc::new(
+        hirsel_engine_store::RequestStore::with_scratch(
+            Arc::new(MemStore::default()),
+            budget.reserve(64 << 20).unwrap(),
+            &std::env::temp_dir(),
+            1 << 30,
+        )
+        .unwrap(),
+    );
     let mut queries = ReadyQueries::new(store.clone());
     let context = store
         .put_content(EMISSION_CONTEXT_DOMAIN, b"original guarded Ready context")
@@ -145,10 +150,15 @@ fn original_scalar_selected_guard_reaches_every_production_ready_unit() {
 #[test]
 fn original_scalar_ready_refuses_foreign_or_malformed_guard_inputs_before_lowering() {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine_store::RequestStore::new(
-        Arc::new(MemStore::default()),
-        budget.reserve(64 << 20).unwrap(),
-    ));
+    let store: Arc<dyn ResultStore> = Arc::new(
+        hirsel_engine_store::RequestStore::with_scratch(
+            Arc::new(MemStore::default()),
+            budget.reserve(64 << 20).unwrap(),
+            &std::env::temp_dir(),
+            1 << 30,
+        )
+        .unwrap(),
+    );
     let mut queries = ReadyQueries::new(store.clone());
     let context = store
         .put_content(EMISSION_CONTEXT_DOMAIN, b"guard refusal context")

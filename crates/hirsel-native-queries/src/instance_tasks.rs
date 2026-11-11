@@ -1382,10 +1382,15 @@ mod retained_tests {
     fn registry_metadata_refuses_one_less_and_releases_its_exact_partition() {
         hirsel_intern::jobs::with_compiler_stack(|| {
             let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-            let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine_store::RequestStore::new(
-                Arc::new(hirsel_engine_store::MemStore::default()),
-                transport.reserve(64 << 20).unwrap(),
-            ));
+            let store: Arc<dyn ResultStore> = Arc::new(
+                hirsel_engine_store::RequestStore::with_scratch(
+                    Arc::new(hirsel_engine_store::MemStore::default()),
+                    transport.reserve(64 << 20).unwrap(),
+                    &std::env::temp_dir(),
+                    1 << 30,
+                )
+                .unwrap(),
+            );
             let mut engine = hirsel_engine::QueryEngine::new(
                 hirsel_engine::default_environment(),
                 hirsel_front_phases::compiler_adapters(),

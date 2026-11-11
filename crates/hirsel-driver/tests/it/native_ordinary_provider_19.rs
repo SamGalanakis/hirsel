@@ -67,10 +67,15 @@ fn ordinary_provider(backend: Backend) {
         let open_store = || -> Arc<dyn ResultStore> { Arc::new(DirStore::new(cache.clone())) };
         let donor = {
             let budget = hirsel_engine_admission::ProcessBudget::new(24 << 20);
-            let store: Arc<dyn ResultStore> = Arc::new(RequestStore::new(
-                open_store(),
-                budget.reserve(24 << 20).unwrap(),
-            ));
+            let store: Arc<dyn ResultStore> = Arc::new(
+                RequestStore::with_scratch(
+                    open_store(),
+                    budget.reserve(24 << 20).unwrap(),
+                    &std::env::temp_dir(),
+                    1 << 30,
+                )
+                .unwrap(),
+            );
             let mut config = hirsel_front_phases::COMPILER.configuration();
             config.store = store.clone();
             config.verify = Verify::On;
@@ -100,10 +105,15 @@ fn ordinary_provider(backend: Backend) {
         assert!(!donor.objects.is_empty());
         let application_compile = |store: Arc<dyn ResultStore>, verification| {
             let transport_budget = hirsel_engine_admission::ProcessBudget::new(24 << 20);
-            let store: Arc<dyn ResultStore> = Arc::new(RequestStore::new(
-                store,
-                transport_budget.reserve(24 << 20).unwrap(),
-            ));
+            let store: Arc<dyn ResultStore> = Arc::new(
+                RequestStore::with_scratch(
+                    store,
+                    transport_budget.reserve(24 << 20).unwrap(),
+                    &std::env::temp_dir(),
+                    1 << 30,
+                )
+                .unwrap(),
+            );
             let mut config = hirsel_front_phases::COMPILER.configuration();
             config.store = store.clone();
             config.verify = Verify::On;

@@ -383,12 +383,17 @@ fn ordinary_read_only_executed_helper_keeps_its_check_product() {
         let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let mut reader = compiler
             .with_config(CompileConfig {
-                store: Arc::new(store::RequestStore::new(
-                    Arc::new(
-                        store::DirStore::new(dir.join("reader")).with_read_only_root(products),
-                    ),
-                    budget.reserve(8 << 20).unwrap(),
-                )),
+                store: Arc::new(
+                    store::RequestStore::with_scratch(
+                        Arc::new(
+                            store::DirStore::new(dir.join("reader")).with_read_only_root(products),
+                        ),
+                        budget.reserve(8 << 20).unwrap(),
+                        &std::env::temp_dir(),
+                        1 << 30,
+                    )
+                    .unwrap(),
+                ),
                 jobs: hirsel_intern::jobs::Jobs::new(1),
                 ..CompileConfig::for_memory_cap(None)
             })

@@ -123,23 +123,6 @@ impl std::fmt::Debug for RequestStore {
     }
 }
 impl RequestStore {
-    pub fn new(
-        backend: Arc<dyn ResultStore>,
-        memory: hirsel_engine_admission::MemoryReservation,
-    ) -> Self {
-        let backend = backend.for_operation().unwrap_or(backend);
-        Self::admitted(
-            backend,
-            Arc::new(Admission {
-                memory,
-                used: AtomicU64::new(0),
-                exhausted: AtomicBool::new(false),
-                scratch: OnceLock::new(),
-                verifier: OnceLock::new(),
-                reads: OnceLock::new(),
-            }),
-        )
-    }
     /// Explicit request-local scratch transport. The selected backend and its
     /// verifier/local-store authority remain unchanged. Metadata and live read
     /// buffers share the original RAM reservation; physical files have the
@@ -797,6 +780,29 @@ impl ResultStore for RequestStore {
 }
 
 #[cfg(test)]
+impl RequestStore {
+    /// The admission core alone, without the scratch layer `with_scratch`
+    /// puts in front of it, so this crate's tests can charge exact byte budgets.
+    pub(crate) fn in_memory(
+        backend: Arc<dyn ResultStore>,
+        memory: hirsel_engine_admission::MemoryReservation,
+    ) -> Self {
+        let backend = backend.for_operation().unwrap_or(backend);
+        Self::admitted(
+            backend,
+            Arc::new(Admission {
+                memory,
+                used: AtomicU64::new(0),
+                exhausted: AtomicBool::new(false),
+                scratch: OnceLock::new(),
+                verifier: OnceLock::new(),
+                reads: OnceLock::new(),
+            }),
+        )
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -852,12 +858,12 @@ mod tests {
         let backend = Arc::new(Backend(Mutex::new(bytes.clone())));
         let provider = Arc::downgrade(&backend);
         let budget = hirsel_engine_admission::ProcessBudget::new(required);
-        let short = RequestStore::new(backend.clone(), budget.reserve(required - 1).unwrap());
+        let short = RequestStore::in_memory(backend.clone(), budget.reserve(required - 1).unwrap());
         assert!(short.open_product_archive(reference).is_none());
         assert_eq!(short.retained_bytes(), 0);
         drop(short);
         assert_eq!(budget.reserved(), 0);
-        let request = Arc::new(RequestStore::new(
+        let request = Arc::new(RequestStore::in_memory(
             backend.clone(),
             budget.reserve(required).unwrap(),
         ));
@@ -924,7 +930,7 @@ mod tests {
                     &std::mem::MaybeUninit::<ArchiveLease>::uninit(),
                 );
         let budget = hirsel_engine_admission::ProcessBudget::new(required);
-        let request = RequestStore::new(Arc::new(Backend), budget.reserve(required).unwrap());
+        let request = RequestStore::in_memory(Arc::new(Backend), budget.reserve(required).unwrap());
         let archive = request.admit_product_archive(reference, bytes).unwrap();
         assert_eq!(archive.bytes().as_ptr(), pointer);
         assert_eq!(archive.retained_bytes(), required);
@@ -971,14 +977,14 @@ mod tests {
         let working = reference.len + ENTRY_CHARGE;
         let backend = Arc::new(Backend(Mutex::new(bytes)));
         let budget = hirsel_engine_admission::ProcessBudget::new(working);
-        let short = RequestStore::new(backend.clone(), budget.reserve(working - 1).unwrap());
+        let short = RequestStore::in_memory(backend.clone(), budget.reserve(working - 1).unwrap());
         assert!(matches!(short.copy_product_archive(reference),
             Err(ProductArchiveError::Admission {
                 stage: "archive copy", requested, retained: 0, limit,
             }) if requested == working && limit == working - 1));
         assert_eq!(short.retained_bytes(), 0);
         drop(short);
-        let request = RequestStore::new(backend.clone(), budget.reserve(working).unwrap());
+        let request = RequestStore::in_memory(backend.clone(), budget.reserve(working).unwrap());
         let archive = request.copy_product_archive(reference).unwrap();
         assert_ne!(archive.bytes().as_ptr(), pointer);
         assert!(archive.retained_bytes() <= working);
@@ -1003,8 +1009,8 @@ mod tests {
         let backend = Arc::new(DirStore::new(directory.path().join("cache")));
         let physical = backend.local_product_store().unwrap();
         let budget = hirsel_engine_admission::ProcessBudget::new(128 << 10);
-        let first = RequestStore::new(backend.clone(), budget.reserve(64 << 10).unwrap());
-        let second = RequestStore::new(backend, budget.reserve(64 << 10).unwrap());
+        let first = RequestStore::in_memory(backend.clone(), budget.reserve(64 << 10).unwrap());
+        let second = RequestStore::in_memory(backend, budget.reserve(64 << 10).unwrap());
         let cancelled = first.operation_scope();
         let completed = second.operation_scope();
         let rejected = first.put_content(domain(), b"cancelled").unwrap();
@@ -1025,7 +1031,7 @@ mod tests {
     fn request_lifecycle_changes_persistence_without_replacing_its_transport() {
         let backend = Arc::new(MemStore::default());
         let budget = hirsel_engine_admission::ProcessBudget::new(128 << 10);
-        let request = RequestStore::new(backend.clone(), budget.reserve(64 << 10).unwrap());
+        let request = RequestStore::in_memory(backend.clone(), budget.reserve(64 << 10).unwrap());
 
         let precompute_root = Address(ContentHash::of_bytes(b"precompute root"));
         let precompute_action = Action(ContentHash::of_bytes(b"precompute action"));
@@ -1209,7 +1215,7 @@ mod tests {
                     RequestStore::with_scratch(backend.clone(), allowance, parent.path(), 4096)
                         .unwrap()
                 } else {
-                    RequestStore::new(backend.clone(), allowance)
+                    RequestStore::in_memory(backend.clone(), allowance)
                 };
                 let operation = request.operation_scope().completing();
                 let part = request
@@ -1243,7 +1249,7 @@ mod tests {
             let request = if scratch {
                 RequestStore::with_scratch(backend.clone(), allowance, parent.path(), 4096).unwrap()
             } else {
-                RequestStore::new(backend.clone(), allowance)
+                RequestStore::in_memory(backend.clone(), allowance)
             };
             let operation = request.operation_scope().completing();
             let part = request
@@ -1299,7 +1305,7 @@ mod tests {
                 refusals: refusals.into(),
             });
             let budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
-            let request = RequestStore::new(backend, budget.reserve(64 << 10).unwrap());
+            let request = RequestStore::in_memory(backend, budget.reserve(64 << 10).unwrap());
             // Content is durable before any association is attempted.
             let contents = request.operation_scope().completing();
             assert_eq!(request.persistence(), Persistence::Complete);
@@ -1342,7 +1348,7 @@ mod tests {
                 let address = Address(ContentHash::of_bytes(&index.to_le_bytes()));
                 backend.associate_product(address, action, reference);
             }
-            let request = RequestStore::new(backend, budget.reserve(allowance).unwrap());
+            let request = RequestStore::in_memory(backend, budget.reserve(allowance).unwrap());
             let (_, actual) = crate::test_alloc::measured(|| {
                 for index in 0..count {
                     let address = Address(ContentHash::of_bytes(&index.to_le_bytes()));
@@ -1378,7 +1384,7 @@ mod tests {
             let allowance = 64 << 10;
             let budget = hirsel_engine_admission::ProcessBudget::new(allowance);
             let request =
-                RequestStore::new(Arc::new(NoneStore), budget.reserve(allowance).unwrap());
+                RequestStore::in_memory(Arc::new(NoneStore), budget.reserve(allowance).unwrap());
             let mut references = Vec::with_capacity(count as usize);
             let (_, actual) = crate::test_alloc::measured(|| {
                 for index in 0..count {
@@ -1413,7 +1419,7 @@ mod tests {
     fn request_transport_survives_durable_failure_and_held_child_retains_admission() {
         let allowance = ENTRY_CHARGE * 4;
         let budget = hirsel_engine_admission::ProcessBudget::new(allowance);
-        let request = Arc::new(RequestStore::new(
+        let request = Arc::new(RequestStore::in_memory(
             Arc::new(NoneStore),
             budget.reserve(allowance).unwrap(),
         ));
@@ -1442,7 +1448,7 @@ mod tests {
         drop(held);
         assert_eq!(budget.reserved(), 0);
         // The next request has no durable success or process-global overlay.
-        let next = RequestStore::new(Arc::new(NoneStore), budget.reserve(allowance).unwrap());
+        let next = RequestStore::in_memory(Arc::new(NoneStore), budget.reserve(allowance).unwrap());
         assert!(next.lookup_product(address()).is_none());
         assert!(next.get_content(reference).is_none());
     }
@@ -1450,7 +1456,8 @@ mod tests {
     fn request_transport_zero_tiny_and_concurrent_allowances_never_expand() {
         for limit in [0, 1, ENTRY_CHARGE, ENTRY_CHARGE + 3] {
             let budget = hirsel_engine_admission::ProcessBudget::new(limit);
-            let request = RequestStore::new(Arc::new(NoneStore), budget.reserve(limit).unwrap());
+            let request =
+                RequestStore::in_memory(Arc::new(NoneStore), budget.reserve(limit).unwrap());
             let value = request.put_content(domain(), b"1234");
             assert!(value.is_none());
             assert!(request.exhausted());
@@ -1478,8 +1485,10 @@ mod tests {
         }
         let allowance = ENTRY_CHARGE * 4;
         let budget = hirsel_engine_admission::ProcessBudget::new(allowance);
-        let a = RequestStore::new(Arc::new(NoneStore), budget.reserve(allowance / 2).unwrap());
-        let b = RequestStore::new(Arc::new(NoneStore), budget.reserve(allowance / 2).unwrap());
+        let a =
+            RequestStore::in_memory(Arc::new(NoneStore), budget.reserve(allowance / 2).unwrap());
+        let b =
+            RequestStore::in_memory(Arc::new(NoneStore), budget.reserve(allowance / 2).unwrap());
         assert!(budget.reserve(1).is_err());
         assert!(a.put_content(domain(), b"a").is_some());
         assert!(b.put_content(domain(), b"b").is_some());
@@ -1490,7 +1499,7 @@ mod tests {
         let backend = Arc::new(MemStore::default());
         let expected = backend.verifier().unwrap();
         let budget = hirsel_engine_admission::ProcessBudget::new(0);
-        let request = RequestStore::new(backend.clone(), budget.reserve(0).unwrap());
+        let request = RequestStore::in_memory(backend.clone(), budget.reserve(0).unwrap());
         assert!(Arc::ptr_eq(&request.verifier().unwrap(), &expected));
         let reference = backend.put_content(domain(), b"durable").unwrap();
         assert_eq!(request.retained_bytes(), 0);
@@ -1506,8 +1515,8 @@ mod tests {
     fn request_associations_remain_selected_across_interleaved_durable_publications() {
         let backend = Arc::new(MemStore::default());
         let budget = hirsel_engine_admission::ProcessBudget::new(ENTRY_CHARGE * 2);
-        let a = RequestStore::new(backend.clone(), budget.reserve(ENTRY_CHARGE).unwrap());
-        let b = RequestStore::new(backend.clone(), budget.reserve(ENTRY_CHARGE).unwrap());
+        let a = RequestStore::in_memory(backend.clone(), budget.reserve(ENTRY_CHARGE).unwrap());
+        let b = RequestStore::in_memory(backend.clone(), budget.reserve(ENTRY_CHARGE).unwrap());
         let first = backend.put_content(domain(), b"first request").unwrap();
         let second = backend.put_content(domain(), b"second request").unwrap();
         let action_a = Action(ContentHash::of_bytes(b"first action"));
@@ -1536,7 +1545,7 @@ mod tests {
         drop(a);
         drop(b);
         assert_eq!(budget.reserved(), 0);
-        let next = RequestStore::new(backend, budget.reserve(ENTRY_CHARGE).unwrap());
+        let next = RequestStore::in_memory(backend, budget.reserve(ENTRY_CHARGE).unwrap());
         assert_eq!(next.lookup_product(address()), Some(selected_a));
     }
 
@@ -1544,7 +1553,8 @@ mod tests {
     fn durable_association_pinning_obeys_the_admitted_metadata_bound() {
         let backend = Arc::new(MemStore::default());
         let budget = hirsel_engine_admission::ProcessBudget::new(ENTRY_CHARGE);
-        let request = RequestStore::new(backend.clone(), budget.reserve(ENTRY_CHARGE).unwrap());
+        let request =
+            RequestStore::in_memory(backend.clone(), budget.reserve(ENTRY_CHARGE).unwrap());
         let reference = backend.put_content(domain(), b"durable content").unwrap();
         let action = Action(address().0);
         request.associate_product(address(), action, reference);
@@ -1650,7 +1660,7 @@ mod tests {
         drop(refusing);
         assert_eq!(budget.reserved(), 0);
 
-        let disabled = RequestStore::new(Arc::new(NoneStore), budget.reserve(0).unwrap());
+        let disabled = RequestStore::in_memory(Arc::new(NoneStore), budget.reserve(0).unwrap());
         disabled.cache_product(address(), action, domain(), b"optional projection");
         let key = EntryKey(address().0, ContentHash::default(), QueryKind::Summary);
         assert!(

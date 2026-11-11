@@ -131,10 +131,15 @@ fn request_objects(
     });
     let budget = hirsel_engine_admission::ProcessBudget::new(768 << 20);
     let transport = hirsel_engine_admission::ProcessBudget::new(24 << 20);
-    let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine_store::RequestStore::new(
-        fixture.store.clone(),
-        transport.reserve(24 << 20).unwrap(),
-    ));
+    let store: Arc<dyn ResultStore> = Arc::new(
+        hirsel_engine_store::RequestStore::with_scratch(
+            fixture.store.clone(),
+            transport.reserve(24 << 20).unwrap(),
+            &std::env::temp_dir(),
+            1 << 30,
+        )
+        .unwrap(),
+    );
     // Direct graph fixtures share production's publication owner across all workers.
     let _publication = store.publication_scope();
     let facts = &fixture.facts;

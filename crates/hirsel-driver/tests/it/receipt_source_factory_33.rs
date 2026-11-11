@@ -13,10 +13,15 @@ const SOURCE: &str = "fn id[T](take value:T)->T {take value}\npub fn main()->u64
 
 fn engine(verify: Verify) -> (NativeOriginalReader, hirsel_syntax::DefPath) {
     let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-    let store: Arc<dyn store::ResultStore> = Arc::new(store::RequestStore::new(
-        Arc::new(store::MemStore::default()),
-        budget.reserve(64 << 20).unwrap(),
-    ));
+    let store: Arc<dyn store::ResultStore> = Arc::new(
+        store::RequestStore::with_scratch(
+            Arc::new(store::MemStore::default()),
+            budget.reserve(64 << 20).unwrap(),
+            &std::env::temp_dir(),
+            1 << 30,
+        )
+        .unwrap(),
+    );
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
         .with_result_store(store.clone());
     engine.verify = verify;
@@ -221,10 +226,15 @@ fn sealed_callback_capture_129_original_graph_declares_owning_complete_profiles(
                 .product_store()
                 .unwrap_or_else(|| Arc::new(store::MemStore::default()));
             let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-            let store = Arc::new(store::RequestStore::new(
-                store,
-                budget.reserve(64 << 20).unwrap(),
-            ));
+            let store = Arc::new(
+                store::RequestStore::with_scratch(
+                    store,
+                    budget.reserve(64 << 20).unwrap(),
+                    &std::env::temp_dir(),
+                    1 << 30,
+                )
+                .unwrap(),
+            );
             let mut discovery = NativeDiscoveryCache::new(program.engine.types().clone(), store);
             let declarations = hirsel_native_cache::declarations::NativeDeclarations::collect(
                 &mut program.engine,

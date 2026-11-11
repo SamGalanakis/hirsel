@@ -287,6 +287,7 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
         products = products,
         product_definitions = read_root_config("hirsel", "product_definitions", ""),
         llvm = "root//tools/buck2/native-toolchain:llvm",
+        llvm_libraries = "toolchains//:llvm-libraries",
         native_tools = native_tool_inputs() if runtime_archives else {},
         cwd = manifest_dir,
         test_binary = name,
@@ -348,13 +349,26 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
             **isolated_common
         )
 
+def hirsel_source_audit(name, binary, cwd, data, args = []):
+    """Run existing source-audit bodies without native execution inputs."""
+    _rust_test(
+        name = name,
+        harness = ":" + binary + "-harness",
+        test_binary = binary,
+        cwd = cwd,
+        data = data,
+        args = args,
+        request = _request(binary),
+        pool = False,
+        exec_compatible_with = ["root//tools/buck2:host"],
+        visibility = ["PUBLIC"],
+    )
+
 def _rust_test_impl(ctx):
-    llvm = ctx.attrs.llvm[DefaultInfo].default_outputs[0]
     binaries = dict(ctx.attrs.bin_exes)
     binaries.update(ctx.attrs.release_bin_exes)
     exes = {bin: dep[DefaultInfo].default_outputs[0] for bin, dep in binaries.items()}
-    inputs = ctx.attrs.data + [exe for _, exe in sorted(exes.items())] + [llvm, ctx.attrs._test_reporter]
-    inputs += ctx.attrs._llvm_libraries[DefaultInfo].default_outputs
+    inputs = ctx.attrs.data + [exe for _, exe in sorted(exes.items())] + [ctx.attrs._test_reporter]
     tools = {name: dep[DefaultInfo].default_outputs[0] for name, dep in ctx.attrs.native_tools.items()}
     inputs += list(tools.values())
     env = {
@@ -364,7 +378,6 @@ def _rust_test_impl(ctx):
         # The same effective request as the executor, including focus mode.
         "HIRSEL_TEST_CPUS": ctx.attrs.request[0],
         "HIRSEL_TEST_PRODUCT_DEFINITIONS": ctx.attrs.product_definitions,
-        "LLVM_SYS_231_PREFIX": cmd_args(llvm),
         # A pool worker's action supervisor can attribute a test run's CPU to
         # these Bazel test variables. They are stable per
         # target and shard, as they are part of the action key.
@@ -374,6 +387,11 @@ def _rust_test_impl(ctx):
         # those virtual bytes on the pool.
         "HIRSEL_MEMORY_LIMIT": "{}K".format(test_memory_limit(ctx.attrs.test_binary, int(ctx.attrs.request[1]))),
     }
+    if ctx.attrs.llvm:
+        llvm = ctx.attrs.llvm[DefaultInfo].default_outputs[0]
+        inputs.append(llvm)
+        inputs += ctx.attrs.llvm_libraries[DefaultInfo].default_outputs
+        env["LLVM_SYS_231_PREFIX"] = cmd_args(llvm)
     env.update(ctx.attrs.extra_env)
     if ctx.attrs.test_binary == "hirsel-conformance-unittest":
         # Reuse freed heap across compiler threads inside the existing data guard.
@@ -479,7 +497,8 @@ _rust_test = rule(
         "data": attrs.list(attrs.source(), default = []),
         "harness": attrs.transition_dep(cfg = "root//tools/buck2:test_tool_transition", providers = [RunInfo]),
         "labels": attrs.list(attrs.string(), default = []),
-        "llvm": attrs.dep(),
+        "llvm": attrs.option(attrs.dep(), default = None),
+        "llvm_libraries": attrs.option(attrs.dep(), default = None),
         "native_selection": attrs.option(attrs.dep(), default = None),
         "native_tools": attrs.dict(attrs.string(), attrs.dep(), default = {}),
         "pool": attrs.bool(default = False),
@@ -496,7 +515,6 @@ _rust_test = rule(
         "_launcher": attrs.source(default = "root//tools/buck2:test_launcher.sh"),
         "_test_reporter": attrs.source(default = "root//tools/buck2:test_report.py"),
         "_private_native_inputs": attrs.source(default = "root//tools/buck2:private_native_inputs.py"),
-        "_llvm_libraries": attrs.dep(default = "toolchains//:llvm-libraries"),
         "_native_environment": attrs.source(default = "root//tools/buck2/native-toolchain:environment.tsv"),
     },
 )
@@ -597,6 +615,7 @@ def hirsel_command_test(name, binary, args, data, cwd, runtime_archives = [], pr
         data = data,
         cwd = cwd,
         llvm = "root//tools/buck2/native-toolchain:llvm",
+        llvm_libraries = "toolchains//:llvm-libraries",
         native_tools = native_tool_inputs() if runtime_archives else {},
         runtime_archives = runtime_archives,
         products = products,
@@ -618,6 +637,7 @@ def _native_changed_test(name, binary, args, data, cwd, runtime_archives, produc
         data = data,
         cwd = cwd,
         llvm = "root//tools/buck2/native-toolchain:llvm",
+        llvm_libraries = "toolchains//:llvm-libraries",
         native_tools = native_tool_inputs() if runtime_archives else {},
         runtime_archives = runtime_archives,
         products = products,
@@ -664,6 +684,7 @@ def hirsel_script_test(name, script, data, runtime_archives = [], full = True, a
             bin_exes = {} if production else bin_exes, release_bin_exes = bin_exes if production else {},
             bin_exe_dir = BIN_EXE_DIR + "/" + name, products = products, files_env = files_env,
             llvm = "root//tools/buck2/native-toolchain:llvm",
+            llvm_libraries = "toolchains//:llvm-libraries",
             native_tools = native_tool_inputs() if runtime_archives else {},
             runtime_archives = runtime_archives, labels = ["gate"],
             exec_compatible_with = [budget_constraint("host")] if host else _test_platform(name),
@@ -740,6 +761,7 @@ def hirsel_link_hosts_test(name, listing, data, runtime_archives):
         bin_exe_dir = "{}/{}".format(BIN_EXE_DIR, harness),
         data = data + [listing], cwd = ".",
         llvm = "root//tools/buck2/native-toolchain:llvm",
+        llvm_libraries = "toolchains//:llvm-libraries",
         native_tools = native_tool_inputs(), runtime_archives = runtime_archives,
         products = "//:hirsel-std-products", labels = ["gate"],
         exec_compatible_with = _test_platform(name), pool = not TESTS_ON_HOST,
@@ -964,7 +986,9 @@ def hirsel_native_pool_tsan(name, width, data, products):
         bin_exes = {"hirsel": ":hirsel-cli-bin-hirsel"},
         bin_exe_dir = BIN_EXE_DIR + "/" + binary + "-harness",
         files_env = {"HIRSEL_NATIVE_CPU_HARNESS": ":" + binary + "-harness"},
-        llvm = "root//tools/buck2/native-toolchain:llvm", native_tools = native_tool_inputs(),
+        llvm = "root//tools/buck2/native-toolchain:llvm",
+        llvm_libraries = "toolchains//:llvm-libraries",
+        native_tools = native_tool_inputs(),
         runtime_archives = [":hirsel-rt-tsan-archives[x86_64-default]"], labels = ["gate"],
         exec_compatible_with = _test_platform(binary), pool = not TESTS_ON_HOST,
         request = _request(binary), visibility = ["PUBLIC"],
@@ -1127,6 +1151,7 @@ def hirsel_deadline_replay_matrix(name, data, runtime_archives, products):
         runtime_archives = runtime_archives,
         products = products,
         llvm = "root//tools/buck2/native-toolchain:llvm",
+        llvm_libraries = "toolchains//:llvm-libraries",
         native_tools = native_tool_inputs(),
         cwd = "crates/hirsel-cli",
         test_binary = binary,

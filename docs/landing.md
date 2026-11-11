@@ -184,8 +184,11 @@ files is refused at once.
 
 Before any build, the head screens every candidate, including single tickets
 and bisection groups, with the checks
-that take seconds: build-file sync, independent line lists and fmt. These
-are the full checks' own scripts. A green screen can be reused only for the
+that take seconds: build-file sync, independent line lists, fmt and the source
+layering, runtime descriptor and runtime/C-header agreement audits. The source
+audits run the existing Rust test bodies with only their source data, without
+native tools, runtime archives or std products. These are the full checks' own
+scripts and test bodies. A green screen can be reused only for the
 same Git tree within that batch. The final fmt check after build and Clippy
 remains in place. If the combined tree fails, and
 origin/main passes them, a binary search over the batch's cumulative trees

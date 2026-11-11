@@ -1037,7 +1037,7 @@ def first_party(meta: dict) -> str:
     archive_consumers = set()
     out = [
         HEADER,
-        'load("//tools/buck2:defs.bzl", "hirsel_binary", "hirsel_build_script", "hirsel_command_test", "hirsel_deadline_replay_matrix", "hirsel_products", "hirsel_library", "hirsel_link_hosts_test", "hirsel_runtime_archives", "hirsel_tsan_runtime_archives", "hirsel_native_pool_tsan", "hirsel_script_test", "hirsel_test", "hirsel_toolchain_bundle")\n',
+        'load("//tools/buck2:defs.bzl", "hirsel_binary", "hirsel_build_script", "hirsel_command_test", "hirsel_deadline_replay_matrix", "hirsel_products", "hirsel_library", "hirsel_link_hosts_test", "hirsel_runtime_archives", "hirsel_tsan_runtime_archives", "hirsel_native_pool_tsan", "hirsel_script_test", "hirsel_source_audit", "hirsel_test", "hirsel_toolchain_bundle")\n',
         'load("//tools/buck2:native_selection.bzl", "hirsel_native_selection")\n',
     ]
 
@@ -1177,6 +1177,17 @@ def first_party(meta: dict) -> str:
                 out.append("\n" + call("hirsel_test", name=f"{name}-test-{target['name']}", deps=own + test_deps, bin_exes=binaries,
                                          shards=count if count > 1 or case_shards else None, case_shards=case_shards or None, costs=costs,
                                          **test_attrs(f"{name}-test-{target['name']}", src), **attrs))
+    for name, binary, cwd, args, data in (
+        ("workspace-layering", "hirsel-lir-test-it", "crates/hirsel-lir", ["dependencies::"],
+         ["//tools/buck2:workspace-metadata.json", "crates/hirsel-lir/Cargo.toml"]),
+        ("runtime-schema", "hirsel-lir-test-it", "crates/hirsel-lir",
+         ["--exact", "schema::runtime_declarations_match_the_landed_c_header"],
+         ["crates/hirsel-lir/Cargo.toml", "crates/hirsel-rt/include/hirsel_rt_v2.h"]),
+        ("runtime-descriptors", "hirsel-rt-test-descriptors", "crates/hirsel-rt", [],
+         Raw('glob(["crates/hirsel-rt/src/**"]) + ["crates/hirsel-rt/Cargo.toml", "crates/hirsel-lir/src/runtime_abi.rs"]')),
+    ):
+        out.append("\n" + call("hirsel_source_audit", name="land-audit-" + name,
+                               binary=binary, cwd=cwd, args=args, data=data))
     out.append("\n" + call("hirsel_deadline_replay_matrix", name="deadline-select-replay",
                             data=Raw('glob(["stdlib/**", "crates/hirsel-cli/Cargo.toml"])'),
                             runtime_archives=archive_views(*REPLAY_VIEWS), products=PRODUCTS))

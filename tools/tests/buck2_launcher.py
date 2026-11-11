@@ -493,6 +493,12 @@ class LauncherSelection(LauncherFixture):
         result = json.loads(self.observed.read_text()) if self.observed.exists() else {'cases': [], 'argv': []}
         return result, run.stdout
 
+    def test_source_only_bodies_run_without_an_llvm_input(self):
+        self.env.pop('LLVM_SYS_231_PREFIX', None)
+        result, _ = self.run_cases('host::smoke', '--exact')
+        self.assertEqual(result['cases'], ['host::smoke'])
+        self.assertIsNone(result['llvm'])
+
     def test_host_scratch_lives_outside_the_project_and_survives_concurrent_links(self):
         # Buck2 stops at a non-UTF-8 name in the project tree; native tests make one.
         scratch = self.root / 'host-tmp'

@@ -66,9 +66,20 @@ if os.environ.get('FAKE_RED_AFTER_RACE') and STAGE == os.environ['FAKE_RED_AFTER
     sys.exit(1)
 '''
 
+FAKE_BUCK = '''#!/bin/sh
+if [ "$1" = test ]; then
+  case "$*" in
+    *land-audit-runtime-schema*)
+      if [ -f broken-runtime-header ]; then echo 'runtime declarations disagree with C header' >&2; exit 1; fi ;;
+    *) [ -z "$FAKE_SLOW_TEST" ] || sleep "$FAKE_SLOW_TEST" ;;
+  esac
+fi
+if [ "$1" = build ] && [ -n "$FAKE_BUILD_LOG" ]; then echo build >> "$FAKE_BUILD_LOG"; fi
+echo root//:a
+'''
 FAKES = {
-    '.buck2/bin/buck2': '#!/bin/sh\n[ "$1" = test ] && [ -n "$FAKE_SLOW_TEST" ] && sleep "$FAKE_SLOW_TEST"\necho root//:a\n',
-    'tools/buck2/prepare.py': "from pathlib import Path\np = Path('.buck2/bin/buck2')\np.parent.mkdir(parents=True, exist_ok=True)\np.write_text('#!/bin/sh\\n[ \"$1\" = test ] && [ -n \"$FAKE_SLOW_TEST\" ] && sleep \"$FAKE_SLOW_TEST\"\\necho root//:a\\n')\np.chmod(0o755)\n",
+    '.buck2/bin/buck2': FAKE_BUCK,
+    'tools/buck2/prepare.py': "from pathlib import Path\np = Path('.buck2/bin/buck2')\np.parent.mkdir(parents=True, exist_ok=True)\np.write_text(" + repr(FAKE_BUCK) + ")\np.chmod(0o755)\n",
     'tools/buck2/sync.py': '',
     'tools/check-hot-files': '',
     'tools/buck2/event_logs.py': "PASS, SKIP, OMITTED = 'PASS', 'SKIP', 'OMITTED'\n",
@@ -163,10 +174,24 @@ class Land(unittest.TestCase):
         self.assertEqual(log.count('EXIT 1'), 1)
         self.assertEqual(self.main_log(), ['base'])
 
+    def test_a_ticket_breaking_the_runtime_header_audit_is_refused_at_screen(self):
+        # The existing schema audit supplies the oracle; this test pins only
+        # the queue's admission rule, before any workspace build can run.
+        (self.lane / 'broken-runtime-header').write_text('wrong declaration\n')
+        self.git(self.lane, 'add', 'broken-runtime-header')
+        self.git(self.lane, 'commit', '-qm', 'break runtime declaration agreement')
+        builds = self.top / 'builds'
+        refused = self.land(FAKE_BUILD_LOG=str(builds))
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn('FAIL  screen: source audits', refused.stdout)
+        self.assertIn('runtime declarations disagree with C header', refused.stdout)
+        self.assertFalse(builds.exists(), refused.stdout)
+        self.assertEqual(self.main_log(), ['base'])
+
     def test_manifest_compile_failure_refuses_the_push(self):
         prepare = self.lane / 'tools/buck2/prepare.py'
         with prepare.open('a') as script:
-            script.write("\np.write_text('#!/bin/sh\\nif [ \"$1\" = test ]; then echo LANG-4 >&2; exit 1; fi\\necho root//:a\\n')\n")
+            script.write("\np.write_text('#!/bin/sh\\nif [ \"$1\" = test ]; then case \"$*\" in *land-audit-*) ;; *) echo LANG-4 >&2; exit 1;; esac; fi\\necho root//:a\\n')\n")
         self.git(self.lane, 'add', str(prepare.relative_to(self.lane)))
         self.git(self.lane, 'commit', '-qm', 'manifest check refuses')
         refused = self.land()

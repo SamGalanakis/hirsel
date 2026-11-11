@@ -75,6 +75,9 @@ CLIPPY_TWINS = 'attrregexfilter(name, "-clippy$", kind("^rust_(library|binary)$"
 # The manifests check: one test, or its shards `-shard-<i>` (tools/buck2/sync.py),
 # never their suite `test-package-manifests`, which the tool before this one runs.
 MANIFESTS = 'kind("_rust_test", attrregexfilter(name, "^test-package-manifests(-shard-[0-9]+)?$", root//:))'
+# These reuse the existing harnesses with source data only.
+SOURCE_AUDITS = ('//:land-audit-workspace-layering', '//:land-audit-runtime-schema',
+                 '//:land-audit-runtime-descriptors')
 # A target literal in a tools/land: the tool on main checks every batch this
 # tree joins, so each one it names must exist in the tree submitted.
 NAMED = re.compile(r'''['"](?:root)?//:([A-Za-z0-9_.+-]+)['"]''')
@@ -501,13 +504,14 @@ def move(tree):
 
 
 def fast(tree):
-    """The checks that take seconds (build files, line lists, fmt) on one tree: None or the first report."""
+    """The checks that take seconds (build files, line lists, fmt, source audits) on one tree: None or the first report."""
     move(tree)
     say(f'screening {tree[:12]} with the fast checks')
     report = (check('screen: prepare.py', [PY, 'tools/buck2/prepare.py'])
               or check('screen: sync.py --if-stale', [PY, 'tools/buck2/sync.py', '--if-stale'])
               or check('screen: independent line lists', [PY, 'tools/check-hot-files'])
-              or check('screen: formatting', [PY, 'tools/buck2/fmt.py', '--check']))
+              or check('screen: formatting', [PY, 'tools/buck2/fmt.py', '--check'])
+              or check('screen: source audits', [BUCK2, 'test', *CONFIG, *SOURCE_AUDITS]))
     if not unchanged(tree):
         raise Refusal('the worktree changed during checks; refusing to push')
     return report

@@ -82,8 +82,10 @@ export XDG_DATA_HOME="$action_cache/data"
 export HIRSEL_RESULTS_DIR="$action_cache/results"
 export HIRSEL_NATIVE_CACHE="$action_cache/runtime"
 mkdir -m 700 "$XDG_CACHE_HOME"
-LLVM_SYS_231_PREFIX="$(cd "$LLVM_SYS_231_PREFIX" && pwd)"
-export LLVM_SYS_231_PREFIX
+if [ -n "${LLVM_SYS_231_PREFIX:-}" ]; then
+  LLVM_SYS_231_PREFIX="$(cd "$LLVM_SYS_231_PREFIX" && pwd)"
+  export LLVM_SYS_231_PREFIX
+fi
 if [ -n "${HIRSEL_NATIVE_ENVIRONMENT:-}" ]; then
   # The shared CAS inode's ctime may change when another action creates or
   # removes a hard link. Detach every tool/shared-library file before strict
@@ -119,8 +121,10 @@ materialize_native_inputs() {
     export HIRSEL_RUNTIME_ARCHIVES
   fi
 }
-export PATH="$LLVM_SYS_231_PREFIX/bin:${PATH:-/usr/bin:/bin}"
-export LD_LIBRARY_PATH="$LLVM_SYS_231_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+if [ -n "${LLVM_SYS_231_PREFIX:-}" ]; then
+  export PATH="$LLVM_SYS_231_PREFIX/bin:${PATH:-/usr/bin:/bin}"
+  export LD_LIBRARY_PATH="$LLVM_SYS_231_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 if [ -n "${HIRSEL_RUNTIME_ARCHIVES:-}" ]; then
   HIRSEL_RUNTIME_ARCHIVES="$(cd "$HIRSEL_RUNTIME_ARCHIVES" && pwd)"
   export HIRSEL_RUNTIME_ARCHIVES

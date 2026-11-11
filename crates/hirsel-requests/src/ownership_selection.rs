@@ -276,6 +276,8 @@ fn request_key(request: &OwnershipRequest) -> Result<ContentHash, ToolError> {
         request.target.digest(),
         format!("{:?}", request.validation),
         &request.launch,
+        // Per compiler, like the native policy: see native_bootstrap.
+        crate::COMPILER_IDENTITY.as_slice(),
     ))
     .map_err(|e| ToolError::Runtime(e.to_string()))?;
     Ok(ContentHash::of_parts(

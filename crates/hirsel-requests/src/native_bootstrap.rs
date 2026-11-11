@@ -128,9 +128,17 @@ impl NativeBootstrap {
                 .map(|proofs| super::native_products::evidence_identity(&proofs.evidence)),
         ))
         .map_err(|error| error.to_string())?;
+        // The compiler identity is part of the policy, so every instance,
+        // Ready, callable and seal-demand address is per compiler: builds of
+        // different compilers sharing one store keep their own associations
+        // instead of overwriting each other's.
         plan.policy = ContentHash::of_parts(
             "hirsel.host.native-policy.v1",
-            [plan.policy.0.as_slice(), native_policy.as_slice()],
+            [
+                plan.policy.0.as_slice(),
+                native_policy.as_slice(),
+                crate::COMPILER_IDENTITY.as_slice(),
+            ],
         );
         let selection = serde_json::to_vec(&(
             source.query().address.0,

@@ -134,7 +134,10 @@ impl State {
 }
 #[inline(always)]
 fn mode() -> u8 {
-    MODE.with(Cell::get)
+    // `try_with` inlines to one thread-pointer load; `with` stays an
+    // out-of-line call through the GOT on every allocation and free. A
+    // destructor-free cell is never torn down, so the fallback never runs.
+    MODE.try_with(Cell::get).unwrap_or(UNSCOPED)
 }
 fn active() -> State {
     ACTIVE

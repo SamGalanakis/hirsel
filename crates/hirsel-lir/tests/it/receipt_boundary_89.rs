@@ -711,6 +711,7 @@ fn cached_call_output_replays_absent_and_present_callee_source_without_materiali
     assert!(
         cache
             .lookup(subject, policy, StageKind::Value, &environment)
+            .unwrap()
             .is_some()
     );
     let demanded = NativeEnvironment {
@@ -720,6 +721,7 @@ fn cached_call_output_replays_absent_and_present_callee_source_without_materiali
     assert!(
         cache
             .lookup(subject, policy, StageKind::Value, &demanded)
+            .unwrap()
             .is_none()
     );
     assert_eq!(

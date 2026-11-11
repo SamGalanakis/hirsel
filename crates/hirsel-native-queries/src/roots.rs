@@ -140,7 +140,7 @@ impl RootProducts {
                             .operations(owner, &snapshot.environment())?,
                         ..snapshot.environment()
                     },
-                )
+                )?
                 .ok_or("settled link Ready lost current C admission")?;
             if current.product != *read
                 || view
@@ -502,7 +502,7 @@ impl RootProducts {
                 .inner
                 .local
                 .queries
-                .lookup(owner, selected.action, &scoped)
+                .lookup(owner, selected.action, &scoped)?
                 .ok_or("observation Ready dependency lost current C admission")?;
             if ready.product != *selected || ready.unit_summary.domain != UNIT_SUMMARY_DOMAIN {
                 return Err("observation metadata differs from selected Ready".into());
@@ -770,7 +770,7 @@ impl NativeRoots for RootProducts {
                 .inner
                 .local
                 .queries
-                .linkage(key, product.product.action, &scoped)
+                .linkage(key, product.product.action, &scoped)?
                 .ok_or("link dependency lost C linkage admission")?;
             let closure = self
                 .inner

@@ -1362,17 +1362,19 @@ fn sealed_native_cache_33_replays_independent_source_and_descriptor_reads() {
     // A fresh authority table must decode and recheck all durable sealed reads.
     let cache = NativeCache::new(Arc::new(local.clone()), Some(local));
     let lookup = |selected: &Selected| {
-        cache.lookup(
-            subject,
-            policy,
-            StageKind::Ready,
-            &NativeEnvironment {
-                target: &target,
-                manifest: &manifest,
-                operations: selected,
-                discharge: None,
-            },
-        )
+        cache
+            .lookup(
+                subject,
+                policy,
+                StageKind::Ready,
+                &NativeEnvironment {
+                    target: &target,
+                    manifest: &manifest,
+                    operations: selected,
+                    discharge: None,
+                },
+            )
+            .unwrap()
     };
     let trace = hirsel_lir::construction::ValueTrace::default();
     let observe = trace.enter();

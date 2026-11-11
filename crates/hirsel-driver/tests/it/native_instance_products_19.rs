@@ -190,7 +190,11 @@ fn native_instance_product_hits_require_current_c_without_value_materialization(
             discharge: None,
         };
         assert_eq!(
-            queries.lookup(&key, action, &environment).unwrap().product,
+            queries
+                .lookup(&key, action, &environment)
+                .unwrap()
+                .unwrap()
+                .product,
             output.product
         );
         drop(checked);
@@ -211,11 +215,12 @@ fn native_instance_product_hits_require_current_c_without_value_materialization(
                 operations: &operations,
                 discharge: None,
             };
-            let hit = queries.lookup(&key, action, &environment).unwrap();
+            let hit = queries.lookup(&key, action, &environment).unwrap().unwrap();
             assert_eq!(hit.product, output.product);
             assert_eq!(
                 queries
                     .linkage(&key, action, &environment)
+                    .unwrap()
                     .unwrap()
                     .definition(),
                 &main
@@ -223,10 +228,11 @@ fn native_instance_product_hits_require_current_c_without_value_materialization(
             assert!(
                 InstanceQueries::new_callable(store.clone())
                     .lookup(&key, action, &environment)
+                    .unwrap()
                     .is_none()
             );
             let wrong = Action(ContentHash::default());
-            assert!(queries.lookup(&key, wrong, &environment).is_none());
+            assert!(queries.lookup(&key, wrong, &environment).unwrap().is_none());
         }
         assert_eq!(
             trace.totals(),
@@ -241,7 +247,10 @@ fn native_instance_product_hits_require_current_c_without_value_materialization(
             discharge: None,
         };
         assert!(
-            queries.lookup(&key, action, &environment).is_none(),
+            queries
+                .lookup(&key, action, &environment)
+                .unwrap()
+                .is_none(),
             "ordinary descriptor cannot replace the independent source association"
         );
     });

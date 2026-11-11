@@ -2,7 +2,7 @@
 //! existing pass implementation; actual final C owns every accepted envelope.
 use super::*;
 use hirsel_engine_store::ResultStore;
-use hirsel_engine_store::{Action, Contents, Domain, Reference};
+use hirsel_engine_store::{Action, Address, Association, Contents, Domain, Reference};
 use hirsel_lir::stage::{Ready, StageKind, ValidatedUnit, Value};
 use hirsel_lir::validate::{Inputs, NativeCache, NativeEnvironment, ValidationContext};
 use hirsel_native::stages::lower_local_raw;
@@ -211,11 +211,11 @@ impl ReadyQueries {
         key: &InstanceAddress,
         action: Action,
         environment: &NativeEnvironment<'_>,
-    ) -> Option<Arc<ReadyProduct>> {
+    ) -> Result<Option<Arc<ReadyProduct>>, String> {
         let result = self
             .lookup_inner(key, action, environment)
-            .map(|(product, _)| product);
-        if result.is_some() {
+            .map(|found| found.map(|(product, _)| product));
+        if matches!(result, Ok(Some(_))) {
             self.counts.hits += 1;
         } else {
             self.counts.misses += 1;
@@ -227,21 +227,38 @@ impl ReadyQueries {
         key: &InstanceAddress,
         action: Action,
         environment: &NativeEnvironment<'_>,
-    ) -> Option<(Arc<ReadyProduct>, hirsel_lir::validate::NativeOutput)> {
+    ) -> Result<Option<(Arc<ReadyProduct>, hirsel_lir::validate::NativeOutput)>, String> {
         if key.target_abi != environment.target.digest() {
-            return None;
+            return Ok(None);
         }
         let address = key.address(READY_KIND);
-        let previous = self.store.lookup_product(address)?;
+        let Some(previous) = self.store.lookup_product(address) else {
+            return Ok(None);
+        };
         if previous.action != action || previous.reference.domain != READY_RECORD_DOMAIN {
-            return None;
+            return Ok(None);
         }
-        let accepted = self.native.lookup(
-            subject(key, action),
-            key.policy,
-            StageKind::Ready,
-            environment,
-        )?;
+        let Some(accepted) = self
+            .native
+            .lookup(
+                subject(key, action),
+                key.policy,
+                StageKind::Ready,
+                environment,
+            )
+            .map_err(|e| e.to_string())?
+        else {
+            return Ok(None);
+        };
+        Ok(self.current(address, previous, accepted))
+    }
+    fn current(
+        &self,
+        address: Address,
+        previous: Association,
+        accepted: hirsel_lir::validate::NativeOutput,
+    ) -> Option<(Arc<ReadyProduct>, hirsel_lir::validate::NativeOutput)> {
+        let action = previous.action;
         let product = ready_product(
             self.store.as_ref(),
             ProductRef::import_archive(
@@ -273,9 +290,10 @@ impl ReadyQueries {
         key: &InstanceAddress,
         action: Action,
         environment: &NativeEnvironment<'_>,
-    ) -> Option<hirsel_lir::validate::CheckedLinkage> {
-        self.lookup_inner(key, action, environment)
-            .map(|(_, accepted)| accepted.linkage())
+    ) -> Result<Option<hirsel_lir::validate::CheckedLinkage>, String> {
+        Ok(self
+            .lookup_inner(key, action, environment)?
+            .map(|(_, accepted)| accepted.linkage()))
     }
 
     /// Read only the C-bound layout closure for program assembly. The Ready
@@ -288,7 +306,7 @@ impl ReadyQueries {
         environment: &NativeEnvironment<'_>,
     ) -> Result<Arc<hirsel_lir::products::CheckedLayouts>, String> {
         let (current, _) = self
-            .lookup_inner(key, product.product.action, environment)
+            .lookup_inner(key, product.product.action, environment)?
             .ok_or("Ready assembly lost current C admission")?;
         if current.product != product.product || record(&current)? != record(product)? {
             return Err("Ready assembly descriptor differs".into());
@@ -312,7 +330,7 @@ impl ReadyQueries {
         String,
     > {
         let (current, accepted) = self
-            .lookup_inner(key, product.product.action, environment)
+            .lookup_inner(key, product.product.action, environment)?
             .ok_or("Ready materialization lost current C admission")?;
         if current.product != product.product || record(&current)? != record(product)? {
             return Err("Ready materialization descriptor differs".into());
@@ -469,7 +487,7 @@ impl ReadyQueries {
             discharge: inputs.discharge,
         };
         let previous = self
-            .lookup_inner(key, action, &environment)
+            .lookup_inner(key, action, &environment)?
             .map(|(p, _)| {
                 p.product
                     .archive(ArchiveAdmission::Retained)

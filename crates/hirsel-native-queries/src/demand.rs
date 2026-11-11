@@ -690,7 +690,7 @@ impl DemandInstances {
         };
         let linkage = match self
             .queries
-            .linkage(key, output.product.product.action, &scoped)
+            .linkage(key, output.product.product.action, &scoped)?
         {
             Some(linkage) => linkage,
             None => {
@@ -1435,7 +1435,7 @@ impl DemandInstances {
         if previous.is_some()
             && !recompute
             && inputs.query_policy().reuse
-            && let Some(product) = self.queries.lookup(key, action, &environment)
+            && let Some(product) = self.queries.lookup(key, action, &environment)?
             && let Ok(output) = self.discovered(key, product, adapters.clone())
         {
             return Ok(output);

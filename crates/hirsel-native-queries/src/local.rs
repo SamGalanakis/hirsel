@@ -366,7 +366,7 @@ impl LocalReadyQueries {
             || options.validation == hirsel_native::Validation::EveryStage;
         if !recompute
             && let Some(cached) = cached
-            && let Some(hit) = self.queries.lookup(key, action, environment)
+            && let Some(hit) = self.queries.lookup(key, action, environment)?
         {
             return Ok(cached(hit));
         }

@@ -149,11 +149,11 @@ impl InstanceQueries {
         key: &InstanceAddress,
         action: Action,
         environment: &NativeEnvironment<'_>,
-    ) -> Option<Arc<InstanceProduct>> {
+    ) -> Result<Option<Arc<InstanceProduct>>, String> {
         let output = self
             .lookup_inner(key, action, environment)
-            .map(|(product, _)| product);
-        if output.is_some() {
+            .map(|found| found.map(|(product, _)| product));
+        if matches!(output, Ok(Some(_))) {
             self.counts.hits += 1;
         } else {
             self.counts.misses += 1;
@@ -168,29 +168,45 @@ impl InstanceQueries {
         key: &InstanceAddress,
         action: Action,
         environment: &NativeEnvironment<'_>,
-    ) -> Option<hirsel_lir::validate::CheckedLinkage> {
-        self.lookup_inner(key, action, environment)
-            .map(|(_, accepted)| accepted.linkage())
+    ) -> Result<Option<hirsel_lir::validate::CheckedLinkage>, String> {
+        Ok(self
+            .lookup_inner(key, action, environment)?
+            .map(|(_, accepted)| accepted.linkage()))
     }
     fn lookup_inner(
         &self,
         key: &InstanceAddress,
         action: Action,
         environment: &NativeEnvironment<'_>,
-    ) -> Option<(Arc<InstanceProduct>, hirsel_lir::validate::NativeOutput)> {
+    ) -> Result<Option<(Arc<InstanceProduct>, hirsel_lir::validate::NativeOutput)>, String> {
         if key.target_abi != environment.target.digest() {
-            return None;
+            return Ok(None);
         }
-        let candidate = self.candidate(key)?;
+        let Some(candidate) = self.candidate(key) else {
+            return Ok(None);
+        };
         if candidate.product.action != action {
-            return None;
+            return Ok(None);
         }
-        let accepted = self.native.lookup(
-            subject(self.phase, key, action),
-            key.policy,
-            StageKind::Value,
-            environment,
-        )?;
+        let Some(accepted) = self
+            .native
+            .lookup(
+                subject(self.phase, key, action),
+                key.policy,
+                StageKind::Value,
+                environment,
+            )
+            .map_err(|e| e.to_string())?
+        else {
+            return Ok(None);
+        };
+        Ok(self.current(candidate, accepted))
+    }
+    fn current(
+        &self,
+        candidate: InstanceProduct,
+        accepted: hirsel_lir::validate::NativeOutput,
+    ) -> Option<(Arc<InstanceProduct>, hirsel_lir::validate::NativeOutput)> {
         let metadata: Metadata = serde_json::from_slice(accepted.metadata()).ok()?;
         if !self.metadata_present(metadata) {
             return None;
@@ -236,7 +252,7 @@ impl InstanceQueries {
         String,
     > {
         let (current, accepted) = self
-            .lookup_inner(key, product.product.action, environment)
+            .lookup_inner(key, product.product.action, environment)?
             .ok_or_else(|| format!(
                 "Value materialization lost current C admission for {} body {} instance {:?}, phase 0x{:08x}",
                 key.instance.definition(), key.instance.body(), key.instance.digest(), self.phase.kind(),
@@ -282,7 +298,7 @@ impl InstanceQueries {
             discharge: inputs.discharge,
         };
         let previous = self
-            .lookup_inner(key, action, &environment)
+            .lookup_inner(key, action, &environment)?
             .map(|(p, _)| {
                 let reference = p
                     .product

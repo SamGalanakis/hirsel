@@ -636,6 +636,9 @@ fn native_products_materialize_stored_ready_bodies_with_bounded_live_layout_read
             hirsel_intern::jobs::Jobs::ONE,
             hirsel_engine_store::VerifyStore::Off,
             |products, _, readies| {
+                // Pressure that cannot fit ends the read epoch, so every
+                // selected body is read again from the spool below.
+                assert!(request.try_admit_product_memory(transport).is_none());
                 // Unrelated live transport leaves room for one closure and
                 // read buffer, not the sum of every decoded layout reader.
                 let pressure = request

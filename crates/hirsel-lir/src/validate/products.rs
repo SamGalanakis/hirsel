@@ -220,7 +220,7 @@ impl NativeOutput {
 pub enum NativeReadError {
     EnvironmentChanged,
     Layout(String),
-    Body {
+    Content {
         reference: Reference,
         reason: hirsel_artifact_store::ContentReadError,
     },
@@ -231,8 +231,8 @@ impl std::fmt::Display for NativeReadError {
         match self {
             Self::EnvironmentChanged => f.write_str("native output environment changed"),
             Self::Layout(reason) => write!(f, "native layout product: {reason}"),
-            Self::Body { reference, reason } => {
-                write!(f, "required native body product {reference:?}: {reason}")
+            Self::Content { reference, reason } => {
+                write!(f, "required native product {reference:?}: {reason}")
             }
             Self::Decode(reason) => write!(f, "native body product decode: {reason}"),
         }
@@ -241,7 +241,7 @@ impl std::fmt::Display for NativeReadError {
 impl std::error::Error for NativeReadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Body { reason, .. } => Some(reason),
+            Self::Content { reason, .. } => Some(reason),
             _ => None,
         }
     }
@@ -388,13 +388,65 @@ impl NativeCache {
     /// The caller first validates the query's complete current dependency
     /// outputs, including source/private proof, layouts, graph, policy and all
     /// explicit callee/optimizer inputs, to obtain `subject`.
+    ///
+    /// `Ok(None)` means no accepted record is current: none was associated,
+    /// it differs from the current environment, or its body or layouts are
+    /// absent, changed or unreadable. A read refused for admission is an
+    /// error, never a miss.
     pub fn lookup(
         &self,
         subject: ContentHash,
         policy: ContentHash,
         stage: StageKind,
         environment: &NativeEnvironment<'_>,
-    ) -> Option<NativeOutput> {
+    ) -> Result<Option<NativeOutput>, NativeReadError> {
+        let Some(record) = self.accepted_record(subject, policy, stage, environment) else {
+            return Ok(None);
+        };
+        // Value and Ready bodies remain unopened. Structural declaration reads
+        // may bind only the portable layout metadata needed for reconstruction.
+        if !self.present(record.body.reference())? || !self.present(record.layouts.reference())? {
+            return Ok(None);
+        }
+        if record.declarations.has_structural() {
+            let Ok(layouts) = self.layouts(record.layouts.reference(), environment.target) else {
+                return Ok(None);
+            };
+            let binding = layouts.binding();
+            if !record.declarations.matches_structural(
+                environment.operations,
+                &binding.table,
+                environment.target,
+            ) {
+                return Ok(None);
+            }
+        }
+        Ok(Some(NativeOutput { record }))
+    }
+
+    /// Whether the provider holds exactly `reference`. Absent, changed or
+    /// unreadable content is a miss that a recompute replaces; a read the
+    /// request's admission or the provider refused is reported as such.
+    fn present(&self, reference: Reference) -> Result<bool, NativeReadError> {
+        use hirsel_artifact_store::ContentReadError;
+        match self.contents.get_content(reference) {
+            Ok(bytes) => Ok(bytes.matches_reference(reference)),
+            Err(reason @ (ContentReadError::Admission { .. } | ContentReadError::Refused(_))) => {
+                Err(NativeReadError::Content { reference, reason })
+            }
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// The accepted record for `subject`, if it matches the current
+    /// environment. No product is read.
+    fn accepted_record(
+        &self,
+        subject: ContentHash,
+        policy: ContentHash,
+        stage: StageKind,
+        environment: &NativeEnvironment<'_>,
+    ) -> Option<Arc<Record>> {
         let domain = body_domain(stage)?;
         let key = address(subject, policy, stage);
         let record = self
@@ -448,25 +500,7 @@ impl NativeCache {
         {
             return None;
         }
-        // Value and Ready bodies remain unopened. Structural declaration reads
-        // may bind only the portable layout metadata needed for reconstruction.
-        self.get(record.body.reference())?;
-        if record.declarations.has_structural() {
-            let layouts = self
-                .layouts(record.layouts.reference(), environment.target)
-                .ok()?;
-            let binding = layouts.binding();
-            if !record.declarations.matches_structural(
-                environment.operations,
-                &binding.table,
-                environment.target,
-            ) {
-                return None;
-            }
-        } else {
-            self.get(record.layouts.reference())?;
-        }
-        Some(NativeOutput { record })
+        Some(record)
     }
 
     /// Validate actual operations and complete independently supplied inputs,
@@ -638,7 +672,7 @@ impl NativeCache {
         let closure = self
             .layouts(output.layouts(), target)
             .map_err(NativeReadError::Layout)?;
-        let body_error = |reason| NativeReadError::Body {
+        let body_error = |reason| NativeReadError::Content {
             reference: output.body(),
             reason,
         };

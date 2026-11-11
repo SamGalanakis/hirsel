@@ -441,6 +441,7 @@ fn cached_pretransfer_inventory_rederives_canonical_abis_from_independent_plans(
                         discharge: None,
                     },
                 )
+                .unwrap()
                 .is_some()
         };
         let trace = hirsel_lir::construction::ValueTrace::default();

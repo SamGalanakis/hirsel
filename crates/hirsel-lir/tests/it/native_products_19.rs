@@ -36,6 +36,7 @@ fn native_products_19_only_actual_validation_can_issue_a_local_output() {
     assert!(
         cache
             .lookup(subject, policy, StageKind::Value, &environment)
+            .unwrap()
             .is_none()
     );
     let (checked, output) = cache
@@ -48,6 +49,7 @@ fn native_products_19_only_actual_validation_can_issue_a_local_output() {
     assert!(
         cache
             .lookup(subject, policy, StageKind::Value, &environment)
+            .unwrap()
             .is_some()
     );
     assert_eq!(
@@ -64,6 +66,7 @@ fn native_products_19_only_actual_validation_can_issue_a_local_output() {
                 StageKind::Value,
                 &environment
             )
+            .unwrap()
             .is_none()
     );
     assert!(
@@ -74,11 +77,13 @@ fn native_products_19_only_actual_validation_can_issue_a_local_output() {
                 StageKind::Value,
                 &environment
             )
+            .unwrap()
             .is_none()
     );
     assert!(
         cache
             .lookup(subject, policy, StageKind::Ready, &environment)
+            .unwrap()
             .is_none()
     );
     let (closure, body) = cache.read(&output, &target).unwrap();
@@ -109,6 +114,7 @@ fn native_products_19_only_actual_validation_can_issue_a_local_output() {
     assert!(
         foreign
             .lookup(subject, policy, StageKind::Value, &environment)
+            .unwrap()
             .is_none()
     );
     let mut malformed = checked.into_raw();
@@ -121,6 +127,7 @@ fn native_products_19_only_actual_validation_can_issue_a_local_output() {
     assert!(
         cache
             .lookup(hash("refused"), policy, StageKind::Value, &environment)
+            .unwrap()
             .is_none()
     );
     // The raw Ready stage also needs its own actual validation, not a Value receipt.
@@ -192,6 +199,7 @@ fn native_products_19_manifest_discharge_and_target_are_independent_reads() {
     assert!(
         cache
             .lookup(subject, policy, StageKind::Value, &environment)
+            .unwrap()
             .is_some()
     );
     let different_manifest = support::manifest(hirsel_core_contract::Disposition::Body);
@@ -202,6 +210,7 @@ fn native_products_19_manifest_discharge_and_target_are_independent_reads() {
     assert!(
         cache
             .lookup(subject, policy, StageKind::Value, &changed)
+            .unwrap()
             .is_none()
     );
     let mut discharge = hirsel_lir::discharge::Discharge::default();
@@ -221,6 +230,7 @@ fn native_products_19_manifest_discharge_and_target_are_independent_reads() {
     assert!(
         cache
             .lookup(subject, policy, StageKind::Value, &changed)
+            .unwrap()
             .is_none()
     );
     let target = hirsel_lir::TargetSpec::aarch64_unknown_linux_gnu();
@@ -231,6 +241,7 @@ fn native_products_19_manifest_discharge_and_target_are_independent_reads() {
     assert!(
         cache
             .lookup(subject, policy, StageKind::Value, &changed)
+            .unwrap()
             .is_none()
     );
 }
@@ -273,6 +284,7 @@ fn native_products_19_directory_reopen_copy_and_corruption() {
         .with_layout_admission(|_| Some(Arc::new(())));
     let current = reopened
         .lookup(subject, policy, StageKind::Value, &environment)
+        .unwrap()
         .unwrap();
     assert_eq!(current.body(), output.body());
     assert_eq!(current.metadata(), output.metadata());
@@ -308,6 +320,7 @@ fn native_products_19_directory_reopen_copy_and_corruption() {
     assert!(
         foreign
             .lookup(subject, policy, StageKind::Value, &environment)
+            .unwrap()
             .is_none()
     );
     let held_layouts = reopened.layouts(output.layouts(), &target).unwrap();
@@ -321,6 +334,7 @@ fn native_products_19_directory_reopen_copy_and_corruption() {
     assert!(
         reopened
             .lookup(subject, policy, StageKind::Value, &environment)
+            .unwrap()
             .is_none()
     );
     std::fs::write(local.output_path(output.layouts()), &original_layout_bytes).unwrap();
@@ -336,6 +350,7 @@ fn native_products_19_directory_reopen_copy_and_corruption() {
     assert!(
         reopened
             .lookup(subject, policy, StageKind::Value, &environment)
+            .unwrap()
             .is_none()
     );
     assert!(reopened.read(&output, &target).is_err());
@@ -385,6 +400,7 @@ fn native_products_19_receipt_io_failure_retains_only_actual_process_acceptance(
     assert!(
         cache
             .lookup(subject, policy, StageKind::Value, &environment)
+            .unwrap()
             .is_some()
     );
     drop(cache);
@@ -392,6 +408,7 @@ fn native_products_19_receipt_io_failure_retains_only_actual_process_acceptance(
     assert!(
         reopened
             .lookup(subject, policy, StageKind::Value, &environment)
+            .unwrap()
             .is_none(),
         "receipt I/O failure cannot claim durable acceptance"
     );
@@ -431,6 +448,7 @@ fn native_products_19_derived_metadata_retains_actual_c_observations() {
     assert!(
         cache
             .lookup(subject, policy, StageKind::Value, &environment)
+            .unwrap()
             .is_none()
     );
     let published = cache.publish_output(&output, b"local equations").unwrap();
@@ -441,6 +459,7 @@ fn native_products_19_derived_metadata_retains_actual_c_observations() {
     assert!(
         cache
             .lookup(subject, policy, StageKind::Value, &environment)
+            .unwrap()
             .is_some()
     );
     let mut discharge = hirsel_lir::discharge::Discharge::default();
@@ -460,12 +479,14 @@ fn native_products_19_derived_metadata_retains_actual_c_observations() {
     assert!(
         cache
             .lookup(subject, policy, StageKind::Value, &changed)
+            .unwrap()
             .is_none()
     );
     let foreign = NativeCache::new(store, None);
     assert!(
         foreign
             .lookup(subject, policy, StageKind::Value, &environment)
+            .unwrap()
             .is_none()
     );
 }
@@ -549,6 +570,7 @@ fn native_products_19_source_observation_is_independent_and_scope_bound() {
     assert!(
         cache
             .lookup(subject, policy, StageKind::Value, &environment)
+            .unwrap()
             .is_none()
     );
     cache
@@ -557,6 +579,7 @@ fn native_products_19_source_observation_is_independent_and_scope_bound() {
     assert!(
         cache
             .lookup(subject, policy, StageKind::Value, &environment)
+            .unwrap()
             .is_some()
     );
     drop(cache);
@@ -565,6 +588,7 @@ fn native_products_19_source_observation_is_independent_and_scope_bound() {
     let reopened = NativeCache::new(Arc::new(local.clone()), Some(local));
     let accepted = reopened
         .lookup(subject, policy, StageKind::Value, &environment)
+        .unwrap()
         .unwrap();
     assert_eq!(accepted.metadata(), b"independent query metadata");
 
@@ -579,6 +603,7 @@ fn native_products_19_source_observation_is_independent_and_scope_bound() {
     assert!(
         reopened
             .lookup(subject, policy, StageKind::Value, &changed)
+            .unwrap()
             .is_none()
     );
     for field in 0..6 {
@@ -603,6 +628,7 @@ fn native_products_19_source_observation_is_independent_and_scope_bound() {
         assert!(
             reopened
                 .lookup(subject, policy, StageKind::Value, &changed)
+                .unwrap()
                 .is_none()
         );
         // A provider row for the wrong actual definition/instance/revision
@@ -647,11 +673,13 @@ fn native_products_19_source_observation_is_independent_and_scope_bound() {
     assert!(
         reopened
             .lookup(absent_subject, policy, StageKind::Value, &changed)
+            .unwrap()
             .is_some()
     );
     assert!(
         reopened
             .lookup(absent_subject, policy, StageKind::Value, &environment)
+            .unwrap()
             .is_none()
     );
     let mut malformed = unit;
@@ -664,6 +692,7 @@ fn native_products_19_source_observation_is_independent_and_scope_bound() {
     assert!(
         reopened
             .lookup(subject, policy, StageKind::Value, &environment)
+            .unwrap()
             .is_some()
     );
     let _ = std::fs::remove_dir_all(root);
@@ -801,6 +830,7 @@ fn native_products_19_unavailable_source_reads_replay_without_promoting_empty_in
     assert!(
         cache
             .lookup(subject, policy, StageKind::Value, &environment)
+            .unwrap()
             .is_some()
     );
     for (events, payloads) in [(true, false), (false, true), (true, true)] {
@@ -816,6 +846,7 @@ fn native_products_19_unavailable_source_reads_replay_without_promoting_empty_in
         assert!(
             cache
                 .lookup(subject, policy, StageKind::Value, &changed_environment)
+                .unwrap()
                 .is_none(),
             "None cannot become Some(empty) without actual C"
         );
@@ -907,6 +938,7 @@ fn native_products_19_receipt_declaration_absence_is_replayed_and_new_demand_ref
     assert!(
         cache
             .lookup(subject, policy, StageKind::Value, &environment)
+            .unwrap()
             .is_some()
     );
     let source = ReceiptSource {
@@ -933,6 +965,7 @@ fn native_products_19_receipt_declaration_absence_is_replayed_and_new_demand_ref
     assert!(
         cache
             .lookup(subject, policy, StageKind::Value, &changed)
+            .unwrap()
             .is_none()
     );
     for mutation in 0..4 {

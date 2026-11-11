@@ -444,7 +444,7 @@ impl SettledProducts {
                             .operations(owner, &snapshot.environment())?,
                         ..snapshot.environment()
                     },
-                )
+                )?
                 .ok_or("settled Ready dependency lost current C admission")?;
             if product.product != *read || ready.insert(read.address.0, product).is_some() {
                 return Err("duplicate or changed settled Ready dependency".into());
@@ -484,7 +484,7 @@ impl NativeProducts for SettledProducts {
                         .operations(key, &self.inner.snapshot.environment())?,
                     ..self.inner.snapshot.environment()
                 },
-            )
+            )?
             .ok_or("object task lost Ready C admission")?;
         if current.product != product.product {
             return Err("object task Ready dependency changed".into());
@@ -558,7 +558,7 @@ impl NativeProducts for DemandProducts {
                         operations: &operations,
                         ..self.snapshot.environment()
                     },
-                )
+                )?
                 .ok_or("selected Ready dependency lost current C admission")?;
             if current.product != *selected {
                 return Err("selected Ready dependency changed".into());

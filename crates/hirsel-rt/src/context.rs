@@ -45,8 +45,9 @@ pub struct Config {
     pub hash_seed: u64,
     /// The linked program's immutable descriptor table; runtime descriptors occupy indices 0/1
     /// (0: the plain pointer-free sequence for Bytes and `List[SocketAddr]`; 1: file walk) and
-    /// the two indices after the table (the runtime's `List[Bytes]`, `text::bytes_list_index`,
-    /// then its list of resource handles, `text::handle_list_index`).
+    /// the three indices after the table (the runtime's `List[Bytes]`, `text::bytes_list_index`,
+    /// its list of resource handles, `text::handle_list_index`, then `authority.read`'s
+    /// `List[HistoryRecord]`, `text::history_list_index`).
     pub layouts: *const *const crate::Layout,
     pub layout_count: u32,
     pub reserved: u32,
@@ -1056,6 +1057,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_ctx_create(
     }
     layouts.push(&crate::text::BYTES_LIST_DESCRIPTOR.0 as *const crate::Layout);
     layouts.push(&crate::text::HANDLE_LIST_DESCRIPTOR.0 as *const crate::Layout);
+    layouts.push(&crate::text::HISTORY_LIST_DESCRIPTOR.0 as *const crate::Layout);
     for &layout in &layouts {
         unsafe {
             crate::release::check_layout(layout);

@@ -225,6 +225,11 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
             "",
             "Advanced(u64)|Fenced()|Refused(AuthorityError)|Undecided(AuthorityError)",
         ),
+        (
+            "HistoryRecord",
+            "",
+            "Claimed(u64,Bytes,Bytes)|Appended(Bytes)",
+        ),
         ("GrantAccess", "", "Read()|ReadWrite()"),
         (
             "NotRunReason",
@@ -1244,6 +1249,7 @@ fn variant(
                 | "CallEnd"
                 | "RunFrame"
                 | "SeamError"
+                | "HistoryRecord"
         )
     {
         t.bounds = vec![
@@ -1259,8 +1265,8 @@ fn variant(
     if name == "ShapeBody" {
         t.bounds = shape_data_bounds();
     }
-    if name == "SeamError" {
-        // Corrupt and Format own a String and Bytes: copyable by count, never plain.
+    if matches!(name, "SeamError" | "HistoryRecord") {
+        // Their arms own Strings and Bytes: copyable by count, never plain.
         t.bounds = vec![
             Bound::Copyable,
             Bound::Data,
@@ -1325,6 +1331,7 @@ fn serializable_core(name: &str, t: &mut TypeDefinition) {
             | "AuthorityError"
             | "SeamError"
             | "Advanced"
+            | "HistoryRecord"
             | "ExitStatus"
             | "ProcessOutput"
             | "PipelineOutput"

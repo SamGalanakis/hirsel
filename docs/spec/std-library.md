@@ -4241,14 +4241,14 @@ it, and versions under one authority compare in commit order across a reopen
 ([STORE-8](storage.md#store-8-versions-snapshots-and-forks)).
 
 **History format.** `std@1/history` is the codec of the
-[history format](storage.md#history-format) the store writes: `encode_group` and the
-streaming `group_writer`/`add_commit`/`finish_group` (each commit's bytes copied once into
-one buffer, the definition table and count added at the cut), `claim_group`,
-`decode_group` against the digest that names the group and `decode_entry` for an entry
-read back from the authority, `follow` for the chain rules across groups, `build_tree`,
-`checkpoint_tree` and the streaming `tree_builder` for content-cut checkpoint nodes,
-`check_level` to validate a checkpoint level by level from `root_expect`, and
-`encode_head`/`decode_head`. Decoders refuse with
+[history format](storage.md#history-format) the store writes inside the authority's
+records: `encode_group` and the streaming `group_writer`/`add_commit`/`finish_group` (each
+commit's bytes copied once into one buffer, the definition table and count added at the
+cut), `decode_group` for an appended record's entry, `claimed` and `follow` for the version
+rules across claim records and groups, `build_tree`, `checkpoint_tree` and the streaming
+`tree_builder` for content-cut checkpoint nodes, and `check_level` to validate a
+checkpoint level by level from `root_expect`. The records' chain is the authority's, so
+the codec never sees it. Decoders refuse with
 `history.Fault = Corrupt() | Unsupported(found: Bytes)`: `Unsupported` carries the magic
 of a record in another format version, recognised before any digest or sum is checked.
 
@@ -4263,8 +4263,8 @@ hold the largest key and value, with `InvalidInput()`, and limits whose largest 
 `transaction_bytes` plus 8 KiB, exceeds `authority.max_entry(a)` with
 `Unsupported(Size(needed, max_entry))`. These checks run before the claim, whether or not
 the store exists, so a refused open has no effect. It then claims the authority, which
-appends a claim group with the next writer epoch and fences every earlier head, and reads
-the history back: each group against its digest and the chain rules, the newest
+appends a claim record with the next writer epoch and fences every earlier head, and reads
+the history back: each record against the chain, each group against the version rules, the newest
 checkpoint's nodes, and the commits after it in order. When the history holds nothing but
 claims (a new authority, or a creation a failure cut before its Genesis), the store
 commits its Genesis, which records `config.limits` and the node bounds; an existing store

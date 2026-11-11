@@ -316,7 +316,7 @@ fn seam_requests(n: u64, text: &str, bytes: &[u8]) -> Vec<hirsel_rt::authority::
             W::Advance {
                 from: n,
                 at: level,
-                entry: bytes.to_vec(),
+                payload: bytes.to_vec(),
             },
         ),
         provider(Some(!n), W::Durable { at: level }),
@@ -395,7 +395,15 @@ fn seam_completions(n: u64, text: &str, bytes: &[u8]) -> Vec<Completion> {
             claim: None,
         },
         S::Outcome {
-            outcome: O::Read(Ok(vec![bytes.to_vec(), vec![]])),
+            outcome: O::Read(Ok(vec![
+                hirsel_store_authority::Record::Claimed {
+                    epoch: n,
+                    attempt: [n as u8; 16],
+                    identity: [!(n as u8); 32],
+                },
+                hirsel_store_authority::Record::Appended(bytes.to_vec()),
+                hirsel_store_authority::Record::Appended(vec![]),
+            ])),
             claim: None,
         },
         S::Outcome {

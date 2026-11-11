@@ -454,8 +454,8 @@ fn served_calls_cross_to_a_place_host_and_the_callers_tape_replays_alone() {
 
 /// The call records of a place's `authority.log@1` history under `dir` that arrived on a
 /// stream: per call, the definition path that ran, its code hash, and the code hash the
-/// caller expected (STORE-11 history format: segment frames `len:u32 check:u32 entry`, each
-/// entry one group).
+/// caller expected (STORE-11 history format: segment frames `len:u32 check:u32 record`, each
+/// appended record's entry one group).
 fn stream_calls(dir: &Path) -> Vec<(String, Vec<u8>, Vec<u8>)> {
     struct Cursor<'a>(&'a [u8], usize);
     impl Cursor<'_> {
@@ -490,8 +490,12 @@ fn stream_calls(dir: &Path) -> Vec<(String, Vec<u8>, Vec<u8>)> {
             frames.take(4);
             let entry = frames.take(len).to_vec();
             let mut c = Cursor(&entry, 0);
-            assert_eq!(c.take(8), b"HSHIST02");
+            assert_eq!(c.take(8), b"HSHIST03");
             c.take(32 + 8 + 8);
+            if c.u8() == 1 {
+                continue; // a claim record
+            }
+            assert_eq!(c.take(8), b"HSGRUP01");
             let count = c.u32();
             let mut arrived = vec![];
             for _ in 0..count {

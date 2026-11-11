@@ -4,9 +4,9 @@
 // history, a chain of commit groups in the history format (`std@1/history`),
 // through the authority seam. Nothing else is stored, and nothing else fences.
 //
-// `open` claims the authority, which appends a claim group naming the next
-// writer epoch, then reads the history back: every group's digest, fields and
-// chain, the newest checkpoint's nodes, and the commits after it, applied in
+// `open` claims the authority, which appends a claim record naming the next
+// writer epoch, then reads the history back: every record's chain, checked by
+// the authority, every group's fields and version rules, the newest checkpoint's nodes, and the commits after it, applied in
 // order. The first commit after the claims a history begins with is the
 // Genesis, which records the limits and the checkpoint node bounds; a history
 // holding only claims is a creation that never completed, so it is no store,
@@ -258,16 +258,17 @@ pub opaque type Store: () uses {Authority} {
   limits: StoreLimits,
   bounds: history.Bounds,
   identity: Bytes,
-  epoch: u64,
   // The state at V, the visible version.
   index: ordered_map.OrderedMap[Bytes, Bytes],
   visible: u64,
   // An empty access set whose lists keep the capacity an earlier run grew,
   // so a run records its reads without allocating once the store is warm.
   spare: AccessSet,
-  // The history's end: the position and digest of the last group advanced.
+  // The history's end position, and the newest group's digest and the version
+  // of its last commit, which a checkpoint names.
   end: u64,
   digest: Bytes,
+  group_last: u64,
   // The group being filled, the entries its commits ran, and their encoded size.
   pending: Option[history.GroupWriter],
   defs: List[history.Def],
@@ -350,7 +351,7 @@ pub fn prefix_bounds(prefix: Bytes) -> (
 }
 
 /// Opens or creates the store `a` keeps and claims it as its writer (STORE-1):
-/// the claim appends a claim entry with the next writer epoch, fencing every
+/// the claim appends a claim record with the next writer epoch, fencing every
 /// earlier head; the store then recovers the newest state the history holds.
 /// A history holding nothing but claims, the first open's included when a
 /// failure cut it before its Genesis, is no store: the open writes the
@@ -392,12 +393,12 @@ pub fn open(a: Authority, config: StoreConfig) -> Result[Store, StoreError] {
     limits: config.limits,
     bounds: history.default_bounds(),
     identity: b"",
-    epoch: 0,
     index: ordered_map.empty(compare_keys),
     visible: 0,
     spare: AccessSet(points: [], spans: []),
     end: 0,
     digest: history.zero_digest(),
+    group_last: 0,
     pending: None(),
     defs: [],
     defs_bytes: 0,
@@ -413,43 +414,56 @@ pub fn open(a: Authority, config: StoreConfig) -> Result[Store, StoreError] {
   Ok(take s)
 }
 
-// Reads the history to the claim's entry at `end`: checks each group's digest,
-// fields and chain, applies the commits after the newest checkpoint onto its
-// state, and adopts the recorded limits. True when the history holds nothing
-// but claims, so the store is new: `history.follow` admits no other commit
-// before the Genesis.
+// Reads the history to the claim's record at `end`: numbers the commits (a
+// claim record is one, an appended record's group its commits), checks each
+// group's fields and rules, applies the commits after the newest checkpoint
+// onto its state, and adopts the recorded limits. The authority has checked
+// the records' chain. True when the history holds nothing but claims, so the
+// store is new: `history.follow` admits no other commit before the Genesis.
 fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
   let floor = authority.floor(a)
   let mut tip = history.origin_tip()
-  // The groups after the newest checkpoint, with their digests.
-  let mut since: List[(history.Group, Bytes)] = []
+  // The groups after the newest checkpoint, with their digests and the
+  // version of their first commit.
+  let mut since: List[(history.Group, Bytes, u64)] = []
+  let mut newest: (Bytes, u64) = (history.zero_digest(), 0)
   let mut checkpoint: Option[history.Descriptor] = None()
   let mut recorded: Option[(StoreLimits, history.Bounds)] = None()
   let mut at: u64 = 0
   while at < end {
-    let entries = match authority.read(a, at, floor, READ_BATCH) {
+    let records = match authority.read(a, at, floor, READ_BATCH) {
       Ok(x) => x,
       Error(e) => return Error(stop(mut s, seam(take e))),
     }
-    if list.len(entries) == 0 {
+    if list.len(records) == 0 {
       return Error(stop(mut s, Corrupt(entry_name(at + 1))))
     }
-    for e in entries {
+    for item in records {
       if at == end {
         break
       }
       at += 1
-      let (g, d) = match history.decode_entry(e) {
+      let e = match item {
+        Claimed(_, _, identity) => {
+          tip = history.claimed(tip, identity)
+          continue
+        },
+        Appended(e) => e,
+      }
+      let g = match history.decode_group(e) {
         Ok(x) => x,
         Error(Unsupported(found: found)) => return Error(
           stop(mut s, Unsupported(Format(found: unique found, object: entry_name(at))))
         ),
         Error(Corrupt()) => return Error(stop(mut s, Corrupt(entry_name(at)))),
       }
-      let Ok(next) = history.follow(tip, g, d) else {
+      let first = tip.last + 1
+      let Ok(next) = history.follow(tip, g) else {
         return Error(stop(mut s, Corrupt(entry_name(at))))
       }
       tip = take next
+      let d = history.digest(e)
+      newest = (copy d, tip.last)
       for x in g.commits {
         match x.body {
           Engine(Genesis(
@@ -473,15 +487,15 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
           },
           Engine(Checkpoint(desc)) => {
             // Its version is a group's last, and that group is before it.
-            let mut kept: List[(history.Group, Bytes)] = []
+            let mut kept: List[(history.Group, Bytes, u64)] = []
             let mut found = false
-            for (h, hd) in since {
-              let last = h.first + list.len(h.commits) - 1
+            for (h, hd, hfirst) in since {
+              let last = hfirst + list.len(h.commits) - 1
               if last == desc.version {
                 found = hd == desc.digest
               }
               if last > desc.version {
-                list.push(mut kept, (copy h, copy hd))
+                list.push(mut kept, (copy h, copy hd, hfirst))
               }
             }
             if !found {
@@ -493,7 +507,7 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
           _ => {},
         }
       }
-      list.push(mut since, (take g, take d))
+      list.push(mut since, (take g, take d, first))
     }
   }
   let mut state: ordered_map.OrderedMap[Bytes, Bytes] = ordered_map.empty(compare_keys)
@@ -502,8 +516,8 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
     state = load_checkpoint(a, mut s, desc)?
     from = desc.version
   }
-  for (g, _) in since {
-    let mut at_version = g.first
+  for (g, _, first) in since {
+    let mut at_version = first
     for x in g.commits {
       if at_version > from {
         apply(mut state, x.writes)
@@ -513,10 +527,11 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
   }
   s.index = take state
   s.visible = tip.last
-  s.epoch = tip.epoch
   s.identity = unique tip.identity
   s.end = end
-  s.digest = unique tip.digest
+  let (newest_digest, newest_last) = take newest
+  s.digest = take newest_digest
+  s.group_last = newest_last
   for i in 0u64..list.len(s.durable) {
     s.durable[i] = tip.last
   }
@@ -925,7 +940,9 @@ pub fn compact(mut s: Store) -> Result[(), StoreError] {
       return Error(stop(mut s, seam(take e)))
     }
   }
-  let desc = history.descriptor(tree, s.visible, s.digest)
+  // The state at V is the state after the newest group: a claim since writes
+  // nothing.
+  let desc = history.descriptor(tree, s.group_last, s.digest)
   let body: history.Body = Engine(Checkpoint(take desc))
   let t = serial(mut s)
   let _ = commit(mut s, take t, take body, None()) ? unreleased
@@ -2666,7 +2683,7 @@ fn flush(mut s: Store) -> Result[(), Unreleased] {
 fn add(mut s: Store, c: history.Commit) -> u64 uses {} {
   let mut w = match replace(mut s.pending, None()) {
     Some(w) => take w,
-    None() => history.group_writer(s.digest, s.visible + 1, s.epoch),
+    None() => history.group_writer(),
   }
   let start = history.writer_bytes(w)
   history.add_commit(mut w, c)
@@ -2736,6 +2753,7 @@ fn advance(a: Authority, mut s: Store, at: Level of a, i: u64) -> Result[(), Unr
       }
       s.end = end
       s.digest = take d
+      s.group_last = s.visible
       let state = current(mut s)
       list.push(mut s.held, Held(position: end, version: s.visible, state: take state))
       let v = s.visible

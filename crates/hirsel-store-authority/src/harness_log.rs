@@ -21,10 +21,9 @@
 //!    the commits counted, not the entries;
 //! 6. nothing here damages the history, so nothing is ever refused as corrupt.
 
-use crate::group::{self, Tip};
 use crate::harness::{Rng, entry};
 use crate::log::Log;
-use crate::{Advanced, Authority, Claim, Error, Level};
+use crate::{Advanced, Authority, Claim, Error, Level, Record};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -169,18 +168,11 @@ fn fail_host(dir: &Path) {
     });
 }
 
-/// The number of commits in each entry: the versions a history holds.
-fn versions(all: &[Vec<u8>]) -> u64 {
-    all.iter()
-        .map(|e| u32::from_le_bytes(e[56..60].try_into().unwrap()) as u64)
-        .sum()
-}
+type Ledger = BTreeMap<u64, (Record, u8)>;
 
-type Ledger = BTreeMap<u64, (Vec<u8>, u8)>;
-
-fn owe(ledger: &mut Ledger, p: u64, bytes: &[u8], level: u8) -> Result<(), String> {
+fn owe(ledger: &mut Ledger, p: u64, record: &Record, level: u8) -> Result<(), String> {
     match ledger.get_mut(&p) {
-        Some((b, l)) if b == bytes => {
+        Some((b, l)) if b == record => {
             *l = (*l).max(level);
             Ok(())
         }
@@ -188,7 +180,7 @@ fn owe(ledger: &mut Ledger, p: u64, bytes: &[u8], level: u8) -> Result<(), Strin
             "position {p} acknowledged with two different entries"
         )),
         None => {
-            ledger.insert(p, (bytes.to_vec(), level));
+            ledger.insert(p, (record.clone(), level));
             Ok(())
         }
     }
@@ -196,7 +188,7 @@ fn owe(ledger: &mut Ledger, p: u64, bytes: &[u8], level: u8) -> Result<(), Strin
 
 struct Writer {
     log: Log,
-    claim: Option<(Claim, Tip)>,
+    claim: Option<Claim>,
     dead: Option<Claim>,
 }
 
@@ -207,7 +199,7 @@ struct Run {
     reader: Log,
     ledger: Ledger,
     /// Entries that must never be in the history: refused or tried dead.
-    never: Vec<(u64, Vec<u8>)>,
+    never: Vec<(u64, Record)>,
 }
 
 impl Run {
@@ -231,7 +223,7 @@ impl Run {
     }
 
     /// Check what a read returned against the ledger and the never-set.
-    fn check(&self, all: &[Vec<u8>]) -> Result<(), String> {
+    fn check(&self, all: &[Record]) -> Result<(), String> {
         for (p, b) in &self.never {
             if all.get(*p as usize - 1) == Some(b) {
                 return Err(format!("an advance with no effect is at {p}"));
@@ -239,14 +231,14 @@ impl Run {
         }
         for (p, (b, _)) in self.ledger.range(..=all.len() as u64) {
             if all[*p as usize - 1] != *b {
-                return Err(format!("a read returned other bytes at {p}"));
+                return Err(format!("a read returned another record at {p}"));
             }
         }
         Ok(())
     }
 }
 
-fn read_all(log: &mut Log) -> Result<Vec<Vec<u8>>, String> {
+fn read_all(log: &mut Log) -> Result<Vec<Record>, String> {
     log.read(0, Level(0), u64::MAX)
         .map_err(|e| format!("read: {e:?}"))
 }
@@ -303,28 +295,16 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
                     Ok(c) => {
                         let all = read_all(&mut wr.log)?;
                         if all.len() as u64 != c.end
-                            || !group::claims(&all[all.len() - 1], &attempt)
+                            || !matches!(all.last(), Some(Record::Claimed { attempt: a, .. }) if *a == attempt)
                         {
                             return Err("the claim is not at the history's end".into());
                         }
-                        let mut tip = Tip::origin();
-                        for e in &all {
-                            tip = group::follow(&tip, e)
-                                .map_err(|_| "a claimed history does not follow".to_string())?;
-                        }
-                        if tip.last != versions(&all) {
-                            return Err(format!(
-                                "a history of {} commits ends at version {}",
-                                versions(&all),
-                                tip.last
-                            ));
-                        }
                         let end = c.end;
-                        if let Some((old, _)) = wr.claim.replace((c.claim, tip)) {
+                        if let Some(old) = wr.claim.replace(c.claim) {
                             wr.dead = Some(old);
                         }
-                        let bytes = all[end as usize - 1].clone();
-                        owe(&mut run.ledger, end, &bytes, HOST.0)?;
+                        let record = all[end as usize - 1].clone();
+                        owe(&mut run.ledger, end, &record, HOST.0)?;
                         run.check(&all)?;
                     }
                     Err(e @ (Error::Corrupt(_) | Error::Format { .. })) => {
@@ -335,40 +315,30 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
             }
             2..=6 => {
                 let wr = &mut run.writers[w];
-                let Some((c, tip)) = wr.claim.as_mut() else {
+                let Some(c) = wr.claim.as_mut() else {
                     continue;
                 };
-                let commits = 1 + rng.below(4) as u32;
-                let e = entry(tip, tag, commits);
+                let e = entry(tag, 1 + rng.below(4) as u32);
                 let from = c.end();
                 match wr.log.advance(c, from, e.clone(), at) {
                     Advanced::Advanced(p) => {
                         if p != from + 1 {
                             return Err(format!("advanced from {from} to {p}"));
                         }
-                        owe(&mut run.ledger, p, &e, at.0)?;
-                        let next = group::follow(tip, &e).unwrap();
-                        if next.last != tip.last + commits as u64 {
-                            return Err(format!(
-                                "a group of {commits} commits followed as another"
-                            ));
-                        }
-                        *tip = next;
+                        owe(&mut run.ledger, p, &Record::Appended(e), at.0)?;
                     }
-                    Advanced::Refused(_) => run.never.push((from + 1, e)),
-                    Advanced::Fenced | Advanced::Undecided(_) => {
-                        wr.dead = wr.claim.take().map(|(c, _)| c);
-                    }
+                    Advanced::Refused(_) => run.never.push((from + 1, Record::Appended(e))),
+                    Advanced::Fenced | Advanced::Undecided(_) => wr.dead = wr.claim.take(),
                 }
             }
             7 => {
                 let wr = &mut run.writers[w];
-                let Some((c, _)) = wr.claim.as_mut() else {
+                let Some(c) = wr.claim.as_mut() else {
                     continue;
                 };
                 match wr.log.durable(c, at) {
                     Ok(d) => {
-                        let held: Vec<(u64, Vec<u8>)> = run
+                        let held: Vec<(u64, Record)> = run
                             .ledger
                             .range(..=d)
                             .map(|(p, (b, _))| (*p, b.clone()))
@@ -378,7 +348,7 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
                         }
                     }
                     Err(Error::Corrupt(e)) => return Err(format!("durable: corrupt {e}")),
-                    Err(Error::Fenced) => wr.dead = wr.claim.take().map(|(c, _)| c),
+                    Err(Error::Fenced) => wr.dead = wr.claim.take(),
                     Err(_) => wr.claim = None,
                 }
             }
@@ -400,9 +370,9 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
                     continue;
                 };
                 let from = c.end();
-                let e = entry(&Tip::origin(), tag, 1);
+                let e = entry(tag, 1);
                 match wr.log.advance(c, from, e.clone(), at) {
-                    Advanced::Fenced => run.never.push((from + 1, e)),
+                    Advanced::Fenced => run.never.push((from + 1, Record::Appended(e))),
                     other => return Err(format!("a dead claim's advance was {other:?}")),
                 }
                 if wr.log.durable(c, at) != Err(Error::Fenced) {

@@ -553,7 +553,7 @@ unsafe fn provider(
                         out.words[0] = claim.unwrap_or(*p);
                     }),
                     Outcome::Read(r) => seam_result(ctx, r, |all, out| {
-                        out.words[0] = crate::text::allocate_bytes_list(ctx, all) as u64;
+                        out.words[0] = crate::text::allocate_history_list(ctx, all) as u64;
                     }),
                     Outcome::Get(r) => seam_result(ctx, r, |v, out| {
                         if let Some(b) = v {
@@ -859,7 +859,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_advance(
     // SAFETY: this semantic entry owns its task until it suspends or returns.
     let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
 
-    let entry = unsafe { crate::io::slice_bytes(owner, start, len) }.to_vec();
+    let payload = unsafe { crate::io::slice_bytes(owner, start, len) }.to_vec();
     unsafe {
         crate::release::hirsel_rt_v2_release(ctx, owner, (*owner).index(), std::ptr::null(), 0, 0)
     };
@@ -869,7 +869,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_advance(
         request: wire::Request::Advance {
             from,
             at: (unsafe { at.read() } % 256) as u8,
-            entry,
+            payload,
         },
     };
     match unsafe {

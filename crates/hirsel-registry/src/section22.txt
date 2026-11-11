@@ -40,7 +40,7 @@ fn claim.end(c: Claim) -> u64
 fn claim.narrow(a: Authority, take c: Claim) -> Option[Claim of a]
 fn authority.advance(a: Authority, mut c: Claim of a, from: u64, take entry: Bytes, at: Level of a) -> Advanced
 fn authority.durable(a: Authority, mut c: Claim of a, at: Level of a) -> Result[u64, SeamError]
-fn authority.read(a: Authority, from: u64, at: Level of a, max: u64) -> Result[List[Bytes], SeamError]
+fn authority.read(a: Authority, from: u64, at: Level of a, max: u64) -> Result[List[HistoryRecord], SeamError]
 fn authority.get(a: Authority, name: String) -> Result[Option[Bytes], SeamError]
 fn authority.put(a: Authority, name: String, take data: Bytes) -> Result[(), SeamError]
 fn authority.reclaim(a: Authority, mut c: Claim of a) -> Result[(), SeamError]

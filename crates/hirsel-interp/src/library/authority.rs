@@ -18,7 +18,9 @@ use super::Library;
 use super::dispatch::{arg, bytes, error, none, ok, some, text, u32_value, u64_value, variant};
 use crate::{Error, OperationCall, OperationContext, OperationResult, Value, invalid};
 use hirsel_store_authority::wire::{self, Outcome};
-use hirsel_store_authority::{Advanced, Authority, AuthorityError, Claim, Error as SeamError};
+use hirsel_store_authority::{
+    Advanced, Authority, AuthorityError, Claim, Error as SeamError, Record,
+};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -285,7 +287,7 @@ impl Library {
             "authority.advance" => wire::Request::Advance {
                 from: u64_arg(arg(a, 2)?, "from")?,
                 at: self.level_of(&name()?, arg(a, 4)?)?,
-                entry: bytes(arg(a, 3)?)?.to_vec(),
+                payload: bytes(arg(a, 3)?)?.to_vec(),
             },
             "authority.durable" => wire::Request::Durable {
                 at: self.level_of(&name()?, arg(a, 2)?)?,
@@ -446,9 +448,9 @@ impl Library {
                 let name = self.authority_name(arg(a, 0)?)?;
                 let (id, held) = self.claim_arg(&name, arg(a, 1)?)?;
                 let from = u64_arg(arg(a, 2)?, "from")?;
-                let entry = bytes(arg(a, 3)?)?.to_vec();
+                let payload = bytes(arg(a, 3)?)?.to_vec();
                 let at = self.level_of(&name, arg(a, 4)?)?;
-                let r = wire::Request::Advance { from, at, entry };
+                let r = wire::Request::Advance { from, at, payload };
                 let (outcome, _) = self.request(&name, Some(&held), r, context)?;
                 let Outcome::Advanced(r) = outcome else {
                     unreachable!("admitted")
@@ -489,7 +491,27 @@ impl Library {
                     unreachable!("admitted")
                 };
                 result(&r, |all| {
-                    list(all.iter().map(|e| Value::Bytes(e.clone())).collect())
+                    list(
+                        all.iter()
+                            .map(|e| match e {
+                                Record::Claimed {
+                                    epoch,
+                                    attempt,
+                                    identity,
+                                } => variant(
+                                    0,
+                                    vec![
+                                        u64_value(*epoch),
+                                        Value::Bytes(attempt.to_vec()),
+                                        Value::Bytes(identity.to_vec()),
+                                    ],
+                                ),
+                                Record::Appended(payload) => {
+                                    variant(1, vec![Value::Bytes(payload.clone())])
+                                }
+                            })
+                            .collect(),
+                    )
                 })
             }
             "authority.get" | "authority.put" => {

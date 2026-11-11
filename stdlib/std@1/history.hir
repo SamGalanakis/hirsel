@@ -1,15 +1,15 @@
-// The history format of a place's store (docs/spec/storage.md STORE-11,
-// "History format"): commit groups chained by SHA-256 digests, checkpoint
-// trees of content-cut nodes, and the head record. Every integer is
-// fixed-width little-endian and every byte string is a u32 length and its
-// bytes. One format version per magic; a reader that meets another magic
-// refuses, and there is no second reader.
+// What a place's store keeps inside its history (docs/spec/storage.md
+// STORE-11, "History format"): the payload of each appended record, a group
+// of commits, and checkpoint trees of content-cut nodes. The authority owns
+// the records around the payloads, their chain and the claims; this file
+// never sees them. Every integer is fixed-width little-endian and every byte
+// string is a u32 length and its bytes. One format version per magic; a
+// reader that meets another magic refuses, and there is no second reader.
 //
-// Decoders check, they never repair: a group is checked against the digest
-// that names it, a node against the digest its parent names, a head record
-// against its own sum. Any failure is `Error(())`, which the engine reports as
-// `Corrupt(name)` and which removes nothing. Only the local log's frame layer
-// can call a record torn; nothing here does.
+// Decoders check, they never repair: a node is checked against the digest its
+// parent names, and a group's every field is checked. Any failure is
+// `Error(())`, which the engine reports as `Corrupt(name)` and which removes
+// nothing.
 
 /// One write of a commit: a put (op 1) or a delete (op 2).
 pub type Write = Put(key: Bytes, value: Bytes) | Delete(key: Bytes)
@@ -83,7 +83,7 @@ pub type Engine = Genesis(
   transaction_bytes: u32,
   range_rows: u32,
   bounds: Bounds
-) | Claim(epoch: u64, attempt: Bytes, identity: Bytes) | Checkpoint(Descriptor) | Retain(
+) | Checkpoint(Descriptor) | Retain(
   floor: u64,
   pins: List[Pin],
   checkpoints: List[Descriptor]
@@ -99,37 +99,19 @@ pub type Commit {
   writes: List[Write],
 }
 
-/// The commits of one advance. `first` is the version of its first commit.
+/// The commits of one advance: an appended record's payload.
 pub type Group {
-  prev: Bytes,
-  first: u64,
-  epoch: u64,
   commits: List[Commit],
   defs: List[Def],
 }
 
-/// What a reader trusts after the groups it has checked: the last group's
-/// digest and version, the writer epoch, the store identity, and whether the
-/// Genesis commit was among them.
+/// What a reader knows after the records it has followed: the version of the
+/// last commit (a claim is one), the store identity the claims name, and
+/// whether the Genesis commit was among them.
 pub type Tip {
-  digest: Bytes,
   last: u64,
-  epoch: u64,
   identity: Bytes,
   created: bool,
-}
-
-/// The mutable record naming the history's end on one backend.
-pub type Head {
-  identity: Bytes,
-  epoch: u64,
-  attempt: Bytes,
-  end: u64,
-  digest: Bytes,
-  checkpoint: Option[Descriptor],
-  locator: Bytes,
-  retain: Bytes,
-  origin: Option[(Bytes, u64)],
 }
 
 /// One checkpoint node: a leaf of entries, or an index of children with
@@ -159,15 +141,12 @@ pub type Expect {
 /// `Corrupt()`. Either refuses the open; neither removes or cuts anything.
 pub type Fault = Corrupt() | Unsupported(found: Bytes)
 
-const GROUP_MAGIC: Bytes = b"HSHIST02"
+const GROUP_MAGIC: Bytes = b"HSGRUP01"
 
 const NODE_MAGIC: Bytes = b"HSNODE01"
 
-const HEAD_MAGIC: Bytes = b"HSHEAD01"
-
-/// The bytes of a group before its first commit: magic, prev, first, epoch
-/// and count.
-pub const GROUP_HEADER: u64 = 60
+/// The bytes of a group before its first commit: magic and count.
+pub const GROUP_HEADER: u64 = 12
 
 /// The bytes of a node before its first entry: magic, level and count.
 pub const NODE_HEADER: u64 = 13
@@ -186,7 +165,7 @@ pub fn digest(data: Bytes) -> unique Bytes uses {} {
   bytes.from_inline(sha256.digest(data))
 }
 
-/// Thirty-two zero bytes: the `prev` of a history's first group.
+/// Thirty-two zero bytes: a descriptor's digest and root when it names none.
 pub fn zero_digest() -> Bytes uses {} {
   bytes.from_list(zeros(32))
 }
@@ -199,9 +178,9 @@ fn zeros(n: u64) -> List[u8] uses {} {
   out
 }
 
-/// The reader's state before a history's first group.
+/// The reader's state before a history's first record.
 pub fn origin_tip() -> Tip uses {} {
-  Tip(digest: zero_digest(), last: 0, epoch: 0, identity: b"", created: false)
+  Tip(last: 0, identity: b"", created: false)
 }
 
 // ---------------------------------------------------------------- encoding
@@ -250,12 +229,9 @@ pub opaque type GroupWriter: () uses {} {
   count: u32,
 }
 
-pub fn group_writer(prev: Bytes, first: u64, epoch: u64) -> GroupWriter uses {} {
+pub fn group_writer() -> GroupWriter uses {} {
   let mut out: List[u8] = []
   put_fixed(mut out, GROUP_MAGIC)
-  put_fixed(mut out, prev)
-  put_u64(mut out, first)
-  put_u64(mut out, epoch)
   put_u32(mut out, 0)
   GroupWriter(out: take out, count: 0)
 }
@@ -316,7 +292,7 @@ pub fn finish_group(take w: GroupWriter, defs: List[Def]) -> (Bytes, Bytes) uses
 
 /// A group's bytes and digest.
 pub fn encode_group(g: Group) -> (Bytes, Bytes) uses {} {
-  let mut w = group_writer(g.prev, g.first, g.epoch)
+  let mut w = group_writer()
   for c in g.commits {
     add_commit(mut w, c)
   }
@@ -381,12 +357,6 @@ fn encode_engine(mut out: List[u8], e: Engine) -> u8 uses {} {
       put_u32(mut out, b.node_max)
       1
     },
-    Claim(epoch: epoch, attempt: attempt, identity: identity) => {
-      put_u64(mut out, epoch)
-      put_fixed(mut out, attempt)
-      put_fixed(mut out, identity)
-      2
-    },
     Checkpoint(d) => {
       put_descriptor(mut out, Some(copy d))
       3
@@ -445,22 +415,6 @@ fn put_descriptor(mut out: List[u8], d: Option[Descriptor]) -> () uses {} {
       put_u64(mut out, x.bytes)
     },
   }
-}
-
-/// A claim group: the one commit a provider appends to claim the history,
-/// after the group whose digest and last version `tip` names. The claim's
-/// epoch is one above the tip's; the first claim mints `identity`.
-pub fn claim_group(tip: Tip, attempt: Bytes, identity: Bytes) -> (Bytes, Bytes) uses {} {
-  let epoch = tip.epoch + 1
-  let mut w = group_writer(tip.digest, tip.last + 1, epoch)
-  add_commit(
-    mut w,
-    Commit(
-      body: Engine(Claim(epoch: epoch, attempt: unique attempt, identity: unique identity)),
-      writes: []
-    )
-  )
-  finish_group(take w, [])
 }
 
 // ---------------------------------------------------------------- decoding
@@ -585,66 +539,30 @@ fn get_descriptor(data: Bytes, mut c: Cursor) -> Result[Option[Descriptor], ()] 
   )
 }
 
-/// Decodes the group `data` named by `expected`, checking the digest, every
-/// field, the format's rules inside one group and that nothing follows it.
-/// Chain rules across groups are `follow`'s.
-pub fn decode_group(data: Bytes, expected: Bytes) -> Result[Group, Fault] uses {} {
+/// Decodes the group an appended record carries, checking every field, the
+/// format's rules inside one group and that nothing follows it. Rules across
+/// groups are `follow`'s.
+pub fn decode_group(data: Bytes) -> Result[Group, Fault] uses {} {
   format(data, GROUP_MAGIC)?
-  if digest(data) != expected {
-    return Error(Corrupt())
-  }
   corrupt(group_fields(data))
-}
-
-/// Decodes a group read from the history, whose digest is not yet known:
-/// the group and its digest, every field checked as `decode_group` checks
-/// them.
-pub fn decode_entry(data: Bytes) -> Result[(Group, Bytes), Fault] uses {} {
-  format(data, GROUP_MAGIC)?
-  let d = digest(data)
-  let g = corrupt(group_fields(data))?
-  Ok((take g, take d))
 }
 
 fn group_fields(data: Bytes) -> Result[Group, ()] uses {} {
   let mut c = Cursor(at: 0, end: bytes.len(data))
   magic(data, mut c, GROUP_MAGIC)?
-  let prev = get_fixed(data, mut c, 32)?
-  let first = get_u64(data, mut c)?
-  let epoch = get_u64(data, mut c)?
   let count: u64 = int.widen(get_u32(data, mut c)?)
-  if first == 0 || count == 0 {
-    return Error(())
-  }
-  // `first + count - 1` must not overflow.
-  let Some(_) = int.checked_add(first, count) else {
+  if count == 0 {
     return Error(())
   }
   let mut commits: List[Commit] = []
   let mut uses_def: u32 = 0
   let mut any_def = false
-  for i in 0u64..count {
-    let version = first + i
+  for _ in 0u64..count {
     let body = get_body(data, mut c)?
-    // Version 1 is the first claim, and a claim is alone in its group. Where
-    // the Genesis falls is `follow`'s: after the claims a history begins with.
-    match body {
-      Engine(Claim(epoch: e, ..)) => {
-        if count != 1 || e != epoch {
-          return Error(())
-        }
-      },
-      Transaction(call) => {
-        any_def = true
-        if call.def >= uses_def {
-          uses_def = call.def + 1
-        }
-      },
-      _ => {},
-    }
-    if version == 1 {
-      let Engine(Claim(..)) = body else {
-        return Error(())
+    if let Transaction(call) = body {
+      any_def = true
+      if call.def >= uses_def {
+        uses_def = call.def + 1
       }
     }
     let writes = get_writes(data, mut c)?
@@ -671,7 +589,7 @@ fn group_fields(data: Bytes) -> Result[Group, ()] uses {} {
       return Error(())
     }
   }
-  Ok(Group(prev: take prev, first: first, epoch: epoch, commits: take commits, defs: take defs))
+  Ok(Group(commits: take commits, defs: take defs))
 }
 
 fn get_writes(data: Bytes, mut c: Cursor) -> Result[List[Write], ()] uses {} {
@@ -777,14 +695,6 @@ fn decode_engine(op: u8, data: Bytes) -> Result[Engine, ()] uses {} {
       return Error(())
     }
     Genesis(key_bytes: k, value_bytes: v, transaction_bytes: t, range_rows: r, bounds: b)
-  } else if op == 2 {
-    let epoch = get_u64(data, mut c)?
-    let attempt = get_fixed(data, mut c, 16)?
-    let identity = get_fixed(data, mut c, 32)?
-    if epoch == 0 {
-      return Error(())
-    }
-    Claim(epoch: epoch, attempt: take attempt, identity: take identity)
   } else if op == 3 {
     let Some(d) = get_descriptor(data, mut c)? else {
       return Error(())
@@ -849,33 +759,31 @@ fn decode_engine(op: u8, data: Bytes) -> Result[Engine, ()] uses {} {
   Ok(take e)
 }
 
-/// Checks that `g`, whose digest is `d`, follows `tip`, and returns the tip
-/// after it: `prev` is the tip's digest, `first` is one above its last
-/// version, a claim group raises the epoch by one, every other group keeps
-/// it, nothing precedes the first claim, every claim names the store
-/// identity, which the first claim and a fork set, and the history's first
-/// commit that is not a claim is its one Genesis.
-pub fn follow(tip: Tip, g: Group, d: Bytes) -> Result[Tip, ()] uses {} {
-  if g.prev != tip.digest || g.first != tip.last + 1 {
-    return Error(())
-  }
-  let mut identity = unique tip.identity
+/// The tip after a claim record naming `identity`: a claim is a commit of its
+/// own. The authority has checked that every claim names one identity.
+pub fn claimed(tip: Tip, identity: Bytes) -> Tip uses {} {
+  Tip(last: tip.last + 1, identity: unique identity, created: tip.created)
+}
+
+/// Checks that the group `g` of an appended record may follow `tip`, and
+/// returns the tip after its commits: the history's first commit is its one
+/// Genesis, every other commit comes after it, and a Fork names the identity
+/// the history's claims name.
+pub fn follow(tip: Tip, g: Group) -> Result[Tip, ()] uses {} {
   let mut created = tip.created
   for x in g.commits {
     match x.body {
-      Engine(Fork(identity: id, ..)) => {
-        if !created {
-          return Error(())
-        }
-        identity = unique id
-      },
       Engine(Genesis(..)) => {
         if created {
           return Error(())
         }
         created = true
       },
-      Engine(Claim(..)) => {},
+      Engine(Fork(identity: id, ..)) => {
+        if !created || id != tip.identity {
+          return Error(())
+        }
+      },
       _ => {
         if !created {
           return Error(())
@@ -883,29 +791,10 @@ pub fn follow(tip: Tip, g: Group, d: Bytes) -> Result[Tip, ()] uses {} {
       },
     }
   }
-  match g.commits[0].body {
-    Engine(Claim(identity: id, ..)) => {
-      if g.epoch != tip.epoch + 1 {
-        return Error(())
-      }
-      if bytes.len(identity) == 0 {
-        identity = unique id
-      } else if id != identity {
-        return Error(())
-      }
-    },
-    _ => {
-      if g.epoch != tip.epoch || tip.epoch == 0 {
-        return Error(())
-      }
-    },
-  }
   Ok(
     Tip(
-      digest: unique d,
-      last: g.first + list.len(g.commits) - 1,
-      epoch: g.epoch,
-      identity: take identity,
+      last: tip.last + list.len(g.commits),
+      identity: unique tip.identity,
       created: created
     )
   )
@@ -1253,84 +1142,4 @@ fn level_fields(expects: List[Expect], blobs: List[Bytes]) -> Result[Step, ()] u
   } else {
     Ok(Next(take next))
   }
-}
-
-// ---------------------------------------------------------------- head record
-
-/// The head record's bytes, ending with the SHA-256 of everything before it.
-pub fn encode_head(h: Head) -> Bytes uses {} {
-  let mut out: List[u8] = []
-  put_fixed(mut out, HEAD_MAGIC)
-  put_fixed(mut out, h.identity)
-  put_u64(mut out, h.epoch)
-  put_fixed(mut out, h.attempt)
-  put_u64(mut out, h.end)
-  put_fixed(mut out, h.digest)
-  put_descriptor(mut out, copy h.checkpoint)
-  put_bytes(mut out, h.locator)
-  put_bytes(mut out, h.retain)
-  match h.origin {
-    None() => put_u8(mut out, 0),
-    Some((identity, at)) => {
-      put_u8(mut out, 1)
-      put_fixed(mut out, identity)
-      put_u64(mut out, at)
-    },
-  }
-  let sum = digest(bytes.view_list(out))
-  put_fixed(mut out, sum)
-  bytes.from_list(take out)
-}
-
-/// Decodes a head record, refusing a wrong magic, sum or field, or any byte
-/// after the sum.
-pub fn decode_head(data: Bytes) -> Result[Head, Fault] uses {} {
-  format(data, HEAD_MAGIC)?
-  corrupt(head_fields(data))
-}
-
-fn head_fields(data: Bytes) -> Result[Head, ()] uses {} {
-  let total = bytes.len(data)
-  if total < 40 {
-    return Error(())
-  }
-  if digest(bytes.slice(data, 0, total - 32)) != bytes.slice(data, total - 32, total) {
-    return Error(())
-  }
-  let mut c = Cursor(at: 0, end: total - 32)
-  magic(data, mut c, HEAD_MAGIC)?
-  let identity = get_fixed(data, mut c, 32)?
-  let epoch = get_u64(data, mut c)?
-  let attempt = get_fixed(data, mut c, 16)?
-  let end = get_u64(data, mut c)?
-  let d = get_fixed(data, mut c, 32)?
-  let checkpoint = get_descriptor(data, mut c)?
-  let locator = get_bytes(data, mut c)?
-  let retain = get_bytes(data, mut c)?
-  let tag = get_u8(data, mut c)?
-  let origin: Option[(Bytes, u64)] = if tag == 0 {
-    None()
-  } else if tag == 1 {
-    let o = get_fixed(data, mut c, 32)?
-    let at = get_u64(data, mut c)?
-    Some((take o, at))
-  } else {
-    return Error(())
-  }
-  if c.at != c.end {
-    return Error(())
-  }
-  Ok(
-    Head(
-      identity: take identity,
-      epoch: epoch,
-      attempt: take attempt,
-      end: end,
-      digest: take d,
-      checkpoint: take checkpoint,
-      locator: take locator,
-      retain: take retain,
-      origin: take origin
-    )
-  )
 }

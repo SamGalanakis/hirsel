@@ -21,11 +21,12 @@
 //   refused; one small write commits and 200 writes of 24 bytes, over the 4096
 //   transaction bytes, are refused; a range of 3 rows reads, in a transaction and in a
 //   query on a snapshot of the reopened store, and a range of 4 is refused in both.
-// - orphan: a claim, then a group holding a commit that is not the Genesis. Nothing
+// - orphan: a claim, then an entry holding a commit that is not the Genesis. Nothing
 //   proves a creation that never happened; it is corruption at entry 2.
 // - damaged: a claim, a Genesis group cut short by a byte, a later claim and a committed
 //   group: an established store whose Genesis is damaged. Corruption at entry 2, never
-//   a new store.
+//   a new store. The authority accepts each payload whole; the group inside is the
+//   engine's to check.
 pub type Failed = Failed(String)
 
 fn say(stdout: Stdout, line: String) -> Result[(), Failed] {
@@ -110,35 +111,15 @@ fn commits(mut s: store.Store, w: (u64, u64, u64), limit: Option[store.TxLimit])
   }
 }
 
-// The tip after the history's entries, read through the seam.
-fn tip(a: Authority) -> Result[history.Tip, Failed] {
-  let Ok(entries) = authority.read(a, 0, authority.floor(a), 100) else {
-    return Error(Failed("read"))
-  }
-  let mut t = history.origin_tip()
-  for e in entries {
-    let Ok((g, d)) = history.decode_entry(e) else {
-      return Error(Failed("decode"))
-    }
-    let Ok(next) = history.follow(t, g, d) else {
-      return Error(Failed("follow"))
-    }
-    t = take next
-  }
-  Ok(take t)
-}
-
-// A group after `t` holding one engine commit.
-fn group(t: history.Tip, body: history.Engine) -> (Bytes, Bytes) {
-  history.encode_group(
+// An entry's payload: a group holding one engine commit.
+fn group(body: history.Engine) -> Bytes {
+  let (data, _) = history.encode_group(
     history.Group(
-      prev: copy t.digest,
-      first: t.last + 1,
-      epoch: t.epoch,
       commits: [history.Commit(body: Engine(copy body), writes: [])],
       defs: []
     )
   )
+  data
 }
 
 fn genesis_body() -> history.Engine {
@@ -239,8 +220,7 @@ fn orphan(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
     return Error(Failed("claim"))
   }
   let mut c = take made
-  let t = tip(a)?
-  let (entry, _) = group(t, StreamFence(sha256_name(b"orphan")))
+  let entry = group(StreamFence(sha256_name(b"orphan")))
   match authority.advance(a, mut c, 1, take entry, authority.floor(a)) {
     Advanced(_) => {},
     _ => return Error(Failed("advance")),
@@ -256,8 +236,7 @@ fn damaged(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
     return Error(Failed("claim"))
   }
   let mut c = take made
-  let t = tip(a)?
-  let (whole, _) = group(t, genesis_body())
+  let whole = group(genesis_body())
   let cut = bytes.slice(whole, 0, bytes.len(whole) - 1)
   match authority.advance(a, mut c, 1, take cut, authority.floor(a)) {
     Advanced(_) => {},
@@ -267,21 +246,7 @@ fn damaged(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
     return Error(Failed("later claim"))
   }
   let mut c2 = take later
-  // The later claim's group, as the authority wrote it: its digest is the next prev.
-  let Ok(entries) = authority.read(a, 2, authority.floor(a), 1) else {
-    return Error(Failed("read"))
-  }
-  let Ok((g3, d3)) = history.decode_entry(entries[0]) else {
-    return Error(Failed("decode"))
-  }
-  let t3 = history.Tip(
-    digest: d3,
-    last: 3,
-    epoch: g3.epoch,
-    identity: b"",
-    created: true
-  )
-  let (entry, _) = group(t3, StreamFence(sha256_name(b"damaged")))
+  let entry = group(StreamFence(sha256_name(b"damaged")))
   match authority.advance(a, mut c2, 3, take entry, authority.floor(a)) {
     Advanced(_) => {},
     _ => return Error(Failed("advance")),

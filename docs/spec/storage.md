@@ -58,7 +58,7 @@ fn store.close(take s: Store) -> Result[(), StoreError]
 
 `store.open` opens or creates the store kept by the authority `a`
 ([STORE-11](#store-11-engine-and-storage-seam)) and claims it as its writer: it appends a
-claim entry with the next **writer epoch** to the history, recovers the newest state the
+claim record with the next **writer epoch** to the history, recovers the newest state the
 history holds, and returns a `Store` that keeps `a`. Of openers that race, exactly one claim succeeds and
 every other open returns `Fenced()`. `Store` is an ordinary affine opaque type; it exports no copying or sending
 bound, and every operation that changes it takes it `mut`. One `Store` value is the
@@ -665,8 +665,8 @@ versions of one store compare in commit order with `==` and `<`, and nothing els
 them is observable; in particular no program learns how many commits a store has made.
 A store's comparison domain is its authority, so versions taken under one authority
 compare across a close and reopen, and comparing versions of two authorities is PROV-2.
-A claim is a commit and versions are history positions: opening a store may advance its
-version though its state is unchanged. Equal versions mean equal states; the converse is
+A claim is a commit: opening a store claims it, so every open advances its version
+though its state is unchanged. Equal versions mean equal states; the converse is
 not promised, and there is no second counter.
 A version is neither `data` nor `key` and is never serialized or hashed.
 
@@ -843,6 +843,7 @@ Advanced       = Advanced(u64) | Fenced() | Refused(AuthorityError) | Undecided(
 AuthorityError = Io(FileError) | Status(u16) | Unreachable()
 SeamError      = Storage(AuthorityError) | Refused(AuthorityError) | Corrupt(String) | Fenced()
                | Format(Bytes, String)
+HistoryRecord  = Claimed(u64, Bytes, Bytes) | Appended(Bytes)
 
 fn io.authority(rt: Io, name: String) -> Result[Authority, GrantError]
 fn authority.max_entry(a: Authority) -> u64
@@ -851,7 +852,7 @@ fn claim.end(c: Claim) -> u64
 fn claim.narrow(a: Authority, take c: Claim) -> Option[Claim of a]
 fn authority.advance(a: Authority, mut c: Claim of a, from: u64, take entry: Bytes, at: Level of a) -> Advanced
 fn authority.durable(a: Authority, mut c: Claim of a, at: Level of a) -> Result[u64, SeamError]
-fn authority.read(a: Authority, from: u64, at: Level of a, max: u64) -> Result[List[Bytes], SeamError]
+fn authority.read(a: Authority, from: u64, at: Level of a, max: u64) -> Result[List[HistoryRecord], SeamError]
 fn authority.get(a: Authority, name: String) -> Result[Option[Bytes], SeamError]
 fn authority.put(a: Authority, name: String, take data: Bytes) -> Result[(), SeamError]
 fn authority.reclaim(a: Authority, mut c: Claim of a) -> Result[(), SeamError]
@@ -876,26 +877,32 @@ A commit the engine has started therefore either completes or, when the scope wa
 cancelled before it started, never began; it is never cut between its entry and its
 durability, and a cancellation never closes the store.
 
-**Positions.** The history is a sequence of **entries** at positions 1, 2, and so on; its
-**end** is the position of the last one, 0 for none. An entry is bytes to the authority.
-What an entry holds (a commit group, a claim, a retention change) and how it is framed
-and checked is the format's (below); commit versions are numbered inside entries, never by positions.
+**Positions.** The history is a sequence of **records** at positions 1, 2, and so on; its
+**end** is the position of the last one, 0 for none. The authority writes every record
+and owns its framing and chain (**Records** below): a **claim record** is the authority's
+own, and an **appended record** carries one **entry**, bytes the engine passed to
+`authority.advance` and the authority never reads. `authority.read` returns each record as
+a `HistoryRecord`: `Claimed(epoch, attempt, identity)` or `Appended(entry)`. What an entry
+holds (a commit group) is the engine's format (below); commit versions are numbered by the
+engine, never by positions.
 
 **Claim.** `authority.claim` makes its caller the history's only writer. It reads the
-history to its end, settles a torn tail (see Recovery), and appends a **claim entry**
-naming a fresh **claim identity**, drawn by the provider and recorded as a provider
-outcome, and the next writer epoch. Of claims that race, exactly one succeeds; each other
-returns `Fenced()` and appends nothing. The first claim of an empty authority mints the
-**store identity**, which every later claim entry, ticket and frontier carries and which
-no other history uses, a fork's included. The fence is the claim entry itself: there is
-no fence object, so nothing that reclaims objects can remove one.
+history to its end, settles a torn tail (see Recovery), and appends a claim record naming
+a fresh **claim attempt**, 16 bytes drawn by the provider and recorded as a provider
+outcome, and the next **writer epoch**, one above the previous claim's. Of claims that
+race, exactly one succeeds; each other returns `Fenced()` and appends nothing. The first
+claim of an empty authority mints the **store identity**, which every later claim
+record, ticket and frontier carries and which no other history uses, a fork's included.
+The fence is the claim record itself: there is no fence object, so nothing that reclaims
+objects can remove one.
 
-**Advance.** `authority.advance(a, c, from, entry, at)` puts `entry` at position
-`from + 1`, whole or nothing, only if `c` is the claim of the newest claim entry and the
-history ends at `from`, and returns once the entry is durable at `at`:
+**Advance.** `authority.advance(a, c, from, entry, at)` puts an appended record carrying
+`entry` at position `from + 1`, whole or nothing, only if `c` is the claim of the newest
+claim record and the history ends at `from`, and returns once the record is durable at
+`at`:
 
 - `Advanced(end)`: the entry is in the history at `end` and durable at `at`.
-- `Fenced()`: a later claim entry is in the history, the history proves the entry absent,
+- `Fenced()`: a later claim record is in the history, the history proves the entry absent,
   and no request the advance sent can still land.
 - `Refused(e)`: the request was refused before it had any effect.
 - `Undecided(e)`: whether the entry is in the history could not be read, or the entry is
@@ -924,8 +931,9 @@ holds it.
 
 **Durability and reads.** `authority.durable(a, c, at)` returns the highest position
 durable at `at`, issuing at most one barrier for every entry since the last.
-`authority.read(a, from, at, max)` returns up to `max` entries after position `from`
-that are durable at `at`. It needs no claim: followers and `store.at` read this way.
+`authority.read(a, from, at, max)` returns up to `max` records after position `from`
+that are durable at `at`, each checked against the chain (**Records** below), so a record
+it returns is the one the history holds. It needs no claim: followers and `store.at` read this way.
 `authority.levels` lists the levels the provider declares, weakest first
 ([STORE-2](#store-2-transactions)); `authority.floor` is the deployment's floor for the
 place, the declared level the grant names; `authority.max_entry` bounds the bytes of one
@@ -965,26 +973,26 @@ floor.
   different length means another claim appended, and the advance returns `Fenced()` with
   no effect. It then issues one `fdatasync` when `at` is `host`. A new segment
   adds a directory sync when it is created. A claim takes the same lock, truncates only a
-  torn tail, appends its claim entry and synchronizes. A reader at `host` notes the
+  torn tail, appends its claim record and synchronizes. A reader at `host` notes the
   file's length, synchronizes the file and returns entries up to that length, so it never
   returns an entry a host crash could lose. A failed `fdatasync` returns
   `Undecided(Io(..))`.
 - **Object storage.** The head object is the only mutable object and changes only by a
-  conditional replace. An advance puts the entry as a group object named by its position
+  conditional replace. An advance puts the record as an object named by its position
   and digest, create-if-absent, then replaces the head with one that names its claim, the
-  new end and the entry's digest, conditional on the entity tag the writer's own previous
+  new end and the record's digest, conditional on the entity tag the writer's own previous
   replace returned. The writer takes that tag only from its own replace's response, or
   from a read of the head that shows its own claim at its own end, never from any other
   read. A head names its claim and end, so no two heads have equal bytes and no tag
   recurs; a replace whose response was lost is therefore retried as the identical
   request, of which at most one lands. A claim reads the head and replaces it
   conditionally, or creates it when absent; of racing claims one replace succeeds. Every
-  entry names its predecessor's digest, so the head reaches every retained entry by name:
-  recovery reads the head and gets each group by its name, back to what it already holds.
-  It lists `h/` only as a hint that lets those gets run in parallel, and a group the
-  listing omits is fetched by name, never taken as missing. Recovering `n` groups costs a
+  record names its predecessor's digest, so the head reaches every retained record by name:
+  recovery reads the head and gets each record by its name, back to what it already holds.
+  It lists `h/` only as a hint that lets those gets run in parallel, and a record the
+  listing omits is fetched by name, never taken as missing. Recovering `n` records costs a
   head read, `ceil(n / 1000)` listing pages and `n` gets, or a head read and `n`
-  sequential gets with no listing. Reclamation removes only group objects at positions up
+  sequential gets with no listing. Reclamation removes only record objects at positions up
   to the head's end that the chain does not name. An object-storage entry whose endpoint
   does not honour create-if-absent and conditional replace refuses every claim with
   `Unsupported(Conditional())`; `objects.s3@1` uses `If-None-Match: *` and `If-Match`.
@@ -1034,11 +1042,11 @@ within `authority.max_entry` (**Bounds** below) refuses with `Unsupported(Size(.
 no commit within the limits is undecidable for size. A refused limit has no effect and is
 definite, never `Unknown(..)`: `store.open` checks the limits it is passed before it
 claims, whether or not the store exists, because a claim is an effect. **An incomplete
-creation is no store:** a history holding nothing but claim entries, as a failure between
+creation is no store:** a history holding nothing but claim records, as a failure between
 the first claim and its durable Genesis leaves it, has acknowledged nothing, and the next
 open creates the store on it, writing the Genesis after its own claim with the limits it
-is passed. Only a history whose every entry is an intact claim is read so; damage to any
-entry, the Genesis of an established store's included, is corruption. A deterministic bound on the work one body may do, equal
+is passed. Only a history whose every record is an intact claim record is read so; damage
+to any record, the Genesis of an established store's included, is corruption. A deterministic bound on the work one body may do, equal
 on every engine, is **Reserved**. It must charge every core operation by its operands, as
 the [long pure primitives](determinism.md#run-configuration) are charged, because an
 operation the host implements costs one step whatever its size; and its charges belong to
@@ -1066,25 +1074,44 @@ records the commit.
 
 Every integer is fixed-width little-endian. `H(x)` is SHA-256. A **byte string** is a
 `u32` length followed by that many bytes. There is one format version, named by the
-magic at the start of every record: six bytes naming the record's family (`HSHIST`,
-`HSNODE`, `HSHEAD`) and two version digits. A reader checks the magic before any digest
-or sum. A magic of the record's family with other version digits refuses the open with
+magic at the start of every record: six bytes naming the record's family (`HSHIST` for a
+history record, `HSGRUP` for a group, `HSNODE` for a checkpoint node, and each provider's
+own, such as `HSOBJH` for the object-storage head) and two version digits. A reader checks
+the magic before any digest or sum. A magic of the record's family with other version digits refuses the open with
 `Unsupported(Format(found, object))`, carrying the magic found; any other magic is
 corruption. Either refusal removes nothing, cuts nothing and writes nothing. A format
 change is a new magic and a cutover, never a second reader.
 
-**Groups.** The history is a chain of **groups**, each the commits of one advance:
+**Records.** The authority owns the record at every position, whole:
 
 ```text
-group  = "HSHIST02" prev:[32] first:u64 epoch:u64 count:u32 commit* defs:u32 def*
+record   = "HSHIST03" prev:[32] position:u64 epoch:u64 kind:u8 body
+claimed  = kind 1, body attempt:[16] identity:[32]
+appended = kind 2, body entry          // the rest of the record
+```
+
+`prev` is `H(record)` of the record before, all zeros at position 1, and `position` is the
+record's own. A record **follows** the history when `prev` and `position` continue it and
+either it is a claim record whose `epoch` is one above the previous record's and whose
+`identity` is the history's (the first claim record, at epoch 1, mints it), or it is an
+appended record with the previous record's `epoch` after at least one claim record. The
+authority checks every record it writes and every record it reads against this chain, and
+`authority.read` returns only records that follow; the engine never sees `prev` or
+`position`. The chain is the history's integrity: a reader that trusts a record's digest
+trusts every record before it. The last record is named by no later one, only by its
+provider: on object storage its object name carries its digest, and a local log checks only
+its frame's length and position.
+
+**Groups.** Each appended record's entry is one **group**, the commits of one advance:
+
+```text
+group  = "HSGRUP01" count:u32 commit* defs:u32 def*
 def    = path:bytes fingerprint:bytes code:[32] revision:bytes
 commit = kind:u8 body writes
 writes = n:u32 { op:u8 key:bytes [value:bytes if op = 1] }*
 ```
 
-`prev` is the **digest** `H(group)` of the previous group, all zeros for the first;
-`first` is the commit version of its first commit (versions start at 1); `epoch` is the
-writer epoch of the head that wrote it. The definition table names each distinct entry
+A group's **digest** is `H(entry)`. The definition table names each distinct entry
 the group's commits ran (its identity: definition path, signature fingerprint and code
 hash, with the runtime contract revision, [RUN-8](runners.md#run-8-identity-and-arrival)) once, and commits refer to it by index.
 The table follows the commits, so a writer encodes each commit once into the group's
@@ -1092,15 +1119,15 @@ buffer as it is ordered and appends the table and the count when it cuts the gro
 A write is a put (`op` 1) or a delete (`op` 2); keys strictly ascend, so a key occurs
 once. The SHA-256 of a commit's `writes` bytes is its write-set digest; it is derived,
 never stored. A group is valid only if every field decodes, nothing follows its
-definition table, it holds at least one commit, every index and op is in range, version
-1 is a Claim, and a claim is alone in its group. Across groups, the first commit that is not
-a claim is the Genesis, which occurs once: a history begins with one or more claim
-groups, then the Genesis. It **follows** the previous group when `prev` is
-that group's digest, `first` is one above its last version, and either it is a claim
-group whose `epoch` is one above the previous group's and whose claim names the
-history's identity (the first claim mints it), or it is not a claim group and has the
-previous group's `epoch`. The digest chain is the history's
-integrity: a reader that trusts a digest trusts every group before it.
+definition table, it holds at least one commit, and every index and op is in range.
+
+**Versions.** Commit versions start at 1 and number the history's commits in record
+order: a claim record is one commit, which writes nothing, and an appended record's group
+contributes its commits in order. The Genesis is the history's first commit that is not a
+claim and occurs once, so a history begins with one or more claim records and then a
+group whose first commit is the Genesis; every other commit comes after it, and a Fork
+names the identity the history's claim records carry. A group that breaks these rules is
+corruption.
 
 Commit kinds:
 
@@ -1114,11 +1141,11 @@ Every kind ends with its `writes`. Engine operations and their payloads:
 
 | Op | Payload |
 |---|---|
-| 1 Genesis | The limits `key_bytes value_bytes transaction_bytes range_rows` and the checkpoint node bounds `node_min node_mean node_max`, each `u32`; the bounds must hold the limits (**Checkpoints** below). It is the first commit after the claims the history begins with (commit 2 unless a creation was cut before its Genesis), and nowhere else. |
-| 2 Claim | `epoch:u64 attempt:[16] identity:[32]`: a claim, one above the previous epoch, with the claimant's random attempt identity and the history's identity. It is alone in its group, whose `epoch` is its own, and every later group carries that epoch until the next claim. Commit 1 is the first claim, which mints the identity; every later claim repeats it. |
+| 1 Genesis | The limits `key_bytes value_bytes transaction_bytes range_rows` and the checkpoint node bounds `node_min node_mean node_max`, each `u32`; the bounds must hold the limits (**Checkpoints** below). It is the first commit after the claim records the history begins with (commit 2 unless a creation was cut before its Genesis), and nowhere else. |
+| 2 | Unassigned: a claim is the authority's claim record, never a commit in a group. Op 2 is corruption. |
 | 3 Checkpoint | A checkpoint descriptor (below). |
 | 4 Retain | The whole retention state ([STORE-8](#store-8-versions-snapshots-and-forks)): `floor:u64`, `n:u32` pins `{ name:bytes version:u64 }` sorted by name, at most 1024 with names of at most 255 bytes, then `m:u32` checkpoint descriptors that retained versions rely on. |
-| 5 Fork | `identity:[32] origin:[32] at:u64`: the first commit of a fork, at version `at + 1`. Its group's `prev` is the digest of the origin's group that holds `at`, and that group's commits above `at` are not the fork's. |
+| 5 Fork | `identity:[32] origin:[32] at:u64`: a fork of the history `origin` at its version `at`, naming the identity of the fork's own history. It comes after the Genesis. |
 | 6 Stream | `op:u8 identity:[32]`: a fence (1) or purge (2) of a call stream ([STORE-12](#store-12-transactions-at-a-runner)). |
 | 7 Library | `name:bytes payload:bytes`: a step a library records as its own, a migration's above all ([STORE-9](#store-9-schema-history-renames-and-migrations)). |
 
@@ -1145,44 +1172,38 @@ The defaults are 256 KiB, 1 MiB and 4 MiB. Bounds **hold** limits when `0 < node
 nodes than the one below; `node_max` is at most the backend's object cap. A root index
 has at least two children, and a node is empty only as the root of an empty state. A **descriptor** is
 `version:u64 digest:[32] root:[32] height:u8 entries:u64 bytes:u64`: the checkpoint's
-version (always a group's last), the digest of that group, the root node, the number
+version (always a group's last; a claim record since writes nothing, so the state after
+the newest group is the state at the head's version), the digest of that group, the root node, the number
 of levels (1 for a lone leaf), the number of entries, and their key and value bytes. A checkpoint counts only once a Checkpoint commit after its version records its
 descriptor, so the chain authenticates it; its nodes are put before that commit.
 Validating one reads its nodes from the root, checks each against the digest its parent
-named, the keys' order and the descriptor's counts, and requires that the first group
-read after it has `prev` equal to the descriptor's digest.
+named, the keys' order and the descriptor's counts, and requires that the group whose
+last version is the descriptor's has the descriptor's digest.
 
-**The head record.** Each backend keeps one mutable record naming the history's end:
+**Provider records.** The engine keeps no head record: the history's end, its claims and
+its chain are the authority's. Each provider frames records its own way and checks every
+record against the chain as it reads it.
+
+**Local log.** Records are appended to segment files `<first position as 20 digits>.seg`
+in frames `len:u32 check:u32 record`, where `check` is the first four bytes of the SHA-256
+of `len` and the record's position, so a damaged length or a frame out of place is
+corruption, not a torn tail. A segment of 256 MiB or more takes no more records; the
+next record starts a new one. One advance is one append and, at `host`, one `fdatasync`.
+
+**Object storage.** A record is the object `h/` followed by its history position as 20
+decimal digits, `-` and the record's digest in lowercase hexadecimal, put only if free.
+The one mutable object is the head:
 
 ```text
-head = "HSHEAD01" identity:[32] epoch:u64 attempt:[16] end:u64 digest:[32]
-       checkpoint:descriptor locator:bytes retain:bytes origin:u8 [identity:[32] at:u64] sum:[32]
+head = "HSOBJH01" attempt:[16] end:u64 digest:[32] sum:[32]
 ```
 
-`sum` is the SHA-256 of everything before it. `end` and `digest` name the last group's
-version and digest, `checkpoint` the newest recorded checkpoint, `retain` the payload of
-the newest Retain commit, and `locator` where the group after the checkpoint starts. On
-object storage the head record is the object every advance replaces conditionally, so
-its `end` is the history's end. A local log rewrites it atomically (write, sync, rename,
-sync the directory) at a claim, a checkpoint, a Retain commit and a segment change; its
-`end` is then a lower bound that the log must reach, which detects the loss of a synced
-suffix up to it. Until a store's first checkpoint the descriptor is all zeros, and
-recovery starts from the first group.
-
-**Local log.** Groups are appended to segment files in the
-framed-file envelope of the [durable journal](determinism.md#durable-journal): magic `hirsel-history 1\n`,
-identity the store's identity, generation the version of the segment's first commit,
-one frame of kind 1 per group with sequences from 0, whose body digest is the group's
-digest, so a group is hashed once. A segment starts at the first group after a
-checkpoint, so earlier segments are reclaimed whole. One advance is one append and one
-`fdatasync`.
-
-**Object storage.** A group is the object `h/` followed by its history position as 20
-decimal digits, `-` and its digest in lowercase hexadecimal, put only if free; then the
-head is replaced conditionally on the tag of the writer's own last replace. A node is `n/` followed by its
-hexadecimal digest. A group object no head record's chain reaches, left by a writer
-fenced or undecided before its head replace, is not history and is reclaimed. A listing
-only finds candidates: every object is checked against the digest that names it.
+naming the newest claim's attempt, the history's end and the last record's digest; `sum`
+is the SHA-256 of everything before it. An advance puts the record, then replaces the head
+conditionally on the tag of the writer's own last replace. A node is `n/` followed by its
+hexadecimal digest. A record object no head's chain reaches, left by a writer fenced or
+undecided before its head replace, is not history and is reclaimed. A listing only finds
+candidates: every object is checked against the digest that names it.
 
 **Bounds.** `transaction_bytes` bounds one encoded commit, its call record and outcome
 included, so whether a transaction fits depends only on its run. Creating a store whose
@@ -1191,36 +1212,40 @@ included, so whether a transaction fits depends only on its run. Creating a stor
 every commit the limits admit fits in one advance. The frame's `u32` length bounds a
 local group at 4 GiB.
 
-**Recovery.** Opening reads, in order:
+**Recovery.** Opening claims the authority, whose claim reads the history to its end and
+settles a torn tail, then reads, in order:
 
-1. the head record, and refuses unless its sum, magic and identity hold;
-2. the checkpoint it names, nodes level by level, every leaf in parallel, validated as
-   above;
-3. the groups after the checkpoint: on a local log from the locator by sequential reads;
-   on object storage by following `prev` back by name from the group whose position and
-   digest the head names to the checkpoint's digest, getting in parallel the candidates
-   a listing of `h/` offers and the rest by name; other candidates are orphans;
-4. each group in order, checking its chain fields and applying its write sets.
+1. every record to the claim's end by `authority.read`, which checks each against the
+   chain: on a local log by sequential reads of the segments; on object storage by
+   following `prev` back by name from the record the head names, getting in parallel the
+   candidates a listing of `h/` offers and the rest by name, other candidates being
+   orphans;
+2. each appended record's group in order, decoded and checked against the version rules,
+   noting the newest Checkpoint commit;
+3. the checkpoint that commit names, nodes level by level, every leaf in parallel,
+   validated as above, and then the write sets of the commits after it, in order.
 
 Only the last frame of the last local segment can be **torn**: an incomplete final
-frame, which recovery cuts. Anything else that fails is **corruption**: a bad digest,
-sum, chain field or decoding, a missing referenced object, or a log that ends below the
-head record's `end`. Corruption refuses the open with
-`Corrupt(..)` naming the object, and removes nothing. A crash may tear or lose a
-suffix no level had reported durable, and recovery ends the history before it. When no
-intact state exists the open refuses rather than guess. Recovery never runs a body. The
-claim of the new head follows recovery.
+frame, which the claim cuts. Anything else that fails is **corruption**: a bad digest,
+sum, chain field or decoding, a missing referenced object, or a record that breaks the
+version rules. Corruption refuses the open with `Corrupt(..)` naming the object, and
+removes nothing. A crash may tear or lose a suffix no level had reported durable, and
+recovery ends the history before it. When no intact state exists the open refuses rather
+than guess. Recovery never runs a body.
 
 **Costs.** A local advance copies each commit's bytes once into a reusable group buffer,
-hashes the group once, and makes one write and one `fdatasync`; framing adds 141 bytes
-per group. A commit adds about 40 bytes plus its caller, argument, outcome and, per
-write, 9 bytes plus the key and value. On object storage an advance is one put and one
-conditional replace. Groups are written once and never rewritten; a checkpoint writes
-only the nodes it does not share with the previous one, and the head record is the only
-object rewritten. Recovery reads the head record, the checkpoint's nodes and the groups
-after it: for `N` commits since the checkpoint, their bytes once, in about one group per
-advance. `db.local@1` records a checkpoint when the history since the last one exceeds
-the state's size and at least 64 MiB, so recovery reads at most about twice the state.
+hashes the group once for its digest, and the authority hashes the record once for the
+chain; it makes one write and, at `host`, one `fdatasync`. The record and its frame add
+65 bytes per group and the group 16 bytes plus its definition table. A commit adds about
+40 bytes plus its caller, argument, outcome and, per write, 9 bytes plus the key and
+value. A claim is one record of 105 bytes, 113 framed on a log. On object storage an advance is one put and
+one conditional replace. Records are written once and never rewritten; a checkpoint
+writes only the nodes it does not share with the previous one, and the object-storage
+head is the only object rewritten. Recovery reads every record the authority retains and
+applies only the commits after the newest checkpoint: for `N` commits since it, their
+write sets once. `db.local@1` records a checkpoint when the history since the last one
+exceeds the state's size and at least 64 MiB, so recovery applies at most about twice the
+state.
 
 ### STORE-12: Transactions at a runner
 

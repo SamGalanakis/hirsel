@@ -4,7 +4,7 @@ use super::{Io, IoGrant, grant_not_granted, io_ok};
 use hirsel_heapcheck::{OpOutcome, OpValue};
 use hirsel_lir::layout_types::ScalarKind;
 use hirsel_store_authority::{
-    Authority, AuthorityError, Claim, Error,
+    Authority, AuthorityError, Claim, Error, Record,
     wire::{self, Outcome},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -332,12 +332,12 @@ impl Io {
                 ("authority", op, rest) => {
                     let (claim, request) = match (op, rest) {
                         ("claim", []) => (None, wire::Request::Claim),
-                        ("advance", [c, from, OpValue::Bytes(entry), at]) => (
+                        ("advance", [c, from, OpValue::Bytes(payload), at]) => (
                             Some(handle(c)?),
                             wire::Request::Advance {
                                 from: bits(from)?,
                                 at: level(at)?,
-                                entry: entry.clone(),
+                                payload: payload.clone(),
                             },
                         ),
                         ("durable", [c, at]) => {
@@ -382,7 +382,27 @@ impl Io {
                             }
                         }),
                         Outcome::Read(r) => result(r, |all| {
-                            OpValue::Sequence(all.into_iter().map(OpValue::ByteSequence).collect())
+                            OpValue::Sequence(
+                                all.into_iter()
+                                    .map(|r| match r {
+                                        Record::Claimed {
+                                            epoch,
+                                            attempt,
+                                            identity,
+                                        } => v(
+                                            0,
+                                            OpValue::Aggregate(vec![
+                                                word(epoch),
+                                                OpValue::ByteSequence(attempt.to_vec()),
+                                                OpValue::ByteSequence(identity.to_vec()),
+                                            ]),
+                                        ),
+                                        Record::Appended(payload) => {
+                                            v(1, OpValue::ByteSequence(payload))
+                                        }
+                                    })
+                                    .collect(),
+                            )
                         }),
                         Outcome::Get(r) => result(r, |b| match b {
                             Some(b) => v(1, OpValue::ByteSequence(b)),
@@ -436,7 +456,7 @@ mod tests {
         let append = wire::Request::Advance {
             from: 1,
             at: 0,
-            entry: b"second".to_vec(),
+            payload: b"second".to_vec(),
         };
         assert_eq!(
             b.request(0, Some(40), append.clone(), 41),
@@ -461,7 +481,8 @@ mod tests {
         assert!(b.clone().live().unwrap().claims.is_empty());
     }
 
-    // An actual authority.read returns two byte buffers, materialized under H.
+    // An actual authority.read returns a claim record and an append record, whose three
+    // byte buffers are materialized under H.
     // Removing its release leaks that result; duplicating it releases twice.
     #[test]
     fn authority_read_buffers_detect_missing_and_duplicate_release() {
@@ -477,7 +498,7 @@ mod tests {
                 wire::Request::Advance {
                     from: 1,
                     at: 0,
-                    entry: b"payload".to_vec(),
+                    payload: b"payload".to_vec(),
                 },
                 41,
             )
@@ -508,30 +529,32 @@ mod tests {
             r.scan = vec![ScanStep::SliceOwner { offset: 0 }];
             r.drop = vec![DropStep::Release { offset: 0 }];
             r.copy = CopyRecipe::Dup;
+            // HistoryRecord: Claimed(u64, Bytes, Bytes) | Appended(Bytes), 64 bytes.
+            let record = l.variant(&[&[word_layout, bytes, bytes], &[bytes]]);
             let sequence = l.record(&[word_layout]);
             let r = l.get_mut(sequence);
-            r.kind = LayoutKind::Sequence { element: bytes };
+            r.kind = LayoutKind::Sequence { element: record };
             r.size = SizeSpec::Dynamic(vec![
                 SizeTerm::Constant(16),
                 SizeTerm::ReadLength {
                     offset: 0,
                     scalar: ScalarKind::U64,
                 },
-                SizeTerm::Constant(24),
+                SizeTerm::Constant(64),
                 SizeTerm::Multiply,
                 SizeTerm::Add,
             ]);
             r.scan = vec![ScanStep::Sequence {
                 count_offset: 0,
                 offset: 16,
-                stride: 24,
-                element: bytes,
+                stride: 64,
+                element: record,
             }];
             r.drop = vec![DropStep::ElementsReverse {
                 count_offset: 0,
                 offset: 16,
-                stride: 24,
-                element: bytes,
+                stride: 64,
+                element: record,
             }];
             r.copy = CopyRecipe::NotCopyable;
             let list = l.block(sequence);

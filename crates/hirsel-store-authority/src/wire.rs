@@ -7,13 +7,13 @@
 //! authority and claim it named; [`serve`] performs it and [`Request::admits`] is the
 //! check every engine applies to an outcome, live or recorded.
 
-use crate::{Advanced, Authority, AuthorityError, Claim, Error, Level};
+use crate::{Advanced, Authority, AuthorityError, Claim, Error, Level, Record};
 
 /// A provider request. A level is its index among the authority's declared levels.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Request {
     Claim,
-    Advance { from: u64, at: u8, entry: Vec<u8> },
+    Advance { from: u64, at: u8, payload: Vec<u8> },
     Durable { at: u8 },
     Reclaim,
     Read { from: u64, at: u8, max: u64 },
@@ -75,11 +75,11 @@ impl Request {
         let mut w = Vec::new();
         match self {
             Request::Claim => w.push(0),
-            Request::Advance { from, at, entry } => {
+            Request::Advance { from, at, payload } => {
                 w.push(1);
                 u64(&mut w, *from);
                 w.push(*at);
-                bytes(&mut w, entry);
+                bytes(&mut w, payload);
             }
             Request::Durable { at } => w.extend_from_slice(&[2, *at]),
             Request::Reclaim => w.push(3),
@@ -109,7 +109,7 @@ impl Request {
             1 => Request::Advance {
                 from: r.u64()?,
                 at: r.u8()?,
-                entry: r.bytes()?.to_vec(),
+                payload: r.bytes()?.to_vec(),
             },
             2 => Request::Durable { at: r.u8()? },
             3 => Request::Reclaim,
@@ -161,8 +161,8 @@ pub fn serve(
                 c.end
             }))
         }
-        Request::Advance { from, at, entry } => {
-            Outcome::Advanced(p.advance(claim()?, from, entry, Level(at)))
+        Request::Advance { from, at, payload } => {
+            Outcome::Advanced(p.advance(claim()?, from, payload, Level(at)))
         }
         Request::Durable { at } => Outcome::Position(p.durable(claim()?, Level(at))),
         Request::Reclaim => Outcome::Unit(p.reclaim(claim()?)),
@@ -179,7 +179,7 @@ pub enum Outcome {
     /// `claim`: the claim's end; `durable`: the durable position.
     Position(Result<u64, Error>),
     Advanced(Advanced),
-    Read(Result<Vec<Vec<u8>>, Error>),
+    Read(Result<Vec<Record>, Error>),
     Get(Result<Option<Vec<u8>>, Error>),
     /// `put` and `reclaim`.
     Unit(Result<(), Error>),
@@ -215,7 +215,7 @@ pub fn encode(o: &Outcome) -> Vec<u8> {
             result(&mut w, r, |w, all| {
                 u64(w, all.len() as u64);
                 for e in all {
-                    bytes(w, e);
+                    record(w, e);
                 }
             });
         }
@@ -253,7 +253,7 @@ pub fn decode(b: &[u8]) -> Option<Outcome> {
             let n = r.u64()?;
             let mut all = Vec::new();
             for _ in 0..n {
-                all.push(r.bytes()?.to_vec());
+                all.push(r.record()?);
             }
             Some(all)
         })?),
@@ -275,6 +275,25 @@ fn u64(w: &mut Vec<u8>, n: u64) {
 fn bytes(w: &mut Vec<u8>, b: &[u8]) {
     u64(w, b.len() as u64);
     w.extend_from_slice(b);
+}
+
+fn record(w: &mut Vec<u8>, e: &Record) {
+    match e {
+        Record::Claimed {
+            epoch,
+            attempt,
+            identity,
+        } => {
+            w.push(0);
+            u64(w, *epoch);
+            w.extend_from_slice(attempt);
+            w.extend_from_slice(identity);
+        }
+        Record::Appended(payload) => {
+            w.push(1);
+            bytes(w, payload);
+        }
+    }
 }
 
 fn medium(w: &mut Vec<u8>, e: &AuthorityError) {
@@ -343,6 +362,17 @@ impl<'a> Reader<'a> {
     }
     fn text(&mut self) -> Option<String> {
         String::from_utf8(self.bytes()?.to_vec()).ok()
+    }
+    fn record(&mut self) -> Option<Record> {
+        Some(match self.u8()? {
+            0 => Record::Claimed {
+                epoch: self.u64()?,
+                attempt: self.take(16)?.try_into().ok()?,
+                identity: self.take(32)?.try_into().ok()?,
+            },
+            1 => Record::Appended(self.bytes()?.to_vec()),
+            _ => return None,
+        })
     }
     fn medium(&mut self) -> Option<AuthorityError> {
         Some(match self.u8()? {

@@ -33,11 +33,10 @@
 //! the write lands (its condition checked then) just before a later request of
 //! any writer, as an unanswered request that arrives late does.
 
-use crate::group::{self, Tip};
 use crate::harness::{Rng, entry};
 use crate::objects::{Bug, Objects};
 use crate::sim::Bucket;
-use crate::{Advanced, Authority, Claim, Error, Level};
+use crate::{Advanced, Authority, Claim, Error, Level, Record};
 use hirsel_object_storage::fake_s3::FakeS3;
 use hirsel_object_storage::{Condition, Listing, ObjectStorage, Put, Replaced, StorageError, Tag};
 use std::cell::Cell;
@@ -93,7 +92,7 @@ impl Baton {
 
 /// The whole history, reading on from what each read returned and retrying
 /// refused reads.
-fn read_all(h: &mut Objects) -> Result<Vec<Vec<u8>>, String> {
+fn read_all(h: &mut Objects) -> Result<Vec<Record>, String> {
     let mut all = Vec::new();
     let mut refused = 0;
     loop {
@@ -106,9 +105,9 @@ fn read_all(h: &mut Objects) -> Result<Vec<Vec<u8>>, String> {
     }
 }
 
-type Ledger = Arc<Mutex<BTreeMap<u64, Vec<u8>>>>;
-/// The entries of advances answered `Fenced`.
-type Denied = Arc<Mutex<Vec<Vec<u8>>>>;
+type Ledger = Arc<Mutex<BTreeMap<u64, Record>>>;
+/// The records of advances answered `Fenced`.
+type Denied = Arc<Mutex<Vec<Record>>>;
 type Hook = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
 
 /// Where a schedule's history lives.
@@ -370,48 +369,52 @@ fn writer(
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9) ^ (me as u64 + 1) | 1);
     let mut h = Objects::new(store, "zone".into(), Level(0));
     h.bug = bug;
-    let mut held: Option<(Claim, Tip)> = None;
+    let mut held: Option<Claim> = None;
     let mut n = 0u64;
     for _ in 0..steps {
         match rng.below(10) {
-            0 | 1 => match h.claim((rng.next() as u128).to_le_bytes(), [rng.next() as u8; 32]) {
-                Ok(c) => {
-                    let all = read_all(&mut h)?;
-                    let mut tip = Tip::origin();
-                    for e in all.iter().take(c.end as usize) {
-                        tip = group::follow(&tip, e)
-                            .map_err(|_| "a claimed history does not follow".to_string())?;
+            0 | 1 => {
+                let attempt = (rng.next() as u128).to_le_bytes();
+                match h.claim(attempt, [rng.next() as u8; 32]) {
+                    Ok(c) => {
+                        // The history the writer now owns ends at its own claim,
+                        // unless a later claim has already passed it.
+                        let all = read_all(&mut h)?;
+                        if !matches!(all.get(c.end as usize - 1), Some(Record::Claimed { attempt: a, .. }) if *a == attempt)
+                        {
+                            return Err(format!("position {} is not the claim's own", c.end));
+                        }
+                        held = Some(c.claim);
                     }
-                    held = Some((c.claim, tip));
+                    Err(e @ (Error::Corrupt(_) | Error::Format { .. })) => {
+                        return Err(format!("claim refused the history: {e:?}"));
+                    }
+                    Err(_) => {}
                 }
-                Err(e @ (Error::Corrupt(_) | Error::Format { .. })) => {
-                    return Err(format!("claim refused the history: {e:?}"));
-                }
-                Err(_) => {}
-            },
+            }
             2..=6 => {
-                let Some((c, tip)) = held.as_mut() else {
+                let Some(c) = held.as_mut() else {
                     continue;
                 };
                 n += 1;
-                let e = entry(tip, (me as u64) << 32 | n, 1 + rng.below(4) as u32);
+                let e = entry((me as u64) << 32 | n, 1 + rng.below(4) as u32);
                 let from = c.end();
                 match h.advance(c, from, e.clone(), Level(0)) {
                     Advanced::Advanced(p) => {
                         if p != from + 1 {
                             return Err(format!("advanced from {from} to {p}"));
                         }
+                        let record = Record::Appended(e);
                         let mut l = ledger.lock().unwrap();
-                        if l.get(&p).is_some_and(|b| *b != e) {
+                        if l.get(&p).is_some_and(|b| *b != record) {
                             return Err(format!("position {p} acknowledged twice"));
                         }
-                        l.insert(p, e.clone());
-                        *tip = group::follow(tip, &e).unwrap();
+                        l.insert(p, record);
                     }
                     Advanced::Refused(_) => {}
                     answer @ (Advanced::Fenced | Advanced::Undecided(_)) => {
                         if answer == Advanced::Fenced {
-                            denied.lock().unwrap().push(e.clone());
+                            denied.lock().unwrap().push(Record::Appended(e.clone()));
                         }
                         // A dead claim stays dead: used again, it is fenced.
                         let from = c.end();
@@ -425,7 +428,7 @@ fn writer(
                 }
             }
             7 => {
-                let Some((c, _)) = held.as_mut() else {
+                let Some(c) = held.as_mut() else {
                     continue;
                 };
                 match h.reclaim(c) {
@@ -438,7 +441,7 @@ fn writer(
                 }
             }
             8 => {
-                if let Some((c, _)) = held.as_mut()
+                if let Some(c) = held.as_mut()
                     && let Err(Error::Fenced) = h.durable(c, Level(0))
                 {
                     held = None;
@@ -449,7 +452,7 @@ fn writer(
                 let l = ledger.lock().unwrap();
                 for (p, b) in l.range(..=all.len() as u64) {
                     if all[*p as usize - 1] != *b {
-                        return Err(format!("a read returned other bytes at {p}"));
+                        return Err(format!("a read returned another record at {p}"));
                     }
                 }
             }
@@ -584,9 +587,8 @@ fn over_s3_an_advance_is_two_requests_and_recovery_gets_each_group_once() {
     let fake = &media.fake.as_ref().unwrap().0;
     let mut h = Objects::new(media.handle(), "zone".into(), Level(0));
     let mut c = h.claim([1; 16], [7; 32]).unwrap().claim;
-    let mut tip = group::follow(&Tip::origin(), &read_all(&mut h).unwrap()[0]).unwrap();
     for tag in 0..1000 {
-        let e = entry(&tip, tag, 1);
+        let e = entry(tag, 1);
         let before = fake.requests();
         let from = c.end();
         assert_eq!(
@@ -594,7 +596,6 @@ fn over_s3_an_advance_is_two_requests_and_recovery_gets_each_group_once() {
             Advanced::Advanced(from + 1)
         );
         assert_eq!(fake.requests() - before, 2);
-        tip = group::follow(&tip, &e).unwrap();
     }
     let before = fake.requests();
     assert_eq!(h.durable(&mut c, Level(0)), Ok(1001));
@@ -614,9 +615,8 @@ fn an_advance_is_two_requests_and_recovery_gets_each_group_once() {
     let bucket = Arc::new(Bucket::new(1, BTreeMap::new()));
     let mut h = Objects::new(bucket.clone(), "zone".into(), Level(0));
     let mut c = h.claim([1; 16], [7; 32]).unwrap().claim;
-    let mut tip = group::follow(&Tip::origin(), &read_all(&mut h).unwrap()[0]).unwrap();
     for tag in 0..20 {
-        let e = entry(&tip, tag, 1);
+        let e = entry(tag, 1);
         let before = bucket.requests();
         let from = c.end();
         assert_eq!(
@@ -624,7 +624,6 @@ fn an_advance_is_two_requests_and_recovery_gets_each_group_once() {
             Advanced::Advanced(from + 1)
         );
         assert_eq!(bucket.requests() - before, 2);
-        tip = group::follow(&tip, &e).unwrap();
     }
     let before = bucket.requests();
     let mut fresh = Objects::new(bucket.clone(), "zone".into(), Level(0));
@@ -729,8 +728,7 @@ impl ObjectStorage for Scripted {
 fn writer_a(s: &Arc<Scripted>) -> (Objects, Claim, Vec<u8>) {
     let mut h = Objects::new(s.clone(), "zone".into(), Level(0));
     let c = h.claim([1; 16], [7; 32]).unwrap().claim;
-    let tip = group::follow(&Tip::origin(), &read_all(&mut h).unwrap()[0]).unwrap();
-    (h, c, entry(&tip, 1, 1))
+    (h, c, entry(1, 1))
 }
 
 /// Writer B claims the bucket on its own handle.
@@ -739,7 +737,7 @@ fn b_claims(bucket: &Arc<Bucket>) {
     b.claim([2; 16], [7; 32]).unwrap();
 }
 
-fn recovered(bucket: &Arc<Bucket>) -> Vec<Vec<u8>> {
+fn recovered(bucket: &Arc<Bucket>) -> Vec<Record> {
     read_all(&mut Objects::new(bucket.clone(), "zone".into(), Level(0))).unwrap()
 }
 
@@ -763,7 +761,7 @@ fn an_advance_whose_entry_is_at_its_position_under_a_later_claim_is_advanced() {
         h.advance(&mut c, from, e.clone(), Level(0)),
         Advanced::Advanced(from + 1)
     );
-    assert_eq!(recovered(&bucket)[from as usize], e);
+    assert_eq!(recovered(&bucket)[from as usize], Record::Appended(e));
 }
 
 /// H2 case 2, another digest at p: B claims before A's replace (answered
@@ -790,7 +788,10 @@ fn an_advance_whose_position_holds_another_entry_is_fenced() {
             "held {held}"
         );
         s.land();
-        assert!(!recovered(&bucket).contains(&e), "held {held}");
+        assert!(
+            !recovered(&bucket).contains(&Record::Appended(e)),
+            "held {held}"
+        );
     }
 }
 
@@ -810,7 +811,7 @@ fn an_advance_whose_absence_is_unproved_is_undecided_across_retries() {
         Advanced::Undecided(_)
     ));
     s.land();
-    assert_eq!(recovered(&bucket)[from as usize], e);
+    assert_eq!(recovered(&bucket)[from as usize], Record::Appended(e));
 
     let bucket = Arc::new(Bucket::new(1, BTreeMap::new()));
     let s = Scripted::new(bucket.clone());
@@ -825,5 +826,5 @@ fn an_advance_whose_absence_is_unproved_is_undecided_across_retries() {
         h.advance(&mut c, from, e.clone(), Level(0)),
         Advanced::Undecided(_)
     ));
-    assert_eq!(recovered(&bucket)[from as usize], e);
+    assert_eq!(recovered(&bucket)[from as usize], Record::Appended(e));
 }

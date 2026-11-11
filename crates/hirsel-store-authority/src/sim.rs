@@ -24,10 +24,10 @@
 //! `crash_at` is a power failure right after its answer. A power failure
 //! loses everything not durable at the strongest level and ends every claim.
 
-use crate::group::{self, Tip};
+use crate::envelope::{self, Chain};
 use crate::{
     Advanced, Authority, AuthorityError, AuthorityGrant, Claim, Claimed, ConfigError, Error, Level,
-    MAX_ENTRY, level_name_ok, live, owner_id,
+    Record, level_name_ok, live, owner_id,
 };
 use hirsel_object_storage::{
     Condition, LIST_PAGE, Listing, ObjectStorage, Put, Replaced, StorageError, Tag, check_key,
@@ -154,6 +154,15 @@ struct Cut {
 }
 
 impl World {
+    /// The chain of the history's first `end` records.
+    fn follow(&self, end: usize) -> Result<Chain, Error> {
+        let mut chain = Chain::default();
+        for (i, e) in self.entries[..end].iter().enumerate() {
+            chain.follow(e).map_err(|b| crate::bad(b, i as u64 + 1))?;
+        }
+        Ok(chain)
+    }
+
     /// Count a request and say which cuts fire at it.
     fn cut(&mut self) -> Cut {
         self.requests += 1;
@@ -277,26 +286,17 @@ impl Sim {
             return Err(Error::Refused(AuthorityError::Unreachable));
         }
         w.torn = None;
-        let mut tip = Tip::origin();
-        for (i, e) in w.entries.iter().enumerate() {
-            tip = group::follow(&tip, e).map_err(|b| crate::bad(b, i as u64 + 1))?;
-        }
-        let entry = group::claim_group(&tip, attempt, fresh);
+        let mut chain = w.follow(w.entries.len())?;
+        let entry = envelope::claimed(&chain.tip, attempt, fresh);
+        chain
+            .follow(&entry)
+            .expect("a claim record follows its tip");
         w.entries.push(entry);
         // A claim is a synchronized append: durable at every level.
         w.barrier(top);
         w.newest = Some(attempt);
-        let end = w.entries.len() as u64;
-        let claim = Claim {
-            owner: self.owner,
-            attempt,
-            end,
-            durable: vec![end; self.levels.len()],
-            segment: 0,
-            length: 0,
-            tag: None,
-            dead: false,
-        };
+        let claim = Claim::new(self.owner, attempt, &chain.tip, self.levels.len());
+        let end = claim.end;
         Ok(Claimed { claim, end })
     }
 
@@ -305,7 +305,7 @@ impl Sim {
         w: &mut World,
         c: &mut Claim,
         from: u64,
-        entry: Vec<u8>,
+        payload: Vec<u8>,
         at: Level,
     ) -> Advanced {
         #[cfg(test)]
@@ -324,12 +324,13 @@ impl Sim {
             c.dead = true;
             return Advanced::Fenced;
         }
-        if entry.len() as u64 > MAX_ENTRY {
+        if crate::oversized(&payload) {
             return Advanced::Refused(AuthorityError::io(std::io::ErrorKind::InvalidInput));
         }
         if w.fault("refuse") {
             return Advanced::Refused(AuthorityError::Unreachable);
         }
+        let entry = envelope::appended(&c.tip(), &payload);
         let lost = w.fault("lost_response");
         if lost && w.draws.next().is_multiple_of(2) {
             // The request was lost: the provider reads the history, finds it
@@ -340,6 +341,7 @@ impl Sim {
             }
             return Advanced::Refused(AuthorityError::Unreachable);
         }
+        c.digest = envelope::digest(&entry);
         w.entries.push(entry);
         let position = w.entries.len() as u64;
         c.end = position;
@@ -384,13 +386,7 @@ impl Sim {
         Ok(c.durable[i])
     }
 
-    fn read_in(
-        &self,
-        w: &mut World,
-        from: u64,
-        at: Level,
-        max: u64,
-    ) -> Result<Vec<Vec<u8>>, Error> {
+    fn read_in(&self, w: &mut World, from: u64, at: Level, max: u64) -> Result<Vec<Record>, Error> {
         #[cfg(test)]
         let no_barrier = w.bug == Some(Bug::ReadWithoutBarrier);
         #[cfg(not(test))]
@@ -411,7 +407,16 @@ impl Sim {
         let end = w.entries.len();
         let start = (from as usize).min(end);
         let stop = start.saturating_add(max as usize).min(end);
-        Ok(w.entries[start..stop].to_vec())
+        // A simulated history is followed from its start on every read: a
+        // power failure may have cut it anywhere since the last.
+        let mut chain = w.follow(start)?;
+        (start..stop)
+            .map(|i| {
+                chain
+                    .follow(&w.entries[i])
+                    .map_err(|b| crate::bad(b, i as u64 + 1))
+            })
+            .collect()
     }
 
     fn get_in(&self, w: &mut World, name: &str) -> Result<Option<Vec<u8>>, Error> {
@@ -457,10 +462,6 @@ impl Authority for Sim {
     fn floor(&self) -> Level {
         self.floor
     }
-    fn max_entry(&self) -> u64 {
-        MAX_ENTRY
-    }
-
     fn claim(&mut self, attempt: [u8; 16], fresh: [u8; 32]) -> Result<Claimed, Error> {
         let mut w = self.world.lock().unwrap();
         let cut = w.cut();
@@ -530,7 +531,7 @@ impl Authority for Sim {
         r
     }
 
-    fn read(&mut self, from: u64, at: Level, max: u64) -> Result<Vec<Vec<u8>>, Error> {
+    fn read(&mut self, from: u64, at: Level, max: u64) -> Result<Vec<Record>, Error> {
         let mut w = self.world.lock().unwrap();
         let cut = w.cut();
         let r = if cut.fail {
@@ -800,19 +801,16 @@ impl Authority for Client {
     fn floor(&self) -> Level {
         self.floor
     }
-    fn max_entry(&self) -> u64 {
-        self.client.max_entry()
-    }
     fn claim(&mut self, attempt: [u8; 16], fresh: [u8; 32]) -> Result<Claimed, Error> {
         self.serving().claim(attempt, fresh)
     }
-    fn advance(&mut self, c: &mut Claim, from: u64, entry: Vec<u8>, at: Level) -> Advanced {
-        self.serving().advance(c, from, entry, at)
+    fn advance(&mut self, c: &mut Claim, from: u64, payload: Vec<u8>, at: Level) -> Advanced {
+        self.serving().advance(c, from, payload, at)
     }
     fn durable(&mut self, c: &mut Claim, at: Level) -> Result<u64, Error> {
         self.serving().durable(c, at)
     }
-    fn read(&mut self, from: u64, at: Level, max: u64) -> Result<Vec<Vec<u8>>, Error> {
+    fn read(&mut self, from: u64, at: Level, max: u64) -> Result<Vec<Record>, Error> {
         self.serving().read(from, at, max)
     }
     fn get(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {

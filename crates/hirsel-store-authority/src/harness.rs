@@ -8,11 +8,11 @@
 //!
 //! 1. an entry acknowledged durable at level `l` (an `Advanced` at `l`, or a
 //!    `durable(l)` covering it) survives every later failure that `l` survives,
-//!    with its bytes;
+//!    with its record;
 //! 2. an entry a read at `l` returned survives the same failures;
 //! 3. no position is acknowledged with two different entries while the first
 //!    is still owed (so a fenced writer never acknowledges);
-//! 4. a read returns at each position the bytes acknowledged there, if any;
+//! 4. a read returns at each position the record acknowledged there, if any;
 //! 5. recovery refuses a history only at a position no writer was acknowledged at;
 //! 6. a claim that died (`Fenced`, `Undecided`) is `Fenced` when used again.
 //!
@@ -20,29 +20,24 @@
 //! refuse; it may never change or drop what the ledger owes. Each planted
 //! defect must break a law.
 
-use crate::group::{self, Tip};
 use crate::sim::{Bug, Config, Sim};
-use crate::{Advanced, Authority, Claim, Error, Level};
+use crate::{Advanced, Authority, Claim, Error, Level, Record};
 use std::collections::BTreeMap;
 
-/// A non-claim group of `commits` engine Library commits following `tip`,
-/// unique by `tag`.
-pub(crate) fn entry(tip: &Tip, tag: u64, commits: u32) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(b"HSHIST02");
-    out.extend_from_slice(&tip.digest);
-    out.extend_from_slice(&(tip.last + 1).to_le_bytes());
-    out.extend_from_slice(&tip.epoch.to_le_bytes());
-    out.extend_from_slice(&commits.to_le_bytes());
-    for _ in 0..commits {
-        out.extend_from_slice(&[2, 7]); // an engine Library commit
-        out.extend_from_slice(&12u32.to_le_bytes());
-        out.extend_from_slice(&0u32.to_le_bytes());
-        out.extend_from_slice(&tag.to_le_bytes());
-        out.extend_from_slice(&0u32.to_le_bytes()); // writes
+/// An engine payload unique by `tag`, `parts` times as long as the smallest:
+/// no authority reads it, so only its bytes and size matter.
+pub(crate) fn entry(tag: u64, parts: u32) -> Vec<u8> {
+    tag.to_le_bytes().repeat(parts as usize * 4)
+}
+
+/// The position a refusal names, when it names a history record.
+pub(crate) fn refused_at(e: &Error) -> Option<u64> {
+    match e {
+        Error::Corrupt(o) | Error::Format { object: o, .. } => {
+            o.strip_prefix("history entry ")?.parse().ok()
+        }
+        _ => None,
     }
-    out.extend_from_slice(&0u32.to_le_bytes()); // definitions
-    out
 }
 
 pub(crate) struct Rng(pub(crate) u64);
@@ -59,12 +54,18 @@ impl Rng {
     }
 }
 
-/// The whole history at the weakest level, retrying refused reads.
-fn read_all(sim: &mut Sim) -> Result<Vec<Vec<u8>>, String> {
+/// The history at the weakest level, retrying refused reads, up to the first
+/// record a failure damaged: a read refuses there, and the ledger's checks
+/// then prove nothing owed is at or past it.
+fn read_all(sim: &mut Sim) -> Result<Vec<Record>, String> {
+    let mut max = u64::MAX;
     loop {
-        match sim.read(0, Level(0), u64::MAX) {
+        match sim.read(0, Level(0), max) {
             Ok(all) => return Ok(all),
             Err(Error::Refused(_)) => continue,
+            Err(e) if max == u64::MAX && refused_at(&e).is_some() => {
+                max = refused_at(&e).unwrap() - 1
+            }
             Err(e) => return Err(format!("read: {e:?}")),
         }
     }
@@ -72,16 +73,16 @@ fn read_all(sim: &mut Sim) -> Result<Vec<Vec<u8>>, String> {
 
 struct Writer {
     sim: Sim,
-    claim: Option<(Claim, Tip)>,
+    claim: Option<Claim>,
 }
 
-/// What the ledger owes at a position: the bytes, the strongest level they
-/// were acknowledged or observed at, and whether a writer was acknowledged.
-type Ledger = BTreeMap<u64, (Vec<u8>, u8, bool)>;
+/// What the ledger owes at a position: the record, the strongest level it
+/// was acknowledged or observed at, and whether a writer was acknowledged.
+type Ledger = BTreeMap<u64, (Record, u8, bool)>;
 
-fn owe(ledger: &mut Ledger, p: u64, bytes: &[u8], level: u8, acked: bool) -> Result<(), String> {
+fn owe(ledger: &mut Ledger, p: u64, record: &Record, level: u8, acked: bool) -> Result<(), String> {
     match ledger.get_mut(&p) {
-        Some((b, l, a)) if b == bytes => {
+        Some((b, l, a)) if b == record => {
             *l = (*l).max(level);
             *a |= acked;
             Ok(())
@@ -90,7 +91,7 @@ fn owe(ledger: &mut Ledger, p: u64, bytes: &[u8], level: u8, acked: bool) -> Res
             "position {p} acknowledged with two different entries"
         )),
         None => {
-            ledger.insert(p, (bytes.to_vec(), level, acked));
+            ledger.insert(p, (record.clone(), level, acked));
             Ok(())
         }
     }
@@ -136,29 +137,20 @@ fn schedule(seed: u64, steps: u32, levels: u8, bug: Option<Bug>) -> Result<(), S
                 let wr = &mut writers[w];
                 match wr.sim.claim(attempt, fresh) {
                     Ok(c) => {
-                        // The writer reads the history it now owns to its end.
+                        // The writer reads the history it now owns to its end,
+                        // which is its own claim.
                         let all = read_all(&mut wr.sim)?;
-                        let mut tip = Tip::origin();
-                        for e in &all {
-                            tip = group::follow(&tip, e)
-                                .map_err(|_| "a claimed history does not follow".to_string())?;
-                        }
                         if all.len() as u64 != c.end {
                             return Err("claim end is not the history's end".into());
                         }
-                        wr.claim = Some((c.claim, tip));
+                        if !matches!(all.last(), Some(Record::Claimed { attempt: a, .. }) if *a == attempt)
+                        {
+                            return Err("a claim's last record is not its own".into());
+                        }
+                        wr.claim = Some(c.claim);
                     }
-                    Err(Error::Corrupt(_)) => {
-                        let all = read_all(&mut wr.sim)?;
-                        let mut tip = Tip::origin();
-                        let bad = all.iter().position(|e| match group::follow(&tip, e) {
-                            Ok(t) => {
-                                tip = t;
-                                false
-                            }
-                            Err(_) => true,
-                        });
-                        let p = bad.ok_or("recovery refused a history that follows")? as u64 + 1;
+                    Err(e @ Error::Corrupt(_)) => {
+                        let p = refused_at(&e).ok_or("recovery refused without a position")?;
                         if matches!(ledger.get(&p), Some((_, _, true))) {
                             return Err(format!("recovery refused the acknowledged entry at {p}"));
                         }
@@ -168,19 +160,18 @@ fn schedule(seed: u64, steps: u32, levels: u8, bug: Option<Bug>) -> Result<(), S
             }
             2..=6 => {
                 let wr = &mut writers[w];
-                let Some((c, tip)) = wr.claim.as_mut() else {
+                let Some(c) = wr.claim.as_mut() else {
                     continue;
                 };
                 tag += 1;
-                let e = entry(tip, tag, 1 + rng.below(4) as u32);
+                let e = entry(tag, 1 + rng.below(4) as u32);
                 let from = c.end();
                 match wr.sim.advance(c, from, e.clone(), at) {
                     Advanced::Advanced(p) => {
                         if p != from + 1 {
                             return Err(format!("advanced from {from} to {p}"));
                         }
-                        owe(&mut ledger, p, &e, at.0, true)?;
-                        *tip = group::follow(tip, &e).unwrap();
+                        owe(&mut ledger, p, &Record::Appended(e), at.0, true)?;
                     }
                     Advanced::Refused(_) => {}
                     Advanced::Fenced | Advanced::Undecided(_) => {
@@ -197,11 +188,11 @@ fn schedule(seed: u64, steps: u32, levels: u8, bug: Option<Bug>) -> Result<(), S
             }
             7 => {
                 let wr = &mut writers[w];
-                let Some((c, _)) = wr.claim.as_mut() else {
+                let Some(c) = wr.claim.as_mut() else {
                     continue;
                 };
                 if let Ok(d) = wr.sim.durable(c, at) {
-                    let held: Vec<(u64, Vec<u8>)> = ledger
+                    let held: Vec<(u64, Record)> = ledger
                         .range(..=d)
                         .map(|(p, (b, _, _))| (*p, b.clone()))
                         .collect();

@@ -35,9 +35,9 @@
 //! undecided before its head replace. It never removes one past the head's end,
 //! which may be the current writer's advance between its two requests.
 
-use crate::group::{self, Tip};
+use crate::envelope::{self, Chain};
 use crate::{
-    Advanced, Authority, AuthorityError, Claim, Claimed, Error, Level, MAX_ENTRY, live, owner_id,
+    Advanced, Authority, AuthorityError, Claim, Claimed, Error, Level, Record, live, owner_id,
 };
 use hirsel_object_storage::{Condition, ObjectStorage, Put, Replaced, StorageError, Tag};
 use sha2::{Digest, Sha256};
@@ -148,11 +148,8 @@ pub struct Objects {
     levels: Vec<String>,
     floor: Level,
     owner: u64,
-    /// The digest of each entry this handle has followed, by position - 1,
-    /// each linked to the one before.
-    chain: Vec<[u8; 32]>,
-    /// The tip after `chain`.
-    tip: Tip,
+    /// The records this handle has followed, each linked to the one before.
+    chain: Chain,
     /// Groups got past the chain's end that are not yet linked to it, kept
     /// across a failed request so following the history makes progress.
     fetched: BTreeMap<String, Vec<u8>>,
@@ -168,8 +165,7 @@ impl Objects {
             levels: vec![level],
             floor,
             owner: owner_id(),
-            chain: Vec::new(),
-            tip: Tip::origin(),
+            chain: Chain::default(),
             fetched: BTreeMap::new(),
             #[cfg(test)]
             bug: None,
@@ -191,14 +187,14 @@ impl Objects {
     }
 
     /// Follow the history from what this handle knows to the head's `end`,
-    /// returning the entries after the known end, in order.
-    fn catch_up(&mut self, end: u64, digest: [u8; 32]) -> Result<Vec<Vec<u8>>, Error> {
-        let known = self.chain.len() as u64;
+    /// returning the records after the known end, in order.
+    fn catch_up(&mut self, end: u64, digest: [u8; 32]) -> Result<Vec<Record>, Error> {
+        let known = self.chain.end();
         let anchor = |p: u64| {
             if p == 0 {
                 [0; 32]
             } else {
-                self.chain[p as usize - 1]
+                self.chain.digests[p as usize - 1]
             }
         };
         if end < known || (end == known && anchor(end) != digest) {
@@ -257,28 +253,33 @@ impl Objects {
                     Err(e) => return Err(Error::Refused(failure(e))),
                 },
             };
-            if group::digest(&bytes) != d {
+            if envelope::digest(&bytes) != d {
                 return Err(Error::Corrupt(key));
             }
-            d = group::prev(&bytes).map_err(|b| crate::bad(b, p))?;
+            d = envelope::prev(&bytes).map_err(|b| crate::bad(b, p))?;
             back.push(bytes);
             p -= 1;
         }
         if d != anchor(known) {
             return Err(Error::Corrupt(group_key(
                 known + 1,
-                &group::digest(back.last().expect("at least one group was followed")),
+                &envelope::digest(back.last().expect("at least one group was followed")),
             )));
         }
         back.reverse();
         self.fetched.clear();
-        let mut tip = self.tip.clone();
-        for (i, entry) in back.iter().enumerate() {
-            tip = group::follow(&tip, entry).map_err(|b| crate::bad(b, known + i as u64 + 1))?;
+        // Followed whole or not at all, so a bad record leaves the chain as it was.
+        let mut chain = self.chain.clone();
+        let mut records = Vec::with_capacity(back.len());
+        for (i, b) in back.iter().enumerate() {
+            records.push(
+                chain
+                    .follow(b)
+                    .map_err(|e| crate::bad(e, known + i as u64 + 1))?,
+            );
         }
-        self.tip = tip;
-        self.chain.extend(back.iter().map(|e| group::digest(e)));
-        Ok(back)
+        self.chain = chain;
+        Ok(records)
     }
 
     /// Settle a head replace that did not report success. `doubt` is whether
@@ -296,7 +297,7 @@ impl Objects {
         if h.attempt == c.attempt {
             if h.end == position && h.digest == entry {
                 c.tag = Some(tag);
-                return Settled::Done(advanced(c, position));
+                return Settled::Done(advanced(c, position, entry));
             }
             if h.end == c.end {
                 if doubt && c.tag.as_ref() != Some(&tag) {
@@ -319,11 +320,9 @@ impl Objects {
         // them can land later: Fenced. A chain that cannot be read decides
         // nothing.
         match self.catch_up(h.end, h.digest) {
-            Ok(_) if self.chain.get(c.end as usize) == Some(&entry) => {
-                c.end = position;
-                c.durable[0] = position;
-                c.dead = true;
-                Settled::Done(Advanced::Advanced(position))
+            Ok(_) if self.chain.digests.get(c.end as usize) == Some(&entry) => {
+                let a = advanced(c, position, entry);
+                Settled::Done(dead(c, a))
             }
             Ok(_) => Settled::Done(dead(c, Advanced::Fenced)),
             Err(_) => Settled::Done(dead(c, Advanced::Undecided(unreachable()))),
@@ -356,8 +355,9 @@ fn dead(c: &mut Claim, a: Advanced) -> Advanced {
     a
 }
 
-fn advanced(c: &mut Claim, position: u64) -> Advanced {
+fn advanced(c: &mut Claim, position: u64, digest: [u8; 32]) -> Advanced {
     c.end = position;
+    c.digest = digest;
     c.durable[0] = position;
     Advanced::Advanced(position)
 }
@@ -369,10 +369,6 @@ impl Authority for Objects {
     fn floor(&self) -> Level {
         self.floor
     }
-    fn max_entry(&self) -> u64 {
-        MAX_ENTRY
-    }
-
     fn claim(&mut self, attempt: [u8; 16], fresh: [u8; 32]) -> Result<Claimed, Error> {
         for _ in 0..CLAIM_TRIES {
             let read = self.head()?;
@@ -385,8 +381,8 @@ impl Authority for Objects {
                 None => Condition::Absent,
             };
             self.catch_up(end, digest)?;
-            let entry = group::claim_group(&self.tip, attempt, fresh);
-            let d = group::digest(&entry);
+            let entry = envelope::claimed(&self.chain.tip, attempt, fresh);
+            let d = envelope::digest(&entry);
             let position = end + 1;
             self.store
                 .put_new(&group_key(position, &d), &entry)
@@ -406,18 +402,11 @@ impl Authority for Objects {
                     _ => continue,
                 },
             };
-            self.tip = group::follow(&self.tip, &entry).expect("a claim group follows its tip");
-            self.chain.push(d);
-            let claim = Claim {
-                owner: self.owner,
-                attempt,
-                end: position,
-                durable: vec![position],
-                segment: 0,
-                length: 0,
-                tag: Some(tag),
-                dead: false,
-            };
+            self.chain
+                .follow(&entry)
+                .expect("a claim record follows its tip");
+            let mut claim = Claim::new(self.owner, attempt, &self.chain.tip, 1);
+            claim.tag = Some(tag);
             return Ok(Claimed {
                 claim,
                 end: position,
@@ -426,14 +415,15 @@ impl Authority for Objects {
         Err(Error::Refused(AuthorityError::Unreachable))
     }
 
-    fn advance(&mut self, c: &mut Claim, from: u64, entry: Vec<u8>, _at: Level) -> Advanced {
+    fn advance(&mut self, c: &mut Claim, from: u64, payload: Vec<u8>, _at: Level) -> Advanced {
         if !live(self.owner, c) || from != c.end {
             return dead(c, Advanced::Fenced);
         }
-        if entry.len() as u64 > MAX_ENTRY {
+        if crate::oversized(&payload) {
             return Advanced::Refused(AuthorityError::io(std::io::ErrorKind::InvalidInput));
         }
-        let d = group::digest(&entry);
+        let entry = envelope::appended(&c.tip(), &payload);
+        let d = envelope::digest(&entry);
         let position = from + 1;
         // A failed put changed no head: at most it left an orphan.
         match self.store.put_new(&group_key(position, &d), &entry) {
@@ -460,7 +450,7 @@ impl Authority for Objects {
             match self.store.replace(HEAD, &head, Condition::Matches(tag)) {
                 Ok(Replaced::Replaced(tag)) => {
                     c.tag = Some(tag);
-                    return advanced(c, position);
+                    return advanced(c, position, d);
                 }
                 Ok(Replaced::Mismatch) => {}
                 Err(_) => doubt = true,
@@ -487,28 +477,27 @@ impl Authority for Objects {
         }
     }
 
-    fn read(&mut self, from: u64, _at: Level, max: u64) -> Result<Vec<Vec<u8>>, Error> {
+    fn read(&mut self, from: u64, _at: Level, max: u64) -> Result<Vec<Record>, Error> {
         let Some((h, _)) = self.head()? else {
             return Ok(Vec::new());
         };
-        let known = self.chain.len() as u64;
+        let known = self.chain.end();
         let fresh = self.catch_up(h.end, h.digest)?;
         let stop = h.end.min(from.saturating_add(max));
         let start = from.min(stop);
         let older: Vec<String> = (start + 1..=stop.min(known))
-            .map(|p| group_key(p, &self.chain[p as usize - 1]))
+            .map(|p| group_key(p, &self.chain.digests[p as usize - 1]))
             .collect();
         let mut out = Vec::with_capacity((stop - start) as usize);
         // Up to `max` entries: a failed get ends the answer early, and fails
         // the read only when it returns nothing.
-        for (key, got) in older.iter().zip(self.store.get_many(&older)) {
+        for (i, (key, got)) in older.iter().zip(self.store.get_many(&older)).enumerate() {
+            let p = start + 1 + i as u64;
             match got {
-                Ok(Some(bytes))
-                    if parse_group_key(key).map(|(_, d)| d) == Some(group::digest(&bytes)) =>
-                {
-                    out.push(bytes)
+                Ok(Some(bytes)) => {
+                    out.push(self.chain.check(p, &bytes).map_err(|b| crate::bad(b, p))?)
                 }
-                Ok(_) => return Err(Error::Corrupt(key.clone())),
+                Ok(None) => return Err(Error::Corrupt(key.clone())),
                 Err(_) if !out.is_empty() => return Ok(out),
                 Err(e) => return Err(Error::Refused(failure(e))),
             }
@@ -564,7 +553,7 @@ impl Authority for Objects {
                 let Some((p, d)) = parse_group_key(key) else {
                     continue;
                 };
-                let named = p >= 1 && self.chain.get(p as usize - 1) == Some(&d);
+                let named = p >= 1 && self.chain.digests.get(p as usize - 1) == Some(&d);
                 // Past the head's end may be the current writer's put whose
                 // head replace is still to come.
                 if !named && (p <= h.end || any_epoch) {

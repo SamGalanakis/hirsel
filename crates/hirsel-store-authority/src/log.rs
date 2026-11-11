@@ -21,9 +21,9 @@
 //! named it, so a host failure never cuts the history short in front of an
 //! entry it keeps.
 
-use crate::group::{self, Tip};
+use crate::envelope::{self, Chain};
 use crate::{
-    Advanced, Authority, AuthorityError, Claim, Claimed, Error, Level, MAX_ENTRY, live, owner_id,
+    Advanced, Authority, AuthorityError, Claim, Claimed, Error, Level, Record, live, owner_id,
 };
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
@@ -157,9 +157,8 @@ pub struct Log {
     floor: Level,
     levels: Vec<String>,
     index: Index,
-    tip: Tip,
-    /// Entries `tip` covers.
-    followed: u64,
+    /// The records followed so far.
+    chain: Chain,
     /// The writer's segment, opened for writing.
     active: Option<(u64, File)>,
     /// A segment this long or longer takes no more entries.
@@ -182,8 +181,7 @@ impl Log {
             floor,
             levels: levels(),
             index: Index::default(),
-            tip: Tip::origin(),
-            followed: 0,
+            chain: Chain::default(),
             active: None,
             segment_max: SEGMENT_MAX,
         })
@@ -328,10 +326,6 @@ impl Authority for Log {
     fn floor(&self) -> Level {
         self.floor
     }
-    fn max_entry(&self) -> u64 {
-        MAX_ENTRY
-    }
-
     fn claim(&mut self, attempt: [u8; 16], fresh: [u8; 32]) -> Result<Claimed, Error> {
         let _guard = self.lock().map_err(Error::Storage)?;
         self.scan()?;
@@ -347,13 +341,8 @@ impl Authority for Log {
             self.index.torn = None;
         }
         let end = self.index.spots.len() as u64;
-        while self.followed < end {
-            let p = self.followed + 1;
-            let entry = self.entry(p)?;
-            self.tip = group::follow(&self.tip, &entry).map_err(|b| crate::bad(b, p))?;
-            self.followed = p;
-        }
-        let entry = group::claim_group(&self.tip, attempt, fresh);
+        self.follow_to(end)?;
+        let entry = envelope::claimed(&self.chain.tip, attempt, fresh);
         let position = end + 1;
         let (segment, length) = match last {
             Some((first, len)) if len < self.segment_max => {
@@ -384,8 +373,9 @@ impl Authority for Log {
         disk::write_all_at(f, &bytes, length)
             .and_then(|_| disk::sync_data(f))
             .map_err(|e| Error::Storage(io(e)))?;
-        self.tip = group::follow(&self.tip, &entry).expect("a claim group follows its tip");
-        self.followed = position;
+        self.chain
+            .follow(&entry)
+            .expect("a claim record follows its tip");
         self.index.spots.push(Spot {
             segment,
             offset: length + FRAME,
@@ -393,31 +383,25 @@ impl Authority for Log {
         });
         let length = length + bytes.len() as u64;
         self.index.segments.last_mut().unwrap().1 = length;
-        let claim = Claim {
-            owner: self.owner,
-            attempt,
-            end: position,
-            durable: vec![position, position],
-            segment,
-            length,
-            tag: None,
-            dead: false,
-        };
+        let mut claim = Claim::new(self.owner, attempt, &self.chain.tip, 2);
+        claim.segment = segment;
+        claim.length = length;
         Ok(Claimed {
             claim,
             end: position,
         })
     }
 
-    fn advance(&mut self, c: &mut Claim, from: u64, entry: Vec<u8>, at: Level) -> Advanced {
+    fn advance(&mut self, c: &mut Claim, from: u64, payload: Vec<u8>, at: Level) -> Advanced {
         if !live(self.owner, c) || from != c.end {
             c.dead = true;
             return Advanced::Fenced;
         }
-        if entry.len() as u64 > MAX_ENTRY {
+        if crate::oversized(&payload) {
             return Advanced::Refused(AuthorityError::io(ErrorKind::InvalidInput));
         }
         let position = from + 1;
+        let entry = envelope::appended(&c.tip(), &payload);
         let bytes = frame(position, &entry);
         {
             let _guard = match self.lock() {
@@ -479,6 +463,7 @@ impl Authority for Log {
         }
         c.length += bytes.len() as u64;
         c.end = position;
+        c.digest = envelope::digest(&entry);
         c.durable[PROCESS.0 as usize] = position;
         if at >= HOST {
             let synced = self
@@ -518,7 +503,7 @@ impl Authority for Log {
         Ok(c.durable[i])
     }
 
-    fn read(&mut self, from: u64, at: Level, max: u64) -> Result<Vec<Vec<u8>>, Error> {
+    fn read(&mut self, from: u64, at: Level, max: u64) -> Result<Vec<Record>, Error> {
         {
             // Under the lock no append is half done, so every frame header the
             // scan sees is whole and a failed check is corruption.
@@ -541,7 +526,22 @@ impl Authority for Log {
                 }
             }
         }
-        (from + 1..=last).map(|p| self.entry(p)).collect()
+        // Each record is followed the first time it is read and checked against
+        // its digest every later time.
+        let mut out = Vec::new();
+        for p in from.min(self.chain.end()) + 1..=last {
+            let bytes = self.entry(p)?;
+            let record = if p > self.chain.end() {
+                self.chain.follow(&bytes)
+            } else {
+                self.chain.check(p, &bytes)
+            }
+            .map_err(|b| crate::bad(b, p))?;
+            if p > from {
+                out.push(record);
+            }
+        }
+        Ok(out)
     }
 
     fn get(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {
@@ -590,6 +590,16 @@ impl Authority for Log {
 }
 
 impl Log {
+    /// Follow the history's records up to position `end`.
+    fn follow_to(&mut self, end: u64) -> Result<(), Error> {
+        while self.chain.end() < end {
+            let p = self.chain.end() + 1;
+            let entry = self.entry(p)?;
+            self.chain.follow(&entry).map_err(|b| crate::bad(b, p))?;
+        }
+        Ok(())
+    }
+
     fn object_path(&self, name: &str) -> Result<PathBuf, Error> {
         let ok = |s: &str| {
             !s.is_empty()

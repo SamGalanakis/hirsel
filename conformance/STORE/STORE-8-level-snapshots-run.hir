@@ -15,7 +15,9 @@
 // holds exactly the state after the last commit and each at disk exactly the state
 // after the last commit acknowledged at disk: never less, which would lose an
 // acknowledged commit, and never more, which a disk failure could lose. The
-// snapshots' versions compare as their commits do.
+// snapshots' versions compare as their commits do. A reopen claims, and a claim is a
+// commit: with nothing else committed, the version after it is past the version before
+// the close, so each of several reopens in a row advances it again.
 pub type Failed = Failed(String)
 
 fn say(stdout: Stdout, line: String) -> Result[(), Failed] {
@@ -162,6 +164,9 @@ fn run(rt: Io, stdout: Stdout, name: String, steps: u64) -> Result[(), Failed] {
         )
       }
     } else {
+      let Ok(closing) = store.snapshot(a, mut s, cache) else {
+        return say(stdout, f"{name}: snapshot failed at step {k}")
+      }
       // A close makes every commit durable at disk.
       let Ok(()) = store.close(take s) else {
         return say(stdout, f"{name}: close failed at step {k}")
@@ -171,6 +176,23 @@ fn run(rt: Io, stdout: Stdout, name: String, steps: u64) -> Result[(), Failed] {
       }
       s = take again
       m.disk = m.made
+      // The reopen's claim is a commit that writes nothing (STORE-8, SEM-5): the
+      // state is the last commit's and the version is past the one before the close.
+      let Ok(reopened) = store.snapshot(a, mut s, cache) else {
+        return say(stdout, f"{name}: snapshot failed at step {k}")
+      }
+      let Some(ja) = commit_of(reopened) else {
+        return say(
+          stdout,
+          f"{name}: a reopened snapshot is no commit's state at step {k}"
+        )
+      }
+      if ja != m.made || !(store.version(a, closing) < store.version(a, reopened)) {
+        return say(
+          stdout,
+          f"{name}: a reopen holds commit {ja} and did not advance the version at step {k}"
+        )
+      }
     }
   }
   let Ok(()) = store.close(take s) else {

@@ -9,15 +9,17 @@
 // stdout: first writer fenced
 // stdout: fenced claim stays fenced
 // stdout: advanced to 3
-// stdout: read 3, entry 3 kept
+// stdout: read 3: claims of epochs 1 and 2 naming one identity, entry 3 kept
 // stdout: put twice: ok
 // stdout: other bytes: corrupt x
 // stdout: missing object: none
 // stdout: a level of other is not main's
 // stdout: a claim of main is not other's
 // The authority seam: a grant names each authority and the levels its provider declares;
-// a later claim fences the writer before it, whose claim stays dead; objects are created
-// once; and a level or claim of one authority never narrows to another.
+// a later claim fences the writer before it, whose claim stays dead; a read returns each
+// claim as a record one epoch up naming the one store identity, and each entry as the
+// payload it was advanced with; objects are created once; and a level or claim of one
+// authority never narrows to another.
 pub type Failed = Failed()
 
 fn say(stdout: Stdout, line: String) -> Result[(), Failed] {
@@ -77,17 +79,31 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
     return Error(Failed())
   }
   let mut count: u64 = 0
+  let mut claims = true
+  let mut identity: Bytes = b""
   let mut kept = false
-  for e in all {
+  for r in all {
     count = count + 1
-    if count == 3 {
-      kept = e == b"three"
+    match r {
+      Claimed(epoch, _, named) => {
+        let same = count == 1 || named == identity
+        claims = claims && epoch == count && count < 3 && same && bytes.len(named) == 32
+        identity = copy named
+      },
+      Appended(payload) => {
+        kept = count == 3 && payload == b"three"
+      },
     }
   }
-  if kept {
-    say(stdout, f"read {count}, entry 3 kept")?
+  let order = if claims {
+    "claims of epochs 1 and 2 naming one identity"
   } else {
-    say(stdout, f"read {count}, entry 3 lost")?
+    "claims out of order"
+  }
+  if kept {
+    say(stdout, f"read {count}: {order}, entry 3 kept")?
+  } else {
+    say(stdout, f"read {count}: {order}, entry 3 lost")?
   }
   let made = authority.put(a, "x", b"1")
   let twice = authority.put(a, "x", b"1")

@@ -17,7 +17,7 @@
 #[cfg(test)]
 hirsel_guard::install!();
 
-pub mod group;
+pub mod envelope;
 #[cfg(test)]
 mod harness;
 #[cfg(test)]
@@ -30,6 +30,7 @@ pub mod objects;
 pub mod sim;
 pub mod wire;
 
+pub use envelope::Record;
 pub use hirsel_run_schema::AuthorityGrant;
 use std::io::ErrorKind;
 
@@ -82,8 +83,11 @@ pub enum Advanced {
 pub struct Claim {
     pub(crate) owner: u64,
     pub(crate) attempt: [u8; 16],
-    /// The writer's own end of the history.
+    /// The writer's own end of the history, and the digest and epoch of the
+    /// record there: what its next append chains from.
     pub(crate) end: u64,
+    pub(crate) digest: [u8; 32],
+    pub(crate) epoch: u64,
     /// The position durable at each level, by level index.
     pub(crate) durable: Vec<u64>,
     /// Provider state: the log's active segment and its length after the
@@ -102,6 +106,30 @@ impl Claim {
     pub fn attempt(&self) -> [u8; 16] {
         self.attempt
     }
+    /// The tip an append of this claim follows.
+    pub(crate) fn tip(&self) -> envelope::Tip {
+        envelope::Tip {
+            digest: self.digest,
+            end: self.end,
+            epoch: self.epoch,
+            identity: None,
+        }
+    }
+    /// A new claim whose own claim record is the last one `tip` covers.
+    pub(crate) fn new(owner: u64, attempt: [u8; 16], tip: &envelope::Tip, levels: usize) -> Self {
+        Claim {
+            owner,
+            attempt,
+            end: tip.end,
+            digest: tip.digest,
+            epoch: tip.epoch,
+            durable: vec![tip.end; levels],
+            segment: 0,
+            length: 0,
+            tag: None,
+            dead: false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -116,19 +144,18 @@ pub trait Authority: Send {
     fn levels(&self) -> &[String];
     /// The deployment's floor for the place.
     fn floor(&self) -> Level;
-    /// The largest entry, in bytes.
-    fn max_entry(&self) -> u64;
     /// Make the caller the history's only writer: settle a torn tail and append
-    /// a claim entry naming `attempt`, minting `fresh` as the store identity when
+    /// a claim record naming `attempt`, minting `fresh` as the store identity when
     /// the history has none.
     fn claim(&mut self, attempt: [u8; 16], fresh: [u8; 32]) -> Result<Claimed, Error>;
-    /// Put `entry` at `from + 1` if `c` is the newest claim and the history ends
-    /// at `from`, and wait until it is durable at `at`.
-    fn advance(&mut self, c: &mut Claim, from: u64, entry: Vec<u8>, at: Level) -> Advanced;
+    /// Append a record of `payload` at `from + 1` if `c` is the newest claim and
+    /// the history ends at `from`, and wait until it is durable at `at`.
+    fn advance(&mut self, c: &mut Claim, from: u64, payload: Vec<u8>, at: Level) -> Advanced;
     /// The highest position durable at `at`, issuing at most one barrier.
     fn durable(&mut self, c: &mut Claim, at: Level) -> Result<u64, Error>;
-    /// Up to `max` entries after `from` that are durable at `at`.
-    fn read(&mut self, from: u64, at: Level, max: u64) -> Result<Vec<Vec<u8>>, Error>;
+    /// Up to `max` records after `from` that are durable at `at`, each checked
+    /// against the chain.
+    fn read(&mut self, from: u64, at: Level, max: u64) -> Result<Vec<Record>, Error>;
     fn get(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error>;
     /// Create an immutable object if its name is free; equal bytes are success.
     fn put(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error>;
@@ -157,13 +184,18 @@ pub(crate) fn live(owner: u64, c: &Claim) -> bool {
     !c.dead && c.owner == owner
 }
 
-/// Map an entry that could not be followed at `position` to a store error.
-pub(crate) fn bad(b: group::Bad, position: u64) -> Error {
+/// Map a record that could not be followed at `position` to a store error.
+pub(crate) fn bad(b: envelope::Bad, position: u64) -> Error {
     let object = format!("history entry {position}");
     match b {
-        group::Bad::Corrupt => Error::Corrupt(object),
-        group::Bad::Unsupported(found) => Error::Format { found, object },
+        envelope::Bad::Corrupt => Error::Corrupt(object),
+        envelope::Bad::Unsupported(found) => Error::Format { found, object },
     }
+}
+
+/// Refuse a payload past [`MAX_ENTRY`] before any effect.
+pub(crate) fn oversized(payload: &[u8]) -> bool {
+    payload.len() as u64 > MAX_ENTRY
 }
 
 /// A process-unique number for a provider handle, so a claim is valid only
@@ -189,7 +221,7 @@ pub fn level(levels: &[String], name: &str) -> Option<Level> {
         .map(|i| Level(i as u8))
 }
 
-/// The default bound on one entry: a group holds at most this many bytes.
+/// Every provider's bound on one entry's payload.
 pub const MAX_ENTRY: u64 = 64 << 20;
 
 /// Why a configuration entry was refused.

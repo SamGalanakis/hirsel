@@ -93,7 +93,52 @@ impl BuildProfile {
 }
 
 /// One build owns its directory from exclusive creation until drop.
-pub struct Scratch(pub PathBuf, bool);
+pub struct Scratch(pub PathBuf, Option<std::process::Child>);
+
+// The cleanup process creates the directory before reporting readiness, so
+// even death during construction leaves no unregistered directory. A separate
+// process group survives bench drivers killing the compiler's whole group.
+// Only its creator removes a directory; an occupied candidate is never armed.
+const CLEANUP: &str = r#"
+trap '' PIPE
+if ! /bin/mkdir -m 700 -- "$1"; then
+    if [ -e "$1" ] || [ -L "$1" ]; then exit 73; fi
+    exit 74
+fi
+trap '/bin/rm -rf -- "$1" || exit 1' EXIT
+printf 'ready\n'
+read -r ignored || :
+"#;
+
+fn cleanup_process(path: &Path) -> std::io::Result<std::process::Child> {
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", CLEANUP, "hirsel-scratch-cleanup"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()?;
+    let mut ready = String::new();
+    let received = BufReader::new(child.stdout.take().unwrap()).read_line(&mut ready);
+    if received.is_ok() && ready == "ready\n" {
+        return Ok(child);
+    }
+    // Close the ownership pipe on every failed construction as well.
+    drop(child.stdin.take());
+    let status = child.wait()?;
+    Err(match received {
+        Err(error) => error,
+        Ok(_) if status.code() == Some(73) => std::io::ErrorKind::AlreadyExists.into(),
+        Ok(_) => std::io::Error::other(format!(
+            "could not create native scratch {}: {status}",
+            path.display()
+        )),
+    })
+}
 impl Scratch {
     pub fn new() -> Result<Self, NativeError> {
         Self::create_in(
@@ -119,12 +164,20 @@ impl Scratch {
                 std::process::id(),
                 next.fetch_add(1, Ordering::Relaxed)
             ));
-            match std::fs::DirBuilder::new().mode(0o700).create(&path) {
-                Ok(()) => {
+            let created = if keep {
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(&path)
+                    .map(|()| None)
+            } else {
+                cleanup_process(&path).map(Some)
+            };
+            match created {
+                Ok(cleanup) => {
                     if keep {
                         eprintln!("hirsel: retaining native scratch at {}", path.display());
                     }
-                    return Ok(Self(path, keep));
+                    return Ok(Self(path, cleanup));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(io(error)),
@@ -134,8 +187,22 @@ impl Scratch {
 }
 impl Drop for Scratch {
     fn drop(&mut self) {
-        if !self.1 {
-            let _ = std::fs::remove_dir_all(&self.0);
+        if let Some(mut cleanup) = self.1.take() {
+            drop(cleanup.stdin.take());
+            if let Err(error) = cleanup.wait().and_then(|status| {
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::other(status.to_string()))
+                }
+            }) {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "hirsel: native scratch cleanup failed at {}: {error}",
+                    self.0.display()
+                );
+            }
         }
     }
 }
@@ -165,5 +232,164 @@ mod scratch_tests {
             std::fs::read(occupied.join("sentinel")).unwrap(),
             b"another build"
         );
+    }
+
+    #[test]
+    fn owner_death_before_readiness_removes_scratch() {
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+        use std::process::{Command, Stdio};
+        let parent = tempfile::tempdir().unwrap();
+        let path = parent.path().join("scratch");
+        // No reader exists even before creation: readiness gets EPIPE, exactly
+        // as when the owner dies while Scratch::new is still starting up.
+        let (reader, writer) = UnixStream::pair().unwrap();
+        drop(reader);
+        let status = Command::new("/bin/sh")
+            .args(["-c", CLEANUP, "hirsel-scratch-cleanup"])
+            .arg(&path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(OwnedFd::from(writer)))
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn scratch_process_child() {
+        let Some(parent) = std::env::var_os("HIRSEL_SCRATCH_TEST_PARENT") else {
+            return;
+        };
+        let mode = std::env::var("HIRSEL_SCRATCH_TEST_MODE").unwrap();
+        let operation = || -> std::io::Result<()> {
+            let scratch = Scratch::create_in(Path::new(&parent), mode == "keep").unwrap();
+            for name in ["observation", "program", "root", "run.json"] {
+                std::fs::write(scratch.0.join(name), b"owned build artifact")?;
+            }
+            println!("SCRATCH {}", scratch.0.display());
+            use std::io::Write;
+            std::io::stdout().flush()?;
+            match mode.as_str() {
+                "exit" => std::process::exit(42),
+                "signal" => {
+                    let mut byte = [0];
+                    use std::io::Read;
+                    let _ = std::io::stdin().read(&mut byte);
+                }
+                "error" => return Err(std::io::Error::other("build failed")),
+                "panic" => panic!("build unwound"),
+                _ => {}
+            }
+            Ok(())
+        };
+        assert_eq!(operation().is_err(), mode == "error");
+    }
+
+    fn process_exit(mode: &str, signal: Option<i32>) {
+        use std::io::{BufRead, BufReader, Read};
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        let parent = tempfile::tempdir().unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "executable::scratch_tests::scratch_process_child",
+                "--nocapture",
+            ])
+            .env("HIRSEL_SCRATCH_TEST_PARENT", parent.path())
+            .env("HIRSEL_SCRATCH_TEST_MODE", mode)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        let path = output
+            .by_ref()
+            .lines()
+            .map(Result::unwrap)
+            .find_map(|line| {
+                line.split_once("SCRATCH ")
+                    .map(|(_, path)| PathBuf::from(path))
+            })
+            .expect("child created its scratch directory");
+        if let Some(signal) = signal {
+            let comm = Command::new("ps")
+                .args(["-o", "comm=", "-p", &child.id().to_string()])
+                .output()
+                .unwrap();
+            assert!(comm.status.success());
+            let name = String::from_utf8(comm.stdout).unwrap();
+            assert!(
+                ![
+                    "systemd",
+                    "dbus-daemon",
+                    "sshd",
+                    "tmux",
+                    "t3",
+                    "orca-ide",
+                    "claude",
+                    "codex"
+                ]
+                .contains(&name.trim())
+            );
+            // SAFETY: this is the process group of the child started above,
+            // never a discovered PID or a parent process.
+            assert_eq!(unsafe { libc::kill(-(child.id() as i32), signal) }, 0);
+        }
+        let status = child.wait().unwrap();
+        match mode {
+            "exit" => assert_eq!(status.code(), Some(42)),
+            "panic" => assert!(!status.success()),
+            "signal" => {
+                use std::os::unix::process::ExitStatusExt;
+                assert_eq!(status.signal(), signal);
+            }
+            _ => assert!(status.success()),
+        }
+        if mode == "keep" {
+            assert!(path.join("program").is_file());
+        } else {
+            // A surviving cleanup process can finish after its owner is reaped.
+            for _ in 0..100 {
+                if !path.exists() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(!path.exists(), "{mode} left {}", path.display());
+        }
+    }
+
+    #[test]
+    fn normal_return_removes_scratch() {
+        process_exit("return", None);
+    }
+    #[test]
+    fn error_return_removes_scratch() {
+        process_exit("error", None);
+    }
+    #[test]
+    fn panic_unwind_removes_scratch() {
+        process_exit("panic", None);
+    }
+    #[test]
+    fn immediate_process_exit_removes_scratch() {
+        process_exit("exit", None);
+    }
+    #[test]
+    fn sigterm_removes_scratch() {
+        process_exit("signal", Some(libc::SIGTERM));
+    }
+    #[test]
+    fn bench_sigkill_removes_scratch() {
+        process_exit("signal", Some(libc::SIGKILL));
+    }
+    #[test]
+    fn explicit_retention_keeps_scratch() {
+        process_exit("keep", None);
     }
 }

@@ -2968,10 +2968,9 @@ impl QueryEngine {
                 registration.syntax.text_hash
             });
             let text = input.implementation;
-            let key = namespace
-                .bodies
-                .get(&id)
-                .and_then(|input| input.queries.as_ref())
+            let key = input
+                .queries
+                .as_ref()
                 .ok_or_else(|| refusal("definition outside accepted capture"))?
                 .modes
                 .clone();

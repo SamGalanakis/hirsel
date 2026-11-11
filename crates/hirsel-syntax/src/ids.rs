@@ -6,8 +6,8 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, BuildHasherDefault};
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicU32, Ordering as Atomic};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as Atomic};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, TryLockError};
 
 /// An interned definition path. Eq and Hash compare ids; Ord compares paths,
 /// so ordered maps iterate in DefPath order whatever order ids were assigned in.
@@ -23,6 +23,11 @@ struct Entry {
     fingerprint: ContentHash,
     display: Box<str>,
     order: Box<[u8]>,
+    /// `generation << 32 | position` in that generation's sort of `order`, or
+    /// 0 before the first ranking that saw this entry. Two entries ranked in
+    /// one generation compare by position; a path pair's order never changes,
+    /// so a rank stays exact for every later comparison.
+    rank: AtomicU64,
 }
 
 /// Bytes whose lexicographic order is `DefPath`'s derived order: every string
@@ -65,6 +70,10 @@ struct Defs {
     assigned: AtomicU32,
     entries: AppendTable<&'static Entry>,
     scramble: Scramble,
+    /// The last ranking generation; held while ranking.
+    ranking: Mutex<u32>,
+    /// Rank again once this many paths are interned.
+    rank_at: AtomicU32,
 }
 
 static DEFS: Defs = Defs {
@@ -72,7 +81,46 @@ static DEFS: Defs = Defs {
     assigned: AtomicU32::new(0),
     entries: AppendTable::new(),
     scramble: Scramble::new("def"),
+    ranking: Mutex::new(0),
+    rank_at: AtomicU32::new(64),
 };
+
+/// Rank every published entry in one new generation, unless `due` is false
+/// once this thread holds the ranking. Without `wait`, a ranking already in
+/// progress on another thread stands in for this one.
+fn rank(wait: bool, due: impl FnOnce(u32) -> bool) {
+    let mut generation = match DEFS.ranking.try_lock() {
+        Ok(generation) => generation,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) if wait => {
+            DEFS.ranking.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+        Err(TryLockError::WouldBlock) => return,
+    };
+    let assigned = DEFS.assigned.load(Atomic::Relaxed);
+    if !due(assigned) {
+        return;
+    }
+    let mut entries: Vec<&'static Entry> = (0..assigned)
+        .filter_map(|position| DEFS.entries.get(position).copied())
+        .collect();
+    entries.sort_unstable_by(|a, b| a.order.cmp(&b.order));
+    *generation += 1;
+    let generation = u64::from(*generation) << 32;
+    for (position, entry) in entries.iter().enumerate() {
+        entry
+            .rank
+            .store(generation | position as u64, Atomic::Relaxed);
+    }
+    // Paths interned after this ranking compare by their keys until the next
+    // one, which comes after an eighth more paths: at most a ninth of the
+    // entries are unranked, and all rankings together sort about nine times
+    // the final entry count.
+    DEFS.rank_at.store(
+        assigned.saturating_add((assigned / 8).max(64)),
+        Atomic::Relaxed,
+    );
+}
 
 fn shard(path: &DefPath) -> &'static RwLock<HashMap<&'static DefPath, DefId, IdHasher>> {
     let hash = IdHasher::default().hash_one(path);
@@ -100,11 +148,24 @@ impl DefId {
             fingerprint: path.fingerprint(),
             display: path.to_string().into(),
             order: order_key(path),
+            rank: AtomicU64::new(0),
         }));
         DEFS.entries.set(position, entry);
         let id = DefId(DEFS.scramble.encode(position));
         index.insert(&entry.path, id);
+        drop(index);
+        if position >= DEFS.rank_at.load(Atomic::Relaxed) {
+            rank(false, |assigned| {
+                assigned > DEFS.rank_at.load(Atomic::Relaxed)
+            });
+        }
         id
+    }
+
+    /// Rank every path interned so far, as interning does periodically.
+    #[cfg(test)]
+    fn rank_now() {
+        rank(true, |_| true);
     }
 
     /// The id already assigned to `path`, if any.
@@ -175,7 +236,12 @@ impl Ord for DefId {
         if self == other {
             return Ordering::Equal;
         }
-        self.entry().order.cmp(&other.entry().order)
+        let (a, b) = (self.entry(), other.entry());
+        let (x, y) = (a.rank.load(Atomic::Relaxed), b.rank.load(Atomic::Relaxed));
+        if x != 0 && x >> 32 == y >> 32 {
+            return x.cmp(&y);
+        }
+        a.order.cmp(&b.order)
     }
 }
 

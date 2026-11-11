@@ -70,10 +70,12 @@ fn ordered_maps_iterate_identically_under_every_salt() {
     assert!(hash_orders.len() > 1, "every salt gave one DefMap order");
 }
 
-/// `DefId` compares precomputed keys; the oracle is `DefPath`'s derived order.
-/// The cases are the boundaries an escaping or list encoding can get wrong:
-/// prefixes, embedded NUL and 0x01/0xff bytes, empty strings, module lists of
-/// different lengths, and a field difference behind an equal earlier field.
+/// `DefId` compares cached ranks or precomputed keys; the oracle is `DefPath`'s
+/// derived order. The cases are the boundaries an escaping or list encoding can
+/// get wrong: prefixes, embedded NUL and 0x01/0xff bytes, empty strings, module
+/// lists of different lengths, and a field difference behind an equal earlier
+/// field. Every pair is compared with the last third interned after a ranking
+/// (ranked against unranked ids), and again once all of them are ranked.
 #[test]
 fn id_order_is_derived_path_order() {
     let texts = [
@@ -104,10 +106,44 @@ fn id_order_is_derived_path_order() {
             }
         }
     }
-    let ids: Vec<DefId> = paths.iter().map(DefId::intern).collect();
-    for (a, x) in paths.iter().zip(&ids) {
-        for (b, y) in paths.iter().zip(&ids) {
-            assert_eq!(x.cmp(y), a.cmp(b), "{a:?} vs {b:?}");
+    let check = |ids: &[DefId]| {
+        for (a, x) in paths.iter().zip(ids) {
+            for (b, y) in paths.iter().zip(ids) {
+                assert_eq!(x.cmp(y), a.cmp(b), "{a:?} vs {b:?}");
+            }
         }
-    }
+    };
+    let (early, late) = paths.split_at(paths.len() * 2 / 3);
+    let mut ids: Vec<DefId> = early.iter().map(DefId::intern).collect();
+    DefId::rank_now();
+    ids.extend(late.iter().map(DefId::intern));
+    check(&ids);
+    DefId::rank_now();
+    check(&ids);
+}
+
+/// A ranking re-stamps entries one at a time while other threads compare, so a
+/// pair can hold ranks from two generations; those must fall back to the keys.
+#[test]
+fn id_order_holds_while_another_thread_ranks() {
+    let paths: Vec<DefPath> = (0..512u32)
+        .map(|i| path("ranked", &format!("{:03}", i.wrapping_mul(7919) % 512)))
+        .collect();
+    let ids: Vec<DefId> = paths.iter().map(DefId::intern).collect();
+    DefId::rank_now();
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            for i in 0..20_000u32 {
+                DefId::intern(&path("growing", &i.to_string()));
+            }
+            done.store(true, Atomic::Relaxed);
+        });
+        let mut i = 0usize;
+        while !done.load(Atomic::Relaxed) {
+            let (a, b) = (i % ids.len(), (i * 31 + 7) % ids.len());
+            assert_eq!(ids[a].cmp(&ids[b]), paths[a].cmp(&paths[b]));
+            i += 1;
+        }
+    });
 }

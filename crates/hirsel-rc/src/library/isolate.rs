@@ -38,7 +38,7 @@ pub static APPLY_MUT: LibraryBody = LibraryBody {
 };
 
 /// `FailureKind`'s variants, by the ordinal `$intrinsic.IsolateKind` returns.
-const KINDS: u32 = 5;
+const KINDS: u32 = hirsel_core_contract::FAILURE_KINDS;
 
 pub(super) struct Entries {
     /// `IsolateBegin(tasks)` for `task.isolate`, `ApplyBegin()` for `runner.apply`.

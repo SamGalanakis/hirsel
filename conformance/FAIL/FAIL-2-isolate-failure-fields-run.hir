@@ -52,6 +52,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), ()] {
         Depth() => line(stdout, "depth"),
         OutOfSpace() => line(stdout, "out of space"),
         DeadMutex() => line(stdout, "dead mutex"),
+        OutOfEnergy() => line(stdout, "out of energy"),
       }
       match caught.cause {
         Some(cause) => {

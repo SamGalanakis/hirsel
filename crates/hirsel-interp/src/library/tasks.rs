@@ -1629,6 +1629,7 @@ pub(super) fn failure_value(
             "Depth" => 2,
             "OutOfSpace" => 3,
             "DeadMutex" => 4,
+            "OutOfEnergy" => 5,
             "Contract" => 1,
             _ => 0,
         };

@@ -231,6 +231,8 @@ pub struct TaskCtx {
     pub(crate) compact: Option<Box<crate::continuation::Compact>>,
     /// LIFO catches owned by their invocation, including stackful wrappers.
     pub(crate) isolations: crate::isolate::Invocations,
+    /// The task's open energy scopes (STORE-11 "Energy", `crate::energy`).
+    pub(crate) energy_scopes: hirsel_core_contract::energy::Scopes,
     #[cfg(feature = "ownership-trace")]
     pub(crate) ownership_cleanup: *mut crate::ownership_trace::CleanupScope,
     pub(crate) resume_bindings: crate::continuation::binding::Bindings,
@@ -572,6 +574,7 @@ impl TaskCtx {
             active_invocations,
             cleanup_depth: 0,
             energy: u64::MAX,
+            energy_scopes: Default::default(),
             cleanup_invocations,
             cleanup_rejections: 0,
             free_ops: Default::default(),

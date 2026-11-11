@@ -61,13 +61,20 @@ impl<S: Stage> Program<S> {
                 self.function(&function.symbol)?;
             }
         }
-        // STORE-11 energy: a charged instance selects its base's body; it is
-        // audited with its charges stripped, and only it may carry charges.
+        // STORE-11 energy: a charged instance selects its base's body, unless
+        // the selections already name it; it is audited with its charges
+        // stripped, and only it may carry charges.
+        let selected: std::collections::BTreeSet<_> = self
+            .invocation_bodies
+            .iter()
+            .map(|r| (&r.definition, r.instance))
+            .collect();
         let charged: std::collections::BTreeSet<_> = self
             .units
             .iter()
             .filter(|u| u.header.charged)
             .map(|u| (&u.header.definition, u.header.instance))
+            .filter(|key| !selected.contains(key))
             .collect();
         let twins: Vec<_> = self
             .invocation_bodies
@@ -191,16 +198,28 @@ impl<S: Stage> Program<S> {
     }
 
     /// The unit implementing a resource layout's finalizer.
-    pub(crate) fn finalizer(&self, definition: &DefPath) -> Checked<usize> {
-        self.units
+    /// The drop body of `definition` that drop glue runs: its charged twin
+    /// when `budgeted` and the program has one, else its uncharged unit
+    /// (STORE-11 energy: a finalizer follows the running context).
+    pub(crate) fn finalizer(&self, definition: &DefPath, budgeted: bool) -> Checked<usize> {
+        let base = self
+            .units
             .iter()
-            .position(|u| &u.header.definition == definition)
-            .ok_or_else(|| {
-                err(
-                    V::Malformed,
-                    format!("no finalizer unit for {definition:?}"),
-                )
+            .position(|u| &u.header.definition == definition && !u.header.charged);
+        let twin = base.filter(|_| budgeted).and_then(|base| {
+            let instance = hirsel_lir::energy::charged_digest(self.units[base].header.instance);
+            self.units.iter().position(|u| {
+                &u.header.definition == definition
+                    && u.header.charged
+                    && u.header.instance == instance
             })
+        });
+        twin.or(base).ok_or_else(|| {
+            err(
+                V::Malformed,
+                format!("no finalizer unit for {definition:?}"),
+            )
+        })
     }
 
     /// The unit to start from.

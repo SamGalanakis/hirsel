@@ -30,13 +30,16 @@
 /// awaits it. A checkpoint's fresh nodes are put in batches of at most
 /// `batch_bytes` bytes and one node more (STORE-11). The limits and the checkpoint node bounds `nodes` are recorded
 /// by the store's Genesis commit when it is created; those an opener of an
-/// existing store passes are ignored.
+/// existing store passes are ignored. Each transaction and query body runs
+/// under `energy` units (STORE-11 "Energy"), a setting of this engine that
+/// nothing records.
 pub type StoreConfig {
   group_commits: u64,
   group_bytes: u64,
   batch_bytes: u64,
   limits: StoreLimits,
   nodes: history.Bounds,
+  energy: u64,
 }
 
 /// The most a commit may write: any key over `key_bytes`, any value over
@@ -84,9 +87,10 @@ pub type TxFailure[E] = Aborted(E) | Canceled(CancelCause) | Faulted(Failure) | 
   StoreError
 ) | Limit(TxLimit) | Unknown(StoreError)
 
-/// Which of the configured limits a commit exceeded.
+/// Which of the configured limits a commit exceeded, or `Energy()` when its
+/// body ran out of energy (STORE-11 "Energy").
 @serializable
-pub type TxLimit = KeyBytes | ValueBytes | TransactionBytes | RangeRows
+pub type TxLimit = KeyBytes | ValueBytes | TransactionBytes | RangeRows | Energy
 
 /// Why a call returned no outcome of its own: `Tx(f)` as for `transact`;
 /// `Denied()` when a later executor epoch holds the stream; `Rejected()` for a
@@ -137,6 +141,7 @@ pub opaque type Snapshot: copyable uses {} {
   version: u64,
   index: ordered_map.OrderedMap[Bytes, Bytes],
   limits: StoreLimits,
+  energy: u64,
 }
 
 /// What a store's head states about one transaction (STORE-4), the same for
@@ -316,8 +321,8 @@ const GROUP_OVERHEAD: u64 = 8192
 const READ_BATCH: u64 = 1024
 
 /// Groups of up to 64 commits or 4 MiB, checkpoint batches of 64 MiB, limits of 4096-byte keys, 1 MiB
-/// values, 16 MiB per transaction and 10000 rows per range, and the default
-/// checkpoint node bounds.
+/// values, 16 MiB per transaction and 10000 rows per range, the default
+/// checkpoint node bounds, and 10^9 units of energy per body.
 pub fn default_config() -> StoreConfig uses {} {
   StoreConfig(
     group_commits: 64,
@@ -329,7 +334,8 @@ pub fn default_config() -> StoreConfig uses {} {
       transaction_bytes: 16777216,
       range_rows: 10000
     ),
-    nodes: history.default_bounds()
+    nodes: history.default_bounds(),
+    energy: 1000000000
   )
 }
 
@@ -847,7 +853,7 @@ pub fn snapshot(a: Authority, mut s: Store, at: Level of a) -> Result[Snapshot o
   let Some((wanted, share)) = durable_state(mut s, i) else {
     return Error(Corrupt("snapshot"))
   }
-  Ok(Snapshot(version: wanted, index: take share, limits: s.limits))
+  Ok(Snapshot(version: wanted, index: take share, limits: s.limits, energy: s.config.energy))
 }
 
 // The version durable at the `i`th declared level and a share of its state.
@@ -1211,7 +1217,9 @@ pub fn transact[A: serializable, R: serializable, E: serializable](
     points: recorder.new(),
     spans: recorder.new()
   )
+  let saved = energy.enter(s.config.energy)
   let returned = runner.apply_mut(f, mut tx, info, argument)
+  let spent = energy.leave(take saved).exhausted
   // The run `tx` ran; its access set is what the entry's reads recorded.
   let Tx(txn: ran, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
   let mut t = take ran
@@ -1219,6 +1227,13 @@ pub fn transact[A: serializable, R: serializable, E: serializable](
     points: recorder.finish(take read_points),
     spans: recorder.finish(take read_spans)
   )
+  if spent {
+    drop_spent(take returned)
+    let base = t.base
+    discard(mut s, take t)
+    gate(mut s, base) ? released
+    return Error(Limit(Energy()))
+  }
   match take returned {
     Ok(Ok(v)) => {
       let outcome: Result[R, TxFailure[E]] = Ok(take v)
@@ -1340,6 +1355,7 @@ pub fn query[A: serializable, R: serializable, E: serializable](
     return Error(Storage(Corrupt("hirsel.argument")))
   }
   let limits = snap.limits
+  let budget = snap.energy
   let tx = Tx(
     txn: reading(take snap),
     limits: limits,
@@ -1348,10 +1364,16 @@ pub fn query[A: serializable, R: serializable, E: serializable](
     spans: recorder.new()
   )
   let info = CallInfo(caller: "", at: 0, seed: 0, id: b"")
+  let saved = energy.enter(budget)
   let returned = runner.apply(f, tx, info, argument)
+  let spent = energy.leave(take saved).exhausted
   let Tx(txn: _, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
   let _: List[Bytes] = recorder.finish(take read_points)
   let _: List[Span] = recorder.finish(take read_spans)
+  if spent {
+    drop_spent(take returned)
+    return Error(Limit(Energy()))
+  }
   match take returned {
     Ok(Ok(v)) => Ok(take v),
     Ok(Error(e)) => Error(Aborted(take e)),
@@ -1368,6 +1390,18 @@ fn reading(take snap: Snapshot) -> Run uses {} {
     writes: ordered_map.empty(compare_keys),
     access: AccessSet(points: [], spans: [])
   )
+}
+
+// The energy what a body that ran out returned may spend as it drops: the
+// size of the cleanup reserve its own cleanup had (STORE-11 "Energy").
+const SPENT_ENERGY: u64 = 1000000
+
+// Drops what a body that ran out returned within energy of its own, so a
+// finalizer of it is bounded as the body's cleanup was.
+fn drop_spent[T](take returned: T) uses {} {
+  let saved = energy.enter(SPENT_ENERGY)
+  let _ = take returned
+  let _ = energy.leave(take saved)
 }
 
 // Fresh owned data decoded from the canonical encoding of `a` (STORE-2): a
@@ -1506,7 +1540,9 @@ pub fn call[A: serializable, R: serializable, E: serializable](
   )
   // The row read decides the request, so the run read it.
   recorder.append(tx.points, copy key)
+  let saved = energy.enter(s.config.energy)
   let returned = runner.apply_mut(f, mut tx, info, argument)
+  let spent = energy.leave(take saved).exhausted
   // The run `tx` ran; its access set is what the entry's reads recorded.
   let Tx(txn: ran, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
   let mut done = take ran
@@ -1514,14 +1550,21 @@ pub fn call[A: serializable, R: serializable, E: serializable](
     points: recorder.finish(take read_points),
     spans: recorder.finish(take read_spans)
   )
-  let outcome: Result[R, TxFailure[E]] = match take returned {
-    Ok(Ok(v)) => Ok(take v),
-    Ok(Error(e)) => Error(Aborted(take e)),
-    Error(failure) => {
-      discard(mut s, take done)
-      gate(mut s, base) ? released_call
-      return Error(Tx(Faulted(take failure)))
-    },
+  // A body that ran out ends `Limit(Energy())` whatever it returned, and the
+  // stream records that end.
+  let outcome: Result[R, TxFailure[E]] = if spent {
+    drop_spent(take returned)
+    Error(Limit(Energy()))
+  } else {
+    match take returned {
+      Ok(Ok(v)) => Ok(take v),
+      Ok(Error(e)) => Error(Aborted(take e)),
+      Error(failure) => {
+        discard(mut s, take done)
+        gate(mut s, base) ? released_call
+        return Error(Tx(Faulted(take failure)))
+      },
+    }
   }
   let ok = match outcome {
     Ok(_) => true,
@@ -1987,16 +2030,22 @@ fn serve_one(mut s: Store, entries: List[Served], take request: Arrived) -> Call
     return InDoubt(Abandoned())
   }
   let tx = Tx(
-    txn: reading(take Snapshot(version: floor_version, index: take index, limits: s.limits)),
+    txn: reading(take Snapshot(version: floor_version, index: take index, limits: s.limits, energy: s.config.energy)),
     limits: s.limits,
     scope: all(Read()),
     points: recorder.new(),
     spans: recorder.new()
   )
+  let saved = energy.enter(s.config.energy)
   let evaluated = body(tx, CallInfo(caller: copy request.caller, at: 0, seed: 0, id: b""), request.argument)
+  let spent = energy.leave(take saved).exhausted
   let Tx(txn: _, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
   let _: List[Bytes] = recorder.finish(take read_points)
   let _: List[Span] = recorder.finish(take read_spans)
+  if spent {
+    let (_, failed) = served.limited(Energy())
+    return Failed(take failed)
+  }
   match take evaluated {
     Undecoded() => NotRun(Rejected()),
     Faulting(failure) => Faulted(codec.encode(failure)),
@@ -2107,23 +2156,33 @@ fn serve_transact(
   )
   // The row read decides the request, so the run read it.
   recorder.append(tx.points, copy key)
+  let saved = energy.enter(s.config.energy)
   let evaluated = body(mut tx, info, argument)
+  let spent = energy.leave(take saved).exhausted
   let Tx(txn: ran, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
   let mut done = take ran
   done.access = AccessSet(
     points: recorder.finish(take read_points),
     spans: recorder.finish(take read_spans)
   )
-  let (ok, recorded, end) = match take evaluated {
-    Undecoded() => {
-      discard(mut s, take done)
-      return released_end(mut s, base, NotRun(Rejected()))
-    },
-    Faulting(failure) => {
-      discard(mut s, take done)
-      return released_end(mut s, base, Faulted(codec.encode(failure)))
-    },
-    Ended(ok: ok, recorded: recorded, end: end) => (ok, take recorded, take end),
+  // A body that ran out ends `Limit(Energy())` whatever it returned, and the
+  // stream records that end.
+  let (ok, recorded, end) = if spent {
+    let (outcome, failed) = served.limited(Energy())
+    let end: CallEnd = Failed(take failed)
+    (false, take outcome, take end)
+  } else {
+    match take evaluated {
+      Undecoded() => {
+        discard(mut s, take done)
+        return released_end(mut s, base, NotRun(Rejected()))
+      },
+      Faulting(failure) => {
+        discard(mut s, take done)
+        return released_end(mut s, base, Faulted(codec.encode(failure)))
+      },
+      Ended(ok: ok, recorded: recorded, end: end) => (ok, take recorded, take end),
+    }
   }
   let limited = fn(l: TxLimit) -> (Bytes, CallEnd) {
     let (outcome, failed) = served.limited(l)

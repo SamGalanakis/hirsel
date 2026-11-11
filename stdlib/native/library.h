@@ -313,6 +313,9 @@ uint8_t hirsel_rt_v2_authority_max_entry(hirsel_rt_v2_ctx*, uint64_t*, const uin
 uint8_t hirsel_rt_v2_level_name(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_slice*, const uint64_t*);
 uint8_t hirsel_rt_v2_level_narrow(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_handle_result*, const uint64_t*, const uint64_t*);
 uint8_t hirsel_rt_v2_claim_end(hirsel_rt_v2_ctx*, uint64_t*, const uint64_t*);
+/* STORE-11 energy scopes: Energy is a value word, EnergyUsed is { u64 units, u8 exhausted }. */
+uint8_t hirsel_rt_v2_energy_enter(hirsel_rt_v2_ctx*, void*, uint64_t*, uint64_t);
+uint8_t hirsel_rt_v2_energy_leave(hirsel_rt_v2_ctx*, void*, void*, uint64_t*);
 uint8_t hirsel_rt_v2_claim_narrow(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_handle_result*, const uint64_t*, uint64_t*);
 uint8_t hirsel_rt_v2_authority_claim(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*);
 uint8_t hirsel_rt_v2_authority_submit(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, uint64_t*, hirsel_rt_v2_header*, uint64_t, uint64_t, hirsel_rt_v2_header*, hirsel_rt_v2_header*, const uint64_t*);

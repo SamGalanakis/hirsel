@@ -20,6 +20,7 @@ mod base64;
 mod continuation;
 mod deadlines;
 mod depth;
+mod energy;
 pub mod handles;
 mod host_child;
 pub mod host_launch;

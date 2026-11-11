@@ -1794,16 +1794,41 @@ done:
     let callee_identity = program.callee_facts.as_ref().map_or([0; 32], |facts| {
         hirsel_rt::program::callee_metadata_identity(&revision.digest(), facts)
     });
-    let callee_codes: Vec<_> = program
+    // A definition formed as an Entry in both uncharged and charged code has a
+    // thunk for each under one path (STORE-11 energy). Launches by path take
+    // the first row, so the uncharged ones come first; a program without
+    // charged twins keeps its table as it was.
+    let charged: std::collections::BTreeSet<String> = program
+        .summaries
+        .iter()
+        .flat_map(|unit| &unit.references)
+        .filter(|symbol| symbol.charged)
+        .map(|symbol| {
+            hirsel_lir::emission::function_thunk_name(&symbol.definition, symbol.instance.as_ref())
+        })
+        .collect();
+    let (uncharged, twins): (Vec<_>, Vec<_>) = program
         .entries
         .iter()
-        .filter(|(_, path)| {
+        .partition(|(thunk, _)| !charged.contains(thunk));
+    let entries: Vec<&(String, String)> = uncharged.into_iter().chain(twins).collect();
+    // One callee row per checked path: its first, uncharged where one exists.
+    let mut callee_paths = std::collections::BTreeSet::new();
+    let callee_rows: Vec<(usize, &(String, String))> = entries
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, (_, path))| {
             program
                 .callee_facts
                 .as_ref()
                 .is_some_and(|facts| facts.facts.contains_key(path))
+                && callee_paths.insert(path)
         })
-        .map(|(thunk, path)| (thunk.clone(), path.as_bytes().to_vec()))
+        .collect();
+    let callee_codes: Vec<_> = callee_rows
+        .iter()
+        .map(|(_, (thunk, path))| (thunk.clone(), path.as_bytes().to_vec()))
         .collect();
     // The launcher object comes from the backend that emitted the program's objects, so a
     // Cranelift build never runs LLVM.
@@ -1824,13 +1849,12 @@ done:
             F::Inline(revision.digest().to_vec()),
             F::Inline(config_bytes),
             F::Entries(
-                program
-                    .entries
+                entries
                     .iter()
                     .map(|(thunk, path)| (thunk.clone(), path.as_bytes().to_vec()))
                     .collect(),
             ),
-            F::U64(program.entries.len() as u64),
+            F::U64(entries.len() as u64),
             F::U64(return_kind),
             F::U64(success_offset),
             F::Entries(
@@ -1889,7 +1913,7 @@ done:
         let mut entry_ir = String::new();
         let mut rows = Vec::new();
         let mut declared = std::collections::BTreeSet::new();
-        for (index, (thunk, path)) in program.entries.iter().enumerate() {
+        for (index, (thunk, path)) in entries.iter().enumerate() {
             entry_ir.push_str(&format!(
                 "@hirsel.entry.path.{index} = private constant [{} x i8] [{}]\n",
                 path.len(),
@@ -1944,8 +1968,7 @@ done:
         } else {
             "null"
         };
-        let callee_rows: Vec<_> = program.entries.iter().enumerate().filter(|(_, (_, path))|
-            program.callee_facts.as_ref().is_some_and(|facts| facts.facts.contains_key(path)))
+        let callee_rows: Vec<_> = callee_rows.iter()
             .map(|(index, (thunk, path))| format!(
                 "{{ ptr, ptr, i64 }} {{ ptr @\"{thunk}\", ptr @hirsel.entry.path.{index}, i64 {} }}", path.len()))
             .collect();
@@ -1976,7 +1999,7 @@ done:
             registry_symbol = registry.symbol(),
             digest = bytes(&revision.digest()),
             config = bytes(&config_bytes),
-            entry_count = program.entries.len(),
+            entry_count = entries.len(),
             value_code_count = value_codes.len(),
             callee_facts_length = callee_facts.as_ref().map_or(0, |text| text.len()),
             callee_code_count = callee_codes.len(),

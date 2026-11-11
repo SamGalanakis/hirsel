@@ -109,6 +109,18 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
             &mut out,
         );
     }
+    // STORE-11 Energy: one open energy scope of the running task. It is an opaque
+    // word no source can build, and it is not copyable, so `energy.leave` takes it.
+    {
+        let b = Builder::new(types, "").with_declarations(&out);
+        let mut t = type_definition(vec![], None);
+        t.bounds = vec![Bound::Inert, Bound::NoallocDrop];
+        publish(
+            types,
+            b.signature("Energy", SignatureKind::Type(Box::new(t)), true),
+            &mut out,
+        );
+    }
     // Typed generation: a generated body for the function type `F`. Like a TypeShape it is
     // compile-time only and not data; it holds text, never authority.
     let b = Builder::new(types, "F").with_declarations(&out);
@@ -280,7 +292,7 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         (
             "FailureKind",
             "",
-            "Check()|Contract()|Depth()|OutOfSpace()|DeadMutex()",
+            "Check()|Contract()|Depth()|OutOfSpace()|DeadMutex()|OutOfEnergy()",
         ),
         ("ShapeVisibility", "", "Private()|Public()|Opaque()"),
         (
@@ -355,6 +367,8 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         // RUN-3: an entry's identity: its definition's full path, signature fingerprint and
         // code hash.
         ("EntryId", "", "path: String,fingerprint: Bytes,code: Bytes"),
+        // STORE-11 Energy: what one energy scope used, and whether it ran out.
+        ("EnergyUsed", "", "units: u64,exhausted: bool"),
         // STORE-12: one request on a call stream.
         (
             "CallRequest",

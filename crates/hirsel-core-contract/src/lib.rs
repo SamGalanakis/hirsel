@@ -7,6 +7,7 @@
 hirsel_guard::install!();
 
 pub mod depth;
+pub mod energy;
 pub mod handle_scan;
 pub mod snapshot;
 pub mod tsan;
@@ -186,15 +187,20 @@ pub const RUNTIME_RULE_BASE: u32 = 1 << 31;
 pub const ENERGY_RULE: &str = "STORE-11";
 pub const RUNTIME_RULES: [&str; 3] = ["CAP-2", "LANG-9", "LANG-10"];
 
-/// The `FailureKind` ordinal (`Check`, `Contract`, `Depth`, `OutOfSpace`, `DeadMutex`) of a
-/// failure of `rule`, as `task.isolate` reports it (FAIL-2): recursion depth (MEM-3), a
-/// bounded arena's exhaustion (MEM-6) and a dead mutex (FAIL-4) have their own kinds, and
-/// every other failure is a check.
+/// The `FailureKind` ordinal (`Check`, `Contract`, `Depth`, `OutOfSpace`, `DeadMutex`,
+/// `OutOfEnergy`) of a failure of `rule`, as `task.isolate` reports it (FAIL-2): recursion
+/// depth (MEM-3), a bounded arena's exhaustion (MEM-6), a dead mutex (FAIL-4) and an
+/// exhausted energy charge (STORE-11) have their own kinds, and every other failure is a
+/// check.
+/// How many `FailureKind` variants `failure_kind` ranges over.
+pub const FAILURE_KINDS: u32 = energy::OUT_OF_ENERGY + 1;
+
 pub fn failure_kind(rule: &str) -> u32 {
     match rule {
         "LANG-10" | "MEM-3" => 2,
         "MEM-6" => 3,
         "FAIL-4" => 4,
+        ENERGY_RULE => energy::OUT_OF_ENERGY,
         _ => 0,
     }
 }

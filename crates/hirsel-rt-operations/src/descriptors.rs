@@ -852,6 +852,9 @@ pub const ENTRIES: &[Entry] = &[
     ops("hirsel_rt_v2_runner_argument", HOST),
     ops("hirsel_rt_v2_runner_io", HOST),
     ops("hirsel_rt_v2_runner_reply", HOST),
+    // energy.rs: a store's energy scopes on the task's meter (STORE-11 Energy).
+    entry("hirsel_rt_v2_energy_enter", Local),
+    entry("hirsel_rt_v2_energy_leave", Local),
     // authority.rs: the store authority seam, served by the run's providers.
     ops("hirsel_rt_v2_io_authority", HOST),
     ops("hirsel_rt_v2_authority_levels", HOST),

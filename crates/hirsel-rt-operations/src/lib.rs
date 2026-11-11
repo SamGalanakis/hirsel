@@ -390,6 +390,8 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
         "io.inbox" | "inbox.take" | "arrival.request" | "arrival.end" => {
             Some(format!("hirsel_rt_v2_{}", name.replace('.', "_")))
         }
+        // A store's energy scopes (STORE-11 Energy, `energy.rs`).
+        "energy.enter" | "energy.leave" => Some(format!("hirsel_rt_v2_{}", name.replace('.', "_"))),
         "runner.send" => Some("hirsel_rt_v2_place_send".into()),
         "$intrinsic.RunnerSend" => Some("hirsel_rt_v2_runner_send".into()),
         "$intrinsic.RunnerWait" => Some("hirsel_rt_v2_runner_wait".into()),
@@ -2519,6 +2521,20 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
     },
     AbiExport {
         caller_site: false,
+        symbol: "hirsel_rt_v2_energy_enter",
+        destination: true,
+        result: Some((8, 8)),
+        parameters: &[Physical::I64],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_energy_leave",
+        destination: true,
+        result: Some((16, 8)),
+        parameters: &[Physical::Pointer],
+    },
+    AbiExport {
+        caller_site: false,
         symbol: "hirsel_rt_v2_claim_end",
         destination: false,
         result: Some((8, 8)),
@@ -3242,6 +3258,9 @@ pub const NATIVE_PATHS: &[&str] = &[
     "authority.get",
     "authority.put",
     "authority.reclaim",
+    // A store's energy scopes (STORE-11 Energy, `hirsel-rt/src/energy.rs`).
+    "energy.enter",
+    "energy.leave",
 ];
 
 /// Stable declaration ownership transport, used by the independently retained inventory.

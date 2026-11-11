@@ -228,6 +228,20 @@ fn rule(ctx: *mut TaskCtx, code: u32) -> &'static str {
     table(ctx).rule(code)
 }
 
+/// Whether rule `code` is an exhausted energy charge's (STORE-11 "Energy"). A
+/// program without a failure table has no charges.
+pub(crate) fn is_energy_rule(ctx: *mut TaskCtx, code: u32) -> bool {
+    // SAFETY: the context is live.
+    let Some(table) = (unsafe { (*ctx).run_ref().failure_table }) else {
+        return false;
+    };
+    code < hirsel_core_contract::RUNTIME_RULE_BASE
+        && code
+            .checked_sub(1)
+            .and_then(|i| table.rules.get(i as usize))
+            .is_some_and(|record| table.text(record, 0) == hirsel_core_contract::ENERGY_RULE)
+}
+
 /// Human failure text for a standalone launch, outside program Io and replay tapes.
 pub fn report(failure: &hirsel_run_schema::Failure) -> String {
     format!(

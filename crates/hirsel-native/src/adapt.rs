@@ -187,10 +187,11 @@ pub fn add_owner(
         Some(record) => OwnerRepresentation::Defined(record.clone()),
         // Primitive capabilities are logical run-context handles. Instant and Level
         // use the same opaque one-word layout for ticks and a level word, with no
-        // handle allocation.
+        // handle allocation; so does an Energy scope word (STORE-11 Energy).
         None if t.capability.is_some()
             || *path == hirsel_syntax::DefPath::core("Instant")
-            || *path == hirsel_syntax::DefPath::core("Level") =>
+            || *path == hirsel_syntax::DefPath::core("Level")
+            || *path == hirsel_syntax::DefPath::core("Energy") =>
         {
             OwnerRepresentation::Handle {
                 revision: signature.fingerprint,

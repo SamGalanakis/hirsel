@@ -937,25 +937,23 @@ impl QueryEngine {
             let queries = {
                 let [modes, lower, evaluate] = match registration {
                     Some(accepted) => self.accepted_front_store_keys(accepted)?,
+                    None if facts.generator && self.items.contains_key(path) => [
+                        self.front_declaration_store_key(path, QueryKind::Modes)?,
+                        self.front_declaration_store_key(path, QueryKind::Lower)?,
+                        self.front_declaration_store_key(path, QueryKind::Evaluate)?,
+                    ],
                     None => {
-                        let mut key = |kind| {
-                            if facts.generator && self.items.contains_key(path) {
-                                self.front_declaration_store_key(path, kind)
-                            } else {
-                                Ok(EntryKey::new(
-                                    self.product_seed(path),
-                                    path,
-                                    implementation,
-                                    kind,
-                                    LoweringPolicy::Reachable,
-                                ))
-                            }
-                        };
-                        [
-                            key(QueryKind::Modes)?,
-                            key(QueryKind::Lower)?,
-                            key(QueryKind::Evaluate)?,
-                        ]
+                        // The seed depends on the path, not the kind: one serves all three.
+                        let seed = self.product_seed(path);
+                        [QueryKind::Modes, QueryKind::Lower, QueryKind::Evaluate].map(|kind| {
+                            EntryKey::new(
+                                seed,
+                                path,
+                                implementation,
+                                kind,
+                                LoweringPolicy::Reachable,
+                            )
+                        })
                     }
                 };
                 Some(Arc::new(BodyKeys {

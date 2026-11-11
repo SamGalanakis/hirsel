@@ -10,9 +10,9 @@
     "dev": {
       "hirsel-analysis-canary": {
         "cpu_count": 1,
-        "mean_cores": 1.1797234741363882,
+        "mean_cores": 1.1831108626817448,
         "memory_kb": 262144,
-        "p95_cores": 1.6098622282608697,
+        "p95_cores": 1.6443068702290076,
         "p99_peak_bytes": 72445952,
         "phases": {
           "check": {
@@ -52,9 +52,9 @@
       },
       "hirsel-analysis-canary-bin-taint": {
         "cpu_count": 1,
-        "mean_cores": 1.106116192109777,
+        "mean_cores": 1.233117783094099,
         "memory_kb": 655360,
-        "p95_cores": 1.5233576923076924,
+        "p95_cores": 1.554828125,
         "p99_peak_bytes": 192929792,
         "phases": {
           "link [pic]": {
@@ -76,9 +76,9 @@
       },
       "hirsel-analysis-canary-bin-units": {
         "cpu_count": 1,
-        "mean_cores": 1.1479110403397028,
+        "mean_cores": 1.3277270892284474,
         "memory_kb": 655360,
-        "p95_cores": 1.4998207446808511,
+        "p95_cores": 1.5544550458715596,
         "p99_peak_bytes": 193089536,
         "phases": {
           "link [pic]": {
@@ -124,9 +124,9 @@
       },
       "hirsel-artifact-store": {
         "cpu_count": 1,
-        "mean_cores": 1.189513224267212,
+        "mean_cores": 1.1850683663267345,
         "memory_kb": 393216,
-        "p95_cores": 2.3199530303030302,
+        "p95_cores": 1.630222156862745,
         "p99_peak_bytes": 152952832,
         "phases": {
           "check": {
@@ -174,10 +174,10 @@
         ]
       },
       "hirsel-artifact-store-unittest-harness": {
-        "cpu_count": 1,
-        "mean_cores": 1.5598791333019313,
+        "cpu_count": 2,
+        "mean_cores": 1.7565280944625408,
         "memory_kb": 458752,
-        "p95_cores": 1.6741927725118484,
+        "p95_cores": 2.7898479825517994,
         "p99_peak_bytes": 273539072,
         "phases": {
           "link [pic]": {
@@ -198,10 +198,10 @@
         ]
       },
       "hirsel-authority": {
-        "cpu_count": 1,
-        "mean_cores": 1.377862864678899,
+        "cpu_count": 2,
+        "mean_cores": 1.722810209316983,
         "memory_kb": 720896,
-        "p95_cores": 1.67253234421365,
+        "p95_cores": 2.9141977538185087,
         "p99_peak_bytes": 530374656,
         "phases": {
           "check": {
@@ -250,9 +250,9 @@
       },
       "hirsel-authority-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.9641803281075734,
+        "mean_cores": 2.9500461844624954,
         "memory_kb": 1048576,
-        "p95_cores": 3.2856055373256767,
+        "p95_cores": 3.3723868656716416,
         "p99_peak_bytes": 768122880,
         "phases": {
           "link [pic]": {
@@ -325,9 +325,9 @@
       },
       "hirsel-check": {
         "cpu_count": 2,
-        "mean_cores": 2.1895278752624847,
+        "mean_cores": 2.288367329206834,
         "memory_kb": 786432,
-        "p95_cores": 3.1152386690647482,
+        "p95_cores": 3.1015385062240663,
         "p99_peak_bytes": 504856576,
         "phases": {
           "check": {
@@ -376,9 +376,9 @@
       },
       "hirsel-check-protocol": {
         "cpu_count": 1,
-        "mean_cores": 0.984368668989547,
+        "mean_cores": 1.0432408741489128,
         "memory_kb": 327680,
-        "p95_cores": 1.3376326203208557,
+        "p95_cores": 1.377978306878307,
         "p99_peak_bytes": 92241920,
         "phases": {
           "check": {
@@ -427,9 +427,9 @@
       },
       "hirsel-check-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.9098094669083334,
+        "mean_cores": 2.921872183791475,
         "memory_kb": 917504,
-        "p95_cores": 3.2312073741903338,
+        "p95_cores": 3.2897602760736198,
         "p99_peak_bytes": 595021824,
         "phases": {
           "link [pic]": {
@@ -451,9 +451,9 @@
       },
       "hirsel-cli-args": {
         "cpu_count": 1,
-        "mean_cores": 0.9752407843137254,
+        "mean_cores": 0.9470539130434784,
         "memory_kb": 131072,
-        "p95_cores": 1.0,
+        "p95_cores": 0.9050333333333334,
         "p99_peak_bytes": 41426944,
         "phases": {
           "diag": {
@@ -516,10 +516,10 @@
         ]
       },
       "hirsel-cli-bin-hirsel": {
-        "cpu_count": 1,
-        "mean_cores": 1.53341903500333,
+        "cpu_count": 2,
+        "mean_cores": 1.6421163579815203,
         "memory_kb": 3538944,
-        "p95_cores": 1.772789544579859,
+        "p95_cores": 1.7922131868131868,
         "p99_peak_bytes": 1073049600,
         "phases": {
           "link [pic]": {
@@ -541,9 +541,9 @@
       },
       "hirsel-cli-bin-hirsel-unittest-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.55308832706981,
+        "mean_cores": 1.571446157666046,
         "memory_kb": 1376256,
-        "p95_cores": 1.733396935483871,
+        "p95_cores": 1.7366659722222222,
         "p99_peak_bytes": 451518464,
         "phases": {
           "link [pic]": {
@@ -565,9 +565,9 @@
       },
       "hirsel-cli-test-assetcheck-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.1978651270115173,
+        "mean_cores": 1.1620570299104591,
         "memory_kb": 327680,
-        "p95_cores": 1.4543932835820896,
+        "p95_cores": 1.4697617924528301,
         "p99_peak_bytes": 97427456,
         "phases": {
           "link [pic]": {
@@ -589,9 +589,9 @@
       },
       "hirsel-cli-test-cli-harness": {
         "cpu_count": 2,
-        "mean_cores": 3.1141752764357897,
+        "mean_cores": 2.955261802755882,
         "memory_kb": 2359296,
-        "p95_cores": 3.3783396729639623,
+        "p95_cores": 3.2871684756898816,
         "p99_peak_bytes": 1754312704,
         "phases": {
           "link [pic]": {
@@ -613,9 +613,9 @@
       },
       "hirsel-cli-test-configctl_8-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.2077231596666256,
+        "mean_cores": 1.1621622424760278,
         "memory_kb": 327680,
-        "p95_cores": 1.466063565891473,
+        "p95_cores": 1.4855157303370787,
         "p99_peak_bytes": 98320384,
         "phases": {
           "link [pic]": {
@@ -707,6 +707,78 @@
           1794361515
         ]
       },
+      "hirsel-cli-test-cpu_pool_1-harness": {
+        "cpu_count": 2,
+        "mean_cores": 1.745564186832723,
+        "memory_kb": 1507328,
+        "p95_cores": 1.847300751503006,
+        "p99_peak_bytes": 507994112,
+        "phases": {
+          "link [pic]": {
+            "cpu_seconds": 1796.831,
+            "max_wall_seconds": 32.925,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 67,
+            "wall_seconds": 1036.841
+          }
+        },
+        "pss_peak_bytes": 1264527360,
+        "samples": 67,
+        "window": [
+          1794276999,
+          1794361518
+        ]
+      },
+      "hirsel-cli-test-cpu_pool_16-harness": {
+        "cpu_count": 2,
+        "mean_cores": 1.7152232239973915,
+        "memory_kb": 1376256,
+        "p95_cores": 1.8367407054337463,
+        "p99_peak_bytes": 482430976,
+        "phases": {
+          "link [pic]": {
+            "cpu_seconds": 1315.147,
+            "max_wall_seconds": 24.385,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 66,
+            "wall_seconds": 775.266
+          }
+        },
+        "pss_peak_bytes": 1173246976,
+        "samples": 66,
+        "window": [
+          1794280989,
+          1794361518
+        ]
+      },
+      "hirsel-cli-test-cpu_pool_4-harness": {
+        "cpu_count": 2,
+        "mean_cores": 1.7131867057273116,
+        "memory_kb": 1507328,
+        "p95_cores": 1.8646208628005658,
+        "p99_peak_bytes": 515428352,
+        "phases": {
+          "link [pic]": {
+            "cpu_seconds": 1923.977,
+            "max_wall_seconds": 33.366,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 67,
+            "wall_seconds": 1132.137
+          }
+        },
+        "pss_peak_bytes": 1233444864,
+        "samples": 67,
+        "window": [
+          1794276994,
+          1794361518
+        ]
+      },
       "hirsel-cli-test-cpu_pool_8-harness": {
         "cpu_count": 1,
         "mean_cores": 1.5685062679500115,
@@ -757,9 +829,9 @@
       },
       "hirsel-cli-test-docsession_11-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.2621476651504402,
+        "mean_cores": 1.210543524774775,
         "memory_kb": 327680,
-        "p95_cores": 1.4815866666666666,
+        "p95_cores": 1.4905884615384615,
         "p99_peak_bytes": 99307520,
         "phases": {
           "link [pic]": {
@@ -781,9 +853,9 @@
       },
       "hirsel-cli-test-examples-harness": {
         "cpu_count": 2,
-        "mean_cores": 1.6822947572612432,
+        "mean_cores": 2.6942482018351783,
         "memory_kb": 1441792,
-        "p95_cores": 1.8224580993520518,
+        "p95_cores": 3.237736312849162,
         "p99_peak_bytes": 677163008,
         "phases": {
           "link [pic]": {
@@ -805,9 +877,9 @@
       },
       "hirsel-cli-test-free-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.5608965114409987,
+        "mean_cores": 1.463525655229685,
         "memory_kb": 1507328,
-        "p95_cores": 1.7138693617021277,
+        "p95_cores": 1.6149981748318925,
         "p99_peak_bytes": 504631296,
         "phases": {
           "link [pic]": {
@@ -829,9 +901,9 @@
       },
       "hirsel-cli-test-httpaggregate_9-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.1840251409889662,
+        "mean_cores": 1.1823941969115765,
         "memory_kb": 327680,
-        "p95_cores": 1.4637739130434784,
+        "p95_cores": 1.4740070866141732,
         "p99_peak_bytes": 98246656,
         "phases": {
           "link [pic]": {
@@ -853,9 +925,9 @@
       },
       "hirsel-cli-test-la_array_dispatch_14-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.2251785023400936,
+        "mean_cores": 1.2030696149217808,
         "memory_kb": 327680,
-        "p95_cores": 1.4919472222222223,
+        "p95_cores": 1.4918586497890296,
         "p99_peak_bytes": 100880384,
         "phases": {
           "link [pic]": {
@@ -877,9 +949,9 @@
       },
       "hirsel-cli-test-la_brainfuck_recursion_10-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.2531666590545785,
+        "mean_cores": 1.2042364058293882,
         "memory_kb": 327680,
-        "p95_cores": 1.490936231884058,
+        "p95_cores": 1.4856794392523365,
         "p99_peak_bytes": 100392960,
         "phases": {
           "link [pic]": {
@@ -901,9 +973,9 @@
       },
       "hirsel-cli-test-la_bwt_inverse_11-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.3059862260074522,
+        "mean_cores": 1.2562693707587909,
         "memory_kb": 327680,
-        "p95_cores": 1.5483977401129942,
+        "p95_cores": 1.5653900735294117,
         "p99_peak_bytes": 104087552,
         "phases": {
           "link [pic]": {
@@ -925,9 +997,9 @@
       },
       "hirsel-cli-test-la_calculator_interpreter_10-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.2210542670845492,
+        "mean_cores": 1.1810509512592862,
         "memory_kb": 327680,
-        "p95_cores": 1.4859421875,
+        "p95_cores": 1.4951852631578948,
         "p99_peak_bytes": 102260736,
         "phases": {
           "link [pic]": {
@@ -949,9 +1021,9 @@
       },
       "hirsel-cli-test-la_graph_rss_10-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.0425163783848266,
+        "mean_cores": 1.048049245703791,
         "memory_kb": 327680,
-        "p95_cores": 1.2595322916666667,
+        "p95_cores": 1.26556106870229,
         "p99_peak_bytes": 90259456,
         "phases": {
           "link [pic]": {
@@ -973,9 +1045,9 @@
       },
       "hirsel-cli-test-la_lzw_10-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.2675800573991032,
+        "mean_cores": 1.288572116274764,
         "memory_kb": 393216,
-        "p95_cores": 1.513883870967742,
+        "p95_cores": 1.5189226890756302,
         "p99_peak_bytes": 103555072,
         "phases": {
           "link [pic]": {
@@ -997,9 +1069,9 @@
       },
       "hirsel-cli-test-la_neural_net_10-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.2511846398341684,
+        "mean_cores": 1.2446119706284153,
         "memory_kb": 327680,
-        "p95_cores": 1.4985059523809523,
+        "p95_cores": 1.5137782258064516,
         "p99_peak_bytes": 104972288,
         "phases": {
           "link [pic]": {
@@ -1021,9 +1093,9 @@
       },
       "hirsel-cli-test-la_ngram_upsert_14-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.2773852858326429,
+        "mean_cores": 1.2086509295900842,
         "memory_kb": 327680,
-        "p95_cores": 1.5484016483516483,
+        "p95_cores": 1.5693538961038962,
         "p99_peak_bytes": 100569088,
         "phases": {
           "link [pic]": {
@@ -1045,9 +1117,9 @@
       },
       "hirsel-cli-test-la_sieve_10-harness": {
         "cpu_count": 2,
-        "mean_cores": 1.6291575618128684,
+        "mean_cores": 2.437498184830368,
         "memory_kb": 1310720,
-        "p95_cores": 1.826177800407332,
+        "p95_cores": 3.088920447284345,
         "p99_peak_bytes": 430153728,
         "phases": {
           "link [pic]": {
@@ -1069,9 +1141,9 @@
       },
       "hirsel-cli-test-la_spectral_split_14-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.249579787193178,
+        "mean_cores": 1.196014314765694,
         "memory_kb": 327680,
-        "p95_cores": 1.4907054421768708,
+        "p95_cores": 1.5131063157894737,
         "p99_peak_bytes": 102801408,
         "phases": {
           "link [pic]": {
@@ -1093,9 +1165,9 @@
       },
       "hirsel-cli-test-rule_explain_5-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.3298922048014132,
+        "mean_cores": 1.2382771937509127,
         "memory_kb": 327680,
-        "p95_cores": 1.5493057803468209,
+        "p95_cores": 1.566880165289256,
         "p99_peak_bytes": 110391296,
         "phases": {
           "link [pic]": {
@@ -1117,9 +1189,9 @@
       },
       "hirsel-cli-test-stream_replay-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.4563972872005386,
+        "mean_cores": 1.2975742298448765,
         "memory_kb": 458752,
-        "p95_cores": 1.6560744,
+        "p95_cores": 1.6627115183246073,
         "p99_peak_bytes": 149192704,
         "phases": {
           "link [pic]": {
@@ -1141,9 +1213,9 @@
       },
       "hirsel-cli-test-tabfold_10-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.1716668777267287,
+        "mean_cores": 1.15950946783306,
         "memory_kb": 393216,
-        "p95_cores": 1.4571727272727273,
+        "p95_cores": 1.487253781512605,
         "p99_peak_bytes": 99102720,
         "phases": {
           "link [pic]": {
@@ -1165,9 +1237,9 @@
       },
       "hirsel-code-store": {
         "cpu_count": 1,
-        "mean_cores": 1.1350051955104996,
+        "mean_cores": 1.2429719544341933,
         "memory_kb": 327680,
-        "p95_cores": 1.5917954166666666,
+        "p95_cores": 1.633436305732484,
         "p99_peak_bytes": 88444928,
         "phases": {
           "check": {
@@ -1216,9 +1288,9 @@
       },
       "hirsel-code-store-test-it-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.2846927164179103,
+        "mean_cores": 1.2303393844344246,
         "memory_kb": 393216,
-        "p95_cores": 1.4936179775280898,
+        "p95_cores": 1.5246698924731183,
         "p99_peak_bytes": 110215168,
         "phases": {
           "link [pic]": {
@@ -1264,9 +1336,9 @@
       },
       "hirsel-codec": {
         "cpu_count": 1,
-        "mean_cores": 0.9464533882030178,
+        "mean_cores": 0.9350822108934799,
         "memory_kb": 196608,
-        "p95_cores": 0.9973422018348624,
+        "p95_cores": 1.0847518867924528,
         "p99_peak_bytes": 53710848,
         "phases": {
           "check": {
@@ -1315,9 +1387,9 @@
       },
       "hirsel-codec-unittest-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.4150629955947136,
+        "mean_cores": 1.294523911671924,
         "memory_kb": 262144,
-        "p95_cores": 1.6390972972972973,
+        "p95_cores": 1.5762610738255034,
         "p99_peak_bytes": 101396480,
         "phases": {
           "link [pic]": {
@@ -1413,10 +1485,10 @@
         ]
       },
       "hirsel-conformance": {
-        "cpu_count": 1,
-        "mean_cores": 1.539704142222944,
+        "cpu_count": 2,
+        "mean_cores": 1.7133401351394217,
         "memory_kb": 851968,
-        "p95_cores": 1.8153815774647888,
+        "p95_cores": 1.8456345794392524,
         "p99_peak_bytes": 471855104,
         "phases": {
           "check": {
@@ -1456,9 +1528,9 @@
       },
       "hirsel-conformance-bin-agree": {
         "cpu_count": 1,
-        "mean_cores": 1.4484167317367151,
+        "mean_cores": 1.5549537722009745,
         "memory_kb": 3407872,
-        "p95_cores": 1.713455928411633,
+        "p95_cores": 1.7460685053380782,
         "p99_peak_bytes": 1013284864,
         "phases": {
           "link [pic]": {
@@ -1479,10 +1551,10 @@
         ]
       },
       "hirsel-conformance-bin-corpus-fmt": {
-        "cpu_count": 1,
-        "mean_cores": 1.3947073408485227,
+        "cpu_count": 2,
+        "mean_cores": 1.613937581993969,
         "memory_kb": 3276800,
-        "p95_cores": 1.702557365269461,
+        "p95_cores": 1.7829223650385604,
         "p99_peak_bytes": 971235328,
         "phases": {
           "link [pic]": {
@@ -1504,9 +1576,9 @@
       },
       "hirsel-conformance-bin-hirsel-conformance": {
         "cpu_count": 1,
-        "mean_cores": 1.4168759940111963,
+        "mean_cores": 1.519528339745645,
         "memory_kb": 3342336,
-        "p95_cores": 1.7184340350877192,
+        "p95_cores": 1.7204420289855074,
         "p99_peak_bytes": 969412608,
         "phases": {
           "link [pic]": {
@@ -1527,10 +1599,10 @@
         ]
       },
       "hirsel-conformance-bin-native": {
-        "cpu_count": 1,
-        "mean_cores": 1.4169740900335148,
+        "cpu_count": 2,
+        "mean_cores": 1.6685103134389914,
         "memory_kb": 3473408,
-        "p95_cores": 1.6878656038647344,
+        "p95_cores": 1.8126190166305134,
         "p99_peak_bytes": 1034432512,
         "phases": {
           "link [pic]": {
@@ -1552,9 +1624,9 @@
       },
       "hirsel-conformance-bin-native-select": {
         "cpu_count": 1,
-        "mean_cores": 1.3994636679385581,
+        "mean_cores": 1.5743858017167605,
         "memory_kb": 3342336,
-        "p95_cores": 1.7021505422993493,
+        "p95_cores": 1.7802745635910224,
         "p99_peak_bytes": 989233152,
         "phases": {
           "link [pic]": {
@@ -1576,9 +1648,9 @@
       },
       "hirsel-conformance-bin-native-unittest-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.3033081659919028,
+        "mean_cores": 1.3805992002864644,
         "memory_kb": 1048576,
-        "p95_cores": 1.5819842657342658,
+        "p95_cores": 1.5878975945017182,
         "p99_peak_bytes": 339132416,
         "phases": {
           "link [pic]": {
@@ -1600,9 +1672,9 @@
       },
       "hirsel-conformance-bin-oracle": {
         "cpu_count": 1,
-        "mean_cores": 1.4133546906002805,
+        "mean_cores": 1.553124,
         "memory_kb": 3342336,
-        "p95_cores": 1.7023609501738124,
+        "p95_cores": 1.7911910204081634,
         "p99_peak_bytes": 1003180032,
         "phases": {
           "link [pic]": {
@@ -1624,9 +1696,9 @@
       },
       "hirsel-conformance-bin-profile": {
         "cpu_count": 1,
-        "mean_cores": 1.391664440899127,
+        "mean_cores": 1.5959749800099952,
         "memory_kb": 3211264,
-        "p95_cores": 1.7176176029962547,
+        "p95_cores": 1.7581615,
         "p99_peak_bytes": 973844480,
         "phases": {
           "link [pic]": {
@@ -1648,9 +1720,9 @@
       },
       "hirsel-conformance-test-it-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.7656715647297134,
+        "mean_cores": 2.5886705497635334,
         "memory_kb": 1441792,
-        "p95_cores": 3.0766721238938053,
+        "p95_cores": 3.032380602782071,
         "p99_peak_bytes": 539602944,
         "phases": {
           "link [pic]": {
@@ -1672,9 +1744,9 @@
       },
       "hirsel-conformance-test-spec_links-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.437285551529875,
+        "mean_cores": 1.4290770753392608,
         "memory_kb": 1048576,
-        "p95_cores": 1.6568845794392524,
+        "p95_cores": 1.6706418181818181,
         "p99_peak_bytes": 324177920,
         "phases": {
           "link [pic]": {
@@ -1696,9 +1768,9 @@
       },
       "hirsel-conformance-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.8654623207523273,
+        "mean_cores": 2.8037544272905723,
         "memory_kb": 1638400,
-        "p95_cores": 3.142161969993477,
+        "p95_cores": 3.179522709551657,
         "p99_peak_bytes": 656703488,
         "phases": {
           "link [pic]": {
@@ -1720,9 +1792,9 @@
       },
       "hirsel-core-contract": {
         "cpu_count": 1,
-        "mean_cores": 1.0595340946464462,
+        "mean_cores": 1.147078760757315,
         "memory_kb": 262144,
-        "p95_cores": 1.5402129032258065,
+        "p95_cores": 1.4748174757281554,
         "p99_peak_bytes": 69087232,
         "phases": {
           "check": {
@@ -1771,9 +1843,9 @@
       },
       "hirsel-core-contract-unittest-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.019892641509434,
+        "mean_cores": 1.4974829896907216,
         "memory_kb": 262144,
-        "p95_cores": 1.120995918367347,
+        "p95_cores": 2.3455445454545454,
         "p99_peak_bytes": 95576064,
         "phases": {
           "link [pic]": {
@@ -1795,9 +1867,9 @@
       },
       "hirsel-cranelift": {
         "cpu_count": 1,
-        "mean_cores": 1.300505002227427,
+        "mean_cores": 1.3990573169647487,
         "memory_kb": 655360,
-        "p95_cores": 1.7077296134208606,
+        "p95_cores": 1.7456528892455858,
         "p99_peak_bytes": 337895424,
         "phases": {
           "check": {
@@ -1845,10 +1917,10 @@
         ]
       },
       "hirsel-cranelift-unittest-harness": {
-        "cpu_count": 1,
-        "mean_cores": 1.5992481627857296,
+        "cpu_count": 2,
+        "mean_cores": 1.6815743594150099,
         "memory_kb": 720896,
-        "p95_cores": 1.741286911231884,
+        "p95_cores": 1.7705047470817121,
         "p99_peak_bytes": 369520640,
         "phases": {
           "link [pic]": {
@@ -1870,9 +1942,9 @@
       },
       "hirsel-diag": {
         "cpu_count": 1,
-        "mean_cores": 1.0129990697674418,
+        "mean_cores": 1.2080901162790696,
         "memory_kb": 262144,
-        "p95_cores": 1.18471677852349,
+        "p95_cores": 1.5749536764705883,
         "p99_peak_bytes": 85917696,
         "phases": {
           "check": {
@@ -1921,9 +1993,9 @@
       },
       "hirsel-diag-unittest-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.4111083050847455,
+        "mean_cores": 1.5670439910979228,
         "memory_kb": 262144,
-        "p95_cores": 1.4111083050847457,
+        "p95_cores": 1.6138883248730964,
         "p99_peak_bytes": 103927808,
         "phases": {
           "link [pic]": {
@@ -1945,9 +2017,9 @@
       },
       "hirsel-driver": {
         "cpu_count": 2,
-        "mean_cores": 2.4160287826839597,
+        "mean_cores": 2.7809194210827055,
         "memory_kb": 2818048,
-        "p95_cores": 3.1051867288459376,
+        "p95_cores": 3.4212506543868155,
         "p99_peak_bytes": 849678336,
         "phases": {
           "check": {
@@ -1998,7 +2070,7 @@
         "cpu_count": 1,
         "mean_cores": 1.0,
         "memory_kb": 196608,
-        "p95_cores": 1.0882252525252525,
+        "p95_cores": 1.0,
         "p99_peak_bytes": 51449856,
         "phases": {
           "link [pic]": {
@@ -2019,10 +2091,10 @@
         ]
       },
       "hirsel-driver-example-candidate_cost": {
-        "cpu_count": 1,
-        "mean_cores": 1.424500247223968,
+        "cpu_count": 2,
+        "mean_cores": 1.6386859355448655,
         "memory_kb": 3211264,
-        "p95_cores": 1.6944908188585608,
+        "p95_cores": 1.8099389147286822,
         "p99_peak_bytes": 984133632,
         "phases": {
           "link [pic]": {
@@ -2044,9 +2116,9 @@
       },
       "hirsel-driver-example-corpus_dump": {
         "cpu_count": 2,
-        "mean_cores": 1.9692539508169296,
+        "mean_cores": 2.050854082922513,
         "memory_kb": 1900544,
-        "p95_cores": 2.5525043137254904,
+        "p95_cores": 2.6806073446327683,
         "p99_peak_bytes": 623878144,
         "phases": {
           "link [pic]": {
@@ -2091,10 +2163,10 @@
         ]
       },
       "hirsel-driver-example-native_fixture_snapshot": {
-        "cpu_count": 1,
-        "mean_cores": 1.3824055803092457,
+        "cpu_count": 2,
+        "mean_cores": 1.8060905924053885,
         "memory_kb": 3014656,
-        "p95_cores": 1.683585421994885,
+        "p95_cores": 1.9097534772182254,
         "p99_peak_bytes": 902438912,
         "phases": {
           "link [pic]": {
@@ -2116,9 +2188,9 @@
       },
       "hirsel-driver-example-package_profile": {
         "cpu_count": 1,
-        "mean_cores": 1.3718254782988188,
+        "mean_cores": 1.518541862694197,
         "memory_kb": 1835008,
-        "p95_cores": 1.6964264857881137,
+        "p95_cores": 1.8006561403508772,
         "p99_peak_bytes": 592494592,
         "phases": {
           "link [pic]": {
@@ -2140,9 +2212,9 @@
       },
       "hirsel-driver-test-it-harness": {
         "cpu_count": 2,
-        "mean_cores": 3.135416441541335,
+        "mean_cores": 3.0446922058510495,
         "memory_kb": 5505024,
-        "p95_cores": 3.3227603357546407,
+        "p95_cores": 3.324814326747933,
         "p99_peak_bytes": 4328529920,
         "phases": {
           "link [pic]": {
@@ -2164,9 +2236,9 @@
       },
       "hirsel-driver-test-it-image-harness": {
         "cpu_count": 2,
-        "mean_cores": 1.6218173538889702,
+        "mean_cores": 2.4670770493804555,
         "memory_kb": 1376256,
-        "p95_cores": 1.8011682788051209,
+        "p95_cores": 3.0477945945945946,
         "p99_peak_bytes": 471789568,
         "phases": {
           "link [pic]": {
@@ -2188,9 +2260,9 @@
       },
       "hirsel-driver-test-it-keyed-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.5534444445954394,
+        "mean_cores": 1.5019790579476717,
         "memory_kb": 1376256,
-        "p95_cores": 1.765140522875817,
+        "p95_cores": 1.7857027607361964,
         "p99_peak_bytes": 390688768,
         "phases": {
           "link [pic]": {
@@ -2236,9 +2308,9 @@
       },
       "hirsel-driver-test-it-products-harness": {
         "cpu_count": 1,
-        "mean_cores": 0.9926545020902561,
+        "mean_cores": 1.5619595787491691,
         "memory_kb": 1376256,
-        "p95_cores": 1.2138264367816092,
+        "p95_cores": 1.8121265868263472,
         "p99_peak_bytes": 437489664,
         "phases": {
           "link [pic]": {
@@ -2260,9 +2332,9 @@
       },
       "hirsel-driver-test-it-resident-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.4773203504457424,
+        "mean_cores": 1.5694017786883339,
         "memory_kb": 1376256,
-        "p95_cores": 1.69281581769437,
+        "p95_cores": 1.7639736170212765,
         "p99_peak_bytes": 427487232,
         "phases": {
           "link [pic]": {
@@ -2284,9 +2356,9 @@
       },
       "hirsel-driver-test-it-scaling-harness": {
         "cpu_count": 2,
-        "mean_cores": 1.6981181084546346,
+        "mean_cores": 2.5129239786015245,
         "memory_kb": 1245184,
-        "p95_cores": 1.8548487179487179,
+        "p95_cores": 3.125726600985222,
         "p99_peak_bytes": 450158592,
         "phases": {
           "link [pic]": {
@@ -2308,9 +2380,9 @@
       },
       "hirsel-driver-test-it-stdlib-harness": {
         "cpu_count": 2,
-        "mean_cores": 3.046513826566629,
+        "mean_cores": 2.9336516399990464,
         "memory_kb": 2228224,
-        "p95_cores": 3.3635345470497917,
+        "p95_cores": 3.2555167840551475,
         "p99_peak_bytes": 1752621056,
         "phases": {
           "link [pic]": {
@@ -2332,9 +2404,9 @@
       },
       "hirsel-driver-test-stack_depth-harness": {
         "cpu_count": 2,
-        "mean_cores": 1.6038924517014463,
+        "mean_cores": 2.3593998707082315,
         "memory_kb": 786432,
-        "p95_cores": 1.8122355119825708,
+        "p95_cores": 2.793299613899614,
         "p99_peak_bytes": 278667264,
         "phases": {
           "link [pic]": {
@@ -2356,9 +2428,9 @@
       },
       "hirsel-driver-test-validate_memory-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.563452139526257,
+        "mean_cores": 1.530186710647005,
         "memory_kb": 983040,
-        "p95_cores": 1.7791004273504274,
+        "p95_cores": 1.7855625,
         "p99_peak_bytes": 285265920,
         "phases": {
           "link [pic]": {
@@ -2380,9 +2452,9 @@
       },
       "hirsel-driver-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.9999947940844174,
+        "mean_cores": 2.895390774592532,
         "memory_kb": 2031616,
-        "p95_cores": 3.1764991362675734,
+        "p95_cores": 3.2459318977756744,
         "p99_peak_bytes": 1080676352,
         "phases": {
           "link [pic]": {
@@ -2404,9 +2476,9 @@
       },
       "hirsel-engine": {
         "cpu_count": 2,
-        "mean_cores": 2.436272949334741,
+        "mean_cores": 2.6418934841375545,
         "memory_kb": 4784128,
-        "p95_cores": 3.1999681444435026,
+        "p95_cores": 3.8473060001926225,
         "p99_peak_bytes": 3421536256,
         "phases": {
           "check": {
@@ -2530,9 +2602,9 @@
       },
       "hirsel-engine-build-script-bin": {
         "cpu_count": 1,
-        "mean_cores": 1.2200531626506022,
+        "mean_cores": 0.8913170929760456,
         "memory_kb": 458752,
-        "p95_cores": 1.3722716216216215,
+        "p95_cores": 1.126085975609756,
         "p99_peak_bytes": 146333696,
         "phases": {
           "link [pic]": {
@@ -2678,11 +2750,35 @@
           1794361951
         ]
       },
+      "hirsel-engine-store-unittest-harness": {
+        "cpu_count": 2,
+        "mean_cores": 1.7364568527520778,
+        "memory_kb": 655360,
+        "p95_cores": 2.024870939226519,
+        "p99_peak_bytes": 328568832,
+        "phases": {
+          "link [pic]": {
+            "cpu_seconds": 1107.339,
+            "max_wall_seconds": 28.266,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 32,
+            "wall_seconds": 642.658
+          }
+        },
+        "pss_peak_bytes": 525800448,
+        "samples": 32,
+        "window": [
+          1794276926,
+          1794360922
+        ]
+      },
       "hirsel-engine-test-it-harness": {
         "cpu_count": 2,
-        "mean_cores": 1.638018864801367,
+        "mean_cores": 2.6051011753718596,
         "memory_kb": 851968,
-        "p95_cores": 1.8231828014184397,
+        "p95_cores": 3.1150440823327616,
         "p99_peak_bytes": 335093760,
         "phases": {
           "link [pic]": {
@@ -2704,9 +2800,9 @@
       },
       "hirsel-engine-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 3.0913683969841848,
+        "mean_cores": 3.233634668290307,
         "memory_kb": 3735552,
-        "p95_cores": 4.11487340201534,
+        "p95_cores": 5.1013710837781385,
         "p99_peak_bytes": 3050405888,
         "phases": {
           "link [pic]": {
@@ -2728,9 +2824,9 @@
       },
       "hirsel-fmt": {
         "cpu_count": 1,
-        "mean_cores": 0.97325525477707,
+        "mean_cores": 1.3115286231884058,
         "memory_kb": 327680,
-        "p95_cores": 1.3029039215686276,
+        "p95_cores": 1.704741015625,
         "p99_peak_bytes": 117047296,
         "phases": {
           "check": {
@@ -2779,9 +2875,9 @@
       },
       "hirsel-fmt-test-corpus-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.558837373737374,
+        "mean_cores": 1.3778201335387776,
         "memory_kb": 327680,
-        "p95_cores": 1.6751168776371308,
+        "p95_cores": 1.6949943298969072,
         "p99_peak_bytes": 92618752,
         "phases": {
           "link [pic]": {
@@ -2803,9 +2899,9 @@
       },
       "hirsel-fmt-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 1.624778349514563,
+        "mean_cores": 2.5207706888788834,
         "memory_kb": 327680,
-        "p95_cores": 1.7011913140311803,
+        "p95_cores": 2.6911033898305083,
         "p99_peak_bytes": 194240512,
         "phases": {
           "link [pic]": {
@@ -2827,9 +2923,9 @@
       },
       "hirsel-free": {
         "cpu_count": 1,
-        "mean_cores": 1.3158474501108648,
+        "mean_cores": 1.4098090271463828,
         "memory_kb": 262144,
-        "p95_cores": 3.7238432835820894,
+        "p95_cores": 1.7257872258064517,
         "p99_peak_bytes": 166371328,
         "phases": {
           "diag": {
@@ -2869,9 +2965,9 @@
       },
       "hirsel-free-loom": {
         "cpu_count": 1,
-        "mean_cores": 1.5145200150513711,
+        "mean_cores": 1.451361954006364,
         "memory_kb": 327680,
-        "p95_cores": 2.563275,
+        "p95_cores": 2.3868402298850575,
         "p99_peak_bytes": 140378112,
         "phases": {
           "check": {
@@ -2911,9 +3007,9 @@
       },
       "hirsel-free-loom-test-atomic-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.5798122680412372,
+        "mean_cores": 1.237881926811053,
         "memory_kb": 393216,
-        "p95_cores": 2.0094190082644627,
+        "p95_cores": 1.48483875,
         "p99_peak_bytes": 85909504,
         "phases": {
           "link [pic]": {
@@ -2933,11 +3029,35 @@
           1794359454
         ]
       },
-      "hirsel-free-loom-test-cancel-harness": {
+      "hirsel-free-loom-test-batch-harness": {
         "cpu_count": 2,
-        "mean_cores": 1.6493502439024392,
+        "mean_cores": 1.717259438644532,
+        "memory_kb": 327680,
+        "p95_cores": 2.498819662921348,
+        "p99_peak_bytes": 101543936,
+        "phases": {
+          "link [pic]": {
+            "cpu_seconds": 100.339,
+            "max_wall_seconds": 4.877,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 24,
+            "wall_seconds": 62.212
+          }
+        },
+        "pss_peak_bytes": 248050688,
+        "samples": 24,
+        "window": [
+          1794276991,
+          1794359453
+        ]
+      },
+      "hirsel-free-loom-test-cancel-harness": {
+        "cpu_count": 1,
+        "mean_cores": 1.4454000917992655,
         "memory_kb": 393216,
-        "p95_cores": 1.9937948453608247,
+        "p95_cores": 1.9438823529411764,
         "p99_peak_bytes": 122601472,
         "phases": {
           "link [pic]": {
@@ -2959,9 +3079,9 @@
       },
       "hirsel-free-loom-test-channel-harness": {
         "cpu_count": 1,
-        "mean_cores": 0.9671580220146764,
+        "mean_cores": 0.9934478033927796,
         "memory_kb": 262144,
-        "p95_cores": 1.158324812030075,
+        "p95_cores": 1.1675273504273505,
         "p99_peak_bytes": 73326592,
         "phases": {
           "link [pic]": {
@@ -2983,9 +3103,9 @@
       },
       "hirsel-free-loom-test-executors-harness": {
         "cpu_count": 2,
-        "mean_cores": 1.8988164705882353,
+        "mean_cores": 1.661811832460733,
         "memory_kb": 393216,
-        "p95_cores": 2.2160771653543305,
+        "p95_cores": 2.216287878787879,
         "p99_peak_bytes": 130719744,
         "phases": {
           "link [pic]": {
@@ -3006,10 +3126,10 @@
         ]
       },
       "hirsel-free-loom-test-frames-harness": {
-        "cpu_count": 2,
-        "mean_cores": 1.6674063810287545,
+        "cpu_count": 1,
+        "mean_cores": 1.5779174579769981,
         "memory_kb": 393216,
-        "p95_cores": 2.0790725806451613,
+        "p95_cores": 2.0862063063063063,
         "p99_peak_bytes": 124899328,
         "phases": {
           "link [pic]": {
@@ -3031,9 +3151,9 @@
       },
       "hirsel-free-loom-test-models-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.5172547666009204,
+        "mean_cores": 2.1546915468986385,
         "memory_kb": 393216,
-        "p95_cores": 3.2315541666666667,
+        "p95_cores": 3.115762804878049,
         "p99_peak_bytes": 154771456,
         "phases": {
           "link [pic]": {
@@ -3055,9 +3175,9 @@
       },
       "hirsel-free-loom-test-mutex-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.5351103028734143,
+        "mean_cores": 1.1824263979562875,
         "memory_kb": 327680,
-        "p95_cores": 1.9365445652173914,
+        "p95_cores": 1.514693181818182,
         "p99_peak_bytes": 85495808,
         "phases": {
           "link [pic]": {
@@ -3079,9 +3199,9 @@
       },
       "hirsel-free-loom-test-schedule-harness": {
         "cpu_count": 2,
-        "mean_cores": 1.9542309763313608,
+        "mean_cores": 1.8949236597252992,
         "memory_kb": 393216,
-        "p95_cores": 2.396378048780488,
+        "p95_cores": 2.3646397435897435,
         "p99_peak_bytes": 136609792,
         "phases": {
           "link [pic]": {
@@ -3103,9 +3223,9 @@
       },
       "hirsel-free-loom-test-wakes-harness": {
         "cpu_count": 2,
-        "mean_cores": 1.6785742179298762,
+        "mean_cores": 1.6020231067961166,
         "memory_kb": 327680,
-        "p95_cores": 2.1133285714285712,
+        "p95_cores": 1.994037,
         "p99_peak_bytes": 128458752,
         "phases": {
           "link [pic]": {
@@ -3126,10 +3246,10 @@
         ]
       },
       "hirsel-free-loom-unittest-harness": {
-        "cpu_count": 1,
-        "mean_cores": 1.383512452537776,
+        "cpu_count": 2,
+        "mean_cores": 1.710040932488616,
         "memory_kb": 327680,
-        "p95_cores": 1.8499233333333334,
+        "p95_cores": 2.6366897897897896,
         "p99_peak_bytes": 149467136,
         "phases": {
           "link [pic]": {
@@ -3151,9 +3271,9 @@
       },
       "hirsel-free-test-it-harness": {
         "cpu_count": 2,
-        "mean_cores": 1.7085841745646904,
+        "mean_cores": 1.8027901287553647,
         "memory_kb": 327680,
-        "p95_cores": 1.7764799537393987,
+        "p95_cores": 1.8027901287553647,
         "p99_peak_bytes": 244948992,
         "phases": {
           "link [pic]": {
@@ -3250,9 +3370,9 @@
       },
       "hirsel-graph": {
         "cpu_count": 1,
-        "mean_cores": 1.1233479768786128,
+        "mean_cores": 1.179414765100671,
         "memory_kb": 262144,
-        "p95_cores": 1.482630890052356,
+        "p95_cores": 1.5654493150684932,
         "p99_peak_bytes": 99905536,
         "phases": {
           "check": {
@@ -3300,10 +3420,10 @@
         ]
       },
       "hirsel-graph-unittest-harness": {
-        "cpu_count": 1,
-        "mean_cores": 1.4004516703786192,
+        "cpu_count": 2,
+        "mean_cores": 1.6139593129139074,
         "memory_kb": 262144,
-        "p95_cores": 1.6843,
+        "p95_cores": 1.7262503623188405,
         "p99_peak_bytes": 101335040,
         "phases": {
           "link [pic]": {
@@ -3325,9 +3445,9 @@
       },
       "hirsel-guard": {
         "cpu_count": 1,
-        "mean_cores": 0.877939916550765,
+        "mean_cores": 0.9942141783567134,
         "memory_kb": 131072,
-        "p95_cores": 0.9199720238095238,
+        "p95_cores": 1.0909279069767441,
         "p99_peak_bytes": 52072448,
         "phases": {
           "diag": {
@@ -3391,9 +3511,9 @@
       },
       "hirsel-heapcheck": {
         "cpu_count": 1,
-        "mean_cores": 1.3511535292139536,
+        "mean_cores": 1.453857646109652,
         "memory_kb": 851968,
-        "p95_cores": 1.7264734655920644,
+        "p95_cores": 1.758447564469914,
         "p99_peak_bytes": 584552448,
         "phases": {
           "check": {
@@ -3442,9 +3562,9 @@
       },
       "hirsel-heapcheck-test-it-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.6414617106824783,
+        "mean_cores": 2.512185461126877,
         "memory_kb": 1179648,
-        "p95_cores": 2.9897780299785865,
+        "p95_cores": 2.946992929292929,
         "p99_peak_bytes": 874565632,
         "phases": {
           "link [pic]": {
@@ -3466,9 +3586,9 @@
       },
       "hirsel-heapcheck-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 1.6463985685631406,
+        "mean_cores": 2.7772954970056447,
         "memory_kb": 1245184,
-        "p95_cores": 1.730652922447123,
+        "p95_cores": 3.064702842377261,
         "p99_peak_bytes": 775213056,
         "phases": {
           "link [pic]": {
@@ -3490,9 +3610,9 @@
       },
       "hirsel-heaps-loom": {
         "cpu_count": 1,
-        "mean_cores": 0.9180224534769834,
+        "mean_cores": 0.8885304871660554,
         "memory_kb": 131072,
-        "p95_cores": 0.9971034482758621,
+        "p95_cores": 0.9854638461538462,
         "p99_peak_bytes": 35319808,
         "phases": {
           "check": {
@@ -3532,9 +3652,9 @@
       },
       "hirsel-heaps-loom-test-models-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.5828338664158044,
+        "mean_cores": 1.811496992179667,
         "memory_kb": 393216,
-        "p95_cores": 2.9632947368421054,
+        "p95_cores": 2.4191810185185183,
         "p99_peak_bytes": 144347136,
         "phases": {
           "link [pic]": {
@@ -3578,6 +3698,81 @@
           1793027085
         ]
       },
+      "hirsel-host-io": {
+        "cpu_count": 2,
+        "mean_cores": 1.6167264840998088,
+        "memory_kb": 655360,
+        "p95_cores": 1.8636628977272727,
+        "p99_peak_bytes": 336146432,
+        "phases": {
+          "check": {
+            "cpu_seconds": 120.066,
+            "max_wall_seconds": 2.805,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 95,
+            "wall_seconds": 138.44
+          },
+          "diag": {
+            "cpu_seconds": 72.161,
+            "max_wall_seconds": 2.772,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 57,
+            "wall_seconds": 81.776
+          },
+          "metadata [pic]": {
+            "cpu_seconds": 434.153,
+            "max_wall_seconds": 5.559,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 183,
+            "wall_seconds": 474.782
+          },
+          "rlib [pic]": {
+            "cpu_seconds": 5620.312,
+            "max_wall_seconds": 36.794,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 183,
+            "wall_seconds": 3240.457
+          }
+        },
+        "pss_peak_bytes": 514892800,
+        "samples": 518,
+        "window": [
+          1794277103,
+          1794362011
+        ]
+      },
+      "hirsel-host-io-unittest-harness": {
+        "cpu_count": 2,
+        "mean_cores": 1.7158461666124583,
+        "memory_kb": 917504,
+        "p95_cores": 1.8549922088353414,
+        "p99_peak_bytes": 356573184,
+        "phases": {
+          "link [pic]": {
+            "cpu_seconds": 2057.42,
+            "max_wall_seconds": 38.085,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 61,
+            "wall_seconds": 1207.855
+          }
+        },
+        "pss_peak_bytes": 736646144,
+        "samples": 61,
+        "window": [
+          1794276931,
+          1794361149
+        ]
+      },
       "hirsel-image": {
         "cpu_count": 1,
         "mean_cores": 1.4835934848484846,
@@ -3613,9 +3808,9 @@
       },
       "hirsel-intern": {
         "cpu_count": 1,
-        "mean_cores": 1.0539081353491722,
+        "mean_cores": 1.1795967957101754,
         "memory_kb": 262144,
-        "p95_cores": 1.2719276752767528,
+        "p95_cores": 1.4799394117647058,
         "p99_peak_bytes": 90849280,
         "phases": {
           "check": {
@@ -3664,9 +3859,9 @@
       },
       "hirsel-intern-unittest-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.3559509401709402,
+        "mean_cores": 1.4367651951123375,
         "memory_kb": 327680,
-        "p95_cores": 1.4958143089430895,
+        "p95_cores": 1.6568940842787683,
         "p99_peak_bytes": 138674176,
         "phases": {
           "link [pic]": {
@@ -3687,10 +3882,10 @@
         ]
       },
       "hirsel-interp": {
-        "cpu_count": 1,
-        "mean_cores": 1.465845565423781,
+        "cpu_count": 2,
+        "mean_cores": 1.6225791668225076,
         "memory_kb": 1179648,
-        "p95_cores": 1.7864072143131975,
+        "p95_cores": 1.8124457039436084,
         "p99_peak_bytes": 872476672,
         "phases": {
           "check": {
@@ -3739,9 +3934,9 @@
       },
       "hirsel-interp-test-it-harness": {
         "cpu_count": 2,
-        "mean_cores": 3.01719062684374,
+        "mean_cores": 2.96778619474734,
         "memory_kb": 917504,
-        "p95_cores": 3.3035050672182007,
+        "p95_cores": 3.4238965788573386,
         "p99_peak_bytes": 686628864,
         "phases": {
           "link [pic]": {
@@ -3763,9 +3958,9 @@
       },
       "hirsel-interp-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 1.6703728185675173,
+        "mean_cores": 2.6958005758313055,
         "memory_kb": 1048576,
-        "p95_cores": 2.3017383401360543,
+        "p95_cores": 3.055908647450111,
         "p99_peak_bytes": 761819136,
         "phases": {
           "link [pic]": {
@@ -3787,9 +3982,9 @@
       },
       "hirsel-kernels": {
         "cpu_count": 1,
-        "mean_cores": 1.1055854188647394,
+        "mean_cores": 1.26314597965502,
         "memory_kb": 262144,
-        "p95_cores": 1.6820539094650206,
+        "p95_cores": 1.6439978328173375,
         "p99_peak_bytes": 89423872,
         "phases": {
           "check": {
@@ -3838,9 +4033,9 @@
       },
       "hirsel-kernels-test-vectors-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.1829678851174934,
+        "mean_cores": 1.1928540829986614,
         "memory_kb": 262144,
-        "p95_cores": 1.282632911392405,
+        "p95_cores": 1.3405658536585365,
         "p99_peak_bytes": 74305536,
         "phases": {
           "link [pic]": {
@@ -3862,9 +4057,9 @@
       },
       "hirsel-kernels-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.444733258020786,
+        "mean_cores": 2.2373358330254893,
         "memory_kb": 327680,
-        "p95_cores": 2.5763432911392403,
+        "p95_cores": 2.608024068767908,
         "p99_peak_bytes": 172810240,
         "phases": {
           "link [pic]": {
@@ -3886,9 +4081,9 @@
       },
       "hirsel-layout": {
         "cpu_count": 1,
-        "mean_cores": 1.2751124092905473,
+        "mean_cores": 1.367034376788781,
         "memory_kb": 393216,
-        "p95_cores": 1.6861379166666666,
+        "p95_cores": 1.737186454183267,
         "p99_peak_bytes": 186961920,
         "phases": {
           "check": {
@@ -3936,10 +4131,10 @@
         ]
       },
       "hirsel-layout-unittest-harness": {
-        "cpu_count": 1,
-        "mean_cores": 1.5670137577250267,
+        "cpu_count": 2,
+        "mean_cores": 1.606029033660955,
         "memory_kb": 458752,
-        "p95_cores": 1.7281922600619195,
+        "p95_cores": 1.7376692913385827,
         "p99_peak_bytes": 189759488,
         "phases": {
           "link [pic]": {
@@ -3961,9 +4156,9 @@
       },
       "hirsel-lexer": {
         "cpu_count": 1,
-        "mean_cores": 0.9091616304347828,
+        "mean_cores": 0.9786256423794438,
         "memory_kb": 196608,
-        "p95_cores": 0.9957036697247706,
+        "p95_cores": 1.1878941176470588,
         "p99_peak_bytes": 55844864,
         "phases": {
           "check": {
@@ -4012,9 +4207,9 @@
       },
       "hirsel-lexer-test-conformance-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.1204824427480917,
+        "mean_cores": 1.025512523364486,
         "memory_kb": 262144,
-        "p95_cores": 1.4562389830508475,
+        "p95_cores": 1.500937634408602,
         "p99_peak_bytes": 77828096,
         "phases": {
           "link [pic]": {
@@ -4036,9 +4231,9 @@
       },
       "hirsel-lexer-unittest-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.443767957746479,
+        "mean_cores": 1.2066420289855073,
         "memory_kb": 262144,
-        "p95_cores": 1.4897291390728478,
+        "p95_cores": 1.4356758426966292,
         "p99_peak_bytes": 90292224,
         "phases": {
           "link [pic]": {
@@ -4060,9 +4255,9 @@
       },
       "hirsel-lir": {
         "cpu_count": 2,
-        "mean_cores": 3.0373692309320273,
+        "mean_cores": 2.8393074116793047,
         "memory_kb": 3080192,
-        "p95_cores": 4.849826192592593,
+        "p95_cores": 3.921871203760474,
         "p99_peak_bytes": 2182664192,
         "phases": {
           "check": {
@@ -4120,9 +4315,9 @@
       },
       "hirsel-lir-test-it-harness": {
         "cpu_count": 2,
-        "mean_cores": 3.0244602655886745,
+        "mean_cores": 3.0191643768042544,
         "memory_kb": 1507328,
-        "p95_cores": 3.2656029682509864,
+        "p95_cores": 3.364751621477937,
         "p99_peak_bytes": 1092235264,
         "phases": {
           "link [pic]": {
@@ -4144,9 +4339,9 @@
       },
       "hirsel-lir-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.445254883197709,
+        "mean_cores": 2.4732004941340526,
         "memory_kb": 1703936,
-        "p95_cores": 2.7256283828382837,
+        "p95_cores": 2.899312809315866,
         "p99_peak_bytes": 910057472,
         "phases": {
           "link [pic]": {
@@ -4168,9 +4363,9 @@
       },
       "hirsel-llvm": {
         "cpu_count": 1,
-        "mean_cores": 1.2968602505990263,
+        "mean_cores": 1.3945165802165804,
         "memory_kb": 655360,
-        "p95_cores": 1.7006821826280623,
+        "p95_cores": 1.7247849015317287,
         "p99_peak_bytes": 394334208,
         "phases": {
           "check": {
@@ -4219,9 +4414,9 @@
       },
       "hirsel-llvm-test-it-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.9199500481875336,
+        "mean_cores": 2.889747415622176,
         "memory_kb": 1114112,
-        "p95_cores": 3.2259672950460323,
+        "p95_cores": 3.343116696217494,
         "p99_peak_bytes": 822239232,
         "phases": {
           "link [pic]": {
@@ -4243,9 +4438,9 @@
       },
       "hirsel-llvm-unittest-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.5406833144318908,
+        "mean_cores": 1.5984731088570534,
         "memory_kb": 655360,
-        "p95_cores": 1.674401111111111,
+        "p95_cores": 1.717186319218241,
         "p99_peak_bytes": 377393152,
         "phases": {
           "link [pic]": {
@@ -4267,9 +4462,9 @@
       },
       "hirsel-lower": {
         "cpu_count": 1,
-        "mean_cores": 1.4367029125711328,
+        "mean_cores": 1.5943784148014866,
         "memory_kb": 524288,
-        "p95_cores": 1.7938142518618823,
+        "p95_cores": 1.8354076335877862,
         "p99_peak_bytes": 365682688,
         "phases": {
           "check": {
@@ -4318,9 +4513,9 @@
       },
       "hirsel-lower-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.919516873216469,
+        "mean_cores": 2.8223530169979947,
         "memory_kb": 720896,
-        "p95_cores": 3.56243808,
+        "p95_cores": 3.1927827008928573,
         "p99_peak_bytes": 526200832,
         "phases": {
           "link [pic]": {
@@ -4342,9 +4537,9 @@
       },
       "hirsel-modes": {
         "cpu_count": 1,
-        "mean_cores": 1.374170505050505,
+        "mean_cores": 1.2285356822285274,
         "memory_kb": 262144,
-        "p95_cores": 2.350244755244755,
+        "p95_cores": 1.6393612359550562,
         "p99_peak_bytes": 139468800,
         "phases": {
           "check": {
@@ -4395,9 +4590,9 @@
       },
       "hirsel-modes-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.1807575009081,
+        "mean_cores": 2.1836429360181877,
         "memory_kb": 393216,
-        "p95_cores": 2.3882071090047394,
+        "p95_cores": 2.615587341772152,
         "p99_peak_bytes": 161615872,
         "phases": {
           "link [pic]": {
@@ -4415,6 +4610,57 @@
         "window": [
           1794276888,
           1794359420
+        ]
+      },
+      "hirsel-native": {
+        "cpu_count": 2,
+        "mean_cores": 1.6626780469747433,
+        "memory_kb": 1310720,
+        "p95_cores": 1.8647219634674534,
+        "p99_peak_bytes": 826490880,
+        "phases": {
+          "check": {
+            "cpu_seconds": 352.147,
+            "max_wall_seconds": 7.291,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 103,
+            "wall_seconds": 376.77
+          },
+          "diag": {
+            "cpu_seconds": 201.33,
+            "max_wall_seconds": 8.399,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 60,
+            "wall_seconds": 216.975
+          },
+          "metadata [pic]": {
+            "cpu_seconds": 1846.208,
+            "max_wall_seconds": 17.298,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 230,
+            "wall_seconds": 1929.386
+          },
+          "rlib [pic]": {
+            "cpu_seconds": 31017.583,
+            "max_wall_seconds": 165.529,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 226,
+            "wall_seconds": 17657.509
+          }
+        },
+        "pss_peak_bytes": 1118095360,
+        "samples": 619,
+        "window": [
+          1794277104,
+          1794362107
         ]
       },
       "hirsel-native-batch": {
@@ -4468,11 +4714,35 @@
           1794362084
         ]
       },
+      "hirsel-native-batch-unittest-harness": {
+        "cpu_count": 2,
+        "mean_cores": 1.7094013444289984,
+        "memory_kb": 1376256,
+        "p95_cores": 1.851666564417178,
+        "p99_peak_bytes": 448479232,
+        "phases": {
+          "link [pic]": {
+            "cpu_seconds": 1795.316,
+            "max_wall_seconds": 25.917,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 63,
+            "wall_seconds": 1059.851
+          }
+        },
+        "pss_peak_bytes": 1121864704,
+        "samples": 63,
+        "window": [
+          1794276935,
+          1794361133
+        ]
+      },
       "hirsel-native-build-bin-hirsel-native-build": {
         "cpu_count": 1,
-        "mean_cores": 1.3896671576557769,
+        "mean_cores": 1.5967690637758694,
         "memory_kb": 3080192,
-        "p95_cores": 1.6973337320574162,
+        "p95_cores": 1.7772789170506913,
         "p99_peak_bytes": 920158208,
         "phases": {
           "link [pic]": {
@@ -4516,6 +4786,57 @@
           1793032335
         ]
       },
+      "hirsel-native-cache": {
+        "cpu_count": 2,
+        "mean_cores": 1.7059787232703716,
+        "memory_kb": 917504,
+        "p95_cores": 1.8769124609375,
+        "p99_peak_bytes": 493395968,
+        "phases": {
+          "check": {
+            "cpu_seconds": 126.978,
+            "max_wall_seconds": 2.934,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 103,
+            "wall_seconds": 146.535
+          },
+          "diag": {
+            "cpu_seconds": 74.518,
+            "max_wall_seconds": 2.618,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 61,
+            "wall_seconds": 85.525
+          },
+          "metadata [pic]": {
+            "cpu_seconds": 721.256,
+            "max_wall_seconds": 8.123,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 229,
+            "wall_seconds": 777.876
+          },
+          "rlib [pic]": {
+            "cpu_seconds": 13175.064,
+            "max_wall_seconds": 71.768,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 226,
+            "wall_seconds": 7333.932
+          }
+        },
+        "pss_peak_bytes": 739818496,
+        "samples": 619,
+        "window": [
+          1794277107,
+          1794362082
+        ]
+      },
       "hirsel-native-cache-unittest-harness": {
         "cpu_count": 1,
         "mean_cores": 1.282342832750953,
@@ -4538,6 +4859,81 @@
         "window": [
           1794276910,
           1794361131
+        ]
+      },
+      "hirsel-native-queries": {
+        "cpu_count": 2,
+        "mean_cores": 1.6454325162925845,
+        "memory_kb": 1376256,
+        "p95_cores": 1.8537548070634402,
+        "p99_peak_bytes": 857329664,
+        "phases": {
+          "check": {
+            "cpu_seconds": 290.93,
+            "max_wall_seconds": 5.917,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 103,
+            "wall_seconds": 311.637
+          },
+          "diag": {
+            "cpu_seconds": 170.128,
+            "max_wall_seconds": 4.89,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 61,
+            "wall_seconds": 179.776
+          },
+          "metadata [pic]": {
+            "cpu_seconds": 1696.387,
+            "max_wall_seconds": 15.573,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 229,
+            "wall_seconds": 1769.456
+          },
+          "rlib [pic]": {
+            "cpu_seconds": 24168.834,
+            "max_wall_seconds": 130.911,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 225,
+            "wall_seconds": 13818.231
+          }
+        },
+        "pss_peak_bytes": 1121116160,
+        "samples": 618,
+        "window": [
+          1794277111,
+          1794362039
+        ]
+      },
+      "hirsel-native-queries-unittest-harness": {
+        "cpu_count": 2,
+        "mean_cores": 1.6961351220839547,
+        "memory_kb": 1441792,
+        "p95_cores": 1.816560269799826,
+        "p99_peak_bytes": 607260672,
+        "phases": {
+          "link [pic]": {
+            "cpu_seconds": 4425.674,
+            "max_wall_seconds": 65.1,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 61,
+            "wall_seconds": 2618.697
+          }
+        },
+        "pss_peak_bytes": 1188037632,
+        "samples": 61,
+        "window": [
+          1794276982,
+          1794361162
         ]
       },
       "hirsel-native-testing": {
@@ -4591,11 +4987,59 @@
           1794362114
         ]
       },
+      "hirsel-native-testing-unittest-harness": {
+        "cpu_count": 2,
+        "mean_cores": 1.7064769426329822,
+        "memory_kb": 1310720,
+        "p95_cores": 1.8293434806629834,
+        "p99_peak_bytes": 555585536,
+        "phases": {
+          "link [pic]": {
+            "cpu_seconds": 2886.318,
+            "max_wall_seconds": 46.253,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 61,
+            "wall_seconds": 1700.776
+          }
+        },
+        "pss_peak_bytes": 1065235456,
+        "samples": 61,
+        "window": [
+          1794276944,
+          1794361142
+        ]
+      },
+      "hirsel-native-unittest-harness": {
+        "cpu_count": 2,
+        "mean_cores": 1.7652926374973104,
+        "memory_kb": 1835008,
+        "p95_cores": 1.8761389757332143,
+        "p99_peak_bytes": 904077312,
+        "phases": {
+          "link [pic]": {
+            "cpu_seconds": 13208.82,
+            "max_wall_seconds": 206.31,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 61,
+            "wall_seconds": 7491.107
+          }
+        },
+        "pss_peak_bytes": 1532918784,
+        "samples": 61,
+        "window": [
+          1794277051,
+          1794361242
+        ]
+      },
       "hirsel-object-storage": {
         "cpu_count": 1,
-        "mean_cores": 0.8062645901639344,
+        "mean_cores": 1.2235343083301922,
         "memory_kb": 393216,
-        "p95_cores": 0.7545013513513513,
+        "p95_cores": 1.8514463087248323,
         "p99_peak_bytes": 147955712,
         "phases": {
           "check": {
@@ -4644,9 +5088,9 @@
       },
       "hirsel-object-storage-test-it-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.1034794805194803,
+        "mean_cores": 1.2363422289613344,
         "memory_kb": 327680,
-        "p95_cores": 1.262823926380368,
+        "p95_cores": 1.5426478813559321,
         "p99_peak_bytes": 97894400,
         "phases": {
           "link [pic]": {
@@ -4668,9 +5112,9 @@
       },
       "hirsel-object-storage-unittest-harness": {
         "cpu_count": 1,
-        "mean_cores": 0.6934674342105263,
+        "mean_cores": 1.3644199426934098,
         "memory_kb": 327680,
-        "p95_cores": 0.8181491666666667,
+        "p95_cores": 1.913785130111524,
         "p99_peak_bytes": 126492672,
         "phases": {
           "link [pic]": {
@@ -4733,10 +5177,10 @@
         ]
       },
       "hirsel-ownership": {
-        "cpu_count": 1,
-        "mean_cores": 1.499971915208282,
+        "cpu_count": 2,
+        "mean_cores": 1.6053787632373202,
         "memory_kb": 720896,
-        "p95_cores": 1.7997396059394632,
+        "p95_cores": 1.8264132084534102,
         "p99_peak_bytes": 485089280,
         "phases": {
           "check": {
@@ -4785,9 +5229,9 @@
       },
       "hirsel-ownership-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.959485168808302,
+        "mean_cores": 2.984481467746148,
         "memory_kb": 1179648,
-        "p95_cores": 3.2221914161656646,
+        "p95_cores": 3.274258097068717,
         "p99_peak_bytes": 779214848,
         "phases": {
           "link [pic]": {
@@ -4809,9 +5253,9 @@
       },
       "hirsel-parser": {
         "cpu_count": 1,
-        "mean_cores": 0.9926208835341366,
+        "mean_cores": 1.2520477476187066,
         "memory_kb": 327680,
-        "p95_cores": 1.22444375,
+        "p95_cores": 1.6797492366412214,
         "p99_peak_bytes": 128503808,
         "phases": {
           "check": {
@@ -4860,9 +5304,9 @@
       },
       "hirsel-parser-test-it-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.4205515942028986,
+        "mean_cores": 1.4057832074249947,
         "memory_kb": 327680,
-        "p95_cores": 1.4205515942028986,
+        "p95_cores": 1.7718060846560846,
         "p99_peak_bytes": 153899008,
         "phases": {
           "link [pic]": {
@@ -4884,9 +5328,9 @@
       },
       "hirsel-parser-unittest-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.0672046025104605,
+        "mean_cores": 0.9846220588235294,
         "memory_kb": 327680,
-        "p95_cores": 1.151589,
+        "p95_cores": 1.1861694444444444,
         "p99_peak_bytes": 96575488,
         "phases": {
           "link [pic]": {
@@ -4950,9 +5394,9 @@
       },
       "hirsel-pipeline-tests-test-front-harness": {
         "cpu_count": 2,
-        "mean_cores": 3.072502365687645,
+        "mean_cores": 2.92286295743774,
         "memory_kb": 2424832,
-        "p95_cores": 3.3232459417675857,
+        "p95_cores": 3.334028956478734,
         "p99_peak_bytes": 1336672256,
         "phases": {
           "link [pic]": {
@@ -4974,9 +5418,9 @@
       },
       "hirsel-pipeline-tests-test-rc-harness": {
         "cpu_count": 2,
-        "mean_cores": 3.0267705180333047,
+        "mean_cores": 2.996487108755268,
         "memory_kb": 2555904,
-        "p95_cores": 3.3188434901453028,
+        "p95_cores": 3.3067613746537394,
         "p99_peak_bytes": 1559158784,
         "phases": {
           "link [pic]": {
@@ -4998,9 +5442,9 @@
       },
       "hirsel-product-codec": {
         "cpu_count": 1,
-        "mean_cores": 1.284912252783235,
+        "mean_cores": 1.3803476068017808,
         "memory_kb": 524288,
-        "p95_cores": 1.7439761904761906,
+        "p95_cores": 1.7341160563380282,
         "p99_peak_bytes": 280059904,
         "phases": {
           "check": {
@@ -5049,9 +5493,9 @@
       },
       "hirsel-product-codec-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 1.620938516294072,
+        "mean_cores": 2.897230229619538,
         "memory_kb": 786432,
-        "p95_cores": 3.2584195604395605,
+        "p95_cores": 3.1003907987866532,
         "p99_peak_bytes": 512950272,
         "phases": {
           "link [pic]": {
@@ -5148,9 +5592,9 @@
       },
       "hirsel-proof-export": {
         "cpu_count": 1,
-        "mean_cores": 1.4753726847521047,
+        "mean_cores": 1.538091288768459,
         "memory_kb": 524288,
-        "p95_cores": 1.7904936416184971,
+        "p95_cores": 1.8285538327526132,
         "p99_peak_bytes": 235008000,
         "phases": {
           "check": {
@@ -5199,9 +5643,9 @@
       },
       "hirsel-proof-export-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.0810578216949365,
+        "mean_cores": 2.8830820172181975,
         "memory_kb": 655360,
-        "p95_cores": 4.743790216154721,
+        "p95_cores": 3.251707213114754,
         "p99_peak_bytes": 420999168,
         "phases": {
           "link [pic]": {
@@ -5272,11 +5716,35 @@
           1794361945
         ]
       },
+      "hirsel-query-products-unittest-harness": {
+        "cpu_count": 2,
+        "mean_cores": 1.6118984632402322,
+        "memory_kb": 458752,
+        "p95_cores": 1.7389788501026695,
+        "p99_peak_bytes": 205615104,
+        "phases": {
+          "link [pic]": {
+            "cpu_seconds": 408.02,
+            "max_wall_seconds": 16.403,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 28,
+            "wall_seconds": 257.163
+          }
+        },
+        "pss_peak_bytes": 379873280,
+        "samples": 28,
+        "window": [
+          1794276914,
+          1794360876
+        ]
+      },
       "hirsel-rc": {
         "cpu_count": 2,
-        "mean_cores": 2.592173343291497,
+        "mean_cores": 2.6108753625745047,
         "memory_kb": 2359296,
-        "p95_cores": 3.197007618888145,
+        "p95_cores": 3.1947825172678432,
         "p99_peak_bytes": 1453240320,
         "phases": {
           "check": {
@@ -5334,9 +5802,9 @@
       },
       "hirsel-rc-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.6996456502732826,
+        "mean_cores": 2.726056472075385,
         "memory_kb": 1310720,
-        "p95_cores": 3.3843022123893807,
+        "p95_cores": 3.034906652512385,
         "p99_peak_bytes": 934014976,
         "phases": {
           "link [pic]": {
@@ -5455,11 +5923,35 @@
           1794360972
         ]
       },
+      "hirsel-registry-unittest-harness": {
+        "cpu_count": 2,
+        "mean_cores": 1.6189457355762136,
+        "memory_kb": 524288,
+        "p95_cores": 1.7429589614740368,
+        "p99_peak_bytes": 262447104,
+        "phases": {
+          "link [pic]": {
+            "cpu_seconds": 658.296,
+            "max_wall_seconds": 18.535,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 34,
+            "wall_seconds": 411.528
+          }
+        },
+        "pss_peak_bytes": 409657344,
+        "samples": 34,
+        "window": [
+          1794276922,
+          1794360968
+        ]
+      },
       "hirsel-remote": {
         "cpu_count": 1,
-        "mean_cores": 1.236817037037037,
+        "mean_cores": 1.4237386009393573,
         "memory_kb": 393216,
-        "p95_cores": 1.6999742753623188,
+        "p95_cores": 1.7500480349344978,
         "p99_peak_bytes": 149319680,
         "phases": {
           "check": {
@@ -5508,9 +6000,9 @@
       },
       "hirsel-remote-test-it-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.5563358581016298,
+        "mean_cores": 1.5500316239316239,
         "memory_kb": 327680,
-        "p95_cores": 1.738780338983051,
+        "p95_cores": 1.7870281456953643,
         "p99_peak_bytes": 127225856,
         "phases": {
           "link [pic]": {
@@ -5607,9 +6099,9 @@
       },
       "hirsel-resolve": {
         "cpu_count": 1,
-        "mean_cores": 1.0888569672498878,
+        "mean_cores": 1.1754389730160537,
         "memory_kb": 327680,
-        "p95_cores": 1.5386008583690987,
+        "p95_cores": 1.5284396666666666,
         "p99_peak_bytes": 121135104,
         "phases": {
           "check": {
@@ -5658,9 +6150,9 @@
       },
       "hirsel-resolve-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.897222461735716,
+        "mean_cores": 2.6400412327155043,
         "memory_kb": 524288,
-        "p95_cores": 3.520714484978541,
+        "p95_cores": 2.9091388252148995,
         "p99_peak_bytes": 394215424,
         "phases": {
           "link [pic]": {
@@ -5681,10 +6173,10 @@
         ]
       },
       "hirsel-rt": {
-        "cpu_count": 1,
-        "mean_cores": 1.5992634605521128,
+        "cpu_count": 2,
+        "mean_cores": 1.606767287281042,
         "memory_kb": 2293760,
-        "p95_cores": 2.7438007960199005,
+        "p95_cores": 1.793372061865826,
         "p99_peak_bytes": 1718489088,
         "phases": {
           "check": {
@@ -5733,9 +6225,9 @@
       },
       "hirsel-rt-archives-default": {
         "cpu_count": 1,
-        "mean_cores": 0.9767953008222521,
+        "mean_cores": 0.9748633537961323,
         "memory_kb": 1048576,
-        "p95_cores": 1.0013915057915057,
+        "p95_cores": 1.0018073544433095,
         "p99_peak_bytes": 759500800,
         "phases": {
           "diag": {
@@ -5757,9 +6249,9 @@
       },
       "hirsel-rt-archives-diagnostic": {
         "cpu_count": 1,
-        "mean_cores": 0.9768848779610361,
+        "mean_cores": 0.9869527868370074,
         "memory_kb": 983040,
-        "p95_cores": 1.0023975626740946,
+        "p95_cores": 1.0017460410557184,
         "p99_peak_bytes": 760975360,
         "phases": {
           "diag": {
@@ -5781,9 +6273,9 @@
       },
       "hirsel-rt-archives-diagnostic-measurement": {
         "cpu_count": 1,
-        "mean_cores": 0.9790846106778986,
+        "mean_cores": 0.9876561285873933,
         "memory_kb": 1048576,
-        "p95_cores": 1.0016221598877981,
+        "p95_cores": 1.0015032378580324,
         "p99_peak_bytes": 766365696,
         "phases": {
           "diag": {
@@ -5805,9 +6297,9 @@
       },
       "hirsel-rt-archives-diagnostic-system-allocator": {
         "cpu_count": 1,
-        "mean_cores": 0.9809171576141746,
+        "mean_cores": 0.9876687624104773,
         "memory_kb": 1048576,
-        "p95_cores": 1.00161894127378,
+        "p95_cores": 1.0018725786163523,
         "p99_peak_bytes": 759644160,
         "phases": {
           "diag": {
@@ -5829,9 +6321,9 @@
       },
       "hirsel-rt-archives-diagnostic-system-allocator-measurement": {
         "cpu_count": 1,
-        "mean_cores": 0.9774146945537378,
+        "mean_cores": 0.986848748479461,
         "memory_kb": 1048576,
-        "p95_cores": 1.0011518461538462,
+        "p95_cores": 1.0023049342105264,
         "p99_peak_bytes": 763281408,
         "phases": {
           "diag": {
@@ -5853,9 +6345,9 @@
       },
       "hirsel-rt-archives-measurement": {
         "cpu_count": 1,
-        "mean_cores": 0.9775343923508079,
+        "mean_cores": 0.9882965002199735,
         "memory_kb": 983040,
-        "p95_cores": 1.0004198211624442,
+        "p95_cores": 1.0022868111455108,
         "p99_peak_bytes": 761851904,
         "phases": {
           "diag": {
@@ -5877,9 +6369,9 @@
       },
       "hirsel-rt-archives-memcheck": {
         "cpu_count": 1,
-        "mean_cores": 0.9825921763694425,
+        "mean_cores": 0.9841606359597849,
         "memory_kb": 1114112,
-        "p95_cores": 1.0013810126582279,
+        "p95_cores": 1.0015157303370787,
         "p99_peak_bytes": 757518336,
         "phases": {
           "diag": {
@@ -5925,9 +6417,9 @@
       },
       "hirsel-rt-archives-system-allocator": {
         "cpu_count": 1,
-        "mean_cores": 0.9765169795059817,
+        "mean_cores": 0.9798305755225575,
         "memory_kb": 1048576,
-        "p95_cores": 1.002136397515528,
+        "p95_cores": 1.0027386509635974,
         "p99_peak_bytes": 754507776,
         "phases": {
           "diag": {
@@ -5949,9 +6441,9 @@
       },
       "hirsel-rt-archives-system-allocator-measurement": {
         "cpu_count": 1,
-        "mean_cores": 0.9754944494893755,
+        "mean_cores": 0.9903567836111048,
         "memory_kb": 1114112,
-        "p95_cores": 1.0018526315789473,
+        "p95_cores": 1.0021128634361234,
         "p99_peak_bytes": 763858944,
         "phases": {
           "diag": {
@@ -5973,9 +6465,9 @@
       },
       "hirsel-rt-example-failure_table": {
         "cpu_count": 1,
-        "mean_cores": 1.1137694629975956,
+        "mean_cores": 1.263787493704885,
         "memory_kb": 655360,
-        "p95_cores": 1.4324854166666667,
+        "p95_cores": 1.52098375,
         "p99_peak_bytes": 214601728,
         "phases": {
           "link [pic]": {
@@ -5997,9 +6489,9 @@
       },
       "hirsel-rt-example-idle_pool": {
         "cpu_count": 1,
-        "mean_cores": 1.1451659668874172,
+        "mean_cores": 1.2460325204506866,
         "memory_kb": 720896,
-        "p95_cores": 1.4415897435897436,
+        "p95_cores": 1.5302522123893805,
         "p99_peak_bytes": 224583680,
         "phases": {
           "link [pic]": {
@@ -6021,9 +6513,9 @@
       },
       "hirsel-rt-operations": {
         "cpu_count": 1,
-        "mean_cores": 0.9723487332908975,
+        "mean_cores": 1.0012395317179419,
         "memory_kb": 262144,
-        "p95_cores": 1.1737777777777778,
+        "p95_cores": 1.1763380208333334,
         "p99_peak_bytes": 120766464,
         "phases": {
           "check": {
@@ -6096,9 +6588,9 @@
       },
       "hirsel-rt-test-descriptors-harness": {
         "cpu_count": 2,
-        "mean_cores": 1.6379794554487723,
+        "mean_cores": 2.471765548295956,
         "memory_kb": 458752,
-        "p95_cores": 1.7939039933444259,
+        "p95_cores": 3.035065357142857,
         "p99_peak_bytes": 224313344,
         "phases": {
           "link [pic]": {
@@ -6120,9 +6612,9 @@
       },
       "hirsel-rt-test-it-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.896124875974745,
+        "mean_cores": 2.7980535700126863,
         "memory_kb": 983040,
-        "p95_cores": 3.179802261380323,
+        "p95_cores": 3.194648540393754,
         "p99_peak_bytes": 659402752,
         "phases": {
           "link [pic]": {
@@ -6144,9 +6636,9 @@
       },
       "hirsel-rt-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 3.071557728786976,
+        "mean_cores": 3.010259993980031,
         "memory_kb": 3735552,
-        "p95_cores": 4.24543656130751,
+        "p95_cores": 3.2053512416146877,
         "p99_peak_bytes": 3014156288,
         "phases": {
           "link [pic]": {
@@ -6168,9 +6660,9 @@
       },
       "hirsel-run-config": {
         "cpu_count": 1,
-        "mean_cores": 1.3393160486511773,
+        "mean_cores": 1.48566380967231,
         "memory_kb": 524288,
-        "p95_cores": 1.7984163567000477,
+        "p95_cores": 1.8469607266435986,
         "p99_peak_bytes": 407625728,
         "phases": {
           "check": {
@@ -6228,9 +6720,9 @@
       },
       "hirsel-run-config-test-it-harness": {
         "cpu_count": 2,
-        "mean_cores": 3.007047678964085,
+        "mean_cores": 2.7641082311534966,
         "memory_kb": 589824,
-        "p95_cores": 3.245177668161435,
+        "p95_cores": 3.235993076459964,
         "p99_peak_bytes": 360501248,
         "phases": {
           "link [pic]": {
@@ -6252,9 +6744,9 @@
       },
       "hirsel-run-config-unittest-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.2525999813084112,
+        "mean_cores": 1.3518800395815664,
         "memory_kb": 393216,
-        "p95_cores": 1.49062225433526,
+        "p95_cores": 1.5116787634408602,
         "p99_peak_bytes": 165462016,
         "phases": {
           "link [pic]": {
@@ -6276,9 +6768,9 @@
       },
       "hirsel-run-schema": {
         "cpu_count": 1,
-        "mean_cores": 1.178022121512174,
+        "mean_cores": 1.2420853928758513,
         "memory_kb": 589824,
-        "p95_cores": 1.5869369341563786,
+        "p95_cores": 1.6749918589743589,
         "p99_peak_bytes": 321265664,
         "phases": {
           "check": {
@@ -6327,9 +6819,9 @@
       },
       "hirsel-run-schema-test-it-harness": {
         "cpu_count": 2,
-        "mean_cores": 1.7157422825613473,
+        "mean_cores": 2.6372916491754124,
         "memory_kb": 458752,
-        "p95_cores": 1.8044424354243542,
+        "p95_cores": 3.070786246418338,
         "p99_peak_bytes": 273190912,
         "phases": {
           "link [pic]": {
@@ -6351,9 +6843,9 @@
       },
       "hirsel-run-schema-unittest-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.2031356135986733,
+        "mean_cores": 1.2431095050522352,
         "memory_kb": 524288,
-        "p95_cores": 1.295447191011236,
+        "p95_cores": 1.4359932,
         "p99_peak_bytes": 257949696,
         "phases": {
           "link [pic]": {
@@ -6375,9 +6867,9 @@
       },
       "hirsel-signature": {
         "cpu_count": 1,
-        "mean_cores": 1.3372694852941174,
+        "mean_cores": 1.4741054842131711,
         "memory_kb": 393216,
-        "p95_cores": 1.7723628548256285,
+        "p95_cores": 1.81239978106185,
         "p99_peak_bytes": 240328704,
         "phases": {
           "check": {
@@ -6426,9 +6918,9 @@
       },
       "hirsel-signature-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.79034507126602,
+        "mean_cores": 2.723805805693831,
         "memory_kb": 589824,
-        "p95_cores": 3.053030466472303,
+        "p95_cores": 3.1282271714922048,
         "p99_peak_bytes": 356605952,
         "phases": {
           "link [pic]": {
@@ -6450,9 +6942,9 @@
       },
       "hirsel-span": {
         "cpu_count": 1,
-        "mean_cores": 0.91416528,
+        "mean_cores": 1.13891206185567,
         "memory_kb": 262144,
-        "p95_cores": 1.02119,
+        "p95_cores": 1.3640223684210526,
         "p99_peak_bytes": 66187264,
         "phases": {
           "check": {
@@ -6501,9 +6993,9 @@
       },
       "hirsel-span-unittest-harness": {
         "cpu_count": 1,
-        "mean_cores": 0.9718889771598809,
+        "mean_cores": 0.9343955112219452,
         "memory_kb": 196608,
-        "p95_cores": 1.21625,
+        "p95_cores": 1.4220545454545455,
         "p99_peak_bytes": 80748544,
         "phases": {
           "link [pic]": {
@@ -6607,11 +7099,35 @@
           1794360869
         ]
       },
+      "hirsel-store-authority-unittest-harness": {
+        "cpu_count": 2,
+        "mean_cores": 1.755305375494071,
+        "memory_kb": 393216,
+        "p95_cores": 2.7142062846580406,
+        "p99_peak_bytes": 173883392,
+        "phases": {
+          "link [pic]": {
+            "cpu_seconds": 155.432,
+            "max_wall_seconds": 7.954,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 20,
+            "wall_seconds": 91.56
+          }
+        },
+        "pss_peak_bytes": 316558336,
+        "samples": 20,
+        "window": [
+          1794276896,
+          1794360872
+        ]
+      },
       "hirsel-syntax": {
         "cpu_count": 1,
-        "mean_cores": 0.9989818945933667,
+        "mean_cores": 1.104331547071223,
         "memory_kb": 458752,
-        "p95_cores": 1.4303726993865031,
+        "p95_cores": 1.3987996268656717,
         "p99_peak_bytes": 207794176,
         "phases": {
           "check": {
@@ -6660,9 +7176,9 @@
       },
       "hirsel-syntax-unittest-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.3260679920477136,
+        "mean_cores": 1.4461142783238492,
         "memory_kb": 458752,
-        "p95_cores": 1.6615341389728098,
+        "p95_cores": 1.7182382113821137,
         "p99_peak_bytes": 217632768,
         "phases": {
           "link [pic]": {
@@ -6684,9 +7200,9 @@
       },
       "hirsel-test-tool-profile-harness": {
         "cpu_count": 1,
-        "mean_cores": 0.6371664804469274,
+        "mean_cores": 0.6456999999999999,
         "memory_kb": 196608,
-        "p95_cores": 0.6371664804469274,
+        "p95_cores": 0.6457,
         "p99_peak_bytes": 55951360,
         "phases": {
           "link [pic]": {
@@ -6708,9 +7224,9 @@
       },
       "hirsel-tir": {
         "cpu_count": 1,
-        "mean_cores": 0.9861333237223384,
+        "mean_cores": 0.9993728363517437,
         "memory_kb": 393216,
-        "p95_cores": 1.1508981595092025,
+        "p95_cores": 1.1607392473118279,
         "p99_peak_bytes": 149131264,
         "phases": {
           "check": {
@@ -6759,9 +7275,9 @@
       },
       "hirsel-tir-unittest-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.1383004094488187,
+        "mean_cores": 1.1844650088809945,
         "memory_kb": 393216,
-        "p95_cores": 1.3194649289099527,
+        "p95_cores": 1.2917145833333334,
         "p99_peak_bytes": 172425216,
         "phases": {
           "link [pic]": {
@@ -6783,9 +7299,9 @@
       },
       "hirsel-type-analysis": {
         "cpu_count": 1,
-        "mean_cores": 1.5309741962984353,
+        "mean_cores": 1.585784482887182,
         "memory_kb": 458752,
-        "p95_cores": 1.8113585758039816,
+        "p95_cores": 1.8157537439613527,
         "p99_peak_bytes": 315817984,
         "phases": {
           "check": {
@@ -6834,9 +7350,9 @@
       },
       "hirsel-type-analysis-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 1.6578582486695692,
+        "mean_cores": 2.864241965785381,
         "memory_kb": 524288,
-        "p95_cores": 1.816248190875721,
+        "p95_cores": 3.2010139377537215,
         "p99_peak_bytes": 340135936,
         "phases": {
           "link [pic]": {
@@ -6858,9 +7374,9 @@
       },
       "hirsel-types": {
         "cpu_count": 2,
-        "mean_cores": 2.113129287752984,
+        "mean_cores": 2.3056365923441815,
         "memory_kb": 917504,
-        "p95_cores": 3.0565090243902437,
+        "p95_cores": 3.4910070607553365,
         "p99_peak_bytes": 733446144,
         "phases": {
           "check": {
@@ -6909,9 +7425,9 @@
       },
       "hirsel-types-test-properties-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.497916630889165,
+        "mean_cores": 1.4785123714285715,
         "memory_kb": 393216,
-        "p95_cores": 1.7306267415730336,
+        "p95_cores": 1.7653304615384615,
         "p99_peak_bytes": 124723200,
         "phases": {
           "link [pic]": {
@@ -6933,9 +7449,9 @@
       },
       "hirsel-types-test-wire-harness": {
         "cpu_count": 1,
-        "mean_cores": 1.4095980388423457,
+        "mean_cores": 1.3483014594594596,
         "memory_kb": 327680,
-        "p95_cores": 1.5646817307692307,
+        "p95_cores": 1.6361173913043479,
         "p99_peak_bytes": 103448576,
         "phases": {
           "link [pic]": {
@@ -6957,9 +7473,9 @@
       },
       "hirsel-types-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.8884125324413175,
+        "mean_cores": 2.780686652832775,
         "memory_kb": 1114112,
-        "p95_cores": 3.0359152284263957,
+        "p95_cores": 3.1080206703910616,
         "p99_peak_bytes": 777871360,
         "phases": {
           "link [pic]": {
@@ -6981,9 +7497,9 @@
       },
       "hirsel-validate": {
         "cpu_count": 2,
-        "mean_cores": 2.6429549727661192,
+        "mean_cores": 2.713391957511648,
         "memory_kb": 1966080,
-        "p95_cores": 3.7958565039262546,
+        "p95_cores": 3.417714369134515,
         "p99_peak_bytes": 1427869696,
         "phases": {
           "check": {
@@ -7041,9 +7557,9 @@
       },
       "hirsel-validate-test-it-harness": {
         "cpu_count": 2,
-        "mean_cores": 2.8476560481710242,
+        "mean_cores": 2.6063562101527347,
         "memory_kb": 983040,
-        "p95_cores": 3.0590713664896185,
+        "p95_cores": 3.111232909994478,
         "p99_peak_bytes": 739037184,
         "phases": {
           "link [pic]": {
@@ -7065,9 +7581,9 @@
       },
       "hirsel-validate-unittest-harness": {
         "cpu_count": 2,
-        "mean_cores": 3.153051975792734,
+        "mean_cores": 3.0878164021516317,
         "memory_kb": 1572864,
-        "p95_cores": 4.3649642505739585,
+        "p95_cores": 3.372867920568292,
         "p99_peak_bytes": 1259569152,
         "phases": {
           "link [pic]": {
@@ -7089,9 +7605,9 @@
       },
       "io-real-workers": {
         "cpu_count": 1,
-        "mean_cores": 1.126924414603441,
+        "mean_cores": 1.4552755059487306,
         "memory_kb": 720896,
-        "p95_cores": 1.4295583333333333,
+        "p95_cores": 1.7009875,
         "p99_peak_bytes": 214257664,
         "phases": {
           "link [pic]": {
@@ -7137,9 +7653,9 @@
       },
       "third-party:_serde_derive-1": {
         "cpu_count": 1,
-        "mean_cores": 1.190869282136895,
+        "mean_cores": 1.4480787987012989,
         "memory_kb": 393216,
-        "p95_cores": 1.190869282136895,
+        "p95_cores": 1.6674071340713408,
         "p99_peak_bytes": 205791232,
         "phases": {
           "proc-macro": {
@@ -7161,9 +7677,9 @@
       },
       "third-party:allocator-api2-0.2": {
         "cpu_count": 1,
-        "mean_cores": 0.8929552631578946,
+        "mean_cores": 0.9647943681318681,
         "memory_kb": 196608,
-        "p95_cores": 0.8635761904761905,
+        "p95_cores": 1.031972131147541,
         "p99_peak_bytes": 60637184,
         "phases": {
           "metadata [pic]": {
@@ -7194,9 +7710,9 @@
       },
       "third-party:anyhow-1": {
         "cpu_count": 1,
-        "mean_cores": 1.1057528384279476,
+        "mean_cores": 1.0782527522935779,
         "memory_kb": 196608,
-        "p95_cores": 1.2075865248226951,
+        "p95_cores": 1.3439785714285715,
         "p99_peak_bytes": 62382080,
         "phases": {
           "metadata [pic]": {
@@ -7227,9 +7743,9 @@
       },
       "third-party:anyhow-1-build-script-build": {
         "cpu_count": 1,
-        "mean_cores": 0.7921274647887325,
+        "mean_cores": 0.9624390658174098,
         "memory_kb": 131072,
-        "p95_cores": 0.7921274647887324,
+        "p95_cores": 1.0727411290322582,
         "p99_peak_bytes": 49819648,
         "phases": {
           "link [pic]": {
@@ -7251,9 +7767,9 @@
       },
       "third-party:arbitrary-1": {
         "cpu_count": 1,
-        "mean_cores": 0.9791039787798408,
+        "mean_cores": 0.9980555643251776,
         "memory_kb": 196608,
-        "p95_cores": 0.9842131578947368,
+        "p95_cores": 1.1540340579710144,
         "p99_peak_bytes": 89886720,
         "phases": {
           "metadata [pic]": {
@@ -7374,9 +7890,9 @@
       },
       "third-party:bincode-1": {
         "cpu_count": 1,
-        "mean_cores": 1.0083072398190047,
+        "mean_cores": 0.9452637812002126,
         "memory_kb": 131072,
-        "p95_cores": 1.0316612068965518,
+        "p95_cores": 1.0509613636363637,
         "p99_peak_bytes": 60919808,
         "phases": {
           "metadata [pic]": {
@@ -7473,9 +7989,9 @@
       },
       "third-party:bitflags-2": {
         "cpu_count": 1,
-        "mean_cores": 0.9965401746724891,
+        "mean_cores": 1.0000906026557712,
         "memory_kb": 196608,
-        "p95_cores": 0.9989634920634921,
+        "p95_cores": 1.009706,
         "p99_peak_bytes": 47079424,
         "phases": {
           "metadata [pic]": {
@@ -7506,9 +8022,9 @@
       },
       "third-party:block-buffer-0.10": {
         "cpu_count": 1,
-        "mean_cores": 0.9452372832369942,
+        "mean_cores": 0.9815511336982016,
         "memory_kb": 131072,
-        "p95_cores": 0.9312674796747967,
+        "p95_cores": 0.989225,
         "p99_peak_bytes": 36892672,
         "phases": {
           "metadata [pic]": {
@@ -7539,9 +8055,9 @@
       },
       "third-party:bumpalo-3": {
         "cpu_count": 1,
-        "mean_cores": 0.9597512820512821,
+        "mean_cores": 0.9619147407407408,
         "memory_kb": 131072,
-        "p95_cores": 0.978509900990099,
+        "p95_cores": 1.0065392857142856,
         "p99_peak_bytes": 47599616,
         "phases": {
           "metadata [pic]": {
@@ -7572,7 +8088,7 @@
       },
       "third-party:cfg-if-1": {
         "cpu_count": 1,
-        "mean_cores": 0.9185243506493506,
+        "mean_cores": 0.9739911211437172,
         "memory_kb": 131072,
         "p95_cores": 1.0,
         "p99_peak_bytes": 30154752,
@@ -7605,9 +8121,9 @@
       },
       "third-party:cpufeatures-0.2": {
         "cpu_count": 1,
-        "mean_cores": 0.8951530026109661,
+        "mean_cores": 0.9717665622552859,
         "memory_kb": 131072,
-        "p95_cores": 0.9607357142857142,
+        "p95_cores": 1.0,
         "p99_peak_bytes": 29548544,
         "phases": {
           "metadata [pic]": {
@@ -7638,9 +8154,9 @@
       },
       "third-party:cranelift-assembler-x64-0.136": {
         "cpu_count": 1,
-        "mean_cores": 0.911389065308568,
+        "mean_cores": 0.9828341368181999,
         "memory_kb": 983040,
-        "p95_cores": 0.9158835220125786,
+        "p95_cores": 1.0239625907990315,
         "p99_peak_bytes": 704036864,
         "phases": {
           "metadata [pic]": {
@@ -7671,9 +8187,9 @@
       },
       "third-party:cranelift-assembler-x64-0.136-build-script-build": {
         "cpu_count": 1,
-        "mean_cores": 1.0,
+        "mean_cores": 1.045714110429448,
         "memory_kb": 196608,
-        "p95_cores": 1.0,
+        "p95_cores": 1.0488,
         "p99_peak_bytes": 55558144,
         "phases": {
           "link [pic]": {
@@ -7695,9 +8211,9 @@
       },
       "third-party:cranelift-assembler-x64-meta-0.136": {
         "cpu_count": 1,
-        "mean_cores": 1.4363529085872575,
+        "mean_cores": 1.4531574658869395,
         "memory_kb": 262144,
-        "p95_cores": 1.556116871704745,
+        "p95_cores": 1.6712165983606557,
         "p99_peak_bytes": 172711936,
         "phases": {
           "metadata [pic]": {
@@ -7728,9 +8244,9 @@
       },
       "third-party:cranelift-bforest-0.136": {
         "cpu_count": 1,
-        "mean_cores": 0.9463882882882885,
+        "mean_cores": 0.9316736762481089,
         "memory_kb": 196608,
-        "p95_cores": 0.9671939655172413,
+        "p95_cores": 1.0039666666666667,
         "p99_peak_bytes": 48046080,
         "phases": {
           "metadata [pic]": {
@@ -7761,7 +8277,7 @@
       },
       "third-party:cranelift-bitset-0.136": {
         "cpu_count": 1,
-        "mean_cores": 0.9029209302325583,
+        "mean_cores": 0.965900620567376,
         "memory_kb": 131072,
         "p95_cores": 1.0,
         "p99_peak_bytes": 37965824,
@@ -7794,9 +8310,9 @@
       },
       "third-party:cranelift-codegen-0.136": {
         "cpu_count": 1,
-        "mean_cores": 1.5765781884527101,
+        "mean_cores": 1.5201318244087796,
         "memory_kb": 1769472,
-        "p95_cores": 1.6855707100796675,
+        "p95_cores": 1.7452497151734851,
         "p99_peak_bytes": 1318436864,
         "phases": {
           "check": {
@@ -7836,9 +8352,9 @@
       },
       "third-party:cranelift-codegen-0.136-build-script-build": {
         "cpu_count": 1,
-        "mean_cores": 1.2104214953271026,
+        "mean_cores": 1.1159585266030014,
         "memory_kb": 196608,
-        "p95_cores": 1.2104214953271029,
+        "p95_cores": 1.299918125,
         "p99_peak_bytes": 71028736,
         "phases": {
           "link [pic]": {
@@ -7860,9 +8376,9 @@
       },
       "third-party:cranelift-codegen-meta-0.136": {
         "cpu_count": 2,
-        "mean_cores": 1.639500136054422,
+        "mean_cores": 2.512884715750233,
         "memory_kb": 393216,
-        "p95_cores": 1.6395001360544217,
+        "p95_cores": 2.75661875,
         "p99_peak_bytes": 265547776,
         "phases": {
           "rlib [pic]": {
@@ -7884,9 +8400,9 @@
       },
       "third-party:cranelift-codegen-shared-0.136": {
         "cpu_count": 1,
-        "mean_cores": 0.8941007853403141,
+        "mean_cores": 0.954049233599019,
         "memory_kb": 131072,
-        "p95_cores": 0.9983684684684685,
+        "p95_cores": 1.0,
         "p99_peak_bytes": 26435584,
         "phases": {
           "metadata [pic]": {
@@ -7917,9 +8433,9 @@
       },
       "third-party:cranelift-control-0.136": {
         "cpu_count": 1,
-        "mean_cores": 1.0012383838383838,
+        "mean_cores": 0.9455317164179105,
         "memory_kb": 131072,
-        "p95_cores": 1.0041096153846154,
+        "p95_cores": 1.0,
         "p99_peak_bytes": 32694272,
         "phases": {
           "metadata [pic]": {
@@ -7950,9 +8466,9 @@
       },
       "third-party:cranelift-entity-0.136": {
         "cpu_count": 1,
-        "mean_cores": 0.9632659574468083,
+        "mean_cores": 0.9759889477167438,
         "memory_kb": 131072,
-        "p95_cores": 0.9852270718232045,
+        "p95_cores": 1.0070100840336134,
         "p99_peak_bytes": 45195264,
         "phases": {
           "metadata [pic]": {
@@ -7983,9 +8499,9 @@
       },
       "third-party:cranelift-frontend-0.136": {
         "cpu_count": 1,
-        "mean_cores": 1.10578968903437,
+        "mean_cores": 1.2441254248695943,
         "memory_kb": 327680,
-        "p95_cores": 1.1616675105485232,
+        "p95_cores": 1.6001171821305842,
         "p99_peak_bytes": 107286528,
         "phases": {
           "check": {
@@ -8025,9 +8541,9 @@
       },
       "third-party:cranelift-isle-0.136": {
         "cpu_count": 2,
-        "mean_cores": 1.627632246798603,
+        "mean_cores": 2.5145086476540937,
         "memory_kb": 393216,
-        "p95_cores": 1.627632246798603,
+        "p95_cores": 2.7307433808553974,
         "p99_peak_bytes": 298905600,
         "phases": {
           "rlib [pic]": {
@@ -8049,9 +8565,9 @@
       },
       "third-party:cranelift-isle-0.136-build-script-build": {
         "cpu_count": 1,
-        "mean_cores": 0.7894888888888889,
+        "mean_cores": 0.8951391534391534,
         "memory_kb": 131072,
-        "p95_cores": 0.7894888888888889,
+        "p95_cores": 0.8889794392523365,
         "p99_peak_bytes": 54927360,
         "phases": {
           "link [pic]": {
@@ -8073,9 +8589,9 @@
       },
       "third-party:cranelift-module-0.136": {
         "cpu_count": 1,
-        "mean_cores": 1.0031482384823847,
+        "mean_cores": 1.048164886911383,
         "memory_kb": 196608,
-        "p95_cores": 1.0367983695652174,
+        "p95_cores": 1.3170511627906978,
         "p99_peak_bytes": 67690496,
         "phases": {
           "check": {
@@ -8115,9 +8631,9 @@
       },
       "third-party:cranelift-object-0.136": {
         "cpu_count": 1,
-        "mean_cores": 0.8497684104627765,
+        "mean_cores": 1.1273333934475502,
         "memory_kb": 262144,
-        "p95_cores": 0.891527027027027,
+        "p95_cores": 1.4554881188118811,
         "p99_peak_bytes": 82685952,
         "phases": {
           "check": {
@@ -8157,9 +8673,9 @@
       },
       "third-party:cranelift-srcgen-0.136": {
         "cpu_count": 1,
-        "mean_cores": 0.9174059040590405,
+        "mean_cores": 1.0510499363057324,
         "memory_kb": 196608,
-        "p95_cores": 1.0268793939393939,
+        "p95_cores": 1.2436829268292684,
         "p99_peak_bytes": 62103552,
         "phases": {
           "metadata [pic]": {
@@ -8247,9 +8763,9 @@
       },
       "third-party:crc32fast-1": {
         "cpu_count": 1,
-        "mean_cores": 0.995734857142857,
+        "mean_cores": 0.975879245283019,
         "memory_kb": 196608,
-        "p95_cores": 1.0379959183673468,
+        "p95_cores": 1.1345798076923077,
         "p99_peak_bytes": 56262656,
         "phases": {
           "metadata [pic]": {
@@ -8280,9 +8796,9 @@
       },
       "third-party:crc32fast-1-build-script-build": {
         "cpu_count": 1,
-        "mean_cores": 1.0,
+        "mean_cores": 0.936974607329843,
         "memory_kb": 131072,
-        "p95_cores": 1.0,
+        "p95_cores": 0.9718069306930693,
         "p99_peak_bytes": 52514816,
         "phases": {
           "link [pic]": {
@@ -8304,9 +8820,9 @@
       },
       "third-party:crypto-common-0.1": {
         "cpu_count": 1,
-        "mean_cores": 0.8606444444444445,
+        "mean_cores": 0.9479046925566343,
         "memory_kb": 131072,
-        "p95_cores": 0.9366239669421488,
+        "p95_cores": 0.9786435643564356,
         "p99_peak_bytes": 33853440,
         "phases": {
           "metadata [pic]": {
@@ -8337,9 +8853,9 @@
       },
       "third-party:digest-0.10": {
         "cpu_count": 1,
-        "mean_cores": 0.8604054945054945,
+        "mean_cores": 0.9308794392523364,
         "memory_kb": 131072,
-        "p95_cores": 0.791916,
+        "p95_cores": 0.9376986013986014,
         "p99_peak_bytes": 40902656,
         "phases": {
           "metadata [pic]": {
@@ -8370,9 +8886,9 @@
       },
       "third-party:equivalent-1": {
         "cpu_count": 1,
-        "mean_cores": 0.8506389999999999,
+        "mean_cores": 0.985412850241546,
         "memory_kb": 131072,
-        "p95_cores": 0.8797401869158878,
+        "p95_cores": 1.0,
         "p99_peak_bytes": 26750976,
         "phases": {
           "metadata [pic]": {
@@ -8403,9 +8919,9 @@
       },
       "third-party:fastrand-2": {
         "cpu_count": 1,
-        "mean_cores": 1.0030454545454546,
+        "mean_cores": 0.9730413003663003,
         "memory_kb": 131072,
-        "p95_cores": 1.0,
+        "p95_cores": 1.0009160714285714,
         "p99_peak_bytes": 47329280,
         "phases": {
           "metadata [pic]": {
@@ -8469,9 +8985,9 @@
       },
       "third-party:fnv-1": {
         "cpu_count": 1,
-        "mean_cores": 0.9838735294117649,
+        "mean_cores": 0.9705259541984733,
         "memory_kb": 131072,
-        "p95_cores": 0.9938233082706767,
+        "p95_cores": 1.0,
         "p99_peak_bytes": 26931200,
         "phases": {
           "metadata [pic]": {
@@ -8502,9 +9018,9 @@
       },
       "third-party:foldhash-0.2": {
         "cpu_count": 1,
-        "mean_cores": 0.9179068965517241,
+        "mean_cores": 0.942510367577757,
         "memory_kb": 131072,
-        "p95_cores": 1.0,
+        "p95_cores": 0.819758,
         "p99_peak_bytes": 41930752,
         "phases": {
           "metadata [pic]": {
@@ -8535,9 +9051,9 @@
       },
       "third-party:generic-array-0.14": {
         "cpu_count": 1,
-        "mean_cores": 0.935495444191344,
+        "mean_cores": 0.9455511293634495,
         "memory_kb": 196608,
-        "p95_cores": 0.9721083333333334,
+        "p95_cores": 1.0014587412587412,
         "p99_peak_bytes": 63041536,
         "phases": {
           "metadata [pic]": {
@@ -8568,9 +9084,9 @@
       },
       "third-party:generic-array-0.14-build-script-build": {
         "cpu_count": 1,
-        "mean_cores": 0.9014153333333335,
+        "mean_cores": 0.965135873605948,
         "memory_kb": 196608,
-        "p95_cores": 1.0,
+        "p95_cores": 1.0282342857142857,
         "p99_peak_bytes": 48197632,
         "phases": {
           "link [pic]": {
@@ -8592,9 +9108,9 @@
       },
       "third-party:getrandom-0.2": {
         "cpu_count": 1,
-        "mean_cores": 0.9128182051282052,
+        "mean_cores": 0.9580724444444445,
         "memory_kb": 131072,
-        "p95_cores": 0.8804291925465838,
+        "p95_cores": 1.0487706896551725,
         "p99_peak_bytes": 43819008,
         "phases": {
           "metadata [pic]": {
@@ -8682,9 +9198,9 @@
       },
       "third-party:getrandom-0.4": {
         "cpu_count": 1,
-        "mean_cores": 0.8510777173913043,
+        "mean_cores": 0.9203383697813121,
         "memory_kb": 131072,
-        "p95_cores": 0.8074699029126213,
+        "p95_cores": 1.000964,
         "p99_peak_bytes": 41873408,
         "phases": {
           "metadata [pic]": {
@@ -8715,9 +9231,9 @@
       },
       "third-party:getrandom-0.4-build-script-build": {
         "cpu_count": 1,
-        "mean_cores": 0.7895306666666667,
+        "mean_cores": 1.037923102310231,
         "memory_kb": 131072,
-        "p95_cores": 0.807642,
+        "p95_cores": 1.0707019417475727,
         "p99_peak_bytes": 43687936,
         "phases": {
           "link [pic]": {
@@ -8739,9 +9255,9 @@
       },
       "third-party:gimli-0.33": {
         "cpu_count": 1,
-        "mean_cores": 1.1397142857142855,
+        "mean_cores": 1.1441422759569104,
         "memory_kb": 524288,
-        "p95_cores": 1.2200205378973106,
+        "p95_cores": 1.3016948051948052,
         "p99_peak_bytes": 286965760,
         "phases": {
           "metadata [pic]": {
@@ -8772,9 +9288,9 @@
       },
       "third-party:hashbrown-0.16": {
         "cpu_count": 1,
-        "mean_cores": 1.0019963369963372,
+        "mean_cores": 0.978770602645762,
         "memory_kb": 196608,
-        "p95_cores": 1.0116651515151516,
+        "p95_cores": 1.021738036809816,
         "p99_peak_bytes": 80900096,
         "phases": {
           "metadata [pic]": {
@@ -8805,9 +9321,9 @@
       },
       "third-party:hashbrown-0.17": {
         "cpu_count": 1,
-        "mean_cores": 0.9823057142857141,
+        "mean_cores": 0.9777266666666667,
         "memory_kb": 196608,
-        "p95_cores": 0.9877786163522012,
+        "p95_cores": 1.0112752,
         "p99_peak_bytes": 79482880,
         "phases": {
           "metadata [pic]": {
@@ -8838,9 +9354,9 @@
       },
       "third-party:heck-0.5": {
         "cpu_count": 1,
-        "mean_cores": 0.9980636627906977,
+        "mean_cores": 0.8767896174863388,
         "memory_kb": 131072,
-        "p95_cores": 0.9984102222222222,
+        "p95_cores": 0.9371076923076923,
         "p99_peak_bytes": 51507200,
         "phases": {
           "metadata [pic]": {
@@ -8871,9 +9387,9 @@
       },
       "third-party:indexmap-2": {
         "cpu_count": 1,
-        "mean_cores": 0.8866935574229693,
+        "mean_cores": 0.9621584379358438,
         "memory_kb": 196608,
-        "p95_cores": 0.9848173652694611,
+        "p95_cores": 0.9998952095808383,
         "p99_peak_bytes": 89214976,
         "phases": {
           "metadata [pic]": {
@@ -8904,9 +9420,9 @@
       },
       "third-party:itoa-1": {
         "cpu_count": 1,
-        "mean_cores": 0.9548145557655955,
+        "mean_cores": 0.9150436827956989,
         "memory_kb": 196608,
-        "p95_cores": 1.0010064,
+        "p95_cores": 0.9931704761904762,
         "p99_peak_bytes": 42450944,
         "phases": {
           "metadata [pic]": {
@@ -8937,9 +9453,9 @@
       },
       "third-party:lexopt-0.3": {
         "cpu_count": 1,
-        "mean_cores": 1.013384771573604,
+        "mean_cores": 0.9508540455616653,
         "memory_kb": 131072,
-        "p95_cores": 1.0257348837209301,
+        "p95_cores": 0.8670708661417322,
         "p99_peak_bytes": 47845376,
         "phases": {
           "metadata [pic]": {
@@ -8970,9 +9486,9 @@
       },
       "third-party:libc-0.2": {
         "cpu_count": 1,
-        "mean_cores": 0.9193492518703243,
+        "mean_cores": 0.9571015537600994,
         "memory_kb": 262144,
-        "p95_cores": 0.9623083743842364,
+        "p95_cores": 1.0305832535885167,
         "p99_peak_bytes": 141541376,
         "phases": {
           "metadata [pic]": {
@@ -9003,9 +9519,9 @@
       },
       "third-party:libc-0.2-build-script-build": {
         "cpu_count": 1,
-        "mean_cores": 1.2437989247311827,
+        "mean_cores": 1.190573103448276,
         "memory_kb": 262144,
-        "p95_cores": 1.2784204545454545,
+        "p95_cores": 1.3525042105263159,
         "p99_peak_bytes": 72019968,
         "phases": {
           "link [pic]": {
@@ -9027,9 +9543,9 @@
       },
       "third-party:libm-0.2": {
         "cpu_count": 1,
-        "mean_cores": 1.0953339754816112,
+        "mean_cores": 1.0893893183201462,
         "memory_kb": 262144,
-        "p95_cores": 1.1489630806845965,
+        "p95_cores": 1.293717741935484,
         "p99_peak_bytes": 115666944,
         "phases": {
           "metadata [pic]": {
@@ -9060,7 +9576,7 @@
       },
       "third-party:libmimalloc-sys-0.1": {
         "cpu_count": 1,
-        "mean_cores": 0.9476302158273381,
+        "mean_cores": 0.9555418131359852,
         "memory_kb": 131072,
         "p95_cores": 1.0,
         "p99_peak_bytes": 27037696,
@@ -9093,9 +9609,9 @@
       },
       "third-party:linux-raw-sys-0.12": {
         "cpu_count": 1,
-        "mean_cores": 0.9732853535353536,
+        "mean_cores": 0.9699863150392017,
         "memory_kb": 131072,
-        "p95_cores": 0.9737592233009709,
+        "p95_cores": 1.006472033898305,
         "p99_peak_bytes": 72454144,
         "phases": {
           "metadata [pic]": {
@@ -9192,9 +9708,9 @@
       },
       "third-party:log-0.4": {
         "cpu_count": 1,
-        "mean_cores": 0.7764037162162162,
+        "mean_cores": 0.9795252912954078,
         "memory_kb": 131072,
-        "p95_cores": 0.7995070921985815,
+        "p95_cores": 1.0112323232323233,
         "p99_peak_bytes": 44695552,
         "phases": {
           "metadata [pic]": {
@@ -9267,9 +9783,9 @@
       },
       "third-party:memchr-2": {
         "cpu_count": 1,
-        "mean_cores": 1.0009357746478873,
+        "mean_cores": 1.0982211019490256,
         "memory_kb": 262144,
-        "p95_cores": 1.1762521505376344,
+        "p95_cores": 1.2906272727272727,
         "p99_peak_bytes": 86929408,
         "phases": {
           "metadata [pic]": {
@@ -9300,7 +9816,7 @@
       },
       "third-party:mimalloc-0.1": {
         "cpu_count": 1,
-        "mean_cores": 1.0,
+        "mean_cores": 0.967033995584989,
         "memory_kb": 131072,
         "p95_cores": 1.0,
         "p99_peak_bytes": 19443712,
@@ -9381,9 +9897,9 @@
       },
       "third-party:object-0.40": {
         "cpu_count": 1,
-        "mean_cores": 0.9561993218040014,
+        "mean_cores": 1.0921328953330314,
         "memory_kb": 655360,
-        "p95_cores": 0.9738325428194994,
+        "p95_cores": 1.3101385074626866,
         "p99_peak_bytes": 451305472,
         "phases": {
           "metadata [pic]": {
@@ -9414,9 +9930,9 @@
       },
       "third-party:once_cell-1": {
         "cpu_count": 1,
-        "mean_cores": 0.9886934108527131,
+        "mean_cores": 0.9817772697150431,
         "memory_kb": 196608,
-        "p95_cores": 1.0033427272727273,
+        "p95_cores": 1.0126336363636363,
         "p99_peak_bytes": 44548096,
         "phases": {
           "metadata [pic]": {
@@ -9513,9 +10029,9 @@
       },
       "third-party:proc-macro2-1": {
         "cpu_count": 1,
-        "mean_cores": 1.0289345403899723,
+        "mean_cores": 1.3387365579302586,
         "memory_kb": 196608,
-        "p95_cores": 1.4137884120171673,
+        "p95_cores": 1.504770945945946,
         "p99_peak_bytes": 90087424,
         "phases": {
           "metadata [pic]": {
@@ -9546,9 +10062,9 @@
       },
       "third-party:proc-macro2-1-build-script-build": {
         "cpu_count": 1,
-        "mean_cores": 0.9440514851485149,
+        "mean_cores": 0.9959508720930234,
         "memory_kb": 131072,
-        "p95_cores": 0.9440514851485149,
+        "p95_cores": 1.0757228346456693,
         "p99_peak_bytes": 50941952,
         "phases": {
           "link [pic]": {
@@ -9627,9 +10143,9 @@
       },
       "third-party:quote-1": {
         "cpu_count": 1,
-        "mean_cores": 0.9543890295358648,
+        "mean_cores": 0.9656892578124999,
         "memory_kb": 131072,
-        "p95_cores": 0.9676772357723578,
+        "p95_cores": 0.9762163636363637,
         "p99_peak_bytes": 56033280,
         "phases": {
           "metadata [pic]": {
@@ -9660,9 +10176,9 @@
       },
       "third-party:quote-1-build-script-build": {
         "cpu_count": 1,
-        "mean_cores": 0.8000456692913385,
+        "mean_cores": 1.018926855123675,
         "memory_kb": 131072,
-        "p95_cores": 0.8000456692913386,
+        "p95_cores": 1.0613535433070866,
         "p99_peak_bytes": 43651072,
         "phases": {
           "link [pic]": {
@@ -9816,9 +10332,9 @@
       },
       "third-party:regalloc2-0.15": {
         "cpu_count": 1,
-        "mean_cores": 0.9442024234693878,
+        "mean_cores": 1.1422326992753624,
         "memory_kb": 327680,
-        "p95_cores": 0.9678390977443609,
+        "p95_cores": 1.3406485294117647,
         "p99_peak_bytes": 159944704,
         "phases": {
           "check": {
@@ -9891,9 +10407,9 @@
       },
       "third-party:ring-0.17": {
         "cpu_count": 1,
-        "mean_cores": 1.1101996270975762,
+        "mean_cores": 1.1752633986928105,
         "memory_kb": 262144,
-        "p95_cores": 1.4624220588235295,
+        "p95_cores": 1.4305845132743362,
         "p99_peak_bytes": 149209088,
         "phases": {
           "metadata [pic]": {
@@ -9924,9 +10440,9 @@
       },
       "third-party:rustc-hash-2": {
         "cpu_count": 1,
-        "mean_cores": 0.764194652406417,
+        "mean_cores": 0.9811037822878229,
         "memory_kb": 131072,
-        "p95_cores": 1.0,
+        "p95_cores": 1.0082446280991735,
         "p99_peak_bytes": 30609408,
         "phases": {
           "metadata [pic]": {
@@ -9981,9 +10497,9 @@
       },
       "third-party:rustix-1": {
         "cpu_count": 1,
-        "mean_cores": 1.0752181229773463,
+        "mean_cores": 1.0972311976209785,
         "memory_kb": 327680,
-        "p95_cores": 1.2141834394904458,
+        "p95_cores": 1.2859461988304093,
         "p99_peak_bytes": 167116800,
         "phases": {
           "metadata [pic]": {
@@ -10014,9 +10530,9 @@
       },
       "third-party:rustix-1-build-script-build": {
         "cpu_count": 1,
-        "mean_cores": 0.9062066666666666,
+        "mean_cores": 1.0319748235294117,
         "memory_kb": 131072,
-        "p95_cores": 0.9616248868778281,
+        "p95_cores": 1.0519100628930818,
         "p99_peak_bytes": 52490240,
         "phases": {
           "link [pic]": {
@@ -10038,9 +10554,9 @@
       },
       "third-party:rustls-0.23": {
         "cpu_count": 1,
-        "mean_cores": 1.48475719237435,
+        "mean_cores": 1.4539903397091654,
         "memory_kb": 524288,
-        "p95_cores": 1.6362218009478673,
+        "p95_cores": 1.6691172651933701,
         "p99_peak_bytes": 316506112,
         "phases": {
           "metadata [pic]": {
@@ -10071,9 +10587,9 @@
       },
       "third-party:rustls-pki-types-1": {
         "cpu_count": 1,
-        "mean_cores": 1.1028289317507418,
+        "mean_cores": 1.1044248378127897,
         "memory_kb": 196608,
-        "p95_cores": 1.2495015463917525,
+        "p95_cores": 1.2834508620689655,
         "p99_peak_bytes": 70328320,
         "phases": {
           "metadata [pic]": {
@@ -10104,9 +10620,9 @@
       },
       "third-party:rustls-webpki-0.103": {
         "cpu_count": 1,
-        "mean_cores": 1.2725869236063316,
+        "mean_cores": 1.242356804878049,
         "memory_kb": 262144,
-        "p95_cores": 1.4273275,
+        "p95_cores": 1.544688953488372,
         "p99_peak_bytes": 94797824,
         "phases": {
           "metadata [pic]": {
@@ -10203,9 +10719,9 @@
       },
       "third-party:serde-1": {
         "cpu_count": 1,
-        "mean_cores": 0.8771617647058824,
+        "mean_cores": 0.9885953961930058,
         "memory_kb": 196608,
-        "p95_cores": 0.9942040650406504,
+        "p95_cores": 1.0801828729281768,
         "p99_peak_bytes": 67739648,
         "phases": {
           "metadata [pic]": {
@@ -10236,9 +10752,9 @@
       },
       "third-party:serde-1-build-script-build": {
         "cpu_count": 1,
-        "mean_cores": 0.9431803986710965,
+        "mean_cores": 0.9703281791907514,
         "memory_kb": 262144,
-        "p95_cores": 1.0294692307692308,
+        "p95_cores": 0.9931766990291262,
         "p99_peak_bytes": 58478592,
         "phases": {
           "link [pic]": {
@@ -10260,9 +10776,9 @@
       },
       "third-party:serde_core-1": {
         "cpu_count": 1,
-        "mean_cores": 0.9689441391941392,
+        "mean_cores": 0.9945853804347826,
         "memory_kb": 327680,
-        "p95_cores": 0.9869842105263158,
+        "p95_cores": 1.0291562962962963,
         "p99_peak_bytes": 174395392,
         "phases": {
           "metadata [pic]": {
@@ -10293,9 +10809,9 @@
       },
       "third-party:serde_core-1-build-script-build": {
         "cpu_count": 1,
-        "mean_cores": 0.8649531914893619,
+        "mean_cores": 0.9632936936936937,
         "memory_kb": 196608,
-        "p95_cores": 0.7818070921985816,
+        "p95_cores": 1.0826142857142858,
         "p99_peak_bytes": 58286080,
         "phases": {
           "link [pic]": {
@@ -10317,9 +10833,9 @@
       },
       "third-party:serde_json-1": {
         "cpu_count": 1,
-        "mean_cores": 1.1296783659378598,
+        "mean_cores": 1.212419648478489,
         "memory_kb": 327680,
-        "p95_cores": 1.3010481884057972,
+        "p95_cores": 1.4150294444444445,
         "p99_peak_bytes": 111046656,
         "phases": {
           "metadata [pic]": {
@@ -10350,9 +10866,9 @@
       },
       "third-party:serde_json-1-build-script-build": {
         "cpu_count": 1,
-        "mean_cores": 0.775236040609137,
+        "mean_cores": 0.9150742424242423,
         "memory_kb": 196608,
-        "p95_cores": 0.7253563636363637,
+        "p95_cores": 1.0,
         "p99_peak_bytes": 34078720,
         "phases": {
           "link [pic]": {
@@ -10440,9 +10956,9 @@
       },
       "third-party:sha2-0.10": {
         "cpu_count": 1,
-        "mean_cores": 0.9753196721311475,
+        "mean_cores": 1.022128830369357,
         "memory_kb": 196608,
-        "p95_cores": 1.0447810699588478,
+        "p95_cores": 1.4571920792079207,
         "p99_peak_bytes": 77377536,
         "phases": {
           "metadata [pic]": {
@@ -10506,9 +11022,9 @@
       },
       "third-party:smallvec-1": {
         "cpu_count": 1,
-        "mean_cores": 0.9610203296703298,
+        "mean_cores": 0.9622405390230209,
         "memory_kb": 131072,
-        "p95_cores": 1.0,
+        "p95_cores": 1.0244267326732672,
         "p99_peak_bytes": 44544000,
         "phases": {
           "check": {
@@ -10548,9 +11064,9 @@
       },
       "third-party:subtle-2": {
         "cpu_count": 1,
-        "mean_cores": 0.8095280323450135,
+        "mean_cores": 0.9603609686609688,
         "memory_kb": 131072,
-        "p95_cores": 0.7131684684684685,
+        "p95_cores": 1.0074435643564357,
         "p99_peak_bytes": 36569088,
         "phases": {
           "metadata [pic]": {
@@ -10614,9 +11130,9 @@
       },
       "third-party:syn-3": {
         "cpu_count": 1,
-        "mean_cores": 1.43958293135436,
+        "mean_cores": 1.5862084258904636,
         "memory_kb": 327680,
-        "p95_cores": 1.43958293135436,
+        "p95_cores": 1.674658045112782,
         "p99_peak_bytes": 179703808,
         "phases": {
           "rlib [pic]": {
@@ -10671,9 +11187,9 @@
       },
       "third-party:target-lexicon-0.13": {
         "cpu_count": 1,
-        "mean_cores": 0.7696137809187279,
+        "mean_cores": 1.0336761664564942,
         "memory_kb": 131072,
-        "p95_cores": 0.8509529411764706,
+        "p95_cores": 1.141831543624161,
         "p99_peak_bytes": 60510208,
         "phases": {
           "metadata [pic]": {
@@ -10704,9 +11220,9 @@
       },
       "third-party:target-lexicon-0.13-build-script-build": {
         "cpu_count": 1,
-        "mean_cores": 1.1724264864864864,
+        "mean_cores": 1.1373175627240144,
         "memory_kb": 196608,
-        "p95_cores": 1.1724264864864864,
+        "p95_cores": 1.2246846153846154,
         "p99_peak_bytes": 65892352,
         "phases": {
           "link [pic]": {
@@ -10728,9 +11244,9 @@
       },
       "third-party:tempfile-3": {
         "cpu_count": 1,
-        "mean_cores": 0.8858051118210862,
+        "mean_cores": 1.1098443273403598,
         "memory_kb": 131072,
-        "p95_cores": 0.9120061904761905,
+        "p95_cores": 1.3851913043478261,
         "p99_peak_bytes": 66437120,
         "phases": {
           "metadata [pic]": {
@@ -10803,9 +11319,9 @@
       },
       "third-party:typenum-1": {
         "cpu_count": 1,
-        "mean_cores": 0.8235129650507329,
+        "mean_cores": 0.9699563951200315,
         "memory_kb": 196608,
-        "p95_cores": 0.9113819767441861,
+        "p95_cores": 1.0146554878048781,
         "p99_peak_bytes": 89317376,
         "phases": {
           "metadata [pic]": {
@@ -10869,9 +11385,9 @@
       },
       "third-party:unicode-ident-1": {
         "cpu_count": 1,
-        "mean_cores": 0.8058407108239094,
+        "mean_cores": 0.8796936224489795,
         "memory_kb": 131072,
-        "p95_cores": 0.870429012345679,
+        "p95_cores": 1.0,
         "p99_peak_bytes": 35987456,
         "phases": {
           "metadata [pic]": {
@@ -10902,9 +11418,9 @@
       },
       "third-party:unicode-width-0.2": {
         "cpu_count": 1,
-        "mean_cores": 0.9769,
+        "mean_cores": 0.9864894601542417,
         "memory_kb": 131072,
-        "p95_cores": 1.0,
+        "p95_cores": 1.008233009708738,
         "p99_peak_bytes": 62246912,
         "phases": {
           "metadata [pic]": {
@@ -10935,9 +11451,9 @@
       },
       "third-party:untrusted-0.9": {
         "cpu_count": 1,
-        "mean_cores": 0.9235964071856287,
+        "mean_cores": 0.9650419797687861,
         "memory_kb": 131072,
-        "p95_cores": 0.947925,
+        "p95_cores": 1.0,
         "p99_peak_bytes": 30605312,
         "phases": {
           "metadata [pic]": {
@@ -10968,9 +11484,9 @@
       },
       "third-party:version_check-0.9": {
         "cpu_count": 1,
-        "mean_cores": 1.2328328859060402,
+        "mean_cores": 1.2787143742255265,
         "memory_kb": 262144,
-        "p95_cores": 1.2506,
+        "p95_cores": 1.3429484126984128,
         "p99_peak_bytes": 62857216,
         "phases": {
           "rlib [pic]": {
@@ -11058,9 +11574,9 @@
       },
       "third-party:wasmtime-internal-core-49": {
         "cpu_count": 1,
-        "mean_cores": 0.9977271186440677,
+        "mean_cores": 0.991849975357319,
         "memory_kb": 196608,
-        "p95_cores": 1.0097481707317073,
+        "p95_cores": 1.1378122448979593,
         "p99_peak_bytes": 77910016,
         "phases": {
           "metadata [pic]": {
@@ -11091,9 +11607,9 @@
       },
       "third-party:wasmtime-internal-core-49-build-script-build": {
         "cpu_count": 1,
-        "mean_cores": 0.7448663461538462,
+        "mean_cores": 0.9625450184501845,
         "memory_kb": 131072,
-        "p95_cores": 0.7448663461538462,
+        "p95_cores": 1.0,
         "p99_peak_bytes": 20598784,
         "phases": {
           "link [pic]": {
@@ -11115,9 +11631,9 @@
       },
       "third-party:webpki-roots-1": {
         "cpu_count": 1,
-        "mean_cores": 0.9502333333333334,
+        "mean_cores": 0.9608645592163847,
         "memory_kb": 131072,
-        "p95_cores": 1.0,
+        "p95_cores": 0.9931254716981132,
         "p99_peak_bytes": 36999168,
         "phases": {
           "check": {
@@ -11214,9 +11730,9 @@
       },
       "third-party:zeroize-1": {
         "cpu_count": 1,
-        "mean_cores": 0.9226227272727273,
+        "mean_cores": 0.9359190169689877,
         "memory_kb": 131072,
-        "p95_cores": 0.8362805825242718,
+        "p95_cores": 1.0517166666666666,
         "p99_peak_bytes": 43163648,
         "phases": {
           "metadata [pic]": {
@@ -11247,9 +11763,9 @@
       },
       "third-party:zmij-1": {
         "cpu_count": 1,
-        "mean_cores": 0.9013349168646081,
+        "mean_cores": 0.961773535791757,
         "memory_kb": 196608,
-        "p95_cores": 0.8501645669291339,
+        "p95_cores": 1.0101936507936509,
         "p99_peak_bytes": 46673920,
         "phases": {
           "metadata [pic]": {
@@ -11280,9 +11796,9 @@
       },
       "third-party:zmij-1-build-script-build": {
         "cpu_count": 1,
-        "mean_cores": 0.8801465020576132,
+        "mean_cores": 0.9306495987158907,
         "memory_kb": 196608,
-        "p95_cores": 0.9483084745762712,
+        "p95_cores": 1.0512024590163935,
         "p99_peak_bytes": 48525312,
         "phases": {
           "link [pic]": {
@@ -11339,9 +11855,9 @@
       },
       "hirsel-authority": {
         "cpu_count": 1,
-        "mean_cores": 1.4286997171851605,
+        "mean_cores": 1.4492692580899762,
         "memory_kb": 786432,
-        "p95_cores": 1.5129106600985223,
+        "p95_cores": 1.5807163348647268,
         "p99_peak_bytes": 541753344,
         "phases": {
           "metadata [pic]": {
@@ -11370,11 +11886,35 @@
           1794359492
         ]
       },
-      "hirsel-check": {
+      "hirsel-candidate": {
         "cpu_count": 2,
-        "mean_cores": 2.0859677951109683,
+        "mean_cores": 1.6375162782255137,
+        "memory_kb": 524288,
+        "p95_cores": 1.8006811023622047,
+        "p99_peak_bytes": 205578240,
+        "phases": {
+          "rlib [pic]": {
+            "cpu_seconds": 451.07,
+            "max_wall_seconds": 17.817,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 24,
+            "wall_seconds": 280.18
+          }
+        },
+        "pss_peak_bytes": 425003008,
+        "samples": 24,
+        "window": [
+          1794323876,
+          1794362118
+        ]
+      },
+      "hirsel-check": {
+        "cpu_count": 1,
+        "mean_cores": 1.4946215199608475,
         "memory_kb": 655360,
-        "p95_cores": 2.4255361022364217,
+        "p95_cores": 1.5920162171628722,
         "p99_peak_bytes": 441573376,
         "phases": {
           "metadata [pic]": {
@@ -11405,9 +11945,9 @@
       },
       "hirsel-check-protocol": {
         "cpu_count": 1,
-        "mean_cores": 1.0184611577181208,
+        "mean_cores": 1.0989396319886766,
         "memory_kb": 327680,
-        "p95_cores": 1.367002205882353,
+        "p95_cores": 1.230745871559633,
         "p99_peak_bytes": 93892608,
         "phases": {
           "metadata [pic]": {
@@ -11462,9 +12002,9 @@
       },
       "hirsel-cli-bin-hirsel": {
         "cpu_count": 1,
-        "mean_cores": 1.547219240048251,
+        "mean_cores": 1.5813968510794334,
         "memory_kb": 1179648,
-        "p95_cores": 1.6986402083333334,
+        "p95_cores": 1.6789207298136646,
         "p99_peak_bytes": 449794048,
         "phases": {
           "link [pic]": {
@@ -11486,9 +12026,9 @@
       },
       "hirsel-code-store": {
         "cpu_count": 1,
-        "mean_cores": 1.1524383315733897,
+        "mean_cores": 1.2498405145326001,
         "memory_kb": 262144,
-        "p95_cores": 1.5428849372384936,
+        "p95_cores": 1.4265939655172413,
         "p99_peak_bytes": 95285248,
         "phases": {
           "metadata [pic]": {
@@ -11519,9 +12059,9 @@
       },
       "hirsel-codec": {
         "cpu_count": 1,
-        "mean_cores": 0.9478672058003347,
+        "mean_cores": 0.9451583291010665,
         "memory_kb": 196608,
-        "p95_cores": 0.8304435185185185,
+        "p95_cores": 1.0263970802919709,
         "p99_peak_bytes": 53100544,
         "phases": {
           "check": {
@@ -11612,9 +12152,9 @@
       },
       "hirsel-core-contract": {
         "cpu_count": 1,
-        "mean_cores": 0.9471028797696184,
+        "mean_cores": 0.9732674865613292,
         "memory_kb": 262144,
-        "p95_cores": 0.9976104294478527,
+        "p95_cores": 1.2932692307692308,
         "p99_peak_bytes": 74121216,
         "phases": {
           "check": {
@@ -11672,9 +12212,9 @@
       },
       "hirsel-cranelift": {
         "cpu_count": 1,
-        "mean_cores": 1.4389136229439057,
+        "mean_cores": 1.4964275388368211,
         "memory_kb": 720896,
-        "p95_cores": 1.6716604204753198,
+        "p95_cores": 1.7026626498002664,
         "p99_peak_bytes": 424087552,
         "phases": {
           "metadata [pic]": {
@@ -11705,9 +12245,9 @@
       },
       "hirsel-diag": {
         "cpu_count": 1,
-        "mean_cores": 1.223329360967185,
+        "mean_cores": 1.233665393258427,
         "memory_kb": 196608,
-        "p95_cores": 1.3420881481481481,
+        "p95_cores": 1.3954793548387097,
         "p99_peak_bytes": 86863872,
         "phases": {
           "metadata [pic]": {
@@ -11737,10 +12277,10 @@
         ]
       },
       "hirsel-driver": {
-        "cpu_count": 2,
-        "mean_cores": 1.602664986461154,
+        "cpu_count": 1,
+        "mean_cores": 1.4375433036397003,
         "memory_kb": 851968,
-        "p95_cores": 1.6812425749643027,
+        "p95_cores": 1.5431213840045377,
         "p99_peak_bytes": 537800704,
         "phases": {
           "metadata [pic]": {
@@ -11770,10 +12310,10 @@
         ]
       },
       "hirsel-engine": {
-        "cpu_count": 2,
-        "mean_cores": 2.530527517840489,
+        "cpu_count": 1,
+        "mean_cores": 1.561993802461956,
         "memory_kb": 3735552,
-        "p95_cores": 2.9600447410571276,
+        "p95_cores": 1.6944574693341121,
         "p99_peak_bytes": 3027550208,
         "phases": {
           "metadata [pic]": {
@@ -11903,9 +12443,9 @@
       },
       "hirsel-fmt": {
         "cpu_count": 1,
-        "mean_cores": 1.263543014354067,
+        "mean_cores": 1.401149582172702,
         "memory_kb": 262144,
-        "p95_cores": 1.3969907268170425,
+        "p95_cores": 1.5568390342052314,
         "p99_peak_bytes": 124428288,
         "phases": {
           "metadata [pic]": {
@@ -11936,9 +12476,9 @@
       },
       "hirsel-free": {
         "cpu_count": 1,
-        "mean_cores": 0.9554243227775657,
+        "mean_cores": 1.0269697235629662,
         "memory_kb": 393216,
-        "p95_cores": 0.9980530612244898,
+        "p95_cores": 1.6400205042016807,
         "p99_peak_bytes": 227151872,
         "phases": {
           "metadata [pic]": {
@@ -12011,9 +12551,9 @@
       },
       "hirsel-graph": {
         "cpu_count": 1,
-        "mean_cores": 1.1543591999999998,
+        "mean_cores": 1.1749427773343974,
         "memory_kb": 196608,
-        "p95_cores": 1.4178295081967214,
+        "p95_cores": 1.2949509505703423,
         "p99_peak_bytes": 69169152,
         "phases": {
           "metadata [pic]": {
@@ -12094,10 +12634,10 @@
         ]
       },
       "hirsel-heapcheck": {
-        "cpu_count": 2,
-        "mean_cores": 1.737549522544742,
+        "cpu_count": 1,
+        "mean_cores": 1.495472912071754,
         "memory_kb": 917504,
-        "p95_cores": 2.0238556789500253,
+        "p95_cores": 1.6931323498419388,
         "p99_peak_bytes": 612052992,
         "phases": {
           "metadata [pic]": {
@@ -12126,11 +12666,44 @@
           1794362002
         ]
       },
+      "hirsel-host-io": {
+        "cpu_count": 2,
+        "mean_cores": 1.6900989569291998,
+        "memory_kb": 655360,
+        "p95_cores": 1.8578903225806451,
+        "p99_peak_bytes": 327598080,
+        "phases": {
+          "metadata [pic]": {
+            "cpu_seconds": 64.686,
+            "max_wall_seconds": 4.676,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 24,
+            "wall_seconds": 70.594
+          },
+          "rlib [pic]": {
+            "cpu_seconds": 988.516,
+            "max_wall_seconds": 33.351,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 24,
+            "wall_seconds": 560.067
+          }
+        },
+        "pss_peak_bytes": 510556160,
+        "samples": 48,
+        "window": [
+          1794323798,
+          1794362010
+        ]
+      },
       "hirsel-intern": {
         "cpu_count": 1,
-        "mean_cores": 0.9896888097660224,
+        "mean_cores": 1.0089390995260663,
         "memory_kb": 262144,
-        "p95_cores": 1.145359243697479,
+        "p95_cores": 1.3422435897435898,
         "p99_peak_bytes": 103784448,
         "phases": {
           "check": {
@@ -12187,10 +12760,10 @@
         ]
       },
       "hirsel-interp": {
-        "cpu_count": 2,
-        "mean_cores": 2.173012202924514,
+        "cpu_count": 1,
+        "mean_cores": 1.4269904376660947,
         "memory_kb": 1114112,
-        "p95_cores": 2.6900042391648213,
+        "p95_cores": 1.5328734046932895,
         "p99_peak_bytes": 862760960,
         "phases": {
           "metadata [pic]": {
@@ -12221,9 +12794,9 @@
       },
       "hirsel-kernels": {
         "cpu_count": 1,
-        "mean_cores": 0.9329477009948912,
+        "mean_cores": 1.0185236070175439,
         "memory_kb": 262144,
-        "p95_cores": 1.0028312,
+        "p95_cores": 1.4551239043824702,
         "p99_peak_bytes": 102191104,
         "phases": {
           "check": {
@@ -12272,9 +12845,9 @@
       },
       "hirsel-layout": {
         "cpu_count": 1,
-        "mean_cores": 1.369164774236388,
+        "mean_cores": 1.4522071956628884,
         "memory_kb": 393216,
-        "p95_cores": 1.6377489711934157,
+        "p95_cores": 1.6793446153846154,
         "p99_peak_bytes": 227459072,
         "phases": {
           "metadata [pic]": {
@@ -12305,9 +12878,9 @@
       },
       "hirsel-lexer": {
         "cpu_count": 1,
-        "mean_cores": 1.0373482720178373,
+        "mean_cores": 1.014154957507082,
         "memory_kb": 131072,
-        "p95_cores": 1.0826191304347825,
+        "p95_cores": 1.0722304761904762,
         "p99_peak_bytes": 53293056,
         "phases": {
           "metadata [pic]": {
@@ -12337,10 +12910,10 @@
         ]
       },
       "hirsel-lir": {
-        "cpu_count": 2,
-        "mean_cores": 2.0387536977061043,
+        "cpu_count": 1,
+        "mean_cores": 1.5734488361882677,
         "memory_kb": 1966080,
-        "p95_cores": 2.2698982327654833,
+        "p95_cores": 1.6813010388083105,
         "p99_peak_bytes": 1602560000,
         "phases": {
           "metadata [pic]": {
@@ -12371,9 +12944,9 @@
       },
       "hirsel-llvm": {
         "cpu_count": 1,
-        "mean_cores": 1.3225947176382784,
+        "mean_cores": 1.3832818415300547,
         "memory_kb": 786432,
-        "p95_cores": 1.5540422826086957,
+        "p95_cores": 1.5430687545520758,
         "p99_peak_bytes": 495702016,
         "phases": {
           "metadata [pic]": {
@@ -12403,10 +12976,10 @@
         ]
       },
       "hirsel-lower": {
-        "cpu_count": 2,
-        "mean_cores": 1.7539614406542317,
+        "cpu_count": 1,
+        "mean_cores": 1.4418552851145243,
         "memory_kb": 458752,
-        "p95_cores": 1.9655725033288949,
+        "p95_cores": 1.5750189957652752,
         "p99_peak_bytes": 349155328,
         "phases": {
           "metadata [pic]": {
@@ -12436,10 +13009,10 @@
         ]
       },
       "hirsel-modes": {
-        "cpu_count": 2,
-        "mean_cores": 2.180581170533415,
+        "cpu_count": 1,
+        "mean_cores": 1.254059034792368,
         "memory_kb": 196608,
-        "p95_cores": 2.5005271719038817,
+        "p95_cores": 1.4743504347826086,
         "p99_peak_bytes": 96899072,
         "phases": {
           "metadata [pic]": {
@@ -12466,6 +13039,39 @@
         "window": [
           1794323756,
           1794359475
+        ]
+      },
+      "hirsel-native": {
+        "cpu_count": 2,
+        "mean_cores": 1.7293045353524463,
+        "memory_kb": 1245184,
+        "p95_cores": 1.8491138014874142,
+        "p99_peak_bytes": 820891648,
+        "phases": {
+          "metadata [pic]": {
+            "cpu_seconds": 206.707,
+            "max_wall_seconds": 14.082,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 24,
+            "wall_seconds": 215.895
+          },
+          "rlib [pic]": {
+            "cpu_seconds": 4765.372,
+            "max_wall_seconds": 147.623,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 24,
+            "wall_seconds": 2665.474
+          }
+        },
+        "pss_peak_bytes": 1051158528,
+        "samples": 48,
+        "window": [
+          1794323804,
+          1794362109
         ]
       },
       "hirsel-native-batch": {
@@ -12501,11 +13107,110 @@
           1794362090
         ]
       },
+      "hirsel-native-cache": {
+        "cpu_count": 2,
+        "mean_cores": 1.6448815125155625,
+        "memory_kb": 917504,
+        "p95_cores": 1.8693611040876528,
+        "p99_peak_bytes": 484581376,
+        "phases": {
+          "metadata [pic]": {
+            "cpu_seconds": 86.369,
+            "max_wall_seconds": 6.813,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 24,
+            "wall_seconds": 93.387
+          },
+          "rlib [pic]": {
+            "cpu_seconds": 1921.834,
+            "max_wall_seconds": 70.875,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 24,
+            "wall_seconds": 1134.635
+          }
+        },
+        "pss_peak_bytes": 731179008,
+        "samples": 48,
+        "window": [
+          1794323811,
+          1794362048
+        ]
+      },
+      "hirsel-native-queries": {
+        "cpu_count": 2,
+        "mean_cores": 1.6898901659269627,
+        "memory_kb": 1310720,
+        "p95_cores": 1.8700989746808956,
+        "p99_peak_bytes": 853966848,
+        "phases": {
+          "metadata [pic]": {
+            "cpu_seconds": 200.038,
+            "max_wall_seconds": 15.304,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 24,
+            "wall_seconds": 208.762
+          },
+          "rlib [pic]": {
+            "cpu_seconds": 3470.471,
+            "max_wall_seconds": 117.115,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 24,
+            "wall_seconds": 1970.595
+          }
+        },
+        "pss_peak_bytes": 1109280768,
+        "samples": 48,
+        "window": [
+          1794323832,
+          1794362103
+        ]
+      },
+      "hirsel-native-testing": {
+        "cpu_count": 2,
+        "mean_cores": 1.6198480749425652,
+        "memory_kb": 720896,
+        "p95_cores": 1.8460414743589744,
+        "p99_peak_bytes": 352952320,
+        "phases": {
+          "metadata [pic]": {
+            "cpu_seconds": 99.279,
+            "max_wall_seconds": 6.384,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 24,
+            "wall_seconds": 104.84
+          },
+          "rlib [pic]": {
+            "cpu_seconds": 1127.561,
+            "max_wall_seconds": 38.93,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 24,
+            "wall_seconds": 660.426
+          }
+        },
+        "pss_peak_bytes": 599137280,
+        "samples": 48,
+        "window": [
+          1794323851,
+          1794362114
+        ]
+      },
       "hirsel-object-storage": {
         "cpu_count": 1,
-        "mean_cores": 1.020003043478261,
+        "mean_cores": 1.070072547683924,
         "memory_kb": 327680,
-        "p95_cores": 1.0359472602739725,
+        "p95_cores": 1.517530625,
         "p99_peak_bytes": 165314560,
         "phases": {
           "check": {
@@ -12587,9 +13292,9 @@
       },
       "hirsel-ownership": {
         "cpu_count": 1,
-        "mean_cores": 1.3769751132009753,
+        "mean_cores": 1.4401431740800048,
         "memory_kb": 917504,
-        "p95_cores": 1.4614651531151004,
+        "p95_cores": 1.566980142475512,
         "p99_peak_bytes": 622845952,
         "phases": {
           "metadata [pic]": {
@@ -12620,9 +13325,9 @@
       },
       "hirsel-parser": {
         "cpu_count": 1,
-        "mean_cores": 1.1532008547008545,
+        "mean_cores": 1.3147344129554657,
         "memory_kb": 327680,
-        "p95_cores": 1.3645178660049628,
+        "p95_cores": 1.4364449315068493,
         "p99_peak_bytes": 121643008,
         "phases": {
           "metadata [pic]": {
@@ -12718,10 +13423,10 @@
         ]
       },
       "hirsel-proof-export": {
-        "cpu_count": 2,
-        "mean_cores": 1.649992508813161,
+        "cpu_count": 1,
+        "mean_cores": 1.532850982768415,
         "memory_kb": 458752,
-        "p95_cores": 2.8175499301675977,
+        "p95_cores": 1.696308979089791,
         "p99_peak_bytes": 316477440,
         "phases": {
           "metadata [pic]": {
@@ -12785,9 +13490,9 @@
       },
       "hirsel-rc": {
         "cpu_count": 2,
-        "mean_cores": 2.143766384872703,
+        "mean_cores": 1.6268574919605299,
         "memory_kb": 2097152,
-        "p95_cores": 2.5002990879828326,
+        "p95_cores": 1.7579848650019014,
         "p99_peak_bytes": 1640009728,
         "phases": {
           "metadata [pic]": {
@@ -12917,9 +13622,9 @@
       },
       "hirsel-resolve": {
         "cpu_count": 1,
-        "mean_cores": 1.1529208103130755,
+        "mean_cores": 1.2677168185961714,
         "memory_kb": 262144,
-        "p95_cores": 1.387566129032258,
+        "p95_cores": 1.4591384615384615,
         "p99_peak_bytes": 128532480,
         "phases": {
           "metadata [pic]": {
@@ -12949,10 +13654,10 @@
         ]
       },
       "hirsel-rt": {
-        "cpu_count": 2,
-        "mean_cores": 1.7866723326505192,
+        "cpu_count": 1,
+        "mean_cores": 1.5110396246921336,
         "memory_kb": 2228224,
-        "p95_cores": 2.068759775491113,
+        "p95_cores": 1.6411021620804354,
         "p99_peak_bytes": 1789382656,
         "phases": {
           "metadata [pic]": {
@@ -12983,9 +13688,9 @@
       },
       "hirsel-rt-archives-default": {
         "cpu_count": 1,
-        "mean_cores": 0.9903127620126068,
+        "mean_cores": 0.9966827229571839,
         "memory_kb": 3080192,
-        "p95_cores": 1.002203955690793,
+        "p95_cores": 1.0024690906169667,
         "p99_peak_bytes": 2538262528,
         "phases": {
           "diag": {
@@ -13016,9 +13721,9 @@
       },
       "hirsel-rt-archives-diagnostic": {
         "cpu_count": 1,
-        "mean_cores": 0.989779174269217,
+        "mean_cores": 0.9948235679244893,
         "memory_kb": 3145728,
-        "p95_cores": 1.0016318584626989,
+        "p95_cores": 1.00263379122407,
         "p99_peak_bytes": 2518855680,
         "phases": {
           "diag": {
@@ -13049,9 +13754,9 @@
       },
       "hirsel-rt-archives-diagnostic-measurement": {
         "cpu_count": 1,
-        "mean_cores": 0.9903398748400463,
+        "mean_cores": 0.9975604981748654,
         "memory_kb": 3145728,
-        "p95_cores": 1.0017316783658017,
+        "p95_cores": 1.0024392174645333,
         "p99_peak_bytes": 2531434496,
         "phases": {
           "diag": {
@@ -13082,9 +13787,9 @@
       },
       "hirsel-rt-archives-diagnostic-system-allocator": {
         "cpu_count": 1,
-        "mean_cores": 0.9913309273412092,
+        "mean_cores": 0.9930664563362689,
         "memory_kb": 3080192,
-        "p95_cores": 1.0024529337728498,
+        "p95_cores": 1.002346923597025,
         "p99_peak_bytes": 2515034112,
         "phases": {
           "diag": {
@@ -13115,9 +13820,9 @@
       },
       "hirsel-rt-archives-diagnostic-system-allocator-measurement": {
         "cpu_count": 1,
-        "mean_cores": 0.9908928654568904,
+        "mean_cores": 0.997400948685922,
         "memory_kb": 3145728,
-        "p95_cores": 1.0024838755304102,
+        "p95_cores": 1.0027618043350908,
         "p99_peak_bytes": 2530004992,
         "phases": {
           "diag": {
@@ -13148,9 +13853,9 @@
       },
       "hirsel-rt-archives-measurement": {
         "cpu_count": 1,
-        "mean_cores": 0.9898552757043179,
+        "mean_cores": 0.9947773610826908,
         "memory_kb": 3145728,
-        "p95_cores": 1.002037099192138,
+        "p95_cores": 1.0023895784364603,
         "p99_peak_bytes": 2546716672,
         "phases": {
           "diag": {
@@ -13181,9 +13886,9 @@
       },
       "hirsel-rt-archives-memcheck": {
         "cpu_count": 1,
-        "mean_cores": 0.9994398440868502,
+        "mean_cores": 0.9961342877813623,
         "memory_kb": 2031616,
-        "p95_cores": 1.0024913178294574,
+        "p95_cores": 1.0021817551060295,
         "p99_peak_bytes": 1656606720,
         "phases": {
           "diag": {
@@ -13247,9 +13952,9 @@
       },
       "hirsel-rt-archives-system-allocator": {
         "cpu_count": 1,
-        "mean_cores": 0.9991997309192924,
+        "mean_cores": 0.9921241346126979,
         "memory_kb": 3080192,
-        "p95_cores": 1.0024699778449144,
+        "p95_cores": 1.0026316606394214,
         "p99_peak_bytes": 2524852224,
         "phases": {
           "diag": {
@@ -13280,9 +13985,9 @@
       },
       "hirsel-rt-archives-system-allocator-measurement": {
         "cpu_count": 1,
-        "mean_cores": 0.9926637415186282,
+        "mean_cores": 0.997392674941987,
         "memory_kb": 3080192,
-        "p95_cores": 1.0021441352973268,
+        "p95_cores": 1.0022201063002334,
         "p99_peak_bytes": 2546343936,
         "phases": {
           "diag": {
@@ -13313,9 +14018,9 @@
       },
       "hirsel-rt-operations": {
         "cpu_count": 1,
-        "mean_cores": 0.9322965489884966,
+        "mean_cores": 0.9531790615316511,
         "memory_kb": 262144,
-        "p95_cores": 1.0069415019762846,
+        "p95_cores": 1.1013880597014925,
         "p99_peak_bytes": 123772928,
         "phases": {
           "check": {
@@ -13364,9 +14069,9 @@
       },
       "hirsel-run-config": {
         "cpu_count": 1,
-        "mean_cores": 0.9947146030167413,
+        "mean_cores": 1.1298144707883155,
         "memory_kb": 851968,
-        "p95_cores": 1.004240653201547,
+        "p95_cores": 1.6224754098360656,
         "p99_peak_bytes": 625127424,
         "phases": {
           "check": {
@@ -13415,9 +14120,9 @@
       },
       "hirsel-run-schema": {
         "cpu_count": 1,
-        "mean_cores": 0.9569062093809189,
+        "mean_cores": 1.045963706392775,
         "memory_kb": 720896,
-        "p95_cores": 0.998034749034749,
+        "p95_cores": 1.4193603053435115,
         "p99_peak_bytes": 526602240,
         "phases": {
           "check": {
@@ -13474,10 +14179,10 @@
         ]
       },
       "hirsel-signature": {
-        "cpu_count": 2,
-        "mean_cores": 1.715879530748889,
+        "cpu_count": 1,
+        "mean_cores": 1.4533591766520344,
         "memory_kb": 393216,
-        "p95_cores": 1.8856914492753623,
+        "p95_cores": 1.6290561522773623,
         "p99_peak_bytes": 259846144,
         "phases": {
           "metadata [pic]": {
@@ -13508,9 +14213,9 @@
       },
       "hirsel-span": {
         "cpu_count": 1,
-        "mean_cores": 0.856807223796034,
+        "mean_cores": 0.9952045647969051,
         "memory_kb": 196608,
-        "p95_cores": 0.8407585798816568,
+        "p95_cores": 1.2128774193548386,
         "p99_peak_bytes": 61616128,
         "phases": {
           "check": {
@@ -13628,9 +14333,9 @@
       },
       "hirsel-syntax": {
         "cpu_count": 1,
-        "mean_cores": 0.943807519666821,
+        "mean_cores": 0.9788730851290804,
         "memory_kb": 393216,
-        "p95_cores": 1.0033407473309608,
+        "p95_cores": 1.1593335260115607,
         "p99_peak_bytes": 216326144,
         "phases": {
           "check": {
@@ -13688,9 +14393,9 @@
       },
       "hirsel-tir": {
         "cpu_count": 1,
-        "mean_cores": 1.0002634360374414,
+        "mean_cores": 1.0441055757915383,
         "memory_kb": 327680,
-        "p95_cores": 1.0975873362445414,
+        "p95_cores": 1.1168041420118344,
         "p99_peak_bytes": 148615168,
         "phases": {
           "metadata [pic]": {
@@ -13719,11 +14424,44 @@
           1794361938
         ]
       },
-      "hirsel-types": {
+      "hirsel-type-analysis": {
         "cpu_count": 2,
-        "mean_cores": 1.7178025619092427,
+        "mean_cores": 1.660377751690458,
+        "memory_kb": 393216,
+        "p95_cores": 1.813299501992032,
+        "p99_peak_bytes": 208777216,
+        "phases": {
+          "metadata [pic]": {
+            "cpu_seconds": 9.04,
+            "max_wall_seconds": 2.531,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 6,
+            "wall_seconds": 9.55
+          },
+          "rlib [pic]": {
+            "cpu_seconds": 167.757,
+            "max_wall_seconds": 20.343,
+            "requested_cpus": [
+              1
+            ],
+            "samples": 6,
+            "wall_seconds": 98.12
+          }
+        },
+        "pss_peak_bytes": 292583424,
+        "samples": 12,
+        "window": [
+          1794323756,
+          1794359475
+        ]
+      },
+      "hirsel-types": {
+        "cpu_count": 1,
+        "mean_cores": 1.4201030371457606,
         "memory_kb": 720896,
-        "p95_cores": 2.093663012295082,
+        "p95_cores": 1.6026371647509579,
         "p99_peak_bytes": 501436416,
         "phases": {
           "metadata [pic]": {
@@ -13753,10 +14491,10 @@
         ]
       },
       "hirsel-validate": {
-        "cpu_count": 2,
-        "mean_cores": 2.2889730325779776,
+        "cpu_count": 1,
+        "mean_cores": 1.5489255681581544,
         "memory_kb": 1376256,
-        "p95_cores": 2.6515505633255634,
+        "p95_cores": 1.7068273417121176,
         "p99_peak_bytes": 1025835008,
         "phases": {
           "metadata [pic]": {
@@ -14027,9 +14765,9 @@
       },
       "third-party:block-buffer-0.10": {
         "cpu_count": 1,
-        "mean_cores": 0.9637829573934836,
+        "mean_cores": 0.9745197063369397,
         "memory_kb": 131072,
-        "p95_cores": 0.9772227642276423,
+        "p95_cores": 0.9813648854961832,
         "p99_peak_bytes": 37924864,
         "phases": {
           "metadata [pic]": {
@@ -14111,7 +14849,7 @@
       },
       "third-party:cfg-if-1": {
         "cpu_count": 1,
-        "mean_cores": 0.9826813888888888,
+        "mean_cores": 0.9764891265597148,
         "memory_kb": 131072,
         "p95_cores": 1.0,
         "p99_peak_bytes": 28655616,
@@ -14162,9 +14900,9 @@
       },
       "third-party:cpufeatures-0.2": {
         "cpu_count": 1,
-        "mean_cores": 0.7546254593175854,
+        "mean_cores": 0.9655683786505539,
         "memory_kb": 131072,
-        "p95_cores": 0.715752,
+        "p95_cores": 1.0,
         "p99_peak_bytes": 31141888,
         "phases": {
           "metadata [pic]": {
@@ -14510,9 +15248,9 @@
       },
       "third-party:cranelift-object-0.136": {
         "cpu_count": 1,
-        "mean_cores": 1.0381584615384616,
+        "mean_cores": 1.2368105263157896,
         "memory_kb": 196608,
-        "p95_cores": 1.122673125,
+        "p95_cores": 1.3954343511450382,
         "p99_peak_bytes": 71618560,
         "phases": {
           "metadata [pic]": {
@@ -14609,9 +15347,9 @@
       },
       "third-party:crypto-common-0.1": {
         "cpu_count": 1,
-        "mean_cores": 0.9350975609756096,
+        "mean_cores": 0.9364518425460636,
         "memory_kb": 131072,
-        "p95_cores": 1.0,
+        "p95_cores": 0.9768466666666666,
         "p99_peak_bytes": 35729408,
         "phases": {
           "metadata [pic]": {
@@ -14660,9 +15398,9 @@
       },
       "third-party:digest-0.10": {
         "cpu_count": 1,
-        "mean_cores": 0.920845642201835,
+        "mean_cores": 0.9449646211646837,
         "memory_kb": 131072,
-        "p95_cores": 0.9547866666666667,
+        "p95_cores": 1.0022533333333334,
         "p99_peak_bytes": 42033152,
         "phases": {
           "metadata [pic]": {
@@ -14876,9 +15614,9 @@
       },
       "third-party:generic-array-0.14": {
         "cpu_count": 1,
-        "mean_cores": 0.8518190283400809,
+        "mean_cores": 0.9692144477317554,
         "memory_kb": 196608,
-        "p95_cores": 0.9081089108910891,
+        "p95_cores": 1.0001468468468468,
         "p99_peak_bytes": 66195456,
         "phases": {
           "metadata [pic]": {
@@ -14927,9 +15665,9 @@
       },
       "third-party:getrandom-0.2": {
         "cpu_count": 1,
-        "mean_cores": 0.9588455974842766,
+        "mean_cores": 0.9699605354058722,
         "memory_kb": 131072,
-        "p95_cores": 1.0,
+        "p95_cores": 1.0137390476190475,
         "p99_peak_bytes": 41418752,
         "phases": {
           "metadata [pic]": {
@@ -15143,9 +15881,9 @@
       },
       "third-party:itoa-1": {
         "cpu_count": 1,
-        "mean_cores": 0.8731263157894736,
+        "mean_cores": 0.8937221232368225,
         "memory_kb": 131072,
-        "p95_cores": 0.9923984848484848,
+        "p95_cores": 0.7190627450980392,
         "p99_peak_bytes": 40726528,
         "phases": {
           "metadata [pic]": {
@@ -15227,9 +15965,9 @@
       },
       "third-party:libc-0.2": {
         "cpu_count": 1,
-        "mean_cores": 0.9648511182108624,
+        "mean_cores": 0.9793048999309868,
         "memory_kb": 262144,
-        "p95_cores": 1.00582875,
+        "p95_cores": 1.0092944,
         "p99_peak_bytes": 140206080,
         "phases": {
           "metadata [pic]": {
@@ -15443,9 +16181,9 @@
       },
       "third-party:memchr-2": {
         "cpu_count": 1,
-        "mean_cores": 1.0137216905901119,
+        "mean_cores": 0.9628922136713446,
         "memory_kb": 196608,
-        "p95_cores": 1.0640279411764706,
+        "p95_cores": 1.212845390070922,
         "p99_peak_bytes": 82747392,
         "phases": {
           "metadata [pic]": {
@@ -15518,9 +16256,9 @@
       },
       "third-party:object-0.40": {
         "cpu_count": 1,
-        "mean_cores": 1.0875284034653463,
+        "mean_cores": 1.1314004566210045,
         "memory_kb": 720896,
-        "p95_cores": 1.2193670918367348,
+        "p95_cores": 1.2345994652406418,
         "p99_peak_bytes": 440467456,
         "phases": {
           "metadata [pic]": {
@@ -15551,9 +16289,9 @@
       },
       "third-party:once_cell-1": {
         "cpu_count": 1,
-        "mean_cores": 0.8455897058823529,
+        "mean_cores": 0.9092872175141243,
         "memory_kb": 131072,
-        "p95_cores": 0.833872072072072,
+        "p95_cores": 0.9958977272727273,
         "p99_peak_bytes": 43618304,
         "phases": {
           "metadata [pic]": {
@@ -15686,9 +16424,9 @@
       },
       "third-party:ring-0.17": {
         "cpu_count": 1,
-        "mean_cores": 1.1837247480403137,
+        "mean_cores": 1.0015561052218296,
         "memory_kb": 262144,
-        "p95_cores": 1.3352286600496277,
+        "p95_cores": 1.4488466292134832,
         "p99_peak_bytes": 164597760,
         "phases": {
           "metadata [pic]": {
@@ -15803,9 +16541,9 @@
       },
       "third-party:rustls-0.23": {
         "cpu_count": 1,
-        "mean_cores": 1.3018245786217197,
+        "mean_cores": 1.0537346661515679,
         "memory_kb": 655360,
-        "p95_cores": 1.6018356421356421,
+        "p95_cores": 1.6237728851540616,
         "p99_peak_bytes": 428400640,
         "phases": {
           "metadata [pic]": {
@@ -15854,9 +16592,9 @@
       },
       "third-party:rustls-pki-types-1": {
         "cpu_count": 1,
-        "mean_cores": 1.0978876075731496,
+        "mean_cores": 0.9561401,
         "memory_kb": 196608,
-        "p95_cores": 1.270023469387755,
+        "p95_cores": 1.2288255102040817,
         "p99_peak_bytes": 69361664,
         "phases": {
           "metadata [pic]": {
@@ -15905,9 +16643,9 @@
       },
       "third-party:rustls-webpki-0.103": {
         "cpu_count": 1,
-        "mean_cores": 1.2080682857142857,
+        "mean_cores": 0.9932944152612662,
         "memory_kb": 262144,
-        "p95_cores": 1.3309691235059762,
+        "p95_cores": 1.4790275862068964,
         "p99_peak_bytes": 101183488,
         "phases": {
           "metadata [pic]": {
@@ -15956,9 +16694,9 @@
       },
       "third-party:serde-1": {
         "cpu_count": 1,
-        "mean_cores": 0.7158184139784947,
+        "mean_cores": 0.982829433177327,
         "memory_kb": 196608,
-        "p95_cores": 0.839711724137931,
+        "p95_cores": 1.0053878504672897,
         "p99_peak_bytes": 65691648,
         "phases": {
           "metadata [pic]": {
@@ -16007,9 +16745,9 @@
       },
       "third-party:serde_core-1": {
         "cpu_count": 1,
-        "mean_cores": 0.9287555934515688,
+        "mean_cores": 0.9742922238222589,
         "memory_kb": 327680,
-        "p95_cores": 1.0044514522821577,
+        "p95_cores": 1.0372184615384616,
         "p99_peak_bytes": 167280640,
         "phases": {
           "metadata [pic]": {
@@ -16058,9 +16796,9 @@
       },
       "third-party:serde_json-1": {
         "cpu_count": 1,
-        "mean_cores": 1.1218217078189299,
+        "mean_cores": 1.0093035795454546,
         "memory_kb": 262144,
-        "p95_cores": 1.3669133105802047,
+        "p95_cores": 1.3487284482758621,
         "p99_peak_bytes": 122990592,
         "phases": {
           "metadata [pic]": {
@@ -16211,9 +16949,9 @@
       },
       "third-party:sha2-0.10": {
         "cpu_count": 1,
-        "mean_cores": 1.0362287581699345,
+        "mean_cores": 1.0102766405484818,
         "memory_kb": 196608,
-        "p95_cores": 1.2291,
+        "p95_cores": 1.403470945945946,
         "p99_peak_bytes": 73797632,
         "phases": {
           "metadata [pic]": {
@@ -16346,9 +17084,9 @@
       },
       "third-party:subtle-2": {
         "cpu_count": 1,
-        "mean_cores": 0.9552117187500001,
+        "mean_cores": 0.9467648531951641,
         "memory_kb": 131072,
-        "p95_cores": 1.0024368421052632,
+        "p95_cores": 0.952568932038835,
         "p99_peak_bytes": 37142528,
         "phases": {
           "metadata [pic]": {
@@ -16496,9 +17234,9 @@
       },
       "third-party:typenum-1": {
         "cpu_count": 1,
-        "mean_cores": 0.9330519444444444,
+        "mean_cores": 0.94025888671875,
         "memory_kb": 196608,
-        "p95_cores": 0.9972740566037736,
+        "p95_cores": 0.9881383333333333,
         "p99_peak_bytes": 91803648,
         "phases": {
           "metadata [pic]": {
@@ -16580,9 +17318,9 @@
       },
       "third-party:untrusted-0.9": {
         "cpu_count": 1,
-        "mean_cores": 0.9870882978723404,
+        "mean_cores": 0.9727442356959863,
         "memory_kb": 131072,
-        "p95_cores": 1.001223076923077,
+        "p95_cores": 1.0,
         "p99_peak_bytes": 35770368,
         "phases": {
           "metadata [pic]": {
@@ -16715,9 +17453,9 @@
       },
       "third-party:webpki-roots-1": {
         "cpu_count": 1,
-        "mean_cores": 0.8538533333333334,
+        "mean_cores": 0.9546738582677166,
         "memory_kb": 131072,
-        "p95_cores": 0.8152792307692308,
+        "p95_cores": 1.0,
         "p99_peak_bytes": 36823040,
         "phases": {
           "metadata [pic]": {
@@ -16757,9 +17495,9 @@
       },
       "third-party:zeroize-1": {
         "cpu_count": 1,
-        "mean_cores": 0.9994522427440633,
+        "mean_cores": 0.9207031746031746,
         "memory_kb": 131072,
-        "p95_cores": 1.0607396226415093,
+        "p95_cores": 1.000080909090909,
         "p99_peak_bytes": 44212224,
         "phases": {
           "metadata [pic]": {
@@ -16808,9 +17546,9 @@
       },
       "third-party:zmij-1": {
         "cpu_count": 1,
-        "mean_cores": 0.896205172413793,
+        "mean_cores": 0.9575911705685618,
         "memory_kb": 196608,
-        "p95_cores": 0.997339534883721,
+        "p95_cores": 1.003560396039604,
         "p99_peak_bytes": 46956544,
         "phases": {
           "metadata [pic]": {
@@ -16863,11 +17601,11 @@
   "special_requests": {
     "clippy": {
       "cpu_count": 1,
-      "cpu_seconds": 32793.82,
-      "memory_kb": 1703936,
-      "pss_peak_kb": 1389924,
-      "samples": 10081,
-      "wall_seconds": 30607.667
+      "cpu_seconds": 21679.27,
+      "memory_kb": 1900544,
+      "pss_peak_kb": 1574874,
+      "samples": 8204,
+      "wall_seconds": 21122.996
     },
     "native_observation": {
       "cpu_count": 1,
@@ -16888,171 +17626,45 @@
   },
   "unmatched": [
     {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 3,
-      "target": "hirsel-authority-unittest-harness"
-    },
-    {
-      "phase": "link [pic]",
+      "phase": "rlib [pic]",
       "profile": "dev",
       "samples": 1,
-      "target": "hirsel-check-unittest-harness"
+      "target": "hirsel-candidate"
     },
     {
       "phase": "link [pic]",
       "profile": "dev",
-      "samples": 11,
+      "samples": 22,
       "target": "hirsel-cli-bin-hirsel"
     },
     {
       "phase": "link [pic]",
       "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-cli-bin-hirsel-unittest-harness"
+      "samples": 1,
+      "target": "hirsel-cli-test-cpu_pool_16-harness"
     },
     {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-cli-test-assetcheck-harness"
-    },
-    {
-      "phase": "link [pic]",
+      "phase": "check",
       "profile": "dev",
       "samples": 1,
-      "target": "hirsel-cli-test-cli-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-cli-test-configctl_8-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-cli-test-docsession_11-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 3,
-      "target": "hirsel-cli-test-examples-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-cli-test-free-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 3,
-      "target": "hirsel-cli-test-httpaggregate_9-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-cli-test-la_array_dispatch_14-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 3,
-      "target": "hirsel-cli-test-la_brainfuck_recursion_10-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 4,
-      "target": "hirsel-cli-test-la_bwt_inverse_11-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-cli-test-la_calculator_interpreter_10-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-cli-test-la_graph_rss_10-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-cli-test-la_lzw_10-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-cli-test-la_neural_net_10-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-cli-test-la_ngram_upsert_14-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-cli-test-la_sieve_10-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 3,
-      "target": "hirsel-cli-test-la_spectral_split_14-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-cli-test-rule_explain_5-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 3,
-      "target": "hirsel-cli-test-stream_replay-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-cli-test-tabfold_10-harness"
-    },
-    {
-      "phase": "rlib [pic]",
-      "profile": "dev",
-      "samples": 3,
       "target": "hirsel-conformance"
     },
     {
       "phase": "link [pic]",
       "profile": "dev",
-      "samples": 8,
+      "samples": 6,
       "target": "hirsel-conformance-bin-agree"
     },
     {
       "phase": "link [pic]",
       "profile": "dev",
-      "samples": 8,
+      "samples": 6,
       "target": "hirsel-conformance-bin-corpus-fmt"
     },
     {
       "phase": "link [pic]",
       "profile": "dev",
-      "samples": 3,
+      "samples": 10,
       "target": "hirsel-conformance-bin-hirsel-conformance"
     },
     {
@@ -17064,146 +17676,56 @@
     {
       "phase": "link [pic]",
       "profile": "dev",
-      "samples": 2,
+      "samples": 4,
       "target": "hirsel-conformance-bin-native-select"
     },
     {
       "phase": "link [pic]",
       "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-conformance-bin-native-unittest-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 10,
+      "samples": 5,
       "target": "hirsel-conformance-bin-oracle"
     },
     {
       "phase": "link [pic]",
       "profile": "dev",
-      "samples": 9,
+      "samples": 4,
       "target": "hirsel-conformance-bin-profile"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-conformance-test-it-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-conformance-test-spec_links-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-conformance-unittest-harness"
-    },
-    {
-      "phase": "diag",
-      "profile": "dev",
-      "samples": 1,
-      "target": "hirsel-driver"
     },
     {
       "phase": "rlib [pic]",
       "profile": "dev",
-      "samples": 4,
+      "samples": 1,
       "target": "hirsel-driver"
     },
     {
       "phase": "link [pic]",
       "profile": "dev",
-      "samples": 1,
+      "samples": 12,
       "target": "hirsel-driver-example-candidate_cost"
     },
     {
       "phase": "link [pic]",
       "profile": "dev",
-      "samples": 8,
+      "samples": 10,
       "target": "hirsel-driver-example-corpus_dump"
     },
     {
       "phase": "link [pic]",
       "profile": "dev",
-      "samples": 6,
+      "samples": 10,
       "target": "hirsel-driver-example-native_fixture_snapshot"
     },
     {
       "phase": "link [pic]",
       "profile": "dev",
-      "samples": 8,
+      "samples": 5,
       "target": "hirsel-driver-example-package_profile"
     },
     {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-driver-test-it-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-driver-test-it-image-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-driver-test-it-keyed-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-driver-test-it-products-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-driver-test-it-resident-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-driver-test-it-scaling-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-driver-test-it-stdlib-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-driver-test-stack_depth-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-driver-test-validate_memory-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 3,
-      "target": "hirsel-driver-unittest-harness"
-    },
-    {
-      "phase": "rlib [pic]",
+      "phase": "check",
       "profile": "dev",
       "samples": 1,
-      "target": "hirsel-engine"
+      "target": "hirsel-engine-admission"
     },
     {
       "phase": "link [pic]",
@@ -17212,142 +17734,214 @@
       "target": "hirsel-engine-test-it-harness"
     },
     {
+      "phase": "metadata [pic]",
+      "profile": "dev",
+      "samples": 1,
+      "target": "hirsel-front-phases"
+    },
+    {
       "phase": "link [pic]",
       "profile": "dev",
       "samples": 1,
-      "target": "hirsel-engine-unittest-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 1,
-      "target": "hirsel-heapcheck-unittest-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-lir-test-it-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 10,
-      "target": "hirsel-native-build-bin-hirsel-native-build"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-native-build-bin-hirsel-native-build-unittest-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 3,
-      "target": "hirsel-ownership-unittest-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-pipeline-tests-test-front-harness"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-pipeline-tests-test-rc-harness"
+      "target": "hirsel-lir-unittest-harness"
     },
     {
       "phase": "rlib [pic]",
       "profile": "dev",
       "samples": 1,
-      "target": "hirsel-rt"
+      "target": "hirsel-native"
     },
     {
-      "phase": "link [pic]",
+      "phase": "rlib [pic]",
       "profile": "dev",
       "samples": 2,
-      "target": "hirsel-rt-example-failure_table"
+      "target": "hirsel-native-batch"
     },
     {
       "phase": "link [pic]",
       "profile": "dev",
-      "samples": 3,
-      "target": "hirsel-rt-example-idle_pool"
+      "samples": 9,
+      "target": "hirsel-native-build-bin-hirsel-native-build"
     },
     {
-      "phase": "check",
-      "profile": "dev",
-      "samples": 1,
-      "target": "hirsel-rt-operations"
-    },
-    {
-      "phase": "link [pic]",
+      "phase": "metadata [pic]",
       "profile": "dev",
       "samples": 1,
-      "target": "hirsel-rt-unittest-harness"
+      "target": "hirsel-native-cache"
     },
     {
-      "phase": "link [pic]",
+      "phase": "rlib [pic]",
+      "profile": "dev",
+      "samples": 1,
+      "target": "hirsel-native-cache"
+    },
+    {
+      "phase": "metadata [pic]",
+      "profile": "dev",
+      "samples": 1,
+      "target": "hirsel-native-queries"
+    },
+    {
+      "phase": "rlib [pic]",
+      "profile": "dev",
+      "samples": 1,
+      "target": "hirsel-native-queries"
+    },
+    {
+      "phase": "rlib [pic]",
+      "profile": "dev",
+      "samples": 1,
+      "target": "hirsel-native-testing"
+    },
+    {
+      "phase": "metadata [pic]",
+      "profile": "dev",
+      "samples": 1,
+      "target": "hirsel-ownership"
+    },
+    {
+      "phase": "rlib [pic]",
+      "profile": "dev",
+      "samples": 1,
+      "target": "hirsel-project-info"
+    },
+    {
+      "phase": "metadata [pic]",
+      "profile": "dev",
+      "samples": 1,
+      "target": "hirsel-requests"
+    },
+    {
+      "phase": "rlib [pic]",
       "profile": "dev",
       "samples": 2,
-      "target": "io-real-workers"
+      "target": "hirsel-requests"
+    },
+    {
+      "phase": "metadata [pic]",
+      "profile": "dev",
+      "samples": 1,
+      "target": "hirsel-span"
+    },
+    {
+      "phase": "metadata [pic]",
+      "profile": "dev",
+      "samples": 1,
+      "target": "third-party:cranelift-codegen-0.136"
+    },
+    {
+      "phase": "rlib [pic]",
+      "profile": "dev",
+      "samples": 1,
+      "target": "third-party:cranelift-codegen-0.136"
+    },
+    {
+      "phase": "metadata [pic]",
+      "profile": "dev",
+      "samples": 1,
+      "target": "third-party:serde-1"
+    },
+    {
+      "phase": "link [pic]",
+      "profile": "release",
+      "samples": 4,
+      "target": "hirsel-cli-bin-hirsel"
+    },
+    {
+      "phase": "rlib [pic]",
+      "profile": "release",
+      "samples": 1,
+      "target": "hirsel-driver"
+    },
+    {
+      "phase": "rlib [pic]",
+      "profile": "release",
+      "samples": 1,
+      "target": "hirsel-engine"
+    },
+    {
+      "phase": "rlib [pic]",
+      "profile": "release",
+      "samples": 1,
+      "target": "hirsel-rc"
+    },
+    {
+      "phase": "rlib [pic]",
+      "profile": "release",
+      "samples": 1,
+      "target": "hirsel-requests"
     },
     {
       "phase": "staticlib",
       "profile": "release",
-      "samples": 2,
+      "samples": 4,
       "target": "hirsel-rt-archives-default"
     },
     {
       "phase": "staticlib",
       "profile": "release",
-      "samples": 2,
+      "samples": 4,
       "target": "hirsel-rt-archives-diagnostic"
     },
     {
       "phase": "staticlib",
       "profile": "release",
-      "samples": 2,
+      "samples": 4,
       "target": "hirsel-rt-archives-diagnostic-measurement"
     },
     {
       "phase": "staticlib",
       "profile": "release",
-      "samples": 2,
+      "samples": 4,
       "target": "hirsel-rt-archives-diagnostic-system-allocator"
     },
     {
       "phase": "staticlib",
       "profile": "release",
-      "samples": 2,
+      "samples": 4,
       "target": "hirsel-rt-archives-diagnostic-system-allocator-measurement"
     },
     {
       "phase": "staticlib",
       "profile": "release",
-      "samples": 2,
+      "samples": 4,
       "target": "hirsel-rt-archives-measurement"
     },
     {
       "phase": "staticlib",
       "profile": "release",
-      "samples": 1,
+      "samples": 2,
       "target": "hirsel-rt-archives-memcheck"
     },
     {
       "phase": "staticlib",
       "profile": "release",
       "samples": 2,
+      "target": "hirsel-rt-archives-ownership-trace"
+    },
+    {
+      "phase": "staticlib",
+      "profile": "release",
+      "samples": 4,
       "target": "hirsel-rt-archives-system-allocator"
     },
     {
       "phase": "staticlib",
       "profile": "release",
-      "samples": 2,
+      "samples": 4,
       "target": "hirsel-rt-archives-system-allocator-measurement"
+    },
+    {
+      "phase": "metadata [static]",
+      "profile": "release",
+      "samples": 1,
+      "target": "hirsel-span"
+    },
+    {
+      "phase": "rlib",
+      "profile": "release",
+      "samples": 1,
+      "target": "hirsel-syntax"
     }
   ]
 }

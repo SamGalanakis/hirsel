@@ -38,6 +38,9 @@ const USAGE_STATUS: i32 = 2;
 /// Exit status of a debug build that allocated or freed inside a section (sysexits'
 /// `EX_SOFTWARE`).
 pub const SECTION_STATUS: i32 = 70;
+/// Exit status of a process whose `HIRSEL_GUARD_ORACLE=1` check found the
+/// owner table's fast answer different from its full one (sysexits' `EX_SOFTWARE`).
+pub const ORACLE_STATUS: i32 = 70;
 
 #[cfg(debug_assertions)]
 thread_local! {
@@ -140,8 +143,8 @@ const SET: u8 = 2;
 static STATE: AtomicU8 = AtomicU8::new(UNSET);
 
 unsafe impl<A: GlobalAlloc> GlobalAlloc for Guarded<A> {
+    #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        admission::allocator_installed();
         limit_once();
         trap_section(layout.size());
         let reservation = admission::before_alloc(layout.size());
@@ -152,8 +155,8 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Guarded<A> {
         admission::allocated(block as usize, reservation);
         block
     }
+    #[inline]
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        admission::allocator_installed();
         limit_once();
         trap_section(layout.size());
         let reservation = admission::before_alloc(layout.size());
@@ -164,6 +167,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Guarded<A> {
         admission::allocated(block as usize, reservation);
         block
     }
+    #[inline]
     unsafe fn realloc(&self, block: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         trap_section(size);
         let reservation = admission::reallocated(block as usize, layout.size(), size);
@@ -174,6 +178,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Guarded<A> {
         admission::allocated(moved as usize, reservation);
         moved
     }
+    #[inline]
     unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
         trap_section(layout.size());
         admission::deallocated(block as usize, layout.size());
@@ -181,15 +186,28 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Guarded<A> {
     }
 }
 
+#[inline(always)]
 fn limit_once() {
-    if STATE.load(Ordering::Acquire) == SET
-        || STATE
-            .compare_exchange(UNSET, SETTING, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
+    if STATE.load(Ordering::Acquire) != SET {
+        set_limit();
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn set_limit() {
+    admission::allocator_installed();
+    if STATE
+        .compare_exchange(UNSET, SETTING, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
     {
         return;
     }
     // getenv and the rlimit calls do not allocate, so they are safe here.
+    let oracle = unsafe { libc::getenv(c"HIRSEL_GUARD_ORACLE".as_ptr()) };
+    admission::oracle(
+        !oracle.is_null() && unsafe { std::ffi::CStr::from_ptr(oracle) }.to_bytes() == b"1",
+    );
     let text = unsafe { libc::getenv(c"HIRSEL_MEMORY_LIMIT".as_ptr()) };
     let requested = if text.is_null() {
         DEFAULT_LIMIT
@@ -385,6 +403,16 @@ fn owner_exhausted(owner: admission::OwnerKind, bytes: usize) -> ! {
         .number(budget.limit())
         .text(b" reserved; retained growth was refused\n")
         .exit(EXIT_STATUS)
+}
+
+#[cold]
+#[inline(never)]
+fn oracle_failed(address: usize) -> ! {
+    Line::new()
+        .text(b"hirsel: guard oracle: the owner table records block ")
+        .number(address as u64)
+        .text(b" that its presence bucket reports absent\n")
+        .exit(ORACLE_STATUS)
 }
 
 #[cold]

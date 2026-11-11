@@ -4,7 +4,9 @@ pub use budget::{MemoryReservation, ProcessBudget};
 use std::sync::{Arc, OnceLock};
 mod owners;
 pub use owners::{Owner, OwnerScope};
-pub(crate) use owners::{allocated, allocator_installed, before_alloc, deallocated, reallocated};
+pub(crate) use owners::{
+    allocated, allocator_installed, before_alloc, deallocated, oracle, reallocated,
+};
 
 pub const OWNERS: usize = 5;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -4,7 +4,7 @@
 use super::{OwnerKind, host_budget};
 use std::{
     alloc::Layout,
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     sync::{
         Arc, Mutex, OnceLock,
@@ -13,8 +13,16 @@ use std::{
 };
 
 static INSTALLED: AtomicBool = AtomicBool::new(false);
+/// Called by the allocator's one-time setup, which every first allocation reaches.
 pub(crate) fn allocator_installed() {
     INSTALLED.store(true, Ordering::Relaxed);
+}
+/// `HIRSEL_GUARD_ORACLE=1`: every free the presence buckets answer alone also
+/// asks the table, as the guard did before the buckets, and a different
+/// answer ends the process.
+static ORACLE: AtomicBool = AtomicBool::new(false);
+pub(crate) fn oracle(on: bool) {
+    ORACLE.store(on, Ordering::Relaxed);
 }
 struct Account {
     kind: OwnerKind,
@@ -105,16 +113,33 @@ enum State {
     Ledger,
     Metadata,
 }
-thread_local! { static ACTIVE: RefCell<State> = const { RefCell::new(State::None) }; }
+thread_local! {
+    static ACTIVE: RefCell<State> = const { RefCell::new(State::None) };
+    /// `ACTIVE`'s variant, kept by [`Scope`]: a plain cell with no destructor,
+    /// so every allocation and free reads it with one TLS load and touches
+    /// neither a borrow flag nor an owner's reference count.
+    static MODE: Cell<u8> = const { Cell::new(UNSCOPED) };
+}
+const UNSCOPED: u8 = 0;
+const CHARGED: u8 = 1;
+const METADATA: u8 = 2;
+impl State {
+    fn mode(&self) -> u8 {
+        match self {
+            Self::None => UNSCOPED,
+            Self::Owner(_) | Self::Ledger => CHARGED,
+            Self::Metadata => METADATA,
+        }
+    }
+}
+#[inline(always)]
+fn mode() -> u8 {
+    MODE.with(Cell::get)
+}
 fn active() -> State {
     ACTIVE
         .try_with(|slot| slot.borrow().clone())
         .unwrap_or(State::None)
-}
-fn in_metadata() -> bool {
-    ACTIVE
-        .try_with(|slot| matches!(*slot.borrow(), State::Metadata))
-        .unwrap_or(false)
 }
 struct Scope {
     previous: Option<State>,
@@ -122,21 +147,26 @@ struct Scope {
 }
 impl Scope {
     fn enter(state: State) -> Self {
+        let mode = state.mode();
         match ACTIVE.try_with(|slot| slot.replace(state)) {
-            Ok(previous) => Self {
-                previous: Some(previous),
-                _thread: std::marker::PhantomData,
-            },
+            Ok(previous) => {
+                MODE.set(mode);
+                Self {
+                    previous: Some(previous),
+                    _thread: std::marker::PhantomData,
+                }
+            }
             Err(_) => crate::owner_exhausted(OwnerKind::Ledger, 0),
         }
     }
 }
 impl Drop for Scope {
     fn drop(&mut self) {
-        if let Some(previous) = self.previous.take()
-            && let Ok(current) = ACTIVE.try_with(|slot| slot.replace(previous))
-        {
-            drop(current);
+        if let Some(previous) = self.previous.take() {
+            MODE.set(previous.mode());
+            if let Ok(current) = ACTIVE.try_with(|slot| slot.replace(previous)) {
+                drop(current);
+            }
         }
     }
 }
@@ -178,7 +208,6 @@ pub(crate) struct Record {
     owner: Tag,
     bytes: usize,
 }
-static READY: AtomicBool = AtomicBool::new(false);
 /// Which addresses may hold a record: a saturating count per address bucket,
 /// raised before a record is inserted and lowered after it is removed, so a
 /// recorded block's bucket is never zero. A free or reallocation of a block
@@ -187,6 +216,7 @@ static READY: AtomicBool = AtomicBool::new(false);
 /// hand-off after its record was inserted, so a relaxed load sees its raise.
 const BUCKETS: usize = 1 << 20;
 static MAYBE: [AtomicU8; BUCKETS] = [const { AtomicU8::new(0) }; BUCKETS];
+#[inline(always)]
 fn bucket(address: usize) -> &'static AtomicU8 {
     let hash = (address as u64 >> 4).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     &MAYBE[(hash >> (64 - BUCKETS.trailing_zeros())) as usize]
@@ -202,18 +232,47 @@ fn lower(address: usize) {
         (n < u8::MAX).then(|| n - 1)
     });
 }
+/// Whether the block at `address` may hold a record. A zero bucket answers
+/// alone; under the oracle the table must agree.
+#[inline(always)]
+fn may_hold(address: usize) -> bool {
+    if bucket(address).load(Ordering::Relaxed) != 0 {
+        return true;
+    }
+    if ORACLE.load(Ordering::Relaxed) && oracle_holds(address) {
+        crate::oracle_failed(address);
+    }
+    false
+}
+/// The table's own answer, asked where this thread holds no table lock.
+#[cold]
+#[inline(never)]
+fn oracle_holds(address: usize) -> bool {
+    BLOCKS.get().is_some_and(|blocks| {
+        blocks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&address)
+    })
+}
 static BLOCKS: OnceLock<Mutex<HashMap<usize, Record>>> = OnceLock::new();
 fn blocks() -> &'static Mutex<HashMap<usize, Record>> {
-    let result = BLOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    READY.store(true, Ordering::Release);
-    result
+    BLOCKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 pub(crate) enum Allocation {
     None,
     Recorded(Record),
     Metadata,
 }
+#[inline(always)]
 pub(crate) fn before_alloc(bytes: usize) -> Allocation {
+    if mode() == UNSCOPED {
+        return Allocation::None;
+    }
+    scoped_alloc(bytes)
+}
+#[inline(never)]
+fn scoped_alloc(bytes: usize) -> Allocation {
     let owner = match active() {
         State::None => return Allocation::None,
         State::Metadata => {
@@ -226,24 +285,29 @@ pub(crate) fn before_alloc(bytes: usize) -> Allocation {
     owner.reserve(bytes);
     Allocation::Recorded(Record { owner, bytes })
 }
+#[inline(always)]
 pub(crate) fn allocated(address: usize, allocation: Allocation) {
     if let Allocation::Recorded(record) = allocation {
-        let _scope = Scope::enter(State::Metadata);
-        raise(address);
-        let previous = blocks()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(address, record);
-        assert!(previous.is_none(), "live allocation addresses are unique");
+        record_block(address, record);
     }
 }
+#[inline(never)]
+fn record_block(address: usize, record: Record) {
+    let _scope = Scope::enter(State::Metadata);
+    raise(address);
+    let previous = blocks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(address, record);
+    assert!(previous.is_none(), "live allocation addresses are unique");
+}
+/// The record of a block whose bucket is nonzero, if the table has one.
+#[inline(never)]
 fn remove(address: usize) -> Option<Record> {
-    if !READY.load(Ordering::Acquire) || bucket(address).load(Ordering::Relaxed) == 0 {
-        return None;
-    }
     // Removal neither allocates nor frees table backing. Avoid touching a
     // destructible TLS scope here: other TLS destructors may still free blocks.
-    let record = blocks()
+    let record = BLOCKS
+        .get()?
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&address);
@@ -252,11 +316,18 @@ fn remove(address: usize) -> Option<Record> {
     }
     record
 }
+#[inline(always)]
 pub(crate) fn deallocated(address: usize, bytes: usize) {
-    if in_metadata() {
+    if mode() == METADATA {
         Tag::Ledger.release(bytes);
         return;
     }
+    if may_hold(address) {
+        release_block(address, bytes);
+    }
+}
+#[inline(never)]
+fn release_block(address: usize, bytes: usize) {
     if let Some(record) = remove(address) {
         assert_eq!(
             record.bytes, bytes,
@@ -265,8 +336,16 @@ pub(crate) fn deallocated(address: usize, bytes: usize) {
         record.owner.release(bytes);
     }
 }
+#[inline(always)]
 pub(crate) fn reallocated(address: usize, old_bytes: usize, new_bytes: usize) -> Allocation {
-    if in_metadata() {
+    if mode() == UNSCOPED && !may_hold(address) {
+        return Allocation::None;
+    }
+    rescoped(address, old_bytes, new_bytes)
+}
+#[inline(never)]
+fn rescoped(address: usize, old_bytes: usize, new_bytes: usize) -> Allocation {
+    if mode() == METADATA {
         if new_bytes > old_bytes {
             Tag::Ledger.reserve(new_bytes - old_bytes);
         } else {
@@ -274,7 +353,7 @@ pub(crate) fn reallocated(address: usize, old_bytes: usize, new_bytes: usize) ->
         }
         return Allocation::Metadata;
     }
-    match remove(address) {
+    match may_hold(address).then(|| remove(address)).flatten() {
         Some(mut record) => {
             assert_eq!(record.bytes, old_bytes);
             if new_bytes > old_bytes {

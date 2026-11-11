@@ -860,13 +860,15 @@ no fence object, so nothing that reclaims objects can remove one.
 history ends at `from`, and returns once the entry is durable at `at`:
 
 - `Advanced(end)`: the entry is in the history at `end` and durable at `at`.
-- `Fenced()`: a later claim entry is in the history, and nothing was appended.
+- `Fenced()`: a later claim entry is in the history, the history proves the entry absent,
+  and no request the advance sent can still land.
 - `Refused(e)`: the request was refused before it had any effect.
 - `Undecided(e)`: whether the entry is in the history could not be read, or the entry is
-  in the history and the barrier for `at` failed. The provider settles a lost response
-  itself by reading the history (its own claim at `from + 1` means it happened; a later
-  claim means `Fenced()`) and returns `Undecided` only when it cannot read. A failed
-  barrier is never retried into success.
+  in the history and the barrier for `at` failed. An unanswered request may land at any
+  later moment, so neither a later claim nor a retry's answer shows by itself that the
+  entry is absent: the provider settles by reading the history, the entry at `from + 1`
+  meaning `Advanced(from + 1)` even under a later claim, and returns `Undecided` when it
+  cannot read. A failed barrier is never retried into success.
 
 After `Fenced()` or `Undecided(..)` the claim is dead: every later operation with it
 returns `Fenced()`. The engine closes the store, a waiting transaction returns

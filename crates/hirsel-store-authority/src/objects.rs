@@ -281,14 +281,16 @@ impl Objects {
         Ok(back)
     }
 
-    /// Settle a head replace that did not report success: `lost` when its
-    /// response was lost, so it may have taken effect.
-    fn settle(&mut self, c: &mut Claim, entry: [u8; 32], lost: bool) -> Settled {
+    /// Settle a head replace that did not report success. `doubt` is whether
+    /// any replace this advance sent went unanswered: such a request may still
+    /// land at any later moment, so no later answer, a retry's mismatch
+    /// included, proves on its own that the entry is absent.
+    fn settle(&mut self, c: &mut Claim, entry: [u8; 32], doubt: bool) -> Settled {
         let position = c.end + 1;
         let (h, tag) = match self.head() {
             Ok(Some(read)) => read,
-            // A mismatch had no effect; a lost response may have had one.
-            Err(e) if !lost => return Settled::Done(Advanced::Refused(refused(e))),
+            // Every replace was answered with a mismatch: none had an effect.
+            Err(e) if !doubt => return Settled::Done(Advanced::Refused(refused(e))),
             Ok(None) | Err(_) => return Settled::Done(dead(c, Advanced::Undecided(unreachable()))),
         };
         if h.attempt == c.attempt {
@@ -297,33 +299,35 @@ impl Objects {
                 return Settled::Done(advanced(c, position));
             }
             if h.end == c.end {
-                if lost && c.tag.as_ref() != Some(&tag) {
+                if doubt && c.tag.as_ref() != Some(&tag) {
                     return Settled::Done(dead(c, Advanced::Undecided(unreachable())));
                 }
-                // The head is still this writer's own at its own end. After a
-                // lost response the retry is the identical conditional request
-                // (no tag recurs, so at most one of the two lands, with the same
-                // bytes): a delayed original never lands after an answer.
+                // The head is still this writer's own at its own end, under the
+                // tag its replaces are conditional on: retry the identical
+                // request. Of it and any unanswered original at most one lands,
+                // with the same bytes.
                 c.tag = Some(tag);
                 return Settled::Retry;
             }
             return Settled::Done(dead(c, Advanced::Undecided(unreachable())));
         }
-        // A later claim holds the history. The entry is in it if this
-        // writer's replace landed before that claim.
-        if lost {
-            match self.catch_up(h.end, h.digest) {
-                Ok(_) if self.chain.get(c.end as usize) == Some(&entry) => {
-                    c.end = position;
-                    c.durable[0] = position;
-                    c.dead = true;
-                    return Settled::Done(Advanced::Advanced(position));
-                }
-                Ok(_) => {}
-                Err(_) => return Settled::Done(dead(c, Advanced::Undecided(unreachable()))),
+        // A later claim holds the history. A replace of this advance may have
+        // landed before it, whatever this attempt was answered, so the chain
+        // decides: the entry at its position is Advanced. Anything else there is
+        // proof of absence, and the head has moved past the tag every replace
+        // of this advance was conditional on, which never recurs, so none of
+        // them can land later: Fenced. A chain that cannot be read decides
+        // nothing.
+        match self.catch_up(h.end, h.digest) {
+            Ok(_) if self.chain.get(c.end as usize) == Some(&entry) => {
+                c.end = position;
+                c.durable[0] = position;
+                c.dead = true;
+                Settled::Done(Advanced::Advanced(position))
             }
+            Ok(_) => Settled::Done(dead(c, Advanced::Fenced)),
+            Err(_) => Settled::Done(dead(c, Advanced::Undecided(unreachable()))),
         }
-        Settled::Done(dead(c, Advanced::Fenced))
     }
 }
 
@@ -442,6 +446,7 @@ impl Authority for Objects {
             digest: d,
         }
         .encode();
+        let mut doubt = false;
         for _ in 0..REPLACE_TRIES {
             let tag = c
                 .tag
@@ -452,15 +457,15 @@ impl Authority for Objects {
                 Some(Ok(Some((_, fresh)))) => fresh,
                 _ => tag,
             };
-            let lost = match self.store.replace(HEAD, &head, Condition::Matches(tag)) {
+            match self.store.replace(HEAD, &head, Condition::Matches(tag)) {
                 Ok(Replaced::Replaced(tag)) => {
                     c.tag = Some(tag);
                     return advanced(c, position);
                 }
-                Ok(Replaced::Mismatch) => false,
-                Err(_) => true,
-            };
-            match self.settle(c, d, lost) {
+                Ok(Replaced::Mismatch) => {}
+                Err(_) => doubt = true,
+            }
+            match self.settle(c, d, doubt) {
                 Settled::Done(a) => return a,
                 Settled::Retry => {}
             }

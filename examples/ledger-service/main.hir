@@ -74,6 +74,8 @@ fn store_error(e: store.StoreError) -> String {
     NoLevel() => "no such level",
     Foreign() => "foreign",
     InvalidInput() => "invalid input",
+    NotRetained() => "version not retained",
+    PinReleased() => "reader pin released",
   }
 }
 

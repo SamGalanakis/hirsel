@@ -1,0 +1,194 @@
+// rule: STORE-8
+// expect: run
+// authorities: {"pins":{"provider":"authority.sim@1","floor":"cache","seed":5,"represent":"log","levels":["cache","disk"],"faults":{}},"c1":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"crash_at":1}},"c2":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"crash_at":2}},"c3":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"crash_at":3}},"c4":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"crash_at":4}},"c5":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"crash_at":5}},"c6":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"crash_at":6}},"c7":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"crash_at":7}},"c8":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"crash_at":8}},"c9":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"crash_at":9}},"c10":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"crash_at":10}},"c11":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"crash_at":11}},"c12":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"crash_at":12}},"c13":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"crash_at":13}},"c14":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"crash_at":14}},"c15":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"crash_at":15}},"c16":{"provider":"authority.sim@1","floor":"cache","seed":1,"represent":"log","levels":["cache","disk"],"faults":{"crash_at":16}}}
+// steps: 20000000
+// A reader pin holds the version its acquire ran at, read with store.at_pin
+// from the readers table durable at the strongest declared level, so the
+// pinned state is readable as soon as the acquire returns, though the place
+// commits at cache and the table only counts at disk. Asking the acquire's
+// stream position again returns the recorded Ok with one holder; a token held
+// already is Taken() at a new position. A takeover inherits the table and a
+// compaction past the pinned version keeps the checkpoint it relies on, while
+// an unpinned version below the newest checkpoint is NotRetained(). A pin its
+// caller drops, or one the operator releases by id, is PinReleased(), and its
+// version is no longer retained.
+// Authority `cN` fails the power right after answering request N, keeping only
+// what is durable at disk. Whatever request it cuts, an acquire that returned
+// Ok has a pin that reads the pinned state after the cut.
+fn put_x(mut tx: store.Tx, info: store.CallInfo, n: u8) -> Result[(), store.TxError] {
+  store.tx_put(mut tx, b"x", bytes.from_list([n]))
+}
+
+fn request(position: u64, name: Bytes) -> CallRequest {
+  CallRequest(
+    stream: d32(b"reader"),
+    epoch: 1,
+    position: position,
+    digest: d32(name),
+    acknowledged: 0
+  )
+}
+
+// Streams and request digests are 32 bytes: the SHA-256 of a name.
+fn d32(name: Bytes) -> Bytes {
+  bytes.from_inline(sha256.digest(name))
+}
+
+fn acquire(mut s: store.Store, position: u64, name: Bytes, p: store.ReaderPin) -> Result[
+  (),
+  store.CallFailure[store.PinError]
+] {
+  store.call(mut s, request(position, name), store.acquire_reader_pin, p)
+}
+
+// True when `p` reads the state whose `x` is `n`, at version `v`.
+fn holds(a: Authority, p: store.ReaderPin, n: u8, v: store.Version of a) -> bool {
+  match store.at_pin(a, p) {
+    Ok(snap) => store.get(snap, b"x") == Some(bytes.from_list([n])) && store.version(
+      a,
+      snap
+    ) == v,
+    Error(_) => false,
+  }
+}
+
+fn released(a: Authority, p: store.ReaderPin) -> bool {
+  match store.at_pin(a, p) {
+    Error(PinReleased()) => true,
+    _ => false,
+  }
+}
+
+fn dropped(a: Authority, v: store.Version of a) -> bool {
+  match store.at(a, v) {
+    Error(NotRetained()) => true,
+    _ => false,
+  }
+}
+
+fn reads(a: Authority, v: store.Version of a, n: u8) -> bool {
+  match store.at(a, v) {
+    Ok(snap) => store.get(snap, b"x") == Some(bytes.from_list([n])),
+    Error(_) => false,
+  }
+}
+
+pub type Failed = Check | Store(store.StoreError)
+
+fn check(ok: bool) -> Result[(), Failed] {
+  if ok {
+    Ok(())
+  } else {
+    Error(Check())
+  }
+}
+
+fn write(mut s: store.Store, n: u8) -> Result[(), Failed] {
+  let done: Result[(), store.TxFailure[store.TxError]] = store.transact(mut s, put_x, n)
+  check(done == Ok(()))
+}
+
+// One cut run over `name`: true when the acquire returned Ok before the cut,
+// so its pin must hold after it.
+fn cut(rt: Io, r: Random, name: String) -> Result[bool, Failed] {
+  let Ok(c) = io.authority(rt, name) else {
+    return Error(Check())
+  }
+  let Ok(p) = store.new_reader_pin(r) else {
+    return Error(Check())
+  }
+  let Ok(opened) = store.open(c, store.default_config()) else {
+    return Ok(false)
+  }
+  let mut s = take opened
+  let done: Result[(), store.TxFailure[store.TxError]] = store.transact(mut s, put_x, 1)
+  let Ok(first) = store.snapshot(c, mut s, authority.floor(c)) else {
+    return Ok(false)
+  }
+  let pinned = store.version(c, first)
+  if done != Ok(()) || acquire(mut s, 1, b"a", p) != Ok(()) {
+    return Ok(false)
+  }
+  check(holds(c, p, 1, pinned))?
+  let _ = store.close(take s)
+  Ok(true)
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
+  let Ok(a) = io.authority(rt, "pins") else {
+    return Error(Check())
+  }
+  let Some(cache) = authority.level(a, "cache") else {
+    return Error(Check())
+  }
+  let Ok(r) = io.random(rt) else {
+    return Error(Check())
+  }
+  let Ok(p) = store.new_reader_pin(r) else {
+    return Error(Check())
+  }
+  let Ok(q) = store.new_reader_pin(r) else {
+    return Error(Check())
+  }
+  let mut s = store.open(a, store.default_config()) ? Store
+  write(mut s, 1)?
+  let first = store.snapshot(a, mut s, cache) ? Store
+  let pinned = store.version(a, first)
+  // The acquire's reply waits for its Retain at disk, so the pin reads at once.
+  check(acquire(mut s, 1, b"a", p) == Ok(()))?
+  check(holds(a, p, 1, pinned))?
+  // The lost reply asked again, and the token asked at a new position.
+  check(acquire(mut s, 1, b"a", p) == Ok(()))?
+  check(acquire(mut s, 2, b"b", p) == Error(Tx(Aborted(Taken()))))?
+  let held = store.reader_pins(a, mut s) ? Store
+  check(list.len(held) == 1)?
+  write(mut s, 2)?
+  let second = store.snapshot(a, mut s, cache) ? Store
+  let unpinned = store.version(a, second)
+  write(mut s, 3)?
+  store.close(take s) ? Store
+  // A takeover holds the same pin, and a compaction keeps what it reads.
+  let mut again = store.open(a, store.default_config()) ? Store
+  let Ok(inherited) = store.reader_pins(a, mut again) else {
+    return Error(Check())
+  }
+  check(list.len(inherited) == 1)?
+  for h in inherited {
+    check(store.pin_version(a, h) == pinned && store.pin_principal(h) == "")?
+  }
+  store.compact(mut again) ? Store
+  check(dropped(a, unpinned))?
+  check(holds(a, p, 1, pinned) && reads(a, pinned, 1))?
+  // The caller drops its pin.
+  let gone: Result[(), store.CallFailure[()]] = store.call(
+    mut again,
+    request(3, b"c"),
+    store.drop_reader_pin,
+    p
+  )
+  check(gone == Ok(()))?
+  check(released(a, p) && dropped(a, pinned))?
+  // The operator releases another by id.
+  check(acquire(mut again, 4, b"d", q) == Ok(()))?
+  let Ok(others) = store.reader_pins(a, mut again) else {
+    return Error(Check())
+  }
+  let mut ids: List[Bytes] = []
+  for h in others {
+    list.push(mut ids, store.pin_holder_id(h))
+  }
+  check(list.len(ids) == 1)?
+  let id = unique ids[0]
+  check(store.release_reader_pin(mut again, copy id) == Ok(true))?
+  check(released(a, q))?
+  check(store.release_reader_pin(mut again, id) == Ok(false))?
+  store.close(take again) ? Store
+  let mut acquired: u64 = 0
+  for k in 1u64..17 {
+    if cut(rt, r, f"c{k}")? {
+      acquired += 1
+    }
+  }
+  check(acquired > 0 && acquired < 16)?
+  Ok(())
+}

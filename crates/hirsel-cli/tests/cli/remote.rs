@@ -556,7 +556,7 @@ fn stream_calls(dir: &Path) -> Vec<(String, Vec<u8>, Vec<u8>)> {
             c.take(32 * created);
             let retired = c.u32();
             c.take(48 * retired);
-            assert_eq!(c.take(8), b"HSGRUP02");
+            assert_eq!(c.take(8), b"HSGRUP03");
             let count = c.u32();
             let mut arrived = vec![];
             for _ in 0..count {

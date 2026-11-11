@@ -76,6 +76,19 @@ pub type Pin {
   version: u64,
 }
 
+/// One holder of a reader pin (STORE-8): the principal the place admitted and
+/// the 16-byte token only the acquirer was given, unique in the store.
+pub type Holder {
+  principal: Bytes,
+  token: Bytes,
+}
+
+/// A version reader pins hold, with its holders sorted by token.
+pub type Reader {
+  version: u64,
+  holders: List[Holder],
+}
+
 /// A commit the engine makes on its own behalf. `Objects()` writes nothing:
 /// its record exists for the objects it inventories or retires.
 pub type Engine = Genesis(
@@ -87,6 +100,7 @@ pub type Engine = Genesis(
 ) | Checkpoint(Descriptor) | Retain(
   floor: u64,
   pins: List[Pin],
+  readers: List[Reader],
   checkpoints: List[Descriptor]
 ) | Fork(identity: Bytes, origin: Bytes, at: u64) | StreamFence(Bytes) | StreamPurge(
   Bytes
@@ -142,7 +156,7 @@ pub type Expect {
 /// `Corrupt()`. Either refuses the open; neither removes or cuts anything.
 pub type Fault = Corrupt() | Unsupported(found: Bytes)
 
-const GROUP_MAGIC: Bytes = b"HSGRUP02"
+const GROUP_MAGIC: Bytes = b"HSGRUP03"
 
 const NODE_MAGIC: Bytes = b"HSNODE02"
 
@@ -159,6 +173,15 @@ const DESCRIPTOR_BYTES: u64 = 105
 const MAX_PINS: u64 = 1024
 
 const MAX_PIN_NAME: u64 = 255
+
+/// The most reader pin holders a Retain records, over all its versions.
+pub const MAX_HOLDERS: u64 = 1024
+
+/// The longest principal a reader pin holder records.
+pub const MAX_PRINCIPAL: u64 = 512
+
+/// A reader pin token's length.
+pub const TOKEN_BYTES: u64 = 16
 
 /// The default checkpoint node bounds: 256 KiB, 1 MiB and 4 MiB.
 pub fn default_bounds() -> Bounds uses {} {
@@ -366,12 +389,21 @@ fn encode_engine(mut out: List[u8], e: Engine) -> u8 uses {} {
       put_descriptor(mut out, Some(copy d))
       3
     },
-    Retain(floor: floor, pins: pins, checkpoints: checkpoints) => {
+    Retain(floor: floor, pins: pins, readers: readers, checkpoints: checkpoints) => {
       put_u64(mut out, floor)
       put_len(mut out, list.len(pins))
       for p in pins {
         put_bytes(mut out, p.name)
         put_u64(mut out, p.version)
+      }
+      put_len(mut out, list.len(readers))
+      for r in readers {
+        put_u64(mut out, r.version)
+        put_len(mut out, list.len(r.holders))
+        for h in r.holders {
+          put_bytes(mut out, h.principal)
+          put_fixed(mut out, h.token)
+        }
       }
       put_len(mut out, list.len(checkpoints))
       for d in checkpoints {
@@ -761,6 +793,41 @@ fn decode_engine(op: u8, data: Bytes) -> Result[Engine, ()] uses {} {
       last = Some(copy name)
       list.push(mut pins, Pin(name: take name, version: version))
     }
+    let r: u64 = int.widen(get_u32(data, mut c)?)
+    let mut readers: List[Reader] = []
+    let mut held: u64 = 0
+    let mut prior_version: Option[u64] = None()
+    for _ in 0u64..r {
+      let version = get_u64(data, mut c)?
+      if let Some(prior) = prior_version {
+        if !(prior < version) {
+          return Error(())
+        }
+      }
+      prior_version = Some(version)
+      let h: u64 = int.widen(get_u32(data, mut c)?)
+      held += h
+      if h == 0 || held > MAX_HOLDERS {
+        return Error(())
+      }
+      let mut holders: List[Holder] = []
+      let mut prior_token: Option[Bytes] = None()
+      for _ in 0u64..h {
+        let principal = get_bytes(data, mut c)?
+        let token = get_fixed(data, mut c, TOKEN_BYTES)?
+        if bytes.len(principal) > MAX_PRINCIPAL {
+          return Error(())
+        }
+        if let Some(t) = prior_token {
+          if !(t < token) {
+            return Error(())
+          }
+        }
+        prior_token = Some(copy token)
+        list.push(mut holders, Holder(principal: take principal, token: take token))
+      }
+      list.push(mut readers, Reader(version: version, holders: take holders))
+    }
     let m: u64 = int.widen(get_u32(data, mut c)?)
     let mut checkpoints: List[Descriptor] = []
     for _ in 0u64..m {
@@ -769,7 +836,7 @@ fn decode_engine(op: u8, data: Bytes) -> Result[Engine, ()] uses {} {
       }
       list.push(mut checkpoints, take d)
     }
-    Retain(floor: floor, pins: take pins, checkpoints: take checkpoints)
+    Retain(floor: floor, pins: take pins, readers: take readers, checkpoints: take checkpoints)
   } else if op == 5 {
     let identity = get_fixed(data, mut c, 32)?
     let origin = get_fixed(data, mut c, 32)?

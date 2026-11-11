@@ -4,6 +4,8 @@
 //! over the memory authorities `main` and `side`. The crash and cancel sweeps
 //! run on the interpreter only: they cut a simulated log at every request, or
 //! cancel at every seam call, which only the simulation does.
+//! The reader pin limit runs here too: each of its 1025 acquires writes the
+//! whole readers table, far past the corpus's step bound.
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
@@ -268,4 +270,11 @@ fn a_migration_canceled_at_any_seam_call_leaves_the_table_whole() {
         batched > whole,
         "no cancel landed after a completed batch: {batched} with batches of 2, {whole} with one batch"
     );
+}
+
+#[test]
+fn the_reader_pin_after_the_limit_is_refused() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/reader_pins/STORE-8-reader-pin-limit-run.hir");
+    run("STORE-8-reader-pin-limit-run", &path, false, 2_000_000_000);
 }

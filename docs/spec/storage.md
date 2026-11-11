@@ -662,6 +662,19 @@ fn store.fork(from: Authority, v: Version of from, to: Authority) -> Result[(), 
 fn store.retain(a: Authority, mut s: Store, floor: Version of a) -> Result[(), StoreError]
 fn store.pin(a: Authority, mut s: Store, name: String, v: Version of a) -> Result[(), StoreError]
 fn store.unpin(mut s: Store, name: String) -> Result[(), StoreError]
+
+ReaderPin  // opaque: a 16-byte token; copyable, plain, sendable, serializable; no version
+PinError   = Limit() | Taken()
+PinHolder  // opaque, of its store's authority: version, principal, id; not serializable
+fn store.new_reader_pin(r: Random) -> Result[ReaderPin, RandomError]
+fn store.acquire_reader_pin(mut tx: Tx, info: CallInfo, p: ReaderPin) -> Result[(), PinError]
+fn store.drop_reader_pin(mut tx: Tx, info: CallInfo, p: ReaderPin) -> Result[(), ()]
+fn store.at_pin(a: Authority, p: ReaderPin) -> Result[Snapshot of a, StoreError]
+fn store.reader_pins(a: Authority, mut s: Store) -> Result[List[PinHolder of a], StoreError]
+fn store.pin_version(a: Authority, h: PinHolder of a) -> Version of a
+fn store.pin_principal(h: PinHolder) -> String
+fn store.pin_holder_id(h: PinHolder) -> Bytes
+fn store.release_reader_pin(mut s: Store, id: Bytes) -> Result[bool, StoreError]
 ```
 
 A **version** names one commit version of one store. It is an opaque ordered token,
@@ -692,6 +705,12 @@ the comparison domain and exercises no authority. `store.at` opens the state at 
 claiming it: a read "as of" that version, available to any holder of the authority, on
 any machine. A query runs against a snapshot on any task, in parallel with the store's
 transactions. Under `db.local@1` taking a snapshot of the head's state costs O(1).
+`store.at` reads `v` from the history durable at the strongest declared level: it is
+`NotRetained()` when `v` is below the newest checkpoint's version and no reader pin holds
+it, or when no commit up to `v` is durable there yet. It is optimistic and pins nothing:
+a snapshot that misses an object reads the history again, and is `NotRetained()` when `v`
+is no longer retained and `Corrupt(..)` when it still is. A snapshot is read whole when
+it opens, so it never fetches again.
 
 **Forks.** `store.fork` creates, under the authority `to`, a new store whose history
 begins as `from`'s history up to version `v`. The fork has its own identity and its own
@@ -717,6 +736,39 @@ changes nothing, and one above `D` of the strongest declared level waits for it.
 only groups and nodes that no retained version and no fork reaches, and only after the
 Retain commit that released them is durable
 ([STORE-11](#store-11-engine-and-storage-seam)).
+
+**Reader pins.** A reader pin holds one version for a reader that may be on another
+machine. The reader draws its token, `store.new_reader_pin`, 16 random bytes; the store
+holds each token at most once, for any principal, so a token names one holder in the
+store. The reader-side calls are transaction entries the head serves with
+`served_transact` and the reader asks with `runner.transact` on its own call stream
+([STORE-12](#store-12-transactions-at-a-runner)); `store.call` is for a caller that is
+itself a head. `acquire_reader_pin` holds the version its call runs at for
+`(info.caller, token)`, by a Retain commit made with the call's own commit, in one
+group; its reply is released only once that Retain is durable at the strongest declared
+level, so a pin whose acquire returned survives any failure the store survives. Asking
+the same stream position again returns the recorded reply, with one holder. It is
+`Taken()` when the store holds the token already and `Limit()` when it holds 1024
+holders over all versions; a caller principal over 512 bytes, or a Retain over the
+authority's largest entry, is `Storage(Unsupported(Size(..)))`, and nothing is ever cut.
+`drop_reader_pin` removes the caller's holder of the token; a token the caller does not
+hold changes nothing, and it cannot fail. `store.at_pin` reads the readers table of the
+newest Retain durable at the strongest declared level: `PinReleased()` at once when no
+holder has the token, otherwise the state at its version, re-read as `store.at` is:
+`PinReleased()` when the holder has gone since, `Corrupt(..)` when it is still there.
+A takeover inherits the table with the rest of the retention state.
+
+The operator, holding the head's `Store`, lists the holders with `store.reader_pins`: each
+one's version, principal and id `H("hirsel.pin.v1", token)`, 32 bytes, so no call shows a
+token. `store.release_reader_pin` releases the holder with that id, whoever holds it, by a
+Retain the engine makes on its own behalf, durable at the strongest declared level before
+it returns: `false` when no holder has the id.
+
+Each acquire or release writes the whole retention state. At the limits (1024 pins with
+255-byte names, 1024 holders with 512-byte principals at distinct versions) a Retain is
+about 1 MB with its descriptors, of which the readers table is about 560 KB, written by
+every acquire and release at a full table. With 32-byte principals a full table is about
+64 KB.
 
 ### STORE-9: Schema history, renames and migrations
 
@@ -1192,7 +1244,7 @@ its frame's length and position.
 **Groups.** Each appended record's entry is one **group**, the commits of one submit:
 
 ```text
-group  = "HSGRUP02" count:u32 commit* defs:u32 def*
+group  = "HSGRUP03" count:u32 commit* defs:u32 def*
 def    = path:bytes fingerprint:bytes code:[32] revision:bytes
 commit = kind:u8 body writes
 writes = n:u32 { op:u8 key:bytes [value:bytes if op = 1] }*
@@ -1231,7 +1283,7 @@ Every kind ends with its `writes`. Engine operations and their payloads:
 | 1 Genesis | The limits `key_bytes value_bytes transaction_bytes range_rows` and the checkpoint node bounds `node_min node_mean node_max`, each `u32`; the bounds must hold the limits (**Checkpoints** below). It is the first commit after the claim records the history begins with (commit 2 unless a creation was cut before its Genesis), and nowhere else. |
 | 2 | Unassigned: a claim is the authority's claim record, never a commit in a group. Op 2 is corruption. |
 | 3 Checkpoint | A checkpoint descriptor (below). |
-| 4 Retain | The whole retention state ([STORE-8](#store-8-versions-snapshots-and-forks)): `floor:u64`, `n:u32` pins `{ name:bytes version:u64 }` sorted by name, at most 1024 with names of at most 255 bytes, then `m:u32` checkpoint descriptors that retained versions rely on. |
+| 4 Retain | The whole retention state ([STORE-8](#store-8-versions-snapshots-and-forks)): `floor:u64`, `n:u32` pins `{ name:bytes version:u64 }` sorted by name, at most 1024 with names of at most 255 bytes; then `r:u32` reader versions `{ version:u64 h:u32 holders{ principal:bytes token:[16] } }`, versions strictly ascending, each with `h >= 1` holders sorted by token, at most 1024 holders in all with principals of at most 512 bytes; then `m:u32` checkpoint descriptors that retained versions rely on. No version is checked against the floor. A group of an earlier magic, `HSGRUP02` included, is `Unsupported(Format(..))`. |
 | 5 Fork | `identity:[32] origin:[32] at:u64`: a fork of the history `origin` at its version `at`, naming the identity of the fork's own history. It comes after the Genesis. |
 | 6 Stream | `op:u8 identity:[32]`: a fence (1) or purge (2) of a call stream ([STORE-12](#store-12-transactions-at-a-runner)). |
 | 7 Library | `name:bytes payload:bytes`: a step a library records as its own, a migration's above all ([STORE-9](#store-9-schema-history-renames-and-migrations)). |
@@ -1550,6 +1602,7 @@ TxError      = NoTable() | TableExists() | Schema(SchemaError) | ReadOnly() | Ou
 SchemaError  = KeyMismatch() | ValueMismatch() | Renamed(stored: String, expected: String)
 StoreError   = Storage(AuthorityError) | Refused(AuthorityError) | Corrupt(String) | Fenced()
              | Closed() | Unsupported(Unsupported) | NoLevel() | Foreign() | InvalidInput()
+             | NotRetained() | PinReleased()
 Unsupported  = Format(found: Bytes, object: String) | Size(needed: u64, max_entry: u64)
              | Conditional()
 TxLimit      = KeyBytes() | ValueBytes() | TransactionBytes() | RangeRows()
@@ -1573,7 +1626,9 @@ creation's limits need groups larger than the authority's largest entry; `Condit
 that an object-storage endpoint does not honour create-if-absent and conditional
 replace. `NoLevel()` (a level name the authority does not declare), `Foreign()` (a
 ticket of another store) and `InvalidInput()` are definite, have no effect and leave the
-store open.
+store open. `NotRetained()` (a version `store.at` reads that the store no longer retains)
+and `PinReleased()` (a reader pin `store.at_pin` reads that no holder has) are definite
+and touch no store ([STORE-8](#store-8-versions-snapshots-and-forks)).
 No outcome reports a conflict or an exhausted retry ([STORE-2](#store-2-transactions)).
 
 ### STORE-14: Tracked access

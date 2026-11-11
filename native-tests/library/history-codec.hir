@@ -150,12 +150,40 @@ fn random_commit(mut g: prng.Generator, defs: u32) -> history.Commit {
     for name in sort_bytes(take names) {
       list.push(mut pins, history.Pin(name: unique name, version: prng.u64(mut g)))
     }
+    // Reader versions ascending, each with one or two holders by token.
+    let mut readers: List[history.Reader] = []
+    let mut version: u64 = 0
+    for _ in 0u64..prng.u64(mut g) % 3 {
+      version += 1 + prng.u64(mut g) % 5
+      // A leading byte keeps the two tokens ascending.
+      let mut holders = [
+        history.Holder(
+          principal: random_bytes(mut g, 6),
+          token: cat([b"\x00", fixed(mut g, 15)])
+        )
+      ]
+      if prng.u64(mut g) % 2 == 0 {
+        list.push(
+          mut holders,
+          history.Holder(
+            principal: random_bytes(mut g, 6),
+            token: cat([b"\x01", fixed(mut g, 15)])
+          )
+        )
+      }
+      list.push(mut readers, history.Reader(version: version, holders: take holders))
+    }
     let mut checkpoints: List[history.Descriptor] = []
     for _ in 0u64..prng.u64(mut g) % 2 {
       list.push(mut checkpoints, random_descriptor(mut g))
     }
     Engine(
-      Retain(floor: prng.u64(mut g), pins: take pins, checkpoints: take checkpoints)
+      Retain(
+        floor: prng.u64(mut g),
+        pins: take pins,
+        readers: take readers,
+        checkpoints: take checkpoints
+      )
     )
   } else if pick == 6 {
     if prng.u64(mut g) % 2 == 0 {
@@ -426,7 +454,7 @@ fn sha(x: Bytes) -> Bytes {
 // A group's bytes from its count's bytes, commits and definitions.
 fn wire_group(count: Bytes, commits: List[Bytes], defs: Bytes) -> Bytes {
   let mut out: List[u8] = []
-  for p in [b"HSGRUP02", copy count] {
+  for p in [b"HSGRUP03", copy count] {
     bytes.append(mut out, p)
   }
   for c in commits {
@@ -434,6 +462,24 @@ fn wire_group(count: Bytes, commits: List[Bytes], defs: Bytes) -> Bytes {
   }
   bytes.append(mut out, defs)
   bytes.from_list(take out)
+}
+
+// A Retain of floor 9 and no pins whose one reader version 7 is held by "p"
+// with token 16 x `first` and then by "p" with token 16 x `second`, and no
+// writes.
+fn reader_pair(first: u8, second: u8) -> Bytes {
+  cat(
+    [
+      b"\x02\x04\x4a\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+      b"\x01\x00\x00\x00\x07\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00",
+      b"\x01\x00\x00\x00p",
+      rep(first, 16),
+      b"\x01\x00\x00\x00p",
+      rep(second, 16),
+      b"\x00\x00\x00\x00",
+      b"\x00\x00\x00\x00"
+    ]
+  )
 }
 
 // A fork's origin position, 0x0102030405060708.
@@ -589,8 +635,8 @@ fn descriptor_value() -> history.Descriptor {
   )
 }
 
-// Engine commits: Checkpoint, Retain (floor 9, pins a=1 and bc=2, one
-// descriptor), StreamFence 32 x 0x71, StreamPurge 32 x 0x72, Genesis with the
+// Engine commits: Checkpoint, Retain (floor 9, pins a=1 and bc=2, reader
+// version 7 held by "p" with token 16 x 0x51, one descriptor), StreamFence 32 x 0x71, StreamPurge 32 x 0x72, Genesis with the
 // default limits and bounds, Fork (identity 32 x 0x81, origin 32 x 0x82, at
 // 0x0102030405060708), Objects.
 fn v2_wire() -> Bytes {
@@ -600,11 +646,14 @@ fn v2_wire() -> Bytes {
       cat([b"\x02\x03\x69\x00\x00\x00", wire_descriptor(), b"\x00\x00\x00\x00"]),
       cat(
         [
-          b"\x02\x04\x94\x00\x00\x00",
+          b"\x02\x04\xb9\x00\x00\x00",
           b"\x09\x00\x00\x00\x00\x00\x00\x00",
           b"\x02\x00\x00\x00",
           b"\x01\x00\x00\x00a\x01\x00\x00\x00\x00\x00\x00\x00",
           b"\x02\x00\x00\x00bc\x02\x00\x00\x00\x00\x00\x00\x00",
+          b"\x01\x00\x00\x00\x07\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00",
+          b"\x01\x00\x00\x00p",
+          rep(81, 16),
           b"\x01\x00\x00\x00",
           wire_descriptor(),
           b"\x00\x00\x00\x00"
@@ -639,6 +688,12 @@ fn v2_value() -> history.Group {
             pins: [
               history.Pin(name: b"a", version: 1),
               history.Pin(name: b"bc", version: 2)
+            ],
+            readers: [
+              history.Reader(
+                version: 7,
+                holders: [history.Holder(principal: b"p", token: rep(81, 16))]
+              )
             ],
             checkpoints: [descriptor_value()]
           )
@@ -803,15 +858,18 @@ fn malformed_groups() -> List[(Bytes, Bytes)] {
     (
       plain(
         [
-          b"\x02\x04\x2b\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x02\x00\x00\x00bc\x02\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00a\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+          b"\x02\x04\x2f\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x02\x00\x00\x00bc\x02\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00a\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
         ]
       ),
       plain(
         [
-          b"\x02\x04\x2b\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x01\x00\x00\x00a\x01\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00bc\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+          b"\x02\x04\x2f\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x01\x00\x00\x00a\x01\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00bc\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
         ]
       )
-    )
+    ),
+    // A reader version's holders not sorted by token: two encodings of one
+    // table, and a token held twice would decode.
+    (plain([reader_pair(82, 81)]), plain([reader_pair(81, 82)]))
   ]
 }
 

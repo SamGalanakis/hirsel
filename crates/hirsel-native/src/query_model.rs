@@ -136,12 +136,16 @@ pub enum ArenaStratum {
 
 /// Canonically sorted members and internal edges. Topology is an address input;
 /// equations and outgoing settled summaries belong to the complete action.
+/// The compiler identity is in both, so builds of different compilers sharing
+/// one store each keep their own association instead of overwriting each
+/// other's.
 #[derive(Clone, Debug)]
 pub struct ComponentKey {
     pub members: Vec<InstanceAddress>,
     pub edges: Vec<(u32, u32)>,
     pub facet: u32,
     pub stratum: ArenaStratum,
+    pub compiler: [u8; 32],
 }
 
 impl ComponentKey {
@@ -165,6 +169,7 @@ impl ComponentKey {
         };
         let mut parts = vec![
             kind.to_le_bytes().to_vec(),
+            self.compiler.to_vec(),
             self.facet.to_le_bytes().to_vec(),
             (self.members.len() as u64).to_le_bytes().to_vec(),
         ];
@@ -414,12 +419,8 @@ pub fn ready_product(
     if reference.domain != READY_RECORD_DOMAIN {
         return Err("wrong Ready descriptor domain".into());
     }
-    let current = store
-        .lookup_product(product.address)
-        .ok_or("missing Ready association")?;
-    if current.action != product.action || current.reference != reference {
-        return Err("Ready descriptor is no longer settled at this action".into());
-    }
+    // The descriptor is the product the caller holds (its own settlement or a
+    // checked lookup); the store's association is never authority here.
     let bytes = archive.bytes();
     let (debug, ready, layout_closure, emission_context, unit_summary, optimizer): ReadyRecord =
         serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;

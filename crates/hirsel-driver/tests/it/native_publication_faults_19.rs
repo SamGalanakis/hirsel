@@ -16,6 +16,10 @@ struct Faults {
     disk: store::DirStore,
     hidden: Mutex<Vec<store::Reference>>,
     flipped: Mutex<Vec<store::Reference>>,
+    /// Once set, another build rewrites each arena association with its own
+    /// action right after this build first reads it.
+    foreign: Mutex<Option<Vec<store::Address>>>,
+    arena_writes: AtomicUsize,
     substituted: Mutex<Vec<(store::Address, store::Association)>>,
     drop_writes: AtomicBool,
     fragment_puts: AtomicUsize,
@@ -79,7 +83,22 @@ impl ResultStore for Faults {
             .iter()
             .find(|(key, _)| *key == address)
             .map(|(_, row)| *row)
-            .or_else(|| self.disk.lookup_product(address))
+            .or_else(|| {
+                let mut row = self.disk.lookup_product(address)?;
+                if let Some(read) = self.foreign.lock().unwrap().as_mut()
+                    && ARENA_KINDS.contains(&row.reference.domain.kind)
+                {
+                    if read.contains(&address) {
+                        row.action = store::Action(hirsel_syntax::ContentHash::of_parts(
+                            "another build's arena action",
+                            [row.action.0.0.as_slice()],
+                        ));
+                    } else {
+                        read.push(address);
+                    }
+                }
+                Some(row)
+            })
     }
     fn associate_product(
         &self,
@@ -90,11 +109,18 @@ impl ResultStore for Faults {
         if !(reference.domain.kind == 0x4f00_0001 && self.drop_writes.load(Ordering::Relaxed)) {
             self.disk.associate_product(address, action, reference);
         }
+        if ARENA_KINDS.contains(&reference.domain.kind) {
+            self.arena_writes.fetch_add(1, Ordering::Relaxed);
+        }
     }
     fn name(&self) -> &'static str {
         "native-publication-fault-controls"
     }
 }
+const ARENA_KINDS: [u32; 2] = [
+    hirsel_native::query_model::ARENA_CANDIDATES_KIND,
+    hirsel_native::query_model::ARENA_CHOSEN_KIND,
+];
 fn compile(faults: Arc<Faults>, verify: Verify) -> crate::native_object_products_19::Objects {
     compile_inspect(faults, verify, PLAN, false, |_, _, _| ())
 }
@@ -153,6 +179,8 @@ fn original_missing_corrupt_metadata_and_failed_publication_recompute_without_lo
             disk: store::DirStore::new(directory.path().join("products")),
             hidden: Mutex::new(vec![]),
             flipped: Mutex::new(vec![]),
+            foreign: Mutex::new(None),
+            arena_writes: AtomicUsize::new(0),
             substituted: Mutex::new(vec![]),
             drop_writes: AtomicBool::new(false),
             fragment_puts: AtomicUsize::new(0),
@@ -206,6 +234,8 @@ fn original_missing_corrupt_metadata_and_failed_publication_recompute_without_lo
             disk: store::DirStore::new(directory.path().join("denied")),
             hidden: Mutex::new(vec![]),
             flipped: Mutex::new(vec![]),
+            foreign: Mutex::new(None),
+            arena_writes: AtomicUsize::new(0),
             substituted: Mutex::new(vec![]),
             drop_writes: AtomicBool::new(true),
             fragment_puts: AtomicUsize::new(0),
@@ -238,6 +268,8 @@ fn a_ready_body_validated_under_the_execution_plan_is_refused_once_its_bytes_cha
             disk: store::DirStore::new(directory.path().join("products")),
             hidden: Mutex::new(vec![]),
             flipped: Mutex::new(vec![]),
+            foreign: Mutex::new(None),
+            arena_writes: AtomicUsize::new(0),
             substituted: Mutex::new(vec![]),
             drop_writes: AtomicBool::new(false),
             fragment_puts: AtomicUsize::new(0),
@@ -266,6 +298,44 @@ fn a_ready_body_validated_under_the_execution_plan_is_refused_once_its_bytes_cha
         assert_eq!(cold.objects, warm.objects);
     });
 }
+
+/// Another build sharing the store may rewrite an arena association after
+/// this build's lookup hit it and before its Ready check, or before its next
+/// run. The association is never authority: the Ready check uses the summary
+/// this build holds, and a foreign action on a later lookup is a miss.
+#[test]
+fn an_arena_association_another_build_rewrote_is_a_miss_never_an_error() {
+    with_compiler_stack(|| {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(Faults {
+            disk: store::DirStore::new(directory.path().join("products")),
+            hidden: Mutex::new(vec![]),
+            flipped: Mutex::new(vec![]),
+            foreign: Mutex::new(None),
+            arena_writes: AtomicUsize::new(0),
+            substituted: Mutex::new(vec![]),
+            drop_writes: AtomicBool::new(false),
+            fragment_puts: AtomicUsize::new(0),
+        });
+        let cold = compile_inspect(store.clone(), Verify::On, ARENA, false, |_, _, _| ());
+        let settled = store.arena_writes.swap(0, Ordering::Relaxed);
+        assert!(settled > 0, "the program settled no arena component");
+        *store.foreign.lock().unwrap() = Some(vec![]);
+        // Every arena lookup hits once, then reads another build's action.
+        let rewritten = compile_inspect(store.clone(), Verify::On, ARENA, false, |_, _, _| ());
+        assert_eq!(store.arena_writes.swap(0, Ordering::Relaxed), 0);
+        // Every arena association now carries a foreign action: all miss.
+        let foreign = compile_inspect(store.clone(), Verify::On, ARENA, false, |_, _, _| ());
+        assert_eq!(
+            store.arena_writes.load(Ordering::Relaxed),
+            settled,
+            "a foreign arena action was taken as a hit"
+        );
+        assert_eq!(cold.objects, rewritten.objects);
+        assert_eq!(cold.objects, foreign.objects);
+    });
+}
+const ARENA: &str = "type Item { n:u64 }\nfn first(a:Arena,n:u64)->(box Item) in a {if n==0u64 {box Item(n:6u64)} else {second(a,n-1u64)}}\nfn second(a:Arena,n:u64)->(box Item) in a {first(a,n)}\nfn wrapper(a:Arena)->(box Item) in a {second(a,2u64)}\nfn main(){arena.with(fn(a:Arena){let x=wrapper(a);});}";
 
 /// C's verdict on a Ready unit reads the bound layout table besides the body.
 /// A unit validated under one table is validated again when asked for under
@@ -320,6 +390,8 @@ fn a_validated_ready_unit_is_reused_only_under_the_table_it_was_validated_under(
             disk: store::DirStore::new(directory.path().join("products")),
             hidden: Mutex::new(vec![]),
             flipped: Mutex::new(vec![]),
+            foreign: Mutex::new(None),
+            arena_writes: AtomicUsize::new(0),
             substituted: Mutex::new(vec![]),
             drop_writes: AtomicBool::new(false),
             fragment_puts: AtomicUsize::new(0),

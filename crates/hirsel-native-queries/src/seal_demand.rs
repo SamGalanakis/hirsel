@@ -221,26 +221,18 @@ impl Plan {
     /// Called only after the advertised dependencies settle. Current C and
     /// source checks remain the enclosing query owner's independent obligation.
     pub fn execute(&self, store: &dyn ResultStore) -> Result<Selection, String> {
+        // Each input is the settled product this process holds; the store's
+        // association is never authority, since another build may rewrite it.
         for input in &self.inputs {
-            let current = store
-                .lookup_product(input.product.address)
-                .ok_or("missing seal-demand instance association")?;
-            if current.action != input.product.action
-                || current.reference
-                    != input
+            if store
+                .get_content(
+                    input
                         .product
                         .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                         .map_err(|e| e.to_string())?
-                        .reference()
-                || store
-                    .get_content(
-                        input
-                            .product
-                            .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
-                            .map_err(|e| e.to_string())?
-                            .reference(),
-                    )
-                    .is_none()
+                        .reference(),
+                )
+                .is_none()
             {
                 return Err("seal-demand instance dependency changed".into());
             }

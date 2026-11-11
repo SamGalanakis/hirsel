@@ -1,6 +1,9 @@
 use crate::rc_support;
 use hirsel_lir::validate::Inputs;
 
+const ONE: [u8; 32] = [1; 32];
+const TWO: [u8; 32] = [2; 32];
+
 #[test]
 fn arena_query_graph_settles_local_equations_and_reuses_unchanged_components() {
     use hirsel_engine_store::{MemStore, ResultStore};
@@ -52,7 +55,7 @@ fn arena_query_graph_settles_local_equations_and_reuses_unchanged_components() {
     }
     nodes.sort_by(|a, b| a.equations.owner.canonical_cmp(&b.equations.owner));
     let mut counts = ArenaQueryCounts::default();
-    let first = settle_arena_queries(&store, &nodes, &[], 0, &mut counts).unwrap();
+    let first = settle_arena_queries(&store, &nodes, &[], 0, ONE, &mut counts).unwrap();
     assert!(counts.misses > 0);
     assert_eq!(counts.hits, 0);
     for name in ["first", "second", "wrapper"] {
@@ -65,7 +68,7 @@ fn arena_query_graph_settles_local_equations_and_reuses_unchanged_components() {
         assert_eq!(xs.1, [0], "{name}");
     }
     let misses = counts.misses;
-    let next = settle_arena_queries(&store, &nodes, &[], 0, &mut counts).unwrap();
+    let next = settle_arena_queries(&store, &nodes, &[], 0, ONE, &mut counts).unwrap();
     assert_eq!(counts.misses, misses);
     assert_eq!(counts.hits, misses);
     assert_eq!(
@@ -87,6 +90,38 @@ fn arena_query_graph_settles_local_equations_and_reuses_unchanged_components() {
                 .reference())
             .collect::<Vec<_>>()
     );
+    // A build of another compiler shares the store: it settles its own
+    // associations without displacing these, and both hit on their next run.
+    let actions = |graph: &hirsel_native_queries::graph::SettledArenaGraph| {
+        graph
+            .candidates
+            .iter()
+            .chain(&graph.chosen)
+            .map(|s| s.product.action)
+            .collect::<Vec<_>>()
+    };
+    let mut other = ArenaQueryCounts::default();
+    let foreign = settle_arena_queries(&store, &nodes, &[], 0, TWO, &mut other).unwrap();
+    assert_eq!((other.misses, other.hits), (misses, 0));
+    assert!(
+        actions(&foreign)
+            .iter()
+            .all(|a| !actions(&first).contains(a))
+    );
+    let mut again = ArenaQueryCounts::default();
+    assert_eq!(
+        actions(&settle_arena_queries(&store, &nodes, &[], 0, ONE, &mut again).unwrap()),
+        actions(&first)
+    );
+    assert_eq!(
+        actions(&settle_arena_queries(&store, &nodes, &[], 0, TWO, &mut again).unwrap()),
+        actions(&foreign)
+    );
+    assert_eq!(
+        (again.misses, again.hits),
+        (0, 2 * misses),
+        "one compiler's association displaced the other's"
+    );
     let mut missing = nodes.pop().unwrap();
     missing.callees.push((
         rc_support::path("missing-callee"),
@@ -95,5 +130,5 @@ fn arena_query_graph_settles_local_equations_and_reuses_unchanged_components() {
     missing.callees.sort();
     missing.callees.dedup();
     nodes.push(missing);
-    assert!(settle_arena_queries(&store, &nodes, &[], 0, &mut counts).is_err());
+    assert!(settle_arena_queries(&store, &nodes, &[], 0, ONE, &mut counts).is_err());
 }

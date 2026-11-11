@@ -136,7 +136,12 @@ impl ArenaTasks {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let mut queries = ArenaQueryPlan::new(&nodes, &[], self.facet)?;
+        let mut queries = ArenaQueryPlan::new(
+            &nodes,
+            &[],
+            self.facet,
+            hirsel_compiler_identity::COMPILER_IDENTITY,
+        )?;
         let ids = queries
             .component_keys
             .iter()

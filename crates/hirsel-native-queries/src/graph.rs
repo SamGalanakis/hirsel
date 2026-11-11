@@ -121,6 +121,7 @@ impl ArenaQueryPlan {
         nodes: &[ArenaNode],
         external: &[(InstanceAddress, Vec<u32>, ProductRef)],
         facet: u32,
+        compiler: [u8; 32],
     ) -> Result<Self, String> {
         if nodes.windows(2).any(|w| {
             !w[0]
@@ -202,6 +203,7 @@ impl ArenaQueryPlan {
                 },
                 facet,
                 stratum: ArenaStratum::Candidates,
+                compiler,
             };
             key.address()?;
             let members: Vec<_> = component
@@ -425,9 +427,10 @@ pub fn settle_arena_queries(
     nodes: &[ArenaNode],
     external: &[(InstanceAddress, Vec<u32>, ProductRef)],
     facet: u32,
+    compiler: [u8; 32],
     counts: &mut ArenaQueryCounts,
 ) -> Result<SettledArenaGraph, String> {
-    let plan = ArenaQueryPlan::new(nodes, external, facet)?;
+    let plan = ArenaQueryPlan::new(nodes, external, facet, compiler)?;
     let mut selected = BTreeMap::new();
     for index in 0..plan.component_keys.len() {
         let output = plan.solve(store, index, &selected, counts)?;
@@ -470,6 +473,7 @@ mod retained_tests {
             }],
             &[],
             1,
+            hirsel_compiler_identity::COMPILER_IDENTITY,
         )
         .unwrap();
         assert!(plan.dependencies(0).unwrap().is_empty());

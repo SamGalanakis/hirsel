@@ -89,7 +89,7 @@ pub fn arena_query(
         "hirsel.native.arena-action.v1",
         [
             address.0.0.as_slice(),
-            hirsel_compiler_identity::COMPILER_IDENTITY.as_slice(),
+            key.compiler.as_slice(),
             bytes.as_slice(),
         ],
     ));

@@ -529,20 +529,14 @@ impl NativeProducts for DemandProducts {
             .summaries
             .get(&address.0)
             .ok_or("arena dependency has not completed")?;
-        let current = self
-            .snapshot
-            .store
-            .lookup_product(address)
-            .ok_or("missing arena dependency association")?;
-        if current.action != summary.product.action
-            || current.reference
-                != summary
-                    .product
-                    .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
-                    .map_err(|e| e.to_string())?
-                    .reference()
-            || self.snapshot.store.get_content(current.reference).is_none()
-        {
+        // The snapshot's own settled summary is authority, never the store's
+        // association, which another build may rewrite.
+        let reference = summary
+            .product
+            .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
+            .map_err(|e| e.to_string())?
+            .reference();
+        if self.snapshot.store.get_content(reference).is_none() {
             return Err("arena dependency is no longer settled".into());
         }
         Ok(summary.clone())

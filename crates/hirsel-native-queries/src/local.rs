@@ -233,11 +233,10 @@ impl LocalReadyQueries {
         let mut chosen = BTreeMap::new();
         let selected_summaries = arena.chosen_reads(key, &owner.facts.body.callees)?;
         for summary in &selected_summaries {
+            // The summary is this process's own settlement (or its checked
+            // hit). The store's association is never authority: another
+            // build may rewrite it at any time.
             let product = summary.product.clone();
-            let association = self
-                .store
-                .lookup_product(product.address)
-                .ok_or("missing settled arena association")?;
             let bytes = self
                 .store
                 .get_content(
@@ -268,12 +267,6 @@ impl LocalReadyQueries {
                     .domain
                     .schema
                     != 1
-                || association.action != product.action
-                || association.reference
-                    != product
-                        .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
-                        .map_err(|e| e.to_string())?
-                        .reference()
                 || rows != expected
             {
                 return Err("arena result differs from its settled descriptor".into());

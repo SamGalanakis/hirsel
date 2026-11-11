@@ -335,6 +335,38 @@ fn every_seeded_place_history_keeps_the_laws() {
     }
 }
 
+/// A seed's objects run: one `authority.objects@1` over `objects.sim@1`, one
+/// of whose writes is held back and lands late, near which another client
+/// claims the history. Half the seeds take H2's shape: a head replace held
+/// back past its settle read lands before the retry, which mismatches, and
+/// the claim lands before the next settle read, so only the chain shows the
+/// batch landed. The rest place the claim at random near the held write.
+fn objects(seed: u64, ops: u64) -> SimulationConfig {
+    let mut z = seed.wrapping_mul(0xbf58476d1ce4e5b9);
+    z ^= z >> 31;
+    let defer = 1 + z % 80;
+    let (wait, claim) = if (z >> 40) & 1 == 0 {
+        (2, defer + 3)
+    } else {
+        let wait = 1 + (z >> 8) % 3;
+        (wait, defer + (z >> 16) % (wait + 3))
+    };
+    let grant = format!(
+        r#"{{"w":{{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{{"provider":"objects.sim@1","seed":{seed},"defer_apply_at":{defer},"defer_for":{wait},"claim_at":{claim}}}}}}}"#
+    );
+    SimulationConfig {
+        authorities: hirsel_run_config::validate_authorities(grant.as_bytes()).unwrap(),
+        ..simulation(seed, ops)
+    }
+}
+
+#[test]
+fn every_seeded_objects_history_keeps_the_laws() {
+    if let Some((seed, law, history)) = sweep(0..200, OPS, objects) {
+        panic!("seed {seed}: {law}\n{history}");
+    }
+}
+
 /// The served scenario: a head serves a store its successor fenced after an
 /// acknowledged call, and caller 8 queries it.
 fn served(_: u64, _: u64) -> SimulationConfig {

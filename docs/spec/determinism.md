@@ -1128,7 +1128,9 @@ and holds its write back until just before request `k + defer_for` (`defer_for` 
 absent), when the write lands with its condition checked then, as a request that arrives
 late does; `crash_at` ends the client right after it, so every later request of that
 client fails with no effect, and the authority continues as a new client that keeps
-nothing of the old one and whose old claims are dead. An object write is whole or absent, so no cut tears one. The objects authority
+nothing of the old one and whose old claims are dead; `claim_at` has another client of
+the same objects claim the history just before request `k` is served, its own requests
+counted, so a later claim can land between the requests of one advance. An object write is whole or absent, so no cut tears one. The objects authority
 settles a head replace that got no success answer by reading the head again, and refuses
 an append whose record put failed (the record, if written, is an orphan no head names), so
 what the store sees, refused before any effect or undecided, follows from where the request

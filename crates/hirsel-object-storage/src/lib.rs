@@ -401,6 +401,17 @@ pub struct MemoryObjects {
     objects: Mutex<BTreeMap<String, Vec<u8>>>,
     faults: Mutex<Option<Faults>>,
     cuts: Mutex<Cutting>,
+    foreign: Mutex<Option<Foreign>>,
+}
+
+/// What [`Cuts::claim_at`] runs: another client's claim of the history.
+#[derive(Clone)]
+struct Foreign(Arc<dyn Fn() + Send + Sync>);
+
+impl std::fmt::Debug for Foreign {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Foreign")
+    }
 }
 
 /// The requests (numbered from 1) at which [`MemoryObjects`] cuts its client.
@@ -426,10 +437,15 @@ pub struct Cuts {
     pub defer_apply_at: Option<u64>,
     /// How many requests later a held-back write takes effect; 1 when absent.
     pub defer_for: Option<u64>,
+    /// Another client claims the history just before the request is served:
+    /// the claim [`MemoryObjects::on_claim`] installs runs first, its own
+    /// requests counted, so a claim can land inside one advance.
+    pub claim_at: Option<u64>,
 }
 
 /// The names of the [`Cuts`] members in an `objects.sim@1` entry.
-pub const CUTS: [&str; 6] = [
+pub const CUTS: [&str; 7] = [
+    "claim_at",
     "crash_at",
     "defer_apply_at",
     "defer_for",
@@ -539,6 +555,10 @@ impl MemoryObjects {
         self.cuts.get_mut().expect("cuts").at = at;
         self
     }
+    /// The claim [`Cuts::claim_at`] runs.
+    pub fn on_claim(&self, claim: Arc<dyn Fn() + Send + Sync>) {
+        *self.foreign.lock().expect("foreign") = Some(Foreign(claim));
+    }
     /// Start a new client after a crash: true when one had happened, and
     /// requests are served again.
     pub fn restart(&self) -> bool {
@@ -553,6 +573,14 @@ impl MemoryObjects {
         }
         c.requests += 1;
         let (n, at) = (Some(c.requests), c.at);
+        if at.claim_at == n {
+            drop(c);
+            let foreign = self.foreign.lock().expect("foreign").clone();
+            if let Some(Foreign(claim)) = foreign {
+                claim();
+            }
+            c = self.cuts.lock().expect("cuts");
+        }
         if c.held.as_ref().is_some_and(|(until, _)| Some(*until) == n) {
             let (_, write) = c.held.take().expect("held");
             write.apply(&mut self.objects.lock().expect("objects"));
@@ -767,6 +795,7 @@ pub fn provider(entry: &serde_json::Value) -> Result<Provider, String> {
             "lose_unapplied_at",
             "defer_apply_at",
             "defer_for",
+            "claim_at",
         ],
         other => return Err(format!("unsupported object storage provider {other}")),
     };
@@ -805,6 +834,7 @@ pub fn provider(entry: &serde_json::Value) -> Result<Provider, String> {
         crash_at: request("crash_at")?,
         defer_apply_at: request("defer_apply_at")?,
         defer_for: request("defer_for")?,
+        claim_at: request("claim_at")?,
     };
     Ok(Provider::Sim(
         MemoryObjects::with_faults(uint("seed")?, uint("fail_one_in")?).with_cuts(cuts),

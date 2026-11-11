@@ -6,7 +6,8 @@
 //! race on one history. With `represent: "objects"` it is
 //! [`crate::objects::Objects`] over a [`Bucket`], a simulated object storage
 //! that refuses requests, loses responses after their effect and returns
-//! incomplete listings.
+//! incomplete listings. Over `objects.sim@1`, `claim_at` makes another client
+//! claim the history inside a request sequence (see [`Client`]).
 //!
 //! Levels are the grant's, weakest first. An append is durable at the weakest
 //! level; a barrier at a level makes everything appended durable at it and
@@ -772,6 +773,17 @@ pub struct Client {
 impl Client {
     pub fn new(bucket: hirsel_object_storage::MemoryObjects, level: String, floor: Level) -> Self {
         let bucket = Arc::new(bucket);
+        // The claim `claim_at` runs: another client of the same objects claims
+        // the history, as a process starting elsewhere would.
+        let weak = Arc::downgrade(&bucket);
+        let (foreign_level, foreign_floor) = (level.clone(), floor);
+        bucket.on_claim(Arc::new(move || {
+            if let Some(bucket) = weak.upgrade() {
+                let mut other =
+                    crate::objects::Objects::new(bucket, foreign_level.clone(), foreign_floor);
+                let _ = other.claim([0xc1; 16], [0xc2; 32]);
+            }
+        }));
         let client = crate::objects::Objects::new(bucket.clone(), level.clone(), floor);
         Client {
             bucket,

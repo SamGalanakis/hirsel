@@ -121,7 +121,10 @@ fn publications(a: Authority) -> Result[List[Publication], Failed] {
     }
     let n = list.len(created)
     if publishes {
-      list.push(mut out, Publication(batches: batches, single: single && n <= 1, objects: objects + n))
+      list.push(
+        mut out,
+        Publication(batches: batches, single: single && n <= 1, objects: objects + n)
+      )
       batches = 0
       single = true
       objects = 0
@@ -175,7 +178,10 @@ fn batched(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
   let (b1, n1) = (p[1].batches, p[1].objects)
   let n2 = p[2].objects
   if one0 && n0 > 2 && b0 + 1 == n0 {
-    say(stdout, f"{name}: one fresh node per batch, each but the last by a Created record")?
+    say(
+      stdout,
+      f"{name}: one fresh node per batch, each but the last by a Created record"
+    )?
   } else {
     say(stdout, f"{name}: first checkpoint of {n0} objects in {b0} batches")?
   }
@@ -200,7 +206,10 @@ fn batched(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
     Some(v) => bytes.len(v) == 15,
     None() => false,
   }
-  let last = match store.get(snap, bytes.from_list([107u8, 107, 107, 107, 107, 107, 136])) {
+  let last = match store.get(
+    snap,
+    bytes.from_list([107u8, 107, 107, 107, 107, 107, 136])
+  ) {
     Some(v) => bytes.len(v) == 16,
     None() => false,
   }
@@ -269,7 +278,11 @@ fn forged(rt: Io, stdout: Stdout, name: String, listed: bool) -> Result[(), Fail
     refs: 64,
     bytes: 67108864
   )
-  let tree = history.build_tree([(b"forged", b"row")], history.default_bounds(), take place)
+  let tree = history.build_tree(
+    [(b"forged", b"row")],
+    history.default_bounds(),
+    take place
+  )
   let mut refs: List[ObjectRef] = []
   for batch in tree.batches {
     for (r, node) in batch {

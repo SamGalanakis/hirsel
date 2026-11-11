@@ -166,7 +166,10 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
   say(stdout, f"outside the claim's positions or epoch: {refused} refused")?
   let short = ObjectRef(lifetime: 5, epoch: 2, digest: b"short")
   match (authority.put(a, mut second, short, b"1"), authority.get(a, short)) {
-    (Error(Refused(_)), Error(Refused(_))) => say(stdout, "a short digest: put and get refused")?,
+    (Error(Refused(_)), Error(Refused(_))) => say(
+      stdout,
+      "a short digest: put and get refused"
+    )?,
     _ => say(stdout, "a short digest: accepted")?,
   }
   let missing = ObjectRef(lifetime: 5, epoch: 2, digest: digest(b"y"))

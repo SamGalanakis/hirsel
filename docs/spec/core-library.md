@@ -421,6 +421,13 @@ N fn energy.enter(budget: u64) -> Energy
 N fn energy.leave(take saved: Energy) -> EnergyUsed
 ```
 
+`energy.enter(budget)` opens an energy scope of `budget` units inside the current one and
+returns its `Energy`, an opaque linear token; `energy.leave` closes the innermost open
+scope, which must be the one its token names, and returns its `EnergyUsed`,
+`{ units: u64, exhausted: bool }`: the units the scope spent, its cleanup reserve
+included, and whether it ran out. Only std@1's store names them, one scope around each
+body it applies ([STORE-11](storage.md#store-11-engine-and-storage-seam) "Energy").
+
 A core operation that only advances an erased state it takes `mut` (`iter.next`) is
 declared at the argument's own captures, so `iter.next(mut it)` and `for x in mut it` over
 an inferred iterator need no written type. An annotated `let mut` binding of an erased state

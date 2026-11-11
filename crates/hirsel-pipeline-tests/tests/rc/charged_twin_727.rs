@@ -553,3 +553,155 @@ pub fn root() -> u64 { let e: Entry[fn(c: (), n: u64, m: u64) -> u64] = spill
     assert!(charged_blocks(unit, |e| matches!(e, Energy::Entry)).is_empty());
     assert_eq!(hirsel_lir::energy::check(unit), Ok(()));
 }
+
+/// `unit` with the failure cleanup entered by `block`'s first failing
+/// instruction resumed into ordinary code at `resume` by an `Isolate`, as a
+/// caught failure is.
+fn catch_into(unit: &LirUnit<Value>, block: usize, resume: usize) -> LirUnit<Value> {
+    let mut out = unit.clone();
+    let failure = out.blocks[block]
+        .instructions
+        .get(&out.instructions)
+        .unwrap()
+        .iter()
+        .find_map(Inst::failure)
+        .expect("the block has a failing instruction");
+    let cleanup = out.tables.edges[out.tables.failures[failure.index()].cleanup.index()]
+        .target
+        .index();
+    let caught = EdgeId(out.tables.edges.len() as u32);
+    out.tables.edges.push(Edge {
+        target: BlockId(resume as u32),
+        arguments: PoolRange::new(0, 0),
+    });
+    out.terminators[cleanup] = Terminator::Isolate {
+        start: ValueId(0),
+        caught,
+    };
+    out
+}
+
+/// `unit` with table edge `edge` sent to a new failure cleanup block of its
+/// own that ends in `terminator`.
+fn divert(unit: &LirUnit<Value>, edge: usize, terminator: Terminator) -> LirUnit<Value> {
+    let mut out = unit.clone();
+    let mut block = out.blocks[out.tables.edges[edge].target.index()].clone();
+    block.parameters = PoolRange::new(0, 0);
+    block.instructions = PoolRange::new(0, 0);
+    out.tables.edges[edge] = Edge {
+        target: BlockId(out.blocks.len() as u32),
+        arguments: PoolRange::new(0, 0),
+    };
+    out.blocks.push(block);
+    out.terminators.push(terminator);
+    out
+}
+
+/// `unit` with table edge `edge` sent to a new failure cleanup block that
+/// only propagates.
+fn propagate_from(unit: &LirUnit<Value>, edge: usize) -> LirUnit<Value> {
+    divert(unit, edge, Terminator::Propagate)
+}
+
+#[test]
+fn a_caught_failure_that_jumps_back_is_a_loop_and_a_failed_charge_pays_no_trip() {
+    let unit = charged_unit(
+        r#"pub fn bump(c: (), x: u64, y: u64) -> u64 { x + y }
+pub fn root() -> u64 { let e: Entry[fn(c: (), x: u64, y: u64) -> u64] = bump
+ 0 }"#,
+        "bump",
+    );
+    assert_eq!(hirsel_lir::energy::check(&unit), Ok(()));
+    let block = (0..unit.blocks.len())
+        .find(|&b| {
+            unit.blocks[b]
+                .instructions
+                .get(&unit.instructions)
+                .unwrap()
+                .iter()
+                .any(|i| i.failure().is_some())
+        })
+        .expect("the add can fail");
+    // The add fails, its cleanup is caught, and the catch resumes at the add.
+    let looped = catch_into(&unit, block, block);
+    assert!(
+        hirsel_lir::energy::check(&looped).is_err(),
+        "accepted a caught failure looping back with no charge"
+    );
+    // An iteration charge before the add whose own failure is caught back
+    // the same way: a trip through the failed charge paid nothing.
+    let charged = charge(&looped, block, Energy::Iteration);
+    assert!(
+        hirsel_lir::energy::check(&charged).is_err(),
+        "a failed charge paid for its trip"
+    );
+    // With the charge's failure propagating, every trip passes the charge.
+    let paid = propagate_from(&charged, charged.tables.edges.len() - 1);
+    assert_eq!(hirsel_lir::energy::check(&paid), Ok(()));
+}
+
+#[test]
+fn a_failure_before_the_entry_charge_caught_into_a_later_call_is_refused() {
+    let unit = charged_unit(
+        r#"fn step(x: u64) -> u64 { x + 1u64 }
+pub fn twice(c: (), x: u64, y: u64) -> u64 { step(step(x + y)) }
+pub fn root() -> u64 { let e: Entry[fn(c: (), x: u64, y: u64) -> u64] = twice
+ 0 }"#,
+        "twice",
+    );
+    assert_eq!(hirsel_lir::energy::check(&unit), Ok(()));
+    let entry = charged_blocks(&unit, |e| matches!(e, Energy::Entry))[0];
+    let first_failing = unit.blocks[entry]
+        .instructions
+        .get(&unit.instructions)
+        .unwrap()
+        .iter()
+        .find(|i| i.failure().is_some());
+    assert!(
+        matches!(
+            first_failing,
+            Some(Inst::Charge {
+                energy: Energy::Entry,
+                ..
+            })
+        ),
+        "the entry charge is its block's first failing instruction"
+    );
+    // The second call's admission, in a block the entry charge precedes.
+    let second = (0..unit.blocks.len())
+        .find(|&b| {
+            b != entry
+                && unit.blocks[b]
+                    .instructions
+                    .get(&unit.instructions)
+                    .unwrap()
+                    .iter()
+                    .any(|i| matches!(i, Inst::FrameEnter { .. }))
+        })
+        .expect("the second call is admitted after the first returns");
+    // The entry charge fails and a catch of its own resumes at the second
+    // call. Nothing else is caught, so no cycle forms: only the walk from
+    // the entry sees the call.
+    let Some(Inst::Charge { failure, .. }) = first_failing else {
+        unreachable!()
+    };
+    let cleanup = unit.tables.failures[failure.index()].cleanup.index();
+    let mut caught = unit.clone();
+    caught.tables.edges.push(Edge {
+        target: BlockId(second as u32),
+        arguments: PoolRange::new(0, 0),
+    });
+    let resume = EdgeId(caught.tables.edges.len() as u32 - 1);
+    let bypass = divert(
+        &caught,
+        cleanup,
+        Terminator::Isolate {
+            start: ValueId(0),
+            caught: resume,
+        },
+    );
+    assert!(
+        hirsel_lir::energy::check(&bypass).is_err(),
+        "accepted a call reached from a failed entry charge"
+    );
+}

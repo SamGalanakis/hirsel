@@ -116,6 +116,12 @@ pub fn check<S: crate::stage::Stage>(unit: &crate::ir::LirUnit<S>) -> Result<(),
             }
             let mut passes = false;
             for inst in instructions[at] {
+                // A failure here, the entry charge's own included, leaves
+                // before the charge is paid.
+                if let Some(failure) = inst.failure() {
+                    let edge = unit.tables.failures[failure.index()].cleanup;
+                    pending.push(unit.tables.edges[edge.index()].target.index());
+                }
                 match inst {
                     Inst::Charge {
                         energy: Energy::Entry,
@@ -137,7 +143,13 @@ pub fn check<S: crate::stage::Stage>(unit: &crate::ir::LirUnit<S>) -> Result<(),
             if matches!(unit.terminators[at], Terminator::Call { .. }) {
                 return fail("a call is reachable before the entry charge".into());
             }
-            pending.extend(forward[at].iter().copied());
+            let ran = instructions[at].len();
+            pending.extend(
+                forward[at]
+                    .iter()
+                    .filter(|o| o.ran == ran)
+                    .map(|o| o.target),
+            );
         }
         if !charged {
             return fail("the entry charge is unreachable from the unit's entry".into());
@@ -157,6 +169,11 @@ pub fn check<S: crate::stage::Stage>(unit: &crate::ir::LirUnit<S>) -> Result<(),
 /// counted loop's single charge (`Span`) at its entry pays for its back edge
 /// when the loop's shape proves the amount bounds its iterations
 /// (`counted_loop`).
+///
+/// A cycle may run through failure transfers: an instruction's or a
+/// terminator's failure enters cleanup, which a `Recover` or `Isolate` can
+/// resume into ordinary code. A charge pays only the transfers that leave
+/// after it ran, so a failure out of the charge itself pays nothing.
 pub fn cycles_paid<S: crate::stage::Stage>(
     unit: &crate::ir::LirUnit<S>,
     entry: bool,
@@ -165,12 +182,23 @@ pub fn cycles_paid<S: crate::stage::Stage>(
     let fail = |what: String| Err(format!("{what} (STORE-11 energy)"));
     let n = unit.blocks.len();
     let (forward, instructions) = graph(unit)?;
-    let holds = |b: usize, f: &dyn Fn(&Energy) -> bool| {
+    let charges = |b: usize, f: &dyn Fn(&Energy) -> bool| {
         instructions[b]
             .iter()
             .any(|i| matches!(i, Inst::Charge { energy, .. } if f(energy)))
     };
-    let cyclic = cycles(&forward, &vec![true; n]).1;
+    let targets = |keep: &dyn Fn(usize, &Out) -> bool| {
+        (0..n)
+            .map(|b| {
+                forward[b]
+                    .iter()
+                    .filter(|o| keep(b, o))
+                    .map(|o| o.target)
+                    .collect()
+            })
+            .collect::<Vec<Vec<usize>>>()
+    };
+    let cyclic = cycles(&targets(&|_, _| true), &vec![true; n]).1;
     let mut paid = Vec::new();
     for (b, block) in instructions.iter().enumerate() {
         for inst in block.iter() {
@@ -194,57 +222,45 @@ pub fn cycles_paid<S: crate::stage::Stage>(
                 paid.push(edge);
             }
         }
-        if holds(b, &|e| matches!(e, Energy::Iteration)) && !cyclic[b] {
+        if charges(b, &|e| matches!(e, Energy::Iteration)) && !cyclic[b] {
             return fail(format!("an iteration charge in block {b} is on no cycle"));
         }
     }
-    let unpaid = (0..n)
-        .map(|b| {
-            unit.terminators[b]
-                .normal_edges(&unit.pools)
-                .into_iter()
-                .filter(|e| !paid.contains(&e.index()))
-                .map(|e| unit.tables.edges[e.index()].target.index())
-                .collect()
-        })
-        .collect::<Vec<Vec<usize>>>();
-    // The charge points cut: a cycle through a charged block pays every trip.
-    let alive: Vec<bool> = (0..n)
-        .map(|b| {
-            !holds(b, &|e| {
-                matches!(e, Energy::Iteration) || (entry && matches!(e, Energy::Entry))
-            })
-        })
-        .collect();
-    if let Some(b) = cycles(&unpaid, &alive).1.iter().position(|&c| c) {
+    // A transfer pays its trip when a charge ran before it: a failure out of
+    // a charge, or out of anything before it, has paid nothing.
+    let cut = |e: &Energy| matches!(e, Energy::Iteration) || (entry && matches!(e, Energy::Entry));
+    let unpaid = targets(&|b, o| {
+        !paid.contains(&o.edge)
+            && !instructions[b][..o.ran]
+                .iter()
+                .any(|i| matches!(i, Inst::Charge { energy, .. } if cut(energy)))
+    });
+    if let Some(b) = cycles(&unpaid, &vec![true; n]).1.iter().position(|&c| c) {
         return fail(format!("the loop at block {b} has no charge"));
     }
     Ok(())
 }
 
-/// Each block's normal successors and its instructions.
+/// A transfer out of a block: to `target` by table edge `edge`, after the
+/// block's first `ran` instructions completed. A normal edge or a
+/// terminator's failure runs after all of them; an instruction's failure
+/// after the ones before it, not the failing one, a failed charge included.
+#[derive(Clone, Copy)]
+struct Out {
+    target: usize,
+    edge: usize,
+    ran: usize,
+}
+
+/// Each block's transfers: its normal edges, its terminator's failure edges
+/// and each instruction's failure edge (a failure enters failure cleanup,
+/// which a `Recover` or `Isolate` can resume into ordinary code), and its
+/// instructions.
 #[allow(clippy::type_complexity)]
 fn graph<S: crate::stage::Stage>(
     unit: &crate::ir::LirUnit<S>,
-) -> Result<(Vec<Vec<usize>>, Vec<&[crate::ir::Inst]>), String> {
+) -> Result<(Vec<Vec<Out>>, Vec<&[crate::ir::Inst]>), String> {
     let n = unit.blocks.len();
-    let successors = |b: usize| -> Result<Vec<usize>, String> {
-        unit.terminators
-            .get(b)
-            .ok_or("charged unit block has no terminator")?
-            .normal_edges(&unit.pools)
-            .into_iter()
-            .map(|e| {
-                unit.tables
-                    .edges
-                    .get(e.index())
-                    .map(|edge| edge.target.index())
-                    .filter(|&t| t < n)
-                    .ok_or_else(|| "charged unit edge outside table".to_owned())
-            })
-            .collect()
-    };
-    let forward = (0..n).map(successors).collect::<Result<Vec<_>, _>>()?;
     let instructions = unit
         .blocks
         .iter()
@@ -255,7 +271,47 @@ fn graph<S: crate::stage::Stage>(
                 .ok_or_else(|| "charged unit block instructions outside table".to_owned())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok((forward, instructions))
+    let to = |edge: crate::ir::EdgeId, ran: usize| -> Result<Out, String> {
+        unit.tables
+            .edges
+            .get(edge.index())
+            .map(|e| e.target.index())
+            .filter(|&t| t < n)
+            .map(|target| Out {
+                target,
+                edge: edge.index(),
+                ran,
+            })
+            .ok_or_else(|| "charged unit edge outside table".to_owned())
+    };
+    let cleanup = |failure: crate::ir::FailureId| -> Result<crate::ir::EdgeId, String> {
+        unit.tables
+            .failures
+            .get(failure.index())
+            .map(|f| f.cleanup)
+            .ok_or_else(|| "charged unit failure outside table".to_owned())
+    };
+    let mut out = Vec::with_capacity(n);
+    for (b, block) in instructions.iter().enumerate() {
+        let term = unit
+            .terminators
+            .get(b)
+            .ok_or("charged unit block has no terminator")?;
+        let mut outs = Vec::new();
+        for (i, inst) in block.iter().enumerate() {
+            if let Some(failure) = inst.failure() {
+                outs.push(to(cleanup(failure)?, i)?);
+            }
+        }
+        for edge in term.normal_edges(&unit.pools) {
+            outs.push(to(edge, block.len())?);
+        }
+        for failure in term.failure_edges(&unit.tables) {
+            outs.push(to(cleanup(failure)?, block.len())?);
+        }
+        out.push(outs);
+    }
+    Ok((out, instructions))
 }
 
 /// The edge a `Span { from, to, inclusive }` charge in block `entry` pays

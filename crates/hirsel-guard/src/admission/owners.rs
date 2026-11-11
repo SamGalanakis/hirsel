@@ -8,7 +8,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
 };
 
@@ -82,6 +82,7 @@ impl Owner {
             bytes,
         };
         record.owner.reserve(bytes);
+        raise(address);
         blocks.insert(address, record);
     }
     pub fn adopt_arc<T: ?Sized>(&self, value: &T) {
@@ -109,6 +110,11 @@ fn active() -> State {
     ACTIVE
         .try_with(|slot| slot.borrow().clone())
         .unwrap_or(State::None)
+}
+fn in_metadata() -> bool {
+    ACTIVE
+        .try_with(|slot| matches!(*slot.borrow(), State::Metadata))
+        .unwrap_or(false)
 }
 struct Scope {
     previous: Option<State>,
@@ -173,6 +179,29 @@ pub(crate) struct Record {
     bytes: usize,
 }
 static READY: AtomicBool = AtomicBool::new(false);
+/// Which addresses may hold a record: a saturating count per address bucket,
+/// raised before a record is inserted and lowered after it is removed, so a
+/// recorded block's bucket is never zero. A free or reallocation of a block
+/// whose bucket is zero was never recorded and skips the table and its lock.
+/// A block reaches another thread's free only through a synchronizing
+/// hand-off after its record was inserted, so a relaxed load sees its raise.
+const BUCKETS: usize = 1 << 20;
+static MAYBE: [AtomicU8; BUCKETS] = [const { AtomicU8::new(0) }; BUCKETS];
+fn bucket(address: usize) -> &'static AtomicU8 {
+    let hash = (address as u64 >> 4).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    &MAYBE[(hash >> (64 - BUCKETS.trailing_zeros())) as usize]
+}
+/// A saturated bucket stays saturated: it then always answers "maybe".
+fn raise(address: usize) {
+    let _ = bucket(address).try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+        (n < u8::MAX).then_some(n + 1)
+    });
+}
+fn lower(address: usize) {
+    let _ = bucket(address).try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+        (n < u8::MAX).then(|| n - 1)
+    });
+}
 static BLOCKS: OnceLock<Mutex<HashMap<usize, Record>>> = OnceLock::new();
 fn blocks() -> &'static Mutex<HashMap<usize, Record>> {
     let result = BLOCKS.get_or_init(|| Mutex::new(HashMap::new()));
@@ -200,6 +229,7 @@ pub(crate) fn before_alloc(bytes: usize) -> Allocation {
 pub(crate) fn allocated(address: usize, allocation: Allocation) {
     if let Allocation::Recorded(record) = allocation {
         let _scope = Scope::enter(State::Metadata);
+        raise(address);
         let previous = blocks()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -208,18 +238,22 @@ pub(crate) fn allocated(address: usize, allocation: Allocation) {
     }
 }
 fn remove(address: usize) -> Option<Record> {
-    if !READY.load(Ordering::Acquire) {
+    if !READY.load(Ordering::Acquire) || bucket(address).load(Ordering::Relaxed) == 0 {
         return None;
     }
     // Removal neither allocates nor frees table backing. Avoid touching a
     // destructible TLS scope here: other TLS destructors may still free blocks.
-    blocks()
+    let record = blocks()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .remove(&address)
+        .remove(&address);
+    if record.is_some() {
+        lower(address);
+    }
+    record
 }
 pub(crate) fn deallocated(address: usize, bytes: usize) {
-    if matches!(active(), State::Metadata) {
+    if in_metadata() {
         Tag::Ledger.release(bytes);
         return;
     }
@@ -232,7 +266,7 @@ pub(crate) fn deallocated(address: usize, bytes: usize) {
     }
 }
 pub(crate) fn reallocated(address: usize, old_bytes: usize, new_bytes: usize) -> Allocation {
-    if matches!(active(), State::Metadata) {
+    if in_metadata() {
         if new_bytes > old_bytes {
             Tag::Ledger.reserve(new_bytes - old_bytes);
         } else {

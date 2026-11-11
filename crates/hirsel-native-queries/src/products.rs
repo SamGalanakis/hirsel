@@ -97,6 +97,9 @@ pub struct NativeSnapshot {
     templates: BTreeMap<super::optimizer::Function, Reference>,
     native: Arc<hirsel_lir::validate::NativeCache>,
     materializations: AtomicU64,
+    /// Units validated once in this snapshot and handed to later consumers
+    /// that bind them into the same table with the same adapters.
+    validated: ValidatedReady,
     pub needs_guard: bool,
     pub guard_admitted_bytes: u64,
     pub guard: std::sync::OnceLock<Arc<super::seal_demand::GuardTasks>>,
@@ -249,6 +252,7 @@ impl NativeSnapshot {
             summaries,
             templates,
             materializations: AtomicU64::new(0),
+            validated: Default::default(),
             needs_guard,
             guard_admitted_bytes: 0,
             guard: Default::default(),
@@ -649,7 +653,9 @@ impl NativeProducts for DemandProducts {
                 operations: &operations,
                 ..environment
             };
-            let (closure, body) = self.local.queries.read(&owner, product, &scoped)?;
+            // Every consumer checks the stored body against its reference; only
+            // a body without a validated unit in scope is decoded below.
+            let (closure, body) = self.local.queries.read_checked(&owner, product, &scoped)?;
             captured.push(body);
             contexts.push(context);
             Ok(closure)
@@ -694,23 +700,48 @@ impl NativeProducts for DemandProducts {
             manifest: environment.manifest,
             discharge: environment.discharge,
         };
+        // C's verdict on a unit reads its body, the bound table (which also
+        // fixes the binding's key maps, checked in `Binding::finish`), the
+        // selected adapters (which, with the table, fix the bound pretransfer
+        // ABIs) and the snapshot's own target, manifest, discharge and operation
+        // declarations. A unit validated under the same table and adapters is
+        // the verdict this call would reach, so it is reused, not decoded or
+        // validated again.
+        let selected_adapters = selected_operations.pretransfer.as_deref().unwrap_or(&[]);
         // One context checks the whole-program table once for every unit, not
         // once per unit.
         let context = hirsel_lir::validate::ValidationContext::new(&inputs);
-        let mut units = Vec::new();
-        for body in &captured {
-            let raw = binding.materialize::<Ready>(body)?;
-            self.ready_materializations += 1;
-            snapshot.materializations.fetch_add(1, Ordering::Relaxed);
-            let definition = raw.header.definition.clone();
-            let unit = context.validate(raw, &inputs).map_err(|e| {
-                format!(
-                    "emission Ready refused for {definition:?}: {:?}",
-                    e.violations
+        let mut captured = captured.into_iter().map(Some).collect::<Vec<_>>();
+        let requests = products
+            .iter()
+            .map(|product| {
+                (
+                    product.product.address.0,
+                    (product.product.clone(), product.ready),
                 )
-            })?;
-            units.push(unit);
-        }
+            })
+            .collect::<Vec<_>>();
+        let units =
+            snapshot
+                .validated
+                .units(&binding.table, selected_adapters, requests, |index| {
+                    let body = captured[index]
+                        .take()
+                        .ok_or("Ready body requested twice")?
+                        .decode()
+                        .map_err(|e| e.to_string())?;
+                    let raw = binding.materialize::<Ready>(&body)?;
+                    drop(body);
+                    self.ready_materializations += 1;
+                    snapshot.materializations.fetch_add(1, Ordering::Relaxed);
+                    let definition = raw.header.definition.clone();
+                    context.validate(raw, &inputs).map_err(|e| {
+                        format!(
+                            "emission Ready refused for {definition:?}: {:?}",
+                            e.violations
+                        )
+                    })
+                })?;
         let mut statics = BTreeMap::new();
         for context in contexts {
             for data in read_statics(snapshot.store.as_ref(), context.statics_finalizers, binding)?
@@ -745,7 +776,133 @@ impl NativeProducts for DemandProducts {
             verify_backend: snapshot.emission.verify_backend,
             measurement: snapshot.emission.measurement,
         };
-        let units = units.iter().collect::<Vec<_>>();
+        let units = units.iter().map(Arc::as_ref).collect::<Vec<_>>();
         use_units(&units, &emit)
+    }
+}
+
+/// The Ready units a snapshot validated, keyed by what C's verdict reads
+/// besides the body: the bound layout table and the selected adapters. Each
+/// unit is held by Ready address with the product and body reference it was
+/// decoded from.
+pub(crate) type ValidatedReady = ValidatedUnits<
+    hirsel_lir::LayoutTable,
+    hirsel_lir::pretransfer::AdapterReference,
+    (ProductRef, Reference),
+    ValidatedUnit<Ready>,
+>;
+
+/// Units validated under one scope (a table `T` and an adapter set `A`), by
+/// address, each with the identity `K` it was validated from. The units hold
+/// their memory, charged to the owner that validated them, until a call under
+/// another scope replaces them or the snapshot drops.
+pub(crate) struct ValidatedUnits<T, A, K, U> {
+    held: std::sync::Mutex<Option<Scoped<T, A, K, U>>>,
+}
+struct Scoped<T, A, K, U> {
+    table: T,
+    adapters: Vec<A>,
+    units: BTreeMap<ContentHash, (K, Arc<U>)>,
+}
+impl<T, A, K, U> Default for ValidatedUnits<T, A, K, U> {
+    fn default() -> Self {
+        Self {
+            held: Default::default(),
+        }
+    }
+}
+impl<T: PartialEq + Clone, A: PartialEq + Clone, K: PartialEq, U> ValidatedUnits<T, A, K, U> {
+    /// The unit for each request, in order. A request whose address holds a
+    /// unit validated from the same identity under this table and adapter set
+    /// gets that unit; every other request is validated by `validate(index)`
+    /// outside the lock, and the fresh units are then held for this scope.
+    pub(crate) fn units<E>(
+        &self,
+        table: &T,
+        adapters: &[A],
+        requests: Vec<(ContentHash, K)>,
+        mut validate: impl FnMut(usize) -> Result<U, E>,
+    ) -> Result<Vec<Arc<U>>, E> {
+        let known = {
+            let held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+            let held = held.as_ref().filter(|held| held.covers(table, adapters));
+            requests
+                .iter()
+                .map(|(address, identity)| {
+                    held.and_then(|held| held.units.get(address))
+                        .filter(|(validated, _)| validated == identity)
+                        .map(|(_, unit)| unit.clone())
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut units = Vec::with_capacity(requests.len());
+        let mut fresh = Vec::new();
+        for (index, (known, request)) in known.into_iter().zip(requests).enumerate() {
+            match known {
+                Some(unit) => units.push(unit),
+                None => {
+                    let unit = Arc::new(validate(index)?);
+                    fresh.push((request, unit.clone()));
+                    units.push(unit);
+                }
+            }
+        }
+        if !fresh.is_empty() {
+            let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+            if !held
+                .as_ref()
+                .is_some_and(|held| held.covers(table, adapters))
+            {
+                *held = Some(Scoped {
+                    table: table.clone(),
+                    adapters: adapters.to_vec(),
+                    units: BTreeMap::new(),
+                });
+            }
+            let held = held.as_mut().expect("scope installed above");
+            for ((address, identity), unit) in fresh {
+                held.units.insert(address, (identity, unit));
+            }
+        }
+        Ok(units)
+    }
+}
+impl<T: PartialEq, A: PartialEq, K, U> Scoped<T, A, K, U> {
+    fn covers(&self, table: &T, adapters: &[A]) -> bool {
+        self.table == *table && self.adapters.as_slice() == adapters
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Validations `units` ran for one request of address 1 and identity 7.
+    fn validations(memo: &ValidatedUnits<u8, u8, u8, u32>, table: u8, adapters: &[u8]) -> u32 {
+        let mut ran = 0;
+        let address = ContentHash::of_bytes(b"unit");
+        memo.units::<()>(&table, adapters, vec![(address, 7)], |_| {
+            ran += 1;
+            Ok(ran)
+        })
+        .unwrap();
+        ran
+    }
+
+    #[test]
+    fn a_unit_is_handed_out_again_only_under_the_table_and_adapters_it_was_validated_under() {
+        let memo = ValidatedUnits::default();
+        assert_eq!(validations(&memo, 1, &[2]), 1);
+        assert_eq!(validations(&memo, 1, &[2]), 0, "same scope validated again");
+        assert_eq!(
+            validations(&memo, 1, &[3]),
+            1,
+            "a unit validated under one adapter set served another"
+        );
+        assert_eq!(
+            validations(&memo, 4, &[3]),
+            1,
+            "a unit validated under one table served another"
+        );
     }
 }

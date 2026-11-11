@@ -76,6 +76,10 @@ pub struct RootProducts {
     selected: Option<Arc<NativeRootProduct>>,
 }
 impl RootProducts {
+    /// Ready bodies this view decoded and validated (memo hits excluded).
+    pub fn ready_materializations(&self) -> u64 {
+        self.inner.ready_materializations
+    }
     pub fn new(
         snapshot: Arc<NativeSnapshot>,
         source: Arc<NativeLinkSource>,

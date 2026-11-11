@@ -45,7 +45,7 @@ mod aliasing;
 mod linkage;
 mod products;
 pub use linkage::{CheckedLinkage, check_arena_scoped_links};
-pub use products::{NativeCache, NativeEnvironment, NativeOutput, NativeReadError};
+pub use products::{CheckedBody, NativeCache, NativeEnvironment, NativeOutput, NativeReadError};
 mod arena;
 pub use arena::check_calls as check_result_arena_calls;
 mod declaration_reads;

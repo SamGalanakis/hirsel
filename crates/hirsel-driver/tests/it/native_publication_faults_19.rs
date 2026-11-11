@@ -15,6 +15,7 @@ use std::sync::{
 struct Faults {
     disk: store::DirStore,
     hidden: Mutex<Vec<store::Reference>>,
+    flipped: Mutex<Vec<store::Reference>>,
     substituted: Mutex<Vec<(store::Address, store::Association)>>,
     drop_writes: AtomicBool,
     fragment_puts: AtomicUsize,
@@ -47,6 +48,10 @@ impl ResultStore for Faults {
     fn get_content(&self, reference: store::Reference) -> Option<store::Bytes> {
         if self.hidden.lock().unwrap().contains(&reference) {
             None
+        } else if self.flipped.lock().unwrap().contains(&reference) {
+            let mut bytes = self.disk.get_content(reference)?.to_vec();
+            *bytes.last_mut()? ^= 1;
+            Some(bytes.into())
         } else {
             self.disk.get_content(reference)
         }
@@ -91,6 +96,20 @@ impl ResultStore for Faults {
     }
 }
 fn compile(faults: Arc<Faults>, verify: Verify) -> crate::native_object_products_19::Objects {
+    compile_inspect(faults, verify, PLAN, false, |_, _, _| ())
+}
+const PLAN: &str = "fn helper(x:u64)->u64{x+1u64}\nfn main()->u64{helper(7u64)}";
+fn compile_inspect(
+    faults: Arc<Faults>,
+    verify: Verify,
+    source: &str,
+    execution: bool,
+    inspect: impl FnOnce(
+        &mut hirsel_native_queries::roots::RootProducts,
+        &Arc<hirsel_native::query_model::NativeRootProduct>,
+        &[Arc<hirsel_native::query_model::ReadyProduct>],
+    ),
+) -> crate::native_object_products_19::Objects {
     let physical = faults.disk.local_product_store().unwrap();
     let publication = physical.request();
     let budget = hirsel_engine_admission::ProcessBudget::new(24 << 20);
@@ -101,13 +120,7 @@ fn compile(faults: Arc<Faults>, verify: Verify) -> crate::native_object_products
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
         .with_result_store(store.clone());
     engine.verify = verify;
-    let file = engine
-        .sources
-        .add(
-            "plan.hir",
-            "fn helper(x:u64)->u64{x+1u64}\nfn main()->u64{helper(7u64)}".into(),
-        )
-        .unwrap();
+    let file = engine.sources.add("plan.hir", source.into()).unwrap();
     let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let mut options =
@@ -123,8 +136,8 @@ fn compile(faults: Arc<Faults>, verify: Verify) -> crate::native_object_products
         false,
         hirsel_intern::jobs::Jobs::ONE,
         store::VerifyStore::Off,
-        false,
-        |_, _, _| (),
+        execution,
+        inspect,
         |_, _| (),
     )
     .0;
@@ -139,6 +152,7 @@ fn original_missing_corrupt_metadata_and_failed_publication_recompute_without_lo
         let store = Arc::new(Faults {
             disk: store::DirStore::new(directory.path().join("products")),
             hidden: Mutex::new(vec![]),
+            flipped: Mutex::new(vec![]),
             substituted: Mutex::new(vec![]),
             drop_writes: AtomicBool::new(false),
             fragment_puts: AtomicUsize::new(0),
@@ -191,6 +205,7 @@ fn original_missing_corrupt_metadata_and_failed_publication_recompute_without_lo
         let denied = Arc::new(Faults {
             disk: store::DirStore::new(directory.path().join("denied")),
             hidden: Mutex::new(vec![]),
+            flipped: Mutex::new(vec![]),
             substituted: Mutex::new(vec![]),
             drop_writes: AtomicBool::new(true),
             fragment_puts: AtomicUsize::new(0),
@@ -208,5 +223,127 @@ fn original_missing_corrupt_metadata_and_failed_publication_recompute_without_lo
         // byte association as source or native validation authority.
         let unverified = compile(denied.clone(), Verify::Off);
         assert_eq!(cold.objects, unverified.objects);
+    });
+}
+
+/// Every consumer of a Ready body reads and checks the stored bytes, also when
+/// the snapshot already validated that body under the execution plan. The
+/// validated units a snapshot keeps never stand in for the body itself.
+#[test]
+fn a_ready_body_validated_under_the_execution_plan_is_refused_once_its_bytes_change() {
+    use hirsel_native::query_model::NativeProducts;
+    with_compiler_stack(|| {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(Faults {
+            disk: store::DirStore::new(directory.path().join("products")),
+            hidden: Mutex::new(vec![]),
+            flipped: Mutex::new(vec![]),
+            substituted: Mutex::new(vec![]),
+            drop_writes: AtomicBool::new(false),
+            fragment_puts: AtomicUsize::new(0),
+        });
+        let cold = compile(store.clone(), Verify::On);
+        let flipped = store.clone();
+        let warm = compile_inspect(
+            store.clone(),
+            Verify::On,
+            PLAN,
+            true,
+            move |products, _, readies| {
+                assert!(!readies.is_empty());
+                products.with_ready(readies, |_, _| Ok(())).unwrap();
+                for ready in readies {
+                    *flipped.flipped.lock().unwrap() = vec![ready.ready];
+                    assert!(
+                        products.with_ready(readies, |_, _| Ok(())).is_err(),
+                        "a changed Ready body was accepted"
+                    );
+                }
+                flipped.flipped.lock().unwrap().clear();
+                products.with_ready(readies, |_, _| Ok(())).unwrap();
+            },
+        );
+        assert_eq!(cold.objects, warm.objects);
+    });
+}
+
+/// C's verdict on a Ready unit reads the bound layout table besides the body.
+/// A unit validated under one table is validated again when asked for under
+/// another, and the held unit is handed out only under the same table. (The
+/// adapter half of the scope is tested on `ValidatedUnits` itself: no unit of
+/// this program adds an adapter beyond another's.)
+#[test]
+fn a_validated_ready_unit_is_reused_only_under_the_table_it_was_validated_under() {
+    use hirsel_native::query_model::{NativeProducts, ReadyProduct};
+    use hirsel_native_queries::roots::RootProducts;
+    use std::collections::BTreeMap;
+    // `other` and `third` bind disjoint layouts.
+    const SOURCE: &str = "type P { n:u64 }\ntype Q { a:u64, b:u64 }\nfn other(q:Q)->u64 { q.a + q.b }\nfn third(p:P)->u64 { p.n + 1u64 }\nfn main()->u64 { other(Q(a:1u64,b:2u64)) + third(P(n:3u64)) }";
+    /// Validations the call ran, and each returned unit by name and address.
+    fn validated(
+        products: &mut RootProducts,
+        selection: &[Arc<ReadyProduct>],
+    ) -> (u64, BTreeMap<String, usize>) {
+        let before = products.ready_materializations();
+        let units = products
+            .with_ready(selection, |units, _| {
+                Ok(units
+                    .iter()
+                    .map(|unit| {
+                        (
+                            unit.unit().header.definition.0.name.clone(),
+                            std::ptr::from_ref(*unit) as usize,
+                        )
+                    })
+                    .collect())
+            })
+            .unwrap();
+        (products.ready_materializations() - before, units)
+    }
+    fn pick(
+        products: &mut RootProducts,
+        readies: &[Arc<ReadyProduct>],
+        names: &[&str],
+    ) -> Vec<Arc<ReadyProduct>> {
+        readies
+            .iter()
+            .filter(|ready| {
+                let (_, units) = validated(products, std::slice::from_ref(ready));
+                units.keys().any(|name| names.contains(&name.as_str()))
+            })
+            .cloned()
+            .collect()
+    }
+    with_compiler_stack(|| {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(Faults {
+            disk: store::DirStore::new(directory.path().join("products")),
+            hidden: Mutex::new(vec![]),
+            flipped: Mutex::new(vec![]),
+            substituted: Mutex::new(vec![]),
+            drop_writes: AtomicBool::new(false),
+            fragment_puts: AtomicUsize::new(0),
+        });
+        compile_inspect(store.clone(), Verify::On, SOURCE, false, |_, _, _| ());
+        // Without an execution plan each call binds only its selection, so
+        // adding `third` changes the table.
+        compile_inspect(
+            store.clone(),
+            Verify::On,
+            SOURCE,
+            false,
+            |products, _, readies| {
+                let other = pick(products, readies, &["other"]);
+                let wider = pick(products, readies, &["other", "third"]);
+                assert_eq!((other.len(), wider.len()), (1, 2));
+                let (_, first) = validated(products, &other);
+                let (again, same) = validated(products, &other);
+                assert_eq!(again, 0, "same table and adapters validated again");
+                assert_eq!(same["other"], first["other"]);
+                let (ran, wide) = validated(products, &wider);
+                assert_eq!(ran, 2, "a unit validated under one table served another");
+                assert_ne!(wide["other"], first["other"]);
+            },
+        );
     });
 }

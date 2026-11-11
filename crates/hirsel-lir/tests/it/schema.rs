@@ -741,6 +741,10 @@ fn fixture_unit<S: Stage>(table: &LayoutTable) -> LirUnit<S> {
             condition: v(10),
             failure: f,
         },
+        Inst::Charge {
+            energy: Energy::Iteration,
+            failure: f,
+        },
         Inst::StorageLive { slot: SlotId(1) },
         Inst::StorageDead {
             slot: SlotId(2),

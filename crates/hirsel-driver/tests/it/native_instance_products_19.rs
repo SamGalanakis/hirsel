@@ -98,7 +98,8 @@ fn native_instance_product_hits_require_current_c_without_value_materialization(
             "native-instance-test-action",
             [b"current".as_slice()],
         ));
-        let mut queries = InstanceQueries::new(store.clone());
+        let validator = InstanceQueries::validator(&store);
+        let mut queries = InstanceQueries::with_validator(store.clone(), validator.clone());
         let inputs = hirsel_lir::validate::Inputs {
             target: &target,
             layouts: &table,
@@ -119,6 +120,78 @@ fn native_instance_product_hits_require_current_c_without_value_materialization(
             )
             .unwrap();
         assert_eq!(queries.counts.validations, 1);
+        // A deliberately inconsistent recomputation must preserve its complete
+        // evidence even when the request store disappears with the compiler.
+        let changed_discovery = store
+            .put_content(INSTANCE_DISCOVERY_DOMAIN, b"different discovery")
+            .unwrap();
+        let mut recomputation = InstanceQueries::with_validator(store.clone(), validator);
+        let error = recomputation
+            .publish(
+                &key,
+                action,
+                checked.unit().clone(),
+                &inputs,
+                &[],
+                changed_discovery,
+                statics,
+            )
+            .unwrap_err();
+        let (_, evidence) = error.split_once("; evidence: ").expect(&error);
+        let evidence: serde_json::Value = serde_json::from_str(evidence).unwrap();
+        assert_eq!(evidence["changed"], serde_json::json!(["discovery"]));
+        assert_eq!(evidence["action"], serde_json::to_value(action.0).unwrap());
+        let directory = std::path::Path::new(evidence["directory"].as_str().unwrap());
+        let before = [
+            output.value,
+            output.layout_closure,
+            output.local_equations,
+            discovery,
+            statics,
+        ];
+        let after = [
+            output.value,
+            output.layout_closure,
+            output.local_equations,
+            changed_discovery,
+            statics,
+        ];
+        for (index, name) in [
+            "value",
+            "layouts",
+            "equations",
+            "discovery",
+            "statics-finalizers",
+        ]
+        .iter()
+        .enumerate()
+        {
+            for (side, reference) in [("before", before[index]), ("after", after[index])] {
+                assert_eq!(
+                    std::fs::read(directory.join(format!("{side}-{name}.bin"))).unwrap(),
+                    &*store.get_content(reference).unwrap(),
+                    "the capture must outlive the request store with exact {side} {name} bytes",
+                );
+            }
+        }
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(directory.join("evidence.json")).unwrap()
+            )
+            .unwrap(),
+            evidence,
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+        let environment = hirsel_lir::validate::NativeEnvironment {
+            target: &target,
+            manifest: &manifest,
+            operations: &operations,
+            discharge: None,
+        };
+        assert_eq!(
+            queries.lookup(&key, action, &environment).unwrap().product,
+            output.product
+        );
         drop(checked);
         drop(inputs);
         drop(instances);

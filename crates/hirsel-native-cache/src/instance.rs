@@ -40,6 +40,8 @@ impl Phase {
     }
 }
 
+mod recomputation;
+
 type Record = (Reference, Reference, Reference, Reference, Reference);
 type Metadata = (Reference, Reference, Reference);
 
@@ -296,10 +298,21 @@ impl InstanceQueries {
         let previous = self
             .lookup_inner(key, action, &environment)
             .map(|p| {
-                p.product
+                let reference = p
+                    .product
                     .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
                     .map(|archive| archive.reference())
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>((
+                    reference,
+                    (
+                        p.value,
+                        p.layout_closure,
+                        p.local_equations,
+                        p.discovery,
+                        p.statics_finalizers,
+                    ),
+                ))
             })
             .transpose()?;
         self.counts.validations += 1;
@@ -353,10 +366,19 @@ impl InstanceQueries {
         let expected = INSTANCE_RECORD_DOMAIN
             .reference(&bytes)
             .ok_or("instance descriptor exceeds record limit")?;
-        if previous.is_some_and(|previous| previous != expected) {
-            return Err(
-                "instance recomputation changed output under unchanged complete action".into(),
-            );
+        if let Some((previous, before)) = previous
+            && previous != expected
+        {
+            return Err(recomputation::Mismatch {
+                key,
+                phase: self.phase.kind(),
+                action,
+                before_descriptor: previous,
+                after_descriptor: expected,
+                before,
+                after: record,
+            }
+            .describe(self.store.as_ref()));
         }
         self.native
             .publish_output(&output, &metadata)

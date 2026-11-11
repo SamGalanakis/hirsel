@@ -35,7 +35,7 @@ pub use installed::{
     SEMANTIC_INPUT, SEMANTIC_SOURCE,
 };
 pub use remote::RemoteStore;
-pub use request::{RequestStore, SessionVerifier};
+pub use request::RequestStore;
 
 macro_rules! product_backing {
     ($($provider:ty),* $(,)?) => { $(

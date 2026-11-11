@@ -211,23 +211,19 @@ impl CompilerRequests {
         // Every provider can evict ordinary products. Compact front and Lower
         // facts therefore have the same bounded carry regardless of provider;
         // with no store, they and the memo graph are a session's only reuse.
-        // The carry's verifier is over this selector's one store.
-        let disk_bytes = limits
-            .runtime_bytes
-            .checked_add(limits.snapshot_bytes)
-            .and_then(|bytes| bytes.checked_add(limits.transport_bytes));
-        let carry = disk_bytes
+        let quarter = limits.transport_bytes / 4;
+        let front = budget
+            .reserve(quarter)
+            .ok()
+            .and_then(|allowance| hirsel_engine::FrontCarry::new(allowance).ok());
+        let lower = budget
+            .reserve(quarter)
+            .ok()
+            .and_then(|allowance| hirsel_engine::LowerCarry::new(allowance).ok());
+        let carry = front
+            .zip(lower)
             .filter(|_| config.verify_store == hirsel_engine_store::VerifyStore::Off)
-            .and_then(|disk_bytes| {
-                super::source_graph::Carry::reserve(
-                    &budget,
-                    limits,
-                    config.store.clone(),
-                    config.verify_store,
-                    &std::env::temp_dir(),
-                    disk_bytes,
-                )
-            });
+            .map(|(front, lower)| super::source_graph::Carry { front, lower });
         let graphs = super::host_selector::GraphSelections::new(&budget, config.hold_bytes != 0);
         let ledger =
             super::inspection::InspectionLedger::new(budget.clone(), limits.snapshot_bytes / 8);

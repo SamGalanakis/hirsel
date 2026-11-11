@@ -59,8 +59,17 @@ fn put(mut tx: store.Tx, info: store.CallInfo, w: (u64, u64, u64)) -> Result[
 
 // How many rows a range of at most `limit` over every key returns.
 fn rows(tx: store.Tx, info: store.CallInfo, limit: u64) -> Result[u64, store.TxError] {
-  let got = store.tx_range(tx, Unbounded(), Unbounded(), limit, Ascending())?
-  Ok(list.len(got))
+  store.tx_range(
+    tx,
+    Unbounded(),
+    Unbounded(),
+    limit,
+    Ascending(),
+    0u64,
+    fn(take n: u64, key: Bytes, value: Bytes) -> (u64, bool) {
+      (n + 1, true)
+    }
+  )
 }
 
 // `rows` as a transaction.

@@ -19,15 +19,15 @@ enum Part {
     Element,
 }
 impl Part {
+    fn of(step: &Projection) -> Self {
+        match step {
+            Projection::Field(field) => Self::Field(*field),
+            Projection::VariantField { variant, field } => Self::Variant(*variant, *field),
+            Projection::Index(_) => Self::Element,
+        }
+    }
     fn path<'a>(projection: impl IntoIterator<Item = &'a Projection>) -> Vec<Self> {
-        projection
-            .into_iter()
-            .map(|step| match step {
-                Projection::Field(field) => Self::Field(*field),
-                Projection::VariantField { variant, field } => Self::Variant(*variant, *field),
-                Projection::Index(_) => Self::Element,
-            })
-            .collect()
+        projection.into_iter().map(Self::of).collect()
     }
 }
 
@@ -50,9 +50,12 @@ impl Content {
         *self != before
     }
     fn place(&self, place: &Place) -> Vec<(Vec<Part>, BTreeSet<u32>)> {
+        let Some(rows) = self.0.get(&place.root.0) else {
+            return vec![];
+        };
         let prefix = Part::path(place.projection.iter());
         let mut held = vec![];
-        for (path, loans) in self.0.get(&place.root.0).into_iter().flatten() {
+        for (path, loans) in rows {
             if path.starts_with(&prefix) {
                 held.push((path[prefix.len()..].to_vec(), loans.clone()));
             } else if prefix.starts_with(path) {
@@ -60,6 +63,21 @@ impl Content {
             }
         }
         held
+    }
+    /// The loans of the rows `place` reads (those `place` returns), without
+    /// building their paths.
+    fn held<'a>(&'a self, place: &'a Place) -> impl Iterator<Item = &'a BTreeSet<u32>> {
+        self.0
+            .get(&place.root.0)
+            .into_iter()
+            .flatten()
+            .filter(|(path, _)| {
+                // One path is a prefix of the other.
+                path.iter()
+                    .zip(&place.projection)
+                    .all(|(part, step)| *part == Part::of(step))
+            })
+            .map(|(_, loans)| loans)
     }
     /// Every loan some installed content holds.
     fn loans(&self) -> BTreeSet<u32> {
@@ -190,21 +208,45 @@ impl Builder<'_, '_> {
                 continue;
             };
             let mut row = vec![];
+            // Only an assignment, a replacement or a returning call installs
+            // content; any other step at most removes it, so it begins holding
+            // no loan and leaves no holder to record that was not recorded.
             for index in 0..self.body.blocks[block].instructions.len() {
-                let instruction = self.body.blocks[block].instructions[index].clone();
-                let mut step = self.instruction_step(&content, &instruction);
-                let held = content.loans();
-                self.transfer_content(&mut content, &instruction.kind);
-                step.needs.extend(content.loans().difference(&held));
+                let instruction = &self.body.blocks[block].instructions[index];
+                let mut step = self.instruction_step(&content, instruction);
+                let installs = matches!(
+                    instruction.kind,
+                    InstructionKind::Assign { .. } | InstructionKind::Replace { .. }
+                );
+                if installs {
+                    let held = content.loans();
+                    self.transfer_content(&mut content, &instruction.kind);
+                    step.needs.extend(content.loans().difference(&held));
+                } else {
+                    self.transfer_content(&mut content, &instruction.kind);
+                }
                 row.push(step);
-                self.record_destroyed_holders(&content);
+                if installs || index == 0 {
+                    self.record_destroyed_holders(&content);
+                }
             }
             let mut step = self.terminator_step(block);
-            let held = content.loans();
-            self.transfer_terminator(&mut content, block);
-            step.needs.extend(content.loans().difference(&held));
+            let installs = matches!(
+                self.body.blocks[block].terminator,
+                Terminator::Call {
+                    returns: Some(_),
+                    ..
+                }
+            );
+            if installs {
+                let held = content.loans();
+                self.transfer_terminator(&mut content, block);
+                step.needs.extend(content.loans().difference(&held));
+            }
+            if installs || row.is_empty() {
+                self.record_destroyed_holders(&content);
+            }
             row.push(step);
-            self.record_destroyed_holders(&content);
             steps.push(row);
         }
         // Backward: the loans and the places whose content is read after each
@@ -443,7 +485,7 @@ impl Builder<'_, '_> {
     fn needed(&self, content: &Content, live: &Live) -> BTreeSet<u32> {
         let mut pending: Vec<u32> = live.loans.iter().copied().collect();
         for place in &live.places {
-            for (_, loans) in content.place(&self.body.places[*place as usize]) {
+            for loans in content.held(&self.body.places[*place as usize]) {
                 pending.extend(loans);
             }
         }
@@ -453,13 +495,16 @@ impl Builder<'_, '_> {
                 continue;
             }
             let source = &self.body.places[self.loan_source(LoanId(loan)).0 as usize];
-            for (_, held) in content.place(source) {
-                pending.extend(held.into_iter().filter(|l| !needs.contains(l)));
+            for held in content.held(source) {
+                pending.extend(held.iter().filter(|l| !needs.contains(l)));
             }
         }
         needs
     }
     fn cursor_holders(&self, content: &Content) -> Vec<(PlaceId, BTreeSet<u32>)> {
+        if self.borrowed_cursor_types.is_empty() {
+            return vec![];
+        }
         content
             .0
             .iter()

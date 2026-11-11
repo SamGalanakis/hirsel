@@ -77,8 +77,9 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
   let mut config = store.default_config()
   config.limits.value_bytes = 4096
   let mut s = store.open(a, config) ? Store
-  // The body's own write fits; the row recording its 3000-byte result does not.
-  check(bump(mut s, request(1, b"a", 0), 3000) == Error(Tx(Limit(ValueBytes()))))?
+  // The body's own write fits; the row recording its 4080-byte result does
+  // not: with the 32-byte request digest beside it, it passes 4096.
+  check(bump(mut s, request(1, b"a", 0), 4080) == Error(Tx(Limit(ValueBytes()))))?
   check(counter(a, mut s) == None())?
   // The limit was recorded: its duplicate returns it without running.
   check(bump(mut s, request(1, b"a", 0), 8) == Error(Tx(Limit(ValueBytes()))))?

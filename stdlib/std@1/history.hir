@@ -23,12 +23,14 @@ pub type Def {
   revision: Bytes,
 }
 
-/// The call stream, position and request digest a transaction arrived with
-/// (STORE-12).
+/// The call stream, position and request digest a transaction arrived with,
+/// and the code hash its caller expected, empty when the caller named none
+/// (STORE-12). The code that ran is the commit's definition.
 pub type Arrival {
   identity: Bytes,
   position: u64,
   digest: Bytes,
+  expected: Bytes,
 }
 
 /// A transaction's call record (STORE-2, STORE-4): its entry, call
@@ -157,7 +159,7 @@ pub type Expect {
 /// `Corrupt()`. Either refuses the open; neither removes or cuts anything.
 pub type Fault = Corrupt() | Unsupported(found: Bytes)
 
-const GROUP_MAGIC: Bytes = b"HSHIST01"
+const GROUP_MAGIC: Bytes = b"HSHIST02"
 
 const NODE_MAGIC: Bytes = b"HSNODE01"
 
@@ -336,6 +338,7 @@ fn encode_body(mut out: List[u8], b: Body) -> () uses {} {
           put_fixed(mut out, a.identity)
           put_u64(mut out, a.position)
           put_fixed(mut out, a.digest)
+          put_bytes(mut out, a.expected)
         },
       }
       put_bytes(mut out, call.args)
@@ -710,7 +713,15 @@ fn get_body(data: Bytes, mut c: Cursor) -> Result[Body, ()] uses {} {
       let identity = get_fixed(data, mut c, 32)?
       let position = get_u64(data, mut c)?
       let request = get_fixed(data, mut c, 32)?
-      Some(Arrival(identity: take identity, position: position, digest: take request))
+      let expected = get_bytes(data, mut c)?
+      Some(
+        Arrival(
+          identity: take identity,
+          position: position,
+          digest: take request,
+          expected: take expected
+        )
+      )
     } else {
       return Error(())
     }

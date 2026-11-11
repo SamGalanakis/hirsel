@@ -5,7 +5,7 @@
 
 use sha2::{Digest, Sha256};
 
-const MAGIC: &[u8; 8] = b"HSHIST01";
+const MAGIC: &[u8; 8] = b"HSHIST02";
 /// The magic's family: other version digits are another format version.
 const FAMILY: &[u8; 6] = b"HSHIST";
 const HEADER: usize = 60;

@@ -163,8 +163,10 @@ fn quote(r: Runner, o: Order) -> Result[u64, RunError[String]] {
 
 Writing `runner.compute(r, fn(o: Order) -> Result[u64, String] { Ok(o.cents) }, o)` is
 RUN-3 at the closure. An entry's value names the definition, never an implementation: a
-call through it runs the revision the receiving place selects for that definition, and the
-receiver checks that it is the caller's ([RUN-8](#run-8-identity-and-arrival)).
+call through it runs the revision the receiving place selects for that definition. For
+`compute` and `call`, where the callee runs the caller's code, the receiver checks that
+it is the caller's; a `transact` or `query` call runs the place's own revision of a
+definition with the same path and fingerprint ([RUN-8](#run-8-identity-and-arrival)).
 
 ```text
 EntryId = { path: String, fingerprint: Bytes, code: Bytes }
@@ -274,6 +276,7 @@ call ends in exactly one outcome:
   ([FAIL-2](failure.md#fail-2-boundary)).
 - `NotRun(reason)`: provably no effect. `Denied` (a grant, allowlist, call-form, admission
   or stale-epoch refusal), `VersionMismatch` (the place does not hold the caller's code,
+  or, for transact and query, an entry of that path with the caller's fingerprint,
   [RUN-8](#run-8-identity-and-arrival)), `Unreachable` (the provider could not deliver the
   request: no connection, no process), `Overloaded` (the place refused for capacity) and
   `Rejected` (a malformed or over-budget request, or a stream position that is out of
@@ -351,11 +354,17 @@ failure:
 1. The request frame decodes and is within the place's budgets, else `NotRun(Rejected())`.
 2. The caller is admitted at this place (transport identity, admission window), else
    `NotRun(Denied())`.
-3. The place holds code for the path whose code hash and signature fingerprint equal the
+3. Code. For the compute and call forms, where the callee runs the caller's code, the
+   place holds code for the path whose code hash and signature fingerprint equal the
    request's: its own revision when that has the path at that hash, else the verified
    closure from its code store ([RUN-13](#run-13-provider-seams)). Otherwise, or when the
    code store fails, `NotRun(VersionMismatch())`, and the place reports the missing
-   hashes. It never runs code whose recomputed hash differs from the request's.
+   hashes. It never runs such code when its recomputed hash differs from the request's.
+   For the transact and query forms, the place serves the path with an equal signature
+   fingerprint, else `NotRun(VersionMismatch())`, and runs its own activated revision of
+   it: the request's code hash is what the caller expected, kept in the request digest
+   and recorded beside the hash that ran ([STORE-10](storage.md#store-10-recording)),
+   never compared.
 4. Authority: the place accepts the call form; the requested grant set is covered by the
    place's grant set for this caller ([RUN-2](#run-2-narrowing) coverage); the definition
    is on both allowlists; and the place's code policy admits the callee: under
@@ -381,9 +390,12 @@ callee itself ([STORE-3](storage.md#store-3-transaction-scope)). A place in the 
 process and revision passes checks 2, 3 and 8 by construction and still performs 4 to 7.
 
 At a `db@1` place the host makes checks 1, 2, 4 (without its allowlist), 6 and 7, and the
-place's head run makes check 3 and the allowlist against the entries it serves, then 5 and
-8, in that order ([STORE-12](storage.md#store-12-transactions-at-a-runner)). The head
-holds only its own revision and loads no code to serve a call.
+place's head run makes, in this order, check 5, which also refuses a caller that does not
+own the stream and answers a recorded position with its recorded outcome, resolving
+nothing; then, for the next position and for a query, check 3 and the allowlist against
+the entries it serves; then check 8 ([STORE-12](storage.md#store-12-transactions-at-a-runner)).
+A call that committed therefore resolves to its recorded outcome after any activation.
+The head holds only its own revision and loads no code to serve a call.
 
 ### RUN-9: Cancellation
 

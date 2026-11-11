@@ -452,32 +452,311 @@ fn served_calls_cross_to_a_place_host_and_the_callers_tape_replays_alone() {
     }
 }
 
-/// The place's head makes RUN-8 checks 3 and 5: a served call whose entry the place does
-/// not serve is `NotRun(Denied())`, and one whose code differs from the place's is
-/// `NotRun(VersionMismatch())`; neither runs.
+/// The call records of a place's `authority.log@1` history under `dir` that arrived on a
+/// stream: per call, the definition path that ran, its code hash, and the code hash the
+/// caller expected (STORE-11 history format: segment frames `len:u32 check:u32 entry`, each
+/// entry one group).
+fn stream_calls(dir: &Path) -> Vec<(String, Vec<u8>, Vec<u8>)> {
+    struct Cursor<'a>(&'a [u8], usize);
+    impl Cursor<'_> {
+        fn take(&mut self, n: usize) -> &[u8] {
+            self.1 += n;
+            &self.0[self.1 - n..self.1]
+        }
+        fn u8(&mut self) -> u8 {
+            self.take(1)[0]
+        }
+        fn u32(&mut self) -> usize {
+            u32::from_le_bytes(self.take(4).try_into().unwrap()) as usize
+        }
+        fn bytes(&mut self) -> Vec<u8> {
+            let n = self.u32();
+            self.take(n).to_vec()
+        }
+    }
+    let mut segments: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "seg"))
+        .collect();
+    segments.sort();
+    let mut calls = vec![];
+    for segment in segments {
+        let data = std::fs::read(&segment).unwrap();
+        let mut frames = Cursor(&data, 0);
+        while frames.1 < data.len() {
+            let len = frames.u32();
+            frames.take(4);
+            let entry = frames.take(len).to_vec();
+            let mut c = Cursor(&entry, 0);
+            assert_eq!(c.take(8), b"HSHIST02");
+            c.take(32 + 8 + 8);
+            let count = c.u32();
+            let mut arrived = vec![];
+            for _ in 0..count {
+                match c.u8() {
+                    1 => {
+                        let def = c.u32();
+                        c.take(16);
+                        c.bytes();
+                        if c.u8() == 1 {
+                            c.take(32 + 8 + 32);
+                            arrived.push((def, c.bytes()));
+                        }
+                        c.bytes();
+                        c.bytes();
+                    }
+                    2 => {
+                        c.u8();
+                        c.bytes();
+                    }
+                    3 => {
+                        c.take(16);
+                        for _ in 0..c.u32() {
+                            c.u8();
+                            c.bytes();
+                        }
+                    }
+                    kind => panic!("commit kind {kind}"),
+                }
+                for _ in 0..c.u32() {
+                    let op = c.u8();
+                    c.bytes();
+                    if op == 1 {
+                        c.bytes();
+                    }
+                }
+            }
+            let mut defs = vec![];
+            for _ in 0..c.u32() {
+                let path = String::from_utf8(c.bytes()).unwrap();
+                c.bytes();
+                let code = c.take(32).to_vec();
+                c.bytes();
+                defs.push((path, code));
+            }
+            for (def, expected) in arrived {
+                let (path, code) = defs[def].clone();
+                calls.push((path, code, expected));
+            }
+        }
+    }
+    calls
+}
+
+/// The place's head makes RUN-8 check 3 for the transact and query forms on path and
+/// fingerprint: a call whose code differs from the caller's runs the place's own code, and
+/// one whose signature differs is `NotRun(VersionMismatch())`. Each call record holds the
+/// code hash the caller expected and the one that ran.
 #[test]
-fn a_place_host_denies_unserved_entries_and_refuses_other_code() {
-    // The host's `transfer` charges a fee, so `moves` has other code there, and its head
-    // does not serve `balance`.
+fn a_place_host_runs_its_own_code_and_refuses_other_signatures() {
     for head in HEADS {
+        // The host's `transfer` charges a fee, so `moves` has other code there, and its
+        // `balance` takes a `u32` account, so its signature differs.
         let fixture = ledger("refused", |source, text| match source {
             "ledger.hir" => text.replace("fee: 0", "fee: 1"),
-            _ => text.replace("      store.served_query(balance),\n", ""),
+            _ => text
+                .replace(
+                    "info: store.CallInfo, account: u64) -> Result[",
+                    "info: store.CallInfo, account: u32) -> Result[",
+                )
+                .replace(
+                    "ledger.balance(tx, account)",
+                    "ledger.balance(tx, int.widen(account))",
+                )
+                .replace(
+                    "for account in [1u64, 2, 3, 4]",
+                    "for account in [1u32, 2, 3, 4]",
+                ),
         });
+        let host_main = std::fs::read_to_string(fixture.0.join("host/main.hir")).unwrap();
+        assert!(
+            host_main.contains("account: u32"),
+            "the host's edit did not apply"
+        );
         let host = fixture.serve_from("host", head);
         let live = fixture.run_from("caller", &fixture.0.join("T"));
         host.stop();
         assert!(live.status.success(), "{head:?}: {}", stderr(&live));
         let mismatch = "not run: version mismatch";
-        let denied = "not run: denied";
         assert_eq!(
             stdout(&live),
             format!(
-                "opened 1 with 500\nopened 2 with 100\n{mismatch}\nopened 3 with 0\n{mismatch}\n\
-                 {mismatch}\n{mismatch}\naccount 1: {denied}\naccount 2: {denied}\n\
-                 account 3: {denied}\naccount 4: {denied}\n"
-            ),
-            "{head:?}"
+                "opened 1 with 500\nopened 2 with 100\nmoved 200 from 1 to 2, fee 1\n\
+                 opened 3 with 0\nmoved 50 from 2 to 3, fee 1\nmoved 250 from 2 to 1, fee 1\n\
+                 insufficient: 550\naccount 1: {mismatch}\naccount 2: {mismatch}\n\
+                 account 3: {mismatch}\naccount 4: {mismatch}\n"
+            )
+        );
+        let mut recorded: Vec<(String, bool)> = stream_calls(&fixture.0.join("db/store"))
+            .into_iter()
+            .map(|(path, ran, expected)| {
+                assert_eq!((ran.len(), expected.len()), (32, 32), "{path}");
+                (path.rsplit('/').next().unwrap().to_owned(), ran == expected)
+            })
+            .collect();
+        recorded.sort();
+        // `opens` ran the caller's code; `moves` (four calls, the refusal included) the host's.
+        let opens = ("opens".to_owned(), true);
+        let moves = ("moves".to_owned(), false);
+        assert_eq!(
+            recorded,
+            [
+                moves.clone(),
+                moves.clone(),
+                moves.clone(),
+                moves,
+                opens.clone(),
+                opens.clone(),
+                opens
+            ]
         );
     }
+}
+
+/// STORE-12 and RUN-8: a call that committed under one build resolves as recorded at a head
+/// built from another. Host A, built from the example as it is, commits the caller's first
+/// call (`opens` 1 with 500); its reply is lost on the way back, so the caller's provider
+/// reconnects and sends the call again at its position. Host B is built from sources where
+/// only `ledger.open`'s body changed (it adds a cent), so `opens` has another code hash
+/// there. The resent position ends with A's recorded end, not `VersionMismatch`, and
+/// account 1 holds 500 before its transfers, A's single application, never B's 501. Every
+/// later call runs B's code, `opens` included: account 2 opens with 101. The records of
+/// `opens` at B hold the caller's hash beside B's; the one at A holds equal hashes.
+#[test]
+fn a_recorded_position_resolves_at_a_head_of_another_build() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+
+    let fixture = ledger("rebuilt", |source, text| match source {
+        "ledger.hir" => text.replace(
+            "  table.put(mut tx, balances(), account, cents) ? Table\n  Ok(cents)\n",
+            "  table.put(mut tx, balances(), account, cents + 1) ? Table\n  Ok(cents + 1)\n",
+        ),
+        _ => text,
+    });
+    let host_src = std::fs::read_to_string(fixture.0.join("host/ledger.hir")).unwrap();
+    assert!(
+        host_src.contains("cents + 1"),
+        "build B's edit did not apply"
+    );
+
+    // The caller reaches the host through a relay that drops the first reply sent after
+    // the first commit is on disk (its table `balances` is the first write naming it) and
+    // holds every later connection until build B listens.
+    let db = fixture.0.join("db");
+    let relay = fixture.0.join("relay.sock");
+    let backend = fixture.0.join("host.sock");
+    let listener = UnixListener::bind(&relay).unwrap();
+    let cut = Arc::new(AtomicBool::new(false));
+    let rebuilt = Arc::new((Mutex::new(false), Condvar::new()));
+    fn committed(dir: &Path) -> bool {
+        std::fs::read_dir(dir).unwrap().flatten().any(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                return committed(&path);
+            }
+            std::fs::read(&path).is_ok_and(|bytes| bytes.windows(8).any(|w| w == b"balances"))
+        })
+    }
+    {
+        let (cut, rebuilt) = (cut.clone(), rebuilt.clone());
+        std::thread::spawn(move || {
+            for client in listener.incoming() {
+                let Ok(client) = client else { return };
+                if cut.load(Ordering::SeqCst) {
+                    let (ready, wake) = &*rebuilt;
+                    let mut ready = ready.lock().unwrap();
+                    while !*ready {
+                        ready = wake.wait(ready).unwrap();
+                    }
+                }
+                let Ok(host) = UnixStream::connect(&backend) else {
+                    return;
+                };
+                let (mut up_from, mut up_to) =
+                    (client.try_clone().unwrap(), host.try_clone().unwrap());
+                std::thread::spawn(move || {
+                    let _ = std::io::copy(&mut up_from, &mut up_to);
+                    let _ = up_to.shutdown(std::net::Shutdown::Both);
+                });
+                let (cut, db) = (cut.clone(), db.clone());
+                std::thread::spawn(move || {
+                    let (mut down_from, mut down_to) = (host, client);
+                    let mut buffer = [0u8; 65536];
+                    loop {
+                        let n = match down_from.read(&mut buffer) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        if !cut.load(Ordering::SeqCst) && committed(&db) {
+                            cut.store(true, Ordering::SeqCst);
+                            break;
+                        }
+                        if down_to.write_all(&buffer[..n]).is_err() {
+                            break;
+                        }
+                    }
+                    let _ = down_to.shutdown(std::net::Shutdown::Both);
+                    let _ = down_from.shutdown(std::net::Shutdown::Both);
+                });
+            }
+        });
+    }
+    let mut grants: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixture.0.join("caller.json")).unwrap()).unwrap();
+    let runner = &mut grants["io"]["runners"][0];
+    runner["endpoint"] = serde_json::json!({"unix": relay.to_str().unwrap()});
+    runner["reconnect"] = serde_json::json!({"attempts": 3});
+    std::fs::write(fixture.0.join("relayed.json"), grants.to_string()).unwrap();
+
+    let host_a = fixture.serve_from("caller", &[]);
+    let caller = Command::new(env!("CARGO_BIN_EXE_hirsel"))
+        .args([
+            "run".as_ref(),
+            fixture.0.join("caller/main.hir.json").as_os_str(),
+            "--grants".as_ref(),
+            fixture.0.join("relayed.json").as_os_str(),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while !cut.load(Ordering::SeqCst) {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(300),
+            "the first commit never reached the disk"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    host_a.stop();
+    let host_b = fixture.serve_from("host", &[]);
+    {
+        let (ready, wake) = &*rebuilt;
+        *ready.lock().unwrap() = true;
+        wake.notify_all();
+    }
+    let live = caller.wait_with_output().unwrap();
+    host_b.stop();
+    assert!(live.status.success(), "{}", stderr(&live));
+    // By hand: 1 opens with 500 at A; at B 2 opens with 101, 200 moves 1 -> 2 (300, 301),
+    // 3 opens with 1, 50 moves 2 -> 3 (251, 51), 250 moves 2 -> 1 (550, 1), 900 from 1 is
+    // refused with its balance.
+    assert_eq!(
+        stdout(&live),
+        "opened 1 with 500\nopened 2 with 101\nmoved 200 from 1 to 2, fee 0\n\
+         opened 3 with 1\nmoved 50 from 2 to 3, fee 0\nmoved 250 from 2 to 1, fee 0\n\
+         insufficient: 550\naccount 1: 550\naccount 2: 1\naccount 3: 51\n\
+         account 4: no account 4\n"
+    );
+    let opens: Vec<bool> = stream_calls(&fixture.0.join("db/store"))
+        .into_iter()
+        .filter(|(path, _, _)| path.ends_with("/opens"))
+        .map(|(_, ran, expected)| ran == expected)
+        .collect();
+    assert_eq!(opens, [true, false, false]);
 }

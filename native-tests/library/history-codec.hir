@@ -82,7 +82,14 @@ fn random_commit(mut g: prng.Generator, defs: u32) -> history.Commit {
     let arrival: Option[history.Arrival] = if prng.u64(mut g) % 2 == 0 {
       None()
     } else {
-      Some(history.Arrival(identity: fixed(mut g, 32), position: prng.u64(mut g), digest: fixed(mut g, 32)))
+      Some(
+        history.Arrival(
+          identity: fixed(mut g, 32),
+          position: prng.u64(mut g),
+          digest: fixed(mut g, 32),
+          expected: random_bytes(mut g, 33)
+        )
+      )
     }
     let d: u32 = int.truncate(prng.u64(mut g) % int.widen(defs))
     Transaction(
@@ -391,7 +398,7 @@ fn sha(x: Bytes) -> Bytes {
 // A group's bytes from its header fields' bytes, commits and definitions.
 fn wire_group(first: Bytes, epoch: Bytes, count: Bytes, commits: List[Bytes], defs: Bytes) -> Bytes {
   let mut out: List[u8] = []
-  for p in [b"HSHIST01", rep(17, 32), copy first, copy epoch, copy count] {
+  for p in [b"HSHIST02", rep(17, 32), copy first, copy epoch, copy count] {
     bytes.append(mut out, p)
   }
   for c in commits {
@@ -407,7 +414,7 @@ const V_FIRST: Bytes = b"\x08\x07\x06\x05\x04\x03\x02\x01"
 const V_EPOCH: Bytes = b"\x18\x17\x16\x15\x14\x13\x12\x11"
 
 // Transaction: def 1, at -2, seed 0x2122232425262728, caller "cl", stream 1
-// with identity 32 x 0x31, position 0x3132333435363738, digest 32 x 0x32,
+// with identity 32 x 0x31, position 0x3132333435363738, digest 32 x 0x32, expected "ex",
 // args "ar", outcome "out"; writes put k1=v1, delete k2.
 fn wire_call(def: Bytes, writes: Bytes) -> Bytes {
   cat(
@@ -421,6 +428,7 @@ fn wire_call(def: Bytes, writes: Bytes) -> Bytes {
       rep(49, 32),
       b"\x38\x37\x36\x35\x34\x33\x32\x31",
       rep(50, 32),
+      b"\x02\x00\x00\x00ex",
       b"\x02\x00\x00\x00ar",
       b"\x03\x00\x00\x00out",
       copy writes
@@ -469,7 +477,9 @@ fn v1_value() -> history.Group {
             at: -2,
             seed: 2387509390608836392,
             caller: b"cl",
-            arrival: Some(history.Arrival(identity: rep(49, 32), position: 3544952156018063160, digest: rep(50, 32))),
+            arrival: Some(
+              history.Arrival(identity: rep(49, 32), position: 3544952156018063160, digest: rep(50, 32), expected: b"ex")
+            ),
             args: b"ar",
             outcome: b"out"
           )
@@ -588,7 +598,7 @@ fn v2_value() -> history.Group {
 fn v3_wire() -> Bytes {
   cat(
     [
-      b"HSHIST01",
+      b"HSHIST02",
       rep(0, 32),
       b"\x01\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00",
       b"\x02\x02\x38\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00",

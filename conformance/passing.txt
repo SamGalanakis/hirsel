@@ -7504,6 +7504,7 @@ conformance/STORE/STORE-12-call-row-limit-run.hir
 conformance/STORE/STORE-12-call-stream-run.hir
 conformance/STORE/STORE-12-serve-fenced-run.hir
 conformance/STORE/STORE-12-serve-run.hir
+conformance/STORE/STORE-12-stream-owner-run.hir
 conformance/STORE/STORE-2-transact-run.hir
 conformance/STORE/STORE-3-narrow-scope-laws-run.hir
 conformance/STORE/STORE-3-narrow-scope-run.hir

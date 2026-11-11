@@ -14,7 +14,7 @@ const HOST: Level = Level(1);
 /// A non-claim group following `tip`.
 fn entry(tip: &Tip, tag: u8) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(b"HSHIST01");
+    out.extend_from_slice(b"HSHIST02");
     out.extend_from_slice(&tip.digest);
     out.extend_from_slice(&(tip.last + 1).to_le_bytes());
     out.extend_from_slice(&tip.epoch.to_le_bytes());

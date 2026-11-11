@@ -765,8 +765,10 @@ change schema together, their final publications are part of one activation
 **Call records.** Every commit records its ordered write set of puts and deletes on byte
 keys and values, whose SHA-256 is its write-set digest, and the call record of the
 transaction that made it, with the outcome it returned ([STORE-2](#store-2-transactions)),
-with its call stream, position and request digest when it arrived on one
-([STORE-12](#store-12-transactions-at-a-runner)). A commit the engine
+with its call stream, position, request digest and the code hash its caller expected when
+it arrived on one ([STORE-12](#store-12-transactions-at-a-runner)). The entry that ran,
+with its code hash, is the record's definition; the expected hash may differ from it,
+since a place runs its own revision. A commit the engine
 makes on its own behalf records which engine operation made it. The history therefore
 states, for every change, what changed and which call, under which code, changed it.
 How long call records are retained is store state
@@ -1041,7 +1043,7 @@ change is a new magic and a cutover, never a second reader.
 **Groups.** The history is a chain of **groups**, each the commits of one advance:
 
 ```text
-group  = "HSHIST01" prev:[32] first:u64 epoch:u64 count:u32 commit* defs:u32 def*
+group  = "HSHIST02" prev:[32] first:u64 epoch:u64 count:u32 commit* defs:u32 def*
 def    = path:bytes fingerprint:bytes code:[32] revision:bytes
 commit = kind:u8 body writes
 writes = n:u32 { op:u8 key:bytes [value:bytes if op = 1] }*
@@ -1071,7 +1073,7 @@ Commit kinds:
 
 | Kind | Body after `kind` | Records |
 |---|---|---|
-| 1 Transaction | `def:u32 at:i64 seed:u64 caller:bytes stream:u8 [identity:[32] position:u64 digest:[32] if stream = 1] args:bytes outcome:bytes` | The call record ([STORE-2](#store-2-transactions)): the entry, the call information ([STORE-4](#store-4-call-information)), the call stream, position and request digest it arrived with ([STORE-12](#store-12-transactions-at-a-runner)), the argument bytes and the canonical bytes of the `Result[R, TxFailure[E]]` it returned. |
+| 1 Transaction | `def:u32 at:i64 seed:u64 caller:bytes stream:u8 [identity:[32] position:u64 digest:[32] expected:bytes if stream = 1] args:bytes outcome:bytes` | The call record ([STORE-2](#store-2-transactions)): the entry that ran, the call information ([STORE-4](#store-4-call-information)), the call stream, position and request digest it arrived with and the code hash its caller expected, empty when the caller named none ([STORE-12](#store-12-transactions-at-a-runner)), the argument bytes and the canonical bytes of the `Result[R, TxFailure[E]]` it returned. |
 | 2 Engine | `op:u8 payload:bytes` | A commit the engine makes on its own behalf, one of the operations below. An unknown `op` is corruption. |
 | 3 Run | `run:[16] n:u32 { kind:u8 payload:bytes }*` | The journal records of a run at the place ([STORE-18](#store-18-runs-at-a-place)), with the kinds and payloads of the [durable journal](determinism.md#durable-journal). |
 
@@ -1219,22 +1221,32 @@ returns the store's error. An `entries` list that names one path twice is
 `InvalidInput()`, before any arrival is taken.
 
 **Naming and resolution.** A served call names its entry only by identity: its path,
-signature fingerprint and code hash ([RUN-3](runners.md#run-3-entries)), never by a
-closure, a code address or a name the caller chose. The head resolves it against
-`entries`, whose identities are those of the head run's own revision: a path it does not
-serve, or serves in the other form, is `NotRun(Denied())`; a path it serves whose
-fingerprint or code hash differs is `NotRun(VersionMismatch())`, reporting the head's
-hashes as missing. A client's call names only path and fingerprint
-([STORE-17](#store-17-clients)) and is resolved on those. The head never loads code to
-serve a call. These are, for a place,
-check 3 and the allowlist of check 4 of [RUN-8](runners.md#run-8-identity-and-arrival);
-the host makes the other checks before the call reaches the head.
+signature fingerprint and the code hash its caller expected
+([RUN-3](runners.md#run-3-entries)), never by a closure, a code address or a name the
+caller chose. The head resolves it against `entries`, whose identities are those of the
+head run's own revision, on path, form and fingerprint: a path it does not serve, or
+serves in the other form, is `NotRun(Denied())`; a path it serves whose fingerprint
+differs is `NotRun(VersionMismatch())`, reporting the head's hashes as missing. The code
+hash is never compared: the place runs its own activated revision, so places that call
+each other activate independently ([STORE-19](#store-19-activation)). A caller that names
+no code hash, a client among them ([STORE-17](#store-17-clients)), is resolved alike.
+The call's record holds both hashes, the one the caller expected and the one that ran
+([STORE-10](#store-10-recording)); the expected one stays in the request digest and is
+never rewritten. A behaviour change a caller must not get silently is a new entry under
+a new name, served beside the old one. The head never loads code to serve a call. These
+are, for a place, check 3 and the allowlist of check 4 of
+[RUN-8](runners.md#run-8-identity-and-arrival); the host makes the other checks before
+the call reaches the head.
 
 **Each arrival.** For each arrival, in the order it chooses, `store.serve`:
 
-1. resolves its entry as above;
-2. for a transact call, decides its stream request in the transaction that would run it
-   (call streams, below); a position with a recorded outcome runs nothing;
+1. for a transact call, decides its stream request in the transaction that would run it
+   (call streams, below), before anything about its entry: a request from a caller that
+   does not own the stream is `NotRun(Denied())`, and a position with a recorded end
+   ends with that end as recorded, resolving and decoding nothing, whatever revision
+   the head now runs and whether or not it still serves the path. Only the next
+   position goes on;
+2. resolves its entry as above, and refuses a level the place does not declare;
 3. decodes the argument bytes against `A` ([SER-2](serialization.md#ser-2-canonical-codec)),
    else `NotRun(Rejected())`;
 4. mints the call information ([STORE-4](#store-4-call-information)) with the arrival's
@@ -1302,21 +1314,27 @@ below says. `Denied()` and `Rejected()` are the runner's `NotRun(Denied())` and
   `H("hirsel.stream.v1", caller name, run instance)`, or a client instance
   ([STORE-17](#store-17-clients)); every stream identity is 32 bytes, and a request whose
   identity is not is `NotRun(Rejected())`. Under the reserved key `hirsel.streams/`
-  followed by the identity, the store keeps the stream's **head row**: its `epoch`, its
-  `applied` position and its `acknowledged` position. Under that key followed by a
+  followed by the identity, the store keeps the stream's **head row**: its `owner`, the
+  caller ([STORE-4](#store-4-call-information)) whose request first used it, its `epoch`,
+  its `applied` position and its `acknowledged` position. Under that key followed by a
   position as a big-endian `u64`, it keeps one **outcome row** for each position above
-  `acknowledged` and at most `applied`: the request digest and the call end. A stream's
+  `acknowledged` and at most `applied`: the request digest and the call end, as the call
+  ended, so answering it needs neither the code nor the types that produced it. A stream's
   identity and positions are logical: they do not change when the head moves to another
   machine or the store to another backend.
 - A request carries the stream identity, the caller's epoch, a position, the request
   digest and the highest position whose outcome the caller has made durable. Positions
   start at 1 and are consecutive, and a caller has at most one request in flight per
   stream; a request that ends in `NotRun` or `Faulted` leaves its position to the caller's
-  next request. The store decides each request in the transaction that would run it: an
-  epoch below the head row's is `NotRun(Denied())`; a position at or below
+  next request. The store decides each request in the transaction that would run it: a
+  request from any caller other than the stream's owner is `NotRun(Denied())` before its
+  position is looked at, so a recorded end never reaches a caller that does not own the
+  stream; an epoch below the head row's is `NotRun(Denied())`; a position at or below
   `acknowledged`, or above `applied + 1`, is `NotRun(Rejected())`; a position above
   `acknowledged` and at most `applied` returns its recorded end when the digest is equal,
-  without decoding it at a served call, and is `NotRun(Rejected())` when it differs;
+  without resolving its entry or decoding the end at a served call, and is
+  `NotRun(Rejected())` when it differs; a call that committed therefore never ends
+  `NotRun`, whichever revision answers its retry;
   position `applied + 1` runs the body, and the same commit puts its outcome row, sets
   `applied`, raises `acknowledged` and deletes the outcome rows at or below it. A request
   whose epoch exceeds the head row's raises it in the commit that decides the request, a

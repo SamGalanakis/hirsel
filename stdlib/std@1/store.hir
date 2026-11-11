@@ -91,11 +91,14 @@ pub type TxLimit = KeyBytes | ValueBytes | TransactionBytes | RangeRows
 @serializable
 pub type CallFailure[E] = Tx(TxFailure[E]) | Denied | Rejected
 
-// A stream's row under `hirsel.streams/<stream>`: its executor epoch, the
-// last position applied, the last one the caller acknowledged, and the digest
-// and encoded outcome of each position between them.
+// A stream's row under `hirsel.streams/<stream>`: the caller that owns it,
+// its executor epoch, the last position applied, the last one the caller
+// acknowledged, and the digest and call end of each position between them.
+// The end is kept as the call ended, so a retry is answered without the code
+// or the types that produced it.
 @serializable
 type StreamRow {
+  owner: String,
   epoch: u64,
   applied: u64,
   acknowledged: u64,
@@ -106,7 +109,7 @@ type StreamRow {
 type Retained {
   position: u64,
   digest: Bytes,
-  outcome: Bytes,
+  end: CallEnd,
 }
 
 /// The store's visible version in its history, awaited with `durable`. It
@@ -1152,7 +1155,8 @@ fn order_seed(n: u64) -> u64 uses {} {
 
 /// `transact` as one request on an ordered call stream, exactly once per
 /// position. The stream's row decides the request in the transaction that
-/// would run it: an epoch below the row's is `Denied()`; a position at or
+/// would run it: a stream another caller owns, or an epoch below the row's, is
+/// `Denied()`; a position at or
 /// below the acknowledged one, above the next one, or retained with another
 /// digest is `Rejected()`, as is a stream identity or request digest that is
 /// not 32 bytes; a retained position with an equal digest returns
@@ -1174,7 +1178,7 @@ pub fn call[A: serializable, R: serializable, E: serializable](
   let key = stream_key(req.stream)
   let t = serial(mut s)
   let base = t.base
-  let row = match decide(mut s, t, key, req) {
+  let row = match decide(mut s, t, key, req, "") {
     Error(e) => {
       discard(mut s, take t)
       return Error(Tx(Storage(take e)))
@@ -1187,10 +1191,10 @@ pub fn call[A: serializable, R: serializable, E: serializable](
       discard(mut s, take t)
       return refuse(mut s, base, Rejected())
     },
-    Ok(Recorded(row, recorded)) => {
+    Ok(Recorded(row, end)) => {
       discard(mut s, take t)
-      let stored: Result[Result[R, TxFailure[E]], DecodeError] = codec.decode(recorded)
-      let Ok(outcome) = take stored else {
+      let recorded: Option[Result[R, TxFailure[E]]] = recorded_outcome(take end)
+      let Some(outcome) = take recorded else {
         return Error(Tx(Storage(stop(mut s, Corrupt("hirsel.streams")))))
       }
       replayed(mut s, take row, key, req, base) ? released_call
@@ -1239,12 +1243,34 @@ pub fn call[A: serializable, R: serializable, E: serializable](
     Error(_) => false,
   }
   let recorded = codec.encode(outcome)
-  let limited = fn(l: TxLimit) -> Bytes {
-    let o: Result[R, TxFailure[E]] = Error(Limit(l))
-    codec.encode(o)
+  let end: CallEnd = match outcome {
+    Ok(v) => Returned(codec.encode(v)),
+    Error(failed) => Failed(codec.encode(failed)),
   }
-  let def = entry_def(runner.entry_id(f))
-  match record(mut s, take done, ok, key, take row, req, def, info, take args, take recorded, limited) {
+  let limited = fn(l: TxLimit) -> (Bytes, CallEnd) {
+    let failure: TxFailure[E] = Limit(l)
+    let failed: CallEnd = Failed(codec.encode(failure))
+    let o: Result[R, TxFailure[E]] = Error(take failure)
+    (codec.encode(o), take failed)
+  }
+  let id = runner.entry_id(f)
+  let def = entry_def(id)
+  let expected = copy_to(heap, id.code)
+  match record(
+    mut s,
+    take done,
+    ok,
+    key,
+    take row,
+    req,
+    take expected,
+    def,
+    info,
+    take args,
+    take recorded,
+    take end,
+    limited
+  ) {
     AsRun() => match take outcome {
       Ok(v) => Ok(take v),
       Error(failed) => Error(Tx(take failed)),
@@ -1254,14 +1280,41 @@ pub fn call[A: serializable, R: serializable, E: serializable](
   }
 }
 
+// The outcome a stream's recorded end stands for, decoded with the caller's
+// own types; `None` for an end no recorded position holds.
+fn recorded_outcome[R: serializable, E: serializable](take end: CallEnd) -> Option[
+  Result[R, TxFailure[E]]
+] uses {} {
+  match take end {
+    Returned(bytes) => {
+      let decoded: Result[R, DecodeError] = codec.decode(bytes)
+      match take decoded {
+        Ok(v) => Some(Ok(take v)),
+        Error(_) => None(),
+      }
+    },
+    Failed(bytes) => {
+      let decoded: Result[TxFailure[E], DecodeError] = codec.decode(bytes)
+      match take decoded {
+        Ok(failure) => Some(Error(take failure)),
+        Error(_) => None(),
+      }
+    },
+    _ => None(),
+  }
+}
+
 // How a stream decides a request (STORE-12): refused for its epoch or its
 // position; a position whose end the stream records, with that end's bytes; or
 // the next position, which runs.
-type Decision = Deny | Reject | Recorded(StreamRow, Bytes) | Next(StreamRow)
+type Decision = Deny | Reject | Recorded(StreamRow, CallEnd) | Next(StreamRow)
 
-// Decides `req` on the stream row under `key` as the run `t` reads it. A row
-// that does not decode closes the store.
-fn decide(mut s: Store, t: Run, key: Bytes, req: CallRequest) -> Result[
+// Decides `req` from `caller` on the stream row under `key` as the run `t`
+// reads it. A stream belongs to the caller that first used it: another
+// caller's request is `Deny()`, before any position is looked at, so no
+// recorded end reaches a caller that does not own it. A row that does not
+// decode closes the store.
+fn decide(mut s: Store, t: Run, key: Bytes, req: CallRequest, caller: String) -> Result[
   Decision,
   StoreError
 ] uses {} {
@@ -1269,7 +1322,7 @@ fn decide(mut s: Store, t: Run, key: Bytes, req: CallRequest) -> Result[
     return Ok(Reject())
   }
   let row = match ordered_map.get(t.state, key) {
-    None() => StreamRow(epoch: 0, applied: 0, acknowledged: 0, retained: []),
+    None() => StreamRow(owner: unique caller, epoch: 0, applied: 0, acknowledged: 0, retained: []),
     Some(data) => {
       let decoded: Result[StreamRow, DecodeError] = codec.decode(data)
       match take decoded {
@@ -1278,7 +1331,7 @@ fn decide(mut s: Store, t: Run, key: Bytes, req: CallRequest) -> Result[
       }
     },
   }
-  if req.epoch < row.epoch {
+  if row.owner != caller || req.epoch < row.epoch {
     return Ok(Deny())
   }
   if req.position <= row.acknowledged || req.position > row.applied + 1 || req.acknowledged >= req.position {
@@ -1287,16 +1340,16 @@ fn decide(mut s: Store, t: Run, key: Bytes, req: CallRequest) -> Result[
   if req.position > row.applied {
     return Ok(Next(take row))
   }
-  let mut found: Option[Bytes] = None()
+  let mut found: Option[CallEnd] = None()
   for r in row.retained {
     if r.position == req.position && r.digest == req.digest {
-      found = Some(unique r.outcome)
+      found = Some(copy r.end)
     }
   }
   match take found {
     // Another request at a recorded position.
     None() => Ok(Reject()),
-    Some(recorded) => Ok(Recorded(take row, take recorded)),
+    Some(end) => Ok(Recorded(take row, take end)),
   }
 }
 
@@ -1335,11 +1388,13 @@ fn record(
   key: Bytes,
   take row: StreamRow,
   req: CallRequest,
+  take expected: Bytes,
   def: history.Def,
   info: CallInfo,
   take args: Bytes,
   take recorded: Bytes,
-  limited: fn(l: TxLimit) -> Bytes uses {}
+  take end: CallEnd,
+  limited: fn(l: TxLimit) -> (Bytes, CallEnd) uses {}
 ) -> Recording {
   let mut next = take row
   next.epoch = req.epoch
@@ -1360,11 +1415,12 @@ fn record(
     discard(mut s, take done)
     serial(mut s)
   }
-  put_row(mut commit_set, unique key, copy next, req, copy recorded)
+  put_row(mut commit_set, unique key, copy next, req, take end)
   let arrival = history.Arrival(
     identity: copy_to(heap, req.stream),
     position: req.position,
-    digest: copy_to(heap, req.digest)
+    digest: copy_to(heap, req.digest),
+    expected: take expected
   )
   let body = call_body(info, Some(copy arrival), copy args, take recorded)
   let l = match settle(mut s, take commit_set, take body, Some(unique def)) {
@@ -1372,9 +1428,9 @@ fn record(
     Error(Limit(over)) => over,
     Error(u) => return Unrecorded(take u),
   }
-  let ended = limited(l)
+  let (ended, ended_end) = limited(l)
   let mut alone = serial(mut s)
-  put_row(mut alone, unique key, take next, req, copy ended)
+  put_row(mut alone, unique key, take next, req, take ended_end)
   let row_alone = call_body(info, Some(take arrival), take args, take ended)
   // A limit here leaves the position the next one.
   match settle(mut s, take alone, take row_alone, Some(unique def)) {
@@ -1388,11 +1444,10 @@ fn record(
 pub opaque type Served: copyable uses {} {
   entry: EntryId,
   body: ServedBody,
-  // The bytes of `TxFailure[E]` `Limit(l)` and `Storage(e)`, and the end a
-  // stream's recorded outcome bytes (a `Result[R, TxFailure[E]]`) stand for.
+  // The bytes of the outcome `Error(Limit(l))` (a `Result[R, TxFailure[E]]`)
+  // and of `TxFailure[E]` `Limit(l)`, and of `TxFailure[E]` `Storage(e)`.
   limited: fn(l: TxLimit) -> (Bytes, Bytes) uses {},
   refused: fn(e: StoreError) -> Bytes uses {},
-  replay: fn(recorded: Bytes) -> Option[CallEnd] uses {},
 }
 
 type ServedBody = Transacting(
@@ -1439,14 +1494,6 @@ pub fn served_transact[A: serializable, R: serializable, E: serializable](
     refused: fn(e: StoreError) -> Bytes {
       let failure: TxFailure[E] = Storage(copy e)
       codec.encode(failure)
-    },
-    replay: fn(recorded: Bytes) -> Option[CallEnd] {
-      let stored: Result[Result[R, TxFailure[E]], DecodeError] = codec.decode(recorded)
-      match take stored {
-        Ok(Ok(v)) => Some(Returned(codec.encode(v))),
-        Ok(Error(failure)) => Some(Failed(codec.encode(failure))),
-        Error(_) => None(),
-      }
     }
   )
 }
@@ -1480,25 +1527,19 @@ pub fn served_query[A: serializable, R: serializable, E: serializable](
     refused: fn(e: StoreError) -> Bytes {
       let failure: TxFailure[E] = Storage(copy e)
       codec.encode(failure)
-    },
-    replay: fn(recorded: Bytes) -> Option[CallEnd] {
-      let stored: Result[Result[R, TxFailure[E]], DecodeError] = codec.decode(recorded)
-      match take stored {
-        Ok(Ok(v)) => Some(Returned(codec.encode(v))),
-        Ok(Error(failure)) => Some(Failed(codec.encode(failure))),
-        Error(_) => None(),
-      }
     }
   )
 }
 
 /// Serves the calls that arrive in `inbox` with `entries` until the inbox
 /// closes, which returns `Ok(())`, or the store closes, which returns its
-/// error (STORE-12). Each arrival names its entry by identity: a path `entries`
-/// does not serve, or serves in the other form, ends `NotRun(Denied())`; one
-/// whose fingerprint or code hash differs ends `NotRun(VersionMismatch())`. A
-/// transact call is decided on its call stream in the transaction that would
-/// run it, as `call` decides it; a query reads the latest commit. An argument
+/// error (STORE-12). A transact call is decided on its call stream first, in
+/// the transaction that would run it, as `call` decides it: a recorded
+/// position ends with its recorded end whatever code the head now runs. A call
+/// that runs names its entry by path and fingerprint: a path `entries` does
+/// not serve, or serves in the other form, ends `NotRun(Denied())`; another
+/// fingerprint ends `NotRun(VersionMismatch())`; the head runs its own code and
+/// records the caller's code hash beside it. A query reads the latest commit. An argument
 /// that does not decode ends `NotRun(Rejected())`. Each end is given once the
 /// output gate releases it. A store that closes, a fenced one included, ends
 /// the arrivals it holds `InDoubt(Abandoned())`; the calls still in the inbox
@@ -1545,76 +1586,101 @@ pub fn serve(mut s: Store, take inbox: Inbox, entries: List[Served]) -> Result[
   Ok(())
 }
 
-// The end of one arrival, resolved against `entries`.
+// The end of one arrival. A transact call is decided on its stream before its
+// entry is resolved, so a recorded position ends as recorded whatever code the
+// head now runs; only a call that runs resolves its entry against `entries`.
 fn serve_one(mut s: Store, entries: List[Served], take request: Arrived) -> CallEnd {
+  let querying = request.form == Query()
+  if !querying && request.form != Transact() {
+    return NotRun(Denied())
+  }
+  if !querying {
+    return serve_transact(mut s, entries, request.entry, request.level, request.request, request.caller, request.argument)
+  }
+  let at = match resolve(entries, request.entry, true, request.level) {
+    Ok(at) => at,
+    Error(end) => return take end,
+  }
+  let served = entries[at]
+  let Querying(body) = served.body else {
+    return NotRun(Denied())
+  }
+  // The latest commit, read once it is released.
+  let head = s.visible
+  if let Error(_) = gate(mut s, head) {
+    return InDoubt(Abandoned())
+  }
+  if s.closed {
+    return InDoubt(Abandoned())
+  }
+  let Some(i) = level_index(s, authority.floor(s.authority)) else {
+    return InDoubt(Abandoned())
+  }
+  let Some((floor_version, index)) = durable_state(mut s, i) else {
+    return InDoubt(Abandoned())
+  }
+  let tx = Tx(
+    txn: reading(take Snapshot(version: floor_version, index: take index, limits: s.limits)),
+    limits: s.limits,
+    scope: all(Read()),
+    points: recorder.new(),
+    spans: recorder.new()
+  )
+  let evaluated = body(tx, CallInfo(caller: copy request.caller, at: 0, seed: 0), request.argument)
+  let Tx(txn: _, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
+  let _: List[Bytes] = recorder.finish(take read_points)
+  let _: List[Span] = recorder.finish(take read_spans)
+  match take evaluated {
+    Undecoded() => NotRun(Rejected()),
+    Faulting(failure) => Faulted(codec.encode(failure)),
+    Ended(ok: _, recorded: _, end: end) => take end,
+  }
+}
+
+// The index in `entries` of the entry a call that runs names (STORE-12): by path, form and
+// signature fingerprint. The caller's code hash is recorded, never compared:
+// the head runs its own revision. A path it does not serve, or serves in the
+// other form, is `Denied()`; another fingerprint is `VersionMismatch()`; a
+// level the store does not declare is `Storage(NoLevel())`, definite.
+fn resolve(entries: List[Served], entry: EntryId, querying: bool, level: Option[String]) -> Result[
+  u64,
+  CallEnd
+] uses {} {
   let mut found: Option[u64] = None()
   let mut k: u64 = 0
   while k < list.len(entries) {
-    if entries[k].entry.path == request.entry.path {
+    if entries[k].entry.path == entry.path {
       found = Some(k)
     }
     k += 1
   }
   let Some(at) = found else {
-    return NotRun(Denied())
+    return Error(NotRun(Denied()))
   }
   let served = entries[at]
-  let querying = match served.body {
+  let serves_query = match served.body {
     Transacting(_) => false,
     Querying(_) => true,
   }
-  if querying != (request.form == Query()) || !(querying || request.form == Transact()) {
-    return NotRun(Denied())
+  if serves_query != querying {
+    return Error(NotRun(Denied()))
   }
-  if served.entry.fingerprint != request.entry.fingerprint || served.entry.code != request.entry.code {
-    return NotRun(VersionMismatch())
+  if served.entry.fingerprint != entry.fingerprint {
+    return Error(NotRun(VersionMismatch()))
   }
-  // A level this store does not declare (STORE-2): definite, no effect.
-  if let Some(_) = request.level {
-    return Failed(served.refused(NoLevel()))
+  if let Some(_) = level {
+    return Error(Failed(served.refused(NoLevel())))
   }
-  match served.body {
-    Querying(body) => {
-      // The latest commit, read once it is released.
-      let head = s.visible
-      if let Error(_) = gate(mut s, head) {
-        return InDoubt(Abandoned())
-      }
-      if s.closed {
-        return InDoubt(Abandoned())
-      }
-      let Some(i) = level_index(s, authority.floor(s.authority)) else {
-        return InDoubt(Abandoned())
-      }
-      let Some((floor_version, index)) = durable_state(mut s, i) else {
-        return InDoubt(Abandoned())
-      }
-      let tx = Tx(
-        txn: reading(take Snapshot(version: floor_version, index: take index, limits: s.limits)),
-        limits: s.limits,
-        scope: all(Read()),
-        points: recorder.new(),
-        spans: recorder.new()
-      )
-      let evaluated = body(tx, CallInfo(caller: copy request.caller, at: 0, seed: 0), request.argument)
-      let Tx(txn: _, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
-      let _: List[Bytes] = recorder.finish(take read_points)
-      let _: List[Span] = recorder.finish(take read_spans)
-      match take evaluated {
-        Undecoded() => NotRun(Rejected()),
-        Faulting(failure) => Faulted(codec.encode(failure)),
-        Ended(ok: _, recorded: _, end: end) => take end,
-      }
-    },
-    Transacting(body) => serve_transact(mut s, served, body, request.request, request.caller, request.argument),
-  }
+  Ok(at)
 }
 
-// A served transact call, decided on its stream as `call` decides it.
+// A served transact call, decided on its stream as `call` decides it: the
+// stream answers a recorded position before any entry is resolved.
 fn serve_transact(
   mut s: Store,
-  served: Served,
-  body: fn(mut tx: Tx, info: CallInfo, argument: Bytes) -> Evaluated uses {},
+  entries: List[Served],
+  entry: EntryId,
+  level: Option[String],
   req: CallRequest,
   caller: String,
   argument: Bytes
@@ -1625,7 +1691,7 @@ fn serve_transact(
   let key = stream_key(req.stream)
   let t = serial(mut s)
   let base = t.base
-  let row = match decide(mut s, t, key, req) {
+  let row = match decide(mut s, t, key, req, caller) {
     Error(_) => {
       discard(mut s, take t)
       return InDoubt(Abandoned())
@@ -1638,18 +1704,26 @@ fn serve_transact(
       discard(mut s, take t)
       return released_end(mut s, base, NotRun(Rejected()))
     },
-    Ok(Recorded(row, recorded)) => {
+    Ok(Recorded(row, end)) => {
       discard(mut s, take t)
-      let Some(end) = served.replay(recorded) else {
-        let _ = stop(mut s, Corrupt("hirsel.streams"))
-        return InDoubt(Abandoned())
-      }
       return match replayed(mut s, take row, key, req, base) {
         Ok(()) => take end,
         Error(_) => InDoubt(Abandoned()),
       }
     },
     Ok(Next(row)) => take row,
+  }
+  let at = match resolve(entries, entry, false, level) {
+    Ok(at) => at,
+    Error(end) => {
+      discard(mut s, take t)
+      return released_end(mut s, base, take end)
+    },
+  }
+  let served = entries[at]
+  let Transacting(body) = served.body else {
+    discard(mut s, take t)
+    return released_end(mut s, base, NotRun(Denied()))
   }
   let seed = order_seed(s.visible + 1)
   let mut tx = Tx(
@@ -1679,13 +1753,28 @@ fn serve_transact(
     },
     Ended(ok: ok, recorded: recorded, end: end) => (ok, take recorded, take end),
   }
-  let limited = fn(l: TxLimit) -> Bytes {
-    let (outcome, _) = served.limited(l)
-    outcome
+  let limited = fn(l: TxLimit) -> (Bytes, CallEnd) {
+    let (outcome, failed) = served.limited(l)
+    (outcome, Failed(failed))
   }
   let def = entry_def(served.entry)
   let info = CallInfo(caller: copy caller, at: 0, seed: seed)
-  match record(mut s, take done, ok, key, take row, req, def, info, unique argument, take recorded, limited) {
+  let expected = copy_to(heap, entry.code)
+  match record(
+    mut s,
+    take done,
+    ok,
+    key,
+    take row,
+    req,
+    take expected,
+    def,
+    info,
+    unique argument,
+    take recorded,
+    copy end,
+    limited
+  ) {
     AsRun() => take end,
     Limited(l) => {
       let (_, failed) = served.limited(l)
@@ -2335,20 +2424,17 @@ fn stream_key(stream: Bytes) -> Bytes uses {} {
   bytes.from_list(take out)
 }
 
-// Puts into `set` the stream row `row`, its retained ends followed by
-// `outcome` at `req`'s position.
+// Puts into `set` the stream row `row`, its retained ends followed by `end`
+// at `req`'s position.
 fn put_row(
   mut set: Run,
   take key: Bytes,
   take row: StreamRow,
   req: CallRequest,
-  take outcome: Bytes
+  take end: CallEnd
 ) -> () uses {} {
   let mut recorded = take row
-  list.push(
-    mut recorded.retained,
-    Retained(position: req.position, digest: unique req.digest, outcome: take outcome)
-  )
+  list.push(mut recorded.retained, Retained(position: req.position, digest: unique req.digest, end: take end))
   run_put(mut set, take key, codec.encode(recorded))
 }
 

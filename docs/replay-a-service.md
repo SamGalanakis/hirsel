@@ -58,9 +58,12 @@ the client's call stream. The store decides each position once, inside the commi
 the outcome it recorded for that position instead of running the entry twice. A query
 uses position 0, which no stream decides, and reads the latest commit.
 
-The head checks what the host leaves to it: an entry it does not serve ends
-`NotRun(Denied())`, a call naming other code `NotRun(VersionMismatch())`, and a level the
-place does not declare `Failed(Storage(NoLevel()))`, each before anything runs.
+The head checks what the host leaves to it. A position it already recorded gets its recorded
+end, whatever code the head now runs. For any other call, an entry it does not serve ends
+`NotRun(Denied())`, an entry whose signature fingerprint differs
+`NotRun(VersionMismatch())`, and a level the place does not declare
+`Failed(Storage(NoLevel()))`, each before anything runs. A call whose signature matches
+runs the place's own code for that entry, not the caller's.
 
 ## Run it under a simulated place
 

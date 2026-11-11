@@ -70,7 +70,7 @@ ENV = {'HIRSEL_BUCK2_CONFIG': ' '.join(CONFIG), 'GIT_EDITOR': 'true',
 # Test harnesses stay out: each one's Clippy twin (CLIPPY_TWINS) checks the same
 # crate, sources and dependencies, so linking it again on every batch at checked
 # O3 only re-proves the link. The manifests check builds its own harness through
-# `[inputs]`; main's hourly run links the rest.
+# `[inputs]`; main's six-hourly run links the rest.
 BUILD_SET = ('root//: - kind("_rust_test", root//:) - attrregexfilter(name, "-clippy$", root//:)'
              ' - attrregexfilter(name, "-harness$", root//:)'
              ' - attrfilter(labels, gate, root//:) - kind("_link_hosts_local", root//:)'

@@ -1,11 +1,16 @@
 //! A process allowance shared by all simultaneously live immutable snapshots.
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 pub struct ProcessBudget {
     limit: u64,
     reserved: Mutex<u64>,
     released: Condvar,
+    /// Threads inside `wait_for_release`, counted under `reserved`'s lock, so a
+    /// release made under that lock wakes exactly when someone can be waiting
+    /// and every other release, nearly all of them, makes no futex call.
+    waiters: AtomicUsize,
     owners: [std::sync::atomic::AtomicU64; super::OWNERS],
     idle_reclaimer: Mutex<Option<Weak<dyn Fn() + Send + Sync>>>,
 }
@@ -16,6 +21,7 @@ impl ProcessBudget {
             limit,
             reserved: Mutex::new(0),
             released: Condvar::new(),
+            waiters: AtomicUsize::new(0),
             owners: std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0)),
             idle_reclaimer: Mutex::new(None),
         })
@@ -42,7 +48,13 @@ impl ProcessBudget {
         let previous =
             self.owners[owner as usize].fetch_sub(bytes, std::sync::atomic::Ordering::Relaxed);
         assert!(previous >= bytes, "named owner charge underflow");
-        self.released.notify_all();
+        self.wake(&reserved);
+    }
+    /// Wake the waiters after a release made while holding `reserved`.
+    fn wake(&self, _held: &MutexGuard<'_, u64>) {
+        if self.waiters.load(Ordering::Relaxed) != 0 {
+            self.released.notify_all();
+        }
     }
     /// Register the process's idle retention authority without extending its lifetime.
     /// Reclamation runs outside the budget lock and must preserve live owners.
@@ -117,7 +129,13 @@ impl ProcessBudget {
     /// budget may wait; one holding a charge could wait on itself.
     pub fn wait_for_release(&self, timeout: Duration) {
         let reserved = self.reserved.lock().unwrap_or_else(|e| e.into_inner());
-        drop(self.released.wait_timeout(reserved, timeout));
+        self.waiters.fetch_add(1, Ordering::Relaxed);
+        let (reserved, _) = self
+            .released
+            .wait_timeout(reserved, timeout)
+            .unwrap_or_else(|e| e.into_inner());
+        self.waiters.fetch_sub(1, Ordering::Relaxed);
+        drop(reserved);
     }
     /// Wake waiters after work became idle without releasing its charge yet.
     pub fn notify_idle(&self) {
@@ -173,11 +191,12 @@ impl Drop for MemoryReservation {
         if bytes == 0 {
             return;
         }
-        *self
+        let mut reserved = self
             .budget
             .reserved
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) -= bytes;
-        self.budget.released.notify_all();
+            .unwrap_or_else(|e| e.into_inner());
+        *reserved -= bytes;
+        self.budget.wake(&reserved);
     }
 }

@@ -150,6 +150,7 @@ def place_host(compiler, directory, db, authority):
     log = (directory / 'host.log').open('w')
     process = subprocess.Popen(list(map(str, [ROOT / 'tools/capped', compiler, 'serve', '--native',
         HERE / 'hirsel.json', '--host', host])), stdout=log, stderr=subprocess.PIPE, text=True)
+    drain = None
     try:
         for line in process.stderr:
             log.write(line)
@@ -163,6 +164,8 @@ def place_host(compiler, directory, db, authority):
     finally:
         kill_owned(process.pid)
         process.wait()
+        if drain is not None:
+            drain.join(10)  # The host's stderr ends with it; write its tail before closing.
         log.close()
         shutil.rmtree(scratch)
 

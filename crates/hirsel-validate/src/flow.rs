@@ -7010,11 +7010,8 @@ impl Checker<'_, '_> {
                     &declared_parts,
                     model.crossing_depth,
                 );
-                self.set_current_unique(
-                    state,
-                    destination,
-                    protocol_receipt
-                        && (promised
+                let result_unique = protocol_receipt
+                    && (promised
                         || parametric
                         || awaited_unique
                         // An owning core cursor transfers parts of its
@@ -7028,8 +7025,17 @@ impl Checker<'_, '_> {
                             .unwrap()
                             .modes
                             .uniqueness
-                            == hirsel_types::Uniqueness::Unique),
-                );
+                            == hirsel_types::Uniqueness::Unique);
+                self.set_current_unique(state, destination, result_unique);
+                // A result installed into a part is a whole receipt for that
+                // part only: unless it is proved unique, it may share content
+                // with another holder, so the root's receipt is spent (MODE-2).
+                if !self.body.places[destination.0 as usize]
+                    .projection
+                    .is_empty()
+                {
+                    self.set_fresh_receipt(state, destination, result_unique);
+                }
                 self.set_current_global(
                     state,
                     destination,

@@ -1446,3 +1446,422 @@ fn copied_nested_unique_captures_retain_lost_receipts_in_the_child() {
         }
     }
 }
+
+// A field under a declared-unique outer part counts as unique even when the
+// field's own type is Aliased. That is sound only if nothing puts a payload with
+// another live holder inside the unique outer: every entry route must reject it
+// (construction, a callee's declared unique result, a write into the payload),
+// or the later unique take of the field must.
+#[derive(Clone, Copy, Debug)]
+enum Holder {
+    None,
+    Local,
+    Field,
+    Capture,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Entry {
+    Construct,
+    Return,
+    Assign,
+    /// The payload is the destination of a call that returns its argument.
+    Call,
+}
+
+fn drops(live: &[u32]) -> Vec<CleanupAction> {
+    let mut live = live.to_vec();
+    live.sort_unstable_by(|a, b| b.cmp(a));
+    live.into_iter().map(drop).collect()
+}
+
+/// The fixture, the (block, instruction) where the payload enters the outer,
+/// and the later unique take (of the field, or with `whole` of the outer).
+fn outer_unique_payload(
+    holder: Holder,
+    entry: Entry,
+    usage: UseKind,
+    whole: bool,
+) -> (Fixture, (u32, u32), (u32, u32)) {
+    let mut f = Fixture::unit();
+    let mut string = ty(TypeKind::Primitive(Primitive::String));
+    let aliased = f.definition.types.push(string.clone());
+    string.modes.uniqueness = Uniqueness::Unique;
+    let unique_string = f.definition.types.push(string);
+    let parameter = |f: &mut Fixture| {
+        let p = f.slot(TypeKind::Primitive(Primitive::String), Storage::Parameter);
+        let root = f.body().places[p as usize].root;
+        f.body().locals[root.0 as usize].ty = unique_string;
+        f.body().places[p as usize].ty = unique_string;
+        f.body().parameters.push(root);
+        p
+    };
+    let source = parameter(&mut f);
+    let initial = matches!(entry, Entry::Assign | Entry::Call).then(|| parameter(&mut f));
+    let mut declaration = capability_signature("Option");
+    let SignatureKind::Type(header) = &mut declaration.kind else {
+        unreachable!()
+    };
+    header.capability = None;
+    header.authority = AuthoritySummary::inert();
+    header.bounds = vec![];
+    header.destructor_allocation = Allocation::MayAllocate;
+    header.generics = vec![GenericParameter::Type {
+        name: "T".into(),
+        bounds: vec![].into(),
+    }];
+    let bound = interner().intern(ty(TypeKind::Parameter(TypeParameterRef::bound(
+        TypeParamId(0),
+    ))));
+    header.representation = Some(
+        interner().intern(ty(TypeKind::Variant(
+            vec![
+                Variant {
+                    name: "Some".into(),
+                    fields: vec![(None, bound)].into(),
+                },
+                Variant {
+                    name: "None".into(),
+                    fields: vec![].into(),
+                },
+            ]
+            .into(),
+        ))),
+    );
+    f.signatures.insert(id("Option"), declaration);
+    let option_kind = TypeKind::Named {
+        definition: id("Option"),
+        arguments: vec![GenericArgument::Type(aliased)].into(),
+    };
+    let mut option = ty(option_kind.clone());
+    option.modes.uniqueness = Uniqueness::Unique;
+    let option = f.definition.types.push(option);
+    let typed = |f: &mut Fixture, kind: TypeKind, ty: TypeId, storage| {
+        let p = f.slot(kind, storage);
+        let root = f.body().places[p as usize].root;
+        f.body().locals[root.0 as usize].ty = ty;
+        f.body().places[p as usize].ty = ty;
+        p
+    };
+    let mut live: Vec<u32> = vec![source];
+    live.extend(initial);
+    let mut blocks = vec![std::mem::take(&mut f.body().blocks[0].instructions)];
+    fn assign(
+        f: &mut Fixture,
+        blocks: &mut [Vec<Instruction>],
+        live: &[u32],
+        block: usize,
+        destination: u32,
+        value: Rvalue,
+    ) {
+        let failure = f.cleanup(drops(live));
+        let rv = RvalueId(f.body().rvalues.len() as u32);
+        f.body().rvalues.push(value);
+        blocks[block].push(inst(
+            InstructionKind::Assign {
+                destination: PlaceId(destination),
+                value: rv,
+            },
+            failure,
+        ));
+    }
+    // The second holder, made before the payload enters the unique outer.
+    let second = match holder {
+        Holder::None => None,
+        Holder::Local => {
+            let h = f.slot(TypeKind::Primitive(Primitive::String), Storage::Local);
+            assign(&mut f, &mut blocks, &live, 0, h, Rvalue::Use(copy(source)));
+            Some(h)
+        }
+        Holder::Field => {
+            let h = f.slot(TypeKind::Tuple(vec![aliased].into()), Storage::Local);
+            let value = Rvalue::Construct {
+                constructor: Constructor::Tuple,
+                fields: vec![ConstructField {
+                    field: 0,
+                    value: copy(source),
+                }],
+                destination: Destination::Inferred,
+            };
+            assign(&mut f, &mut blocks, &live, 0, h, value);
+            Some(h)
+        }
+        Holder::Capture => {
+            let mut nested = Fixture::unit();
+            nested.definition.types = f.definition.types.clone();
+            let unit = f.body().result;
+            nested.body().locals[0].ty = unit;
+            nested.body().places[0].ty = unit;
+            nested.body().result = unit;
+            nested.slot(TypeKind::Primitive(Primitive::String), Storage::Capture);
+            nested.body().blocks[0].terminator = ret(0, 0);
+            f.definition.types = nested.definition.types;
+            f.definition.bodies.push(nested.definition.bodies.remove(0));
+            let mut fun =
+                match function_signature("ignored", vec![], TypeKind::Tuple(vec![].into())).kind {
+                    SignatureKind::Function(fun) => fun,
+                    _ => unreachable!(),
+                };
+            fun.result = unit;
+            let h = f.slot(TypeKind::Function(fun), Storage::Local);
+            let value = Rvalue::Closure {
+                context: hirsel_types::CaptureContext::OwningScoped,
+                body: BodyId(1),
+                captures: vec![copy(source)],
+                destination: Destination::Inferred,
+            };
+            assign(&mut f, &mut blocks, &live, 0, h, value);
+            Some(h)
+        }
+    };
+    live.extend(second);
+    let some = |value: Operand| Rvalue::Construct {
+        constructor: Constructor::Variant {
+            definition: path("Option"),
+            variant: 0,
+        },
+        fields: vec![ConstructField { field: 0, value }],
+        destination: Destination::Inferred,
+    };
+    let entering = operand(source, usage);
+    let opt = typed(&mut f, option_kind.clone(), option, Storage::Temporary);
+    let first = match entry {
+        Entry::Assign | Entry::Call => take(initial.unwrap()),
+        _ => entering.clone(),
+    };
+    let mut site = (0, blocks[0].len() as u32);
+    assign(&mut f, &mut blocks, &live, 0, opt, some(first.clone()));
+    live.retain(|&p| first.usage != UseKind::Take || p != first.place.0);
+    if let Entry::Return = entry {
+        f.body().result = option;
+        owner_sig(&mut f, &[PassingMode::Take]);
+        let cleanup = f.cleanup(drops(&live));
+        f.body().blocks[0].instructions = blocks.remove(0);
+        f.body().blocks[0].terminator = ret(opt, cleanup);
+        return (f, site, site);
+    }
+    // The unique outer sits inside an unqualified tuple root.
+    let root = f.slot(TypeKind::Tuple(vec![option].into()), Storage::Temporary);
+    let root_tuple = Rvalue::Construct {
+        constructor: Constructor::Tuple,
+        fields: vec![ConstructField {
+            field: 0,
+            value: take(opt),
+        }],
+        destination: Destination::Inferred,
+    };
+    live.push(opt);
+    assign(&mut f, &mut blocks, &live, 0, root, root_tuple);
+    live.retain(|&p| p != opt);
+    live.push(root);
+    let outer = f.body().places.len() as u32;
+    let root_local = f.body().places[root as usize].root;
+    f.body().places.push(Place {
+        root: root_local,
+        projection: vec![Projection::Field(0)].into(),
+        ty: option,
+        loan: None,
+        binding: None,
+    });
+    let payload = f.body().places.len() as u32;
+    f.body().places.push(Place {
+        root: root_local,
+        projection: vec![
+            Projection::Field(0),
+            Projection::VariantField {
+                variant: 0,
+                field: 0,
+            },
+        ]
+        .into(),
+        ty: aliased,
+        loan: None,
+        binding: None,
+    });
+    let scrutinee = f.through_loan(outer, 0);
+    blocks[0].push(inst(
+        InstructionKind::BeginLoan {
+            id: LoanId(0),
+            place: PlaceId(outer),
+            mutable: false,
+            if_inactive: false,
+        },
+        0,
+    ));
+    let end = inst(
+        InstructionKind::EndLoan {
+            loan: LoanId(0),
+            if_active: false,
+        },
+        0,
+    );
+    blocks.push(vec![end.clone()]);
+    let switched = live.clone();
+    let out = |f: &mut Fixture| {
+        typed(
+            f,
+            TypeKind::Primitive(Primitive::String),
+            unique_string,
+            Storage::Temporary,
+        )
+    };
+    let mut call = None;
+    if let Entry::Assign | Entry::Call = entry {
+        let before = out(&mut f);
+        assign(
+            &mut f,
+            &mut blocks,
+            &live,
+            1,
+            before,
+            Rvalue::Use(take(payload)),
+        );
+        live.insert(0, before);
+        site = (1, blocks[1].len() as u32);
+        if let Entry::Call = entry {
+            let signature = function_signature(
+                "give",
+                vec![(PassingMode::Take, TypeKind::Primitive(Primitive::String))],
+                TypeKind::Primitive(Primitive::String),
+            );
+            f.signatures.insert(signature.definition.clone(), signature);
+            // `give(copy s)` takes a copied temporary, as lowering emits it.
+            let argument = if usage == UseKind::Copy {
+                let copied = f.slot(TypeKind::Primitive(Primitive::String), Storage::Temporary);
+                assign(
+                    &mut f,
+                    &mut blocks,
+                    &live,
+                    1,
+                    copied,
+                    Rvalue::Use(entering.clone()),
+                );
+                take(copied)
+            } else {
+                entering.clone()
+            };
+            call = Some(Terminator::Call {
+                callee: Callee::Definition {
+                    path: path("give"),
+                    arguments: vec![],
+                },
+                arguments: vec![CallArgument {
+                    parameter: ParamId(0),
+                    value: argument,
+                }],
+                returns: Some(CallReturn {
+                    destination: PlaceId(payload),
+                    next: BlockId(3),
+                }),
+                on_failure: CleanupId(f.cleanup(drops(&live))),
+            });
+            blocks.push(vec![]);
+        } else {
+            assign(
+                &mut f,
+                &mut blocks,
+                &live,
+                1,
+                payload,
+                Rvalue::Use(entering.clone()),
+            );
+        }
+        if usage == UseKind::Take {
+            live.retain(|&p| p != source);
+        }
+    }
+    let (taken, from) = if whole {
+        (
+            typed(&mut f, option_kind, option, Storage::Temporary),
+            outer,
+        )
+    } else {
+        (out(&mut f), payload)
+    };
+    let last = blocks.len() - 1;
+    let exit = (
+        if call.is_some() { 3 } else { 1 },
+        blocks[last].len() as u32,
+    );
+    assign(
+        &mut f,
+        &mut blocks,
+        &live,
+        last,
+        taken,
+        Rvalue::Use(take(from)),
+    );
+    live.insert(0, taken);
+    let parameters = vec![PassingMode::Take; f.body().parameters.len()];
+    owner_sig(&mut f, &parameters);
+    let done = f.cleanup(drops(&live));
+    let otherwise = f.cleanup(drops(&switched));
+    f.body().blocks[0].instructions = blocks.remove(0);
+    f.body().blocks[0].terminator = Terminator::Switch {
+        value: operand(scrutinee, UseKind::Borrow),
+        arms: vec![(0, BlockId(1))],
+        otherwise: BlockId(2),
+    };
+    if let Some(call) = call {
+        f.body().blocks.push(block(blocks.remove(0), call));
+        f.body().blocks.push(block(vec![end], ret(0, otherwise)));
+        f.body().blocks.push(block(blocks.remove(0), ret(0, done)));
+    } else {
+        f.body().blocks.push(block(blocks.remove(0), ret(0, done)));
+        f.body().blocks.push(block(vec![end], ret(0, otherwise)));
+    }
+    (f, site, exit)
+}
+
+#[test]
+fn outer_unique_payload_rejects_every_second_holder() {
+    let at = |f: &Fixture, (block, instruction): (u32, u32)| {
+        validate(
+            &tabled(&f.definition),
+            interner(),
+            &f.signatures,
+            &mut vec![],
+        )
+        .unwrap()
+        .violations
+        .iter()
+        .any(|v| {
+            v.block == Some(BlockId(block))
+                && v.instruction == Some(instruction)
+                && matches!(v.kind, ViolationKind::TypeMismatch { .. })
+        })
+    };
+    for entry in [Entry::Construct, Entry::Return, Entry::Assign, Entry::Call] {
+        for whole in [false, true] {
+            // A call result is not proved unique, so the call entry has no
+            // valid twin here; its negatives still pin the partial write.
+            if !matches!(entry, Entry::Call) {
+                outer_unique_payload(Holder::None, entry, UseKind::Take, whole)
+                    .0
+                    .valid();
+            }
+            for (holder, usage) in [
+                (Holder::None, UseKind::Copy),
+                (Holder::Local, UseKind::Take),
+                (Holder::Local, UseKind::Copy),
+                (Holder::Field, UseKind::Take),
+                (Holder::Field, UseKind::Copy),
+                (Holder::Capture, UseKind::Take),
+                (Holder::Capture, UseKind::Copy),
+            ] {
+                let (f, site, exit) = outer_unique_payload(holder, entry, usage, whole);
+                // A write into the payload is a partial write; its unique take rejects.
+                let site = if let Entry::Assign | Entry::Call = entry {
+                    exit
+                } else {
+                    site
+                };
+                assert!(
+                    at(&f, site),
+                    "{entry:?} {holder:?} {usage:?} {whole}: {:?}",
+                    f.kinds()
+                );
+            }
+        }
+    }
+}

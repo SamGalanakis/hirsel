@@ -1244,6 +1244,23 @@ impl Checker<'_, '_> {
             state
                 .must
                 .set_fact(place.root.0 as usize, MustFacts::FRESH_RECEIPT, fresh);
+        } else if !fresh
+            && needs_release(self, place.ty, self.t)
+            && !matches!(
+                self.t.get(place.ty).unwrap().kind,
+                hirsel_types::TypeKind::Builtin {
+                    kind: hirsel_types::BuiltinType::Shared,
+                    ..
+                }
+            )
+        {
+            // A part written with content that is not a fresh receipt may
+            // share it with another holder, so the root's whole receipt no
+            // longer proves its declared unique parts (MODE-2). Plain bits
+            // and a Shared boundary install no counted alias.
+            state
+                .must
+                .set_fact(place.root.0 as usize, MustFacts::FRESH_RECEIPT, false);
         }
     }
     pub(super) fn operand_unique(&self, state: &State, value: &Operand) -> bool {

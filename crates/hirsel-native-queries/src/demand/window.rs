@@ -232,8 +232,8 @@ impl StoredInstance {
     ) -> Result<Vec<hirsel_lir::ir::Symbol>, String> {
         let bytes = instances
             .store
-            .get_content(self.adapters)
-            .ok_or("missing native adapter facts")?;
+            .read_product_content(self.adapters)
+            .map_err(|error| format!("native adapter facts: {error}"))?;
         if ADAPTERS.reference(&bytes) != Some(self.adapters) {
             return Err("native adapter facts identity differs".into());
         }

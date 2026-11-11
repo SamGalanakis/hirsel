@@ -622,8 +622,8 @@ impl NativeProducts for DemandProducts {
             }
             let bytes = snapshot
                 .store
-                .get_content(product.emission_context)
-                .ok_or("missing unit emission context")?;
+                .read_product_content(product.emission_context)
+                .map_err(|error| format!("unit emission context: {error}"))?;
             let context: UnitEmissionContext =
                 serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
             let (instance, _) = snapshot.instances.admitted(&owner, &environment)?;

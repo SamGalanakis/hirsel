@@ -370,8 +370,8 @@ pub trait NativeProducts {
         &mut self,
         key: &InstanceAddress,
         _backend: &str,
-    ) -> Result<Vec<Arc<ReadyProduct>>, String> {
-        Ok(vec![self.ready(key)?])
+    ) -> Result<Vec<(InstanceAddress, Arc<ReadyProduct>)>, String> {
+        Ok(vec![(key.clone(), self.ready(key)?)])
     }
 
     /// Units are borrowed only while their reached layout closure is bound.

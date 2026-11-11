@@ -491,12 +491,12 @@ impl NativeProducts for SettledProducts {
         &mut self,
         key: &InstanceAddress,
         backend: &str,
-    ) -> Result<Vec<Arc<ReadyProduct>>, String> {
+    ) -> Result<Vec<(InstanceAddress, Arc<ReadyProduct>)>, String> {
         self.inner
             .snapshot
             .codegen_owners(key, backend)?
             .iter()
-            .map(|owner| self.ready(owner))
+            .map(|owner| Ok((owner.clone(), self.ready(owner)?)))
             .collect()
     }
     fn with_ready<R>(
@@ -586,11 +586,11 @@ impl NativeProducts for DemandProducts {
         &mut self,
         key: &InstanceAddress,
         backend: &str,
-    ) -> Result<Vec<Arc<ReadyProduct>>, String> {
+    ) -> Result<Vec<(InstanceAddress, Arc<ReadyProduct>)>, String> {
         self.snapshot
             .codegen_owners(key, backend)?
             .iter()
-            .map(|owner| self.ready(owner))
+            .map(|owner| Ok((owner.clone(), self.ready(owner)?)))
             .collect()
     }
     fn with_ready<R>(

@@ -626,7 +626,7 @@ impl NativeProducts for RootProducts {
         &mut self,
         key: &InstanceAddress,
         backend: &str,
-    ) -> Result<Vec<Arc<ReadyProduct>>, String> {
+    ) -> Result<Vec<(InstanceAddress, Arc<ReadyProduct>)>, String> {
         self.inner.codegen_units(key, backend)
     }
     fn with_ready<R>(

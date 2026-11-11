@@ -148,6 +148,27 @@ pub fn identity(product: &ProductRef) -> Result<ContentHash, String> {
     };
     Ok(descriptor_identity(ahead, continuation, context))
 }
+/// The plan identity an ordinary object of `bodies` keys: the whole ahead plan
+/// and context, and only the continuation rows of its own bodies, so an edit
+/// that replans one body rebuilds only the objects holding it. Returns the
+/// identity and the continuation subset's own identity, which emission checks.
+pub fn object_identity(
+    product: &ProductRef,
+    bodies: &std::collections::BTreeSet<ContentHash>,
+) -> Result<(ContentHash, ContentHash), String> {
+    if product.domain() != PLAN {
+        return Err("wrong execution plan domain/schema".into());
+    }
+    let plan = product
+        .live_value::<ExecutionPlan>()
+        .ok_or("an object's plan subset needs the live execution plan")?;
+    let continuation = plan.continuation.restricted_identity(bodies);
+    Ok((
+        descriptor_identity(plan.ahead.identity, continuation, plan.context),
+        continuation,
+    ))
+}
+
 fn descriptor_identity(
     ahead: ContentHash,
     continuation: ContentHash,

@@ -230,6 +230,14 @@ where
         // The producer checks its old reads and native authority before returning
         // a descriptor. No Value or Ready decoding is needed to decide this hit.
         let selected = self.native.codegen_units(&key.owner, &key.backend)?;
+        let bodies = selected
+            .iter()
+            .map(|(owner, _)| owner.instance.digest())
+            .collect::<std::collections::BTreeSet<_>>();
+        let selected = selected
+            .into_iter()
+            .map(|(_, ready)| ready)
+            .collect::<Vec<_>>();
         let ready = selected.first().ok_or("Codegen omitted its owner")?;
         let optimizer = selected[1..]
             .iter()
@@ -237,12 +245,16 @@ where
             .collect::<Vec<_>>();
         // Keep the live plan owner through the action, including cache hits.
         let execution = self.native.execution_read();
+        let plan = execution
+            .as_ref()
+            .map(|execution| crate::execution_plan::object_identity(execution, &bodies))
+            .transpose()?;
         codegen_checked(
             self.store.as_ref(),
             key,
             ready,
             &optimizer,
-            execution.as_ref(),
+            plan.map(|(identity, _)| identity),
             self.verify_store,
             || {
                 self.native.with_ready(&selected, |units, inputs| {
@@ -277,8 +289,10 @@ where
                         .iter()
                         .map(|u| u.unit().header.instance)
                         .collect();
+                    let continuation = object_continuation(units, inputs, &bodies, plan)?;
                     let inputs = hirsel_lir::emission::EmitInputs {
                         available_externally: &copies,
+                        continuation: continuation.as_ref(),
                         ..inputs.clone()
                     };
                     // Source paths/line-table binding are Link inputs; the producer
@@ -328,12 +342,36 @@ fn codegen(
     codegen_checked(store, key, ready, &[], None, VerifyStore::Off, compute)
 }
 
+/// The continuation plans an ordinary object emits with: its own bodies' rows
+/// only, exactly the subset its key recorded (`execution_plan::object_identity`).
+/// A body or row the key did not cover fails here rather than reusing an object.
+pub(crate) fn object_continuation(
+    units: &[&hirsel_lir::stage::ValidatedUnit<hirsel_lir::stage::Ready>],
+    inputs: &hirsel_lir::emission::EmitInputs<'_>,
+    bodies: &std::collections::BTreeSet<hirsel_syntax::ContentHash>,
+    keyed: Option<(hirsel_syntax::ContentHash, hirsel_syntax::ContentHash)>,
+) -> Result<Option<hirsel_lir::continuation::ContinuationPlans>, String> {
+    if units
+        .iter()
+        .map(|unit| unit.unit().header.instance)
+        .collect::<std::collections::BTreeSet<_>>()
+        != *bodies
+    {
+        return Err("object materialized other bodies than its key".into());
+    }
+    let continuation = inputs.continuation.map(|plans| plans.restricted(bodies));
+    if continuation.as_ref().map(|plans| plans.identity) != keyed.map(|(_, subset)| subset) {
+        return Err("object continuation plans differ from its key".into());
+    }
+    Ok(continuation)
+}
+
 fn codegen_checked(
     store: &dyn ResultStore,
     key: &CodegenKey,
     ready: &ReadyProduct,
     optimizer: &[ProductRef],
-    execution: Option<&ProductRef>,
+    execution: Option<ContentHash>,
     verify_store: VerifyStore,
     compute: impl FnOnce() -> Result<ObjectArtifact, String>,
 ) -> Result<FragmentProduct, String> {
@@ -349,7 +387,6 @@ fn codegen_checked(
         ready.emission_context,
         ready.unit_summary,
     ];
-    let execution = execution.map(crate::execution_plan::identity).transpose()?;
     for product in ready.optimizer_reads.iter().chain(optimizer) {
         reads.push(
             product

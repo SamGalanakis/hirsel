@@ -96,9 +96,14 @@ pub fn codegen<N: NativeProducts, L>(
     }
     // This owner retains plans, observations and admission across the action.
     let execution = queries.native.execution_read();
-    let execution_identity = execution
+    let bodies = key
+        .units
+        .iter()
+        .map(|unit| unit.owner.instance.digest())
+        .collect::<std::collections::BTreeSet<_>>();
+    let plan = execution
         .as_ref()
-        .map(crate::execution_plan::identity)
+        .map(|execution| crate::execution_plan::object_identity(execution, &bodies))
         .transpose()?;
     let summaries = selected
         .iter()
@@ -124,7 +129,7 @@ pub fn codegen<N: NativeProducts, L>(
             address: key.query_id().address,
             owner,
             summary,
-            execution: execution_identity,
+            execution: plan.map(|(identity, _)| identity),
         },
         &reads,
         queries.verify_store,
@@ -142,6 +147,11 @@ pub fn codegen<N: NativeProducts, L>(
                             .into(),
                     );
                 }
+                let continuation = super::object_continuation(units, inputs, &bodies, plan)?;
+                let inputs = &hirsel_lir::emission::EmitInputs {
+                    continuation: continuation.as_ref(),
+                    ..inputs.clone()
+                };
                 let debug = selected[0].debug;
                 if selected.iter().any(|ready| ready.debug != debug) {
                     return Err("whole-module debug settings differ".into());

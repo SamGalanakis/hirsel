@@ -561,6 +561,11 @@ pub struct ContinuationPlan {
 pub struct ContinuationPlans {
     pub plans: BTreeMap<ContentHash, ContinuationPlan>,
     pub identity: ContentHash,
+    /// Exact runtime/helper bytes the plans are bound to (`PlanInputs`).
+    pub runtime: ContentHash,
+    /// The bodies an object's subset answers for ([`Self::restricted`]); a
+    /// read outside them would be a key input the object never recorded.
+    pub scope: Option<BTreeSet<ContentHash>>,
 }
 
 /// How each call of a body affects its continuation.
@@ -1657,7 +1662,7 @@ fn plan_unit<'a>(
         let sources = isolate::finalizer_sources(checked, inputs.table, u.header.instance);
         let partial = ContinuationPlans {
             plans: done.clone(),
-            identity: ContentHash::default(),
+            ..Default::default()
         };
         for state in &mut cleanups {
             let root = isolate
@@ -1852,16 +1857,28 @@ impl ContinuationPlans {
                 units,
             );
         }
-        let identity = Self::identity_of(&plans, inputs);
-        Self { plans, identity }
+        let identity = Self::identity_of(&plans, inputs.runtime);
+        Self {
+            plans,
+            identity,
+            runtime: inputs.runtime,
+            scope: None,
+        }
     }
 
     pub(crate) fn identity_of(
         plans: &BTreeMap<ContentHash, ContinuationPlan>,
-        inputs: &PlanInputs<'_>,
+        runtime: ContentHash,
+    ) -> ContentHash {
+        Self::identity_over(runtime, plans.iter().collect())
+    }
+
+    fn identity_over(
+        runtime: ContentHash,
+        plans: Vec<(&ContentHash, &ContinuationPlan)>,
     ) -> ContentHash {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(&inputs.runtime.0);
+        bytes.extend_from_slice(&runtime.0);
         bytes.extend_from_slice(&(plans.len() as u64).to_le_bytes());
         for (id, plan) in plans {
             bytes.extend_from_slice(&id.0);
@@ -1870,7 +1887,44 @@ impl ContinuationPlans {
         ContentHash::of_parts("hirsel.continuation.plans.v1", [bytes.as_slice()])
     }
 
+    /// The identity of [`Self::restricted`] to `bodies`, without copying plans.
+    pub fn restricted_identity(&self, bodies: &BTreeSet<ContentHash>) -> ContentHash {
+        Self::identity_over(
+            self.runtime,
+            self.plans
+                .iter()
+                .filter(|(id, _)| bodies.contains(id))
+                .collect(),
+        )
+    }
+
+    /// The plans of `bodies` only, as an ordinary object of those bodies keys
+    /// and records them: an edit elsewhere leaves this subset unchanged. Its
+    /// identity is the whole planner identity over the same rows.
+    pub fn restricted(&self, bodies: &BTreeSet<ContentHash>) -> Self {
+        let plans: BTreeMap<_, _> = self
+            .plans
+            .iter()
+            .filter(|(id, _)| bodies.contains(id))
+            .map(|(id, plan)| (*id, plan.clone()))
+            .collect();
+        Self {
+            identity: Self::identity_of(&plans, self.runtime),
+            plans,
+            runtime: self.runtime,
+            scope: Some(bodies.clone()),
+        }
+    }
+
     pub fn get(&self, body: ContentHash) -> Option<&ContinuationPlan> {
+        // Answering None here would emit a resumable body as Direct under a
+        // key that never covered it: fail instead of reusing a stale object.
+        assert!(
+            self.scope
+                .as_ref()
+                .is_none_or(|scope| scope.contains(&body)),
+            "continuation row {body:?} read outside the object's own bodies"
+        );
         self.plans.get(&body)
     }
 

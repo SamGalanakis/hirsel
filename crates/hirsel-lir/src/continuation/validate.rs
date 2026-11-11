@@ -1261,7 +1261,10 @@ fn validate_plans(
             return Err(ContinuationError::Certificate(*id));
         }
     }
-    if certificates && plans.identity != ContinuationPlans::identity_of(&plans.plans, inputs) {
+    if certificates
+        && (plans.runtime != inputs.runtime
+            || plans.identity != ContinuationPlans::identity_of(&plans.plans, inputs.runtime))
+    {
         return Err(ContinuationError::Identity);
     }
     Ok(())

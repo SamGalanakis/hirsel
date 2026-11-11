@@ -979,7 +979,7 @@ fn execution_plan_identity_controls_object_hits_and_imported_keys() {
         &key,
         &ready,
         &[],
-        Some(&original),
+        Some(crate::execution_plan::identity(&original).unwrap()),
         VerifyStore::Off,
         || Ok(object()),
     )
@@ -995,7 +995,7 @@ fn execution_plan_identity_controls_object_hits_and_imported_keys() {
         &key,
         &ready,
         &[],
-        Some(&reopened),
+        Some(crate::execution_plan::identity(&reopened).unwrap()),
         VerifyStore::Off,
         || panic!("equal persisted plan identity missed the object cache"),
     )
@@ -1006,7 +1006,7 @@ fn execution_plan_identity_controls_object_hits_and_imported_keys() {
         &key,
         &ready,
         &[],
-        Some(&reopened),
+        Some(crate::execution_plan::identity(&reopened).unwrap()),
         VerifyStore::Recompute,
         || Ok(object()),
     )
@@ -1028,7 +1028,7 @@ fn execution_plan_identity_controls_object_hits_and_imported_keys() {
             &key,
             &ready,
             &[],
-            Some(&changed),
+            Some(crate::execution_plan::identity(&changed).unwrap()),
             VerifyStore::Off,
             || {
                 calls.set(calls.get() + 1);

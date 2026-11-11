@@ -679,9 +679,11 @@ impl DemandInstances {
         {
             return Err("native dependency differs from the request snapshot".into());
         }
-        let output = output.read(self, key)?;
+        // The scope (and its independent adapter inventory check) precedes any
+        // facts decode, as before; the instance itself is then read once.
         let operations =
-            self.operations_input(key, &output.facts.source.adapters, request, environment)?;
+            self.operations_input(key, &output.adapters(self)?, request, environment)?;
+        let output = output.read(self, key)?;
         let scoped = NativeEnvironment {
             operations: &operations,
             ..*environment

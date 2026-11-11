@@ -189,6 +189,24 @@ reaches only what `c` carries. They are the evaluation operation of a store
 ([STORE-15](storage.md#store-15-evaluation-and-re-execution)), which passes a `Tx` as `c`
 and a `CallInfo` as `call`.
 
+```text
+EntryRef = { path: String, fingerprint: Bytes }   // std@1/entry_ref; serializable data
+fn entry_ref.reference[F](f: Entry[F]) -> EntryRef
+fn entry_ref.resolve[F](r: EntryRef, among: List[Entry[F]]) -> Option[Entry[F]]
+```
+
+An **entry reference** names an entry as data, so that a stored row or a message can name
+one: its path and signature fingerprint, without the code hash, so it names the same
+definition across revisions that change only its body. It is inert and grants nothing.
+It is not an entry, and nothing runs it. `entry_ref.resolve` returns the element of
+`among` whose identity has `r`'s path and fingerprint, or `None()`. Resolution never
+looks beyond `among`, so the program chooses which entries a stored reference can reach,
+and the entry's type is `among`'s, never one read from the bytes. A reference whose
+entry moved (another path) or changed its signature (another fingerprint) resolves to
+`None()`. `EntryRef` has no type parameter: a reference's bytes cannot state a type, so
+a parameter on it would be a claim that decoding cannot check
+([SER-1](serialization.md#ser-1-serializable-schemas)).
+
 ### RUN-4: Calls
 
 A runner call has a form fixed by the callee's shape. Authority enters a callee only

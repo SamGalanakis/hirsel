@@ -4214,6 +4214,8 @@ fn call_info.caller(c: store.CallInfo) -> String uses {}
 fn call_info.at(c: store.CallInfo) -> i64 uses {}
 fn call_info.seed(c: store.CallInfo) -> u64 uses {}
 fn call_info.id(c: store.CallInfo) -> Option[Bytes] uses {}
+fn entry_ref.reference[F](f: Entry[F]) -> entry_ref.EntryRef uses {}
+fn entry_ref.resolve[F](r: entry_ref.EntryRef, among: List[Entry[F]]) -> Option[Entry[F]] uses {}
 fn store.tx_get(tx: store.Tx, key: Bytes) -> Result[Option[Bytes], store.TxError] requires !store.reserved(key)
 fn store.tx_put(mut tx: store.Tx, take key: Bytes, take value: Bytes) -> Result[(), store.TxError] requires !store.reserved(key)
 fn store.tx_delete(mut tx: store.Tx, take key: Bytes) -> Result[(), store.TxError] requires !store.reserved(key)
@@ -4359,6 +4361,10 @@ store: every later call returns `Closed()`. `close` makes every commit durable a
 strongest declared level and releases the store and its claim. Crash and fault behaviour
 belongs to the authority provider (`authority.memory@1`, `authority.sim@1`,
 `authority.log@1`, `authority.objects@1`), not to the store.
+
+`entry_ref.EntryRef` is an entry's path and signature fingerprint as serializable data.
+`entry_ref.reference` makes one, and `entry_ref.resolve` finds its entry among the ones
+it is given, or returns `None()` ([RUN-3](runners.md#run-3-entries)).
 
 ## Compressed data
 

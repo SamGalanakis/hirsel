@@ -86,6 +86,10 @@ path as `path.of` does. No other core type is serializable: those that hold a ca
 type. The exact core identity matters: a same-spelled user type
 gets no exemption.
 
+`Entry[F]` is not serializable. A stored or sent name of an entry is an
+`entry_ref.EntryRef` ([RUN-3](runners.md#run-3-entries)), a path and a fingerprint that
+grant nothing and resolve only among the entries a program already holds.
+
 Schema admission and opt-in failures are SER-1 at the declaration or at the encoding use.
 
 ### SER-2: Canonical codec

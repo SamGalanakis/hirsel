@@ -1866,6 +1866,9 @@ An activation commits only when the result is coherent:
 - every parked row's trigger names an entry that exists in the selected revision and
   accepts that row's type, and every call a parked run awaits completes with a type its
   resume entry accepts ([STORE-18](#store-18-runs-at-a-place));
+- every entry reference ([RUN-3](runners.md#run-3-entries)) a row holds, wherever the
+  row's schema places `entry_ref.EntryRef`, names an entry of the selected revision with
+  its path and fingerprint;
 - no exported entry has changed its signature. A breaking change to an exported entry is
   a new entry under a new name; the old one stays until it is removed on purpose, because
   callers and clients that hold the old signature cannot be changed in the same commit;

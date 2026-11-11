@@ -990,6 +990,12 @@
       ]
     },
     {
+      "path": "entry_ref.hir",
+      "module": [
+        "entry_ref"
+      ]
+    },
+    {
       "path": "shlex.hir",
       "module": [
         "shlex"

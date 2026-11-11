@@ -63,7 +63,7 @@ pub enum Error {
     Format { found: [u8; 8], object: String },
 }
 
-/// The outcome of [`Authority::advance`].
+/// The outcome of [`Authority::wait`] for one queued entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Advanced {
     /// The entry is in the history at this position and durable at the level asked.
@@ -97,6 +97,21 @@ pub struct Claim {
     /// `authority.objects@1`: the head's tag from the writer's own last replace.
     pub(crate) tag: Option<hirsel_object_storage::Tag>,
     pub(crate) dead: bool,
+    /// Entries submitted and not yet appended, oldest first, each chained on
+    /// the one before it and the first on `end`.
+    pub(crate) queue: Vec<Queued>,
+    /// Outcomes a wait decided for positions no wait has asked for yet.
+    pub(crate) settled: Vec<(u64, Advanced)>,
+}
+
+/// An entry [`Authority::submit`] queued: its record, built on the record
+/// before it, and the level its wait makes it durable at.
+#[derive(Debug)]
+pub struct Queued {
+    pub(crate) position: u64,
+    pub(crate) record: Vec<u8>,
+    pub(crate) digest: [u8; 32],
+    pub(crate) at: Level,
 }
 
 impl Claim {
@@ -106,14 +121,24 @@ impl Claim {
     pub fn attempt(&self) -> [u8; 16] {
         self.attempt
     }
-    /// The tip an append of this claim follows.
-    pub(crate) fn tip(&self) -> envelope::Tip {
+    /// The tip the next submitted entry follows: the newest queued one, or the
+    /// writer's own end.
+    pub(crate) fn queued_tip(&self) -> envelope::Tip {
+        let (digest, end) = match self.queue.last() {
+            Some(q) => (q.digest, q.position),
+            None => (self.digest, self.end),
+        };
         envelope::Tip {
-            digest: self.digest,
-            end: self.end,
+            digest,
+            end,
             epoch: self.epoch,
             identity: None,
         }
+    }
+    /// Records the append of `q`: the writer's end moves to it.
+    pub(crate) fn appended(&mut self, q: &Queued) {
+        self.end = q.position;
+        self.digest = q.digest;
     }
     /// A new claim whose own claim record is the last one `tip` covers.
     pub(crate) fn new(owner: u64, attempt: [u8; 16], tip: &envelope::Tip, levels: usize) -> Self {
@@ -128,6 +153,8 @@ impl Claim {
             length: 0,
             tag: None,
             dead: false,
+            queue: Vec::new(),
+            settled: Vec::new(),
         }
     }
 }
@@ -148,9 +175,60 @@ pub trait Authority: Send {
     /// a claim record naming `attempt`, minting `fresh` as the store identity when
     /// the history has none.
     fn claim(&mut self, attempt: [u8; 16], fresh: [u8; 32]) -> Result<Claimed, Error>;
-    /// Append a record of `payload` at `from + 1` if `c` is the newest claim and
-    /// the history ends at `from`, and wait until it is durable at `at`.
-    fn advance(&mut self, c: &mut Claim, from: u64, payload: Vec<u8>, at: Level) -> Advanced;
+    /// Append `batch`, the claim's oldest queued entries in order, if `c` is the
+    /// newest claim and the history ends at the claim's end, and make each
+    /// durable at its level with at most one barrier: one outcome per entry, in
+    /// order. An entry after one not `Advanced` is never appended: it is
+    /// `Fenced`, or `Undecided` when its own append may have had an effect.
+    fn append(&mut self, c: &mut Claim, batch: &[Queued]) -> Vec<Advanced>;
+    /// Queue a record of `payload` at the claim's next position and return the
+    /// position, with no I/O. A dead claim is `Fenced` and a payload past
+    /// [`MAX_ENTRY`] refused; neither has an effect.
+    fn submit(&mut self, c: &mut Claim, payload: Vec<u8>, at: Level) -> Result<u64, Error> {
+        if c.dead {
+            return Err(Error::Fenced);
+        }
+        if oversized(&payload) {
+            return Err(Error::Refused(AuthorityError::io(ErrorKind::InvalidInput)));
+        }
+        let tip = c.queued_tip();
+        let record = envelope::appended(&tip, &payload);
+        let position = tip.end + 1;
+        c.queue.push(Queued {
+            position,
+            digest: envelope::digest(&record),
+            record,
+            at,
+        });
+        Ok(position)
+    }
+    /// The outcome of the entry queued at `p`: appends every queued entry,
+    /// those after `p` too, with one barrier, and keeps the others' outcomes
+    /// for their own waits, so waits taken oldest first still batch. A position no submit returned, or one already
+    /// answered, is refused.
+    fn wait(&mut self, c: &mut Claim, p: u64) -> Advanced {
+        if let Some(i) = c.settled.iter().position(|(q, _)| *q == p) {
+            return c.settled.remove(i).1;
+        }
+        let Some(n) = c.queue.iter().position(|q| q.position == p) else {
+            return Advanced::Refused(AuthorityError::io(ErrorKind::InvalidInput));
+        };
+        let batch: Vec<Queued> = std::mem::take(&mut c.queue);
+        let mut outcomes = self.append(c, &batch);
+        debug_assert_eq!(outcomes.len(), batch.len());
+        if outcomes.iter().any(|a| !matches!(a, Advanced::Advanced(_))) {
+            c.dead = true;
+        }
+        let answer = outcomes.remove(n);
+        c.settled.extend(
+            batch
+                .iter()
+                .map(|q| q.position)
+                .filter(|q| *q != p)
+                .zip(outcomes),
+        );
+        answer
+    }
     /// The highest position durable at `at`, issuing at most one barrier.
     fn durable(&mut self, c: &mut Claim, at: Level) -> Result<u64, Error>;
     /// Up to `max` records after `from` that are durable at `at`, each checked
@@ -196,6 +274,20 @@ pub(crate) fn bad(b: envelope::Bad, position: u64) -> Error {
 /// Refuse a payload past [`MAX_ENTRY`] before any effect.
 pub(crate) fn oversized(payload: &[u8]) -> bool {
     payload.len() as u64 > MAX_ENTRY
+}
+
+/// The outcomes of a batch whose first `done` entries had `head` and whose
+/// rest were never appended.
+pub(crate) fn outcomes(
+    batch: &[Queued],
+    done: usize,
+    head: impl Fn(&Queued) -> Advanced,
+) -> Vec<Advanced> {
+    batch
+        .iter()
+        .enumerate()
+        .map(|(i, q)| if i < done { head(q) } else { Advanced::Fenced })
+        .collect()
 }
 
 /// A process-unique number for a provider handle, so a claim is valid only

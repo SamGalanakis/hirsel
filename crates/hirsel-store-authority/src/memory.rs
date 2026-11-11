@@ -2,7 +2,7 @@
 //! survives no failure. Handles made by [`Memory::share`] see one history.
 
 use crate::envelope::{self, Chain};
-use crate::{Advanced, Authority, Claim, Claimed, Error, Level, Record, live, owner_id};
+use crate::{Advanced, Authority, Claim, Claimed, Error, Level, Queued, Record, live, owner_id};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -67,29 +67,22 @@ impl Authority for Memory {
         Ok(Claimed { claim, end })
     }
 
-    fn advance(&mut self, c: &mut Claim, from: u64, payload: Vec<u8>, _at: Level) -> Advanced {
+    fn append(&mut self, c: &mut Claim, batch: &[Queued]) -> Vec<Advanced> {
         let mut w = self.world.lock().unwrap();
         let w = &mut *w;
-        if !live(self.owner, c)
-            || w.newest != Some(c.attempt)
-            || from != c.end
-            || w.chain.end() != from
-        {
+        if !live(self.owner, c) || w.newest != Some(c.attempt) || w.chain.end() != c.end {
             c.dead = true;
-            return Advanced::Fenced;
+            return crate::outcomes(batch, 0, |_| unreachable!());
         }
-        if crate::oversized(&payload) {
-            return Advanced::Refused(crate::AuthorityError::io(std::io::ErrorKind::InvalidInput));
+        for q in batch {
+            w.chain
+                .follow(&q.record)
+                .expect("an append follows its claim");
+            w.records.push(q.record.clone());
+            c.appended(q);
         }
-        let record = envelope::appended(&c.tip(), &payload);
-        w.chain
-            .follow(&record)
-            .expect("an append follows its claim");
-        w.records.push(record);
-        c.end = from + 1;
-        c.digest = w.chain.tip.digest;
         c.durable[0] = c.end;
-        Advanced::Advanced(c.end)
+        crate::outcomes(batch, batch.len(), |q| Advanced::Advanced(q.position))
     }
 
     fn durable(&mut self, c: &mut Claim, _at: Level) -> Result<u64, Error> {

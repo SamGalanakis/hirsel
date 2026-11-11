@@ -2,8 +2,8 @@
 //! real files, with the file-system calls an append makes faulted and a host
 //! failure modelled.
 //!
-//! Racing handles claim, advance groups of one to four commits at either
-//! level, wait for durability, read, and use claims that died; process and
+//! Racing handles claim, append windows of one to three entries of one to four
+//! commits at either level, wait for durability, read, and use claims that died; process and
 //! host failures strike between steps. The disk seam (`log::disk`) fails
 //! writes with nothing written, writes short, fails `fdatasync`, segment
 //! creation and the directory sync, and fails truncation. A host failure keeps
@@ -15,13 +15,13 @@
 //!    `durable`, a read there, or a claim, which is durable at `host`)
 //!    survives every later failure that level survives, with its bytes;
 //! 2. no position is acknowledged with two different entries;
-//! 3. an advance refused, or tried with a dead claim, has no effect;
+//! 3. an entry refused, or fenced behind one that failed, has no effect;
 //! 4. a claim that died (`Fenced`, `Undecided`) is `Fenced` at every later use;
 //! 5. a claimed history follows, its claim is at its end, and its versions are
 //!    the commits counted, not the entries;
 //! 6. nothing here damages the history, so nothing is ever refused as corrupt.
 
-use crate::harness::{Rng, entry};
+use crate::harness::{Rng, append, entry, stays_dead, window};
 use crate::log::Log;
 use crate::{Advanced, Authority, Claim, Error, Level, Record};
 use std::cell::RefCell;
@@ -226,7 +226,7 @@ impl Run {
     fn check(&self, all: &[Record]) -> Result<(), String> {
         for (p, b) in &self.never {
             if all.get(*p as usize - 1) == Some(b) {
-                return Err(format!("an advance with no effect is at {p}"));
+                return Err(format!("an entry with no effect is at {p}"));
             }
         }
         for (p, (b, _)) in self.ledger.range(..=all.len() as u64) {
@@ -318,17 +318,31 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
                 let Some(c) = wr.claim.as_mut() else {
                     continue;
                 };
-                let e = entry(tag, 1 + rng.below(4) as u32);
-                let from = c.end();
-                match wr.log.advance(c, from, e.clone(), at) {
-                    Advanced::Advanced(p) => {
-                        if p != from + 1 {
-                            return Err(format!("advanced from {from} to {p}"));
+                let entries: Vec<(Vec<u8>, Level)> = (0..1 + rng.below(3))
+                    .map(|i| {
+                        let at = Level(rng.below(2) as u8);
+                        (entry(tag << 2 | i, 1 + rng.below(4) as u32), at)
+                    })
+                    .collect();
+                let newest = rng.below(2) == 0;
+                let mut dead = false;
+                for ((e, at), (p, answer)) in
+                    entries
+                        .iter()
+                        .zip(window(&mut wr.log, c, &entries, newest)?)
+                {
+                    let e = Record::Appended(e.clone());
+                    match answer {
+                        Advanced::Advanced(_) => owe(&mut run.ledger, p, &e, at.0)?,
+                        Advanced::Refused(_) | Advanced::Fenced => {
+                            run.never.push((p, e));
+                            dead = true;
                         }
-                        owe(&mut run.ledger, p, &Record::Appended(e), at.0)?;
+                        Advanced::Undecided(_) => dead = true,
                     }
-                    Advanced::Refused(_) => run.never.push((from + 1, Record::Appended(e))),
-                    Advanced::Fenced | Advanced::Undecided(_) => wr.dead = wr.claim.take(),
+                }
+                if dead {
+                    wr.dead = wr.claim.take();
                 }
             }
             7 => {
@@ -369,14 +383,12 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
                 let Some(c) = wr.dead.as_mut() else {
                     continue;
                 };
-                let from = c.end();
-                let e = entry(tag, 1);
-                match wr.log.advance(c, from, e.clone(), at) {
-                    Advanced::Fenced => run.never.push((from + 1, Record::Appended(e))),
-                    other => return Err(format!("a dead claim's advance was {other:?}")),
-                }
-                if wr.log.durable(c, at) != Err(Error::Fenced) {
-                    return Err("a dead claim's durable was not fenced".into());
+                // A superseded claim may not know it yet: its submit queues,
+                // and the append is fenced with no effect.
+                if append(&mut wr.log, c, entry(tag << 2 | 3, 1), at) != Advanced::Fenced
+                    || !stays_dead(&mut wr.log, c, at)
+                {
+                    return Err("a dead claim was used again".into());
                 }
             }
             k => {

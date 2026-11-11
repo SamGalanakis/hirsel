@@ -13,7 +13,8 @@ use crate::{Advanced, Authority, AuthorityError, Claim, Error, Level, Record};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Request {
     Claim,
-    Advance { from: u64, at: u8, payload: Vec<u8> },
+    Submit { at: u8, payload: Vec<u8> },
+    Wait { position: u64 },
     Durable { at: u8 },
     Reclaim,
     Read { from: u64, at: u8, max: u64 },
@@ -26,7 +27,8 @@ impl Request {
     pub fn operation(&self) -> &'static str {
         match self {
             Request::Claim => "authority.claim",
-            Request::Advance { .. } => "authority.advance",
+            Request::Submit { .. } => "authority.submit",
+            Request::Wait { .. } => "authority.wait",
             Request::Durable { .. } => "authority.durable",
             Request::Reclaim => "authority.reclaim",
             Request::Read { .. } => "authority.read",
@@ -39,27 +41,33 @@ impl Request {
     pub fn claimed(&self) -> bool {
         matches!(
             self,
-            Request::Advance { .. } | Request::Durable { .. } | Request::Reclaim
+            Request::Submit { .. }
+                | Request::Wait { .. }
+                | Request::Durable { .. }
+                | Request::Reclaim
         )
     }
 
     /// The level the request names, if any.
     pub fn level(&self) -> Option<u8> {
         match self {
-            Request::Advance { at, .. } | Request::Durable { at } | Request::Read { at, .. } => {
+            Request::Submit { at, .. } | Request::Durable { at } | Request::Read { at, .. } => {
                 Some(*at)
             }
             _ => None,
         }
     }
 
-    /// Whether `o` can answer this request: its kind, an advance by exactly one entry and
-    /// a read within its bound. A tape or provider that breaks this is refused.
+    /// Whether `o` can answer this request: its kind, a wait answered for its own
+    /// position and a read within its bound. A tape or provider that breaks this is refused.
     pub fn admits(&self, o: &Outcome) -> bool {
         match (self, o) {
-            (Request::Claim | Request::Durable { .. }, Outcome::Position(_)) => true,
-            (Request::Advance { from, .. }, Outcome::Advanced(a)) => match a {
-                Advanced::Advanced(p) => from.checked_add(1) == Some(*p),
+            (
+                Request::Claim | Request::Submit { .. } | Request::Durable { .. },
+                Outcome::Position(_),
+            ) => true,
+            (Request::Wait { position }, Outcome::Advanced(a)) => match a {
+                Advanced::Advanced(p) => p == position,
                 _ => true,
             },
             (Request::Read { max, .. }, Outcome::Read(r)) => {
@@ -75,11 +83,14 @@ impl Request {
         let mut w = Vec::new();
         match self {
             Request::Claim => w.push(0),
-            Request::Advance { from, at, payload } => {
-                w.push(1);
-                u64(&mut w, *from);
+            Request::Submit { at, payload } => {
+                w.push(7);
                 w.push(*at);
                 bytes(&mut w, payload);
+            }
+            Request::Wait { position } => {
+                w.push(8);
+                u64(&mut w, *position);
             }
             Request::Durable { at } => w.extend_from_slice(&[2, *at]),
             Request::Reclaim => w.push(3),
@@ -106,11 +117,12 @@ impl Request {
         let mut r = Reader(b);
         let q = match r.u8()? {
             0 => Request::Claim,
-            1 => Request::Advance {
-                from: r.u64()?,
+            // 1 was an advance, before appends were split into submit and wait.
+            7 => Request::Submit {
                 at: r.u8()?,
                 payload: r.bytes()?.to_vec(),
             },
+            8 => Request::Wait { position: r.u64()? },
             2 => Request::Durable { at: r.u8()? },
             3 => Request::Reclaim,
             4 => Request::Read {
@@ -161,9 +173,10 @@ pub fn serve(
                 c.end
             }))
         }
-        Request::Advance { from, at, payload } => {
-            Outcome::Advanced(p.advance(claim()?, from, payload, Level(at)))
+        Request::Submit { at, payload } => {
+            Outcome::Position(p.submit(claim()?, payload, Level(at)))
         }
+        Request::Wait { position } => Outcome::Advanced(p.wait(claim()?, position)),
         Request::Durable { at } => Outcome::Position(p.durable(claim()?, Level(at))),
         Request::Reclaim => Outcome::Unit(p.reclaim(claim()?)),
         Request::Read { from, at, max } => Outcome::Read(p.read(from, Level(at), max)),
@@ -176,7 +189,7 @@ pub fn serve(
 /// What one seam operation returned.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Outcome {
-    /// `claim`: the claim's end; `durable`: the durable position.
+    /// `claim`: the claim's end; `submit`: the queued position; `durable`: the durable position.
     Position(Result<u64, Error>),
     Advanced(Advanced),
     Read(Result<Vec<Record>, Error>),

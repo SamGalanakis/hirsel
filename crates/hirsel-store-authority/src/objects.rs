@@ -16,8 +16,9 @@
 //! returned. Since a head names its claim and end, no two heads have equal
 //! bytes and no tag recurs.
 //!
-//! An advance is two requests: create the group object if absent, then replace
-//! the head. A claim reads the head, follows the history to its end, creates its
+//! An append of `k` entries is `k + 1` requests: create each record object if
+//! absent, then replace the head once, naming the newest. That record's digest
+//! covers every record before it, so the batch lands whole or not at all. A claim reads the head, follows the history to its end, creates its
 //! claim entry and replaces the head (or creates it when absent); of racing
 //! claims one replace succeeds.
 //!
@@ -33,11 +34,12 @@
 //! Reclamation lists `h/` and removes a group object at a position the head
 //! has reached that the chain does not name: left by a writer fenced or
 //! undecided before its head replace. It never removes one past the head's end,
-//! which may be the current writer's advance between its two requests.
+//! which may be the current writer's append between its puts and its replace.
 
 use crate::envelope::{self, Chain};
 use crate::{
-    Advanced, Authority, AuthorityError, Claim, Claimed, Error, Level, Record, live, owner_id,
+    Advanced, Authority, AuthorityError, Claim, Claimed, Error, Level, Queued, Record, live,
+    owner_id,
 };
 use hirsel_object_storage::{Condition, ObjectStorage, Put, Replaced, StorageError, Tag};
 use sha2::{Digest, Sha256};
@@ -49,7 +51,7 @@ const MAGIC: &[u8; 8] = b"HSOBJH01";
 /// The magic's family: other version digits are another format version.
 const FAMILY: &[u8; 6] = b"HSOBJH";
 const HEAD_BYTES: usize = 8 + 16 + 8 + 32 + 32;
-/// Attempts of a claim whose head replace lost to the current writer's advance.
+/// Attempts of a claim whose head replace lost to the current writer's append.
 const CLAIM_TRIES: usize = 8;
 
 /// Deliberate defects the harness must catch (its negative controls; the first
@@ -282,12 +284,49 @@ impl Objects {
         Ok(records)
     }
 
-    /// Settle a head replace that did not report success. `doubt` is whether
-    /// any replace this advance sent went unanswered: such a request may still
-    /// land at any later moment, so no later answer, a retry's mismatch
-    /// included, proves on its own that the entry is absent.
-    fn settle(&mut self, c: &mut Claim, entry: [u8; 32], doubt: bool) -> Settled {
-        let position = c.end + 1;
+    /// Moves the head from the writer's own end to `last`, the newest record
+    /// of a batch whose objects are all put, retrying while the head is still
+    /// the writer's own. A replace that went unanswered may still land at any
+    /// later moment, so no later answer, a retry's mismatch included, proves
+    /// on its own that the batch is absent.
+    fn replace_head(&mut self, c: &mut Claim, last: &Queued) -> Advanced {
+        let head = Head {
+            attempt: c.attempt,
+            end: last.position,
+            digest: last.digest,
+        }
+        .encode();
+        let mut doubt = false;
+        for _ in 0..REPLACE_TRIES {
+            let tag = c
+                .tag
+                .clone()
+                .expect("an objects claim holds its head's tag");
+            #[cfg(test)]
+            let tag = match self.has(Bug::NoCas).then(|| self.store.get_tagged(HEAD)) {
+                Some(Ok(Some((_, fresh)))) => fresh,
+                _ => tag,
+            };
+            match self.store.replace(HEAD, &head, Condition::Matches(tag)) {
+                Ok(Replaced::Replaced(tag)) => {
+                    c.tag = Some(tag);
+                    return advanced(c, last.position, last.digest);
+                }
+                Ok(Replaced::Mismatch) => {}
+                Err(_) => doubt = true,
+            }
+            match self.settle(c, last.position, last.digest, doubt) {
+                Settled::Done(a) => return a,
+                Settled::Retry => {}
+            }
+        }
+        dead(c, Advanced::Undecided(unreachable()))
+    }
+
+    /// Decides a batch whose head replaces to `position`, the record of digest
+    /// `entry`, were answered with a mismatch or not at all. The record's
+    /// digest covers every record before it, so the batch lands whole or not.
+    fn settle(&mut self, c: &mut Claim, position: u64, entry: [u8; 32], doubt: bool) -> Settled {
         let (h, tag) = match self.head() {
             Ok(Some(read)) => read,
             // Every replace was answered with a mismatch: none had an effect.
@@ -312,15 +351,15 @@ impl Objects {
             }
             return Settled::Done(dead(c, Advanced::Undecided(unreachable())));
         }
-        // A later claim holds the history. A replace of this advance may have
+        // A later claim holds the history. A replace of this append may have
         // landed before it, whatever this attempt was answered, so the chain
         // decides: the entry at its position is Advanced. Anything else there is
         // proof of absence, and the head has moved past the tag every replace
-        // of this advance was conditional on, which never recurs, so none of
+        // of this append was conditional on, which never recurs, so none of
         // them can land later: Fenced. A chain that cannot be read decides
         // nothing.
         match self.catch_up(h.end, h.digest) {
-            Ok(_) if self.chain.digests.get(c.end as usize) == Some(&entry) => {
+            Ok(_) if self.chain.digests.get(position as usize - 1) == Some(&entry) => {
                 let a = advanced(c, position, entry);
                 Settled::Done(dead(c, a))
             }
@@ -336,7 +375,7 @@ enum Settled {
     Retry,
 }
 
-/// Head replaces one advance sends before it gives up as undecided.
+/// Head replaces one append sends before it gives up as undecided.
 const REPLACE_TRIES: u32 = 3;
 
 fn unreachable() -> AuthorityError {
@@ -415,52 +454,45 @@ impl Authority for Objects {
         Err(Error::Refused(AuthorityError::Unreachable))
     }
 
-    fn advance(&mut self, c: &mut Claim, from: u64, payload: Vec<u8>, _at: Level) -> Advanced {
-        if !live(self.owner, c) || from != c.end {
-            return dead(c, Advanced::Fenced);
+    fn append(&mut self, c: &mut Claim, batch: &[Queued]) -> Vec<Advanced> {
+        if !live(self.owner, c) {
+            c.dead = true;
+            return crate::outcomes(batch, 0, |_| unreachable!());
         }
-        if crate::oversized(&payload) {
-            return Advanced::Refused(AuthorityError::io(std::io::ErrorKind::InvalidInput));
-        }
-        let entry = envelope::appended(&c.tip(), &payload);
-        let d = envelope::digest(&entry);
-        let position = from + 1;
-        // A failed put changed no head: at most it left an orphan.
-        match self.store.put_new(&group_key(position, &d), &entry) {
-            Ok(Put::Created | Put::Exists) => {}
-            Err(e) => return Advanced::Refused(failure(e)),
-        }
-        let head = Head {
-            attempt: c.attempt,
-            end: position,
-            digest: d,
-        }
-        .encode();
-        let mut doubt = false;
-        for _ in 0..REPLACE_TRIES {
-            let tag = c
-                .tag
-                .clone()
-                .expect("an objects claim holds its head's tag");
-            #[cfg(test)]
-            let tag = match self.has(Bug::NoCas).then(|| self.store.get_tagged(HEAD)) {
-                Some(Ok(Some((_, fresh)))) => fresh,
-                _ => tag,
-            };
-            match self.store.replace(HEAD, &head, Condition::Matches(tag)) {
-                Ok(Replaced::Replaced(tag)) => {
-                    c.tag = Some(tag);
-                    return advanced(c, position, d);
+        // Every group object first. A failed put changed no head: at most it
+        // left an orphan, and it and the entries after it are not appended.
+        let mut put = 0;
+        let mut failed = None;
+        for q in batch {
+            match self
+                .store
+                .put_new(&group_key(q.position, &q.digest), &q.record)
+            {
+                Ok(Put::Created | Put::Exists) => put += 1,
+                Err(e) => {
+                    failed = Some(Advanced::Refused(failure(e)));
+                    break;
                 }
-                Ok(Replaced::Mismatch) => {}
-                Err(_) => doubt = true,
-            }
-            match self.settle(c, d, doubt) {
-                Settled::Done(a) => return a,
-                Settled::Retry => {}
             }
         }
-        dead(c, Advanced::Undecided(unreachable()))
+        let head = match put {
+            0 => Advanced::Fenced,
+            _ => self.replace_head(c, &batch[put - 1]),
+        };
+        let mut out: Vec<Advanced> = batch
+            .iter()
+            .take(put)
+            .map(|q| match &head {
+                Advanced::Advanced(_) => Advanced::Advanced(q.position),
+                other => other.clone(),
+            })
+            .collect();
+        if let Some(f) = failed {
+            c.dead = true;
+            out.push(f);
+        }
+        out.resize(batch.len(), Advanced::Fenced);
+        out
     }
 
     fn durable(&mut self, c: &mut Claim, _at: Level) -> Result<u64, Error> {

@@ -76,7 +76,8 @@ fn authority.max_entry(a: Authority) -> u64
 fn authority.claim(a: Authority) -> Result[Claim of a, SeamError]
 fn claim.end(c: Claim) -> u64
 fn claim.narrow(a: Authority, take c: Claim) -> Option[Claim of a]
-fn authority.advance(a: Authority, mut c: Claim of a, from: u64, take entry: Bytes, at: Level of a) -> Advanced
+fn authority.submit(a: Authority, mut c: Claim of a, take entry: Bytes, at: Level of a) -> Result[u64, SeamError]
+fn authority.wait(a: Authority, mut c: Claim of a, position: u64) -> Advanced
 fn authority.durable(a: Authority, mut c: Claim of a, at: Level of a) -> Result[u64, SeamError]
 fn authority.read(a: Authority, from: u64, at: Level of a, max: u64) -> Result[List[HistoryRecord], SeamError]
 fn authority.get(a: Authority, name: String) -> Result[Option[Bytes], SeamError]

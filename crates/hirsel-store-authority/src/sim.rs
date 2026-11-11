@@ -14,7 +14,7 @@
 //! survive: every entry not durable at level `k` is lost.
 //!
 //! A log representation also cuts its history at a chosen request, for tests
-//! that must reach every seam call in turn. Its requests (claim, advance,
+//! that must reach every seam call in turn. Its requests (claim, wait,
 //! durable, read, get, put and reclaim, on every handle of one history) are
 //! numbered from 1, and each of the faults [`CUTS`] names the request it
 //! fires at: `fail_at` refuses it before any effect; `lose_response_at` lets
@@ -27,7 +27,7 @@
 use crate::envelope::{self, Chain};
 use crate::{
     Advanced, Authority, AuthorityError, AuthorityGrant, Claim, Claimed, ConfigError, Error, Level,
-    Record, level_name_ok, live, owner_id,
+    Queued, Record, level_name_ok, live, owner_id,
 };
 use hirsel_object_storage::{
     Condition, LIST_PAGE, Listing, ObjectStorage, Put, Replaced, StorageError, Tag, check_key,
@@ -300,14 +300,7 @@ impl Sim {
         Ok(Claimed { claim, end })
     }
 
-    fn advance_in(
-        &self,
-        w: &mut World,
-        c: &mut Claim,
-        from: u64,
-        payload: Vec<u8>,
-        at: Level,
-    ) -> Advanced {
+    fn append_in(&self, w: &mut World, c: &mut Claim, batch: &[Queued]) -> Vec<Advanced> {
         #[cfg(test)]
         let (no_fence, no_barrier) = (
             w.bug == Some(Bug::NoFence),
@@ -315,54 +308,59 @@ impl Sim {
         );
         #[cfg(not(test))]
         let (no_fence, no_barrier) = (false, false);
+        // Only the first entry's outcome is its own; the rest were never sent.
+        let first = |a: Advanced| crate::outcomes(batch, 1, move |_| a.clone());
         if !no_fence
             && (!live(self.owner, c)
                 || w.newest != Some(c.attempt)
-                || from != c.end
-                || w.entries.len() as u64 != from)
+                || w.entries.len() as u64 != c.end)
         {
             c.dead = true;
-            return Advanced::Fenced;
-        }
-        if crate::oversized(&payload) {
-            return Advanced::Refused(AuthorityError::io(std::io::ErrorKind::InvalidInput));
+            return crate::outcomes(batch, 0, |_| unreachable!());
         }
         if w.fault("refuse") {
-            return Advanced::Refused(AuthorityError::Unreachable);
+            return first(Advanced::Refused(AuthorityError::Unreachable));
         }
-        let entry = envelope::appended(&c.tip(), &payload);
         let lost = w.fault("lost_response");
         if lost && w.draws.next().is_multiple_of(2) {
             // The request was lost: the provider reads the history, finds it
-            // still ends at `from`, and reports no effect, unless it cannot read.
+            // still ends at the writer's end, and reports no effect, unless it
+            // cannot read.
             if w.fault("refuse") {
-                c.dead = true;
-                return Advanced::Undecided(AuthorityError::Unreachable);
+                return first(Advanced::Undecided(AuthorityError::Unreachable));
             }
-            return Advanced::Refused(AuthorityError::Unreachable);
+            return first(Advanced::Refused(AuthorityError::Unreachable));
         }
-        c.digest = envelope::digest(&entry);
-        w.entries.push(entry);
-        let position = w.entries.len() as u64;
-        c.end = position;
+        for q in batch {
+            w.entries.push(q.record.clone());
+            c.appended(q);
+        }
         // Whatever is appended is durable at the weakest level.
-        w.durable[0] = position;
+        w.durable[0] = c.end;
         if lost && w.fault("refuse") {
             // The response was lost and the history cannot be read.
-            c.dead = true;
-            return Advanced::Undecided(AuthorityError::Unreachable);
+            return crate::outcomes(batch, batch.len(), |_| {
+                Advanced::Undecided(AuthorityError::Unreachable)
+            });
         }
-        if at.0 > 0 && !no_barrier {
+        let top = batch.iter().map(|q| q.at).max().unwrap_or(Level(0));
+        if top.0 > 0 && !no_barrier {
             if w.fault("barrier") {
-                c.dead = true;
-                return Advanced::Undecided(AuthorityError::io(std::io::ErrorKind::Other));
+                let e = AuthorityError::io(std::io::ErrorKind::Other);
+                return crate::outcomes(batch, batch.len(), |q| {
+                    if q.at.0 > 0 {
+                        Advanced::Undecided(e.clone())
+                    } else {
+                        Advanced::Advanced(q.position)
+                    }
+                });
             }
-            w.barrier(at);
+            w.barrier(top);
         }
-        for d in &mut c.durable[..=at.0 as usize] {
-            *d = position;
+        for d in &mut c.durable[..=top.0 as usize] {
+            *d = c.end;
         }
-        Advanced::Advanced(position)
+        crate::outcomes(batch, batch.len(), |q| Advanced::Advanced(q.position))
     }
 
     fn durable_in(&self, w: &mut World, c: &mut Claim, at: Level) -> Result<u64, Error> {
@@ -483,20 +481,19 @@ impl Authority for Sim {
         r
     }
 
-    fn advance(&mut self, c: &mut Claim, from: u64, entry: Vec<u8>, at: Level) -> Advanced {
+    fn append(&mut self, c: &mut Claim, batch: &[Queued]) -> Vec<Advanced> {
         let mut w = self.world.lock().unwrap();
         let cut = w.cut();
+        let all = |a: Advanced| crate::outcomes(batch, batch.len(), move |_| a.clone());
         let r = if cut.fail {
-            Advanced::Refused(unreadable())
+            crate::outcomes(batch, 1, |_| Advanced::Refused(unreadable()))
         } else if cut.tear {
             w.power_fail();
-            c.dead = true;
-            Advanced::Undecided(unreadable())
+            all(Advanced::Undecided(unreadable()))
         } else {
-            match self.advance_in(&mut w, c, from, entry, at) {
-                Advanced::Advanced(_) if cut.lose => {
-                    c.dead = true;
-                    Advanced::Undecided(unreadable())
+            match self.append_in(&mut w, c, batch) {
+                r if cut.lose && r.iter().all(|a| matches!(a, Advanced::Advanced(_))) => {
+                    all(Advanced::Undecided(unreadable()))
                 }
                 r => r,
             }
@@ -804,8 +801,8 @@ impl Authority for Client {
     fn claim(&mut self, attempt: [u8; 16], fresh: [u8; 32]) -> Result<Claimed, Error> {
         self.serving().claim(attempt, fresh)
     }
-    fn advance(&mut self, c: &mut Claim, from: u64, payload: Vec<u8>, at: Level) -> Advanced {
-        self.serving().advance(c, from, payload, at)
+    fn append(&mut self, c: &mut Claim, batch: &[Queued]) -> Vec<Advanced> {
+        self.serving().append(c, batch)
     }
     fn durable(&mut self, c: &mut Claim, at: Level) -> Result<u64, Error> {
         self.serving().durable(c, at)

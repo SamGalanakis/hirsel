@@ -453,7 +453,7 @@ that a log prefix is complete. A crash after a durable preparation but before is
 conservatively produce InDoubt although no effect happened. Planned exceptions: a compute
 runner call is recorded but not journaled, and recovery re-issues it, because its
 signature proves it has no effect ([RUN-7](runners.md#run-7-retry-classes)); and a store
-commit's in-doubt advance is settled by reading the store's history
+commit's in-doubt append is settled by reading the store's history
 ([STORE-10](storage.md#store-10-recording)). The journal records of a durable run that
 belongs to a place commit in that place's store, with the run's writes
 ([STORE-18](storage.md#store-18-runs-at-a-place)); the rules of this section hold
@@ -1130,7 +1130,7 @@ late does; `crash_at` ends the client right after it, so every later request of 
 client fails with no effect, and the authority continues as a new client that keeps
 nothing of the old one and whose old claims are dead. An object write is whole or absent, so no cut tears one. The objects authority
 settles a head replace that got no success answer by reading the head again, and refuses
-an advance whose group put failed (the group, if written, is an orphan no head names), so
+an append whose record put failed (the record, if written, is an orphan no head names), so
 what the store sees, refused before any effect or undecided, follows from where the request
 was cut and that read, not from the kind of failure. No other provider or representation takes a cut:
 `objects.dir@1` and `objects.s3@1` refuse the members.

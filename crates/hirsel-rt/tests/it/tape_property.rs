@@ -313,12 +313,12 @@ fn seam_requests(n: u64, text: &str, bytes: &[u8]) -> Vec<hirsel_rt::authority::
         provider(None, W::Claim),
         provider(
             Some(!n),
-            W::Advance {
-                from: n,
+            W::Submit {
                 at: level,
                 payload: bytes.to_vec(),
             },
         ),
+        provider(Some(!n), W::Wait { position: n }),
         provider(Some(!n), W::Durable { at: level }),
         provider(Some(!n), W::Reclaim),
         provider(

@@ -332,14 +332,16 @@ impl Io {
                 ("authority", op, rest) => {
                     let (claim, request) = match (op, rest) {
                         ("claim", []) => (None, wire::Request::Claim),
-                        ("advance", [c, from, OpValue::Bytes(payload), at]) => (
+                        ("submit", [c, OpValue::Bytes(payload), at]) => (
                             Some(handle(c)?),
-                            wire::Request::Advance {
-                                from: bits(from)?,
+                            wire::Request::Submit {
                                 at: level(at)?,
                                 payload: payload.clone(),
                             },
                         ),
+                        ("wait", [c, p]) => {
+                            (Some(handle(c)?), wire::Request::Wait { position: bits(p)? })
+                        }
                         ("durable", [c, at]) => {
                             (Some(handle(c)?), wire::Request::Durable { at: level(at)? })
                         }
@@ -453,13 +455,16 @@ mod tests {
             Some((Outcome::Position(Ok(1)), true))
         );
         let mut b = a.clone();
-        let append = wire::Request::Advance {
-            from: 1,
+        let submit = wire::Request::Submit {
             at: 0,
             payload: b"second".to_vec(),
         };
         assert_eq!(
-            b.request(0, Some(40), append.clone(), 41),
+            b.request(0, Some(40), submit, 41),
+            Some((Outcome::Position(Ok(2)), false))
+        );
+        assert_eq!(
+            b.request(0, Some(40), wire::Request::Wait { position: 2 }, 41),
             Some((
                 Outcome::Advanced(hirsel_store_authority::Advanced::Advanced(2)),
                 false
@@ -495,13 +500,15 @@ mod tests {
             .request(
                 0,
                 Some(40),
-                wire::Request::Advance {
-                    from: 1,
+                wire::Request::Submit {
                     at: 0,
                     payload: b"payload".to_vec(),
                 },
                 41,
             )
+            .unwrap();
+        io.authorities
+            .request(0, Some(40), wire::Request::Wait { position: 2 }, 41)
             .unwrap();
         let authority = io.grant(IoGrant::Authority { index: 0 });
         for releases in [1, 0, 2] {

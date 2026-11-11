@@ -2,13 +2,13 @@
 //! bucket (the place-authority-674 model's search, on the real provider).
 //!
 //! Racing writers, each on its own handle and thread, claim with fresh
-//! identities, advance groups of one to four commits, reclaim,
-//! check durability and read; exactly one runs at a time, and before every
-//! request the turn passes to a writer chosen by the seed, so one writer's
-//! advance can be cut between its group put and its head replace by another's
-//! claim or reclamation. The bucket refuses requests, loses responses after
-//! their effect and returns incomplete listings. The oracle is a ledger of
-//! acknowledged advances, kept apart from the provider:
+//! identities, append windows of one to three entries of one to four commits,
+//! reclaim, check durability and read; exactly one runs at a time, and before
+//! every request the turn passes to a writer chosen by the seed, so one
+//! writer's append can be cut between its record puts and its head replace by
+//! another's claim or reclamation. The bucket refuses requests, loses responses
+//! after their effect and returns incomplete listings. The oracle is a ledger
+//! of acknowledged entries, kept apart from the provider:
 //!
 //! 1. no position is acknowledged with two different entries (so a fenced
 //!    writer never acknowledges);
@@ -18,7 +18,7 @@
 //! 4. no claim, read or recovery refuses the history as corrupt: nothing here
 //!    damages it;
 //! 5. a claim that died (`Fenced`, `Undecided`) is `Fenced` when used again;
-//! 6. an advance answered `Fenced` (nothing was appended) is not in the
+//! 6. an entry answered `Fenced` (nothing was appended) is not in the
 //!    recovered history.
 //!
 //! Each planted defect must break a law.
@@ -33,7 +33,7 @@
 //! the write lands (its condition checked then) just before a later request of
 //! any writer, as an unanswered request that arrives late does.
 
-use crate::harness::{Rng, entry};
+use crate::harness::{Rng, append, entry, stays_dead, window};
 use crate::objects::{Bug, Objects};
 use crate::sim::Bucket;
 use crate::{Advanced, Authority, Claim, Error, Level, Record};
@@ -106,7 +106,7 @@ fn read_all(h: &mut Objects) -> Result<Vec<Record>, String> {
 }
 
 type Ledger = Arc<Mutex<BTreeMap<u64, Record>>>;
-/// The records of advances answered `Fenced`.
+/// The records of entries answered `Fenced`.
 type Denied = Arc<Mutex<Vec<Record>>>;
 type Hook = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
 
@@ -396,35 +396,42 @@ fn writer(
                 let Some(c) = held.as_mut() else {
                     continue;
                 };
-                n += 1;
-                let e = entry((me as u64) << 32 | n, 1 + rng.below(4) as u32);
-                let from = c.end();
-                match h.advance(c, from, e.clone(), Level(0)) {
-                    Advanced::Advanced(p) => {
-                        if p != from + 1 {
-                            return Err(format!("advanced from {from} to {p}"));
+                let entries: Vec<(Vec<u8>, Level)> = (0..1 + rng.below(3))
+                    .map(|_| {
+                        n += 1;
+                        (
+                            entry((me as u64) << 32 | n, 1 + rng.below(4) as u32),
+                            Level(0),
+                        )
+                    })
+                    .collect();
+                let newest = rng.below(2) == 0;
+                let mut dead = false;
+                for ((e, _), (p, answer)) in
+                    entries.iter().zip(window(&mut h, c, &entries, newest)?)
+                {
+                    let record = Record::Appended(e.clone());
+                    match answer {
+                        Advanced::Advanced(_) => {
+                            let mut l = ledger.lock().unwrap();
+                            if l.get(&p).is_some_and(|b| *b != record) {
+                                return Err(format!("position {p} acknowledged twice"));
+                            }
+                            l.insert(p, record);
                         }
-                        let record = Record::Appended(e);
-                        let mut l = ledger.lock().unwrap();
-                        if l.get(&p).is_some_and(|b| *b != record) {
-                            return Err(format!("position {p} acknowledged twice"));
+                        Advanced::Fenced => {
+                            denied.lock().unwrap().push(record);
+                            dead = true;
                         }
-                        l.insert(p, record);
+                        Advanced::Refused(_) | Advanced::Undecided(_) => dead = true,
                     }
-                    Advanced::Refused(_) => {}
-                    answer @ (Advanced::Fenced | Advanced::Undecided(_)) => {
-                        if answer == Advanced::Fenced {
-                            denied.lock().unwrap().push(Record::Appended(e.clone()));
-                        }
-                        // A dead claim stays dead: used again, it is fenced.
-                        let from = c.end();
-                        if h.advance(c, from, e, Level(0)) != Advanced::Fenced
-                            || h.durable(c, Level(0)) != Err(Error::Fenced)
-                        {
-                            return Err("a dead claim was used again".into());
-                        }
-                        held = None;
+                }
+                if dead {
+                    // A dead claim stays dead: used again, it is fenced.
+                    if !stays_dead(&mut h, c, Level(0)) {
+                        return Err("a dead claim was used again".into());
                     }
+                    held = None;
                 }
             }
             7 => {
@@ -527,7 +534,7 @@ fn schedule(
     for e in denied.lock().unwrap().iter() {
         if let Some(p) = all.iter().position(|a| a == e) {
             return Err(format!(
-                "an advance answered Fenced is at position {} of the recovered history",
+                "an entry answered Fenced is at position {} of the recovered history",
                 p + 1
             ));
         }
@@ -578,24 +585,22 @@ fn every_planted_defect_breaks_the_object_storage_law_over_s3() {
     }
 }
 
-/// The spec's cost over `objects.s3@1`, counted by the server: an advance is
-/// two requests, `durable` one, and recovering `n` groups one head GET,
-/// `ceil(n / 1000)` listing pages and `n` group GETs.
+/// The spec's cost over `objects.s3@1`, counted by the server: a window of `k`
+/// entries is `k` record PUTs and one head replace, `durable` one request, and
+/// recovering `n` records one head GET, `ceil(n / 1000)` listing pages and `n`
+/// record GETs.
 #[test]
-fn over_s3_an_advance_is_two_requests_and_recovery_gets_each_group_once() {
+fn over_s3_a_window_is_a_put_each_and_one_replace_and_recovery_gets_each_record_once() {
     let media = Media::new(Medium::S3, 1, BTreeMap::new());
     let fake = &media.fake.as_ref().unwrap().0;
     let mut h = Objects::new(media.handle(), "zone".into(), Level(0));
     let mut c = h.claim([1; 16], [7; 32]).unwrap().claim;
-    for tag in 0..1000 {
-        let e = entry(tag, 1);
+    for w in 0..250 {
+        let entries: Vec<_> = (0..4).map(|i| (entry(w * 4 + i, 1), Level(0))).collect();
         let before = fake.requests();
-        let from = c.end();
-        assert_eq!(
-            h.advance(&mut c, from, e.clone(), Level(0)),
-            Advanced::Advanced(from + 1)
-        );
-        assert_eq!(fake.requests() - before, 2);
+        let all = window(&mut h, &mut c, &entries, w % 2 == 0).unwrap();
+        assert!(all.iter().all(|(_, a)| matches!(a, Advanced::Advanced(_))));
+        assert_eq!(fake.requests() - before, 4 + 1);
     }
     let before = fake.requests();
     assert_eq!(h.durable(&mut c, Level(0)), Ok(1001));
@@ -607,23 +612,26 @@ fn over_s3_an_advance_is_two_requests_and_recovery_gets_each_group_once() {
     assert_eq!(fake.requests() - before, 1 + 2 + 1001);
 }
 
-/// The cost the spec states: an advance is two requests (the group put and the
-/// head replace), and recovering `n` groups is a head get, one listing page and
-/// `n` group gets.
+/// The cost the spec states: a window of `k` entries is `k + 1` requests (a put
+/// per record and one head replace), and recovering `n` records is a head get,
+/// one listing page and `n` record gets.
 #[test]
-fn an_advance_is_two_requests_and_recovery_gets_each_group_once() {
+fn a_window_is_a_put_each_and_one_replace_and_recovery_gets_each_record_once() {
     let bucket = Arc::new(Bucket::new(1, BTreeMap::new()));
     let mut h = Objects::new(bucket.clone(), "zone".into(), Level(0));
     let mut c = h.claim([1; 16], [7; 32]).unwrap().claim;
-    for tag in 0..20 {
-        let e = entry(tag, 1);
+    let mut tag = 0;
+    for k in [1, 2, 3, 4, 5, 5] {
+        let entries: Vec<_> = (0..k)
+            .map(|_| {
+                tag += 1;
+                (entry(tag, 1), Level(0))
+            })
+            .collect();
         let before = bucket.requests();
-        let from = c.end();
-        assert_eq!(
-            h.advance(&mut c, from, e.clone(), Level(0)),
-            Advanced::Advanced(from + 1)
-        );
-        assert_eq!(bucket.requests() - before, 2);
+        let all = window(&mut h, &mut c, &entries, k % 2 == 0).unwrap();
+        assert!(all.iter().all(|(_, a)| matches!(a, Advanced::Advanced(_))));
+        assert_eq!(bucket.requests() - before, k + 1);
     }
     let before = bucket.requests();
     let mut fresh = Objects::new(bucket.clone(), "zone".into(), Level(0));
@@ -724,7 +732,7 @@ impl ObjectStorage for Scripted {
     }
 }
 
-/// Writer A, claimed over `s`, about to advance from its claim with `e`.
+/// Writer A, claimed over `s`, about to append from its claim with `e`.
 fn writer_a(s: &Arc<Scripted>) -> (Objects, Claim, Vec<u8>) {
     let mut h = Objects::new(s.clone(), "zone".into(), Level(0));
     let c = h.claim([1; 16], [7; 32]).unwrap().claim;
@@ -742,26 +750,33 @@ fn recovered(bucket: &Arc<Bucket>) -> Vec<Record> {
 }
 
 /// H2 case 1, our digest at p: A's first replace goes unanswered, its retry
-/// is answered with a mismatch because the late first replace landed and B
-/// then claimed. The chain holds A's entry at p, so A is `Advanced`, though
-/// the request that told it something was answered.
+/// is answered with a mismatch because the late first replace landed, then
+/// either nothing else happened (the head is A's own at p) or B claimed (the
+/// chain holds A's record at p). Either way A is `Advanced`, though the
+/// request that told it something was answered, and for a window of entries
+/// p is the window's last position, which every entry in it is answered at.
 #[test]
-fn an_advance_whose_entry_is_at_its_position_under_a_later_claim_is_advanced() {
-    let bucket = Arc::new(Bucket::new(1, BTreeMap::new()));
-    let s = Scripted::new(bucket.clone());
-    let (mut h, mut c, e) = writer_a(&s);
-    let (s2, b2) = (s.clone(), bucket.clone());
-    let lands_then_b_claims = Box::new(move || {
-        s2.land();
-        b_claims(&b2);
-    });
-    s.arm(vec![Act::Hold, Act::Before(lands_then_b_claims)], vec![]);
-    let from = c.end();
-    assert_eq!(
-        h.advance(&mut c, from, e.clone(), Level(0)),
-        Advanced::Advanced(from + 1)
-    );
-    assert_eq!(recovered(&bucket)[from as usize], Record::Appended(e));
+fn an_append_whose_entry_is_at_its_position_under_a_later_claim_is_advanced() {
+    for (k, later) in [(1, true), (2, true), (1, false), (2, false)] {
+        let bucket = Arc::new(Bucket::new(1, BTreeMap::new()));
+        let s = Scripted::new(bucket.clone());
+        let (mut h, mut c, _) = writer_a(&s);
+        let (s2, b2) = (s.clone(), bucket.clone());
+        let lands = Box::new(move || {
+            s2.land();
+            if later {
+                b_claims(&b2);
+            }
+        });
+        s.arm(vec![Act::Hold, Act::Before(lands)], vec![]);
+        let entries: Vec<_> = (0..k).map(|i| (entry(10 + i, 1), Level(0))).collect();
+        let all = window(&mut h, &mut c, &entries, true).unwrap();
+        let history = recovered(&bucket);
+        for ((e, _), (p, answer)) in entries.iter().zip(all) {
+            assert_eq!(answer, Advanced::Advanced(p), "k {k}, later {later}");
+            assert_eq!(history[p as usize - 1], Record::Appended(e.clone()));
+        }
+    }
 }
 
 /// H2 case 2, another digest at p: B claims before A's replace (answered
@@ -769,7 +784,7 @@ fn an_advance_whose_entry_is_at_its_position_under_a_later_claim_is_advanced() {
 /// on a tag the head has left for good, lands later with no effect). Both
 /// are `Fenced`, and A's entry is never in the history.
 #[test]
-fn an_advance_whose_position_holds_another_entry_is_fenced() {
+fn an_append_whose_position_holds_another_entry_is_fenced() {
     for held in [false, true] {
         let bucket = Arc::new(Bucket::new(1, BTreeMap::new()));
         let s = Scripted::new(bucket.clone());
@@ -781,9 +796,8 @@ fn an_advance_whose_position_holds_another_entry_is_fenced() {
         } else {
             s.arm(vec![Act::Before(b_claims)], vec![]);
         }
-        let from = c.end();
         assert_eq!(
-            h.advance(&mut c, from, e.clone(), Level(0)),
+            append(&mut h, &mut c, e.clone(), Level(0)),
             Advanced::Fenced,
             "held {held}"
         );
@@ -800,14 +814,14 @@ fn an_advance_whose_position_holds_another_entry_is_fenced() {
 /// never `Fenced` or `Refused`, and the doubt outlives a later answered
 /// mismatch: here the late replace lands, so A's entry is in the history.
 #[test]
-fn an_advance_whose_absence_is_unproved_is_undecided_across_retries() {
+fn an_append_whose_absence_is_unproved_is_undecided_across_retries() {
     let bucket = Arc::new(Bucket::new(1, BTreeMap::new()));
     let s = Scripted::new(bucket.clone());
     let (mut h, mut c, e) = writer_a(&s);
     s.arm(vec![Act::Hold, Act::Hold, Act::Hold], vec![]);
     let from = c.end();
     assert!(matches!(
-        h.advance(&mut c, from, e.clone(), Level(0)),
+        append(&mut h, &mut c, e.clone(), Level(0)),
         Advanced::Undecided(_)
     ));
     s.land();
@@ -823,7 +837,7 @@ fn an_advance_whose_absence_is_unproved_is_undecided_across_retries() {
     );
     let from = c.end();
     assert!(matches!(
-        h.advance(&mut c, from, e.clone(), Level(0)),
+        append(&mut h, &mut c, e.clone(), Level(0)),
         Advanced::Undecided(_)
     ));
     assert_eq!(recovered(&bucket)[from as usize], Record::Appended(e));

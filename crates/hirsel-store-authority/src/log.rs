@@ -10,20 +10,22 @@
 //! out of place is corruption, not a torn tail. Only a frame cut short at the
 //! end of the last segment is torn.
 //!
-//! An advance takes the lock file's open-file-description lock (`flock`),
-//! compares the active segment's length with the length the writer's own last
-//! append left, appends the frame with one `pwrite`, releases the lock and, at
-//! `host`, issues one `fdatasync`. A different length means another claim
+//! An append of a batch takes the lock file's open-file-description lock
+//! (`flock`), compares the active segment's length with the length the
+//! writer's own last append left, writes each entry's frame with one `pwrite`,
+//! releases the lock and, if any entry asks for `host`, issues one
+//! `fdatasync` for the batch. A different length means another claim
 //! appended: `Fenced`, with no effect. It never reads.
 //!
-//! Whatever starts a new segment, an advance or a claim, first syncs the full
+//! Whatever starts a new segment, an append or a claim, first syncs the full
 //! one, and a segment's first frame is written only once a directory sync has
 //! named it, so a host failure never cuts the history short in front of an
 //! entry it keeps.
 
 use crate::envelope::{self, Chain};
 use crate::{
-    Advanced, Authority, AuthorityError, Claim, Claimed, Error, Level, Record, live, owner_id,
+    Advanced, Authority, AuthorityError, Claim, Claimed, Error, Level, Queued, Record, live,
+    owner_id,
 };
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
@@ -308,6 +310,52 @@ impl Log {
         // A claim starts a new segment only after a full one.
         Ok(c.length < self.segment_max || !self.segment_path(c.end + 1).exists())
     }
+
+    /// Writes `q`'s frame after the writer's own end, under the lock, rolling
+    /// into a new segment after a full one. The error is the entry's outcome.
+    fn write(&mut self, c: &mut Claim, q: &Queued) -> Result<(), Advanced> {
+        let bytes = frame(q.position, &q.record);
+        if c.length >= self.segment_max {
+            // Everything in the full segment becomes durable at `host`
+            // before the next one starts, so `durable` syncs one file.
+            if c.durable[HOST.0 as usize] < c.end {
+                let synced = self
+                    .writer(c.segment)
+                    .and_then(|f| disk::sync_data(f).map_err(io));
+                if let Err(e) = synced {
+                    return Err(Advanced::Undecided(e));
+                }
+                c.durable[HOST.0 as usize] = c.end;
+            }
+            match self.create_segment(q.position) {
+                Ok(f) => self.active = Some((q.position, f)),
+                Err(AuthorityError::Io(5)) => return Err(Advanced::Fenced),
+                Err(e) => return Err(Advanced::Refused(e)),
+            }
+            c.segment = q.position;
+            c.length = 0;
+        }
+        let f = self.writer(c.segment).map_err(Advanced::Refused)?;
+        match disk::write_at(f, &bytes, c.length) {
+            Ok(n) if n == bytes.len() => {}
+            result => {
+                // Settle by the file's length: unchanged means no effect.
+                let len = f.metadata().map(|m| m.len());
+                let e = match result {
+                    Err(e) => io(e),
+                    Ok(_) => AuthorityError::io(ErrorKind::WriteZero),
+                };
+                if matches!(len, Ok(l) if l == c.length) {
+                    return Err(Advanced::Refused(e));
+                }
+                return Err(Advanced::Undecided(e));
+            }
+        }
+        c.length += bytes.len() as u64;
+        c.appended(q);
+        c.durable[PROCESS.0 as usize] = q.position;
+        Ok(())
+    }
 }
 
 struct Guard(std::os::unix::io::RawFd);
@@ -355,7 +403,7 @@ impl Authority for Log {
             }
             _ => {
                 // The full segment's tail is synced before the next one starts,
-                // as an advance does: a host failure could otherwise cut it
+                // as an append does: a host failure could otherwise cut it
                 // short under the claim, which is durable at `host`.
                 if let Some((first, _)) = last {
                     self.writer(first)
@@ -392,90 +440,65 @@ impl Authority for Log {
         })
     }
 
-    fn advance(&mut self, c: &mut Claim, from: u64, payload: Vec<u8>, at: Level) -> Advanced {
-        if !live(self.owner, c) || from != c.end {
+    fn append(&mut self, c: &mut Claim, batch: &[Queued]) -> Vec<Advanced> {
+        if !live(self.owner, c) {
             c.dead = true;
-            return Advanced::Fenced;
+            return crate::outcomes(batch, 0, |_| unreachable!());
         }
-        if crate::oversized(&payload) {
-            return Advanced::Refused(AuthorityError::io(ErrorKind::InvalidInput));
-        }
-        let position = from + 1;
-        let entry = envelope::appended(&c.tip(), &payload);
-        let bytes = frame(position, &entry);
+        // Each frame is written under the lock; `written` of them landed and
+        // `failed` is the outcome of the one after them, if any.
+        let mut written = 0;
+        let mut failed = None;
         {
-            let _guard = match self.lock() {
-                Ok(g) => g,
-                Err(e) => return Advanced::Refused(e),
+            let first = match self.lock() {
+                Ok(g) => match self.unchanged(c) {
+                    Ok(true) => Ok(g),
+                    Ok(false) => Err(Advanced::Fenced),
+                    Err(e) => Err(Advanced::Refused(e)),
+                },
+                Err(e) => Err(Advanced::Refused(e)),
             };
-            match self.unchanged(c) {
-                Ok(true) => {}
-                Ok(false) => {
-                    c.dead = true;
-                    return Advanced::Fenced;
-                }
-                Err(e) => return Advanced::Refused(e),
-            }
-            if c.length >= self.segment_max {
-                // Everything in the full segment becomes durable at `host`
-                // before the next one starts, so `durable` syncs one file.
-                if c.durable[HOST.0 as usize] < c.end {
-                    let synced = self
-                        .writer(c.segment)
-                        .and_then(|f| disk::sync_data(f).map_err(io));
-                    if let Err(e) = synced {
-                        c.dead = true;
-                        return Advanced::Undecided(e);
+            match first {
+                Ok(_guard) => {
+                    for q in batch {
+                        if let Err(a) = self.write(c, q) {
+                            failed = Some(a);
+                            break;
+                        }
+                        written += 1;
                     }
-                    c.durable[HOST.0 as usize] = c.end;
                 }
-                match self.create_segment(position) {
-                    Ok(f) => self.active = Some((position, f)),
-                    Err(AuthorityError::Io(5)) => {
-                        c.dead = true;
-                        return Advanced::Fenced;
-                    }
-                    Err(e) => return Advanced::Refused(e),
-                }
-                c.segment = position;
-                c.length = 0;
-            }
-            let f = match self.writer(c.segment) {
-                Ok(f) => f,
-                Err(e) => return Advanced::Refused(e),
-            };
-            match disk::write_at(f, &bytes, c.length) {
-                Ok(n) if n == bytes.len() => {}
-                result => {
-                    // Settle by the file's length: unchanged means no effect.
-                    let len = f.metadata().map(|m| m.len());
-                    let e = match result {
-                        Err(e) => io(e),
-                        Ok(_) => AuthorityError::io(ErrorKind::WriteZero),
-                    };
-                    if matches!(len, Ok(l) if l == c.length) {
-                        return Advanced::Refused(e);
-                    }
-                    c.dead = true;
-                    return Advanced::Undecided(e);
-                }
+                Err(a) => failed = Some(a),
             }
         }
-        c.length += bytes.len() as u64;
-        c.end = position;
-        c.digest = envelope::digest(&entry);
-        c.durable[PROCESS.0 as usize] = position;
-        if at >= HOST {
-            let synced = self
+        // One barrier covers every frame written, at the strongest level any
+        // of them asks for.
+        let top = batch[..written].iter().map(|q| q.at).max();
+        let mut barrier = None;
+        if top >= Some(HOST) && c.durable[HOST.0 as usize] < c.end {
+            match self
                 .writer(c.segment)
-                .and_then(|f| disk::sync_data(f).map_err(io));
-            if let Err(e) = synced {
-                c.dead = true;
-                return Advanced::Undecided(e);
+                .and_then(|f| disk::sync_data(f).map_err(io))
+            {
+                Ok(()) => c.durable[HOST.0 as usize] = c.end,
+                Err(e) => barrier = Some(e),
             }
-            c.durable[HOST.0 as usize] = position;
         }
-        Advanced::Advanced(position)
+        if failed.is_some() || barrier.is_some() {
+            c.dead = true;
+        }
+        batch
+            .iter()
+            .enumerate()
+            .map(|(i, q)| match (&barrier, i.cmp(&written)) {
+                (Some(e), std::cmp::Ordering::Less) if q.at >= HOST => {
+                    Advanced::Undecided(e.clone())
+                }
+                (_, std::cmp::Ordering::Less) => Advanced::Advanced(q.position),
+                (_, std::cmp::Ordering::Equal) => failed.clone().unwrap_or(Advanced::Fenced),
+                _ => Advanced::Fenced,
+            })
+            .collect()
     }
 
     fn durable(&mut self, c: &mut Claim, at: Level) -> Result<u64, Error> {

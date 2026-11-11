@@ -63,7 +63,7 @@ history holds, and returns a `Store` that keeps `a`. Of openers that race, exact
 every other open returns `Fenced()`. `Store` is an ordinary affine opaque type; it exports no copying or sending
 bound, and every operation that changes it takes it `mut`. One `Store` value is the
 store's **head**: its only writer. A later claim of the same authority, in this process
-or any other, fences the earlier head: its next advance of the history returns
+or any other, fences the earlier head: its next append to the history returns
 `Fenced()`, and it closes. Other runs and hosts reach a store only through its head
 ([STORE-12](#store-12-transactions-at-a-runner)) or by following its history
 ([STORE-20](#store-20-one-history-many-machines)).
@@ -677,7 +677,9 @@ a query reads from it depends on no commit that a failure level `at` survives co
 Releasing that result at a stronger level waits for that level like any outcome, and
 reading one's own write takes `store.durable` on its ticket and then a new snapshot; a
 snapshot never advances. The head keeps the state at `V` and at each declared level's
-`D(L)`, sharing equal states, so the snapshots it can take cost O(levels) retained states.
+`D(L)`, sharing equal states, so the snapshots it can take cost O(levels) retained states;
+while a serve holds groups submitted and unanswered, it also keeps each one's state until
+all are answered, at most 8 more.
 `store.snapshot` takes the store `mut` because it shares a state the head holds,
 which it moves out and back, though it changes nothing observable.
 `store.version` names a snapshot's version; it takes `a` by plain shared borrow to name
@@ -821,9 +823,9 @@ refuses a request that differs from the recorded one in any byte. The recording 
 never changes what a transaction does.
 
 At the `durable` level ([RUN-14](runners.md#run-14-recording-levels)) a commit's
-durability point is the advance of the history that carries it, journaled like any
+durability point is the wait that appends the group carrying it, journaled like any
 request. A crash between that request's `Prepared` and `Completed` records leaves it in
-doubt, and recovery settles it by reading the history: every advance carries its
+doubt, and recovery settles it by reading the history: every appended group carries its
 writer's claim and is one group whose digest the writer computed before it sent it, so
 the history either holds that group or holds another in its place. That is a provider recovery procedure
 [recording and resuming](determinism.md#recording-and-resuming) allows.
@@ -850,7 +852,8 @@ fn authority.max_entry(a: Authority) -> u64
 fn authority.claim(a: Authority) -> Result[Claim of a, SeamError]
 fn claim.end(c: Claim) -> u64
 fn claim.narrow(a: Authority, take c: Claim) -> Option[Claim of a]
-fn authority.advance(a: Authority, mut c: Claim of a, from: u64, take entry: Bytes, at: Level of a) -> Advanced
+fn authority.submit(a: Authority, mut c: Claim of a, take entry: Bytes, at: Level of a) -> Result[u64, SeamError]
+fn authority.wait(a: Authority, mut c: Claim of a, position: u64) -> Advanced
 fn authority.durable(a: Authority, mut c: Claim of a, at: Level of a) -> Result[u64, SeamError]
 fn authority.read(a: Authority, from: u64, at: Level of a, max: u64) -> Result[List[HistoryRecord], SeamError]
 fn authority.get(a: Authority, name: String) -> Result[Option[Bytes], SeamError]
@@ -860,8 +863,8 @@ fn authority.reclaim(a: Authority, mut c: Claim of a) -> Result[(), SeamError]
 
 `SeamError` is the seam's own failure, a core type; the engine reports each as the
 `StoreError` of the same name, `Format(..)` as `Unsupported(Format(..))`
-([STORE-13](#store-13-failures)). `claim.end` is the position the claim's holder last
-extended the history to. A claim kept where its brand cannot be written (a field of the
+([STORE-13](#store-13-failures)). `claim.end` is the highest position a wait on the
+claim was answered `Advanced` at. A claim kept where its brand cannot be written (a field of the
 store) is recovered with `claim.narrow`, which is `None()`, ending the claim, when it is
 not `a`'s.
 
@@ -871,7 +874,7 @@ by recovery like any other and refused if it breaks the format.
 
 **Cancellation.** No seam operation is a cancellation point
 ([CONC-3](concurrency.md#conc-3-cancellation)), under any provider: a task's `claim`,
-`advance`, `durable`, `read`, `get`, `put` and `reclaim` run to their outcome whatever its
+`submit`, `wait`, `durable`, `read`, `get`, `put` and `reclaim` run to their outcome whatever its
 scope's cancellation, as a shielded drop's `Io` does, and no provider sees a cancellation.
 A commit the engine has started therefore either completes or, when the scope was
 cancelled before it started, never began; it is never cut between its entry and its
@@ -881,7 +884,7 @@ durability, and a cancellation never closes the store.
 **end** is the position of the last one, 0 for none. The authority writes every record
 and owns its framing and chain (**Records** below): a **claim record** is the authority's
 own, and an **appended record** carries one **entry**, bytes the engine passed to
-`authority.advance` and the authority never reads. `authority.read` returns each record as
+`authority.submit` and the authority never reads. `authority.read` returns each record as
 a `HistoryRecord`: `Claimed(epoch, attempt, identity)` or `Appended(entry)`. What an entry
 holds (a commit group) is the engine's format (below); commit versions are numbered by the
 engine, never by positions.
@@ -896,38 +899,46 @@ record, ticket and frontier carries and which no other history uses, a fork's in
 The fence is the claim record itself: there is no fence object, so nothing that reclaims
 objects can remove one.
 
-**Advance.** `authority.advance(a, c, from, entry, at)` puts an appended record carrying
-`entry` at position `from + 1`, whole or nothing, only if `c` is the claim of the newest
-claim record and the history ends at `from`, and returns once the record is durable at
-`at`:
+**Append.** An append is split in two. `authority.submit(a, c, entry, at)` queues an
+appended record carrying `entry` at the claim's next position, one past the history's
+end or the last entry it queued, and returns that position with no request and no
+effect: a dead claim is `Fenced()` and an entry over `authority.max_entry` is
+`Refused(..)`. `authority.wait(a, c, p)` appends every entry the claim has queued, those
+submitted after `p` too, in order, whole or nothing each, only while `c` is the claim of
+the newest claim record and the history ends where the first of them follows, with at
+most one barrier at the strongest level any of them names, and returns `p`'s outcome
+once its record is durable at its `at`. The outcomes of the other entries are kept for
+their own waits, so waits taken in any order answer each position once; a position no
+submit returned, or one already answered, is `Refused(..)`.
 
-- `Advanced(end)`: the entry is in the history at `end` and durable at `at`.
+- `Advanced(p)`: the entry is in the history at `p` and durable at its level.
 - `Fenced()`: a later claim record is in the history, the history proves the entry absent,
-  and no request the advance sent can still land.
+  and no request the append sent can still land. An entry queued after one that was not
+  appended is `Fenced()` too: it was never sent.
 - `Refused(e)`: the request was refused before it had any effect.
 - `Undecided(e)`: whether the entry is in the history could not be read, or the entry is
-  in the history and the barrier for `at` failed. A failed barrier is never retried into
-  success.
+  in the history and the barrier for its level failed. A failed barrier is never retried
+  into success.
 
 An unanswered request may land at any later moment, so neither a later claim nor a retry's
 answer shows by itself that the entry is absent. A provider that did not hear its append
-succeed settles it by reading the history at `p = from + 1`. Once any request of the
-advance went unanswered, that doubt holds for every retry:
+succeed settles it by reading the history at `p`, the position of the last record it
+sent; that record's chain covers every record before it. Once any request of the append
+went unanswered, that doubt holds for every retry:
 
 1. this entry at `p`: `Advanced(p)`, even when a later claim holds the history;
-2. another entry at `p`, under a later claim that no request of the advance can land
+2. another entry at `p`, under a later claim that no request of the append can land
    behind: `Fenced()`;
 3. nothing at `p` while the head is unchanged, or a history it cannot read: `Undecided`,
    never `Fenced()`, and never `Refused` after a request went unanswered.
 
-After `Fenced()` or `Undecided(..)` the claim is dead: every later operation with it
-returns `Fenced()`. The engine closes the store, a waiting transaction returns
-`Unknown(..)` on `Undecided`, and the next claim settles what survived. A head has at most
-one advance in flight; the groups behind it queue. A superseded head learns that it was
-fenced at its next `advance`, `durable` or `reclaim`; it never released an outcome that
-depends on a commit the history does not hold, because the gate waited for the advance.
-There is no second way to extend a history, and a commit exists exactly when the history
-holds it.
+After any outcome but `Advanced` the claim is dead: every later operation with it returns
+`Fenced()`, and entries queued behind are `Fenced()`. The engine closes the store, a
+waiting transaction returns `Unknown(..)` on `Undecided`, and the next claim settles what
+survived. A superseded head learns that it was fenced at its next `wait`, `durable` or
+`reclaim`; it never released an outcome that depends on a commit the history does not
+hold, because the gate waited for that commit's append. There is no second way to extend
+a history, and a commit exists exactly when the history holds it.
 
 **Durability and reads.** `authority.durable(a, c, at)` returns the highest position
 durable at `at`, issuing at most one barrier for every entry since the last.
@@ -966,21 +977,21 @@ floor.
 | `authority.objects@1` | a head object and immutable segment objects in an object-storage entry | the one level its grant names and states, such as `zone` or `region` |
 | `authority.sim@1` | either representation, simulated | as its grant states |
 
-- **Local log.** An advance takes the lock file's open-file-description lock (`flock` or
+- **Local log.** A wait takes the lock file's open-file-description lock (`flock` or
   `F_OFD_SETLK`; never a process-associated `fcntl` lock, which closing any descriptor of
   the file releases), compares the active segment's length with the length the writer's
-  own last append left, appends the entry with one `write`, and releases the lock; a
-  different length means another claim appended, and the advance returns `Fenced()` with
-  no effect. It then issues one `fdatasync` when `at` is `host`. A new segment
+  own last append left, appends each queued entry with one `write`, and releases the lock;
+  a different length means another claim appended, and the wait returns `Fenced()` with
+  no effect. It then issues one `fdatasync` when any of the entries names `host`. A new segment
   adds a directory sync when it is created. A claim takes the same lock, truncates only a
   torn tail, appends its claim record and synchronizes. A reader at `host` notes the
   file's length, synchronizes the file and returns entries up to that length, so it never
   returns an entry a host crash could lose. A failed `fdatasync` returns
   `Undecided(Io(..))`.
 - **Object storage.** The head object is the only mutable object and changes only by a
-  conditional replace. An advance puts the record as an object named by its position
-  and digest, create-if-absent, then replaces the head with one that names its claim, the
-  new end and the record's digest, conditional on the entity tag the writer's own previous
+  conditional replace. A wait puts each queued record as an object named by its position
+  and digest, create-if-absent, then replaces the head once with one that names its
+  claim, the new end and the last record's digest, conditional on the entity tag the writer's own previous
   replace returned. The writer takes that tag only from its own replace's response, or
   from a read of the head that shows its own claim at its own end, never from any other
   read. A head names its claim and end, so no two heads have equal bytes and no tag
@@ -1005,10 +1016,10 @@ floor.
   exactly the same engine, and it is the one fault path; the engine has no other fault
   seam.
 
-**Cost per commit group.** The log: one `write` and, at `host`, one `fdatasync`,
-plus the lock, unlock and length check, with no read. Object storage: two requests (the
-segment put and the head replace); the next group's segment put may be in flight while
-this group's head replace is pending, and head replaces are serialized. A claim costs a
+**Cost per wait.** For `k` queued groups, the log: `k` `write`s and, when any names
+`host`, one `fdatasync`, plus one lock, unlock and length check, with no read. Object
+storage: `k + 1` requests (a record put each and one head replace). A submit costs no
+request. A claim costs a
 read of the history to its end and one synchronized append, or two requests. Taking a
 snapshot costs no request.
 
@@ -1030,8 +1041,12 @@ runners. The grant's floor is a name the provider declares, checked before entry
 
 **Group commit.** Commits apply to the head's state at once, raising `V`, and queue. A
 queue is advanced as one group when an outcome awaits its durability or a group bound in
-the configuration is reached, never on a timer. **The head never holds a key across an
-authority request:** ordering and running a transaction wait on no advance, no object
+the configuration is reached, never on a timer. A head serving calls
+([STORE-12](#store-12-transactions-at-a-runner)) runs the arrivals already waiting in its
+inbox before it releases the ends it holds, over at most 8 inbox batches, so their commits
+share groups and one wait covers them; a group that reaches a bound meanwhile is submitted
+without a wait while fewer than 8 are unanswered. **The head never holds a key across an
+authority request:** ordering and running a transaction wait on no append, no object
 read and no other machine, so a contended key is served at memory speed whatever the
 authority.
 
@@ -1102,7 +1117,7 @@ trusts every record before it. The last record is named by no later one, only by
 provider: on object storage its object name carries its digest, and a local log checks only
 its frame's length and position.
 
-**Groups.** Each appended record's entry is one **group**, the commits of one advance:
+**Groups.** Each appended record's entry is one **group**, the commits of one submit:
 
 ```text
 group  = "HSGRUP01" count:u32 commit* defs:u32 def*
@@ -1188,7 +1203,8 @@ record against the chain as it reads it.
 in frames `len:u32 check:u32 record`, where `check` is the first four bytes of the SHA-256
 of `len` and the record's position, so a damaged length or a frame out of place is
 corruption, not a torn tail. A segment of 256 MiB or more takes no more records; the
-next record starts a new one. One advance is one append and, at `host`, one `fdatasync`.
+next record starts a new one. A wait is one `write` per queued record and, at `host`, one
+`fdatasync`.
 
 **Object storage.** A record is the object `h/` followed by its history position as 20
 decimal digits, `-` and the record's digest in lowercase hexadecimal, put only if free.
@@ -1199,8 +1215,8 @@ head = "HSOBJH01" attempt:[16] end:u64 digest:[32] sum:[32]
 ```
 
 naming the newest claim's attempt, the history's end and the last record's digest; `sum`
-is the SHA-256 of everything before it. An advance puts the record, then replaces the head
-conditionally on the tag of the writer's own last replace. A node is `n/` followed by its
+is the SHA-256 of everything before it. A wait puts each queued record, then replaces the
+head once, conditionally on the tag of the writer's own last replace. A node is `n/` followed by its
 hexadecimal digest. A record object no head's chain reaches, left by a writer fenced or
 undecided before its head replace, is not history and is reclaimed. A listing only finds
 candidates: every object is checked against the digest that names it.
@@ -1209,7 +1225,7 @@ candidates: every object is checked against the digest that names it.
 included, so whether a transaction fits depends only on its run. Creating a store whose
 `transaction_bytes` plus 8 KiB of group and definition overhead exceeds
 `authority.max_entry` refuses with `Unsupported(Size(..))`, and a group is cut before it would exceed that, so
-every commit the limits admit fits in one advance. The frame's `u32` length bounds a
+every commit the limits admit fits in one entry. The frame's `u32` length bounds a
 local group at 4 GiB.
 
 **Recovery.** Opening claims the authority, whose claim reads the history to its end and
@@ -1233,13 +1249,13 @@ removes nothing. A crash may tear or lose a suffix no level had reported durable
 recovery ends the history before it. When no intact state exists the open refuses rather
 than guess. Recovery never runs a body.
 
-**Costs.** A local advance copies each commit's bytes once into a reusable group buffer,
+**Costs.** A local append copies each commit's bytes once into a reusable group buffer,
 hashes the group once for its digest, and the authority hashes the record once for the
 chain; it makes one write and, at `host`, one `fdatasync`. The record and its frame add
 65 bytes per group and the group 16 bytes plus its definition table. A commit adds about
 40 bytes plus its caller, argument, outcome and, per write, 9 bytes plus the key and
-value. A claim is one record of 105 bytes, 113 framed on a log. On object storage an advance is one put and
-one conditional replace. Records are written once and never rewritten; a checkpoint
+value. A claim is one record of 105 bytes, 113 framed on a log. On object storage a wait of `k` groups is `k` puts
+and one conditional replace. Records are written once and never rewritten; a checkpoint
 writes only the nodes it does not share with the previous one, and the object-storage
 head is the only object rewritten. Recovery reads every record the authority retains and
 applies only the commits after the newest checkpoint: for `N` commits since it, their

@@ -17,7 +17,7 @@ compare-and-swap (`FenceableManifest::init_writer`) and writing a fence WAL.
 The store has no fence objects: since place-store-681 it is a writer over an
 authority (storage.md STORE-11), and a writer holds the history by its claim.
 `authority.claim` ends every earlier claim, and an ended claim's
-`authority.advance` answers `Fenced` with nothing appended, which is SlateDB's
+`authority.wait` answers `Fenced` with nothing appended, which is SlateDB's
 guarantee made by the authority instead of by the store's layout. The model
 negative controls for it are `harness_objects.rs` (`no_cas`, `any_epoch`,
 `trust_listing`).

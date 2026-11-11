@@ -25,11 +25,14 @@ fn a_later_claim_fences_the_earlier_writer() {
     let mut a = Log::open(dir.path(), HOST).unwrap();
     let mut b = Log::open(dir.path(), HOST).unwrap();
     let mut ca = a.claim([1; 16], [9; 32]).unwrap().claim;
-    assert_eq!(a.advance(&mut ca, 1, entry(1), HOST), Advanced::Advanced(2));
+    assert_eq!(a.submit(&mut ca, entry(1), HOST), Ok(2));
+    assert_eq!(a.wait(&mut ca, 2), Advanced::Advanced(2));
     let cb = b.claim([2; 16], [8; 32]).unwrap();
     assert_eq!(cb.end, 3);
     // The superseded writer appends nothing and stays dead.
-    assert_eq!(a.advance(&mut ca, 2, entry(2), HOST), Advanced::Fenced);
+    assert_eq!(a.submit(&mut ca, entry(2), HOST), Ok(3));
+    assert_eq!(a.wait(&mut ca, 3), Advanced::Fenced);
+    assert_eq!(a.submit(&mut ca, entry(3), HOST), Err(Error::Fenced));
     assert_eq!(a.durable(&mut ca, HOST), Err(Error::Fenced));
     let all = b.read(0, HOST, u64::MAX).unwrap();
     // The second claim, one epoch up, repeats the identity the first minted.
@@ -56,7 +59,8 @@ fn a_cut_short_tail_is_settled_and_a_damaged_one_refused() {
     let dir = tempfile::tempdir().unwrap();
     let mut a = Log::open(dir.path(), HOST).unwrap();
     let mut c = a.claim([1; 16], [9; 32]).unwrap().claim;
-    assert_eq!(a.advance(&mut c, 1, entry(1), HOST), Advanced::Advanced(2));
+    assert_eq!(a.submit(&mut c, entry(1), HOST), Ok(2));
+    assert_eq!(a.wait(&mut c, 2), Advanced::Advanced(2));
     let whole = fs::read(segment(dir.path())).unwrap();
 
     // A frame cut short at the end is an append a crash interrupted.

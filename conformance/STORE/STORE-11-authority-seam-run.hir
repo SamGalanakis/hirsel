@@ -8,18 +8,21 @@
 // stdout: second claim to 2
 // stdout: first writer fenced
 // stdout: fenced claim stays fenced
-// stdout: advanced to 3
-// stdout: read 3: claims of epochs 1 and 2 naming one identity, entry 3 kept
+// stdout: a dead claim submits nothing
+// stdout: submitted at 3 and 4
+// stdout: answered 4 then 3, claim at 4
+// stdout: read 4: claims of epochs 1 and 2 naming one identity, entries 3 and 4 kept
 // stdout: put twice: ok
 // stdout: other bytes: corrupt x
 // stdout: missing object: none
 // stdout: a level of other is not main's
 // stdout: a claim of main is not other's
 // The authority seam: a grant names each authority and the levels its provider declares;
-// a later claim fences the writer before it, whose claim stays dead; a read returns each
-// claim as a record one epoch up naming the one store identity, and each entry as the
-// payload it was advanced with; objects are created once; and a level or claim of one
-// authority never narrows to another.
+// a later claim fences the writer before it, whose claim stays dead and queues nothing;
+// entries submitted together take consecutive positions, and waits taken newest first
+// each answer their own; a read returns each claim as a record one epoch up naming the
+// one store identity, and each entry as the payload it was submitted with; objects
+// are created once; and a level or claim of one authority never narrows to another.
 pub type Failed = Failed()
 
 fn say(stdout: Stdout, line: String) -> Result[(), Failed] {
@@ -63,7 +66,11 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
   }
   let mut second = take made_second
   say(stdout, f"second claim to {claim.end(second)}")?
-  match authority.advance(a, mut first, 1, b"stale", floor) {
+  let stale = match authority.submit(a, mut first, b"stale", floor) {
+    Ok(p) => authority.wait(a, mut first, p),
+    Error(_) => Fenced(),
+  }
+  match stale {
     Fenced() => say(stdout, "first writer fenced")?,
     _ => say(stdout, "first writer advanced")?,
   }
@@ -71,8 +78,22 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
     Error(Fenced()) => say(stdout, "fenced claim stays fenced")?,
     _ => say(stdout, "fenced claim revived")?,
   }
-  match authority.advance(a, mut second, 2, b"three", floor) {
-    Advanced(end) => say(stdout, f"advanced to {end}")?,
+  match authority.submit(a, mut first, b"dead", floor) {
+    Error(Fenced()) => say(stdout, "a dead claim submits nothing")?,
+    _ => say(stdout, "a dead claim submitted")?,
+  }
+  let (Ok(p3), Ok(p4)) = (
+    authority.submit(a, mut second, b"three", floor),
+    authority.submit(a, mut second, b"four", floor)
+  ) else {
+    return Error(Failed())
+  }
+  say(stdout, f"submitted at {p3} and {p4}")?
+  match (authority.wait(a, mut second, p4), authority.wait(a, mut second, p3)) {
+    (Advanced(q4), Advanced(q3)) => say(
+      stdout,
+      f"answered {q4} then {q3}, claim at {claim.end(second)}"
+    )?,
     _ => say(stdout, "second writer refused")?,
   }
   let Ok(all) = authority.read(a, 0, floor, 10) else {
@@ -81,7 +102,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
   let mut count: u64 = 0
   let mut claims = true
   let mut identity: Bytes = b""
-  let mut kept = false
+  let mut appended: List[Bytes] = []
   for r in all {
     count = count + 1
     match r {
@@ -91,19 +112,20 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
         identity = copy named
       },
       Appended(payload) => {
-        kept = count == 3 && payload == b"three"
+        list.push(mut appended, copy payload)
       },
     }
   }
+  let kept = count == 4 && appended == [b"three", b"four"]
   let order = if claims {
     "claims of epochs 1 and 2 naming one identity"
   } else {
     "claims out of order"
   }
   if kept {
-    say(stdout, f"read {count}: {order}, entry 3 kept")?
+    say(stdout, f"read {count}: {order}, entries 3 and 4 kept")?
   } else {
-    say(stdout, f"read {count}: {order}, entry 3 lost")?
+    say(stdout, f"read {count}: {order}, entries 3 and 4 lost")?
   }
   let made = authority.put(a, "x", b"1")
   let twice = authority.put(a, "x", b"1")

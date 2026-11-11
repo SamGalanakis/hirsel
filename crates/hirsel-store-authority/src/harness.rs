@@ -1,7 +1,8 @@
 //! The crash and level law, run against the simulated authority.
 //!
-//! Racing writers claim with fresh identities, advance groups of one to four
-//! commits at random levels and wait for durability;
+//! Racing writers claim with fresh identities, submit windows of one to three
+//! entries of one to four commits at random levels, wait on them newest or
+//! oldest first, and wait for durability;
 //! readers read at random levels; failures at random levels strike between
 //! steps, with every fault the simulation injects. The oracle is a ledger of
 //! what was acknowledged, kept apart from the authority:
@@ -28,6 +29,61 @@ use std::collections::BTreeMap;
 /// no authority reads it, so only its bytes and size matter.
 pub(crate) fn entry(tag: u64, parts: u32) -> Vec<u8> {
     tag.to_le_bytes().repeat(parts as usize * 4)
+}
+
+/// Appends a window of `entries` (each a payload and its level) on `c`: submits
+/// them all, then waits on them newest or oldest first; either way the first
+/// wait appends the window with one barrier. Each entry's position and outcome, in submit order; a wait
+/// answered for another position than its submit's is an error, and an entry
+/// a dead claim refused to queue is `Fenced`.
+pub(crate) fn window(
+    a: &mut dyn Authority,
+    c: &mut Claim,
+    entries: &[(Vec<u8>, Level)],
+    newest: bool,
+) -> Result<Vec<(u64, Advanced)>, String> {
+    let start = c.end() + 1;
+    let mut queued = Vec::new();
+    for (i, (e, at)) in entries.iter().enumerate() {
+        let expect = start + i as u64;
+        match a.submit(c, e.clone(), *at) {
+            Ok(p) if p == expect => queued.push(p),
+            Ok(p) => return Err(format!("submitted at {p}, not {expect}")),
+            Err(Error::Fenced) => break,
+            Err(e) => return Err(format!("a submit was refused: {e:?}")),
+        }
+    }
+    if newest {
+        queued.reverse();
+    }
+    let mut out = BTreeMap::new();
+    for p in queued {
+        let answer = a.wait(c, p);
+        if matches!(answer, Advanced::Advanced(q) if q != p) {
+            return Err(format!("a wait at {p} answered {answer:?}"));
+        }
+        out.insert(p, answer);
+    }
+    Ok((0..entries.len() as u64)
+        .map(|i| {
+            let p = start + i;
+            (p, out.remove(&p).unwrap_or(Advanced::Fenced))
+        })
+        .collect())
+}
+
+/// Appends `e` alone at `at`: a submit and its wait.
+pub(crate) fn append(a: &mut dyn Authority, c: &mut Claim, e: Vec<u8>, at: Level) -> Advanced {
+    match a.submit(c, e, at) {
+        Ok(p) => a.wait(c, p),
+        Err(Error::Refused(e)) => Advanced::Refused(e),
+        Err(_) => Advanced::Fenced,
+    }
+}
+
+/// Whether a dead claim stays dead: used again, it queues nothing and is fenced.
+pub(crate) fn stays_dead(a: &mut dyn Authority, c: &mut Claim, at: Level) -> bool {
+    a.submit(c, entry(0, 1), at) == Err(Error::Fenced) && a.durable(c, at) == Err(Error::Fenced)
 }
 
 /// The position a refusal names, when it names a history record.
@@ -163,27 +219,32 @@ fn schedule(seed: u64, steps: u32, levels: u8, bug: Option<Bug>) -> Result<(), S
                 let Some(c) = wr.claim.as_mut() else {
                     continue;
                 };
-                tag += 1;
-                let e = entry(tag, 1 + rng.below(4) as u32);
-                let from = c.end();
-                match wr.sim.advance(c, from, e.clone(), at) {
-                    Advanced::Advanced(p) => {
-                        if p != from + 1 {
-                            return Err(format!("advanced from {from} to {p}"));
+                let entries: Vec<(Vec<u8>, Level)> = (0..1 + rng.below(3))
+                    .map(|_| {
+                        tag += 1;
+                        let at = Level(rng.below(levels as u64) as u8);
+                        (entry(tag, 1 + rng.below(4) as u32), at)
+                    })
+                    .collect();
+                let newest = rng.below(2) == 0;
+                let mut dead = false;
+                for ((e, at), (p, answer)) in
+                    entries
+                        .iter()
+                        .zip(window(&mut wr.sim, c, &entries, newest)?)
+                {
+                    match answer {
+                        Advanced::Advanced(_) => {
+                            owe(&mut ledger, p, &Record::Appended(e.clone()), at.0, true)?
                         }
-                        owe(&mut ledger, p, &Record::Appended(e), at.0, true)?;
+                        _ => dead = true,
                     }
-                    Advanced::Refused(_) => {}
-                    Advanced::Fenced | Advanced::Undecided(_) => {
-                        // A dead claim stays dead: used again, it is fenced.
-                        let from = c.end();
-                        if wr.sim.advance(c, from, e, at) != Advanced::Fenced
-                            || wr.sim.durable(c, at) != Err(Error::Fenced)
-                        {
-                            return Err("a dead claim was used again".into());
-                        }
-                        wr.claim = None;
+                }
+                if dead {
+                    if !stays_dead(&mut wr.sim, c, at) {
+                        return Err("a dead claim was used again".into());
                     }
+                    wr.claim = None;
                 }
             }
             7 => {

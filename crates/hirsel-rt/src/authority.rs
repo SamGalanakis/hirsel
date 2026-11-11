@@ -4,7 +4,7 @@
 //!
 //! What follows from the grant alone (a projection, the declared levels, the floor, the
 //! entry bound, a claim's end and the narrowings) is the [`State`]'s, so replay derives it
-//! again. What a provider decides (each claim, advance, barrier, read and object request)
+//! again. What a provider decides (each claim, submit, wait, barrier, read and object request)
 //! is a sampled input: a live adapter draws it from its [`Providers`], replay from the
 //! tape, and [`State::sample`] admits either the same way, minting a claim's handle and
 //! moving its end.
@@ -243,8 +243,8 @@ impl State {
     }
 
     /// Admit a provider's outcome, live or recorded: it answers its request, an admitted
-    /// claim mints its handle (a recorded one must name the same) and an advance moves the
-    /// claim's end.
+    /// claim mints its handle (a recorded one must name the same) and an answered wait moves
+    /// the claim's end.
     pub(crate) fn sample_seam(
         &mut self,
         request: &SeamRequest,
@@ -273,11 +273,14 @@ impl State {
                 Some(id)
             }
             _ if minted.is_some() => return Err(AdapterError::InvalidCompletion),
-            (_, Outcome::Advanced(Advanced::Advanced(end))) => {
+            (_, Outcome::Advanced(Advanced::Advanced(p))) => {
+                // Waits may be answered newest first: the end never moves back.
                 let c = claim.expect("a claimed request");
-                self.handles
-                    .rows
-                    .insert(c, Grant::Claim { index, end: *end });
+                let end = match self.handles.rows.get(&c) {
+                    Some(Grant::Claim { end, .. }) => (*end).max(*p),
+                    _ => *p,
+                };
+                self.handles.rows.insert(c, Grant::Claim { index, end });
                 None
             }
             _ => None,
@@ -839,18 +842,17 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_claim(
     unsafe { provider(ctx, out, a.read(), None, wire::Request::Claim) }
 }
 
-/// `authority.advance(a, mut c, from, take entry, at) -> Advanced`.
+/// `authority.submit(a, mut c, take payload, at) -> Result[u64, SeamError]`.
 /// # Safety
-/// Context bound; Authority, Claim and Level borrowed; the entry transfers one owner
+/// Context bound; Authority, Claim and Level borrowed; the payload transfers one owner
 /// credit; out writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_rt_v2_authority_advance(
+pub unsafe extern "C" fn hirsel_rt_v2_authority_submit(
     ctx: *mut crate::TaskCtx,
     _destination: *mut u8,
-    out: *mut AdvancedResult,
+    out: *mut SeamResult,
     a: *const u64,
     c: *mut u64,
-    from: u64,
     owner: *mut crate::Header,
     start: u64,
     len: u64,
@@ -863,14 +865,32 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_advance(
     unsafe {
         crate::release::hirsel_rt_v2_release(ctx, owner, (*owner).index(), std::ptr::null(), 0, 0)
     };
+    let request = wire::Request::Submit {
+        at: (unsafe { at.read() } % 256) as u8,
+        payload,
+    };
+    unsafe { provider(ctx, out, a.read(), Some(c.read()), request) }
+}
+
+/// `authority.wait(a, mut c, position) -> Advanced`.
+/// # Safety
+/// Context bound; Authority and Claim borrowed; out writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_rt_v2_authority_wait(
+    ctx: *mut crate::TaskCtx,
+    _destination: *mut u8,
+    out: *mut AdvancedResult,
+    a: *const u64,
+    c: *mut u64,
+    position: u64,
+) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
     let request = SeamRequest::Provider {
         authority: unsafe { a.read() },
         claim: Some(unsafe { c.read() }),
-        request: wire::Request::Advance {
-            from,
-            at: (unsafe { at.read() } % 256) as u8,
-            payload,
-        },
+        request: wire::Request::Wait { position },
     };
     match unsafe {
         seam_call(ctx, request, |c| {

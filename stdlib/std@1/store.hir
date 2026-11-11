@@ -242,6 +242,14 @@ type Held {
   state: ordered_map.OrderedMap[Bytes, Bytes],
 }
 
+// A group submitted to the authority and not yet answered: its position, its
+// last version and the index of the level it was submitted at.
+type Submitted {
+  position: u64,
+  version: u64,
+  level: u64,
+}
+
 /// The head of one store: its only writer (STORE-1). It keeps the store's
 /// authority and claim; a later claim of the authority fences it.
 pub opaque type Store: () uses {Authority} {
@@ -276,6 +284,12 @@ pub opaque type Store: () uses {Authority} {
   // D(L) for each declared level, and the groups whose states some D(L) needs.
   durable: List[u64],
   held: List[Held],
+  // Groups submitted and not yet answered, oldest first: empty but while a
+  // serve holds several groups' ends.
+  submitted: List[Submitted],
+  // While a serve runs an arrival, the highest version its output gates asked
+  // for: the serve releases the arrival's end once that version is durable.
+  deferred: Option[u64],
   closed: bool,
 }
 
@@ -404,6 +418,8 @@ pub fn open(a: Authority, config: StoreConfig) -> Result[Store, StoreError] {
     defs_bytes: 0,
     durable: take reached,
     held: [],
+    submitted: [],
+    deferred: None(),
     closed: false
   )
   let created = recover(a, mut s, end)?
@@ -1608,28 +1624,110 @@ pub fn serve(mut s: Store, take inbox: Inbox, entries: List[Served]) -> Result[
     i += 1
   }
   let mut held = take inbox
+  // The arrivals run and not yet ended, with each one's end and the version
+  // its output gates asked for, over `batches` inbox batches.
+  let mut ran: List[Arrival] = []
+  let mut ends: List[CallEnd] = []
+  let mut needs: List[u64] = []
+  let mut batches: u64 = 0
+  let mut broken = false
+  let mut next = inbox.take(mut held, true)
   while true {
-    let Some(arrivals) = inbox.take(mut held, true) else {
-      return Ok(())
+    let Some(arrivals) = take next else {
+      return end_held(mut s, take ran, take ends, needs)
     }
-    let mut failed: Option[StoreError] = None()
     for arrival in take arrivals {
       if s.closed {
-        arrival.end(take arrival, InDoubt(Abandoned()))
+        list.push(mut ends, InDoubt(Abandoned()))
+        list.push(mut needs, 0)
       } else {
         let request = arrival.request(arrival)
+        s.deferred = Some(0)
         let end = serve_one(mut s, entries, take request)
-        if s.closed {
-          failed = Some(Closed())
-          arrival.end(take arrival, InDoubt(Abandoned()))
-        } else {
-          arrival.end(take arrival, take end)
+        let need = match replace(mut s.deferred, None()) {
+          Some(n) => n,
+          None() => 0,
         }
+        // A store that closes during an arrival ends it InDoubt; any other end is a bug in std.
+        if s.closed && !in_doubt(end) {
+          broken = true
+          list.push(mut ends, InDoubt(Abandoned()))
+        } else {
+          list.push(mut ends, take end)
+        }
+        list.push(mut needs, need)
       }
+      list.push(mut ran, take arrival)
     }
-    if let Some(e) = take failed {
-      return Error(take e)
+    batches += 1
+    // Arrivals already waiting run before these ends are released, while
+    // fewer than WINDOW batches are held: their commits share the groups and
+    // one barrier covers them all.
+    next = if s.closed || batches >= WINDOW {
+      None()
+    } else {
+      inbox.take(mut held, false)
     }
+    let more = match next {
+      Some(got) => list.len(got) > 0,
+      None() => false,
+    }
+    if !more {
+      let given = end_held(mut s, take ran, take ends, needs)
+      if broken {
+        return Error(stop(mut s, Corrupt("hirsel.serve")))
+      }
+      given?
+      ran = []
+      ends = []
+      needs = []
+      batches = 0
+      next = inbox.take(mut held, true)
+    }
+  }
+  Ok(())
+}
+
+// Whether `end` is in doubt.
+fn in_doubt(end: CallEnd) -> bool uses {} {
+  match end {
+    InDoubt(_) => true,
+    _ => false,
+  }
+}
+
+// Serve holds at most this many inbox batches' ends, and this many groups
+// submitted and unanswered.
+const WINDOW: u64 = 8
+
+// Ends each of `ran` with its end once every version it saw is durable at the
+// floor, after one wait for all of them. An arrival whose version did not
+// become durable ends `InDoubt(Abandoned())`, and the store's closing is the
+// error.
+fn end_held(mut s: Store, take ran: List[Arrival], take ends: List[CallEnd], needs: List[u64]) -> Result[
+  (),
+  StoreError
+] {
+  let mut top: u64 = 0
+  for n in needs {
+    if n > top {
+      top = n
+    }
+  }
+  if !s.closed {
+    let _ = release(mut s, top)
+  }
+  let mut k: u64 = 0
+  for arrival in take ran {
+    if needs[k] <= s.durable[s.floor] {
+      arrival.end(take arrival, copy ends[k])
+    } else {
+      arrival.end(take arrival, InDoubt(Abandoned()))
+    }
+    k += 1
+  }
+  if s.closed {
+    return Error(Closed())
   }
   Ok(())
 }
@@ -1655,7 +1753,7 @@ fn serve_one(mut s: Store, entries: List[Served], take request: Arrived) -> Call
   }
   // The latest commit, read once it is released.
   let head = s.visible
-  if let Error(_) = gate(mut s, head) {
+  if let Error(_) = release(mut s, head) {
     return InDoubt(Abandoned())
   }
   if s.closed {
@@ -2551,9 +2649,27 @@ fn over_limit(limits: StoreLimits, writes: ordered_map.OrderedMap[Bytes, Option[
 // kind, op and empty payload): what any commit costs beyond its writes.
 const WRITES_FRAME: u64 = 11
 
-// The output gate at `version`: advances the pending group at the floor when
-// a commit at or below it is not yet durable there.
+// The output gate at `upto`: advances the pending group at the floor when
+// a commit at or below it is not yet durable there. While a serve runs an
+// arrival it only notes `upto`, and the serve releases the arrival's end.
 fn gate(mut s: Store, upto: u64) -> Result[(), Unreleased] {
+  if upto <= s.durable[s.floor] {
+    return Ok(())
+  }
+  if let Some(n) = s.deferred {
+    if s.closed {
+      return Error(Storage(Closed()))
+    }
+    if upto > n {
+      s.deferred = Some(upto)
+    }
+    return Ok(())
+  }
+  release(mut s, upto)
+}
+
+// Waits until every commit up to `upto` is durable at the floor.
+fn release(mut s: Store, upto: u64) -> Result[(), Unreleased] {
   if upto <= s.durable[s.floor] {
     return Ok(())
   }
@@ -2670,12 +2786,17 @@ fn commit(mut s: Store, take t: Run, take body: history.Body, take def: Option[h
   Ok(made)
 }
 
-// Advances the pending group at the floor.
+// Advances the pending group at the floor. While a serve holds ends, the group
+// is only submitted, unless WINDOW groups would then be unanswered.
 fn flush(mut s: Store) -> Result[(), Unreleased] {
   let a = s.authority
   let at = authority.floor(a)
   let i = s.floor
-  advance(a, mut s, at, i)
+  submit(a, mut s, at, i)?
+  match s.deferred {
+    Some(_) if list.len(s.submitted) < WINDOW => Ok(()),
+    _ => answer(a, mut s),
+  }
 }
 
 // Adds `c` to the pending group, opening one after the history's end when
@@ -2727,8 +2848,17 @@ fn def_size(d: history.Def) -> u64 uses {} {
 // Extends the history with the pending group, durable at `at`, the level at
 // index `i`: every commit up to V is then durable at `at` and each weaker
 // level. A refusal or a later claim leaves the group out of the history, and
-// an undecided advance leaves it unknown; each closes the store.
+// an undecided append leaves it unknown; each closes the store.
 fn advance(a: Authority, mut s: Store, at: Level of a, i: u64) -> Result[(), Unreleased] {
+  submit(a, mut s, at, i)?
+  answer(a, mut s)
+}
+
+// Submits the pending group at `at`, the level at index `i`, as the history's
+// next entry. The head moves past it and its state is held; nothing is
+// durable until it is answered. A dead claim or a refused group closes the
+// store with nothing appended.
+fn submit(a: Authority, mut s: Store, at: Level of a, i: u64) -> Result[(), Unreleased] {
   let Some(w) = replace(mut s.pending, None()) else {
     return Ok(())
   }
@@ -2742,28 +2872,57 @@ fn advance(a: Authority, mut s: Store, at: Level of a, i: u64) -> Result[(), Unr
     return Error(Storage(stop(mut s, Closed())))
   }
   let mut c = take narrowed
-  let outcome = authority.advance(a, mut c, s.end, take entry, at)
+  let submitted = authority.submit(a, mut c, take entry, at)
   // The annotation forgets the brand: the store holds its claim unbranded.
   let back: Claim = take c
   s.claim = Some(take back)
-  match outcome {
-    Advanced(end) => {
-      if end != s.end + 1 {
-        return Error(Unknown(stop(mut s, Corrupt(entry_name(end)))))
-      }
-      s.end = end
-      s.digest = take d
-      s.group_last = s.visible
-      let state = current(mut s)
-      list.push(mut s.held, Held(position: end, version: s.visible, state: take state))
-      let v = s.visible
-      raise_durable(mut s, v, i)
-      Ok(())
-    },
-    Fenced() => Error(Storage(stop(mut s, Fenced()))),
-    Refused(e) => Error(Storage(stop(mut s, Refused(copy e)))),
-    Undecided(e) => Error(Unknown(stop(mut s, Storage(copy e)))),
+  let position = match take submitted {
+    Ok(p) => p,
+    Error(e) => return Error(Storage(stop(mut s, seam(take e)))),
   }
+  if position != s.end + 1 {
+    return Error(Unknown(stop(mut s, Corrupt(entry_name(position)))))
+  }
+  s.end = position
+  s.digest = take d
+  s.group_last = s.visible
+  let state = current(mut s)
+  list.push(mut s.held, Held(position: position, version: s.visible, state: take state))
+  list.push(mut s.submitted, Submitted(position: position, version: s.visible, level: i))
+  Ok(())
+}
+
+// Waits for every submitted group, oldest first: each answered one makes its
+// commits durable at its level and each weaker one. The first other answer
+// closes the store: a refused or fenced group is out of the history, an
+// undecided one unknown.
+fn answer(a: Authority, mut s: Store) -> Result[(), Unreleased] {
+  let groups = replace(mut s.submitted, [])
+  for g in groups {
+    let Some(held) = replace(mut s.claim, None()) else {
+      return Error(Storage(stop(mut s, Closed())))
+    }
+    let Some(narrowed) = claim.narrow(a, take held) else {
+      return Error(Storage(stop(mut s, Closed())))
+    }
+    let mut c = take narrowed
+    let outcome = authority.wait(a, mut c, g.position)
+    let back: Claim = take c
+    s.claim = Some(take back)
+    match outcome {
+      Advanced(p) => {
+        if p != g.position {
+          return Error(Unknown(stop(mut s, Corrupt(entry_name(p)))))
+        }
+        raise(mut s, g.version, g.level)
+      },
+      Fenced() => return Error(Storage(stop(mut s, Fenced()))),
+      Refused(e) => return Error(Storage(stop(mut s, Refused(copy e)))),
+      Undecided(e) => return Error(Unknown(stop(mut s, Storage(copy e)))),
+    }
+  }
+  forget(mut s)
+  Ok(())
 }
 
 // Waits until every commit is durable at `at`, the level at index `i`:
@@ -2776,6 +2935,12 @@ fn wait(a: Authority, mut s: Store, at: Level of a, i: u64) -> Result[(), Unrele
   }
   if let Some(_) = s.pending {
     return advance(a, mut s, at, i)
+  }
+  if list.len(s.submitted) > 0 {
+    answer(a, mut s)?
+    if s.durable[i] >= s.visible {
+      return Ok(())
+    }
   }
   let Some(held) = replace(mut s.claim, None()) else {
     return Error(Storage(stop(mut s, Closed())))
@@ -2798,18 +2963,23 @@ fn wait(a: Authority, mut s: Store, at: Level of a, i: u64) -> Result[(), Unrele
       upto = h.version
     }
   }
-  raise_durable(mut s, upto, i)
+  raise(mut s, upto, i)
+  forget(mut s)
   Ok(())
 }
 
-// Raises D(L) to `version` for the level at index `i` and each weaker one,
-// then forgets the states no D(L) and not V needs.
-fn raise_durable(mut s: Store, upto: u64, i: u64) -> () uses {} {
+// Raises D(L) to `upto` for the level at index `i` and each weaker one.
+fn raise(mut s: Store, upto: u64, i: u64) -> () uses {} {
   for j in 0u64..i + 1 {
     if s.durable[j] < upto {
       s.durable[j] = upto
     }
   }
+}
+
+// Forgets the held states no D(L) and not V needs. Run once every submitted
+// group is answered, so no group's state is dropped before its level reaches it.
+fn forget(mut s: Store) -> () uses {} {
   let held = replace(mut s.held, [])
   let mut kept: List[Held] = []
   let n = list.len(held)
@@ -2920,6 +3090,7 @@ fn stop(mut s: Store, take e: StoreError) -> StoreError uses {} {
   s.closed = true
   s.claim = None()
   s.pending = None()
+  s.submitted = []
   e
 }
 

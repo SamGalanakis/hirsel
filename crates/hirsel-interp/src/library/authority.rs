@@ -5,7 +5,7 @@
 //! has none of. On a host the adapter serves every provider, as it does a native run's,
 //! and hands the library each outcome (`host_authority_outcome`).
 //!
-//! What a provider decides (each claim, advance, barrier, read and object request) is a
+//! What a provider decides (each claim, submit, wait, barrier, read and object request) is a
 //! recorded capability input of `Authority`: the request is the grant name and the
 //! operation's arguments, the completion `hirsel_store_authority::wire`'s outcome. Replay
 //! rebuilds every outcome from the tape and never makes a provider. The levels, floor and
@@ -284,10 +284,12 @@ impl Library {
         let name = || self.authority_name(arg(a, 0)?);
         Ok(Some(match op {
             "authority.claim" => wire::Request::Claim,
-            "authority.advance" => wire::Request::Advance {
-                from: u64_arg(arg(a, 2)?, "from")?,
-                at: self.level_of(&name()?, arg(a, 4)?)?,
-                payload: bytes(arg(a, 3)?)?.to_vec(),
+            "authority.submit" => wire::Request::Submit {
+                at: self.level_of(&name()?, arg(a, 3)?)?,
+                payload: bytes(arg(a, 2)?)?.to_vec(),
+            },
+            "authority.wait" => wire::Request::Wait {
+                position: u64_arg(arg(a, 2)?, "position")?,
             },
             "authority.durable" => wire::Request::Durable {
                 at: self.level_of(&name()?, arg(a, 2)?)?,
@@ -444,21 +446,32 @@ impl Library {
                     Err(e) => error(seam_error(&e)),
                 }
             }
-            "authority.advance" => {
+            "authority.submit" => {
+                let name = self.authority_name(arg(a, 0)?)?;
+                let (_, held) = self.claim_arg(&name, arg(a, 1)?)?;
+                let payload = bytes(arg(a, 2)?)?.to_vec();
+                let at = self.level_of(&name, arg(a, 3)?)?;
+                let r = wire::Request::Submit { at, payload };
+                let Outcome::Position(r) = self.request(&name, Some(&held), r, context)?.0 else {
+                    unreachable!("admitted")
+                };
+                result(&r, |p| u64_value(*p))
+            }
+            "authority.wait" => {
                 let name = self.authority_name(arg(a, 0)?)?;
                 let (id, held) = self.claim_arg(&name, arg(a, 1)?)?;
-                let from = u64_arg(arg(a, 2)?, "from")?;
-                let payload = bytes(arg(a, 3)?)?.to_vec();
-                let at = self.level_of(&name, arg(a, 4)?)?;
-                let r = wire::Request::Advance { from, at, payload };
+                let position = u64_arg(arg(a, 2)?, "position")?;
+                let r = wire::Request::Wait { position };
                 let (outcome, _) = self.request(&name, Some(&held), r, context)?;
                 let Outcome::Advanced(r) = outcome else {
                     unreachable!("admitted")
                 };
                 match r {
-                    Advanced::Advanced(end) => {
-                        self.authorities.claims.get_mut(&id).unwrap().end = end;
-                        variant(0, vec![u64_value(end)])
+                    Advanced::Advanced(p) => {
+                        // Waits may be answered newest first: the end never moves back.
+                        let claimed = self.authorities.claims.get_mut(&id).unwrap();
+                        claimed.end = claimed.end.max(p);
+                        variant(0, vec![u64_value(p)])
                     }
                     Advanced::Fenced => variant(1, vec![]),
                     Advanced::Refused(e) => variant(2, vec![medium(&e)]),

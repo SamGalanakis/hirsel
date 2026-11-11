@@ -897,20 +897,34 @@ fn a_superseded_writer_never_replaces_the_head_with_its_continuation() {
     assert_eq!(head(), successor);
 }
 
-/// A bucket handle that counts listing requests.
+/// A bucket handle that counts listing requests and head reads.
 struct Lists {
     inner: Arc<Bucket>,
     n: std::sync::atomic::AtomicU64,
+    heads: std::sync::atomic::AtomicU64,
 }
 
 impl Lists {
+    fn new(inner: Arc<Bucket>) -> Self {
+        Lists {
+            inner,
+            n: Default::default(),
+            heads: Default::default(),
+        }
+    }
     fn count(&self) -> u64 {
         self.n.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn heads(&self) -> u64 {
+        self.heads.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
 impl ObjectStorage for Lists {
     fn get_tagged(&self, key: &str) -> Result<Option<(Vec<u8>, Tag)>, StorageError> {
+        if key == "head" {
+            self.heads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         self.inner.get_tagged(key)
     }
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
@@ -955,10 +969,7 @@ fn reclaimed(h: &mut Objects, c: &mut Claim) {
 #[test]
 fn a_claim_walks_the_listing_once_and_the_next_claim_walks_it_again() {
     let bucket = Arc::new(Bucket::new(1, BTreeMap::new()));
-    let lists = Arc::new(Lists {
-        inner: bucket.clone(),
-        n: Default::default(),
-    });
+    let lists = Arc::new(Lists::new(bucket.clone()));
     let object = |lifetime, data: &[u8]| crate::ObjectRef {
         lifetime,
         epoch: 1,
@@ -1000,4 +1011,38 @@ fn a_claim_walks_the_listing_once_and_the_next_claim_walks_it_again() {
         Ok(None),
         "and removes what the last walk missed"
     );
+}
+
+/// A reclaim call reads the head once (storage.md STORE-11, Reclamation): the
+/// records it reads to find each retirement's creator come from the history
+/// the call already followed, not from a head read per record.
+#[test]
+fn a_reclaim_call_reads_the_head_once() {
+    let bucket = Arc::new(Bucket::new(1, BTreeMap::new()));
+    let lists = Arc::new(Lists::new(bucket.clone()));
+    let mut h = Objects::new(lists.clone(), "zone".into(), Level(0));
+    let mut c = h.claim([1; 16], [7; 32]).unwrap().claim;
+    let mut made = Vec::new();
+    for p in 2..10u64 {
+        let data = p.to_le_bytes().to_vec();
+        let r = crate::ObjectRef {
+            lifetime: p,
+            epoch: 1,
+            digest: crate::envelope::digest(&data),
+        };
+        h.put(&mut c, r, data).unwrap();
+        let at = h.submit(&mut c, entry(p, 1), &[r], &[], Level(0)).unwrap();
+        assert_eq!(h.wait(&mut c, at), Advanced::Advanced(p));
+        made.push(r);
+    }
+    let at = h
+        .submit(&mut c, entry(10, 1), &[], &made, Level(0))
+        .unwrap();
+    assert_eq!(h.wait(&mut c, at), Advanced::Advanced(10));
+    let before = lists.heads();
+    assert_eq!(h.reclaim(&mut c, 64), Ok(crate::Reclaimed::Done));
+    assert_eq!(lists.heads() - before, 1);
+    for r in made {
+        assert_eq!(h.get(r), Ok(None), "every retirement is deleted");
+    }
 }

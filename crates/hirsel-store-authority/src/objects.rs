@@ -204,6 +204,28 @@ impl Objects {
         self.bug == Some(bug)
     }
 
+    /// The records after `start` up to `stop`, both within the followed chain,
+    /// got and checked against it without reading the head. A failed get ends
+    /// the answer early, and fails it only when it returns nothing.
+    fn followed(&mut self, start: u64, stop: u64) -> Result<Vec<Record>, Error> {
+        let keys: Vec<String> = (start + 1..=stop)
+            .map(|p| group_key(p, &self.chain.digests[p as usize - 1]))
+            .collect();
+        let mut out = Vec::with_capacity(keys.len());
+        for (i, (key, got)) in keys.iter().zip(self.store.get_many(&keys)).enumerate() {
+            let p = start + 1 + i as u64;
+            match got {
+                Ok(Some(bytes)) => {
+                    out.push(self.chain.check(p, &bytes).map_err(|b| crate::bad(b, p))?)
+                }
+                Ok(None) => return Err(Error::Corrupt(key.clone())),
+                Err(_) if !out.is_empty() => return Ok(out),
+                Err(e) => return Err(Error::Refused(failure(e))),
+            }
+        }
+        Ok(out)
+    }
+
     /// The head and its tag, `None` for an empty history.
     fn head(&self) -> Result<Option<(Head, Tag)>, Error> {
         match self.store.get_tagged(HEAD) {
@@ -546,25 +568,11 @@ impl Authority for Objects {
         let fresh = self.catch_up(h.end, h.digest)?;
         let stop = h.end.min(from.saturating_add(max));
         let start = from.min(stop);
-        let older: Vec<String> = (start + 1..=stop.min(known))
-            .map(|p| group_key(p, &self.chain.digests[p as usize - 1]))
-            .collect();
-        let mut out = Vec::with_capacity((stop - start) as usize);
-        // Up to `max` entries: a failed get ends the answer early, and fails
-        // the read only when it returns nothing.
-        for (i, (key, got)) in older.iter().zip(self.store.get_many(&older)).enumerate() {
-            let p = start + 1 + i as u64;
-            match got {
-                Ok(Some(bytes)) => {
-                    out.push(self.chain.check(p, &bytes).map_err(|b| crate::bad(b, p))?)
-                }
-                Ok(None) => return Err(Error::Corrupt(key.clone())),
-                Err(_) if !out.is_empty() => return Ok(out),
-                Err(e) => return Err(Error::Refused(failure(e))),
+        let mut out = self.followed(start, stop.min(known))?;
+        if out.len() as u64 == stop.min(known).saturating_sub(start) {
+            for p in (start + 1).max(known + 1)..=stop {
+                out.push(fresh[(p - known - 1) as usize].clone());
             }
-        }
-        for p in (start + 1).max(known + 1)..=stop {
-            out.push(fresh[(p - known - 1) as usize].clone());
         }
         Ok(out)
     }
@@ -651,8 +659,13 @@ impl Space for Objects {
         format!("o/{}", r.name())
     }
 
+    /// Reclaim caught up to the head before it began, and reads only below
+    /// its strongest-durable end, so the followed chain answers without
+    /// reading the head again.
     fn records(&mut self, from: u64, max: u64) -> Result<Vec<Record>, Error> {
-        self.read(from, Level(0), max)
+        let end = self.chain.end();
+        let stop = end.min(from.saturating_add(max));
+        self.followed(from.min(stop), stop)
     }
 
     /// Replaces the head with the claim's own end and `sweep`, on the claim's

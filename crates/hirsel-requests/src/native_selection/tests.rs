@@ -146,6 +146,7 @@ fn actual_native_selector_coalesces_build_and_bound_run_without_a_retained_contr
                             stderr: &mut stderr,
                         },
                         None,
+                        None,
                     )
                     .unwrap()
                     .unwrap();

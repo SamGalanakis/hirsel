@@ -28,7 +28,10 @@ trailer, so the trailer stays `complete N`; `local.threads@1` interleaves its ca
 with the caller on the caller's thread, bounded to `threads` running at once, rather than
 on operating-system threads; and `hirsel serve` runs one callee at a time (`runs` other
 than 1 is refused), holds only its own revision (`code.none@1`), and refuses `durable`
-callee recording. A `sim@1` crash on a host launch stops the callee before one of its
+callee recording. `hirsel serve --native` runs a `db@1` place's head natively, as a
+tasks.free@1 call run of a bound executable that the host links to with `--hirsel-place
+<fd>`; its callees stay interpreted, and since its takes are not yet on its tape, a native
+head under `tapes` is refused. A `sim@1` crash on a host launch stops the callee before one of its
 requests but keeps every write it completed, since its directories are host directories,
 not simulated ones.
 

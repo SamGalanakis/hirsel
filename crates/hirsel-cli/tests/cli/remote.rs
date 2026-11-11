@@ -152,7 +152,11 @@ impl Fixture {
     }
     /// Start the host and wait until it accepts connections.
     fn serve(&self) -> Host {
-        serve(&self.0.join("main.hir.json"), &self.0.join("host.json"))
+        serve(
+            &self.0.join("main.hir.json"),
+            &self.0.join("host.json"),
+            &[],
+        )
     }
     fn call(&self, grants: &str, tape: Option<&Path>) -> Output {
         let manifest = self.0.join("main.hir.json");
@@ -178,10 +182,13 @@ impl Fixture {
         ])
     }
 }
-/// Start `hirsel serve` of `manifest` under `host` and wait until it accepts connections.
-fn serve(manifest: &Path, host: &Path) -> Host {
+/// Start `hirsel serve` of `manifest` under `host` with `options` and wait until it accepts
+/// connections.
+fn serve(manifest: &Path, host: &Path, options: &[&str]) -> Host {
     let mut child = Command::new(env!("CARGO_BIN_EXE_hirsel"))
-        .args(["serve".as_ref(), manifest.as_os_str()])
+        .arg("serve")
+        .args(options)
+        .arg(manifest)
         .arg("--host")
         .arg(host)
         .stdout(Stdio::piped())
@@ -289,10 +296,12 @@ fn ledger(name: &str, host_edit: impl Fn(&str, String) -> String) -> Fixture {
 }
 
 impl Fixture {
-    fn serve_from(&self, dir: &str) -> Host {
+    /// Serve `dir`'s program; `options` select the head's engine.
+    fn serve_from(&self, dir: &str, options: &[&str]) -> Host {
         serve(
             &self.0.join(dir).join("main.hir.json"),
             &self.0.join("host.json"),
+            options,
         )
     }
     fn run_from(&self, dir: &str, tape: &Path) -> Output {
@@ -418,23 +427,29 @@ const LEDGER: &str = "opened 1 with 500\nopened 2 with 100\nmoved 200 from 1 to 
 
 /// A caller's transact and query calls cross `remote.tls@1` to a `hirsel serve` place and
 /// end as they do at a `sim@1` place; the caller's tape replays alone, with no host.
+/// The place's head runs interpreted, or natively (`--native`); either way the caller sees
+/// the same ends.
+const HEADS: [&[&str]; 2] = [&[], &["--native"]];
+
 #[test]
 fn served_calls_cross_to_a_place_host_and_the_callers_tape_replays_alone() {
-    let fixture = ledger("served", |_, text| text);
-    let host = fixture.serve_from("host");
-    let tape = fixture.0.join("T");
-    let live = fixture.run_from("caller", &tape);
-    host.stop();
-    assert!(live.status.success(), "{}", stderr(&live));
-    assert_eq!(stdout(&live), LEDGER);
-    let replayed = fixture.hirsel(&[
-        "run".as_ref(),
-        fixture.0.join("caller/main.hir.json").as_os_str(),
-        "--replay".as_ref(),
-        tape.as_os_str(),
-    ]);
-    assert!(replayed.status.success(), "{}", stderr(&replayed));
-    assert_eq!(stdout(&replayed), LEDGER);
+    for head in HEADS {
+        let fixture = ledger("served", |_, text| text);
+        let host = fixture.serve_from("host", head);
+        let tape = fixture.0.join("T");
+        let live = fixture.run_from("caller", &tape);
+        host.stop();
+        assert!(live.status.success(), "{head:?}: {}", stderr(&live));
+        assert_eq!(stdout(&live), LEDGER, "{head:?}");
+        let replayed = fixture.hirsel(&[
+            "run".as_ref(),
+            fixture.0.join("caller/main.hir.json").as_os_str(),
+            "--replay".as_ref(),
+            tape.as_os_str(),
+        ]);
+        assert!(replayed.status.success(), "{head:?}: {}", stderr(&replayed));
+        assert_eq!(stdout(&replayed), LEDGER, "{head:?}");
+    }
 }
 
 /// The place's head makes RUN-8 checks 3 and 5: a served call whose entry the place does
@@ -444,22 +459,25 @@ fn served_calls_cross_to_a_place_host_and_the_callers_tape_replays_alone() {
 fn a_place_host_denies_unserved_entries_and_refuses_other_code() {
     // The host's `transfer` charges a fee, so `moves` has other code there, and its head
     // does not serve `balance`.
-    let fixture = ledger("refused", |source, text| match source {
-        "ledger.hir" => text.replace("fee: 0", "fee: 1"),
-        _ => text.replace("      store.served_query(balance),\n", ""),
-    });
-    let host = fixture.serve_from("host");
-    let live = fixture.run_from("caller", &fixture.0.join("T"));
-    host.stop();
-    assert!(live.status.success(), "{}", stderr(&live));
-    let mismatch = "not run: version mismatch";
-    let denied = "not run: denied";
-    assert_eq!(
-        stdout(&live),
-        format!(
-            "opened 1 with 500\nopened 2 with 100\n{mismatch}\nopened 3 with 0\n{mismatch}\n\
-             {mismatch}\n{mismatch}\naccount 1: {denied}\naccount 2: {denied}\n\
-             account 3: {denied}\naccount 4: {denied}\n"
-        )
-    );
+    for head in HEADS {
+        let fixture = ledger("refused", |source, text| match source {
+            "ledger.hir" => text.replace("fee: 0", "fee: 1"),
+            _ => text.replace("      store.served_query(balance),\n", ""),
+        });
+        let host = fixture.serve_from("host", head);
+        let live = fixture.run_from("caller", &fixture.0.join("T"));
+        host.stop();
+        assert!(live.status.success(), "{head:?}: {}", stderr(&live));
+        let mismatch = "not run: version mismatch";
+        let denied = "not run: denied";
+        assert_eq!(
+            stdout(&live),
+            format!(
+                "opened 1 with 500\nopened 2 with 100\n{mismatch}\nopened 3 with 0\n{mismatch}\n\
+                 {mismatch}\n{mismatch}\naccount 1: {denied}\naccount 2: {denied}\n\
+                 account 3: {denied}\naccount 4: {denied}\n"
+            ),
+            "{head:?}"
+        );
+    }
 }

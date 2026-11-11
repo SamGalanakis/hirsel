@@ -51,6 +51,44 @@ struct Head {
     _io: Option<Rc<RefCell<RealIo>>>,
 }
 
+/// The place this run's root heads for a runner host in another process (`--hirsel-place`):
+/// the host's admitted calls arrive on the link, and each end goes back on it. The host
+/// owns the streams, so an arrival's key is its link id.
+struct Link {
+    place: Arc<Place>,
+    /// Each arrival the reader took off the link, then `None` once the link closed.
+    arrivals: std::sync::mpsc::Receiver<Option<(u64, place::ServedCall)>>,
+    out: std::fs::File,
+}
+impl Link {
+    fn key(id: u64) -> [u8; 32] {
+        let mut key = [0; 32];
+        key[..8].copy_from_slice(&id.to_le_bytes());
+        key
+    }
+    /// Give the host every end the head made; a host that is gone takes no more, and its
+    /// closed link must not end the head's program by SIGPIPE.
+    fn send_ends(&mut self) -> bool {
+        let ends = self.place.ends();
+        crate::process::without_sigpipe(|| {
+            for (key, outcome) in &ends {
+                let id = u64::from_le_bytes(key[..8].try_into().unwrap());
+                let end = hirsel_run_schema::place::PlaceMessage::End(id, outcome.clone());
+                if end.write(&mut self.out).is_err() {
+                    break;
+                }
+            }
+        });
+        !ends.is_empty()
+    }
+}
+impl Drop for Link {
+    /// The head's last ends reach the host before the process exits.
+    fn drop(&mut self) {
+        self.send_ends();
+    }
+}
+
 /// A caller's transact stream at one place: the last position with a definite end, the
 /// request in flight, and the transact calls waiting for it to end.
 #[derive(Default)]
@@ -71,6 +109,7 @@ pub(crate) struct Home {
     served: BTreeMap<[u8; 32], ([u8; 16], String)>,
     tag: u64,
     driver_installed: bool,
+    link: Option<Link>,
 }
 impl Home {
     /// # Safety
@@ -86,10 +125,84 @@ impl Home {
             served: BTreeMap::new(),
             tag: 0,
             driver_installed: false,
+            link: None,
         });
         let pointer = &raw mut *home;
         assert!(home.slot.home.swap(pointer, Ordering::AcqRel).is_null());
         home
+    }
+
+    /// Serve the place this run's root heads over `link` to its runner host: the root's
+    /// call state gets the place, and a reader thread hands home each arrival.
+    ///
+    /// # Safety
+    /// Sole admission owner of `root`, before any worker reads its call state.
+    pub(crate) unsafe fn serve_link(
+        &mut self,
+        root: *mut TaskCtx,
+        link: std::fs::File,
+    ) -> Result<(), String> {
+        let place = Place::new(self.slot.transport.signal.clone());
+        let run = unsafe { (*root).run() };
+        let call = run
+            .runner_call
+            .take()
+            .ok_or("a place link without a call run")?;
+        let mut call = Arc::try_unwrap(call).map_err(|_| "the root's call state is shared")?;
+        call.place = Some(place.clone());
+        run.runner_call = Some(Arc::new(call));
+        let mut input = std::io::BufReader::new(link.try_clone().map_err(|e| e.to_string())?);
+        let (arrivals, received) = std::sync::mpsc::channel();
+        let signal = self.slot.transport.signal.clone();
+        self.slot.transport.linked.store(true, Ordering::Release);
+        std::thread::Builder::new()
+            .name("place link".into())
+            .spawn(move || {
+                use hirsel_run_schema::place::PlaceMessage;
+                loop {
+                    let arrival = match PlaceMessage::read(&mut input) {
+                        Ok(Some(PlaceMessage::Arrive(id, call))) => Some((id, call)),
+                        // A clean close, a broken link or a message only the head sends.
+                        _ => None,
+                    };
+                    let closed = arrival.is_none();
+                    let _ = arrivals.send(arrival);
+                    signal.notify();
+                    if closed {
+                        break;
+                    }
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        self.link = Some(Link {
+            place,
+            arrivals: received,
+            out: link,
+        });
+        Ok(())
+    }
+
+    /// Hand the head what arrived on its link, and the host the ends the head made.
+    fn poll_link(&mut self, waiters: &mut Vec<(u32, u32)>) -> bool {
+        let Some(link) = &mut self.link else {
+            return false;
+        };
+        let mut changed = false;
+        for arrival in link.arrivals.try_iter() {
+            changed = true;
+            let woken = match arrival {
+                Some((id, call)) => link.place.arrive(Owed {
+                    key: Link::key(id),
+                    call,
+                }),
+                None => {
+                    self.slot.transport.linked.store(false, Ordering::Release);
+                    link.place.disconnect()
+                }
+            };
+            waiters.extend(woken);
+        }
+        changed | link.send_ends()
     }
 
     fn start_callee(
@@ -228,7 +341,7 @@ impl Home {
         key: [u8; 32],
         caller: [u8; 16],
         grant: &RunnerGrant,
-        call: place::Arrived,
+        call: place::ServedCall,
     ) -> Stopped<()> {
         let entry = &grant.entry;
         let place = entry.node.clone().unwrap_or_else(|| entry.name.clone());
@@ -560,6 +673,7 @@ impl Home {
             changed = true;
         }
         changed |= self.poll_heads(&mut waiters)?;
+        changed |= self.poll_link(&mut waiters);
         unsafe { crate::tasks::free::home::runner_wakes(root, &waiters) };
         if !changed && self.slot.transport.pending() && !unsafe { crate::pool::home_posts(root) } {
             crate::readiness::Readiness::wait_many(&[

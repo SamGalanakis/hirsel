@@ -138,6 +138,9 @@ pub(in crate::tasks::free) fn request_keys_with_domains(
         | R::Stopped => {
             vec![(crate::io_keys::PLACE, Mode::Exclusive)]
         }
+        // As under cooperative tasks (io_keys): authorities share no finer key, so each
+        // provider call orders against the whole seam.
+        R::Seam(_) => vec![(ROOT, Mode::Exclusive)],
         R::MonotonicClock { io: 1 }
         | R::WallClock { io: 1 }
         | R::Process { io: 1 }

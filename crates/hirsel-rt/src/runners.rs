@@ -59,6 +59,7 @@ type Admit = unsafe fn(
     Option<[u8; 16]>,
     bool,
     Option<std::sync::Arc<crate::io_real::ConcurrentIo>>,
+    Option<std::fs::File>,
 ) -> Result<Admitted, String>;
 
 /// The launcher names this provider only when its program reaches runner entries.
@@ -83,17 +84,26 @@ unsafe fn admit(
     instance: Option<[u8; 16]>,
     production_free: bool,
     io: Option<std::sync::Arc<crate::io_real::ConcurrentIo>>,
+    place: Option<std::fs::File>,
 ) -> Result<Admitted, String> {
     // The owner stays on admission. Detached workers hold only Slot's Send
     // transport, and never destroy Home's Rc adapters or sinks.
     let mut home: Option<HomeOwner> = None;
-    let adapter = if production_free && !config.runners.is_empty() {
+    let adapter = if production_free && (!config.runners.is_empty() || place.is_some()) {
         let adapter = if let Some(io) = io {
             let slot =
                 native::Slot::new(io).map_err(|error| format!("native runners: {error:?}"))?;
             unsafe { (*ctx).run().runner_home = Some(slot.clone()) };
-            home = Some(unsafe { native::Home::new(slot.clone(), config.clone()) });
+            let mut owner = unsafe { native::Home::new(slot.clone(), config.clone()) };
+            if let Some(link) = place {
+                // SAFETY: admission owns the root, whose call state no worker reads yet.
+                unsafe { owner.serve_link(ctx, link) }
+                    .map_err(|error| format!("the place's link: {error}"))?;
+            }
+            home = Some(owner);
             Some(native::wrap(&slot))
+        } else if place.is_some() {
+            return Err("a served place's head needs production io".into());
         } else {
             None
         };

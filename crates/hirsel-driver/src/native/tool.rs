@@ -107,7 +107,54 @@ pub fn run_path_native_backend_with_trace_events(
     validation: super::Validation,
     trace_events: Option<&Path>,
 ) -> Result<Result<RunOutcome, NativeError>, ToolError> {
-    if matches!(launch, crate::HostLaunch::Callee { .. }) {
+    run_native(
+        path,
+        launch,
+        evidence,
+        backend,
+        output,
+        policy,
+        validation,
+        trace_events,
+        None,
+    )
+}
+
+/// Run a served `db@1` place's head natively: `launch` is its live tasks.free@1 call record,
+/// and `link` the runner host's end of the place link, which the head serves until it ends.
+pub fn run_place_head(
+    path: &Path,
+    launch: crate::HostLaunch<'_>,
+    backend: super::Backend,
+    policy: crate::session::Policy,
+    link: std::os::fd::BorrowedFd<'_>,
+) -> Result<Result<RunOutcome, NativeError>, ToolError> {
+    run_native(
+        path,
+        launch,
+        None,
+        backend,
+        Output::Inherit { json: false },
+        policy,
+        super::Validation::Ready,
+        None,
+        Some(link),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_native(
+    path: &Path,
+    launch: crate::HostLaunch<'_>,
+    evidence: Option<&super::Evidence>,
+    backend: super::Backend,
+    output: Output<'_>,
+    policy: crate::session::Policy,
+    validation: super::Validation,
+    trace_events: Option<&Path>,
+    place: Option<std::os::fd::BorrowedFd<'_>>,
+) -> Result<Result<RunOutcome, NativeError>, ToolError> {
+    if place.is_none() && matches!(launch, crate::HostLaunch::Callee { .. }) {
         return Err(ToolError::Runtime(
             "launch: a runner host runs its callees interpreted".into(),
         ));
@@ -174,7 +221,14 @@ pub fn run_path_native_backend_with_trace_events(
                         "native launch revision changed during selection".into(),
                     ));
                 }
-                super::request_output::run_bound_output(input, launch, bound, output, trace_events)
+                super::request_output::run_bound_output(
+                    input,
+                    launch,
+                    bound,
+                    output,
+                    trace_events,
+                    place,
+                )
             }
             crate::requests::CompileResult::NativeError(error) => Ok(Err(error.clone())),
             _ => Err(ToolError::Runtime(

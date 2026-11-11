@@ -19,7 +19,7 @@ pub(in crate::runners) enum Work {
         crash_after: Option<u32>,
     },
     /// Route a served call to the `db@1` place its runner's node names.
-    Served(super::place::Arrived),
+    Served(super::place::ServedCall),
 }
 
 #[derive(Default)]
@@ -39,6 +39,8 @@ pub(super) struct Transport {
     pub signal: Arc<crate::readiness::Signal>,
     pub driver: crate::readiness::Readiness,
     pub work: crate::readiness::Readiness,
+    /// A runner host's link to this run's place is open: an arrival may come at any time.
+    pub linked: std::sync::atomic::AtomicBool,
 }
 
 impl Transport {
@@ -55,6 +57,7 @@ impl Transport {
             io,
             signal,
             work,
+            linked: Default::default(),
         }))
     }
 
@@ -137,7 +140,8 @@ impl Transport {
     }
 
     pub fn pending(&self) -> bool {
-        !self.rows.lock().unwrap().active.is_empty()
+        self.linked.load(std::sync::atomic::Ordering::Acquire)
+            || !self.rows.lock().unwrap().active.is_empty()
     }
 
     pub fn take(&self) -> VecDeque<(u64, [u8; 32], Spec)> {

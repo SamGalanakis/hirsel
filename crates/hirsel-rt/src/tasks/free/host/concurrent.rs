@@ -340,7 +340,11 @@ pub(super) unsafe fn native_keys(ctx: *mut TaskCtx, request: &Request) -> Stoppe
         },
         unsafe { (*ctx).run_ref().free_root_env },
     )
-    .map_err(|_| Stop::Refused("native host request metadata is not admitted".into()))?;
+    .map_err(|stop| {
+        Stop::Refused(format!(
+            "native host request metadata is not admitted: {stop:?}"
+        ))
+    })?;
     let coupled = unsafe {
         (*ctx)
             .run_ref()

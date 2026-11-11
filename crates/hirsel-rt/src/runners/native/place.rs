@@ -5,27 +5,12 @@
 use super::*;
 use std::collections::BTreeMap;
 
-/// A served call as `arrival.request` states it.
-#[derive(Clone)]
-pub(crate) struct Arrived {
-    pub form: CallForm,
-    pub path: String,
-    pub fingerprint: [u8; 32],
-    pub code: [u8; 32],
-    pub caller: String,
-    pub stream: [u8; 32],
-    pub epoch: u64,
-    pub position: u64,
-    pub digest: [u8; 32],
-    pub acknowledged: u64,
-    pub level: Option<String>,
-    pub argument: Vec<u8>,
-}
+pub(crate) use hirsel_run_schema::place::ServedCall;
 
 /// An arrival the place owes an end: the caller's call key, and the call.
 pub(super) struct Owed {
     pub key: [u8; 32],
-    pub call: Arrived,
+    pub call: ServedCall,
 }
 
 #[derive(Default)]
@@ -51,10 +36,13 @@ pub(crate) struct Place {
 
 /// What a take hands over.
 pub(crate) enum Take {
-    /// The arrivals' ids, oldest first (empty when the place is closed or nothing waited).
+    /// The arrivals' ids, oldest first (empty when nothing is queued and the take does not
+    /// wait).
     Arrivals(Vec<u64>),
     /// Nothing queued yet: park until home wakes `waiter`.
     Park,
+    /// The host stopped and nothing is queued: `None`, and nothing more arrives.
+    Closed,
 }
 
 impl Place {
@@ -73,12 +61,17 @@ impl Place {
     }
 
     /// `inbox.take(i, wait)`: every queued arrival; with `wait`, park `waiter` while none is
-    /// queued and the place is open.
+    /// queued and the place is open; `Closed` once the place closed and none is queued.
     pub(crate) fn take(&self, wait: bool, waiter: (u32, u32)) -> Take {
         let mut rows = self.rows.lock().unwrap();
-        if rows.queued.is_empty() && !rows.closed && wait {
-            rows.waiter = Some(waiter);
-            return Take::Park;
+        if rows.queued.is_empty() {
+            if rows.closed {
+                return Take::Closed;
+            }
+            if wait {
+                rows.waiter = Some(waiter);
+                return Take::Park;
+            }
         }
         let queued = std::mem::take(&mut rows.queued);
         let mut ids = Vec::with_capacity(queued.len());
@@ -92,7 +85,7 @@ impl Place {
     }
 
     /// `arrival.request`: the taken arrival `id`'s call.
-    pub(crate) fn request(&self, id: u64) -> Option<Arrived> {
+    pub(crate) fn request(&self, id: u64) -> Option<ServedCall> {
         self.rows
             .lock()
             .unwrap()
@@ -148,6 +141,14 @@ impl Place {
             return None;
         }
         rows.queued.push_back(owed);
+        rows.waiter.take()
+    }
+
+    /// The runner host's link closed: nothing more arrives, and the parked take wakes to
+    /// what is queued.
+    pub(super) fn disconnect(&self) -> Option<(u32, u32)> {
+        let mut rows = self.rows.lock().unwrap();
+        rows.closed = true;
         rows.waiter.take()
     }
 

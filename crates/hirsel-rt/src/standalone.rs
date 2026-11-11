@@ -165,6 +165,8 @@ pub(crate) struct LiveOptions {
     pub revocations: Option<std::path::PathBuf>,
     pub replay_policy: Option<OsString>,
     pub trace: Option<(usize, std::path::PathBuf)>,
+    /// `--hirsel-place <fd>`: the head's link to its runner host, and its offset.
+    pub place: Option<(usize, i32)>,
 }
 
 fn argument_error(detail: &str) -> RunRefusal {
@@ -183,6 +185,7 @@ pub(crate) fn live_options(arguments: &[OsString]) -> Result<LiveOptions, RunRef
         revocations: None,
         replay_policy: None,
         trace: None,
+        place: None,
     };
     let mut selector = None;
     let mut offset = 0;
@@ -204,6 +207,7 @@ pub(crate) fn live_options(arguments: &[OsString]) -> Result<LiveOptions, RunRef
                     | "--hirsel-revocation"
                     | "--hirsel-replay-policy"
                     | "--hirsel-trace-events"
+                    | "--hirsel-place"
             )
         );
         if !known {
@@ -240,6 +244,16 @@ pub(crate) fn live_options(arguments: &[OsString]) -> Result<LiveOptions, RunRef
             "--hirsel-trace-events" => {
                 if options.trace.replace((offset, value.into())).is_some() {
                     return Err(argument_error("duplicated --hirsel-trace-events"));
+                }
+            }
+            "--hirsel-place" => {
+                let fd = value
+                    .to_str()
+                    .and_then(|fd| fd.parse::<i32>().ok())
+                    .filter(|fd| *fd > 2)
+                    .ok_or_else(|| argument_error("expected a descriptor after --hirsel-place"))?;
+                if options.place.replace((offset, fd)).is_some() {
+                    return Err(argument_error("duplicated --hirsel-place"));
                 }
             }
             _ => unreachable!(),

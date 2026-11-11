@@ -1681,6 +1681,10 @@ unsafe fn launch(program: &Program, mut arguments: Vec<std::ffi::OsString>) -> R
         Ok(path) => path,
         Err(error) => return refuse(&error),
     };
+    let place = match select_place(&mut arguments) {
+        Ok(place) => place,
+        Err(error) => return refuse(&error),
+    };
     let selected = if program.standalone() {
         match crate::standalone::select(
             arguments.clone(),
@@ -1729,7 +1733,29 @@ unsafe fn launch(program: &Program, mut arguments: Vec<std::ffi::OsString>) -> R
     if let Some(path) = trace_events {
         run = run.with_trace_events(path);
     }
+    if let Some(link) = place {
+        run = run.with_place(link);
+    }
     run.wait()
+}
+
+/// `--hirsel-place <fd>`, taken out of the runtime prefix: the descriptor of the link a runner
+/// host passed this process to serve its place as the head.
+fn select_place(arguments: &mut Vec<std::ffi::OsString>) -> Result<Option<std::fs::File>, String> {
+    let options = crate::standalone::live_options(arguments).map_err(|e| e.to_string())?;
+    let Some((offset, fd)) = options.place else {
+        return Ok(None);
+    };
+    arguments.drain(offset..offset + 2);
+    // Own only an open descriptor, so the link is never another file's number.
+    if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+        return Err(format!("--hirsel-place {fd} is not an open descriptor"));
+    }
+    // SAFETY: the host passed this open descriptor for the place link alone, and nothing
+    // else in this process owns it.
+    Ok(Some(unsafe {
+        <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd)
+    }))
 }
 
 #[inline(never)]
@@ -1924,6 +1950,22 @@ pub(crate) unsafe fn execute(
         .or_else(|| fixture_run.as_ref().filter(|_| cpu_fixture.is_none()))
         .filter(|run| free_tasks(run));
     let production_free = free_run.is_some();
+    // A served place's head: a live tasks.free@1 Call run its runner host links to. Its
+    // arrivals come from the host and are not on a tape, so the head records nothing.
+    let place_link = match options.place {
+        None => None,
+        Some(_) if !production_free || replay_call.is_none() || production_io.is_none() => {
+            return Err("--hirsel-place runs a live tasks.free@1 call run".into());
+        }
+        Some(_)
+            if production_io
+                .as_ref()
+                .is_some_and(|(_, _, tape)| tape.is_some()) =>
+        {
+            return Err("a served place's head does not record its arrivals".into());
+        }
+        Some(link) => Some(link),
+    };
     let mut free_session = None;
     let trace_destination = options
         .trace_events
@@ -2842,6 +2884,9 @@ pub(crate) unsafe fn execute(
         }
     }
     let runner_launch = crate::runtime_roots::runners();
+    if place_link.is_some() && runner_launch.is_none() {
+        return Err("a served place's head without the runner provider".into());
+    }
     let (_runners_home, free_adapter) = if let Some(provider) = runner_launch {
         let runner_config = crate::runners::Config {
             runners: runners.clone(),
@@ -2864,6 +2909,7 @@ pub(crate) unsafe fn execute(
                 runner_instance,
                 production_free,
                 free_adapter,
+                place_link,
             )
         }?
     } else {
@@ -3542,6 +3588,8 @@ pub(crate) struct Options {
     /// The scheduling row counters, when the host asked for them.
     pub(crate) metrics: Option<std::sync::Arc<crate::pool::WorkerMetrics>>,
     pub(crate) trace_events: Option<std::path::PathBuf>,
+    /// A served place's link to its runner host (`--hirsel-place`).
+    pub(crate) place: Option<std::fs::File>,
 }
 
 /// The delay after which a test stops the run from another thread: `HIRSEL_RT_STOP_AFTER_MS`.

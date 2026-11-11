@@ -17,6 +17,7 @@ mod path;
 pub use file_reads::{FileReadScript, FileReadiness};
 pub mod frame;
 pub mod ownership_trace;
+pub mod place;
 pub mod tape;
 pub use path::confined_relative;
 

@@ -1150,6 +1150,7 @@ fn native_bootstrap_policy_case(bind_run: bool) {
                         stderr: &mut stderr,
                     },
                     None,
+                    None,
                 )
                 .unwrap()
                 .unwrap();
@@ -1178,6 +1179,7 @@ fn native_bootstrap_policy_case(bind_run: bool) {
                         stdout: &mut stdout,
                         stderr: &mut stderr,
                     },
+                    None,
                     None,
                 )
                 .unwrap()

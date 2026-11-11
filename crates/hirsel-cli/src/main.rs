@@ -10,7 +10,7 @@ use hirsel_driver::CompilerRequestsExt;
 use hirsel_engine::{QueryError, RunOutcome, ToolError, Verify};
 use std::{env, ffi::OsString, path::Path, process::ExitCode};
 
-const USAGE: &str = "usage: hirsel [--verbose] [--timings[=json]] [--mem-usage] check [--verify-cache] [--watch] [--json | --safe] <source|manifest.json> | serve [--stop] [--workspace <dir>] [--idle <seconds>] | test [--no-verify] [--json] [--seed <u64>] [--scheduler <name@1:seed> | --explore <n> [--scheduler <name@1>]] [--race] [--sim-points <root-release,atomic-store>] [--bless | --bench [--bench-time <ms>]] [--max-steps <n|unbounded> | --native [--backend llvm|cranelift]] [--trace-ownership <dir>] <source|manifest.json> [filter...] | run [--verify-cache] [--validate-stages] [--no-verify] [--json] [--native [--backend llvm|cranelift] [--proofs <sidecar> [--trust <tool@version>]...] | --simulation <json>] <source|manifest.json> [(--run <json> | --grants <json>) [--record <tape>] [--revocations <json>] | --replay <tape>] [--max-steps <n|unbounded>] [--cores <n>] [--trace-events <jsonl>] [--trace-ownership <json>] [-- args...] | build [--verify-cache] [--validate-stages] [--no-verify] [--release | --debug] [--lto] [--backend llvm|cranelift] [--target x86_64-linux | aarch64-linux] [--proofs <sidecar> [--trust <tool@version>]...] <source|manifest.json> -o <exe> | new <dir> [--lib] | fmt [--check] <source|manifest.json> | expand <source|manifest.json> | hash <source|manifest.json> | export --tir|--run|--c-header|--native-abi <source|manifest.json> -o <file> | deps card <manifest.json> [--package name@ver[/module]] [--code-store config.json] [--json] | explain RULE [--json] | explain --list [--json] (docs/rule-explain.md) | doc <source|manifest.json> [-o <out.md>] [--json] | view <tape> --capture <id> -o <file> [--perfetto | --source <program> --analysis <id>] [--timing <sidecar>] | store verify <directory> | precompute <package manifest.json> -o <directory> | env --json | tapes check <tape>... | tapes trial <candidate manifest.json> --grants <json> [--from <n>] <tape> | ctl <socket> (cores <n> | metrics) | serve [--no-verify] <source|manifest.json> --host <json>";
+const USAGE: &str = "usage: hirsel [--verbose] [--timings[=json]] [--mem-usage] check [--verify-cache] [--watch] [--json | --safe] <source|manifest.json> | serve [--stop] [--workspace <dir>] [--idle <seconds>] | test [--no-verify] [--json] [--seed <u64>] [--scheduler <name@1:seed> | --explore <n> [--scheduler <name@1>]] [--race] [--sim-points <root-release,atomic-store>] [--bless | --bench [--bench-time <ms>]] [--max-steps <n|unbounded> | --native [--backend llvm|cranelift]] [--trace-ownership <dir>] <source|manifest.json> [filter...] | run [--verify-cache] [--validate-stages] [--no-verify] [--json] [--native [--backend llvm|cranelift] [--proofs <sidecar> [--trust <tool@version>]...] | --simulation <json>] <source|manifest.json> [(--run <json> | --grants <json>) [--record <tape>] [--revocations <json>] | --replay <tape>] [--max-steps <n|unbounded>] [--cores <n>] [--trace-events <jsonl>] [--trace-ownership <json>] [-- args...] | build [--verify-cache] [--validate-stages] [--no-verify] [--release | --debug] [--lto] [--backend llvm|cranelift] [--target x86_64-linux | aarch64-linux] [--proofs <sidecar> [--trust <tool@version>]...] <source|manifest.json> -o <exe> | new <dir> [--lib] | fmt [--check] <source|manifest.json> | expand <source|manifest.json> | hash <source|manifest.json> | export --tir|--run|--c-header|--native-abi <source|manifest.json> -o <file> | deps card <manifest.json> [--package name@ver[/module]] [--code-store config.json] [--json] | explain RULE [--json] | explain --list [--json] (docs/rule-explain.md) | doc <source|manifest.json> [-o <out.md>] [--json] | view <tape> --capture <id> -o <file> [--perfetto | --source <program> --analysis <id>] [--timing <sidecar>] | store verify <directory> | precompute <package manifest.json> -o <directory> | env --json | tapes check <tape>... | tapes trial <candidate manifest.json> --grants <json> [--from <n>] <tape> | ctl <socket> (cores <n> | metrics) | serve [--no-verify] [--native [--backend llvm|cranelift]] <source|manifest.json> --host <json>";
 
 const FMT_HELP: &str = "usage: hirsel fmt [--check] <source|manifest.json>\n\nFormat a source file or a package's direct sources.\nExample: hirsel fmt examples/configctl/hirsel.json\n--check reports differences without writing (exit 1; unchanged: 0).\nAll sources are prepared before writing; unchanged files are skipped.\nWrite errors are reported; writes across files are not atomic.";
 
@@ -263,6 +263,8 @@ enum Command {
     Serve {
         file: OsString,
         host: OsString,
+        /// Run the place's head natively, on this back end.
+        native: Option<hirsel_native::Backend>,
     },
     Run {
         file: OsString,
@@ -853,18 +855,30 @@ fn parse_command(args: Vec<OsString>) -> Result<Command, lexopt::Error> {
             file: source_arg(&mut args)?,
         },
         Some(Value(command)) if command == "serve" => {
-            let (mut file, mut host) = (None, None);
+            let (mut file, mut host, mut native, mut selected) = (None, None, false, None);
             while let Some(arg) = args.next()? {
                 match arg {
                     Long("host") if host.is_none() => host = Some(args.value()?),
+                    Long("native") if !native => native = true,
+                    Long("backend") if selected.is_none() => {
+                        selected = Some(backend(args.value()?)?)
+                    }
                     Value(path) if file.is_none() && !path.to_string_lossy().starts_with('-') => {
                         file = Some(path)
                     }
                     arg => return Err(arg.unexpected()),
                 }
             }
+            if selected.is_some() && !native {
+                return Err("--backend requires --native".into());
+            }
             match (file, host) {
-                (Some(file), Some(host)) => Command::Serve { file, host },
+                // A native head is the edit loop's: Cranelift unless LLVM is asked for.
+                (Some(file), Some(host)) => Command::Serve {
+                    file,
+                    host,
+                    native: native.then(|| selected.unwrap_or(hirsel_native::Backend::Cranelift)),
+                },
                 _ => return Err("serve requires a program and --host <json>".into()),
             }
         }
@@ -1837,10 +1851,11 @@ fn execute_command(
                 Err(error) => tool_error(error, false),
             };
         }
-        Command::Serve { file, host } => {
+        Command::Serve { file, host, native } => {
             let served = hirsel_driver::serve::serve(
                 Path::new(&file),
                 Path::new(&host),
+                native,
                 policy,
                 &mut |endpoint| eprintln!("hirsel serve: listening on {endpoint}"),
             );

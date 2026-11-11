@@ -2772,6 +2772,7 @@ pub fn launch_ownership(
         inherit: false,
         stdout: &mut stdout,
         stderr: &mut stderr,
+        place: None,
     });
     launch_impl(
         runnable,
@@ -3048,7 +3049,13 @@ fn launch_impl(
             record,
             revocations,
         } => {
-            if live.is_some() {
+            if let Some(live) = &live {
+                if let Some(link) = live.place {
+                    use std::os::fd::AsRawFd;
+                    command
+                        .arg("--hirsel-place")
+                        .arg(link.as_raw_fd().to_string());
+                }
                 if let Some(path) = record {
                     // Observer controls belong to the host launcher, outside the
                     // admitted program environment and all replay inputs.
@@ -3105,6 +3112,21 @@ fn launch_impl(
     let output = match live {
         Some(live) => {
             let (mut process, _hold) = process(runnable, target, toolchain, &tooling, &command)?;
+            if let Some(link) = live.place {
+                use std::os::fd::AsRawFd;
+                use std::os::unix::process::CommandExt;
+                let fd = link.as_raw_fd();
+                // SAFETY: only the async-signal-safe fcntl runs between fork and exec; it
+                // keeps the link, and no other descriptor, open across exec in the child.
+                unsafe {
+                    process.pre_exec(move || {
+                        if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+            }
             let observed = live
                 .run
                 .signals_grant()
@@ -3345,6 +3367,9 @@ pub struct LiveRun<'a> {
     pub inherit: bool,
     pub stdout: &'a mut dyn std::io::Write,
     pub stderr: &'a mut dyn std::io::Write,
+    /// A served place's head: the runner host's end of its link, which the head inherits
+    /// as `--hirsel-place <fd>`.
+    pub place: Option<std::os::fd::BorrowedFd<'a>>,
 }
 
 /// A user's server runs until it exits or is interrupted; harness timeouts remain tooling.

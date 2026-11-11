@@ -16,3 +16,4 @@ pub use tool::run_path_native_backend;
 pub use tool::run_path_native_backend_with_trace_events;
 pub use tool::run_path_native_backend_with_validation;
 pub use tool::run_path_native_with_config;
+pub use tool::run_place_head;

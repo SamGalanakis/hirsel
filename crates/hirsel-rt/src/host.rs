@@ -364,6 +364,7 @@ impl Host {
             workers: None,
             metrics: None,
             trace_events: None,
+            place: None,
         }
     }
 }
@@ -451,8 +452,14 @@ pub struct RunHandle<'p> {
     workers: Option<(u32, bool)>,
     metrics: Option<std::sync::Arc<crate::pool::WorkerMetrics>>,
     trace_events: Option<std::path::PathBuf>,
+    place: Option<std::fs::File>,
 }
 impl RunHandle<'_> {
+    /// Run as a served place's head whose runner host is at the other end of `link`.
+    pub(crate) fn with_place(mut self, link: std::fs::File) -> Self {
+        self.place = Some(link);
+        self
+    }
     /// Export complete canonical Ordered events. Refuses before entry for
     /// a scheduling contract other than FIFO cooperative execution.
     /// The destination is created only after complete evidence validates.
@@ -495,12 +502,14 @@ impl RunHandle<'_> {
             workers,
             metrics,
             trace_events,
+            place,
         } = self;
         let options = crate::launch::Options {
             control,
             workers,
             metrics,
             trace_events,
+            place,
         };
         // SAFETY: a loaded program's code and data live for the process.
         match unsafe {

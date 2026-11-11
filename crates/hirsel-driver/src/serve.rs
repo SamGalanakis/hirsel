@@ -22,8 +22,10 @@ use hirsel_remote::host::{
 use hirsel_remote::transport::{Command, Event, HostTls, Listener};
 use hirsel_remote::wire::Wire;
 use hirsel_run_config::host::HostConfig;
+use hirsel_run_schema::place::{PlaceMessage, ServedCall};
 use hirsel_run_schema::{CallForm, CallOutcome, CalleeFacts, CalleeOutcome, CodeReach, IoGrants};
 use std::collections::BTreeMap;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -96,7 +98,7 @@ struct Shared {
     sessions: BTreeMap<SessionId, Sender<Command>>,
     cancels: BTreeMap<RunId, CancelHandle>,
     /// The place's head inbox, once the head runs.
-    head: Option<PlaceHandle>,
+    head: Option<Head>,
     next_session: SessionId,
     work: Sender<Work>,
 }
@@ -144,8 +146,8 @@ impl Shared {
                         handle.cancel();
                     }
                 }
-                Action::Arrive(arrival) => match &self.head {
-                    Some(head) => head.arrive(arrival.id, arrived(*arrival)),
+                Action::Arrive(arrival) => match &mut self.head {
+                    Some(head) => head.arrive(*arrival),
                     // Served calls are admitted only at a place, whose head is set first.
                     None => {
                         let actions = self
@@ -156,6 +158,45 @@ impl Shared {
                 },
             }
         }
+    }
+}
+
+/// The place's head, as the host hands it arrivals: an interpreted head's inbox, or the
+/// host's end of a native head's place link.
+enum Head {
+    Interpreted(PlaceHandle),
+    Native(UnixStream),
+}
+impl Head {
+    /// Hand the head `arrival`. A native head that is gone reads nothing more; its process
+    /// ending closes the place.
+    fn arrive(&mut self, arrival: Arrival) {
+        match self {
+            Self::Interpreted(head) => head.arrive(arrival.id, arrived(arrival)),
+            Self::Native(link) => {
+                let id = arrival.id;
+                let _ = PlaceMessage::Arrive(id, served(arrival)).write(link);
+            }
+        }
+    }
+}
+
+/// A served call as a native head's `arrival.request` states it.
+fn served(arrival: Arrival) -> ServedCall {
+    let call = arrival.call;
+    ServedCall {
+        form: call.form,
+        path: call.path,
+        fingerprint: call.fingerprint,
+        code: call.code,
+        caller: arrival.caller,
+        stream: arrival.stream,
+        epoch: call.epoch,
+        position: call.position,
+        digest: arrival.digest,
+        acknowledged: call.acknowledged,
+        level: call.level,
+        argument: call.argument,
     }
 }
 
@@ -191,6 +232,7 @@ fn read(path: &str, what: &str) -> Result<Vec<u8>, ToolError> {
 pub fn serve(
     program: &Path,
     config: &Path,
+    native: Option<hirsel_native::Backend>,
     policy: crate::session::Policy,
     ready: &mut dyn FnMut(&str),
 ) -> Result<(), ToolError> {
@@ -278,7 +320,10 @@ pub fn serve(
     }));
     let config = Arc::new(config);
     if config.place.is_some() {
-        start_head(program, policy, fresh, &config, &shared)?;
+        match native {
+            None => start_head(program, policy, fresh, &config, &shared)?,
+            Some(backend) => start_native_head(program, policy, backend, fresh, &config, &shared)?,
+        }
     }
     {
         let (shared, config, wire) = (shared.clone(), config.clone(), wire.clone());
@@ -331,7 +376,7 @@ fn start_head(
         shared.dispatch(actions);
     }))
     .map_err(|e| host_error("the place's inbox", e))?;
-    shared.lock().unwrap().head = Some(handle);
+    shared.lock().unwrap().head = Some(Head::Interpreted(handle));
     let (program, config, shared) = (program.to_path_buf(), config.clone(), shared.clone());
     std::thread::Builder::new()
         .name("place head".into())
@@ -367,32 +412,7 @@ fn run_head(
     let crate::requests::CompileResult::Tir(input) = &selected.result else {
         return Err(host_error("host.place.head", "not a runnable entry"));
     };
-    let (_, schema) = crate::call_schemas(&input.signature, &input.runtime)
-        .map_err(|e| host_error("host.place.head", format!("{e:?}")))?;
-    let argument = hirsel_interp::library::runners::encode(&schema, &hirsel_interp::Value::Unit)
-        .map_err(|e| host_error("host.place.head", format!("{e:?}")))?;
-    let cause = hirsel_run_schema::Cause {
-        instance,
-        ordinal: 0,
-        digest: [0; 32],
-    };
-    let key = hirsel_run_schema::call_key(&instance, 0);
-    let seed = |name: &str| hirsel_run_schema::callee_seed(&key, name);
-    let mut record = hirsel_run_config::RunConfig::empty(
-        input.revision.digest(),
-        place.head.clone(),
-        hirsel_run_schema::LaunchKind::Call,
-    );
-    record.call = Some(hirsel_run_schema::CallRecord::new(
-        CallForm::Call,
-        &cause,
-        &argument,
-    ));
-    record.inputs.hash_seed = seed("hash");
-    record.inputs.random_seed = seed("random");
-    record.inputs.test_seed = seed("test");
-    record.io = Some(place.grants.clone());
-    let run = record
+    let run = head_record(input, &place.head, place.grants.clone(), instance)?
         .validated()
         .map_err(|e| host_error("host.place", e))?;
     let tape = config
@@ -413,6 +433,138 @@ fn run_head(
         Some(Hosted::Head(feed)),
         false,
     )?;
+    eprintln!("hirsel serve: the place's head ended: {outcome:?}");
+    Ok(())
+}
+
+/// The head's run record: a call of its `fn(rt: Io, a: ())` entry with `()` under `grants`,
+/// its seeds derived from the host's `instance`.
+fn head_record(
+    input: &hirsel_requests::TirExecution,
+    head: &str,
+    grants: IoGrants,
+    instance: [u8; 16],
+) -> Result<hirsel_run_config::RunConfig, ToolError> {
+    let (_, schema) = crate::call_schemas(&input.signature, &input.runtime)
+        .map_err(|e| host_error("host.place.head", format!("{e:?}")))?;
+    let argument = hirsel_interp::library::runners::encode(&schema, &hirsel_interp::Value::Unit)
+        .map_err(|e| host_error("host.place.head", format!("{e:?}")))?;
+    let cause = hirsel_run_schema::Cause {
+        instance,
+        ordinal: 0,
+        digest: [0; 32],
+    };
+    let key = hirsel_run_schema::call_key(&instance, 0);
+    let seed = |name: &str| hirsel_run_schema::callee_seed(&key, name);
+    let mut record = hirsel_run_config::RunConfig::empty(
+        input.revision.digest(),
+        head.to_owned(),
+        hirsel_run_schema::LaunchKind::Call,
+    );
+    record.call = Some(hirsel_run_schema::CallRecord::new(
+        CallForm::Call,
+        &cause,
+        &argument,
+    ));
+    record.inputs.hash_seed = seed("hash");
+    record.inputs.random_seed = seed("random");
+    record.inputs.test_seed = seed("test");
+    record.io = Some(grants);
+    Ok(record)
+}
+
+/// Start the place's head natively on its own thread: it builds the head as a bound call
+/// executable and runs it as a tasks.free@1 call run linked to this host. The host writes it
+/// each served call it admits and takes back each end; once the head's process exits and
+/// its last ends are read, later served calls are unreachable.
+fn start_native_head(
+    program: &Path,
+    policy: crate::session::Policy,
+    backend: hirsel_native::Backend,
+    instance: [u8; 16],
+    config: &Arc<HostConfig>,
+    shared: &Arc<Mutex<Shared>>,
+) -> Result<(), ToolError> {
+    // A native head's arrivals are not on its tape (determinism.md): it records nothing.
+    if config.tapes.is_some() {
+        return Err(host_error(
+            "host.tapes",
+            "a native place's head does not record its arrivals",
+        ));
+    }
+    let (host_end, head_end) = UnixStream::pair().map_err(|e| host_error("the place's link", e))?;
+    let mut ends = host_end
+        .try_clone()
+        .map_err(|e| host_error("the place's link", e))?;
+    shared.lock().unwrap().head = Some(Head::Native(host_end));
+    let reader = {
+        let shared = shared.clone();
+        std::thread::Builder::new()
+            .name("place link".into())
+            .spawn(move || {
+                while let Ok(Some(PlaceMessage::End(id, end))) = PlaceMessage::read(&mut ends) {
+                    let mut shared = shared.lock().unwrap();
+                    let actions = shared.host.arrival_ended(id, end);
+                    shared.dispatch(actions);
+                }
+            })
+            .map_err(|e| host_error("the place's link", e))?
+    };
+    let (program, config, shared) = (program.to_path_buf(), config.clone(), shared.clone());
+    std::thread::Builder::new()
+        .name("place head".into())
+        .spawn(move || {
+            if let Err(error) =
+                run_native_head(&program, policy, backend, instance, &config, &head_end)
+            {
+                eprintln!("hirsel serve: the place's head: {error:?}");
+            }
+            // The head's process has exited: once the link's last ends are in, the place
+            // serves nothing more.
+            drop(head_end);
+            let _ = reader.join();
+            let mut shared = shared.lock().unwrap();
+            let actions = shared.host.head_ended();
+            shared.dispatch(actions);
+        })
+        .map_err(|e| host_error("the place's head", e))?;
+    Ok(())
+}
+
+/// Build and run the place's head natively until it ends, linked to the host by `link`.
+fn run_native_head(
+    program: &Path,
+    policy: crate::session::Policy,
+    backend: hirsel_native::Backend,
+    instance: [u8; 16],
+    config: &HostConfig,
+    link: &UnixStream,
+) -> Result<(), ToolError> {
+    use std::os::fd::AsFd;
+    let place = config.place.as_ref().expect("a place host");
+    let definition =
+        crate::def_path(&place.head).ok_or_else(|| host_error("host.place.head", &place.head))?;
+    let mut session = crate::session::Session::open_resident(program, policy);
+    let selected = session.request(crate::requests::CompileOperation::Tir {
+        definition: Some(definition),
+    })?;
+    let crate::requests::CompileResult::Tir(input) = &selected.result else {
+        return Err(host_error("host.place.head", "not a runnable entry"));
+    };
+    // Native places run under tasks.free@1 (determinism.md).
+    let mut grants = place.grants.clone();
+    grants.tasks = Some("tasks.free@1".into());
+    let run = head_record(input, &place.head, grants, instance)?
+        .validated()
+        .map_err(|e| host_error("host.place", e))?;
+    drop(selected);
+    drop(session);
+    let launch = HostLaunch::Callee {
+        run: &run,
+        record: None,
+    };
+    let outcome = crate::native::run_place_head(program, launch, backend, policy, link.as_fd())?
+        .map_err(|e| host_error("the place's head", e))?;
     eprintln!("hirsel serve: the place's head ended: {outcome:?}");
     Ok(())
 }

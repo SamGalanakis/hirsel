@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use hirsel_run_schema::{CallForm, CallOutcome, RunnerRequest};
 
-use super::native::place::{Arrived, Place, Take};
+use super::native::place::{Place, ServedCall, Take};
 use super::{
     DENIED, EntryIdAbi, allocate_owned_bytes, entry_path, execution, native, runner, state,
 };
@@ -165,7 +165,7 @@ unsafe fn send(
     let work = match (served, canceled) {
         (false, _) => Err(CallOutcome::NotRun(DENIED)),
         (true, Some(cause)) => Err(CallOutcome::Canceled(cause)),
-        (true, None) => Ok(native::Work::Served(Arrived {
+        (true, None) => Ok(native::Work::Served(ServedCall {
             form,
             path,
             fingerprint,
@@ -285,6 +285,15 @@ pub unsafe extern "C" fn hirsel_rt_v2_inbox_take(
             Take::Arrivals(ids) => break ids,
             // Home wakes the take when a call arrives or the place closes.
             Take::Park => crate::tasks::park_retry(ctx, false),
+            // The host stopped: `None`, the null list block.
+            Take::Closed => {
+                // SAFETY: `out` is writable.
+                unsafe {
+                    out.write(std::ptr::null_mut());
+                    crate::tasks::yield_now(&mut *ctx);
+                }
+                return STATUS_OK;
+            }
         }
     };
     let words: Vec<u64> = ids.into_iter().map(|id| PLACE | id).collect();
@@ -347,7 +356,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_arrival_request(
         CallForm::Transact => 2,
         CallForm::Query => 3,
     };
-    let Arrived {
+    let ServedCall {
         path,
         fingerprint,
         code,

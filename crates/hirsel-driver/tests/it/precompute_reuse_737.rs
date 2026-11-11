@@ -79,7 +79,8 @@ impl Fixture {
         assert!(output.status.success(), "{mode}: {output:?}");
         stdout
             .lines()
-            .find_map(|line| line.strip_prefix("V runs: "))
+            // The harness may print the test name on the same line.
+            .find_map(|line| line.split_once("V runs: ").map(|(_, runs)| runs))
             .unwrap_or_else(|| panic!("{mode}: {stdout}"))
             .parse()
             .unwrap()

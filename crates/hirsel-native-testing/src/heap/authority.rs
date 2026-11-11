@@ -119,10 +119,17 @@ impl Authorities {
         }
         self.live.as_mut()
     }
+    /// A fork that has not rebuilt its providers closes from the history: the
+    /// claims open are those its requests minted and it has not closed. Cleanup
+    /// then costs no replay of every request the base served.
     pub(super) fn close(&mut self, id: u64) -> Result<(), String> {
-        self.live()
-            .and_then(|s| s.claims.remove(&id))
-            .ok_or_else(|| format!("model close of unknown Claim {id}"))?;
+        let open = match &mut self.live {
+            Some(live) => live.claims.remove(&id).is_some(),
+            None => !self.closed.contains(&id) && self.history.iter().any(|r| r.minted == Some(id)),
+        };
+        if !open {
+            return Err(format!("model close of unknown Claim {id}"));
+        }
         self.closed.insert(id);
         Ok(())
     }
@@ -565,6 +572,17 @@ mod tests {
         );
         b.close(40).unwrap();
         assert!(b.clone().live().unwrap().claims.is_empty());
+        // A fork closes without rebuilding providers; each minted Claim closes
+        // once, and stays closed when a later request rebuilds them.
+        let mut c = a.clone();
+        c.close(40).unwrap();
+        assert!(c.close(40).is_err());
+        assert!(c.close(99).is_err());
+        assert_eq!(
+            c.request(0, Some(40), wire::Request::Durable { at: 0 }, 43),
+            None
+        );
+        c.close(41).unwrap();
     }
 
     // An actual authority.read returns a claim record and an append record that names one

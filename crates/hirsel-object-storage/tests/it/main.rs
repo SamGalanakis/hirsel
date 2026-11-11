@@ -456,8 +456,13 @@ fn steady_state_requests_allocate_only_what_they_return() {
 #[test]
 fn request_cuts_are_taken_by_the_simulated_objects_and_refused_by_real_storage() {
     let dir = tempfile::tempdir().unwrap();
-    for cut in CUTS {
-        let sim = serde_json::json!({"provider": "objects.sim@1", cut: 3});
+    let delays = serde_json::json!([{"at": 3, "lands": 4}]);
+    for (cut, value) in CUTS
+        .iter()
+        .map(|c| (*c, serde_json::json!(3)))
+        .chain([("delays", delays)])
+    {
+        let sim = serde_json::json!({"provider": "objects.sim@1", cut: value});
         assert!(open(&sim).is_ok(), "{cut}");
         for real in [
             serde_json::json!({"provider": "objects.dir@1", "path": dir.path(), cut: 3}),
@@ -512,11 +517,10 @@ fn a_cut_fires_at_its_request_and_a_crash_holds_until_restart() {
     assert!(crashed.restart());
     assert!(!crashed.restart());
     assert_eq!(crashed.put_new("y", b"2"), Ok(Put::Created));
-    // A held-back write is unanswered and absent until just before request
-    // 2 + defer_for, and its condition is checked when it lands.
+    // A held-back write is unanswered and absent until just before the
+    // request it lands before, and its condition is checked when it lands.
     let held = at(Cuts {
-        defer_apply_at: Some(2),
-        defer_for: Some(2),
+        delays: vec![Delay { at: 2, lands: 4 }],
         ..Cuts::default()
     });
     assert!(matches!(
@@ -527,8 +531,7 @@ fn a_cut_fires_at_its_request_and_a_crash_holds_until_restart() {
     assert_eq!(held.get("x").unwrap().as_deref(), Some(&b"1"[..]));
     // Request 2 replaces x if it still holds 0; request 3 deletes x first.
     let late = at(Cuts {
-        defer_apply_at: Some(2),
-        defer_for: Some(2),
+        delays: vec![Delay { at: 2, lands: 4 }],
         ..Cuts::default()
     });
     assert_eq!(late.put_new("x", b"0"), Ok(Put::Created));
@@ -536,4 +539,36 @@ fn a_cut_fires_at_its_request_and_a_crash_holds_until_restart() {
     assert!(late.replace("x", b"1", zero).is_err());
     assert_eq!(late.delete("x"), Ok(()));
     assert_eq!(late.get("x").unwrap(), None);
+}
+
+#[test]
+fn delayed_writes_stay_outstanding_together_and_land_in_script_order_across_a_restart() {
+    // Request 1 puts x and request 3 deletes it, both held; request 2 crashes
+    // the client, which restarts. The delete is listed first, so when both
+    // land before request 5 the put lands last and x is there; listed the
+    // other way round, x is gone. Neither lands before request 5, restart or
+    // no restart.
+    for (delays, after) in [
+        (
+            vec![Delay { at: 3, lands: 5 }, Delay { at: 1, lands: 5 }],
+            Some(&b"1"[..]),
+        ),
+        (
+            vec![Delay { at: 1, lands: 5 }, Delay { at: 3, lands: 5 }],
+            None,
+        ),
+    ] {
+        let o = MemoryObjects::new().with_cuts(Cuts {
+            delays,
+            crash_at: Some(2),
+            ..Cuts::default()
+        });
+        assert!(o.put_new("x", b"1").is_err());
+        assert!(o.get("y").unwrap().is_none());
+        assert!(o.get("y").is_err());
+        assert!(o.restart());
+        assert!(o.delete("x").is_err());
+        assert!(o.get("x").unwrap().is_none());
+        assert_eq!(o.get("x").unwrap().as_deref(), after);
+    }
 }

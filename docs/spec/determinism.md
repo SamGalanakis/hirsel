@@ -1123,10 +1123,12 @@ An `objects.sim@1` entry of `authority.objects@1` takes the same kind of cuts as
 each a request number `k` (the object requests counted from 1: every get, put, conditional
 replace, listing and delete, one per key): `fail_at` answers request `k` with a definite
 refusal and no effect; `lose_unapplied_at` loses it before its effect, unanswered;
-`lose_response_at` applies it and loses its reply; `defer_apply_at` loses it unanswered
-and holds its write back until just before request `k + defer_for` (`defer_for` 1 when
-absent), when the write lands with its condition checked then, as a request that arrives
-late does; `crash_at` ends the client right after it, so every later request of that
+`lose_response_at` applies it and loses its reply; `delays`, a list of `{"at": k,
+"lands": m}` with `k < m` and each `k` distinct, answers each request `k` unavailable at
+once and holds its write back until just before request `m`, when the write lands with
+its condition checked then, as a request that arrives late does; any number of delays may
+be outstanding together, a client restart neither drops nor lands them, and writes due
+before the same request land in the order the list gives; `crash_at` ends the client right after it, so every later request of that
 client fails with no effect, and the authority continues as a new client that keeps
 nothing of the old one and whose old claims are dead; `claim_at` has another client of
 the same objects claim the history just before request `k` is served, its own requests

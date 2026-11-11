@@ -351,8 +351,9 @@ fn objects(seed: u64, ops: u64) -> SimulationConfig {
         let wait = 1 + (z >> 8) % 3;
         (wait, defer + (z >> 16) % (wait + 3))
     };
+    let lands = defer + wait;
     let grant = format!(
-        r#"{{"w":{{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{{"provider":"objects.sim@1","seed":{seed},"defer_apply_at":{defer},"defer_for":{wait},"claim_at":{claim}}}}}}}"#
+        r#"{{"w":{{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{{"provider":"objects.sim@1","seed":{seed},"delays":[{{"at":{defer},"lands":{lands}}}],"claim_at":{claim}}}}}}}"#
     );
     SimulationConfig {
         authorities: hirsel_run_config::validate_authorities(grant.as_bytes()).unwrap(),

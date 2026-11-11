@@ -416,7 +416,7 @@ impl std::fmt::Debug for Foreign {
 
 /// The requests (numbered from 1) at which [`MemoryObjects`] cuts its client.
 /// An object write is whole or absent, so no cut tears one.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Cuts {
     /// Answer a definite refusal ([`StorageError::Io`]), with no effect.
     pub fail_at: Option<u64>,
@@ -429,26 +429,33 @@ pub struct Cuts {
     /// The client dies right after the request: every later request fails
     /// with no effect, uncounted, until [`MemoryObjects::restart`].
     pub crash_at: Option<u64>,
-    /// Hold the request's write back: the client hears
-    /// [`StorageError::Unavailable`] at once, and the write (its condition
-    /// checked then) takes effect just before request `defer_apply_at +
-    /// defer_for` is served, as an unanswered request that lands late does. A
-    /// read held back has no effect.
-    pub defer_apply_at: Option<u64>,
-    /// How many requests later a held-back write takes effect; 1 when absent.
-    pub defer_for: Option<u64>,
+    /// The requests held back in transit, any number outstanding at once:
+    /// see [`Delay`].
+    pub delays: Vec<Delay>,
     /// Another client claims the history just before the request is served:
     /// the claim [`MemoryObjects::on_claim`] installs runs first, its own
     /// requests counted, so a claim can land inside one advance.
     pub claim_at: Option<u64>,
 }
 
-/// The names of the [`Cuts`] members in an `objects.sim@1` entry.
-pub const CUTS: [&str; 7] = [
+/// One request held back in transit. Request `at` is answered
+/// [`StorageError::Unavailable`] at once, with no effect then; its write (its
+/// condition checked then) takes effect just before request `lands` is
+/// served, as an unanswered request that arrives late does, whatever the
+/// client did meanwhile, a restart included. Writes due before the same
+/// request take effect in the order the delays are listed. A read held back
+/// has no effect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Delay {
+    pub at: u64,
+    pub lands: u64,
+}
+
+/// The names of the request-number [`Cuts`] members in an `objects.sim@1`
+/// entry; `delays` is a list of `{"at": .., "lands": ..}`.
+pub const CUTS: [&str; 5] = [
     "claim_at",
     "crash_at",
-    "defer_apply_at",
-    "defer_for",
     "fail_at",
     "lose_response_at",
     "lose_unapplied_at",
@@ -459,8 +466,9 @@ struct Cutting {
     at: Cuts,
     requests: u64,
     down: bool,
-    /// A held-back write and the request it takes effect before.
-    held: Option<(u64, Held)>,
+    /// The held-back writes, each under the index of its delay in the script,
+    /// in that order.
+    held: Vec<(usize, Held)>,
 }
 
 /// A write a cut holds back.
@@ -513,8 +521,9 @@ enum Fate {
     Serve { lost: bool },
     /// No effect; answer this error.
     Fail(fn(String) -> StorageError),
-    /// Hold the write back until request `until`; answer Unavailable.
-    Defer { until: u64 },
+    /// Hold the write back as the script's delay `delay` says; answer
+    /// Unavailable.
+    Defer { delay: usize },
 }
 
 #[derive(Debug)]
@@ -564,16 +573,16 @@ impl MemoryObjects {
     pub fn restart(&self) -> bool {
         std::mem::take(&mut self.cuts.lock().expect("cuts").down)
     }
-    /// Count a request and say what the cuts make of it. A held-back write
-    /// due before this request takes effect first.
+    /// Count a request and say what the cuts make of it. The held-back writes
+    /// due before this request take effect first.
     fn fate(&self) -> Fate {
         let mut c = self.cuts.lock().expect("cuts");
         if c.down {
             return Fate::Fail(StorageError::Unavailable);
         }
         c.requests += 1;
-        let (n, at) = (Some(c.requests), c.at);
-        if at.claim_at == n {
+        let n = Some(c.requests);
+        if c.at.claim_at == n {
             drop(c);
             let foreign = self.foreign.lock().expect("foreign").clone();
             if let Some(Foreign(claim)) = foreign {
@@ -581,15 +590,20 @@ impl MemoryObjects {
             }
             c = self.cuts.lock().expect("cuts");
         }
-        if c.held.as_ref().is_some_and(|(until, _)| Some(*until) == n) {
-            let (_, write) = c.held.take().expect("held");
-            write.apply(&mut self.objects.lock().expect("objects"));
+        let Cutting {
+            at, requests, held, ..
+        } = &mut *c;
+        let (due, kept) = std::mem::take(held)
+            .into_iter()
+            .partition(|(d, _)| at.delays[*d].lands == *requests);
+        *held = kept;
+        let mut objects = self.objects.lock().expect("objects");
+        for (_, write) in due {
+            write.apply(&mut objects);
         }
-        c.down = at.crash_at == n;
-        if at.defer_apply_at == n {
-            Fate::Defer {
-                until: c.requests + at.defer_for.unwrap_or(1),
-            }
+        drop(objects);
+        let fate = if let Some(delay) = at.delays.iter().position(|d| Some(d.at) == n) {
+            Fate::Defer { delay }
         } else if at.fail_at == n {
             Fate::Fail(StorageError::Io)
         } else if at.lose_unapplied_at == n {
@@ -598,7 +612,9 @@ impl MemoryObjects {
             Fate::Serve {
                 lost: at.lose_response_at == n,
             }
-        }
+        };
+        c.down = c.at.crash_at == n;
+        fate
     }
     /// The next fault decision: None, or whether the faulted operation's
     /// effect still happens. A cut decides first.
@@ -610,9 +626,11 @@ impl MemoryObjects {
     ) -> Result<Option<bool>, StorageError> {
         match self.fate() {
             Fate::Fail(error) => return Err(error(format!("cut at {operation} {key}"))),
-            Fate::Defer { until } => {
+            Fate::Defer { delay } => {
                 if let Some(w) = write() {
-                    self.cuts.lock().expect("cuts").held = Some((until, w));
+                    let held = &mut self.cuts.lock().expect("cuts").held;
+                    let place = held.partition_point(|(d, _)| *d < delay);
+                    held.insert(place, (delay, w));
                 }
                 return Err(StorageError::Unavailable(format!(
                     "cut at {operation} {key}: held back"
@@ -793,8 +811,7 @@ pub fn provider(entry: &serde_json::Value) -> Result<Provider, String> {
             "fail_at",
             "lose_response_at",
             "lose_unapplied_at",
-            "defer_apply_at",
-            "defer_for",
+            "delays",
             "claim_at",
         ],
         other => return Err(format!("unsupported object storage provider {other}")),
@@ -832,13 +849,44 @@ pub fn provider(entry: &serde_json::Value) -> Result<Provider, String> {
         lose_unapplied_at: request("lose_unapplied_at")?,
         lose_response_at: request("lose_response_at")?,
         crash_at: request("crash_at")?,
-        defer_apply_at: request("defer_apply_at")?,
-        defer_for: request("defer_for")?,
+        delays: delays(provider, members.get("delays"))?,
         claim_at: request("claim_at")?,
     };
     Ok(Provider::Sim(
         MemoryObjects::with_faults(uint("seed")?, uint("fail_one_in")?).with_cuts(cuts),
     ))
+}
+
+/// An `objects.sim@1` entry's `delays`: a list of `{"at": k, "lands": m}`,
+/// each `at` a distinct request and each `lands` a later one.
+fn delays(provider: &str, value: Option<&serde_json::Value>) -> Result<Vec<Delay>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let shape = || format!("{provider} delays is a list of {{\"at\": k, \"lands\": m}}, 0 < k < m");
+    let mut out: Vec<Delay> = Vec::new();
+    for d in value.as_array().ok_or_else(shape)? {
+        let members = d.as_object().ok_or_else(shape)?;
+        if members.len() != 2 {
+            return Err(shape());
+        }
+        let number = |name: &str| members.get(name).and_then(|v| v.as_u64()).ok_or_else(shape);
+        let delay = Delay {
+            at: number("at")?,
+            lands: number("lands")?,
+        };
+        if delay.at == 0 || delay.lands <= delay.at {
+            return Err(shape());
+        }
+        if out.iter().any(|o| o.at == delay.at) {
+            return Err(format!(
+                "{provider} delays holds request {} twice",
+                delay.at
+            ));
+        }
+        out.push(delay);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

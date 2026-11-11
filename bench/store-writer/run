@@ -82,6 +82,20 @@ def children(pid):
             yield from children(int(child))
 
 
+def place_heads(serve_pid):
+    """The place heads `hirsel serve` runs: its descendants started with `--hirsel-place`
+    (serve also keeps helpers, such as the shell that holds its scratch directory)."""
+    heads = []
+    for pid in list(children(serve_pid))[1:]:
+        try:
+            arguments = Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+        except OSError:
+            continue
+        if b'--hirsel-place' in arguments:
+            heads.append(pid)
+    return heads
+
+
 def target_pid(parent, executable):
     for pid in children(parent):
         try:
@@ -449,7 +463,7 @@ def sample(kind, cell, group, submitters, workload, out, compiler, source_sha, p
                         bytes_before = disk_bytes(stored)
                         if served:
                             # The setup's calls have started the head by now.
-                            heads = list(children(serve_pid))[1:]
+                            heads = place_heads(serve_pid)
                             if len(heads) != 1:
                                 raise RuntimeError(f'the place host runs {len(heads)} heads, not one')
                             head = heads[0]
@@ -646,7 +660,7 @@ def callers_sample(cell, group, callers, workload, out, compiler, source_sha, he
                 reader.join()
             if any(not lines[i] or lines[i][-1].strip() != 'READY' for i in range(callers)):
                 raise RuntimeError(f'{suffix}: a caller did not reach READY')
-            heads = list(children(serve_pid))[1:]
+            heads = place_heads(serve_pid)
             if len(heads) != 1:
                 raise RuntimeError(f'the place host runs {len(heads)} heads, not one')
             head = heads[0]

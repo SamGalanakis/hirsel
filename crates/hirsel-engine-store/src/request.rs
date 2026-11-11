@@ -210,6 +210,26 @@ impl RequestStore {
             .set(Arc::downgrade(request.verifier.as_ref().unwrap()));
         Ok(request)
     }
+    /// A request whose verifier is `session`'s when it is over the same store
+    /// and verify mode, and its own otherwise.
+    pub fn with_scratch_and_session_verifier(
+        session: &SessionVerifier,
+        backend: Arc<dyn ResultStore>,
+        verify: crate::VerifyStore,
+        memory: hirsel_engine_admission::MemoryReservation,
+        parent: &std::path::Path,
+        disk_bytes: u64,
+    ) -> std::io::Result<Self> {
+        if !session.serves(&backend, verify) {
+            return Self::with_scratch_and_verifier_transport(backend, memory, parent, disk_bytes);
+        }
+        let mut request = Self::with_scratch(backend, memory, parent, disk_bytes)?;
+        request.verifier = session
+            .owner
+            .as_ref()
+            .and_then(|owner| owner.verifier.clone());
+        Ok(request)
+    }
     fn admitted(backend: Arc<dyn ResultStore>, memory: Arc<Admission>) -> Self {
         let verifier = backend.verifier();
         let baseline = backend.persistence();
@@ -241,6 +261,59 @@ impl RequestStore {
         }
         state.used += bytes;
         true
+    }
+}
+/// One session's verifier, owned beside its carries so that the authority a
+/// carried row holds lives as long as the row. Its rows, facts and content
+/// are charged to the session's own fixed reservation and spool, never to a
+/// request's, so a request's end releases nothing V published. V publishes a
+/// row only after storing its content, as every store-owned verifier does.
+/// A store with operation epochs issues authority per operation, so its
+/// requests keep their own verifiers.
+pub struct SessionVerifier {
+    /// The store a request must be over to share this verifier.
+    backend: Arc<dyn ResultStore>,
+    verify: crate::VerifyStore,
+    /// Kept for its verifier; it serves no products. None over a store with
+    /// operation epochs.
+    owner: Option<RequestStore>,
+}
+impl SessionVerifier {
+    pub fn new(
+        backend: Arc<dyn ResultStore>,
+        verify: crate::VerifyStore,
+        memory: hirsel_engine_admission::MemoryReservation,
+        parent: &std::path::Path,
+        disk_bytes: u64,
+    ) -> std::io::Result<Self> {
+        let owner = match backend.for_operation() {
+            Some(_) => None,
+            None => Some(RequestStore::with_scratch_and_verifier_transport(
+                backend.clone(),
+                memory,
+                parent,
+                disk_bytes,
+            )?),
+        };
+        Ok(Self {
+            backend,
+            verify,
+            owner,
+        })
+    }
+    /// The store this session's requests use when the caller selects none.
+    pub fn backend(&self) -> &Arc<dyn ResultStore> {
+        &self.backend
+    }
+    /// A different store identity (and so a different compiler's store) or
+    /// verify mode has its own authority.
+    fn serves(&self, backend: &Arc<dyn ResultStore>, verify: crate::VerifyStore) -> bool {
+        self.owner.is_some()
+            && std::ptr::addr_eq(Arc::as_ptr(&self.backend), Arc::as_ptr(backend))
+            && self.verify == verify
+    }
+    pub fn retained_bytes(&self) -> u64 {
+        self.owner.as_ref().map_or(0, RequestStore::retained_bytes)
     }
 }
 struct ArchiveLease {
@@ -1661,6 +1734,51 @@ mod tests {
         assert!(disabled.lookup_product(address()).is_none());
         assert_eq!(disabled.retained_bytes(), 0);
         assert!(!disabled.exhausted());
+    }
+    /// Authority is shared only over the session's own store and verify mode,
+    /// and never over a store whose operations issue their own authority.
+    #[test]
+    fn session_verifier_serves_only_its_own_store_and_verify_mode() {
+        use crate::VerifyStore::{Off, Recompute};
+        let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
+        let parent = tempfile::tempdir().unwrap();
+        let session = |backend: &Arc<dyn ResultStore>| {
+            SessionVerifier::new(
+                backend.clone(),
+                Off,
+                budget.reserve(4 << 20).unwrap(),
+                parent.path(),
+                1 << 20,
+            )
+            .unwrap()
+        };
+        let verifier = |session: &SessionVerifier, backend: &Arc<dyn ResultStore>, verify| {
+            RequestStore::with_scratch_and_session_verifier(
+                session,
+                backend.clone(),
+                verify,
+                budget.reserve(4 << 20).unwrap(),
+                parent.path(),
+                1 << 20,
+            )
+            .unwrap()
+            .verifier()
+            .unwrap()
+        };
+        let empty: Arc<dyn ResultStore> = Arc::new(NoneStore);
+        let shared = session(&empty);
+        let first = verifier(&shared, &empty, Off);
+        assert!(Arc::ptr_eq(&first, &verifier(&shared, &empty, Off)));
+        let other: Arc<dyn ResultStore> = Arc::new(NoneStore);
+        assert!(!Arc::ptr_eq(&first, &verifier(&shared, &other, Off)));
+        assert!(!Arc::ptr_eq(&first, &verifier(&shared, &empty, Recompute)));
+        let root = tempfile::tempdir().unwrap();
+        let durable: Arc<dyn ResultStore> = Arc::new(crate::DirStore::new(root.path().into()));
+        let per_operation = session(&durable);
+        assert!(!Arc::ptr_eq(
+            &verifier(&per_operation, &durable, Off),
+            &verifier(&per_operation, &durable, Off)
+        ));
     }
     #[test]
     fn verifier_transport_admits_its_actual_index_and_releases_all_rows() {

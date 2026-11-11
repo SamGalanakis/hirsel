@@ -1258,3 +1258,60 @@ fn demand_views_relower_only_an_edited_definition_and_its_dependents() {
         });
     });
 }
+
+/// A session's checks share the verifier its carried rows were issued under:
+/// an unchanged re-check runs V nowhere, and after a check that fails the
+/// next one reports exactly what a fresh session reports. V's run count is
+/// process-wide, so the body runs alone in a child process.
+#[test]
+fn session_checks_keep_their_carrys_verifier_across_a_failed_check() {
+    const NAME: &str = "scheduled_instance_registration::session_checks_keep_their_carrys_verifier_across_a_failed_check";
+    if std::env::var_os("HIRSEL_SESSION_VERIFIER_CHILD").is_none() {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([NAME, "--exact", "--nocapture", "--test-threads=1"])
+            .env("HIRSEL_SESSION_VERIFIER_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success() && String::from_utf8_lossy(&child.stdout).contains("1 passed"),
+            "{}\n{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        return;
+    }
+    use hirsel_intern::timings::{self, Count};
+    let runs = || {
+        timings::report()
+            .counts
+            .into_iter()
+            .find(|(kind, _)| *kind == Count::VRuns)
+            .unwrap()
+            .1
+    };
+    let report = |program: &mut LoadedProgram| {
+        let output = program.check(LoweringPolicy::Comptime).unwrap();
+        format!("{:?} {:?}", output.completion, output.diagnostics)
+    };
+    let broken = format!("{SOURCE}fn broken()->u8 uses {{}} {{true}}\n");
+    with_compiler_stack(|| {
+        timings::enable();
+        // With no store, the session's verifier is the only home of V's rows.
+        let none = || Arc::new(hirsel_engine_store::NoneStore);
+        let mut cold = String::new();
+        fixture_in(none(), SOURCE, 1, |program, _| cold = report(program));
+        fixture_in(none(), SOURCE, 1, |program, _| {
+            assert_eq!(report(program), cold);
+            let before = runs();
+            assert_eq!(report(program), cold);
+            assert_eq!(runs(), before, "an unchanged re-check ran V");
+            let main = program.source_paths()[0].clone();
+            assert!(program.replace_source(&main, broken.clone()).unwrap());
+            program.parse_sources().unwrap();
+            assert_ne!(report(program), cold);
+            assert!(program.replace_source(&main, SOURCE.to_string()).unwrap());
+            program.parse_sources().unwrap();
+            assert_eq!(report(program), cold);
+        });
+    });
+}

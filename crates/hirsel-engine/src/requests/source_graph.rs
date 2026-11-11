@@ -249,10 +249,44 @@ pub struct SourceSelection {
     pub input_bytes: u64,
 }
 
-/// One selector's carries across its source revisions' fresh graphs.
+/// One selector's carries across its source revisions' fresh graphs, and the
+/// verifier whose authority their rows hold; all three go together.
+#[derive(Clone)]
 pub struct SourceCarry {
     pub front: Arc<FrontCarry>,
     pub lower: Arc<LowerCarry>,
+    pub verifier: Arc<hirsel_engine_store::SessionVerifier>,
+}
+
+impl SourceCarry {
+    /// A quarter of the request transport each for the front rows, the Lower
+    /// rows and the verifier's rows, from the process budget. Any refusal
+    /// leaves the session without a carry.
+    pub fn reserve(
+        budget: &Arc<hirsel_engine_admission::ProcessBudget>,
+        limits: RequestLimits,
+        backend: Arc<dyn ResultStore>,
+        verify: hirsel_engine_store::VerifyStore,
+        scratch_parent: &std::path::Path,
+        disk_bytes: u64,
+    ) -> Option<Self> {
+        let quarter = limits.transport_bytes / 4;
+        let front = FrontCarry::new(budget.reserve(quarter).ok()?).ok()?;
+        let lower = LowerCarry::new(budget.reserve(quarter).ok()?).ok()?;
+        let verifier = hirsel_engine_store::SessionVerifier::new(
+            backend,
+            verify,
+            budget.reserve(quarter).ok()?,
+            scratch_parent,
+            disk_bytes,
+        )
+        .ok()?;
+        Some(Self {
+            front,
+            lower,
+            verifier: Arc::new(verifier),
+        })
+    }
 }
 
 /// Nested Lower/Evaluate continuations admitted under the active frames.
@@ -1048,36 +1082,48 @@ impl QueryEngine {
             .checked_add(limits.snapshot_bytes)
             .and_then(|bytes| bytes.checked_add(limits.transport_bytes))
             .ok_or_else(|| uninstalled())?;
-        let backend: Arc<dyn ResultStore> = self
-            .result_store
-            .clone()
-            .unwrap_or_else(|| Arc::new(NoneStore));
-        let store = match RequestStore::with_scratch_and_verifier_transport(
-            backend,
-            loading.take_transport(),
-            &std::env::temp_dir(),
-            disk_bytes,
-        ) {
+        // With no store selected, every request of this engine's session is
+        // over the session's one empty store, so they share its verifier.
+        let backend: Arc<dyn ResultStore> = self.result_store.clone().unwrap_or_else(|| {
+            self.source_carry.as_ref().map_or_else(
+                || Arc::new(NoneStore) as Arc<dyn ResultStore>,
+                |carry| carry.verifier.backend().clone(),
+            )
+        });
+        // Like a request selector, the engine keeps one carry pair and its
+        // verifier across its fresh graphs; with no store it is a session's
+        // only reuse.
+        if self.source_carry.is_none() && self.verify_store == hirsel_engine_store::VerifyStore::Off
+        {
+            self.source_carry = SourceCarry::reserve(
+                budget,
+                limits,
+                backend.clone(),
+                self.verify_store,
+                &std::env::temp_dir(),
+                disk_bytes,
+            );
+        }
+        let store = match &self.source_carry {
+            Some(carry) => RequestStore::with_scratch_and_session_verifier(
+                &carry.verifier,
+                backend,
+                self.verify_store,
+                loading.take_transport(),
+                &std::env::temp_dir(),
+                disk_bytes,
+            ),
+            None => RequestStore::with_scratch_and_verifier_transport(
+                backend,
+                loading.take_transport(),
+                &std::env::temp_dir(),
+                disk_bytes,
+            ),
+        };
+        let store = match store {
             Ok(store) => Arc::new(store),
             Err(error) => return Err(loading.failed(ToolError::Io(error))),
         };
-        // Like a request selector, the engine keeps one carry pair across
-        // its fresh graphs; with no store it is a session's only reuse.
-        if self.source_carry.is_none() && self.verify_store == hirsel_engine_store::VerifyStore::Off
-        {
-            let quarter = limits.transport_bytes / 4;
-            let front = budget
-                .reserve(quarter)
-                .ok()
-                .and_then(|allowance| FrontCarry::new(allowance).ok());
-            let lower = budget
-                .reserve(quarter)
-                .ok()
-                .and_then(|allowance| LowerCarry::new(allowance).ok());
-            self.source_carry = front
-                .zip(lower)
-                .map(|(front, lower)| SourceCarry { front, lower });
-        }
         let previous = self.result_store.replace(store.clone());
         let result = self.check_installed(selection, jobs, limits, budget, loading, &store);
         self.result_store = previous;
@@ -1152,10 +1198,7 @@ impl QueryEngine {
             storage: true,
             ..SourceShape::default()
         };
-        let carry = self.source_carry.as_ref().map(|carry| SourceCarry {
-            front: carry.front.clone(),
-            lower: carry.lower.clone(),
-        });
+        let carry = self.source_carry.clone();
         let (scope, limits) = prepare_source_scope(
             self,
             selection,

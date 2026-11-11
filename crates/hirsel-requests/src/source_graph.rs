@@ -1094,12 +1094,23 @@ pub(super) fn install(
         .checked_add(limits.snapshot_bytes)
         .and_then(|bytes| bytes.checked_add(limits.transport_bytes))
         .ok_or_else(|| uninstalled())?;
-    let store = match RequestStore::with_scratch_and_verifier_transport(
-        config.store.clone(),
-        loading.take_transport(),
-        scratch_parent,
-        disk_bytes,
-    ) {
+    let store = match carry {
+        Some(carry) => RequestStore::with_scratch_and_session_verifier(
+            &carry.verifier,
+            config.store.clone(),
+            config.verify_store,
+            loading.take_transport(),
+            scratch_parent,
+            disk_bytes,
+        ),
+        None => RequestStore::with_scratch_and_verifier_transport(
+            config.store.clone(),
+            loading.take_transport(),
+            scratch_parent,
+            disk_bytes,
+        ),
+    };
+    let store = match store {
         Ok(store) => Arc::new(store),
         Err(error) => return Err(loading.failed(ToolError::Io(error))),
     };

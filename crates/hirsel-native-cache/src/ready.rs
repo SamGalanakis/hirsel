@@ -212,7 +212,9 @@ impl ReadyQueries {
         action: Action,
         environment: &NativeEnvironment<'_>,
     ) -> Option<Arc<ReadyProduct>> {
-        let result = self.lookup_inner(key, action, environment);
+        let result = self
+            .lookup_inner(key, action, environment)
+            .map(|(product, _)| product);
         if result.is_some() {
             self.counts.hits += 1;
         } else {
@@ -225,7 +227,7 @@ impl ReadyQueries {
         key: &InstanceAddress,
         action: Action,
         environment: &NativeEnvironment<'_>,
-    ) -> Option<Arc<ReadyProduct>> {
+    ) -> Option<(Arc<ReadyProduct>, hirsel_lir::validate::NativeOutput)> {
         if key.target_abi != environment.target.digest() {
             return None;
         }
@@ -261,7 +263,7 @@ impl ReadyQueries {
         {
             return None;
         }
-        Some(Arc::new(product))
+        Some((Arc::new(product), accepted))
     }
 
     /// Obtain only C's own linkage observations after the same current
@@ -272,15 +274,8 @@ impl ReadyQueries {
         action: Action,
         environment: &NativeEnvironment<'_>,
     ) -> Option<hirsel_lir::validate::CheckedLinkage> {
-        self.lookup_inner(key, action, environment)?;
-        self.native
-            .lookup(
-                subject(key, action),
-                key.policy,
-                StageKind::Ready,
-                environment,
-            )
-            .map(|accepted| accepted.linkage())
+        self.lookup_inner(key, action, environment)
+            .map(|(_, accepted)| accepted.linkage())
     }
 
     /// Read only the C-bound layout closure for program assembly. The Ready
@@ -292,7 +287,7 @@ impl ReadyQueries {
         product: &ReadyProduct,
         environment: &NativeEnvironment<'_>,
     ) -> Result<Arc<hirsel_lir::products::CheckedLayouts>, String> {
-        let current = self
+        let (current, _) = self
             .lookup_inner(key, product.product.action, environment)
             .ok_or("Ready assembly lost current C admission")?;
         if current.product != product.product || record(&current)? != record(product)? {
@@ -316,21 +311,12 @@ impl ReadyQueries {
         ),
         String,
     > {
-        let current = self
+        let (current, accepted) = self
             .lookup_inner(key, product.product.action, environment)
             .ok_or("Ready materialization lost current C admission")?;
         if current.product != product.product || record(&current)? != record(product)? {
             return Err("Ready materialization descriptor differs".into());
         }
-        let accepted = self
-            .native
-            .lookup(
-                subject(key, product.product.action),
-                key.policy,
-                StageKind::Ready,
-                environment,
-            )
-            .ok_or("Ready materialization lost native output")?;
         self.native
             .read(&accepted, environment.target)
             .map_err(|e| e.to_string())
@@ -484,7 +470,7 @@ impl ReadyQueries {
         };
         let previous = self
             .lookup_inner(key, action, &environment)
-            .map(|p| {
+            .map(|(p, _)| {
                 p.product
                     .archive(ArchiveAdmission::Retained)
                     .map(|archive| archive.reference())

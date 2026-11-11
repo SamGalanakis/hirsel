@@ -206,16 +206,7 @@ impl StoredInstance {
             .map(|window| window.read(self.bytes))
             .transpose()
             .map_err(|e| format!("native facts for {}: {e}", key.instance.definition()))?;
-        let bytes = instances
-            .store
-            .get_content(self.adapters)
-            .ok_or("missing native adapter facts")?;
-        if ADAPTERS.reference(&bytes) != Some(self.adapters) {
-            return Err("native adapter facts identity differs".into());
-        }
-        let adapters =
-            hirsel_codec::from_text(std::str::from_utf8(&bytes).map_err(|e| e.to_string())?)
-                .map_err(|e| format!("native adapter facts: {e:?}"))?;
+        let adapters = self.adapters(instances)?;
         let mut output = instances.decode_completed(key, self.product.clone(), adapters)?;
         // Decode uses the consumer's scratch. Reopening may change allocation
         // capacities and structural sharing without changing any content.
@@ -232,6 +223,22 @@ impl StoredInstance {
         Arc::make_mut(&mut Arc::make_mut(&mut output.facts).body)._window = lease.clone();
         output._window = lease;
         Ok(Arc::new(output))
+    }
+    /// Only the pretransfer adapter facts, the same content `read` decodes into
+    /// `facts.source.adapters`; an operation scope needs nothing else.
+    pub fn adapters(
+        &self,
+        instances: &DemandInstances,
+    ) -> Result<Vec<hirsel_lir::ir::Symbol>, String> {
+        let bytes = instances
+            .store
+            .get_content(self.adapters)
+            .ok_or("missing native adapter facts")?;
+        if ADAPTERS.reference(&bytes) != Some(self.adapters) {
+            return Err("native adapter facts identity differs".into());
+        }
+        hirsel_codec::from_text(std::str::from_utf8(&bytes).map_err(|e| e.to_string())?)
+            .map_err(|e| format!("native adapter facts: {e:?}"))
     }
     pub fn retained_bytes(&self) -> u64 {
         size_of::<Self>() as u64

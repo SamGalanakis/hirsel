@@ -560,7 +560,8 @@ impl DemandInstances {
                 discharge: Some(&options.discharge),
             };
             let (request, _request_charge) = self.callable_request(request_records[origin])?;
-            let scoped = self.operations_input(original, stored, &request, &env)?;
+            let scoped =
+                self.operations_input(original, &output.facts.source.adapters, &request, &env)?;
             let (closure, body) = self.queries.read(
                 original,
                 &output.product,
@@ -913,7 +914,7 @@ impl DemandInstances {
                 read_json(self.store.as_ref(), request_records[origin])?;
             let original_operations = self.operations_input(
                 &originals[origin].0,
-                &originals[origin].1,
+                &originals[origin].1.adapters(self)?,
                 &original_request,
                 &NativeEnvironment {
                     target: &self.target,

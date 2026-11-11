@@ -150,7 +150,9 @@ impl InstanceQueries {
         action: Action,
         environment: &NativeEnvironment<'_>,
     ) -> Option<Arc<InstanceProduct>> {
-        let output = self.lookup_inner(key, action, environment);
+        let output = self
+            .lookup_inner(key, action, environment)
+            .map(|(product, _)| product);
         if output.is_some() {
             self.counts.hits += 1;
         } else {
@@ -167,22 +169,15 @@ impl InstanceQueries {
         action: Action,
         environment: &NativeEnvironment<'_>,
     ) -> Option<hirsel_lir::validate::CheckedLinkage> {
-        self.lookup_inner(key, action, environment)?;
-        self.native
-            .lookup(
-                subject(self.phase, key, action),
-                key.policy,
-                StageKind::Value,
-                environment,
-            )
-            .map(|output| output.linkage())
+        self.lookup_inner(key, action, environment)
+            .map(|(_, accepted)| accepted.linkage())
     }
     fn lookup_inner(
         &self,
         key: &InstanceAddress,
         action: Action,
         environment: &NativeEnvironment<'_>,
-    ) -> Option<Arc<InstanceProduct>> {
+    ) -> Option<(Arc<InstanceProduct>, hirsel_lir::validate::NativeOutput)> {
         if key.target_abi != environment.target.digest() {
             return None;
         }
@@ -215,7 +210,7 @@ impl InstanceQueries {
         ) {
             return None;
         }
-        Some(Arc::new(candidate))
+        Some((Arc::new(candidate), accepted))
     }
 
     pub fn layouts(
@@ -240,7 +235,7 @@ impl InstanceQueries {
         ),
         String,
     > {
-        let current = self
+        let (current, accepted) = self
             .lookup_inner(key, product.product.action, environment)
             .ok_or_else(|| format!(
                 "Value materialization lost current C admission for {} body {} instance {:?}, phase 0x{:08x}",
@@ -249,15 +244,6 @@ impl InstanceQueries {
         if current.product != product.product {
             return Err("Value materialization descriptor differs".into());
         }
-        let accepted = self
-            .native
-            .lookup(
-                subject(self.phase, key, product.product.action),
-                key.policy,
-                StageKind::Value,
-                environment,
-            )
-            .ok_or("Value materialization lost native output")?;
         self.native
             .read(&accepted, environment.target)
             .map_err(|e| e.to_string())
@@ -297,7 +283,7 @@ impl InstanceQueries {
         };
         let previous = self
             .lookup_inner(key, action, &environment)
-            .map(|p| {
+            .map(|(p, _)| {
                 let reference = p
                     .product
                     .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)

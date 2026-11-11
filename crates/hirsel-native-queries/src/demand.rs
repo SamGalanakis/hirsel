@@ -679,8 +679,9 @@ impl DemandInstances {
         {
             return Err("native dependency differs from the request snapshot".into());
         }
-        let operations = self.operations_input(key, output, request, environment)?;
         let output = output.read(self, key)?;
+        let operations =
+            self.operations_input(key, &output.facts.source.adapters, request, environment)?;
         let scoped = NativeEnvironment {
             operations: &operations,
             ..*environment
@@ -723,19 +724,18 @@ impl DemandInstances {
             .requests
             .get(key.instance.encoding())
             .ok_or("native operation scope has no original request")?;
-        self.operations_input(key, output, request, environment)
+        self.operations_input(key, &output.adapters(self)?, request, environment)
     }
     fn operations_input<'a>(
         &'a self,
         key: &'a InstanceAddress,
-        output: &StoredInstance,
+        adapters: &[hirsel_lir::ir::Symbol],
         request: &Request,
         environment: &NativeEnvironment<'a>,
     ) -> Result<super::instance_operations::InstanceOperations<'a>, String> {
         if request.key.bind()? != key.instance {
             return Err("native operation scope has another original request".into());
         }
-        let output = output.read(self, key)?;
         Ok(super::instance_operations::InstanceOperations {
             inventory: Some(&self.seal_inventory),
             declarations: environment.operations,
@@ -745,10 +745,7 @@ impl DemandInstances {
                 .source_definition()
                 .map(|_| (key.instance.definition(), key.instance.digest())),
             pretransfer: Some(
-                output
-                    .facts
-                    .source
-                    .adapters
+                adapters
                     .iter()
                     .map(|symbol| {
                         let mut selected = environment

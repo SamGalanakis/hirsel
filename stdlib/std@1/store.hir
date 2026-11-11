@@ -266,6 +266,8 @@ pub opaque type Store: () uses {Authority} {
   limits: StoreLimits,
   bounds: history.Bounds,
   identity: Bytes,
+  // `seed_key` of the identity: the start of the default seed stream (STORE-4).
+  seed_key: u64,
   // The state at V, the visible version.
   index: ordered_map.OrderedMap[Bytes, Bytes],
   visible: u64,
@@ -407,6 +409,7 @@ pub fn open(a: Authority, config: StoreConfig) -> Result[Store, StoreError] {
     limits: config.limits,
     bounds: history.default_bounds(),
     identity: b"",
+    seed_key: 0,
     index: ordered_map.empty(compare_keys),
     visible: 0,
     spare: AccessSet(points: [], spans: []),
@@ -544,6 +547,7 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
   s.index = take state
   s.visible = tip.last
   s.identity = unique tip.identity
+  s.seed_key = seed_key(s.identity)
   s.end = end
   let (newest_digest, newest_last) = take newest
   s.digest = take newest_digest
@@ -1182,7 +1186,7 @@ fn ordered(s: Store) -> CallInfo uses {} {
   CallInfo(
     caller: "",
     at: 0,
-    seed: order_seed(s.visible + 1),
+    seed: order_seed(s.seed_key, s.visible + 1),
     id: call_id(s.identity, s.visible + 1)
   )
 }
@@ -1196,8 +1200,13 @@ fn call_id(identity: Bytes, at: u64) -> Bytes uses {} {
   for i in 0u64..8 {
     list.push(mut v, int.truncate(at >> i * 8))
   }
+  framed_digest([b"hirsel.call.v1", copy identity, bytes.from_list(take v)])
+}
+
+// The history format's length-framed SHA-256 of `parts`.
+fn framed_digest(parts: List[Bytes]) -> Bytes uses {} {
   let mut out: List[u8] = []
-  for part in [b"hirsel.call.v1", copy identity, bytes.from_list(take v)] {
+  for part in parts {
     let n = bytes.len(part)
     for i in 0u64..8 {
       list.push(mut out, int.truncate(n >> i * 8))
@@ -1209,9 +1218,23 @@ fn call_id(identity: Bytes, at: u64) -> Bytes uses {} {
   history.digest(bytes.from_list(take out))
 }
 
-// splitmix64's finalizer: distinct versions give well-spread seeds.
-fn order_seed(n: u64) -> u64 uses {} {
-  let mut z = core@1/int.wrapping_mul(n, 0x9e3779b97f4a7c15u64)
+// The first eight bytes, little-endian, of `H("hirsel.seed.v1", identity)`.
+fn seed_key(identity: Bytes) -> u64 uses {} {
+  let d = framed_digest([b"hirsel.seed.v1", copy identity])
+  let mut k = 0u64
+  for i in 0u64..8 {
+    let byte: u64 = int.widen(d[i])
+    k = k | byte << i * 8
+  }
+  k
+}
+
+// The default seed at version `n` (STORE-4): element `n` of the splitmix64
+// stream that starts at the store's `seed_key`, so it derives from the store
+// identity and the version, and distinct versions of one store differ.
+fn order_seed(key: u64, n: u64) -> u64 uses {} {
+  let step = core@1/int.wrapping_mul(n, 0x9e3779b97f4a7c15u64)
+  let mut z = core@1/int.wrapping_add(key, step)
   z = core@1/int.wrapping_mul(z ^ z >> 30, 0xbf58476d1ce4e5b9u64)
   z = core@1/int.wrapping_mul(z ^ z >> 27, 0x94d049bb133111ebu64)
   z ^ z >> 31
@@ -1874,7 +1897,7 @@ fn serve_transact(
   let info = CallInfo(
     caller: copy caller,
     at: 0,
-    seed: order_seed(s.visible + 1),
+    seed: order_seed(s.seed_key, s.visible + 1),
     id: call_id(s.identity, s.visible + 1)
   )
   let mut tx = Tx(

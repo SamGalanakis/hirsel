@@ -7,17 +7,19 @@
 // later calls are such a store). A run that aborts commits nothing, and the
 // transaction that next commits takes its version and so its id. A reopened
 // store keeps its identity, so the two stores' ids still differ there. A
-// query is not ordered and has no id.
+// query is not ordered and has no id. The default seed derives from the store
+// identity and the version as well: the two stores' seeds at one version
+// differ, and so do one store's at two versions.
 @serializable
 type Stop = Stopped(Bytes) | Db(store.TxError)
 
-// Commits a write and returns its id.
-fn stamp(mut tx: store.Tx, info: store.CallInfo, n: u64) -> Result[Bytes, Stop] {
+// Commits a write and returns its id and seed.
+fn stamp(mut tx: store.Tx, info: store.CallInfo, n: u64) -> Result[(Bytes, u64), Stop] {
   let Some(id) = call_info.id(info) else {
-    return Ok(b"")
+    return Ok((b"", 0))
   }
   store.tx_put(mut tx, b"last", copy id) ? Db
-  Ok(id)
+  Ok((id, call_info.seed(info)))
 }
 
 // Aborts, returning the id it ran under.
@@ -43,12 +45,16 @@ fn check(ok: bool) -> Result[(), Failed] {
   }
 }
 
-fn committed(mut s: store.Store) -> Result[Bytes, Failed] {
-  let r: Result[Bytes, store.TxFailure[Stop]] = store.transact(mut s, stamp, 0u64)
+fn committed(mut s: store.Store) -> Result[(Bytes, u64), Failed] {
+  let r: Result[(Bytes, u64), store.TxFailure[Stop]] = store.transact(
+    mut s,
+    stamp,
+    0u64
+  )
   match take r {
-    Ok(id) => {
+    Ok((id, seed)) => {
       check(bytes.len(id) == 32)?
-      Ok(take id)
+      Ok((take id, seed))
     },
     Error(_) => Error(Check()),
   }
@@ -63,17 +69,17 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
   }
   let mut sa = store.open(a, store.default_config()) ? Store
   let mut sb = store.open(b, store.default_config()) ? Store
-  let a1 = committed(mut sa)?
-  let b1 = committed(mut sb)?
+  let (a1, a1_seed) = committed(mut sa)?
+  let (b1, b1_seed) = committed(mut sb)?
   // The same version of two stores.
-  check(a1 != b1)?
+  check(a1 != b1 && a1_seed != b1_seed)?
   let aborted: Result[Bytes, store.TxFailure[Stop]] = store.transact(
     mut sa,
     refuse,
     0u64
   )
-  let a2 = committed(mut sa)?
-  check(a2 != a1)?
+  let (a2, a2_seed) = committed(mut sa)?
+  check(a2 != a1 && a2_seed != a1_seed)?
   check(aborted == Error(Aborted(Stopped(copy a2))))?
   let snap = store.snapshot(a, mut sa, authority.floor(a)) ? Store
   check(store.query(take snap, has_id, 0u64) == Ok(false))?
@@ -83,9 +89,9 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
   let mut rb = store.open(b, store.default_config()) ? Store
   // b committed once less than a, so its second commit here shares a3's
   // version.
-  let a3 = committed(mut ra)?
+  let (a3, a3_seed) = committed(mut ra)?
   let _ = committed(mut rb)?
-  let b3 = committed(mut rb)?
-  check(a3 != a1 && a3 != a2 && a3 != b3)?
+  let (b3, b3_seed) = committed(mut rb)?
+  check(a3 != a1 && a3 != a2 && a3 != b3 && a3_seed != b3_seed)?
   Ok(())
 }

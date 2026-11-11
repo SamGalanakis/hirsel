@@ -62,6 +62,10 @@ pub(crate) struct Entry {
     pub(crate) valid: OnceLock<Result<(), GraphError>>,
     pub(crate) actual_key: OnceLock<Option<Arc<str>>>,
     pub(crate) rewrite_features: OnceLock<u8>,
+    /// Set on a private row once the source-backed base answered that it has
+    /// no candidates for it. That answer is permanent, so later interns of the
+    /// row skip the provider.
+    base_absent: OnceLock<()>,
 }
 impl Entry {
     fn new(row: Type) -> Self {
@@ -71,6 +75,7 @@ impl Entry {
             valid: OnceLock::new(),
             actual_key: OnceLock::new(),
             rewrite_features: OnceLock::new(),
+            base_absent: OnceLock::new(),
         }
     }
 }
@@ -106,6 +111,8 @@ fn row_hash(row: &Type) -> u64 {
 /// A lazy immutable component provider. `rows` returns a checked component with
 /// edges expressed as ids obtained from `base.id_at`, without demanding rows.
 /// `candidates` is an index only; TypeBase compares complete rows after loading.
+/// It is a pure function of the row and the base: a row with no candidates
+/// never gets any. Only `rows` may fail now and succeed later.
 pub trait TypeBaseSource: Send + Sync {
     fn rows(&self, position: u32, base: &TypeBase) -> Option<Vec<(u32, Type)>>;
     fn candidates(&self, row: &Type, base: &TypeBase) -> Vec<u32>;
@@ -281,17 +288,40 @@ impl TypeBase {
         .then_some(())
     }
     fn find(&self, hash: u64, row: &Type) -> Option<TypeId> {
-        if let Some(source) = &self.source {
-            return source
-                .candidates(row, self)
-                .into_iter()
-                .find_map(|p| (self.entry(p)?.row == *row).then(|| Self::id(p)));
+        match self.lookup(hash, row) {
+            BaseLookup::Found(id) => Some(id),
+            BaseLookup::Absent | BaseLookup::Unsettled => None,
         }
-        self.index.get(&hash)?.iter().find(|id| {
-            self.entry(id.position().expect("a base id"))
-                .is_some_and(|e| e.row == *row)
-        })
     }
+    fn lookup(&self, hash: u64, row: &Type) -> BaseLookup {
+        if let Some(source) = &self.source {
+            let candidates = source.candidates(row, self);
+            if candidates.is_empty() {
+                return BaseLookup::Absent;
+            }
+            // A candidate whose component fails to load may match later.
+            return candidates
+                .into_iter()
+                .find_map(|p| (self.entry(p)?.row == *row).then(|| Self::id(p)))
+                .map_or(BaseLookup::Unsettled, BaseLookup::Found);
+        }
+        self.index
+            .get(&hash)
+            .and_then(|ids| {
+                ids.iter().find(|id| {
+                    self.entry(id.position().expect("a base id"))
+                        .is_some_and(|e| e.row == *row)
+                })
+            })
+            .map_or(BaseLookup::Unsettled, BaseLookup::Found)
+    }
+}
+
+/// A base lookup. `Absent` is permanent; an `Unsettled` miss is asked again.
+enum BaseLookup {
+    Found(TypeId),
+    Absent,
+    Unsettled,
 }
 
 const SHARDS: usize = 64;
@@ -376,16 +406,21 @@ impl TypeInterner {
             .find(|id| self.get(*id).is_some_and(|other| other == row))
     }
 
-    fn find_base(
+    /// An indexed id whose base answer is settled: a base row, or a private
+    /// row the base permanently lacks.
+    fn find_settled(
         &self,
         index: &HashMap<u64, Ids, IdHasher>,
         hash: u64,
         row: &Type,
     ) -> Option<TypeId> {
         index.get(&hash)?.iter().find(|id| {
-            id.position()
-                .is_some_and(|position| position < self.base_len)
-                && self.get(*id).is_some_and(|other| other == row)
+            id.position().is_some_and(|position| {
+                self.entry(*id).is_some_and(|entry| {
+                    (position < self.base_len || entry.base_absent.get().is_some())
+                        && entry.row == *row
+                })
+            })
         })
     }
 
@@ -396,7 +431,7 @@ impl TypeInterner {
         let hash = row_hash(&row);
         let source_backed = self.base.as_ref().is_some_and(|base| base.source.is_some());
         if source_backed
-            && let Some(id) = self.find_base(
+            && let Some(id) = self.find_settled(
                 &self
                     .shard(hash)
                     .read()
@@ -408,12 +443,17 @@ impl TypeInterner {
             self.counters.hits.fetch_add(1, Ordering::Relaxed);
             return id;
         }
-        if let Some(id) = self.base.as_ref().and_then(|b| b.find(hash, &row)) {
+        let lookup = self
+            .base
+            .as_ref()
+            .map_or(BaseLookup::Absent, |b| b.lookup(hash, &row));
+        if let BaseLookup::Found(id) = lookup {
             if source_backed {
-                // Reuse only a complete canonical base match. Misses and local
-                // rows still check the provider, including after missing input
-                // becomes available. At most one entry per matched base id is
-                // added to the existing shard index; no rows are copied.
+                // Reuse only a complete canonical base match. Unsettled misses
+                // still check the provider, so a component that loads later
+                // takes precedence over an existing private row. At most one
+                // entry per matched base id is added to the existing shard
+                // index; no rows are copied.
                 let start = std::time::Instant::now();
                 let mut index = self
                     .shard(hash)
@@ -436,6 +476,18 @@ impl TypeInterner {
             self.counters.hits.fetch_add(1, Ordering::Relaxed);
             return id;
         }
+        let settle = |id: TypeId| {
+            if source_backed
+                && matches!(lookup, BaseLookup::Absent)
+                && let Some(entry) = id
+                    .position()
+                    .filter(|&position| position >= self.base_len)
+                    .and_then(|position| self.local_entry(position))
+            {
+                let _ = entry.base_absent.set(());
+            }
+            id
+        };
         let shard = self.shard(hash);
         if let Some(id) = self.find(
             &shard.read().unwrap_or_else(PoisonError::into_inner),
@@ -443,7 +495,7 @@ impl TypeInterner {
             &row,
         ) {
             self.counters.hits.fetch_add(1, Ordering::Relaxed);
-            return id;
+            return settle(id);
         }
         let start = std::time::Instant::now();
         let mut index = shard.write().unwrap_or_else(PoisonError::into_inner);
@@ -452,7 +504,7 @@ impl TypeInterner {
             .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         if let Some(id) = self.find(&index, hash, &row) {
             self.counters.hits.fetch_add(1, Ordering::Relaxed);
-            return id;
+            return settle(id);
         }
         let id = self.publish(row);
         match index.get_mut(&hash) {
@@ -461,7 +513,7 @@ impl TypeInterner {
                 index.insert(hash, Ids::One(id));
             }
         }
-        id
+        settle(id)
     }
 
     fn publish(&self, row: Type) -> TypeId {
@@ -779,12 +831,12 @@ mod source_base_lookup_tests {
                 ]
             })
         }
-        fn candidates(&self, _: &Type, _: &TypeBase) -> Vec<u32> {
+        fn candidates(&self, row: &Type, _: &TypeBase) -> Vec<u32> {
+            // Pure: availability gates only `rows`.
             self.candidates.fetch_add(1, Ordering::Relaxed);
-            if self.available.load(Ordering::Relaxed) {
-                vec![0, 1]
-            } else {
-                vec![]
+            match row.kind {
+                TypeKind::Primitive(Primitive::U16) => vec![],
+                _ => vec![0, 1],
             }
         }
     }
@@ -815,6 +867,18 @@ mod source_base_lookup_tests {
             types.len(),
             base.len(),
             "matching rows allocate no private types"
+        );
+        let absent = types.intern(Type::with_kind(TypeKind::Primitive(Primitive::U16)));
+        for _ in 0..32 {
+            assert_eq!(
+                types.intern(Type::with_kind(TypeKind::Primitive(Primitive::U16))),
+                absent
+            );
+        }
+        assert_eq!(
+            source.candidates.load(Ordering::Relaxed),
+            3,
+            "a row without candidates is asked once"
         );
     }
     #[test]

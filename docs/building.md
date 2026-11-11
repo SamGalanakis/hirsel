@@ -996,6 +996,19 @@ runs`), how many of those images were already cached (`cached images`), and each
 kind of fallback to a linked executable with its first reason (`fallback: foreign:
 the program calls C (1)`); see "Native runs without an executable".
 
+`budget` reports the process query allowance (`hirsel_guard::admission`): its
+`limit`, the `headroom` header facts leave free (a tenth of the limit), the
+`peak` reserved total and the evictable header bytes held at that peak, each
+named owner's bytes at the peak, and each reserving code site's bytes at the
+peak and its own peak (sites under 1 MiB appear only in the JSON form).
+`unevictable stretch` is the high water of unevictable growth between two
+eviction points, and `named owners` the part of it that grew inside the
+allocator, where nothing can be evicted; the headroom must stay well above
+that. `largest charge` and `by a named owner` are the largest single charges.
+A named owner refused while header facts are held names its growth since the
+last eviction point and the headroom: the declared bound on what one stretch
+of checking may add to the unevictable owners.
+
 `process_cpu_ns` is CPU used by all threads during the measured command;
 `untimed_cpu_ns` is that total minus summed phase CPU. Both are null when the
 host cannot read process CPU. A resident timings request runs on the server and

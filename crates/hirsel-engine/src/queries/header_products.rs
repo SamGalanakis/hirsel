@@ -23,9 +23,27 @@ pub(crate) struct HeaderProduct {
     accounted: AtomicBool,
     recent: AtomicBool,
 }
+/// A partition's budget, which charges header facts as its evictable class.
 pub(crate) trait HeaderAllowance: Send + Sync {
-    fn take_header(&self, bytes: u64) -> Option<hirsel_engine_admission::MemoryReservation>;
-    fn available_header_bytes(&self) -> u64;
+    fn header_budget(&self) -> &Arc<hirsel_engine_admission::ProcessBudget>;
+    #[track_caller]
+    fn take_header(&self, bytes: u64) -> Option<hirsel_engine_admission::MemoryReservation> {
+        self.header_budget().reserve_evictable(bytes).ok()
+    }
+    /// A required header charge once nothing more evicts: it may use the
+    /// headroom rather than refuse while the limit still has room.
+    #[track_caller]
+    fn take_required_header(
+        &self,
+        bytes: u64,
+    ) -> Option<hirsel_engine_admission::MemoryReservation> {
+        self.header_budget()
+            .reserve_evictable_in_headroom(bytes)
+            .ok()
+    }
+    fn available_header_bytes(&self) -> u64 {
+        self.header_budget().evictable_free()
+    }
 }
 /// What one settled header row holds against a budget.
 enum HeaderCharge {
@@ -820,10 +838,14 @@ impl HeaderProducts {
             .and_then(|admission| admission.partition.upgrade());
         let allowance = match partition {
             Some(partition) => loop {
+                self.restore_headroom(partition.header_budget(), 0);
                 if let Some(allowance) = partition.take_header(bytes) {
                     break allowance;
                 }
                 if !self.evict() {
+                    if let Some(allowance) = partition.take_required_header(bytes) {
+                        break allowance;
+                    }
                     return Err(sources::source_refusal(format!(
                         "source allowance cannot retain {bytes} bytes"
                     )));
@@ -978,11 +1000,19 @@ impl HeaderProducts {
             &std::mem::MaybeUninit::<std::sync::Mutex<HeaderCharge>>::uninit(),
         ));
         let allowance = loop {
+            if reclaim {
+                self.restore_headroom(partition.header_budget(), 0);
+            }
             if let Some(allowance) = partition.take_header(bytes) {
                 break allowance;
             }
             // Reclaim optional facts until the request footprint has room.
             if !reclaim || !self.evict() {
+                // A reclaiming admission is required once nothing more evicts;
+                // a non-reclaiming one is optional and declines instead.
+                if reclaim && let Some(allowance) = partition.take_required_header(bytes) {
+                    break allowance;
+                }
                 if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
                     let payloads = self
                         .operation
@@ -1296,6 +1326,17 @@ impl HeaderProducts {
             }
         }
         false
+    }
+    /// An eviction point: evict header facts until `budget`'s headroom stays
+    /// free after a further unevictable `charge`, or nothing more evicts.
+    /// Unevictable growth is measured from here.
+    pub(crate) fn restore_headroom(
+        &self,
+        budget: &hirsel_engine_admission::ProcessBudget,
+        charge: u64,
+    ) {
+        while budget.short_of_headroom(charge) && self.evict() {}
+        budget.eviction_point();
     }
     /// Evict one unpinned settled entry.
     pub(crate) fn evict(&self) -> bool {
@@ -1742,15 +1783,12 @@ pub(super) fn decode_installed_syntax(
 #[cfg(test)]
 mod retention_tests {
     use super::*;
-    use hirsel_engine_admission::{MemoryReservation, ProcessBudget};
+    use hirsel_engine_admission::ProcessBudget;
 
     struct Allowance(Arc<ProcessBudget>);
     impl HeaderAllowance for Allowance {
-        fn take_header(&self, bytes: u64) -> Option<MemoryReservation> {
-            self.0.reserve(bytes).ok()
-        }
-        fn available_header_bytes(&self) -> u64 {
-            self.0.free()
+        fn header_budget(&self) -> &Arc<ProcessBudget> {
+            &self.0
         }
     }
 

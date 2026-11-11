@@ -329,13 +329,13 @@ pub fn jobs() -> usize {
 
 /// Text built on the stack: the reports run where allocation has failed.
 struct Line {
-    bytes: [u8; 384],
+    bytes: [u8; 512],
     len: usize,
 }
 impl Line {
     fn new() -> Self {
         Line {
-            bytes: [0; 384],
+            bytes: [0; 512],
             len: 0,
         }
     }
@@ -373,6 +373,10 @@ impl Line {
         self.number(bytes)
     }
     fn exit(&self, status: i32) -> ! {
+        self.emit();
+        unsafe { libc::_exit(status) }
+    }
+    fn emit(&self) {
         let mut written = 0;
         while written < self.len {
             let n = unsafe {
@@ -387,7 +391,6 @@ impl Line {
             }
             written += n as usize;
         }
-        unsafe { libc::_exit(status) }
     }
 }
 
@@ -422,17 +425,80 @@ pub fn spawn_failed(stack: usize, error: std::io::Error) -> ! {
 #[cold]
 fn owner_exhausted(owner: admission::OwnerKind, bytes: usize) -> ! {
     let budget = admission::host_budget().0;
-    Line::new()
-        .text(b"hirsel: process query allowance exhausted; owner ")
+    let refusal = budget.owner_refusal(owner);
+    let mut line = Line::new();
+    line.text(b"hirsel: process query allowance exhausted; owner ")
         .text(owner.name().as_bytes())
         .text(b" requests ")
         .number(bytes as u64)
         .text(b" bytes with ")
-        .number(budget.reserved())
+        .number(refusal.reserved)
         .text(b" of ")
-        .number(budget.limit())
-        .text(b" reserved; retained growth was refused\n")
-        .exit(EXIT_STATUS)
+        .number(refusal.limit)
+        .text(b" reserved; ");
+    if refusal.evictable == 0 {
+        line.text(b"retained growth was refused\n");
+    } else {
+        line.text(b"it grew ")
+            .number(refusal.growth)
+            .text(b" bytes since the last eviction point, with ")
+            .number(refusal.reserved - refusal.evictable)
+            .text(b" unevictable and ")
+            .number(refusal.evictable)
+            .text(b" evictable header bytes held; one stretch of checking between eviction points may add at most the headroom of ")
+            .number(refusal.headroom)
+            .text(b" bytes to the unevictable owners\n");
+    }
+    line.emit();
+    budget_table(budget);
+    Line::new().exit(EXIT_STATUS)
+}
+
+/// The budget's peak by owner and by code site, written without allocating.
+#[cold]
+fn budget_table(budget: &admission::ProcessBudget) {
+    let report = budget.report();
+    Line::new()
+        .text(b"hirsel: budget peak ")
+        .number(report.peak)
+        .text(b" (evictable ")
+        .number(report.peak_evictable)
+        .text(b"), headroom ")
+        .number(report.headroom)
+        .text(b", largest unevictable stretch ")
+        .number(report.stretch)
+        .text(b" (named owners ")
+        .number(report.owner_stretch)
+        .text(b")")
+        .text(b", largest single charge ")
+        .number(report.largest)
+        .text(b" (named owner ")
+        .number(report.owner_largest)
+        .text(b")")
+        .text(b"\n")
+        .emit();
+    for kind in admission::OwnerKind::ALL {
+        Line::new()
+            .text(b"hirsel: budget owner ")
+            .text(kind.name().as_bytes())
+            .text(b" ")
+            .number(report.peak_owners[kind as usize])
+            .text(b"\n")
+            .emit();
+    }
+    admission::sites::each(1 << 20, |site, at_peak, own| {
+        Line::new()
+            .text(b"hirsel: budget site ")
+            .text(site.file().as_bytes())
+            .text(b":")
+            .number(site.line() as u64)
+            .text(b" at peak ")
+            .number(at_peak)
+            .text(b" own peak ")
+            .number(own)
+            .text(b"\n")
+            .emit();
+    });
 }
 
 #[cold]
@@ -567,12 +633,27 @@ mod tests {
         if std::env::var_os(CHILD).is_none() {
             return;
         }
-        if std::env::var_os("HIRSEL_GUARD_TEST_OWNER").is_some() {
+        if let Some(case) = std::env::var_os("HIRSEL_GUARD_TEST_OWNER") {
             let owner = admission::Owner::new(admission::OwnerKind::SessionTypes);
             let budget = admission::host_budget().0;
-            let _full = budget.reserve(budget.free()).unwrap();
+            let headroom = budget.headroom();
+            // "full": unevictable charges take the whole limit. Otherwise
+            // optional facts fill the cache to its capacity, an eviction
+            // point passes, and the owner grows by less or more than H.
+            let (_held, grow) = match case.to_str() {
+                Some("full") => (budget.reserve(budget.free()).unwrap(), 4096),
+                Some("within") => (
+                    budget.reserve_evictable(budget.evictable_free()).unwrap(),
+                    headroom / 2,
+                ),
+                _ => (
+                    budget.reserve_evictable(budget.evictable_free()).unwrap(),
+                    headroom + (1 << 20),
+                ),
+            };
+            budget.eviction_point();
             let _scope = owner.enter();
-            let block = std::hint::black_box(Box::new([0u8; 4096]));
+            let block = std::hint::black_box(vec![0u8; grow as usize]);
             println!("unadmitted owner published {} bytes", block.len());
             return;
         }
@@ -609,13 +690,63 @@ mod tests {
             "tests::exhaustion_child",
             &[
                 ("HIRSEL_MEMORY_LIMIT", "128M"),
-                ("HIRSEL_GUARD_TEST_OWNER", "1"),
+                ("HIRSEL_GUARD_TEST_OWNER", "full"),
             ],
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(EXIT_STATUS), "{stderr}");
         assert!(
             stderr.contains("process query allowance exhausted; owner session type interner"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("reserved; retained growth was refused\n"),
+            "{stderr}"
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("unadmitted owner published"));
+    }
+
+    /// Optional facts fill the cache only to the limit less the headroom, so
+    /// an owner growing by less than it after an eviction point is admitted
+    /// inside the allocator, where nothing can be evicted.
+    #[test]
+    fn owner_growth_within_the_headroom_needs_no_eviction() {
+        let output = child(
+            "tests::exhaustion_child",
+            &[
+                ("HIRSEL_MEMORY_LIMIT", "128M"),
+                ("HIRSEL_GUARD_TEST_OWNER", "within"),
+            ],
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{stderr}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("unadmitted owner published"));
+    }
+
+    /// Growth past the headroom while facts are held is refused as the
+    /// declared bound on one stretch, naming the growth, H and the facts.
+    #[test]
+    fn owner_growth_beyond_the_headroom_names_the_stretch_bound() {
+        let output = child(
+            "tests::exhaustion_child",
+            &[
+                ("HIRSEL_MEMORY_LIMIT", "128M"),
+                ("HIRSEL_GUARD_TEST_OWNER", "beyond"),
+            ],
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(EXIT_STATUS), "{stderr}");
+        // 128M less a quarter is a 96 MiB limit; H is a share of it.
+        let limit = 96u64 << 20;
+        let headroom = limit / admission::HEADROOM_SHARE;
+        assert!(
+            stderr.contains(&format!(
+                " evictable header bytes held; one stretch of checking between eviction points may add at most the headroom of {headroom} bytes to the unevictable owners\n"
+            )),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("owner session type interner requests "),
             "{stderr}"
         );
         assert!(!String::from_utf8_lossy(&output.stdout).contains("unadmitted owner published"));

@@ -176,11 +176,8 @@ struct FrontSourceBacking {
     _sources: SourceMap,
 }
 impl header_products::HeaderAllowance for FrontSourceBacking {
-    fn take_header(&self, bytes: u64) -> Option<hirsel_engine_admission::MemoryReservation> {
-        self.request.reserve(bytes).ok()
-    }
-    fn available_header_bytes(&self) -> u64 {
-        self.request.free()
+    fn header_budget(&self) -> &Arc<hirsel_engine_admission::ProcessBudget> {
+        &self.request
     }
 }
 struct LiveSourceBacking {
@@ -929,18 +926,19 @@ impl FrontBodyQueries {
             FrontState::Settled { publication, .. } => Ok(publication.clone()),
         })
     }
+    /// An eviction point: reclaim idle consumers until the request footprint
+    /// has room for `charge`, and header facts until the headroom stays free
+    /// beside it.
     fn make_room(&self, cx: &mut dyn QueryContext, charge: u64) -> Option<()> {
-        // Reclaim idle consumers until the request footprint has room.
-        while self._allowance.request.free() < charge {
-            if !cx.evict_body()
-                && !self
-                    .namespace
-                    .snapshot
-                    .header_products()
-                    .is_some_and(|headers| headers.evict())
-            {
+        let request = &self._allowance.request;
+        let headers = self.namespace.snapshot.header_products();
+        while request.free() < charge {
+            if !cx.evict_body() && !headers.is_some_and(|headers| headers.evict()) {
                 return None;
             }
+        }
+        if let Some(headers) = headers {
+            headers.restore_headroom(request, charge);
         }
         Some(())
     }
@@ -977,7 +975,11 @@ impl FrontBodyQueries {
         let _ = self.make_room(cx, charge);
         let request = &self._allowance.request;
         let mut allowance = match request.reserve(charge) {
-            Ok(allowance) => allowance,
+            Ok(allowance) => {
+                // Growth past this eviction point starts after the grant.
+                request.eviction_point();
+                allowance
+            }
             Err(_) => {
                 self.record_refusal(owner, charge, request.free());
                 return None;
@@ -1777,6 +1779,11 @@ impl QueryFactory for Factory {
             || self.0.namespace.snapshot.evict_cached()
             || self.0.inputs.clear_addresses()
             || self.0.trim_slot_admission()
+    }
+    fn restore_headroom(&self) {
+        if let Some(headers) = self.0.namespace.snapshot.header_products() {
+            headers.restore_headroom(&self.0._allowance.request, 0);
+        }
     }
     fn create(&self, query: QueryId) -> Result<Box<dyn QueryTask>, Reference> {
         if !self.0.owns_query(query)

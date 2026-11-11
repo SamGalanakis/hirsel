@@ -113,6 +113,9 @@ pub trait QueryFactory: Send + Sync {
     fn evict_cache(&self, _scratch: u64) -> bool {
         false
     }
+    /// An eviction point between top-level roots, with no task running:
+    /// evict optional facts until the process headroom is free again.
+    fn restore_headroom(&self) {}
 
     /// Drop a settled compact cache entry after archiving its complete facts
     /// within the active producer's already admitted scratch bound.

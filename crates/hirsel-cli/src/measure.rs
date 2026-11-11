@@ -244,6 +244,7 @@ fn table(command: &str, wall: Duration, report: &timings::Report) -> String {
         text += &format!("  {:<18}{value:>10}\n", count.name());
     }
     text += &instructions_table(&report.instructions);
+    text += &budget_table();
     let runner = hirsel_native::counts();
     text += &format!(
         "runner\n  {:<18}{:>10}\n  {:<18}{:>10}\n",
@@ -253,6 +254,76 @@ fn table(command: &str, wall: Duration, report: &timings::Report) -> String {
         text += &format!("  fallback: {} ({count})\n", runner.reasons[kind]);
     }
     text
+}
+
+/// Code sites below this peak appear only in the JSON form.
+const SITE_FLOOR: u64 = 1 << 20;
+
+/// The process budget's peak by owner and by reserving site, the headroom
+/// kept free of header facts, and the high water of unevictable growth
+/// between two eviction points, which the headroom must stay well above.
+fn budget_table() -> String {
+    let budget = hirsel_guard::admission::host_budget().0;
+    let report = budget.report();
+    let mib = |bytes: u64| format!("{:>10.1} MiB", bytes as f64 / (1 << 20) as f64);
+    let mut text = String::from("budget\n");
+    for (name, bytes) in [
+        ("limit", report.limit),
+        ("headroom", report.headroom),
+        ("peak reserved", report.peak),
+        ("  evictable at peak", report.peak_evictable),
+        ("unevictable stretch", report.stretch),
+        ("  named owners", report.owner_stretch),
+        ("largest charge", report.largest),
+        ("  by a named owner", report.owner_largest),
+    ] {
+        text += &format!("  {name:<30}{}\n", mib(bytes));
+    }
+    for kind in hirsel_guard::admission::OwnerKind::ALL {
+        let bytes = report.peak_owners[kind as usize];
+        text += &format!("  owner {:<24}{}\n", kind.name(), mib(bytes));
+    }
+    let mut sites = Vec::new();
+    hirsel_guard::admission::sites::each(SITE_FLOOR, |site, at_peak, own| {
+        sites.push((format!("{}:{}", site.file(), site.line()), at_peak, own));
+    });
+    sites.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
+    for (site, at_peak, own) in sites {
+        text += &format!(
+            "  site {site} at peak {} own peak {}\n",
+            mib(at_peak),
+            mib(own)
+        );
+    }
+    text
+}
+
+fn budget_json() -> serde_json::Value {
+    let budget = hirsel_guard::admission::host_budget().0;
+    let report = budget.report();
+    let mut sites = Vec::new();
+    hirsel_guard::admission::sites::each(0, |site, at_peak, own| {
+        sites.push(serde_json::json!({
+            "site": format!("{}:{}", site.file(), site.line()),
+            "at_peak": at_peak,
+            "own_peak": own,
+        }));
+    });
+    serde_json::json!({
+        "limit": report.limit,
+        "headroom": report.headroom,
+        "peak": report.peak,
+        "peak_evictable": report.peak_evictable,
+        "stretch": report.stretch,
+        "owner_stretch": report.owner_stretch,
+        "largest": report.largest,
+        "owner_largest": report.owner_largest,
+        "owners": hirsel_guard::admission::OwnerKind::ALL
+            .iter()
+            .map(|kind| (kind.name().to_string(), report.peak_owners[*kind as usize].into()))
+            .collect::<serde_json::Map<_, _>>(),
+        "sites": sites,
+    })
 }
 
 fn json(
@@ -291,6 +362,7 @@ fn json(
             .collect::<serde_json::Map<_, _>>(),
     });
     value["instructions"] = instructions_json(&report.instructions);
+    value["budget"] = budget_json();
     let runner = hirsel_native::counts();
     value["runner"] = serde_json::json!({
         "image_runs": runner.images,

@@ -161,6 +161,7 @@ fn drive(shared: &Arc<Mutex<State>>, request: u64) {
             };
             let done = state.requests[&request].results[index].is_some();
             if !done {
+                state.restore_headroom();
                 let outcome = state.demand(root);
                 if let Some(request) = state.requests.get_mut(&request) {
                     request.results[index] = Some(outcome);
@@ -484,6 +485,15 @@ impl State {
             Err(_) => Err(self.errors.panicked),
         };
         self.settle(query, outcome)
+    }
+    /// Only between top-level roots: no task is running or holds guards.
+    fn restore_headroom(&self) {
+        debug_assert!(self.stack.is_empty());
+        for factory in self.factories.values() {
+            if let Factory::Send(factory) = factory {
+                factory.restore_headroom();
+            }
+        }
     }
     fn evict_body(&mut self, scratch: u64) -> bool {
         let mut evicted = None;

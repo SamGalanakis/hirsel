@@ -1798,14 +1798,8 @@ mod tests {
         use hirsel_validate::SignatureLookup;
         struct Allowance(Arc<hirsel_engine_admission::ProcessBudget>);
         impl header_products::HeaderAllowance for Allowance {
-            fn take_header(
-                &self,
-                bytes: u64,
-            ) -> Option<hirsel_engine_admission::MemoryReservation> {
-                self.0.reserve(bytes).ok()
-            }
-            fn available_header_bytes(&self) -> u64 {
-                self.0.free()
+            fn header_budget(&self) -> &Arc<hirsel_engine_admission::ProcessBudget> {
+                &self.0
             }
         }
         hirsel_intern::jobs::with_compiler_stack(|| {

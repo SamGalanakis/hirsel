@@ -729,7 +729,7 @@ impl<S: Stage> Machine<'_, S> {
         let mut work = vec![Job::Visit(plan.root)];
         let mut open: Vec<(BTreeSet<&[u8]>, Option<&[u8]>)> = vec![];
         // The reference's value budget: each count charges its elements (a map's twice)
-        // before any is read.
+        // before any is read, and each `box` one.
         let mut values = 0u64;
         let mut charge = |n: u64| {
             if n > VALUE_BUDGET - values {
@@ -855,7 +855,13 @@ impl<S: Stage> Machine<'_, S> {
                 CodecNode::Framed { value, .. } | CodecNode::Checked { value, .. } => {
                     work.push(Job::Visit(*value))
                 }
-                CodecNode::Box { payload, .. } => work.push(Job::Visit(*payload)),
+                CodecNode::Box { payload, .. } => {
+                    // A source `box` is one value; a variable flat block is layout only.
+                    if matches!(self.record(layout)?.kind, LayoutKind::Box { .. }) {
+                        check!(charge(1));
+                    }
+                    work.push(Job::Visit(*payload))
+                }
                 CodecNode::Sequence { element, .. } => {
                     let count = check!(input.number(8)) as u64;
                     check!(satisfiable(&input, count, min(element)));

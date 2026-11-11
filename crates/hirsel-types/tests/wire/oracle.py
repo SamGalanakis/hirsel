@@ -3,8 +3,8 @@
 
 The expected descriptor is supplied by the caller, never accepted as authority
 from input. The oracle is an executable byte specification, not a source opt-in
-checker. Decoding more than 1,000,000 values (one per collection element, two per map
-entry, charged when the count is known) is `Limit`; a root or chosen arm with no finite
+checker. Decoding more than 1,000,000 values (one per collection element and per `box`
+read, two per map entry, an element charged when its count is known) is `Limit`; a root or chosen arm with no finite
 encoding is `Truncated`. The depth bound only guards Python's recursion.
 """
 import json
@@ -100,7 +100,7 @@ def parse_descriptor(data):
             elif kind in (2, 3) and len(args) == 2 and [a[0] for a in args] == [0, 1]:
                 node = ("seq", args[0][1], args[1][1])
             elif kind == 4 and len(args) == 1 and args[0][0] == 0:
-                node = ("wrap", args[0][1])
+                node = ("box", args[0][1])
             elif kind == 5 and len(args) == 2 and all(a[0] == 0 for a in args):
                 node = ("map", args[0][1], args[1][1])
             elif kind == 6 and len(args) == 1 and args[0][0] == 0:
@@ -127,7 +127,7 @@ def parse_descriptor(data):
             edges = [t for arm in node[1] for t in arm]
         elif node[0] == "map":
             edges = node[1:]
-        elif node[0] in ("wrap", "set", "seq"):
+        elif node[0] in ("wrap", "box", "set", "seq"):
             edges = [node[1]]
         else:
             edges = []
@@ -151,7 +151,7 @@ def fewest(nodes):
                 n = sum(size[c] for c in node[1])
             elif kind == "variant":
                 n = 4 + min((sum(size[c] for c in arm) for arm in node[1]), default=math.inf)
-            elif kind == "wrap":
+            elif kind in ("wrap", "box"):
                 n = size[node[1]]
             elif kind == "seq" and node[2] is not None:
                 n = 0 if node[2] == 0 else node[2] * size[node[1]]
@@ -206,7 +206,11 @@ def decode_payload(descriptor, data):
             if sum(size[c] for c in node[1][ordinal]) == math.inf:
                 raise DecodeError("Truncated")
             return ["variant", ordinal, [read(t, depth+1) for t in node[1][ordinal]]]
-        if kind == "wrap":
+        if kind in ("wrap", "box"):
+            if kind == "box":
+                if remaining[0] < 1:
+                    raise DecodeError("Limit")
+                remaining[0] -= 1
             return ["wrap", read(node[1], depth+1)]
         fixed = kind == "seq" and node[2] is not None
         n = node[2] if fixed else r.uint(8)
@@ -266,7 +270,7 @@ def encode_payload(descriptor, value):
             return b"".join(write(t, v) for t, v in zip(node[1], value[1], strict=True))
         if kind == "variant":
             return uint(value[1], 4) + b"".join(write(t, v) for t, v in zip(node[1][value[1]], value[2], strict=True))
-        if kind == "wrap":
+        if kind in ("wrap", "box"):
             return write(node[1], value[1])
         content = value[1]
         prefix = b"" if kind == "seq" and node[2] is not None else uint(len(content), 8)

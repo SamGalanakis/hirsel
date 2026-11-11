@@ -271,6 +271,8 @@ Invariants and boundary:
   occurrences; the first verdict 0 releases the value and writes `Error(Invalid)`.
   Program version 5 applies the private tombstone entry metadata to Set too,
   using the same optional key/unit pairs as Map.
+  Program version 6 ends each BOX node with 1 for a source `box`, one value of the
+  decode budget, or 0 for a variable flat block, which is layout only.
   Flat reconstruction patches native byte extents separately from wire element
   counts; sequential blocks retain exact used bytes and SoA blocks retain rounded
   column capacity. Both walks are iterative. Past

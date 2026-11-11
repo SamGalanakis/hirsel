@@ -84,7 +84,7 @@ fn fields_and_scalar_bits_keep_actual_typed_addresses() {
 fn box_and_checked_wrappers_remain_explicit_without_running_checks_or_counts() {
     let access = Access::parse(&program(&[
         vec![NODE_CHECKED, 999, 1],
-        vec![NODE_BOX, 77, 8, 8, 2],
+        vec![NODE_BOX, 77, 8, 8, 2, 1],
         vec![NODE_SCALAR, 4],
     ]));
     let source = block(31u64);
@@ -126,7 +126,7 @@ fn variants_visit_only_active_fields_and_null_niches_never_follow_box() {
     }
     let access = Access::parse(&program(&[
         vec![NODE_VARIANT, 1, 0, 0, 2, 0, 1, 0, 1, 8, 8],
-        vec![NODE_BOX, 2, 8, 8, 2],
+        vec![NODE_BOX, 2, 8, 8, 2, 1],
         vec![NODE_SCALAR, 4],
     ]));
     let source = block(9u64);

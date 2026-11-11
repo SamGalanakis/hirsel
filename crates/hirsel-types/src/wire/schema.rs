@@ -44,10 +44,16 @@ impl Codec {
                             .collect(),
                     )
                 }
-                SchemaNode::Box(t)
-                | SchemaNode::Nominal {
+                SchemaNode::Box(t) => Node::Wrapper {
+                    child: t.0 as usize,
+                    boxed: true,
+                },
+                SchemaNode::Nominal {
                     representation: t, ..
-                } => Node::Wrapper(t.0 as usize),
+                } => Node::Wrapper {
+                    child: t.0 as usize,
+                    boxed: false,
+                },
                 SchemaNode::Builtin { kind, arguments } => {
                     use BuiltinType::*;
                     use SchemaArgument::{Size as N, Type};
@@ -65,9 +71,10 @@ impl Codec {
                                 count: Some(*n),
                             }
                         }
-                        (Packed, [Type(t)]) if is_variant(schema, *t) => {
-                            Node::Wrapper(t.0 as usize)
-                        }
+                        (Packed, [Type(t)]) if is_variant(schema, *t) => Node::Wrapper {
+                            child: t.0 as usize,
+                            boxed: false,
+                        },
                         (Map, [Type(k), Type(v)]) => {
                             key_tree(schema, *k)?;
                             Node::Map {

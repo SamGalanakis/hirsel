@@ -866,6 +866,9 @@ impl CodecPlan {
                         },
                         u64::from(pr.align),
                         u64::from(p.0),
+                        // A source `box` is one value of the decode budget (SER-2); a
+                        // variable flat block is layout only.
+                        u64::from(matches!(r.kind, LayoutKind::Box { .. })),
                     ]);
                 }
                 CodecNode::Sequence { layout, element } => {
@@ -1058,7 +1061,7 @@ fn scalar_code(kind: ScalarKind) -> Result<u64, String> {
 }
 
 /// The codec program's version and node kinds (`HIRSEL_RT_V2_CODEC_*`).
-pub const PROGRAM_VERSION: u64 = 5;
+pub const PROGRAM_VERSION: u64 = 6;
 pub const NODE_SCALAR: u64 = 0;
 pub const NODE_TEXT: u64 = 1;
 pub const NODE_FIELDS: u64 = 2;

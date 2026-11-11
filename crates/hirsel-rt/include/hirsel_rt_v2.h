@@ -530,7 +530,8 @@ uint64_t hirsel_rt_v2_hash_finish(uint64_t state);
  *   VARIANT   form (0 ordinal u32, 1 null-pointer niche), tag offset, the niche's nullary arm,
  *             arm count, then per arm in ordinal order: count, (offset, node) per field;
  *             finally one native active extent per arm
- *   BOX       payload index, size (NO_NODE for variable flat), align, payload node
+ *   BOX       payload index, size (NO_NODE for variable flat), align, payload node, and 1 for
+ *             a source `box` (one value of the decode budget) or 0 for a variable flat block
  *   SEQUENCE  payload index, element align, first element offset, stride, element node
  *   REPEAT    count, stride, element node
  *   MAP, SET  container payload index, size, align, entries and index field offsets, the entries
@@ -559,9 +560,9 @@ uint64_t hirsel_rt_v2_hash_finish(uint64_t state);
  * `value` (the root node's layout) and writes a fresh Bytes slice of the envelope at `out`.
  * codec_decode reads the Bytes slice at `bytes`, validates the envelope and the whole payload
  * first, then writes Result[T, DecodeError] at `out`: Ok of fresh owned data, or Error of the
- * first malformation in reading order. Neither fails; operational budgets (the reference's
- * limits) terminate environmentally. */
-#define HIRSEL_RT_V2_CODEC_VERSION 5
+ * first malformation in reading order, or Error(Limit) past the reference's decode budgets. An
+ * encode past them terminates environmentally. */
+#define HIRSEL_RT_V2_CODEC_VERSION 6
 #define HIRSEL_RT_V2_CODEC_NODE_SCALAR 0
 #define HIRSEL_RT_V2_CODEC_NODE_TEXT 1
 #define HIRSEL_RT_V2_CODEC_NODE_FIELDS 2

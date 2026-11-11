@@ -746,6 +746,8 @@ count live key/value pairs and exclude tags, buckets and hash-cache storage.
 Codec program version 5 extends the private entry offsets to Set, after version 4
 added checked opaque nodes, without changing
 `CodecNode::Map` or the wire format. Runtime ABI 21 adds the streaming hash entries.
+Codec program version 6 ends each BOX node with whether its layout is a source `box`
+(one value of SER-2's decode budget) or a variable flat block; `CodecNode` is unchanged.
 
 Runtime ABI 22 enables the existing hidden caller-site pair on blocking
 task/channel exports, so native Blocked outcomes can name their parked waits.

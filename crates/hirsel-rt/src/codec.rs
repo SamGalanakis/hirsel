@@ -55,7 +55,7 @@ enum Form {
 pub type CheckThunk =
     unsafe extern "C" fn(ctx: *mut TaskCtx, value: *const u8, verdict: *mut u8) -> u8;
 
-pub const CODEC_VERSION: u64 = 5;
+pub const CODEC_VERSION: u64 = 6;
 pub const NODE_SCALAR: u64 = 0;
 pub const NODE_TEXT: u64 = 1;
 pub const NODE_FIELDS: u64 = 2;
@@ -190,6 +190,8 @@ enum Node<'a> {
         size: u64,
         align: u64,
         payload: usize,
+        /// A source `box`, one value of the decode budget; a variable flat block is not.
+        boxed: bool,
     },
     Sequence {
         elements: Elements,
@@ -516,6 +518,7 @@ impl<'a> Program<'a> {
                 size: w.next(),
                 align: w.next(),
                 payload: w.node(),
+                boxed: w.next() != 0,
             },
             NODE_SEQUENCE => Node::Sequence {
                 elements: w.elements(),
@@ -1125,6 +1128,8 @@ fn flat_decode(
 
 enum Put {
     Visit(usize, *const u8),
+    /// A source `box`: one value of the budget.
+    Boxed,
     /// The next `count` elements of a sequence, `stride` apart from `at`.
     Elements {
         node: usize,
@@ -1185,7 +1190,7 @@ unsafe fn encode_payload(
     let base = out.len();
     work.clear();
     work.push(Put::Visit(program.root, value));
-    // The decoder's value count: one per element, two per map entry.
+    // The decoder's value count: one per element and per `box`, two per map entry.
     let mut values = 0u64;
     let mut charge = |n: u64| {
         values += n;
@@ -1224,6 +1229,7 @@ unsafe fn encode_payload(
                     _ => return Err(Stop::Failed),
                 }
             }
+            Put::Boxed => charge(1)?,
             Put::Mark => {
                 if sets.is_empty() {
                     fault("a codec set mark outside a set");
@@ -1446,7 +1452,12 @@ unsafe fn encode_node(
                     work.push(Put::Visit(child, at.add(offset as usize)));
                 }
             }
-            Node::Box { payload: p, .. } => {
+            Node::Box {
+                payload: p, boxed, ..
+            } => {
+                if boxed {
+                    work.push(Put::Boxed);
+                }
                 work.push(Put::Visit(p, payload(pointer(at))));
             }
             Node::Sequence { elements, element } => {
@@ -1695,7 +1706,8 @@ fn validate(
     work.clear();
     work.push(Check::Visit(program.root));
     let mut collections: Vec<Collection<'_>> = Vec::new();
-    // Each count charges its elements (a map's twice) before any is read.
+    // Each count charges its elements (a map's twice) before any is read, and each `box`
+    // one.
     let mut values = 0u64;
     let mut charge = |n: u64| {
         if n > LIMIT_VALUES - values {
@@ -1829,7 +1841,12 @@ fn validate(
                         }
                         work.extend(ids(arm).rev().map(Check::Visit));
                     }
-                    Node::Box { payload, .. } => work.push(Check::Visit(payload)),
+                    Node::Box { payload, boxed, .. } => {
+                        if boxed {
+                            charge(1)?;
+                        }
+                        work.push(Check::Visit(payload))
+                    }
                     Node::Sequence { element, .. }
                     | Node::FlatSequence { element, .. }
                     | Node::Sequential { element, .. }
@@ -2032,6 +2049,7 @@ unsafe fn materialize(
                     size,
                     align,
                     payload: p,
+                    ..
                 } => {
                     if size == NO_NODE {
                         flat.clear();

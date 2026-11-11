@@ -2,7 +2,8 @@
 // expect: run
 // Input past the decode budget of 1,000,000 values is `Limit`, a DecodeError like any
 // other: no input ends the run. The values are collection elements, two per Map entry,
-// charged when each count is read: records, tuples and nominal wrappers add none.
+// charged when each count is read, and `box` reads: records, tuples and nominal wrappers
+// add none.
 // Units take no bytes, so these counts satisfy the bytes left and only the budget refuses
 // them. The same holds inside an envelope. A type with no finite encoding is `Truncated`
 // where it would be read, so no schema makes a decode walk forever.
@@ -19,6 +20,28 @@ type Chain {
 
 @serializable
 type Loop = Stop | Spin(Chain)
+
+// A list in all but name: only its boxes bound its depth.
+@serializable
+type Link {
+  next: Option[box Link],
+}
+
+// Units and links share one budget.
+@serializable
+type Mixed {
+  units: List[()],
+  link: Link,
+}
+
+// The payload of a Link with `n` boxed links (n >= 1): n `Some` tags, then a `None`.
+fn links(n: u64) -> Bytes {
+  let mut out: List[u8] = []
+  bytes.append(mut out, b"\x01\x00\x00\x00")
+  bytes.append_from_history(mut out, 4, 4 * (n - 1))
+  bytes.append(mut out, b"\x00\x00\x00\x00")
+  bytes.from_list(take out)
+}
 
 fn limited[T: serializable](t: Test, none: Option[T], payload: Bytes) {
   let decoded: Result[T, DecodeError] = codec.decode_payload(none, payload)
@@ -94,6 +117,22 @@ pub fn main(t: Test) -> Result[(), DecodeError] {
     Error(Limit()) => test.check(t, true),
     _ => test.check(t, false),
   }
+  // 999,999 units and one boxed link are exactly the budget; a second link is over it.
+  let mixed_none: Option[Mixed] = None()
+  decodes(
+    t,
+    mixed_none,
+    b"\x3f\x42\x0f\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00"
+  )
+  limited(
+    t,
+    mixed_none,
+    b"\x3f\x42\x0f\x00\x00\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00"
+  )
+  // A chain one box deeper than the budget is refused, on a decoder that walks it
+  // without native recursion.
+  let link_none: Option[Link] = None()
+  limited(t, link_none, links(1000001))
   // A Chain has no finite encoding, as a root or as a chosen arm.
   let chain_none: Option[Chain] = None()
   truncated(t, chain_none, b"")

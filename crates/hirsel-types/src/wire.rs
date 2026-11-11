@@ -39,8 +39,8 @@ pub struct Value {
 }
 
 /// Host budgets, not language schema or value limits. Decoding refuses input longer than
-/// `bytes`, or holding more than `values` values (one per collection element, two per map
-/// entry), with `Error::Limit`, which source decodes return as `DecodeError::Limit` (SER-2
+/// `bytes`, or holding more than `values` values (one per collection element and per
+/// `box`, two per map entry), with `Error::Limit`, which source decodes return as `DecodeError::Limit` (SER-2
 /// Validation). Encoding charges the same budgets, as operational refusal.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
@@ -78,9 +78,21 @@ enum Node {
     Scalar(Primitive),
     Fields(Vec<usize>),
     Variant(Vec<Vec<usize>>),
-    Wrapper(usize),
-    Sequence { element: usize, count: Option<u64> },
-    Map { key: usize, value: usize },
+    /// A nominal, `Packed` or `box` boundary. Each `box` read is one value of the
+    /// decode budget: recursion through a box is the one unbounded walk a count
+    /// does not charge.
+    Wrapper {
+        child: usize,
+        boxed: bool,
+    },
+    Sequence {
+        element: usize,
+        count: Option<u64>,
+    },
+    Map {
+        key: usize,
+        value: usize,
+    },
     Set(usize),
 }
 
@@ -123,7 +135,7 @@ fn minimum(nodes: &[Node]) -> Vec<u64> {
                     .map(|arm| sum(&min, arm))
                     .min()
                     .map_or(u64::MAX, |arm| arm.saturating_add(4)),
-                Node::Wrapper(child) => min[*child],
+                Node::Wrapper { child, .. } => min[*child],
                 Node::Sequence {
                     element,
                     count: Some(n),
@@ -227,7 +239,7 @@ impl Codec {
                     let children: Vec<_> = parts.drain(start..).collect();
                     let mut bytes = vec![];
                     match &self.nodes[t] {
-                        Node::Wrapper(_) => {
+                        Node::Wrapper { .. } => {
                             parts.push(children.into_iter().next().ok_or(Error::Value)?);
                             continue;
                         }
@@ -276,7 +288,10 @@ impl Codec {
                             parts.push(bytes);
                             continue;
                         }
-                        (Node::Wrapper(child), ValueNode::Wrapper(v)) => {
+                        (Node::Wrapper { child, boxed }, ValueNode::Wrapper(v)) => {
+                            if *boxed {
+                                budget.count(1)?;
+                            }
                             children.push((*child, *v))
                         }
                         (Node::Fields(types), ValueNode::Fields(fields)) => {
@@ -316,7 +331,8 @@ impl Codec {
                         }
                         _ => return Err(Error::Value),
                     }
-                    // The decoder's count: elements, and both halves of each map entry.
+                    // The decoder's count: elements, both halves of each map entry, and
+                    // (above) each box.
                     if matches!(
                         self.nodes[t],
                         Node::Sequence { .. } | Node::Map { .. } | Node::Set(_)
@@ -531,7 +547,10 @@ impl Codec {
                             work.push(Job::Finish(Build::Variant(tag), fields.len()));
                             work.extend(fields.iter().rev().map(|t| Job::Visit(*t)));
                         }
-                        Node::Wrapper(child) => {
+                        Node::Wrapper { child, boxed } => {
+                            if *boxed {
+                                budget.count(1)?;
+                            }
                             work.push(Job::Finish(Build::Wrapper, 1));
                             work.push(Job::Visit(*child));
                         }

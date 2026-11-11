@@ -215,12 +215,16 @@ finite encoding (an uninhabited recursive schema) is `Truncated` before any of i
 no bytes hold it. Decoding has two budgets, and input past either is `Limit`, which is
 distinct from the malformed-data errors: input longer than 64 MiB (67,108,864 bytes), or
 more than 1,000,000 values. The values are the elements of every `List`, `Array`,
-`Inline`, `Simd` and `Set`, and both the key and the value of every Map entry; records, tuples, variants,
-boxes and nominal wrappers add none, because only a count can multiply data that takes no
-bytes. Each count charges its elements when it is known, after the bytes check and before
-any element is read, and is `Limit` if it would pass the budget: a `List[()]` of n units
-holds n values, a `List[T]` of n records of two `()` fields also n, a `List[List[()]]`
-of one list of n units n + 1, and a `Map[(), ()]` of n entries 2n. Neither budget is a
+`Inline`, `Simd` and `Set`, both the key and the value of every Map entry, and every
+`box` read; records, tuples, variants and nominal wrappers add none. A count can
+multiply data that takes no bytes, and recursion through a `box` is the one walk no count
+bounds (`type Chain {next: Option[box Chain]}` costs only a tag per level), so these
+are what the budget charges. Each count charges its elements when it is known, after
+the bytes check and before any element is read, and each `box` charges one when it is
+read; either is `Limit` if it would pass the budget: a `List[()]` of n units holds n
+values, a `List[T]` of n records of two `()` fields also n, a `List[List[()]]` of one
+list of n units n + 1, a `Map[(), ()]` of n entries 2n, and a `Chain` of n boxed links n.
+Neither budget is a
 language size or depth bound, and no input ends a run: `codec.decode` and
 `codec.decode_payload` return `Error(Limit())`, and an operation that decodes stored or
 received data reports it as its own typed refusal (a table row as `Limit(ValueBytes())`

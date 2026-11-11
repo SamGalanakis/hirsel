@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Install the pinned Buck2 client and every pinned build input into ignored state.
 
-`.buck2/bin/buck2` is the official release named in `pins.json`; the prelude at
+`.buck2/bin/buck2` is the checked-in client.py guard; `buck2-real` beside it is
+the official release named in `pins.json`. The prelude at
 `.buck2/prelude` is the one bundled in that executable, with
 prelude_overlay.py's checksum-pinned patches. The Rust toolchain, the LLVM tree and
 Reindeer come from their own bootstrap scripts. Pinned inputs come from the
@@ -97,7 +98,7 @@ def prepare_client(args, state, lock_fd):
     if destination.is_symlink():
         raise SystemExit('Refusing a symlinked executable directory')
     destination.mkdir(exist_ok=True)
-    executable = destination / 'buck2'
+    executable = destination / 'buck2-real'
     if not (executable.is_file() and not executable.is_symlink() and digest(executable) == PIN['executable_sha256']):
         def fetch(tree):
             tree.mkdir()
@@ -122,9 +123,14 @@ def prepare_client(args, state, lock_fd):
             if digest(binary) != PIN['executable_sha256']:
                 raise SystemExit('Buck2 executable checksum mismatch')
             os.replace(binary, executable)
+    wrapper = destination / 'buck2'
+    pending = destination / 'buck2-wrapper'
+    pending.unlink(missing_ok=True)
+    pending.symlink_to('../../tools/buck2/client.py')
+    os.replace(pending, wrapper)
     if not args.client_only:
         prepare_tools(executable, lock_fd)
-    print(executable)
+    print(wrapper)
 
 
 def main():

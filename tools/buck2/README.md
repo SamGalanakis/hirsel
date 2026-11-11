@@ -24,8 +24,11 @@ No lane commits a generated file, so no rebase can conflict on one
   read differently, so a documentation edit regenerates nothing and a Rust
   source edit reruns only the inventory; either part replaces an output only
   when its bytes change. `sync.py` without flags regenerates both parts. After
-  you edit sources or rebase, run `prepare.py` or
-  `sync.py --if-stale` before a bare `.buck2/bin/buck2`. Where the root BUCK is
+  you edit sources or rebase, `.buck2/bin/buck2 build|test` checks the stamp
+  before starting Buck and refuses stale inputs with the command
+  `python3 tools/buck2/sync.py --if-stale`. It compares content digests,
+  existence probes and glob matches; fresh inputs are never regenerated.
+  `kill`, `status` and `log` bypass the check. Where the root BUCK is
   missing, Buck2 reads the committed `BUCK.unsynced` (`[buildfile]` in
   `.buckconfig`), which fails saying to run `sync.py`. The files are
   byte-identical to the committed ones they replace, so every action key, and
@@ -53,6 +56,7 @@ python3 tools/buck2/prepare.py --local  # or: no pool, every action on this host
 ```
 
 `bootstrap.py` installs the official Buck2 release pinned in `pins.json` at
+`.buck2/bin/buck2-real`, behind the checked-in `client.py` entry point
 `.buck2/bin/buck2`, its bundled prelude with the overlay below at
 `.buck2/prelude`, the Rust toolchain in `toolchain-lock.json` at
 `toolchains/rust-files/`, the LLVM tree at `toolchains/llvm-files/`
@@ -60,6 +64,11 @@ python3 tools/buck2/prepare.py --local  # or: no pool, every action on this host
 checked against its pinned SHA-256. Inputs are shared between checkouts
 through the store in `bootstrap_store.py` (`$HIRSEL_BUCK2_STORE`, default
 `~/.cache/hirsel-buck2`; `off` disables it).
+
+A new worktree needs `prepare.py`: unlike `sync.py`, it installs the pinned
+client, prelude, Rust, LLVM (including the hermetic C++ headers) and Reindeer,
+and configures execution. The wrapper also refuses a missing or stale LLVM
+receipt or required file with that command; it does not bootstrap automatically.
 
 A pool's endpoint and credentials never enter the repository. `prepare.py`
 runs an optional hook, the executable named by `$HIRSEL_BUCK2_REMOTE_CONFIG`

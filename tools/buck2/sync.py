@@ -1050,6 +1050,11 @@ def first_party(meta: dict) -> str:
                             data=Raw('glob(["stdlib/**", "native-tests/**"])'),
                             runtime_archives=archive_views(*on_both("default")), products=PRODUCTS,
                             files_env={"HIRSEL_STARTUP_DRIVER_TESTS": "//:hirsel-driver-unittest-harness", "HIRSEL_STARTUP_NATIVE_TESTS": "//:hirsel-native-unittest-harness"}))
+    out.append("\n" + call("hirsel_script_test", name="test-buck2-client", script="tools/tests/buck2_client.py", full=False,
+                           data=["//tools/buck2:bootstrap.py", "//tools/buck2:bootstrap_store.py", "//tools/buck2:bootstrap_llvm.py",
+                                 "//tools/buck2:client.py", "//tools/buck2:generated.py", "//tools/buck2:merging.py",
+                                 "//tools/buck2:llvm-cxx-headers-lock.json", "//tools/buck2:llvm-runtime-lock.json",
+                                 "//tools/buck2:pins.json", "tools/native-toolchain/llvm-23.lock"]))
     out.append("\n" + call("hirsel_script_test", name="test-native-scratch-tools", script="tools/tests/buck2_sync.py", full=False,
                            args=["AtomicScratch"],
                            data=["//tools/buck2:sync.py", "//tools/buck2:generated.py",

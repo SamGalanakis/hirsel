@@ -785,7 +785,11 @@ fn explicit_toolchain_context_loads_sidecar_graph_without_host_discovery() {
         .with_config(config())
         .load_check_package_inputs(manifest, &base, false)
         .unwrap()
-        .installation_inputs(compiler.identity(), base.read(manifest).unwrap().to_vec());
+        .installation_inputs(
+            compiler.identity(),
+            base.read(manifest).unwrap().to_vec(),
+            Default::default(),
+        );
     let store = Arc::new(InstalledStd(Arc::new(installed)));
     let config = || crate::CompileConfig {
         store: store.clone(),

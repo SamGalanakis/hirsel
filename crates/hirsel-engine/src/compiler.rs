@@ -188,6 +188,73 @@ impl Compiler {
         }
         engine
     }
+    /// The footprint and key a package installation records for the
+    /// Precompute that observed `inputs` under this compiler.
+    pub fn installation_footprint(
+        &self,
+        inputs: &crate::loader_inputs::FrozenInputs,
+    ) -> hirsel_engine_store::InstalledInputs {
+        use crate::loader_inputs::Operation;
+        hirsel_engine_store::InstalledInputs {
+            operations: inputs
+                .operations()
+                .map(|operation| {
+                    let kind = match operation {
+                        Operation::Read(_) => 0,
+                        Operation::Canonicalize(_) => 1,
+                        Operation::Metadata(_) => 2,
+                        Operation::Directory(_) => 3,
+                    };
+                    (kind, operation.path().to_owned())
+                })
+                .collect(),
+            key: self.installation_key(inputs),
+        }
+    }
+    /// Key of a package installation under this compiler (whose identity the
+    /// header and V's registration each bind): every setting that changes
+    /// Precompute products, and every loader observation (bytes, paths, kinds,
+    /// directory listings and failures). Loading is a function of its
+    /// observations under one compiler identity, so equal observations of the
+    /// same operations select the same package graph and products.
+    pub fn installation_key(&self, inputs: &crate::loader_inputs::FrozenInputs) -> ContentHash {
+        let limits = self.comptime_limits();
+        let settings = [
+            &limits.budget.to_le_bytes()[..],
+            &(limits.call_depth as u64).to_le_bytes(),
+            format!("{:?}/{:?}", self.lowering, self.verify).as_bytes(),
+        ]
+        .concat();
+        let observations = inputs.identity_parts();
+        ContentHash::of_parts(
+            "hirsel.installed-package.inputs.v1",
+            std::iter::once(&settings[..]).chain(observations.iter().map(Vec::as_slice)),
+        )
+    }
+    /// Re-observe a recorded installation footprint under `limits`. None when
+    /// an operation is malformed or the replay exceeds the capture bounds.
+    pub fn replay_installation_footprint(
+        operations: &[(u8, std::path::PathBuf)],
+        limits: crate::loader_inputs::InputLimits,
+    ) -> Option<crate::loader_inputs::FrozenInputs> {
+        use crate::loader_inputs::{CaptureInputs, InputLimit, LoaderInputs};
+        let capture = CaptureInputs::new(limits);
+        for (kind, path) in operations {
+            let observed = match kind {
+                0 => capture.read(path).map(drop),
+                1 => capture.canonicalize(path).map(drop),
+                2 => capture.metadata(path).map(drop),
+                3 => capture.directory(path).map(drop),
+                _ => return None,
+            };
+            // OS failures are observations; only exhausting a bound refuses.
+            if observed.is_err_and(|error| error.get_ref().is_some_and(|e| e.is::<InputLimit>())) {
+                return None;
+            }
+        }
+        let replayed = capture.freeze();
+        (replayed.operations().count() == operations.len()).then_some(replayed)
+    }
     /// Exact compiler source and toolchain digest used by durable products.
     pub fn identity(&self) -> ContentHash {
         ContentHash(self.identity)

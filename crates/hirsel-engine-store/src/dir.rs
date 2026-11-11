@@ -816,6 +816,7 @@ mod tests {
                 text: "pub fn value()->u8{1u8}".into(),
             }],
             vec![],
+            Default::default(),
         )
         .publish(&writer, &records)
         .unwrap();

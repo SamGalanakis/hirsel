@@ -27,8 +27,8 @@ mod request;
 pub use dir::{DirStore, FORMAT, GcReport};
 pub use installed::InstalledSourceRecords;
 pub use installed::{
-    InstalledDefinition, InstalledDefinitionKey, InstalledDefinitionOwnership, InstalledPackage,
-    InstalledSource,
+    InstalledDefinition, InstalledDefinitionKey, InstalledDefinitionOwnership, InstalledInputs,
+    InstalledPackage, InstalledSource,
 };
 pub use installed::{
     InstalledSemanticInput, InstalledSpecializations, SEMANTIC_BODY, SEMANTIC_HEADER,

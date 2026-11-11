@@ -16,6 +16,7 @@ struct Header {
     sources: Vec<InstalledSource>,
     dependencies: Vec<PackageId>,
     definitions: BTreeMap<DefPath, InstalledDefinition>,
+    inputs: InstalledInputs,
 }
 
 fn invalid() -> Box<bincode::ErrorKind> {
@@ -84,6 +85,7 @@ pub(crate) fn decode(bytes: &[u8]) -> bincode::Result<InstalledPackage> {
         sources: header.sources,
         dependencies: header.dependencies,
         definitions: header.definitions,
+        inputs: header.inputs,
         rows,
         contents,
         records: Default::default(),

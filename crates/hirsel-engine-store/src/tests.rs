@@ -66,6 +66,7 @@ pub(crate) fn install(root: &std::path::Path, addresses: &[ContentHash], content
             text: String::new(),
         }],
         vec![],
+        Default::default(),
     )
     .publish(&store, &records)
     .unwrap();

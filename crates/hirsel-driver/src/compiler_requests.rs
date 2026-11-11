@@ -53,6 +53,11 @@ impl CompilerRequestsExt for Compiler {
             .with_owned_engines()
             .with_config(config.clone());
         let mut requests = CompilerRequests::for_host(compiler, config);
+        if installation_current(self, output, requests.input_limits()) {
+            // The root already holds exactly this Precompute, and V's own
+            // registration of its products loads. Nothing is written.
+            return Ok(());
+        }
         let completed = requests.execute(manifest, CompileOperation::Precompute)?;
         if !matches!(completed.result, CompileResult::Precomputed { .. }) {
             return Err(ToolError::Runtime(
@@ -65,6 +70,13 @@ impl CompilerRequestsExt for Compiler {
         let package = loaded.installation_inputs(
             self.identity(),
             completed.inputs.read(&manifest_path)?.to_vec(),
+            match &completed.inputs {
+                crate::requests::CompileInputs::Frozen(inputs) => {
+                    self.installation_footprint(inputs)
+                }
+                // No recorded footprint: a later Precompute never reuses it.
+                _ => Default::default(),
+            },
         );
         store.publish_installation(package)?;
         if let Some(installation) = installation {
@@ -93,6 +105,41 @@ impl CompilerRequestsExt for Compiler {
         let compiler = self.clone().with_config(config.clone());
         Session::open_with_compiler(path, compiler).check_safe()
     }
+}
+
+/// A previous Precompute into `output` is reused only when its header opens
+/// checked with every record intact, a replay of its loader footprint gives
+/// the same key under this compiler, and V's registration of exactly this
+/// root's products loads. A key match alone is never V authority.
+fn installation_current(
+    compiler: &Compiler,
+    output: &Path,
+    limits: hirsel_engine::loader_inputs::InputLimits,
+) -> bool {
+    let Ok(recorded) =
+        hirsel_engine_store::InstalledPackage::current_inputs(output, compiler.identity())
+    else {
+        return false;
+    };
+    if recorded.operations.is_empty() {
+        return false;
+    }
+    let Some(replayed) = Compiler::replay_installation_footprint(&recorded.operations, limits)
+    else {
+        return false;
+    };
+    if compiler.installation_key(&replayed) != recorded.key {
+        return false;
+    }
+    hirsel_validate::Installation::default_state().is_some_and(|state| {
+        hirsel_validate::Installation::registered(
+            output,
+            &state,
+            compiler.identity(),
+            std::sync::Arc::default(),
+        )
+        .is_some()
+    })
 }
 
 impl crate::resident::ObservedEngine for crate::requests::CompilerRequests {

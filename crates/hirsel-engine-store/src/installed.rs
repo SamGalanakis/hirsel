@@ -15,10 +15,10 @@ use std::path::{Path, PathBuf};
 
 const PACKAGE: Domain = Domain {
     kind: 0x4600_0039,
-    schema: 3,
+    schema: 4,
 };
 fn address() -> Address {
-    Address(ContentHash::of_bytes(b"hirsel.installed-package.v3"))
+    Address(ContentHash::of_bytes(b"hirsel.installed-package.v4"))
 }
 
 #[cfg(test)]
@@ -70,6 +70,7 @@ mod tests {
                 text: "pub fn value()->u8{1u8}".into(),
             }],
             vec![],
+            InstalledInputs::default(),
         );
         installed.publish(&store, &records).unwrap();
         (store, compiler, package, reference)
@@ -599,6 +600,16 @@ pub struct InstalledSource {
     pub text: String,
 }
 
+/// The complete loader footprint of the Precompute that produced an
+/// installation: every observed operation, as (kind, path), and the producing
+/// compiler's key over those observations and every setting that changes its
+/// products. A later Precompute replays the operations and compares the key.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct InstalledInputs {
+    pub operations: Vec<(u8, PathBuf)>,
+    pub key: ContentHash,
+}
+
 #[derive(Debug)]
 /// One manifest generation and immutable, verified snapshots of demanded records.
 /// The header alone defines the installation: a row resolves to its listed
@@ -692,6 +703,7 @@ pub struct InstalledPackage {
     pub sources: Vec<InstalledSource>,
     pub dependencies: Vec<PackageId>,
     definitions: BTreeMap<DefPath, InstalledDefinition>,
+    pub inputs: InstalledInputs,
     /// Physical action rows and content required by the completed Precompute.
     rows: Vec<(ContentHash, ContentHash, Reference)>,
     contents: Vec<Reference>,
@@ -762,6 +774,7 @@ impl InstalledPackage {
         manifest: Vec<u8>,
         sources: Vec<InstalledSource>,
         dependencies: Vec<PackageId>,
+        inputs: InstalledInputs,
     ) -> Self {
         Self {
             compiler,
@@ -771,6 +784,7 @@ impl InstalledPackage {
             sources,
             dependencies,
             definitions: BTreeMap::new(),
+            inputs,
             rows: vec![],
             contents: vec![],
             records: Default::default(),
@@ -819,6 +833,22 @@ impl InstalledPackage {
                     .chain(self.rows.iter().map(|&(_, _, reference)| reference)),
             )
             .map_err(|error| format!("partial or corrupt package product content or row: {error}"))
+    }
+    /// The producing inputs of the installation published at `root`, only when
+    /// its header opens checked under `compiler` and every recorded row and
+    /// content is present and intact. This reads; it never writes the root.
+    pub fn current_inputs(root: &Path, compiler: ContentHash) -> Result<InstalledInputs, String> {
+        if !root.join("index/MANIFEST").is_file() {
+            return Err("no installed package".into());
+        }
+        let store = hirsel_artifact_store::Store::new(root.to_owned());
+        let _scope = store.batch();
+        let installed = Self::read(&store)?;
+        if installed.compiler != compiler {
+            return Err("stale installed package: compiler identity mismatch".into());
+        }
+        installed.check_records(&store)?;
+        Ok(installed.inputs)
     }
     /// Audit the complete published installation, including unused products.
     pub fn verify_store(root: &Path) -> Result<(), String> {

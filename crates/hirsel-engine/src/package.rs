@@ -169,6 +169,7 @@ impl LoadedProgram {
         &self,
         compiler: ContentHash,
         manifest: Vec<u8>,
+        inputs: hirsel_engine_store::InstalledInputs,
     ) -> hirsel_engine_store::InstalledPackage {
         let package = self.entry.0.package.clone();
         let sources = self
@@ -197,6 +198,7 @@ impl LoadedProgram {
             manifest,
             sources,
             dependencies,
+            inputs,
         )
     }
     pub fn source_files(&self) -> impl Iterator<Item = &(FileId, FileContext)> {

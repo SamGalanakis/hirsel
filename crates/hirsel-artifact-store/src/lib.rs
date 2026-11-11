@@ -1123,12 +1123,17 @@ impl Store {
         header.extend(reference.output.0.0);
         header.extend([0; 8]);
         if self.packs(reference.len) {
-            // An installation keeps one indexed copy of each medium content.
-            if bytes.len() > pack::SMALL && self.packed_source(0, reference.output.0).is_some() {
+            header.extend(bytes);
+            // An installation keeps one indexed copy of each medium content,
+            // but only an intact one: a damaged copy is shadowed by this write.
+            if bytes.len() > pack::SMALL
+                && self
+                    .packed_get(0, reference.output.0)
+                    .is_ok_and(|stored| *stored == *header)
+            {
                 self.count(Counter::IdenticalUpdates, 1);
                 return Ok(reference);
             }
-            header.extend(bytes);
             self.packed_put(0, reference.output.0, header.into())?;
         } else {
             let path = self.path(reference.output.0, "outputs");

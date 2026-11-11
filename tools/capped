@@ -12,8 +12,9 @@ user's current process count, and CPU affinity to $HIRSEL_JOBS CPUs; the
 report names the mechanism that applied. The command sees the same
 HIRSEL_MEMORY_LIMIT and HIRSEL_JOBS, so a hirsel binary's own guard (crates/hirsel-guard) caps itself identically.
 Runs share numbered slots: MemAvailable / MemoryMax at startup, clamped to
-2..8, or HIRSEL_CAPPED_SLOTS. --long uses a separate single slot. Queued runs
-report holders and their wait. At exit it prints the scope's peak memory, wall time and exit status to stderr. A run that reaches
+2..8, or HIRSEL_CAPPED_SLOTS. --long uses a separate single slot. Waiters are
+served in arrival order, and a checkout holding 3 slots is passed over while
+another checkout waits. Queued runs report holders and their wait. At exit it prints the scope's peak memory, wall time and exit status to stderr. A run that reaches
 the memory cap is a finding: report the program and its peak, never
 raise the cap to make it pass. Many-program runs go through Buck2 test targets.
 """
@@ -78,51 +79,140 @@ def holder(lock) -> str:
         return 'holder metadata unavailable'
 
 
+# Slots one checkout may hold while another checkout waits; alone it may use them all.
+FAIR_SHARE = 3
+
+
+def checkout_of(directory: str) -> str:
+    """The checkout a run belongs to: the nearest directory holding `.git`
+    (a Buck action's scratch directory sits inside its checkout's buck-out)."""
+    path = Path(directory).resolve()
+    for candidate in (path, *path.parents):
+        if (candidate / '.git').exists():
+            return str(candidate)
+    return str(path)
+
+
 @contextmanager
-def slot(directory: Path, count: int, command: list[str], long: bool = False):
+def locked(path: Path):
+    with open(path, 'a+') as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        yield
+
+
+def waiting(queue: Path) -> list[tuple[Path, str]]:
+    """Live tickets, oldest first, as (path, checkout). A ticket whose flock
+    can be taken belongs to a waiter that died: remove it."""
+    tickets = []
+    for path in sorted(queue.iterdir()):
+        try:
+            with open(path) as ticket:
+                try:
+                    fcntl.flock(ticket, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    tickets.append((path, json.loads(path.read_text() or '{}').get('checkout', '')))
+                    continue
+            path.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            continue
+    return tickets
+
+
+def held_by(lock) -> str:
+    try:
+        lock.seek(0)
+        record = json.load(lock)
+        return record.get('checkout') or checkout_of(record['cwd'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return ''
+
+
+@contextmanager
+def slot(directory: Path, count: int, command: list[str], long: bool = False, checkout: str | None = None):
     """Lease one flock slot, automatically released even if its process dies.
+
+    Waiters are served first come, first served, except that a checkout
+    holding FAIR_SHARE or more slots is passed over while another checkout
+    waits. So a run from one checkout starts within one job's turn however
+    many runs another checkout queued first, and a checkout alone still uses
+    every slot. Each waiter holds a flock on its ticket in the queue
+    directory; every decision is taken under the queue's lock.
 
     Never unlink slot files: a waiter may already have the inode open. Stale
     metadata is overwritten after acquisition, without trusting a reused pid.
     """
     prefix = f'hirsel-capped-{os.getuid()}'
+    kind = 'long' if long else 'short'
     names = [f'{prefix}.long.lock'] if long else [f'{prefix}.slot-{i + 1}.lock' for i in range(count)]
+    checkout = checkout or checkout_of(os.getcwd())
+    queue = directory / f'{prefix}.{kind}.queue'
+    queue.mkdir(exist_ok=True)
+    guard = directory / f'{prefix}.{kind}.queue.guard'
+    with locked(guard):
+        path = queue / f'{time.time_ns():020d}-{os.getpid()}-{id(names):x}'
+        ticket = open(path, 'w')
+        fcntl.flock(ticket, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        json.dump(dict(checkout=checkout, command=command), ticket)
+        ticket.flush()
     started = time.monotonic()
     report_at = started
     queued = False
-    while True:
-        holders = []
-        for name in names:
-            lock = open(directory / name, 'a+')
-            try:
-                try:
-                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    holders.append(f'{name}: {holder(lock)}')
-                    continue
-                lock.seek(0)
-                lock.truncate()
-                json.dump(dict(pid=os.getpid(), cwd=os.getcwd(), command=command,
-                               started=time.monotonic()), lock)
-                lock.flush()
-                if queued:
-                    print(f'capped: acquired {name} after waiting {time.monotonic() - started:.1f} s',
-                          file=sys.stderr)
-                try:
-                    yield
-                finally:
+    lock = None
+    try:
+        while True:
+            with locked(guard):
+                tickets = waiting(queue)
+                held, holders, free = {}, [], None
+                for name in names:
+                    candidate = open(directory / name, 'a+')
+                    try:
+                        fcntl.flock(candidate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        owner = held_by(candidate)
+                        held[owner] = held.get(owner, 0) + 1
+                        holders.append(f'{name}: {holder(candidate)}')
+                        candidate.close()
+                        continue
+                    if free is None:
+                        free = (name, candidate)
+                    else:
+                        candidate.close()
+                served = next((p for p, owner in tickets
+                               if held.get(owner, 0) < FAIR_SHARE
+                               or all(other == owner for _, other in tickets)), None)
+                if free and served == path:
+                    name, lock = free
                     lock.seek(0)
                     lock.truncate()
-                return
-            finally:
-                lock.close()
-        now = time.monotonic()
-        if now >= report_at:
-            print(f'capped: waiting {now - started:.1f} s for a {"long" if long else "short"} slot; '
-                  f'holders:\n  ' + '\n  '.join(holders), file=sys.stderr, flush=True)
-            report_at = now + 5
-        queued = True
-        time.sleep(0.1)
+                    json.dump(dict(pid=os.getpid(), cwd=os.getcwd(), checkout=checkout, command=command,
+                                   started=time.monotonic()), lock)
+                    lock.flush()
+                    path.unlink(missing_ok=True)
+                    ticket.close()
+                    break
+                if free:
+                    free[1].close()
+                ahead = [p for p, _ in tickets].index(path) if path in [p for p, _ in tickets] else 0
+            now = time.monotonic()
+            if now >= report_at:
+                print(f'capped: waiting {now - started:.1f} s for a {kind} slot, {ahead} ahead; '
+                      f'holders:\n  ' + '\n  '.join(holders), file=sys.stderr, flush=True)
+                report_at = now + 5
+            queued = True
+            time.sleep(0.1)
+    finally:
+        if not ticket.closed:
+            path.unlink(missing_ok=True)
+            ticket.close()
+    if queued:
+        print(f'capped: acquired {name} after waiting {time.monotonic() - started:.1f} s',
+              file=sys.stderr)
+    try:
+        yield
+    finally:
+        lock.seek(0)
+        lock.truncate()
+        lock.close()
 
 
 def own_cgroup() -> Path | None:

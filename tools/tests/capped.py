@@ -10,6 +10,7 @@ from pathlib import Path
 import runpy
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -224,6 +225,38 @@ class Capped(unittest.TestCase):
             self.assertIn("command=first 'two words'", report)
             self.assertIn('command=second age=', report)
             self.assertIn('.slot-2.lock after waiting', report)
+
+    def test_one_short_run_starts_within_a_job_turn_while_another_checkout_queues_eight_long_runs(self):
+        # Checkout A runs three rounds on all eight slots (alone it may fill
+        # them); B then asks for one. B must get the first slot A frees, not
+        # wait behind A's next rounds, which re-enter the moment a job ends.
+        events, record = [], threading.Lock()
+        full = threading.Barrier(9, timeout=20)
+
+        def a(worker):
+            for turn in range(3):
+                with capped.slot(self.root, 8, [f'a{worker}.{turn}'], checkout='A'):
+                    with record:
+                        events.append(('A', turn))
+                    if turn == 0:
+                        full.wait()
+                    time.sleep(0.3)
+
+        def b():
+            full.wait()
+            with capped.slot(self.root, 8, ['b'], checkout='B'):
+                with record:
+                    events.append(('B', None))
+
+        threads = [threading.Thread(target=a, args=(i,)) for i in range(8)] + [threading.Thread(target=b)]
+        with contextlib.redirect_stderr(io.StringIO()):
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(60)
+        self.assertIn(('B', None), events)
+        before = events[:events.index(('B', None))]
+        self.assertEqual(before, [('A', 0)] * 8, events)
 
     def test_short_and_long_slots_are_independent_and_long_is_serial(self):
         with capped.slot(self.root, 2, ['short one']), capped.slot(self.root, 2, ['short two']):

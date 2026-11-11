@@ -6,7 +6,8 @@
 // once each on the caller's stream and commit at the place, and a query reads
 // its latest commit. A call to an entry the head does not serve is Denied, and
 // one waiting for a level the place does not declare is NoLevel, with no
-// effect.
+// effect. A served transaction gets its call id as a local one does (STORE-4):
+// 32 bytes, different for each commit.
 @serializable
 type Short = Overdrawn(u64) | Db(store.TxError)
 
@@ -38,6 +39,28 @@ fn balance(tx: store.Tx, info: store.CallInfo, a: ()) -> Result[u64, Short] {
   read(tx)
 }
 
+// Commits a write and returns the call id it ran under, empty when it had none.
+fn stamp(mut tx: store.Tx, info: store.CallInfo, a: ()) -> Result[Bytes, Short] {
+  let id = match call_info.id(info) {
+    Some(id) => id,
+    None() => b"",
+  }
+  store.tx_put(mut tx, b"stamp", copy id) ? Db
+  Ok(id)
+}
+
+// The id a served `stamp` committed under, when it committed under 32 bytes.
+fn stamped(take r: Result[Bytes, RunError[store.TxFailure[Short]]]) -> Option[Bytes] {
+  match take r {
+    Ok(id) => if bytes.len(id) == 32 {
+      Some(take id)
+    } else {
+      None()
+    },
+    _ => None(),
+  }
+}
+
 // The place's head: one store, served until the execution ends.
 pub fn head(rt: Io, a: ()) -> Result[(), store.StoreError] {
   let Ok(place) = io.authority(rt, "place") else {
@@ -50,7 +73,11 @@ pub fn head(rt: Io, a: ()) -> Result[(), store.StoreError] {
   store.serve(
     mut s,
     take inbox,
-    [store.served_transact(deposit), store.served_query(balance)]
+    [
+      store.served_transact(deposit),
+      store.served_transact(stamp),
+      store.served_query(balance)
+    ]
   )
 }
 
@@ -59,6 +86,9 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
   failure.check(runner.transact(ledger, deposit, 5u64) == Ok(5u64), Arithmetic())
   failure.check(runner.transact(ledger, deposit, 7u64) == Ok(12u64), Arithmetic())
   failure.check(runner.query(ledger, balance, ()) == Ok(12u64), Arithmetic())
+  let first = stamped(runner.transact(ledger, stamp, ()))
+  let second = stamped(runner.transact(ledger, stamp, ()))
+  failure.check(first != None() && second != None() && first != second, Arithmetic())
   // The head serves no withdraw: nothing runs.
   failure.check(
     runner.transact(ledger, withdraw, 1u64) == Error(NotRun(Denied())),

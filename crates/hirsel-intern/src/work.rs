@@ -108,6 +108,8 @@ pub enum Counter {
     RegistrationComparisons,
     /// Semantic generator/normalization observations compared by registration validation.
     RegistrationReadComparisons,
+    /// Source ownership projections built from the source tables.
+    SourceProjectionBuilds,
     /// Immutable declaration projections built from their row inputs.
     DeclarationProjections,
     ExecutionReplayRequests,

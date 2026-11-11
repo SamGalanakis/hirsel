@@ -41,6 +41,14 @@ impl Recheck {
             _ => Recheck::Sampled,
         })
     }
+    /// Whether a checked build rechecks `path` in round `round`: every path,
+    /// or one in `sample` by path hash, a different one each round.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    pub(crate) fn selects(self, path: &DefPath, round: u64, sample: u64) -> bool {
+        let hash = path.fingerprint().0;
+        let key = u64::from_le_bytes(hash[..8].try_into().expect("a content hash has 8 bytes"));
+        self == Recheck::Every || key.wrapping_add(round) % sample == 0
+    }
 }
 /// The previous view's rows and the session constants every row read.
 pub(super) struct Carried {
@@ -140,9 +148,7 @@ impl Carried {
     /// in this view.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub(super) fn rechecks(&self, path: &DefPath) -> bool {
-        let hash = path.fingerprint().0;
-        let key = u64::from_le_bytes(hash[..8].try_into().expect("a content hash has 8 bytes"));
-        self.recheck == Recheck::Every || key.wrapping_add(self.view) % SAMPLE == 0
+        self.recheck.selects(path, self.view, SAMPLE)
     }
     /// The carried row of `id` when every read it made still holds.
     pub(super) fn reuse(&mut self, engine: &QueryEngine, id: DefId, path: &DefPath) -> Option<Row> {

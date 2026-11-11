@@ -1248,7 +1248,7 @@ impl QueryEngine {
             if syntax.item.definition != *path || syntax.text_hash != record.implementation {
                 return Err(QueryError::NotImplemented);
             }
-            self.materialize_bound_syntax(path, syntax, &context);
+            self.materialize_syntax(path, syntax);
             return Ok(());
         }
         if let Some(inputs) = self.source_inputs.clone()
@@ -1357,7 +1357,7 @@ impl QueryEngine {
                 "its bindings do not name the declaration's binders",
             ));
         };
-        self.materialize_alias_syntax(path, syntax);
+        self.materialize_syntax(path, syntax);
         // A new definition, as a CT-5 instance: the signature snapshot now
         // includes it.
         self.note_inputs([path.clone()]);

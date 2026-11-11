@@ -394,111 +394,23 @@ impl<K: Ord, V> FromIterator<(K, V)> for SourceTable<K, V> {
     }
 }
 impl QueryEngine {
-    pub(crate) fn materialize_bound_syntax(
-        &mut self,
-        path: &DefPath,
-        syntax: Arc<hirsel_syntax::ItemSyntax>,
-        context: &NativeRecordContext,
-    ) {
-        // The insert leaves the built context unchanged when its reverse
-        // binding is already this anchor and its anchor's scalar owner stays:
-        // either it already is this item, or an earlier materialized item
-        // still wins owner selection (catalog and generated fallbacks do not
-        // outrank an inserted item).
-        let equivalent = Arc::ptr_eq(self.types(), &context.types)
-            && syntax.item.definition == *path
-            && !self.items.contains_key(path)
-            && context.record_source_anchor(path, syntax.occurrence) == Some(syntax.anchor)
-            && match context.record_owner_ref(syntax.anchor) {
-                Some((owner, occurrence)) if owner == path => {
-                    occurrence == syntax.occurrence
-                        && context.bindings.definition(syntax.anchor) == DefId::get(path)
-                }
-                Some((owner, occurrence)) => {
-                    owner < path
-                        && self.sources.anchor(syntax.anchor).is_some()
-                        && self.items.get(owner).is_some_and(|items| {
-                            items.iter().any(|item| {
-                                item.anchor == syntax.anchor && item.occurrence == occurrence
-                            })
-                        })
-                }
-                None => false,
-            };
-        if equivalent {
-            let ownership = self.source_ownership.clone();
-            let current = ownership.current.lock().unwrap_or_else(|e| e.into_inner());
-            if current.as_ref().is_some_and(|projection| {
-                projection.placement == self.sources.placement_revision()
-                    && projection.types.ptr_eq(&Arc::downgrade(self.types()))
-                    && projection
-                        .bindings
-                        .ptr_eq(&Arc::downgrade(&context.bindings))
-            }) {
-                Arc::make_mut(&mut self.items.values).insert(path.clone(), vec![syntax]);
-                return;
-            }
-        }
-        self.items.insert(path.clone(), vec![syntax]);
-    }
-    /// A specialization shares its base's placed anchor. When an earlier
-    /// materialized item still wins scalar owner selection, insertion changes
-    /// only the new definition's reverse binding.
-    pub(crate) fn materialize_alias_syntax(
+    /// Places one new declaration. The current source projection takes the
+    /// declaration's own bindings as a delta, and is emptied (rebuilt on its
+    /// next read) only when the declaration changes an answer the projection
+    /// already gives: which owner an existing anchor resolves to, that owner's
+    /// declaration, or the anchor an existing reverse binding names.
+    pub(crate) fn materialize_syntax(
         &mut self,
         path: &DefPath,
         syntax: Arc<hirsel_syntax::ItemSyntax>,
     ) {
-        let previous = {
-            let current = self
-                .source_ownership
-                .current
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            current.as_ref().and_then(|projection| {
-                if projection.placement != self.sources.placement_revision()
-                    || !projection.types.ptr_eq(&Arc::downgrade(self.types()))
-                    || syntax.item.definition != *path
-                    || self.items.contains_key(path)
-                {
-                    return None;
-                }
-                let context = NativeRecordContext {
-                    types: self.types.clone(),
-                    bindings: projection.bindings.upgrade()?,
-                };
-                let (owner, occurrence) = context.record_owner_ref(syntax.anchor)?;
-                // Catalog and generated fallbacks do not outrank an inserted
-                // item. Reuse only when an existing item remains the winner.
-                if owner >= path
-                    || !self.items.get(owner).is_some_and(|items| {
-                        items.iter().any(|item| {
-                            item.anchor == syntax.anchor && item.occurrence == occurrence
-                        })
-                    })
-                    || context
-                        .record_source_anchor(path, syntax.occurrence)
-                        .is_some()
-                {
-                    return None;
-                }
-                Some(context)
-            })
+        let placement = self.placement(path, &syntax);
+        let Some(delta) = placement else {
+            self.items.insert(path.clone(), vec![syntax]);
+            return;
         };
-        let (anchor, occurrence) = (syntax.anchor, syntax.occurrence);
-        self.items.insert(path.clone(), vec![syntax]);
-        if let Some(previous) = previous {
-            let context = NativeRecordContext {
-                types: previous.types,
-                bindings: Arc::new(SourceBindings {
-                    owners: Box::new([]),
-                    anchors: Box::new([((RecordOwner::capture(path), occurrence), anchor)]),
-                    source_definitions: Box::new([]),
-                    parent: Some(previous.bindings),
-                    admission: Default::default(),
-                    cache: Arc::downgrade(&self.source_ownership),
-                }),
-            };
+        Arc::make_mut(&mut self.items.values).insert(path.clone(), vec![syntax]);
+        if let Some(context) = delta {
             *self
                 .source_ownership
                 .current
@@ -510,6 +422,156 @@ impl QueryEngine {
                 // Hold the new delta until its next capture admits it.
                 scalar: Some(context),
             });
+        }
+        // Each recheck rebuilds the whole projection, so the sample is far
+        // sparser than a carried row's: a program places tens of thousands
+        // of declarations.
+        #[cfg(debug_assertions)]
+        if super::namespace::Recheck::of_process().selects(path, 0, 1024) {
+            self.recheck_source_projection();
+        }
+    }
+    /// How placing `syntax` at `path` changes the current projection: `None`
+    /// when it must be rebuilt, `Some(None)` when it already answers for the
+    /// declaration, and otherwise the delta generation that does.
+    ///
+    /// A build takes an anchor's owner from the first item in path order
+    /// that cites it, ahead of catalog and generated fallbacks, and keys its
+    /// reverse binding by the item's own path and occurrence; extending with
+    /// an inherited base only fills keys the build leaves empty.
+    fn placement(
+        &self,
+        path: &DefPath,
+        syntax: &hirsel_syntax::ItemSyntax,
+    ) -> Option<Option<NativeRecordContext>> {
+        if syntax.item.definition != *path || self.items.contains_key(path) {
+            return None;
+        }
+        let bindings = {
+            let current = self
+                .source_ownership
+                .current
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let projection = current.as_ref()?;
+            if projection.placement != self.sources.placement_revision()
+                || !projection.types.ptr_eq(&Arc::downgrade(self.types()))
+            {
+                return None;
+            }
+            projection.bindings.upgrade()?
+        };
+        let live = NativeRecordContext {
+            types: self.types.clone(),
+            bindings,
+        };
+        let (anchor, occurrence) = (syntax.anchor, syntax.occurrence);
+        // A build indexes only placed anchors.
+        if self.sources.anchor(anchor).is_none() {
+            return Some(None);
+        }
+        let mut owners = Vec::new();
+        let mut source_definitions = Vec::new();
+        match live.record_owner_ref(anchor) {
+            Some((owner, at)) if owner == path => {
+                if at != occurrence || live.bindings.definition(anchor) != DefId::get(path) {
+                    return None;
+                }
+            }
+            // An earlier item keeps owner selection.
+            Some((owner, at))
+                if owner < path
+                    && self.items.get(owner).is_some_and(|items| {
+                        items
+                            .iter()
+                            .any(|item| item.anchor == anchor && item.occurrence == at)
+                    }) => {}
+            // The declaration takes an anchor some other owner resolves to.
+            Some(_) => return None,
+            None => {
+                owners.push((anchor, (RecordOwner::capture(path), occurrence)));
+                source_definitions.push((anchor, DefId::intern(path)));
+            }
+        }
+        let mut anchors = Vec::new();
+        match live.record_source_anchor(path, occurrence) {
+            Some(bound) if bound == anchor => {}
+            Some(_) => return None,
+            None => anchors.push(((RecordOwner::capture(path), occurrence), anchor)),
+        }
+        if owners.is_empty() && anchors.is_empty() {
+            return Some(None);
+        }
+        Some(Some(NativeRecordContext {
+            types: live.types,
+            bindings: Arc::new(SourceBindings {
+                owners: owners.into_boxed_slice(),
+                anchors: anchors.into_boxed_slice(),
+                source_definitions: source_definitions.into_boxed_slice(),
+                parent: Some(live.bindings),
+                admission: Default::default(),
+                cache: Arc::downgrade(&self.source_ownership),
+            }),
+        }))
+    }
+    /// A checked build compares the kept projection with a fresh rebuild; any
+    /// difference is a wrong anchor answer, so it fails naming the anchor.
+    #[cfg(debug_assertions)]
+    fn recheck_source_projection(&self) {
+        let (kept, fresh) = (self.source_records(), self.fresh_source_records());
+        let owners = |context: &NativeRecordContext| {
+            context
+                .bindings
+                .owners()
+                .map(|(anchor, (owner, at))| (*anchor, (owner.path().clone(), *at)))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let anchors = |context: &NativeRecordContext| {
+            context
+                .bindings
+                .anchors()
+                .map(|((owner, at), anchor)| ((owner.path().clone(), *at), *anchor))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let definitions = |context: &NativeRecordContext| {
+            context
+                .bindings
+                .definitions()
+                .map(|(anchor, definition)| (*anchor, definition.path().clone()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        fn first_difference<K: Ord + Clone, V: PartialEq>(
+            kept: &BTreeMap<K, V>,
+            fresh: &BTreeMap<K, V>,
+        ) -> Option<K> {
+            kept.keys()
+                .chain(fresh.keys())
+                .find(|key| kept.get(key) != fresh.get(key))
+                .cloned()
+        }
+        let (kept_owners, fresh_owners) = (owners(&kept), owners(&fresh));
+        if let Some(anchor) = first_difference(&kept_owners, &fresh_owners) {
+            panic!(
+                "kept source projection gives anchor {anchor:?} owner {:?}, a rebuild {:?}",
+                kept_owners.get(&anchor),
+                fresh_owners.get(&anchor)
+            );
+        }
+        let (kept_anchors, fresh_anchors) = (anchors(&kept), anchors(&fresh));
+        if let Some(owner) = first_difference(&kept_anchors, &fresh_anchors) {
+            panic!(
+                "kept source projection binds {owner:?} to anchor {:?}, a rebuild to {:?}",
+                kept_anchors.get(&owner),
+                fresh_anchors.get(&owner)
+            );
+        }
+        let (kept_definitions, fresh_definitions) = (definitions(&kept), definitions(&fresh));
+        if let Some(anchor) = first_difference(&kept_definitions, &fresh_definitions) {
+            panic!(
+                "kept source projection gives anchor {anchor:?} declaration {:?}, a rebuild {:?}",
+                kept_definitions.get(&anchor),
+                fresh_definitions.get(&anchor)
+            );
         }
     }
     pub(crate) fn inherit_source_records(&self, context: NativeRecordContext) {
@@ -532,6 +594,20 @@ impl QueryEngine {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(context);
     }
+    /// The projection a build gives now, ignoring the kept one.
+    fn fresh_source_records(&self) -> NativeRecordContext {
+        let context = NativeRecordContext::build(self);
+        match self
+            .source_ownership
+            .inherited
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            Some(inherited) => context.extend(inherited, &self.sources),
+            None => context,
+        }
+    }
     pub(crate) fn source_records(&self) -> NativeRecordContext {
         let mut current = self
             .source_ownership
@@ -548,16 +624,8 @@ impl QueryEngine {
                 bindings,
             };
         }
-        let mut context = NativeRecordContext::build(self);
-        if let Some(inherited) = self
-            .source_ownership
-            .inherited
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            context = context.extend(inherited, &self.sources);
-        }
+        hirsel_intern::work::count(hirsel_intern::work::Counter::SourceProjectionBuilds);
+        let context = self.fresh_source_records();
         *current = Some(SourceProjection {
             placement: self.sources.placement_revision(),
             types: Arc::downgrade(&context.types),

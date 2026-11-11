@@ -837,7 +837,6 @@ impl HeaderSources {
     }
     fn install_items(engine: &mut QueryEngine, syntaxes: &[Arc<ItemSyntax>]) -> bool {
         let mut changed = false;
-        let mut owners = None;
         for syntax in syntaxes {
             if engine
                 .items
@@ -851,9 +850,7 @@ impl HeaderSources {
                 continue;
             }
             if !engine.items.contains_key(&syntax.item.definition) {
-                let owners =
-                    owners.get_or_insert_with(|| crate::NativeRecordContext::capture(engine));
-                engine.materialize_bound_syntax(&syntax.item.definition, syntax.clone(), owners);
+                engine.materialize_syntax(&syntax.item.definition, syntax.clone());
                 changed = true;
                 continue;
             }

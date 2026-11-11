@@ -37,15 +37,19 @@ fn captured_anchor_bindings_match_scalar_selection_with_duplicate_and_generated_
         );
     }
     engine.sources.add("unowned.hir", "".into()).unwrap();
+    let builds = || hirsel_intern::work::read(hirsel_intern::work::Counter::SourceProjectionBuilds);
+    let first = builds();
     let _previous = NativeRecordContext::capture(&engine);
     // Later aliases preserve the current owner; an earlier alias replaces it.
     // Both must agree with the independent scalar scan, including reverse
-    // bindings for aliases that are not the selected owner.
-    for name in ["zzz_alias", "000_alias"] {
+    // bindings for aliases that are not the selected owner. Only the earlier
+    // alias changes an owner, so these reads build one projection after the
+    // first.
+    for name in ["zzz_alias", "zzz_second_alias", "000_alias"] {
         let mut alias = (*engine.items.values().next().unwrap()[0]).clone();
         alias.item.definition.0.name = name.into();
         let path = alias.item.definition.clone();
-        engine.materialize_alias_syntax(&path, Arc::new(alias));
+        engine.materialize_syntax(&path, Arc::new(alias));
         let captured = NativeRecordContext::capture(&engine);
         for (anchor, _, _) in engine.sources.anchors() {
             let owner = scalar_owner(&engine, anchor);
@@ -66,6 +70,7 @@ fn captured_anchor_bindings_match_scalar_selection_with_duplicate_and_generated_
             }
         }
     }
+    assert_eq!(builds() - first, 2);
 }
 
 fn context(name: &str, text: &str) -> (NativeRecordContext, Anchor, hirsel_types::TypeId) {
@@ -412,7 +417,7 @@ fn ownership_product_tracks_removal_reordering_relocation_and_parse_eviction() {
     let budget = hirsel_engine_admission::ProcessBudget::new(bytes);
     let mut allowance = budget.reserve(bytes).unwrap();
     before.admit(&mut allowance).unwrap();
-    consumer.materialize_bound_syntax(&path, syntax.clone(), &before);
+    consumer.materialize_syntax(&path, syntax.clone());
     assert_scalar_bindings(&consumer);
     assert_eq!(
         consumer.source_records().unadmitted_bytes(),
@@ -433,7 +438,7 @@ fn ownership_product_tracks_removal_reordering_relocation_and_parse_eviction() {
     let mut alias = (*syntax).clone();
     alias.item.definition.0.name = "aaa_alias".into();
     let alias_path = alias.item.definition.clone();
-    consumer.materialize_bound_syntax(&alias_path, Arc::new(alias), &before);
+    consumer.materialize_syntax(&alias_path, Arc::new(alias));
     assert_scalar_bindings(&consumer);
     assert_eq!(
         before.record_owner(syntax.anchor),

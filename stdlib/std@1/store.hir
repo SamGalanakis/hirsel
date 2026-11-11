@@ -1859,6 +1859,15 @@ pub fn tx_get(tx: Tx, key: Bytes) -> Result[Option[Bytes] in tx, TxError]
   Ok(ordered_map.get(tx.txn.state, key))
 }
 
+/// `tx_get` with `within` checked in place of the transaction's scope:
+/// `OutOfScope()` without reading unless the transaction's scope holds every
+/// key `within` holds, at any access, and `within` holds `key`.
+pub fn tx_get_in(tx: Tx, within: KeyScope, key: Bytes) -> Result[Option[Bytes] in tx, TxError]
+  requires !reserved(key) {
+  read_within(tx, within)?
+  table_read(tx, within, copy_to(heap, key))
+}
+
 /// Stores `value` under `key` when the transaction commits. The commit
 /// checks the write limits.
 pub fn tx_put(mut tx: Tx, take key: Bytes, take value: Bytes) -> Result[(), TxError]
@@ -1894,6 +1903,37 @@ pub fn tx_range[A](
   take initial: A,
   step: fn(take A, Bytes, Bytes) -> (A, bool)
 ) -> Result[A, TxError] {
+  fold_keys(tx, tx.scope, from, to, limit, order, take initial, step)
+}
+
+/// `tx_range` with `within` checked in place of the transaction's scope:
+/// `OutOfScope()` without reading unless the transaction's scope holds every
+/// key `within` holds, at any access, and `within` holds the range.
+pub fn tx_range_in[A](
+  tx: Tx,
+  within: KeyScope,
+  from: RangeBound[Bytes],
+  to: RangeBound[Bytes],
+  limit: u64,
+  order: ScanOrder,
+  take initial: A,
+  step: fn(take A, Bytes, Bytes) -> (A, bool)
+) -> Result[A, TxError] {
+  read_within(tx, within)?
+  fold_keys(tx, within, from, to, limit, order, take initial, step)
+}
+
+// `tx_range` with `scope` checked in place of the transaction's.
+fn fold_keys[A](
+  tx: Tx,
+  scope: KeyScope,
+  from: RangeBound[Bytes],
+  to: RangeBound[Bytes],
+  limit: u64,
+  order: ScanOrder,
+  take initial: A,
+  step: fn(take A, Bytes, Bytes) -> (A, bool)
+) -> Result[A, TxError] {
   if limit == 0 {
     return Error(InvalidInput())
   }
@@ -1915,12 +1955,12 @@ pub fn tx_range[A](
   } else {
     None()
   }
-  if !tx.scope.whole {
+  if !scope.whole {
     if let Some((a, b)) = below {
-      check(spans_hold(tx.scope.spans, a, b, false), false)?
+      check(spans_hold(scope.spans, a, b, false), false)?
     }
     if let Some((a, b)) = above {
-      check(spans_hold(tx.scope.spans, a, b, false), false)?
+      check(spans_hold(scope.spans, a, b, false), false)?
     }
   }
   if limit > tx.limits.range_rows {
@@ -2137,8 +2177,8 @@ fn spans_hold(spans: List[ScopeSpan], lo: Bytes, hi: Option[Bytes], write: bool)
 // a library's rows.
 // The value of `key` in this transaction, after checking read access and
 // the key limit. The read enters the run's access set.
-fn table_read(tx: Tx, take key: Bytes) -> Result[Option[Bytes] in tx, TxError] {
-  admit(tx.scope, key, false)?
+fn table_read(tx: Tx, scope: KeyScope, take key: Bytes) -> Result[Option[Bytes] in tx, TxError] {
+  admit(scope, key, false)?
   if bytes.len(key) > tx.limits.key_bytes {
     return Error(Limit(KeyBytes()))
   }
@@ -2173,6 +2213,7 @@ fn table_delete(mut tx: Tx, take key: Bytes) -> Result[(), TxError] {
 // row limit.
 fn table_range[A](
   tx: Tx,
+  scope: KeyScope,
   take lo: Bytes,
   take hi: Option[Bytes],
   limit: u64,
@@ -2180,8 +2221,8 @@ fn table_range[A](
   take initial: A,
   step: fn(take A, Bytes, Bytes) -> (A, bool)
 ) -> Result[A, TxError] {
-  if !tx.scope.whole {
-    check(spans_hold(tx.scope.spans, lo, hi, false), false)?
+  if !scope.whole {
+    check(spans_hold(scope.spans, lo, hi, false), false)?
   }
   if limit > tx.limits.range_rows {
     return Error(Limit(RangeRows()))
@@ -2249,7 +2290,7 @@ pub fn narrow[R: inert](mut tx: Tx, scope: KeyScope, body: fn(mut sub: Tx) -> R 
   R,
   TxError
 ] {
-  if !scope_within(scope, tx.scope) {
+  if !scope_within(scope, tx.scope, false) {
     return Error(OutOfScope())
   }
   let outer = replace(mut tx.scope, unique scope)
@@ -2258,60 +2299,26 @@ pub fn narrow[R: inert](mut tx: Tx, scope: KeyScope, body: fn(mut sub: Tx) -> R 
   Ok(take returned)
 }
 
-/// `narrow` to `scope` with every key Read, through a borrowed `Tx`: `body`
-/// borrows a facet of the same transaction whose scope is `scope`, read only,
-/// so it cannot write. Its reads enter the run's access set.
-pub fn narrow_read[R: inert](tx: Tx, scope: KeyScope, body: fn(sub: Tx) -> R uses {}) -> Result[
-  R,
-  TxError
-] {
-  let inner = read_only(scope)
-  if !scope_within(inner, tx.scope) {
-    return Error(OutOfScope())
-  }
-  // The facet sees the same state; its recorders hand what its body read to
-  // the parent's when it ends.
-  let facet = Tx(
-    txn: unique tx.txn,
-    limits: unique tx.limits,
-    scope: take inner,
-    points: recorder.new(),
-    spans: recorder.new()
-  )
-  let returned = body(facet)
-  let Tx(txn: _, limits: _, scope: _, points: points, spans: spans) = take facet
-  let point_keys: List[Bytes] = recorder.finish(take points)
-  for key in take point_keys {
-    recorder.append(tx.points, take key)
-  }
-  let span_reads: List[Span] = recorder.finish(take spans)
-  for span in take span_reads {
-    recorder.append(tx.spans, take span)
-  }
-  Ok(take returned)
+// The transaction's scope, for a library read that checks it as the byte
+// reads do.
+fn tx_scope(tx: Tx) -> KeyScope in tx uses {} {
+  tx.scope
 }
 
-// `scope` with every key Read: one pass, joining spans that touch, since
-// equal access now merges them.
-fn read_only(scope: KeyScope) -> KeyScope uses {} {
-  let mut spans: List[ScopeSpan] = []
-  for span in scope.spans {
-    let last = list.len(spans)
-    if last > 0 && spans[last - 1].hi == Some(copy span.lo) {
-      spans[last - 1].hi = unique span.hi
-    } else {
-      list.push(
-        mut spans,
-        ScopeSpan(lo: unique span.lo, hi: unique span.hi, write: false)
-      )
-    }
+// `OutOfScope()` unless `tx`'s scope holds every key `scope` holds, at any
+// access: what a read within `scope` checks before it reads.
+fn read_within(tx: Tx, scope: KeyScope) -> Result[(), TxError] uses {} {
+  if scope_within(scope, tx.scope, true) {
+    Ok(())
+  } else {
+    Error(OutOfScope())
   }
-  KeyScope(spans: take spans, whole: false)
 }
 
 // Whether every key `inner` holds, `outer` holds with an access at least as
-// strong: one pass over both sorted span lists, never moving back in `outer`.
-fn scope_within(inner: KeyScope, outer: KeyScope) -> bool uses {} {
+// strong, or with any access when `read`: one pass over both sorted span
+// lists, never moving back in `outer`.
+fn scope_within(inner: KeyScope, outer: KeyScope, read: bool) -> bool uses {} {
   if outer.whole {
     return true
   }
@@ -2325,7 +2332,7 @@ fn scope_within(inner: KeyScope, outer: KeyScope) -> bool uses {} {
     let mut at = copy span.lo
     let mut held = false
     while !held {
-      if j == n || at < outer.spans[j].lo || span.write && !outer.spans[j].write {
+      if j == n || at < outer.spans[j].lo || !read && span.write && !outer.spans[j].write {
         return false
       }
       match outer.spans[j].hi {
@@ -2939,14 +2946,15 @@ fn check_delete_all(tx: Tx, doomed: List[Bytes]) -> Option[TxLimit] uses {} {
 // dropping a table. `range_rows` does not bound it; the commit's limits do.
 fn table_all[A](
   tx: Tx,
+  scope: KeyScope,
   take lo: Bytes,
   take hi: Option[Bytes],
   write: bool,
   take initial: A,
   step: fn(take A, Bytes, Bytes) -> (A, bool)
 ) -> Result[A, TxError] {
-  if !tx.scope.whole {
-    check(spans_hold(tx.scope.spans, lo, hi, write), write)?
+  if !scope.whole {
+    check(spans_hold(scope.spans, lo, hi, write), write)?
   }
   let (folded, _) = scan(tx, Some((take lo, take hi)), true, 18446744073709551615, take initial, step)
   Ok(take folded)

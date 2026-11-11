@@ -234,21 +234,21 @@ fn concat(prefix: Bytes, suffix: Bytes) -> Bytes uses {} {
   bytes.from_list(take out)
 }
 
-fn load_catalog(tx: store.Tx, name: String) -> Result[Catalog, store.TxError] {
+fn load_catalog(tx: store.Tx, within: store.KeyScope, name: String) -> Result[Catalog, store.TxError] {
   if !valid(name) {
     return Error(InvalidInput())
   }
-  let (c, _) = read_catalog(tx, metadata_key(name), b"", b"")?
+  let (c, _) = read_catalog(tx, within, metadata_key(name), b"", b"")?
   Ok(c)
 }
 
 // The catalog record under `key`, and whether its digests are `key_digest`
 // and `value_digest`, compared in the read view.
-fn read_catalog(tx: store.Tx, take key: Bytes, key_digest: Bytes, value_digest: Bytes) -> Result[
+fn read_catalog(tx: store.Tx, within: store.KeyScope, take key: Bytes, key_digest: Bytes, value_digest: Bytes) -> Result[
   (Catalog, bool),
   store.TxError
 ] {
-  let raw = match store.table_read(tx, take key)? {
+  let raw = match store.table_read(tx, within, take key)? {
     Some(raw) => raw,
     None() => return Error(NoTable()),
   }
@@ -282,7 +282,7 @@ fn digest_bytes(data: Bytes) -> Bytes uses {} {
 
 // The live epochs' descriptors and the renames declared since the base, from
 // the history rows.
-fn live(tx: store.Tx, name: String, c: Catalog) -> Result[
+fn live(tx: store.Tx, within: store.KeyScope, name: String, c: Catalog) -> Result[
   (List[Schemas], List[(String, String)]),
   store.TxError
 ] {
@@ -291,7 +291,7 @@ fn live(tx: store.Tx, name: String, c: Catalog) -> Result[
   let mut n = c.base
   while n < next_epoch(c) {
     let key = history_key(name, n)
-    let raw = match store.table_read(tx, take key)? {
+    let raw = match store.table_read(tx, within, take key)? {
       Some(raw) => raw,
       None() => return Error(corrupt()),
     }
@@ -325,7 +325,7 @@ fn admits(latest: Schemas, mine: Schemas) -> Result[(), store.TxError] uses {} {
 // The table `t` names once its schemas are checked against `t`'s types: one
 // read of the catalog entry when its digests are theirs, and of the live
 // history rows besides when they are not.
-fn opened[K: key + serializable, V: serializable](tx: store.Tx, t: Table[K, V]) -> Result[
+fn opened[K: key + serializable, V: serializable](tx: store.Tx, within: store.KeyScope, t: Table[K, V]) -> Result[
   (Catalog, Open),
   store.TxError
 ] {
@@ -335,7 +335,7 @@ fn opened[K: key + serializable, V: serializable](tx: store.Tx, t: Table[K, V]) 
   }
   let encoded = keys.encode(name)
   let (key, value) = digests(t)
-  let (c, current) = read_catalog(tx, catalog_key(encoded), key, value)?
+  let (c, current) = read_catalog(tx, within, catalog_key(encoded), key, value)?
   let rows = generation_rows(encoded, c.generation)
   if current {
     let o = Open(
@@ -350,7 +350,7 @@ fn opened[K: key + serializable, V: serializable](tx: store.Tx, t: Table[K, V]) 
     )
     return Ok((take c, take o))
   }
-  let (epochs, renames) = live(tx, name, c)?
+  let (epochs, renames) = live(tx, within, name, c)?
   admits(unique epochs[list.len(epochs) - 1], descriptors(t))?
   let o = Open(
     rows: take rows,
@@ -372,11 +372,12 @@ fn opened[K: key + serializable, V: serializable](tx: store.Tx, t: Table[K, V]) 
 // so no write lands among stale rows.
 fn unused(tx: store.Tx, take rows: Bytes) -> Result[(), store.TxError] {
   let pending = store.garbage(copy rows)
-  if let Some(_) = store.table_read(tx, take pending)? {
+  if let Some(_) = store.table_read(tx, store.tx_scope(tx), take pending)? {
     return Error(reused())
   }
   let left = store.table_range(
     tx,
+    store.tx_scope(tx),
     copy rows,
     keys.prefix_end(rows),
     1,
@@ -414,7 +415,7 @@ pub fn create[K: key + serializable, V: serializable](mut tx: store.Tx, t: Table
   }
   let catalog = metadata_key(table_name(t))
   store.admit_write(tx, catalog)?
-  if let Some(_) = store.table_read(tx, take catalog)? {
+  if let Some(_) = store.table_read(tx, store.tx_scope(tx), take catalog)? {
     return Error(TableExists())
   }
   let name = table_name(t)
@@ -512,9 +513,31 @@ pub fn get[K: key + serializable, V: serializable](tx: store.Tx, t: Table[K, V],
   Option[V],
   store.TxError
 ] {
-  let (_, o) = opened(tx, t)?
+  read_row(tx, store.tx_scope(tx), t, key)
+}
+
+/// `get` with `within` checked in place of the transaction's scope:
+/// `OutOfScope()` without reading unless the transaction's scope holds every
+/// key `within` holds, at any access, and `within` holds every key `get` reads.
+pub fn get_in[K: key + serializable, V: serializable](
+  tx: store.Tx,
+  within: store.KeyScope,
+  t: Table[K, V],
+  key: K
+) -> Result[Option[V], store.TxError] {
+  store.read_within(tx, within)?
+  read_row(tx, within, t, key)
+}
+
+fn read_row[K: key + serializable, V: serializable](
+  tx: store.Tx,
+  within: store.KeyScope,
+  t: Table[K, V],
+  key: K
+) -> Result[Option[V], store.TxError] {
+  let (_, o) = opened(tx, within, t)?
   let encoded = row_key(o, key)?
-  match store.table_read(tx, take encoded)? {
+  match store.table_read(tx, within, take encoded)? {
     Some(data) => {
       let value: V = decode_value(o, data)?
       Ok(Some(take value))
@@ -530,7 +553,7 @@ pub fn put[K: key + serializable, V: serializable](
   key: K,
   value: V
 ) -> Result[(), store.TxError] {
-  let (c, o) = opened(tx, t)?
+  let (c, o) = opened(tx, store.tx_scope(tx), t)?
   let latest = if o.plain {
     b""
   } else {
@@ -547,10 +570,10 @@ pub fn delete[K: key + serializable, V: serializable](
   t: Table[K, V],
   key: K
 ) -> Result[bool, store.TxError] {
-  let (_, o) = opened(tx, t)?
+  let (_, o) = opened(tx, store.tx_scope(tx), t)?
   let encoded = row_key(o, key)?
   store.admit_write(tx, encoded)?
-  let exists = match store.table_read(tx, copy encoded)? {
+  let exists = match store.table_read(tx, store.tx_scope(tx), copy encoded)? {
     Some(_) => true,
     None() => false,
   }
@@ -639,10 +662,38 @@ pub fn range[K: key + serializable, V: serializable](
   limit: u64,
   order: store.ScanOrder
 ) -> Result[List[(K, V)], store.TxError] {
+  read_rows(tx, store.tx_scope(tx), t, from, to, limit, order)
+}
+
+/// `range` with `within` checked in place of the transaction's scope:
+/// `OutOfScope()` without reading unless the transaction's scope holds every
+/// key `within` holds, at any access, and `within` holds every key `range` reads.
+pub fn range_in[K: key + serializable, V: serializable](
+  tx: store.Tx,
+  within: store.KeyScope,
+  t: Table[K, V],
+  from: store.RangeBound[K],
+  to: store.RangeBound[K],
+  limit: u64,
+  order: store.ScanOrder
+) -> Result[List[(K, V)], store.TxError] {
+  store.read_within(tx, within)?
+  read_rows(tx, within, t, from, to, limit, order)
+}
+
+fn read_rows[K: key + serializable, V: serializable](
+  tx: store.Tx,
+  within: store.KeyScope,
+  t: Table[K, V],
+  from: store.RangeBound[K],
+  to: store.RangeBound[K],
+  limit: u64,
+  order: store.ScanOrder
+) -> Result[List[(K, V)], store.TxError] {
   if limit == 0 {
     return Error(InvalidInput())
   }
-  let (_, o) = opened(tx, t)?
+  let (_, o) = opened(tx, within, t)?
   let prefix = unique o.rows
   let low = lower(o.key, prefix, o.renames, o.plain, from)?
   let high = upper(o.key, prefix, o.renames, o.plain, to)?
@@ -651,6 +702,7 @@ pub fn range[K: key + serializable, V: serializable](
   let initial: Result[List[(K, V)], store.TxError] = Ok([])
   let rows = store.table_range(
     tx,
+    within,
     take low,
     take high,
     limit,
@@ -725,7 +777,7 @@ pub fn scope_keys[K: key + serializable, V: serializable](
   to: store.RangeBound[K],
   access: store.Access
 ) -> Result[store.KeyScope, store.TxError] {
-  let (_, o) = opened(tx, t)?
+  let (_, o) = opened(tx, store.tx_scope(tx), t)?
   let name = table_name(t)
   let prefix = unique o.rows
   let low = lower(o.key, prefix, o.renames, o.plain, from)?
@@ -735,7 +787,25 @@ pub fn scope_keys[K: key + serializable, V: serializable](
 
 /// Returns the immutable schema history; hashes exclude package version text.
 pub fn history(tx: store.Tx, name: String) -> Result[List[SchemaEntry], store.TxError] {
-  let c = load_catalog(tx, name)?
+  read_history(tx, store.tx_scope(tx), name)
+}
+
+/// `history` with `within` checked in place of the transaction's scope:
+/// `OutOfScope()` without reading unless the transaction's scope holds every
+/// key `within` holds, at any access, and `within` holds every key `history` reads.
+pub fn history_in(tx: store.Tx, within: store.KeyScope, name: String) -> Result[
+  List[SchemaEntry],
+  store.TxError
+] {
+  store.read_within(tx, within)?
+  read_history(tx, within, name)
+}
+
+fn read_history(tx: store.Tx, within: store.KeyScope, name: String) -> Result[
+  List[SchemaEntry],
+  store.TxError
+] {
+  let c = load_catalog(tx, within, name)?
   // The history rows are the table's own namespace: `range_rows` does not
   // bound reading them, as it did not bound the catalog value they were.
   let prefix = history_rows(name)
@@ -743,6 +813,7 @@ pub fn history(tx: store.Tx, name: String) -> Result[List[SchemaEntry], store.Tx
   let initial: Result[List[SchemaEntry], store.TxError] = Ok([])
   let read = store.table_all(
     tx,
+    within,
     take prefix,
     take end,
     false,
@@ -795,8 +866,8 @@ pub fn rename(mut tx: store.Tx, name: String, from: String, to: String) -> Resul
     return Error(InvalidInput())
   }
   store.admit_write(tx, metadata_key(name))?
-  let c = load_catalog(tx, name)?
-  let (epochs, _) = live(tx, name, c)?
+  let c = load_catalog(tx, store.tx_scope(tx), name)?
+  let (epochs, _) = live(tx, store.tx_scope(tx), name, c)?
   let latest = unique epochs[list.len(epochs) - 1]
   let key = internal.table_schema.rename_schema(latest.key, from, to)
   let value = internal.table_schema.rename_schema(latest.value, from, to)
@@ -837,7 +908,7 @@ pub fn drop[K: key + serializable, V: serializable](mut s: store.Store, t: Table
   store.transact_body(
     mut s,
     fn(mut tx: store.Tx) -> Result[(), store.TxError] {
-      let (c, _) = opened(tx, t)?
+      let (c, _) = opened(tx, store.tx_scope(tx), t)?
       let name = table_name(t)
       store.table_delete(mut tx, metadata_key(name))?
       store.table_put(mut tx, store.garbage(history_rows(name)), b"")?
@@ -878,10 +949,10 @@ fn start[
   B: serializable,
   E: serializable
 ](mut tx: store.Tx, from: Table[J, A], to: Table[K, B]) -> Result[Start, MigrateError[E]] {
-  if let Ok(_) = opened(tx, to) {
+  if let Ok(_) = opened(tx, store.tx_scope(tx), to) {
     return Ok(Current())
   }
-  let (c, o) = opened(tx, from) ? Table
+  let (c, o) = opened(tx, store.tx_scope(tx), from) ? Table
   let name = table_name(from)
   let generation = next_generation(c.generation)
   unused(tx, take rows_of(name, generation)) ? Table
@@ -928,6 +999,7 @@ fn advance[
   let initial: (List[(Bytes, Bytes, Bytes)], Option[MigrateError[E]]) = ([], None())
   let (rewritten, failed) = store.table_range(
     tx,
+    store.tx_scope(tx),
     take low,
     keys.prefix_end(prefix),
     batch,
@@ -955,7 +1027,7 @@ fn advance[
   }
   let mut count = p.count
   for (key, row, data) in rewritten {
-    if let Some(_) = store.table_read(tx, copy row) ? Table {
+    if let Some(_) = store.table_read(tx, store.tx_scope(tx), copy row) ? Table {
       return Error(Collision())
     }
     store.table_put(mut tx, unique row, unique data) ? Table

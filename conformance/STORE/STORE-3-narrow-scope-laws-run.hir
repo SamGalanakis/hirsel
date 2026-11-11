@@ -4,8 +4,8 @@
 // steps: 12000000
 // random scope pairs of up to six parts each, against the naive per-key oracle
 // A narrowing succeeds exactly when every key's access in the child is at
-// most its access in the parent, and a read narrowing exactly when every key
-// the child holds the parent holds at all, both read naively from the
+// most its access in the parent, and a read within the child exactly when every
+// key the child holds the parent holds at all, both read naively from the
 // scopes' parts at every boundary of either scope. A scope is the same
 // whatever order its keys are given in and when each part is cut in two,
 // and joining two scopes gives the same scope either way round.
@@ -212,14 +212,21 @@ fn round_of(mut tx: store.Tx, info: store.CallInfo, r: Round) -> Result[bool, ()
           true
         }
       )
-      let read = store.narrow_read(
+      // An empty range: only the check that the scope is within `sub`'s can
+      // refuse it.
+      let read = store.tx_range_in(
         sub,
         scope_of(r.child),
-        fn(x: store.Tx) -> bool {
-          true
+        Included(b"\xff"),
+        Excluded(b"\xff"),
+        1,
+        Ascending(),
+        0u64,
+        fn(take n: u64, key: Bytes, value: Bytes) -> (u64, bool) {
+          (n + 1, true)
         }
       )
-      (nested == Ok(true)) == r.expected && (read == Ok(true)) == r.expected_read
+      (nested == Ok(true)) == r.expected && (read == Ok(0u64)) == r.expected_read
     }
   )
   if outcome != Ok(true) {

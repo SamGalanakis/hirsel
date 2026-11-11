@@ -188,8 +188,8 @@ fn probe(d: Dir, p: Path) -> u64 {
 **Narrowing.** A narrowing operation mints a new capability of its argument's type whose
 authority is within its argument's, served by the same provider: `dir.narrow` to a
 subdirectory, `dir.read_only` to read-only access, `net.narrow` and `proc.narrow` to rules
-within their argument's, `env.narrow` to a subset of names, and `store.narrow` and
-`store.narrow_read` to a key scope within a `Tx`'s
+within their argument's, `env.narrow` to a subset of names, and `store.narrow` to a key
+scope within a `Tx`'s
 ([STORE-3](storage.md#store-3-transaction-scope)). A request outside the argument's
 authority mints nothing: it returns `NotGranted()`, `FileFault` for a path that escapes a
 `Dir`, or `OutOfScope()` for a `Tx`. Each use checks the narrowed capability's own

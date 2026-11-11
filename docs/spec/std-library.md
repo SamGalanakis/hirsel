@@ -4218,11 +4218,12 @@ fn store.tx_get(tx: store.Tx, key: Bytes) -> Result[Option[Bytes], store.TxError
 fn store.tx_put(mut tx: store.Tx, take key: Bytes, take value: Bytes) -> Result[(), store.TxError] requires !store.reserved(key)
 fn store.tx_delete(mut tx: store.Tx, take key: Bytes) -> Result[(), store.TxError] requires !store.reserved(key)
 fn store.tx_range[A](tx: store.Tx, from: store.RangeBound[Bytes], to: store.RangeBound[Bytes], limit: u64, order: store.ScanOrder, take initial: A, step: fn(take A, Bytes, Bytes) -> (A, bool)) -> Result[A, store.TxError]
+fn store.tx_get_in(tx: store.Tx, within: store.KeyScope, key: Bytes) -> Result[Option[Bytes], store.TxError] requires !store.reserved(key)
+fn store.tx_range_in[A](tx: store.Tx, within: store.KeyScope, from: store.RangeBound[Bytes], to: store.RangeBound[Bytes], limit: u64, order: store.ScanOrder, take initial: A, step: fn(take A, Bytes, Bytes) -> (A, bool)) -> Result[A, store.TxError]
 fn store.keys(from: store.RangeBound[Bytes], to: store.RangeBound[Bytes], access: store.Access) -> store.KeyScope uses {}
 fn store.all(access: store.Access) -> store.KeyScope uses {}
 fn store.join(a: store.KeyScope, b: store.KeyScope) -> store.KeyScope uses {}
 fn store.narrow[R: inert](mut tx: store.Tx, scope: store.KeyScope, body: fn(mut sub: store.Tx) -> R uses {}) -> Result[R, store.TxError]
-fn store.narrow_read[R: inert](tx: store.Tx, scope: store.KeyScope, body: fn(sub: store.Tx) -> R uses {}) -> Result[R, store.TxError]
 fn store.reserved(key: Bytes) -> bool uses {}
 fn store.get(snap: store.Snapshot, key: Bytes) -> Option[Bytes] in snap uses {}
 fn store.range(snap: store.Snapshot, from: ordered_map.Bound[Bytes], to: ordered_map.Bound[Bytes], direction: ordered_map.Direction, limit: u64) -> List[(Bytes, Bytes)] uses {}
@@ -4307,11 +4308,12 @@ checks no cancellation; `Canceled` is the runner form's. Keys beginning with `hi
 them, and `tx_range` passes over them.
 
 **Key scopes.** A `Tx` has a key scope, every key with `ReadWrite` in the `Tx` that
-`transact` and `call` give the body. `narrow` and `narrow_read` run `body` with a `Tx` of
-the same transaction whose scope is `scope`, and refuse with `OutOfScope` unless `scope`
-is within the `Tx`'s own ([STORE-3](storage.md#store-3-transaction-scope)). `narrow_read`
-narrows to `scope` with every key `Read`, so the scope refuses its writes; its reads enter
-the transaction's access set as any other's.
+`transact` and `call` give the body. `narrow` runs `body` with a `Tx` of the same
+transaction whose scope is `scope`, and refuses with `OutOfScope` unless `scope` is within
+the `Tx`'s own ([STORE-3](storage.md#store-3-transaction-scope)). `tx_get_in`,
+`tx_range_in` and `table`'s `get_in`, `range_in` and `history_in` read a borrowed `Tx`
+with `within` checked in place of its scope: `OutOfScope` without reading unless the `Tx`'s
+scope holds every key `within` holds, with any access.
 Every operation checks its keys before it reads or writes: a key or range outside the
 scope is `OutOfScope`, a write to a key held with `Read` is `ReadOnly`. A scope is held as
 sorted disjoint spans: the check is one branch for an unnarrowed `Tx` and a binary search
@@ -5759,10 +5761,13 @@ fn table.named[K: key + serializable, V: serializable](name: String) -> table.Ta
 fn table.create[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V]) -> Result[(), store.TxError]
 fn table.drop[K: key + serializable, V: serializable, S](mut s: store.Store[S], t: table.Table[K, V]) -> Result[(), store.TxFailure[store.TxError]]
 fn table.get[K: key + serializable, V: serializable](tx: store.Tx, t: table.Table[K, V], key: K) -> Result[Option[V], store.TxError]
+fn table.get_in[K: key + serializable, V: serializable](tx: store.Tx, within: store.KeyScope, t: table.Table[K, V], key: K) -> Result[Option[V], store.TxError]
 fn table.put[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], key: K, value: V) -> Result[(), store.TxError]
 fn table.delete[K: key + serializable, V: serializable](mut tx: store.Tx, t: table.Table[K, V], key: K) -> Result[bool, store.TxError]
 fn table.range[K: key + serializable, V: serializable](tx: store.Tx, t: table.Table[K, V], from: store.RangeBound[K], to: store.RangeBound[K], limit: u64, order: store.ScanOrder) -> Result[List[(K, V)], store.TxError]
+fn table.range_in[K: key + serializable, V: serializable](tx: store.Tx, within: store.KeyScope, t: table.Table[K, V], from: store.RangeBound[K], to: store.RangeBound[K], limit: u64, order: store.ScanOrder) -> Result[List[(K, V)], store.TxError]
 fn table.history(tx: store.Tx, name: String) -> Result[List[table.SchemaEntry], store.TxError]
+fn table.history_in(tx: store.Tx, within: store.KeyScope, name: String) -> Result[List[table.SchemaEntry], store.TxError]
 fn table.rename(mut tx: store.Tx, name: String, from: String, to: String) -> Result[(), store.TxError]
 fn table.migrate[J: key + serializable, A: serializable, K: key + serializable, B: serializable, E: serializable, S](within: Scope, mut s: store.Store[S], from: table.Table[J, A], to: table.Table[K, B], f: Entry[fn(c: (), key: J, old: A) -> Result[(K, B), E]], batch: u64) -> Result[u64, table.MigrateError[E]]
 fn table.scope[K: key + serializable, V: serializable](t: table.Table[K, V], access: store.Access) -> store.KeyScope

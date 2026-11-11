@@ -262,7 +262,6 @@ fn store.keys(from: RangeBound[Bytes], to: RangeBound[Bytes], access: Access) ->
 fn store.all(access: Access) -> KeyScope
 fn store.join(a: KeyScope, b: KeyScope) -> KeyScope
 fn store.narrow[R: inert](mut tx: Tx, scope: KeyScope, body: fn(mut sub: Tx) -> R uses {}) -> Result[R, TxError]
-fn store.narrow_read[R: inert](tx: Tx, scope: KeyScope, body: fn(sub: Tx) -> R uses {}) -> Result[R, TxError]
 ```
 
 - `store.keys` is the keys between `from` and `to` outside the reserved namespace, each
@@ -271,19 +270,36 @@ fn store.narrow_read[R: inert](tx: Tx, scope: KeyScope, body: fn(sub: Tx) -> R u
   without authority: it grants nothing until a `Tx` is narrowed to it. Two key scopes
   are equal when they hold the same keys with the same accesses.
 - **Scope of a `Tx`.** The `Tx` a transaction or query entry receives has the scope
-  `store.all(ReadWrite())`. `store.narrow` and `store.narrow_read` run `body` once with a
-  `Tx` of the same transaction whose scope is exactly `scope`, and return `Ok` of its
-  result. They return `OutOfScope()` without running `body` unless `scope` is
-  **within** `tx`'s scope: every key it holds, `tx`'s scope holds with an access at
-  least as strong (`ReadWrite()` is stronger than `Read()`). So a narrowing of a
-  narrowing is within both, and the relation is reflexive and transitive.
+  `store.all(ReadWrite())`. `store.narrow` runs `body` once with a `Tx` of the same
+  transaction whose scope is exactly `scope`, and returns `Ok` of its result. It returns
+  `OutOfScope()` without running `body` unless `scope` is **within** `tx`'s scope: every
+  key it holds, `tx`'s scope holds with an access at least as strong (`ReadWrite()` is
+  stronger than `Read()`). So a narrowing of a narrowing is within both, and the
+  relation is reflexive and transitive.
 - **What the body holds.** `body` is `uses {}` and its result `inert`
   ([CAP-3](capabilities.md#cap-3-restriction)), so it cannot capture the parent `Tx`
   and cannot keep or return the narrowed one
   ([MODE-6](ownership.md#mode-6-scoped-capabilities)): code that holds only the narrowed
   `Tx` cannot reach its parent's rows. The narrowed `Tx` reads the same state and its
-  writes are the transaction's writes. `store.narrow_read` takes a borrowed `Tx`, as a
-  query entry holds, and gives `body` a borrowed one, which cannot write.
+  writes are the transaction's writes. `store.narrow` takes `tx` `mut` because it swaps
+  the scope of that one `Tx` in place for `body` and restores it after, which an
+  exclusive `Tx` allows and a borrowed one does not.
+- **Scoped reads.** A borrowed `Tx`, as a query entry holds, reads within a narrower
+  scope through the scoped forms of the five reads:
+
+  ```text
+  fn store.tx_get_in(tx: Tx, within: KeyScope, key: Bytes) -> Result[Option[Bytes], TxError]
+  fn store.tx_range_in[A](tx: Tx, within: KeyScope, from: RangeBound[Bytes], to: RangeBound[Bytes], limit: u64, order: ScanOrder, take initial: A, step: fn(take A, Bytes, Bytes) -> (A, bool)) -> Result[A, TxError]
+  fn table.get_in[K: key + serializable, V: serializable](tx: Tx, within: KeyScope, t: Table[K, V], key: K) -> Result[Option[V], TxError]
+  fn table.range_in[K: key + serializable, V: serializable](tx: Tx, within: KeyScope, t: Table[K, V], from: RangeBound[K], to: RangeBound[K], limit: u64, order: ScanOrder) -> Result[List[(K, V)], TxError]
+  fn table.history_in(tx: Tx, within: KeyScope, name: String) -> Result[List[SchemaEntry], TxError]
+  ```
+
+  Each is its unscoped read with `within` checked in place of `tx`'s scope. It returns
+  `OutOfScope()` without reading unless `tx`'s scope holds every key `within` holds,
+  with any access, and then checks each key or range it reads against `within`, so
+  `within` only attenuates `tx`. Its reads enter the access set as any other's. A scoped
+  read checks `within` on every call, and holds no `Tx` of its own to pass on.
 - **Access.** Every operation checks each key before it reads or writes it, and a range
   before it reads any of it: a key or range outside the scope returns `OutOfScope()`, and
   a write to a key the scope holds only with `Read()` returns `ReadOnly()`. A range is
@@ -360,16 +376,13 @@ fn move_cents(mut tx: Tx, req: Transfer) -> Result[u64, Refusal] {
   Ok(req.cents)
 }
 
-// A query entry narrows its borrowed Tx to the caller's one balance, read only.
+// A query entry reads its borrowed Tx within the caller's one balance.
 pub fn balance(tx: Tx, call: CallInfo, account: u64) -> Result[u64, Refusal] {
   if table.get(tx, owners(), account) ? Db != Some(call_info.caller(call)) {
     return Error(NotYours(account))
   }
   let only = table.scope_keys(tx, balances(), Included(account), Included(account), Read()) ? Db
-  let read = store.narrow_read(tx, only, fn(sub: Tx) -> Result[Option[u64], TxError] {
-    table.get(sub, balances(), account)
-  }) ? Db
-  match read ? Db {
+  match table.get_in(tx, only, balances(), account) ? Db {
     Some(cents) => Ok(cents),
     None() => Error(NoAccount(account)),
   }

@@ -7508,6 +7508,7 @@ conformance/STORE/STORE-12-stream-owner-run.hir
 conformance/STORE/STORE-2-transact-run.hir
 conformance/STORE/STORE-3-narrow-scope-laws-run.hir
 conformance/STORE/STORE-3-narrow-scope-run.hir
+conformance/STORE/STORE-3-scoped-read-run.hir
 conformance/STORE/STORE-3-table-scope-denied-run.hir
 conformance/STORE/STORE-3-table-scope-run.hir
 conformance/STORE/STORE-3-tx-escape-bad.hir

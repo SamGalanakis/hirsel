@@ -3,14 +3,15 @@
 //! `Appended` record carries is the engine's payload, which no authority reads.
 //!
 //! ```text
-//! record   = "HSHIST04" prev:[32] position:u64 epoch:u64 kind:u8 body
+//! record   = "HSHIST05" prev:[32] position:u64 epoch:u64 kind:u8 body
 //! Claimed  = kind 1, body attempt:[16] identity:[32]
-//! Appended = kind 2, body count:u32 digest:[32]* payload
+//! Appended = kind 2, body count:u32 digest:[32]* retired:u32 ref* payload
+//! ref      = lifetime:u64 epoch:u64 digest:[32]
 //! ```
 //!
 //! An `Appended` record's inventory lists the digests of the objects the entry
-//! creates, whose lifetime and epoch are the record's own; the payload is the
-//! rest.
+//! creates, whose lifetime and epoch are the record's own, then the objects it
+//! retires, each created by an earlier record; the payload is the rest.
 //!
 //! `prev` is the SHA-256 of the record before, zeros at position 1. A
 //! `Claimed` record raises the epoch by one and names the store identity, which
@@ -19,14 +20,16 @@
 
 use sha2::{Digest, Sha256};
 
-const MAGIC: &[u8; 8] = b"HSHIST04";
+const MAGIC: &[u8; 8] = b"HSHIST05";
 /// The magic's family: other version digits are another format version.
 const FAMILY: &[u8; 6] = b"HSHIST";
 const HEADER: usize = 8 + 32 + 8 + 8 + 1;
 const CLAIMED: u8 = 1;
 const APPENDED: u8 = 2;
 const CLAIMED_BYTES: usize = HEADER + 16 + 32;
-const REF_BYTES: usize = 32;
+const DIGEST_BYTES: usize = 32;
+/// A retired reference: lifetime, epoch and digest.
+pub(crate) const REF_BYTES: usize = 48;
 
 /// What a record says, without its chain fields.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -40,6 +43,8 @@ pub enum Record {
         payload: Vec<u8>,
         /// The objects the entry creates, each at the record's position and epoch.
         created: Vec<crate::ObjectRef>,
+        /// The objects the entry retires, each created at an earlier position.
+        retired: Vec<crate::ObjectRef>,
     },
 }
 
@@ -113,25 +118,58 @@ pub fn decode(b: &[u8]) -> Result<Record, Bad> {
 }
 
 /// An appended record's body at `position` in `epoch`: an inventory of
-/// digests, then the payload.
+/// digests, the references it retires, then the payload. A retired reference
+/// names an object of an earlier position.
 fn appended_body(position: u64, epoch: u64, body: &[u8]) -> Result<Record, Bad> {
-    let count = u32::from_le_bytes(body.get(..4).ok_or(Bad::Corrupt)?.try_into().unwrap());
-    let refs = (count as usize)
-        .checked_mul(REF_BYTES)
-        .filter(|n| *n <= body.len() - 4)
-        .ok_or(Bad::Corrupt)?;
-    let created = body[4..4 + refs]
-        .chunks_exact(REF_BYTES)
+    let mut at = 0;
+    let count = |at: &mut usize, size: usize| -> Result<usize, Bad> {
+        let n = body.get(*at..*at + 4).ok_or(Bad::Corrupt)?;
+        let n = u32::from_le_bytes(n.try_into().unwrap()) as usize;
+        *at += 4;
+        let len = n
+            .checked_mul(size)
+            .filter(|len| *len <= body.len() - *at)
+            .ok_or(Bad::Corrupt)?;
+        *at += len;
+        Ok(len)
+    };
+    let len = count(&mut at, DIGEST_BYTES)?;
+    let created = body[at - len..at]
+        .chunks_exact(DIGEST_BYTES)
         .map(|d| crate::ObjectRef {
             lifetime: position,
             epoch,
             digest: d.try_into().unwrap(),
         })
         .collect();
+    let len = count(&mut at, REF_BYTES)?;
+    let retired: Vec<crate::ObjectRef> = body[at - len..at]
+        .chunks_exact(REF_BYTES)
+        .map(object_ref)
+        .collect();
+    if retired.iter().any(|r| !retirable(r, position, epoch)) {
+        return Err(Bad::Corrupt);
+    }
     Ok(Record::Appended {
-        payload: body[4 + refs..].to_vec(),
+        payload: body[at..].to_vec(),
         created,
+        retired,
     })
+}
+
+/// The reference a retirement's 48 bytes name.
+fn object_ref(b: &[u8]) -> crate::ObjectRef {
+    crate::ObjectRef {
+        lifetime: u64_at(b, 0),
+        epoch: u64_at(b, 8),
+        digest: b[16..48].try_into().unwrap(),
+    }
+}
+
+/// Whether a record at `position` in `epoch` can retire `r`: an object an
+/// earlier record created, under this claim or an earlier one.
+pub(crate) fn retirable(r: &crate::ObjectRef, position: u64, epoch: u64) -> bool {
+    r.lifetime > 0 && r.lifetime < position && r.epoch > 0 && r.epoch <= epoch
 }
 
 /// The record `b` and the tip after it, which must follow `tip`: `prev` is the
@@ -189,17 +227,25 @@ pub fn claimed(tip: &Tip, attempt: [u8; 16], fresh: [u8; 32]) -> Vec<u8> {
 }
 
 /// The append record of `payload` after `tip`, in its epoch, inventorying the
-/// objects of digests `created` at the record's position and epoch.
-pub fn appended(tip: &Tip, created: &[[u8; 32]], payload: &[u8]) -> Vec<u8> {
-    let mut out = header(
-        tip,
-        tip.epoch,
-        APPENDED,
-        4 + created.len() * REF_BYTES + payload.len(),
-    );
+/// objects of digests `created` at the record's position and epoch and
+/// retiring the objects `retired`.
+pub fn appended(
+    tip: &Tip,
+    created: &[[u8; 32]],
+    retired: &[crate::ObjectRef],
+    payload: &[u8],
+) -> Vec<u8> {
+    let body = 8 + created.len() * DIGEST_BYTES + retired.len() * REF_BYTES + payload.len();
+    let mut out = header(tip, tip.epoch, APPENDED, body);
     out.extend_from_slice(&(created.len() as u32).to_le_bytes());
     for d in created {
         out.extend_from_slice(d);
+    }
+    out.extend_from_slice(&(retired.len() as u32).to_le_bytes());
+    for r in retired {
+        out.extend_from_slice(&r.lifetime.to_le_bytes());
+        out.extend_from_slice(&r.epoch.to_le_bytes());
+        out.extend_from_slice(&r.digest);
     }
     out.extend_from_slice(payload);
     out
@@ -272,7 +318,7 @@ mod tests {
     use super::*;
 
     fn hand_claim() -> Vec<u8> {
-        let mut b = b"HSHIST04".to_vec();
+        let mut b = b"HSHIST05".to_vec();
         b.extend([0; 32]);
         b.extend([1, 0, 0, 0, 0, 0, 0, 0]);
         b.extend([1, 0, 0, 0, 0, 0, 0, 0]);
@@ -282,15 +328,20 @@ mod tests {
         b
     }
 
-    /// An append at position 2 in epoch 1 creating one object.
-    fn hand_append(prev: &[u8; 32]) -> Vec<u8> {
-        let mut b = b"HSHIST04".to_vec();
+    /// An append at position `at` in epoch 1 creating one object and retiring
+    /// the object of digest 0x95 created at `lifetime` in epoch 1.
+    fn hand_append(prev: &[u8; 32], at: u8, lifetime: u8) -> Vec<u8> {
+        let mut b = b"HSHIST05".to_vec();
         b.extend(prev);
-        b.extend([2, 0, 0, 0, 0, 0, 0, 0]);
+        b.extend([at, 0, 0, 0, 0, 0, 0, 0]);
         b.extend([1, 0, 0, 0, 0, 0, 0, 0]);
         b.push(2);
         b.extend([1, 0, 0, 0]);
         b.extend([0x93; 32]);
+        b.extend([1, 0, 0, 0]);
+        b.extend([lifetime, 0, 0, 0, 0, 0, 0, 0]);
+        b.extend([1, 0, 0, 0, 0, 0, 0, 0]);
+        b.extend([0x95; 32]);
         b.extend(b"pay");
         b
     }
@@ -328,8 +379,16 @@ mod tests {
             }
         );
         assert_eq!(tip1.digest, digest(&claim));
-        let append = hand_append(&digest(&claim));
-        assert_eq!(appended(&tip1, &[[0x93; 32]], b"pay"), append);
+        let retired = crate::ObjectRef {
+            lifetime: 1,
+            epoch: 1,
+            digest: [0x95; 32],
+        };
+        let append = hand_append(&digest(&claim), 2, 1);
+        assert_eq!(
+            appended(&tip1, &[[0x93; 32]], &[retired.clone()], b"pay"),
+            append
+        );
         let (tip2, r2) = follow(&tip1, &append).unwrap();
         assert_eq!(
             r2,
@@ -339,8 +398,15 @@ mod tests {
                     lifetime: 2,
                     epoch: 1,
                     digest: [0x93; 32]
-                }]
+                }],
+                retired: vec![retired]
             }
+        );
+        // A retirement of an object no earlier record could have created, the
+        // record's own position, is refused.
+        assert_eq!(
+            follow(&tip1, &hand_append(&digest(&claim), 2, 2)).map(|_| ()),
+            Err(Bad::Corrupt)
         );
         assert_eq!(
             (tip2.end, tip2.epoch, tip2.identity),
@@ -355,7 +421,7 @@ mod tests {
     fn records_that_break_a_chain_rule_are_refused() {
         let origin = Tip::origin();
         let (tip1, _) = follow(&origin, &claimed(&origin, [1; 16], [2; 32])).unwrap();
-        let (tip2, _) = follow(&tip1, &appended(&tip1, &[], b"x")).unwrap();
+        let (tip2, _) = follow(&tip1, &appended(&tip1, &[], &[], b"x")).unwrap();
         let doctored = |f: &dyn Fn(&mut Tip)| {
             let mut t = tip2.clone();
             f(&mut t);
@@ -363,14 +429,17 @@ mod tests {
         };
         let bad = [
             // Nothing before the first claim.
-            (origin.clone(), appended(&origin, &[], b"x")),
+            (origin.clone(), appended(&origin, &[], &[], b"x")),
             // Another prev, a skipped and a repeated position.
             (
                 tip2.clone(),
-                appended(&doctored(&|t| t.digest = [9; 32]), &[], b"x"),
+                appended(&doctored(&|t| t.digest = [9; 32]), &[], &[], b"x"),
             ),
-            (tip2.clone(), appended(&doctored(&|t| t.end = 3), &[], b"x")),
-            (tip2.clone(), appended(&tip1, &[], b"x")),
+            (
+                tip2.clone(),
+                appended(&doctored(&|t| t.end = 3), &[], &[], b"x"),
+            ),
+            (tip2.clone(), appended(&tip1, &[], &[], b"x")),
             // A claim that skips an epoch or names another identity.
             (
                 tip2.clone(),
@@ -383,7 +452,7 @@ mod tests {
             // An append in another epoch.
             (
                 tip2.clone(),
-                appended(&doctored(&|t| t.epoch = 2), &[], b"x"),
+                appended(&doctored(&|t| t.epoch = 2), &[], &[], b"x"),
             ),
         ];
         for (i, (tip, record)) in bad.iter().enumerate() {
@@ -394,7 +463,7 @@ mod tests {
             );
         }
         // Each case's twin, built from the true tip, follows.
-        assert!(follow(&tip2, &appended(&tip2, &[], b"x")).is_ok());
+        assert!(follow(&tip2, &appended(&tip2, &[], &[], b"x")).is_ok());
         assert!(follow(&tip2, &claimed(&tip2, [3; 16], [4; 32])).is_ok());
     }
 
@@ -403,7 +472,12 @@ mod tests {
         let origin = Tip::origin();
         let c = claimed(&origin, [5; 16], [6; 32]);
         let (t1, _) = follow(&origin, &c).unwrap();
-        let a = appended(&t1, &[[0x94; 32]], b"payload bytes");
+        let gone = crate::ObjectRef {
+            lifetime: 1,
+            epoch: 1,
+            digest: [0x96; 32],
+        };
+        let a = appended(&t1, &[[0x94; 32]], &[gone], b"payload bytes");
         let (t2, _) = follow(&t1, &a).unwrap();
         let last = claimed(&t2, [7; 16], [0; 32]);
         let records = vec![c, a, last];

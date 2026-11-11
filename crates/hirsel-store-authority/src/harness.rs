@@ -46,7 +46,7 @@ pub(crate) fn window(
     let mut queued = Vec::new();
     for (i, (e, at)) in entries.iter().enumerate() {
         let expect = start + i as u64;
-        match a.submit(c, e.clone(), &[], *at) {
+        match a.submit(c, e.clone(), &[], &[], *at) {
             Ok(p) if p == expect => queued.push(p),
             Ok(p) => return Err(format!("submitted at {p}, not {expect}")),
             Err(Error::Fenced) => break,
@@ -74,7 +74,7 @@ pub(crate) fn window(
 
 /// Appends `e` alone at `at`: a submit and its wait.
 pub(crate) fn append(a: &mut dyn Authority, c: &mut Claim, e: Vec<u8>, at: Level) -> Advanced {
-    match a.submit(c, e, &[], at) {
+    match a.submit(c, e, &[], &[], at) {
         Ok(p) => a.wait(c, p),
         Err(Error::Refused(e)) => Advanced::Refused(e),
         Err(_) => Advanced::Fenced,
@@ -83,7 +83,7 @@ pub(crate) fn append(a: &mut dyn Authority, c: &mut Claim, e: Vec<u8>, at: Level
 
 /// Whether a dead claim stays dead: used again, it queues nothing and is fenced.
 pub(crate) fn stays_dead(a: &mut dyn Authority, c: &mut Claim, at: Level) -> bool {
-    a.submit(c, entry(0, 1), &[], at) == Err(Error::Fenced)
+    a.submit(c, entry(0, 1), &[], &[], at) == Err(Error::Fenced)
         && a.durable(c, at) == Err(Error::Fenced)
 }
 
@@ -241,6 +241,7 @@ fn schedule(seed: u64, steps: u32, levels: u8, bug: Option<Bug>) -> Result<(), S
                             &Record::Appended {
                                 payload: e.clone(),
                                 created: vec![],
+                                retired: vec![],
                             },
                             at.0,
                             true,
@@ -331,5 +332,61 @@ fn every_planted_defect_breaks_the_law() {
         Bug::ReadWithoutBarrier,
     ] {
         assert!(sweep(Some(bug), 1000).is_some(), "{bug:?} went unnoticed");
+    }
+}
+
+/// Reclamation decides at the strongest-durable end, never a weaker one
+/// (storage.md STORE-11, Reclamation): a retirement acknowledged only at the
+/// weakest of two levels is made durable at the strongest before its object is
+/// removed, so a failure the strongest level survives never leaves a recovered
+/// history inventorying an object that is gone.
+#[test]
+fn a_retirement_removes_its_object_only_once_strongest_durable() {
+    let config = Config {
+        seed: 1,
+        represent: crate::sim::Represent::Log,
+        levels: vec!["cache".into(), "disk".into()],
+        faults: BTreeMap::new(),
+    };
+    let mut sim = Sim::new(config, Level(0));
+    let mut c = sim.claim([1; 16], [2; 32]).unwrap().claim;
+    let kept = crate::ObjectRef {
+        lifetime: 2,
+        epoch: 1,
+        digest: crate::envelope::digest(b"kept"),
+    };
+    sim.put(&mut c, kept, b"kept".to_vec()).unwrap();
+    let p2 = sim
+        .submit(&mut c, entry(2, 1), &[kept], &[], Level(1))
+        .unwrap();
+    assert_eq!(sim.wait(&mut c, p2), Advanced::Advanced(2));
+    let p3 = sim
+        .submit(&mut c, entry(3, 1), &[], &[kept], Level(0))
+        .unwrap();
+    assert_eq!(sim.wait(&mut c, p3), Advanced::Advanced(3));
+    let mut done = false;
+    for _ in 0..100 {
+        if sim.reclaim(&mut c, 64).unwrap() == crate::Reclaimed::Done {
+            done = true;
+            break;
+        }
+    }
+    assert!(done, "reclamation never finished");
+    sim.crash(Level(1));
+    let mut needed = Vec::new();
+    for record in read_all(&mut sim).unwrap() {
+        if let Record::Appended {
+            created, retired, ..
+        } = record
+        {
+            needed.extend(created);
+            needed.retain(|r| !retired.contains(r));
+        }
+    }
+    for r in needed {
+        assert!(
+            sim.get(r).unwrap().is_some(),
+            "an object the recovered history inventories is gone: {r:?}"
+        );
     }
 }

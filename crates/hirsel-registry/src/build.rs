@@ -228,8 +228,9 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         (
             "HistoryRecord",
             "",
-            "Claimed(u64,Bytes,Bytes)|Appended(Bytes,List[ObjectRef])",
+            "Claimed(u64,Bytes,Bytes)|Appended(Bytes,List[ObjectRef],List[ObjectRef])",
         ),
+        ("Reclaimed", "", "More()|Done()"),
         ("GrantAccess", "", "Read()|ReadWrite()"),
         (
             "NotRunReason",
@@ -1333,6 +1334,7 @@ fn serializable_core(name: &str, t: &mut TypeDefinition) {
             | "SeamError"
             | "Advanced"
             | "HistoryRecord"
+            | "Reclaimed"
             | "ObjectRef"
             | "ExitStatus"
             | "ProcessOutput"

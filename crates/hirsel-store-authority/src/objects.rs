@@ -7,14 +7,16 @@
 //! before it, and one mutable object, `head`:
 //!
 //! ```text
-//! head = "HSOBJH01" attempt:[16] end:u64 digest:[32] sum:[32]
+//! head = "HSOBJH02" attempt:[16] end:u64 digest:[32] revision:u64
+//!        scanned:u64 index:u32 len:u32 cursor sum:[32]
 //! ```
 //!
 //! naming the newest claim's attempt, the history's end and the last entry's
-//! digest; `sum` is the SHA-256 of everything before it. The head changes only
-//! by a conditional replace on the entity tag the writer's own previous replace
-//! returned. Since a head names its claim and end, no two heads have equal
-//! bytes and no tag recurs.
+//! digest, then reclamation's continuation; `sum` is the SHA-256 of everything
+//! before it. The head changes only by a conditional replace on the entity tag
+//! the writer's own previous replace returned, and every replace, a claim's,
+//! an append's or a reclamation's, writes the revision one up, so no two heads
+//! have equal bytes and no tag recurs.
 //!
 //! An append of `k` entries is `k + 1` requests: create each record object if
 //! absent, then replace the head once, naming the newest. That record's digest
@@ -31,15 +33,17 @@
 //! (plus one per orphan the listing shows), the gets concurrent; with no
 //! listing, one head get and `n` sequential gets.
 //!
-//! Reclamation lists `h/` and removes a group object at a position the head
-//! has reached that the chain does not name: left by a writer fenced or
-//! undecided before its head replace. It never removes one past the head's end,
-//! which may be the current writer's append between its puts and its replace.
+//! Reclamation lists every key. Derived objects are `o/<name>`. Besides them it
+//! removes a group object at a position the head has reached that the chain
+//! does not name: left by a writer fenced or undecided before its head replace.
+//! It never removes one past the head's end, which may be the current writer's
+//! append between its puts and its replace.
 
 use crate::envelope::{self, Chain};
+use crate::reclaim::{self, Found, Page, Space, Sweep};
 use crate::{
-    Advanced, Authority, AuthorityError, Claim, Claimed, Error, Level, Queued, Record, live,
-    owner_id,
+    Advanced, Authority, AuthorityError, Claim, Claimed, Error, Level, ObjectRef, Queued,
+    Reclaimed, Record, live, owner_id,
 };
 use hirsel_object_storage::{Condition, ObjectStorage, Put, Replaced, StorageError, Tag};
 use sha2::{Digest, Sha256};
@@ -47,10 +51,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 const HEAD: &str = "head";
-const MAGIC: &[u8; 8] = b"HSOBJH01";
+const MAGIC: &[u8; 8] = b"HSOBJH02";
 /// The magic's family: other version digits are another format version.
 const FAMILY: &[u8; 6] = b"HSOBJH";
-const HEAD_BYTES: usize = 8 + 16 + 8 + 32 + 32;
+/// The head's bytes before its continuation's cursor.
+const HEAD_FIXED: usize = 8 + 16 + 8 + 32 + 8 + 8 + 4 + 4;
 /// Attempts of a claim whose head replace lost to the current writer's append.
 const CLAIM_TRIES: usize = 8;
 
@@ -71,20 +76,35 @@ pub(crate) enum Bug {
     TrustListing,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct Head {
     attempt: [u8; 16],
     end: u64,
     digest: [u8; 32],
+    revision: u64,
+    sweep: Sweep,
 }
 
 impl Head {
+    /// The head `c` writes next: at `end` and `digest`, with continuation
+    /// `sweep`, one revision past the claim's last.
+    fn next(c: &Claim, end: u64, digest: [u8; 32], sweep: &Sweep) -> Head {
+        Head {
+            attempt: c.attempt,
+            end,
+            digest,
+            revision: c.revision + 1,
+            sweep: sweep.clone(),
+        }
+    }
+
     fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(HEAD_BYTES);
+        let mut out = Vec::with_capacity(HEAD_FIXED + self.sweep.cursor.len() + 32);
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&self.attempt);
         out.extend_from_slice(&self.end.to_le_bytes());
         out.extend_from_slice(&self.digest);
+        reclaim::encode(self.revision, &self.sweep, &mut out);
         let sum = Sha256::digest(&out);
         out.extend_from_slice(&sum);
         out
@@ -98,17 +118,22 @@ impl Head {
                 object: HEAD.to_string(),
             });
         }
-        if b.len() != HEAD_BYTES || &b[..8] != MAGIC {
+        if b.len() < HEAD_FIXED + 32 || &b[..8] != MAGIC {
             return Err(corrupt());
         }
-        let body = HEAD_BYTES - 32;
-        if Sha256::digest(&b[..body])[..] != b[body..] {
+        let (body, sum) = b.split_at(b.len() - 32);
+        if Sha256::digest(body)[..] != *sum {
             return Err(corrupt());
         }
+        let Some((revision, sweep, [])) = reclaim::decode(&body[64..]) else {
+            return Err(corrupt());
+        };
         Ok(Head {
             attempt: b[8..24].try_into().unwrap(),
             end: u64::from_le_bytes(b[24..32].try_into().unwrap()),
             digest: b[32..64].try_into().unwrap(),
+            revision,
+            sweep,
         })
     }
 }
@@ -290,12 +315,7 @@ impl Objects {
     /// later moment, so no later answer, a retry's mismatch included, proves
     /// on its own that the batch is absent.
     fn replace_head(&mut self, c: &mut Claim, last: &Queued) -> Advanced {
-        let head = Head {
-            attempt: c.attempt,
-            end: last.position,
-            digest: last.digest,
-        }
-        .encode();
+        let head = Head::next(c, last.position, last.digest, &c.sweep).encode();
         let mut doubt = false;
         for _ in 0..REPLACE_TRIES {
             let tag = c
@@ -310,6 +330,7 @@ impl Objects {
             match self.store.replace(HEAD, &head, Condition::Matches(tag)) {
                 Ok(Replaced::Replaced(tag)) => {
                     c.tag = Some(tag);
+                    c.revision += 1;
                     return advanced(c, last.position, last.digest);
                 }
                 Ok(Replaced::Mismatch) => {}
@@ -334,11 +355,12 @@ impl Objects {
             Ok(None) | Err(_) => return Settled::Done(dead(c, Advanced::Undecided(unreachable()))),
         };
         if h.attempt == c.attempt {
-            if h.end == position && h.digest == entry {
+            if h.end == position && h.digest == entry && h.revision == c.revision + 1 {
                 c.tag = Some(tag);
+                c.revision += 1;
                 return Settled::Done(advanced(c, position, entry));
             }
-            if h.end == c.end {
+            if h.end == c.end && h.revision == c.revision {
                 if doubt && c.tag.as_ref() != Some(&tag) {
                     return Settled::Done(dead(c, Advanced::Undecided(unreachable())));
                 }
@@ -414,6 +436,9 @@ impl Authority for Objects {
             let (end, digest) = read
                 .as_ref()
                 .map_or((0, [0; 32]), |(h, _)| (h.end, h.digest));
+            let (revision, sweep) = read.as_ref().map_or((0, Sweep::default()), |(h, _)| {
+                (h.revision, h.sweep.clone())
+            });
             let holder = read.as_ref().map(|(h, _)| h.attempt);
             let condition = match &read {
                 Some((_, tag)) => Condition::Matches(tag.clone()),
@@ -430,6 +455,8 @@ impl Authority for Objects {
                 attempt,
                 end: position,
                 digest: d,
+                revision: revision + 1,
+                sweep: sweep.clone(),
             };
             let tag = match self.store.replace(HEAD, &head.encode(), condition) {
                 Ok(Replaced::Replaced(tag)) => tag,
@@ -446,6 +473,8 @@ impl Authority for Objects {
                 .expect("a claim record follows its tip");
             let mut claim = Claim::new(self.owner, attempt, &self.chain.tip, 1);
             claim.tag = Some(tag);
+            claim.revision = revision + 1;
+            claim.sweep = sweep;
             return Ok(Claimed {
                 claim,
                 end: position,
@@ -558,7 +587,7 @@ impl Authority for Objects {
         }
     }
 
-    fn reclaim(&mut self, c: &mut Claim) -> Result<(), Error> {
+    fn reclaim(&mut self, c: &mut Claim, budget: u64) -> Result<Reclaimed, Error> {
         if !live(self.owner, c) {
             c.dead = true;
             return Err(Error::Fenced);
@@ -571,34 +600,102 @@ impl Authority for Objects {
             }
         };
         self.catch_up(h.end, h.digest)?;
+        reclaim::run(self, c, c.durable[0], budget)
+    }
+}
+
+impl Space for Objects {
+    fn page(&mut self, after: &str, s: u64) -> Result<Page, Error> {
         #[cfg(test)]
         let any_epoch = self.has(Bug::AnyEpoch);
         #[cfg(not(test))]
         let any_epoch = false;
-        let mut after = String::new();
-        loop {
-            let page = self
-                .store
-                .list("h/", &after)
-                .map_err(|e| Error::Storage(failure(e)))?;
-            for key in &page.keys {
-                let Some((p, d)) = parse_group_key(key) else {
-                    continue;
+        let listing = self
+            .store
+            .list("", after)
+            .map_err(|e| Error::Storage(failure(e)))?;
+        let keys = listing
+            .keys
+            .into_iter()
+            .map(|key| {
+                let found = if let Some((p, d)) = parse_group_key(&key) {
+                    let named = p >= 1 && self.chain.digests.get(p as usize - 1) == Some(&d);
+                    // Past the head's end may be the current writer's put whose
+                    // head replace is still to come.
+                    if !named && (p <= s || any_epoch) {
+                        Found::Garbage
+                    } else {
+                        Found::Keep
+                    }
+                } else {
+                    key.strip_prefix("o/")
+                        .and_then(ObjectRef::parse)
+                        .map_or(Found::Keep, Found::Object)
                 };
-                let named = p >= 1 && self.chain.digests.get(p as usize - 1) == Some(&d);
-                // Past the head's end may be the current writer's put whose
-                // head replace is still to come.
-                if !named && (p <= h.end || any_epoch) {
-                    self.store
-                        .delete(key)
-                        .map_err(|e| Error::Storage(failure(e)))?;
-                }
+                (key, found)
+            })
+            .collect();
+        Ok(Page {
+            keys,
+            more: listing.truncated,
+        })
+    }
+
+    fn remove(&mut self, key: &str) -> Result<(), Error> {
+        self.store
+            .delete(key)
+            .map_err(|e| Error::Storage(failure(e)))
+    }
+
+    fn key(&self, r: &ObjectRef) -> String {
+        format!("o/{}", r.name())
+    }
+
+    fn records(&mut self, from: u64, max: u64) -> Result<Vec<Record>, Error> {
+        self.read(from, Level(0), max)
+    }
+
+    /// Replaces the head with the claim's own end and `sweep`, on the claim's
+    /// own tag, settling an unanswered or mismatched replace by the head it
+    /// reads: its own new bytes landed, its own old bytes under another tag
+    /// retry, anything else is a later claim.
+    fn publish(&mut self, c: &mut Claim, sweep: &Sweep) -> Result<(), Error> {
+        let head = Head::next(c, c.end, c.digest, sweep);
+        let bytes = head.encode();
+        for _ in 0..REPLACE_TRIES {
+            let tag = c
+                .tag
+                .clone()
+                .expect("an objects claim holds its head's tag");
+            if let Ok(Replaced::Replaced(tag)) =
+                self.store.replace(HEAD, &bytes, Condition::Matches(tag))
+            {
+                c.tag = Some(tag);
+                c.revision += 1;
+                return Ok(());
             }
-            match page.keys.last() {
-                Some(last) if page.truncated => after = last.clone(),
-                _ => return Ok(()),
+            match self.head() {
+                Ok(Some((h, tag))) if h == head => {
+                    c.tag = Some(tag);
+                    c.revision += 1;
+                    return Ok(());
+                }
+                Ok(Some((h, tag)))
+                    if h.attempt == c.attempt
+                        && h.revision == c.revision
+                        && (h.end, h.digest) == (c.end, c.digest) =>
+                {
+                    c.tag = Some(tag);
+                }
+                Ok(_) => {
+                    c.dead = true;
+                    return Err(Error::Fenced);
+                }
+                Err(_) => break,
             }
         }
+        c.dead = true;
+        Err(Error::Storage(unreachable()))
     }
 }
 

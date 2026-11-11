@@ -27,11 +27,13 @@ mod harness_objects;
 pub mod log;
 pub mod memory;
 pub mod objects;
+mod reclaim;
 pub mod sim;
 pub mod wire;
 
 pub use envelope::Record;
 pub use hirsel_run_schema::AuthorityGrant;
+pub use reclaim::{Reclaimed, Sweep};
 use std::io::ErrorKind;
 
 /// An immutable object: the history position whose record creates it, the
@@ -55,6 +57,32 @@ impl ObjectRef {
             n.push_str(&format!("{b:02x}"));
         }
         n
+    }
+
+    /// The reference [`ObjectRef::name`] wrote `name` for.
+    pub fn parse(name: &str) -> Option<ObjectRef> {
+        let (lifetime, rest) = name.split_once('-')?;
+        let (epoch, digest) = rest.split_once('-')?;
+        if lifetime.len() != 20 || epoch.len() != 20 || digest.len() != 64 {
+            return None;
+        }
+        let digit = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+        if !digit(lifetime) || !digit(epoch) {
+            return None;
+        }
+        let mut out = [0u8; 32];
+        for (i, o) in out.iter_mut().enumerate() {
+            let pair = &digest[2 * i..2 * i + 2];
+            if pair.bytes().any(|b| b.is_ascii_uppercase()) {
+                return None;
+            }
+            *o = u8::from_str_radix(pair, 16).ok()?;
+        }
+        Some(ObjectRef {
+            lifetime: lifetime.parse().ok()?,
+            epoch: epoch.parse().ok()?,
+            digest: out,
+        })
     }
 }
 
@@ -130,6 +158,10 @@ pub struct Claim {
     pub(crate) queue: Vec<Queued>,
     /// Outcomes a wait decided for positions no wait has asked for yet.
     pub(crate) settled: Vec<(u64, Advanced)>,
+    /// The store's reclamation continuation as the claim loaded or last
+    /// published it, and that publication's revision.
+    pub(crate) sweep: Sweep,
+    pub(crate) revision: u64,
 }
 
 /// An entry [`Authority::submit`] queued: its record, built on the record
@@ -183,6 +215,8 @@ impl Claim {
             dead: false,
             queue: Vec::new(),
             settled: Vec::new(),
+            sweep: Sweep::default(),
+            revision: 0,
         }
     }
 }
@@ -210,15 +244,18 @@ pub trait Authority: Send {
     /// `Fenced`, or `Undecided` when its own append may have had an effect.
     fn append(&mut self, c: &mut Claim, batch: &[Queued]) -> Vec<Advanced>;
     /// Queue a record of `payload` inventorying `created` at the claim's next
-    /// position and return the position, with no I/O. A dead claim is `Fenced`;
-    /// a payload that with 32 bytes per created object is past [`MAX_ENTRY`],
-    /// or a created object at another position or epoch, is refused; neither
+    /// position and retiring `retired` there, and return the position, with
+    /// no I/O. A dead claim is `Fenced`; a payload that with 32 bytes per
+    /// created and 48 per retired object is past [`MAX_ENTRY`], a created
+    /// object at another position or epoch, or a retired one of a lifetime not
+    /// below the position or an epoch past the claim's, is refused; neither
     /// has an effect.
     fn submit(
         &mut self,
         c: &mut Claim,
         payload: Vec<u8>,
         created: &[ObjectRef],
+        retired: &[ObjectRef],
         at: Level,
     ) -> Result<u64, Error> {
         if c.dead {
@@ -226,15 +263,18 @@ pub trait Authority: Send {
         }
         let tip = c.queued_tip();
         let position = tip.end + 1;
-        if oversized(&payload, created.len())
+        if oversized(&payload, created.len(), retired.len())
             || created
                 .iter()
                 .any(|r| r.lifetime != position || r.epoch != c.epoch)
+            || retired
+                .iter()
+                .any(|r| !envelope::retirable(r, position, c.epoch))
         {
             return Err(Error::Refused(AuthorityError::io(ErrorKind::InvalidInput)));
         }
         let digests: Vec<[u8; 32]> = created.iter().map(|r| r.digest).collect();
-        let record = envelope::appended(&tip, &digests, &payload);
+        let record = envelope::appended(&tip, &digests, retired, &payload);
         c.queue.push(Queued {
             position,
             digest: envelope::digest(&record),
@@ -308,8 +348,16 @@ pub trait Authority: Send {
     /// Create the provider's object `name` if it is free; equal bytes are
     /// success, other bytes `Corrupt(name)`.
     fn put_object(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error>;
-    /// Remove what no retained version needs, decided from the history alone.
-    fn reclaim(&mut self, c: &mut Claim) -> Result<(), Error>;
+    /// Remove objects no version the history keeps needs, decided from the
+    /// history alone at the claim's strongest-durable end, making at most
+    /// `budget` provider requests besides that barrier, and publish where it
+    /// stopped. `More` when the budget ran out first; a budget below 2 is
+    /// refused.
+    fn reclaim(&mut self, c: &mut Claim, budget: u64) -> Result<Reclaimed, Error>;
+    /// The strongest declared level.
+    fn top(&self) -> Level {
+        Level(self.levels().len() as u8 - 1)
+    }
 }
 
 impl AuthorityError {
@@ -342,10 +390,10 @@ pub(crate) fn bad(b: envelope::Bad, position: u64) -> Error {
     }
 }
 
-/// Refuse an entry past [`MAX_ENTRY`] before any effect: its payload and 32
-/// bytes for each object it inventories.
-pub(crate) fn oversized(payload: &[u8], created: usize) -> bool {
-    payload.len() as u64 + 32 * created as u64 > MAX_ENTRY
+/// Refuse an entry past [`MAX_ENTRY`] before any effect: its payload, 32
+/// bytes for each object it inventories and 48 for each it retires.
+pub(crate) fn oversized(payload: &[u8], created: usize, retired: usize) -> bool {
+    payload.len() as u64 + 32 * created as u64 + 48 * retired as u64 > MAX_ENTRY
 }
 
 /// The outcomes of a batch whose first `done` entries had `head` and whose
@@ -548,16 +596,24 @@ mod object_law {
         assert_eq!(a.get(at(3)), Err(Error::Corrupt(at(3).name())));
         // An entry inventories only objects at its own position.
         for wrong in [at(3), other_epoch] {
-            let r = a.submit(&mut c, b"e".to_vec(), &[wrong], Level(0));
+            let r = a.submit(&mut c, b"e".to_vec(), &[wrong], &[], Level(0));
             assert_eq!(r.map(|_| ()), refused);
         }
-        let p = a.submit(&mut c, b"e".to_vec(), &[at(2)], Level(0)).unwrap();
+        // An entry retires only objects an earlier record could have created.
+        for wrong in [at(2), at(3), ObjectRef { epoch: 2, ..at(1) }] {
+            let r = a.submit(&mut c, b"e".to_vec(), &[], &[wrong], Level(0));
+            assert_eq!(r.map(|_| ()), refused);
+        }
+        let p = a
+            .submit(&mut c, b"e".to_vec(), &[at(2)], &[at(1)], Level(0))
+            .unwrap();
         assert_eq!(a.wait(&mut c, p), Advanced::Advanced(2));
         assert_eq!(
             a.read(0, Level(0), 8).unwrap()[1],
             Record::Appended {
                 payload: b"e".to_vec(),
-                created: vec![at(2)]
+                created: vec![at(2)],
+                retired: vec![at(1)]
             }
         );
         // Position 2 is written: a put there could only be garbage.

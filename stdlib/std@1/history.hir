@@ -76,8 +76,8 @@ pub type Pin {
   version: u64,
 }
 
-/// A commit the engine makes on its own behalf. `Created()` writes nothing:
-/// its record inventories one batch of a checkpoint's fresh nodes.
+/// A commit the engine makes on its own behalf. `Objects()` writes nothing:
+/// its record exists for the objects it inventories or retires.
 pub type Engine = Genesis(
   key_bytes: u32,
   value_bytes: u32,
@@ -90,7 +90,7 @@ pub type Engine = Genesis(
   checkpoints: List[Descriptor]
 ) | Fork(identity: Bytes, origin: Bytes, at: u64) | StreamFence(Bytes) | StreamPurge(
   Bytes
-) | Library(name: Bytes, payload: Bytes) | Created()
+) | Library(name: Bytes, payload: Bytes) | Objects()
 
 /// What a commit records besides its writes: kind 1, 2 or 3.
 pub type Body = Transaction(Call) | Engine(Engine) | Run(run: Bytes, records: List[Record])
@@ -400,7 +400,7 @@ fn encode_engine(mut out: List[u8], e: Engine) -> u8 uses {} {
       put_bytes(mut out, payload)
       7
     },
-    Created() => 8,
+    Objects() => 8,
   }
 }
 
@@ -428,6 +428,13 @@ fn put_ref(mut out: List[u8], r: ObjectRef) -> () uses {} {
   put_u64(mut out, r.lifetime)
   put_u64(mut out, r.epoch)
   put_fixed(mut out, r.digest)
+}
+
+/// The bytes of `r`: distinct references never share them.
+pub fn ref_key(r: ObjectRef) -> Bytes uses {} {
+  let mut out: List[u8] = []
+  put_ref(mut out, r)
+  bytes.from_list(take out)
 }
 
 // ---------------------------------------------------------------- decoding
@@ -783,7 +790,7 @@ fn decode_engine(op: u8, data: Bytes) -> Result[Engine, ()] uses {} {
     let payload = get_bytes(data, mut c)?
     Library(name: take name, payload: take payload)
   } else if op == 8 {
-    Created()
+    Objects()
   } else {
     return Error(())
   }

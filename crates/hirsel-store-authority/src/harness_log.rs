@@ -334,6 +334,7 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
                     let e = Record::Appended {
                         payload: e.clone(),
                         created: vec![],
+                        retired: vec![],
                     };
                     match answer {
                         Advanced::Advanced(_) => owe(&mut run.ledger, p, &e, at.0)?,
@@ -436,4 +437,111 @@ fn sweep(seeds: u64) -> Option<String> {
 #[test]
 fn the_log_keeps_the_crash_and_level_law_through_disk_faults() {
     assert_eq!(sweep(400), None);
+}
+
+/// Runs reclamation until it is done.
+fn reclaimed(a: &mut Log, c: &mut Claim) -> Result<(), Error> {
+    for _ in 0..100 {
+        if a.reclaim(c, 64)? == crate::Reclaimed::Done {
+            return Ok(());
+        }
+    }
+    panic!("reclamation never finished");
+}
+
+fn object(lifetime: u64, epoch: u64, data: &[u8]) -> crate::ObjectRef {
+    crate::ObjectRef {
+        lifetime,
+        epoch,
+        digest: crate::envelope::digest(data),
+    }
+}
+
+/// Reclamation's eligibility at S, the claim's strongest-durable end, over a
+/// real log (storage.md STORE-11, Reclamation), each rule beside its refused
+/// twin. R1: a retirement removes its object once its record is in the history
+/// at or below S, never while the record is only queued. R2: an object of a
+/// recorded position its record does not inventory goes (I1: a same-epoch put
+/// beside the record's own object), the inventoried one stays, and a record
+/// that cannot be read keeps its candidate and fails the call. R3: an object
+/// past S goes only when its epoch is below the claim's; an earlier epoch's object
+/// inventoried below the later claim stays. A superseded writer's
+/// publication of the continuation is fenced and leaves the file as it was.
+#[test]
+fn reclamation_removes_exactly_what_the_history_gives_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = Log::open(dir.path(), Level(0)).unwrap();
+    let mut c = a.claim([1; 16], [2; 32]).unwrap().claim;
+    let (kept, stray) = (object(2, 1, b"kept"), object(2, 1, b"stray"));
+    let (held, ahead) = (object(2, 1, b"held"), object(5, 1, b"ahead"));
+    for (r, data) in [
+        (kept, &b"kept"[..]),
+        (stray, b"stray"),
+        (held, b"held"),
+        (ahead, b"ahead"),
+    ] {
+        a.put(&mut c, r, data.to_vec()).unwrap();
+    }
+    let p2 = a
+        .submit(&mut c, b"record-two".to_vec(), &[kept, held], &[], Level(1))
+        .unwrap();
+    assert_eq!(a.wait(&mut c, p2), Advanced::Advanced(2));
+    let p3 = a
+        .submit(&mut c, b"record-three".to_vec(), &[], &[kept], Level(1))
+        .unwrap();
+    reclaimed(&mut a, &mut c).unwrap();
+    assert_eq!(a.get(stray), Ok(None), "R2: not inventoried at 2");
+    assert!(
+        a.get(kept).unwrap().is_some(),
+        "R1 twin: retired by a queued record"
+    );
+    assert!(
+        a.get(ahead).unwrap().is_some(),
+        "R3 twin: the claim's own epoch"
+    );
+    assert_eq!(a.wait(&mut c, p3), Advanced::Advanced(3));
+    reclaimed(&mut a, &mut c).unwrap();
+    assert_eq!(a.get(kept), Ok(None), "R1: retired at 3");
+    // A takeover at 4, epoch 2: `ahead` is past S of an earlier epoch.
+    let continuation = || fs::read(dir.path().join("reclaim")).ok();
+    let before = continuation();
+    assert!(before.is_some());
+    let mut b = Log::open(dir.path(), Level(0)).unwrap();
+    let mut c2 = b.claim([3; 16], [2; 32]).unwrap().claim;
+    assert_eq!(
+        crate::reclaim::Space::publish(&mut a, &mut c, &crate::Sweep::default()),
+        Err(Error::Fenced)
+    );
+    assert_eq!(continuation(), before, "a fenced publication moved nothing");
+    let mine = object(6, 2, b"mine");
+    b.put(&mut c2, mine, b"mine".to_vec()).unwrap();
+    reclaimed(&mut b, &mut c2).unwrap();
+    assert_eq!(b.get(ahead), Ok(None), "R3: epoch 1 past S under epoch 2");
+    assert!(
+        b.get(mine).unwrap().is_some(),
+        "R3 twin: the claim's own epoch"
+    );
+    assert!(
+        b.get(held).unwrap().is_some(),
+        "R3 twin: an earlier epoch's object inventoried below the later claim"
+    );
+    // A candidate at 3 whose record cannot be read stays: the next claim's
+    // walk, which reads that record, fails.
+    let candidate = object(3, 1, b"candidate");
+    b.put_object(&candidate.name(), b"candidate".to_vec())
+        .unwrap();
+    let segment = dir.path().join(format!("{:020}.seg", 1));
+    let mut bytes = fs::read(&segment).unwrap();
+    let at = bytes
+        .windows(12)
+        .position(|w| w == b"record-three")
+        .unwrap();
+    bytes[at] ^= 1;
+    fs::write(&segment, &bytes).unwrap();
+    let mut c3 = b.claim([4; 16], [2; 32]).unwrap().claim;
+    assert!(matches!(b.reclaim(&mut c3, 64), Err(Error::Corrupt(_))));
+    assert!(
+        b.get(candidate).unwrap().is_some(),
+        "R2 twin: unreadable record"
+    );
 }

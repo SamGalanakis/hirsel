@@ -21,11 +21,26 @@
 //! one, and a segment's first frame is written only once a directory sync has
 //! named it, so a host failure never cuts the history short in front of an
 //! entry it keeps.
+//!
+//! Objects are files `objects/<name>`. Reclamation's continuation is the file
+//! `reclaim`:
+//!
+//! ```text
+//! reclaim = "HSLOGR01" revision:u64 scanned:u64 index:u32 len:u32 cursor sum:[32]
+//! ```
+//!
+//! `sum` is the SHA-256 of everything before it. A claim reads it under the
+//! lock. A publication takes the lock, checks the history still ends where the
+//! writer's own last append left it and that the file's revision is the one the
+//! claim read or last wrote, and under the lock writes the next revision to a
+//! temporary file, synchronizes it, renames it over `reclaim` and synchronizes
+//! the directory: a fenced writer never moves the continuation back.
 
 use crate::envelope::{self, Chain};
+use crate::reclaim::{self, Found, Page, Space, Sweep};
 use crate::{
-    Advanced, Authority, AuthorityError, Claim, Claimed, Error, Level, Queued, Record, live,
-    owner_id,
+    Advanced, Authority, AuthorityError, Claim, Claimed, Error, Level, ObjectRef, Queued,
+    Reclaimed, Record, live, owner_id,
 };
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
@@ -43,6 +58,12 @@ const HOST: Level = Level(1);
 const FRAME: u64 = 8;
 /// A segment this long or longer takes no more entries.
 pub const SEGMENT_MAX: u64 = 256 << 20;
+const RECLAIM: &str = "reclaim";
+const RECLAIM_MAGIC: &[u8; 8] = b"HSLOGR01";
+/// The magic's family: other version digits are another format version.
+const RECLAIM_FAMILY: &[u8; 6] = b"HSLOGR";
+/// Object names one listing page holds.
+const PAGE: usize = 1000;
 
 /// The file-system calls that change the history's files. The log harness
 /// injects its faults here and models what a host failure keeps.
@@ -431,9 +452,12 @@ impl Authority for Log {
         });
         let length = length + bytes.len() as u64;
         self.index.segments.last_mut().unwrap().1 = length;
+        let (revision, sweep) = self.continuation()?;
         let mut claim = Claim::new(self.owner, attempt, &self.chain.tip, 2);
         claim.segment = segment;
         claim.length = length;
+        claim.revision = revision;
+        claim.sweep = sweep;
         Ok(Claimed {
             claim,
             end: position,
@@ -605,14 +629,123 @@ impl Authority for Log {
         }
     }
 
-    fn reclaim(&mut self, c: &mut Claim) -> Result<(), Error> {
-        // Retention entries arrive with retention; until then nothing is
-        // below a floor, and removing nothing is always within the rule.
-        self.durable(c, PROCESS).map(|_| ())
+    fn reclaim(&mut self, c: &mut Claim, budget: u64) -> Result<Reclaimed, Error> {
+        let s = self.durable(c, HOST)?;
+        reclaim::run(self, c, s, budget)
+    }
+}
+
+impl Space for Log {
+    fn page(&mut self, after: &str, _s: u64) -> Result<Page, Error> {
+        let mut names = Vec::new();
+        let dir = self.dir.join("objects");
+        for e in fs::read_dir(&dir).map_err(|e| Error::Storage(io(e)))? {
+            let e = e.map_err(|e| Error::Storage(io(e)))?;
+            if let Some(name) = e.file_name().to_str()
+                && name > after
+            {
+                names.push(name.to_string());
+            }
+        }
+        names.sort_unstable();
+        let more = names.len() > PAGE;
+        names.truncate(PAGE);
+        let keys = names
+            .into_iter()
+            .map(|n| {
+                let found = ObjectRef::parse(&n).map_or(Found::Keep, Found::Object);
+                (n, found)
+            })
+            .collect();
+        Ok(Page { keys, more })
+    }
+
+    fn remove(&mut self, key: &str) -> Result<(), Error> {
+        match fs::remove_file(self.object_path(key)?) {
+            Err(e) if e.kind() != ErrorKind::NotFound => Err(Error::Storage(io(e))),
+            _ => Ok(()),
+        }
+    }
+
+    fn key(&self, r: &ObjectRef) -> String {
+        r.name()
+    }
+
+    fn records(&mut self, from: u64, max: u64) -> Result<Vec<Record>, Error> {
+        self.read(from, HOST, max)
+    }
+
+    fn publish(&mut self, c: &mut Claim, sweep: &Sweep) -> Result<(), Error> {
+        // What was removed stays removed before the continuation passes it.
+        disk::sync_dir(&self.dir.join("objects")).map_err(|e| Error::Storage(io(e)))?;
+        let _guard = self.lock().map_err(Error::Storage)?;
+        if !self.unchanged(c).map_err(Error::Storage)? || self.continuation()?.0 != c.revision {
+            c.dead = true;
+            return Err(Error::Fenced);
+        }
+        let revision = c.revision + 1;
+        let mut out = RECLAIM_MAGIC.to_vec();
+        reclaim::encode(revision, sweep, &mut out);
+        let sum = Sha256::digest(&out);
+        out.extend_from_slice(&sum);
+        let tmp = self.dir.join(format!(
+            ".{RECLAIM}-{}",
+            c.attempt
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        ));
+        let written = (|| {
+            let f = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o644)
+                .open(&tmp)?;
+            disk::write_all_at(&f, &out, 0)?;
+            disk::sync_data(&f)?;
+            fs::rename(&tmp, self.dir.join(RECLAIM))?;
+            disk::sync_dir(&self.dir)
+        })();
+        if let Err(e) = written {
+            let _ = fs::remove_file(&tmp);
+            // A rename that may have happened leaves the file's revision unknown.
+            c.dead = true;
+            return Err(Error::Storage(io(e)));
+        }
+        c.revision = revision;
+        Ok(())
     }
 }
 
 impl Log {
+    /// The reclamation continuation and its revision; none yet is revision 0.
+    fn continuation(&self) -> Result<(u64, Sweep), Error> {
+        let b = match fs::read(self.dir.join(RECLAIM)) {
+            Ok(b) => b,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok((0, Sweep::default())),
+            Err(e) => return Err(Error::Storage(io(e))),
+        };
+        let corrupt = || Error::Corrupt(RECLAIM.to_string());
+        if b.len() >= 8 && &b[..8] != RECLAIM_MAGIC && &b[..6] == RECLAIM_FAMILY {
+            return Err(Error::Format {
+                found: b[..8].try_into().unwrap(),
+                object: RECLAIM.to_string(),
+            });
+        }
+        if b.len() < 8 + 32 || &b[..8] != RECLAIM_MAGIC {
+            return Err(corrupt());
+        }
+        let (body, sum) = b.split_at(b.len() - 32);
+        if Sha256::digest(body)[..] != *sum {
+            return Err(corrupt());
+        }
+        match reclaim::decode(&body[8..]) {
+            Some((revision, sweep, [])) => Ok((revision, sweep)),
+            _ => Err(corrupt()),
+        }
+    }
+
     /// Follow the history's records up to position `end`.
     fn follow_to(&mut self, end: u64) -> Result<(), Error> {
         while self.chain.end() < end {

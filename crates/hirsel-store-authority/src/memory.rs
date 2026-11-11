@@ -2,7 +2,11 @@
 //! survives no failure. Handles made by [`Memory::share`] see one history.
 
 use crate::envelope::{self, Chain};
-use crate::{Advanced, Authority, Claim, Claimed, Error, Level, Queued, Record, live, owner_id};
+use crate::reclaim::{self, Found, Page, Space, Sweep};
+use crate::{
+    Advanced, Authority, Claim, Claimed, Error, Level, ObjectRef, Queued, Reclaimed, Record, live,
+    owner_id,
+};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -16,6 +20,8 @@ struct World {
     chain: Chain,
     newest: Option<[u8; 16]>,
     objects: BTreeMap<String, Vec<u8>>,
+    /// Reclamation's continuation and its revision.
+    sweep: (u64, Sweep),
 }
 
 pub struct Memory {
@@ -62,7 +68,8 @@ impl Authority for Memory {
             .expect("a claim record follows its tip");
         w.records.push(record);
         w.newest = Some(attempt);
-        let claim = Claim::new(self.owner, attempt, &w.chain.tip, 1);
+        let mut claim = Claim::new(self.owner, attempt, &w.chain.tip, 1);
+        (claim.revision, claim.sweep) = w.sweep.clone();
         let end = claim.end;
         Ok(Claimed { claim, end })
     }
@@ -124,7 +131,55 @@ impl Authority for Memory {
         }
     }
 
-    fn reclaim(&mut self, c: &mut Claim) -> Result<(), Error> {
-        self.durable(c, Level(0)).map(|_| ())
+    fn reclaim(&mut self, c: &mut Claim, budget: u64) -> Result<Reclaimed, Error> {
+        let s = self.durable(c, Level(0))?;
+        reclaim::run(self, c, s, budget)
+    }
+}
+
+/// Object names one listing page holds.
+const PAGE: usize = 1000;
+
+impl Space for Memory {
+    fn page(&mut self, after: &str, _s: u64) -> Result<Page, Error> {
+        let w = self.world.lock().unwrap();
+        let mut names = w
+            .objects
+            .range::<str, _>((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded))
+            .map(|(n, _)| n.clone());
+        let keys: Vec<(String, Found)> = names
+            .by_ref()
+            .take(PAGE)
+            .map(|n| {
+                let found = ObjectRef::parse(&n).map_or(Found::Keep, Found::Object);
+                (n, found)
+            })
+            .collect();
+        let more = names.next().is_some();
+        Ok(Page { keys, more })
+    }
+
+    fn remove(&mut self, key: &str) -> Result<(), Error> {
+        self.world.lock().unwrap().objects.remove(key);
+        Ok(())
+    }
+
+    fn key(&self, r: &ObjectRef) -> String {
+        r.name()
+    }
+
+    fn records(&mut self, from: u64, max: u64) -> Result<Vec<Record>, Error> {
+        self.read(from, Level(0), max)
+    }
+
+    fn publish(&mut self, c: &mut Claim, sweep: &Sweep) -> Result<(), Error> {
+        let mut w = self.world.lock().unwrap();
+        if !live(self.owner, c) || w.newest != Some(c.attempt) || w.sweep.0 != c.revision {
+            c.dead = true;
+            return Err(Error::Fenced);
+        }
+        c.revision += 1;
+        w.sweep = (c.revision, sweep.clone());
+        Ok(())
     }
 }

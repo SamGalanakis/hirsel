@@ -207,15 +207,15 @@ pub static OBJECT_REF_LIST_DESCRIPTOR: ObjectRefListDescriptor = ObjectRefListDe
 
 /// The payload descriptor of `authority.read`'s `List[HistoryRecord]`: a sequence of
 /// 64-byte variants, `Claimed(u64, Bytes, Bytes)` (tag 0) or `Appended(Bytes,
-/// List[ObjectRef])` (tag 1), whose drop program releases each arm's owners, highest index
-/// first. Its steps are
+/// List[ObjectRef], List[ObjectRef])` (tag 1), whose drop program releases each arm's
+/// owners, highest index first. Its steps are
 /// the derivation's (`hirsel_lir::rt_program`).
 #[repr(transparent)]
 pub struct HistoryListDescriptor(pub Layout);
 // SAFETY: this immutable descriptor points only at the immutable steps below.
 unsafe impl Sync for HistoryListDescriptor {}
 #[repr(transparent)]
-struct HistoryListSteps([crate::Step; 7]);
+struct HistoryListSteps([crate::Step; 8]);
 // SAFETY: immutable steps with no layout pointers.
 unsafe impl Sync for HistoryListSteps {}
 static HISTORY_LIST_STEPS: HistoryListSteps = HistoryListSteps([
@@ -223,7 +223,7 @@ static HISTORY_LIST_STEPS: HistoryListSteps = HistoryListSteps([
         kind: crate::STEP_LOOP,
         field: crate::WHOLE_VALUE,
         variant: 0,
-        span: 6,
+        span: 7,
         offset: 16,
         stride: 64,
         count: 0,
@@ -267,8 +267,19 @@ static HISTORY_LIST_STEPS: HistoryListSteps = HistoryListSteps([
         kind: crate::STEP_TAG,
         field: crate::WHOLE_VALUE,
         variant: 1,
-        span: 2,
+        span: 3,
         offset: 0,
+        stride: 0,
+        count: 0,
+        count_offset: crate::NO_OFFSET,
+        layout: std::ptr::null(),
+    },
+    crate::Step {
+        kind: crate::STEP_RELEASE,
+        field: crate::WHOLE_VALUE,
+        variant: 0,
+        span: 0,
+        offset: 40,
         stride: 0,
         count: 0,
         count_offset: crate::NO_OFFSET,
@@ -304,7 +315,7 @@ pub static HISTORY_LIST_DESCRIPTOR: HistoryListDescriptor = HistoryListDescripto
     align: 8,
     finalizer: None,
     steps: HISTORY_LIST_STEPS.0.as_ptr(),
-    step_count: 7,
+    step_count: 8,
     field_count: 0,
     flags: LAYOUT_DYNAMIC
         | crate::LAYOUT_LOGICAL_PER_ELEMENT
@@ -401,12 +412,19 @@ pub unsafe fn allocate_history_list(
                     slice(16, attempt);
                     slice(40, identity);
                 }
-                Record::Appended { payload, created } => {
+                Record::Appended {
+                    payload,
+                    created,
+                    retired,
+                } => {
                     at.cast::<u32>().write(1);
                     slice(8, payload);
                     at.add(32)
                         .cast::<*mut Header>()
                         .write_unaligned(allocate_object_ref_list(ctx, created));
+                    at.add(40)
+                        .cast::<*mut Header>()
+                        .write_unaligned(allocate_object_ref_list(ctx, retired));
                 }
             }
         }

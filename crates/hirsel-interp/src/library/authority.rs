@@ -19,7 +19,7 @@ use super::dispatch::{arg, bytes, error, none, ok, some, text, u32_value, u64_va
 use crate::{Error, OperationCall, OperationContext, OperationResult, Value, invalid};
 use hirsel_store_authority::wire::{self, Outcome};
 use hirsel_store_authority::{
-    Advanced, Authority, AuthorityError, Claim, Error as SeamError, ObjectRef, Record,
+    Advanced, Authority, AuthorityError, Claim, Error as SeamError, ObjectRef, Reclaimed, Record,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -330,13 +330,14 @@ impl Library {
         Ok(Some(match op {
             "authority.claim" => wire::Request::Claim,
             // A reference that names no object is answered without the provider.
-            "authority.submit" => match object_refs(arg(a, 3)?)? {
-                Some(created) => wire::Request::Submit {
-                    at: self.level_of(&name()?, arg(a, 4)?)?,
+            "authority.submit" => match (object_refs(arg(a, 3)?)?, object_refs(arg(a, 4)?)?) {
+                (Some(created), Some(retired)) => wire::Request::Submit {
+                    at: self.level_of(&name()?, arg(a, 5)?)?,
                     payload: bytes(arg(a, 2)?)?.to_vec(),
                     created,
+                    retired,
                 },
-                None => return Ok(None),
+                _ => return Ok(None),
             },
             "authority.wait" => wire::Request::Wait {
                 position: u64_arg(arg(a, 2)?, "position")?,
@@ -344,7 +345,9 @@ impl Library {
             "authority.durable" => wire::Request::Durable {
                 at: self.level_of(&name()?, arg(a, 2)?)?,
             },
-            "authority.reclaim" => wire::Request::Reclaim,
+            "authority.reclaim" => wire::Request::Reclaim {
+                budget: u64_arg(arg(a, 2)?, "budget")?,
+            },
             "authority.read" => wire::Request::Read {
                 from: u64_arg(arg(a, 1)?, "from")?,
                 at: self.level_of(&name()?, arg(a, 2)?)?,
@@ -504,13 +507,14 @@ impl Library {
                 let name = self.authority_name(arg(a, 0)?)?;
                 let (_, held) = self.claim_arg(&name, arg(a, 1)?)?;
                 let payload = bytes(arg(a, 2)?)?.to_vec();
-                let at = self.level_of(&name, arg(a, 4)?)?;
-                match object_refs(arg(a, 3)?)? {
-                    Some(created) => {
+                let at = self.level_of(&name, arg(a, 5)?)?;
+                match (object_refs(arg(a, 3)?)?, object_refs(arg(a, 4)?)?) {
+                    (Some(created), Some(retired)) => {
                         let r = wire::Request::Submit {
                             at,
                             payload,
                             created,
+                            retired,
                         };
                         let Outcome::Position(r) = self.request(&name, Some(&held), r, context)?.0
                         else {
@@ -518,7 +522,7 @@ impl Library {
                         };
                         result(&r, |p| u64_value(*p))
                     }
-                    None => no_object(),
+                    _ => no_object(),
                 }
             }
             "authority.wait" => {
@@ -550,11 +554,16 @@ impl Library {
                         at: self.level_of(&name, arg(a, 2)?)?,
                     }
                 } else {
-                    wire::Request::Reclaim
+                    wire::Request::Reclaim {
+                        budget: u64_arg(arg(a, 2)?, "budget")?,
+                    }
                 };
                 match self.request(&name, Some(&held), r, context)?.0 {
                     Outcome::Position(r) => result(&r, |p| u64_value(*p)),
-                    Outcome::Unit(r) => result(&r, |()| Value::Unit),
+                    Outcome::Reclaimed(r) => result(&r, |done| match done {
+                        Reclaimed::More => variant(0, vec![]),
+                        Reclaimed::Done => variant(1, vec![]),
+                    }),
                     _ => unreachable!("admitted"),
                 }
             }
@@ -583,11 +592,16 @@ impl Library {
                                         Value::Bytes(identity.to_vec()),
                                     ],
                                 ),
-                                Record::Appended { payload, created } => variant(
+                                Record::Appended {
+                                    payload,
+                                    created,
+                                    retired,
+                                } => variant(
                                     1,
                                     vec![
                                         Value::Bytes(payload.clone()),
                                         list(created.iter().map(object_ref_value).collect()),
+                                        list(retired.iter().map(object_ref_value).collect()),
                                     ],
                                 ),
                             })

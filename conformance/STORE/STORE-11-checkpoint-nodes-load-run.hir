@@ -1,6 +1,6 @@
 // rule: STORE-11
 // expect: run
-// authorities: {"r28":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":28}},"r29":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":29}},"r30":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":30}},"r31":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":31}},"r32":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":32}},"r33":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":33}},"r34":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":34}},"r35":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":35}},"r36":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":36}},"r37":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":37}},"r38":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":38}}}
+// authorities: {"r30":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":30}},"r31":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":31}},"r32":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":32}},"r33":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":33}},"r34":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":34}},"r35":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":35}},"r36":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":36}},"r37":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":37}},"r38":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":38}},"r39":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":39}},"r40":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"fail_at":40}}}
 // steps: 20000000
 // Checkpoints of several nodes (bounds 64 to 1024 bytes) over a simulated log
 // whose history is cut at an authority request; authority `rN` refuses request N.
@@ -9,7 +9,7 @@
 // compact; commit 3 rewrites one value, so the next checkpoint shares every
 // leaf away from that value with this one; commit 4 inserts five keys and deletes one
 // mid-range; compact; commit 6 deletes five keys and rewrites one; close.
-// The history runs uncut, and requests 28 to 38 are the reopen's
+// The history runs uncut, and requests 30 to 40 are the reopen's
 // own: it reads the last checkpoint level by level, root to leaves. A reopen
 // the cut refuses is followed by one that holds the model's end state, and a
 // reopen the cut lets through holds it too.
@@ -19,9 +19,9 @@
 const KIND: String = "r"
 
 // The first request this case cuts, and the last (0: to the history's end).
-const FIRST: u64 = 28
+const FIRST: u64 = 30
 
-const LAST: u64 = 38
+const LAST: u64 = 40
 
 // Whether the cuts fall on a reopen after the history rather than in it.
 const LOAD: bool = true
@@ -156,7 +156,7 @@ fn height(a: Authority) -> u8 {
   }
   let mut h: u8 = 0
   for r in records {
-    if let Appended(entry, _) = r {
+    if let Appended(entry, _, _) = r {
       if let Ok(g) = history.decode_group(entry) {
         for c in g.commits {
           if let Engine(Checkpoint(d)) = c.body {

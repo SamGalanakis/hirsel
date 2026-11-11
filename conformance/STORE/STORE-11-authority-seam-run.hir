@@ -19,6 +19,10 @@
 // stdout: got 1 byte, missing object: none
 // stdout: a created object at another position: refused
 // stdout: entry 5 inventories its object
+// stdout: a retirement at or past its own position or of a later epoch: 3 refused
+// stdout: entry 6 retires entry 5's object
+// stdout: reclaim with budget 1: refused
+// stdout: reclaimed: the retired object gone, an unrecorded one at 7 gone, one at 8 kept
 // stdout: a level of other is not main's
 // stdout: a claim of main is not other's
 // The authority seam: a grant names each authority and the levels its provider declares;
@@ -29,8 +33,11 @@
 // is put once, only with bytes of its digest, only by the live claim, of its epoch,
 // at a position from the claim's next to 64 past it, and a digest not of 32 bytes
 // names no object; a submit inventories only objects of its own position and epoch,
-// and a read returns them with its entry; and a level or claim of one authority
-// never narrows to another.
+// and retires only objects of an earlier position and an epoch up to its own, and a
+// read returns both with its entry; reclamation removes a retired object and one of
+// a recorded position that its record does not inventory, and keeps one of the
+// claim's epoch past the durable end; and a level or claim of one authority never
+// narrows to another.
 pub type Failed = Failed()
 
 fn digest(data: Bytes) -> Bytes {
@@ -78,7 +85,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
   }
   let mut second = take made_second
   say(stdout, f"second claim to {claim.end(second)}")?
-  let stale = match authority.submit(a, mut first, b"stale", [], floor) {
+  let stale = match authority.submit(a, mut first, b"stale", [], [], floor) {
     Ok(p) => authority.wait(a, mut first, p),
     Error(_) => Fenced(),
   }
@@ -90,13 +97,13 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
     Error(Fenced()) => say(stdout, "fenced claim stays fenced")?,
     _ => say(stdout, "fenced claim revived")?,
   }
-  match authority.submit(a, mut first, b"dead", [], floor) {
+  match authority.submit(a, mut first, b"dead", [], [], floor) {
     Error(Fenced()) => say(stdout, "a dead claim submits nothing")?,
     _ => say(stdout, "a dead claim submitted")?,
   }
   let (Ok(p3), Ok(p4)) = (
-    authority.submit(a, mut second, b"three", [], floor),
-    authority.submit(a, mut second, b"four", [], floor)
+    authority.submit(a, mut second, b"three", [], [], floor),
+    authority.submit(a, mut second, b"four", [], [], floor)
   ) else {
     return Error(Failed())
   }
@@ -123,7 +130,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
         claims = claims && epoch == count && count < 3 && same && bytes.len(named) == 32
         identity = copy named
       },
-      Appended(payload, _) => {
+      Appended(payload, _, _) => {
         list.push(mut appended, copy payload)
       },
     }
@@ -180,10 +187,10 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
     )?,
     _ => say(stdout, "get: wrong")?,
   }
-  let Ok(p5) = authority.submit(a, mut second, b"five", [copy r], floor) else {
+  let Ok(p5) = authority.submit(a, mut second, b"five", [copy r], [], floor) else {
     return Error(Failed())
   }
-  match authority.submit(a, mut second, b"six", [copy r], floor) {
+  match authority.submit(a, mut second, b"six", [copy r], [], floor) {
     Error(Refused(_)) => say(stdout, "a created object at another position: refused")?,
     _ => say(stdout, "a created object at another position: accepted")?,
   }
@@ -196,7 +203,9 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
   let mut inventoried = list.len(tail) == 1
   for t in tail {
     inventoried = inventoried && match t {
-      Appended(payload, created) => payload == b"five" && created == [copy r],
+      Appended(payload, created, retired) => payload == b"five" && created == [copy r] && list.len(
+        retired
+      ) == 0,
       Claimed(..) => false,
     }
   }
@@ -204,6 +213,97 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
     say(stdout, "entry 5 inventories its object")?
   } else {
     say(stdout, "entry 5 lost its object")?
+  }
+  // Entry 6 may retire only an object of a position below 6 and an epoch up to 2.
+  let unretirable = [
+    ObjectRef(lifetime: 6, epoch: 2, digest: copy one),
+    ObjectRef(lifetime: 7, epoch: 2, digest: copy one),
+    ObjectRef(lifetime: 5, epoch: 3, digest: copy one)
+  ]
+  let mut unretired: u64 = 0
+  for o in unretirable {
+    if let Error(Refused(_)) = authority.submit(
+      a,
+      mut second,
+      b"six",
+      [],
+      [copy o],
+      floor
+    ) {
+      unretired = unretired + 1
+    }
+  }
+  say(
+    stdout,
+    f"a retirement at or past its own position or of a later epoch: {unretired} refused"
+  )?
+  let Ok(p6) = authority.submit(a, mut second, b"six", [], [copy r], floor) else {
+    return Error(Failed())
+  }
+  let Advanced(_) = authority.wait(a, mut second, p6) else {
+    return Error(Failed())
+  }
+  let Ok(six) = authority.read(a, 5, floor, 10) else {
+    return Error(Failed())
+  }
+  let mut retires = p6 == 6 && list.len(six) == 1
+  for t in six {
+    retires = retires && match t {
+      Appended(payload, created, retired) => payload == b"six" && list.len(created) == 0 && retired == [
+        copy r
+      ],
+      Claimed(..) => false,
+    }
+  }
+  if retires {
+    say(stdout, "entry 6 retires entry 5's object")?
+  } else {
+    say(stdout, "entry 6 retires nothing")?
+  }
+  match authority.reclaim(a, mut second, 1) {
+    Error(Refused(_)) => say(stdout, "reclaim with budget 1: refused")?,
+    _ => say(stdout, "reclaim with budget 1: ran")?,
+  }
+  // An object put at 7 that entry 7 does not inventory, and one at 8, past the
+  // durable end, of the claim's own epoch.
+  let two = digest(b"2")
+  let unrecorded = ObjectRef(lifetime: 7, epoch: 2, digest: copy two)
+  let ahead = ObjectRef(lifetime: 8, epoch: 2, digest: copy two)
+  let (Ok(()), Ok(())) = (
+    authority.put(a, mut second, unrecorded, b"2"),
+    authority.put(a, mut second, ahead, b"2")
+  ) else {
+    return Error(Failed())
+  }
+  let Ok(p7) = authority.submit(a, mut second, b"seven", [], [], floor) else {
+    return Error(Failed())
+  }
+  let Advanced(_) = authority.wait(a, mut second, p7) else {
+    return Error(Failed())
+  }
+  let mut done = false
+  let mut calls: u64 = 0
+  while !done && calls < 100 {
+    calls = calls + 1
+    match authority.reclaim(a, mut second, 64) {
+      Ok(Done()) => {
+        done = true
+      },
+      Ok(More()) => {},
+      Error(_) => return Error(Failed()),
+    }
+  }
+  match (
+    authority.get(a, r),
+    authority.get(a, unrecorded),
+    authority.get(a, ahead),
+    done
+  ) {
+    (Ok(None()), Ok(None()), Ok(Some(_)), true) => say(
+      stdout,
+      "reclaimed: the retired object gone, an unrecorded one at 7 gone, one at 8 kept"
+    )?,
+    _ => say(stdout, "reclaimed: wrong")?,
   }
   match level.narrow(a, authority.floor(b)) {
     None() => say(stdout, "a level of other is not main's")?,

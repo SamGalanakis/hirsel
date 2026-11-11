@@ -101,8 +101,8 @@ authority.levels	3ca126e9955d3359b2354e20bb4782e62aa699fafd40b65374e6465f039f6a0
 authority.max_entry	b28a14973b9c62384644316177af524a1709d20918ffcb292a404283ee93e825	0:b:n->n
 authority.put	41c4cff49d7a604f9d4d198dbed244d3ed3eb12a8278499e336352fd358aa49b	0:b:n;1:m:n;2:b:n;3:t:n->n
 authority.read	c7d8e20871c198d0d0702ac09d1f619fcc3e30b3af01465e7525b39283562d7c	0:b:n;1:b:n;2:b:n;3:b:n->n
-authority.reclaim	30aa80f1378000e9e4e1ef758f5a7cde5fe986fd3ae35731118de87e20ca20c0	0:b:n;1:m:n->n
-authority.submit	31d65a403e87dfc29b297e93ba36a07e15976feb92090ed90e09179a87413286	0:b:n;1:m:n;2:t:n;3:b:n;4:b:n->n
+authority.reclaim	5e4ad115c9759f2fdc94bcbf33391b54517cfb37e0aece9aec7ba1353c02c403	0:b:n;1:m:n;2:b:n->n
+authority.submit	f9bef5f9a6f7284c604e18652cb97f532f114f84550ae587e2c8dc6ca4aba9d6	0:b:n;1:m:n;2:t:n;3:b:n;4:b:n;5:b:n->n
 authority.wait	ab09cc5709b6d4cbea706f0a02b6b87d733e4ad12158c72f7535657d76ce0cd3	0:b:n;1:m:n;2:b:n->n
 bytes.append	b29ae84f6277a9dd7cf3cb64d73f0612af68c8453f2277cbe95cd48d87317729	0:m:n;1:b:n->n
 bytes.append_from_history	e476591f56ab5d2c5bed7bf4e17a9b2f250224f2f4d848d29ca520b9c736fbcc	0:m:n;1:b:n;2:b:n->n

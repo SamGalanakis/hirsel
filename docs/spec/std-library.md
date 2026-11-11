@@ -4354,7 +4354,10 @@ order. A level of another authority is `NoLevel()` and a ticket of another store
 **Compaction.** `compact` makes every commit durable at the strongest declared level,
 puts the content-cut nodes of a checkpoint of the visible state that the authority does
 not already hold, and records the checkpoint's descriptor by a Checkpoint commit, so
-recovery reads that checkpoint and applies only the commits after it.
+recovery reads that checkpoint and applies only the commits after it. The Checkpoint
+record and the records after it retire every object the store made that the checkpoint
+no longer holds, and `compact` then reclaims until the authority reports `Done()`, so
+each retired object is gone when it returns.
 
 **Failures and close.** `Storage`, `Refused`, `Corrupt`, `Fenced` and `Closed` close the
 store: every later call returns `Closed()`. `close` makes every commit durable at the

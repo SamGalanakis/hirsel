@@ -279,10 +279,13 @@ pub opaque type Store: () uses {Authority} {
   // so a run records its reads without allocating once the store is warm.
   spare: AccessSet,
   // The epoch of the store's claim, the objects the next submitted group
-  // inventories, and the newest checkpoint's nodes by digest: the objects a
-  // checkpoint may reuse.
+  // inventories and those it retires, the objects the history created and no
+  // record retired, by `history.ref_key`, and the newest checkpoint's nodes
+  // by digest: the objects a checkpoint may reuse.
   epoch: u64,
   created: List[ObjectRef],
+  retired: List[ObjectRef],
+  made: ordered_map.OrderedMap[Bytes, ObjectRef],
   live: ordered_map.OrderedMap[Bytes, ObjectRef],
   // The history's end position, and the newest group's digest and the version
   // of its last commit, which a checkpoint names.
@@ -429,6 +432,8 @@ pub fn open(a: Authority, config: StoreConfig) -> Result[Store, StoreError] {
     spare: AccessSet(points: [], spans: []),
     epoch: 0,
     created: [],
+    retired: [],
+    made: ordered_map.empty(compare_keys),
     live: ordered_map.empty(compare_keys),
     end: 0,
     digest: history.zero_digest(),
@@ -466,14 +471,10 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
   let mut checkpoint: Option[history.Descriptor] = None()
   let mut recorded: Option[(StoreLimits, history.Bounds)] = None()
   let mut epoch: u64 = 0
-  // The objects of the run of Created records just read, from `run_first`,
-  // and the newest checkpoint's publication: its fresh objects by digest,
-  // from position `fresh_from` to its own, `fresh_at`.
-  let mut run: List[ObjectRef] = []
-  let mut run_first: Option[u64] = None()
-  let mut fresh: ordered_map.OrderedMap[Bytes, ObjectRef] = ordered_map.empty(compare_keys)
-  let mut fresh_from: u64 = 0
-  let mut fresh_at: u64 = 0
+  // The objects the records created and none retired, and the position of
+  // the newest checkpoint's record.
+  let mut made: ordered_map.OrderedMap[Bytes, ObjectRef] = ordered_map.empty(compare_keys)
+  let mut checkpoint_at: u64 = 0
   let mut at: u64 = 0
   while at < end {
     let records = match authority.read(a, at, floor, READ_BATCH) {
@@ -488,15 +489,13 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
         break
       }
       at += 1
-      let (e, made) = match item {
+      let (e, created, retired) = match item {
         Claimed(n, _, identity) => {
           tip = history.claimed(tip, identity)
           epoch = n
-          run = []
-          run_first = None()
           continue
         },
-        Appended(e, made) => (copy e, copy made),
+        Appended(e, created, retired) => (copy e, copy created, copy retired),
       }
       let g = match history.decode_group(e) {
         Ok(x) => x,
@@ -512,8 +511,7 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
       tip = take next
       let d = history.digest(e)
       newest = (copy d, tip.last)
-      let mut creates = false
-      let mut publishes = false
+      let mut objects = false
       for x in g.commits {
         match x.body {
           Engine(Genesis(
@@ -553,44 +551,27 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
             }
             since = take kept
             checkpoint = Some(copy desc)
-            publishes = true
+            checkpoint_at = at
+            objects = true
           },
-          Engine(Created()) => {
-            creates = true
+          Engine(Objects()) => {
+            objects = true
           },
           _ => {},
         }
       }
-      // A record inventories objects only to publish a checkpoint: a Created
-      // record's batch, named by the Checkpoint record that ends the run of
-      // Created records of one claim just before it, or its own last batch.
-      if publishes {
-        fresh = ordered_map.empty(compare_keys)
-        for r in run {
-          ordered_map.insert(mut fresh, copy r.digest, copy r)
-        }
-        for r in made {
-          ordered_map.insert(mut fresh, copy r.digest, copy r)
-        }
-        fresh_from = match run_first {
-          Some(p) => p,
-          None() => at,
-        }
-        fresh_at = at
-        run = []
-        run_first = None()
-      } else if creates {
-        if let None() = run_first {
-          run_first = Some(at)
-        }
-        for r in made {
-          list.push(mut run, copy r)
-        }
-      } else if list.len(made) > 0 {
+      // Only a record holding an Objects or a Checkpoint commit inventories
+      // or retires objects, and it retires only what an earlier record made.
+      if !objects && (list.len(created) > 0 || list.len(retired) > 0) {
         return Error(stop(mut s, Corrupt(entry_name(at))))
-      } else {
-        run = []
-        run_first = None()
+      }
+      for r in created {
+        ordered_map.insert(mut made, history.ref_key(r), copy r)
+      }
+      for r in retired {
+        if let None() = ordered_map.remove(mut made, history.ref_key(r)) {
+          return Error(stop(mut s, Corrupt(entry_name(at))))
+        }
       }
       list.push(mut since, (take g, take d, first))
     }
@@ -598,7 +579,7 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
   let mut state: ordered_map.OrderedMap[Bytes, Bytes] = ordered_map.empty(compare_keys)
   let mut from: u64 = 0
   if let Some(desc) = checkpoint {
-    state = load_checkpoint(a, mut s, desc, fresh, fresh_from, fresh_at)?
+    state = load_checkpoint(a, mut s, desc, made, checkpoint_at)?
     from = desc.version
   }
   for (g, _, first) in since {
@@ -611,6 +592,7 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
     }
   }
   s.index = take state
+  s.made = take made
   s.visible = tip.last
   s.identity = unique tip.identity
   s.seed_key = seed_key(s.identity)
@@ -635,16 +617,14 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
 
 // The state a checkpoint records, read level by level from its root, each
 // node checked against the digest its parent names; it sets the store's live
-// objects to the checkpoint's nodes. The checkpoint was published from
-// position `from` to its own, `at`: a node of a lifetime in that range is
-// one of `fresh`, which those records inventory, and one of an earlier
-// lifetime is an object the head that published it had admitted.
+// objects to the checkpoint's nodes. The checkpoint's record is at `at`:
+// every node is one of `made`, which a record at or before it created, so
+// reclamation never removes it.
 fn load_checkpoint(
   a: Authority,
   mut s: Store,
   desc: history.Descriptor,
-  fresh: ordered_map.OrderedMap[Bytes, ObjectRef],
-  from: u64,
+  made: ordered_map.OrderedMap[Bytes, ObjectRef],
   at: u64
 ) -> Result[ordered_map.OrderedMap[Bytes, Bytes], StoreError] {
   let mut live: ordered_map.OrderedMap[Bytes, ObjectRef] = ordered_map.empty(compare_keys)
@@ -653,11 +633,7 @@ fn load_checkpoint(
     let mut blobs: List[Bytes] = []
     for x in expects {
       let r = x.r
-      let listed = match ordered_map.get(fresh, r.digest) {
-        Some(f) => f == r,
-        None() => false,
-      }
-      if r.lifetime > at || r.lifetime >= from && !listed {
+      if r.lifetime > at || !ordered_map.contains(made, history.ref_key(r)) {
         return Error(stop(mut s, Corrupt(entry_name(at))))
       }
       match authority.get(a, copy r) {
@@ -1023,13 +999,15 @@ fn current(mut s: Store) -> ordered_map.OrderedMap[Bytes, Bytes] uses {} {
 }
 
 /// Puts the nodes of a checkpoint of the state at V that the newest
-/// checkpoint does not already hold and records its descriptor by a
-/// Checkpoint commit, so recovery applies only the commits after it
-/// (STORE-11). The fresh nodes go in batches, each put under the claim and
-/// then inventoried by its own record before the next is put: a Created
-/// commit for every batch but the last, which the Checkpoint's record
-/// inventories. Every commit is first made durable at the strongest declared
-/// level, and so is each of these.
+/// checkpoint does not already hold, records its descriptor by a Checkpoint
+/// commit, so recovery applies only the commits after it, and removes the
+/// objects no record keeps (STORE-11). The fresh nodes go in batches, each
+/// put under the claim and then inventoried by its own record before the next
+/// is put: an Objects commit for every batch but the last, which the
+/// Checkpoint's record inventories. That record and Objects records after it
+/// retire every object the history made that the new tree does not hold.
+/// Every commit is first made durable at the strongest declared level, and so
+/// is each of these; reclamation then runs until it is done.
 pub fn compact(mut s: Store) -> Result[(), StoreError] {
   if s.closed {
     return Error(Closed())
@@ -1037,7 +1015,7 @@ pub fn compact(mut s: Store) -> Result[(), StoreError] {
   let a = s.authority
   strongest(a, mut s) ? unreleased
   // The state at V is the state after the newest group: a claim since writes
-  // nothing, and so do the Created commits.
+  // nothing, and so do the Objects commits.
   let last = s.group_last
   let group = copy s.digest
   let placement = history.Placement(
@@ -1049,29 +1027,117 @@ pub fn compact(mut s: Store) -> Result[(), StoreError] {
     bytes: s.config.batch_bytes
   )
   let tree = history.checkpoint_tree(copy s.bounds, take placement, s.index)
+  let mut held: ordered_map.OrderedMap[Bytes, ObjectRef] = ordered_map.empty(compare_keys)
+  for r in tree.refs {
+    ordered_map.insert(mut held, history.ref_key(r), copy r)
+  }
+  let mut retire: List[ObjectRef] = []
+  for r in made_refs(s.made) {
+    if !ordered_map.contains(held, history.ref_key(r)) {
+      list.push(mut retire, copy r)
+    }
+  }
   let n = list.len(tree.batches)
-  for i in 0u64..n {
-    let mut made: List[ObjectRef] = []
-    for (r, node) in tree.batches[i] {
-      put_node(a, mut s, r, copy node)?
-      list.push(mut made, copy r)
+  let room = retire_room(s.max_entry)
+  let mut next: u64 = 0
+  let mut i: u64 = 0
+  while i < n || next < list.len(retire) {
+    let mut created: List[ObjectRef] = []
+    if i < n {
+      for (r, node) in tree.batches[i] {
+        put_node(a, mut s, r, copy node)?
+        list.push(mut created, copy r)
+      }
     }
-    let body: history.Body = if i + 1 < n {
-      Engine(Created())
-    } else {
+    let body: history.Body = if i + 1 == n {
       Engine(Checkpoint(history.descriptor(tree, last, group)))
+    } else {
+      Engine(Objects())
     }
-    s.created = take made
+    // Retirements ride the Checkpoint's record and those after it.
+    let mut retired: List[ObjectRef] = []
+    if i + 1 >= n {
+      let mut used: u64 = 32 * list.len(created)
+      while next < list.len(retire) && (used + 48 <= room || list.len(retired) == 0 && used == 0) {
+        list.push(mut retired, copy retire[next])
+        used += 48
+        next += 1
+      }
+    }
+    for r in created {
+      ordered_map.insert(mut s.made, history.ref_key(r), copy r)
+    }
+    for r in retired {
+      let _ = ordered_map.remove(mut s.made, history.ref_key(r))
+    }
+    s.created = take created
+    s.retired = take retired
     let t = serial(mut s)
     let _ = commit(mut s, take t, take body, None()) ? unreleased
     strongest(a, mut s) ? unreleased
+    i += 1
   }
   let mut live: ordered_map.OrderedMap[Bytes, ObjectRef] = ordered_map.empty(compare_keys)
   for r in tree.refs {
     ordered_map.insert(mut live, copy r.digest, copy r)
   }
   s.live = take live
+  reclaim(a, mut s)
+}
+
+// Provider requests one reclamation call may make.
+const RECLAIM_BUDGET: u64 = 64
+
+// Calls `authority.reclaim` until it is done. Its strongest-durable end is the
+// store's end: every record is durable at the strongest level.
+fn reclaim(a: Authority, mut s: Store) -> Result[(), StoreError] {
+  while true {
+    let Some(held) = replace(mut s.claim, None()) else {
+      return Error(stop(mut s, Closed()))
+    }
+    let Some(narrowed) = claim.narrow(a, take held) else {
+      return Error(stop(mut s, Closed()))
+    }
+    let mut c = take narrowed
+    let outcome = authority.reclaim(a, mut c, RECLAIM_BUDGET)
+    let back: Claim = take c
+    s.claim = Some(take back)
+    match take outcome {
+      Ok(More()) => {},
+      Ok(Done()) => return Ok(()),
+      Error(e) => return Error(stop(mut s, seam(take e))),
+    }
+  }
   Ok(())
+}
+
+// The objects of `m`, in key order.
+fn made_refs(m: ordered_map.OrderedMap[Bytes, ObjectRef]) -> List[ObjectRef] uses {} {
+  let start: List[ObjectRef] = []
+  let from: ordered_map.Bound[Bytes] = Unbounded()
+  let end: ordered_map.Bound[Bytes] = Unbounded()
+  ordered_map.fold_range(
+    m,
+    from,
+    end,
+    Ascending(),
+    take start,
+    fn(take acc: List[ObjectRef], _k: Bytes, r: ObjectRef) -> (List[ObjectRef], bool) {
+      let mut out = take acc
+      list.push(mut out, unique r)
+      (take out, true)
+    }
+  )
+}
+
+// The bytes one record's object references may take beside a group of an
+// engine commit: 32 per inventoried object and 48 per retired one.
+fn retire_room(max_entry: u64) -> u64 uses {} {
+  if max_entry > GROUP_OVERHEAD {
+    max_entry - GROUP_OVERHEAD
+  } else {
+    0
+  }
 }
 
 // The objects one record inventories at most: what fits an entry of
@@ -3028,7 +3094,8 @@ fn submit(a: Authority, mut s: Store, at: Level of a, i: u64) -> Result[(), Unre
   }
   let mut c = take narrowed
   let created = replace(mut s.created, [])
-  let submitted = authority.submit(a, mut c, take entry, created, at)
+  let retired = replace(mut s.retired, [])
+  let submitted = authority.submit(a, mut c, take entry, created, retired, at)
   // The annotation forgets the brand: the store holds its claim unbranded.
   let back: Claim = take c
   s.claim = Some(take back)

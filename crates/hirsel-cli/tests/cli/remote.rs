@@ -522,13 +522,15 @@ fn stream_calls(dir: &Path) -> Vec<(String, Vec<u8>, Vec<u8>)> {
             frames.take(4);
             let entry = frames.take(len).to_vec();
             let mut c = Cursor(&entry, 0);
-            assert_eq!(c.take(8), b"HSHIST04");
+            assert_eq!(c.take(8), b"HSHIST05");
             c.take(32 + 8 + 8);
             if c.u8() == 1 {
                 continue; // a claim record
             }
             let created = c.u32();
             c.take(32 * created);
+            let retired = c.u32();
+            c.take(48 * retired);
             assert_eq!(c.take(8), b"HSGRUP02");
             let count = c.u32();
             let mut arrived = vec![];

@@ -7,7 +7,9 @@
 //! authority and claim it named; [`serve`] performs it and [`Request::admits`] is the
 //! check every engine applies to an outcome, live or recorded.
 
-use crate::{Advanced, Authority, AuthorityError, Claim, Error, Level, ObjectRef, Record};
+use crate::{
+    Advanced, Authority, AuthorityError, Claim, Error, Level, ObjectRef, Reclaimed, Record,
+};
 
 /// A provider request. A level is its index among the authority's declared levels.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -17,6 +19,7 @@ pub enum Request {
         at: u8,
         payload: Vec<u8>,
         created: Vec<ObjectRef>,
+        retired: Vec<ObjectRef>,
     },
     Wait {
         position: u64,
@@ -24,7 +27,9 @@ pub enum Request {
     Durable {
         at: u8,
     },
-    Reclaim,
+    Reclaim {
+        budget: u64,
+    },
     Read {
         from: u64,
         at: u8,
@@ -47,7 +52,7 @@ impl Request {
             Request::Submit { .. } => "authority.submit",
             Request::Wait { .. } => "authority.wait",
             Request::Durable { .. } => "authority.durable",
-            Request::Reclaim => "authority.reclaim",
+            Request::Reclaim { .. } => "authority.reclaim",
             Request::Read { .. } => "authority.read",
             Request::Get { .. } => "authority.get",
             Request::Put { .. } => "authority.put",
@@ -61,7 +66,7 @@ impl Request {
             Request::Submit { .. }
                 | Request::Wait { .. }
                 | Request::Durable { .. }
-                | Request::Reclaim
+                | Request::Reclaim { .. }
                 | Request::Put { .. }
         )
     }
@@ -92,7 +97,8 @@ impl Request {
                 r.as_ref().map_or(true, |all| all.len() as u64 <= *max)
             }
             (Request::Get { .. }, Outcome::Get(_)) => true,
-            (Request::Reclaim | Request::Put { .. }, Outcome::Unit(_)) => true,
+            (Request::Reclaim { .. }, Outcome::Reclaimed(_)) => true,
+            (Request::Put { .. }, Outcome::Unit(_)) => true,
             _ => false,
         }
     }
@@ -105,18 +111,23 @@ impl Request {
                 at,
                 payload,
                 created,
+                retired,
             } => {
-                w.push(9);
+                w.push(12);
                 w.push(*at);
                 bytes(&mut w, payload);
                 refs(&mut w, created);
+                refs(&mut w, retired);
             }
             Request::Wait { position } => {
                 w.push(8);
                 u64(&mut w, *position);
             }
             Request::Durable { at } => w.extend_from_slice(&[2, *at]),
-            Request::Reclaim => w.push(3),
+            Request::Reclaim { budget } => {
+                w.push(13);
+                u64(&mut w, *budget);
+            }
             Request::Read { from, at, max } => {
                 w.push(4);
                 u64(&mut w, *from);
@@ -141,15 +152,17 @@ impl Request {
         let q = match r.u8()? {
             0 => Request::Claim,
             // 1 was an advance, before appends were split into submit and wait;
-            // 7, 5 and 6 were submit, get and put before objects had references.
-            9 => Request::Submit {
+            // 7, 5 and 6 were submit, get and put before objects had references;
+            // 9 and 3 were submit and reclaim before retirement.
+            12 => Request::Submit {
                 at: r.u8()?,
                 payload: r.bytes()?.to_vec(),
                 created: r.refs()?,
+                retired: r.refs()?,
             },
             8 => Request::Wait { position: r.u64()? },
             2 => Request::Durable { at: r.u8()? },
-            3 => Request::Reclaim,
+            13 => Request::Reclaim { budget: r.u64()? },
             4 => Request::Read {
                 from: r.u64()?,
                 at: r.u8()?,
@@ -202,10 +215,11 @@ pub fn serve(
             at,
             payload,
             created,
-        } => Outcome::Position(p.submit(claim()?, payload, &created, Level(at))),
+            retired,
+        } => Outcome::Position(p.submit(claim()?, payload, &created, &retired, Level(at))),
         Request::Wait { position } => Outcome::Advanced(p.wait(claim()?, position)),
         Request::Durable { at } => Outcome::Position(p.durable(claim()?, Level(at))),
-        Request::Reclaim => Outcome::Unit(p.reclaim(claim()?)),
+        Request::Reclaim { budget } => Outcome::Reclaimed(p.reclaim(claim()?, budget)),
         Request::Read { from, at, max } => Outcome::Read(p.read(from, Level(at), max)),
         Request::Get { r } => Outcome::Get(p.get(r)),
         Request::Put { r, data } => Outcome::Unit(p.put(claim()?, r, data)),
@@ -221,8 +235,9 @@ pub enum Outcome {
     Advanced(Advanced),
     Read(Result<Vec<Record>, Error>),
     Get(Result<Option<Vec<u8>>, Error>),
-    /// `put` and `reclaim`.
+    /// `put`.
     Unit(Result<(), Error>),
+    Reclaimed(Result<Reclaimed, Error>),
 }
 
 pub fn encode(o: &Outcome) -> Vec<u8> {
@@ -273,6 +288,15 @@ pub fn encode(o: &Outcome) -> Vec<u8> {
             w.push(4);
             result(&mut w, r, |_, ()| {});
         }
+        Outcome::Reclaimed(r) => {
+            w.push(5);
+            result(&mut w, r, |w, done| {
+                w.push(match done {
+                    Reclaimed::More => 0,
+                    Reclaimed::Done => 1,
+                })
+            });
+        }
     }
     w
 }
@@ -303,6 +327,11 @@ pub fn decode(b: &[u8]) -> Option<Outcome> {
             _ => None,
         })?),
         4 => Outcome::Unit(r.result(|_| Some(()))?),
+        5 => Outcome::Reclaimed(r.result(|r| match r.u8()? {
+            0 => Some(Reclaimed::More),
+            1 => Some(Reclaimed::Done),
+            _ => None,
+        })?),
         _ => return None,
     };
     r.0.is_empty().then_some(o)
@@ -329,11 +358,17 @@ fn record(w: &mut Vec<u8>, e: &Record) {
             w.extend_from_slice(attempt);
             w.extend_from_slice(identity);
         }
-        // 1 was an appended record before it had an inventory.
-        Record::Appended { payload, created } => {
-            w.push(2);
+        // 1 and 2 were an appended record before it had an inventory and
+        // before it had retirements.
+        Record::Appended {
+            payload,
+            created,
+            retired,
+        } => {
+            w.push(3);
             bytes(w, payload);
             refs(w, created);
+            refs(w, retired);
         }
     }
 }
@@ -425,9 +460,10 @@ impl<'a> Reader<'a> {
                 attempt: self.take(16)?.try_into().ok()?,
                 identity: self.take(32)?.try_into().ok()?,
             },
-            2 => Record::Appended {
+            3 => Record::Appended {
                 payload: self.bytes()?.to_vec(),
                 created: self.refs()?,
+                retired: self.refs()?,
             },
             _ => return None,
         })

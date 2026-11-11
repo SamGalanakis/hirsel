@@ -413,6 +413,7 @@ fn writer(
                     let record = Record::Appended {
                         payload: e.clone(),
                         created: vec![],
+                        retired: vec![],
                     };
                     match answer {
                         Advanced::Advanced(_) => {
@@ -441,8 +442,8 @@ fn writer(
                 let Some(c) = held.as_mut() else {
                     continue;
                 };
-                match h.reclaim(c) {
-                    Ok(()) => {}
+                match h.reclaim(c, 64) {
+                    Ok(_) => {}
                     Err(Error::Fenced) => held = None,
                     Err(e @ (Error::Corrupt(_) | Error::Format { .. })) => {
                         return Err(format!("reclaim refused the history: {e:?}"));
@@ -781,7 +782,8 @@ fn an_append_whose_entry_is_at_its_position_under_a_later_claim_is_advanced() {
                 history[p as usize - 1],
                 Record::Appended {
                     payload: e.clone(),
-                    created: vec![]
+                    created: vec![],
+                    retired: vec![]
                 }
             );
         }
@@ -814,7 +816,8 @@ fn an_append_whose_position_holds_another_entry_is_fenced() {
         assert!(
             !recovered(&bucket).contains(&Record::Appended {
                 payload: e,
-                created: vec![]
+                created: vec![],
+                retired: vec![]
             }),
             "held {held}"
         );
@@ -841,7 +844,8 @@ fn an_append_whose_absence_is_unproved_is_undecided_across_retries() {
         recovered(&bucket)[from as usize],
         Record::Appended {
             payload: e,
-            created: vec![]
+            created: vec![],
+            retired: vec![]
         }
     );
 
@@ -862,7 +866,138 @@ fn an_append_whose_absence_is_unproved_is_undecided_across_retries() {
         recovered(&bucket)[from as usize],
         Record::Appended {
             payload: e,
-            created: vec![]
+            created: vec![],
+            retired: vec![]
         }
+    );
+}
+
+/// A superseded writer's continuation publication is a replace on a tag the
+/// head has left for good: it is fenced, kills the claim, and the head stays
+/// the successor's bytes (storage.md STORE-11, Object storage).
+#[test]
+fn a_superseded_writer_never_replaces_the_head_with_its_continuation() {
+    let bucket = Arc::new(Bucket::new(1, BTreeMap::new()));
+    let s = Scripted::new(bucket.clone());
+    let (mut h, mut c, _) = writer_a(&s);
+    b_claims(&bucket);
+    let head = || bucket.get_tagged("head").unwrap().unwrap().0;
+    let successor = head();
+    let sweep = crate::Sweep {
+        scanned: 1,
+        index: 0,
+        cursor: "o/".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        crate::reclaim::Space::publish(&mut h, &mut c, &sweep),
+        Err(Error::Fenced)
+    );
+    assert!(c.dead);
+    assert_eq!(head(), successor);
+}
+
+/// A bucket handle that counts listing requests.
+struct Lists {
+    inner: Arc<Bucket>,
+    n: std::sync::atomic::AtomicU64,
+}
+
+impl Lists {
+    fn count(&self) -> u64 {
+        self.n.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl ObjectStorage for Lists {
+    fn get_tagged(&self, key: &str) -> Result<Option<(Vec<u8>, Tag)>, StorageError> {
+        self.inner.get_tagged(key)
+    }
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.get(key)
+    }
+    fn get_many(&self, keys: &[String]) -> Vec<Result<Option<Vec<u8>>, StorageError>> {
+        self.inner.get_many(keys)
+    }
+    fn put_new(&self, key: &str, bytes: &[u8]) -> Result<Put, StorageError> {
+        self.inner.put_new(key, bytes)
+    }
+    fn replace(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        condition: Condition,
+    ) -> Result<Replaced, StorageError> {
+        self.inner.replace(key, bytes, condition)
+    }
+    fn list(&self, prefix: &str, after: &str) -> Result<Listing, StorageError> {
+        self.n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.list(prefix, after)
+    }
+    fn delete(&self, key: &str) -> Result<(), StorageError> {
+        self.inner.delete(key)
+    }
+}
+
+fn reclaimed(h: &mut Objects, c: &mut Claim) {
+    for _ in 0..100 {
+        if h.reclaim(c, 64).unwrap() == crate::Reclaimed::Done {
+            return;
+        }
+    }
+    panic!("reclamation never finished");
+}
+
+/// Reclamation walks the listing once per claim (storage.md STORE-11,
+/// Reclamation): after a claim's walk reached the listing's end, its reclaim
+/// makes no listing request and still deletes what a record retired, and a
+/// put no record followed waits for the next claim, whose own walk removes it.
+#[test]
+fn a_claim_walks_the_listing_once_and_the_next_claim_walks_it_again() {
+    let bucket = Arc::new(Bucket::new(1, BTreeMap::new()));
+    let lists = Arc::new(Lists {
+        inner: bucket.clone(),
+        n: Default::default(),
+    });
+    let object = |lifetime, data: &[u8]| crate::ObjectRef {
+        lifetime,
+        epoch: 1,
+        digest: crate::envelope::digest(data),
+    };
+    let mut h = Objects::new(lists.clone(), "zone".into(), Level(0));
+    let mut c = h.claim([1; 16], [7; 32]).unwrap().claim;
+    let kept = object(2, b"kept");
+    h.put(&mut c, kept, b"kept".to_vec()).unwrap();
+    let p2 = h
+        .submit(&mut c, entry(2, 1), &[kept], &[], Level(0))
+        .unwrap();
+    assert_eq!(h.wait(&mut c, p2), Advanced::Advanced(2));
+    reclaimed(&mut h, &mut c);
+    assert!(
+        lists.count() > 0,
+        "the claim's first reclaim walks the listing"
+    );
+    let stray = object(3, b"stray");
+    h.put(&mut c, stray, b"stray".to_vec()).unwrap();
+    let p3 = h
+        .submit(&mut c, entry(3, 1), &[], &[kept], Level(0))
+        .unwrap();
+    assert_eq!(h.wait(&mut c, p3), Advanced::Advanced(3));
+    let walked = lists.count();
+    reclaimed(&mut h, &mut c);
+    assert_eq!(lists.count(), walked, "no listing after the claim's walk");
+    assert_eq!(h.get(kept), Ok(None), "the retirement is deleted");
+    assert!(
+        h.get(stray).unwrap().is_some(),
+        "garbage after the walk waits"
+    );
+    let mut h2 = Objects::new(lists.clone(), "zone".into(), Level(0));
+    let mut c2 = h2.claim([2; 16], [7; 32]).unwrap().claim;
+    reclaimed(&mut h2, &mut c2);
+    assert!(lists.count() > walked, "the next claim walks the listing");
+    assert_eq!(
+        h2.get(stray),
+        Ok(None),
+        "and removes what the last walk missed"
     );
 }

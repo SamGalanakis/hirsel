@@ -850,21 +850,22 @@ Advanced       = Advanced(u64) | Fenced() | Refused(AuthorityError) | Undecided(
 AuthorityError = Io(FileError) | Status(u16) | Unreachable()
 SeamError      = Storage(AuthorityError) | Refused(AuthorityError) | Corrupt(String) | Fenced()
                | Format(Bytes, String)
-HistoryRecord  = Claimed(u64, Bytes, Bytes) | Appended(Bytes, List[ObjectRef])
+HistoryRecord  = Claimed(u64, Bytes, Bytes) | Appended(Bytes, List[ObjectRef], List[ObjectRef])
 ObjectRef      = { lifetime: u64, epoch: u64, digest: Bytes }
+Reclaimed      = More() | Done()
 
 fn io.authority(rt: Io, name: String) -> Result[Authority, GrantError]
 fn authority.max_entry(a: Authority) -> u64
 fn authority.claim(a: Authority) -> Result[Claim of a, SeamError]
 fn claim.end(c: Claim) -> u64
 fn claim.narrow(a: Authority, take c: Claim) -> Option[Claim of a]
-fn authority.submit(a: Authority, mut c: Claim of a, take entry: Bytes, created: List[ObjectRef], at: Level of a) -> Result[u64, SeamError]
+fn authority.submit(a: Authority, mut c: Claim of a, take entry: Bytes, created: List[ObjectRef], retired: List[ObjectRef], at: Level of a) -> Result[u64, SeamError]
 fn authority.wait(a: Authority, mut c: Claim of a, position: u64) -> Advanced
 fn authority.durable(a: Authority, mut c: Claim of a, at: Level of a) -> Result[u64, SeamError]
 fn authority.read(a: Authority, from: u64, at: Level of a, max: u64) -> Result[List[HistoryRecord], SeamError]
 fn authority.get(a: Authority, r: ObjectRef) -> Result[Option[Bytes], SeamError]
 fn authority.put(a: Authority, mut c: Claim of a, r: ObjectRef, take data: Bytes) -> Result[(), SeamError]
-fn authority.reclaim(a: Authority, mut c: Claim of a) -> Result[(), SeamError]
+fn authority.reclaim(a: Authority, mut c: Claim of a, budget: u64) -> Result[Reclaimed, SeamError]
 ```
 
 `SeamError` is the seam's own failure, a core type; the engine reports each as the
@@ -891,8 +892,9 @@ durability, and a cancellation never closes the store.
 and owns its framing and chain (**Records** below): a **claim record** is the authority's
 own, and an **appended record** carries one **entry**, bytes the engine passed to
 `authority.submit` and the authority never reads. `authority.read` returns each record as
-a `HistoryRecord`: `Claimed(epoch, attempt, identity)` or `Appended(entry, created)`,
-where `created` is the record's **inventory**, the objects the record creates (**Objects**
+a `HistoryRecord`: `Claimed(epoch, attempt, identity)` or `Appended(entry, created,
+retired)`, where `created` is the record's **inventory**, the objects the record creates,
+and `retired` its **retirements**, objects of earlier records it gives up (**Objects**
 below). What an entry holds (a commit group) is the engine's format (below); commit
 versions are numbered by the engine, never by positions.
 
@@ -906,12 +908,14 @@ record, ticket and frontier carries and which no other history uses, a fork's in
 The fence is the claim record itself: there is no fence object, so nothing that reclaims
 objects can remove one.
 
-**Append.** An append is split in two. `authority.submit(a, c, entry, created, at)`
-queues an appended record carrying `entry` and inventorying `created` at the claim's next
-position, one past the history's end or the last entry it queued, and returns that
-position with no request and no effect: a dead claim is `Fenced()`, and an entry that with
-32 bytes for each object it inventories is over `authority.max_entry`, or a created object
-of another position or epoch than the record's, is `Refused(..)`. `authority.wait(a, c, p)` appends every entry the claim has queued, those
+**Append.** An append is split in two. `authority.submit(a, c, entry, created, retired,
+at)` queues an appended record carrying `entry`, inventorying `created` and retiring
+`retired` at the claim's next position, one past the history's end or the last entry it
+queued, and returns that position with no request and no effect: a dead claim is
+`Fenced()`, and an entry that with 32 bytes for each object it inventories and 48 for each
+it retires is over `authority.max_entry`, a created object of another position or epoch
+than the record's, or a retired object whose lifetime is 0 or not below the record's
+position or whose epoch is 0 or above the record's, is `Refused(..)`. `authority.wait(a, c, p)` appends every entry the claim has queued, those
 submitted after `p` too, in order, whole or nothing each, only while `c` is the claim of
 the newest claim record and the history ends where the first of them follows, with at
 most one barrier at the strongest level any of them names, and returns `p`'s outcome
@@ -970,18 +974,45 @@ reads one, `None` when it is absent, and bytes whose digest is not the reference
 `Corrupt(name)`. No object is ever replaced. The record at an object's lifetime
 inventories it, so whether a history created an object is read from the history alone,
 and because the epoch is in the name a successor never shares an object a dead claim put
-at the same position, equal bytes included.
+at the same position, equal bytes included. A later record **retires** an object by
+naming its whole reference; once that record is durable at the strongest declared level,
+reclamation may remove the object. Retirement is the only way an inventoried object
+becomes removable, and the engine never reads a retired object again.
 
-**Reclamation.** `authority.reclaim` removes only what no retained version needs, and
-decides it from the history alone: the floor and pins its retention entries record
-([STORE-8](#store-8-versions-snapshots-and-forks)), durable at the strongest declared
-level. It removes entries and derived objects that only versions below the floor need,
-and objects written under a claim older than the newest that no entry names. A floor
-never decreases and a claim is never reused, so a reclaim that runs from a stale reading
-of the history removes nothing that a newer reading keeps, a successor's checkpoint
-included. Recovery never depends on a listing: it may use one only to fetch in parallel
-what it then reaches by name. An incomplete listing leaves garbage for a later reclaim and
-never loses state.
+**Reclamation.** `authority.reclaim(a, c, budget)` removes only objects the history gives
+up, and decides it from the history alone at `S`, the claim's **strongest-durable end**,
+the highest position durable at the strongest declared level. An object `r` is removed
+when
+
+- a record at or below `S` retires it;
+- `r.lifetime <= S` and the record at `r.lifetime` does not inventory `r`: it is a claim
+  record, or no reference in its inventory equals `r` (another epoch or digest), as when a
+  put's record never followed or a successor's record took the position; or
+- `r.lifetime > S` and `r.epoch` is below the claim's: the claim's own record is
+  synchronized at every level, so it is at or below `S`, and no record of an earlier epoch
+  follows it.
+
+An object of lifetime 0, or a name that does not parse, is kept. A record the call needs
+and cannot read stops it with nothing more removed: nothing is removable by default.
+The same call removes the provider's own garbage below `S` (**Providers** below). A call
+first deletes, in record order, the retirements of the records after its continuation up
+to `S`, then, once per claim, walks the provider's listing from the continuation's cursor
+for the other two cases: a claim of another epoch than the cursor's starts the walk at the
+listing's start, and once a claim's walk reached the listing's end, its later calls only
+delete retirements. Garbage that appears after a claim's walk (a failed publication, a
+put no record followed) waits for the next claim's. It makes at most `budget` provider
+requests, record reads, listing pages, deletes and the continuation's publication
+included, retries a failed delete up to 3 requests before it fails, and returns `More()`
+when the budget ran out first and `Done()` once every retirement up to `S` is deleted and
+the claim's walk has reached the listing's end. A budget below 2 is `Refused(..)`. Where
+it stopped is the store's **continuation**: the position up to which every retirement is
+deleted, how many of the next record's are, the listing cursor and the epoch whose walk it
+is in, and the epoch whose walk reached the listing's end. The provider publishes it, fenced, when it
+changed; a claim inherits it, and a superseded head's publication is `Fenced()` and moves
+nothing. Deleting an absent object is success, so a call repeated after a lost response or
+a takeover removes nothing a newer reading keeps. Recovery never depends on a listing: it
+may use one only to fetch in parallel what it then reaches by name. An incomplete listing
+leaves garbage for a later reclaim and never loses state.
 
 **Providers.** The run configuration grants authorities by name
 ([determinism](determinism.md#authority-grants)); each entry names its provider and
@@ -1001,7 +1032,11 @@ floor.
   a different length means another claim appended, and the wait returns `Fenced()` with
   no effect. It then issues one `fdatasync` when any of the entries names `host`. A new segment
   adds a directory sync when it is created. A claim takes the same lock, truncates only a
-  torn tail, appends its claim record and synchronizes. A reader at `host` notes the
+  torn tail, appends its claim record and synchronizes, and reads reclamation's
+  continuation, the file `reclaim`. Reclamation lists `objects/` in name order and
+  publishes its continuation under the lock after the same length check and a check that
+  `reclaim` is the revision the claim read or last wrote, through a temporary file, an
+  `fdatasync`, a rename over `reclaim` and a directory sync. A reader at `host` notes the
   file's length, synchronizes the file and returns entries up to that length, so it never
   returns an entry a host crash could lose. A failed `fdatasync` returns
   `Undecided(Io(..))`.
@@ -1021,7 +1056,9 @@ floor.
   listing omits is fetched by name, never taken as missing. Recovering `n` records costs a
   head read, `ceil(n / 1000)` listing pages and `n` gets, or a head read and `n`
   sequential gets with no listing. Reclamation removes only record objects at positions up
-  to the head's end that the chain does not name. An object-storage entry whose endpoint
+  to `S` that the chain does not name, and keeps its continuation in the head: every
+  replace, a claim's, a wait's or reclamation's, carries it with a revision one up, so a
+  continuation that cycles back at an unchanged end never recreates a tag. An object-storage entry whose endpoint
   does not honour create-if-absent and conditional replace refuses every claim with
   `Unsupported(Conditional())`; `objects.s3@1` uses `If-None-Match: *` and `If-Match`.
 - **Memory** keeps the history in the host process for tests and scratch stores.
@@ -1038,7 +1075,7 @@ floor.
 storage: `k + 1` requests (a record put each and one head replace). A submit costs no
 request. A claim costs a
 read of the history to its end and one synchronized append, or two requests. Taking a
-snapshot costs no request.
+snapshot costs no request. A reclaim call costs at most its budget.
 
 **History and derived objects.** The history is **authoritative**: only the head writes
 it. Every other object (a checkpoint of the state at a version, an index part) is
@@ -1099,11 +1136,22 @@ fn store.compact(mut s: Store) -> Result[(), StoreError]
 ```
 
 `store.compact` puts the nodes of a checkpoint at the durable version's group end that
-the head's current checkpoint does not already hold, and records its descriptor by a
-Checkpoint commit, so recovery applies only the commits after it. Its fresh nodes are put
-in **creation batches** (**Checkpoints** below), each inventoried by one record: every
-batch but the last by a record holding one Created commit, and the last by the record
-holding the Checkpoint commit.
+the head's current checkpoint does not already hold, records its descriptor by a
+Checkpoint commit, so recovery applies only the commits after it, and reclaims. Its fresh
+nodes are put in **creation batches** (**Checkpoints** below), each inventoried by one
+record: every batch but the last by a record holding one Objects commit, and the last by
+the record holding the Checkpoint commit. The objects the history **made**, those a record
+inventories and none retires, that the new tree does not hold are retired by that record,
+as many as fit beside its inventory, and by records holding one Objects commit after it.
+Each record is durable at the strongest declared level before the next is put; then
+`store.compact` calls `authority.reclaim` with a budget of 64 until `Done()`: the first
+compaction of a claim walks the provider's listing once, and each later one only deletes
+the retirements its records and earlier ones published. A failure closes the store. A
+batch a dead claim put and never published is removed by the listing walk of a later
+claim's first compaction, and a retirement its crash cut short by that compaction's
+deletes, never by an open, which writes nothing but its claim and a new store's Genesis.
+Beside its checkpoint, which visits every entry and node of the state, a compaction's
+retirement work is one pass over the nodes the history made.
 
 #### History format
 
@@ -1120,14 +1168,17 @@ change is a new magic and a cutover, never a second reader.
 **Records.** The authority owns the record at every position, whole:
 
 ```text
-record   = "HSHIST04" prev:[32] position:u64 epoch:u64 kind:u8 body
+record   = "HSHIST05" prev:[32] position:u64 epoch:u64 kind:u8 body
 claimed  = kind 1, body attempt:[16] identity:[32]
-appended = kind 2, body count:u32 digest:[32]* entry   // entry: the rest of the record
+appended = kind 2, body count:u32 digest:[32]* retired:u32 ref* entry   // entry: the rest
+ref      = lifetime:u64 epoch:u64 digest:[32]
 ```
 
 `prev` is `H(record)` of the record before, all zeros at position 1, and `position` is the
 record's own. An appended record's digests are its inventory: each names the object of
-that digest at the record's position and epoch, so a reference costs the record 32 bytes. A record **follows** the history when `prev` and `position` continue it and
+that digest at the record's position and epoch, so a reference costs the record 32 bytes.
+Its refs are its retirements, 48 bytes each; one whose lifetime is 0 or not below the
+record's position, or whose epoch is 0 or above the record's, is corruption. A record **follows** the history when `prev` and `position` continue it and
 either it is a claim record whose `epoch` is one above the previous record's and whose
 `identity` is the history's (the first claim record, at epoch 1, mints it), or it is an
 appended record with the previous record's `epoch` after at least one claim record. The
@@ -1184,7 +1235,7 @@ Every kind ends with its `writes`. Engine operations and their payloads:
 | 5 Fork | `identity:[32] origin:[32] at:u64`: a fork of the history `origin` at its version `at`, naming the identity of the fork's own history. It comes after the Genesis. |
 | 6 Stream | `op:u8 identity:[32]`: a fence (1) or purge (2) of a call stream ([STORE-12](#store-12-transactions-at-a-runner)). |
 | 7 Library | `name:bytes payload:bytes`: a step a library records as its own, a migration's above all ([STORE-9](#store-9-schema-history-renames-and-migrations)). |
-| 8 Created | Empty: the record holding it creates the objects it inventories, one creation batch of a checkpoint a later record of the same epoch publishes (**Checkpoints** below). Any other payload is corruption. |
+| 8 Objects | Empty: the record holding it exists for the objects it inventories or retires, a creation batch of a checkpoint a later record publishes or retirements after a Checkpoint commit's record (**Checkpoints** below). Any other payload is corruption. |
 
 **Checkpoints.** A checkpoint is the state at a group's last version as a tree of
 derived **nodes**, each an object named by its reference:
@@ -1221,9 +1272,9 @@ the state after the newest group is the state at the head's version), the digest
 group, the root node's reference (no lifetime or epoch of 0), the number
 of levels (1 for a lone leaf), the number of entries, and their key and value bytes. A checkpoint counts only once a Checkpoint commit after its version records its
 descriptor, so the chain authenticates it; its nodes are put before that commit, and the
-record holding the commit, with the run of records holding a Created commit just before it
-in its epoch, inventories every fresh node. A record that inventories an object and holds
-neither a Created nor a Checkpoint commit is corruption.
+record holding the commit or one before it inventories every fresh node. A record that
+inventories or retires an object and holds neither an Objects nor a Checkpoint commit is
+corruption, and so is the retirement of an object the history did not make.
 Validating one reads its nodes from the root, checks each against the digest its parent
 named, the keys' order and the descriptor's counts, and requires that the group whose
 last version is the descriptor's has the descriptor's digest.
@@ -1244,15 +1295,24 @@ decimal digits, `-` and the record's digest in lowercase hexadecimal, put only i
 The one mutable object is the head:
 
 ```text
-head = "HSOBJH01" attempt:[16] end:u64 digest:[32] sum:[32]
+head = "HSOBJH02" attempt:[16] end:u64 digest:[32] revision:u64
+       scanned:u64 index:u32 sweeping:u64 swept:u64 len:u32 cursor sum:[32]
 ```
 
-naming the newest claim's attempt, the history's end and the last record's digest; `sum`
-is the SHA-256 of everything before it. A wait puts each queued record, then replaces the
+naming the newest claim's attempt, the history's end and the last record's digest, then
+reclamation's continuation: the revision, one up on every replace, the position up to
+which every retirement is deleted, how many of the next record's are, the epoch whose
+listing walk the cursor is in, the epoch whose walk reached the listing's end (0 before
+any), and the listing cursor of `len` bytes; `sum` is the SHA-256 of everything before it. A wait puts each queued record, then replaces the
 head once, conditionally on the tag of the writer's own last replace. An object is `o/`
 followed by its lifetime and its epoch as 20 decimal digits each and its digest in
 lowercase hexadecimal, separated by `-`; on a local log it is the file of that name under
-`objects/`. A record object no head's chain reaches, left by a writer fenced or
+`objects/`, and the continuation is the file
+
+```text
+reclaim = "HSLOGR01" revision:u64 scanned:u64 index:u32 sweeping:u64 swept:u64 len:u32
+          cursor sum:[32]
+``` A record object no head's chain reaches, left by a writer fenced or
 undecided before its head replace, is not history and is reclaimed. A listing only finds
 candidates: every object is checked against the digest that names it.
 
@@ -1275,9 +1335,10 @@ settles a torn tail, then reads, in order:
    noting the newest Checkpoint commit;
 3. the checkpoint that commit names, nodes level by level, every leaf in parallel,
    validated as above, and then the write sets of the commits after it, in order. A node
-   reference of a lifetime past the Checkpoint's record, or of a lifetime at or past the
-   first record of its publication that the publication does not inventory, is corruption
-   of that record, as is a missing or damaged node.
+   reference of a lifetime past the Checkpoint's record, or one the history did not make
+   (no record inventories it, or a record retires it), is corruption of that record, as is
+   a missing or damaged node. A made object is never removable, so recovery reads only
+   nodes reclamation keeps.
 
 Only the last frame of the last local segment can be **torn**: an incomplete final
 frame, which the claim cuts. Anything else that fails is **corruption**: a bad digest,
@@ -1290,7 +1351,7 @@ than guess. Recovery never runs a body.
 **Costs.** A local append copies each commit's bytes once into a reusable group buffer,
 hashes the group once for its digest, and the authority hashes the record once for the
 chain; it makes one write and, at `host`, one `fdatasync`. The record and its frame add
-69 bytes per group, 32 per object it inventories, and the group 16 bytes plus its
+73 bytes per group, 32 per object it inventories, 48 per object it retires, and the group 16 bytes plus its
 definition table. A commit adds about
 40 bytes plus its caller, argument, outcome and, per write, 9 bytes plus the key and
 value. A claim is one record of 105 bytes, 113 framed on a log. On object storage a wait of `k` groups is `k` puts

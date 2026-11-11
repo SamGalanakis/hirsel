@@ -321,11 +321,16 @@ fn seam_requests(n: u64, text: &str, bytes: &[u8]) -> Vec<hirsel_rt::authority::
                     epoch: !n,
                     digest: [n as u8; 32],
                 }],
+                retired: vec![hirsel_store_authority::ObjectRef {
+                    lifetime: !n,
+                    epoch: n,
+                    digest: [!n as u8; 32],
+                }],
             },
         ),
         provider(Some(!n), W::Wait { position: n }),
         provider(Some(!n), W::Durable { at: level }),
-        provider(Some(!n), W::Reclaim),
+        provider(Some(!n), W::Reclaim { budget: n }),
         provider(
             None,
             W::Read {
@@ -421,10 +426,16 @@ fn seam_completions(n: u64, text: &str, bytes: &[u8]) -> Vec<Completion> {
                         epoch: !n,
                         digest: [!(n as u8); 32],
                     }],
+                    retired: vec![hirsel_store_authority::ObjectRef {
+                        lifetime: !n,
+                        epoch: n,
+                        digest: [n as u8; 32],
+                    }],
                 },
                 hirsel_store_authority::Record::Appended {
                     payload: vec![],
                     created: vec![],
+                    retired: vec![],
                 },
             ])),
             claim: None,
@@ -446,7 +457,19 @@ fn seam_completions(n: u64, text: &str, bytes: &[u8]) -> Vec<Completion> {
             claim: None,
         },
         S::Outcome {
-            outcome: O::Unit(Err(error)),
+            outcome: O::Unit(Err(error.clone())),
+            claim: None,
+        },
+        S::Outcome {
+            outcome: O::Reclaimed(Ok(hirsel_store_authority::Reclaimed::More)),
+            claim: None,
+        },
+        S::Outcome {
+            outcome: O::Reclaimed(Ok(hirsel_store_authority::Reclaimed::Done)),
+            claim: None,
+        },
+        S::Outcome {
+            outcome: O::Reclaimed(Err(error)),
             claim: None,
         },
     ]

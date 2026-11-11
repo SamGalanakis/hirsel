@@ -4,7 +4,7 @@ use super::{Io, IoGrant, grant_not_granted, io_ok};
 use hirsel_heapcheck::{OpOutcome, OpValue};
 use hirsel_lir::layout_types::ScalarKind;
 use hirsel_store_authority::{
-    Authority, AuthorityError, Claim, Error, Record,
+    Authority, AuthorityError, Claim, Error, Reclaimed, Record,
     wire::{self, Outcome},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -258,6 +258,20 @@ fn object_refs(v: &OpValue) -> Option<Option<Vec<hirsel_store_authority::ObjectR
         .collect::<Option<Vec<_>>>()
         .map(|all| all.into_iter().collect())
 }
+/// A `List[ObjectRef]` value.
+fn refs(all: Vec<hirsel_store_authority::ObjectRef>) -> OpValue {
+    OpValue::Sequence(
+        all.into_iter()
+            .map(|r| {
+                OpValue::Aggregate(vec![
+                    word(r.lifetime),
+                    word(r.epoch),
+                    OpValue::ByteSequence(r.digest.to_vec()),
+                ])
+            })
+            .collect(),
+    )
+}
 fn handle(v: &OpValue) -> Option<u64> {
     match v {
         OpValue::Handle(h) => Some(*h),
@@ -371,14 +385,17 @@ impl Io {
                     };
                     let (claim, request) = match (op, rest) {
                         ("claim", []) => (None, wire::Request::Claim),
-                        ("submit", [c, OpValue::Bytes(payload), created, at]) => {
-                            let Some(created) = object_refs(created)? else {
+                        ("submit", [c, OpValue::Bytes(payload), created, retired, at]) => {
+                            let (Some(created), Some(retired)) =
+                                (object_refs(created)?, object_refs(retired)?)
+                            else {
                                 return Some(OpOutcome::Value(no_object()));
                             };
                             let request = wire::Request::Submit {
                                 at: level(at)?,
                                 payload: payload.clone(),
                                 created,
+                                retired,
                             };
                             (Some(handle(c)?), request)
                         }
@@ -410,7 +427,12 @@ impl Io {
                             ),
                             None => return Some(OpOutcome::Value(no_object())),
                         },
-                        ("reclaim", [c]) => (Some(handle(c)?), wire::Request::Reclaim),
+                        ("reclaim", [c, budget]) => (
+                            Some(handle(c)?),
+                            wire::Request::Reclaim {
+                                budget: bits(budget)?,
+                            },
+                        ),
                         _ => return None,
                     };
                     let minted = self.next;
@@ -443,24 +465,16 @@ impl Io {
                                                 OpValue::ByteSequence(identity.to_vec()),
                                             ]),
                                         ),
-                                        Record::Appended { payload, created } => v(
+                                        Record::Appended {
+                                            payload,
+                                            created,
+                                            retired,
+                                        } => v(
                                             1,
                                             OpValue::Aggregate(vec![
                                                 OpValue::ByteSequence(payload),
-                                                OpValue::Sequence(
-                                                    created
-                                                        .into_iter()
-                                                        .map(|r| {
-                                                            OpValue::Aggregate(vec![
-                                                                word(r.lifetime),
-                                                                word(r.epoch),
-                                                                OpValue::ByteSequence(
-                                                                    r.digest.to_vec(),
-                                                                ),
-                                                            ])
-                                                        })
-                                                        .collect(),
-                                                ),
+                                                refs(created),
+                                                refs(retired),
                                             ]),
                                         ),
                                     })
@@ -472,6 +486,10 @@ impl Io {
                             None => v(0, OpValue::Unit),
                         }),
                         Outcome::Unit(r) => result(r, |_| OpValue::Unit),
+                        Outcome::Reclaimed(r) => result(r, |r| match r {
+                            Reclaimed::More => v(0, OpValue::Unit),
+                            Reclaimed::Done => v(1, OpValue::Unit),
+                        }),
                         Outcome::Advanced(a) => match a {
                             hirsel_store_authority::Advanced::Advanced(n) => v(0, word(n)),
                             hirsel_store_authority::Advanced::Fenced => v(1, OpValue::Unit),
@@ -520,6 +538,7 @@ mod tests {
             at: 0,
             payload: b"second".to_vec(),
             created: vec![],
+            retired: vec![],
         };
         assert_eq!(
             b.request(0, Some(40), submit, 41),
@@ -570,6 +589,7 @@ mod tests {
                         epoch: 1,
                         digest: [7; 32],
                     }],
+                    retired: vec![],
                 },
                 41,
             )
@@ -634,9 +654,9 @@ mod tests {
             }];
             r.copy = CopyRecipe::NotCopyable;
             let refs = l.block(refs);
-            // HistoryRecord: Claimed(u64, Bytes, Bytes) | Appended(Bytes, List[ObjectRef]),
-            // 64 bytes.
-            let record = l.variant(&[&[word_layout, bytes, bytes], &[bytes, refs]]);
+            // HistoryRecord: Claimed(u64, Bytes, Bytes) |
+            // Appended(Bytes, List[ObjectRef], List[ObjectRef]), 64 bytes.
+            let record = l.variant(&[&[word_layout, bytes, bytes], &[bytes, refs, refs]]);
             let sequence = l.record(&[word_layout]);
             let r = l.get_mut(sequence);
             r.kind = LayoutKind::Sequence { element: record };

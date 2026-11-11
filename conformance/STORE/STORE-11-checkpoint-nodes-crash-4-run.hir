@@ -1,6 +1,6 @@
 // rule: STORE-11
 // expect: run
-// authorities: {"c19":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"crash_at":19}},"c20":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"crash_at":20}},"c21":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"crash_at":21}},"c22":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"crash_at":22}},"c23":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"crash_at":23}},"c24":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"crash_at":24}},"c25":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"crash_at":25}},"c26":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"crash_at":26}},"c27":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"crash_at":27}},"c28":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"crash_at":28}},"c29":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"crash_at":29}}}
+// authorities: {"c19":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"crash_at":19}},"c20":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"crash_at":20}},"c21":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"crash_at":21}},"c22":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"crash_at":22}},"c23":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"crash_at":23}},"c24":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"crash_at":24}}}
 // steps: 20000000
 // Checkpoints of several nodes (bounds 64 to 1024 bytes) over a simulated log
 // whose history is cut at an authority request; authority `cN` fails the power right after request N's answer.
@@ -18,7 +18,7 @@
 // Every `cN` up to the history's last request stops the history there, and
 // the first one past it lets the history finish, which ends the sweep; that
 // history's last checkpoint has height 2 or more.
-// This case makes the cuts at requests 19 to the history's end.
+// This case makes the cuts at requests 19 to 24.
 // stdout: checkpoints: 0
 
 // The cut this case makes at each request.
@@ -27,7 +27,7 @@ const KIND: String = "c"
 // The first request this case cuts, and the last (0: to the history's end).
 const FIRST: u64 = 19
 
-const LAST: u64 = 0
+const LAST: u64 = 24
 
 // Whether the cuts fall on a reopen after the history rather than in it.
 const LOAD: bool = false
@@ -162,7 +162,7 @@ fn height(a: Authority) -> u8 {
   }
   let mut h: u8 = 0
   for r in records {
-    if let Appended(entry, _) = r {
+    if let Appended(entry, _, _) = r {
       if let Ok(g) = history.decode_group(entry) {
         for c in g.commits {
           if let Engine(Checkpoint(d)) = c.body {

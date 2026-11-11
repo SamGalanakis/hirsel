@@ -162,7 +162,7 @@ fn height(a: Authority) -> u8 {
   }
   let mut h: u8 = 0
   for r in records {
-    if let Appended(entry, _) = r {
+    if let Appended(entry, _, _) = r {
       if let Ok(g) = history.decode_group(entry) {
         for c in g.commits {
           if let Engine(Checkpoint(d)) = c.body {

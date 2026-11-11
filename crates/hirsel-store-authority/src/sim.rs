@@ -24,11 +24,14 @@
 //! leaves its own append, if any, torn and so never in the history; and
 //! `crash_at` is a power failure right after its answer. A power failure
 //! loses everything not durable at the strongest level and ends every claim.
+//! A reclaim call is one request whatever its budget, its continuation kept
+//! in the world, which a failure never loses.
 
 use crate::envelope::{self, Chain};
+use crate::reclaim::{self, Found, Page, Space, Sweep};
 use crate::{
     Advanced, Authority, AuthorityError, AuthorityGrant, Claim, Claimed, ConfigError, Error, Level,
-    Queued, Record, level_name_ok, live, owner_id,
+    ObjectRef, Queued, Reclaimed, Record, level_name_ok, live, owner_id,
 };
 use hirsel_object_storage::{
     Condition, LIST_PAGE, Listing, ObjectStorage, Put, Replaced, StorageError, Tag, check_key,
@@ -137,6 +140,8 @@ struct World {
     torn: Option<Vec<u8>>,
     newest: Option<[u8; 16]>,
     objects: BTreeMap<String, Vec<u8>>,
+    /// Reclamation's continuation and its revision, which a failure keeps.
+    sweep: (u64, Sweep),
     draws: Draws,
     faults: BTreeMap<String, u64>,
     /// Requests served so far, which number the cuts.
@@ -238,6 +243,7 @@ impl Sim {
             torn: None,
             newest: None,
             objects: BTreeMap::new(),
+            sweep: (0, Sweep::default()),
             draws: Draws(config.seed),
             faults: config.faults,
             requests: 0,
@@ -296,7 +302,8 @@ impl Sim {
         // A claim is a synchronized append: durable at every level.
         w.barrier(top);
         w.newest = Some(attempt);
-        let claim = Claim::new(self.owner, attempt, &chain.tip, self.levels.len());
+        let mut claim = Claim::new(self.owner, attempt, &chain.tip, self.levels.len());
+        (claim.revision, claim.sweep) = w.sweep.clone();
         let end = claim.end;
         Ok(Claimed { claim, end })
     }
@@ -439,11 +446,83 @@ impl Sim {
         }
     }
 
-    fn reclaim_in(&self, w: &mut World, c: &mut Claim) -> Result<(), Error> {
-        if !live(self.owner, c) || w.newest != Some(c.attempt) {
+    /// One reclaim call, served whole inside the one request it counts as:
+    /// its barrier, reads, listings and deletes draw no faults of their own.
+    fn reclaim_in(&self, w: &mut World, c: &mut Claim, budget: u64) -> Result<Reclaimed, Error> {
+        let top = Level(self.levels.len() as u8 - 1);
+        let s = self.durable_in(w, c, top)?;
+        reclaim::run(
+            &mut InWorld {
+                w,
+                owner: self.owner,
+            },
+            c,
+            s,
+            budget,
+        )
+    }
+}
+
+/// The simulated log's objects and history as reclamation sees them.
+struct InWorld<'a> {
+    w: &'a mut World,
+    owner: u64,
+}
+
+/// Object names one listing page holds.
+const PAGE: usize = 1000;
+
+impl Space for InWorld<'_> {
+    fn page(&mut self, after: &str, _s: u64) -> Result<Page, Error> {
+        let mut names = self
+            .w
+            .objects
+            .keys()
+            .filter(|k| k.as_str() > after)
+            .cloned();
+        let keys: Vec<(String, Found)> = names
+            .by_ref()
+            .take(PAGE)
+            .map(|n| {
+                let found = ObjectRef::parse(&n).map_or(Found::Keep, Found::Object);
+                (n, found)
+            })
+            .collect();
+        let more = names.next().is_some();
+        Ok(Page { keys, more })
+    }
+
+    fn remove(&mut self, key: &str) -> Result<(), Error> {
+        self.w.objects.remove(key);
+        Ok(())
+    }
+
+    fn key(&self, r: &ObjectRef) -> String {
+        r.name()
+    }
+
+    fn records(&mut self, from: u64, max: u64) -> Result<Vec<Record>, Error> {
+        let end = *self.w.durable.last().unwrap() as usize;
+        let start = (from as usize).min(end);
+        let stop = start.saturating_add(max as usize).min(end);
+        let mut chain = self.w.follow(start)?;
+        (start..stop)
+            .map(|i| {
+                chain
+                    .follow(&self.w.entries[i])
+                    .map_err(|b| crate::bad(b, i as u64 + 1))
+            })
+            .collect()
+    }
+
+    fn publish(&mut self, c: &mut Claim, sweep: &Sweep) -> Result<(), Error> {
+        if !live(self.owner, c) || self.w.newest != Some(c.attempt) || self.w.sweep.0 != c.revision
+        {
             c.dead = true;
             return Err(Error::Fenced);
         }
+        c.revision += 1;
+        self.w.sweep = (c.revision, sweep.clone());
         Ok(())
     }
 }
@@ -590,7 +669,7 @@ impl Authority for Sim {
         r
     }
 
-    fn reclaim(&mut self, c: &mut Claim) -> Result<(), Error> {
+    fn reclaim(&mut self, c: &mut Claim, budget: u64) -> Result<Reclaimed, Error> {
         let mut w = self.world.lock().unwrap();
         let cut = w.cut();
         let r = if cut.fail {
@@ -600,8 +679,8 @@ impl Authority for Sim {
             c.dead = true;
             Err(Error::Storage(unreadable()))
         } else {
-            match self.reclaim_in(&mut w, c) {
-                Ok(()) if cut.lose => {
+            match self.reclaim_in(&mut w, c, budget) {
+                Ok(_) if cut.lose => {
                     c.dead = true;
                     Err(Error::Storage(unreadable()))
                 }
@@ -828,7 +907,7 @@ impl Authority for Client {
     fn put_object(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error> {
         self.serving().put_object(name, data)
     }
-    fn reclaim(&mut self, c: &mut Claim) -> Result<(), Error> {
-        self.serving().reclaim(c)
+    fn reclaim(&mut self, c: &mut Claim, budget: u64) -> Result<Reclaimed, Error> {
+        self.serving().reclaim(c, budget)
     }
 }

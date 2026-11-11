@@ -18,7 +18,7 @@ use crate::handles::Grant;
 use crate::io::{AdapterError, Completion, IoError, Request, State};
 use hirsel_store_authority::wire::{self, Outcome};
 use hirsel_store_authority::{
-    Advanced, AuthorityError, AuthorityGrant, Error as SeamError, ObjectRef,
+    Advanced, AuthorityError, AuthorityGrant, Error as SeamError, ObjectRef, Reclaimed,
 };
 use std::collections::BTreeMap;
 
@@ -568,6 +568,13 @@ unsafe fn provider(
                         }
                     }),
                     Outcome::Unit(r) => seam_result(ctx, r, |(), _| {}),
+                    // A nullary enum is its u32 ordinal, at the payload's offset.
+                    Outcome::Reclaimed(r) => seam_result(ctx, r, |done, out| {
+                        out.words[0] = match done {
+                            Reclaimed::More => 0,
+                            Reclaimed::Done => 1,
+                        };
+                    }),
                     Outcome::Advanced(_) => crate::fault("seam completion mismatch"),
                 }
             },
@@ -844,9 +851,9 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_claim(
     unsafe { provider(ctx, out, a.read(), None, wire::Request::Claim) }
 }
 
-/// `authority.submit(a, mut c, take payload, created, at) -> Result[u64, SeamError]`.
+/// `authority.submit(a, mut c, take payload, created, retired, at) -> Result[u64, SeamError]`.
 /// # Safety
-/// Context bound; Authority, Claim, the `List[ObjectRef]` block and Level borrowed; the
+/// Context bound; Authority, Claim, the two `List[ObjectRef]` blocks and Level borrowed; the
 /// payload transfers one owner credit; out writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_rt_v2_authority_submit(
@@ -859,6 +866,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_submit(
     start: u64,
     len: u64,
     created: *mut crate::Header,
+    retired: *mut crate::Header,
     at: *const u64,
 ) -> u8 {
     // SAFETY: this semantic entry owns its task until it suspends or returns.
@@ -868,13 +876,16 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_submit(
     unsafe {
         crate::release::hirsel_rt_v2_release(ctx, owner, (*owner).index(), std::ptr::null(), 0, 0)
     };
-    let Some(created) = (unsafe { object_refs(created) }) else {
+    let (Some(created), Some(retired)) = (unsafe { object_refs(created) }, unsafe {
+        object_refs(retired)
+    }) else {
         return unsafe { no_object(ctx, out) };
     };
     let request = wire::Request::Submit {
         at: (unsafe { at.read() } % 256) as u8,
         payload,
         created,
+        retired,
     };
     unsafe { provider(ctx, out, a.read(), Some(c.read()), request) }
 }
@@ -1074,7 +1085,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_put(
     unsafe { provider(ctx, out, a.read(), Some(c.read()), request) }
 }
 
-/// `authority.reclaim(a, mut c) -> Result[(), SeamError]`.
+/// `authority.reclaim(a, mut c, budget) -> Result[Reclaimed, SeamError]`.
 /// # Safety
 /// Context bound; Authority and Claim borrowed; out writable.
 #[unsafe(no_mangle)]
@@ -1084,11 +1095,13 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_reclaim(
     out: *mut SeamResult,
     a: *const u64,
     c: *mut u64,
+    budget: u64,
 ) -> u8 {
     // SAFETY: this semantic entry owns its task until it suspends or returns.
     let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
 
-    unsafe { provider(ctx, out, a.read(), Some(c.read()), wire::Request::Reclaim) }
+    let request = wire::Request::Reclaim { budget };
+    unsafe { provider(ctx, out, a.read(), Some(c.read()), request) }
 }
 
 /// The tape form of a seam request and completion: one byte string each.

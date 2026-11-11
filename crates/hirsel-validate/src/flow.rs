@@ -6514,9 +6514,13 @@ impl Checker<'_, '_> {
                 }
                 // MODE-2: the result and each `mut` argument may receive the
                 // borrow-only shares of every argument. A global result of a
-                // named function holds nothing a borrowed or `mut` argument
-                // reaches, which stays the caller's (MODE-1): only taken and
-                // copied arguments can pass it a share.
+                // named function holds nothing a borrowed argument reaches,
+                // which stays the caller's (MODE-1). Taken and copied arguments
+                // can pass it a share, and so can a `mut` argument, whose
+                // content the callee may move out (`replace(mut a, [])`) into
+                // a result that can hold it.
+                let result_holds =
+                    destination.is_some_and(|d| needs_release(self, self.place_type(d), self.t));
                 let argument_shares: BTreeSet<usize> = arguments
                     .iter()
                     .flat_map(|a| self.operand_shares(state, &a.value).held())
@@ -6532,7 +6536,11 @@ impl Checker<'_, '_> {
                 let mut borrowed: BTreeSet<usize> = if global_result {
                     arguments
                         .iter()
-                        .filter(|a| matches!(a.value.usage, UseKind::Take | UseKind::Copy))
+                        .filter(|a| match a.value.usage {
+                            UseKind::Take | UseKind::Copy => true,
+                            UseKind::Mut => result_holds,
+                            _ => false,
+                        })
                         .flat_map(|a| self.operand_shares(state, &a.value).held())
                         .collect()
                 } else {

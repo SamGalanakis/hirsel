@@ -717,13 +717,28 @@ fn a_returned_value_keeps_only_the_shares_it_derives_from() {
     viewed_then_needed(Share::Returned).valid();
 }
 
-/// `fn main(mut x: unique String)` passing the related share `view(x)` by
-/// borrow to `digest(s: String) -> String`, keeping the digest in a local
-/// and dropping the share, then calling `need(mut x)`. With `related`, the
-/// digest is `in s` and so may still hold the share.
-fn digested_then_needed(related: bool) -> Fixture {
+/// How `digested_then_needed` hands the share `view(x)` to `digest`.
+#[derive(Clone, Copy, PartialEq)]
+enum Digest {
+    /// By borrow, to `digest(s: String) -> String`.
+    Borrowed,
+    /// By borrow, to `digest(s: String) -> String in s`.
+    Related,
+    /// By `mut`, to `digest(mut s: String) -> String`, which may move the
+    /// share out of `s` into its result (`replace(mut s, "")`).
+    Moved,
+    /// By `mut`, to `digest(mut s: String)`, which returns nothing.
+    Mutated,
+}
+
+/// `fn main(mut x: unique String)` passing the related share `view(x)` to
+/// `digest` as `how` says, keeping the digest in a local and dropping the
+/// share, then calling `need(mut x)`.
+fn digested_then_needed(how: Digest) -> Fixture {
     let (mut f, x) = handback(true);
     let string = TypeKind::Primitive(Primitive::String);
+    let unit_ty = TypeKind::Tuple(vec![].into());
+    let by_mut = matches!(how, Digest::Moved | Digest::Mutated);
     f.emit(InstructionKind::BeginLoan {
         id: LoanId(0),
         place: PlaceId(x),
@@ -731,7 +746,12 @@ fn digested_then_needed(related: bool) -> Fixture {
         if_inactive: false,
     });
     let via = f.through_loan(x, 0);
-    let shared = f.slot(string.clone(), Storage::Temporary);
+    let storage = if by_mut {
+        Storage::Local
+    } else {
+        Storage::Temporary
+    };
+    let shared = f.slot(string.clone(), storage);
     let lent = f.cleanup(vec![CleanupAction::EndLoan {
         loan: LoanId(0),
         if_active: false,
@@ -752,8 +772,13 @@ fn digested_then_needed(related: bool) -> Fixture {
         on_failure: CleanupId(lent),
     };
     let holding = f.cleanup(vec![drop(shared)]);
+    let digest_ty = if how == Digest::Mutated {
+        unit_ty.clone()
+    } else {
+        string.clone()
+    };
+    let digest = f.slot(digest_ty.clone(), Storage::Local);
     let through = f.through_loan(shared, 1);
-    let digest = f.slot(string.clone(), Storage::Local);
     let reading = f.cleanup(vec![
         CleanupAction::EndLoan {
             loan: LoanId(1),
@@ -761,25 +786,33 @@ fn digested_then_needed(related: bool) -> Fixture {
         },
         drop(shared),
     ]);
+    // A `mut` argument passes through a mutable loan of the share's local.
+    let first = vec![
+        inst(
+            InstructionKind::EndLoan {
+                loan: LoanId(0),
+                if_active: false,
+            },
+            holding,
+        ),
+        inst(
+            InstructionKind::BeginLoan {
+                id: LoanId(1),
+                place: PlaceId(shared),
+                mutable: by_mut,
+                if_inactive: false,
+            },
+            reading,
+        ),
+    ];
+    let usage = if by_mut {
+        UseKind::Mut
+    } else {
+        UseKind::Borrow
+    };
+    let argument = operand(through, usage);
     f.body().blocks.push(block(
-        vec![
-            inst(
-                InstructionKind::EndLoan {
-                    loan: LoanId(0),
-                    if_active: false,
-                },
-                holding,
-            ),
-            inst(
-                InstructionKind::BeginLoan {
-                    id: LoanId(1),
-                    place: PlaceId(shared),
-                    mutable: false,
-                    if_inactive: false,
-                },
-                reading,
-            ),
-        ],
+        first,
         Terminator::Call {
             callee: Callee::Definition {
                 path: path("digest"),
@@ -787,7 +820,7 @@ fn digested_then_needed(related: bool) -> Fixture {
             },
             arguments: vec![CallArgument {
                 parameter: ParamId(0),
-                value: operand(through, UseKind::Borrow),
+                value: argument,
             }],
             returns: Some(CallReturn {
                 destination: PlaceId(digest),
@@ -798,24 +831,25 @@ fn digested_then_needed(related: bool) -> Fixture {
     ));
     let both = f.cleanup(vec![drop(digest), drop(shared)]);
     let kept = f.cleanup(vec![drop(digest)]);
-    let unit = f.slot(TypeKind::Tuple(vec![].into()), Storage::Temporary);
+    let unit = f.slot(unit_ty.clone(), Storage::Temporary);
+    let second = vec![
+        inst(
+            InstructionKind::EndLoan {
+                loan: LoanId(1),
+                if_active: false,
+            },
+            both,
+        ),
+        inst(
+            InstructionKind::Drop {
+                place: PlaceId(shared),
+                if_live: false,
+            },
+            kept,
+        ),
+    ];
     f.body().blocks.push(block(
-        vec![
-            inst(
-                InstructionKind::EndLoan {
-                    loan: LoanId(1),
-                    if_active: false,
-                },
-                both,
-            ),
-            inst(
-                InstructionKind::Drop {
-                    place: PlaceId(shared),
-                    if_live: false,
-                },
-                kept,
-            ),
-        ],
+        second,
         Terminator::Call {
             callee: Callee::Definition {
                 path: path("need"),
@@ -836,12 +870,13 @@ fn digested_then_needed(related: bool) -> Fixture {
     f.body().blocks.push(block(vec![], ret(0, exit)));
     owner_sig(&mut f, &[PassingMode::Mut]);
     view_and_need(&mut f);
-    let mut digest = function_signature(
-        "digest",
-        vec![(PassingMode::Borrow, string.clone())],
-        string,
-    );
-    if related {
+    let passing = if by_mut {
+        PassingMode::Mut
+    } else {
+        PassingMode::Borrow
+    };
+    let mut digest = function_signature("digest", vec![(passing, string)], digest_ty);
+    if how == Digest::Related {
         let SignatureKind::Function(fun) = &mut digest.kind else {
             panic!()
         };
@@ -857,9 +892,25 @@ fn digested_then_needed(related: bool) -> Fixture {
 fn a_global_result_holds_no_share_of_a_borrowed_argument() {
     // MODE-1: `digest`'s global result cannot reach its borrowed argument,
     // so `x` is unique again once the share itself is dropped.
-    digested_then_needed(false).valid();
+    digested_then_needed(Digest::Borrowed).valid();
     // A result related to the argument may still hold the share.
-    assert!(!digested_then_needed(true).kinds().is_empty());
+    assert!(!digested_then_needed(Digest::Related).kinds().is_empty());
+}
+
+#[test]
+fn a_global_result_may_hold_the_share_of_a_mut_argument() {
+    // MODE-2: `digest(mut s) -> String` can return `replace(mut s, "")`, so
+    // its global result may hold `view(x)`'s share after the share's own
+    // local dies. Reachable from source (`b = steal(mut a)` on `a = view(xs)`,
+    // then `grow(mut xs)`); old V restored `x` and accepted it.
+    assert_eq!(
+        digested_then_needed(Digest::Moved).kinds(),
+        vec![ViolationKind::TypeMismatch {
+            entity: "call argument"
+        }]
+    );
+    // With no result, nothing outlives the share's local.
+    digested_then_needed(Digest::Mutated).valid();
 }
 
 /// `fn main(mut x: String, mut z: String)` calling `callee(mut x, mut z)`,

@@ -32,6 +32,17 @@ pub struct AcceptedFrontRegistration {
     _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
     _refresh: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
     retained: u64,
+    engine_validation: std::sync::Mutex<Option<EngineValidation>>,
+}
+
+#[derive(Clone)]
+struct EngineValidation {
+    revision: hirsel_query_products::reads::Revision,
+    unchanged: bool,
+    snapshot: std::sync::Weak<crate::SignatureSnapshot>,
+    inputs: std::sync::Weak<header_products::SourceInputs>,
+    sources: native_records::NativeRecordIdentity,
+    _lease: Arc<dyn Send + Sync>,
 }
 impl AcceptedFrontRegistration {
     pub(crate) fn in_engine(
@@ -39,6 +50,9 @@ impl AcceptedFrontRegistration {
         engine: &mut QueryEngine,
         pool: &Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> Result<Arc<Self>, QueryError> {
+        if self.engine_validation_holds(engine, true) {
+            return Ok(self.clone());
+        }
         let (reads, execution) = self.validate_engine_inputs(engine)?;
         if reads == *self.reads {
             return Ok(self.clone());
@@ -83,7 +97,79 @@ impl AcceptedFrontRegistration {
                 .checked_add(refresh.bytes())
                 .ok_or_else(refusal)?,
             _refresh: Some(refresh),
+            engine_validation: Default::default(),
         }))
+    }
+
+    fn engine_validation_holds(&self, engine: &mut QueryEngine, unchanged: bool) -> bool {
+        let previous = self
+            .engine_validation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(previous) = previous else {
+            return false;
+        };
+        // A cold or changed owner needs no reconstruction of source inputs just
+        // to discover that it has no reusable result.
+        let holds = (!unchanged || previous.unchanged)
+            && previous.revision == engine.revision
+            && previous.sources.matches(engine)
+            && previous
+                .snapshot
+                .ptr_eq(&Arc::downgrade(&engine.signature_inputs()))
+            && header_products::SourceInputs::reusable(engine)
+                .is_some_and(|inputs| previous.inputs.ptr_eq(&Arc::downgrade(&inputs)))
+            && previous.revision == engine.revision
+            && previous.sources.matches(engine);
+        if !holds {
+            self.engine_validation
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+        }
+        holds
+    }
+
+    fn remember_engine_validation(
+        &self,
+        engine: &QueryEngine,
+        snapshot: &Arc<crate::SignatureSnapshot>,
+        inputs: &Arc<header_products::SourceInputs>,
+        sources: native_records::NativeRecordIdentity,
+        revision: hirsel_query_products::reads::Revision,
+        unchanged: bool,
+    ) {
+        if engine.revision != revision
+            || !header_products::SourceInputs::reusable(engine)
+                .is_some_and(|current| Arc::ptr_eq(&current, inputs))
+            || !sources.matches(engine)
+        {
+            return;
+        }
+        let Some(headers) = snapshot.header_products() else {
+            return;
+        };
+        // A weak key keeps its Arc control allocation after the payload drops.
+        // Charge those allocations before retaining this optional result.
+        let bytes = (size_of::<crate::SignatureSnapshot>()
+            + size_of::<header_products::SourceInputs>()
+            + 4 * size_of::<usize>()) as u64
+            + native_records::NativeRecordIdentity::control_bytes();
+        let Ok(lease) = headers.try_validation_lease(bytes) else {
+            return;
+        };
+        *self
+            .engine_validation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(EngineValidation {
+            revision,
+            unchanged,
+            snapshot: Arc::downgrade(snapshot),
+            inputs: Arc::downgrade(inputs),
+            sources,
+            _lease: lease,
+        });
     }
     pub fn definition(&self) -> &DefPath {
         self.output.definition()
@@ -266,6 +352,9 @@ impl AcceptedFrontRegistration {
         self.execution.as_ref()
     }
     pub(crate) fn validate(&self, engine: &mut QueryEngine) -> Result<(), QueryError> {
+        if self.engine_validation_holds(engine, false) {
+            return Ok(());
+        }
         self.validate_engine_inputs(engine).map(|_| ())
     }
     fn validate_engine_inputs(
@@ -276,7 +365,10 @@ impl AcceptedFrontRegistration {
         let original = Some((syntax.anchor, syntax.occurrence, syntax.text_hash));
         let snapshot = engine.signature_inputs();
         let anchors = engine.source_records();
-        self.validate_exact(
+        let inputs = header_products::SourceInputs::reusable(engine);
+        let source_identity = anchors.identity();
+        let revision = engine.revision;
+        let result = self.validate_exact(
             original,
             engine.verify,
             engine,
@@ -324,7 +416,21 @@ impl AcceptedFrontRegistration {
                 ),
                 _ => engine.observe(definition, key),
             },
-        )
+        )?;
+        let unchanged = result.0 == *self.reads
+            && result.1.as_ref().map(|receipt| receipt.contexts())
+                == self.execution.as_ref().map(|receipt| receipt.contexts());
+        if let Some(inputs) = &inputs {
+            self.remember_engine_validation(
+                engine,
+                &snapshot,
+                inputs,
+                source_identity,
+                revision,
+                unchanged,
+            );
+        }
+        Ok(result)
     }
 }
 
@@ -591,6 +697,7 @@ impl AcceptanceInputs {
                 _allowance: retained_allowance,
                 _refresh: None,
                 retained,
+                engine_validation: Default::default(),
             }))
         })();
         match result {

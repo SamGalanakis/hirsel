@@ -1235,6 +1235,8 @@ impl DemandProducer {
         registrations: &[Arc<AcceptedFrontRegistration>],
     ) -> Result<Arc<FrontLowerQueries>, QueryError> {
         engine.prepare_namespace_scope();
+        // Keep this round's projection live while each registration replays it.
+        let _source_bindings = (!registrations.is_empty()).then(|| engine.source_records());
         let refreshed = registrations
             .iter()
             .map(|registration| registration.in_engine(engine, &self.request))

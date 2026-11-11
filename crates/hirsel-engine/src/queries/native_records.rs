@@ -35,6 +35,44 @@ pub struct NativeRecordContext {
     types: Arc<hirsel_types::TypeInterner>,
     bindings: Arc<SourceBindings>,
 }
+#[derive(Clone)]
+pub(crate) struct NativeRecordIdentity {
+    types: std::sync::Weak<hirsel_types::TypeInterner>,
+    bindings: std::sync::Weak<SourceBindings>,
+}
+impl NativeRecordIdentity {
+    pub(crate) fn matches(&self, engine: &QueryEngine) -> bool {
+        if !self.types.ptr_eq(&Arc::downgrade(engine.types())) {
+            return false;
+        }
+        // The caller also proves unchanged source inputs and engine revision.
+        // Read the existing projection without reconstructing an expired payload.
+        engine
+            .source_ownership
+            .current
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|current| {
+                current.placement == engine.sources.placement_revision()
+                    && self.types.ptr_eq(&current.types)
+                    && self.bindings.ptr_eq(&current.bindings)
+            })
+    }
+    pub(crate) fn control_bytes() -> u64 {
+        (size_of::<hirsel_types::TypeInterner>()
+            + size_of::<SourceBindings>()
+            + 4 * size_of::<usize>()) as u64
+    }
+}
+impl NativeRecordContext {
+    pub(crate) fn identity(&self) -> NativeRecordIdentity {
+        NativeRecordIdentity {
+            types: Arc::downgrade(&self.types),
+            bindings: Arc::downgrade(&self.bindings),
+        }
+    }
+}
 struct SourceBindings {
     owners: Box<[(Anchor, (RecordOwner, u32))]>,
     anchors: Box<[((RecordOwner, u32), Anchor)]>,

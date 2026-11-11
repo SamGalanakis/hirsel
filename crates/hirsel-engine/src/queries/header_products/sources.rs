@@ -27,12 +27,22 @@ pub(crate) struct SourceInputs {
     origin_items: Weak<BTreeMap<DefPath, Vec<Arc<ItemSyntax>>>>,
     origin_placement: u64,
     reconstructed_items: std::sync::Mutex<Weak<BTreeMap<DefPath, Vec<Arc<ItemSyntax>>>>>,
+    matched_sources: std::sync::Mutex<Option<SourceMatch>>,
     pub(super) catalog: catalog::Catalog,
     pub(super) syntax: Arc<HeaderSources>,
     declarations: crate::DeclarationIndex,
     installed: BTreeSet<FileId>,
     retained: u64,
     admission: OnceLock<hirsel_engine_admission::MemoryReservation>,
+}
+// Both positive and negative comparisons belong to exact immutable source
+// owners. Successor assemblies otherwise scan every candidate for every replay.
+struct SourceMatch {
+    catalog: catalog::CatalogIdentity,
+    items: Weak<BTreeMap<DefPath, Vec<Arc<ItemSyntax>>>>,
+    placement: u64,
+    matches: bool,
+    _admission: hirsel_engine_admission::MemoryReservation,
 }
 type SyntaxBinding = (DefId, ContentHash, hirsel_span::Anchor, u32);
 fn compare_binding(left: &SyntaxBinding, right: &SyntaxBinding) -> std::cmp::Ordering {
@@ -113,7 +123,7 @@ impl SourceInputs {
     pub(crate) fn retained_bytes(&self) -> u64 {
         self.retained
     }
-    pub(super) fn reusable(engine: &QueryEngine) -> Option<Arc<Self>> {
+    pub(crate) fn reusable(engine: &QueryEngine) -> Option<Arc<Self>> {
         let operation_inputs = engine
             .operation
             .inputs
@@ -144,6 +154,9 @@ impl SourceInputs {
         {
             return false;
         }
+        self.matches_sources(engine)
+    }
+    fn matches_sources(&self, engine: &QueryEngine) -> bool {
         if self.origin_placement == engine.sources.placement_revision()
             && self.origin_catalog.matches(&engine.catalog)
             && self.origin_items.ptr_eq(&engine.items.owner())
@@ -187,6 +200,40 @@ impl SourceInputs {
                 return true;
             }
         }
+        if let Some(previous) = &*self
+            .matched_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            && previous.placement == engine.sources.placement_revision()
+            && previous.catalog.matches(&engine.catalog)
+            && previous.items.ptr_eq(&engine.items.owner())
+        {
+            return previous.matches;
+        }
+        let matches = self.matches_bindings(engine);
+        if let Some(admission) = self.admission.get() {
+            let catalog = engine.catalog.identity();
+            let bytes = catalog.retained_bytes().saturating_add(
+                hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<
+                    BTreeMap<DefPath, Vec<Arc<ItemSyntax>>>,
+                >::uninit()),
+            );
+            if let Ok(admission) = admission.budget().reserve(bytes) {
+                *self
+                    .matched_sources
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(SourceMatch {
+                    catalog,
+                    items: engine.items.owner(),
+                    placement: engine.sources.placement_revision(),
+                    matches,
+                    _admission: admission,
+                });
+            }
+        }
+        matches
+    }
+    fn matches_bindings(&self, engine: &QueryEngine) -> bool {
         let mut observed = std::collections::HashSet::new();
         let mut files = BTreeMap::new();
         let mut binding = |id, file, body, anchor, occurrence| {
@@ -251,6 +298,7 @@ impl SourceInputs {
             origin_catalog,
             origin_items: engine.items.owner(),
             reconstructed_items: Default::default(),
+            matched_sources: Default::default(),
             origin_placement: engine.sources.placement_revision(),
             catalog: engine
                 .catalog

@@ -978,6 +978,7 @@ pub struct EnvironmentStamp {
 pub(crate) struct EnvironmentFacts {
     pub(crate) execution: crate::FactTable<crate::receipts::ExecutionKey, crate::ExecutionReceipt>,
     pub(crate) reads: crate::FactTable<VRead, bool>,
+    pub(crate) replays: crate::FactTable<crate::receipts::ReplayCheckKey, ()>,
 }
 impl EnvironmentStamp {
     fn new(types: &Arc<TypeInterner>, store: &ValidatedSignatures) -> Self {
@@ -992,7 +993,8 @@ impl EnvironmentStamp {
                 .map_or_else(std::sync::Weak::new, Arc::downgrade),
             facts: Arc::new(EnvironmentFacts {
                 execution: crate::FactTable::new(graph.clone()),
-                reads: crate::FactTable::new(graph),
+                reads: crate::FactTable::new(graph.clone()),
+                replays: crate::FactTable::new(graph),
             }),
         }
     }

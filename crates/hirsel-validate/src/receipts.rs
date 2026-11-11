@@ -576,7 +576,9 @@ impl VerifierCache {
         let owners = std::mem::take(&mut *self.4.lock().unwrap());
         for owner in owners {
             if let Some(facts) = owner.facts.upgrade() {
-                count += facts.reads.evict_ready() + facts.execution.evict_ready();
+                count += facts.reads.evict_ready()
+                    + facts.execution.evict_ready()
+                    + facts.replays.evict_ready();
             }
         }
         hirsel_intern::work::count_by(hirsel_intern::work::Counter::VerifierFactEvictions, count);
@@ -1320,24 +1322,26 @@ impl VerifierCache {
             let compute = || {
                 let mut artifacts = Vec::new();
                 let mut covered = std::collections::BTreeSet::new();
-                for ((accepted, replay), overlay) in key
-                    .artifacts
-                    .iter()
-                    .map(|key| &key.artifact)
-                    .zip(&replayed)
-                    .zip(&overlays)
+                for ((replay_key, replay), overlay) in
+                    key.artifacts.iter().zip(&replayed).zip(&overlays)
                 {
+                    let accepted = &replay_key.artifact;
                     if artifacts.contains(accepted) {
                         artifacts.push(accepted.clone());
                         continue;
                     }
-                    hirsel_intern::work::count(
-                        hirsel_intern::work::Counter::ExecutionReplayComputations,
-                    );
-                    hirsel_intern::timings::count(
-                        hirsel_intern::timings::Count::ExecutionReplayComputations,
-                    );
-                    let replay = replay.as_ref().map_err(Clone::clone)?;
+                    let replay = match replay {
+                        Ok(replay) => replay,
+                        Err(error) => {
+                            hirsel_intern::work::count(
+                                hirsel_intern::work::Counter::ExecutionReplayComputations,
+                            );
+                            hirsel_intern::timings::count(
+                                hirsel_intern::timings::Count::ExecutionReplayComputations,
+                            );
+                            return Err(error.clone());
+                        }
+                    };
                     let package = replay
                         .archive
                         .header()
@@ -1367,42 +1371,83 @@ impl VerifierCache {
                             crate::SignatureInputs::Raw(&*raw)
                         }
                     };
-                    let original = &accepted.original.receipt;
-                    if original.artifact != accepted.artifact
-                        || original.policy != accepted.policy
-                        || original.action != accepted.receipt
-                        || original.action
-                            != receipt_action(original.artifact, original.policy, &original.reads)
-                    {
-                        return Err(FactError::Refused);
-                    }
-                    for read in &original.reads {
-                        if !self.read_holds(&types, read, inputs)? {
+                    let check = || {
+                        hirsel_intern::work::count(
+                            hirsel_intern::work::Counter::ExecutionReplayComputations,
+                        );
+                        hirsel_intern::timings::count(
+                            hirsel_intern::timings::Count::ExecutionReplayComputations,
+                        );
+                        let original = &accepted.original.receipt;
+                        if original.artifact != accepted.artifact
+                            || original.policy != accepted.policy
+                            || original.action != accepted.receipt
+                            || original.action
+                                != receipt_action(
+                                    original.artifact,
+                                    original.policy,
+                                    &original.reads,
+                                )
+                        {
                             return Err(FactError::Refused);
                         }
-                    }
-                    let exact = Artifact {
-                        definition: hirsel_product_codec::TirView::Archived(&replay.archive),
-                        types: types.clone(),
-                        identity: Some(replay.identity),
-                        owners: replay.owners.clone(),
-                        overlay: replay.overlay.clone(),
+                        for read in &original.reads {
+                            if !self.read_holds(&types, read, inputs)? {
+                                return Err(FactError::Refused);
+                            }
+                        }
+                        let exact = Artifact {
+                            definition: hirsel_product_codec::TirView::Archived(&replay.archive),
+                            types: types.clone(),
+                            identity: Some(replay.identity),
+                            owners: replay.owners.clone(),
+                            overlay: replay.overlay.clone(),
+                        };
+                        let (report, _, refreshed) = validate_with_receipt_in(
+                            &exact,
+                            inputs,
+                            replay.policy,
+                            Some(self),
+                            &mut vec![],
+                        )
+                        .map_err(FactError::View)?;
+                        if !report.violations.is_empty()
+                            || !refreshed.as_ref().is_some_and(|current| {
+                                current.artifact == accepted.artifact
+                                    && current.policy == accepted.policy
+                            })
+                        {
+                            return Err(FactError::Refused);
+                        }
+                        Ok(Arc::new(()))
                     };
-                    let (report, _, refreshed) = validate_with_receipt_in(
-                        &exact,
-                        inputs,
-                        replay.policy,
-                        Some(self),
-                        &mut vec![],
-                    )
-                    .map_err(FactError::View)?;
-                    if !report.violations.is_empty()
-                        || !refreshed.as_ref().is_some_and(|current| {
-                            current.artifact == accepted.artifact
-                                && current.policy == accepted.policy
-                        })
-                    {
-                        return Err(FactError::Refused);
+                    if let Some(stamp) = inputs.stamp() {
+                        // A receipt's issuance is authenticated above. Compatibility
+                        // depends on the artifact, its exact source bindings and
+                        // this immutable V input, not on the execution that used it.
+                        let replay_key = ReplayCheckKey {
+                            issuer: key.issuer.clone(),
+                            replay: replay_key.clone(),
+                        };
+                        let bytes = replay_key.replay.bytes().ok_or(FactError::Admission)? + 512;
+                        stamp.facts.replays.get_or_try_init(
+                            replay_key,
+                            || {
+                                self.retain_fact(bytes)
+                                    .map_err(|_| FactError::Admission)
+                                    .map(|lease| lease.unwrap_or_else(|| Arc::new(())))
+                            },
+                            check,
+                            |result| result.is_ok() || matches!(result, Err(FactError::Refused)),
+                        )?;
+                        if let Some(lease) = self
+                            .retain_fact((4 * size_of::<EnvironmentOwner>() + 128) as u64)
+                            .map_err(|_| FactError::Admission)?
+                        {
+                            self.remember(stamp, &lease);
+                        }
+                    } else {
+                        check()?;
                     }
                     artifacts.push(accepted.clone());
                 }
@@ -1577,6 +1622,11 @@ impl ReplayKey {
         (size_of::<Self>() as u64 + 512)
             .checked_add(size_of_val(self.bindings.as_slice()) as u64 * 4)
     }
+}
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub(crate) struct ReplayCheckKey {
+    issuer: IssuerKey,
+    replay: ReplayKey,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub(crate) struct ExecutionKey {
@@ -2704,6 +2754,11 @@ mod tests {
             &[accepted.clone(), accepted.clone()],
         )
         .unwrap();
+        let alternate = ExecutionReceipt::compose(
+            &[(package.clone(), ContentHash::of_bytes(b"another issuance"))],
+            &[accepted.clone(), accepted.clone()],
+        )
+        .unwrap();
         let table = |extra| {
             let mut rows = f
                 .signatures
@@ -2819,11 +2874,11 @@ mod tests {
                 package: &package,
                 views: &tables[index],
             };
-            for _ in 0..5 {
+            for receipt in [&original, &alternate, &original, &alternate, &original] {
                 assert!(
                     cache
                         .revalidate_execution(
-                            &original,
+                            receipt,
                             session(),
                             |p, n| (*p == path("main") && n == 0).then_some(site),
                             &environment

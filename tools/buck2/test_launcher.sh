@@ -20,6 +20,25 @@ root="$(pwd)"
 # Keep SDK copies on the executor's original scratch filesystem, before the
 # recording tests select their ancestry-safe /dev/shm TMPDIR.
 native_inputs_tmp="${TMPDIR:-/tmp}"
+scratch_owner="$(realpath "${HIRSEL_SCRATCH_OWNER:-$root/tools/buck2/scratch.py}")"
+# Retain all launcher artifacts for diagnosis only when explicitly requested.
+# HIRSEL_KEEP_TEST_SCRATCH also protects them from subsequent recovery sweeps.
+keep_scratch="${HIRSEL_KEEP_TEST_SCRATCH:-}"
+scratch=""
+action_cache=""
+private_native_inputs=""
+cleanup_scratch() {
+  if [ -z "$keep_scratch" ] && [ -n "$action_cache" ]; then
+    rm -rf -- "$action_cache" || :
+  fi
+  for owned in "$private_native_inputs" "$scratch"; do
+    [ -z "$owned" ] || python3 "$scratch_owner" release "$owned" '' "$$" "$keep_scratch" || :
+  done
+}
+trap cleanup_scratch 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 # A test runs the CLI in its own process: never on, or by starting, the
 # workspace's resident compiler (crates/hirsel-cli/src/serve.rs).
 export HIRSEL_DAEMON=off
@@ -42,7 +61,7 @@ if [ -n "${HIRSEL_TEST_POOL:-}" ]; then
   # source ancestry the runtime cannot establish, so it refuses recordings
   # there (crates/hirsel-rt/src/host_paths.rs). The action's private /dev
   # tmpfs is mounted at its root: scratch directories and TMPDIR live there.
-  scratch=/dev/shm/hirsel-test
+  scratch="$(python3 "$scratch_owner" create /dev/shm hirsel-test- "$$" "$keep_scratch")"
   mkdir -p "$scratch/target-tmpdir" "$scratch/tmp" "$(dirname "$HIRSEL_TEST_TMPDIR")"
   rm -rf "$HIRSEL_TEST_TMPDIR"
   ln -s "$scratch/target-tmpdir" "$HIRSEL_TEST_TMPDIR"
@@ -51,9 +70,9 @@ else
   # On this host, scratch lives outside the project: Buck2 watches the project
   # tree and stops at a file name that is not UTF-8, which native launch tests
   # create on purpose. One directory per checkout, linked in atomically, since
-  # host tests run concurrently: a directory an older run left is renamed away,
-  # never deleted in place, and nothing recreates it, so a placed link stays.
-  scratch="${TMPDIR:-/tmp}/hirsel-test-$(printf %s "$root" | cksum | cut -d' ' -f1)"
+  # host tests run concurrently. Leases retain the target until the last
+  # launcher exits. Replace a pre-link directory by rename before removing it.
+  scratch="$(python3 "$scratch_owner" create "${TMPDIR:-/tmp}" hirsel-test- "$$" "$keep_scratch" "$(printf %s "$root" | cksum | cut -d' ' -f1)")"
   mkdir -p "$scratch" "$(dirname "$HIRSEL_TEST_TMPDIR")"
   until [ "$(readlink "$HIRSEL_TEST_TMPDIR" || true)" = "$scratch" ]; do
     if [ -d "$HIRSEL_TEST_TMPDIR" ] && [ ! -L "$HIRSEL_TEST_TMPDIR" ] &&
@@ -71,12 +90,7 @@ fi
 # pattern); the launcher stays alive so its exit trap also runs on test failure.
 action_cache="$(mktemp -d "$scratch/action-XXXXXXXXXX")"
 action_cache="$(cd "$action_cache" && pwd)"
-private_native_inputs=""
 native_input_materializer=""
-trap 'rm -rf "$action_cache"; [ -z "$private_native_inputs" ] || rm -rf "$private_native_inputs"' 0
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
 export XDG_CACHE_HOME="$action_cache/cache"
 export XDG_DATA_HOME="$action_cache/data"
 export HIRSEL_RESULTS_DIR="$action_cache/results"
@@ -110,7 +124,7 @@ materialize_native_inputs() {
   for argument in "$@"; do
     case "$argument" in --list | --help | -h) return 0 ;; esac
   done
-  private_native_inputs="$(mktemp -d "$native_inputs_tmp/hirsel-native-inputs-XXXXXXXXXX")"
+  private_native_inputs="$(python3 "$scratch_owner" create "$native_inputs_tmp" hirsel-native-inputs- "$$" "$keep_scratch")"
   LLVM_SYS_231_PREFIX="$(python3 "$native_input_materializer" "$LLVM_SYS_231_PREFIX" "$private_native_inputs/llvm")"
   export LLVM_SYS_231_PREFIX
   export PATH="$LLVM_SYS_231_PREFIX/bin:$PATH"

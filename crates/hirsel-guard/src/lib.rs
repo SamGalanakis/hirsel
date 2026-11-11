@@ -22,6 +22,7 @@
 //! ends the process with exit status [`SECTION_STATUS`]. Sections write only
 //! room reserved before them and run no destructor (design §5 Op sections).
 pub mod admission;
+pub mod scratch;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU8, Ordering};

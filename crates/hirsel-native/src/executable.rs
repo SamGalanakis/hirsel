@@ -158,12 +158,14 @@ impl Scratch {
         next: &AtomicU64,
     ) -> Result<Self, NativeError> {
         use std::os::unix::fs::DirBuilderExt;
+        hirsel_guard::scratch::sweep(parent, "hirsel-build-");
         loop {
-            let path = parent.join(format!(
-                "hirsel-build-{}-{}",
-                std::process::id(),
-                next.fetch_add(1, Ordering::Relaxed)
-            ));
+            let path = hirsel_guard::scratch::path(
+                parent,
+                "hirsel-build-",
+                next.fetch_add(1, Ordering::Relaxed),
+            )
+            .map_err(io)?;
             let created = if keep {
                 std::fs::DirBuilder::new()
                     .mode(0o700)
@@ -175,6 +177,11 @@ impl Scratch {
             match created {
                 Ok(cleanup) => {
                     if keep {
+                        let marker = path.join(".hirsel-keep");
+                        if let Err(error) = std::fs::write(marker, b"") {
+                            let _ = std::fs::remove_dir_all(&path);
+                            return Err(io(error));
+                        }
                         eprintln!("hirsel: retaining native scratch at {}", path.display());
                     }
                     return Ok(Self(path, cleanup));
@@ -213,6 +220,27 @@ fn io(error: std::io::Error) -> NativeError {
 #[cfg(test)]
 mod scratch_tests {
     use super::*;
+
+    #[test]
+    fn creation_sweeps_dead_owners_but_keeps_live_and_retained_builds() {
+        let parent = tempfile::tempdir().unwrap();
+        let dead = parent.path().join("hirsel-build-4294967295-0-0");
+        let reused = parent.path().join(format!(
+            "hirsel-build-{}-18446744073709551615-0",
+            std::process::id()
+        ));
+        let retained = parent.path().join("hirsel-build-4294967295-0-1");
+        for path in [&dead, &reused, &retained] {
+            std::fs::create_dir(path).unwrap();
+        }
+        std::fs::write(retained.join(".hirsel-keep"), b"").unwrap();
+        let live = Scratch::create_in(parent.path(), false).unwrap();
+        let _next = Scratch::create_in(parent.path(), false).unwrap();
+        assert!(!dead.exists());
+        assert!(!reused.exists());
+        assert!(retained.is_dir());
+        assert!(live.0.is_dir());
+    }
 
     #[test]
     fn exclusive_creation_skips_existing_names_and_drop_cleans_up() {

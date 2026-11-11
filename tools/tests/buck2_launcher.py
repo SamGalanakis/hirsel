@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER = Path(os.environ.get('HIRSEL_TEST_LAUNCHER', ROOT / 'tools/buck2/test_launcher.sh')).resolve()
+SCRATCH_OWNER = Path(os.environ.get('HIRSEL_SCRATCH_OWNER', ROOT / 'tools/buck2/scratch.py')).resolve()
 CASES = {
     'pool::full_gate_heap': True,
     'host::full_gate_arm': True,
@@ -143,6 +144,7 @@ class LauncherFixture(unittest.TestCase):
             HIRSEL_TEST_TMPDIR=str(self.root / 'tmp'), HIRSEL_TEST_CWD=str(self.root),
             LLVM_SYS_231_PREFIX=str(self.root / 'llvm'), CASES=json.dumps(CASES),
             OBSERVED=str(self.observed), HIRSEL_TEST_BINARY='fixture-test-it',
+            HIRSEL_SCRATCH_OWNER=str(SCRATCH_OWNER), TMPDIR=str(self.root / 'scratch'),
             TEST_TARGET='root//:fixture-test-it')
         for key in ('HIRSEL_TEST_POOL', 'HIRSEL_TEST_CPUS', 'HIRSEL_TEST_EXACT_CPUS', 'TEST_SHARD_INDEX', 'TEST_TOTAL_SHARDS', 'HIRSEL_TEST_HOST_ONLY', 'HIRSEL_TEST_REPORT_ACTIVE', 'HIRSEL_TEST_REPORTER'):
             self.env.pop(key, None)
@@ -221,6 +223,100 @@ class PrivateNativeInputs(LauncherFixture):
         result = subprocess.run(['sh', str(LAUNCHER), 'harness', '--list'], cwd=self.root, env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('pool::smoke: test', result.stdout)
+
+
+class ScratchOwnership(LauncherFixture):
+    def helper(self):
+        import runpy
+        return runpy.run_path(str(SCRATCH_OWNER))
+
+    def test_sweep_keeps_live_owner_and_removes_dead_and_reused_owners(self):
+        helper = self.helper()
+        owner = f'{os.getpid()}-{helper["start_time"](os.getpid())}'
+        parent = self.root / 'scratch'
+        parent.mkdir()
+        for prefix in ('hirsel-test-', 'hirsel-native-inputs-'):
+            with self.subTest(prefix=prefix):
+                live = parent / f'{prefix}live'
+                dead = parent / f'{prefix}dead'
+                reused = parent / f'{prefix}reused'
+                retained = parent / f'{prefix}retained'
+                unregistered = parent / f'{prefix}4294967295-0-interrupted'
+                for path, identity in ((live, owner), (dead, '4294967295-0'),
+                                       (reused, f'{os.getpid()}-0'), (retained, '4294967295-0')):
+                    (path / '.hirsel-owners').mkdir(parents=True)
+                    (path / '.hirsel-owners' / identity).touch()
+                (retained / '.hirsel-keep').touch()
+                unregistered.mkdir()
+                helper['sweep'](parent, prefix)
+                self.assertTrue(live.is_dir())
+                self.assertTrue(retained.is_dir())
+                self.assertFalse(dead.exists())
+                self.assertFalse(reused.exists())
+                self.assertFalse(unregistered.exists())
+
+    def test_shared_scratch_lives_until_last_launcher_exits(self):
+        probe = self.root / 'probe'
+        probe.write_text("""#!/usr/bin/env python3
+import os, sys
+from pathlib import Path
+scratch = Path('tmp').resolve()
+(scratch / os.environ['TOKEN']).write_text('owned')
+print(scratch, flush=True)
+sys.stdin.readline()
+assert (scratch / os.environ['TOKEN']).read_text() == 'owned'
+""")
+        probe.chmod(0o755)
+        runs = []
+        try:
+            for token in ('first', 'second'):
+                run = subprocess.Popen(['sh', str(LAUNCHER), 'probe'], cwd=self.root,
+                                       env=self.env | {'TOKEN': token}, stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                runs.append(run)
+                path = Path(run.stdout.readline().strip())
+                self.assertTrue((path / token).is_file())
+            first_path = Path(os.readlink(self.root / 'tmp'))
+            runs[0].stdin.write('done\n'); runs[0].stdin.flush()
+            self.assertEqual(runs[0].wait(), 0, runs[0].stderr.read())
+            self.assertTrue((first_path / 'second').is_file())
+            runs[1].stdin.write('done\n'); runs[1].stdin.flush()
+            self.assertEqual(runs[1].wait(), 0, runs[1].stderr.read())
+            self.assertFalse(first_path.exists())
+        finally:
+            for run in runs:
+                if run.poll() is None:
+                    run.communicate('done\n')
+                for pipe in (run.stdin, run.stdout, run.stderr):
+                    pipe.close()
+
+    def test_failure_after_native_creation_cleans_both_patterns_and_keep_retains(self):
+        environment = self.root / 'native-environment.tsv'
+        environment.write_text('')
+        materializer = self.root / 'materialize.py'
+        materializer.write_text("import sys\nfrom pathlib import Path\np=Path(sys.argv[2]); p.mkdir(); print(p)\n")
+        harness = self.root / 'harness'
+        harness.write_text("#!/bin/sh\nprintf '%s\\n' \"$LLVM_SYS_231_PREFIX\" \"$XDG_CACHE_HOME\"\nexit 17\n")
+        harness.chmod(0o755)
+        # A failed cache-removal command must not skip the remaining owners.
+        commands = self.root / 'commands'
+        commands.mkdir()
+        (commands / 'rm').write_text('#!/bin/sh\nexit 1\n')
+        (commands / 'rm').chmod(0o755)
+        for keep in ('', '1'):
+            with self.subTest(keep=keep):
+                env = self.env | dict(HIRSEL_NATIVE_ENVIRONMENT=str(environment),
+                                      HIRSEL_PRIVATE_NATIVE_INPUTS=str(materializer), HIRSEL_KEEP_TEST_SCRATCH=keep,
+                                      PATH=str(commands) + ':' + os.environ['PATH'])
+                env.pop('HIRSEL_TEST_BINARY', None)
+                run = subprocess.run(['sh', str(LAUNCHER), 'harness'], cwd=self.root,
+                                     env=env, capture_output=True, text=True)
+                self.assertEqual(run.returncode, 17, run.stderr)
+                native, cache = map(Path, run.stdout.splitlines())
+                scratch = Path(os.readlink(self.root / 'tmp'))
+                self.assertEqual(native.exists(), bool(keep))
+                self.assertEqual(cache.exists(), bool(keep))
+                self.assertEqual(scratch.exists(), bool(keep))
 
 
 class LauncherReporting(LauncherFixture):
@@ -516,7 +612,7 @@ class LauncherSelection(LauncherFixture):
         target = Path(os.readlink(link))
         self.assertEqual(target.parent, scratch)
         self.assertTrue(target.name.startswith('hirsel-test-'))
-        self.assertEqual(list(target.iterdir()), [])
+        self.assertFalse(target.exists(), 'the last concurrent launcher removes shared scratch')
 
     def test_two_cpu_reservation_bounds_threads_and_workers(self):
         self.env.update(HIRSEL_TEST_CPUS='2', RUST_TEST_THREADS='8', HIRSEL_JOBS='8')

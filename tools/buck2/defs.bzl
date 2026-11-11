@@ -368,13 +368,14 @@ def _rust_test_impl(ctx):
     binaries = dict(ctx.attrs.bin_exes)
     binaries.update(ctx.attrs.release_bin_exes)
     exes = {bin: dep[DefaultInfo].default_outputs[0] for bin, dep in binaries.items()}
-    inputs = ctx.attrs.data + [exe for _, exe in sorted(exes.items())] + [ctx.attrs._test_reporter]
+    inputs = ctx.attrs.data + [exe for _, exe in sorted(exes.items())] + [ctx.attrs._test_reporter, ctx.attrs._scratch_owner]
     tools = {name: dep[DefaultInfo].default_outputs[0] for name, dep in ctx.attrs.native_tools.items()}
     inputs += list(tools.values())
     env = {
         "HIRSEL_TEST_CWD": ctx.attrs.cwd,
         "HIRSEL_VALIDATE_STAGES": "1",
         "HIRSEL_TEST_TMPDIR": TEST_TMPDIR,
+        "HIRSEL_SCRATCH_OWNER": cmd_args(ctx.attrs._scratch_owner),
         # The same effective request as the executor, including focus mode.
         "HIRSEL_TEST_CPUS": ctx.attrs.request[0],
         "HIRSEL_TEST_PRODUCT_DEFINITIONS": ctx.attrs.product_definitions,
@@ -513,6 +514,7 @@ _rust_test = rule(
         "shards": attrs.int(default = 0),
         "test_binary": attrs.string(default = ""),
         "_launcher": attrs.source(default = "root//tools/buck2:test_launcher.sh"),
+        "_scratch_owner": attrs.source(default = "root//tools/buck2:scratch.py"),
         "_test_reporter": attrs.source(default = "root//tools/buck2:test_report.py"),
         "_private_native_inputs": attrs.source(default = "root//tools/buck2:private_native_inputs.py"),
         "_native_environment": attrs.source(default = "root//tools/buck2/native-toolchain:environment.tsv"),

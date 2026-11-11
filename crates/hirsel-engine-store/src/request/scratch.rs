@@ -18,11 +18,12 @@ impl Root {
         parent: &Path,
     ) -> std::io::Result<Arc<Self>> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = parent.join(format!(
-            ".hirsel-request-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        hirsel_guard::scratch::sweep(parent, ".hirsel-request-");
+        let path = hirsel_guard::scratch::path(
+            parent,
+            ".hirsel-request-",
+            NEXT.fetch_add(1, Ordering::Relaxed),
+        )?;
         let bytes =
             hirsel_engine_admission::retained_arc_bytes(&std::mem::MaybeUninit::<Self>::uninit())
                 .checked_add(path.capacity() as u64)
@@ -629,6 +630,34 @@ fn read_at(file: &fs::File, bytes: &mut [u8], offset: u64) -> std::io::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scratch_creation_sweeps_dead_owner() {
+        let parent = tempfile::tempdir().unwrap();
+        let stale = parent.path().join(".hirsel-request-4294967295-0-0");
+        std::fs::create_dir(&stale).unwrap();
+        std::fs::write(stale.join("interrupted-product"), b"scratch").unwrap();
+        let budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
+        let mut memory = budget.reserve(64 << 10).unwrap();
+        let _root = super::Root::new(&mut memory, parent.path()).unwrap();
+        assert!(!stale.exists());
+    }
+
+    #[test]
+    fn scratch_sweep_keeps_live_owner_and_removes_reused_pid() {
+        let parent = tempfile::tempdir().unwrap();
+        let budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
+        let mut memory = budget.reserve(64 << 10).unwrap();
+        let live = super::Root::new(&mut memory, parent.path()).unwrap();
+        let stale = parent.path().join(format!(
+            ".hirsel-request-{}-18446744073709551615-0",
+            std::process::id()
+        ));
+        std::fs::create_dir(&stale).unwrap();
+        let _root = super::Root::new(&mut memory, parent.path()).unwrap();
+        assert!(live.path.is_dir(), "this process still owns its directory");
+        assert!(!stale.exists(), "a reused PID is not the recorded owner");
+    }
 
     fn domain() -> Domain {
         Domain {

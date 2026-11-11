@@ -1314,6 +1314,7 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_script_test", name="test-buck2-launcher", script="tools/tests/buck2_launcher.py", full=False,
                             data=["tools/tests/buck2_launcher.py"],
                             files_env={"HIRSEL_TEST_LAUNCHER": "//tools/buck2:test_launcher.sh",
+                                       "HIRSEL_SCRATCH_OWNER": "//tools/buck2:scratch.py",
                                        "HIRSEL_TEST_REPORTER": "//tools/buck2:test_report.py",
                                        "HIRSEL_TEST_EXECUTOR": "//tools/buck2:test_executor.py",
                                        "HIRSEL_TEST_REPORT_FIXTURE": "//:test-report-fixture-harness",

@@ -7477,6 +7477,11 @@ conformance/SER/SER-2-utf8-run.hir
 conformance/SER/SER-2-variable-flat-run.hir
 conformance/SER/SER-2-vectors-run.hir
 conformance/STORE/STORE-11-authority-seam-run.hir
+conformance/STORE/STORE-11-checkpoint-cuts-crash-run.hir
+conformance/STORE/STORE-11-checkpoint-cuts-fail-run.hir
+conformance/STORE/STORE-11-checkpoint-cuts-lose-run.hir
+conformance/STORE/STORE-11-checkpoint-cuts-tear-run.hir
+conformance/STORE/STORE-11-checkpoint-run.hir
 conformance/STORE/STORE-11-crash-cuts-crash-run.hir
 conformance/STORE/STORE-11-crash-cuts-fail-run.hir
 conformance/STORE/STORE-11-crash-cuts-lose-run.hir

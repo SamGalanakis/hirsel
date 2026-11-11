@@ -1,0 +1,221 @@
+// rule: STORE-11
+// expect: run
+// authorities: {"cp":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{}},"full":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{}}}
+// steps: 20000000
+// Recovery hashes every commit and checkpoint with the interpreted SHA-256, seven
+// times over.
+// Recovery from a checkpoint and its tail is recovery from the whole history. The
+// history: commit 1 puts six values of 2000 bytes and twelve small ones;
+// compact; commit 3 overwrites one large value, deletes another and a small one
+// and adds a small one; commit 4 adds a value of 2250 bytes; compact; commit 6
+// deletes a large value and overwrites a small one. Store `cp` runs it, closing and reopening after every step, and
+// after each reopen holds exactly the rows the model gives for that step. Store
+// `full` runs the same commits with no compaction, and after a reopen holds the
+// same rows as `cp`.
+// stdout: checkpoints: 0
+
+// A value of `len` bytes, each `fill`, built by doubling.
+fn value(fill: u8, len: u64) -> Bytes {
+  let mut out: List[u8] = [fill]
+  while list.len(out) * 2 <= len {
+    let half = bytes.from_list(copy out)
+    bytes.append(mut out, half)
+  }
+  let have = list.len(out)
+  if have < len {
+    let head = bytes.from_list(copy out)
+    bytes.append(mut out, bytes.slice(head, 0, len - have))
+  }
+  bytes.from_list(take out)
+}
+
+fn big(i: u8) -> Bytes {
+  bytes.from_list([98u8, 47u8, 48u8 + i])
+}
+
+fn small(i: u8) -> Bytes {
+  bytes.from_list([115u8, 47u8, 48u8 + i / 10, 48u8 + i % 10])
+}
+
+// One write of a step: the key, and the fill and length of its value, or a
+// deletion when the length is 0.
+type Write {
+  key: Bytes,
+  fill: u8,
+  len: u64,
+}
+
+// The writes of step j; compactions (2 and 5) write nothing.
+fn writes(j: u8) -> List[Write] {
+  let mut w: List[Write] = []
+  if j == 1 {
+    for i in 1u8..7u8 {
+      list.push(mut w, Write(key: big(i), fill: i, len: 2000))
+    }
+    for i in 1u8..13u8 {
+      list.push(mut w, Write(key: small(i), fill: 20 + i, len: 50))
+    }
+  } else if j == 3 {
+    list.push(mut w, Write(key: big(2), fill: 7, len: 1875))
+    list.push(mut w, Write(key: big(3), fill: 0, len: 0))
+    list.push(mut w, Write(key: small(3), fill: 0, len: 0))
+    list.push(mut w, Write(key: small(13), fill: 33, len: 50))
+  } else if j == 4 {
+    list.push(mut w, Write(key: big(7), fill: 8, len: 2250))
+  } else if j == 6 {
+    list.push(mut w, Write(key: big(1), fill: 0, len: 0))
+    list.push(mut w, Write(key: small(1), fill: 9, len: 20))
+  }
+  w
+}
+
+fn compaction(j: u8) -> bool {
+  j == 2 || j == 5
+}
+
+const STEPS: u8 = 6
+
+fn step(mut tx: store.Tx, info: store.CallInfo, j: u8) -> Result[u8, store.TxError] {
+  for w in writes(j) {
+    if w.len == 0 {
+      store.tx_delete(mut tx, copy w.key)?
+    } else {
+      store.tx_put(mut tx, copy w.key, value(w.fill, w.len))?
+    }
+  }
+  Ok(j)
+}
+
+// The model: the keys after step j, ascending, each with its value's fill and
+// length.
+fn want(j: u8) -> List[Write] {
+  let mut m: List[Write] = []
+  for i in 1u8..j + 1 {
+    for w in writes(i) {
+      let mut next: List[Write] = []
+      let mut placed = false
+      for old in m {
+        if !placed && w.key <= old.key {
+          if w.len > 0 {
+            list.push(mut next, copy w)
+          }
+          placed = true
+          if w.key != old.key {
+            list.push(mut next, copy old)
+          }
+        } else {
+          list.push(mut next, copy old)
+        }
+      }
+      if !placed && w.len > 0 {
+        list.push(mut next, copy w)
+      }
+      m = take next
+    }
+  }
+  m
+}
+
+pub type Failed = Check(String) | Store(store.StoreError)
+
+fn check(ok: bool, take what: String) -> Result[(), Failed] {
+  if ok {
+    Ok(())
+  } else {
+    Error(Check(what))
+  }
+}
+
+// Every user row of the store's state at its floor.
+fn rows(a: Authority, mut s: store.Store) -> Result[List[(Bytes, Bytes)], Failed] {
+  let snap = store.snapshot(a, mut s, authority.floor(a)) ? Store
+  let mut user: List[(Bytes, Bytes)] = []
+  for (k, v) in store.range(snap, Unbounded(), Unbounded(), Ascending(), 100) {
+    if !store.reserved(k) {
+      list.push(mut user, (copy k, copy v))
+    }
+  }
+  Ok(user)
+}
+
+// Whether the rows are the model's after step j.
+fn holds(r: List[(Bytes, Bytes)], j: u8) -> bool {
+  let m = want(j)
+  if list.len(r) != list.len(m) {
+    return false
+  }
+  for i in 0u64..list.len(m) {
+    let (k, v) = copy r[i]
+    if k != m[i].key || v != value(m[i].fill, m[i].len) {
+      return false
+    }
+  }
+  true
+}
+
+fn reopen(a: Authority, name: String) -> Result[store.Store, Failed] {
+  match store.open(a, store.default_config()) {
+    Ok(s) => Ok(s),
+    Error(_) => Error(Check(f"{name}: reopen refused")),
+  }
+}
+
+fn run(mut s: store.Store, j: u8, compacting: bool) -> Result[(), Failed] {
+  if compaction(j) {
+    if compacting {
+      store.compact(mut s) ? Store
+    }
+    return Ok(())
+  }
+  let r: Result[u8, store.TxFailure[store.TxError]] = store.transact(mut s, step, j)
+  check(r == Ok(j), f"commit {j} failed")
+}
+
+pub fn main(rt: Io) -> Result[(), Failed] {
+  let Ok(stdout) = io.stdout(rt) else {
+    return Error(Check("stdout"))
+  }
+  let r = sweep(rt)
+  let failures: u64 = match r {
+    Ok(()) => 0,
+    Error(Check(what)) => {
+      let _ = out.print(stdout, f"{what}\n")
+      1
+    },
+    Error(Store(_)) => {
+      let _ = out.print(stdout, "store error\n")
+      1
+    },
+  }
+  let _ = out.print(stdout, f"checkpoints: {failures}\n")
+  Ok(())
+}
+
+fn sweep(rt: Io) -> Result[(), Failed] {
+  let Ok(cp) = io.authority(rt, "cp") else {
+    return Error(Check("cp not granted"))
+  }
+  let Ok(full) = io.authority(rt, "full") else {
+    return Error(Check("full not granted"))
+  }
+  for j in 1u8..STEPS + 1 {
+    let mut s = reopen(cp, "cp")?
+    run(mut s, j, true)?
+    store.close(take s) ? Store
+    let mut again = reopen(cp, "cp")?
+    let seen = rows(cp, mut again)?
+    check(holds(seen, j), f"cp: after step {j}, {list.len(seen)} rows, not the model's")?
+    store.close(take again) ? Store
+  }
+  let mut f = reopen(full, "full")?
+  for j in 1u8..STEPS + 1 {
+    run(mut f, j, false)?
+  }
+  store.close(take f) ? Store
+  let mut last = reopen(full, "full")?
+  let whole = rows(full, mut last)?
+  let mut checked = reopen(cp, "cp")?
+  let tail = rows(cp, mut checked)?
+  check(whole == tail, "the whole history and the checkpoint with its tail differ")?
+  check(holds(whole, STEPS), "the whole history is not the model's")
+}

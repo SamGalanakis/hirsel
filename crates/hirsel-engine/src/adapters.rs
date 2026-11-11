@@ -351,9 +351,6 @@ fn core_error(error: hirsel_interp::Error) -> RuntimeError {
         hirsel_interp::Error::ProviderFailed(record) => {
             RuntimeError::Tool(format!("unhandled provider failure: {record:?}"))
         }
-        hirsel_interp::Error::Ended(failure) => {
-            RuntimeError::Tool(format!("unhandled run end: {failure:?}"))
-        }
     }
 }
 fn launch_error(error: hirsel_interp::library::LaunchError) -> RuntimeError {

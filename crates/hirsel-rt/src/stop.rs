@@ -2,7 +2,7 @@
 //!
 //! A run's root task runs on a fiber of its own ([`run_root`]), so the launcher keeps its stack
 //! while the run executes. A [`Stop`] (Blocked, a spent budget, an adapter refusal, a replay
-//! divergence, a codec limit or a failed serializable check) ends the run from wherever it is raised: the runtime's internal
+//! divergence, a codec limit or a failure recorded where no compiled frame can unwind it) ends the run from wherever it is raised: the runtime's internal
 //! functions return `Result<T, Stop>` up to the entry compiled code called, which checks it
 //! ([`check`]) and switches back to the launcher's stack ([`raise`]). The Rust frames below that
 //! entry have returned and dropped their locals by then; the entry's own frame and compiled
@@ -34,9 +34,9 @@ pub enum Stop {
     /// A replay's requests left its recording.
     Diverged(String),
     Environmental(Environmental),
-    /// A failure the runtime cannot unwind through: a serializable check failed inside the
-    /// codec (FAIL-3). The run ends with its recorded failure, as if its entry had failed,
-    /// with no cleanup.
+    /// A failure recorded where no compiled frame can unwind it (a runner call's failed
+    /// reply, a refused host wait). The run ends with its recorded failure, as if its entry
+    /// had failed, with no cleanup.
     Failed,
     /// A scripted signal took its default action (`signals.script@1`).
     Signaled(hirsel_run_schema::SignalKind),

@@ -3294,8 +3294,8 @@ pub(crate) unsafe fn execute(
     if let Some(placement) = &admitted_placement {
         let _ = writeln!(record, "placement {}", hex(&placement.to_json()));
     }
-    // FAIL-3: a run a failure ended where it stood reports that failure as a failed entry,
-    // but its tasks still hold their storage, so it is abandoned like a stopped run.
+    // A failure recorded where no compiled frame can unwind it (`Stop::Failed`) reports as a
+    // failed entry, but its tasks still hold their storage, so it is abandoned like a stopped run.
     let ended = matches!(ran, Err(crate::stop::Stop::Failed));
     let ran = if ended { Ok(STATUS_FAILURE) } else { ran };
     let outcome = if let Some(outcome) = replay_outcome {

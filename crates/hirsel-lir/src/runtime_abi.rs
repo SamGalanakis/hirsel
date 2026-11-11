@@ -1109,7 +1109,7 @@ impl RuntimeEntry {
             ),
             Self::CodecDecode => (
                 "hirsel_rt_v2_codec_decode",
-                VOID,
+                U8,
                 const {
                     &[
                         CTX,

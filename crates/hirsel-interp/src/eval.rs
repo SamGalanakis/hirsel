@@ -117,10 +117,6 @@ pub(crate) fn run_observed<O: crate::ownership_trace::Observer>(
             execution.failures.push(*record);
             Ok(())
         }
-        (Err(Error::Ended(failure)), _) => {
-            execution.outcome = Outcome::Failed(failure);
-            Ok(())
-        }
         (Err(Error::Trapped(trap)), Some(_)) => {
             execution.outcome = Outcome::Trapped(*trap);
             Ok(())

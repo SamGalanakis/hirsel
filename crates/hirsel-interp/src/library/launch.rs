@@ -303,7 +303,6 @@ fn runtime_error(e: Error) -> LaunchError {
         Error::ProviderFailed(record) => {
             LaunchError::Runtime(format!("unhandled provider failure: {:?}", record.failure))
         }
-        Error::Ended(failure) => LaunchError::Runtime(format!("unhandled run end: {failure:?}")),
     }
 }
 

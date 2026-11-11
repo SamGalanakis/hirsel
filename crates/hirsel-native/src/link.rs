@@ -3867,7 +3867,7 @@ fn observe_run_tables<'a>(
             waits.ok_or_else(|| bad("Blocked run has no wait report".into()))?,
         );
     }
-    // A failure that ended the run where it stood (FAIL-3) is abandoned unaudited.
+    // A failure that ended the run where it stood (`Stop::Failed`) is abandoned unaudited.
     if ended && (!unaudited || status != Some(1) || failures.is_empty()) {
         return Err(bad("an inconsistent ended observation record".into()));
     }

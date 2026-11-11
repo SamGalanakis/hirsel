@@ -1,0 +1,102 @@
+// rule: STORE-11
+// expect: run
+// authorities: {"main":{"provider":"authority.memory@1","floor":"memory"}}
+// steps: 20000000
+// A serializable check that fails inside a transaction body fails the body's decode,
+// which unwinds like any failure (FAIL-3): the reconstructed list, every String in it
+// included, is released once, and the transaction ends Faulted with nothing committed.
+// A check that runs out of energy ends the transaction Limit(Energy()). Both checks run
+// on the third of five elements, and the store stays usable after each.
+@serializable(check = valid)
+pub opaque type Month: plain + key + sendable + inert + noalloc_drop uses {} {
+  number: u8,
+}
+
+// Admits 1 and 2; fails on 3 and above (u8 overflow); spins far past the budget on 0.
+@noalloc
+fn valid(value: Month) -> bool uses {} {
+  if value.number == 0 {
+    let mut sum: u64 = 0
+    for i in 0u64..1000000000000u64 {
+      sum = int.wrapping_add(sum, i)
+    }
+    sum > 0
+  } else {
+    value.number * 100 > 0
+  }
+}
+
+@serializable
+type Entry {
+  name: String,
+  month: Month,
+}
+
+@serializable
+type Read = Db(store.TxError)
+
+fn entries(months: List[u8]) -> List[Entry] {
+  let mut out: List[Entry] = []
+  for m in months {
+    list.push(
+      mut out,
+      Entry(name: "an entry whose name the decode allocates", month: Month(number: m))
+    )
+  }
+  out
+}
+
+// Marks the store, then decodes `encoded`: the number of entries, or 0 when a check
+// rejected one.
+fn load(mut tx: store.Tx, info: store.CallInfo, encoded: Bytes) -> Result[u64, Read] {
+  store.tx_put(mut tx, b"seen", b"yes") ? Db
+  let decoded: Result[List[Entry], DecodeError] = codec.decode(encoded)
+  match decoded {
+    Ok(read) => Ok(list.len(read)),
+    Error(_) => Ok(0),
+  }
+}
+
+pub type Failed = Check | Store(store.StoreError)
+
+fn check(ok: bool) -> Result[(), Failed] {
+  if ok {
+    Ok(())
+  } else {
+    Error(Check())
+  }
+}
+
+fn faulted(r: Result[u64, store.TxFailure[Read]]) -> bool {
+  match r {
+    Error(Faulted(_)) => true,
+    _ => false,
+  }
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
+  let Ok(a) = io.authority(rt, "main") else {
+    return Error(Check())
+  }
+  let at = authority.floor(a)
+  let mut config = store.default_config()
+  config.energy = 100000
+  let mut s = store.open(a, config) ? Store
+  let first = store.snapshot(a, mut s, at) ? Store
+  let failing = codec.encode(entries([1, 2, 3, 1, 2]))
+  let failed: Result[u64, store.TxFailure[Read]] = store.transact(mut s, load, failing)
+  check(faulted(failed))?
+  let spinning = codec.encode(entries([1, 2, 0, 1, 2]))
+  let spun: Result[u64, store.TxFailure[Read]] = store.transact(mut s, load, spinning)
+  check(spun == Error(Limit(Energy())))?
+  // Neither committed.
+  let after = store.snapshot(a, mut s, at) ? Store
+  check(store.version(a, after) == store.version(a, first))?
+  check(store.get(take after, b"seen") == None())?
+  // The store is usable afterwards.
+  let good = codec.encode(entries([1, 2, 1, 2, 1]))
+  let ok: Result[u64, store.TxFailure[Read]] = store.transact(mut s, load, good)
+  check(ok == Ok(5))?
+  store.close(take s) ? Store
+  Ok(())
+}

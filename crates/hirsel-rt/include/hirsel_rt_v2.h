@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define HIRSEL_RT_V2_ABI_VERSION 111
+#define HIRSEL_RT_V2_ABI_VERSION 113
 /* TaskSpawn trailing flags: compiler proofs, ignored in ordered execution and replay. */
 #define HIRSEL_RT_V2_SPAWN_IMMEDIATE_AWAIT 1
 #define HIRSEL_RT_V2_SPAWN_OP_FREE 2
@@ -557,14 +557,15 @@ uint64_t hirsel_rt_v2_hash_finish(uint64_t state);
  *   CHECKED   check index into the codec's checks, value node at the same address: a checked
  *             opaque type (SER-1). After materializing, decode calls each check on its value,
  *             inner occurrences first; at the first verdict 0 it releases the value through the
- *             root descriptor and writes Error(Invalid). A check's failure status ends the run
- *             with its recorded failure and no cleanup (FAIL-3).
+ *             root descriptor and writes Error(Invalid). A check's failure status, or a refused
+ *             check entry, also releases the value, leaves `out` zeroed and makes codec_decode
+ *             return 1 with the failure recorded: the decode's failure edge (FAIL-3).
  * Every walk is iterative: no native stack depth follows the data. codec_encode reads the value at
  * `value` (the root node's layout) and writes a fresh Bytes slice of the envelope at `out`.
  * codec_decode reads the Bytes slice at `bytes`, validates the envelope and the whole payload
- * first, then writes Result[T, DecodeError] at `out`: Ok of fresh owned data, or Error of the
- * first malformation in reading order, or Error(Limit) past the reference's decode budgets. An
- * encode past them terminates environmentally. */
+ * first, then writes Result[T, DecodeError] at `out` and returns 0: Ok of fresh owned data, or
+ * Error of the first malformation in reading order, or Error(Limit) past the reference's decode
+ * budgets. An encode past them terminates environmentally. */
 #define HIRSEL_RT_V2_CODEC_VERSION 6
 #define HIRSEL_RT_V2_CODEC_NODE_SCALAR 0
 #define HIRSEL_RT_V2_CODEC_NODE_TEXT 1
@@ -601,7 +602,7 @@ typedef struct hirsel_rt_v2_codec {
     uint64_t form;
 } hirsel_rt_v2_codec;
 void hirsel_rt_v2_codec_encode(hirsel_rt_v2_ctx *ctx, const hirsel_rt_v2_codec *codec, const void *value, void *out);
-void hirsel_rt_v2_codec_decode(hirsel_rt_v2_ctx *ctx, const hirsel_rt_v2_codec *codec, const void *bytes, void *out);
+uint8_t hirsel_rt_v2_codec_decode(hirsel_rt_v2_ctx *ctx, const hirsel_rt_v2_codec *codec, const void *bytes, void *out);
 
 void hirsel_rt_v2_region_owner(hirsel_rt_v2_ctx *ctx, hirsel_rt_v2_region *region, hirsel_rt_v2_header *block, uint32_t index, uint64_t capacity, uint64_t align);
 

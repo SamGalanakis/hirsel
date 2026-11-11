@@ -64,9 +64,9 @@ regions and arenas opened inside are freed, and resource drops are the only user
 runs. A failure inside a drop abandons that drop and still releases its fields; if the drop
 belongs to a type declared in a package marked `unsafe ffi`, the process ends instead.
 A failure inside the check of a checked serializable type
-([SER-1](serialization.md#ser-1-serializable-schemas)) also ends the run at once, with
-that failure, its rule and its site, as the run's failure: the codec that called it
-cannot unwind, so no cleanup runs and no `task.isolate` catches it.
+([SER-1](serialization.md#ser-1-serializable-schemas)) is the failure of the decode that
+called it: the reconstructed value is released, and the failure unwinds from the decode
+like any other.
 
 The primary failure stays primary; failures during later cleanup extend its ordered cause
 chain. Cleanup continues across siblings after a failure in one of them. Shielding

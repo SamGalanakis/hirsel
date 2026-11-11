@@ -24,12 +24,13 @@ Invariants and boundary:
   a launched executable's bound run configuration) to `hirsel_rt_v2_main`, which loads it into
   a `Program`; a run's context reaches its own program's failure table, so runs of several
   programs share a process. A run's root task runs on a fiber, and Blocked, an adapter refusal,
-  a replay divergence, a codec limit and a failed serializable check are `Stop`s: the runtime's internal functions return
+  a replay divergence and a codec limit are `Stop`s: the runtime's internal functions return
   `Result<_, Stop>` up to the entry compiled code called, which switches back to the launcher's
   stack; the launcher abandons the run's fibers, destroys its context and receives a
-  `RunOutcome`; a failed check's `Stop::Failed` ends the run as a failed entry with the
-  check's recorded failure and no cleanup (FAIL-3); like a stopped run it is
-  abandoned, with no exit audit. Only the standalone launcher turns an outcome into a process exit status
+  `RunOutcome`; a `Stop::Failed` (a runner call's failed reply, a refused host wait)
+  ends the run as a failed entry with its recorded failure and no cleanup; like a stopped
+  run it is abandoned, with no exit audit. A failed serializable check is no stop:
+  `codec_decode` releases the value and returns a failure status (FAIL-3). Only the standalone launcher turns an outcome into a process exit status
   (`RunOutcome::exit_code`). Invariant faults, host exhaustion, PROG-4 violations, stack
   overflow and a stop inside a foreign call still end the process.
 - A `host::Host` admits a bound run once (`Host::admit`: grants, mounts, revocations, clock and

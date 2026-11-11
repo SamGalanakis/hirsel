@@ -153,10 +153,13 @@ fn decode(cx: &mut ImportCx<'_>, call: &CallShape<'_>, form: CodecForm) -> R<boo
     let value = cx.operand(&argument.value)?;
     let codec = cx.codec(plan);
     let result = cx.fresh(result_layout);
+    // A failing check fails the call (FAIL-3): the TIR call's own failure edge.
+    let failure = cx.failure(None)?;
     cx.push(Inst::Decode {
         result,
         value,
         codec,
+        failure,
     });
     cx.consumed(value);
     cx.finish(call, result)?;

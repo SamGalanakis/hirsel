@@ -171,10 +171,22 @@ fn decode(b: &mut Body<'_, '_>, ty: TypeId, bytes: AddressId) -> R<ValueId> {
     let codec = push_codec(b, plan);
     let (value, loan) = b.borrow(bytes, false)?;
     let decoded = b.fresh(result);
+    // `body_plan` refuses a checked type here, so this edge is never taken. It ends the
+    // loan on `bytes` before the body's cleanup, as an invocation's failure edge does.
+    let failure = b.failure(None);
+    let at = b.current();
+    let ending = b.block(BlockKind::FailureCleanup, &[]);
+    b.at(ending);
+    b.end_loan(loan);
+    let tail = b.ed.unit.tables.failures[failure.index()].cleanup;
+    b.terminate(Terminator::Jump(tail));
+    b.at(at);
+    let failure = b.failure_to(ending, &[], None);
     b.push(Inst::Decode {
         result: decoded,
         value,
         codec,
+        failure,
     });
     b.end_loan(loan);
     let (slot, address) = local(b, decoded)?;

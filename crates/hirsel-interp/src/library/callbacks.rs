@@ -558,10 +558,8 @@ impl Library {
         if let Pending::Cpu(batch) = pending {
             return self.cpu_resume(*batch, result, arguments, context);
         }
-        // FAIL-3: a failing check ends the run where it stands; the codec cannot unwind.
-        if let (Pending::Check { .. }, OperationResult::Failed(failure)) = (&pending, &result) {
-            return Err(Error::Ended(failure.clone()));
-        }
+        // A failing check fails the decode, which unwinds like any failed call (FAIL-3); the
+        // decoded value is dropped with `pending`.
         if let OperationResult::Failed(failure) = result {
             return Ok(OperationResult::Failed(failure));
         }

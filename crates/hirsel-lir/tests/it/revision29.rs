@@ -374,12 +374,14 @@ fn decode(m: Mutant) -> Vec<K> {
     let abi = t.abi(&[(Passing::Borrow, operand)], Some(produced));
     t.builder.unit.header.abi = abi;
     let r = t.plain(produced);
+    let failure = t.fails();
     t.builder.push(
         ENTRY,
         Inst::Decode {
             result: r,
             value: x,
             codec: CodecId(0),
+            failure,
         },
     );
     t.builder.ret(ENTRY, Some(r));

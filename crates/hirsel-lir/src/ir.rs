@@ -896,11 +896,17 @@ pub enum Inst {
     /// validated completely against the plan's descriptor and schema, then
     /// either `Ok` of a fresh owned value of the plan's root layout or `Error`
     /// of the first `DecodeError` in reading order, at the plan's result
-    /// layout. Nothing partially decoded exists; it cannot fail.
+    /// layout. Nothing partially decoded exists.
+    ///
+    /// It fails when one of the plan's checks fails (LIR schema revision 69):
+    /// the runtime has recorded that failure and released the decoded value
+    /// whole before it takes `failure`, so `result` is never defined there and
+    /// nothing the instruction made is live on the edge.
     Decode {
         result: ValueId,
         value: ValueId,
         codec: CodecId,
+        failure: FailureId,
     },
     /// The same borrowed block reference at another payload layout. Exactly
     /// one of the operand's and the result's layouts is the cursor's opaque
@@ -2230,6 +2236,7 @@ impl Inst {
             | Inst::Binary { failure, .. }
             | Inst::Compare { failure, .. }
             | Inst::Hash { failure, .. }
+            | Inst::Decode { failure, .. }
             | Inst::Check { failure, .. }
             | Inst::Charge { failure, .. }
             | Inst::Address { failure, .. }
@@ -2273,7 +2280,6 @@ impl Inst {
             | Inst::FlatField { .. }
             | Inst::FlatClose { .. }
             | Inst::Encode { .. }
-            | Inst::Decode { .. }
             | Inst::CopyValue { .. }
             | Inst::Recast { .. }
             | Inst::Freeze { .. }
@@ -2317,6 +2323,7 @@ impl Inst {
             | Inst::Binary { failure, .. }
             | Inst::Compare { failure, .. }
             | Inst::Hash { failure, .. }
+            | Inst::Decode { failure, .. }
             | Inst::Check { failure, .. }
             | Inst::Charge { failure, .. }
             | Inst::Address { failure, .. }
@@ -2360,7 +2367,6 @@ impl Inst {
             | Inst::FlatField { .. }
             | Inst::FlatClose { .. }
             | Inst::Encode { .. }
-            | Inst::Decode { .. }
             | Inst::CopyValue { .. }
             | Inst::Recast { .. }
             | Inst::Freeze { .. }
@@ -2569,15 +2575,21 @@ impl Inst {
                 result,
                 value,
                 codec,
-            }
-            | Self::Decode {
-                result,
-                value,
-                codec,
             } => {
                 f(R::Value(result));
                 f(R::Value(value));
                 f(R::Codec(codec));
+            }
+            Self::Decode {
+                result,
+                value,
+                codec,
+                failure,
+            } => {
+                f(R::Value(result));
+                f(R::Value(value));
+                f(R::Codec(codec));
+                f(R::Failure(failure));
             }
             Self::SeqReserve {
                 address,
@@ -3614,7 +3626,7 @@ snapshot_enum!(Inst {
     FlatClose { address, construct, field, version },
     Hash { result, value, layout, failure },
     Encode { result, value, codec },
-    Decode { result, value, codec },
+    Decode { result, value, codec, failure },
     Recast { result, value },
     CopyValue { result, value },
     UniqueCopy { result, value, construct, deep, failure },

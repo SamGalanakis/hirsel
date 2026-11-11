@@ -1742,7 +1742,9 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 self.define(result, thawed)
             }
             // The runtime walks the operand in place against the unit's codec
-            // program and writes the produced value into a slot of its layout.
+            // program and writes the produced value into a slot of its layout. A
+            // decode whose check failed has released what it decoded and recorded
+            // the failure: its status takes the failure edge, `result` unloaded.
             Inst::Encode {
                 result,
                 value,
@@ -1752,10 +1754,11 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 result,
                 value,
                 codec,
+                ..
             } => {
-                let entry = match inst {
-                    Inst::Encode { .. } => RuntimeEntry::CodecEncode,
-                    _ => RuntimeEntry::CodecDecode,
+                let (entry, failure) = match *inst {
+                    Inst::Decode { failure, .. } => (RuntimeEntry::CodecDecode, Some(failure)),
+                    _ => (RuntimeEntry::CodecEncode, None),
                 };
                 let codec = self.codec(codec)?;
                 let layout = self.value_type(value)?.layout;
@@ -1765,8 +1768,12 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 let produced = self.value_type(result)?.layout;
                 let out = self.stack(produced)?;
                 let call = self.runtime(entry)?;
-                self.builder
+                let status = self
+                    .builder
                     .call(call, &[self.context, codec, at.ptr, out.ptr]);
+                if let Some(failure) = failure {
+                    self.status_guard(status, failure)?;
+                }
                 let value = self.load(self.layout_shape(produced)?, out);
                 self.define(result, value)
             }

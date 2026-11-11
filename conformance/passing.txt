@@ -1275,7 +1275,7 @@ conformance/FAIL/FAIL-3-pqcombined-push-pop-first-fail.hir
 conformance/FAIL/FAIL-3-pqcombined-push-pop-late-fail.hir
 conformance/FAIL/FAIL-3-pqcombined-replace-first-fail.hir
 conformance/FAIL/FAIL-3-pqcombined-replace-late-fail.hir
-conformance/FAIL/FAIL-3-serializable-check-fail.hir
+conformance/FAIL/FAIL-3-serializable-check-unwinds-run.hir
 conformance/FAIL/FAIL-3-sorted-insert-taken-callback.hir
 conformance/FAIL/FAIL-3-std-priority-queue-fail.hir
 conformance/FAIL/FAIL-3-std-priority-queue-pop-fail.hir
@@ -7493,6 +7493,7 @@ conformance/STORE/STORE-11-crash-cuts-crash-run.hir
 conformance/STORE/STORE-11-crash-cuts-fail-run.hir
 conformance/STORE/STORE-11-crash-cuts-lose-run.hir
 conformance/STORE/STORE-11-crash-cuts-tear-run.hir
+conformance/STORE/STORE-11-decode-check-run.hir
 conformance/STORE/STORE-11-energy-drop-run.hir
 conformance/STORE/STORE-11-energy-grant-bad.hir
 conformance/STORE/STORE-11-energy-run.hir

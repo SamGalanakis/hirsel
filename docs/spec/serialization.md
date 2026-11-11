@@ -51,8 +51,8 @@ are values of `T`. Encoding never calls it. Decoding reconstructs the whole valu
 calls `f` once for every occurrence of `T` in it, an inner occurrence before the one that
 holds it and otherwise in the order of their encodings. The first `false` releases the
 reconstructed value and returns `Error(Invalid)`, so no unchecked value is ever exposed.
-`f` should be total: a failure inside it ends the run
-([FAIL-3](failure.md#fail-3-what-runs)). A checked opaque type has no structural
+A failure inside `f` releases the reconstructed value and fails the decode with that
+failure, which unwinds from it ([FAIL-3](failure.md#fail-3-what-runs)). A checked opaque type has no structural
 `serializable` bound of its own, and a same-named type without the opt-in gets no codec.
 
 ```hirsel

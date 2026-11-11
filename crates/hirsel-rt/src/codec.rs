@@ -1166,17 +1166,28 @@ enum Put {
     Check(usize, *const u8),
 }
 
+/// What a decode's check pass found (SER-1).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Verdict {
+    /// Every check admitted its occurrence.
+    Admitted,
+    /// A check returned false.
+    Rejected,
+    /// A check failed, or its entry was refused; the failure is recorded.
+    Failed,
+}
+
 /// Append the SER-2 payload of the value at `value` to `s.out`. With `checks`, a decode's
 /// check pass over the value it reconstructed: it also calls each checked node's check,
-/// inner occurrences first and otherwise in encoding order, and is false at the first
-/// rejection (SER-1).
+/// inner occurrences first and otherwise in encoding order, and stops at the first check
+/// that does not admit its occurrence (SER-1).
 unsafe fn encode_payload(
     ctx: *mut TaskCtx,
     program: Program<'_>,
     value: *const u8,
     checks: Option<&[CheckThunk]>,
     s: &mut Scratch,
-) -> Stopped<bool> {
+) -> Stopped<Verdict> {
     let Scratch {
         out,
         put: work,
@@ -1211,8 +1222,9 @@ unsafe fn encode_payload(
                     .unwrap_or_else(|| fault("a codec check outside the codec's checks"));
                 let mut verdict = 0u8;
                 // SAFETY: the check borrows the reconstructed value at `at`, of its layout.
+                // A refused entry has recorded LANG-10.
                 if unsafe { crate::depth::enter_callback(ctx) } != crate::STATUS_OK {
-                    return Err(Stop::Failed);
+                    return Ok(Verdict::Failed);
                 }
                 // SAFETY: successful admission retains the borrowed occurrence;
                 // the thunk returns only after its ordinary cleanup.
@@ -1223,10 +1235,10 @@ unsafe fn encode_payload(
                 }
                 match (status, verdict) {
                     (crate::STATUS_OK, 1) => (),
-                    (crate::STATUS_OK, 0) => return Ok(false),
+                    (crate::STATUS_OK, 0) => return Ok(Verdict::Rejected),
                     (crate::STATUS_OK, _) => fault("a codec check verdict that is not a bool"),
-                    // FAIL-3: the codec cannot unwind, so the check's failure ends the run.
-                    _ => return Err(Stop::Failed),
+                    // The check recorded its failure; the decode fails (FAIL-3).
+                    _ => return Ok(Verdict::Failed),
                 }
             }
             Put::Boxed => charge(1)?,
@@ -1373,7 +1385,7 @@ unsafe fn encode_payload(
     if (out.len() - base) as u64 > LIMIT_BYTES {
         return Err(budget());
     }
-    Ok(true)
+    Ok(Verdict::Admitted)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1601,7 +1613,7 @@ unsafe fn encode(
                 s.out.extend_from_slice(&[0; 8]);
             }
             let start = s.out.len();
-            if !encode_payload(ctx, program, value.cast(), None, s)? {
+            if encode_payload(ctx, program, value.cast(), None, s)? != Verdict::Admitted {
                 fault("an encoding rejected by a check");
             }
             if form == Form::Envelope {
@@ -2193,8 +2205,11 @@ unsafe fn materialize(
 }
 
 /// `codec.decode` (LIR schema revision 29): validate the Bytes slice at `bytes` completely,
-/// then write `Ok` of fresh owned data or `Error` of its first `DecodeError` at `out`. It cannot
-/// fail; past the reference's operational budgets the run stops environmentally.
+/// then write `Ok` of fresh owned data or `Error` of its first `DecodeError` at `out` and return
+/// `STATUS_OK`. Since LIR revision 69 it fails when a check fails or its entry is refused: the
+/// decoded value is released whole first, `out` is left zeroed, and it returns
+/// `STATUS_FAILURE` with the failure recorded (FAIL-3). Past the reference's operational budgets
+/// the run stops environmentally.
 ///
 /// # Safety
 /// `ctx` is a live run context, `codec` a compiler-emitted codec, `bytes` a live Bytes value of
@@ -2205,7 +2220,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_codec_decode(
     codec: *const Codec,
     bytes: *const c_void,
     out: *mut c_void,
-) {
+) -> u8 {
     // SAFETY: this semantic entry owns its task until it suspends or returns.
     let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
     // SAFETY: caller contract; the decoder's own storage is dropped before a stop.
@@ -2218,7 +2233,7 @@ unsafe fn decode(
     bytes: *const c_void,
     out: *mut c_void,
     s: &mut Scratch,
-) -> Stopped<()> {
+) -> Stopped<u8> {
     unsafe {
         let (program, form, descriptor, checks) = program(codec);
         let input = text_bytes(&program.bytes(), bytes.cast());
@@ -2247,10 +2262,12 @@ unsafe fn decode(
                 materialize(ctx, program, payload, value, s);
                 match program.root_descriptor {
                     None => Ok(()),
-                    // SER-1: every check admits its occurrence, or the value is released.
+                    // SER-1: every check admits its occurrence, or the value is released,
+                    // here and only here; decoded types are inert, so no finalizer runs.
                     Some(index) => {
                         s.out.clear();
-                        if encode_payload(ctx, program, value, Some(checks), s)? {
+                        let verdict = encode_payload(ctx, program, value, Some(checks), s)?;
+                        if verdict == Verdict::Admitted {
                             Ok(())
                         } else {
                             let mut cleanup =
@@ -2268,6 +2285,9 @@ unsafe fn decode(
                                 fault("a decoded value's release failed");
                             }
                             std::ptr::write_bytes(out, 0, program.out_size as usize);
+                            if verdict == Verdict::Failed {
+                                return Ok(crate::STATUS_FAILURE);
+                            }
                             Err(DecodeError::Invalid)
                         }
                     }
@@ -2289,5 +2309,5 @@ unsafe fn decode(
             }
         }
     }
-    Ok(())
+    Ok(crate::STATUS_OK)
 }

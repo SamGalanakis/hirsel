@@ -2151,6 +2151,7 @@ impl<S: Stage> Checker<'_, '_, S> {
                 result,
                 value,
                 codec,
+                ..
             } => {
                 // An unknown codec is the identity check's violation.
                 if let Some(plan) = unit.tables.codecs.get(codec.index()) {

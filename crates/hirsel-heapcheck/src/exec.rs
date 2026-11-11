@@ -134,9 +134,18 @@ fn returning(normal: Option<EdgeId>) -> Checked<EdgeId> {
 enum After {
     Next,
     Exhausted,
-    Operation { normal: Option<EdgeId> },
-    Reset { result: ValueId, token: TokenId },
-    RegionExit { region: usize },
+    /// The instruction failed with its failure recorded: take its failure edge.
+    Failed,
+    Operation {
+        normal: Option<EdgeId>,
+    },
+    Reset {
+        result: ValueId,
+        token: TokenId,
+    },
+    RegionExit {
+        region: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -340,9 +349,6 @@ pub(crate) struct Machine<'p, S> {
     roots: BTreeMap<u64, Held>,
     forgotten: Snapshot<Held>,
     finished: Option<Finished>,
-    /// A failure ended the run where it stood (FAIL-3: a serializable check's failure):
-    /// nothing is cleaned up, so the terminal audit does not run.
-    ended: bool,
     terminal: Option<Observation>,
     word: u64,
     /// Nesting of loan re-resolution: a loan whose address reads a value
@@ -483,7 +489,6 @@ impl<'p, S: Stage> Machine<'p, S> {
             roots: BTreeMap::new(),
             forgotten: Default::default(),
             finished: None,
-            ended: false,
             terminal: None,
             word: u64::from(program.target.pointer_bytes),
             resolving: 0,
@@ -3713,9 +3718,6 @@ impl<'p, S: Stage> Machine<'p, S> {
                         return Err(v);
                     }
                 };
-                if self.ended {
-                    return Ok(false);
-                }
                 match control {
                     Control::Continue => self.stack.push(Activity::Frame(f)),
                     Control::Push(next) => {
@@ -5235,6 +5237,7 @@ impl<'p, S: Stage> Machine<'p, S> {
                 result,
                 value,
                 codec,
+                ..
             } => {
                 let plan = u
                     .tables
@@ -5276,7 +5279,8 @@ impl<'p, S: Stage> Machine<'p, S> {
                     )?;
                     let (unit, occurrence) = pending.pop().expect("a check");
                     let Some(frame) = self.check_frame(f, unit, occurrence)? else {
-                        return Ok(Control::Continue);
+                        let release = self.check_failed(f, held, layout)?;
+                        return Ok(Control::Push(Activity::Drain(release)));
                     };
                     f.resume = Resume::Checks {
                         result,
@@ -9683,11 +9687,40 @@ impl<'p, S: Stage> Machine<'p, S> {
     }
 
     /// Checked serialization cannot unwind into ordinary language cleanup.
-    fn fatal_check(&mut self) {
-        self.stack.clear();
-        self.tasks = None;
-        self.finished = Some(Finished::Failed);
-        self.ended = true;
+    /// A decode's check failed, or its entry was refused, with the failure recorded: the
+    /// decoded value in `held` is released whole, then the decode takes its failure edge
+    /// (FAIL-3). `result` is never defined. Returns the release, to run above `caller`.
+    fn check_failed(&mut self, caller: &mut Frame, held: Ptr, layout: LayoutId) -> Checked<Drain> {
+        let unit = self.unit(caller.unit);
+        let Some(&Inst::Decode { failure, .. }) = self
+            .pool(
+                unit.blocks[caller.block.index()].instructions,
+                &unit.instructions,
+            )?
+            .get(caller.statement as usize)
+        else {
+            return fail(V::Malformed, "codec checks resumed off their decode");
+        };
+        caller.resume = Resume::Drain {
+            after: After::Failed,
+            failure: Some(failure),
+        };
+        Ok(Drain {
+            caller: None,
+            operation: None,
+            work: vec![
+                Work::Death {
+                    alloc: held.alloc,
+                    raw: None,
+                },
+                Work::DropAt {
+                    at: held,
+                    layout,
+                    mask: None,
+                },
+            ],
+            failed: false,
+        })
     }
 
     /// A frame calling a decode's check (SER-1) on a copy of the occurrence it borrows.
@@ -9704,7 +9737,6 @@ impl<'p, S: Stage> Machine<'p, S> {
             .unwrap_or((caller.caller, caller.operation));
         let Some(cleanup) = self.admit_invocation(caller) else {
             self.record_sites("LANG-10", sites.0, sites.1, caller.unit, true);
-            self.fatal_check();
             return Ok(None);
         };
         let [p] = self.unit(unit).parameters.as_slice() else {
@@ -9745,9 +9777,12 @@ impl<'p, S: Stage> Machine<'p, S> {
             Exit::RejectTransfer(_) => {
                 return fail(V::FrameImbalance, "codec check returned private status 3");
             }
-            // FAIL-3: the codec cannot unwind, so the check's failure ends the run.
+            // The check recorded its failure: the decode fails.
             Exit::Fail => {
-                self.fatal_check();
+                let ty = self.value_type(caller.unit, result)?;
+                let release = self.check_failed(&mut caller, held, ty.layout)?;
+                self.stack.push(Activity::Frame(caller));
+                self.stack.push(Activity::Drain(release));
                 return Ok(());
             }
             Exit::Return(Some((
@@ -9766,6 +9801,9 @@ impl<'p, S: Stage> Machine<'p, S> {
         let ty = self.value_type(caller.unit, result)?;
         if verdict && let Some((unit, occurrence)) = pending.pop() {
             let Some(frame) = self.check_frame(&caller, unit, occurrence)? else {
+                let release = self.check_failed(&mut caller, held, ty.layout)?;
+                self.stack.push(Activity::Frame(caller));
+                self.stack.push(Activity::Drain(release));
                 return Ok(());
             };
             caller.resume = Resume::Checks {
@@ -10101,6 +10139,16 @@ impl<'p, S: Stage> Machine<'p, S> {
                 "drain finished under a frame that is not waiting",
             );
         };
+        if matches!(after, After::Failed) {
+            self.take_failure(
+                &mut f,
+                failure
+                    .ok_or_else(|| err(V::Malformed, "a failed instruction without its edge"))?,
+                false,
+            )?;
+            self.stack.push(Activity::Frame(f));
+            return Ok(());
+        }
         if matches!(after, After::Exhausted) {
             self.unwind(
                 &mut f,
@@ -10129,7 +10177,7 @@ impl<'p, S: Stage> Machine<'p, S> {
         let site = self.site(&f);
         let result: Checked<()> = (|| {
             match after {
-                After::Operation { .. } | After::Exhausted => unreachable!(),
+                After::Operation { .. } | After::Exhausted | After::Failed => unreachable!(),
                 After::Next => {}
                 After::Reset { result, token } => {
                     if d.failed {
@@ -10945,9 +10993,6 @@ impl<'p, S: Stage> Machine<'p, S> {
             signaled: None,
         };
         self.terminal = Some(observation);
-        if self.ended {
-            return Ok(());
-        }
         if let Finished::Returned(Some((held, layout, _))) = finished
             && held.credits > 0
             && self.carries(&held.val)
@@ -10991,10 +11036,7 @@ impl<'p, S: Stage> Machine<'p, S> {
         // Returned-value finalizers may fail during the harness drain.
         observation.failures = self.failures.clone();
         observation.output = self.output.clone();
-        // A run that ended where it stood is discarded whole, as its runtime context is.
-        if !self.ended {
-            self.audit()?;
-        }
+        self.audit()?;
         Ok((observation, self.ledger.exemptions.clone()))
     }
 

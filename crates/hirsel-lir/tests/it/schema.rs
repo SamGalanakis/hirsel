@@ -1146,6 +1146,7 @@ fn fixture_unit<S: Stage>(table: &LayoutTable) -> LirUnit<S> {
         result: v(65),
         value: v(64),
         codec: CodecId(0),
+        failure: f,
     });
     // LIR schema revision 32.
     insts.push(Inst::IsWritable {

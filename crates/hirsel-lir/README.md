@@ -480,7 +480,9 @@ LIR revision 39 adds `CodecNode::Checked { layout, check, value }` and
 and decoding calls `checks[check]`, a unit function symbol at a `fn(value: T) -> bool`
 FnAbi borrowing that layout, on every reconstructed occurrence, inner ones first. The
 first `false` releases the value and decodes to `DecodeError.Invalid`, the eleventh
-`DECODE_ERRORS` arm; a failing check ends the run (FAIL-3). C holds the node to a
+`DECODE_ERRORS` arm. A failing (or refused) check releases the value too, and the
+decode takes its `failure` edge with the failure recorded and `result` undefined
+(revision 69; FAIL-3). C holds the node to a
 record or variant child at its own layout and the check to that exact FnAbi, and an
 encode plan to no checks; `tests/it/revision29.rs` retains the hand-built twins.
 

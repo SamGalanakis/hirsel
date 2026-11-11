@@ -628,7 +628,9 @@ impl FnEmitter<'_, '_, '_> {
                 self.rt(RuntimeEntry::Free, &[context, block])?;
                 self.define(result, thawed)
             }
-            // SER-2: the runtime walks the plan; neither can fail.
+            // SER-2: the runtime walks the plan. A decode whose check failed has
+            // released what it decoded and recorded the failure: its status takes the
+            // failure edge, `result` unloaded.
             Inst::Encode {
                 result,
                 value,
@@ -638,10 +640,11 @@ impl FnEmitter<'_, '_, '_> {
                 result,
                 value,
                 codec,
+                ..
             } => {
-                let entry = match inst {
-                    Inst::Encode { .. } => RuntimeEntry::CodecEncode,
-                    _ => RuntimeEntry::CodecDecode,
+                let (entry, failure) = match *inst {
+                    Inst::Decode { failure, .. } => (RuntimeEntry::CodecDecode, Some(failure)),
+                    _ => (RuntimeEntry::CodecEncode, None),
                 };
                 let codec = self.codec(codec)?;
                 let layout = self.value_type(value)?.layout;
@@ -652,7 +655,13 @@ impl FnEmitter<'_, '_, '_> {
                 let produced = self.value_type(result)?.layout;
                 let out = self.stack(produced)?;
                 let context = self.context;
-                self.rt(entry, &[context, codec, at.ptr, out.ptr])?;
+                let status = self.rt(entry, &[context, codec, at.ptr, out.ptr])?;
+                if let Some(failure) = failure {
+                    let Some(status) = status else {
+                        return self.invalid("codec_decode without a status");
+                    };
+                    self.status_guard(status, failure)?;
+                }
                 let shape = self.layout_shape(produced)?;
                 let value = self.load(shape, out);
                 self.define(result, value)

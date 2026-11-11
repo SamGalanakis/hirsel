@@ -335,3 +335,221 @@ pub fn root() -> u64 { let e: Entry[fn(c: (), n: u64, m: u64) -> u64] = count
         );
     }
 }
+
+/// The charged instance of `name` lowered from `source`, which forms it as an
+/// `Entry` so lowering charges it.
+fn charged_unit(source: &str, name: &str) -> LirUnit<Value> {
+    let (_, lowered) = lower_valid(source);
+    crate::rc_support::instances_of(&lowered, name)
+        .into_iter()
+        .map(|id| lowered.units[id.index()].clone())
+        .find(|unit| unit.header.charged)
+        .expect("the Entry formation charges the function")
+}
+
+/// `unit`'s blocks reached in one step from `block`.
+fn successors(unit: &LirUnit<Value>, block: usize) -> Vec<usize> {
+    unit.terminators[block]
+        .normal_edges(&unit.pools)
+        .iter()
+        .map(|e| unit.tables.edges[e.index()].target.index())
+        .collect()
+}
+
+/// Whether some cycle of `unit` passes `block` and avoids every block in `cut`.
+fn on_cycle_avoiding(unit: &LirUnit<Value>, block: usize, cut: &[usize]) -> bool {
+    let mut seen = vec![false; unit.blocks.len()];
+    let mut pending = successors(unit, block);
+    while let Some(b) = pending.pop() {
+        if b == block {
+            return true;
+        }
+        if cut.contains(&b) || std::mem::replace(&mut seen[b], true) {
+            continue;
+        }
+        pending.extend(successors(unit, b));
+    }
+    false
+}
+
+/// The blocks of `unit` holding a charge of `kind`.
+fn charged_blocks(unit: &LirUnit<Value>, kind: fn(&Energy) -> bool) -> Vec<usize> {
+    (0..unit.blocks.len())
+        .filter(|&b| {
+            unit.blocks[b]
+                .instructions
+                .get(&unit.instructions)
+                .unwrap()
+                .iter()
+                .any(|i| matches!(i, Inst::Charge { energy, .. } if kind(energy)))
+        })
+        .collect()
+}
+
+/// `unit` with the charges of `block` removed.
+fn uncharge(unit: &LirUnit<Value>, block: usize) -> LirUnit<Value> {
+    let mut out = unit.clone();
+    let kept: Vec<_> = out.blocks[block]
+        .instructions
+        .get(&out.instructions)
+        .unwrap()
+        .iter()
+        .filter(|i| !matches!(i, Inst::Charge { .. }))
+        .cloned()
+        .collect();
+    let start = out.instructions.len() as u32;
+    out.instructions.extend(kept);
+    out.blocks[block].instructions = PoolRange::new(start, out.instructions.len() as u32 - start);
+    out
+}
+
+#[test]
+fn a_self_tail_loop_is_paid_by_its_entry_charge_on_every_trip() {
+    // A self tail call becomes a loop whose header is the body's entry
+    // block, which holds the entry charge: every trip passes it, as every
+    // activation would (std ordered_map `find`, which STORE-3 reaches).
+    let unit = charged_unit(
+        r#"fn step(x: u64) -> u64 { x + 1u64 }
+pub fn down(c: (), n: u64, acc: u64) -> u64 {
+  if n == 0u64 { return acc }
+  down(c, n - 1u64, step(acc))
+}
+pub fn root() -> u64 { let e: Entry[fn(c: (), n: u64, acc: u64) -> u64] = down
+ 0 }"#,
+        "down",
+    );
+    let entry = charged_blocks(&unit, |e| matches!(e, Energy::Entry));
+    assert_eq!(entry.len(), 1, "one entry charge");
+    assert!(
+        on_cycle_avoiding(&unit, entry[0], &[]),
+        "the entry charge is on the tail loop"
+    );
+    assert_eq!(hirsel_lir::energy::check(&unit), Ok(()));
+    // The same loop without its entry charge pays nothing per trip.
+    assert!(hirsel_lir::energy::check(&uncharge(&unit, entry[0])).is_err());
+}
+
+#[test]
+fn a_cycle_charged_on_one_arm_only_is_refused() {
+    let unit = charged_unit(
+        r#"fn step(x: u64) -> u64 { x + 1u64 }
+pub fn walk(c: (), n: u64, m: u64) -> u64 {
+  let mut i = 0u64
+  let mut s = step(m)
+  while i < n {
+    if i < m { s = s + i } else { s = s * m }
+    i = i + 1u64
+  }
+  s
+}
+pub fn root() -> u64 { let e: Entry[fn(c: (), n: u64, m: u64) -> u64] = walk
+ 0 }"#,
+        "walk",
+    );
+    assert_eq!(hirsel_lir::energy::check(&unit), Ok(()));
+    let header = charged_blocks(&unit, |e| matches!(e, Energy::Iteration));
+    assert_eq!(header.len(), 1, "one iteration charge");
+    let bare = uncharge(&unit, header[0]);
+    // The loop's two arms: both targets of a branch on the loop.
+    let arms = (0..unit.blocks.len())
+        .map(|b| successors(&unit, b))
+        .find(|s| s.len() == 2 && s.iter().all(|&a| on_cycle_avoiding(&unit, a, &[])))
+        .expect("a branch inside the loop");
+    for &arm in &arms {
+        assert!(
+            on_cycle_avoiding(&unit, header[0], &[arm]),
+            "a cycle avoids each arm"
+        );
+        let one = charge(&bare, arm, Energy::Iteration);
+        assert!(
+            hirsel_lir::energy::check(&one).is_err(),
+            "accepted a loop with one arm uncharged"
+        );
+    }
+    let both = charge(
+        &charge(&bare, arms[0], Energy::Iteration),
+        arms[1],
+        Energy::Iteration,
+    );
+    assert_eq!(hirsel_lir::energy::check(&both), Ok(()));
+}
+
+#[test]
+fn a_nested_loop_whose_inner_cycle_is_uncharged_is_refused() {
+    let unit = charged_unit(
+        r#"fn step(x: u64) -> u64 { x + 1u64 }
+pub fn grid(c: (), n: u64, m: u64) -> u64 {
+  let mut i = 0u64
+  let mut s = step(m)
+  while i < n {
+    let mut j = 0u64
+    while j < m { s = s + j; j = j + 1u64 }
+    i = i + 1u64
+  }
+  s
+}
+pub fn root() -> u64 { let e: Entry[fn(c: (), n: u64, m: u64) -> u64] = grid
+ 0 }"#,
+        "grid",
+    );
+    assert_eq!(hirsel_lir::energy::check(&unit), Ok(()));
+    let headers = charged_blocks(&unit, |e| matches!(e, Energy::Iteration));
+    assert_eq!(headers.len(), 2, "both loops charge each trip");
+    // Removing a loop's charge leaves the unit paid exactly when every cycle
+    // through that block passes the other charge; the inner loop's cycle
+    // avoids the outer charge, so removing the inner charge is refused.
+    let mut refused = 0;
+    for &h in &headers {
+        let other = *headers.iter().find(|&&o| o != h).unwrap();
+        let unpaid = on_cycle_avoiding(&unit, h, &[other]);
+        refused += usize::from(unpaid);
+        assert_eq!(
+            hirsel_lir::energy::check(&uncharge(&unit, h)).is_err(),
+            unpaid,
+            "block {h}: a cycle through it avoids the other charge: {unpaid}"
+        );
+    }
+    assert!(
+        refused >= 1,
+        "the inner loop's cycle avoids the outer charge"
+    );
+}
+
+#[test]
+fn a_charged_copy_whose_push_uses_reserved_room_needs_no_entry_charge() {
+    // std `bytes.from_inline`, which STORE-3 reaches: FACT-3 retargets its
+    // push into reserved room to `$native.list_push_spare`, still the leaf
+    // `list.push` that lowering saw, so the unit makes no call that adds an
+    // activation and carries no entry charge.
+    let (_, lowered) = crate::rc_support::lower(
+        r#"pub fn inlined[n: size](xs: Inline[u8, n]) -> unique Bytes uses {} {
+  let mut out: List[u8] = []
+  core@1/list.reserve(mut out, n)
+  for b in xs {
+    core@1/list.push(mut out, b)
+  }
+  core@1/bytes.from_list(take out)
+}
+pub fn spill(c: (), n: u64, m: u64) -> u64 {
+  let xs: Inline[u8, 4] = [1u8; 4]
+  let b = inlined(xs)
+  bytes.len(b)
+}
+pub fn root() -> u64 { let e: Entry[fn(c: (), n: u64, m: u64) -> u64] = spill
+ 0 }"#,
+    );
+    let unit = crate::rc_support::instances_of(&lowered, "inlined")
+        .into_iter()
+        .map(|id| &lowered.units[id.index()])
+        .find(|unit| unit.header.charged)
+        .expect("the charged spill charges inlined");
+    let spare = unit.tables.calls.iter().any(|call| match call.callee {
+        Callee::Direct(s) => unit.tables.symbols[s.index()]
+            .definition
+            .is_core("$native.list_push_spare"),
+        _ => false,
+    });
+    assert!(spare, "the push is retargeted to the reserved room");
+    assert!(charged_blocks(unit, |e| matches!(e, Energy::Entry)).is_empty());
+    assert_eq!(hirsel_lir::energy::check(unit), Ok(()));
+}

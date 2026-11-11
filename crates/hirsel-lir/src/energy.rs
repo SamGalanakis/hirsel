@@ -44,13 +44,19 @@ pub fn strip<S: crate::stage::Stage>(
 /// Whether a charged unit carries every charge the charging rule requires,
 /// and only those, and names only charged code (STORE-11 energy).
 ///
-/// - An `Entry` charge sits on the straight jump path from the unit's entry,
-///   off every cycle, with no call admission, call or cycle before it. There
-///   is at most one, and one whenever the unit can transfer control to
-///   another unit by any call (see `transfers`).
-/// - Every cycle passes through an `Iteration` charge, and every `Iteration`
-///   charge is on a cycle, except a counted loop's back edge, which the
-///   loop's one `Span` charge at entry pays for (`counted_loop`).
+/// - There is at most one `Entry` charge, and one whenever the unit can
+///   transfer control to another unit by any call (see `transfers`). It
+///   precedes every call: no path from the unit's entry reaches a call or a
+///   call admission without passing it.
+/// - No cycle avoids every charge: with the blocks holding an `Iteration` or
+///   the `Entry` charge removed as cut points, the control-flow graph is
+///   acyclic, except for a counted loop's back edge, which the loop's one
+///   `Span` charge at entry pays for (`counted_loop`). A charge in a block
+///   runs on every pass through it, so a cut block charges every trip around
+///   any cycle through it. An `Entry` charge inside a cycle (a self-tail
+///   loop, whose header is the body's entry block) so pays one unit per
+///   activation, and a loop with some path around it uncharged is refused.
+///   Every `Iteration` charge is on a cycle.
 /// - Every function and constant it names is charged, unless the target can
 ///   never have a charged instance: a `core@1` definition (runtime operations
 ///   and LIR-built library bodies, which carry their own size charges). An
@@ -133,34 +139,46 @@ pub fn check<S: crate::stage::Stage>(unit: &crate::ir::LirUnit<S>) -> Result<(),
         ));
     }
     if entries == 1 {
-        let mut at = unit.entry.index();
+        // The blocks reachable from the entry without passing the charge.
         let mut seen = vec![false; n];
-        'path: loop {
-            if at >= n || seen[at] || cyclic[at] {
-                return fail("no entry charge precedes the unit's first call or loop".into());
+        let mut pending = vec![unit.entry.index()];
+        let mut charged = false;
+        while let Some(at) = pending.pop() {
+            if at >= n || std::mem::replace(&mut seen[at], true) {
+                continue;
             }
-            seen[at] = true;
+            let mut passes = false;
             for inst in instructions[at] {
                 match inst {
                     Inst::Charge {
                         energy: Energy::Entry,
                         ..
-                    } => break 'path,
+                    } => {
+                        passes = true;
+                        break;
+                    }
                     Inst::FrameEnter { .. } => {
                         return fail("a call is admitted before the entry charge".into());
                     }
                     _ => {}
                 }
             }
-            match unit.terminators[at] {
-                Terminator::Jump(_) => at = forward[at][0],
-                _ => return fail("the entry charge is off the unit's straight entry path".into()),
+            if passes {
+                charged = true;
+                continue;
             }
+            if matches!(unit.terminators[at], Terminator::Call { .. }) {
+                return fail("a call is reachable before the entry charge".into());
+            }
+            pending.extend(forward[at].iter().copied());
+        }
+        if !charged {
+            return fail("the entry charge is unreachable from the unit's entry".into());
         }
     }
 
-    // Every cycle passes through an iteration charge, and every iteration
-    // charge is on a cycle, except that a counted loop's single charge
+    // No cycle avoids every charge, and every iteration charge is on a
+    // cycle, except that a counted loop's single charge
     // (`Span`) at its entry pays for its back edge when the loop's shape
     // proves the amount bounds its iterations (`counted_loop`).
     let mut paid = Vec::new();
@@ -200,8 +218,9 @@ pub fn check<S: crate::stage::Stage>(unit: &crate::ir::LirUnit<S>) -> Result<(),
                 .collect()
         })
         .collect::<Vec<Vec<usize>>>();
+    // The charge points cut: a cycle through a charged block pays every trip.
     let alive: Vec<bool> = (0..n)
-        .map(|b| !holds(b, &|e| matches!(e, Energy::Iteration)))
+        .map(|b| !holds(b, &|e| matches!(e, Energy::Iteration | Energy::Entry)))
         .collect();
     if let Some(b) = cycles(&unpaid, &alive).1.iter().position(|&c| c) {
         return fail(format!("the loop at block {b} has no charge"));
@@ -510,7 +529,12 @@ fn transfers<S: crate::stage::Stage>(unit: &crate::ir::LirUnit<S>) -> Result<boo
                     .definition
             }
         };
-        if hirsel_core_contract::depth::adds_activation(definition) {
+        // FACT-3's spare-capacity append is its source primitive `list.push`
+        // with the capacity check removed (as invocation coverage holds it):
+        // the same leaf, which lowering saw and gave no entry charge.
+        if hirsel_core_contract::depth::adds_activation(definition)
+            && !definition.is_core("$native.list_push_spare")
+        {
             return Ok(true);
         }
     }

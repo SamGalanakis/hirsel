@@ -91,6 +91,21 @@ never downloads or unpacks them here. Only targets that name
 the pool's client listener serves the action cache read-only, so a local
 result could not be uploaded (`allow_cache_uploads`) anyway.
 
+## Formatting before a commit
+
+`python3 tools/buck2/fmt.py` formats Rust and checks changed conformance cases;
+`--check` also makes the Rust pass read-only. Case checks never rewrite source
+or move expected diagnostic lines. The selection includes branch commits since
+the merge-base with `origin/main`, staged and unstaged changes, and untracked
+cases. The land screen supplies its batch base explicitly. Archived `reports/`
+files and unchanged cases are excluded, as are std and native library fixtures.
+
+When cases changed, the script builds the candidate's `hirsel-conformance` and
+runs `--format-only --path <case>` for each selected path. This uses the same
+`format_path` seam as `hirsel fmt` and the corpus's exact rule/line exemptions
+for intentional syntax errors; it executes no case programs. A Rust-only change
+needs no formatter binary build.
+
 ## Compiler cost trend
 
 `tools/cost-trend` accepts an already-built **release** bundle and builds nothing:

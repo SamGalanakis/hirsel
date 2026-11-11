@@ -508,14 +508,18 @@ def move(tree):
         raise Refusal(f'cannot check out {tree[:12]} cleanly; refusing to push')
 
 
-def fast(tree):
+def fast(tree, base=None):
     """The checks that take seconds (build files, line lists, fmt, source audits) on one tree: None or the first report."""
     move(tree)
     say(f'screening {tree[:12]} with the fast checks')
+    formatting = [PY, 'tools/buck2/fmt.py', '--check']
+    if base is not None:
+        # An older base's formatter ignores this, rather than parsing a new flag.
+        formatting = ['env', 'HIRSEL_FMT_BASE=' + base, *formatting]
     report = (check('screen: prepare.py', [PY, 'tools/buck2/prepare.py'])
               or check('screen: sync.py --if-stale', [PY, 'tools/buck2/sync.py', '--if-stale'])
               or check('screen: independent line lists', [PY, 'tools/check-hot-files'])
-              or check('screen: formatting', [PY, 'tools/buck2/fmt.py', '--check'])
+              or check('screen: formatting', formatting)
               or check('screen: source audits', [BUCK2, 'test', *CONFIG, *SOURCE_AUDITS]))
     if not unchanged(tree):
         raise Refusal('the worktree changed during checks; refusing to push')
@@ -547,7 +551,7 @@ def full(tree, screened=False):
                       or check('Clippy', [PY, 'tools/buck2/clippy.py'])
                       or check('package and example manifests', [BUCK2, 'test', *CONFIG, *manifests]))
     # fast(tree) checked this exact tree's formatting (now or when screened);
-    # fmt reads only tracked sources and the pinned rustfmt, so no rerun.
+    # fmt checks Rust plus the changed cases against the candidate formatter; no rerun.
     if not unchanged(tree):
         raise Refusal('the worktree changed during checks; refusing to push')
     return report
@@ -756,13 +760,13 @@ class Batch:
             members = [member for member, _ in applied]
             if not applied:
                 return members
-            if not (report := fast(tip)):
+            if not (report := fast(tip, base)):
                 self.screened.add(git('rev-parse', tip + '^{tree}').stdout.strip())
                 return members
             if len(applied) == 1:
                 self.red(members[0], report)
                 return []
-            if fast(base):
+            if fast(base, base):
                 say('the base fails the fast checks itself; the screen blames no ticket')
                 return members
             # trees[i] holds the first i tickets: trees[low] passes, trees[high] fails.
@@ -770,7 +774,7 @@ class Batch:
             low, high = 0, len(applied)
             while high - low > 1:
                 middle = (low + high) // 2
-                if found := fast(trees[middle]):
+                if found := fast(trees[middle], base):
                     high, report = middle, found
                 else:
                     low = middle

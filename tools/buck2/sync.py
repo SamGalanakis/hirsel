@@ -1050,6 +1050,9 @@ def first_party(meta: dict) -> str:
                             data=Raw('glob(["stdlib/**", "native-tests/**"])'),
                             runtime_archives=archive_views(*on_both("default")), products=PRODUCTS,
                             files_env={"HIRSEL_STARTUP_DRIVER_TESTS": "//:hirsel-driver-unittest-harness", "HIRSEL_STARTUP_NATIVE_TESTS": "//:hirsel-native-unittest-harness"}))
+    out.append("\n" + call("hirsel_script_test", name="test-fmt", script="tools/tests/fmt.py", full=False, host=True,
+                           data=["//tools/buck2:fmt.py"],
+                           files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-conformance-bin-hirsel-conformance"}))
     out.append("\n" + call("hirsel_script_test", name="test-buck2-client", script="tools/tests/buck2_client.py", full=False,
                            data=["//tools/buck2:bootstrap.py", "//tools/buck2:bootstrap_store.py", "//tools/buck2:bootstrap_llvm.py",
                                  "//tools/buck2:client.py", "//tools/buck2:generated.py", "//tools/buck2:merging.py",
@@ -1295,7 +1298,8 @@ def first_party(meta: dict) -> str:
                             data=["tools/land", "tools/land-run", "tools/land_events.py", "tools/tests/land.py", "tools/check-hot-files", "tools/main-runs",
                                   "//tools/buck2:run_failures.py", "//tools/buck2:generated.py",
                                   "//tools/buck2:merging.py", "//tools/buck2:clippy.py", "//tools/buck2:fmt.py",
-                                  "//tools/buck2:event_logs.py", "//tools/buck2:rust_environment.py"]))
+                                  "//tools/buck2:event_logs.py", "//tools/buck2:rust_environment.py"],
+                            files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-conformance-bin-hirsel-conformance"}))
     out.append("\n" + call("hirsel_test", name="test-report-fixture", crate="test_report_fixture",
                             crate_root="tools/tests/fixtures/test_report.rs",
                             srcs=["tools/tests/fixtures/test_report.rs"], features=[], deps=[],

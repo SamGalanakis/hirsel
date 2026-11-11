@@ -17,6 +17,7 @@ fn main_on_compiler_thread() -> ExitCode {
     let mut json = false;
     let mut verbose = false;
     let mut check_format = false;
+    let mut format_only = false;
     let help = parse_or_exit((|| {
         let mut args = Parser::from_env();
         while let Some(arg) = args.next()? {
@@ -29,6 +30,10 @@ fn main_on_compiler_thread() -> ExitCode {
                 Long("json") => json = true,
                 Long("verbose") => verbose = true,
                 Long("check-format") => check_format = true,
+                Long("format-only") => {
+                    format_only = true;
+                    check_format = true;
+                }
                 Long("help") | Short('h') => return Ok(true),
                 _ => return Err(arg.unexpected()),
             }
@@ -37,7 +42,7 @@ fn main_on_compiler_thread() -> ExitCode {
     })());
     if help {
         println!(
-            "usage: hirsel-conformance [--json] [--verbose] [--check-format] [--path PREFIX]... [--root <repo>] [--hash-seed N] [--shard I/N]"
+            "usage: hirsel-conformance [--json] [--verbose] [--check-format | --format-only] [--path PREFIX]... [--root <repo>] [--hash-seed N] [--shard I/N]"
         );
         return ExitCode::SUCCESS;
     }
@@ -62,12 +67,22 @@ fn main_on_compiler_thread() -> ExitCode {
             shard,
             paths: &paths,
         };
-        let report = run_suite_selected_with_format(
-            &root,
-            &SeededCompiler(hash_seed),
-            selection,
-            check_format,
-        )?;
+        let report = if format_only {
+            let mut report = hirsel_conformance::Report::default();
+            hirsel_conformance::corpus_format::check_canonical_selected(
+                &root,
+                &mut report,
+                selection,
+            )?;
+            report
+        } else {
+            run_suite_selected_with_format(
+                &root,
+                &SeededCompiler(hash_seed),
+                selection,
+                check_format,
+            )?
+        };
         Ok::<_, String>(report)
     })();
     match result {
@@ -75,20 +90,27 @@ fn main_on_compiler_thread() -> ExitCode {
             if json {
                 println!("{}", report.json());
             } else {
-                println!(
-                    "selection: {} prefixes / {} globally matched / {} shard-selected / {} executed{}",
-                    report.selection.requested_prefixes.len(),
-                    report.selection.globally_matched,
-                    report.selection.selected,
-                    report.counts.validated,
-                    if report.selection.empty_partition() {
-                        " (empty partition)"
-                    } else {
-                        ""
-                    },
-                );
-                println!("whole corpus: {}", report.counts);
-                println!("in-gate corpus: {}", report.in_gate);
+                if format_only {
+                    println!(
+                        "corpus formatting: {} cases checked",
+                        report.selection.selected
+                    );
+                } else {
+                    println!(
+                        "selection: {} prefixes / {} globally matched / {} shard-selected / {} executed{}",
+                        report.selection.requested_prefixes.len(),
+                        report.selection.globally_matched,
+                        report.selection.selected,
+                        report.counts.validated,
+                        if report.selection.empty_partition() {
+                            " (empty partition)"
+                        } else {
+                            ""
+                        },
+                    );
+                    println!("whole corpus: {}", report.counts);
+                    println!("in-gate corpus: {}", report.in_gate);
+                }
                 if check_format {
                     println!(
                         "corpus formatting: {} intentional syntax rejections exempt",

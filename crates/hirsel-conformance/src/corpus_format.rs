@@ -629,7 +629,8 @@ pub fn check_canonical_selected(
     report: &mut Report,
     selection: crate::Selection<'_>,
 ) -> Result<(), String> {
-    let files = selection.files(root)?;
+    let (files, scope) = selection.resolve(root)?;
+    report.selection = scope;
     check_canonical_files(root, report, &files)
 }
 

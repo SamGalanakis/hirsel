@@ -78,11 +78,12 @@ impl CompilerRequestsExt for Compiler {
                 _ => Default::default(),
             },
         );
-        store.publish_installation(package)?;
+        let header = store.publish_installation(package)?;
         if let Some(installation) = installation {
             // Product installation remains usable when optional durable local
             // registration cannot be published. A later Check runs V again.
-            let _ = installation.finish();
+            // V binds the header this run published, not what the root holds.
+            let _ = installation.finish(header);
         }
         Ok(())
     }

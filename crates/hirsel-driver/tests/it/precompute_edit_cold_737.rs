@@ -33,7 +33,11 @@ struct Registration {
     root: PathBuf,
     _filesystem: (u64, u64),
     _verifier: hirsel_syntax::ContentHash,
-    _products: hirsel_syntax::ContentHash,
+    _header: (
+        hirsel_syntax::ContentHash,
+        hirsel_syntax::ContentHash,
+        hirsel_artifact_store::Reference,
+    ),
     _generation: String,
     rows: BTreeMap<hirsel_syntax::ContentHash, hirsel_artifact_store::Reference>,
 }

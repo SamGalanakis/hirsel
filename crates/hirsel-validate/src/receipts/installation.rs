@@ -18,7 +18,9 @@ struct Registration {
     root: PathBuf,
     filesystem: (u64, u64),
     verifier: ContentHash,
-    products: ContentHash,
+    /// The installed-package header association this run published: its
+    /// address, action and header reference.
+    header: (ContentHash, ContentHash, Reference),
     generation: String,
     rows: BTreeMap<ContentHash, Reference>,
 }
@@ -116,16 +118,18 @@ impl hirsel_artifact_store::Contents for Contents {
 /// Cooperating precomputes of one root are serialized: `begin` takes the
 /// root's exclusive lock in private state and holds it until the installation
 /// drops, so root capture, product publication and registration of one run
-/// never interleave with another's. `finish` therefore registers the products
-/// this run published, unless a writer outside this protocol changed the root
-/// meanwhile; every registered row is still checked against current content
-/// and reads at each use, and a later change of the root's products is a miss.
+/// never interleave with another's. `finish` registers the installed-package
+/// header association its caller published, never whatever the root holds at
+/// finish time. A registration loads only while the root's header association
+/// is exactly the registered one, so a writer outside this protocol that
+/// changes the header, before or after `finish`, makes it a miss. Every
+/// registered row is still checked against current content and reads at use.
 ///
 /// Failure or interruption before `finish` registers nothing and deletes only
 /// this run's own generation. The root's previous registration stays, but it
-/// loads only while the root's products are unchanged, so a run that failed
-/// after publishing products leaves a safe miss: the next Check runs V and the
-/// next Precompute rebuilds. Once the registration is renamed into place its
+/// loads only while the root still holds the header it names, so a run that
+/// failed after publishing its header leaves a safe miss: the next Check runs
+/// V and the next Precompute rebuilds. Once the registration is renamed into place its
 /// generation is never deleted, even if `finish` then reports an error.
 ///
 /// Trust boundary: the private state directory is trusted to this user
@@ -182,7 +186,7 @@ impl Installation {
         });
         rows.store.set_cache_cap(2 << 30);
         // The previous registration, read only under this lock and only while
-        // it still authenticates against the root's unchanged products. V may
+        // it still authenticates against the root's unchanged header. V may
         // adopt its own rows from it (see adopt.rs); nothing else reads it.
         let previous = Self::rows(&root, &state, verifier).ok();
         let cache = Arc::new(VerifierCache(
@@ -206,7 +210,15 @@ impl Installation {
     pub fn verifier(&self) -> Arc<VerifierCache> {
         self.cache.clone()
     }
-    pub fn finish(mut self) -> io::Result<()> {
+    /// Register this run's rows for the header association `header` that the
+    /// caller published into the root.
+    pub fn finish(
+        mut self,
+        header: (
+            hirsel_artifact_store::Address,
+            hirsel_artifact_store::Association,
+        ),
+    ) -> io::Result<()> {
         if self
             .rows
             .overflow
@@ -219,7 +231,7 @@ impl Installation {
             root: self.root.clone(),
             filesystem: filesystem(&self.root)?,
             verifier: self.verifier,
-            products: products(&self.root)?,
+            header: (header.0.0, header.1.action.0, header.1.reference),
             generation: self.generation.clone(),
             rows: self
                 .rows
@@ -294,7 +306,7 @@ impl Installation {
             || registration.root != root
             || registration.verifier != verifier
             || registration.filesystem != filesystem(&root)?
-            || registration.products != products(&root)?
+            || !header_current(&root, registration.header)
             || registration.rows.len() > MAX_ROWS
             || registration.generation.len() != 64
             || !registration
@@ -347,17 +359,15 @@ pub(super) fn registration_path(state: &Path, root: &Path) -> PathBuf {
         .0)
     ))
 }
-fn products(root: &Path) -> io::Result<ContentHash> {
-    let file = fs::File::open(root.join("index/MANIFEST"))?;
-    let mut bytes = vec![];
-    file.take(421).read_to_end(&mut bytes)?;
-    if bytes.len() < 36 || bytes.len() > 420 {
-        return Err(invalid());
-    }
-    Ok(ContentHash::of_parts(
-        "hirsel.verifier.installation.products.v1",
-        [&bytes[..]],
-    ))
+/// The root's current association at the registered header address is
+/// exactly the registered header.
+fn header_current(
+    root: &Path,
+    (address, action, reference): (ContentHash, ContentHash, Reference),
+) -> bool {
+    Store::new(root.to_path_buf())
+        .lookup_owned(hirsel_artifact_store::Address(address))
+        .is_some_and(|current| current.action.0 == action && current.reference == reference)
 }
 #[cfg(unix)]
 fn filesystem(root: &Path) -> io::Result<(u64, u64)> {

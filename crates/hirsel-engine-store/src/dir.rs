@@ -179,7 +179,12 @@ impl DirStore {
         self.verifier = installation.verifier();
         self
     }
-    pub fn publish_installation(&self, package: super::InstalledPackage) -> std::io::Result<()> {
+    /// Publish the installation and return the header association it
+    /// published, which V's registration binds.
+    pub fn publish_installation(
+        &self,
+        package: super::InstalledPackage,
+    ) -> std::io::Result<(super::Address, hirsel_artifact_store::Association)> {
         let records = self
             .installation
             .as_ref()
@@ -1023,14 +1028,15 @@ mod tests {
             crate::product_association_key(product).0,
             crate::product_association_key(other).0,
         );
-        crate::tests::install(&root, &[first.0, second.0, product_row, other_row], &[]);
+        let header =
+            crate::tests::install(&root, &[first.0, second.0, product_row, other_row], &[]);
         let store = hirsel_artifact_store::Store::new(root.clone());
         let installed = store.lookup(Address(product_row)).unwrap();
         let state = directory.path().join("state");
         let identity = hirsel_syntax::ContentHash::of_bytes(b"compiler");
         hirsel_validate::Installation::begin(&root, &state, identity)
             .unwrap()
-            .finish()
+            .finish(header)
             .unwrap();
         let registered = || {
             hirsel_validate::Installation::registered(&root, &state, identity, Default::default())
@@ -1064,7 +1070,11 @@ mod tests {
         assert_eq!(opened.records.lookup(Address(product_row)), Some(installed));
         InstalledPackage::verify_store(&root).unwrap();
         // V's rows never resolve through the index, and its registration
-        // binds the index it accepted: a changed index is not that root.
+        // binds the installed-package header it accepted: rewritten index rows
+        // leave that header, while a changed header is not that root.
+        assert!(registered().is_some());
+        let other = crate::tests::install(&root, &[first.0], &[]);
+        assert_ne!(other, header);
         assert!(registered().is_none());
     }
 

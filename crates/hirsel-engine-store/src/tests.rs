@@ -35,7 +35,12 @@ fn variant(sig: &str, payload: &str) -> VariantRef {
 /// Publish an installation header over `root` listing the rows its index
 /// holds now at `addresses`, plus `contents`. A read-only root serves only
 /// what its header lists.
-pub(crate) fn install(root: &std::path::Path, addresses: &[ContentHash], contents: &[Reference]) {
+/// Publish a seed installation and return its header association.
+pub(crate) fn install(
+    root: &std::path::Path,
+    addresses: &[ContentHash],
+    contents: &[Reference],
+) -> (Address, hirsel_artifact_store::Association) {
     let store = hirsel_artifact_store::Store::new(root.to_owned());
     let mut records = crate::installed::InstallationRecords::default();
     for address in addresses {
@@ -69,7 +74,7 @@ pub(crate) fn install(root: &std::path::Path, addresses: &[ContentHash], content
         Default::default(),
     )
     .publish(&store, &records)
-    .unwrap();
+    .unwrap()
 }
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(

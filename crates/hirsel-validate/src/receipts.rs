@@ -3735,7 +3735,11 @@ mod tests {
                 .is_none()
         );
     }
-    fn installation_products(root: &std::path::Path, bytes: &[u8]) {
+    /// Publish a stand-in installation header into `root`; returns it.
+    fn installation_products(
+        root: &std::path::Path,
+        bytes: &[u8],
+    ) -> (Address, hirsel_artifact_store::Association) {
         let store = Store::new(root.to_path_buf());
         let reference = store
             .put(
@@ -3746,13 +3750,23 @@ mod tests {
                 bytes,
             )
             .unwrap();
-        store
-            .associate(
-                Address(ContentHash::of_bytes(b"ordinary")),
-                Action(ContentHash::default()),
-                reference,
-            )
-            .unwrap();
+        let address = Address(ContentHash::of_bytes(b"ordinary"));
+        let action = Action(ContentHash::default());
+        store.associate(address, action, reference).unwrap();
+        (
+            address,
+            hirsel_artifact_store::Association { action, reference },
+        )
+    }
+    /// The header association `root` holds now.
+    fn header(root: &std::path::Path) -> (Address, hirsel_artifact_store::Association) {
+        let address = Address(ContentHash::of_bytes(b"ordinary"));
+        (
+            address,
+            Store::new(root.to_path_buf())
+                .lookup_owned(address)
+                .unwrap(),
+        )
     }
     fn registered(
         f: &Fixture,
@@ -3763,7 +3777,7 @@ mod tests {
         let install = Installation::begin(root, state, build).unwrap();
         let cache = install.verifier();
         assert!(check(f, &cache, build).0.violations.is_empty());
-        install.finish().unwrap();
+        install.finish(header(root)).unwrap();
         Installation::registered(root, state, build, Arc::default()).unwrap()
     }
     #[test]
@@ -3796,6 +3810,7 @@ mod tests {
         assert!(Installation::registered(&root.0, &state, build, Arc::default()).is_none());
         let (fresh, ran) = check(&malformed, &VerifierCache::default(), build);
         assert!(ran && !fresh.violations.is_empty());
+        installation_products(&root.0, b"products");
         let installed = registered(&valid, &root.0, &state, build);
         assert!(!check(&valid, &installed, build).1);
         let (refused, ran) = check(&malformed, &installed, build);
@@ -3906,11 +3921,42 @@ mod tests {
                 .is_empty()
         );
         installation::FAIL_AFTER_RENAME.set(true);
-        assert!(install.finish().is_err());
+        assert!(install.finish(header(&root.0)).is_err());
         // The renamed registration is visible, so its generation must survive.
         let pinned = Installation::registered(&root.0, &state, build, Arc::default())
             .expect("the visible registration names a kept generation");
         assert!(!check(&f, &pinned, build).1);
+    }
+    /// A header changed by a writer outside the precompute protocol between
+    /// product publication and `finish`: `finish` registers the header this
+    /// run published, so the registration never vouches for the other header.
+    #[test]
+    fn finish_registers_the_header_it_published_not_the_one_on_disk() {
+        let root = Directory::new();
+        let state = Directory::new();
+        let state = state.0.join("private");
+        let build = ContentHash::of_bytes(b"local verifier");
+        let f = Fixture::unit();
+        let install = Installation::begin(&root.0, &state, build).unwrap();
+        assert!(
+            check(&f, &install.verifier(), build)
+                .0
+                .violations
+                .is_empty()
+        );
+        let published = installation_products(&root.0, b"published products");
+        let other = installation_products(&root.0, b"another writer's products");
+        install.finish(published).unwrap();
+        assert!(Installation::registered(&root.0, &state, build, Arc::default()).is_none());
+        // The root holding the published header again is what was registered.
+        let store = Store::new(root.0.clone());
+        store
+            .associate(published.0, published.1.action, published.1.reference)
+            .unwrap();
+        let registered = Installation::registered(&root.0, &state, build, Arc::default())
+            .expect("the published header is registered");
+        assert!(!check(&f, &registered, build).1);
+        assert_ne!(other, published);
     }
     #[test]
     fn cooperating_precomputes_of_one_root_do_not_interleave() {
@@ -3926,11 +3972,11 @@ mod tests {
             std::thread::spawn(move || {
                 let second = Installation::begin(&root, &state, build).unwrap();
                 began.send(()).unwrap();
-                installation_products(&root, b"second products");
-                second.finish().unwrap();
+                let header = installation_products(&root, b"second products");
+                second.finish(header).unwrap();
             })
         };
-        installation_products(&root.0, b"first products");
+        let header = installation_products(&root.0, b"first products");
         assert!(check(&f, &first.verifier(), build).0.violations.is_empty());
         // Between the first run's product publication and its registration,
         // the second run has not captured the root.
@@ -3939,7 +3985,7 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_millis(500))
                 .is_err()
         );
-        first.finish().unwrap();
+        first.finish(header).unwrap();
         assert!(Installation::registered(&root.0, &state, build, Arc::default()).is_some());
         second_began.recv().unwrap();
         second.join().unwrap();
@@ -4012,7 +4058,7 @@ mod tests {
         let views = frozen(&f);
         let first = Installation::begin(&root.0, &state, build).unwrap();
         assert!(frozen_check(&f, &first.verifier(), build, &views).1);
-        first.finish().unwrap();
+        first.finish(header(&root.0)).unwrap();
         let old = generations(&state);
 
         let second = Installation::begin(&root.0, &state, build).unwrap();
@@ -4023,7 +4069,7 @@ mod tests {
         assert!(fresh_ran && fresh.violations.is_empty() && report.violations.is_empty());
         assert_eq!(accepted.unwrap(), fresh_accepted.unwrap());
         assert_eq!(reads, fresh_reads);
-        second.finish().unwrap();
+        second.finish(header(&root.0)).unwrap();
 
         // The new generation holds the whole closure: reopen it with the old
         // generation gone and empty fact tables.
@@ -4042,7 +4088,7 @@ mod tests {
         let f = Fixture::call();
         let first = Installation::begin(&root.0, &state, build).unwrap();
         let (_, _, accepted, _) = frozen_check(&f, &first.verifier(), build, &frozen(&f));
-        first.finish().unwrap();
+        first.finish(header(&root.0)).unwrap();
         let action = accepted.unwrap().receipt;
 
         // The callee's view changes; the artifact itself does not.
@@ -4065,10 +4111,10 @@ mod tests {
         previous(&install).forget(original_receipt_key(action));
         let (report, ran, accepted, _) = frozen_check(&f, &install.verifier(), build, &frozen(&f));
         assert!(ran && report.violations.is_empty() && accepted.is_some());
-        install.finish().unwrap();
+        install.finish(header(&root.0)).unwrap();
         let next = Installation::begin(&root.0, &state, build).unwrap();
         assert!(!frozen_check(&f, &next.verifier(), build, &frozen(&f)).1);
-        next.finish().unwrap();
+        next.finish(header(&root.0)).unwrap();
 
         let path = installation::registration_path(
             &state.canonicalize().unwrap(),
@@ -4114,7 +4160,7 @@ mod tests {
         };
         let first = Installation::begin(&root.0, &state, build).unwrap();
         let published = publish(&first.verifier());
-        first.finish().unwrap();
+        first.finish(header(&root.0)).unwrap();
         let old = generations(&state);
 
         let second = Installation::begin(&root.0, &state, build).unwrap();
@@ -4141,7 +4187,7 @@ mod tests {
             publish(&VerifierCache::default()),
             "forced fresh V agrees"
         );
-        second.finish().unwrap();
+        second.finish(header(&root.0)).unwrap();
         for directory in old {
             std::fs::remove_dir_all(directory).unwrap();
         }
@@ -4196,7 +4242,7 @@ mod tests {
         .unwrap();
         let subject = receipt.identity().unwrap();
         first.verifier().publish_execution(subject, &receipt);
-        first.finish().unwrap();
+        first.finish(header(&root.0)).unwrap();
         let old = generations(&state);
         let closure = |cache: &VerifierCache| {
             [
@@ -4249,7 +4295,7 @@ mod tests {
         let install = Installation::begin(&root.0, &state, build).unwrap();
         assert!(revalidated(&install.verifier()).is_some());
         assert_eq!(closure(&install.verifier()), [true; 3]);
-        install.finish().unwrap();
+        install.finish(header(&root.0)).unwrap();
         for directory in old {
             std::fs::remove_dir_all(directory).unwrap();
         }

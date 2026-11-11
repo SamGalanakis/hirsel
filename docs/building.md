@@ -172,8 +172,11 @@ A successful local `precompute MANIFEST -o PRODUCTS` also registers its fresh V
 receipts in `$XDG_STATE_HOME/hirsel/verifier`, or
 `$HOME/.local/state/hirsel/verifier`. This private state survives disposable
 cache clearing. A local secret authenticates the exact issued association map,
-compiler identity, canonical installed path and filesystem identity, product
-index generation and private state path. Checks pin that map and still check
+compiler identity, canonical installed path and filesystem identity, the
+installed-package header association that precompute published, and private
+state path. A registration loads only while the root still holds that exact
+header, so a header written by anyone else, before or after registration, is
+a miss. Checks pin that map and still check
 current reads and every demanded content container. Copied product roots or
 registration files supply no authority. Missing, changed or corrupt state falls
 back to full local V. Registration failure leaves usable ordinary products.
@@ -181,7 +184,7 @@ back to full local V. Registration failure leaves usable ordinary products.
 After a failed precompute: a safe miss and a rebuild. A precompute holds a
 private per-root lock from capturing the root through registration. A failed
 or interrupted run leaves the previous registration usable only while the
-root's MANIFEST is unchanged; otherwise checks miss and V runs. The next
+root still holds the header it names; otherwise checks miss and V runs. The next
 precompute into the root may adopt V's own rows from the previous registered
 generation. A row that misses in the new generation is first checked as a hit
 would be: exact identity, policy and every current read, against V's frozen
@@ -196,7 +199,7 @@ verdicts are not adopted. Execution evidence is adopted only under V's own
 frozen environment and is then revalidated in full.
 
 Trust boundary: the registration secret, the private state directory and the
-compiler build are trusted. Product roots, their MANIFEST and every stored
+compiler build are trusted. Product roots, their index and every stored
 content, including a previous generation's, are not: each is checked by
 reference and each row by its reads before use. A writer that changes a root
 outside the precompute lock can cause misses, not acceptance of unchecked work.

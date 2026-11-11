@@ -795,7 +795,7 @@ impl InstalledPackage {
         mut self,
         store: &hirsel_artifact_store::Store,
         records: &InstallationRecords,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<(Address, hirsel_artifact_store::Association)> {
         let mut records = records.clone();
         self.index_definitions(store, &mut records)?;
         self.rows = records
@@ -817,7 +817,12 @@ impl InstalledPackage {
         self.check_records(store).map_err(std::io::Error::other)?;
         let bytes = bincode::serialize(&self).map_err(std::io::Error::other)?;
         let reference = store.put(PACKAGE, &bytes)?;
-        store.associate(address(), Action(reference.output.0), reference)
+        let action = Action(reference.output.0);
+        store.associate(address(), action, reference)?;
+        Ok((
+            address(),
+            hirsel_artifact_store::Association { action, reference },
+        ))
     }
     fn check_records(
         &self,

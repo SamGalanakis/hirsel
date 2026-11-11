@@ -4181,7 +4181,7 @@ entries, and all subsequent lookups retain the existing Dir confinement.
 ## Stores
 
 ```text
-StoreConfig { group_commits: u64, group_bytes: u64, limits: StoreLimits }
+StoreConfig { group_commits: u64, group_bytes: u64, limits: StoreLimits, nodes: history.Bounds }
 StoreLimits { key_bytes: u64, value_bytes: u64, transaction_bytes: u64, range_rows: u64 }
 StoreError = Storage(AuthorityError) | Refused(AuthorityError) | Corrupt(String) | Fenced | Closed | Unsupported(Unsupported) | NoLevel | Foreign | InvalidInput
 Unsupported = Format(found: Bytes, object: String) | Size(needed: u64, max_entry: u64) | Conditional
@@ -4258,8 +4258,8 @@ by name as `io.authority(rt, name)`. Keys and values are `Bytes`, ordered
 byte-lexicographically (`compare_keys`). A `Store` is the single writer of its
 authority's history; a `Snapshot` is a copyable value that holds no authority.
 
-**Open.** `open(a, config)` first refuses limits above `u32`, or node bounds that cannot
-hold the largest key and value, with `InvalidInput()`, and limits whose largest group,
+**Open.** `open(a, config)` first refuses limits above `u32`, or node bounds
+(`config.nodes`) that cannot hold the largest key and value, with `InvalidInput()`, and limits whose largest group,
 `transaction_bytes` plus 8 KiB, exceeds `authority.max_entry(a)` with
 `Unsupported(Size(needed, max_entry))`. These checks run before the claim, whether or not
 the store exists, so a refused open has no effect. It then claims the authority, which
@@ -4267,8 +4267,8 @@ appends a claim record with the next writer epoch and fences every earlier head,
 the history back: each record against the chain, each group against the version rules, the newest
 checkpoint's nodes, and the commits after it in order. When the history holds nothing but
 claims (a new authority, or a creation a failure cut before its Genesis), the store
-commits its Genesis, which records `config.limits` and the node bounds; an existing store
-keeps the limits its Genesis recorded. A commit other than the Genesis after only claims,
+commits its Genesis, which records `config.limits` and `config.nodes`; an existing store
+keeps the limits and node bounds its Genesis recorded. A commit other than the Genesis after only claims,
 or any group, node or chain that fails a check, is `Corrupt(name)`; a record of another
 format version is `Unsupported(Format(..))`.
 Stores written by the earlier numbered-object layout are not opened.

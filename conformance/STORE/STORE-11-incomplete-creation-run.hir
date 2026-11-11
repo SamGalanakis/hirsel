@@ -21,6 +21,10 @@
 //   refused; one small write commits and 200 writes of 24 bytes, over the 4096
 //   transaction bytes, are refused; a range of 3 rows reads, in a transaction and in a
 //   query on a snapshot of the reopened store, and a range of 4 is refused in both.
+//   The creation's node bounds hold too: its nodes are at most 1024 bytes, so after 60
+//   writes of 31- and 32-byte leaf entries a checkpoint has several leaves under an index
+//   (height 2 or more), where the default bounds hold them in one leaf. A creation whose bounds
+//   cannot hold its limits is InvalidInput.
 // - orphan: a claim, then an entry holding a commit that is not the Genesis. Nothing
 //   proves a creation that never happened; it is corruption at entry 2.
 // - damaged: a claim, a Genesis group cut short by a byte, a later claim and a committed
@@ -92,14 +96,36 @@ fn ranged(r: Result[u64, store.TxFailure[store.TxError]], n: Option[u64]) -> boo
 }
 
 // Limits far under the defaults: 8-byte keys, 16-byte values, 4096-byte
-// transactions and 3-row ranges.
+// transactions and 3-row ranges, and checkpoint nodes of 64 to 1024 bytes.
 fn tight() -> store.StoreConfig {
   let mut c = store.default_config()
   c.limits.key_bytes = 8
   c.limits.value_bytes = 16
   c.limits.transaction_bytes = 4096
   c.limits.range_rows = 3
+  c.nodes = history.Bounds(node_min: 64, node_mean: 128, node_max: 1024)
   c
+}
+
+// The height of the newest checkpoint `a`'s history records, 0 if none.
+fn checkpoint_height(a: Authority) -> Result[u8, Failed] {
+  let Ok(records) = authority.read(a, 1, authority.floor(a), 4096) else {
+    return Error(Failed("read"))
+  }
+  let mut height: u8 = 0
+  for r in records {
+    if let Appended(entry) = r {
+      let Ok(g) = history.decode_group(entry) else {
+        return Error(Failed("decode"))
+      }
+      for c in g.commits {
+        if let Engine(Checkpoint(d)) = c.body {
+          height = d.height
+        }
+      }
+    }
+  }
+  Ok(height)
 }
 
 // Whether a commit of `w` is refused for `limit`, or commits when `limit` is None.
@@ -151,6 +177,12 @@ fn claims_only(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
   let Ok(_) = authority.claim(a) else {
     return Error(Failed("claim"))
   }
+  // Leaf entries of 8 + 8 + 16 bytes cannot fit 40-byte nodes.
+  let mut unfit = tight()
+  unfit.nodes = history.Bounds(node_min: 16, node_mean: 32, node_max: 40)
+  let Error(InvalidInput()) = store.open(a, unfit) else {
+    return say(stdout, f"{name}: unfit bounds not refused")
+  }
   let Ok(made) = store.open(a, tight()) else {
     return say(stdout, f"{name}: refused")
   }
@@ -200,7 +232,19 @@ fn claims_only(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
   let q4 = store.query(take snap, rows, 4u64)
   let scans = ranged(r3, Some(3)) && ranged(r4, None())
   let queries = ranged(q3, Some(1)) && ranged(q4, None())
-  let mut kept_limits = scans && queries
+  // 30 keys of 8 bytes and 30 of 7, each with a 16-byte value: 1890 bytes of leaf
+  // entries, over node_max.
+  let filled = commits(mut s2, (30, 8, 16), None()) && commits(
+    mut s2,
+    (30, 7, 16),
+    None()
+  )
+  let Ok(()) = store.compact(mut s2) else {
+    return Error(Failed("compact"))
+  }
+  let height = checkpoint_height(a)?
+  let nodes = height >= 2
+  let mut kept_limits = scans && queries && filled && nodes
   for e in edges {
     kept_limits = kept_limits && e
   }

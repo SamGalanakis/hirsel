@@ -74,15 +74,18 @@ commits that were not yet durable. Holding a `Store` grants nothing outside its
 authority.
 
 ```text
-StoreConfig = { group_commits: u64, group_bytes: u64, limits: StoreLimits }
+StoreConfig = { group_commits: u64, group_bytes: u64, limits: StoreLimits, nodes: Bounds }
 StoreLimits = { key_bytes: u64, value_bytes: u64, transaction_bytes: u64, range_rows: u64 }
+Bounds      = { node_min: u32, node_mean: u32, node_max: u32 }   // std@1/history
 ```
 
 `StoreConfig` holds the settings of the engine provider, `db.local@1`: the group bounds
-of [STORE-11](#store-11-engine-and-storage-seam) and the limits. A setting that can decide
-an outcome, a limit above all, is recorded in the store when it is created and is the same
-for every run of every body; an opener cannot change it, and the limits it passes to an
-existing store are ignored. Durability is not a setting: each wait names its level
+of [STORE-11](#store-11-engine-and-storage-seam), the limits and the checkpoint node bounds
+(STORE-11 **Checkpoints**; `default_config` gives the default bounds). A setting that can
+decide an outcome, a limit above all, or that shapes the stored objects, as the node bounds
+do, is recorded in the store when it is created and is the same for every run of every
+body; an opener cannot change it, and the limits and bounds it passes to an existing store
+are ignored. Bounds that do not hold the limits are `InvalidInput()` before the claim. Durability is not a setting: each wait names its level
 ([STORE-2](#store-2-transactions)), and faults come only from a simulated authority.
 
 ### STORE-2: Transactions

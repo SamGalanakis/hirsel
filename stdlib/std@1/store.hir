@@ -27,12 +27,14 @@
 
 /// The engine's settings (STORE-1). A group advances once it holds
 /// `group_commits` commits or `group_bytes` encoded bytes, or when an outcome
-/// awaits it. The limits are recorded by the store's Genesis commit when it is
-/// created; the limits an opener of an existing store passes are ignored.
+/// awaits it. The limits and the checkpoint node bounds `nodes` are recorded
+/// by the store's Genesis commit when it is created; those an opener of an
+/// existing store passes are ignored.
 pub type StoreConfig {
   group_commits: u64,
   group_bytes: u64,
   limits: StoreLimits,
+  nodes: history.Bounds,
 }
 
 /// The most a commit may write: any key over `key_bytes`, any value over
@@ -302,8 +304,9 @@ const GROUP_OVERHEAD: u64 = 8192
 // Entries read from the authority per request.
 const READ_BATCH: u64 = 1024
 
-/// Groups of up to 64 commits or 4 MiB, and limits of 4096-byte keys, 1 MiB
-/// values, 16 MiB per transaction and 10000 rows per range.
+/// Groups of up to 64 commits or 4 MiB, limits of 4096-byte keys, 1 MiB
+/// values, 16 MiB per transaction and 10000 rows per range, and the default
+/// checkpoint node bounds.
 pub fn default_config() -> StoreConfig uses {} {
   StoreConfig(
     group_commits: 64,
@@ -313,7 +316,8 @@ pub fn default_config() -> StoreConfig uses {} {
       value_bytes: 1048576,
       transaction_bytes: 16777216,
       range_rows: 10000
-    )
+    ),
+    nodes: history.default_bounds()
   )
 }
 
@@ -371,13 +375,14 @@ pub fn prefix_bounds(prefix: Bytes) -> (
 /// earlier head; the store then recovers the newest state the history holds.
 /// A history holding nothing but claims, the first open's included when a
 /// failure cut it before its Genesis, is no store: the open writes the
-/// Genesis commit, which records `config.limits`; an existing store keeps its
-/// own. Limits no
-/// group could frame within the authority's entries are refused, with
-/// `Unsupported(Size(..))`, before the claim, whether or not the store exists,
-/// so the refusal has no effect.
+/// Genesis commit, which records `config.limits` and `config.nodes`; an
+/// existing store keeps its own. Limits no group could frame within the
+/// authority's entries are refused with `Unsupported(Size(..))`, and limits
+/// over 4294967295 or node bounds that do not hold them with `InvalidInput()`,
+/// before the claim, whether or not the store exists, so the refusal has no
+/// effect.
 pub fn open(a: Authority, config: StoreConfig) -> Result[Store, StoreError] {
-  creatable(config.limits, authority.max_entry(a))?
+  creatable(config.limits, config.nodes, authority.max_entry(a))?
   let made = match authority.claim(a) {
     Ok(c) => c,
     Error(e) => return Error(seam(take e)),
@@ -407,7 +412,7 @@ pub fn open(a: Authority, config: StoreConfig) -> Result[Store, StoreError] {
     max_entry: authority.max_entry(a),
     config: config,
     limits: config.limits,
-    bounds: history.default_bounds(),
+    bounds: config.nodes,
     identity: b"",
     seed_key: 0,
     index: ordered_map.empty(compare_keys),
@@ -427,7 +432,7 @@ pub fn open(a: Authority, config: StoreConfig) -> Result[Store, StoreError] {
   )
   let created = recover(a, mut s, end)?
   if created {
-    genesis(a, mut s, config.limits)?
+    genesis(a, mut s, config.limits, config.nodes)?
   }
   collect(mut s)?
   Ok(take s)
@@ -603,15 +608,18 @@ fn load_checkpoint(a: Authority, mut s: Store, desc: history.Descriptor) -> Resu
   Ok(ordered_map.empty(compare_keys))
 }
 
-// Whether a store with these limits could be created over an authority whose
-// entries hold at most `max_entry` bytes. It is checked before the claim, so
-// a refused creation has no effect.
-fn creatable(limits: StoreLimits, max_entry: u64) -> Result[(), StoreError] uses {} {
+// Whether a store with these limits and node bounds could be created over an
+// authority whose entries hold at most `max_entry` bytes. It is checked before
+// the claim, so a refused creation has no effect.
+fn creatable(limits: StoreLimits, nodes: history.Bounds, max_entry: u64) -> Result[
+  (),
+  StoreError
+] uses {} {
   let most: u64 = 4294967295
   if limits.key_bytes > most || limits.value_bytes > most || limits.transaction_bytes > most || limits.range_rows > most {
     return Error(InvalidInput())
   }
-  if !history.bounds_fit(int.narrow(limits.key_bytes), int.narrow(limits.value_bytes), history.default_bounds()) {
+  if !history.bounds_fit(int.narrow(limits.key_bytes), int.narrow(limits.value_bytes), nodes) {
     return Error(InvalidInput())
   }
   let needed = limits.transaction_bytes + GROUP_OVERHEAD
@@ -623,10 +631,12 @@ fn creatable(limits: StoreLimits, max_entry: u64) -> Result[(), StoreError] uses
 
 // Records a new store's limits and checkpoint bounds as the commit after the
 // history's claims, durable at every level before `open` returns.
-fn genesis(a: Authority, mut s: Store, limits: StoreLimits) -> Result[(), StoreError] {
+fn genesis(a: Authority, mut s: Store, limits: StoreLimits, bounds: history.Bounds) -> Result[
+  (),
+  StoreError
+] {
   let k: u32 = int.narrow(limits.key_bytes)
   let v: u32 = int.narrow(limits.value_bytes)
-  let bounds = history.default_bounds()
   s.limits = limits
   s.bounds = copy bounds
   let body: history.Body = Engine(

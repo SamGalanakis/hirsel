@@ -369,13 +369,15 @@ impl OwnershipTasks {
             manifest: environment.manifest,
             discharge: environment.discharge,
         };
+        // One context checks the bound table once for every unit it binds.
+        let context = hirsel_lir::validate::ValidationContext::new(&bound_inputs);
         let mut units = Vec::new();
         let mut plans = BTreeMap::new();
         let mut statics = BTreeMap::new();
         for ((product, observed), (_, body)) in outputs.iter().zip(&local).zip(&captures) {
-            let unit =
-                hirsel_lir::validate::validate_ready(binding.materialize(body)?, &bound_inputs)
-                    .map_err(|e| format!("bound ownership Ready C: {:?}", e.violations))?;
+            let unit = context
+                .validate(binding.materialize(body)?, &bound_inputs)
+                .map_err(|e| format!("bound ownership Ready C: {:?}", e.violations))?;
             let request = &self.requests[&product.address.0];
             let declarations = snapshot
                 .instances

@@ -694,13 +694,16 @@ impl NativeProducts for DemandProducts {
             manifest: environment.manifest,
             discharge: environment.discharge,
         };
+        // One context checks the whole-program table once for every unit, not
+        // once per unit.
+        let context = hirsel_lir::validate::ValidationContext::new(&inputs);
         let mut units = Vec::new();
         for body in &captured {
             let raw = binding.materialize::<Ready>(body)?;
             self.ready_materializations += 1;
             snapshot.materializations.fetch_add(1, Ordering::Relaxed);
             let definition = raw.header.definition.clone();
-            let unit = hirsel_lir::validate::validate(raw, &inputs).map_err(|e| {
+            let unit = context.validate(raw, &inputs).map_err(|e| {
                 format!(
                     "emission Ready refused for {definition:?}: {:?}",
                     e.violations

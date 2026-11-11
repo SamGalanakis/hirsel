@@ -142,6 +142,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
   check(acquire(mut s, 2, b"b", p) == Error(Tx(Aborted(Taken()))))?
   let held = store.reader_pins(a, mut s) ? Store
   check(list.len(held) == 1)?
+  check(store.pin_principal(held[0]) == "")?
   write(mut s, 2)?
   let second = store.snapshot(a, mut s, cache) ? Store
   let unpinned = store.version(a, second)

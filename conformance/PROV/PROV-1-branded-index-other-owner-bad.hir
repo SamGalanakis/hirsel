@@ -1,0 +1,26 @@
+// rule: PROV-1
+// expect: reject PROV-1 at line 24
+// twin: PROV/PROV-1-branded-index-read-run.hir
+pub opaque type Token: copyable uses {} {
+  text: String,
+}
+
+fn make(a: String) -> Token of a {
+  Token(text: "payload")
+}
+
+fn inspect(a: String, token: Token of a) -> bool {
+  token.text == "payload"
+}
+
+fn gather(a: String) -> List[Token of a] {
+  [make(a)]
+}
+
+pub fn main() -> Result[(), ()] {
+  let a: String = "owner"
+  let held = gather(a)
+  let other: String = "other"
+  failure.check(inspect(other, held[0]), TextInvariant())
+  Ok(())
+}

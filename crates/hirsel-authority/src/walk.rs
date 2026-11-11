@@ -1855,31 +1855,16 @@ impl<'a> Checker<'a> {
                 used = self.used(base).join(self.used(index));
                 // An element read keeps the brands its sequence's element
                 // type names (PROV-1), which a written binding type supplies.
-                if let (Some(sequence), Some(element)) = (self.ty(base), self.ty(e)) {
+                if let Some(sequence) = self.ty(base) {
                     if let TypeKind::Builtin {
                         kind: BuiltinType::List | BuiltinType::Array | BuiltinType::Inline,
                         arguments,
                     } = &self.t.get(sequence).unwrap().kind
                     {
                         if let Some(GenericArgument::Type(contract)) = arguments.first() {
-                            let contract = *contract;
-                            let branded = self.part_brands(element, contract);
-                            let row = self.t.get(branded).unwrap();
-                            let brand = &self.t.get(contract).unwrap().brand;
-                            if row.brand.alternatives.is_empty() && brand.alternatives.len() == 1 {
-                                let mut row = row.clone();
-                                row.brand = brand.clone();
-                                let branded = self.intern(row);
-                                self.set_ty(e, branded);
-                            } else if branded != element {
-                                self.set_ty(e, branded);
-                            }
-                            // PROV-4, OWN-8: an element lives where its
-                            // sequence does, as a field of a record does.
-                            let placed = self.projected_item(sequence, contract);
-                            let mut row = self.t.get(placed).unwrap().clone();
-                            row.brand = Brand::default();
-                            let placed = self.intern(row);
+                            // Refine from the instantiated element, including its
+                            // root brand, just as for fields and loop items.
+                            let placed = self.projected_item(sequence, *contract);
                             self.refine_projection(e, placed);
                         }
                     }

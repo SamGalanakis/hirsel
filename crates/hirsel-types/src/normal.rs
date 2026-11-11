@@ -104,6 +104,7 @@ pub(crate) fn validate(t: &TypeInterner, root: TypeId) -> Result<(), GraphError>
                 .map(|e| verdict(e.ty).expect("children are decided before their parent"))
                 .find(Result::is_err)
                 .unwrap_or(Ok(()));
+            t.retain_verdict(id, &result);
             let _ = entry.valid.set(result);
             t.count_valid();
             on_path.remove(&id);

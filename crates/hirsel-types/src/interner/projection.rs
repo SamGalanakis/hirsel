@@ -26,6 +26,7 @@ impl TypeInterner {
         self: &Arc<Self>,
         roots: impl IntoIterator<Item = TypeId>,
     ) -> TypeProjection {
+        let _retained = self.owner.enter();
         let mut seen = HashSet::<TypeId, IdHasher>::default();
         let mut pending: Vec<_> = roots.into_iter().collect();
         let mut ids = Vec::new();
@@ -86,6 +87,8 @@ impl TypeProjection {
     /// Construct under the caller's admitted reservation. All existing
     /// contexts and externally held rows remain untouched and readable.
     pub fn into_interner(self) -> Arc<TypeInterner> {
+        let owner = Owner::new(OwnerKind::SessionTypes);
+        let _retained = owner.enter();
         let mut bytes = 0;
         let rows = self
             .ids
@@ -101,6 +104,7 @@ impl TypeProjection {
             })
             .collect();
         Arc::new(TypeInterner {
+            owner: owner.clone(),
             base: self.source.base.clone(),
             base_len: self.source.base_len,
             local_start: self.high_water,

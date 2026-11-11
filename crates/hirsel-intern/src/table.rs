@@ -57,6 +57,12 @@ impl<T> AppendTable<T> {
         self.chunk(index)[offset].get_or_init(init)
     }
 
+    pub fn allocations(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.chunks
+            .iter()
+            .filter_map(OnceLock::get)
+            .map(|chunk| (chunk.as_ptr() as usize, std::mem::size_of_val(&**chunk)))
+    }
     /// Bytes reserved for row slots, including slots not initialized yet.
     pub fn allocated_bytes(&self) -> usize {
         self.chunks

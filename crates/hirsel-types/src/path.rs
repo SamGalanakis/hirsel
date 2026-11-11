@@ -77,6 +77,14 @@ impl<T> SharedPath<T> {
             .pad_to_align()
             .size()
     }
+    pub(crate) fn node_allocation_address(&self) -> Option<usize> {
+        self.tail.as_ref().map(|node| {
+            let (_, offset) = Layout::new::<[usize; 2]>()
+                .extend(Layout::new::<Node<T>>())
+                .expect("existing Arc node layout");
+            Arc::as_ptr(node) as usize - offset
+        })
+    }
     pub fn get(&self, index: usize) -> Option<&T> {
         if index >= self.len() {
             return None;

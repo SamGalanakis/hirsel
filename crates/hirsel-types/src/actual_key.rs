@@ -62,6 +62,7 @@ pub fn generated_actual_key(
 /// graph is invalid (a recovery row or a cycle has no instance).
 fn closed_spelling(t: &TypeInterner, ty: TypeId) -> Option<Arc<str>> {
     let compute = || {
+        let _retained = t.retained_owner(ty).enter();
         (t.valid(ty) && !mentions_parameter(t, ty))
             .then(|| Arc::from(CanonicalSpelling::closed(t, ty)))
     };

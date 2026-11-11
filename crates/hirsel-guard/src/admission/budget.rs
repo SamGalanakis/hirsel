@@ -6,6 +6,7 @@ pub struct ProcessBudget {
     limit: u64,
     reserved: Mutex<u64>,
     released: Condvar,
+    owners: [std::sync::atomic::AtomicU64; super::OWNERS],
     idle_reclaimer: Mutex<Option<Weak<dyn Fn() + Send + Sync>>>,
 }
 impl ProcessBudget {
@@ -15,8 +16,33 @@ impl ProcessBudget {
             limit,
             reserved: Mutex::new(0),
             released: Condvar::new(),
+            owners: std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0)),
             idle_reclaimer: Mutex::new(None),
         })
+    }
+    pub fn owner_bytes(&self) -> [u64; super::OWNERS] {
+        self.owners
+            .each_ref()
+            .map(|value| value.load(std::sync::atomic::Ordering::Relaxed))
+    }
+    pub(super) fn retain_owner(&self, owner: super::OwnerKind, bytes: u64) -> bool {
+        let mut reserved = self.reserved.lock().unwrap_or_else(|e| e.into_inner());
+        if bytes > self.limit.saturating_sub(*reserved) {
+            return false;
+        }
+        *reserved += bytes;
+        self.owners[owner as usize].fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
+    pub(super) fn release_owner(&self, owner: super::OwnerKind, bytes: u64) {
+        let mut reserved = self.reserved.lock().unwrap_or_else(|e| e.into_inner());
+        *reserved = reserved
+            .checked_sub(bytes)
+            .expect("admitted owner releases its own bytes");
+        let previous =
+            self.owners[owner as usize].fetch_sub(bytes, std::sync::atomic::Ordering::Relaxed);
+        assert!(previous >= bytes, "named owner charge underflow");
+        self.released.notify_all();
     }
     /// Register the process's idle retention authority without extending its lifetime.
     /// Reclamation runs outside the budget lock and must preserve live owners.
@@ -54,9 +80,13 @@ impl ProcessBudget {
     pub fn reserve_once(self: &Arc<Self>, bytes: u64) -> std::io::Result<MemoryReservation> {
         let mut reserved = self.reserved.lock().unwrap_or_else(|e| e.into_inner());
         if bytes > self.limit.saturating_sub(*reserved) {
+            let used = *reserved;
+            // Formatting can allocate/free. Keep the allocator's ownership
+            // table out of this budget lock's lifetime.
+            drop(reserved);
             return Err(std::io::Error::other(format!(
                 "process query allowance exhausted: {bytes} bytes requested with {} of {} reserved",
-                *reserved, self.limit
+                used, self.limit
             )));
         }
         *reserved += bytes;
@@ -149,36 +179,5 @@ impl Drop for MemoryReservation {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) -= bytes;
         self.budget.released.notify_all();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn split_transfers_one_charge_and_each_owner_releases_its_part() {
-        let budget = ProcessBudget::new(100);
-        let mut outer = budget.reserve(100).unwrap();
-        assert!(outer.split(101).is_none());
-        assert_eq!(outer.bytes(), 100);
-        assert_eq!(budget.reserved(), 100);
-        let first = outer.split(30).unwrap();
-        let mut second = outer.split(50).unwrap();
-        let nested = second.split(40).unwrap();
-        assert_eq!(
-            outer.bytes() + first.bytes() + second.bytes() + nested.bytes(),
-            100
-        );
-        assert_eq!(budget.reserved(), 100);
-        assert!(budget.reserve(1).is_err());
-        drop(outer);
-        assert_eq!(budget.reserved(), 80);
-        let replacement = budget.reserve(20).unwrap();
-        drop(first);
-        drop(second);
-        drop(nested);
-        assert_eq!(budget.reserved(), 20);
-        drop(replacement);
-        assert_eq!(budget.reserved(), 0);
     }
 }

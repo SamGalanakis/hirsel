@@ -6,13 +6,11 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+hirsel-guard = { path = "../hirsel-guard" }
 hirsel-run-config = { path = "../hirsel-run-config" }
 hirsel-run-schema = { path = "../hirsel-run-schema" }
 hirsel-syntax = { path = "../hirsel-syntax" }
 hirsel-types = { path = "../hirsel-types" }
-
-[dev-dependencies]
-hirsel-guard = { path = "../hirsel-guard" }
 
 [features]
 test-alloc = []

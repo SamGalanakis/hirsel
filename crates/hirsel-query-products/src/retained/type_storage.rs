@@ -66,7 +66,11 @@ fn local_type_interner_bound_covers_owned_modes_and_callable_payloads_without_lo
     let path = DefPath::core("source.type.payload");
     hirsel_syntax::DefId::intern(&path);
     let symbol = hirsel_intern::Symbol::intern("field");
+    let process = hirsel_guard::admission::host_budget().0;
+    let session = hirsel_guard::admission::OwnerKind::SessionTypes as usize;
+    let ledger = hirsel_guard::admission::OwnerKind::Ledger as usize;
     for width in [1, 4, 16] {
+        let before = process.owner_bytes();
         let (types, actual) = crate::test_alloc::measured(|| {
             let types = TypeInterner::new(None);
             let unit = types.intern(Type::unit());
@@ -122,16 +126,38 @@ fn local_type_interner_bound_covers_owned_modes_and_callable_payloads_without_lo
         });
         let (bound, inspection) = crate::test_alloc::measured(|| types.retained_local_bytes());
         assert_eq!(inspection.allocations, 0);
+        let admitted = process.owner_bytes();
+        let local = types.retained_charge();
+        assert!(types.retained_owners_match());
+        assert_eq!(admitted[session] - before[session], local);
+        assert_eq!(
+            actual.live as u64,
+            local + admitted[ledger] - before[ledger],
+            "all physical backing is charged to its original owner"
+        );
         assert!(
-            actual.live as u64 <= bound,
-            "width {width}: actual {} exceeds {bound}",
-            actual.live
+            local <= bound,
+            "width {width}: actual interner backing {local} exceeds {bound}"
         );
         let clone = types.clone();
         let (_, release) = crate::test_alloc::measured(|| drop(types));
         assert_eq!(release.live, 0);
         let (_, release) = crate::test_alloc::measured(|| drop(clone));
-        assert_eq!(-release.live, actual.live);
+        let after = process.owner_bytes();
+        assert_eq!(
+            after[session], before[session],
+            "the local owner refunds in full"
+        );
+        for kind in hirsel_guard::admission::OwnerKind::ALL {
+            if kind as usize != ledger {
+                assert_eq!(after[kind as usize], before[kind as usize]);
+            }
+        }
+        assert_eq!(
+            release.live + actual.live,
+            (after[ledger] - before[ledger]) as isize,
+            "only the independently admitted ledger backing survives the final alias"
+        );
     }
     struct Unloaded;
     impl TypeBaseSource for Unloaded {

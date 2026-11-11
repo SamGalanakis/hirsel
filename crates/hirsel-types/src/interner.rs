@@ -4,6 +4,7 @@
 //! and never reach output: persisted forms encode canonical per-definition
 //! tables (`table`), and ordered output sorts by content, never by `TypeId`.
 use crate::*;
+use hirsel_intern::retention::{Owner, OwnerKind};
 use hirsel_intern::{AppendTable, IdHash, IdHasher, Scramble};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -153,6 +154,7 @@ impl TypeRowLoad<'_> {
 /// An immutable shared prefix. A source-backed base loads only demanded
 /// components; decoded rows have exactly one owner across session interners.
 pub struct TypeBase {
+    owner: Owner,
     entries: Box<[OnceLock<Entry>]>,
     index: HashMap<u64, Ids, IdHasher>,
     source: Option<Arc<dyn TypeBaseSource>>,
@@ -162,12 +164,15 @@ impl TypeBase {
     /// Build a base of `count` rows. `build` receives the ids the rows will
     /// have, so rows may name each other in any order.
     pub fn build(count: usize, build: impl FnOnce(&[TypeId]) -> Vec<Type>) -> Arc<Self> {
+        let owner = Owner::new(OwnerKind::SharedTypeBase);
+        let _retained = owner.enter();
         let count = u32::try_from(count).expect("type base exceeds u32");
         let ids: Vec<_> = (0..count).map(TypeId::at).collect();
         let rows = build(&ids);
         assert_eq!(rows.len(), ids.len(), "type base row count changed");
         let mut index: HashMap<u64, Ids, IdHasher> = HashMap::default();
         for (id, row) in ids.iter().zip(&rows) {
+            retained::adopt_row(&owner, row);
             let hash = row_hash(row);
             let duplicate = index
                 .get(&hash)
@@ -185,6 +190,7 @@ impl TypeBase {
             id.position().expect("a base id") as usize
         }
         Arc::new(Self {
+            owner: owner.clone(),
             entries: rows
                 .into_iter()
                 .map(|row| OnceLock::from(Entry::new(row)))
@@ -193,6 +199,20 @@ impl TypeBase {
             source: None,
             loading: Mutex::new(()),
         })
+    }
+    pub fn retained_owners_match(&self) -> bool {
+        self.owner.owns_arc(self)
+            && self
+                .owner
+                .owns(self.entries.as_ptr() as usize, size_of_val(&*self.entries))
+            && self
+                .entries
+                .iter()
+                .filter_map(OnceLock::get)
+                .all(|entry| retained::entry_owners_match(&self.owner, entry))
+    }
+    pub fn retained_charge(&self) -> u64 {
+        self.owner.bytes()
     }
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -206,7 +226,10 @@ impl TypeBase {
     }
     /// Construct the compact index without decoding any type rows.
     pub fn from_source(count: u32, source: Arc<dyn TypeBaseSource>) -> Arc<Self> {
+        let owner = Owner::new(OwnerKind::SharedTypeBase);
+        let _retained = owner.enter();
         Arc::new(Self {
+            owner: owner.clone(),
             entries: (0..count).map(|_| OnceLock::new()).collect(),
             index: HashMap::default(),
             source: Some(source),
@@ -228,10 +251,14 @@ impl TypeBase {
         // providers never recursively demand another row while holding this lock.
         let _loading = self.loading.lock().unwrap_or_else(PoisonError::into_inner);
         if slot.get().is_none() {
+            let _retained = self.owner.enter();
             let rows = self.source.as_ref()?.rows(position, self)?;
             self.check_rows(position, &rows)?;
             for (p, row) in rows {
-                self.entries[p as usize].get_or_init(|| Entry::new(row));
+                self.entries[p as usize].get_or_init(|| {
+                    retained::adopt_row(&self.owner, &row);
+                    Entry::new(row)
+                });
             }
         }
         slot.get()
@@ -289,6 +316,7 @@ pub struct InternerStats {
 /// The session's canonical, concurrent type interner. `Sync`: one per session,
 /// shared by every phase and thread.
 pub struct TypeInterner {
+    owner: Owner,
     base: Option<Arc<TypeBase>>,
     base_len: u32,
     local_start: u32,
@@ -315,8 +343,11 @@ struct Counters {
 
 impl TypeInterner {
     pub fn new(base: Option<Arc<TypeBase>>) -> Arc<Self> {
+        let owner = Owner::new(OwnerKind::SessionTypes);
+        let _retained = owner.enter();
         let base_len = base.as_ref().map_or(0, |b| b.len() as u32);
         Arc::new(Self {
+            owner: owner.clone(),
             base,
             base_len,
             local_start: base_len,
@@ -361,6 +392,7 @@ impl TypeInterner {
     /// The id of `row`, exact and lossless: equal rows (Rust `==`) get one id,
     /// and every field, parameter names and labels included, survives.
     pub fn intern(&self, row: Type) -> TypeId {
+        let _retained = self.owner.enter();
         let hash = row_hash(&row);
         let source_backed = self.base.as_ref().is_some_and(|base| base.source.is_some());
         if source_backed
@@ -433,6 +465,7 @@ impl TypeInterner {
     }
 
     fn publish(&self, row: Type) -> TypeId {
+        retained::adopt_row(&self.owner, &row);
         let local = self.assigned.fetch_add(1, Ordering::Relaxed);
         let position = local
             .checked_add(self.local_start)
@@ -454,6 +487,7 @@ impl TypeInterner {
         count: usize,
         build: impl FnOnce(&[TypeId]) -> Vec<Type>,
     ) -> Vec<TypeId> {
+        let _retained = self.owner.enter();
         let count = u32::try_from(count).expect("type graph exceeds u32");
         let local = self.assigned.fetch_add(count, Ordering::Relaxed);
         let first = local
@@ -466,6 +500,7 @@ impl TypeInterner {
         assert_eq!(rows.len(), ids.len(), "type graph row count changed");
         let hashes: Vec<_> = rows.iter().map(row_hash).collect();
         for (offset, row) in rows.into_iter().enumerate() {
+            retained::adopt_row(&self.owner, &row);
             self.counters
                 .row_bytes
                 .fetch_add(row_bytes(&row), Ordering::Relaxed);
@@ -492,6 +527,30 @@ impl TypeInterner {
         ids
     }
 
+    pub(crate) fn retain_verdict(&self, id: TypeId, result: &Result<(), GraphError>) {
+        retained::adopt_error(self.retained_owner(id), result);
+    }
+    pub fn retained_owners_match(&self) -> bool {
+        self.owner.owns_arc(self)
+            && self
+                .entries
+                .allocations()
+                .chain(self.base_normals.allocations())
+                .all(|(address, bytes)| self.owner.owns(address, bytes))
+    }
+    pub(crate) fn retained_owner(&self, id: TypeId) -> &Owner {
+        if id
+            .position()
+            .is_some_and(|position| position < self.base_len)
+        {
+            &self.base.as_ref().expect("base row has a base").owner
+        } else {
+            &self.owner
+        }
+    }
+    pub fn retained_charge(&self) -> u64 {
+        self.owner.bytes()
+    }
     pub(crate) fn entry(&self, id: TypeId) -> Option<&Entry> {
         let position = id.position()?;
         if position < self.base_len {
@@ -513,6 +572,7 @@ impl TypeInterner {
     }
 
     pub(crate) fn normal_forms(&self, id: TypeId) -> Option<&NormalForms> {
+        let _retained = self.owner.enter();
         let position = id.position()?;
         if position < self.base_len {
             return Some(

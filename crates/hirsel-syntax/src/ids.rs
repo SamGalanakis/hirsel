@@ -138,6 +138,7 @@ impl DefId {
         {
             return id;
         }
+        let _retained = hirsel_intern::retention::symbols().enter();
         let mut index = shard.write().unwrap_or_else(PoisonError::into_inner);
         if let Some(&id) = index.get(path) {
             return id;

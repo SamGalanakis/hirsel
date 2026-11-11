@@ -27,6 +27,7 @@ pub const OMITTED: &[(&str, u32)] = &[
 ];
 #[derive(Clone)]
 pub struct BuiltinRegistry {
+    owner: hirsel_guard::admission::Owner,
     /// The interner the signatures' rows were built into.
     types: Arc<TypeInterner>,
     signatures: Arc<BTreeMap<DefId, OnceLock<SignatureRef>>>,
@@ -43,6 +44,9 @@ struct Shared {
 fn shared() -> &'static Shared {
     static SHARED: OnceLock<Shared> = OnceLock::new();
     SHARED.get_or_init(|| {
+        let owner =
+            hirsel_guard::admission::Owner::new(hirsel_guard::admission::OwnerKind::CoreSignatures);
+        let _retained = owner.enter();
         use bincode::Options;
         let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/core-products.index"));
         let index: products::CoreProducts = bincode::DefaultOptions::new()
@@ -60,6 +64,7 @@ fn shared() -> &'static Shared {
         let references: BTreeMap<_, _> = index.signatures.into_iter().collect();
         let signatures = references.keys().map(|&d| (d, OnceLock::new())).collect();
         let registry = BuiltinRegistry {
+            owner,
             types,
             signatures: Arc::new(signatures),
             revision: index.revision,
@@ -102,12 +107,16 @@ impl BuiltinRegistry {
     }
     /// The core signatures, built into `types`.
     pub fn build(types: &Arc<TypeInterner>) -> Self {
+        let owner =
+            hirsel_guard::admission::Owner::new(hirsel_guard::admission::OwnerKind::CoreSignatures);
+        let _retained = owner.enter();
         let signatures = declarations::build::registry(types);
         let revision = ContentHash::of_parts(
             "hirsel.core.registry.v9",
             signatures.values().map(|s| s.fingerprint.0.as_slice()),
         );
         Self {
+            owner,
             types: types.clone(),
             signatures: Arc::new(
                 signatures
@@ -142,6 +151,7 @@ impl BuiltinRegistry {
     }
     fn decode<'a>(&self, d: DefId, slot: &'a OnceLock<SignatureRef>) -> &'a SignatureRef {
         slot.get_or_init(|| {
+            let _retained = self.owner.enter();
             let records = self.records.as_ref().expect("lazy core records");
             let reference = *self.references.get(&d).expect("core product reference");
             let bytes = records
@@ -154,6 +164,15 @@ impl BuiltinRegistry {
                     .expect("core signature record"),
             )
         })
+    }
+    pub fn retained_signature_charge(&self) -> u64 {
+        self.owner.bytes()
+    }
+    pub fn retained_signature_owners_match(&self) -> bool {
+        self.signatures
+            .values()
+            .filter_map(OnceLock::get)
+            .all(|signature| self.owner.owns_arc(&**signature))
     }
     pub fn revision(&self) -> ContentHash {
         self.revision

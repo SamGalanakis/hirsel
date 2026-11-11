@@ -18,7 +18,7 @@ use hirsel_intern::jobs::Jobs;
 use hirsel_query_products::LoweringPolicy;
 use hirsel_span::{FileId, SourceMap};
 use hirsel_syntax::{DefPath, FileContext, PackageId};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 /// Process bounds of one request graph: its executor, its immutable snapshot
 /// partitions and its store transport.
@@ -32,20 +32,8 @@ pub struct RequestLimits {
 // Every host in a process shares one allowance, including different
 // sessions and the engine's own checks. Capturing the guard policy once
 // prevents each source revision from creating a new full-cap budget.
-static HOST: OnceLock<(Arc<hirsel_engine_admission::ProcessBudget>, u64)> = OnceLock::new();
 pub fn host_budget() -> (&'static Arc<hirsel_engine_admission::ProcessBudget>, u64) {
-    let (budget, cap) = HOST.get_or_init(|| {
-        let cap = std::env::var("HIRSEL_MEMORY_LIMIT")
-            .ok()
-            .and_then(|text| hirsel_guard::parse_limit(text.as_bytes()))
-            .unwrap_or(hirsel_guard::DEFAULT_LIMIT);
-        // Keep a quarter for the host, source loader and native libraries.
-        (
-            hirsel_engine_admission::ProcessBudget::new(cap.saturating_sub(cap / 4)),
-            cap,
-        )
-    });
-    (budget, *cap)
+    hirsel_guard::admission::host_budget()
 }
 pub fn host_limits(cap: u64, jobs: usize) -> RequestLimits {
     RequestLimits {

@@ -52,6 +52,10 @@ unsafe impl GlobalAlloc for Counting {
         moved
     }
 }
+/// Current independent physical count inside one measurement interval.
+pub fn live_bytes() -> isize {
+    COUNT.with(|slot| slot.get().expect("active allocation measurement").live)
+}
 pub fn measured<T>(run: impl FnOnce() -> T) -> (T, Count) {
     struct Reset;
     impl Drop for Reset {

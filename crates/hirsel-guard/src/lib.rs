@@ -21,6 +21,8 @@
 //! recorder section is open on the calling thread ([`section`]): such a call
 //! ends the process with exit status [`SECTION_STATUS`]. Sections write only
 //! room reserved before them and run no destructor (design §5 Op sections).
+pub mod admission;
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -138,33 +140,42 @@ static STATE: AtomicU8 = AtomicU8::new(UNSET);
 
 unsafe impl<A: GlobalAlloc> GlobalAlloc for Guarded<A> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        admission::allocator_installed();
         limit_once();
         trap_section(layout.size());
+        let reservation = admission::before_alloc(layout.size());
         let block = unsafe { self.0.alloc(layout) };
         if block.is_null() {
             exhausted(layout.size());
         }
+        admission::allocated(block as usize, reservation);
         block
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        admission::allocator_installed();
         limit_once();
         trap_section(layout.size());
+        let reservation = admission::before_alloc(layout.size());
         let block = unsafe { self.0.alloc_zeroed(layout) };
         if block.is_null() {
             exhausted(layout.size());
         }
+        admission::allocated(block as usize, reservation);
         block
     }
     unsafe fn realloc(&self, block: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         trap_section(size);
+        let reservation = admission::reallocated(block as usize, layout.size(), size);
         let moved = unsafe { self.0.realloc(block, layout, size) };
         if moved.is_null() {
             exhausted(size);
         }
+        admission::allocated(moved as usize, reservation);
         moved
     }
     unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
         trap_section(layout.size());
+        admission::deallocated(block as usize, layout.size());
         unsafe { self.0.dealloc(block, layout) }
     }
 }
@@ -360,6 +371,22 @@ pub fn spawn_failed(stack: usize, error: std::io::Error) -> ! {
 }
 
 #[cold]
+fn owner_exhausted(owner: admission::OwnerKind, bytes: usize) -> ! {
+    let budget = admission::host_budget().0;
+    Line::new()
+        .text(b"hirsel: process query allowance exhausted; owner ")
+        .text(owner.name().as_bytes())
+        .text(b" requests ")
+        .number(bytes as u64)
+        .text(b" bytes with ")
+        .number(budget.reserved())
+        .text(b" of ")
+        .number(budget.limit())
+        .text(b" reserved; retained growth was refused\n")
+        .exit(EXIT_STATUS)
+}
+
+#[cold]
 fn exhausted(size: usize) -> ! {
     let mut current = libc::rlimit {
         rlim_cur: libc::RLIM_INFINITY,
@@ -481,6 +508,15 @@ mod tests {
         if std::env::var_os(CHILD).is_none() {
             return;
         }
+        if std::env::var_os("HIRSEL_GUARD_TEST_OWNER").is_some() {
+            let owner = admission::Owner::new(admission::OwnerKind::SessionTypes);
+            let budget = admission::host_budget().0;
+            let _full = budget.reserve(budget.free()).unwrap();
+            let _scope = owner.enter();
+            let block = std::hint::black_box(Box::new([0u8; 4096]));
+            println!("unadmitted owner published {} bytes", block.len());
+            return;
+        }
         let mut blocks = vec![];
         for _ in 0..64 {
             let block = vec![1u8; 4 << 20];
@@ -506,6 +542,24 @@ mod tests {
             "{stderr}"
         );
         assert!(!String::from_utf8_lossy(&output.stdout).contains("allocated"));
+    }
+
+    #[test]
+    fn process_owner_denial_refuses_before_allocation_and_publication() {
+        let output = child(
+            "tests::exhaustion_child",
+            &[
+                ("HIRSEL_MEMORY_LIMIT", "128M"),
+                ("HIRSEL_GUARD_TEST_OWNER", "1"),
+            ],
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(EXIT_STATUS), "{stderr}");
+        assert!(
+            stderr.contains("process query allowance exhausted; owner session type interner"),
+            "{stderr}"
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("unadmitted owner published"));
     }
 
     #[test]

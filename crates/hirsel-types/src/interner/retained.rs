@@ -5,19 +5,27 @@ use super::*;
 use std::alloc::Layout;
 
 #[derive(Default)]
-struct Bytes(u64);
-impl Bytes {
+struct Bytes<'a>(u64, Option<&'a dyn Fn(usize, usize)>);
+impl Bytes<'_> {
     fn add(&mut self, n: usize) {
         self.0 = self.0.saturating_add(n as u64);
     }
+    fn allocation(&mut self, address: usize, bytes: usize) {
+        self.add(bytes);
+        if let Some(visit) = self.1 {
+            visit(address, bytes);
+        }
+    }
+    fn string(&mut self, value: &String) {
+        self.allocation(value.as_ptr() as usize, value.capacity());
+    }
     fn arc<T: ?Sized>(&mut self, value: &T) {
-        self.add(
-            Layout::new::<[usize; 2]>()
-                .extend(Layout::for_value(value))
-                .expect("existing Arc allocation")
-                .0
-                .pad_to_align()
-                .size(),
+        let (layout, offset) = Layout::new::<[usize; 2]>()
+            .extend(Layout::for_value(value))
+            .expect("existing Arc layout");
+        self.allocation(
+            value as *const T as *const () as usize - offset,
+            layout.pad_to_align().size(),
         );
     }
     fn shared<T>(&mut self, values: &SharedSlice<T>, mut visit: impl FnMut(&mut Self, &T)) {
@@ -33,7 +41,10 @@ impl Bytes {
     }
     fn fields<T>(&mut self, mut path: &SharedPath<T>) {
         while path.node_identity().is_some() {
-            self.add(path.node_allocation_bytes());
+            self.allocation(
+                path.node_allocation_address().expect("nonempty path"),
+                path.node_allocation_bytes(),
+            );
             path = path.prefix().expect("nonempty path has prefix");
         }
     }
@@ -43,12 +54,15 @@ impl Bytes {
             modules,
             name,
         } = &value.0;
-        self.add(package.name.capacity());
-        self.add(package.version.capacity());
-        self.add(name.capacity());
-        self.add(modules.capacity().saturating_mul(size_of::<String>()));
+        self.string(&package.name);
+        self.string(&package.version);
+        self.string(name);
+        self.allocation(
+            modules.as_ptr() as usize,
+            modules.capacity().saturating_mul(size_of::<String>()),
+        );
         for module in modules {
-            self.add(module.capacity());
+            self.string(module);
         }
     }
     fn root(&mut self, value: &OriginRoot) {
@@ -76,10 +90,10 @@ impl Bytes {
     fn generic(&mut self, value: &GenericParameter) {
         match value {
             GenericParameter::Type { name, bounds } => {
-                self.add(name.capacity());
+                self.string(name);
                 self.flat(bounds);
             }
-            GenericParameter::Size { name } => self.add(name.capacity()),
+            GenericParameter::Size { name } => self.string(name),
         }
     }
     fn function(&mut self, value: &FunctionType) {
@@ -103,7 +117,7 @@ impl Bytes {
         self.shared(generics, Self::generic);
         self.shared(parameters, |w, value| {
             for name in [&value.name, &value.label].into_iter().flatten() {
-                w.add(name.capacity());
+                w.string(name);
             }
         });
         self.authority(authority);
@@ -112,8 +126,8 @@ impl Bytes {
         }
         self.flat(contracts);
         if let Some(value) = foreign {
-            self.add(value.abi.capacity());
-            self.add(value.aliasing_contract.capacity());
+            self.string(&value.abi);
+            self.string(&value.aliasing_contract);
         }
     }
     fn row(&mut self, value: &Type) {
@@ -265,4 +279,27 @@ impl TypeInterner {
         }
         bytes.0
     }
+}
+
+pub(super) fn adopt_row(owner: &Owner, row: &Type) {
+    Bytes(0, Some(&|address, bytes| owner.adopt(address, bytes))).row(row);
+}
+pub(super) fn adopt_error(owner: &Owner, error: &Result<(), GraphError>) {
+    if let Err(GraphError::UnboundOrigin(root)) = error {
+        Bytes(0, Some(&|address, bytes| owner.adopt(address, bytes))).root(root);
+    }
+}
+
+pub(super) fn entry_owners_match(owner: &Owner, entry: &Entry) -> bool {
+    let matched = std::cell::Cell::new(true);
+    Bytes(
+        0,
+        Some(&|address, bytes| {
+            if bytes != 0 && !owner.owns(address, bytes) {
+                matched.set(false);
+            }
+        }),
+    )
+    .entry(entry);
+    matched.get()
 }

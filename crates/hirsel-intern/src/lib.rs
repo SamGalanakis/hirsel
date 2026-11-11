@@ -8,6 +8,7 @@ hirsel_guard::install!();
 pub mod jobs;
 pub mod memory;
 pub mod persist;
+pub mod retention;
 mod salt;
 mod table;
 pub mod test_progress;
@@ -61,6 +62,7 @@ impl Symbol {
         {
             return symbol;
         }
+        let _retained = retention::symbols().enter();
         let mut index = shard.write().unwrap_or_else(PoisonError::into_inner);
         if let Some(&symbol) = index.get(text) {
             return symbol;
@@ -73,6 +75,18 @@ impl Symbol {
         symbol
     }
 
+    pub fn retained_owners_match() -> bool {
+        let owner = retention::symbols();
+        (0..SYMBOLS.assigned.load(Atomic::Relaxed)).all(|at| {
+            SYMBOLS
+                .spellings
+                .get(at)
+                .is_some_and(|text| owner.owns(text.as_ptr() as usize, text.len()))
+        }) && SYMBOLS
+            .spellings
+            .allocations()
+            .all(|(address, bytes)| owner.owns(address, bytes))
+    }
     /// This symbol's spelling.
     #[inline]
     pub fn as_str(self) -> &'static str {

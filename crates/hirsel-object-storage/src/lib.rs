@@ -158,7 +158,8 @@ pub fn check_key(key: &str) -> Result<(), StorageError> {
 /// directory and every one above it up to the root, so directories the put
 /// created are durable too. A put that finds the key taken runs the same
 /// directory barrier before returning `Exists`, so the existing entry is
-/// durable whoever linked it. A replace holds the root's `.lock` file lock
+/// durable whoever linked it; a delete runs it whether or not the key is
+/// there, so an unlink is durable whoever made it. A replace holds the root's `.lock` file lock
 /// (an open-file-description lock, so every handle in every process
 /// excludes the others), compares the current content's tag, then writes a
 /// synced temporary file and renames it over the key. Tags are content
@@ -166,28 +167,71 @@ pub fn check_key(key: &str) -> Result<(), StorageError> {
 #[derive(Clone, Debug)]
 pub struct DirObjects {
     root: PathBuf,
+    disk: Arc<dyn Disk>,
 }
+
+/// The file-system calls that change a [`DirObjects`] root: by default the
+/// real ones. A test installs its own to fault them and to model what a host
+/// failure keeps of the root.
+pub trait Disk: std::fmt::Debug + Send + Sync {
+    /// Create a file that must not exist, for writing.
+    fn create_new(&self, path: &Path) -> std::io::Result<File> {
+        File::create_new(path)
+    }
+    /// Write all of `bytes` at the start of `file`.
+    fn write_all(&self, mut file: &File, bytes: &[u8]) -> std::io::Result<()> {
+        file.write_all(bytes)
+    }
+    /// Make `file`'s bytes durable.
+    fn sync(&self, file: &File) -> std::io::Result<()> {
+        file.sync_all()
+    }
+    fn hard_link(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        fs::hard_link(from, to)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        fs::rename(from, to)
+    }
+    fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+        fs::remove_file(path)
+    }
+    /// Make `dir`'s entries durable.
+    fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
+        File::open(dir).and_then(|handle| handle.sync_all())
+    }
+}
+
+/// The real file-system calls.
+#[derive(Debug)]
+struct RealDisk;
+
+impl Disk for RealDisk {}
 
 static TEMPORARY: AtomicU64 = AtomicU64::new(0);
 
 impl DirObjects {
     /// Objects under `root`, which is created when absent.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, StorageError> {
+        Self::open_on(root, Arc::new(RealDisk))
+    }
+    /// Objects under `root` whose changes go through `disk`.
+    pub fn open_on(root: impl Into<PathBuf>, disk: Arc<dyn Disk>) -> Result<Self, StorageError> {
         let root = root.into();
         fs::create_dir_all(&root).map_err(|e| io(&root, e))?;
-        Ok(Self { root })
+        Ok(Self { root, disk })
     }
     pub fn root(&self) -> &Path {
         &self.root
     }
     /// Sync the directory holding `path` and each one above it through the
-    /// root.
+    /// root, past any that does not exist.
     fn sync_directories(&self, path: &Path) -> Result<(), StorageError> {
         let mut directory = path.parent();
         while let Some(dir) = directory {
-            File::open(dir)
-                .and_then(|handle| handle.sync_all())
-                .map_err(|e| io(dir, e))?;
+            match self.disk.sync_dir(dir) {
+                Err(e) if e.kind() != ErrorKind::NotFound => return Err(io(dir, e)),
+                _ => {}
+            }
             if dir == self.root {
                 break;
             }
@@ -261,13 +305,13 @@ impl DirObjects {
             TEMPORARY.fetch_add(1, Ordering::Relaxed)
         ));
         let written = (|| {
-            let mut file = File::create_new(&temporary)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            fs::rename(&temporary, &path)
+            let file = self.disk.create_new(&temporary)?;
+            self.disk.write_all(&file, bytes)?;
+            self.disk.sync(&file)?;
+            self.disk.rename(&temporary, &path)
         })();
         if let Err(e) = written {
-            let _ = fs::remove_file(&temporary);
+            let _ = self.disk.remove_file(&temporary);
             return Err(io(&path, e));
         }
         self.sync_directories(&path)?;
@@ -339,9 +383,11 @@ impl ObjectStorage for DirObjects {
     fn delete(&self, key: &str) -> Result<(), StorageError> {
         check_key(key)?;
         let path = self.root.join(key);
-        match fs::remove_file(&path) {
+        // An absent key runs the same barrier, so an unlink whose directory
+        // sync failed is durable before the delete answers.
+        match self.disk.remove_file(&path) {
             Ok(()) => self.sync_directories(&path),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => self.sync_directories(&path),
             Err(e) => Err(io(&path, e)),
         }
     }
@@ -363,16 +409,16 @@ impl ObjectStorage for DirObjects {
             TEMPORARY.fetch_add(1, Ordering::Relaxed)
         ));
         let written = (|| {
-            let mut file = File::create_new(&temporary)?;
-            file.write_all(bytes)?;
-            file.sync_all()
+            let file = self.disk.create_new(&temporary)?;
+            self.disk.write_all(&file, bytes)?;
+            self.disk.sync(&file)
         })();
         if let Err(e) = written {
-            let _ = fs::remove_file(&temporary);
+            let _ = self.disk.remove_file(&temporary);
             return Err(io(&temporary, e));
         }
-        let linked = fs::hard_link(&temporary, &path);
-        let _ = fs::remove_file(&temporary);
+        let linked = self.disk.hard_link(&temporary, &path);
+        let _ = self.disk.remove_file(&temporary);
         match linked {
             Ok(()) => {
                 self.sync_directories(&path)?;

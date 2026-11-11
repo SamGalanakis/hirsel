@@ -44,7 +44,7 @@ use crate::{
 };
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -68,14 +68,14 @@ const PAGE: usize = 1000;
 /// The file-system calls that change the history's files. The log harness
 /// injects its faults here and models what a host failure keeps.
 mod disk {
-    use std::fs::{File, OpenOptions};
+    use std::fs::{self, File, OpenOptions};
     use std::io;
-    use std::os::unix::fs::FileExt;
+    use std::os::unix::fs::{FileExt, OpenOptionsExt};
     use std::path::Path;
 
     pub(super) fn write_at(f: &File, bytes: &[u8], at: u64) -> io::Result<usize> {
         #[cfg(test)]
-        if let Some(r) = crate::harness_log::write_at(f, bytes, at) {
+        if let Some(r) = crate::harness_disk::write_at(f, bytes, at) {
             return r;
         }
         f.write_at(bytes, at)
@@ -96,7 +96,7 @@ mod disk {
 
     pub(super) fn sync_data(f: &File) -> io::Result<()> {
         #[cfg(test)]
-        if let Some(r) = crate::harness_log::sync_data(f) {
+        if let Some(r) = crate::harness_disk::sync_data(f) {
             return r;
         }
         f.sync_data()
@@ -104,7 +104,7 @@ mod disk {
 
     pub(super) fn set_len(f: &File, len: u64) -> io::Result<()> {
         #[cfg(test)]
-        if let Some(r) = crate::harness_log::set_len(f, len) {
+        if let Some(r) = crate::harness_disk::set_len(f, len) {
             return r;
         }
         f.set_len(len)
@@ -112,19 +112,44 @@ mod disk {
 
     pub(super) fn create_new(path: &Path) -> io::Result<File> {
         #[cfg(test)]
-        if let Some(r) = crate::harness_log::create_new(path) {
+        if let Some(r) = crate::harness_disk::create_new(path) {
             return r;
         }
         OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
+            .mode(0o644)
             .open(path)
+    }
+
+    pub(super) fn rename(from: &Path, to: &Path) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(r) = crate::harness_disk::rename(from, to) {
+            return r;
+        }
+        fs::rename(from, to)
+    }
+
+    pub(super) fn remove_file(path: &Path) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(r) = crate::harness_disk::remove_file(path) {
+            return r;
+        }
+        fs::remove_file(path)
+    }
+
+    pub(super) fn hard_link(from: &Path, to: &Path) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(r) = crate::harness_disk::hard_link(from, to) {
+            return r;
+        }
+        fs::hard_link(from, to)
     }
 
     pub(super) fn sync_dir(dir: &Path) -> io::Result<()> {
         #[cfg(test)]
-        if let Some(r) = crate::harness_log::sync_dir(dir) {
+        if let Some(r) = crate::harness_disk::sync_dir(dir) {
             return r;
         }
         File::open(dir).and_then(|d| d.sync_all())
@@ -606,20 +631,14 @@ impl Authority for Log {
         fs::create_dir_all(&parent).map_err(|e| Error::Storage(io(e)))?;
         let tmp = parent.join(format!(".tmp-{}-{}", std::process::id(), owner_id()));
         let created = (|| {
-            let mut f = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o644)
-                .open(&tmp)?;
-            f.write_all(&data)?;
-            f.sync_data()?;
-            fs::hard_link(&tmp, &path)
+            let f = disk::create_new(&tmp)?;
+            disk::write_all_at(&f, &data, 0)?;
+            disk::sync_data(&f)?;
+            disk::hard_link(&tmp, &path)
         })();
-        let _ = fs::remove_file(&tmp);
+        let _ = disk::remove_file(&tmp);
         match created {
-            Ok(()) => File::open(&parent)
-                .and_then(|d| d.sync_all())
-                .map_err(|e| Error::Storage(io(e))),
+            Ok(()) => disk::sync_dir(&parent).map_err(|e| Error::Storage(io(e))),
             Err(e) if e.kind() == ErrorKind::AlreadyExists => match fs::read(&path) {
                 Ok(old) if old == data => Ok(()),
                 Ok(_) => Err(Error::Corrupt(name.to_string())),
@@ -661,7 +680,7 @@ impl Space for Log {
     }
 
     fn remove(&mut self, key: &str) -> Result<(), Error> {
-        match fs::remove_file(self.object_path(key)?) {
+        match disk::remove_file(&self.object_path(key)?) {
             Err(e) if e.kind() != ErrorKind::NotFound => Err(Error::Storage(io(e))),
             _ => Ok(()),
         }
@@ -704,11 +723,11 @@ impl Space for Log {
                 .open(&tmp)?;
             disk::write_all_at(&f, &out, 0)?;
             disk::sync_data(&f)?;
-            fs::rename(&tmp, self.dir.join(RECLAIM))?;
+            disk::rename(&tmp, &self.dir.join(RECLAIM))?;
             disk::sync_dir(&self.dir)
         })();
         if let Err(e) = written {
-            let _ = fs::remove_file(&tmp);
+            let _ = disk::remove_file(&tmp);
             // A rename that may have happened leaves the file's revision unknown.
             c.dead = true;
             return Err(Error::Storage(io(e)));

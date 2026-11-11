@@ -3,13 +3,11 @@
 //! failure modelled.
 //!
 //! Racing handles claim, append windows of one to three entries of one to four
-//! commits at either level, wait for durability, read, and use claims that died; process and
-//! host failures strike between steps. The disk seam (`log::disk`) fails
-//! writes with nothing written, writes short, fails `fdatasync`, segment
-//! creation and the directory sync, and fails truncation. A host failure keeps
-//! of each segment its synced bytes and any prefix of the rest, and removes a
-//! segment no directory sync named. The ledger is kept apart from the
-//! authority:
+//! commits at either level, wait for durability, read, put objects, and use
+//! claims that died; process and host failures strike between steps. The disk
+//! seam (`log::disk`) faults the file-system calls as `harness_disk` says,
+//! and a host failure keeps what that model keeps. The ledger is kept apart
+//! from the authority:
 //!
 //! 1. an entry acknowledged durable at a level (an `Advanced` there, a covering
 //!    `durable`, a read there, or a claim, which is durable at `host`)
@@ -19,154 +17,18 @@
 //! 4. a claim that died (`Fenced`, `Undecided`) is `Fenced` at every later use;
 //! 5. a claimed history follows, its claim is at its end, and its versions are
 //!    the commits counted, not the entries;
-//! 6. nothing here damages the history, so nothing is ever refused as corrupt.
+//! 6. nothing here damages the history, so nothing is ever refused as corrupt;
+//! 7. an object put acknowledged survives every later failure with its bytes,
+//!    and any object present is whole.
 
 use crate::harness::{Rng, append, entry, stays_dead, window};
+use crate::harness_disk::{self, KINDS};
 use crate::log::Log;
 use crate::{Advanced, Authority, Claim, Error, Level, Record};
-use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::{self, File, OpenOptions};
-use std::io;
-use std::os::unix::fs::{FileExt, MetadataExt};
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::fs;
 
 const HOST: Level = Level(1);
-
-const WRITE: usize = 0;
-const SHORT: usize = 1;
-const SYNC: usize = 2;
-const CREATE: usize = 3;
-const DIR_SYNC: usize = 4;
-const SET_LEN: usize = 5;
-
-/// The faults the disk seam injects, and what a host failure would keep.
-struct Disk {
-    rng: Rng,
-    /// One call in `odds[kind]` fails that way; 0 never.
-    odds: [u64; 6],
-    /// Each segment's synced length, by inode.
-    synced: HashMap<u64, u64>,
-    /// The segments a directory sync named, by inode.
-    named: HashSet<u64>,
-}
-
-thread_local! {
-    static DISK: RefCell<Option<Disk>> = const { RefCell::new(None) };
-}
-
-fn with<R>(f: impl FnOnce(&mut Disk) -> R) -> Option<R> {
-    DISK.with(|d| d.borrow_mut().as_mut().map(f))
-}
-
-fn strikes(d: &mut Disk, kind: usize) -> bool {
-    d.odds[kind] != 0 && d.rng.below(d.odds[kind]) == 0
-}
-
-fn errno(n: i32) -> io::Error {
-    io::Error::from_raw_os_error(n)
-}
-
-pub(crate) fn write_at(f: &File, bytes: &[u8], at: u64) -> Option<io::Result<usize>> {
-    with(|d| {
-        if strikes(d, WRITE) {
-            return Err(errno(libc::ENOSPC));
-        }
-        let n = if bytes.len() > 1 && strikes(d, SHORT) {
-            1 + d.rng.below(bytes.len() as u64 - 1) as usize
-        } else {
-            bytes.len()
-        };
-        f.write_all_at(&bytes[..n], at).map(|_| n)
-    })
-}
-
-pub(crate) fn sync_data(f: &File) -> Option<io::Result<()>> {
-    with(|d| {
-        if strikes(d, SYNC) {
-            return Err(errno(libc::EIO));
-        }
-        let m = f.metadata()?;
-        d.synced.insert(m.ino(), m.len());
-        Ok(())
-    })
-}
-
-pub(crate) fn set_len(f: &File, len: u64) -> Option<io::Result<()>> {
-    with(|d| {
-        if strikes(d, SET_LEN) {
-            return Err(errno(libc::EIO));
-        }
-        f.set_len(len)?;
-        if let Some(s) = d.synced.get_mut(&f.metadata()?.ino()) {
-            *s = (*s).min(len);
-        }
-        Ok(())
-    })
-}
-
-pub(crate) fn create_new(path: &Path) -> Option<io::Result<File>> {
-    with(|d| {
-        if strikes(d, CREATE) {
-            return Err(errno(libc::ENOSPC));
-        }
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(path)
-    })
-}
-
-pub(crate) fn sync_dir(dir: &Path) -> Option<io::Result<()>> {
-    with(|d| {
-        if strikes(d, DIR_SYNC) {
-            return Err(errno(libc::EIO));
-        }
-        for e in fs::read_dir(dir)? {
-            d.named.insert(e?.metadata()?.ino());
-        }
-        Ok(())
-    })
-}
-
-fn segments(dir: &Path) -> Vec<std::path::PathBuf> {
-    let mut out: Vec<_> = fs::read_dir(dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| p.extension().is_some_and(|x| x == "seg"))
-        .collect();
-    out.sort();
-    out
-}
-
-/// The host fails: each segment keeps its synced bytes and any prefix of the
-/// rest, and a segment no directory sync named is gone.
-fn fail_host(dir: &Path) {
-    with(|d| {
-        for path in segments(dir) {
-            let m = fs::metadata(&path).unwrap();
-            if !d.named.contains(&m.ino()) {
-                fs::remove_file(&path).unwrap();
-                continue;
-            }
-            let synced = d.synced.get(&m.ino()).copied().unwrap_or(0).min(m.len());
-            let keep = synced + d.rng.below(m.len() - synced + 1);
-            OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .and_then(|f| f.set_len(keep))
-                .unwrap();
-        }
-        d.synced.clear();
-        d.named.clear();
-        for path in segments(dir) {
-            let m = fs::metadata(&path).unwrap();
-            d.synced.insert(m.ino(), m.len());
-            d.named.insert(m.ino());
-        }
-    });
-}
 
 type Ledger = BTreeMap<u64, (Record, u8)>;
 
@@ -200,6 +62,8 @@ struct Run {
     ledger: Ledger,
     /// Entries that must never be in the history: refused or tried dead.
     never: Vec<(u64, Record)>,
+    /// Every object put, by name: its bytes, and whether a put acknowledged it.
+    objects: BTreeMap<String, (Vec<u8>, bool)>,
 }
 
 impl Run {
@@ -246,7 +110,7 @@ fn read_all(log: &mut Log) -> Result<Vec<Record>, String> {
 /// One schedule; `Err` names the first broken law.
 fn schedule(seed: u64, steps: u32) -> Result<(), String> {
     let mut rng = Rng(seed | 1);
-    let mut odds = [0; 6];
+    let mut odds = [0; KINDS];
     for o in &mut odds {
         *o = if rng.below(4) == 0 {
             0
@@ -254,14 +118,7 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
             6 + rng.below(40)
         };
     }
-    DISK.with(|d| {
-        *d.borrow_mut() = Some(Disk {
-            rng: Rng(seed.wrapping_mul(0x9E37_79B9) | 1),
-            odds,
-            synced: HashMap::new(),
-            named: HashSet::new(),
-        })
-    });
+    harness_disk::install(seed.wrapping_mul(0x9E37_79B9), odds);
     let dir = tempfile::tempdir().unwrap();
     let mut probe = Log::open(dir.path(), Level(0)).unwrap();
     probe.segment_max = 300 + rng.below(700);
@@ -272,6 +129,7 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
         reader: probe,
         ledger: Ledger::new(),
         never: Vec::new(),
+        objects: BTreeMap::new(),
     };
     run.writers = (0..3)
         .map(|_| Writer {
@@ -285,7 +143,7 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
         let w = rng.below(run.writers.len() as u64) as usize;
         let at = Level(rng.below(2) as u8);
         tag += 1;
-        match rng.below(13) {
+        match rng.below(14) {
             0 | 1 => {
                 let attempt = (rng.next() as u128).to_le_bytes();
                 let mut fresh = [0u8; 32];
@@ -395,10 +253,30 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
                     return Err("a dead claim was used again".into());
                 }
             }
+            13 => {
+                let data = entry(tag << 2, 1 + rng.below(4) as u32);
+                let r = crate::ObjectRef {
+                    lifetime: tag,
+                    epoch: 1,
+                    digest: crate::envelope::digest(&data),
+                };
+                let put = run.writers[w].log.put_object(&r.name(), data.clone());
+                match put {
+                    Ok(()) => {
+                        run.objects.insert(r.name(), (data, true));
+                    }
+                    Err(e @ (Error::Corrupt(_) | Error::Format { .. })) => {
+                        return Err(format!("an object put refused the objects: {e:?}"));
+                    }
+                    Err(_) => {
+                        run.objects.insert(r.name(), (data, false));
+                    }
+                }
+            }
             k => {
                 let host = k == 12;
                 if host {
-                    fail_host(run.dir.path());
+                    harness_disk::fail_host(run.dir.path());
                 }
                 run.reopen();
                 // What the failure may lose is no longer owed.
@@ -414,6 +292,18 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
                     }
                 }
                 run.check(&all)?;
+                for (name, (data, owed)) in &run.objects {
+                    match run.reader.get_object(name) {
+                        Ok(Some(b)) if b == *data => {}
+                        Ok(None) if !owed => {}
+                        other => {
+                            return Err(format!(
+                                "object {name}, acknowledged {owed}, is {other:?} after a {} failure",
+                                if host { "host" } else { "process" }
+                            ));
+                        }
+                    }
+                }
                 // Past what the failure kept nothing is owed or excluded.
                 let keep = all.len() as u64;
                 run.ledger.retain(|p, _| *p <= keep);
@@ -430,7 +320,7 @@ fn sweep(seeds: u64) -> Option<String> {
             .err()
             .map(|e| format!("seed {seed}: {e}"))
     });
-    DISK.with(|d| *d.borrow_mut() = None);
+    harness_disk::remove();
     found
 }
 

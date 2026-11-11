@@ -21,6 +21,8 @@ pub mod envelope;
 #[cfg(test)]
 mod harness;
 #[cfg(test)]
+mod harness_disk;
+#[cfg(test)]
 mod harness_log;
 #[cfg(test)]
 mod harness_objects;

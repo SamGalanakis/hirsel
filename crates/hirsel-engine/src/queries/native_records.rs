@@ -105,46 +105,44 @@ impl SourceBindings {
             .map(|at| self.source_definitions[at].1)
             .or_else(|| self.parent.as_ref()?.definition(anchor))
     }
+    /// This generation and its ancestors, root first. Alias deltas make long
+    /// chains of one-binding generations, so whole views merge the chain once
+    /// instead of filtering every inherited row through every descendant.
+    fn generations(&self) -> Vec<&Self> {
+        let mut chain = vec![self];
+        while let Some(parent) = &chain[chain.len() - 1].parent {
+            chain.push(parent);
+        }
+        chain.reverse();
+        chain
+    }
+    /// The effective view: a key's nearest generation wins, in key order.
+    fn effective<'a, K: Ord + 'a, T: 'a>(
+        &'a self,
+        rows: impl Fn(&'a Self) -> &'a [T],
+        key: impl Fn(&'a T) -> K,
+    ) -> Box<dyn Iterator<Item = &'a T> + 'a> {
+        if self.parent.is_none() {
+            return Box::new(rows(self).iter());
+        }
+        let mut view = BTreeMap::new();
+        for generation in self.generations() {
+            for row in rows(generation) {
+                view.insert(key(row), row);
+            }
+        }
+        Box::new(view.into_values())
+    }
     fn owners(&self) -> Box<dyn Iterator<Item = &(Anchor, (RecordOwner, u32))> + '_> {
-        Box::new(
-            self.owners.iter().chain(
-                self.parent
-                    .iter()
-                    .flat_map(|parent| parent.owners())
-                    .filter(|(anchor, _)| {
-                        self.owners
-                            .binary_search_by_key(anchor, |(anchor, _)| *anchor)
-                            .is_err()
-                    }),
-            ),
-        )
+        self.effective(|bindings| &bindings.owners, |(anchor, _)| *anchor)
     }
     fn anchors(&self) -> Box<dyn Iterator<Item = &((RecordOwner, u32), Anchor)> + '_> {
-        Box::new(
-            self.anchors.iter().chain(
-                self.parent
-                    .iter()
-                    .flat_map(|parent| parent.anchors())
-                    .filter(|(owner, _)| {
-                        self.anchors
-                            .binary_search_by(|(selected, _)| selected.cmp(owner))
-                            .is_err()
-                    }),
-            ),
-        )
+        self.effective(|bindings| &bindings.anchors, |(owner, _)| owner)
     }
     fn definitions(&self) -> Box<dyn Iterator<Item = &(Anchor, DefId)> + '_> {
-        Box::new(
-            self.source_definitions.iter().chain(
-                self.parent
-                    .iter()
-                    .flat_map(|parent| parent.definitions())
-                    .filter(|(anchor, _)| {
-                        self.source_definitions
-                            .binary_search_by_key(anchor, |(anchor, _)| *anchor)
-                            .is_err()
-                    }),
-            ),
+        self.effective(
+            |bindings| &bindings.source_definitions,
+            |(anchor, _)| *anchor,
         )
     }
     fn bytes(&self) -> Option<u64> {
@@ -499,21 +497,43 @@ impl NativeRecordContext {
             .definitions()
             .copied()
             .collect::<BTreeMap<_, _>>();
-        for (anchor, owner) in inherited.bindings.owners() {
-            owners.entry(*anchor).or_insert_with(|| owner.clone());
+        // The inherited effective view, merged once; every check below is a
+        // lookup in it rather than a walk of its generation chain.
+        let inherited_owners = inherited
+            .bindings
+            .owners()
+            .map(|(anchor, owner)| (*anchor, owner))
+            .collect::<BTreeMap<_, _>>();
+        let inherited_anchors = inherited
+            .bindings
+            .anchors()
+            .map(|(owner, anchor)| (owner, *anchor))
+            .collect::<BTreeMap<_, _>>();
+        let inherited_definitions = inherited
+            .bindings
+            .definitions()
+            .copied()
+            .collect::<BTreeMap<_, _>>();
+        for (anchor, owner) in &inherited_owners {
+            owners.entry(*anchor).or_insert_with(|| (*owner).clone());
         }
-        for (owner, anchor) in inherited.bindings.anchors() {
-            let same_source = |other| {
+        // Many inherited anchors cite the same pair of files; compare each
+        // pair's bytes once.
+        let mut same_text = BTreeMap::new();
+        for (owner, anchor) in &inherited_anchors {
+            let mut same_source = |other| {
                 let ((old_file, old_base), (new_file, new_base)) =
                     (sources.anchor(*anchor)?, sources.anchor(other)?);
                 let (old, new) = (sources.file(old_file)?, sources.file(new_file)?);
                 Some(
                     old_base == new_base
                         && old.logical_path() == new.logical_path()
-                        && (std::ptr::eq(old, new) || old.text() == new.text()),
+                        && *same_text
+                            .entry((old_file, new_file))
+                            .or_insert_with(|| std::ptr::eq(old, new) || old.text() == new.text()),
                 )
             };
-            match anchors.entry(owner.clone()) {
+            match anchors.entry((*owner).clone()) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     entry.insert(*anchor);
                 }
@@ -525,16 +545,13 @@ impl NativeRecordContext {
                 _ => {}
             }
         }
-        for (anchor, definition) in inherited.bindings.definitions() {
+        for (anchor, definition) in &inherited_definitions {
             definitions.entry(*anchor).or_insert(*definition);
         }
-        owners.retain(|anchor, owner| inherited.bindings.owner(*anchor) != Some(owner));
-        anchors.retain(|(owner, occurrence), anchor| {
-            inherited.bindings.anchor(owner.path(), *occurrence) != Some(*anchor)
-        });
-        definitions.retain(|anchor, definition| {
-            inherited.bindings.definition(*anchor) != Some(*definition)
-        });
+        owners.retain(|anchor, owner| inherited_owners.get(anchor) != Some(&&*owner));
+        anchors.retain(|owner, anchor| inherited_anchors.get(owner) != Some(anchor));
+        definitions
+            .retain(|anchor, definition| inherited_definitions.get(anchor) != Some(definition));
         if owners.is_empty() && anchors.is_empty() && definitions.is_empty() {
             return Self {
                 types: self.types.clone(),

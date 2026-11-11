@@ -184,9 +184,10 @@ TEST_DATA = {
     # Every rule ID any crate cites must resolve in docs/spec.
     # Relative spec links reach top-level docs, research notes, port reports and licenses.
     "hirsel-conformance-test-spec_links": ["crates/**", "docs/*.md", "docs/research/**", "reports/**"],
-    # memcheck:: compiles a C program against the runtime header.
+    # memcheck:: compiles a C program against the runtime header; native
+    # publication faults build the whole tasks example.
     "hirsel-driver-test-it": ["crates/hirsel-driver/tests/fixtures/**", "crates/hirsel-rt/include/**",
-                              "examples/tasks/model.hir", "examples/tasks/store.hir", "tools/portable-manifest"],
+                              "examples/tasks/**", "tools/portable-manifest"],
     "hirsel-driver-test-it-stdlib": ["crates/hirsel-driver/tests/fixtures/**"],
     "hirsel-llvm-test-it": ["crates/hirsel-llvm/tests/native/**"],
     "hirsel-ownership-unittest": ["crates/hirsel-ownership/proptest-regressions/**"],

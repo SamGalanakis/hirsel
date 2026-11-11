@@ -629,18 +629,6 @@ impl NativeCache {
         output: &NativeOutput,
         target: &TargetSpec,
     ) -> Result<(Arc<CheckedLayouts>, UnitBody), NativeReadError> {
-        let (closure, body) = self.read_checked(output, target)?;
-        Ok((closure, body.decode()?))
-    }
-
-    /// The accepted output's layouts and its body bytes, checked against the
-    /// body's content reference but not decoded. A consumer that already holds
-    /// the unit validated from these bytes needs only this check.
-    pub fn read_checked(
-        &self,
-        output: &NativeOutput,
-        target: &TargetSpec,
-    ) -> Result<(Arc<CheckedLayouts>, CheckedBody), NativeReadError> {
         if output.record.target != target.digest()
             || output.record.lir != crate::LIR_VERSION
             || output.record.validator != crate::VALIDATOR_VERSION
@@ -663,7 +651,11 @@ impl NativeCache {
                 hirsel_artifact_store::ContentReadError::InvalidContent,
             ));
         }
-        Ok((closure, CheckedBody(body)))
+        let body: UnitBody = hirsel_codec::from_text(
+            std::str::from_utf8(&body).map_err(|e| NativeReadError::Decode(e.to_string()))?,
+        )
+        .map_err(|e| NativeReadError::Decode(format!("{e:?}")))?;
+        Ok((closure, body))
     }
 
     /// A self-contained local materialization for a demanded transformation.
@@ -684,16 +676,5 @@ impl NativeCache {
         }
         let unit = binding.materialize::<S>(&body)?;
         validate(unit, inputs).map_err(|e| format!("native output refused: {:?}", e.violations))
-    }
-}
-
-/// Body bytes that matched their content reference, not yet decoded.
-pub struct CheckedBody(hirsel_artifact_store::Bytes);
-impl CheckedBody {
-    pub fn decode(self) -> Result<UnitBody, NativeReadError> {
-        hirsel_codec::from_text(
-            std::str::from_utf8(&self.0).map_err(|e| NativeReadError::Decode(e.to_string()))?,
-        )
-        .map_err(|e| NativeReadError::Decode(format!("{e:?}")))
     }
 }

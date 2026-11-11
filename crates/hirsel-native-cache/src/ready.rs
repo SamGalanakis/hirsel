@@ -311,24 +311,6 @@ impl ReadyQueries {
         ),
         String,
     > {
-        let (closure, body) = self.read_checked(key, product, environment)?;
-        Ok((closure, body.decode().map_err(|e| e.to_string())?))
-    }
-
-    /// The same current-association and content checks as `read`, leaving the
-    /// body undecoded for a consumer that may already hold its validated unit.
-    pub fn read_checked(
-        &self,
-        key: &InstanceAddress,
-        product: &ReadyProduct,
-        environment: &NativeEnvironment<'_>,
-    ) -> Result<
-        (
-            Arc<hirsel_lir::products::CheckedLayouts>,
-            hirsel_lir::validate::CheckedBody,
-        ),
-        String,
-    > {
         let (current, accepted) = self
             .lookup_inner(key, product.product.action, environment)
             .ok_or("Ready materialization lost current C admission")?;
@@ -336,7 +318,7 @@ impl ReadyQueries {
             return Err("Ready materialization descriptor differs".into());
         }
         self.native
-            .read_checked(&accepted, environment.target)
+            .read(&accepted, environment.target)
             .map_err(|e| e.to_string())
     }
 

@@ -647,9 +647,11 @@ impl NativeProducts for DemandProducts {
                 operations: &operations,
                 ..environment
             };
-            // Every consumer checks the stored body against its reference; only
-            // a body without a validated unit in scope is decoded below.
-            let (closure, body) = self.local.queries.read_checked(&owner, product, &scoped)?;
+            // Every consumer reads and checks the stored body against its
+            // reference, and decodes it at once: a read's bytes stay charged to
+            // the request's scratch read admission while they live, so holding
+            // every selected body's bytes at once would exhaust it.
+            let (closure, body) = self.local.queries.read(&owner, product, &scoped)?;
             captured.push(body);
             contexts.push(context);
             Ok(closure)
@@ -719,11 +721,7 @@ impl NativeProducts for DemandProducts {
             snapshot
                 .validated
                 .units(&binding.table, selected_adapters, requests, |index| {
-                    let body = captured[index]
-                        .take()
-                        .ok_or("Ready body requested twice")?
-                        .decode()
-                        .map_err(|e| e.to_string())?;
+                    let body = captured[index].take().ok_or("Ready body requested twice")?;
                     let raw = binding.materialize::<Ready>(&body)?;
                     drop(body);
                     self.ready_materializations += 1;

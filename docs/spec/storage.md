@@ -632,6 +632,9 @@ versions of one store compare in commit order with `==` and `<`, and nothing els
 them is observable; in particular no program learns how many commits a store has made.
 A store's comparison domain is its authority, so versions taken under one authority
 compare across a close and reopen, and comparing versions of two authorities is PROV-2.
+A claim is a commit and versions are history positions: opening a store may advance its
+version though its state is unchanged. Equal versions mean equal states; the converse is
+not promised, and there is no second counter.
 A version is neither `data` nor `key` and is never serialized or hashed.
 
 A **snapshot** is the immutable state of a store at one version, together with the store

@@ -1,6 +1,6 @@
 // rule: STORE-2
 // expect: run
-// authorities: {"main":{"provider":"authority.memory@1","floor":"memory"},"small":{"provider":"authority.memory@1","floor":"memory"}}
+// authorities: {"main":{"provider":"authority.memory@1","floor":"memory"},"small":{"provider":"authority.memory@1","floor":"memory"},"edge":{"provider":"authority.memory@1","floor":"memory"}}
 // store.transact runs a transaction entry: it commits the entry's writes as
 // one commit when it returns Ok, discards them and returns Aborted when it
 // returns Error, refuses a commit over a limit with no effect, and ends a run
@@ -142,9 +142,10 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
 }
 
 // The group overhead is 8192 bytes, so transaction_bytes of 64 MiB less 8191
-// needs 64 MiB and one byte and is refused before any claim. A put of a 3-byte
-// key and a 200-byte value encodes past transaction_bytes 128: refused, no
-// effect.
+// needs 64 MiB and one byte and is refused before any claim. transaction_bytes
+// bounds the encoded commit, its call record and outcome included: a store whose
+// limit is exactly that size commits it, and one whose limit is a byte less
+// refuses it with no effect, as it refuses a far larger one.
 fn sizes(rt: Io) -> Result[(), Failed] {
   let Ok(a) = io.authority(rt, "small") else {
     return Error(Check())
@@ -156,7 +157,9 @@ fn sizes(rt: Io) -> Result[(), Failed] {
     _ => false,
   }
   check(over)?
-  config.limits.transaction_bytes = 128
+  let fits = Pair(key: b"big", value: filled(20))
+  let exact = encoded_size(fits)
+  config.limits.transaction_bytes = exact
   let mut s = store.open(a, config) ? Store
   let oversized: Result[(), store.TxFailure[store.TxError]] = store.transact(
     mut s,
@@ -167,11 +170,37 @@ fn sizes(rt: Io) -> Result[(), Failed] {
   let small: Result[(), store.TxFailure[store.TxError]] = store.transact(
     mut s,
     puts,
-    Pair(key: b"big", value: filled(20))
+    copy fits
   )
   check(small == Ok(()))?
   let snap = store.snapshot(a, mut s, authority.floor(a)) ? Store
   check(store.get(snap, b"big") == Some(filled(20)))?
   store.close(take s) ? Store
+  let Ok(e) = io.authority(rt, "edge") else {
+    return Error(Check())
+  }
+  config.limits.transaction_bytes = exact - 1
+  let mut t = store.open(e, config) ? Store
+  let past: Result[(), store.TxFailure[store.TxError]] = store.transact(
+    mut t,
+    puts,
+    take fits
+  )
+  check(past == Error(Limit(TransactionBytes())))?
+  let none = store.snapshot(e, mut t, authority.floor(e)) ? Store
+  check(store.get(none, b"big") == None())?
+  store.close(take t) ? Store
   Ok(())
+}
+
+// The size of a local `puts` commit of `p` laid out by the History format
+// (storage.md): kind, def, at, seed, an empty caller, stream 0, the argument
+// and outcome bytes (each a byte string of its codec encoding), then the writes:
+// a count and one put of the key and the value.
+fn encoded_size(p: Pair) -> u64 {
+  let ok: Result[(), store.TxFailure[store.TxError]] = Ok(())
+  let args = bytes.len(codec.encode(p))
+  let outcome = bytes.len(codec.encode(ok))
+  let record = 1u64 + 4 + 8 + 8 + 4 + 1 + (4 + args) + (4 + outcome)
+  record + 4 + 1 + (4 + bytes.len(p.key)) + (4 + bytes.len(p.value))
 }

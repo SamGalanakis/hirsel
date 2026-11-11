@@ -94,7 +94,18 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
   store.close(take s) ? Store
   let mut again = store.open(a, store.default_config()) ? Store
   let now = store.snapshot(a, mut again, at) ? Store
-  check(store.version(a, now) == store.version(a, latest))?
+  // The reopen's claim is a commit (STORE-8): its version may pass latest, never fall
+  // below it, and the state is latest's.
+  check(!(store.version(a, now) < store.version(a, latest)))?
+  check(
+    store.range(now, all, Unbounded(), up, 10) == store.range(
+      latest,
+      all,
+      Unbounded(),
+      up,
+      10
+    )
+  )?
   check(
     store.get(now, b"user/ada") == Some(b"1815-12-10") && store.get(now, b"user/alan") == None() && store.get(
       now,

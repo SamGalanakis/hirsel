@@ -501,6 +501,8 @@ fn decode_value[V: serializable](o: Open, data: Bytes) -> Result[V, store.TxErro
   }
   match take value {
     Ok(v) => Ok(take v),
+    // A row past the codec's decode budgets is a value this run will not hold.
+    Error(Limit()) => Error(Limit(ValueBytes())),
     Error(_) => Error(corrupt()),
   }
 }
@@ -619,6 +621,7 @@ fn decode_key[K: key + serializable](r: KeyReader, raw: Bytes) -> Result[K, stor
   }
   match take key {
     Ok(k) => Ok(take k),
+    Error(Limit()) => Error(Limit(KeyBytes())),
     Error(_) => Error(corrupt()),
   }
 }

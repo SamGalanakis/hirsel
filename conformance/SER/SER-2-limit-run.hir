@@ -1,0 +1,104 @@
+// rule: SER-2
+// expect: run
+// Input past the decode budget of 1,000,000 values is `Limit`, a DecodeError like any
+// other: no input ends the run. The values are collection elements, two per Map entry,
+// charged when each count is read: records, tuples and nominal wrappers add none.
+// Units take no bytes, so these counts satisfy the bytes left and only the budget refuses
+// them. The same holds inside an envelope. A type with no finite encoding is `Truncated`
+// where it would be read, so no schema makes a decode walk forever.
+@serializable
+type Twin {
+  a: (),
+  b: (),
+}
+
+@serializable
+type Chain {
+  next: box Chain,
+}
+
+@serializable
+type Loop = Stop | Spin(Chain)
+
+fn limited[T: serializable](t: Test, none: Option[T], payload: Bytes) {
+  let decoded: Result[T, DecodeError] = codec.decode_payload(none, payload)
+  match take decoded {
+    Error(Limit()) => test.check(t, true),
+    _ => test.check(t, false),
+  }
+}
+
+fn truncated[T: serializable](t: Test, none: Option[T], payload: Bytes) {
+  let decoded: Result[T, DecodeError] = codec.decode_payload(none, payload)
+  match take decoded {
+    Error(Truncated()) => test.check(t, true),
+    _ => test.check(t, false),
+  }
+}
+
+// `payload` decodes, and its value encodes back to it.
+fn decodes[T: serializable](t: Test, none: Option[T], payload: Bytes) {
+  let decoded: Result[T, DecodeError] = codec.decode_payload(none, payload)
+  match take decoded {
+    Ok(v) => test.check(t, codec.encode_payload(v) == payload),
+    Error(_) => test.check(t, false),
+  }
+}
+
+pub fn main(t: Test) -> Result[(), DecodeError] {
+  let units_none: Option[List[()]] = None()
+  // 2^40 units.
+  limited(t, units_none, b"\x00\x00\x00\x00\x00\x01\x00\x00")
+  // 1,000,000 units: exactly the budget.
+  decodes(t, units_none, b"\x40\x42\x0f\x00\x00\x00\x00\x00")
+  // 1,000,001 units: one value over.
+  limited(t, units_none, b"\x41\x42\x0f\x00\x00\x00\x00\x00")
+  let twins_none: Option[List[Twin]] = None()
+  // 1,000,000 Twins: a record of units costs its list one value.
+  decodes(t, twins_none, b"\x40\x42\x0f\x00\x00\x00\x00\x00")
+  limited(t, twins_none, b"\x41\x42\x0f\x00\x00\x00\x00\x00")
+  let nested_none: Option[List[List[()]]] = None()
+  // One list of 999,999 units: 1,000,000 values.
+  decodes(
+    t,
+    nested_none,
+    b"\x01\x00\x00\x00\x00\x00\x00\x00\x3f\x42\x0f\x00\x00\x00\x00\x00"
+  )
+  // Two lists, of 999,998 units and then 1: the second count is the 1,000,001st value.
+  limited(
+    t,
+    nested_none,
+    b"\x02\x00\x00\x00\x00\x00\x00\x00\x3e\x42\x0f\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00"
+  )
+  let pairs_none: Option[Map[(), ()]] = None()
+  // 500,001 entries hold 1,000,002 values.
+  limited(t, pairs_none, b"\x21\xa1\x07\x00\x00\x00\x00\x00")
+  // 500,000 entries fit the budget, so the second entry's repeated key is reached.
+  let duplicate: Result[Map[(), ()], DecodeError] = codec.decode_payload(
+    pairs_none,
+    b"\x20\xa1\x07\x00\x00\x00\x00\x00"
+  )
+  match take duplicate {
+    Error(Duplicate()) => test.check(t, true),
+    _ => test.check(t, false),
+  }
+  // Inside an envelope: the envelope of an empty List[()] with its count made 2^40.
+  let empty: List[()] = []
+  let e = codec.encode(empty)
+  let n = bytes.len(e)
+  let mut out: List[u8] = []
+  bytes.append(mut out, bytes.slice(e, 0, n - 8))
+  bytes.append(mut out, b"\x00\x00\x00\x00\x00\x01\x00\x00")
+  let enveloped: Result[List[()], DecodeError] = codec.decode(bytes.from_list(take out))
+  match enveloped {
+    Error(Limit()) => test.check(t, true),
+    _ => test.check(t, false),
+  }
+  // A Chain has no finite encoding, as a root or as a chosen arm.
+  let chain_none: Option[Chain] = None()
+  truncated(t, chain_none, b"")
+  let loop_none: Option[Loop] = None()
+  truncated(t, loop_none, b"\x01\x00\x00\x00")
+  decodes(t, loop_none, b"\x00\x00\x00\x00")
+  Ok(())
+}

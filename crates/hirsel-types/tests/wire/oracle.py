@@ -3,7 +3,9 @@
 
 The expected descriptor is supplied by the caller, never accepted as authority
 from input. The oracle is an executable byte specification, not a source opt-in
-checker. Its finite host budgets are operational refusal.
+checker. Decoding more than 1,000,000 values (one per collection element, two per map
+entry, charged when the count is known) is `Limit`; a root or chosen arm with no finite
+encoding is `Truncated`. The depth bound only guards Python's recursion.
 """
 import json
 import math
@@ -165,10 +167,11 @@ def decode_payload(descriptor, data):
     root, nodes = parse_descriptor(descriptor)
     size = fewest(nodes)
     r, remaining = Reader(data), [1000000]
+    if size[root] == math.inf:
+        raise DecodeError("Truncated")
 
     def read(t, depth=0):
-        remaining[0] -= 1
-        if remaining[0] < 0 or depth > 256:
+        if depth > 256:
             raise DecodeError("Limit")
         node = nodes[t]
         kind = node[0]
@@ -200,6 +203,8 @@ def decode_payload(descriptor, data):
             ordinal = r.uint(4)
             if ordinal >= len(node[1]):
                 raise DecodeError("Tag")
+            if sum(size[c] for c in node[1][ordinal]) == math.inf:
+                raise DecodeError("Truncated")
             return ["variant", ordinal, [read(t, depth+1) for t in node[1][ordinal]]]
         if kind == "wrap":
             return ["wrap", read(node[1], depth+1)]
@@ -209,8 +214,10 @@ def decode_payload(descriptor, data):
         # A count the bytes left cannot hold is truncated input, before any budget.
         if not fixed and n > 0 and n * each > len(r.data) - r.pos:
             raise DecodeError("Truncated")
-        if n > remaining[0] // (2 if kind == "map" else 1):
+        charge = n * (2 if kind == "map" else 1)
+        if charge > remaining[0]:
             raise DecodeError("Limit")
+        remaining[0] -= charge
         result, keys, previous = [], set(), None
         for _ in range(n):
             start = r.pos

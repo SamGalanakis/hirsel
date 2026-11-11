@@ -1889,8 +1889,10 @@ run-time implementation.
 
 `codec.encode` and `codec.decode` use the [canonical codec](serialization.md#ser-2-canonical-codec).
 `DecodeError` is the nullary variant `Version | SchemaMismatch | Truncated |
-Trailing | Scalar | Utf8 | Tag | Length | Duplicate | Order | Invalid`, itself `serializable`; these are expected
-validation failures with no partially decoded value. Operational refusal is separate.
+Trailing | Scalar | Utf8 | Tag | Length | Duplicate | Order | Invalid | Limit`, itself `serializable`;
+these are expected validation failures with no partially decoded value, and `Limit` is input
+past the decode budgets ([SER-2 Validation](serialization.md#validation)), so no input bytes
+end a run.
 
 `codec.encode_payload` and `codec.decode_payload(of, data)` are the same codec without the
 envelope ([SER-2 source operations](serialization.md#source-operations)): the payload of

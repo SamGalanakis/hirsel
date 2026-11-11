@@ -208,8 +208,9 @@ pub struct CodecPlan {
     pub checks: Vec<CodecCheck>,
 }
 
-/// The `DecodeError` arms, in ordinal order (core-library.md).
-pub const DECODE_ERRORS: [&str; 11] = [
+/// The `DecodeError` arms, in ordinal order (core-library.md); `Limit` since LIR schema
+/// revision 67.
+pub const DECODE_ERRORS: [&str; 12] = [
     "Version",
     "SchemaMismatch",
     "Truncated",
@@ -221,6 +222,7 @@ pub const DECODE_ERRORS: [&str; 11] = [
     "Duplicate",
     "Order",
     "Invalid",
+    "Limit",
 ];
 
 /// `ENTRIES` and `INDEX`: the fields of a Map or Set container payload.

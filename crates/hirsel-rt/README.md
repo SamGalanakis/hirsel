@@ -274,8 +274,9 @@ Invariants and boundary:
   Flat reconstruction patches native byte extents separately from wire element
   counts; sequential blocks retain exact used bytes and SoA blocks retain rounded
   column capacity. Both walks are iterative. Past
-  `hirsel_types::wire::Limits::default`'s byte and value budgets the run stops with
-  `Environmental(CodecLimit)`, as the interpreter's operational limit ends it.
+  `hirsel_types::wire::Limits::default`'s byte and value budgets a decode returns
+  `DecodeError::Limit`, and an encode stops the run with `Environmental(CodecLimit)`,
+  as the interpreter's operational limit ends it.
 - No numeric Depth or frame charge exists until spec #16 rules.
 
 Transitions of D's Lean model (`proofs/rc/README.md`) cited in code comments as `T<ID> <name>`;

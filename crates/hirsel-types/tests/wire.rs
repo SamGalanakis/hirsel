@@ -596,16 +596,14 @@ fn schema_mismatch_and_budgets_are_distinct_refusals() {
     );
     // Cyclic in-memory values and zero-byte schema recursion cannot hang.
     let cycle = Codec::new(&schema(vec![N::Box(S(0))])).unwrap();
-    let limits = Limits {
-        values: 10,
-        work: 100,
-        ..Limits::default()
-    };
     assert_eq!(
-        cycle.encode_payload(&value(vec![D::Wrapper(V(0))]), limits),
-        Err(Error::Limit)
+        cycle.encode_payload(&value(vec![D::Wrapper(V(0))]), Limits::default()),
+        Err(Error::Value)
     );
-    assert_eq!(cycle.decode_payload(&[], limits), Err(Error::Limit));
+    assert_eq!(
+        cycle.decode_payload(&[], Limits::default()),
+        Err(Error::Truncated)
+    );
 }
 #[test]
 fn checked_flat_fast_path_is_exact_and_conservative() {
@@ -789,7 +787,6 @@ fn arbitrary_bytes_never_publish_noncanonical_values() {
     ];
     let limits = Limits {
         values: 32,
-        work: 256,
         bytes: 256,
     };
     let mut rng = 0x3141592653589793u64;

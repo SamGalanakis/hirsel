@@ -14,7 +14,9 @@ use std::collections::BTreeSet;
 
 const MAGIC: &[u8; 4] = b"HSC1";
 const VERSION: u32 = 1;
-/// The reference codec's operational value budget (`hirsel_types::wire::Limits`).
+/// The reference's decode budgets (`hirsel_types::wire::Limits::default`): past either, a
+/// decode is `DecodeError::Limit` (SER-2 Validation).
+const BYTE_BUDGET: usize = 64 * 1024 * 1024;
 const VALUE_BUDGET: u64 = 1_000_000;
 
 /// `DecodeError`'s ordinals, in the reference's order of detection.
@@ -32,6 +34,8 @@ enum Malformed {
     Order = 9,
     /// A check rejected a decoded representation (SER-1).
     Invalid = 10,
+    /// The input exceeds a decode budget.
+    Limit = 11,
 }
 
 struct Input<'a> {
@@ -660,6 +664,9 @@ impl<S: Stage> Machine<'_, S> {
         plan: &CodecPlan,
         bytes: &'b [u8],
     ) -> Checked<Result<&'b [u8], Malformed>> {
+        if bytes.len() > BYTE_BUDGET {
+            return Ok(Err(Malformed::Limit));
+        }
         let mut input = Input { bytes, at: 0 };
         let envelope = |input: &mut Input<'b>| -> Result<&'b [u8], Malformed> {
             if input.take(4)? != MAGIC || input.number(4)? != u128::from(VERSION) {
@@ -715,17 +722,20 @@ impl<S: Stage> Machine<'_, S> {
             }
             Ok(())
         };
+        // A root or chosen arm with no finite encoding is truncated input: no bytes hold it.
+        if min(&plan.root) == u64::MAX {
+            return Ok(Err(Malformed::Truncated));
+        }
         let mut work = vec![Job::Visit(plan.root)];
         let mut open: Vec<(BTreeSet<&[u8]>, Option<&[u8]>)> = vec![];
-        // The reference's operational value budget: past it, H declines.
+        // The reference's value budget: each count charges its elements (a map's twice)
+        // before any is read.
         let mut values = 0u64;
-        let budget = |values: u64, n: u64| {
-            if n > VALUE_BUDGET.saturating_sub(values) {
-                return fail(
-                    V::Unsupported,
-                    "a codec value beyond the operational budget",
-                );
+        let mut charge = |n: u64| {
+            if n > VALUE_BUDGET - values {
+                return Err(Malformed::Limit);
             }
+            values += n;
             Ok(())
         };
         macro_rules! check {
@@ -795,8 +805,6 @@ impl<S: Stage> Machine<'_, S> {
                     continue;
                 }
             };
-            values += 1;
-            budget(values, 0)?;
             let node = self.plan_node(plan, id)?;
             let layout = node.layout();
             match node {
@@ -839,6 +847,9 @@ impl<S: Stage> Machine<'_, S> {
                     let Some(arm) = arms.get(tag) else {
                         return Ok(Err(Malformed::Tag));
                     };
+                    if arm.iter().fold(0u64, |n, f| n.saturating_add(min(f))) == u64::MAX {
+                        return Ok(Err(Malformed::Truncated));
+                    }
                     work.extend(arm.iter().rev().map(|f| Job::Visit(*f)));
                 }
                 CodecNode::Framed { value, .. } | CodecNode::Checked { value, .. } => {
@@ -848,7 +859,7 @@ impl<S: Stage> Machine<'_, S> {
                 CodecNode::Sequence { element, .. } => {
                     let count = check!(input.number(8)) as u64;
                     check!(satisfiable(&input, count, min(element)));
-                    budget(values, count)?;
+                    check!(charge(count));
                     work.push(Job::Elements {
                         node: *element,
                         count,
@@ -861,7 +872,7 @@ impl<S: Stage> Machine<'_, S> {
                         LayoutKind::Simd { lanes, .. } => u64::from(lanes),
                         _ => return fail(V::TypeConfusion, "a codec repeat off its layout"),
                     };
-                    budget(values, count)?;
+                    check!(charge(count));
                     work.push(Job::Elements {
                         node: *element,
                         count,
@@ -875,7 +886,7 @@ impl<S: Stage> Machine<'_, S> {
                         count,
                         min(key).saturating_add(min(value))
                     ));
-                    budget(values, count.saturating_mul(2))?;
+                    check!(charge(count.saturating_mul(2)));
                     work.push(Job::Close);
                     work.push(Job::Entries {
                         key: *key,
@@ -887,7 +898,7 @@ impl<S: Stage> Machine<'_, S> {
                 CodecNode::Set { element, .. } => {
                     let count = check!(input.number(8)) as u64;
                     check!(satisfiable(&input, count, min(element)));
-                    budget(values, count)?;
+                    check!(charge(count));
                     work.push(Job::Close);
                     work.push(Job::Elements {
                         node: *element,

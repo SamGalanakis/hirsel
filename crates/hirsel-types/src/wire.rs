@@ -38,19 +38,20 @@ pub struct Value {
     pub nodes: Vec<ValueNode>,
 }
 
-/// Host budgets are operational refusal, not language schema or value limits.
+/// Host budgets, not language schema or value limits. Decoding refuses input longer than
+/// `bytes`, or holding more than `values` values (one per collection element, two per map
+/// entry), with `Error::Limit`, which source decodes return as `DecodeError::Limit` (SER-2
+/// Validation). Encoding charges the same budgets, as operational refusal.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub bytes: usize,
     pub values: usize,
-    pub work: usize,
 }
 impl Default for Limits {
     fn default() -> Self {
         Self {
             bytes: 64 * 1024 * 1024,
             values: 1_000_000,
-            work: 4_000_000,
         }
     }
 }
@@ -154,17 +155,9 @@ fn satisfiable(input: &Input<'_>, n: usize, each: u64) -> Result<(), Error> {
 
 struct Budget {
     limits: Limits,
-    work: usize,
     values: usize,
 }
 impl Budget {
-    fn step(&mut self) -> Result<(), Error> {
-        self.work = self.work.checked_add(1).ok_or(Error::Limit)?;
-        if self.work > self.limits.work {
-            return Err(Error::Limit);
-        }
-        Ok(())
-    }
     fn count(&mut self, count: usize) -> Result<(), Error> {
         self.values = self.values.checked_add(count).ok_or(Error::Limit)?;
         if self.values > self.limits.values {
@@ -210,11 +203,7 @@ impl Codec {
     }
 
     pub fn encode_payload(&self, value: &Value, limits: Limits) -> Result<Vec<u8>, Error> {
-        let mut budget = Budget {
-            limits,
-            work: 0,
-            values: 0,
-        };
+        let mut budget = Budget { limits, values: 0 };
         self.encode_part(value, self.root, value.root, &mut budget)
     }
 
@@ -232,7 +221,6 @@ impl Codec {
         let mut work = vec![Job::Visit(schema, root)];
         let mut parts: Vec<Vec<u8>> = vec![];
         while let Some(job) = work.pop() {
-            budget.step()?;
             match job {
                 Job::Finish(t, n, tag) => {
                     let start = parts.len().checked_sub(n).ok_or(Error::Value)?;
@@ -273,7 +261,11 @@ impl Codec {
                     parts.push(bytes);
                 }
                 Job::Visit(t, id) => {
-                    budget.count(1)?;
+                    // No value has a type with no finite encoding: an in-memory cycle
+                    // through zero-byte nodes is refused here rather than walked forever.
+                    if self.minimum[t] == u64::MAX {
+                        return Err(Error::Value);
+                    }
                     let v = value.nodes.get(id.0).ok_or(Error::Value)?;
                     let mut children = vec![];
                     let mut tag = None;
@@ -324,15 +316,16 @@ impl Codec {
                         }
                         _ => return Err(Error::Value),
                     }
-                    if children.len() > budget.limits.values.saturating_sub(budget.values) {
-                        return Err(Error::Limit);
+                    // The decoder's count: elements, and both halves of each map entry.
+                    if matches!(
+                        self.nodes[t],
+                        Node::Sequence { .. } | Node::Map { .. } | Node::Set(_)
+                    ) {
+                        budget.count(children.len())?;
                     }
                     work.push(Job::Finish(t, children.len(), tag));
                     work.extend(children.into_iter().rev().map(|(t, v)| Job::Visit(t, v)));
                 }
-            }
-            if work.len() > budget.limits.work {
-                return Err(Error::Limit);
             }
         }
         if parts.len() != 1 {
@@ -347,11 +340,7 @@ impl Codec {
     }
 
     fn envelope(&self, payload: &[u8], limits: Limits) -> Result<Vec<u8>, Error> {
-        let budget = Budget {
-            limits,
-            work: 0,
-            values: 0,
-        };
+        let budget = Budget { limits, values: 0 };
         let mut out = vec![];
         put(&mut out, MAGIC, &budget)?;
         put(&mut out, &VERSION.to_le_bytes(), &budget)?;
@@ -428,11 +417,12 @@ impl Codec {
         if bytes.len() > limits.bytes {
             return Err(Error::Limit);
         }
-        let mut budget = Budget {
-            limits,
-            work: 0,
-            values: 0,
-        };
+        // A root or chosen arm with no finite encoding is truncated input: no bytes hold
+        // it. With collections charged to the value budget, this bounds the walk.
+        if self.minimum[self.root] == u64::MAX {
+            return Err(Error::Truncated);
+        }
+        let mut budget = Budget { limits, values: 0 };
         let mut input = Input { bytes, at: 0 };
         let mut nodes = vec![];
         let mut values = vec![];
@@ -460,7 +450,6 @@ impl Codec {
         }
         let mut collections: Vec<Collection<'_>> = vec![];
         while let Some(job) = work.pop() {
-            budget.step()?;
             match job {
                 Job::CollectionStart => collections.push(Collection::default()),
                 Job::CollectionEnd => {
@@ -516,7 +505,6 @@ impl Codec {
                     values.push(id);
                 }
                 Job::Visit(t) => {
-                    budget.count(1)?;
                     match &self.nodes[t] {
                         Node::Scalar(p) => {
                             let node = decode_scalar(*p, &mut input, materialize)?;
@@ -533,6 +521,13 @@ impl Codec {
                         Node::Variant(arms) => {
                             let tag = input.number(4)? as u32;
                             let fields = arms.get(tag as usize).ok_or(Error::Tag)?;
+                            if fields
+                                .iter()
+                                .fold(0u64, |n, f| n.saturating_add(self.minimum[*f]))
+                                == u64::MAX
+                            {
+                                return Err(Error::Truncated);
+                            }
                             work.push(Job::Finish(Build::Variant(tag), fields.len()));
                             work.extend(fields.iter().rev().map(|t| Job::Visit(*t)));
                         }
@@ -549,9 +544,7 @@ impl Codec {
                                     n
                                 }
                             };
-                            if n > budget.limits.values.saturating_sub(budget.values) {
-                                return Err(Error::Limit);
-                            }
+                            budget.count(n)?;
                             work.push(Job::Finish(Build::Sequence, n));
                             work.extend((0..n).map(|_| Job::Visit(*element)));
                         }
@@ -562,9 +555,7 @@ impl Codec {
                                 n,
                                 self.minimum[*key].saturating_add(self.minimum[*value]),
                             )?;
-                            if n > budget.limits.values.saturating_sub(budget.values) / 2 {
-                                return Err(Error::Limit);
-                            }
+                            budget.count(n.checked_mul(2).ok_or(Error::Limit)?)?;
                             work.push(Job::CollectionEnd);
                             work.push(Job::Finish(Build::Map, n * 2));
                             for _ in 0..n {
@@ -579,9 +570,7 @@ impl Codec {
                         Node::Set(element) => {
                             let n = input.length()?;
                             satisfiable(&input, n, self.minimum[*element])?;
-                            if n > budget.limits.values.saturating_sub(budget.values) {
-                                return Err(Error::Limit);
-                            }
+                            budget.count(n)?;
                             // Each start must be captured at actual visit time.
                             work.push(Job::CollectionEnd);
                             work.push(Job::Finish(Build::Set, n));
@@ -595,9 +584,6 @@ impl Codec {
                         }
                     }
                 }
-            }
-            if work.len() > budget.limits.work {
-                return Err(Error::Limit);
             }
         }
         if input.at != bytes.len() {

@@ -7444,6 +7444,7 @@ conformance/SER/SER-2-document-codec-payload-run.hir
 conformance/SER/SER-2-duplicate-map-run.hir
 conformance/SER/SER-2-duplicate-set-run.hir
 conformance/SER/SER-2-flat-zero-stride-list-run.hir
+conformance/SER/SER-2-limit-run.hir
 conformance/SER/SER-2-map-removed-equals-dense-run.hir
 conformance/SER/SER-2-mutual-group-run.hir
 conformance/SER/SER-2-noncanonical-bool-run.hir

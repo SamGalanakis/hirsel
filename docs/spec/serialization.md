@@ -124,10 +124,10 @@ either fails some validation or decodes as a valid but different value of `T`.
 (noncanonical bool or NaN, or a `char` that is not a Unicode scalar value),
 `Utf8` (invalid String encoding), `Tag` (invalid variant ordinal), `Length`
 (invalid or overflowing extent), `Duplicate` (repeated Map key or Set element),
-`Order` (descending Set encodings), and `Invalid` (a checked opaque type's check
-rejected a decoded representation). Schema or valid source-value
-inconsistencies are compiler errors; operational budget exhaustion is separate
-from `DecodeError`.
+`Order` (descending Set encodings), `Invalid` (a checked opaque type's check
+rejected a decoded representation), and `Limit` (input past the decode budgets; see
+[Validation](#validation)). Schema or valid source-value inconsistencies are compiler
+errors.
 
 ## Canonical data codec version 1
 
@@ -208,11 +208,26 @@ Each read and each length addition or multiplication is checked before indexing 
 allocating; overflow, truncation, an invalid `bool`, `char`, tag, NaN or UTF-8, duplicate
 map keys, noncanonical sets and trailing payload or envelope bytes are rejected. No
 partially decoded value is exposed, and no user constructor, callback or finalizer runs.
-Operational byte, value or work budgets may refuse service separately from malformed data;
-they are not language size or depth bounds. A budget refusal inside a runner call or a
-store operation is that operation's typed refusal (`NotRun(Rejected())`, `Limit(..)`),
-never the end of the process. Decoder traversal counts zero-byte elements
-and cannot loop forever on an uninhabited recursive schema. For canonical input,
+A List, Set or Map count is `Truncated` when the count times its element's fewest
+encoded bytes (a Map entry's: key's plus value's) exceeds the bytes left, decided when the
+count is read, before any element. A root, or a chosen variant arm, whose type has no
+finite encoding (an uninhabited recursive schema) is `Truncated` before any of it is read:
+no bytes hold it. Decoding has two budgets, and input past either is `Limit`, which is
+distinct from the malformed-data errors: input longer than 64 MiB (67,108,864 bytes), or
+more than 1,000,000 values. The values are the elements of every `List`, `Array`,
+`Inline`, `Simd` and `Set`, and both the key and the value of every Map entry; records, tuples, variants,
+boxes and nominal wrappers add none, because only a count can multiply data that takes no
+bytes. Each count charges its elements when it is known, after the bytes check and before
+any element is read, and is `Limit` if it would pass the budget: a `List[()]` of n units
+holds n values, a `List[T]` of n records of two `()` fields also n, a `List[List[()]]`
+of one list of n units n + 1, and a `Map[(), ()]` of n entries 2n. Neither budget is a
+language size or depth bound, and no input ends a run: `codec.decode` and
+`codec.decode_payload` return `Error(Limit())`, and an operation that decodes stored or
+received data reports it as its own typed refusal (a table row as `Limit(ValueBytes())`
+or `Limit(KeyBytes())`; a runner call as `NotRun(Rejected())`). With these two rules a
+decode does work bounded by its input and schema, so it cannot loop forever. Encoding
+reads no input; it charges the same budgets, and an encode past them is an operational
+refusal that ends the run, which no value a decode accepted reaches. For canonical input,
 `encode(decode(bytes))` is byte-identical; `decode(encode(value))` preserves the specified
 data, with canonical NaNs, canonical `Set` order, fresh ownership and no sharing.
 

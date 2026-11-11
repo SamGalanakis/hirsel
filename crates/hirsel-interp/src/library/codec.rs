@@ -58,9 +58,7 @@ pub(super) fn call(
                 .collect::<R<_>>()?;
             library.check_decoded(value, checks)
         }
-        Err(error @ (wire::Error::Schema | wire::Error::Value | wire::Error::Limit)) => {
-            Err(codec_error(error))
-        }
+        Err(error @ (wire::Error::Schema | wire::Error::Value)) => Err(codec_error(error)),
         Err(error) => Ok(OperationResult::returned(decode_error(error_ordinal(
             error,
         )?))),
@@ -176,6 +174,8 @@ fn error_ordinal(error: wire::Error) -> R<u32> {
         wire::Error::Length => 7,
         wire::Error::Duplicate => 8,
         wire::Error::Order => 9,
+        // Input past the decode budgets (SER-2 Validation); `Invalid`, 10, comes from checks.
+        wire::Error::Limit => 11,
         other => return Err(codec_error(other)),
     })
 }

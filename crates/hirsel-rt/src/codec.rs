@@ -7,7 +7,8 @@
 //! depth follows the data. Decoding validates the envelope and the whole payload before it
 //! allocates anything, then builds fresh blocks in reading order; nothing partially decoded
 //! exists. Error classes and their order are the reference codec's (`hirsel_types::wire`).
-//! The reference's operational budgets (bytes, visited values) terminate environmentally.
+//! Past the reference's budgets (bytes, and values: one per collection element, two per map
+//! entry) a decode is `DecodeError::Limit` and an encode stops environmentally.
 pub mod access;
 mod borrowed;
 pub(crate) mod structural;
@@ -77,7 +78,8 @@ pub const NO_NODE: u64 = u64::MAX;
 
 const MAGIC: &[u8; 4] = b"HSC1";
 const WIRE_VERSION: u32 = 1;
-/// The reference codec's operational budgets (`hirsel_types::wire::Limits::default`).
+/// The reference codec's budgets (`hirsel_types::wire::Limits::default`): past them a decode
+/// is `DecodeError::Limit`, and an encode stops operationally (`budget`).
 const LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 const LIMIT_VALUES: u64 = 1_000_000;
 
@@ -97,6 +99,8 @@ pub enum DecodeError {
     Order = 9,
     /// A checked opaque's check rejected a decoded representation (SER-1).
     Invalid = 10,
+    /// The input exceeds the decode budgets, `LIMIT_BYTES` or `LIMIT_VALUES` (SER-2).
+    Limit = 11,
 }
 
 #[derive(Clone, Copy)]
@@ -715,7 +719,7 @@ unsafe fn write_text(ctx: *mut TaskCtx, text: &Text, at: *mut u8, bytes: &[u8]) 
     }
 }
 
-/// The stop past `hirsel_types::wire::Limits::default`'s byte or value budget: the run ends
+/// The stop of an encode past `hirsel_types::wire::Limits::default`'s byte or value budget: the run ends
 /// environmentally, as the interpreter's operational limit ends it.
 fn budget() -> Stop {
     Stop::Environmental(hirsel_run_schema::Environmental::CodecLimit)
@@ -723,22 +727,39 @@ fn budget() -> Stop {
 
 /// Each node's fewest wire bytes for one program (`u64::MAX` for a node with no finite
 /// value), as `hirsel_types::wire` computes them: the least fixpoint from "no finite
-/// value", so a recursive schema gets its shortest finite encoding. Computed the first
-/// time a decode of the program reads a count, and kept for the next decode of it.
+/// value", so a recursive schema gets its shortest finite encoding. Every decode reads its
+/// root's, so the sizes of the last few programs decoded are kept: a caller alternating a
+/// key and a value codec computes each once.
 #[derive(Default)]
 struct Minimum {
-    program: usize,
-    sizes: Vec<u64>,
+    /// (program words address, sizes), most recently computed last.
+    programs: Vec<(usize, Vec<u64>)>,
 }
+
+/// How many programs' minimum sizes `Minimum` keeps.
+const MINIMUM_PROGRAMS: usize = 8;
 
 impl Minimum {
     fn of(&mut self, program: Program<'_>) -> &[u64] {
         let key = program.words.as_ptr() as usize;
-        if self.program != key || self.sizes.len() != program.count {
-            self.program = key;
-            fixpoint(program, &mut self.sizes);
-        }
-        &self.sizes
+        let found = self
+            .programs
+            .iter()
+            .position(|(k, sizes)| *k == key && sizes.len() == program.count);
+        let index = match found {
+            Some(index) => index,
+            None => {
+                let mut sizes = if self.programs.len() == MINIMUM_PROGRAMS {
+                    self.programs.remove(0).1
+                } else {
+                    Vec::new()
+                };
+                fixpoint(program, &mut sizes);
+                self.programs.push((key, sizes));
+                self.programs.len() - 1
+            }
+        };
+        &self.programs[index].1
     }
 }
 
@@ -797,17 +818,6 @@ fn satisfiable(input: &Input<'_>, n: u64, each: u64) -> Result<(), DecodeError> 
     Ok(())
 }
 
-/// Why a payload does not decode: its first `DecodeError`, or the operational budget.
-enum Invalid {
-    Decode(DecodeError),
-    Budget,
-}
-impl From<DecodeError> for Invalid {
-    fn from(error: DecodeError) -> Self {
-        Invalid::Decode(error)
-    }
-}
-
 fn nan32(bits: u32) -> bool {
     bits & 0x7fff_ffff > 0x7f80_0000
 }
@@ -835,7 +845,7 @@ struct Scratch {
     flat_jobs: Vec<Job>,
     content: Vec<u8>,
     inline: Vec<(usize, usize)>,
-    /// The last decoded program's per-node minimum wire sizes, kept across calls.
+    /// Recently decoded programs' per-node minimum wire sizes, kept across calls.
     minimum: Minimum,
 }
 
@@ -1175,7 +1185,16 @@ unsafe fn encode_payload(
     let base = out.len();
     work.clear();
     work.push(Put::Visit(program.root, value));
+    // The decoder's value count: one per element, two per map entry.
     let mut values = 0u64;
+    let mut charge = |n: u64| {
+        values += n;
+        if values > LIMIT_VALUES {
+            Err(budget())
+        } else {
+            Ok(())
+        }
+    };
     while let Some(job) = work.pop() {
         if (out.len() - base) as u64 > LIMIT_BYTES {
             return Err(budget());
@@ -1243,6 +1262,7 @@ unsafe fn encode_payload(
                 if count == 0 {
                     continue;
                 }
+                charge(1)?;
                 work.push(Put::Elements {
                     node,
                     at: at.wrapping_add(stride as usize),
@@ -1257,6 +1277,7 @@ unsafe fn encode_payload(
             }
             Put::Sequential { node, at, count } => {
                 if count > 0 {
+                    charge(1)?;
                     let n = unsafe { flat_extent(program, node, at, extent) };
                     work.push(Put::Sequential {
                         node,
@@ -1274,10 +1295,7 @@ unsafe fn encode_payload(
                 count,
             } => {
                 if row < count {
-                    values += 1;
-                    if values > LIMIT_VALUES {
-                        return Err(budget());
-                    }
+                    charge(1)?;
                     let Node::Columns { data, columns, .. } = program.node(node) else {
                         fault("codec rows of a node that is not columns");
                     };
@@ -1313,6 +1331,7 @@ unsafe fn encode_payload(
                 if !unsafe { container.map.live(at) } {
                     continue;
                 }
+                charge(if container.set { 1 } else { 2 })?;
                 if let Some(value) = container.value {
                     work.push(Put::Visit(
                         value,
@@ -1328,10 +1347,6 @@ unsafe fn encode_payload(
                 }
             }
             Put::Visit(node, at) => {
-                values += 1;
-                if values > LIMIT_VALUES {
-                    return Err(budget());
-                }
                 unsafe {
                     encode_node(
                         ctx,
@@ -1671,18 +1686,23 @@ fn validate(
     bytes: &[u8],
     work: &mut Vec<Check>,
     minimum: &mut Minimum,
-) -> Result<(), Invalid> {
+) -> Result<(), DecodeError> {
     let mut input = Input { bytes, at: 0 };
+    // A root or chosen arm with no finite encoding is truncated input: no bytes hold it.
+    if minimum.of(program)[program.root] == u64::MAX {
+        return Err(DecodeError::Truncated);
+    }
     work.clear();
     work.push(Check::Visit(program.root));
     let mut collections: Vec<Collection<'_>> = Vec::new();
+    // Each count charges its elements (a map's twice) before any is read.
     let mut values = 0u64;
-    let reserve = |values: u64, n: u64| {
-        if n > LIMIT_VALUES.saturating_sub(values) {
-            Err(Invalid::Budget)
-        } else {
-            Ok(())
+    let mut charge = |n: u64| {
+        if n > LIMIT_VALUES - values {
+            return Err(DecodeError::Limit);
         }
+        values += n;
+        Ok(())
     };
     while let Some(job) = work.pop() {
         match job {
@@ -1743,10 +1763,6 @@ fn validate(
                 work.push(Check::Visit(key));
             }
             Check::Visit(node) => {
-                values += 1;
-                if values > LIMIT_VALUES {
-                    return Err(Invalid::Budget);
-                }
                 match program.node(node) {
                     Node::Scalar(Scalar::Bool) => {
                         if input.number(1)? > 1 {
@@ -1793,6 +1809,11 @@ fn validate(
                     Node::Variant { arms, .. } => {
                         let tag = input.number(4)? as u32;
                         let arm = arms.get(tag).ok_or(DecodeError::Tag)?;
+                        let sizes = minimum.of(program);
+                        if pairs(arm).fold(0u64, |n, (_, f)| n.saturating_add(sizes[f])) == u64::MAX
+                        {
+                            return Err(DecodeError::Truncated);
+                        }
                         work.extend(pairs(arm).rev().map(|(_, f)| Check::Visit(f)));
                     }
                     Node::Framed(child) | Node::Checked { value: child, .. } => {
@@ -1802,6 +1823,10 @@ fn validate(
                     Node::FlatVariant(arms) => {
                         let tag = input.number(4)? as u32;
                         let arm = arms.get(tag).ok_or(DecodeError::Tag)?;
+                        let sizes = minimum.of(program);
+                        if ids(arm).fold(0u64, |n, f| n.saturating_add(sizes[f])) == u64::MAX {
+                            return Err(DecodeError::Truncated);
+                        }
                         work.extend(ids(arm).rev().map(Check::Visit));
                     }
                     Node::Box { payload, .. } => work.push(Check::Visit(payload)),
@@ -1811,7 +1836,7 @@ fn validate(
                     | Node::Columns { element, .. } => {
                         let count = input.length()?;
                         satisfiable(&input, count, minimum.of(program)[element])?;
-                        reserve(values, count)?;
+                        charge(count)?;
                         work.push(Check::Elements {
                             node: element,
                             count,
@@ -1819,7 +1844,7 @@ fn validate(
                         });
                     }
                     Node::Repeat { count, element, .. } => {
-                        reserve(values, count)?;
+                        charge(count)?;
                         work.push(Check::Elements {
                             node: element,
                             count,
@@ -1834,10 +1859,7 @@ fn validate(
                             .map_or(0, |value| sizes[value])
                             .saturating_add(sizes[container.key]);
                         satisfiable(&input, count, each)?;
-                        reserve(
-                            values,
-                            count.saturating_mul(if container.set { 1 } else { 2 }),
-                        )?;
+                        charge(count.saturating_mul(if container.set { 1 } else { 2 }))?;
                         work.push(Check::CollectionEnd);
                         work.push(match container.value {
                             None => Check::Elements {
@@ -2182,16 +2204,17 @@ unsafe fn decode(
     unsafe {
         let (program, form, descriptor, checks) = program(codec);
         let input = text_bytes(&program.bytes(), bytes.cast());
-        if input.len() as u64 > LIMIT_BYTES {
-            return Err(budget());
-        }
         let out = out.cast::<u8>();
         std::ptr::write_bytes(out, 0, program.out_size as usize);
-        let payload = match form {
-            Form::Envelope => envelope(input, descriptor),
-            Form::Payload => Ok(input),
+        let payload = if input.len() as u64 > LIMIT_BYTES {
+            Err(DecodeError::Limit)
+        } else {
+            match form {
+                Form::Envelope => envelope(input, descriptor),
+                Form::Payload => Ok(input),
+            }
         };
-        let checked = match payload.map_err(Invalid::Decode) {
+        let checked = match payload {
             Ok(payload) => {
                 validate(program, payload, &mut s.check, &mut s.minimum).map(|()| payload)
             }
@@ -2227,7 +2250,7 @@ unsafe fn decode(
                                 fault("a decoded value's release failed");
                             }
                             std::ptr::write_bytes(out, 0, program.out_size as usize);
-                            Err(Invalid::Decode(DecodeError::Invalid))
+                            Err(DecodeError::Invalid)
                         }
                     }
                 }
@@ -2236,8 +2259,7 @@ unsafe fn decode(
         };
         match checked {
             Ok(()) => (),
-            Err(Invalid::Budget) => return Err(budget()),
-            Err(Invalid::Decode(error)) => {
+            Err(error) => {
                 let &[offset, error_node] = program.write_arm(program.out, out, 1) else {
                     fault("a codec result whose Error arm is not one field");
                 };

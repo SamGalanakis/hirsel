@@ -140,7 +140,7 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         (
             "DecodeError",
             "",
-            "Version()|SchemaMismatch()|Truncated()|Trailing()|Scalar()|Utf8()|Tag()|Length()|Duplicate()|Order()|Invalid()",
+            "Version()|SchemaMismatch()|Truncated()|Trailing()|Scalar()|Utf8()|Tag()|Length()|Duplicate()|Order()|Invalid()|Limit()",
         ),
         ("Option", "T", "None()|Some(T)"),
         ("CheckRule", "", "Arithmetic()|TextInvariant()|Bounds()"),

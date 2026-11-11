@@ -40,6 +40,7 @@ listing, which runs Buck2).
 from __future__ import annotations
 
 import argparse
+import collections
 import functools
 import json
 import math
@@ -407,7 +408,10 @@ def shards(binary: str) -> tuple[int, str | None, dict[int, int]]:
         # This harness declares top-level tests and example!(...) test cases;
         # the indented #[test] inside the macro is its template, not a case.
         count = len(re.findall(r"(?m)^#\[test\]$|^example!\(", source))
-        return max(1, count), None, {}
+        # One case a shard here too: declared cases fill their width groups.
+        declared = case_cpus().get(binary, {})
+        groups = collections.Counter(declared.values())
+        return max(1, count - len(declared)), None, dict(sorted(groups.items()))
     if binary not in SHARDED:
         if binary in case_cpus():
             raise SystemExit(f"{binary} declares case widths but is not sharded by cost; add it to SHARDED")

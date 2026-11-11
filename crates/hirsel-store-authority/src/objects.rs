@@ -58,6 +58,9 @@ const FAMILY: &[u8; 6] = b"HSOBJH";
 const HEAD_FIXED: usize = 8 + 16 + 8 + 32 + 8 + 8 + 4 + 4;
 /// Attempts of a claim whose head replace lost to the current writer's append.
 const CLAIM_TRIES: usize = 8;
+/// Reads of the head one request makes while each answers a state older than
+/// this handle has seen.
+const HEAD_READS: usize = 4;
 
 /// Deliberate defects the harness must catch (its negative controls; the first
 /// two are the place-authority-674 model's).
@@ -180,6 +183,9 @@ pub struct Objects {
     /// Groups got past the chain's end that are not yet linked to it, kept
     /// across a failed request so following the history makes progress.
     fetched: BTreeMap<String, Vec<u8>>,
+    /// The newest head revision this handle has read or written. A head below
+    /// it is an older state a lagging replica or cache answered.
+    seen: u64,
     #[cfg(test)]
     pub(crate) bug: Option<Bug>,
 }
@@ -194,6 +200,7 @@ impl Objects {
             owner: owner_id(),
             chain: Chain::default(),
             fetched: BTreeMap::new(),
+            seen: 0,
             #[cfg(test)]
             bug: None,
         }
@@ -226,13 +233,31 @@ impl Objects {
         Ok(out)
     }
 
-    /// The head and its tag, `None` for an empty history.
-    fn head(&self) -> Result<Option<(Head, Tag)>, Error> {
-        match self.store.get_tagged(HEAD) {
-            Ok(None) => Ok(None),
-            Ok(Some((bytes, tag))) => Ok(Some((Head::decode(&bytes)?, tag))),
-            Err(e) => Err(Error::Refused(failure(e))),
+    /// The head and its tag, `None` for an empty history. A head older than
+    /// one this handle has read or written, an absent one included, is a stale
+    /// answer, not damage: it is read again, and after [`HEAD_READS`] stale
+    /// answers the request is refused, having had no effect.
+    fn head(&mut self) -> Result<Option<(Head, Tag)>, Error> {
+        for _ in 0..HEAD_READS {
+            match self.store.get_tagged(HEAD) {
+                Ok(None) if self.seen == 0 => return Ok(None),
+                Ok(None) => {}
+                Ok(Some((bytes, tag))) => {
+                    let h = Head::decode(&bytes)?;
+                    if h.revision >= self.seen {
+                        self.seen = h.revision;
+                        return Ok(Some((h, tag)));
+                    }
+                }
+                Err(e) => return Err(Error::Refused(failure(e))),
+            }
         }
+        Err(Error::Refused(unreachable()))
+    }
+
+    /// Notes that this handle's claim `c` wrote the head at its revision.
+    fn wrote(&mut self, c: &Claim) {
+        self.seen = self.seen.max(c.revision);
     }
 
     /// Follow the history from what this handle knows to the head's `end`,
@@ -353,6 +378,7 @@ impl Objects {
                 Ok(Replaced::Replaced(tag)) => {
                     c.tag = Some(tag);
                     c.revision += 1;
+                    self.wrote(c);
                     return advanced(c, last.position, last.digest);
                 }
                 Ok(Replaced::Mismatch) => {}
@@ -380,6 +406,7 @@ impl Objects {
             if h.end == position && h.digest == entry && h.revision == c.revision + 1 {
                 c.tag = Some(tag);
                 c.revision += 1;
+                self.wrote(c);
                 return Settled::Done(advanced(c, position, entry));
             }
             if h.end == c.end && h.revision == c.revision {
@@ -496,6 +523,7 @@ impl Authority for Objects {
             let mut claim = Claim::new(self.owner, attempt, &self.chain.tip, 1);
             claim.tag = Some(tag);
             claim.revision = revision + 1;
+            self.wrote(&claim);
             claim.sweep = sweep;
             return Ok(Claimed {
                 claim,
@@ -685,12 +713,14 @@ impl Space for Objects {
             {
                 c.tag = Some(tag);
                 c.revision += 1;
+                self.wrote(c);
                 return Ok(());
             }
             match self.head() {
                 Ok(Some((h, tag))) if h == head => {
                     c.tag = Some(tag);
                     c.revision += 1;
+                    self.wrote(c);
                     return Ok(());
                 }
                 Ok(Some((h, tag)))

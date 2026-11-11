@@ -1395,7 +1395,12 @@ reclamation's continuation: the revision, one up on every replace, the position 
 which every retirement is deleted, how many of the next record's are, the epoch whose
 listing walk the cursor is in, the epoch whose walk reached the listing's end (0 before
 any), and the listing cursor of `len` bytes; `sum` is the SHA-256 of everything before it. A wait puts each queued record, then replaces the
-head once, conditionally on the tag of the writer's own last replace. An object is `o/`
+head once, conditionally on the tag of the writer's own last replace. A get of the head may be answered by a lagging replica or
+cache: a head whose revision is below the newest one the handle has read or written, or no
+head after one, is that older state, never corruption, and is got again; four such
+answers in a row refuse the request with `Refused(Unreachable())`, having had no effect.
+Only a head at or past that revision that contradicts the chain the handle followed (an
+end below it, or another record at its end) is `Corrupt("head")`. An object is `o/`
 followed by its lifetime and its epoch as 20 decimal digits each and its digest in
 lowercase hexadecimal, separated by `-`; on a local log it is the file of that name under
 `objects/`, and the continuation is the file

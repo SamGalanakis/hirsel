@@ -20,7 +20,7 @@ from account i mod 8 to its successor, wrapping at 8. There are 512 successful
 transfers per sample. Groups contain 1 or 8 transfers in one atomic transaction,
 with one durable output gate per group. This is application batching, not eight
 independent transactions sharing a store log group. Store `group_commits` is 1.
-One or four closed-loop clients each keep one group outstanding. Hirsel clients
+One, four, sixteen or sixty-four closed-loop clients each keep one group outstanding. Hirsel clients
 are cooperative tasks on one execution worker and the Rust clients are threads, all feeding one writer.
 Admission, channel queuing, commit, sync, and joining clients are included in
 throughput. Latency starts at submission and ends when the writer returns from
@@ -60,13 +60,24 @@ Rust counts calls to its global System allocator. These are engine-specific
 allocator requests, not a common logical-object metric; compare each engine with
 its later runs. Aligned allocation APIs are not counted by the libc probes.
 
-Bytes are the phase's increase in regular-file sizes, meaning encoded log bytes,
-not block-device bytes or filesystem write amplification. The store's authority is `authority.log@1` with floor `host`, and `group_commits` is 1,
-so each commit group must be exactly one log append, one `pwrite64` of its frame, followed
-by one `fdatasync` before it is acknowledged. The runner refuses a native or interpreter
-sample whose phase makes any other number of pwrite64, fdatasync or fsync calls
-(kernel tracepoint counts), and under `--profile` one where a barrier does not follow its own append in the
-trace. A commit acknowledged without its barrier fails the sample. References count one append per group. No I/O tracing
+Bytes are the phase's increase in regular-file sizes, meaning encoded log or object bytes,
+not block-device bytes or filesystem write amplification.
+
+Each sample runs one cell: one authority at one level its provider declares, set as the
+deployment floor, with `group_commits` 1, so each commit group is one advance. A cell
+names the failure an acknowledged commit survives, and the runner refuses a native or
+interpreter sample whose phase makes other kernel calls than the cell requires
+(tracepoint counts; under `--profile`, the trace order too):
+
+| Cell | Authority, level | Survives | Per commit group |
+|---|---|---|---|
+| `log-host` | `authority.log@1`, `host` | OS crash or power loss; the disk survives | one `pwrite64`, then one `fdatasync` |
+| `log-process` | `authority.log@1`, `process` | process crash | one `pwrite64`, no sync |
+| `memory` | `authority.memory@1`, `memory` | nothing outside the process | no file calls, no bytes |
+| `objects-dir` | `authority.objects@1` over `objects.dir@1`, `host` | OS crash or power loss | at least one sync (each put syncs its file and directories) |
+
+`--cells` picks a subset. The Rust and raw references run once per workload and pair
+with `log-host`. Allocation diagnostics run for `log-host` only. No I/O tracing
 is used in latency samples. Percentiles use nearest rank over 512 or 64 durable
 groups; each transfer in a group shares its completion latency. These are one
 sample's empirical percentiles, not confidence intervals or stable tail estimates.

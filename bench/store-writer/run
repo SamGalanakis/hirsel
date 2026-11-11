@@ -14,6 +14,21 @@ import sys
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 BANNED = {12, 13, 14, 15, 28, 29, 30, 31}
+# A cell is one authority at one level its provider declares, the deployment's floor.
+# `survives` is the failure an acknowledged commit survives at that level. `barriers` is
+# what the kernel must see per commit group, as (pwrite64, fdatasync, fsync) counts in
+# trace order, or None for "at least one fdatasync or fsync per group, any mix".
+CELLS = {
+    'log-host': dict(provider='authority.log@1', floor='host', barriers=('w', 'd'),
+                     survives='operating system crash or power loss; the disk survives'),
+    'log-process': dict(provider='authority.log@1', floor='process', barriers=('w',),
+                        survives='process crash; written to the operating system, not synchronized'),
+    'memory': dict(provider='authority.memory@1', floor='memory', barriers=(),
+                   survives='nothing outside the process; the history lives in its memory'),
+    'objects-dir': dict(provider='authority.objects@1', floor='host', barriers=None,
+                        survives='operating system crash or power loss; objects.dir@1 syncs each '
+                                 'object and its directories before a put returns'),
+}
 
 
 def run(command, **kwargs):
@@ -146,18 +161,26 @@ def sync_trace(path):
     return syncs, calls
 
 
-def check_log_barriers(commits, appends, datasyncs, fsyncs, order=None):
-    """What authority.log@1 must do for a store whose floor is `host`, with
-    group_commits 1 and one writer: each commit group is one advance, which
-    appends its frame with one pwrite and then issues one fdatasync before
-    the group is acknowledged. Nothing else writes or syncs in the phase (a
-    segment is 256 MiB, so no segment starts). `order`, from a trace, also
-    requires each barrier to follow its own append."""
-    if (appends, datasyncs, fsyncs) != (commits, commits, 0):
-        raise RuntimeError(f'log barriers: {appends} pwrite64, {datasyncs} fdatasync and {fsyncs} fsync '
-                           f'for {commits} commit groups; expected one pwrite64 then one fdatasync each')
-    if order is not None and order != ['w', 'd'] * commits:
-        raise RuntimeError('log barriers: a commit group\'s fdatasync did not follow its own pwrite64')
+def check_barriers(cell, commits, appends, datasyncs, fsyncs, order=None):
+    """What the cell's authority must do with group_commits 1 and one writer:
+    each commit group is one advance. authority.log@1 appends its frame with
+    one pwrite and, at `host` only, issues one fdatasync before the group is
+    acknowledged; a segment is 256 MiB, so no segment starts in the phase.
+    authority.memory@1 makes no file calls. authority.objects@1 over
+    objects.dir@1 syncs at least once per group. `order`, from a trace, also
+    requires each log barrier to follow its own append."""
+    shape = CELLS[cell]['barriers']
+    if shape is None:
+        if datasyncs + fsyncs < commits:
+            raise RuntimeError(f'{cell} barriers: {datasyncs} fdatasync and {fsyncs} fsync for '
+                               f'{commits} commit groups; expected at least one each')
+        return
+    expected = tuple(commits * shape.count(c) for c in 'wds')
+    if (appends, datasyncs, fsyncs) != expected:
+        raise RuntimeError(f'{cell} barriers: {appends} pwrite64, {datasyncs} fdatasync and {fsyncs} fsync '
+                           f'for {commits} commit groups; expected {expected}')
+    if order is not None and order != list(shape) * commits:
+        raise RuntimeError(f'{cell} barriers: a commit group\'s calls were out of order')
 
 
 def source_revision():
@@ -167,8 +190,8 @@ def source_revision():
     return revision
 
 
-def binding(source_sha, workload, kind, group, submitters, profile=False, allocations=False):
-    return dict(source_sha=source_sha, workload=workload, engine=kind, group=group,
+def binding(source_sha, workload, kind, cell, group, submitters, profile=False, allocations=False):
+    return dict(source_sha=source_sha, workload=workload, engine=kind, cell=cell, group=group,
                 submitters=submitters, profile=profile, allocations=allocations)
 
 
@@ -180,10 +203,10 @@ def saved_sample(path, expected):
     return row
 
 
-def sample(kind, group, submitters, workload, out, compiler, source_sha, profile=False, allocation_events=()):
+def sample(kind, cell, group, submitters, workload, out, compiler, source_sha, profile=False, allocation_events=()):
     if source_revision() != source_sha:
         raise RuntimeError('source revision changed before measurement')
-    suffix = f'{kind}-g{group}-c{submitters}' + ('-profile' if profile else '-allocations' if allocation_events else '')
+    suffix = f'{kind}-{cell}-g{group}-c{submitters}' + ('-profile' if profile else '-allocations' if allocation_events else '')
     directory = out / suffix
     directory.mkdir()  # Never reuse an old database or overwrite original evidence.
     db = directory / 'db'
@@ -191,10 +214,19 @@ def sample(kind, group, submitters, workload, out, compiler, source_sha, profile
     arguments = [workload[k] for k in ('accounts', 'initial_balance', 'transfers', 'amount')]
     arguments += [group, submitters]
     grants = directory / 'grants.json'
+    spec = CELLS[cell]
+    authority = dict(provider=spec['provider'], floor=spec['floor'])
+    stored = db  # Where the cell's history lives on disk, if anywhere.
+    if spec['provider'] == 'authority.log@1':
+        authority.update(mount='db', path='store')
+    elif spec['provider'] == 'authority.objects@1':
+        stored = directory / 'objects'
+        stored.mkdir()
+        authority.update(level=spec['floor'], objects=dict(provider='objects.dir@1', path=str(stored)))
     grants.write_text(json.dumps(dict(io=dict(stdout='stdout.bytes@1', stdin='stdin.bytes@1',
         tasks='tasks.cooperative@1', monotonic_clock='clock.monotonic.ns@1',
         dirs=[dict(path='db', host=str(db), access='read_write')],
-        authorities=dict(db=dict(provider='authority.log@1', floor='host', mount='db', path='store'))), args=list(map(str, arguments)))))
+        authorities=dict(db=authority)), args=list(map(str, arguments)))))
     if kind == 'interp':
         executable = compiler
         command = [compiler, 'run', '--mem-usage', HERE / 'hirsel.json', '--grants', grants,
@@ -246,14 +278,14 @@ def sample(kind, group, submitters, workload, out, compiler, source_sha, profile
                 if line.strip() == 'READY':
                     pid = target_pid(process.pid, executable)
                     before = read_counters(pid, objects)
-                    bytes_before = disk_bytes(db)
+                    bytes_before = disk_bytes(stored)
                     control('enable')
                     process.stdin.write('go\n')
                     process.stdin.flush()
                 elif line.strip() == 'DONE':
                     control('disable')
                     after = read_counters(pid, objects)
-                    bytes_after = disk_bytes(db)
+                    bytes_after = disk_bytes(stored)
                     process.stdin.write('finish\n')
                     process.stdin.flush()
             status = process.wait()
@@ -288,18 +320,20 @@ def sample(kind, group, submitters, workload, out, compiler, source_sha, profile
         else:
             appends, datasyncs, fsyncs = (int(metrics[f'syscalls:sys_enter_{c}'])
                                           for c in ('pwrite64', 'fdatasync', 'fsync'))
-        check_log_barriers(commits, appends, datasyncs, fsyncs, trace_calls)
+        check_barriers(cell, commits, appends, datasyncs, fsyncs, trace_calls)
         delta.update(fsyncs=datasyncs + fsyncs, log_appends=appends)
-    if delta['fsyncs'] < commits or bytes_after <= bytes_before:
-        raise RuntimeError('durability/body counters did not cover every commit')
+    elif delta['fsyncs'] < commits:
+        raise RuntimeError('durability counters did not cover every commit')
+    if (bytes_after > bytes_before) != (spec['provider'] != 'authority.memory@1'):
+        raise RuntimeError(f'{cell}: the phase grew the files by {bytes_after - bytes_before} bytes')
     if kind == 'interp':
         allocations = delta['allocations'] + delta['reallocations']
     elif kind in ('metal', 'raw'):
         allocations = next(int(line.split()[1]) for line in lines if line.startswith('allocations '))
     else:
         allocations = sum(metrics[event] for event in allocation_events) if allocation_events else None
-    row = dict(binding=binding(source_sha, workload, kind, group, submitters, profile, bool(allocation_events)),
-        engine=kind, group=group, submitters=submitters, transfers=workload['transfers'],
+    row = dict(binding=binding(source_sha, workload, kind, cell, group, submitters, profile, bool(allocation_events)),
+        engine=kind, cell=cell, survives=spec['survives'], group=group, submitters=submitters, transfers=workload['transfers'],
         commits=commits, elapsed_ns=elapsed, transfers_s=workload['transfers'] * 1e9 / elapsed,
         p50_us=latencies[math.ceil(len(latencies) * .50) - 1] / 1000,
         p99_us=latencies[math.ceil(len(latencies) * .99) - 1] / 1000,
@@ -332,7 +366,11 @@ def main():
     parser.add_argument('--skip-build', action='store_true', help='reuse output/native and output/metal')
     parser.add_argument('--resume', action='store_true', help='reuse completed samples in this evidence directory')
     parser.add_argument('--profile', action='store_true', help='also collect one phase-gated writer profile per engine')
+    parser.add_argument('--cells', default=','.join(CELLS), help='comma-separated authority cells to measure')
     args = parser.parse_args()
+    cells = args.cells.split(',')
+    if not cells or any(c not in CELLS for c in cells):
+        parser.error(f'cells are among {", ".join(CELLS)}')
     source_sha = source_revision()
     allowed = sorted(os.sched_getaffinity(0) - BANNED)
     if len(allowed) < 2:
@@ -356,34 +394,34 @@ def main():
         parser.error('unsupported workload mix or durability')
     with native_allocation_probes(out / 'native') as events:
         rows = []
+        def measured(kind, cell, group, clients, the_workload=workload, **mode):
+            """A saved cell when resuming, else a new sample."""
+            name = f'{kind}-{cell}-g{group}-c{clients}' + ('-profile' if mode.get('profile') else
+                '-allocations' if mode.get('allocation_events') else '')
+            saved = out / name / 'result.json'
+            if args.resume and saved.exists():
+                return saved_sample(saved, binding(source_sha, the_workload, kind, cell, group, clients,
+                    mode.get('profile', False), bool(mode.get('allocation_events'))))
+            return sample(kind, cell, group, clients, the_workload, out, compiler, source_sha, **mode)
+        # The Rust reference keeps one log synchronized per group: it pairs with log-host.
         for group in workload['groups']:
             for clients in workload['submitters']:
-                for kind in ('metal', 'native', 'interp'):
-                    saved = out / f'{kind}-g{group}-c{clients}' / 'result.json'
-                    if args.resume and saved.exists():
-                        rows.append(saved_sample(saved, binding(source_sha, workload, kind, group, clients)))
-                    else:
-                        rows.append(sample(kind, group, clients, workload, out, compiler, source_sha))
-                    if kind == 'native' and rows[-1].get('allocations_commit') is None:
-                        alloc_saved = out / f'native-g{group}-c{clients}-allocations/result.json'
-                        diagnostic = (saved_sample(alloc_saved, binding(source_sha, workload, kind, group, clients, allocations=True)) if args.resume and alloc_saved.exists()
-                            else sample(kind, group, clients, workload, out, compiler, source_sha, allocation_events=events))
-                        rows[-1]['allocations_commit'] = diagnostic['allocations_commit']
-                        saved.write_text(json.dumps(rows[-1], indent=2) + '\n')
-        raw_workload = dict(workload, groups=[1], submitters=[1])
-        raw_saved = out / 'raw-g1-c1/result.json'
-        rows.append(saved_sample(raw_saved, binding(source_sha, raw_workload, 'raw', 1, 1)) if args.resume and raw_saved.exists()
-                    else sample('raw', 1, 1, raw_workload, out, compiler, source_sha))
+                rows.append(measured('metal', 'log-host', group, clients))
+                for cell in cells:
+                    for kind in ('native', 'interp'):
+                        rows.append(measured(kind, cell, group, clients))
+                        if kind == 'native' and cell == 'log-host' and rows[-1].get('allocations_commit') is None:
+                            rows[-1]['allocations_commit'] = measured(kind, cell, group, clients,
+                                allocation_events=events)['allocations_commit']
+                            (out / f'{kind}-{cell}-g{group}-c{clients}' / 'result.json').write_text(
+                                json.dumps(rows[-1], indent=2) + '\n')
+        rows.append(measured('raw', 'log-host', 1, 1, dict(workload, groups=[1], submitters=[1])))
         if args.profile:
             for kind in ('native', 'interp'):
-                saved = out / f'{kind}-g1-c1-profile/result.json'
-                if args.resume and saved.exists():
-                    saved_sample(saved, binding(source_sha, workload, kind, 1, 1, profile=True))
-                else:
-                    sample(kind, 1, 1, workload, out, compiler, source_sha, profile=True)
+                measured(kind, 'log-host', 1, 1, profile=True)
     if source_revision() != source_sha:
         raise RuntimeError('source revision changed during measurement; no summary written')
-    summary = dict(source_sha=source_sha,
+    summary = dict(source_sha=source_sha, cells={c: CELLS[c]['survives'] for c in cells},
         workload=workload, cpus=allowed[:2], compiler=str(compiler), rows=rows)
     (out / 'results.json').write_text(json.dumps(summary, indent=2) + '\n')
 

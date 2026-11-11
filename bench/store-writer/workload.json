@@ -9,7 +9,9 @@
   ],
   "submitters": [
     1,
-    4
+    4,
+    16,
+    64
   ],
   "durability": "Durable",
   "mix": "round_robin_to_next_amount_1_2_3"

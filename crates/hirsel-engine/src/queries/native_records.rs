@@ -197,7 +197,15 @@ impl SourceBindings {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .as_mut()
+                && current.scalar.as_ref().is_some_and(|scalar| {
+                    scalar
+                        .bindings
+                        .generations()
+                        .into_iter()
+                        .any(|generation| std::ptr::eq(generation, self))
+                })
             {
+                // Release only a hold that would pin this charge.
                 current.scalar = None;
             }
         }
@@ -251,6 +259,58 @@ struct SourceProjection {
     types: std::sync::Weak<hirsel_types::TypeInterner>,
     bindings: std::sync::Weak<SourceBindings>,
     scalar: Option<NativeRecordContext>,
+}
+/// The engine releases its hold on bindings once a partition admits them, so
+/// the partition's charge ends with its last holder. When that holder drops
+/// the projected generation, the engine takes back an unadmitted, flattened
+/// copy of the same view, as it held before admission, instead of rebuilding
+/// the whole context on its next read. The reservation and every parent
+/// generation are released here.
+impl Drop for SourceBindings {
+    fn drop(&mut self) {
+        if !self.admitted() {
+            return;
+        }
+        let Some(cache) = self.cache.upgrade() else {
+            return;
+        };
+        // A projection replaced under this lock is being retired anyway.
+        let Ok(mut current) = cache.current.try_lock() else {
+            return;
+        };
+        let Some(projection) = current.as_mut() else {
+            return;
+        };
+        if projection.scalar.is_some() || !std::ptr::eq(projection.bindings.as_ptr(), self) {
+            return;
+        }
+        let Some(types) = projection.types.upgrade() else {
+            return;
+        };
+        let (owners, anchors, source_definitions) = if self.parent.is_none() {
+            (
+                std::mem::take(&mut self.owners),
+                std::mem::take(&mut self.anchors),
+                std::mem::take(&mut self.source_definitions),
+            )
+        } else {
+            (
+                self.owners().cloned().collect(),
+                self.anchors().cloned().collect(),
+                self.definitions().copied().collect(),
+            )
+        };
+        let bindings = Arc::new(SourceBindings {
+            owners,
+            anchors,
+            source_definitions,
+            parent: None,
+            admission: Default::default(),
+            cache: self.cache.clone(),
+        });
+        projection.bindings = Arc::downgrade(&bindings);
+        projection.scalar = Some(NativeRecordContext { types, bindings });
+    }
 }
 #[derive(Default)]
 pub(crate) struct SourceOwnership {
@@ -340,12 +400,31 @@ impl QueryEngine {
         syntax: Arc<hirsel_syntax::ItemSyntax>,
         context: &NativeRecordContext,
     ) {
+        // The insert leaves the built context unchanged when its reverse
+        // binding is already this anchor and its anchor's scalar owner stays:
+        // either it already is this item, or an earlier materialized item
+        // still wins owner selection (catalog and generated fallbacks do not
+        // outrank an inserted item).
         let equivalent = Arc::ptr_eq(self.types(), &context.types)
             && syntax.item.definition == *path
             && !self.items.contains_key(path)
-            && context.record_owner_ref(syntax.anchor) == Some((path, syntax.occurrence))
             && context.record_source_anchor(path, syntax.occurrence) == Some(syntax.anchor)
-            && context.bindings.definition(syntax.anchor) == DefId::get(path);
+            && match context.record_owner_ref(syntax.anchor) {
+                Some((owner, occurrence)) if owner == path => {
+                    occurrence == syntax.occurrence
+                        && context.bindings.definition(syntax.anchor) == DefId::get(path)
+                }
+                Some((owner, occurrence)) => {
+                    owner < path
+                        && self.sources.anchor(syntax.anchor).is_some()
+                        && self.items.get(owner).is_some_and(|items| {
+                            items.iter().any(|item| {
+                                item.anchor == syntax.anchor && item.occurrence == occurrence
+                            })
+                        })
+                }
+                None => false,
+            };
         if equivalent {
             let ownership = self.source_ownership.clone();
             let current = ownership.current.lock().unwrap_or_else(|e| e.into_inner());

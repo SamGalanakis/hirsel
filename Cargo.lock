@@ -766,6 +766,7 @@ dependencies = [
  "hirsel-rc",
  "hirsel-registry",
  "hirsel-remote",
+ "hirsel-remote-host",
  "hirsel-requests",
  "hirsel-resolve",
  "hirsel-rt",
@@ -1585,8 +1586,17 @@ dependencies = [
  "rustls",
  "rustls-webpki",
  "sha2",
- "tempfile",
  "webpki-roots",
+]
+
+[[package]]
+name = "hirsel-remote-host"
+version = "0.1.0"
+dependencies = [
+ "hirsel-guard",
+ "hirsel-remote",
+ "hirsel-run-schema",
+ "tempfile",
 ]
 
 [[package]]
@@ -1674,6 +1684,7 @@ dependencies = [
  "hirsel-kernels",
  "hirsel-layout",
  "hirsel-lir",
+ "hirsel-remote",
  "hirsel-rt",
  "hirsel-rt-operations",
  "hirsel-run-config",

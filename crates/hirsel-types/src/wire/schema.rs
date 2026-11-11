@@ -230,6 +230,145 @@ pub fn descriptor_digest(descriptor: &[u8]) -> [u8; 32] {
     sha2::Sha256::digest(descriptor).into()
 }
 
+/// The schema a descriptor (`codec.descriptor`) describes: the inverse of the codec's own
+/// descriptor, so a side that holds only descriptor bytes compiles the same codec. A
+/// checked opaque's check function is not in descriptor bytes, so it is absent here.
+pub fn descriptor_schema(bytes: &[u8]) -> Result<SerializableSchema, Error> {
+    struct Reader<'a>(&'a [u8]);
+    impl Reader<'_> {
+        fn take(&mut self, n: usize) -> Result<&[u8], Error> {
+            if self.0.len() < n {
+                return Err(Error::Truncated);
+            }
+            let (head, rest) = self.0.split_at(n);
+            self.0 = rest;
+            Ok(head)
+        }
+        fn byte(&mut self) -> Result<u8, Error> {
+            Ok(self.take(1)?[0])
+        }
+        fn u32(&mut self) -> Result<u32, Error> {
+            Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+        }
+        fn id(&mut self) -> Result<SchemaId, Error> {
+            self.u32().map(SchemaId)
+        }
+        fn count(&mut self) -> Result<usize, Error> {
+            let n = self.u32()? as usize;
+            // Each counted row takes at least one byte, so a forged count fails here.
+            if n > self.0.len() {
+                return Err(Error::Truncated);
+            }
+            Ok(n)
+        }
+        fn text(&mut self) -> Result<String, Error> {
+            let n = u64::from_le_bytes(self.take(8)?.try_into().unwrap());
+            let n = usize::try_from(n).map_err(|_| Error::Truncated)?;
+            String::from_utf8(self.take(n)?.to_vec()).map_err(|_| Error::Utf8)
+        }
+    }
+    let mut r = Reader(bytes);
+    let version = r.u32()?;
+    let root = r.id()?;
+    let count = r.count()?;
+    let mut nodes = Vec::with_capacity(count);
+    for _ in 0..count {
+        nodes.push(match r.byte()? {
+            0 => {
+                let tag = r.byte()?;
+                SchemaNode::Scalar(
+                    SCALARS
+                        .iter()
+                        .copied()
+                        .find(|p| scalar_tag(*p) == Ok(tag))
+                        .ok_or(Error::Schema)?,
+                )
+            }
+            1 => SchemaNode::Tuple((0..r.count()?).map(|_| r.id()).collect::<Result<_, _>>()?),
+            2 => SchemaNode::Record(
+                (0..r.count()?)
+                    .map(|_| Ok((r.text()?, r.id()?)))
+                    .collect::<Result<_, Error>>()?,
+            ),
+            3 => {
+                let mut cases = vec![];
+                for _ in 0..r.count()? {
+                    let name = r.text()?;
+                    let mut fields = vec![];
+                    for _ in 0..r.count()? {
+                        let named = match r.byte()? {
+                            0 => None,
+                            1 => Some(r.text()?),
+                            _ => return Err(Error::Schema),
+                        };
+                        fields.push((named, r.id()?));
+                    }
+                    cases.push((name, fields));
+                }
+                SchemaNode::Variant(cases)
+            }
+            4 => SchemaNode::Box(r.id()?),
+            5 => {
+                let tag = r.byte()?;
+                let kind = BUILTINS
+                    .iter()
+                    .copied()
+                    .find(|b| builtin_tag(*b) == Ok(tag))
+                    .ok_or(Error::Schema)?;
+                let mut arguments = vec![];
+                for _ in 0..r.count()? {
+                    arguments.push(match r.byte()? {
+                        0 => SchemaArgument::Type(r.id()?),
+                        1 => SchemaArgument::Size(Size::Constant(u64::from_le_bytes(
+                            r.take(8)?.try_into().unwrap(),
+                        ))),
+                        _ => return Err(Error::Schema),
+                    });
+                }
+                SchemaNode::Builtin { kind, arguments }
+            }
+            6 => {
+                let package = hirsel_syntax::PackageId {
+                    name: r.text()?,
+                    version: r.text()?,
+                };
+                let modules = (0..r.count()?)
+                    .map(|_| r.text())
+                    .collect::<Result<_, _>>()?;
+                let name = r.text()?;
+                SchemaNode::Nominal {
+                    definition: crate::DefPath(hirsel_syntax::ItemPath {
+                        package,
+                        modules,
+                        name,
+                    }),
+                    representation: r.id()?,
+                    check: None,
+                }
+            }
+            _ => return Err(Error::Schema),
+        });
+    }
+    if !r.0.is_empty() {
+        return Err(Error::Trailing);
+    }
+    Ok(SerializableSchema {
+        version,
+        root,
+        nodes,
+    })
+}
+const SCALARS: [Primitive; 16] = {
+    use Primitive::*;
+    [
+        Bool, U8, U16, U32, U64, U128, I8, I16, I32, I64, I128, F32, F64, String, Bytes, Char,
+    ]
+};
+const BUILTINS: [BuiltinType; 7] = {
+    use BuiltinType::*;
+    [Array, List, Inline, Simd, Packed, Map, Set]
+};
+
 fn descriptor(schema: &SerializableSchema, versions: bool) -> Result<Vec<u8>, Error> {
     let mut out = vec![];
     out.extend_from_slice(&schema.version.to_le_bytes());

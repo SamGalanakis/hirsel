@@ -20,6 +20,8 @@ pub(in crate::runners) enum Work {
     },
     /// Route a served call to the `db@1` place its runner's node names.
     Served(super::place::ServedCall),
+    /// Hand the call to its `remote.tls@1` runner's provider, which sends it to that host.
+    Remote(Box<hirsel_remote::frame::Call>),
 }
 
 #[derive(Default)]
@@ -29,7 +31,8 @@ struct Rows {
     queued: VecDeque<(u64, [u8; 32], Spec)>,
     active: BTreeSet<[u8; 32]>,
     outcomes: BTreeMap<[u8; 32], RunnerCompletion>,
-    cancels: VecDeque<[u8; 32]>,
+    /// Each forwarded cancellation: the call and its cause.
+    cancels: VecDeque<([u8; 32], u32)>,
     waiters: BTreeMap<[u8; 32], (u32, u32)>,
 }
 
@@ -107,8 +110,8 @@ impl Transport {
         if !rows.active.contains(&key) {
             return Err(AdapterError::InvalidCompletion);
         }
-        if cancel.is_some() {
-            rows.cancels.push_back(key);
+        if let Some(cause) = cancel {
+            rows.cancels.push_back((key, cause));
             self.signal.notify();
         }
         if let Some(outcome) = rows.outcomes.remove(&key) {
@@ -135,7 +138,7 @@ impl Transport {
         true
     }
 
-    pub fn cancels(&self) -> VecDeque<[u8; 32]> {
+    pub fn cancels(&self) -> VecDeque<([u8; 32], u32)> {
         std::mem::take(&mut self.rows.lock().unwrap().cancels)
     }
 
@@ -176,7 +179,10 @@ mod tests {
         );
         assert!(transport.cancels().is_empty());
         assert_eq!(transport.poll(key, Some(0)), Ok(Completion::Ready));
-        assert_eq!(transport.cancels().into_iter().collect::<Vec<_>>(), [key]);
+        assert_eq!(
+            transport.cancels().into_iter().collect::<Vec<_>>(),
+            [(key, 0)]
+        );
         let outcome = RunnerCompletion {
             outcome: CallOutcome::Canceled(1),
             callee: None,

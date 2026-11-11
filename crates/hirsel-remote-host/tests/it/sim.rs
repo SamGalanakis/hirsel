@@ -13,8 +13,9 @@
 //!   caller received is the one the recovered journal holds and its `Status` answers.
 use hirsel_remote::client::{Client, ClientAction, Settings};
 use hirsel_remote::frame::{Call, Frame};
-use hirsel_remote::host::{Action, Caller, Digests, Host, Limits, Place, Refusal};
-use hirsel_remote::journal::{Entry, Journal, NoJournal, SimDisk};
+use hirsel_remote::wire::Digests;
+use hirsel_remote_host::host::{Action, Caller, Host, Limits, Place, Refusal};
+use hirsel_remote_host::journal::{Entry, Journal, NoJournal, SimDisk};
 use hirsel_run_schema::{CallForm, CallOutcome, GrantSet, IoGrants, call_key};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 

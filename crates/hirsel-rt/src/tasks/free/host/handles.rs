@@ -41,10 +41,21 @@ impl Envelope {
             && let Ok(Completion::Runner(completion)) = &self.result
         {
             let expected = hirsel_run_schema::callee_instance(&key);
+            // A callee that ran has the key's instance; a served call runs in its place's
+            // head, not a callee run, so it ends with none. A poll names only the key.
+            let ran = match request {
+                Request::RunnerCall(request) if request.form.served() => {
+                    completion.callee.is_none()
+                }
+                Request::RunnerCall(_) => completion.callee == Some(expected),
+                _ => completion
+                    .callee
+                    .is_none_or(|instance| instance == expected),
+            };
             let valid = match &completion.outcome {
                 hirsel_run_schema::CallOutcome::Ok(_)
                 | hirsel_run_schema::CallOutcome::Failed(_)
-                | hirsel_run_schema::CallOutcome::Faulted(_) => completion.callee == Some(expected),
+                | hirsel_run_schema::CallOutcome::Faulted(_) => ran,
                 hirsel_run_schema::CallOutcome::NotRun(_)
                 | hirsel_run_schema::CallOutcome::Canceled(_) => completion.callee.is_none(),
                 hirsel_run_schema::CallOutcome::InDoubt(_) => completion

@@ -1,6 +1,6 @@
 //! The durable call journal keeps every acknowledged record, cuts only an incomplete final
 //! frame, and refuses any other damage as corrupt.
-use hirsel_remote::journal::{DirJournal, Entry, Journal, StreamKey};
+use hirsel_remote_host::journal::{DirJournal, Entry, Journal, StreamKey};
 use hirsel_run_schema::CallOutcome;
 
 fn stream() -> StreamKey {
@@ -71,7 +71,7 @@ fn a_dir_journal_recovers_its_records_and_drops_a_torn_tail() {
 /// so no later synced record is lost.
 #[test]
 fn the_shared_damage_table_holds_and_a_refusal_leaves_the_file_unchanged() {
-    use hirsel_remote::journal::{FORMAT, known};
+    use hirsel_remote_host::journal::{FORMAT, known};
     use hirsel_run_schema::frame::damage::{Expect, cases};
     let dir = tempfile::tempdir().unwrap();
     {
@@ -137,7 +137,7 @@ fn the_shared_damage_table_holds_and_a_refusal_leaves_the_file_unchanged() {
 /// is missing or incomplete is refused untouched.
 #[test]
 fn a_compacted_dir_journal_recovers_its_checkpoint_and_the_records_after_it() {
-    use hirsel_remote::journal::FORMAT;
+    use hirsel_remote_host::journal::FORMAT;
     use hirsel_run_schema::frame;
     let dir = tempfile::tempdir().unwrap();
     let acknowledged = |position| Entry::Acknowledged {

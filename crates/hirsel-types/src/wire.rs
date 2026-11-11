@@ -5,7 +5,7 @@ use crate::{BuiltinType, Primitive, Size};
 use std::collections::BTreeSet;
 
 mod schema;
-pub use schema::{descriptor_digest, version_free_descriptor};
+pub use schema::{descriptor_digest, descriptor_schema, version_free_descriptor};
 
 pub const VERSION: u32 = 1;
 pub const MAGIC: &[u8; 4] = b"HSC1";

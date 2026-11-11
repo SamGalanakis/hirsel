@@ -113,12 +113,40 @@ pub(crate) struct Home {
     tag: u64,
     driver_installed: bool,
     link: Option<Link>,
+    /// The run's `remote.tls@1` providers, and the call and runner of each token handed
+    /// to one and not yet complete.
+    remote: Option<hirsel_remote::provider::Providers>,
+    remote_calls: BTreeMap<u64, ([u8; 32], String)>,
+    remote_token: u64,
 }
 impl Home {
     /// # Safety
     /// Sole admission owner before root publication. The returned stable box
     /// stays home and outlives every call to service on this run.
-    pub(crate) unsafe fn new(slot: Arc<Slot>, config: Config) -> Box<Self> {
+    /// A live run's remote runners open their providers here, reading their TLS material;
+    /// each completion wakes home.
+    pub(crate) unsafe fn new(
+        slot: Arc<Slot>,
+        config: Config,
+        instance: Option<[u8; 16]>,
+    ) -> Result<Box<Self>, String> {
+        let remote = if config.runners.iter().any(|e| e.provider == "remote.tls@1") {
+            let signal = slot.transport.signal.clone();
+            hirsel_remote::provider::Providers::open(
+                &config.runners,
+                instance.ok_or("remote runners without a run instance")?,
+                || {
+                    config
+                        .request_schemas
+                        .as_ref()
+                        .ok_or("production runners require compiled request schemas")?
+                        .wire()
+                },
+                Arc::new(move || signal.notify()),
+            )?
+        } else {
+            None
+        };
         let mut home = Box::new(Self {
             slot,
             config,
@@ -129,10 +157,13 @@ impl Home {
             tag: 0,
             driver_installed: false,
             link: None,
+            remote,
+            remote_calls: BTreeMap::new(),
+            remote_token: 0,
         });
         let pointer = &raw mut *home;
         assert!(home.slot.home.swap(pointer, Ordering::AcqRel).is_null());
-        home
+        Ok(home)
     }
 
     /// Serve the place this run's root heads over `link` to its runner host: the root's
@@ -566,16 +597,39 @@ impl Home {
                     self.start_callee(key, called, start, lose_reply, crash_after)?
                 }
                 Work::Served(call) => self.serve(key, caller, &grant, call)?,
+                Work::Remote(call) => {
+                    let remote = self.remote.as_ref().ok_or_else(|| {
+                        Stop::Refused("a remote.tls@1 call without its provider".into())
+                    })?;
+                    self.remote_token += 1;
+                    let token = self.remote_token;
+                    remote.submit(&grant.entry.name, token, *call, request.digest);
+                    self.remote_calls
+                        .insert(token, (key, grant.entry.name.clone()));
+                }
             }
             changed = true;
         }
-        for key in self.slot.transport.cancels() {
+        for (key, cause) in self.slot.transport.cancels() {
             if let Some(child) = self.children.iter().find(|child| child.key == key) {
                 unsafe { crate::tasks::free::home::runner_cancel((*child.run.root).run_ptr()) };
+                changed = true;
+            } else if let Some((token, (_, runner))) =
+                self.remote_calls.iter().find(|(_, (k, _))| *k == key)
+                && let Some(remote) = &self.remote
+            {
+                remote.cancel(runner, *token, cause);
                 changed = true;
             }
         }
         let mut waiters = Vec::new();
+        // The completions the providers took back from their hosts.
+        for (token, completion) in self.remote.iter().flat_map(|r| r.take()) {
+            if let Some((key, _)) = self.remote_calls.remove(&token) {
+                waiters.extend(self.slot.transport.complete(key, completion));
+                changed = true;
+            }
+        }
         let mut index = 0;
         while index < self.children.len() {
             changed |= self.children[index].run.service();

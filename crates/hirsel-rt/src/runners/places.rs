@@ -133,7 +133,10 @@ unsafe fn send(
         .definitions
         .as_ref()
         .is_none_or(|allowed| allowed.contains(&path));
-    let served = place && form.served() && listed && model.head.is_some();
+    // Another host's place: its provider sends the call, and the host and its head make
+    // the place's checks (RUN-8).
+    let remote = model.provider == "remote.tls@1";
+    let served = form.served() && listed && (remote || place && model.head.is_some());
     // SAFETY: the context is live.
     let canceled = unsafe { crate::tasks::canceled(ctx) };
     let name = model.name.clone();
@@ -143,8 +146,20 @@ unsafe fn send(
         .callees
         .get(&path)
         .map_or(([0; 32], [0; 32]), |f| (f.fingerprint, f.code));
-    let digest =
-        hirsel_run_schema::request_digest(form, &path, &fingerprint, &code, &[], &[], &argument);
+    // A remote host recomputes the digest from the requested grant set and allowlist.
+    let (grants, definitions) = match remote {
+        true => unsafe { super::request_bytes(ctx, &grant) },
+        false => (Vec::new(), Vec::new()),
+    };
+    let digest = hirsel_run_schema::request_digest(
+        form,
+        &path,
+        &fingerprint,
+        &code,
+        &grants,
+        &definitions,
+        &argument,
+    );
     let run = state(ctx);
     let instance = run.instance;
     let ordinal = run.requests;
@@ -155,8 +170,8 @@ unsafe fn send(
         form,
         path: path.clone(),
         digest,
-        grants: Vec::new(),
-        definitions: Vec::new(),
+        grants,
+        definitions,
         key,
         argument: argument.clone(),
     };
@@ -165,6 +180,13 @@ unsafe fn send(
     let work = match (served, canceled) {
         (false, _) => Err(CallOutcome::NotRun(DENIED)),
         (true, Some(cause)) => Err(CallOutcome::Canceled(cause)),
+        (true, None) if remote => Ok(native::Work::Remote(super::remote_call(
+            &request,
+            &grant,
+            ordinal,
+            (fingerprint, code),
+            level,
+        ))),
         (true, None) => Ok(native::Work::Served(ServedCall {
             form,
             path,

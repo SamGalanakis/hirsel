@@ -64,8 +64,9 @@
 //! reflected in its state, the host compacts a journal that is due: the checkpoint holds
 //! each stream, its acknowledged position, and every position above it, decided or
 //! admitted, so recovering the checkpoint gives what recovering the whole journal would.
-use crate::frame::{Call, CallRef, Frame, Outcome};
 use crate::journal::{Entry, Journal, StreamKey};
+use hirsel_remote::frame::{Call, CallRef, Frame, Outcome};
+use hirsel_remote::wire::Digests;
 use hirsel_run_schema::{CallOutcome, IoGrants, call_key};
 use std::collections::{BTreeMap, VecDeque};
 
@@ -111,11 +112,6 @@ pub trait Place {
             missing: vec![],
         })
     }
-}
-
-/// A request's digest as the caller computed it (RUN-11).
-pub trait Digests {
-    fn digest(&self, call: &Call) -> [u8; 32];
 }
 
 /// What the host asks its transport and executor to do.

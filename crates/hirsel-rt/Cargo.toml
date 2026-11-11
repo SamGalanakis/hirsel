@@ -35,6 +35,8 @@ hirsel-rt-operations = { path = "../hirsel-rt-operations" }
 hirsel-run-config = { path = "../hirsel-run-config" }
 hirsel-store-authority = { path = "../hirsel-store-authority" }
 hirsel-run-schema = { path = "../hirsel-run-schema" }
+hirsel-remote = { path = "../hirsel-remote" }
+hirsel-types = { path = "../hirsel-types" }
 libc = { version = "0.2", default-features = false }
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "=1.0.9"

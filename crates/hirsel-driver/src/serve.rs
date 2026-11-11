@@ -2,7 +2,7 @@
 //! listens where its host configuration says, admits each TLS client as the caller its
 //! certificate (or its absence) names, checks every arriving call (RUN-8) against the
 //! callee entries its program defines, keeps each caller's call streams exactly once
-//! ([`hirsel_remote::host::Host`]), and runs each admitted call as its own callee run on
+//! ([`hirsel_remote_host::host::Host`]), and runs each admitted call as its own callee run on
 //! this host, recorded to its own tape when the configuration records callees (RUN-10).
 //!
 //! Connections run on their own threads; the callee runs run one at a time on the calling
@@ -16,11 +16,11 @@
 use crate::{HostLaunch, ToolError};
 use hirsel_host_io::{CancelHandle, ExternalCancel, Hosted, PlaceFeed, PlaceHandle};
 use hirsel_remote::frame::Call;
-use hirsel_remote::host::{
-    ABANDONED, Action, Arrival, Caller, Host, Limits, Place, Refusal, RunId, SessionId, Start,
-};
 use hirsel_remote::transport::{Command, Event, HostTls, Listener};
 use hirsel_remote::wire::Wire;
+use hirsel_remote_host::host::{
+    ABANDONED, Action, Arrival, Caller, Host, Limits, Place, Refusal, RunId, SessionId, Start,
+};
 use hirsel_run_config::host::HostConfig;
 use hirsel_run_schema::place::{PlaceMessage, ServedCall};
 use hirsel_run_schema::{CallForm, CallOutcome, CalleeFacts, CalleeOutcome, CodeReach, IoGrants};
@@ -271,10 +271,10 @@ pub fn serve(
         .ok()
         .and_then(|bytes| bytes.try_into().ok())
         .ok_or_else(|| host_error("the incarnation", "the secure generator is unavailable"))?;
-    let journal: Box<dyn hirsel_remote::journal::Journal> = match &config.journal {
-        None => Box::new(hirsel_remote::journal::NoJournal::new(fresh)),
+    let journal: Box<dyn hirsel_remote_host::journal::Journal> = match &config.journal {
+        None => Box::new(hirsel_remote_host::journal::NoJournal::new(fresh)),
         Some(entry) => Box::new(
-            hirsel_remote::journal::DirJournal::open(
+            hirsel_remote_host::journal::DirJournal::open(
                 Path::new(entry.path.as_deref().unwrap_or_default()),
                 fresh,
             )

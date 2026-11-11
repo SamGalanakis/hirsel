@@ -10,8 +10,9 @@ both under a simulation fixture and in a host launch. A host launch records link
 `hirsel tapes trial` re-issues a tape's calls to a candidate revision; it predates
 [re-execution](#re-execution) and reports byte equality only. The
 arrival check covers the definition allowlists and a runner entry's `admit.safe@1` code
-policy (RUN-8). An interpreted host launch calls `remote.tls@1` runners, and `hirsel serve`
-is their runner host (crate `hirsel-remote`). Native code runs `local.threads@1` and `sim@1`
+policy (RUN-8). An interpreted host launch calls `remote.tls@1` runners, and so does a
+native one from a run record under `tasks.free@1`, the run's admission for every runner it
+sends to; `hirsel serve` is their runner host (crates `hirsel-remote` and `hirsel-remote-host`). Native code runs `local.threads@1` and `sim@1`
 places under a launch that names its runners (the native corpus harness): an `Entry` is a
 static callable (its definition's code and the static empty environment), and each sent
 call's callee is a run of the same execution in the process, with the interpreter's place

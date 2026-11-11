@@ -35,13 +35,13 @@ identities, crates/hirsel-rt/tests/it/tls-data) to a `hirsel serve --native` hos
 is `main.hir`'s `head`: one store over the place's `db` authority with the local mode's
 configuration, serving the local mode's three entries. Served samples run in the `log-host` cell
 only (`authority.log@1`, floor `host`, `group_commits` 1): the transport is the same at every level. The host links the head with the `run --native` preset, LLVM at the release optimization
-level without scoped specialization. The caller runs interpreted, because native launch does not
-offer `remote.tls@1` runners yet. A served commit's `instructions_commit`, `cpu_us_commit`, log
+level without scoped specialization. The caller is the bench's native build, run under
+`tasks.free@1`: its home's provider sends each call over `remote.tls@1`. A served commit's `instructions_commit`, `cpu_us_commit`, log
 barriers and allocations are the head process's, counted by `perf stat` attached to it between the
 caller's markers, with the same barrier check as the local engines. Its allocation diagnostic
 probes the head's executable once it runs. `caller_*` and `host_*` give the caller's and the host's
 own instructions and task clock. Throughput and latency are the caller's, so they include the
-interpreted caller, TLS, the host's forwarding and the place link. A served store stays with its
+caller, TLS, the host's forwarding and the place link. A served store stays with its
 place: the oracle runs as a served transaction, without a close and recovery. `results.json`'s
 `served` gives each served cell's ratios to the local native and Rust cells of the same group and
 submitters.
@@ -81,7 +81,7 @@ Bytes are the phase's increase in regular-file sizes, meaning encoded log or obj
 not block-device bytes or filesystem write amplification.
 
 The `callers` engine is the served place with one caller process per submitter: 1, 4, 16 or
-64 `hirsel run` processes, each with one client on its own `remote.tls@1` runner and so its own
+64 processes of the bench's native build, each with one client on its own `remote.tls@1` runner and so its own
 call stream, against one `hirsel serve --native` host. Caller k commits the groups whose first
 transfer is k * group modulo callers * group; caller 0 opens the accounts before the others
 start and runs the oracle once all are done. The head can then see several arrivals in one

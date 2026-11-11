@@ -304,17 +304,22 @@ impl Fixture {
             options,
         )
     }
-    fn run_from(&self, dir: &str, tape: &Path) -> Output {
+    /// Run `dir`'s program as `caller` runs it, recording `tape`.
+    fn run_from(&self, dir: &str, caller: Caller, tape: &Path) -> Output {
         let manifest = self.0.join(dir).join("main.hir.json");
-        let grants = self.0.join("caller.json");
-        self.hirsel(&[
-            "run".as_ref(),
+        let grants = self.0.join(format!("caller-{}.json", caller.tasks));
+        let text = std::fs::read_to_string(self.0.join("caller.json")).unwrap();
+        std::fs::write(&grants, text.replace("tasks.cooperative@1", caller.tasks)).unwrap();
+        let mut args: Vec<&std::ffi::OsStr> = vec!["run".as_ref()];
+        args.extend(caller.options.iter().map(std::ffi::OsStr::new));
+        args.extend([
             manifest.as_os_str(),
             "--grants".as_ref(),
             grants.as_os_str(),
             "--record".as_ref(),
             tape.as_os_str(),
-        ])
+        ]);
+        self.hirsel(&args)
     }
 }
 
@@ -425,30 +430,57 @@ const LEDGER: &str = "opened 1 with 500\nopened 2 with 100\nmoved 200 from 1 to 
      insufficient: 550\naccount 1: 550\naccount 2: 0\naccount 3: 50\n\
      account 4: no account 4\n";
 
+/// How the caller runs: its engine's options and the tasks provider its run admits.
+#[derive(Clone, Copy, Debug)]
+struct Caller {
+    options: &'static [&'static str],
+    tasks: &'static str,
+}
+const INTERPRETED: Caller = Caller {
+    options: &[],
+    tasks: "tasks.cooperative@1",
+};
+/// A native program reaches another host's runner only under `tasks.free@1`.
+const NATIVE: Caller = Caller {
+    options: &["--native"],
+    tasks: "tasks.free@1",
+};
+
 /// A caller's transact and query calls cross `remote.tls@1` to a `hirsel serve` place and
 /// end as they do at a `sim@1` place; the caller's tape replays alone, with no host.
-/// The place's head runs interpreted, or natively (`--native`); either way the caller sees
-/// the same ends.
-const HEADS: [&[&str]; 2] = [&[], &["--native"]];
+/// The place's head runs interpreted, or natively (`--native`), and so does the caller;
+/// either way the caller sees the same ends.
+const CELLS: [(&[&str], Caller); 3] = [
+    (&[], INTERPRETED),
+    (&["--native"], INTERPRETED),
+    (&["--native"], NATIVE),
+];
 
 #[test]
 fn served_calls_cross_to_a_place_host_and_the_callers_tape_replays_alone() {
-    for head in HEADS {
+    for (head, caller) in CELLS {
         let fixture = ledger("served", |_, text| text);
         let host = fixture.serve_from("host", head);
         let tape = fixture.0.join("T");
-        let live = fixture.run_from("caller", &tape);
+        let live = fixture.run_from("caller", caller, &tape);
         host.stop();
-        assert!(live.status.success(), "{head:?}: {}", stderr(&live));
-        assert_eq!(stdout(&live), LEDGER, "{head:?}");
-        let replayed = fixture.hirsel(&[
-            "run".as_ref(),
-            fixture.0.join("caller/main.hir.json").as_os_str(),
-            "--replay".as_ref(),
-            tape.as_os_str(),
-        ]);
-        assert!(replayed.status.success(), "{head:?}: {}", stderr(&replayed));
-        assert_eq!(stdout(&replayed), LEDGER, "{head:?}");
+        assert!(
+            live.status.success(),
+            "{head:?} {caller:?}: {}",
+            stderr(&live)
+        );
+        assert_eq!(stdout(&live), LEDGER, "{head:?} {caller:?}");
+        let manifest = fixture.0.join("caller/main.hir.json");
+        let mut args: Vec<&std::ffi::OsStr> = vec!["run".as_ref()];
+        args.extend(caller.options.iter().map(std::ffi::OsStr::new));
+        args.extend([manifest.as_os_str(), "--replay".as_ref(), tape.as_os_str()]);
+        let replayed = fixture.hirsel(&args);
+        assert!(
+            replayed.status.success(),
+            "{head:?} {caller:?}: {}",
+            stderr(&replayed)
+        );
+        assert_eq!(stdout(&replayed), LEDGER, "{head:?} {caller:?}");
     }
 }
 
@@ -557,7 +589,7 @@ fn stream_calls(dir: &Path) -> Vec<(String, Vec<u8>, Vec<u8>)> {
 /// code hash the caller expected and the one that ran.
 #[test]
 fn a_place_host_runs_its_own_code_and_refuses_other_signatures() {
-    for head in HEADS {
+    for (head, caller) in CELLS {
         // The host's `transfer` charges a fee, so `moves` has other code there, and its
         // `balance` takes a `u32` account, so its signature differs.
         let fixture = ledger("refused", |source, text| match source {
@@ -582,9 +614,13 @@ fn a_place_host_runs_its_own_code_and_refuses_other_signatures() {
             "the host's edit did not apply"
         );
         let host = fixture.serve_from("host", head);
-        let live = fixture.run_from("caller", &fixture.0.join("T"));
+        let live = fixture.run_from("caller", caller, &fixture.0.join("T"));
         host.stop();
-        assert!(live.status.success(), "{head:?}: {}", stderr(&live));
+        assert!(
+            live.status.success(),
+            "{head:?} {caller:?}: {}",
+            stderr(&live)
+        );
         let mismatch = "not run: version mismatch";
         assert_eq!(
             stdout(&live),

@@ -4,11 +4,12 @@
 //! session that holds its stream when the end exists; the host never decides a served
 //! position, so a reopened stream's `applied` does not move.
 use hirsel_remote::frame::{Call, Frame, Outcome};
-use hirsel_remote::host::{
-    ABANDONED, Action, Arrival, Caller, DENIED, Digests, Host, Limits, OVERLOADED, Place, REJECTED,
-    Refusal, UNREACHABLE,
+use hirsel_remote::wire::Digests;
+use hirsel_remote_host::host::{
+    ABANDONED, Action, Arrival, Caller, DENIED, Host, Limits, OVERLOADED, Place, REJECTED, Refusal,
+    UNREACHABLE,
 };
-use hirsel_remote::journal::NoJournal;
+use hirsel_remote_host::journal::NoJournal;
 use hirsel_run_schema::{CallForm, CallOutcome, GrantSet, IoGrants, call_key};
 
 const STREAM: [u8; 32] = [7; 32];

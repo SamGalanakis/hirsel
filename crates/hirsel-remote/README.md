@@ -3,9 +3,11 @@
 The `remote.tls@1` runner provider (docs/spec/runners.md, RUN-13): runner calls
 that cross to another host over TLS on a TCP or Unix stream socket, exactly
 once per call position, with cancellation, in-doubt outcomes and status
-queries. The crate is protocol state machines plus their transport; the driver
-wires them to the interpreter (`hirsel-driver` `network/remote.rs` on the
-caller, `serve.rs` on the host).
+queries. This crate is the frames, the caller's protocol state machine and
+provider, and the transports; the runtime and the interpreter's host I/O share
+it. The host's protocol and call journal (`host.rs`, `journal.rs`, and the
+protocol tests) are `hirsel-remote-host`'s, which `hirsel serve` wires
+(`hirsel-driver` `serve.rs`).
 
 **Frames** (`frame.rs`, `wire.rs`). One frame is one value of the core type
 `RunFrame` (`Open`, `Opened`, `Refused`, `Call`, `Outcome`, `Cancel`,

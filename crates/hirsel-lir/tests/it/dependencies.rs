@@ -37,6 +37,9 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-syntax", Class::Data),
     ("hirsel-codec", Class::Data),
     ("hirsel-types", Class::Data),
+    // The `remote.tls@1` protocol, a caller's provider and the transports, which the
+    // runtime and the interpreter's host I/O share; the host is hirsel-remote-host.
+    ("hirsel-remote", Class::Data),
     ("hirsel-artifact-store", Class::Storage),
     ("hirsel-engine-store", Class::Storage),
     ("hirsel-store-authority", Class::Storage),
@@ -75,7 +78,7 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-rt", Class::Implementation),
     ("hirsel-heapcheck", Class::Implementation),
     ("hirsel-code-store", Class::Implementation),
-    ("hirsel-remote", Class::Implementation),
+    ("hirsel-remote-host", Class::Implementation),
     ("hirsel-kernels", Class::LeafKernel),
     ("hirsel-engine", Class::Wiring),
     ("hirsel-registry", Class::Wiring),

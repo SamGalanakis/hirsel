@@ -385,7 +385,8 @@ def sample(kind, cell, group, submitters, workload, out, compiler, source_sha, p
         if served:
             socket, serve_pid = host.enter_context(place_host(compiler, directory, db, authority))
             arguments.append('served')
-            io.update(dirs=[], runners=[dict(name='db', provider='remote.tls@1',
+            # Home sends a native caller's calls to another host's place: a Free run.
+            io.update(tasks='tasks.free@1', dirs=[], runners=[dict(name='db', provider='remote.tls@1',
                 endpoint=dict(unix=str(socket)), server_name='localhost',
                 roots=dict(pem=str(TLS / 'server.cert')),
                 identity=dict(chain=str(TLS / 'client.cert'), key=str(TLS / 'client.key')),
@@ -398,12 +399,7 @@ def sample(kind, cell, group, submitters, workload, out, compiler, source_sha, p
             executable = compiler
             command = [compiler, 'run', '--mem-usage', HERE / 'hirsel.json', '--grants', grants,
                        '--max-steps', 'unbounded', '--cores', '2', '--', *arguments]
-        elif kind == 'served':
-            # Native callers do not reach remote.tls@1 places yet; the interpreted caller does.
-            executable = compiler
-            command = [compiler, 'run', HERE / 'hirsel.json', '--grants', grants,
-                       '--max-steps', 'unbounded', '--cores', '2', '--', *arguments]
-        elif kind == 'native':
+        elif kind in ('native', 'served'):
             executable = out / 'native'
             command = [executable, '--hirsel-grants', grants, *arguments]
         else:
@@ -590,9 +586,10 @@ def callers_sample(cell, group, callers, workload, out, compiler, source_sha, he
     spec = CELLS[cell]
     authority = dict(provider=spec['provider'], floor=spec['floor'], mount='db', path='store')
     commits = workload['transfers'] // group
+    caller = out / 'native'  # The bench's native build, as the served engine's caller.
     with ExitStack() as host:
         socket, serve_pid = host.enter_context(place_host(compiler, directory, db, authority))
-        io = dict(stdout='stdout.bytes@1', stdin='stdin.bytes@1', tasks='tasks.cooperative@1',
+        io = dict(stdout='stdout.bytes@1', stdin='stdin.bytes@1', tasks='tasks.free@1',
             monotonic_clock='clock.monotonic.ns@1', dirs=[], runners=[dict(name='db',
                 provider='remote.tls@1', endpoint=dict(unix=str(socket)), server_name='localhost',
                 roots=dict(pem=str(TLS / 'server.cert')),
@@ -606,8 +603,7 @@ def callers_sample(cell, group, callers, workload, out, compiler, source_sha, he
             grants.write_text(json.dumps(dict(io=io, args=list(map(str, arguments)))))
             for end in ('in', 'out'):
                 os.mkfifo(directory / f'caller-{index}.{end}')
-            launched.append(dict(command=list(map(str, [compiler, 'run', HERE / 'hirsel.json',
-                '--grants', grants, '--max-steps', 'unbounded', '--cores', '2', '--', *arguments])),
+            launched.append(dict(command=list(map(str, [caller, '--hirsel-grants', grants, *arguments])),
                 stdin=str(directory / f'caller-{index}.in'), stdout=str(directory / f'caller-{index}.out'),
                 stderr=str(directory / f'caller-{index}.stderr.log')))
         launcher = json.dumps(dict(limit=os.environ['HIRSEL_MEMORY_LIMIT'], callers=launched))
@@ -618,7 +614,7 @@ def callers_sample(cell, group, callers, workload, out, compiler, source_sha, he
         outputs = []
         with (directory / 'stderr.log').open('w') as errors:
             # The callers get two CPUs of their own: the head and host keep the pair every
-            # other sample runs on, and many interpreted callers do not take its time.
+            # other sample runs on, and many callers do not take its time.
             process = subprocess.Popen([str(ROOT / 'tools/capped'), sys.executable, '-c', CALLERS_LAUNCHER,
                 launcher], env=scope_env, stderr=errors,
                 preexec_fn=lambda: os.sched_setaffinity(0, CALLER_CPUS))
@@ -670,7 +666,7 @@ def callers_sample(cell, group, callers, workload, out, compiler, source_sha, he
                 total = 0
                 for pid in callers_pids:
                     try:
-                        if Path(f'/proc/{pid}/exe').resolve() != compiler.resolve():
+                        if Path(f'/proc/{pid}/exe').resolve() != caller.resolve():
                             continue
                         fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
                         total += int(fields[11]) + int(fields[12])

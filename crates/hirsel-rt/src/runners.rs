@@ -94,7 +94,8 @@ unsafe fn admit(
             let slot =
                 native::Slot::new(io).map_err(|error| format!("native runners: {error:?}"))?;
             unsafe { (*ctx).run().runner_home = Some(slot.clone()) };
-            let mut owner = unsafe { native::Home::new(slot.clone(), config.clone()) };
+            let mut owner = unsafe { native::Home::new(slot.clone(), config.clone(), instance) }
+                .map_err(|error| format!("native runners: {error}"))?;
             if let Some(link) = place {
                 // SAFETY: admission owns the root, whose call state no worker reads yet.
                 unsafe { owner.serve_link(ctx, link) }
@@ -929,6 +930,52 @@ fn code(outcome: &CallOutcome) -> u64 {
     }
 }
 
+/// The requested grant set and allowlist of a call at `grant`, in canonical codec bytes
+/// (RUN-11).
+///
+/// # Safety
+/// `ctx` is live.
+unsafe fn request_bytes(ctx: *mut TaskCtx, grant: &RunnerGrant) -> (Vec<u8>, Vec<u8>) {
+    let Some(grants) = hirsel_run_schema::GrantSet::of(&grant.grants).canonical() else {
+        fault("a runner's grant set has a net rule the codec cannot encode");
+    };
+    let definitions = hirsel_run_schema::allowlist_bytes(grant.definitions.as_deref());
+    if let Some(schemas) = &execution(ctx).config.request_schemas {
+        schemas.encode(&grants, &definitions)
+    } else {
+        if unsafe { (*ctx).run_ref().free_production } {
+            fault("production runners require compiled request schemas");
+        }
+        (grants, definitions)
+    }
+}
+
+/// The frame a `remote.tls@1` provider sends for a call: the request and the parts only its
+/// digest holds. The provider gives it its stream position.
+fn remote_call(
+    request: &RunnerRequest,
+    grant: &RunnerGrant,
+    ordinal: u64,
+    (fingerprint, code): ([u8; 32], [u8; 32]),
+    level: Option<String>,
+) -> Box<hirsel_remote::frame::Call> {
+    Box::new(hirsel_remote::frame::Call {
+        epoch: 0,
+        position: 0,
+        ordinal,
+        key: request.key,
+        form: request.form,
+        path: request.path.clone(),
+        fingerprint,
+        code,
+        grants: hirsel_run_schema::GrantSet::of(&grant.grants),
+        definitions: grant.definitions.clone(),
+        argument: request.argument.clone(),
+        acknowledged: 0,
+        level,
+    })
+}
+
 /// RUN-4: the request, the checks in order, then the place's contract, for the running
 /// task's call of the Entry with code word `entry.0`: the call's ticket. A refused call
 /// completes at once; a sent one parks for its callee (`spawn`: a `runner.spawn` call,
@@ -950,24 +997,11 @@ unsafe fn send(
     let e = execution(ctx);
     let facts = e.config.callees.get(&path).cloned();
     let fault_seed = e.config.fault_seed;
-    let request_schemas = e.config.request_schemas.clone();
+    let (grants, definitions) = unsafe { request_bytes(ctx, &grant) };
     let run = state(ctx);
     let ordinal = run.requests;
     run.requests += 1;
     let key = hirsel_run_schema::call_key(&run.instance, ordinal);
-    // The requested grant set and allowlist in canonical codec bytes (RUN-11).
-    let Some(grants) = hirsel_run_schema::GrantSet::of(&grant.grants).canonical() else {
-        fault("a runner's grant set has a net rule the codec cannot encode");
-    };
-    let definitions = hirsel_run_schema::allowlist_bytes(grant.definitions.as_deref());
-    let (grants, definitions) = if let Some(schemas) = request_schemas {
-        schemas.encode(&grants, &definitions)
-    } else {
-        if unsafe { (*ctx).run_ref().free_production } {
-            fault("production runners require compiled request schemas");
-        }
-        (grants, definitions)
-    };
     let (fingerprint, code_hash) = facts
         .as_ref()
         .map_or(([0; 32], [0; 32]), |f| (f.fingerprint, f.code));
@@ -1006,10 +1040,14 @@ unsafe fn send(
             cause
         }
     });
+    let remote = grant.entry.provider == "remote.tls@1";
     let placed = if !listed || !admitted {
         Err(CallOutcome::NotRun(DENIED))
     } else if let Some(cause) = canceled {
         Err(CallOutcome::Canceled(cause))
+    } else if remote {
+        // Another host's place makes its own contract's decisions.
+        Ok((None, false))
     } else {
         match run
             .places
@@ -1027,15 +1065,24 @@ unsafe fn send(
     };
     if unsafe { (*ctx).run_ref().free_production } {
         drop(path);
-        let work = placed.map(|(crash_after, lose_reply)| native::Work::Callee {
-            start: Start {
-                main,
-                entry,
-                argument,
-                form,
+        let work = placed.map(|(crash_after, lose_reply)| match remote {
+            true => native::Work::Remote(remote_call(
+                &request,
+                &grant,
+                ordinal,
+                (fingerprint, code_hash),
+                None,
+            )),
+            false => native::Work::Callee {
+                start: Start {
+                    main,
+                    entry,
+                    argument,
+                    form,
+                },
+                lose_reply,
+                crash_after,
             },
-            lose_reply,
-            crash_after,
         });
         return unsafe { native::send(ctx, request, grant, ordinal, work) };
     }

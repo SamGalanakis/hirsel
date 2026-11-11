@@ -502,6 +502,14 @@ fn recursive_canonical_golden_vectors() {
         expected.extend_from_slice(&(payload_bytes.len() as u64).to_le_bytes());
         expected.extend_from_slice(&payload_bytes);
         assert_eq!(bytes, expected, "{} envelope", case.name);
+        // A side holding only the descriptor compiles the same codec.
+        let described = hirsel_types::wire::descriptor_schema(codec.descriptor()).unwrap();
+        assert_eq!(
+            Codec::new(&described).unwrap().descriptor(),
+            codec.descriptor(),
+            "{} descriptor",
+            case.name
+        );
         let decoded = codec.decode(&bytes, Limits::default()).unwrap();
         assert_eq!(
             codec.encode(&decoded, Limits::default()).unwrap(),

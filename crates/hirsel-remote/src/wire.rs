@@ -4,7 +4,6 @@
 //! digest its caller computed (RUN-11).
 use crate::data::{DataCodec, DataError};
 use crate::frame::{Call, Frame, Malformed, allowlist_data, grant_set_data};
-use crate::host::Digests;
 use hirsel_types::serialization::SerializableSchema;
 use hirsel_types::wire::Limits;
 use std::io::{self, Read, Write};
@@ -99,6 +98,10 @@ impl Wire {
         input.read_exact(&mut bytes)?;
         self.decode(&bytes).map(Some)
     }
+}
+/// A request's digest as the caller computed it (RUN-11).
+pub trait Digests {
+    fn digest(&self, call: &Call) -> [u8; 32];
 }
 impl Digests for Wire {
     fn digest(&self, call: &Call) -> [u8; 32] {

@@ -2151,14 +2151,25 @@ pub(crate) unsafe fn execute(
             None => Vec::new(),
         }
     };
-    // Native places run in this process; another host's (remote.tls@1) is not offered.
-    if let Some(entry) = runners
-        .iter()
-        .find(|e| !matches!(e.provider.as_str(), "local.threads@1" | "sim@1"))
-    {
+    // Native places run in this process. Another host's (remote.tls@1) is reached by home's
+    // provider, so only a tasks.free@1 run, which has a home, sends to one.
+    if let Some(entry) = runners.iter().find(|e| {
+        !matches!(
+            e.provider.as_str(),
+            "local.threads@1" | "sim@1" | "remote.tls@1"
+        )
+    }) {
         return Err(format!(
             "runner {} names {}, which native code does not run",
             entry.name, entry.provider
+        ));
+    }
+    if let Some(entry) = runners.iter().find(|e| e.provider == "remote.tls@1")
+        && !production_free
+    {
+        return Err(format!(
+            "runner {} is another host's (remote.tls@1), which native code reaches only under tasks.free@1",
+            entry.name
         ));
     }
     // `runner.grants` compiles to the six flags and empty lists (RUN-2). A `db@1` place's
@@ -2167,10 +2178,12 @@ pub(crate) unsafe fn execute(
     let place = |e: &hirsel_run_schema::RunnerEntry| {
         e.provider == "sim@1" && e.models.as_deref() == Some("db@1") && e.head.is_some()
     };
+    // Another host runs a remote runner's callees under its grants.
     if let Some(entry) = runners.iter().find(|e| {
-        e.grants.as_ref().is_some_and(|g| {
-            (!g.dirs.is_empty() && !place(e)) || g.net.is_some() || g.process.is_some()
-        })
+        e.provider != "remote.tls@1"
+            && e.grants.as_ref().is_some_and(|g| {
+                (!g.dirs.is_empty() && !place(e)) || g.net.is_some() || g.process.is_some()
+            })
     }) {
         return Err(format!(
             "runner {} grants directories, network or processes, which native runners do not",

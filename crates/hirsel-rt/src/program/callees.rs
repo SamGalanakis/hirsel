@@ -6,22 +6,25 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 /// Compiler-derived SER-2 descriptors for the two request fields whose values
-/// the runtime constructs. Entry argument and reply codecs remain generated code.
+/// the runtime constructs, and for core `RunFrame`, the frame a `remote.tls@1`
+/// provider sends. Entry argument and reply codecs remain generated code.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestSchemas {
     grants: Vec<u8>,
     definitions: Vec<u8>,
+    frame: Vec<u8>,
 }
 impl RequestSchemas {
     /// Retained buffers of the copied, body-free request schema descriptors.
     pub fn retained_metadata_bytes(&self) -> u64 {
         self.grants
             .capacity()
-            .saturating_add(self.definitions.capacity()) as u64
+            .saturating_add(self.definitions.capacity())
+            .saturating_add(self.frame.capacity()) as u64
     }
 
-    pub fn new(grants: Vec<u8>, definitions: Vec<u8>) -> Result<Self, String> {
-        if [&grants, &definitions]
+    pub fn new(grants: Vec<u8>, definitions: Vec<u8>, frame: Vec<u8>) -> Result<Self, String> {
+        if [&grants, &definitions, &frame]
             .iter()
             .any(|bytes| bytes.is_empty() || bytes.len() > 1 << 20)
         {
@@ -30,7 +33,24 @@ impl RequestSchemas {
         Ok(Self {
             grants,
             definitions,
+            frame,
         })
+    }
+
+    /// The `remote.tls@1` frame codec: `RunFrame`'s, and the request digest's grant set
+    /// and allowlist codecs, from the same descriptors.
+    pub(crate) fn wire(&self) -> Result<hirsel_remote::wire::Wire, String> {
+        let schema = |bytes: &[u8]| {
+            hirsel_types::wire::descriptor_schema(bytes)
+                .map_err(|e| format!("a runner request schema descriptor: {e:?}"))
+        };
+        hirsel_remote::wire::Wire::new(
+            &schema(&self.frame)?,
+            &schema(&self.grants)?,
+            &schema(&self.definitions)?,
+            hirsel_remote::wire::DEFAULT_FRAME_BYTES,
+        )
+        .map_err(|e| format!("RunFrame: {e:?}"))
     }
 
     /// Frame the existing canonical payloads exactly as SER-2 does. The
@@ -73,6 +93,7 @@ impl Metadata {
                 "request_schemas": {
                     "grants": hirsel_run_schema::hex(&schemas.grants),
                     "definitions": hirsel_run_schema::hex(&schemas.definitions),
+                    "frame": hirsel_run_schema::hex(&schemas.frame),
                 },
             })
             .to_string(),
@@ -122,7 +143,11 @@ impl Metadata {
                 })
                 .collect()
         };
-        let schemas = RequestSchemas::new(descriptor("grants")?, descriptor("definitions")?)?;
+        let schemas = RequestSchemas::new(
+            descriptor("grants")?,
+            descriptor("definitions")?,
+            descriptor("frame")?,
+        )?;
         Ok(Self {
             facts,
             request_schemas: Some(schemas),
@@ -327,7 +352,7 @@ mod tests {
     fn descriptor_request_schemas_are_canonical_and_bound_to_program_identity() {
         let metadata = Metadata {
             facts: facts(),
-            request_schemas: Some(RequestSchemas::new(vec![1, 2], vec![3, 4]).unwrap()),
+            request_schemas: Some(RequestSchemas::new(vec![1, 2], vec![3, 4], vec![5, 6]).unwrap()),
         };
         let text = metadata.json();
         let codes = [row(7)];
@@ -335,12 +360,13 @@ mod tests {
         d.callee_identity = metadata_identity(&d.digest, &metadata);
         let loaded = unsafe { Program::load(&d) }.unwrap();
         assert_eq!(loaded.callees.as_ref(), Some(&metadata));
-        for field in ["grants", "definitions"] {
+        for field in ["grants", "definitions", "frame"] {
             let mut forged = metadata.clone();
             let schemas = forged.request_schemas.as_mut().unwrap();
             match field {
                 "grants" => schemas.grants[0] ^= 1,
-                _ => schemas.definitions[0] ^= 1,
+                "definitions" => schemas.definitions[0] ^= 1,
+                _ => schemas.frame[0] ^= 1,
             }
             let bytes = forged.json();
             d.callee_facts = bytes.as_ptr();

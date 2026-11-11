@@ -15,4 +15,3 @@ webpki-roots = "=1.0.9"
 
 [dev-dependencies]
 hirsel-guard = { path = "../hirsel-guard" }
-tempfile = "3"

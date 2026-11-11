@@ -182,15 +182,19 @@ pub fn settled_callee_metadata(
         });
     }
     let failed = |error: String| NativeError::new(StageName::Launch, error);
-    let schemas = hirsel_interp::library::runners::core_schema(runtime, "GrantSet")
-        .and_then(|grants| {
-            hirsel_interp::library::runners::allowlist_schema(runtime)
-                .map(|definitions| (grants, definitions))
-        })
-        .map_err(|e| failed(format!("runner request schemas: {e:?}")))?;
+    use hirsel_interp::library::runners::{allowlist_schema, core_schema};
+    let schemas = (|| {
+        Ok::<_, hirsel_interp::Error>((
+            core_schema(runtime, "GrantSet")?,
+            allowlist_schema(runtime)?,
+            core_schema(runtime, "RunFrame")?,
+        ))
+    })()
+    .map_err(|e| failed(format!("runner request schemas: {e:?}")))?;
     let request_schemas = hirsel_rt::program::RunnerRequestSchemas::new(
         schemas.0.codec.descriptor().to_vec(),
         schemas.1.codec.descriptor().to_vec(),
+        schemas.2.codec.descriptor().to_vec(),
     )
     .map_err(failed)?;
     Ok(hirsel_rt::program::CalleeMetadata {

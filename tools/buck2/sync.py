@@ -316,6 +316,7 @@ EMPTY_UNIT_HARNESSES = {
     "hirsel-front-phases-unittest",
     "hirsel-heaps-loom-unittest",
     "hirsel-native-build-bin-hirsel-native-build-unittest",
+    "hirsel-remote-host-unittest",
     "hirsel-remote-unittest",
 }
 

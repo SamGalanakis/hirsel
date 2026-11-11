@@ -70,6 +70,9 @@ impl Link {
     /// closed link must not end the head's program by SIGPIPE.
     fn send_ends(&mut self) -> bool {
         let ends = self.place.ends();
+        if ends.is_empty() {
+            return false;
+        }
         crate::process::without_sigpipe(|| {
             for (key, outcome) in &ends {
                 let id = u64::from_le_bytes(key[..8].try_into().unwrap());
@@ -79,7 +82,7 @@ impl Link {
                 }
             }
         });
-        !ends.is_empty()
+        true
     }
 }
 impl Drop for Link {
@@ -536,6 +539,9 @@ impl Home {
             self.driver_installed = true;
         }
         self.slot.transport.signal.drain();
+        // Consume the work signal's readiness with the signal itself; a stale one would end
+        // every idle wait at once and spin home.
+        self.slot.transport.work.ready().map_err(Stop::refusal)?;
         let mut changed = false;
         for (_token, key, spec) in self.slot.transport.take() {
             let Spec {

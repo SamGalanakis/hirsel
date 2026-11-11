@@ -53,7 +53,8 @@ class ResumeTests(unittest.TestCase):
     def resume(self):
         with patch.object(runner, 'HERE', self.root), \
              patch.object(runner.sys, 'argv', ['run', '--output', str(self.out), '--compiler',
-                                              str(self.root / 'compiler'), '--skip-build', '--resume', '--profile']), \
+                                              str(self.root / 'compiler'), '--skip-build', '--resume', '--profile',
+                                              '--engines', 'metal,native,served,interp']), \
              patch.object(runner.os, 'sched_getaffinity', return_value={0, 1}), \
              patch.object(runner.os, 'sched_setaffinity'), \
              patch.object(runner.subprocess, 'check_output', return_value='measured-revision\n'), \

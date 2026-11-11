@@ -80,6 +80,22 @@ its later runs. Aligned allocation APIs are not counted by the libc probes.
 Bytes are the phase's increase in regular-file sizes, meaning encoded log or object bytes,
 not block-device bytes or filesystem write amplification.
 
+The `callers` engine is the served place with one caller process per submitter: 1, 4, 16 or
+64 `hirsel run` processes, each with one client on its own `remote.tls@1` runner and so its own
+call stream, against one `hirsel serve --native` host. Caller k commits the groups whose first
+transfer is k * group modulo callers * group; caller 0 opens the accounts before the others
+start and runs the oracle once all are done. The head can then see several arrivals in one
+inbox batch, and `store.serve`'s window can let one barrier cover several commits, so the
+barrier check asks for one `pwrite64` per commit and between one and `commits` fdatasyncs.
+All callers run in one `tools/capped` scope of 8G (each process guards itself at 2G) on two
+CPUs of their own, so the head and host keep the pair every other sample runs on. Throughput
+is the runner's wall time from releasing every caller to the last caller's `DONE`; latencies are
+every caller's. `commits_fsync` is commits per barrier, and `caller_cpu_us_commit` sums the
+callers' CPU from `/proc`. A second, diagnostic sample probes the head's allocator calls and
+records its `hirsel_rt_v2_inbox_take` and `hirsel_rt_v2_arrival_request` calls in order:
+`inbox_batches` counts the takes some arrival followed, and `arrivals_batch` is arrivals per
+such batch. `--engines`, `--groups` and `--submitters` pick subsets.
+
 Each sample runs one cell: one authority at one level its provider declares, set as the
 deployment floor, with `group_commits` 1, so each commit group is one advance. A cell
 names the failure an acknowledged commit survives, and the runner refuses a native,

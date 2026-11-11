@@ -1,8 +1,8 @@
 // Store adapter for the ledger workload. Each group is one transaction, made
 // on a store this process opens (local) or by a `db@1` place's head (served).
-pub type Error = Grant(GrantError) | Clock(ClockError) | Output(
-  OutputError
-) | Input(InputError) | Store(store.StoreError) | Tx(store.TxFailure[ledger.Refusal]) | Run(
+pub type Error = Grant(GrantError) | Clock(ClockError) | Output(OutputError) | Input(
+  InputError
+) | Store(store.StoreError) | Tx(store.TxFailure[ledger.Refusal]) | Run(
   RunError[store.TxFailure[ledger.Refusal]]
 ) | Usage
 
@@ -98,7 +98,7 @@ pub fn head(rt: Io, a: ()) -> Result[(), store.StoreError] {
     [
       store.served_transact(open_account),
       store.served_transact(transfers),
-      store.served_transact(verify),
+      store.served_transact(verify)
     ]
   )
 }
@@ -106,7 +106,9 @@ pub fn head(rt: Io, a: ()) -> Result[(), store.StoreError] {
 /// One transaction of the entry `f` on `w`; the writer comes back with its outcome.
 fn commit[A: serializable](
   take w: Writer,
-  f: Entry[fn(mut tx: store.Tx, info: store.CallInfo, a: A) -> Result[u64, ledger.Refusal]],
+  f: Entry[
+    fn(mut tx: store.Tx, info: store.CallInfo, a: A) -> Result[u64, ledger.Refusal]
+  ],
   a: A
 ) -> (Writer, Result[u64, Error]) {
   match take w {
@@ -161,7 +163,7 @@ fn client(
   c: MonotonicClock,
   take sender: Sender[Request],
   id: u64,
-  clients: u64,
+  stride: u64,
   count: u64,
   group: u64
 ) {
@@ -179,7 +181,7 @@ fn client(
     failure.check(results.is_ok(sent), Arithmetic())
     let received = channel.receive(tasks, mut rx)
     failure.check(results.is_ok(received), Arithmetic())
-    first += clients * group
+    first += stride * group
   }
 }
 
@@ -198,9 +200,19 @@ fn run(rt: Io, args: Args) -> Result[(), Error] {
     Ok(mode) => mode == "served",
     Error(_) => false,
   }
-  if accounts < 2 || group == 0 || clients == 0 || count == 0 || count % group != 0 || count % accounts != 0 {
+  // A served sample may split its clients over `callers` processes, each with its own
+  // runner and so its own call stream; this one is `caller`. Caller 0 opens the
+  // accounts and runs the oracle once every caller is done.
+  let callers: u64 = if number(args, 7) == 0 {
+    1
+  } else {
+    number(args, 7)
+  }
+  let caller = number(args, 8)
+  if accounts < 2 || group == 0 || clients == 0 || count == 0 || count % group != 0 || count % accounts != 0 || caller >= callers || count % (callers * group) != 0 || callers > 1 && !served {
     return Error(Usage())
   }
+  let share = count / callers
   let mut config = store.default_config()
   config.group_commits = 1
   let mut db = if served {
@@ -208,7 +220,12 @@ fn run(rt: Io, args: Args) -> Result[(), Error] {
   } else {
     Local(store.open(io.authority(rt, "db") ? Grant, config) ? Store)
   }
-  for account in 0u64..accounts {
+  let opening: u64 = if caller == 0 {
+    accounts
+  } else {
+    0
+  }
+  for account in 0u64..opening {
     let (next, opened) = commit(
       take db,
       open_account,
@@ -237,13 +254,21 @@ fn run(rt: Io, args: Args) -> Result[(), Error] {
           task.async(
             scope,
             fn() {
-              client(tasks, c, take outgoing, id, clients, count, group)
+              client(
+                tasks,
+                c,
+                take outgoing,
+                caller * clients + id,
+                callers * clients,
+                count,
+                group
+              )
             }
           )
         )
       }
       let mut completed: u64 = 0
-      while completed < count {
+      while completed < share {
         let req = match channel.receive(tasks, mut rx) {
           Ok(r) => take r,
           Error(_) => {
@@ -290,12 +315,16 @@ fn run(rt: Io, args: Args) -> Result[(), Error] {
     },
     Served(r) => Served(r),
   }
-  // The oracle runs outside the timed phase.
-  let (checked, verified) = commit(
-    take reopened,
-    verify,
-    Expected(accounts: accounts, initial: initial, count: count, amount: amount)
-  )
+  // The oracle runs outside the timed phase, after every caller is done.
+  let (checked, verified) = if caller == 0 {
+    commit(
+      take reopened,
+      verify,
+      Expected(accounts: accounts, initial: initial, count: count, amount: amount)
+    )
+  } else {
+    (take reopened, Ok(0))
+  }
   let _ = take verified?
   if let Local(s) = take checked {
     store.close(take s) ? Store

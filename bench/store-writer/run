@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -36,6 +37,9 @@ CELLS = {
 }
 # The repository's TLS test identities (crates/hirsel-rt/tests/it/tls-data/README.md).
 TLS = ROOT / 'crates/hirsel-rt/tests/it/tls-data'
+# `callers` is the served place with one caller process per submitter, each its own stream.
+ENGINES = ('metal', 'native', 'served', 'interp', 'callers')
+CALLER_CPUS = []
 TOOLCHAIN_VARIABLES = ('HIRSEL_RUNTIME_ARCHIVES', 'HIRSEL_LINK_KIT', 'HIRSEL_GLIBC_FLOOR',
                        'HIRSEL_CAPTURE_LINKER', 'HIRSEL_AUDITOR_PACKAGE', 'LLVM_SYS_231_PREFIX')
 
@@ -204,6 +208,51 @@ class Attached:
         return self.values
 
 
+class Recorded(Attached):
+    """`perf record` of uprobe `events` in one running process, between `enable` and
+    `disable`; `finish` gives the events' names in the order they fired."""
+    def __init__(self, pid, events, path):
+        self.control, self.ack = path.with_suffix('.control'), path.with_suffix('.ack')
+        os.mkfifo(self.control)
+        os.mkfifo(self.ack)
+        self.write, self.read = os.open(self.control, os.O_RDWR), os.open(self.ack, os.O_RDWR)
+        self.path, self.values = path, None
+        self.process = subprocess.Popen(['perf', 'record', '-q', '-e', ','.join(events), '-p', str(pid),
+            '-o', path, '-D', '-1', f'--control=fifo:{self.control},{self.ack}'],
+            stderr=subprocess.DEVNULL)
+
+    def finish(self):
+        if self.values is not None:
+            return self.values
+        if self.process.poll() is None:
+            self.process.send_signal(signal.SIGINT)
+        self.process.wait()
+        for fd in (self.write, self.read):
+            os.close(fd)
+        self.control.unlink()
+        self.ack.unlink()
+        script = subprocess.check_output(['perf', 'script', '-i', self.path, '-F', 'event'], text=True)
+        self.values = [line.strip().rstrip(':').rsplit('_', 1)[-1].rstrip(':')
+                       for line in script.splitlines() if line.strip()]
+        self.path.unlink()  # Keep the counts, not the raw trace.
+        return self.values
+
+
+def batches(fired):
+    """Inbox batches in a head's uprobe sequence: a take that some arrival's
+    request follows before the next take. Returns (batches, arrivals)."""
+    count, arrivals, open_take = 0, 0, False
+    for name in fired:
+        if name == 'take':
+            open_take = True
+        elif name == 'request':
+            arrivals += 1
+            if open_take:
+                count += 1
+                open_take = False
+    return count, arrivals
+
+
 def disk_bytes(directory):
     return sum(p.stat().st_size for p in directory.rglob('*') if p.is_file())
 
@@ -212,12 +261,12 @@ PROBE_SETS = itertools.count()
 
 
 @contextmanager
-def native_allocation_probes(binary):
+def native_allocation_probes(binary, symbols=('malloc', 'calloc', 'realloc')):
     # The local native probes stay while a served head's are added: name each set apart.
     group = f'storebench_{os.getpid()}_{next(PROBE_SETS)}'
     events = []
     try:
-        for name in ('malloc', 'calloc', 'realloc'):
+        for name in symbols:
             event = f'{group}:{group}_{name}'
             run(['sudo', '-n', 'perf', 'probe', '-x', binary, '--add', f'{event}={name}'],
                 stdout=subprocess.DEVNULL)
@@ -506,15 +555,222 @@ def sample(kind, cell, group, submitters, workload, out, compiler, source_sha, p
         return row
 
 
+# Each caller process of a `callers` sample runs as its own child of one capped scope,
+# with its stdin and stdout on named pipes the runner holds (the scope does not pass
+# descriptors through), and HIRSEL_MEMORY_LIMIT per process (each hirsel binary guards
+# itself at it). Output pipes open in caller order, as the runner opens them.
+CALLERS_LAUNCHER = r'''
+import json, os, subprocess, sys
+spec = json.loads(sys.argv[1])
+env = dict(os.environ, HIRSEL_MEMORY_LIMIT=spec['limit'])
+children = []
+for c in spec['callers']:
+    with open(c['stdin'], 'rb') as stdin, open(c['stdout'], 'wb') as stdout, open(c['stderr'], 'w') as stderr:
+        children.append(subprocess.Popen(c['command'], stdin=stdin, stdout=stdout, stderr=stderr, env=env))
+sys.exit(max(child.wait() for child in children))
+'''
+
+
+def callers_sample(cell, group, callers, workload, out, compiler, source_sha, head_trace=False):
+    """`callers` caller processes, each with one client on its own runner and so its own
+    call stream, against one served place: the head can see several arrivals per inbox
+    batch, and serve's window can let one barrier cover several commits. Throughput is the
+    runner's wall time from releasing every caller to the last caller's DONE. With
+    `head_trace`, a diagnostic sample also probes the head's allocator calls and records
+    its inbox takes and arrival requests in order."""
+    if source_revision() != source_sha:
+        raise RuntimeError('source revision changed before measurement')
+    if cell != 'log-host':
+        raise RuntimeError('callers samples run in the log-host cell')
+    suffix = f'callers-{cell}-g{group}-c{callers}' + ('-allocations' if head_trace else '')
+    directory = out / suffix
+    directory.mkdir()
+    db = directory / 'db'
+    db.mkdir()
+    spec = CELLS[cell]
+    authority = dict(provider=spec['provider'], floor=spec['floor'], mount='db', path='store')
+    commits = workload['transfers'] // group
+    with ExitStack() as host:
+        socket, serve_pid = host.enter_context(place_host(compiler, directory, db, authority))
+        io = dict(stdout='stdout.bytes@1', stdin='stdin.bytes@1', tasks='tasks.cooperative@1',
+            monotonic_clock='clock.monotonic.ns@1', dirs=[], runners=[dict(name='db',
+                provider='remote.tls@1', endpoint=dict(unix=str(socket)), server_name='localhost',
+                roots=dict(pem=str(TLS / 'server.cert')),
+                identity=dict(chain=str(TLS / 'client.cert'), key=str(TLS / 'client.key')),
+                grants=dict(dirs=[]), definitions=None)])
+        launched = []
+        for index in range(callers):
+            arguments = [workload[k] for k in ('accounts', 'initial_balance', 'transfers', 'amount')]
+            arguments += [group, 1, 'served', callers, index]
+            grants = directory / f'caller-{index}.grants.json'
+            grants.write_text(json.dumps(dict(io=io, args=list(map(str, arguments)))))
+            for end in ('in', 'out'):
+                os.mkfifo(directory / f'caller-{index}.{end}')
+            launched.append(dict(command=list(map(str, [compiler, 'run', HERE / 'hirsel.json',
+                '--grants', grants, '--max-steps', 'unbounded', '--cores', '2', '--', *arguments])),
+                stdin=str(directory / f'caller-{index}.in'), stdout=str(directory / f'caller-{index}.out'),
+                stderr=str(directory / f'caller-{index}.stderr.log')))
+        launcher = json.dumps(dict(limit=os.environ['HIRSEL_MEMORY_LIMIT'], callers=launched))
+        # One scope holds every caller: the sample takes the host's slot and this one.
+        scope_env = dict(os.environ, HIRSEL_MEMORY_LIMIT='8G')
+        # Held open for writing here, so a caller's stdin opens at once and stays open.
+        inputs = [os.fdopen(os.open(directory / f'caller-{i}.in', os.O_RDWR), 'w') for i in range(callers)]
+        outputs = []
+        with (directory / 'stderr.log').open('w') as errors:
+            # The callers get two CPUs of their own: the head and host keep the pair every
+            # other sample runs on, and many interpreted callers do not take its time.
+            process = subprocess.Popen([str(ROOT / 'tools/capped'), sys.executable, '-c', CALLERS_LAUNCHER,
+                launcher], env=scope_env, stderr=errors,
+                preexec_fn=lambda: os.sched_setaffinity(0, CALLER_CPUS))
+        lines = [[] for _ in range(callers)]
+        try:
+            opener = threading.Thread(target=lambda: outputs.extend(
+                open(directory / f'caller-{i}.out') for i in range(callers)), daemon=True)
+            opener.start()
+            while opener.is_alive():
+                opener.join(1)
+                if process.poll() is not None and opener.is_alive():
+                    raise RuntimeError(f'{suffix}: the callers ended before they started: {directory / "stderr.log"}')
+            def until(index, marker):
+                for line in outputs[index]:
+                    lines[index].append(line)
+                    if line.strip() == marker:
+                        return
+                raise RuntimeError(f'{suffix}: caller {index} ended before {marker}: '
+                                   f'{directory / f"caller-{index}.stderr.log"}')
+            def answer(index, text):
+                inputs[index].write(text + '\n')
+                inputs[index].flush()
+            # Caller 0 opens the accounts before the others reach their gate.
+            until(0, 'READY')
+            readers = [threading.Thread(target=until, args=(i, 'READY')) for i in range(1, callers)]
+            for reader in readers:
+                reader.start()
+            for reader in readers:
+                reader.join()
+            if any(not lines[i] or lines[i][-1].strip() != 'READY' for i in range(callers)):
+                raise RuntimeError(f'{suffix}: a caller did not reach READY')
+            heads = list(children(serve_pid))[1:]
+            if len(heads) != 1:
+                raise RuntimeError(f'the place host runs {len(heads)} heads, not one')
+            head = heads[0]
+            events = 'instructions:u,task-clock,syscalls:sys_enter_fsync,syscalls:sys_enter_fdatasync,syscalls:sys_enter_pwrite64'
+            executable = Path(f'/proc/{head}/exe').resolve()
+            probes = host.enter_context(native_allocation_probes(executable)) if head_trace else []
+            traced = host.enter_context(native_allocation_probes(executable,
+                ('hirsel_rt_v2_inbox_take', 'hirsel_rt_v2_arrival_request'))) if head_trace else []
+            attached = []
+            for make in [lambda: Attached(head, ','.join([events, *probes]), directory / 'head.csv'),
+                         lambda: Attached(serve_pid, 'instructions:u,task-clock', directory / 'host.csv'),
+                         *([lambda: Recorded(head, traced, directory / 'trace.data')] if traced else [])]:
+                attached.append(make())
+                host.callback(attached[-1].finish)  # Before its probes are removed.
+            callers_pids = list(children(process.pid))
+            def cpu_ticks():
+                total = 0
+                for pid in callers_pids:
+                    try:
+                        if Path(f'/proc/{pid}/exe').resolve() != compiler.resolve():
+                            continue
+                        fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+                        total += int(fields[11]) + int(fields[12])
+                    except OSError:
+                        pass
+                return total
+            bytes_before = disk_bytes(db)
+            ticks_before = cpu_ticks()
+            for counter in attached:
+                counter.send('enable')
+            done = [threading.Thread(target=until, args=(i, 'DONE')) for i in range(callers)]
+            started = time.monotonic_ns()
+            for index in range(callers):
+                answer(index, 'go')
+            for reader in done:
+                reader.start()
+            for reader in done:
+                reader.join()
+            finished = time.monotonic_ns()
+            for counter in attached:
+                counter.send('disable')
+            if any(lines[i][-1].strip() != 'DONE' for i in range(callers)):
+                raise RuntimeError(f'{suffix}: a caller did not reach DONE')
+            ticks_after = cpu_ticks()
+            bytes_after = disk_bytes(db)
+            # Caller 0 runs the oracle after every other caller is done.
+            for index in range(1, callers):
+                answer(index, 'finish')
+                until(index, 'verified')
+            answer(0, 'finish')
+            until(0, 'verified')
+            status = process.wait()
+        except BaseException:
+            kill_owned(process.pid)
+            process.wait()
+            raise
+        finally:
+            for stream in inputs + outputs:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        for index in range(callers):
+            (directory / f'caller-{index}.stdout.log').write_text(''.join(lines[index]))
+            for end in ('in', 'out'):
+                (directory / f'caller-{index}.{end}').unlink()
+        if status:
+            raise RuntimeError(f'{suffix} failed: {directory / "stderr.log"}')
+        latencies = sorted(int(line.split()[1]) for caller in lines for line in caller
+                           if line.startswith('latency '))
+        if len(latencies) != commits:
+            raise RuntimeError('missing durable completion latency bodies')
+        own = attached[0].finish()
+        appends, datasyncs, fsyncs = (int(own[f'syscalls:sys_enter_{c}'])
+                                      for c in ('pwrite64', 'fdatasync', 'fsync'))
+        # authority.log@1 writes each entry and syncs once per wait: one append per commit,
+        # and one fdatasync may cover several.
+        if appends != commits or fsyncs or not 1 <= datasyncs <= commits:
+            raise RuntimeError(f'{cell} barriers: {appends} pwrite64, {datasyncs} fdatasync and '
+                               f'{fsyncs} fsync for {commits} commit groups')
+        if bytes_after <= bytes_before:
+            raise RuntimeError(f'{cell}: the phase did not grow the files')
+        elapsed = finished - started
+        transport = attached[1].finish()
+        row = dict(binding=binding(source_sha, workload, 'callers', cell, group, callers, False, head_trace),
+            engine='callers', cell=cell, survives=spec['survives'], group=group, submitters=callers,
+            transfers=workload['transfers'], commits=commits, elapsed_ns=elapsed,
+            transfers_s=workload['transfers'] * 1e9 / elapsed,
+            p50_us=latencies[math.ceil(len(latencies) * .50) - 1] / 1000,
+            p99_us=latencies[math.ceil(len(latencies) * .99) - 1] / 1000,
+            fsyncs_commit=(datasyncs + fsyncs) / commits, commits_fsync=commits / (datasyncs + fsyncs),
+            bytes_commit=(bytes_after - bytes_before) / commits, log_appends_commit=appends / commits,
+            allocations_commit=sum(own[event] for event in probes) / commits if head_trace else None,
+            instructions_commit=own['instructions:u'] / commits,
+            cpu_us_commit=own['task-clock'] * 1000 / commits,
+            caller_cpu_us_commit=(ticks_after - ticks_before) * 1e6 / os.sysconf('SC_CLK_TCK') / commits,
+            host_instructions_commit=transport['instructions:u'] / commits,
+            host_cpu_us_commit=transport['task-clock'] * 1000 / commits,
+            counters=dict(fsyncs=datasyncs + fsyncs, log_appends=appends))
+        if traced:
+            taken, arrivals = batches(attached[2].finish())
+            if arrivals != commits:
+                raise RuntimeError(f'{suffix}: the head took {arrivals} arrivals for {commits} commits')
+            row.update(inbox_batches=taken, arrivals_batch=arrivals / taken)
+        if source_revision() != source_sha:
+            raise RuntimeError('source revision changed during measurement; no result written')
+        (directory / 'result.json').write_text(json.dumps(row, indent=2) + '\n')
+        print(json.dumps(row), flush=True)
+        return row
+
+
 def served_ratios(rows):
     """Each served cell beside the local native run and the Rust reference of the same cell."""
     cells = {(row['binding']['engine'], row['binding']['cell'], row['binding']['group'],
               row['binding']['submitters']): row for row in rows if not row['binding']['profile']}
     ratios = []
     for (engine, cell, group, clients), served in cells.items():
-        if engine != 'served':
+        if engine not in ('served', 'callers'):
             continue
-        entry = dict(cell=cell, group=group, submitters=clients)
+        entry = dict(engine=engine, cell=cell, group=group, submitters=clients)
         for reference in ('native', 'metal'):
             other = cells.get((reference, cell, group, clients))
             if other is None:
@@ -536,15 +792,25 @@ def main():
     parser.add_argument('--resume', action='store_true', help='reuse completed samples in this evidence directory')
     parser.add_argument('--profile', action='store_true', help='also collect one phase-gated writer profile per engine')
     parser.add_argument('--cells', default=','.join(CELLS), help='comma-separated authority cells to measure')
+    parser.add_argument('--engines', default=','.join(ENGINES), help='comma-separated engines to measure')
+    parser.add_argument('--groups', help='comma-separated subset of the workload\'s groups')
+    parser.add_argument('--submitters', help='comma-separated subset of the workload\'s submitter counts')
     args = parser.parse_args()
     cells = args.cells.split(',')
     if not cells or any(c not in CELLS for c in cells):
         parser.error(f'cells are among {", ".join(CELLS)}')
+    engines = args.engines.split(',')
+    if not engines or any(e not in ENGINES for e in engines):
+        parser.error(f'engines are among {", ".join(ENGINES)}')
     source_sha = source_revision()
     allowed = sorted(os.sched_getaffinity(0) - BANNED)
     if len(allowed) < 2:
         parser.error('two allowed CPUs required')
     os.sched_setaffinity(0, allowed[:2])
+    if 'callers' in engines:
+        if len(allowed) < 4:
+            parser.error('four allowed CPUs required for callers samples')
+        CALLER_CPUS[:] = allowed[2:4]
     os.environ.pop('HIRSEL_RT_MIGRATE', None)
     os.environ.update(HIRSEL_MEMORY_LIMIT='2G', HIRSEL_JOBS='2',
                       HIRSEL_RT_WORKERS='1', HIRSEL_DAEMON='off',
@@ -568,35 +834,55 @@ def main():
         def measured(kind, cell, group, clients, the_workload=workload, **mode):
             """A saved cell when resuming, else a new sample."""
             name = f'{kind}-{cell}-g{group}-c{clients}' + ('-profile' if mode.get('profile') else
-                '-allocations' if mode.get('allocation_events') or mode.get('head_allocations') else '')
+                '-allocations' if mode.get('allocation_events') or mode.get('head_allocations')
+                or mode.get('head_trace') else '')
             saved = out / name / 'result.json'
             if args.resume and saved.exists():
                 return saved_sample(saved, binding(source_sha, the_workload, kind, cell, group, clients,
                     mode.get('profile', False),
-                    bool(mode.get('allocation_events')) or mode.get('head_allocations', False)))
+                    bool(mode.get('allocation_events')) or mode.get('head_allocations', False)
+                    or mode.get('head_trace', False)))
+            if kind == 'callers':
+                return callers_sample(cell, group, clients, the_workload, out, compiler, source_sha, **mode)
             return sample(kind, cell, group, clients, the_workload, out, compiler, source_sha, **mode)
         # The Rust reference keeps one log synchronized per group: it pairs with log-host.
-        for group in workload['groups']:
-            for clients in workload['submitters']:
-                rows.append(measured('metal', 'log-host', group, clients))
+        def subset(name, chosen):
+            values = workload[name] if chosen is None else [int(v) for v in chosen.split(',')]
+            if any(v not in workload[name] for v in values):
+                parser.error(f'{name} are among {workload[name]}')
+            return values
+        for group in subset('groups', args.groups):
+            for clients in subset('submitters', args.submitters):
+                if 'metal' in engines:
+                    rows.append(measured('metal', 'log-host', group, clients))
                 for cell in cells:
                     # A served transact costs the same transport at every level: log-host only.
-                    for kind in ('native', 'served', 'interp') if cell == 'log-host' else ('native', 'interp'):
+                    for kind in ('native', 'served', 'interp', 'callers') if cell == 'log-host' else ('native', 'interp'):
+                        if kind not in engines:
+                            continue
                         rows.append(measured(kind, cell, group, clients))
+                        if kind == 'callers':
+                            diagnostic = measured(kind, cell, group, clients, head_trace=True)
+                            rows[-1].update({k: diagnostic[k] for k in
+                                             ('allocations_commit', 'inbox_batches', 'arrivals_batch')})
+                            (out / f'{kind}-{cell}-g{group}-c{clients}' / 'result.json').write_text(
+                                json.dumps(rows[-1], indent=2) + '\n')
+                            continue
                         if kind in ('native', 'served') and cell == 'log-host' and rows[-1].get('allocations_commit') is None:
                             rows[-1]['allocations_commit'] = measured(kind, cell, group, clients,
                                 **(dict(allocation_events=events) if kind == 'native'
                                    else dict(head_allocations=True)))['allocations_commit']
                             (out / f'{kind}-{cell}-g{group}-c{clients}' / 'result.json').write_text(
                                 json.dumps(rows[-1], indent=2) + '\n')
-        rows.append(measured('raw', 'log-host', 1, 1, dict(workload, groups=[1], submitters=[1])))
+        if 'metal' in engines:
+            rows.append(measured('raw', 'log-host', 1, 1, dict(workload, groups=[1], submitters=[1])))
         if args.profile:
             for kind in ('native', 'interp'):
                 measured(kind, 'log-host', 1, 1, profile=True)
     if source_revision() != source_sha:
         raise RuntimeError('source revision changed during measurement; no summary written')
     summary = dict(source_sha=source_sha, cells={c: CELLS[c]['survives'] for c in cells},
-        workload=workload, cpus=allowed[:2], compiler=str(compiler), rows=rows, served=served_ratios(rows))
+        workload=workload, cpus=allowed[:2], caller_cpus=CALLER_CPUS, compiler=str(compiler), rows=rows, served=served_ratios(rows))
     (out / 'results.json').write_text(json.dumps(summary, indent=2) + '\n')
 
 

@@ -8,7 +8,7 @@
 //! providers; a runner whose material does not load refuses the launch.
 use crate::client::{Client, ClientAction, Settings};
 use crate::frame::Call;
-use crate::transport::{ClientTls, Command, Event};
+use crate::transport::{ClientTls, Command, Commands, Event};
 use crate::wire::Wire;
 use hirsel_run_schema::{Endpoint, Roots, RunnerCompletion, RunnerEntry};
 use std::collections::BTreeMap;
@@ -165,7 +165,7 @@ struct Worker {
     client: Client,
     inputs: Sender<Input>,
     received: Receiver<Input>,
-    connection: Option<Sender<Command>>,
+    connection: Option<Commands>,
     generation: u64,
     completions: Arc<Mutex<Vec<(u64, RunnerCompletion)>>>,
     notify: Notify,
@@ -227,13 +227,13 @@ impl Worker {
                     Ok(tls) => {
                         self.generation += 1;
                         let generation = self.generation;
-                        let (commands, received) = channel();
+                        let (commands, connection) = crate::transport::queue();
                         let inputs = self.inputs.clone();
                         let wire = self.wire.clone();
                         let spawned = std::thread::Builder::new()
                             .name("runner connection".into())
                             .spawn(move || {
-                                crate::transport::serve(tls, wire, received, |event| {
+                                crate::transport::serve(tls, wire, connection, |event| {
                                     inputs.send(Input::Connection(generation, event)).is_ok()
                                 })
                             });

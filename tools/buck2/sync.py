@@ -317,7 +317,6 @@ EMPTY_UNIT_HARNESSES = {
     "hirsel-heaps-loom-unittest",
     "hirsel-native-build-bin-hirsel-native-build-unittest",
     "hirsel-remote-host-unittest",
-    "hirsel-remote-unittest",
 }
 
 # Required startup consumers include these existing full-gate HTTP launches.

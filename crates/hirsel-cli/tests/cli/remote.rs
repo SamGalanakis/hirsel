@@ -27,6 +27,21 @@ fn half(n: u64) -> Result[u64, String] {
   Ok(n / 2u64)
 }
 
+fn echo(s: String) -> Result[String, String] {
+  Ok(string.concat(s, ""))
+}
+
+// 256 KiB: a frame each way larger than a TLS session's default 64 KiB send buffer.
+fn wide() -> String {
+  let mut s = "0123456789abcdef"
+  let mut i = 0u64
+  while i < 14u64 {
+    s = string.concat(s, s)
+    i = i + 1u64
+  }
+  s
+}
+
 fn shown(outcome: Result[u64, RunError[String]]) -> String {
   match outcome {
     Ok(n) => if n == 4u64 {
@@ -53,10 +68,20 @@ pub fn main(rt: Io) -> Result[(), AppError] {
   let even = shown(runner.compute(far, half, 8u64))
   let odd = shown(runner.compute(far, half, 3u64))
   let large = shown(runner.compute(far, half, 200u64))
+  let echoed = match runner.compute(far, echo, wide()) {
+    Ok(back) => if back == wide() {
+      "ok wide\n"
+    } else {
+      "changed\n"
+    },
+    Error(NotRun(Unreachable())) => "unreachable\n",
+    Error(_) => "refused\n",
+  }
   out.print(output, called) ? Output
   out.print(output, even) ? Output
   out.print(output, odd) ? Output
   out.print(output, large) ? Output
+  out.print(output, echoed) ? Output
   Ok(())
 }
 "#;
@@ -366,18 +391,18 @@ fn calls_cross_to_a_host_over_a_unix_socket_and_every_tape_replays_alone() {
     let anonymous = fixture.call("anonymous.json", None);
     let printed = host.stop();
     assert!(live.status.success(), "{}", stderr(&live));
-    assert_eq!(stdout(&live), "ok\nok 4\nfailed odd\nfaulted\n");
+    assert_eq!(stdout(&live), "ok\nok 4\nfailed odd\nfaulted\nok wide\n");
     // The call with io ran on the host, under the host's grant for this caller.
     assert_eq!(printed, "remote\n");
     assert!(anonymous.status.success(), "{}", stderr(&anonymous));
     assert_eq!(
         stdout(&anonymous),
-        "unreachable\nunreachable\nunreachable\nunreachable\n"
+        "unreachable\nunreachable\nunreachable\nunreachable\nunreachable\n"
     );
 
     let caller = fixture.replay(&tape);
     assert!(caller.status.success(), "{}", stderr(&caller));
-    assert_eq!(stdout(&caller), "ok\nok 4\nfailed odd\nfaulted\n");
+    assert_eq!(stdout(&caller), "ok\nok 4\nfailed odd\nfaulted\nok wide\n");
 
     let mut tapes: Vec<PathBuf> = std::fs::read_dir(fixture.0.join("tapes"))
         .unwrap()
@@ -389,7 +414,7 @@ fn calls_cross_to_a_host_over_a_unix_socket_and_every_tape_replays_alone() {
         })
         .collect();
     tapes.sort();
-    assert_eq!(tapes.len(), 4, "{tapes:?}");
+    assert_eq!(tapes.len(), 5, "{tapes:?}");
     let mut replayed: Vec<String> = tapes
         .iter()
         .map(|callee| {
@@ -404,7 +429,7 @@ fn calls_cross_to_a_host_over_a_unix_socket_and_every_tape_replays_alone() {
         })
         .collect();
     replayed.sort();
-    assert_eq!(replayed, ["", "", "", "remote\n"]);
+    assert_eq!(replayed, ["", "", "", "", "remote\n"]);
 
     let mut args = vec!["tapes".as_ref(), "check".as_ref(), tape.as_os_str()];
     args.extend(tapes.iter().map(|t| t.as_os_str()));
@@ -416,7 +441,7 @@ fn calls_cross_to_a_host_over_a_unix_socket_and_every_tape_replays_alone() {
         stderr(&check)
     );
     assert!(
-        stdout(&check).ends_with("tapes: 4 links checked, 0 unchecked\n"),
+        stdout(&check).ends_with("tapes: 5 links checked, 0 unchecked\n"),
         "{}",
         stdout(&check)
     );

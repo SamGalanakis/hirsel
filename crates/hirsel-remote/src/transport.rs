@@ -4,10 +4,11 @@
 //! `WebPkiClientVerifier`) with the ring provider, as the program-facing TLS provider does
 //! (hirsel-rt `net_tls.rs`); the material loaders are hirsel-run-schema's.
 //!
-//! A [`Connection`] owns one socket and its TLS session on its own thread: it writes the
-//! frames handed to it and reads frames as they arrive, so a caller never blocks on the
-//! network. The socket has a short read timeout, which bounds how long a queued write
-//! waits for the reader to yield.
+//! A connection ([`serve`]) owns one socket and its TLS session on its own thread: it writes
+//! the frames handed to it and reads frames as they arrive, so a caller never blocks on the
+//! network. A reader thread blocks on the socket and hands each read to the connection
+//! through the same queue as its commands, so the connection wakes for whichever comes
+//! first and a queued frame is written at once.
 use crate::frame::Frame;
 use crate::wire::Wire;
 use hirsel_run_schema::Endpoint;
@@ -18,11 +19,9 @@ use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
-/// How long a connection's reader waits before it looks for frames to write.
-const POLL: Duration = Duration::from_millis(5);
 /// The bound on connecting and on a TLS handshake.
 const HANDSHAKE: Duration = Duration::from_secs(10);
 
@@ -61,6 +60,12 @@ impl Socket {
             Self::Tcp(s) => s.set_read_timeout(timeout),
             Self::Unix(s) => s.set_read_timeout(timeout),
         }
+    }
+    fn try_clone(&self) -> io::Result<Self> {
+        Ok(match self {
+            Self::Tcp(s) => Self::Tcp(s.try_clone()?),
+            Self::Unix(s) => Self::Unix(s.try_clone()?),
+        })
     }
     fn shutdown(&self) {
         let _ = match self {
@@ -293,94 +298,265 @@ pub enum Command {
     Close,
 }
 
-/// Run a connection until it closes: write every frame `commands` hands over, and report
-/// every frame that arrives, then [`Event::Closed`], through `report`. `report` returns
-/// false once nobody listens, which also ends the connection.
-pub fn serve(
-    tls: Tls,
-    wire: Arc<Wire>,
-    commands: Receiver<Command>,
-    mut report: impl FnMut(Event) -> bool,
-) {
+/// What wakes a connection thread: a command, or what its reader read.
+enum Input {
+    Command(Command),
+    Read(Vec<u8>),
+    /// The socket's read side ended or failed.
+    End,
+}
+
+/// The sending end of a connection's queue. Dropping it closes the connection.
+pub struct Commands(Sender<Input>);
+impl Commands {
+    /// Queue `command`; false once the connection has ended.
+    pub fn send(&self, command: Command) -> bool {
+        self.0.send(Input::Command(command)).is_ok()
+    }
+}
+impl Drop for Commands {
+    fn drop(&mut self) {
+        let _ = self.0.send(Input::Command(Command::Close));
+    }
+}
+/// A connection's queue, which [`serve`] takes.
+pub struct Queue {
+    inputs: Sender<Input>,
+    received: Receiver<Input>,
+}
+/// A new connection queue and its sending end.
+pub fn queue() -> (Commands, Queue) {
+    let (inputs, received) = channel();
+    (Commands(inputs.clone()), Queue { inputs, received })
+}
+
+/// Run a connection until it closes: write every frame its [`Commands`] hand over, and
+/// report every frame that arrives, then [`Event::Closed`], through `report`. `report`
+/// returns false once nobody listens, which also ends the connection.
+pub fn serve(tls: Tls, wire: Arc<Wire>, queue: Queue, mut report: impl FnMut(Event) -> bool) {
     let Tls {
         session,
         mut socket,
     } = tls;
-    let _ = socket.set_read_timeout(Some(POLL));
-    match session {
-        rustls::Connection::Client(mut session) => {
-            pump(&mut session, &mut socket, &wire, &commands, &mut report)
-        }
-        rustls::Connection::Server(mut session) => {
-            pump(&mut session, &mut socket, &wire, &commands, &mut report)
+    let Queue { inputs, received } = queue;
+    let reader = socket
+        .set_read_timeout(None)
+        .and_then(|()| socket.try_clone());
+    let reader = reader.and_then(|reader| {
+        std::thread::Builder::new()
+            .name("runner connection reader".into())
+            .spawn(move || read(reader, inputs))
+    });
+    if reader.is_ok() {
+        match session {
+            rustls::Connection::Client(mut session) => {
+                pump(&mut session, &mut socket, &wire, &received, &mut report)
+            }
+            rustls::Connection::Server(mut session) => {
+                pump(&mut session, &mut socket, &wire, &received, &mut report)
+            }
         }
     }
+    // Ends the reader's blocking read too.
     socket.shutdown();
     report(Event::Closed);
 }
 
-fn pump<C, S>(
-    session: &mut C,
+/// The reader thread: every read of the socket, until it ends or nobody listens.
+fn read(mut socket: Socket, inputs: Sender<Input>) {
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        let input = match socket.read(&mut chunk) {
+            Ok(0) => Input::End,
+            Ok(n) => Input::Read(chunk[..n].to_vec()),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => Input::End,
+        };
+        let end = matches!(input, Input::End);
+        if inputs.send(input).is_err() || end {
+            return;
+        }
+    }
+}
+
+/// Write every TLS record the session holds.
+fn flush<S: rustls::SideData>(
+    session: &mut rustls::ConnectionCommon<S>,
+    socket: &mut Socket,
+) -> io::Result<()> {
+    while session.wants_write() {
+        match session.write_tls(socket) {
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+fn pump<S: rustls::SideData>(
+    session: &mut rustls::ConnectionCommon<S>,
     socket: &mut Socket,
     wire: &Wire,
-    commands: &Receiver<Command>,
+    received: &Receiver<Input>,
     report: &mut impl FnMut(Event) -> bool,
-) where
-    C: std::ops::DerefMut + std::ops::Deref<Target = rustls::ConnectionCommon<S>>,
-    S: rustls::SideData,
-{
-    let mut stream = rustls::Stream::new(session, socket);
-    let mut buffer: Vec<u8> = vec![];
-    let mut chunk = vec![0u8; 64 * 1024];
-    'connection: loop {
-        loop {
-            match commands.try_recv() {
-                Ok(Command::Send(frame)) => {
-                    if wire.write(&mut stream, &frame).is_err() {
-                        break 'connection;
-                    }
+) {
+    // A frame is queued whole and written at once; the wire bounds its size.
+    session.set_buffer_limit(None);
+    let mut inbound = Inbound {
+        buffer: vec![],
+        plain: vec![0u8; 64 * 1024],
+    };
+    // The handshake's last read may also have taken the peer's first records: they are
+    // the session's already, and no later read brings them.
+    if inbound.receive(session, &[], wire, report) && flush(session, socket).is_ok() {
+        while let Ok(input) = received.recv() {
+            let open = match input {
+                Input::Command(Command::Send(frame)) => {
+                    wire.write(&mut session.writer(), &frame).is_ok()
                 }
-                Ok(Command::Close) | Err(TryRecvError::Disconnected) => break 'connection,
-                Err(TryRecvError::Empty) => break,
-            }
-        }
-        match stream.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => buffer.extend_from_slice(&chunk[..n]),
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                continue;
-            }
-            Err(_) => break,
-        }
-        // Every whole frame the buffer holds.
-        while buffer.len() >= 8 {
-            let len = u64::from_le_bytes(buffer[..8].try_into().unwrap());
-            if len > wire.limit() {
-                break 'connection;
-            }
-            let end = 8 + len as usize;
-            if buffer.len() < end {
+                Input::Command(Command::Close) | Input::End => false,
+                Input::Read(bytes) => inbound.receive(session, &bytes, wire, report),
+            };
+            // What a command wrote, and any record the session answers a read with.
+            if !open || flush(session, socket).is_err() {
                 break;
             }
-            let frame = wire.decode(&buffer[8..end]);
-            buffer.drain(..end);
+        }
+    }
+    session.send_close_notify();
+    let _ = flush(session, socket);
+}
+
+/// A connection's received plaintext not yet whole frames.
+struct Inbound {
+    buffer: Vec<u8>,
+    plain: Vec<u8>,
+}
+impl Inbound {
+    /// Take `bytes` read from the socket, and report each whole frame the session then
+    /// holds; false when the connection ends.
+    fn receive<S: rustls::SideData>(
+        &mut self,
+        session: &mut rustls::ConnectionCommon<S>,
+        bytes: &[u8],
+        wire: &Wire,
+        report: &mut impl FnMut(Event) -> bool,
+    ) -> bool {
+        let mut rest = bytes;
+        loop {
+            if !rest.is_empty() && session.read_tls(&mut rest).is_err() {
+                return false;
+            }
+            if session.process_new_packets().is_err() {
+                return false;
+            }
+            loop {
+                match session.reader().read(&mut self.plain) {
+                    // The peer's close_notify.
+                    Ok(0) => return false,
+                    Ok(n) => self.buffer.extend_from_slice(&self.plain[..n]),
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(_) => return false,
+                }
+            }
+            if rest.is_empty() {
+                break;
+            }
+        }
+        // Every whole frame the buffer holds.
+        while self.buffer.len() >= 8 {
+            let len = u64::from_le_bytes(self.buffer[..8].try_into().unwrap());
+            if len > wire.limit() {
+                return false;
+            }
+            let end = 8 + len as usize;
+            if self.buffer.len() < end {
+                break;
+            }
+            let frame = wire.decode(&self.buffer[8..end]);
+            self.buffer.drain(..end);
             match frame {
                 Ok(frame) => {
                     if !report(Event::Frame(frame)) {
-                        break 'connection;
+                        return false;
                     }
                 }
                 // A frame that does not decode ends the session: nothing after it can be
                 // trusted to be framed.
-                Err(_) => break 'connection,
+                Err(_) => return false,
             }
         }
+        true
     }
-    stream.conn.send_close_notify();
-    let _ = stream.conn.complete_io(stream.sock);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hirsel_types::serialization::{
+        SERIALIZABLE_SCHEMA_VERSION, SchemaId, SchemaNode, SerializableSchema,
+    };
+
+    const CERT: &[u8] = include_bytes!("../../hirsel-rt/tests/it/tls-data/server.cert");
+    const KEY: &[u8] = include_bytes!("../../hirsel-rt/tests/it/tls-data/server.key");
+
+    /// Moves every record `from` has to write into `to`.
+    fn shuttle(
+        from: &mut impl std::ops::DerefMut<Target = rustls::ConnectionCommon<impl rustls::SideData>>,
+        to: &mut impl std::ops::DerefMut<Target = rustls::ConnectionCommon<impl rustls::SideData>>,
+    ) {
+        let mut records = vec![];
+        while from.wants_write() {
+            from.write_tls(&mut records).unwrap();
+        }
+        let mut rest = &records[..];
+        while !rest.is_empty() {
+            to.read_tls(&mut rest).unwrap();
+            to.process_new_packets().unwrap();
+        }
+    }
+
+    /// A caller's first record can reach the host in the same read as its handshake
+    /// Finished, so the handshake hands the session over already holding it; no later
+    /// read brings it again. Here that record is a frame header over the wire's limit,
+    /// which must end the session at once: a session that only looks at what it holds
+    /// when the socket next has bytes would wait forever.
+    #[test]
+    fn a_session_acts_on_records_its_handshake_already_read() {
+        let client = ClientTls::new("localhost", Some(CERT), None).unwrap();
+        let host = HostTls::new(CERT, KEY, None).unwrap();
+        let mut c = ClientConnection::new(client.config.clone(), client.name.clone()).unwrap();
+        let mut s = ServerConnection::new(host.config.clone()).unwrap();
+        while c.is_handshaking() {
+            shuttle(&mut c, &mut s);
+            shuttle(&mut s, &mut c);
+        }
+        c.writer().write_all(&u64::MAX.to_le_bytes()).unwrap();
+        shuttle(&mut c, &mut s);
+        assert!(!s.is_handshaking());
+
+        let unit = SerializableSchema {
+            version: SERIALIZABLE_SCHEMA_VERSION,
+            root: SchemaId(0),
+            nodes: vec![SchemaNode::Tuple(vec![])],
+        };
+        let wire = Arc::new(Wire::new(&unit, &unit, &unit, 1 << 20).unwrap());
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let tls = Tls {
+            session: rustls::Connection::Server(s),
+            socket: Socket::Unix(socket),
+        };
+        let (commands, queue) = queue();
+        let (events, seen) = channel();
+        let served = std::thread::spawn(move || {
+            serve(tls, wire, queue, |event| {
+                events.send(matches!(event, Event::Closed)).is_ok()
+            })
+        });
+        let closed = seen.recv_timeout(Duration::from_secs(10));
+        drop(commands);
+        served.join().unwrap();
+        assert_eq!(closed, Ok(true));
+    }
 }

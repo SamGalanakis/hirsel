@@ -16,7 +16,7 @@
 use crate::{HostLaunch, ToolError};
 use hirsel_host_io::{CancelHandle, ExternalCancel, Hosted, PlaceFeed, PlaceHandle};
 use hirsel_remote::frame::Call;
-use hirsel_remote::transport::{Command, Event, HostTls, Listener};
+use hirsel_remote::transport::{Command, Commands, Event, HostTls, Listener};
 use hirsel_remote::wire::Wire;
 use hirsel_remote_host::host::{
     ABANDONED, Action, Arrival, Caller, Host, Limits, Place, Refusal, RunId, SessionId, Start,
@@ -95,7 +95,7 @@ impl Place for Served {
 struct Shared {
     host: Host,
     place: Served,
-    sessions: BTreeMap<SessionId, Sender<Command>>,
+    sessions: BTreeMap<SessionId, Commands>,
     cancels: BTreeMap<RunId, CancelHandle>,
     /// The place's head inbox, once the head runs.
     head: Option<Head>,
@@ -603,7 +603,7 @@ fn accept(
                         grants: entry.grants.clone(),
                         definitions: entry.definitions.clone(),
                     });
-                let (commands, received) = channel();
+                let (commands, queue) = hirsel_remote::transport::queue();
                 let session = {
                     let mut shared = shared.lock().unwrap();
                     let session = shared.next_session;
@@ -613,7 +613,7 @@ fn accept(
                     session
                 };
                 let digests = wire.clone();
-                hirsel_remote::transport::serve(tls, wire, received, |event| {
+                hirsel_remote::transport::serve(tls, wire, queue, |event| {
                     let mut guard = shared.lock().unwrap();
                     let shared = &mut *guard;
                     let actions = match event {

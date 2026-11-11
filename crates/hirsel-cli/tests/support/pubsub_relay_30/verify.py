@@ -10,9 +10,12 @@ def main(cli, manifest, requested):
     root = Path(manifest).parent
     cases = json.loads((root/'cases.json').read_text())
     env = {k:v for k,v in os.environ.items() if not k.startswith('HIRSEL_RT_')}
-    env.update(HIRSEL_JOBS='4',HIRSEL_MEMORY_LIMIT='2G',HIRSEL_DAEMON='off',HIRSEL_RESULTS='none@1',HIRSEL_TIMING='off')
-    capped=root/'capped';capped.chmod(0o755)
     selection = select_cells(cases, requested)
+    # The CPU pool the selected cells place on: their widest `cores`, and at
+    # least the two CPUs the test reserves (test_requirements.bzl).
+    jobs = max(2, *(int(cell.rsplit('-', 1)[1]) for cell in selection))
+    env.update(HIRSEL_JOBS=str(jobs),HIRSEL_MEMORY_LIMIT='2G',HIRSEL_DAEMON='off',HIRSEL_RESULTS='none@1',HIRSEL_TIMING='off')
+    capped=root/'capped';capped.chmod(0o755)
     receipts=[]
     def save(): (root/'receipts.json').write_text(json.dumps(receipts,indent=2)+'\n')
     def run(cmd, stem, measured=True):

@@ -22,7 +22,8 @@ def fixture_bytes(value):
 
 def main(a):
     root=a.root
-    env=dict(os.environ,HIRSEL_MEMORY_LIMIT='2G',HIRSEL_JOBS='4')
+    # Every case places on one core; two CPUs cover it and the native build.
+    env=dict(os.environ,HIRSEL_MEMORY_LIMIT='2G',HIRSEL_JOBS='2')
     for key in list(env):
         if key.startswith('HIRSEL_RT_'):env.pop(key)
     receipts=[]

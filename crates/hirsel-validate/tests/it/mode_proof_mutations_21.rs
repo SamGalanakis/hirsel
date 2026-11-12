@@ -142,6 +142,109 @@ fn projection_owner(forged: bool) -> Fixture {
     f
 }
 
+// `p = ("a",)`, proved sendable; then `p.0 = ordinary(take s)`, whose result
+// row is proved Sendable (twin) or not (forged), and `take p.0` crosses
+// (oldv-attack-770 candidate 2). The written part has only the result's proof;
+// `p`'s proof of its old contents does not cover it.
+fn written_part(forged: bool) -> Fixture {
+    let mut f = Fixture::unit();
+    let field = f.definition.types.push(ty(string()));
+    let a = f.slot(string(), Storage::Temporary);
+    f.assign(a, Rvalue::Constant(Constant::String("a".into())), 0);
+    let s = f.slot(string(), Storage::Local);
+    let c = f.cleanup(vec![drop(a)]);
+    f.assign(s, Rvalue::Constant(Constant::String("s".into())), c);
+    let p = f.slot(TypeKind::Tuple(vec![field].into()), Storage::Local);
+    let c = f.cleanup(vec![drop(s), drop(a)]);
+    f.assign(
+        p,
+        Rvalue::Construct {
+            constructor: Constructor::Tuple,
+            fields: vec![ConstructField {
+                field: 0,
+                value: take(a),
+            }],
+            destination: Destination::Inferred,
+        },
+        c,
+    );
+    let part = f.body().places.len() as u32;
+    let root = f.body().places[p as usize].root;
+    f.body().places.push(Place {
+        loan: None,
+        binding: None,
+        root,
+        projection: vec![Projection::Field(0)].into(),
+        ty: field,
+    });
+    let both = f.cleanup(vec![drop(p), drop(s)]);
+    f.body().blocks[0].instructions.push(inst(
+        InstructionKind::Drop {
+            place: PlaceId(part),
+            if_live: false,
+        },
+        both,
+    ));
+    let mut ordinary =
+        function_signature("ordinary", vec![(PassingMode::Take, string())], string());
+    if !forged {
+        let SignatureKind::Function(header) = &mut ordinary.kind else {
+            unreachable!()
+        };
+        let mut result = ty(string());
+        result.modes.sendability = Sendability::Sendable;
+        header.result = interner().intern(result);
+    }
+    f.signatures.insert(id("ordinary"), ordinary);
+    let after = f.cleanup(vec![drop(p)]);
+    f.body().blocks[0].terminator = Terminator::Call {
+        callee: Callee::Definition {
+            path: path("ordinary"),
+            arguments: vec![],
+        },
+        arguments: vec![CallArgument {
+            parameter: ParamId(0),
+            value: take(s),
+        }],
+        returns: Some(CallReturn {
+            destination: PlaceId(part),
+            next: BlockId(1),
+        }),
+        on_failure: CleanupId(both),
+    };
+    let unit = TypeKind::Tuple(vec![].into());
+    let mut required = ty(string());
+    required.modes.sendability = Sendability::Sendable;
+    required.sendability_requirement = SendabilityRequirement::Sendable;
+    let mut consume =
+        function_signature("consume", vec![(PassingMode::Take, string())], unit.clone());
+    let SignatureKind::Function(header) = &mut consume.kind else {
+        unreachable!()
+    };
+    header.parameters[0].ty = interner().intern(required);
+    f.signatures.insert(id("consume"), consume);
+    let done = f.slot(unit, Storage::Temporary);
+    let crossing = Terminator::Call {
+        callee: Callee::Definition {
+            path: path("consume"),
+            arguments: vec![],
+        },
+        arguments: vec![CallArgument {
+            parameter: ParamId(0),
+            value: take(part),
+        }],
+        returns: Some(CallReturn {
+            destination: PlaceId(done),
+            next: BlockId(2),
+        }),
+        on_failure: CleanupId(after),
+    };
+    f.body().blocks.push(block(vec![], crossing));
+    let exit = f.cleanup(vec![drop(done), drop(p)]);
+    f.body().blocks.push(block(vec![], ret(0, exit)));
+    f
+}
+
 // Both generic declarations exist. The same ordinal in the child binder has
 // no sendability bound; a foreign/missing binder would only be malformed setup.
 fn generic_binder(forged: bool) -> Fixture {
@@ -402,7 +505,7 @@ fn check(f: &Fixture, expected: Expected) {
 }
 
 fn matrix() -> String {
-    let cases: [(&str, fn(bool) -> Fixture, Expected); 9] = [
+    let cases: [(&str, fn(bool) -> Fixture, Expected); 10] = [
         (
             "current unique after share",
             current_unique,
@@ -433,6 +536,11 @@ fn matrix() -> String {
             |forged| incoming_branch(forged, false),
             Expected::Mismatch("call argument"),
         ),
+        (
+            "written part",
+            written_part,
+            Expected::Mismatch("call argument"),
+        ),
         ("cleanup obligation", cleanup_obligation, Expected::Cleanup),
         (
             "capture unique",
@@ -457,7 +565,7 @@ fn matrix() -> String {
         &incoming_branch(true, true),
         Expected::Mismatch("call argument"),
     );
-    out += "10 pairs; 20 fixtures; 52 direct/decoded/body-permuted verdicts\n";
+    out += "11 pairs; 22 fixtures; 56 direct/decoded/body-permuted verdicts\n";
     out
 }
 

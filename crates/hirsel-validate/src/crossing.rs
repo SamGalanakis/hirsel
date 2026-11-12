@@ -28,7 +28,8 @@ impl Parts {
             .map(|(_, proof)| *proof)
     }
     pub(super) fn set(&mut self, path: &[Part], proof: bool) {
-        if proof && path.contains(&Part::Elements) && self.get(path) == Some(false) {
+        // One summary covers every element: proving one never proves the rest.
+        if proof && path.contains(&Part::Elements) && self.get(path) != Some(true) {
             return;
         }
         self.0.retain(|p, _| !p.starts_with(path));
@@ -56,6 +57,25 @@ impl Parts {
             installed.extend(p.iter().cloned());
             self.0.insert(installed, *proof);
         }
+    }
+    /// Replace the part at `path` with a written value's evidence, `sendable`
+    /// saying the value is proved Sendable. The part keeps only that evidence:
+    /// an ancestor's proof of the old contents no longer covers it, and an
+    /// unproved value leaves the part to its row. An Elements summary still
+    /// covers the elements not written.
+    pub(super) fn write(&mut self, path: &[Part], incoming: &Self, sendable: bool) {
+        let mut written = incoming.clone();
+        if sendable {
+            written.0.entry(vec![]).or_insert(true);
+        }
+        if path.contains(&Part::Elements) {
+            written.join(&self.project(path));
+        }
+        if written.get(&[]).is_none() {
+            self.0
+                .retain(|p, proof| !*proof || !path.starts_with(p) || p.len() == path.len());
+        }
+        self.install(path, &written);
     }
     /// Finite checked-projection domain, independent of Source flow. Losing a
     /// deep positive proof is conservative; a deep failure remains a failure

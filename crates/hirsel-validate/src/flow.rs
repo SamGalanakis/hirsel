@@ -4697,7 +4697,13 @@ impl Checker<'_, '_> {
         self.set_fresh_receipt(state, displaced, old_receipt);
         self.set_current_global(state, displaced, old_global);
         self.set_current_sendable(state, displaced, old_sendable);
-        self.install_crossing_parts(state, displaced, &old_crossing, model.crossing_depth);
+        self.install_crossing_parts(
+            state,
+            displaced,
+            &old_crossing,
+            old_sendable,
+            model.crossing_depth,
+        );
         self.write(model, state, displaced, true, false, report);
         if if_live {
             for part in model.parts(displaced) {
@@ -4739,7 +4745,13 @@ impl Checker<'_, '_> {
         self.set_fresh_receipt(state, destination, new_receipt);
         self.set_current_global(state, destination, new_global);
         self.set_current_sendable(state, destination, new_sendable);
-        self.install_crossing_parts(state, destination, &new_crossing, model.crossing_depth);
+        self.install_crossing_parts(
+            state,
+            destination,
+            &new_crossing,
+            new_sendable,
+            model.crossing_depth,
+        );
         self.write(model, state, destination, owned, independent_data, report);
         self.set_authority(model, state, destination, new_authority);
         self.install_tags(model, state, destination, new_tags);
@@ -6111,6 +6123,7 @@ impl Checker<'_, '_> {
                         state,
                         *destination,
                         &crossing_parts,
+                        sendable,
                         model.crossing_depth,
                     );
                     self.write(
@@ -6192,6 +6205,7 @@ impl Checker<'_, '_> {
                         state,
                         *destination,
                         &crossing,
+                        sendable,
                         model.crossing_depth,
                     );
                     self.write(model, state, *destination, true, false, report);
@@ -6797,26 +6811,27 @@ impl Checker<'_, '_> {
                         for (path, _) in receipts {
                             parts.set(&path, true);
                         }
+                        // The callee may replace current content according to
+                        // this fixed receiving contract, not its old producer.
+                        let handed_back = hirsel_types::crossing_requirement(row)
+                            == hirsel_types::Sendability::Sendable
+                            || self.bound(
+                                self.t,
+                                self.place_type(place),
+                                hirsel_types::Bound::Plain,
+                                &self.generic_declarations(),
+                            );
                         if prefix.is_empty() {
                             state.crossing_parts[access.root.0 as usize] = parts;
                         } else {
-                            state.crossing_parts[access.root.0 as usize].install(&prefix, &parts);
+                            state.crossing_parts[access.root.0 as usize].write(
+                                &prefix,
+                                &parts,
+                                handed_back,
+                            );
                         }
                         state.crossing_parts[access.root.0 as usize].restrict(model.crossing_depth);
-                        // The callee may replace current content according to
-                        // this fixed receiving contract, not its old producer.
-                        self.set_current_sendable(
-                            state,
-                            place,
-                            hirsel_types::crossing_requirement(row)
-                                == hirsel_types::Sendability::Sendable
-                                || self.bound(
-                                    self.t,
-                                    self.place_type(place),
-                                    hirsel_types::Bound::Plain,
-                                    &self.generic_declarations(),
-                                ),
-                        );
+                        self.set_current_sendable(state, place, handed_back);
                     }
                     let keeps_identity = matches!(
                         row.kind,
@@ -7004,6 +7019,11 @@ impl Checker<'_, '_> {
                         _ => None,
                     },
                 };
+                // MODE-4: the callee's declared result row says whether the
+                // result crosses, whatever row the destination place has.
+                let declared_sendable = declared.as_ref().is_some_and(|(root, _)| {
+                    self.t.row(*root).modes.sendability == hirsel_types::Sendability::Sendable
+                });
                 if let Some((root, roles)) = declared
                     && protocol_receipt
                     && matches!(
@@ -7066,15 +7086,24 @@ impl Checker<'_, '_> {
                     )
                     .is_global(),
                 );
-                self.set_current_sendable(
-                    state,
-                    destination,
-                    self.t
+                let sendable = declared_sendable
+                    || self
+                        .t
                         .get(self.place_type(destination))
                         .unwrap()
                         .modes
                         .sendability
-                        == hirsel_types::Sendability::Sendable,
+                        == hirsel_types::Sendability::Sendable;
+                self.set_current_sendable(state, destination, sendable);
+                // MODE-4: the destination now holds the result alone. Its
+                // crossing proof is the result row's, never the proof an
+                // ancestor or an earlier value held for the old content.
+                self.install_crossing_parts(
+                    state,
+                    destination,
+                    &crossing::Parts::default(),
+                    sendable,
+                    model.crossing_depth,
                 );
                 self.write(model, state, destination, true, false, report);
                 if !protocol_receipt {

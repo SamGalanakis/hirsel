@@ -710,15 +710,15 @@ impl Checker<'_, '_> {
         state: &mut State,
         destination: PlaceId,
         parts: &crossing::Parts,
+        sendable: bool,
         depth: usize,
     ) {
         let access = &self.body.places[destination.0 as usize];
-        if access.projection.is_empty() {
-            state.crossing_parts[access.root.0 as usize] = parts.clone();
-        } else {
-            state.crossing_parts[access.root.0 as usize]
-                .install(&crossing::path(&access.projection), parts);
-        }
+        state.crossing_parts[access.root.0 as usize].write(
+            &crossing::path(&access.projection),
+            parts,
+            sendable,
+        );
         state.crossing_parts[access.root.0 as usize].restrict(depth);
     }
     pub(super) fn set_current_sendable(

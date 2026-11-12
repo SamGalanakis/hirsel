@@ -934,6 +934,12 @@ fn pipe(root: &Path) -> PathBuf {
   failure.check(arg.len(args) < 3, Arithmetic())
   Ok(())
 }
+
+pub fn other(rt: Io, args: Args) -> Result[(), GrantError] {
+  let output = io.stdout(rt)?
+  let _ = out.print(output, "other\n")
+  main(rt, args)
+}
 "#,
     )
     .unwrap();
@@ -1029,6 +1035,16 @@ fn a_run_record_launches_its_executable_with_this_runs_inputs() {
     assert_eq!((answer, counts), (cold.clone(), MISS), "trap");
     let (answer, counts) = home.warm_in(root, &three, b"y");
     assert_eq!((answer, counts), (cold, HIT), "trap again");
+    // An LLVM run lives at the address its backend names: on its own
+    // backend it misses, publishes and hits, and the build of the same
+    // sources with the same backend keeps its own record.
+    let llvm = [&["run", "--native", "--backend", "llvm"][..], &one[2..]].concat();
+    let cold = home.cold_in(root, &llvm, &[], b"l");
+    assert_eq!(cold.stdout, b"arg a\nl", "{cold:?}");
+    let (answer, counts) = home.warm_in(root, &llvm, b"l");
+    assert_eq!((answer, counts), (cold.clone(), MISS), "llvm run");
+    let (answer, counts) = home.warm_in(root, &llvm, b"l");
+    assert_eq!((answer, counts), (cold, HIT), "llvm run again");
     // The check and build records still answer their own operations.
     let (_, counts) = home.warm(root, &["check", "pipe/hirsel.json"], &[]);
     assert_eq!(counts, HIT, "check after runs");
@@ -1131,4 +1147,27 @@ fn a_run_record_launches_its_executable_with_this_runs_inputs() {
     }
     grow(&runtime);
     flips(&env, b"q", "runtime archives replaced at the same path");
+    // What the program is: a body edit, a manifest that names another
+    // entry, then other grants-file bytes. Each misses and launches the new
+    // program, as a cold run of the edited files does.
+    let edit = |path: &str, from: &str, to: &str| {
+        let path = root.join(path);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(from), "{path:?}");
+        std::fs::write(&path, text.replacen(from, to, 1)).unwrap();
+    };
+    edit("pipe/main.hir", r#""done\n""#, r#""fin\n""#);
+    let cold = home.cold_in(root, &one, &env, b"s");
+    let stderr = String::from_utf8_lossy(&cold.stderr);
+    assert!(
+        stderr.contains("fin\n") && !stderr.contains("done"),
+        "{cold:?}"
+    );
+    flips(&env, b"s", "source body edit");
+    edit("pipe/hirsel.json", r#""name":"main""#, r#""name":"other""#);
+    let cold = home.cold_in(root, &one, &env, b"m");
+    assert_eq!(cold.stdout, b"other\narg a\nm", "{cold:?}");
+    flips(&env, b"m", "manifest entry edit");
+    edit("pipe/grants.json", r#""args":[]"#, r#""args": []"#);
+    flips(&env, b"g", "grants file bytes");
 }

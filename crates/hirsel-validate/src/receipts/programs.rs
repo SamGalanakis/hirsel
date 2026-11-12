@@ -104,12 +104,20 @@ pub enum Section {
     ///   the platform row of the record's key;
     /// - 32 bytes: the bound run's identity (`ValidatedRun::identity`), which
     ///   the linker embeds in the executable;
-    /// - emulator: length and UTF-8 path; length 0 means the host runs it;
-    /// - launch binding inputs: the entry's binding facts (program digest,
-    ///   entry, launch kind, roots, code reach);
+    /// - emulator: length and the path's raw Unix `OsStr` bytes (not
+    ///   necessarily UTF-8); length 0 means the host runs it;
+    /// - launch binding inputs: length and the JSON of the driver's `Facts`
+    ///   (program digest, entry, `LaunchKind`, roots as Io 0, Args 1, Env 2,
+    ///   Unsafe 3, Test 4, code reach);
     /// - unmodeled foreign symbol: length and `user\0extern`, or length 0;
-    /// - observation anchors: length and the observation tables (failure
-    ///   rules, site ranges, anchors) with the source files they cite.
+    /// - observation anchors: length and the JSON of the driver's `Tables`
+    ///   (cited source files, failure rules, site ranges, anchors, keyed by
+    ///   `DefPath`).
+    ///
+    /// The two JSON parts are frozen with this layout: their serde shape
+    /// includes `hirsel_run_schema::LaunchKind` and `hirsel_syntax::DefPath`.
+    /// A change to `Facts`, `Tables` or either of those types' serialized
+    /// form needs a new inner version.
     R = 8,
 }
 const SECTIONS: usize = 9;

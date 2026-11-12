@@ -30,9 +30,9 @@ use std::path::{Path, PathBuf};
 enum Class {
     /// Its value selects what is produced: the value is in P.
     Key,
-    /// A native tool or archive a build links with and a check never reads:
-    /// its value is in a build's success key, not in the source key a check
-    /// and a failing build share.
+    /// A native tool or archive a build or run links with and a check never
+    /// reads: its value is in a build's and a run's success key, not in the
+    /// source key a check and a failing build or run share.
     Native,
     /// It selects an owner (a store, cache or home): its canonical path is in P.
     Owner,
@@ -527,7 +527,7 @@ fn bypassed(reason: String) {
 /// The running compiler's own bytes: this executable, then every libLLVM it
 /// mapped, each by the content digest of the very inode it mapped. Only code
 /// generation runs libLLVM, so a check keys the executable alone and a build
-/// both. A rebuilt
+/// or run both. A rebuilt
 /// or replaced compiler is another key even when its source identity is
 /// equal; a file whose stat changed but whose bytes did not (a hard link
 /// added elsewhere moves a shared inode's ctime) keeps its key at the cost of
@@ -687,8 +687,8 @@ struct Keyed {
     package: String,
     /// The source key: equal for a check and a build of the same inputs.
     source: ContentHash,
-    /// What only code generation reads, which a build's success key adds:
-    /// the native rows and the loaded libLLVM files.
+    /// What only code generation reads, which a build's and a run's success
+    /// keys add: the native rows and the loaded libLLVM files.
     native: Vec<u8>,
 }
 
@@ -1317,6 +1317,7 @@ pub(crate) fn run(
                 "hirsel.program.run-key.v1",
                 [
                     &keyed.source.0[..],
+                    keyed.native.as_slice(),
                     rendered.as_slice(),
                     &evidence.0,
                     &platform.0,

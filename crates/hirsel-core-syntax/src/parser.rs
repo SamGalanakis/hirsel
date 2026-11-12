@@ -328,7 +328,9 @@ impl Parser<'_> {
         }
     }
     fn item_start(&self) -> bool {
-        ITEM_START.contains(&self.word(0)) && !(self.at("fn") && self.word(1) == "(")
+        ITEM_START.contains(&self.word(0))
+            && !(self.at("fn") && self.word(1) == "(")
+            && !(self.at("scoped") && self.word(1) == "fn")
     }
     fn recover(&mut self, start: usize, item: bool) {
         let mut braces = 0usize;

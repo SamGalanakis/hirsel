@@ -1,4 +1,135 @@
 use super::*;
+fn formatted(text: &str, mode: ParseMode) -> String {
+    let p = parse(text, mode);
+    assert!(p.diagnostics.is_empty(), "{text}: {:?}", p.diagnostics);
+    let output = format(&p).unwrap();
+    let q = parse(&output, mode);
+    assert!(q.diagnostics.is_empty(), "{output}: {:?}", q.diagnostics);
+    assert_eq!(format(&q).as_deref(), Some(output.as_str()));
+    let tokens = |text: &str| {
+        lex(text)
+            .tokens
+            .into_iter()
+            .filter_map(|t| {
+                (!matches!(
+                    t.kind,
+                    TokenKind::Trivia(TriviaKind::Space | TriviaKind::Newline) | TokenKind::Eof
+                ))
+                .then(|| {
+                    (
+                        t.kind,
+                        text[t.span.start as usize..t.span.end as usize].to_owned(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(tokens(text), tokens(&output));
+    let shape = |p: &ParseOutput| {
+        p.syntax
+            .items
+            .iter()
+            .map(|i| {
+                (
+                    i.root,
+                    i.tree.edges.clone(),
+                    i.tree
+                        .nodes
+                        .iter()
+                        .map(|n| {
+                            (
+                                n.kind,
+                                n.token.map(|t| i.tree.token_text(&i.text, t).to_owned()),
+                                n.children.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(shape(&p), shape(&q));
+    output
+}
+
+#[test]
+fn formatter_canonical_blocks_lists_and_attributes() {
+    let text = "@twin( B ) type A{x:u64,y: (u64,u64)}\nfn f [T](x:T)->T{let mut y:T=x; if true {y}else{ x }}";
+    assert_eq!(
+        formatted(text, ParseMode::Source),
+        "@twin(B)\ntype A {\n    x: u64,\n    y: (u64, u64)\n}\n\nfn f[T](x: T) -> T {\n    let mut y: T = x;\n    if true {\n        y\n    } else {\n        x\n    }\n}\n"
+    );
+    assert_eq!(
+        formatted(
+            "pub fn f [T](take x:T,bytes n:u64)->Result[T,Capacity] waits\npub type X",
+            ParseMode::Signatures
+        ),
+        "pub fn f[T](take x: T, bytes n: u64) -> Result[T, Capacity] waits\n\npub type X\n"
+    );
+}
+
+#[test]
+fn formatter_keeps_statement_values_and_exit_boundaries() {
+    assert_eq!(
+        formatted(
+            "fn f(){return\n(x)\nloop{break\ny}\nlet z=1;\nz}",
+            ParseMode::Source
+        ),
+        "fn f() {\n    return\n    (x)\n    loop {\n        break\n        y\n    }\n    let z = 1;\n    z\n}\n"
+    );
+    formatted("fn f(){match x{A=>{1},B=>2\nC=>3}}", ParseMode::Source);
+    formatted(
+        "fn f(){ 'again: loop { if true { break 'again 3 }; continue 'again } }",
+        ParseMode::Source,
+    );
+    formatted(
+        "resource type R { x: u64 } drop(r) { f(r.x); }",
+        ParseMode::Source,
+    );
+}
+
+#[test]
+fn formatter_preserves_comments_and_literal_bytes() {
+    let text = "// header\n/// doc\nfn f(){/* before */let x=r##\"a\n  b\"##; // trailing\n/* alone\n exact */\nx /* inline */ + 1}\n// end";
+    assert_eq!(
+        formatted(text, ParseMode::Source),
+        "// header\n/// doc\nfn f() {\n    /* before */\n    let x = r##\"a\n  b\"##; // trailing\n    /* alone\n exact */\n    x /* inline */ + 1\n}\n// end\n"
+    );
+    formatted("fn f() { /* only */ }", ParseMode::Source);
+    formatted("// only comment  ", ParseMode::Source);
+    formatted(
+        "fn f() {}\n// attached\nfn g() {}\n/* tail */",
+        ParseMode::Source,
+    );
+}
+
+#[test]
+fn formatter_uses_syntax_roles_for_spacing() {
+    assert_eq!(
+        formatted(
+            "fn f(x:u64){- -x + ! !x;\n1 .0;\nf (x)[0].1?\nlet g=scoped fn(x:u64)->u64{x}}",
+            ParseMode::Source
+        ),
+        "fn f(x: u64) {\n    --x + !!x;\n    1 .0;\n    f(x)[0].1?\n    let g = scoped fn(x: u64) -> u64 {\n        x\n    }\n}\n"
+    );
+    formatted(
+        "fn f(g:own[send] fn(take u64)->u64 waits){ g(take x) }",
+        ParseMode::Source,
+    );
+    assert_eq!(
+        formatted("fn f(){ - (x) }", ParseMode::Source),
+        "fn f() {\n    -(x)\n}\n"
+    );
+    formatted("fn f(){ scoped fn(x:u64)->u64{x} }", ParseMode::Source);
+}
+
+#[test]
+fn formatter_refuses_invalid_or_incomplete_source() {
+    assert!(format(&parse("fn f() { let = 1 }", ParseMode::Source)).is_none());
+    let mut parsed = parse("fn f() {}", ParseMode::Source);
+    parsed.resource_refusal = Some(ResourceRefusal::SourceTooLarge);
+    assert!(format(&parsed).is_none());
+}
 fn good(text: &str) -> SyntaxFile {
     let p = parse(text, ParseMode::Source);
     assert_eq!(p.diagnostics, vec![], "{text}");

@@ -29,14 +29,15 @@ this state; every rule of this specification that refuses a body is decided from
 - the **accumulators**: for the definition and each open closure body, whether it has made a
   `waits` call ([LANG-8](language.md#lang-8-signatures)), and for each open closure its
   captures in first-naming order ([LANG-14](language.md#lang-14-captures));
-- the **callback loans**: for each call receiving a scoped callback, the places its captures
-  view or lend `mut`, held for that call ([OWN-21](#own-21-scoped-callbacks));
+- the **capture descriptors**: for each scoped callable value, the whole slots or formal
+  anchors it captures, each with its mode (view or `mut`) and lexical scope, and the loans
+  each activation holds ([OWN-21](#own-21-scoped-callbacks));
 - the published **type summaries** ([OWN-2](#own-2-type-summaries)) and **constant values**
   ([LANG-20](language.md#lang-20-constants)), which declaration preprocessing computes once
   ([index](index.md)) and checking reads and never recomputes.
 
 At a join ([OWN-16](#own-16-joins)), availability joins by its table, freeze records,
-reservations, anchor sets and callback loans join by union, and the accumulators by
+reservations, anchor sets and capture descriptors join by union, `mut` dominating view, and the accumulators by
 "or" and concatenation. How an implementation represents this state, and how it emits drop
 flags, is its choice; neither changes what is accepted.
 
@@ -68,8 +69,9 @@ Each type declaration publishes one **summary**. This is its whole content:
 - its logical size ([MEM-24](budgets.md#mem-24-logical-charges)), its layout obligations
   ([MEM-9](memory.md#mem-9-compact-types)) and its declared twin
   ([MEM-17](memory.md#mem-17-clone));
-- its **holds** set: which of resource, capability, scoped value and stable reference it
-  contains at any depth.
+- its **holds** set: which of resource, capability, scoped value, stable reference and
+  **opaque owner** (a builder, `Causes` or an owning closure: an owner with no copy
+  contract) it contains at any depth.
 
 Kind, size and layout read only the fields held inline. The indirections `Box`, `List`,
 `Map`, `Rc`, `Arc`, `Task`, `Sender`, `Receiver`, callables and stable references have a
@@ -83,8 +85,8 @@ refusal ([PROG-6](programs.md#prog-6-one-meaning)). The holds set reads every fi
 types that name each other through fields, at any depth, form a group, and every member of
 a group holds the union of what the group's fields hold directly and what the other types
 they name hold. Where a rule needs a type to hold nothing, a type parameter counts as
-holding every category its bounds do not exclude: `plain` excludes resource, scoped value
-and stable reference, but not capability, so `Wrap[T: plain] { item: T }` may hold a
+holding every category its bounds do not exclude: `plain` excludes resource, scoped value,
+stable reference and opaque owner, but not capability, so `Wrap[T: plain] { item: T }` may hold a
 capability. A generic declaration's summary is stated
 in terms of its parameters and instantiated from the arguments' summaries at each use. A
 `type` whose fields are all plain is **plain**: it is copied by `let`, by passing and by
@@ -134,7 +136,8 @@ fn f(c: Bytes, take s: String) { let x = Cursor(input: view c, owned: take s); l
 
 The bounds are:
 
-- `plain`: OWN-2.
+- `plain`: exactly the types of plain kind (OWN-2, OWN-3). An own type, `List[T]` and
+  `Box[T]` included, never has it, whatever its arguments.
 - `shareable`: plain types, counted types, and own types that declare it and whose fields
   are shareable; never resources, scoped or stable types, or owning closures. Required of
   `Rc` and `Arc` payloads.
@@ -493,9 +496,20 @@ fn first(xs: List[String]) -> Option[View[String]] { list.get(xs, 0) }  // refus
 A callable type written `scoped fn(..) -> U` is a **scoped callback**: it may capture views
 and lend `mut` (LANG-14), and it is itself scoped (OWN-19). It may be bound by `let` and
 passed on as an argument. Its view parameters last for one invocation, so neither `U` nor
-any capture may be anchored to a parameter. Its captures are
-checked as arguments of the call that receives the callback, and their loans last that
-whole call.
+any capture may be anchored to a parameter.
+
+Every scoped callable value carries a static **capture descriptor**, computed once with the
+closure body: the slots or formal anchors it captures, each with its mode (view, or `mut`
+when the body assigns or lends it `mut`) and lexical scope. The descriptor follows the value
+through moves, scoped aggregates, argument substitution, returned anchors and joins, where
+descriptors unite and `mut` dominates view. It is **activated** for a direct invocation,
+for that invocation, and for a call that receives it as an argument, for that whole call. At
+activation each captured place must be live, and writable for a `mut` capture, and its loan
+is checked as an argument of that call against the other arguments, active loans and
+freezes (OWN-9 to OWN-12). Forwarding a received callback reborrows its loans and creates no
+second loan of the same place. An inactive descriptor grants no access, and every captured
+slot outlives the callback. A view of an owning callable used as a scoped callback freezes
+that owner for the scoped value's extent.
 
 ```hirsel
 fn count_if(xs: List[String], keep: scoped fn(String) -> bool) -> u64 { 0 }
@@ -509,6 +523,14 @@ fn grab(xs: List[String]) -> u64 {
   let mut last: Option[View[String]] = None
   each(xs, fn(s: String) { last = Some(view s) })     // refused: OWN-21, escapes the call
   0
+}
+```
+```hirsel
+fn direct(take src: String) {
+  let cb = scoped fn() { let _ = string.push(mut src, "x") }
+  let seen = view src
+  cb()                                                    // refused: OWN-10, src is frozen
+  let _ = string.byte_len(seen)
 }
 ```
 
@@ -615,7 +637,7 @@ after a failure ([FAIL-7](failure.md#fail-7-one-owner-per-survivor)).
 | T3.4 | install, `q` ? with flag clear, M or uninit | install `v`; set the flag if flagged | | |
 | T3.5 | `replace(mut q, take v)` | install `v`; result owns old, unfinalized | | |
 | T3.6 | discarded `replace` result | dropped at statement end | its finalizer fails | `q` owns `v`; `cause+=e`; prop |
-| T3.7 | whole destructure | `r` M; bound fields L; omitted fields dropped in declaration order; a resource's unused cause cell and grant `ref` | an omitted drop fails | `cause+=e`; next omitted drop; prop cleans bound fields |
+| T3.7 | whole destructure | `r` M; bound fields L; omitted fields dropped in declaration order; a resource's whole block `ref`: its field storage, unused cause cell and unused grant; blocks the fields own stay with them | an omitted drop fails | `cause+=e`; next omitted drop; prop cleans bound fields |
 
 **T4 Counted values**
 

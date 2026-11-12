@@ -40,9 +40,11 @@ declare one name are refused where that name is read through `m`. Each member ke
 definition identity (package, module path, name): `list.push` is the core library's and
 `list.sort` the standard library's, and visibility and type identity read that identity.
 An extension sees no private member of the core module. A local or parameter may not have
-the name of a visible local, a definition of its module, a module or a prelude function, so
-module names are never shadowed: `main`'s argument list is written `argv: Args`, not
-`args: Args`. Two definitions with one name in one module are refused. Variants are
+the name of a visible local, a value definition of its own module or a prelude function. It
+may have the name of a module or a dependency package: in its scope the local wins, also as
+the first component of a dotted path, so adding a module or a dependency never makes an
+existing local illegal. `main`'s argument list is written `argv: Args` in this
+specification; `args: Args` is equally legal. Two definitions with one name in one module are refused. Variants are
 written bare (`Ok(x)`, `None`) and selected by the expected type; a dotted path never names
 a variant. Core roles (`Result`, `Capacity`, the capability types) are fixed by definition
 path, never by spelling.
@@ -202,9 +204,9 @@ fn keep(take s: String) -> fn() -> u64 { fn() -> u64 { string.byte_len(s) } }
 
 A closure's captures are the locals of enclosing scopes that its body names; naming
 `r.f` captures `r`. A closure written `scoped fn`, or whose expected type is a `scoped fn`,
-is scoped: it captures as the arguments of the call that receives it, a capture it only
-reads as a view of the place it reads and a capture it assigns or lends `mut` as a `mut`
-loan of that place, both for that whole call, and it never moves a capture. Any other
+is scoped: a capture it only reads is a view of the place it reads and a capture it
+assigns or lends `mut` is a `mut` loan of that place, held while its capture descriptor is
+active ([OWN-21](ownership.md#own-21-scoped-callbacks)), and it never moves a capture. Any other
 closure with captures is an **owning closure**: creating it admits one environment block
 ([MEM-24](budgets.md#mem-24-logical-charges)) and then copies its plain captures into it and
 moves the others, whose slots become moved ([OWN-5](ownership.md#own-5-availability)); its
@@ -260,9 +262,8 @@ fn f(c: bool) { while c { break 5 } }                     // refused: LANG-15, w
 ### LANG-16: Loops
 
 `loop` repeats until a `break`. `while c` and `while let p = e` test before each iteration.
-`for x in e` iterates a range, or a view of a `List`, a `Map`, a `FixedSpan` or a `Causes`, and `for take x in
-e` consumes an own `List` ([SEM-6](semantics.md#sem-6-iteration)); nothing else is a loop
-source in v1. A `for` pattern is irrefutable. Bindings made by one iteration end with it
+`for x in e` iterates exactly the sources of [SEM-6](semantics.md#sem-6-iteration), in its
+modes, and `for take x in e` consumes an own `List`; no other iteration consumes in v1. A `for` pattern is irrefutable. Bindings made by one iteration end with it
 ([OWN-17](ownership.md#own-17-loops)).
 
 ```hirsel

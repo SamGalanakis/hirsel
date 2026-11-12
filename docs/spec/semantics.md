@@ -141,13 +141,22 @@ in a source, on timing, on the host or on unrecorded scheduling.
 ### SEM-9: Inline arrays
 
 `Inline[T, n]`, where `n` is an integer literal, is `n` values of type `T` held inline, with
-no block: its size is `n` × the size of `T` and it admits nothing. `T` is plain or own, and
-the array has `T`'s kind and its bounds ([core](core.md#built-in-types)). `[a, b, c]` builds
-one from its elements, evaluated left to right, and `[x; n]` from `n` copies of a plain `x`;
-either may be a constant ([LANG-20](language.md#lang-20-constants)). `a[i]` is a place, read
-through a view and assigned like a field; it fails with `Bounds` when `i` is not below `n`.
-`for` iterates it from index 0 (SEM-6). An own array is cleaned from index 0. The length is
-part of the type, and no code is generic over it in v1.
+no block: its size is `n` × the size of `T` and it admits nothing. `n` is a value from 0 to
+`2^64 − 1`; a suffix on it is not part of the type, so `Inline[u8, 2u8]` is `Inline[u8, 2]`.
+`T` is plain or own, and the array has `T`'s kind and its bounds
+([core](core.md#built-in-types)); a type parameter is a valid `T` only when its bounds prove
+it plain, and `n = 0` changes neither. `[a, b, c]` builds one from its elements, evaluated
+left to right: with an expected `Inline[T, n]` it has exactly `n` elements, each checked
+against `T`, and without one every element synthesises the same `T`; `[]` needs an expected
+type. `[x; n]` evaluates `x` exactly once, even when `n` is 0, and needs a plain `x`. Either
+form may be a constant ([LANG-20](language.md#lang-20-constants)). A construction
+interrupted by a failure cleans its completed elements in reverse. `a[i]` is a place, read
+through a view and assigned or replaced like a field, never moved out of (OWN-14); it fails
+with `Bounds` when `i` is not below `n`. `for` iterates it from index 0 (SEM-6). An own
+array is cleaned from index 0. A plain array may be a field of a stable type that is not
+compact (MEM-2); a compact type has no `Inline` field in v1 and uses `FixedSpan`
+([MEM-9](memory.md#mem-9-compact-types)). The length is part of the type, and no code is
+generic over it in v1.
 
 ```hirsel
 const POW10: Inline[u64, 4] = [1, 10, 100, 1000]

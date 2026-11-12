@@ -89,9 +89,12 @@ cancellation), the views of the exited scopes end first, and views of scopes not
 stay; then owning slots are cleaned, innermost scope first and each scope's slots in reverse
 declaration order (the slots a pattern binds are declared in pattern order). A live slot is
 cleaned, a maybe slot is cleaned when its flag is set, and a moved slot is not touched.
-Cleaning a value runs its finalizer if it has one, then cleans its fields in reverse
-declaration order and the elements of a sequence from the highest index down, then frees
-and refunds its block. A region opened by an exited block closes after its block's owners
+Cleaning a value runs its finalizer if it has one, then cleans its record and tuple fields
+in reverse declaration order, the elements of a complete `List` or `Inline` array from
+index 0 up, a `Map`'s entries as [core](core.md) says and a queue's items as
+[CONC-9](tasks.md#conc-9-queue-drop) says, then frees and refunds its block. A construction
+that fails cleans its completed temporaries in reverse evaluation order
+([T1.1](ownership.md#own-26-the-transition-table)). A region opened by an exited block closes after its block's owners
 are cleaned.
 
 ```hirsel
@@ -149,9 +152,10 @@ A resource literal admits the resource's storage, cause cell and grant
 resource is cleaned exactly once: by its finalizer on implicit drop, or by an explicit
 consuming function. A consuming function in the defining module ends a resource without
 its finalizer by a whole destructure ([T3.7](ownership.md#own-26-the-transition-table)),
-which is how fallible finalisation (`close`, `commit`, `flush`) is written; the
-destructure refunds the resource's unused cause cell and grant after its fields are
-transferred. There is no `forget`. A finalizer has a unit result and no `?` of its own; the
+which is how fallible finalisation (`close`, `commit`, `flush`) is written; after its fields
+are transferred the destructure frees and refunds the resource's whole block (its field
+storage, unused cause cell and unused grant), and the blocks its fields own stay charged
+with them. There is no `forget`. A finalizer has a unit result and no `?` of its own; the
 functions it calls may use `?` inside them. It is shielded: it observes no cancellation
 ([CONC-7](tasks.md#conc-7-cancellation-points)), though it may call `waits` operations, and
 it may spawn from its grant. It uses only the capabilities stored in the resource and its grant

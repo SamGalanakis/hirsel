@@ -81,19 +81,23 @@ fn build_in[T](r: Region, bytes n: u64,
 type BuildError = Capacity(Capacity) | Overflow
 ```
 
-`build_in` admits one allocation of `n` bytes in `r`, then calls the writer `w` once with a
-new destination `d`. Every destination has an identity, a number no other destination of
+`build_in` requires a compact `T` and fixes the destination's `W` to `T`'s. It admits one
+allocation of `n` bytes in `r`, then calls the writer `w` once with a new destination
+`d`. Every destination has an identity, a number no other destination of
 the run has. `dest.put(mut d, L)`, where `L` is a construction literal of a compact type
 `U`, is a built-in form of type `Result[Child[U], BuildError]`: it writes `L` completely at
 the destination's next byte. A `Child[U]` is plain data: the destination's identity and the
 offset of a complete `U`. In `L`, a `Link[V]` field takes a `Child[V]`; an inline `Text` or
 span field takes a view of a `String` or `List`, whose contents are copied; an inline compact
-field takes a nested literal. A put whose `Link` child has another destination's identity,
-and a writer that returns such a root, fail with `Bounds`; this check is one comparison
-per link. A nested literal is encoded with the destination's `W`, whatever its own
-declaration's. A put that does not fit in what is left of `n`, or one in which a count, a
-link distance or the used prefix would exceed `2^b − 1` for that `W` (MEM-9), writes nothing
-and returns `Error(Overflow)`; both are decided before the first byte is written. The `Child[T]` that `w` returns is the root: the builder holds the
+field takes a nested literal. Every put, a separately put child of another compact type included, is encoded with the
+destination's `W`, whatever the literal's own declaration says. A put evaluates `L`'s
+fields left to right without writing, then checks each `Link` child's identity in
+depth-first field order, then the size and width, and only then writes. A child with
+another destination's identity, and a writer that returns such a root, fail with `Bounds`;
+this check is one comparison per link and comes before the size check. A put that does not
+fit in what is left of `n`, or one in which a count, a link distance or the used prefix
+would exceed `2^b − 1` for that `W` (MEM-9), writes nothing, returns `Error(Overflow)` and
+leaves the destination usable for a smaller put. The `Child[T]` that `w` returns is the root: the builder holds the
 destination's whole used prefix as the blob, and the reference that `finish` publishes
 records the root's offset in it. A published compact value is copied into another region by
 `clone_in` (MEM-17). Nothing in a destination assumes a fixed element stride. Bytes of an unused or failed destination stay charged until the region closes.
@@ -190,8 +194,10 @@ reset or reopened; `loop { region r { .. } }` opens a fresh region each iteratio
 A compact value is one contiguous allocation (a **blob**) of at most `2^b − 1` bytes, where
 `b` is `W`'s bit width, laid out with fields in declaration order, each at the next byte
 with no padding. A compact type's fields are scalars, `bool`, `char`, other compact types
-(inline), `Text`, `FixedSpan[T]` (MEM-12), and `Link[U]` (MEM-10). A compact type held inline or
-as a link target is encoded with its holder's `W`; a `Text` or `FixedSpan` that is not inside
+(inline), `Text`, `FixedSpan[T]` (MEM-12), and `Link[U]` (MEM-10); an `Inline` array is not
+one in v1. A compact type held inline or as a link target is encoded with its holder's `W`,
+and a view of it, however it is projected, passed, returned or copied, keeps that `W`, its
+blob and its offset in the blob; a `Text` or `FixedSpan` that is not inside
 a compact type is encoded with `W = u64`. Every compact type's smallest encoding is at least
 one byte; a type that can encode to zero bytes is refused. Compact values are built only
 through MEM-3 and MEM-4. Compact layout is the only layout a program can declare in v1;
@@ -211,6 +217,7 @@ alignment, region chunking, every non-compact layout and the calling convention.
 ```hirsel
 @compact(u32) stable type Bad { owner: String }             // refused: MEM-9, own field
 @compact(u16) stable type Empty {}                          // refused: MEM-9, zero bytes
+@compact(u16) stable type Packed { data: Inline[u8, 4] }    // refused: MEM-9, an Inline field
 ```
 
 ### MEM-10: Inline fields and links
@@ -329,10 +336,16 @@ fn own_copy(take h: Rc[Node]) -> Result[Node, Capacity] {
 
 ### MEM-17: clone
 
-`clone(x) -> Result[U, Capacity]` deep-copies the own parts of `x` into new blocks charged
-to the current limit and shares its counted edges. `clone_in(r, x) -> Result[U in r,
-Capacity]` copies into region `r`; a compact value is copied as its whole blob, keeping its
-root offset. The result type `U` is the expected type: `x`'s type, or its declared **twin**.
+`clone(x)` and `clone_in(r, x)` are built-in typing forms. The expected type selects
+their result `U` and what is copied: first `x`'s own type, if it is `U` or `U`'s declared
+**twin**; otherwise the payloads through `Box`, `Rc` and `Arc`, outermost first, the first
+that is `U` or its twin. No match is refused. `clone(x) -> Result[U, Capacity]` makes a
+plain, own or counted `U`: it deep-copies the own parts of the selected value into new
+blocks charged to the current limit and shares its counted edges, a counted root selected
+as `U` included, and keeps the regions of its stable fields. `clone_in(r, x) -> Result[U
+in r, Capacity]` makes a stable `U` in `r`; a compact value is copied as the whole used
+blob at its original `W`, keeping the selected value's offset, never re-encoded at `U`'s
+own `W`.
 `@twin(P)` on a non-generic declaration names the type `P` it pairs with; the pair is
 symmetric. The two have the same field names in the same order, and each pair of field
 types is identical, a built-in pair (`String` and `Text`; `List[T]` and `FixedSpan[T]`;
@@ -345,7 +358,9 @@ cannot hold counted fields. Each copied `List`, `String` or `Map` gets capacity 
 length. The copy is depth-first: a record's fields in declaration order, a variant's active
 payload, a list's elements in index order and a map's entries in insertion order (key, then
 value), and each block is admitted when the walk reaches it, before what it holds. A value
-whose type summary holds a resource is never cloned (OWN-4). Failure is
+whose type summary holds a resource, a scoped value or an opaque owner
+([OWN-2](ownership.md#own-2-type-summaries)) is never cloned and is refused here, at the
+form; plain callables and capabilities copy as plain values. Failure is
 [T1.5](ownership.md#own-26-the-transition-table).
 
 ```hirsel
@@ -356,6 +371,10 @@ fn freeze(r: Region, x: Row) -> Result[RowS in r, Capacity] { clone_in(r, x) }
 ```hirsel
 type Row { name: String, n: u64 }
 @twin(Row) stable type RowN { label: Text, n: u64 }          // refused: MEM-17, field names
+```
+```hirsel
+fn dup(r: Region, b: SpanBuilder[u8, in r]) -> Result[SpanBuilder[u8, in r], Capacity] { clone(b) }
+                                                            // refused: MEM-17, an opaque owner
 ```
 
 ## Pools

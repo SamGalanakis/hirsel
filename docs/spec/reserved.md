@@ -178,8 +178,8 @@ literals (an `Inline` array literal is not one); format strings; `forget`; stati
 conversion of errors by `?`; code generic over the numeric types: the bounds `integer` and
 `float` are written only by core declarations ([OWN-4](ownership.md#own-4-bounds)), and a
 library writes one function per width; `text.as_string`, because `Text` and `String` have
-different representations (an author copies with `string.from` of the `Text` view, or keeps
-a `String`); generics over an `Inline` length; persistent mutable views; derivation and codecs; contracts and
+different representations (an author copies with `clone(t)` where `Result[String,
+Capacity]` is expected, or keeps a `String`); generics over an `Inline` length; persistent mutable views; derivation and codecs; contracts and
 facts; the store, runners and places; recording formats. A later opt-in execution-budget
 scope may stop code at a loop back edge or a call while such a scope is present; no v1
 rule assumes that code cannot be stopped there.

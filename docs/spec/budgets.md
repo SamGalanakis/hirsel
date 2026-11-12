@@ -84,7 +84,8 @@ same points ([SEM-8](semantics.md#sem-8-determinism)).
 A block is refunded to the limit its record leads to (MEM-20) when it is freed: when its
 owner is cleaned, when a region closes, when a counted node's last holder goes, when a
 collection's storage is replaced by growth, and when a resource is wholly destructured (its
-unused cause cell and grant, [T3.7](ownership.md#own-26-the-transition-table)). Refunding
+field storage, unused cause cell and unused grant,
+[T3.7](ownership.md#own-26-the-transition-table)). Refunding
 cannot fail and admits nothing ([T5.7](ownership.md#own-26-the-transition-table)).
 Mechanical release, region close and counted release never allocate
 ([FAIL-13](failure.md#fail-13-mechanical-release)); a user finalizer may, and admits only from
@@ -109,9 +110,11 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 | `main`'s task at startup | 256 + 32, from the root limit before `main` runs; a root limit smaller than this does not start the run |
 | channel | capacity × item size + 64 |
 
-`list.new`, `string.new`, `map.new` and every other empty collection allocate nothing and
-charge 0. A `clone` or `clone_in` charges each copy at capacity equal to its length
-([MEM-17](memory.md#mem-17-clone)). An allocation not in this table does not exist in v1.
+`list.new`, `string.new`, `map.new`, `list.with_capacity(0)` and an empty span builder
+allocate nothing and charge 0; an explicit `span.with_capacity(r, 0)` and an empty
+`text.copy_in` still admit their count header ([core](core.md)). A `clone` or `clone_in`
+charges each copy at capacity equal to its length, and a compact `clone_in` charges the
+whole copied blob, not the selected value's size ([MEM-17](memory.md#mem-17-clone)). An allocation not in this table does not exist in v1.
 
 Creating a resource admits its cause cell, and can therefore fail with `Capacity`, unless
 it is **mechanical**: its cleanup can never add a cause. Exactly four resources are

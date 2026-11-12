@@ -83,6 +83,24 @@ pub(super) fn physical<'m>(module: &'m Module<'m>, ty: PhysicalType) -> Type<'m>
     }
 }
 
+/// The parameters a value entry passes as root values: exclusive addresses of a
+/// block or box. Read from the ABI and layouts alone, so a caller and the body's
+/// owner select the same entry in and across objects.
+pub(super) fn root_parameters(layouts: &LayoutTable, abi: &FnAbi) -> Vec<usize> {
+    abi.parameters
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            (p.passing == ParameterPassing::ExclusiveAddress
+                && matches!(
+                    layouts.layout(p.layout).map(|l| &l.kind),
+                    Some(LayoutKind::Block { .. } | LayoutKind::Box { .. })
+                ))
+            .then_some(i)
+        })
+        .collect()
+}
+
 impl<'m, 'a> Signature<'m, 'a> {
     /// The signature of a Hirsel entry: a plain scalar result returns in registers.
     pub(super) fn of(
@@ -187,20 +205,7 @@ impl<'m, 'a> Signature<'m, 'a> {
     }
 
     pub(super) fn with_roots(mut self, module: &'m Module<'m>, layouts: &LayoutTable) -> Self {
-        self.roots = self
-            .abi
-            .parameters
-            .iter()
-            .enumerate()
-            .filter_map(|(i, p)| {
-                (p.passing == ParameterPassing::ExclusiveAddress
-                    && matches!(
-                        layouts.layout(p.layout).map(|l| &l.kind),
-                        Some(LayoutKind::Block { .. } | LayoutKind::Box { .. })
-                    ))
-                .then_some(i)
-            })
-            .collect();
+        self.roots = root_parameters(layouts, self.abi);
         self.sequence_roots = self
             .roots
             .iter()

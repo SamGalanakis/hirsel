@@ -84,7 +84,7 @@ mod values;
 
 pub(crate) use pair::{PairField, PairWord, REGISTER_PAIR, pair_type};
 use pair::{decode_word, encode_word, value_word};
-use signature::{Aliasing, Hidden, Signature};
+use signature::{Aliasing, Hidden, Signature, root_parameters};
 
 /// The pipeline LLVM runs between the two verifier passes.
 pub(crate) fn pipeline(opt: OptLevel) -> &'static str {
@@ -662,16 +662,10 @@ fn lower<T>(
                 return Err(CodegenError::DuplicateSymbol { name });
             }
             let external = Signature::of(&module, inputs.layouts, abi, &unit.header.definition)?;
-            // These checked sequence bodies inline into both their adapter and
-            // callers. Keep the ordinary root companions on that private path
-            // too, so length and uniqueness survive each loop iteration.
-            let private_roots = inputs.alternate
-                && (unit.header.definition.is_core("list.push")
-                    || unit.header.definition.is_core("list.reserve")
-                    || unit.header.definition.is_core("$native.list_push_spare"));
-            let signature = if unit.header.origin == UnitOrigin::Library
-                && (!inputs.alternate || private_roots)
-            {
+            let private_roots = inputs.alternate && ahead_value_entry(&unit.header.definition);
+            // Every body defines its value entry (`X.roots9` when it has roots); ahead
+            // code keeps it only for its inlined sequence helpers.
+            let signature = if !inputs.alternate || private_roots {
                 Signature::of(&module, inputs.layouts, abi, &unit.header.definition)?
                     .with_roots(&module, inputs.layouts)
             } else {
@@ -757,7 +751,7 @@ fn lower<T>(
                     module.make_available_externally(entry);
                     optimizer_only.insert(name.clone());
                     optimizer_only.insert(body_name.clone());
-                } else {
+                } else if template {
                     module.make_weak_odr(entry);
                 }
                 module.add_attribute(entry, AttributeSlot::Function, Attribute::InlineHint);
@@ -916,7 +910,7 @@ fn lower<T>(
             if !inputs.alternate && abi.shape == CallableShape::Definition {
                 let thunk =
                     function_thunk_name(&unit.header.definition, Some(&unit.header.instance));
-                define_function_thunk(&module, &thunk, function, &signature);
+                define_function_thunk(&module, &thunk, entry, &external);
                 manifested.exports.insert(
                     thunk.clone(),
                     ObjectSymbol {
@@ -1295,7 +1289,16 @@ fn fn_abi<'a>(
 
 /// Bytes of a `hirsel_rt_v2_region` record (`HIRSEL_RT_V2_ASSERT_SIZE` in the header).
 
-/// The name suffix of a library body's private root-value entry. It changes with that
+/// The ahead bodies that keep their value entry: these checked sequence helpers
+/// inline into both their adapter and callers, so the root companions keep length
+/// and uniqueness across each loop iteration.
+fn ahead_value_entry(definition: &DefPath) -> bool {
+    definition.is_core("list.push")
+        || definition.is_core("list.reserve")
+        || definition.is_core("$native.list_push_spare")
+}
+
+/// The name suffix of a body's root-value entry. It changes with that
 /// entry's signature, so a `linkonce_odr` body of an older signature never merges
 /// with a caller of this one.
 const ROOTS_SUFFIX: &str = ".roots9";

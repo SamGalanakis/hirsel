@@ -287,8 +287,9 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         }
     }
 
-    /// The link name of function `symbol`, imported at `abi`.
-    pub(super) fn named_function(&mut self, symbol: SymbolId, abi: &FnAbi) -> Emitted<String> {
+    /// The link name of function `symbol`'s slot entry; the call site imports the
+    /// entry it selects.
+    pub(super) fn named_function(&mut self, symbol: SymbolId) -> Emitted<(String, DefPath)> {
         let Some(symbol) = self.unit.tables.symbols.get(symbol.index()) else {
             return self.invalid("a callee outside the symbol table");
         };
@@ -320,16 +321,41 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         } else {
             symbol_name(&symbol.definition, symbol.instance.as_ref())
         };
-        self.manifested
-            .imports
-            .entry(name.clone())
-            .or_insert_with(|| ObjectSymbol {
-                name: name.clone(),
-                kind: ObjectSymbolKind::Function,
-                definition: Some(symbol.definition.clone()),
-                abi: Some(abi_digest(abi)),
-            });
-        Ok(name)
+        Ok((name, symbol.definition.clone()))
+    }
+
+    /// Whether `call` enters its callee's value entry `X.roots9` rather than the
+    /// slot form `X`. Decided from the call's ABI and layouts, which the body's
+    /// owner reads the same way (`lower`), so caller and owner agree whatever
+    /// object either is in. A resume boundary enters the callee's frame or the
+    /// runtime instead, and ahead code keeps value entries only between its
+    /// private sequence helpers.
+    pub(super) fn value_entry_call(&self, call: CallId, site: &CallSite, abi: &FnAbi) -> bool {
+        if root_parameters(self.inputs.layouts, abi).is_empty() {
+            return false;
+        }
+        let symbol = match site.callee {
+            Callee::Direct(symbol) | Callee::Bound { code: symbol, .. } => {
+                &self.unit.tables.symbols[symbol.index()]
+            }
+            Callee::Indirect(_) if self.inputs.alternate => {
+                return self
+                    .inputs
+                    .ahead
+                    .and_then(|plan| plan.cpu_callee(self.unit, call))
+                    .is_some_and(|symbol| ahead_value_entry(&symbol.definition));
+            }
+            Callee::Indirect(_) | Callee::Operation(_) => return false,
+        };
+        if self.inputs.alternate {
+            return ahead_value_entry(&symbol.definition)
+                && symbol.instance.is_some_and(|id| {
+                    self.inputs
+                        .ahead
+                        .is_some_and(|p| p.has_private_edge(self.unit.header.instance, id))
+                });
+        }
+        !self.resume_boundary_call(call)
     }
 
     pub(super) fn call(
@@ -377,14 +403,19 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         let nested = self.resume_boundary(call)?;
         let arguments = self.pool(site.arguments, &unit.pools.call_arguments)?;
         // The callee: a named function, or a code pointer and its environment.
-        let (callee, environment, name): (Value<'m>, Option<Value<'m>>, Option<String>) = match site
-            .callee
-        {
-            Callee::Direct(symbol) => (
-                self.module.const_zero(self.module.ptr_type()),
-                None,
-                Some(self.named_function(symbol, abi)?),
-            ),
+        let (callee, environment, name): (
+            Value<'m>,
+            Option<Value<'m>>,
+            Option<(String, Option<DefPath>)>,
+        ) = match site.callee {
+            Callee::Direct(symbol) => {
+                let (name, definition) = self.named_function(symbol)?;
+                (
+                    self.module.const_zero(self.module.ptr_type()),
+                    None,
+                    Some((name, Some(definition))),
+                )
+            }
             // A bound call (LIR schema revision 9): the named instance with
             // its closure's environment.
             Callee::Bound { code, closure } => {
@@ -392,10 +423,11 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                     return self.invalid("a bound call through an ABI without an environment");
                 }
                 let (_, env) = self.callable_parts(closure)?;
+                let (name, definition) = self.named_function(code)?;
                 (
                     self.module.const_zero(self.module.ptr_type()),
                     Some(env),
-                    Some(self.named_function(code, abi)?),
+                    Some((name, Some(definition))),
                 )
             }
             Callee::Operation(op) => {
@@ -429,7 +461,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                         (
                             self.module.const_zero(self.module.ptr_type()),
                             None,
-                            Some(symbol.clone()),
+                            Some((symbol.clone(), None)),
                         )
                     }
                     other => {
@@ -454,25 +486,13 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                             &symbol.definition,
                             symbol.instance.unwrap(),
                         );
-                        self.manifested
-                            .imports
-                            .entry(name.clone())
-                            .or_insert_with(|| ObjectSymbol {
-                                name: name.clone(),
-                                kind: ObjectSymbolKind::Function,
-                                definition: Some(symbol.definition.clone()),
-                                abi: Some(abi_digest(abi)),
-                            });
-                        name
+                        (name, Some(symbol.definition.clone()))
                     });
                 (code, Some(env), name)
             }
         };
-        let root_name = name
-            .as_ref()
-            .map(|n| format!("{n}{ROOTS_SUFFIX}"))
-            .filter(|n| self.manifested.library.contains(n));
-        let signature = if root_name.is_some() {
+        let value_entry = self.value_entry_call(call, site, abi);
+        let signature = if value_entry {
             Signature::of(self.module, self.inputs.layouts, abi, self.definition())?
                 .with_roots(self.module, self.inputs.layouts)
         } else if let Callee::Operation(_) = site.callee {
@@ -480,12 +500,31 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         } else {
             Signature::of(self.module, self.inputs.layouts, abi, self.definition())?
         };
-        let signature = if self.inputs.alternate && root_name.is_some() {
+        let signature = if self.inputs.alternate && value_entry {
             signature.with_ahead(self.module)
         } else {
             signature
         };
-        let name = root_name.or(name);
+        // A Hirsel callee is imported under the entry the call selects.
+        let name = name.map(|(name, definition)| {
+            let name = if value_entry {
+                format!("{name}{ROOTS_SUFFIX}")
+            } else {
+                name
+            };
+            if let Some(definition) = definition {
+                self.manifested
+                    .imports
+                    .entry(name.clone())
+                    .or_insert_with(|| ObjectSymbol {
+                        name: name.clone(),
+                        kind: ObjectSymbolKind::Function,
+                        definition: Some(definition),
+                        abi: Some(abi_digest(abi)),
+                    });
+            }
+            name
+        });
         // A runtime primitive's body is the runtime's, which states nothing.
         let aliasing = match site.callee {
             Callee::Operation(_) => Aliasing::Unstated,

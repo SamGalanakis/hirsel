@@ -786,6 +786,76 @@ fn a_small_callee_inlines_across_singleton_objects_at_o3() {
     });
 }
 
+/// A body with a root parameter, its caller in another object: `grow` succeeds
+/// once and fails once after pushing, and the caller reads the list back each
+/// time.
+const ROOTS_ACROSS_OBJECTS: &str = "fn grow(mut rows: List[u64], n: u64) -> Result[(), ()] {\n  for i in 0u64..n {\n    list.push(mut rows, i)\n  }\n  if n > 30u64 { Error(()) } else { Ok(()) }\n}\npub fn main(rt: Io, args: Args) -> Result[(), GrantError] {\n  let mut rows: List[u64] = []\n  let first = match grow(mut rows, 20u64) {\n    Ok(_) => true,\n    Error(_) => false,\n  }\n  let second = match grow(mut rows, 40u64) {\n    Ok(_) => false,\n    Error(_) => true,\n  }\n  let ok = first && second && list.len(rows) == 60 && rows[19] == 19 && rows[59] == 39\n  let _ = out.print(io.stdout(rt)?, if ok { \"ok\\n\" } else { \"bad\\n\" })\n  Ok(())\n}\n";
+
+/// Every direct call of a body with roots enters the owner's value entry, a
+/// source body's included (784 L1): one object per unit at O0 imports
+/// `grow.roots9` itself, not its slot form, and the roots the callee grew are
+/// read back on success and failure on the interpreter, the heap checker and
+/// native code as one object, one per unit and seeded groups.
+#[test]
+fn a_rooted_source_callee_in_another_object_returns_its_roots_on_both_outcomes() {
+    use hirsel_native::OptLevel;
+    use hirsel_native::Options;
+    use hirsel_native::partition_objects;
+    use hirsel_native_testing::Runtime;
+    let mut matrix = topology_matrix(2);
+    matrix.push(Configuration {
+        options: Options::new(x86()),
+        engine: Engine::Heap { campaign: true },
+    });
+    matrix.push(Configuration {
+        options: Options::new(x86()),
+        engine: Engine::Native {
+            opt: OptLevel::None,
+            partition: Partition::Singleton,
+            runtime: Runtime::Diagnostic,
+        },
+    });
+    let observed = agree("roots-across-objects", ROOTS_ACROSS_OBJECTS, &matrix);
+    assert_eq!(observed.output, b"ok\n");
+    with_compiler_stack(|| {
+        let program = checked(ROOTS_ACROSS_OBJECTS);
+        let ready = hirsel_native_batch::build(&program.validated, &Options::new(x86())).unwrap();
+        let registry = hirsel_lir::descriptor_registry::DescriptorRegistry::new(
+            &ready.table,
+            &ready.finalizers,
+        );
+        let mut grow = program.entry.clone();
+        grow.0.name = "grow".into();
+        let objects = partition_objects(
+            &ready,
+            OptLevel::None,
+            Partition::Singleton,
+            &registry,
+            false,
+            None,
+        )
+        .unwrap();
+        let caller = objects
+            .iter()
+            .find(|o| {
+                o.exports
+                    .iter()
+                    .any(|s| s.definition.as_ref() == Some(&program.entry))
+            })
+            .unwrap();
+        let imported: Vec<_> = caller
+            .imports
+            .iter()
+            .filter(|s| s.definition.as_ref() == Some(&grow))
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(
+            matches!(imported.as_slice(), [name] if name.ends_with(".roots9")),
+            "{imported:?}"
+        );
+    });
+}
+
 /// A failing index in statement position fails at the index expression, by
 /// line and column, in all three engines (the diagnostics part's primary site is the
 /// operation that fails; corpus headers pin only the line).

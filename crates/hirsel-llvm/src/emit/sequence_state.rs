@@ -63,25 +63,14 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         }
     }
 
-    pub(super) fn root_call(&self, call: &CallSite) -> bool {
-        if let Callee::Direct(symbol) = call.callee {
-            let symbol = &self.unit.tables.symbols[symbol.index()];
-            let name = if self.inputs.alternate
-                && symbol.instance.is_some_and(|id| {
-                    self.inputs
-                        .ahead
-                        .is_some_and(|plan| plan.has_private_edge(self.unit.header.instance, id))
-                }) {
-                hirsel_lir::ahead::alternate_name(&symbol.definition, symbol.instance.unwrap())
-            } else {
-                symbol_name(&symbol.definition, symbol.instance.as_ref())
-            };
-            self.manifested
-                .library
-                .contains(&format!("{name}{ROOTS_SUFFIX}"))
-        } else {
-            false
-        }
+    /// Whether call `call` hands its root arguments to the callee's value entry.
+    pub(super) fn root_call(&self, call: usize) -> bool {
+        let site = &self.unit.tables.calls[call];
+        self.inputs
+            .layouts
+            .fn_abis
+            .get(site.abi.0 as usize)
+            .is_some_and(|abi| self.value_entry_call(CallId(call as u32), site, abi))
     }
 
     pub(super) fn allocate_sequence_states(&mut self) -> Emitted {
@@ -124,8 +113,8 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
             {
                 continue;
             }
-            let escaped = self.unit.tables.calls.iter().any(|call| {
-                !self.root_call(call) && call.arguments.get(&self.unit.pools.call_arguments).is_some_and(|args| {
+            let escaped = self.unit.tables.calls.iter().enumerate().any(|(index, call)| {
+                !self.root_call(index) && call.arguments.get(&self.unit.pools.call_arguments).is_some_and(|args| {
                     args.iter().any(|arg| matches!(arg.value, ArgumentValue::Address { address, .. } if self.whole_slot(address) == Some(SlotId(i as u32))))
                 })
             });
@@ -194,8 +183,8 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 _ => {}
             }
         }
-        for call in &unit.tables.calls {
-            if !self.root_call(call) {
+        for (index, call) in unit.tables.calls.iter().enumerate() {
+            if !self.root_call(index) {
                 continue;
             }
             for argument in self.pool(call.arguments, &unit.pools.call_arguments)? {

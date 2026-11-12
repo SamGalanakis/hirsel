@@ -321,6 +321,28 @@ mod tests {
         (Address, Association),
         InstalledPackage,
     ) {
+        imaged_with(
+            root,
+            bad,
+            &[
+                ("a", "one", "a.hir"),
+                ("a", "two", "a.hir"),
+                ("b", "three", "b.hir"),
+            ],
+        )
+    }
+    /// `imaged` with the definitions `layout` lists, as module, name and file.
+    fn imaged_with(
+        root: &Path,
+        bad: bool,
+        layout: &[(&str, &str, &str)],
+    ) -> (
+        hirsel_artifact_store::Store,
+        ContentHash,
+        PackageId,
+        (Address, Association),
+        InstalledPackage,
+    ) {
         let store = hirsel_artifact_store::Store::new(root.to_owned());
         let compiler = ContentHash::of_bytes(b"compiler");
         let package = PackageId {
@@ -330,11 +352,7 @@ mod tests {
         let manifest = b"manifest".to_vec();
         let mut records = InstallationRecords::default();
         let mut definitions = BTreeMap::new();
-        for (module, name, file) in [
-            ("a", "one", "a.hir"),
-            ("a", "two", "a.hir"),
-            ("b", "three", "b.hir"),
-        ] {
+        for &(module, name, file) in layout {
             let path = DefPath(hirsel_syntax::ItemPath {
                 package: package.clone(),
                 modules: vec![module.into()],
@@ -457,6 +475,64 @@ mod tests {
         damaged[at] ^= 1;
         std::fs::write(path, damaged).unwrap();
     }
+    /// Register `header` as the installation at `root`, and return a request
+    /// against it: each call is a new process's request, which selects the
+    /// registration and opens exactly the header it authenticated.
+    fn registered(
+        directory: &Path,
+        root: &Path,
+        compiler: ContentHash,
+        package: &PackageId,
+        header: (Address, Association),
+    ) -> impl Fn() -> Result<Arc<InstalledPackage>, String> {
+        use crate::ResultStore;
+        let state = directory.join("state");
+        hirsel_validate::Installation::begin(root, &state, compiler)
+            .unwrap()
+            .finish(header)
+            .unwrap();
+        let (local, root, package) = (directory.join("local"), root.to_owned(), package.clone());
+        move || {
+            crate::DirStore::new(local.clone())
+                .with_read_only_root(root.clone())
+                .with_registration(compiler, state.clone())
+                .for_operation()
+                .unwrap()
+                .installed_package(&package, compiler)
+        }
+    }
+    /// Every file of the verifier registrations under `directory`'s state.
+    fn registration(directory: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        let mut pending = vec![directory.join("state")];
+        while let Some(at) = pending.pop() {
+            for entry in std::fs::read_dir(at).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    files.insert(path.clone(), std::fs::read(path).unwrap());
+                }
+            }
+        }
+        assert!(!files.is_empty());
+        files
+    }
+    /// Replace `reference`'s stored payload, wherever it is packed, with
+    /// `payload` of the same length: storage serving other valid bytes for it.
+    fn substitute(store: &hirsel_artifact_store::Store, reference: Reference, payload: &[u8]) {
+        let path = store.output_path(reference);
+        let stored = store.get_owned(reference).unwrap();
+        assert_eq!(stored.len(), payload.len());
+        assert_ne!(&*stored, payload);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let at = bytes
+            .windows(stored.len())
+            .position(|bytes| bytes == &*stored)
+            .unwrap();
+        bytes[at..at + payload.len()].copy_from_slice(payload);
+        std::fs::write(path, bytes).unwrap();
+    }
     fn item(package: &PackageId, module: &str, name: &str) -> DefPath {
         DefPath(hirsel_syntax::ItemPath {
             package: package.clone(),
@@ -465,32 +541,31 @@ mod tests {
         })
     }
     /// The header authenticates every section by reference. With the header
-    /// association untouched, a changed byte in a definition chunk is refused
-    /// when a definition in that chunk is first demanded, while the other
-    /// chunk loads; a changed byte in a section open reads refuses the open.
+    /// and its registration untouched, a changed byte in a definition chunk
+    /// is refused when a definition in that chunk is first demanded, while the
+    /// other chunk loads; a changed byte in a section open reads refuses the
+    /// open. A refusal never rewrites the registration.
     #[test]
     fn a_changed_section_byte_is_refused_at_its_first_use() {
         let directory = tempfile::tempdir().unwrap();
-        let (store, compiler, package, header, installed) = imaged(directory.path(), false);
+        let root = directory.path().join("installed");
+        let (store, compiler, package, header, installed) = imaged(&root, false);
+        let request = registered(directory.path(), &root, compiler, &package, header);
+        let before = registration(directory.path());
         let sections = installed.sections.clone().unwrap();
         damage(&store, sections.chunks[1]);
-        // A new process, without this one's record of checked ranges.
-        let fresh = || hirsel_artifact_store::Store::new(directory.path().to_owned());
-        let opened =
-            InstalledPackage::open_header(&fresh(), Some(header), &package, compiler).unwrap();
+        let opened = request().unwrap();
         // Membership reads the index only: catalog enumerations ask it of
         // every source path, and must neither decode nor meet a bad chunk.
-        let sources = opened.package.source_records().unwrap();
+        let sources = opened.source_records().unwrap();
         assert!(sources.installs(&item(&package, "b", "three")));
         assert!(!sources.installs(&item(&package, "b", "absent")));
         let one = opened
-            .package
             .definition(&item(&package, "a", "one"))
             .unwrap()
             .unwrap();
         assert_eq!(one.key.definition, item(&package, "a", "one"));
         let refused = opened
-            .package
             .definition(&item(&package, "b", "three"))
             .unwrap_err();
         assert!(
@@ -499,46 +574,50 @@ mod tests {
         );
         assert!(
             opened
-                .package
                 .definition(&item(&package, "b", "absent"))
                 .unwrap()
                 .is_none()
         );
         damage(&store, sections.index);
-        let refused =
-            InstalledPackage::open_header(&fresh(), Some(header), &package, compiler).unwrap_err();
+        let refused = request().unwrap_err();
         assert!(
             refused.contains("corrupt installed package section"),
             "{refused}"
         );
+        assert_eq!(registration(directory.path()), before);
     }
     /// An inconsistent descriptor nobody demands no longer refuses the open;
     /// the one that is demanded is refused on that first load, and the others,
-    /// in its chunk and outside it, load.
+    /// in its chunk and outside it, load. The registration authenticated the
+    /// header, not the descriptor, and the refusal leaves it unchanged. The
+    /// store audit, which decodes every descriptor, refuses the image.
     #[test]
     fn one_bad_descriptor_is_refused_at_its_first_load_and_the_others_load() {
         let directory = tempfile::tempdir().unwrap();
-        let (store, compiler, package, header, _) = imaged(directory.path(), true);
-        let opened =
-            InstalledPackage::open_header(&store, Some(header), &package, compiler).unwrap();
-        let refused = opened
-            .package
-            .definition(&item(&package, "a", "two"))
-            .unwrap_err();
+        let root = directory.path().join("installed");
+        let (_, compiler, package, header, _) = imaged(&root, true);
+        let request = registered(directory.path(), &root, compiler, &package, header);
+        let before = registration(directory.path());
+        // The audit decodes and checks what no request demanded.
+        let audit = InstalledPackage::verify_store(&root).unwrap_err();
+        assert!(
+            audit.contains("invalid installed definition descriptor"),
+            "{audit}"
+        );
+        let opened = request().unwrap();
+        let refused = opened.definition(&item(&package, "a", "two")).unwrap_err();
         assert!(
             refused.contains("invalid installed definition descriptor"),
             "{refused}"
         );
         for (module, name) in [("a", "one"), ("b", "three")] {
-            let definition = opened
-                .package
-                .definition(&item(&package, module, name))
-                .unwrap();
+            let definition = opened.definition(&item(&package, module, name)).unwrap();
             assert_eq!(
                 definition.unwrap().key.definition,
                 item(&package, module, name)
             );
         }
+        assert_eq!(registration(directory.path()), before);
     }
     /// The image of `header` with one section rewritten by `edit`, under a new
     /// header that the root now associates.
@@ -563,9 +642,11 @@ mod tests {
     }
     /// Lookups binary-search the rows, contents and fingerprint order, so an
     /// authenticated image that misorders one is refused at open rather than
-    /// answering "absent" for what it lists. An index entry that points into
-    /// another definition's bytes refuses its own path; the definition it
-    /// points at still loads.
+    /// answering "absent" for what it lists. Index ranges must tile their
+    /// chunks: one pointing into another definition's bytes, or past its
+    /// chunk, is refused at open. Two entries whose ranges are exchanged
+    /// still tile, and each is refused on load because the descriptor it
+    /// reaches is another path's.
     #[test]
     fn a_misordered_or_misdirected_section_is_refused_never_reported_absent() {
         let directory = tempfile::tempdir().unwrap();
@@ -592,31 +673,118 @@ mod tests {
                 "{refused}"
             );
         }
-        // Entries are in path order: a.one, a.two, b.three. Point a.one's
-        // chunk, offset and length at a.two's descriptor.
-        let misdirected = rewritten(
+        // Entries are in path order: a.one, a.two, b.three, each a 32-byte
+        // fingerprint then chunk, offset and length.
+        let range = |entry: usize| 8 + entry * 44 + 32..8 + (entry + 1) * 44;
+        for edit in [
+            // a.one's range onto a.two's descriptor: two overlap, one is unowned.
+            Box::new(move |bytes: &mut [u8]| bytes.copy_within(range(1), range(0).start))
+                as Box<dyn FnOnce(&mut [u8])>,
+            // b.three's range one byte past the end of its chunk.
+            Box::new(move |bytes: &mut [u8]| bytes[range(2).end - 4] += 1),
+            // b.three's range into chunk 0.
+            Box::new(move |bytes: &mut [u8]| bytes[range(2).start] = 0),
+        ] {
+            let refused = open(rewritten(&store, header, |s| &mut s.index, edit)).unwrap_err();
+            assert!(
+                refused.contains("invalid installed package section"),
+                "{refused}"
+            );
+        }
+        let exchanged = rewritten(
             &store,
             header,
             |s| &mut s.index,
             |bytes| {
-                bytes.copy_within(8 + 44 + 32..8 + 2 * 44, 8 + 32);
+                let (one, two) = bytes[8..range(1).end].split_at_mut(44);
+                one[32..].swap_with_slice(&mut two[32..]);
             },
         );
-        let opened = open(misdirected).unwrap();
-        let refused = opened
+        let opened = open(exchanged).unwrap();
+        for name in ["one", "two"] {
+            let refused = opened
+                .package
+                .definition(&item(&package, "a", name))
+                .unwrap_err();
+            assert!(
+                refused.contains("invalid installed definition index"),
+                "{refused}"
+            );
+        }
+        let three = opened
             .package
-            .definition(&item(&package, "a", "one"))
-            .unwrap_err();
-        assert!(
-            refused.contains("invalid installed definition index"),
-            "{refused}"
-        );
-        let two = opened
-            .package
-            .definition(&item(&package, "a", "two"))
+            .definition(&item(&package, "b", "three"))
             .unwrap()
             .unwrap();
-        assert_eq!(two.key.definition, item(&package, "a", "two"));
+        assert_eq!(three.key.definition, item(&package, "b", "three"));
+    }
+    /// Storage that serves other bytes for a chunk the registered header
+    /// lists, whether another chunk's, the same chunk's from an earlier
+    /// generation of the image, or a truncated copy, is refused when a
+    /// definition in that chunk is demanded; the other chunk loads and the
+    /// registration is unchanged. The chunks here have equal lengths and are
+    /// packed, so storage can serve one's bytes for the other in place; the
+    /// truncated chunk is large enough to be stored on its own.
+    #[test]
+    fn a_chunk_served_with_other_bytes_is_refused() {
+        let layout = [("a", "one", "a.hir"), ("b", "two", "b.hir")];
+        let refused_at =
+            |directory: &Path,
+             root: &Path,
+             layout: &[(&str, &str, &str)],
+             tamper: &dyn Fn(&hirsel_artifact_store::Store, &image::Sections)| {
+                let (store, compiler, package, header, installed) =
+                    imaged_with(root, false, layout);
+                let request = registered(directory, root, compiler, &package, header);
+                let before = registration(directory);
+                tamper(&store, installed.sections.as_ref().unwrap());
+                let opened = request().unwrap();
+                let one = opened
+                    .definition(&item(&package, "a", "one"))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(one.key.definition, item(&package, "a", "one"));
+                let (module, name, _) = layout[1];
+                let refused = opened
+                    .definition(&item(&package, module, name))
+                    .unwrap_err();
+                assert!(
+                    refused.contains("corrupt installed definition chunk"),
+                    "{refused}"
+                );
+                assert_eq!(registration(directory), before);
+            };
+        // Another chunk's valid bytes.
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("installed");
+        refused_at(directory.path(), &root, &layout, &|store, sections| {
+            let other = store.get_owned(sections.chunks[0]).unwrap();
+            substitute(store, sections.chunks[1], &other);
+        });
+        // An earlier generation's chunk: b.two then named another compiler.
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("installed");
+        let (_, _, _, _, old) = imaged_with(&root, true, &layout);
+        let old = old.sections.unwrap().chunks[1];
+        refused_at(directory.path(), &root, &layout, &|store, sections| {
+            let old = store.get_owned(old).unwrap();
+            substitute(store, sections.chunks[1], &old);
+        });
+        // A truncated chunk.
+        let long = "long".repeat(1100);
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("installed");
+        refused_at(
+            directory.path(),
+            &root,
+            &[("a", "one", "a.hir"), ("b", &long, "b.hir")],
+            &|store, sections| {
+                let path = store.output_path(sections.chunks[1]);
+                let bytes = std::fs::read(&path).unwrap();
+                assert_eq!(bytes.len() as u64, 64 + sections.chunks[1].len);
+                std::fs::write(path, &bytes[..bytes.len() / 2]).unwrap();
+            },
+        );
     }
     #[test]
     fn demanded_expanded_content_refuses_before_allocating_and_remains_usable() {
@@ -1173,7 +1341,13 @@ impl InstalledPackage {
     ) -> Result<hirsel_artifact_store::VerifiedRecords, String> {
         let _scope = store.batch();
         let installed = Self::read(store)?;
-        installed.check_records(store)
+        let records = installed.check_records(store)?;
+        installed
+            .definitions
+            .as_ref()
+            .ok_or("installed package without a definition index")?
+            .audit()?;
+        Ok(records)
     }
     fn read(store: &hirsel_artifact_store::Store) -> Result<Self, String> {
         Self::read_header(store, None)

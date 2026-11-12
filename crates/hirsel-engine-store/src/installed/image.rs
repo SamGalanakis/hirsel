@@ -366,6 +366,35 @@ pub(super) fn read(
     {
         return Err(invalid());
     }
+    // The entries tile every chunk: each range in bounds, none overlapping
+    // another, and no chunk byte left to no definition. A range redirected
+    // onto another definition's bytes is refused here; a swap of two ranges
+    // keeps the tiling and is refused by the fingerprint check on load.
+    let mut ranges = (0..count)
+        .map(|at| {
+            let entry = &fingerprints[at * ENTRY..(at + 1) * ENTRY];
+            (
+                u32_at(entry, 32),
+                u64::from(u32_at(entry, 36)),
+                u64::from(u32_at(entry, 40)),
+            )
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_unstable();
+    let mut ends = vec![0u64; sections.chunks.len()];
+    for (chunk, offset, len) in ranges {
+        let end = ends.get_mut(chunk as usize).ok_or_else(invalid)?;
+        if offset != *end {
+            return Err(invalid());
+        }
+        *end = offset + len;
+    }
+    if !ends
+        .iter()
+        .eq(sections.chunks.iter().map(|chunk| &chunk.len))
+    {
+        return Err(invalid());
+    }
     let sources = header
         .sources
         .into_iter()
@@ -522,6 +551,11 @@ impl Definitions {
             &definition,
         )?;
         Ok(definition)
+    }
+    /// Decode and check every listed definition without keeping any: the
+    /// whole-package audit that open defers to first demand.
+    pub(crate) fn audit(&self) -> Result<(), String> {
+        (0..self.count).try_for_each(|at| self.load(at).map(drop))
     }
     /// The most this owner can come to hold: the index, every chunk, and the
     /// decoded definitions, whose heap parts are no larger than their encoding.

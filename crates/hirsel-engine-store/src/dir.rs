@@ -206,7 +206,11 @@ impl DirStore {
         self
     }
     /// This store, selecting `identity`'s registration in `state` on first use.
-    fn with_registration(&self, identity: hirsel_syntax::ContentHash, state: PathBuf) -> Self {
+    pub(crate) fn with_registration(
+        &self,
+        identity: hirsel_syntax::ContentHash,
+        state: PathBuf,
+    ) -> Self {
         Self {
             registration: Some(Arc::new(Registration {
                 identity,

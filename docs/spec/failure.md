@@ -18,7 +18,7 @@ raised it:
 | `Overflow` | checked integer arithmetic, conversion and shift counts ([SEM-1](semantics.md#sem-1-integers)) |
 | `Bounds` | indexing and slicing out of range; `channel.new(0)` |
 | `Division` | integer division or remainder by zero |
-| `Unwrap` | `option.unwrap` of `None`, `result.unwrap` of `Error` |
+| `Unwrap` | [`option.unwrap`](../../core/core/option.hirsel) of `None`, [`result.unwrap`](../../core/core/result.hirsel) of `Error` ([core](core.md#contracts-the-signatures-do-not-state)) |
 | `Fail(text)` | `fail(msg)`, which has type `Never` |
 | `Cancelled` | a cancellation point that observes cancellation ([CONC-7](tasks.md#conc-7-cancellation-points)) |
 | `Capacity` | an allocation beyond a finalizer's grant ([MEM-27](budgets.md#mem-27-finalizer-grants)) |
@@ -41,7 +41,7 @@ value's finalizer, a callee's own failure), and what it did is not undone: a cal
 effects on its `mut` arguments stand, and so does an installed value.
 
 ```hirsel
-fn put(mut q: List[File], take f: File) -> Result[(), (Capacity, File)] {
+fn put(mut q: List[HostFile], take f: HostFile) -> Result[(), (Capacity, HostFile)] {
   list.push(mut q, take f)              // on Capacity the error owns f
 }
 ```
@@ -121,7 +121,8 @@ replaces the primary cause, and no cause is dropped.
 
 A cause is stored in a **cause cell**. Propagating a failure moves the existing chain and
 reserves nothing. A cell is reserved only with an obligation that can add a cause: each
-task has one primary cell from its start, and each resource value has one, admitted with
+task has one primary cell from its start, and each resource value that is not mechanical
+([MEM-24](budgets.md#mem-24-logical-charges), FAIL-13) has one, admitted with
 the resource ([MEM-24](budgets.md#mem-24-logical-charges)); a resource created by a
 finalizer takes its cell and storage from the finalizer's grant
 ([MEM-27](budgets.md#mem-27-finalizer-grants)). A cause raised by a finalizer goes into its

@@ -136,7 +136,10 @@ pub fn default_context() -> FileContext {
 /// The spec's parts under conformance/old-spec, by file name, which the spec hash covers.
 /// The conformance spec_links test checks that they are the whole directory.
 pub const SPEC_PARTS: [(&str, &[u8]); 27] = [
-    ("brands.md", include_bytes!("../../../conformance/old-spec/brands.md")),
+    (
+        "brands.md",
+        include_bytes!("../../../conformance/old-spec/brands.md"),
+    ),
     (
         "capabilities.md",
         include_bytes!("../../../conformance/old-spec/capabilities.md"),
@@ -181,12 +184,18 @@ pub const SPEC_PARTS: [(&str, &[u8]); 27] = [
         "implementation.md",
         include_bytes!("../../../conformance/old-spec/implementation.md"),
     ),
-    ("index.md", include_bytes!("../../../conformance/old-spec/index.md")),
+    (
+        "index.md",
+        include_bytes!("../../../conformance/old-spec/index.md"),
+    ),
     (
         "language.md",
         include_bytes!("../../../conformance/old-spec/language.md"),
     ),
-    ("memory.md", include_bytes!("../../../conformance/old-spec/memory.md")),
+    (
+        "memory.md",
+        include_bytes!("../../../conformance/old-spec/memory.md"),
+    ),
     (
         "ownership.md",
         include_bytes!("../../../conformance/old-spec/ownership.md"),
@@ -203,7 +212,10 @@ pub const SPEC_PARTS: [(&str, &[u8]); 27] = [
         "runners.md",
         include_bytes!("../../../conformance/old-spec/runners.md"),
     ),
-    ("schema.md", include_bytes!("../../../conformance/old-spec/schema.md")),
+    (
+        "schema.md",
+        include_bytes!("../../../conformance/old-spec/schema.md"),
+    ),
     (
         "scoped-transport.md",
         include_bytes!("../../../conformance/old-spec/scoped-transport.md"),
@@ -224,7 +236,10 @@ pub const SPEC_PARTS: [(&str, &[u8]); 27] = [
         "storage.md",
         include_bytes!("../../../conformance/old-spec/storage.md"),
     ),
-    ("syntax.md", include_bytes!("../../../conformance/old-spec/syntax.md")),
+    (
+        "syntax.md",
+        include_bytes!("../../../conformance/old-spec/syntax.md"),
+    ),
     (
         "utf8-streaming.md",
         include_bytes!("../../../conformance/old-spec/utf8-streaming.md"),

@@ -725,7 +725,11 @@ mod tests {
             std::fs::write(root.join(path), source).unwrap();
         }
         std::fs::write(root.join("conformance/pending.txt"), "").unwrap();
-        std::fs::write(root.join("conformance/old-spec/language.md"), "### LANG-7: Types\n").unwrap();
+        std::fs::write(
+            root.join("conformance/old-spec/language.md"),
+            "### LANG-7: Types\n",
+        )
+        .unwrap();
         for path in [
             "native-tests/regressions/history.tsv",
             "native-tests/regressions/exclusions.tsv",

@@ -28,8 +28,8 @@ of a stable type that is not compact evaluates its fields left to right, admits 
 `r` and publishes the value; its type is `Result[T in r, Capacity]`
 ([T1.2](ownership.md#own-26-the-transition-table)). A stable type's fields are plain, or
 stable (and `Option` and tuples of these) whose regions outlive the value's (MEM-6); a field
-whose type is a type parameter needs the bound `plain`. Own, counted, resource, scoped and
-capability fields are refused, at every depth.
+whose type is a type parameter needs the bound `plain`. Own, counted, resource and scoped
+fields are refused, at every depth; a plain capability may be held, as in any plain value.
 
 ```hirsel
 stable type Span2 { start: u64, end: u64 }
@@ -43,21 +43,22 @@ stable type Bad { name: String }                            // refused: MEM-2, o
 
 Two builder types exist, each naming its element or result type and its region.
 `span.builder(r)` makes a `SpanBuilder[T, in r]`, which builds a `FixedSpan[T] in r` (MEM-12)
-of a plain `T`:
+of a plain `T`; `span.with_capacity(r, n)` makes one with room for `n` elements, admitted at
+once ([core](core.md)):
 `span.push(mut b, x: T)` appends one element and may fail with `Capacity`, returning its
 argument and leaving the builder unchanged ([T1.6](ownership.md#own-26-the-transition-table));
-`span.finish(take b)` publishes it. A `Builder[T, in r]`, made by `build_in` or `prepare_in`
+`span.finish(take b)` publishes it. A `Builder[T, in r]`, made by `build_in`
 (MEM-4), holds one finished compact blob; `finish(take b)` publishes it as a `T in r`. Both
 builders are own, affine and not `send`, expose no view of their contents, and cannot leave
 the block that opened `r` (MEM-7). Neither `finish` can fail or allocate. When a span
 builder outgrows its current allocation it continues in a new, larger one; the bytes it
 abandons stay charged until the region closes ([FAIL-6](failure.md#fail-6-region-prefixes)).
-`span.builder` admits nothing; finishing a builder that holds no element publishes the
+`span.builder` admits nothing until the first push; finishing a builder that holds no element publishes the
 empty span, which allocates nothing. Dropping an unfinished builder publishes nothing.
 
 ```hirsel
 fn digits(n: u64, r: Region) -> Result[FixedSpan[u8] in r, (Capacity, u8)] {
-  let mut b = span.builder(r)
+  let mut b: SpanBuilder[u8, in r] = span.builder(r)
   let mut k = n
   loop { span.push(mut b, int.narrow(k % 10))?; k = k / 10; if k == 0 { break } }
   Ok(span.finish(take b))
@@ -89,11 +90,13 @@ offset of a complete `U`. In `L`, a `Link[V]` field takes a `Child[V]`; an inlin
 span field takes a view of a `String` or `List`, whose contents are copied; an inline compact
 field takes a nested literal. A put whose `Link` child has another destination's identity,
 and a writer that returns such a root, fail with `Bounds`; this check is one comparison
-per link. A put that does not fit in what is left of `n` writes nothing and returns
-`Error(Overflow)`. The `Child[T]` that `w` returns is the root: the builder holds the
+per link. A nested literal is encoded with the destination's `W`, whatever its own
+declaration's. A put that does not fit in what is left of `n`, or one in which a count, a
+link distance or the used prefix would exceed `2^b − 1` for that `W` (MEM-9), writes nothing
+and returns `Error(Overflow)`; both are decided before the first byte is written. The `Child[T]` that `w` returns is the root: the builder holds the
 destination's whole used prefix as the blob, and the reference that `finish` publishes
-records the root's offset in it. `prepare_in(r, staging)` admits an allocation of a staged compact value's blob and
-copies it. Bytes of an unused or failed destination stay charged until the region closes.
+records the root's offset in it. A published compact value is copied into another region by
+`clone_in` (MEM-17). Nothing in a destination assumes a fixed element stride. Bytes of an unused or failed destination stay charged until the region closes.
 `Dest` is scoped and moves (OWN-3), so a destination cannot be stored, returned or passed
 to `finish`.
 
@@ -146,6 +149,7 @@ fn tok(s: Region, t: Text in s) -> Result[u64, Capacity] {
 }
 ```
 ```hirsel
+stable type Token[in src] { text: Text in src, line: u32 }
 type Hidden { text: Text }                                   // refused: MEM-6, no region
 fn tok(t: String) -> Result[(), Capacity] {
   region outer {
@@ -227,6 +231,7 @@ stable fields of a non-compact type.
 fn eval(e: Expr) -> i64 { match e { Num(n) => n, Add(a, b) => eval(a) + eval(b) } }
 ```
 ```hirsel
+@compact(u32) stable type Expr = Num(i64) | Add(Link[Expr], Link[Expr])
 fn keep(e: Expr) -> Link[Expr] { match e { Add(a, _) => a, _ => fail("leaf") } }
                                               // refused: MEM-10, a link is not a value
 ```
@@ -238,13 +243,14 @@ variant of a published value is impossible (MEM-5); a new value is built instead
 
 ### MEM-12: Stable sequences
 
-v1 has two stable sequence types. `FixedSpan[T]` holds elements of a plain type `T` whose
-values all have one size: scalars, `bool`, `char`, and tuples and plain records of these. It
-is a `W`-width count, then the elements at a fixed stride. `Text` is a `W`-width byte count,
+This revision has two stable sequence types. `FixedSpan[T]` holds elements of a plain type
+`T`. It is a `W`-width count, then the elements at a stride of `T`'s logical size; an
+element's bytes are the encoding of MEM-9 when `T` is a scalar, `bool`, `char`, or a tuple or
+record of these, and private otherwise. `Text` is a `W`-width byte count,
 then that many bytes of valid UTF-8 ([SEM-3](semantics.md#sem-3-text)). `span.get(s, i)`
-returns `Option[T]` after one bounds test; `s[i]` fails with `Bounds` instead. Sequences of
-variable-size or stable elements are reserved ([reserved](reserved.md)); in v1 they are
-built from compact types and links.
+returns `Option[T]` after one bounds test; `s[i]` fails with `Bounds` instead. OPEN: sequences of
+variable-size or stable elements; implementers must not rely on their absence. They are planned for v1 ([reserved](reserved.md#open-in-this-revision));
+until they land they are built from compact types and links.
 
 ```hirsel
 fn total(xs: FixedSpan[u64]) -> u64 { let mut t: u64 = 0; for x in xs { t += x }; t }
@@ -291,7 +297,7 @@ fn cons(take l: String, take tail: Option[Rc[Node]]) -> Result[Rc[Node], (Capaci
 }
 ```
 ```hirsel
-fn wrap(take f: File) -> Result[Rc[File], (Capacity, File)] { rc.new(take f) }
+fn wrap(take f: HostFile) -> Result[Rc[HostFile], (Capacity, HostFile)] { rc.new(take f) }
                                                              // refused: OWN-4, not shareable
 ```
 
@@ -315,8 +321,9 @@ returns the payload without copying when the count is 1, and otherwise returns `
 unchanged.
 
 ```hirsel
+type Node: shareable { label: String }
 fn own_copy(take h: Rc[Node]) -> Result[Node, Capacity] {
-  match rc.try_unwrap(take h) { Ok(take n) => Ok(n), Error(take h) => clone(h) }
+  match rc.try_unwrap(take h) { Ok(take n) => Ok(take n), Error(take g) => clone(g) }
 }
 ```
 
@@ -330,10 +337,14 @@ root offset. The result type `U` is the expected type: `x`'s type, or its declar
 symmetric. The two have the same field names in the same order, and each pair of field
 types is identical, a built-in pair (`String` and `Text`; `List[T]` and `FixedSpan[T]`;
 `Box[X]` and a stable reference to `Y` where `X` and `Y` are twins), a declared twin pair, or
-`Option`, `Result` or a tuple of such pairs, component by component. While a declaration's
+`Option`, `Result` or a tuple of such pairs, component by component. Two variant types pair
+when their arms have the same names in the same order and each pair of arm payloads pairs
+by the same rule. While a declaration's
 fields are checked, its own pair is assumed, so recursive twins check. A stable target
 cannot hold counted fields. Each copied `List`, `String` or `Map` gets capacity equal to its
-length; elements are copied in index order and map entries in insertion order. A value
+length. The copy is depth-first: a record's fields in declaration order, a variant's active
+payload, a list's elements in index order and a map's entries in insertion order (key, then
+value), and each block is admitted when the walk reaches it, before what it holds. A value
 whose type summary holds a resource is never cloned (OWN-4). Failure is
 [T1.5](ownership.md#own-26-the-transition-table).
 
@@ -343,6 +354,7 @@ type Row { name: String, n: u64 }
 fn freeze(r: Region, x: Row) -> Result[RowS in r, Capacity] { clone_in(r, x) }
 ```
 ```hirsel
+type Row { name: String, n: u64 }
 @twin(Row) stable type RowN { label: Text, n: u64 }          // refused: MEM-17, field names
 ```
 

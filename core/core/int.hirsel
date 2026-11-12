@@ -12,6 +12,7 @@ pub fn checked_div[T](a: T, b: T) -> Option[T]
 pub fn saturating_add[T](a: T, b: T) -> T
 pub fn saturating_sub[T](a: T, b: T) -> T
 pub fn saturating_mul[T](a: T, b: T) -> T
+pub fn mul_wide(a: u64, b: u64) -> (u64, u64)
 pub fn widen[T, U](x: T) -> U
 pub fn narrow[T, U](x: T) -> U
 pub fn try_narrow[T, U](x: T) -> Option[U]

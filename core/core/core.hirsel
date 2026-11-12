@@ -1,6 +1,7 @@
 // Module `core`: the prelude. Every `pub` declaration here is named unqualified
 // (LANG-7). A type declared with no body is built in: its kind, bounds, size and layout are
-// the ones the specification gives it. Contracts: docs/spec/core.md.
+// the ones the specification gives it (docs/spec/core.md, "Built-in types").
+// Contracts: docs/spec/core.md.
 
 pub type Option[T] = None | Some(T)
 pub type Result[T, E] = Ok(T) | Error(E)
@@ -63,5 +64,4 @@ pub fn replace[T](mut q: T, take v: T) -> T
 pub fn clone[T, U](x: T) -> Result[U, Capacity]
 pub fn clone_in[T, U](r: Region, x: T) -> Result[U in r, Capacity]
 pub fn build_in[T](r: Region, bytes n: u64, w: scoped fn(mut Dest[T]) -> Result[Child[T], BuildError]) -> Result[Builder[T, in r], BuildError]
-pub fn prepare_in[T](r: Region, staging: T) -> Result[Builder[T, in r], BuildError]
 pub fn finish[T, in r](take b: Builder[T, in r]) -> T in r

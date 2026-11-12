@@ -14,25 +14,25 @@ written for ([MEM-24](budgets.md#mem-24-logical-charges)); in v1 that is `charge
 A definition is private to its module unless marked `pub`. A `pub` type exposes its
 fields, variants and constructors, and may be wholly destructured anywhere it is visible,
 except that a resource is destructured only in its defining module
-([OWN-14](ownership.md#own-14-no-partial-moves)). A `pub opaque` type exposes its name, kind and declared
-bounds only: outside its module its values cannot be constructed, destructured, matched
-on their fields or read field by field. Opaque types are how a library keeps an invariant
-([MEM-18](memory.md#mem-18-pools-are-library-code)); outside its module, a whole place of an
-opaque type reached through a `mut` parameter cannot be assigned or replaced.
+([OWN-14](ownership.md#own-14-no-partial-moves)). A `pub opaque` type exposes its name and its published summary
+([OWN-2](ownership.md#own-2-type-summaries)) only: outside its module its values cannot be
+constructed, destructured, matched on their fields or read field by field. Opaque types
+are how a library keeps an invariant ([MEM-18](memory.md#mem-18-pools-are-library-code)).
 
 ```hirsel
 pub opaque type Month { n: u8 }
 pub fn month(n: u8) -> Option[Month] { if n >= 1 && n <= 12 { Some(Month(n: n)) } else { None } }
 ```
 ```hirsel
-fn thirteenth() -> date.Month { date.Month(n: 13) }      // refused: PROG-2, Month is opaque
+fn forge() -> Unique { Unique(n: 1) }                     // refused: PROG-2, Unique is opaque
 ```
 
 ### PROG-3: Entry
 
 A program's entry is a `pub fn main` named by its manifest. Its parameters are capability
 types ([CAP-4](capabilities.md#cap-4-entry-grants)) and `Args`, all unmarked. `Args` is an
-opaque own type holding the run's argument strings for the whole run, read with
+opaque plain type designating the run's argument strings, which are host memory outside
+every limit and live for the whole run ([core](core.md#built-in-types)), read with
 `args.len(a)` and `args.get(a, i) -> Option[View[String]] in a`. Its result is `Result[(), E]` for any `E`. The
 run's configuration supplies the root limit ([MEM-19](budgets.md#mem-19-limits)). The run
 ends when `main` returns and its cleanup is done: `Ok(())` is success, `Error(e)` is an
@@ -40,7 +40,7 @@ error outcome carrying `e`, a failure is a failure outcome
 ([FAIL-14](failure.md#fail-14-failure-boundary)).
 
 ```hirsel
-pub fn main(out: Stdout, args: Args) -> Result[(), WriteError] waits { stdout.write(out, "hello\n") }
+pub fn main(out: Stdout, argv: Args) -> Result[(), WriteError] waits { stdout.write(out, "hello\n") }
 ```
 ```hirsel
 pub fn main(take xs: List[u64]) -> Result[(), ()] { Ok(()) }   // refused: PROG-3

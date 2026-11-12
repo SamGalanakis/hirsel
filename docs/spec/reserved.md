@@ -42,11 +42,11 @@ code; FAIL-15 makes stack exhaustion a run stop.
 **R6.** `String`/`List` and `Text`/`FixedSpan` are distinct types; compact fields declare
 inline or linked storage and links stay in one blob; wire formats are separate;
 optimisation keeps declared shapes. Sequences of variable-size or stable elements, and an
-indexed form of them, are later and will be new types; v1 builds such data from compact
-types and links. *v1:* MEM-9 to MEM-12, MEM-28.
+indexed form of them, will be new types; they are planned for v1 and open in this revision
+(below). *v1:* MEM-9 to MEM-12, MEM-28.
 
 **R7.** Literals evaluate fields before admission; `build_in` admits before its writer
-runs; `prepare_in` copies; only completed builders are public; `finish` cannot fail or
+runs; `clone_in` copies a published blob whole; only completed builders are public; `finish` cannot fail or
 allocate; failed prefixes stay charged until close. *v1:* MEM-3, MEM-4, FAIL-4, FAIL-6.
 
 **R8.** "A future isolate catches language failure only after inner loans, owners,
@@ -126,11 +126,11 @@ exactly the capabilities in its arguments, and an owning closure captures none (
 LANG-14), so a later declared facade restricts only what v1 already passes explicitly.
 CAP-7.
 
-**R20 (amended).** Every allocation is charged to the current limit; a bound scope covers
+**R20 (amended).** Every allocation is charged to the current limit, except collection growth, which keeps its storage's limit (MEM-26, MEM-27); a bound scope covers
 own, counted, region and task storage; its reservation debits the parent and all of its
 cleanup precedes its refund. *Amended clause:* values a scope funded may leave it; at exit
 the scope's limit record is handed over to its parent, which already holds those bytes,
-so every surviving block is funded by a live limit, refunds stay constant amortised, and
+so every surviving block is funded by a live limit, a refund costs amortised inverse-Ackermann time, and
 `Capacity.available` names the limit the admission was tried against. This replaces the
 audit's "child-domain/root values cannot escape". *v1:* MEM-20, MEM-25, MEM-26.
 
@@ -173,9 +173,22 @@ and changes the meaning of no v1 program.
 User-made shared limits; mutexes, atomics and cells; weak counted references; catching
 failures; deadlines and timeouts; task sets and selection; `@noalloc`; compile-time
 evaluation beyond `const`; unsafe code and foreign functions; layout declarations other
-than `@compact`; methods, traits and implementation contracts; imports; list literals;
-format strings; `forget`; static brands; sequences of variable-size or stable elements;
-conversion of errors by `?`; persistent mutable views; derivation and codecs; contracts and
+than `@compact`; methods, traits and implementation contracts; imports; list and map
+literals (an `Inline` array literal is not one); format strings; `forget`; static brands;
+conversion of errors by `?`; code generic over the numeric types, for which v1 has no bound
+(a library writes one function per width; only core operations such as `int.parse` range
+over every integer type); `text.as_string`, because `Text` and `String` have
+different representations (an author copies with `string.from` of the `Text` view, or keeps
+a `String`); generics over an `Inline` length; persistent mutable views; derivation and codecs; contracts and
 facts; the store, runners and places; recording formats. A later opt-in execution-budget
 scope may stop code at a loop back edge or a call while such a scope is present; no v1
 rule assumes that code cannot be stopped there.
+
+## Open in this revision
+
+Each item below is marked at its rule with "OPEN"; implementers must not rely on what the
+rule says about it.
+
+| item | rule | what is coming |
+|---|---|---|
+| Compact sequences of variable-size elements | [MEM-12](memory.md#mem-12-stable-sequences) | Planned for v1: a stable sequence of variable-size elements walked in order, an optional declared index, and a nested in-place builder that writes a document into one blob with no staging copy. They reuse MEM-2's element eligibility (plain or stable) and MEM-4's destinations and `Child` values, and take new type names; the names `SeqSpan` and `IndexedSpan` are kept free for them. |

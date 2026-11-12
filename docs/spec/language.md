@@ -20,8 +20,9 @@ fn f(d: Dir) -> Result[(HostFile, HostFile), IoError] waits {
 
 There are no imports. Types and values have separate namespaces, and the grammar decides
 which one a name is read in: a name in a type position (LANG-5) is a type, and any other
-name is a value. A type name resolves, in order, to a type of the current module or a type
-of the **prelude**; a value name resolves to a local, a function or constant of the current
+name is a value. A type name resolves, in order, to a builtin type name (LANG-10), a type
+of the current module or a type of the **prelude**, and declaring a type with a builtin
+type name is refused; a value name resolves to a local, a function or constant of the current
 module, a function of the prelude, a module of the current package, a dependency package or
 a core module. The prelude is the `core` module of the core library: every `pub`
 declaration in `core/core/core.hirsel` ([core](core.md)), and nothing else. A dotted path
@@ -38,8 +39,10 @@ member is refused, so an extension never redeclares or shadows one; two extensio
 declare one name are refused where that name is read through `m`. Each member keeps its
 definition identity (package, module path, name): `list.push` is the core library's and
 `list.sort` the standard library's, and visibility and type identity read that identity.
-An extension sees no private member of the core module. A local may not have the name of a visible local, a definition of its module, a module or a
-prelude function. Two definitions with one name in one module are refused. Variants are
+An extension sees no private member of the core module. A local or parameter may not have
+the name of a visible local, a definition of its module, a module or a prelude function, so
+module names are never shadowed: `main`'s argument list is written `argv: Args`, not
+`args: Args`. Two definitions with one name in one module are refused. Variants are
 written bare (`Ok(x)`, `None`) and selected by the expected type; a dotted path never names
 a variant. Core roles (`Result`, `Capacity`, the capability types) are fixed by definition
 path, never by spelling.
@@ -62,13 +65,15 @@ A closure writes its parameter types; its result type may be omitted when the ex
 type gives it.
 
 `waits` says that a call may wait and may observe cancellation
-([CONC-7](tasks.md#conc-7-cancellation-points)). A function or closure is declared `waits`
+([CONC-7](tasks.md#conc-7-cancellation-points)). `main` is always `waits`
+([PROG-3](programs.md#prog-3-entry)), and a core declaration's `waits` is as written.
+Every other function or closure is declared `waits`
 exactly when its body calls a function, or invokes a callable, whose type is `waits`; one
 declared `waits` without such a call is refused too. Cleanup never counts: finalizers and the
 cleanup of task handles run shielded and observe no cancellation
 ([FAIL-11](failure.md#fail-11-resources), [CONC-8](tasks.md#conc-8-abandoned-handles)), so a
 finalizer may call `waits` operations without being marked, and no implicit cleanup makes a
-function `waits`. `main` is `waits` ([PROG-3](programs.md#prog-3-entry)).
+function `waits`.
 
 ```hirsel
 fn twice(x: u64) -> u64 { x * 2 }
@@ -99,8 +104,9 @@ type Bad = A(x: u64, u64)                                 // refused: LANG-9, mi
 
 ### LANG-10: Built-in types
 
-The builtin type names are `bool`, `char`, `i8` to `i64`, `u8` to `u64`, `f32` and `f64`;
-unit `()` and tuples `(A, B, ..)` are written by syntax. Every other type a program names
+The builtin type names are `bool`, `char`, `i8` to `i64`, `u8` to `u64`, `f32`, `f64` and
+`Inline` ([SEM-9](semantics.md#sem-9-inline-arrays)); unit `()` and tuples `(A, B, ..)` are
+written by syntax. Every other type a program names
 without declaring it is declared in the prelude ([core](core.md)), `Option`, `Result`,
 `String`, `List` and the capability types included. `Never` is the type of `return`,
 `break`, `continue`, `fail` and a loop with no `break`, and converts to every type. Kinds
@@ -187,8 +193,8 @@ cannot move, assign or lend them `mut`. An owning closure may capture only a val
 type holds no resource, no capability, no view, no scoped value and no stable reference at
 any depth, as its type
 summary records ([OWN-2](ownership.md#own-2-type-summaries)): plain values other than
-capabilities, own values, counted holders of such values, and nothing whose type is a type
-parameter. Resources and capabilities reach a closure as call arguments. The environment
+capabilities, own values, counted holders of such values, and nothing whose summary may
+hold a capability, such as a type parameter or `Wrap[T]` for `type Wrap[T: plain] { item: T }`. Resources and capabilities reach a closure as call arguments. The environment
 holds the captures in the order the body first names them, and cleaning it cleans them in
 reverse.
 
@@ -248,9 +254,11 @@ refutable patterns. Arms of an owned scrutinee bind by
 [OWN-15](ownership.md#own-15-match-on-an-owned-value).
 
 ```hirsel
+type Shape = Circle(f64) | Rect(w: f64, h: f64)
 fn area(s: Shape) -> f64 { match s { Circle(r) => 3.14 * r * r, Rect(w: w, h: h) => w * h } }
 ```
 ```hirsel
+type Shape = Circle(f64) | Rect(w: f64, h: f64)
 fn area(s: Shape) -> f64 { match s { Circle(r) => 3.14 * r * r } }   // refused: LANG-17, Rect missing
 ```
 
@@ -282,9 +290,9 @@ constant stack whatever the depth of the value; a finalizer is an ordinary call.
 
 ### LANG-20: Constants
 
-`const N: T = e` declares a plain constant. `e` may use literals, operators, tuple and plain
-constructions, and other constants; it calls no function. It is evaluated when the program
-is checked, by the rules of [semantics](semantics.md); a constant that would fail, or whose
+`const N: T = e` declares a plain constant. `e` may use literals, operators, tuple, plain and
+`Inline` array constructions, and other constants; it calls no function. Constants are evaluated once, before any body is checked, in
+dependency order, by the rules of [semantics](semantics.md); a constant that would fail, or whose
 constants reach itself, is refused. A string literal is not a constant.
 
 ```hirsel

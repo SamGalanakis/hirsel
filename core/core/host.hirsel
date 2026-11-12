@@ -8,7 +8,7 @@ pub fn close(take f: HostFile) -> Result[(), IoError] waits
 pub fn try_lock(mut f: HostFile) -> Result[bool, IoError] waits
 pub fn unlock(mut f: HostFile) -> Result[(), IoError] waits
 pub fn mkdir(d: Dir, p: String) -> Result[(), IoError] waits
-pub fn mkdtemp(d: Dir) -> Result[(Dir, String), IoError] waits
+pub fn mkdtemp(d: Dir, mut name: String) -> Result[Dir, IoError] waits
 pub fn remove(d: Dir, p: String) -> Result[(), IoError] waits
 pub fn remove_tree(d: Dir, p: String) -> Result[(), IoError] waits
 pub fn wall_ms(c: Clock) -> u64

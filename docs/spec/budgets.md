@@ -19,7 +19,9 @@ bookkeeping: drop flags and the limit records of MEM-20.
 ### MEM-20: Limit records and hand-over
 
 Every block, counted node, region allocation, queue, task record and cause cell is charged
-to the limit current where it is made, and refers to that limit's **record**. A block keeps
+to the limit current where it is made, except that growth of a collection with storage is
+charged where MEM-26 and MEM-27 say, and refers to the record of the limit it was charged
+to. A block keeps
 its record when its owner is moved, sent, returned or received: its refund goes to the
 limit the record leads to.
 
@@ -84,8 +86,9 @@ owner is cleaned, when a region closes, when a counted node's last holder goes, 
 collection's storage is replaced by growth, and when a resource is wholly destructured (its
 unused cause cell and grant, [T3.7](ownership.md#own-26-the-transition-table)). Refunding
 cannot fail and admits nothing ([T5.7](ownership.md#own-26-the-transition-table)).
-Cleaning, closing and counted release never allocate
-([FAIL-13](failure.md#fail-13-mechanical-release)).
+Mechanical release, region close and counted release never allocate
+([FAIL-13](failure.md#fail-13-mechanical-release)); a user finalizer may, and admits only from
+its grant (MEM-27).
 
 ### MEM-24: Logical charges
 
@@ -101,7 +104,7 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 | region allocation | its byte count, rounded up to 8 |
 | a `Text` or `FixedSpan` made outside a compact type | 8 (count) + payload bytes, rounded up to 8 |
 | a span builder's allocation | a region allocation of its current capacity × element size + 8 |
-| resource value | its storage, plus 32 for its cause cell, plus its grant (MEM-27) |
+| resource value | one block: its fields' sizes, plus 32 for its cause cell, plus its grant (MEM-27) |
 | task | 256 + its result's size + 32 for its primary cause cell + its reserved limit `n` |
 | `main`'s task at startup | 256 + 32, from the root limit before `main` runs; a root limit smaller than this does not start the run |
 | channel | capacity × item size + 64 |
@@ -120,11 +123,13 @@ finalizer raised it. `HostFile`'s finalizer closes the host file and ignores the
 resource, admits its cell; `channel.sender` admits nothing.
 
 Sizes are logical, never an engine's: scalars are their widths, `bool` 1, `char` 4, `()` 0; a
-record or tuple is the sum of its fields; an own variant type is 8 plus its largest
-payload; `Box`, `Rc`, `Arc`, a task handle, a capability and a plain `fn` count 8;
-a `View`, a `Child`, an `own fn`, a `scoped fn` and a reference to a stable value (`Text`
-and `FixedSpan` included) count 16; `List`, `String` and `Map` headers, `Sender` and `Receiver` count 24; a
-compact value held inline counts its encoding.
+record or tuple is the sum of its fields; a variant type, plain or own, is 8 plus its largest
+payload; a value of a declared resource type counts 8 wherever it is held, its fields, cell
+and grant being charged once on its own block; a plain `fn` counts 8, and an `own fn`, a
+`scoped fn` and a reference to a stable value count 16; a compact value held inline counts
+its encoding. Every built-in type's size is in [core](core.md#built-in-types). Words an
+engine adds of its own, such as alignment or an environment's drop recipe, are never
+charged.
 
 A collection grows to capacity `max(needed, 4, 2 × old capacity)`; the new storage is
 admitted before the old is refunded, so growth briefly holds both. Nothing shrinks
@@ -157,10 +162,10 @@ fn f() -> Result[u64, Capacity] { bound bytes { 1 } }       // refused: LANG-5, 
 
 ### MEM-26: Growth keeps the limit
 
-A collection with no storage refers to no limit; its first growth is charged to the
-current limit. Outside a finalizer (MEM-27), growing a collection that has storage charges the new storage to the limit
+A collection with no storage, empty or static, refers to no limit; its first growth is
+charged to the current limit. Outside a finalizer (MEM-27), growing a collection that has storage charges the new storage to the limit
 its current storage's record leads to, not to the current one, and refunds the old storage
-there. So growing an outer owner inside a bound scope never touches the scope's limit:
+there. So growing an outer owner that has storage inside a bound scope never touches the scope's limit:
 whether the scope is exhausted makes no difference, and the growth is admitted or returns
 `Capacity` against the owner's limit, which has already lost the scope's reservation `n`
 (MEM-25).
@@ -182,7 +187,7 @@ funded the resource (MEM-20). So cleanup, failure cleanup included, never admits
 limit but a grant.
 
 ```hirsel
-resource type Log grant bytes 256 { sink: Sink }
+resource type Log grant bytes 256 { sink: Sender[String] }
 ```
 
 ### MEM-28: Optimisation keeps charges

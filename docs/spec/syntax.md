@@ -19,7 +19,7 @@ block-comment = "/*", { block-comment | non-delimiter-scalar }, "*/" ;
 
 A `non-newline-scalar` is any scalar other than LF and CR; a `non-delimiter-scalar` is any
 scalar that does not begin `/*` or `*/`. Tokens are formed by longest match, except that
-no number begins directly after a `.` token, so `p.0.1` is `p`, `.`, `0`, `.`, `1`.
+no float literal begins directly after a `.` token, so `p.0.1` is `p`, `.`, `0`, `.`, `1`.
 Comments nest. `///` and `/** */` are documentation comments and otherwise comments. A
 block comment's newlines count as newlines for LANG-4. An unterminated comment is one
 invalid token.
@@ -31,13 +31,11 @@ The reserved keywords are exactly:
 ```text
 fn let mut match if else loop while for in break continue return
 take copy view type stable resource scoped region bound
-pub opaque const where true false
+pub opaque const where true false bytes
 ```
 
 A keyword cannot be declared or used as a name anywhere, after a `.` included. These names
-are contextual and ordinary elsewhere: `bytes` after `bound` and `grant`, and before a sized
-parameter or argument; `drop` after
-a resource declaration; `plain`, `shareable`, `send`, `key` and `ordered` in a bound
+are contextual and ordinary elsewhere: `drop` after a resource declaration; `plain`, `shareable`, `send`, `key` and `ordered` in a bound
 list; `own` before `fn` in a type; `waits` after a function or callable header. Library types and functions, including `Region`,
 `View`, `Rc`, `Arc` and `Capacity`, are ordinary names. `_` is the discard pattern.
 
@@ -65,21 +63,21 @@ escape       = "\\", ( "\\" | '"' | "'" | "n" | "r" | "t" | "0" )
              | "\\x", hex-digit, hex-digit
              | "\\u{", hex-digit, { hex-digit }, "}" ;
 string       = '"', { string-scalar | escape }, '"' ;
-bytes        = 'b"', { ascii-string-scalar | byte-escape }, '"' ;
+byte-string  = 'b"', { ascii-string-scalar | byte-escape }, '"' ;
 raw-string   = "r", hashes, '"', raw-body, '"', hashes ;
-raw-bytes    = "br", hashes, '"', ascii-raw-body, '"', hashes ;
+raw-byte-string    = "br", hashes, '"', ascii-raw-body, '"', hashes ;
 hashes       = { "#" } ;
 character    = "'", ( character-scalar | escape ), "'" ;
 byte         = "b'", ( ascii-character-scalar | byte-escape ), "'" ;
-literal      = integer | float | character | byte | string | bytes
-             | raw-string | raw-bytes | "true" | "false" ;
+literal      = integer | float | character | byte | string | byte-string
+             | raw-string | raw-byte-string | "true" | "false" ;
 ```
 
 `string-scalar` excludes `"`, `\`, the controls U+0000–U+001F and U+007F, newlines and
 `Bidi_Control`; `character-scalar` is the same with `'` in place of `"`; `raw-body` is any
 scalars other than CR; `byte-escape` is `escape` without its `\u{..}` form; the `ascii-`
 forms also exclude non-ASCII. In strings and characters `\xNN`
-is at most 7F and `\u{..}` has one to six digits denoting a Unicode scalar value; in bytes
+is at most 7F and `\u{..}` has one to six digits denoting a Unicode scalar value; in byte strings
 and byte literals `\xNN` is any byte and `\u{..}` is absent. A character literal is exactly
 one scalar. A raw literal closes at the first `"` followed by its opening number of
 hashes, keeps every source byte including LF, and has no escapes; a CR inside it is
@@ -172,7 +170,7 @@ type-atom   = type-path, [ "[", nonempty(type-arg), "]" ]
             | "(", ")" | "(", type, ")" | "(", type, ",", list(type), ")"
             | [ "scoped" | "own", [ "[", bounds, "]" ] ], "fn", "(", list(fn-param), ")",
               [ "->", type ], [ "waits" ] ;
-type-arg    = type | "in", place ;
+type-arg    = type | "in", place | integer ;
 fn-param    = [ "take" | "mut" ], [ name, ":" ], type ;
 type-path   = name, { ".", name } ;
 
@@ -202,6 +200,7 @@ postfix     = primary, { "(", list(argument), ")" | "[", expression, "]"
 argument    = [ name, ":" ], expression | "bytes", expression ;
 primary     = literal | type-path | "(", ")" | "(", expression, ")"
             | "(", expression, ",", list(expression), ")"
+            | "[", list(expression), "]" | "[", expression, ";", integer, "]"
             | [ label ], ( block | loop-expr ) | if-expr | match-expr | closure
             | "region", name, block | "bound", "bytes", expression, block
             | "return", [ expression ] | "break", [ "'", name ], [ expression ]

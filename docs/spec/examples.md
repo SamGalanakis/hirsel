@@ -107,10 +107,10 @@ fn eval(e: Expr) -> u64 {
 }
 
 fn write(mut d: Dest[Expr]) -> Result[Child[Expr], BuildError] {
-  let two = dest.put(mut d, Num(2))?
-  let three = dest.put(mut d, Num(3))?
-  let sum = dest.put(mut d, Add(two, three))?
-  let one = dest.put(mut d, Num(1))?
+  let two: Child[Expr] = dest.put(mut d, Num(2))?
+  let three: Child[Expr] = dest.put(mut d, Num(3))?
+  let sum: Child[Expr] = dest.put(mut d, Add(two, three))?
+  let one: Child[Expr] = dest.put(mut d, Num(1))?
   dest.put(mut d, Add(one, sum))
 }
 

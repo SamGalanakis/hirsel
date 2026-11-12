@@ -13,7 +13,8 @@ has the left operand's type; a count that is negative or at least the width fail
 sign-extends signed and zero-extends unsigned values. Operands of a binary operator have one type; there are no
 mixed-width operators. Conversions are named and take their target from the expected type: `int.widen` exists
 only where every value fits; `int.narrow` fails with `Overflow`; `int.try_narrow` returns `Option[U]`;
-`int.truncate` keeps the low bits.
+`int.truncate` keeps the low bits. `int.mul_wide` gives the full 128-bit product of two `u64`
+as its high and low halves.
 
 ```hirsel
 fn add(x: u8) -> u8 { int.wrapping_add(x, 100) }
@@ -27,7 +28,8 @@ fn add(x: u8, y: u16) -> u16 { x + y }                    // refused: SEM-1, mix
 `f32` and `f64` are IEEE 754 binary32 and binary64 with round-to-nearest-even and no mode
 state. Expressions are evaluated as written: no contraction, reassociation or wider
 intermediates; `float.mul_add` fuses explicitly. Subnormals are kept and zero is signed, as
-IEEE 754 says. Every NaN an operation produces has one bit pattern: `0x7fc00000` for `f32`,
+IEEE 754 says. Every NaN an operation produces, `float.from_bits32` and `from_bits64`
+included, has one bit pattern: `0x7fc00000` for `f32`,
 `0x7ff8000000000000` for `f64`. `float.to_int` truncates toward zero and returns `NaN` or
 `OutOfRange` as its error; conversions from integers to floats and from `f64` to `f32`
 round to nearest even. [core](core.md) lists every numeric conversion. `%` is integer-only.
@@ -40,7 +42,8 @@ totalOrder.
 surrogates and values above `0x10FFFF`) convert it. `String` is an opaque own type over
 UTF-8 storage that is always valid; `Text` is its stable twin; `Bytes` is `List[u8]`.
 `string.from_utf8` validates a `Bytes` into a `String`, `string.into_bytes` gives its
-storage back, and `string.as_bytes` views it as bytes. Length is `byte_len`; scalars are
+owned storage back, copying a static literal into new storage and so returning `Capacity`
+([core](core.md)), and `string.as_bytes` views it as bytes. Length is `byte_len`; scalars are
 read with `string.next_scalar(s, at) -> Option[(char, u64)]`, which returns the scalar at
 byte position `at` and the next position. `string.slice` fails with `Bounds` at a position
 that would split a scalar. Equality, order and hashing are bytewise;
@@ -64,7 +67,8 @@ loop (SEM-6).
 ### SEM-5: Maps
 
 `Map[K: key, V]` is own and iterates in insertion order. Insertion, lookup and removal take
-amortised expected constant time; removal keeps the order of the remaining entries.
+amortised expected constant time apart from hashing and comparing keys, which is linear in
+a key's size, and from cleaning what they drop; removal keeps the order of the remaining entries.
 Inserting an existing key installs the new value in place, keeps the stored key, cleans
 the old value and then drops the incoming key; it admits nothing, so it never returns
 `Capacity`. `map.get(m, k)` returns `Option[View[V]] in m`
@@ -83,7 +87,7 @@ fn count(m: Map[String, u64], k: String) -> u64 { match map.get(m, k) { Some(v) 
 
 ### SEM-6: Iteration
 
-`for x in e` iterates a range, or a view of a `List`, a `FixedSpan` or a `Causes`
+`for x in e` iterates a range, or a view of a `List`, an `Inline` array, a `FixedSpan` or a `Causes`
 ([core](core.md)), binding a view of each element from the lowest index. Over a view of a
 `Map` it binds `(View[K], View[V])` for each entry in insertion order. `for take x in e` consumes an own `List`, moving each
 element out from the lowest index and cleaning the rest if the loop exits early. Nothing
@@ -105,7 +109,7 @@ fn grow(mut xs: List[u64]) -> Result[(), Capacity] {
 
 `==` and `!=` need `key` operands; `<`, `<=`, `>` and `>=` need `ordered` operands
 ([OWN-4](ownership.md#own-4-bounds)). Integers, `bool`, `char`, unit, `String` and `Text`
-are both. Tuples, `Option`, `Result`, `List` and `FixedSpan` have a bound when
+are both. Tuples, `Option`, `Result`, `List`, `Inline` and `FixedSpan` have a bound when
 their components do. `Unique` is `key` and not `ordered`
 ([MEM-18](memory.md#mem-18-pools-are-library-code)). A nominal type has a bound when it declares it and its fields have it.
 Equality is structural. Order is numeric for integers and `char`, `false` before `true`,
@@ -131,3 +135,22 @@ identically on every engine, build and optimisation level: the same values, outp
 `Capacity` results, failure causes and sites, cleanup order and run outcome. Nothing
 observable depends on addresses (of blocks or of functions), on the order of declarations
 in a source, on timing, on the host or on unrecorded scheduling.
+
+### SEM-9: Inline arrays
+
+`Inline[T, n]`, where `n` is an integer literal, is `n` values of type `T` held inline, with
+no block: its size is `n` × the size of `T` and it admits nothing. `T` is plain or own, and
+the array has `T`'s kind and its bounds ([core](core.md#built-in-types)). `[a, b, c]` builds
+one from its elements, evaluated left to right, and `[x; n]` from `n` copies of a plain `x`;
+either may be a constant ([LANG-20](language.md#lang-20-constants)). `a[i]` is a place, read
+through a view and assigned like a field; it fails with `Bounds` when `i` is not below `n`.
+`for` iterates it from index 0 (SEM-6). An own array is cleaned from index 0. The length is
+part of the type, and no code is generic over it in v1.
+
+```hirsel
+const POW10: Inline[u64, 4] = [1, 10, 100, 1000]
+fn scale(x: u64, k: u64) -> u64 { x * POW10[k] }
+```
+```hirsel
+fn first(xs: Inline[u64, 3]) -> u64 { xs[3] }              // fails with Bounds when called
+```

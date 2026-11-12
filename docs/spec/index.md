@@ -19,7 +19,11 @@ These goals decide between designs. A rule that would break one of them is wrong
 1. **An agent can write correct code without global knowledge.** Every top-level
    definition has a complete signature, and checking a definition reads only its own body
    and the declarations it names ([LANG-8](language.md#lang-8-signatures)). No rule needs a
-   solve, a fixpoint or a walk over other definitions.
+   solve, a fixpoint or a walk over other definitions' bodies. Before any body is checked,
+   **declaration preprocessing** computes each type's summary
+   ([OWN-2](ownership.md#own-2-type-summaries)) and each constant's value
+   ([LANG-20](language.md#lang-20-constants)) once, in dependency order, from declarations
+   alone.
 2. **Representation is declared.** A type's declaration fixes whether its values are
    plain, own, stable, resource, counted or scoped, and every use inherits it
    ([OWN-1](ownership.md#own-1-representation-is-declared-once)). Costs follow from the
@@ -44,11 +48,11 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Language](language.md) | LANG-6 to LANG-20 |
 | [Ownership](ownership.md) | OWN-1 to OWN-26 |
 | [Memory](memory.md) | MEM-1 to MEM-18 |
-| [Budgets](budgets.md) | MEM-19 to MEM-26 |
+| [Budgets](budgets.md) | MEM-19 to MEM-28 |
 | [Failure](failure.md) | FAIL-1 to FAIL-15 |
 | [Tasks](tasks.md) | CONC-1 to CONC-12 |
 | [Capabilities](capabilities.md) | CAP-1 to CAP-8 |
-| [Semantics](semantics.md) | SEM-1 to SEM-8 |
+| [Semantics](semantics.md) | SEM-1 to SEM-9 |
 | [Programs](programs.md) | PROG-1 to PROG-6 |
 | [Diagnostics](diagnostics.md) | PROG-7 and PROG-8 |
 | [Core library](core.md) | |
@@ -63,6 +67,9 @@ refuses programs, the smallest accepted and refused programs. Rule IDs are numbe
 introduced. A refusal comment `// refused: ID` names the rule a refusal cites. The
 [transition table](ownership.md#own-26-the-transition-table) is the single authority for
 what every operation does to ownership, charges and failures. Examples are informative.
+Every code block is a self-contained program fragment: it declares each type it uses that
+the core library does not, and a block whose comment says `refused` is refused only where
+the comment says.
 
 ## Glossary
 

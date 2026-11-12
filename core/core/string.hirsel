@@ -3,9 +3,9 @@
 pub fn new() -> String
 pub fn from(s: String) -> Result[String, Capacity]
 pub fn from_utf8(take b: Bytes) -> Result[String, Bytes]
-pub fn into_bytes(take s: String) -> Bytes
+pub fn into_bytes(take s: String) -> Result[Bytes, (Capacity, String)]
 pub fn as_bytes(s: String) -> View[Bytes] in s
-pub fn slice(s: String, from: u64, to: u64) -> View[String] in s
+pub fn slice(s: String, lo: u64, hi: u64) -> View[String] in s
 pub fn next_scalar(s: String, at: u64) -> Option[(char, u64)]
 pub fn byte_len(s: String) -> u64
 pub fn push(mut s: String, t: String) -> Result[(), Capacity]

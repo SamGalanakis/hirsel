@@ -17,11 +17,27 @@ this state; every rule of this specification that refuses a body is decided from
   ([OWN-11](#own-11-call-arguments), [OWN-12](#own-12-assignment));
 - the **anchor sets**: for each scoped value, the places and regions it reads
   ([OWN-19](#own-19-scoped-values));
-- the published **type summaries** ([OWN-2](#own-2-type-summaries)), which are read and
-  never recomputed.
+- the **outlives relation**: the reflexive transitive relation over the region parameters
+  of the signature, closed once from its `where` clauses, and extended by the lexical scope
+  tree and parameter-outlives-local edges as regions open
+  ([MEM-6](memory.md#mem-6-roots)); root and placement checks read it and the declared type
+  roots;
+- the **typing context**: the signature, the expected type at each point
+  ([LANG-11](language.md#lang-11-typing-is-local)), and at each open call the type and
+  region arguments found so far and its unsuffixed literal arguments, pending until all
+  the call's arguments are seen;
+- the **accumulators**: for the definition and each open closure body, whether it has made a
+  `waits` call ([LANG-8](language.md#lang-8-signatures)), and for each open closure its
+  captures in first-naming order ([LANG-14](language.md#lang-14-captures));
+- the **callback loans**: for each call receiving a scoped callback, the places its captures
+  view or lend `mut`, held for that call ([OWN-21](#own-21-scoped-callbacks));
+- the published **type summaries** ([OWN-2](#own-2-type-summaries)) and **constant values**
+  ([LANG-20](language.md#lang-20-constants)), which declaration preprocessing computes once
+  ([index](index.md)) and checking reads and never recomputes.
 
 At a join ([OWN-16](#own-16-joins)), availability joins by its table, freeze records,
-reservations and anchor sets join by union. How an implementation represents this state, and how it emits drop
+reservations, anchor sets and callback loans join by union, and the accumulators by
+"or" and concatenation. How an implementation represents this state, and how it emits drop
 flags, is its choice; neither changes what is accepted.
 
 ### OWN-1: Representation is declared once
@@ -65,12 +81,14 @@ path, byte offset) is least. The holds set reads every field, through indirectio
 types that name each other through fields, at any depth, form a group, and every member of
 a group holds the union of what the group's fields hold directly and what the other types
 they name hold. Where a rule needs a type to hold nothing, a type parameter counts as
-holding everything unless its bound is `plain`. A generic declaration's summary is stated
+holding every category its bounds do not exclude: `plain` excludes resource, scoped value
+and stable reference, but not capability, so `Wrap[T: plain] { item: T }` may hold a
+capability. A generic declaration's summary is stated
 in terms of its parameters and instantiated from the arguments' summaries at each use. A
 `type` whose fields are all plain is **plain**: it is copied by `let`, by passing and by
 capture, and has no cleanup. Scalars, `bool`, `char`, unit, plain callables, and tuples,
-`Option` and `Result` of plain types are plain. The checker reads summaries and never
-recomputes them.
+`Option` and `Result` of plain types are plain. The summaries of built-in types are in
+[core](core.md#built-in-types). The checker reads summaries and never recomputes them.
 
 ```hirsel
 type Point { x: i64, y: i64 }
@@ -133,7 +151,7 @@ not have it, plain types' `shareable` and `send` excepted. `plain` is never decl
 type Leaf: shareable + send { n: List[u64] }
 ```
 ```hirsel
-type Tree: shareable { kids: List[Rc[Tree]], log: File }  // refused: OWN-4, File is a resource
+type Tree: shareable { kids: List[Rc[Tree]], log: HostFile }  // refused: OWN-4, a resource
 ```
 
 ### OWN-5: Availability
@@ -209,12 +227,14 @@ plain `T` reads as the value. A stable value used where a view is expected is th
 ([OWN-25](#own-25-stable-values-are-read-as-views)).
 
 ```hirsel
+type Inbox { items: List[String] }
 fn sum(m: Inbox) -> u64 {
   let items = view m.items
   list.len(items)
 }
 ```
 ```hirsel
+type Inbox { items: List[String] }
 fn f(mut m: Inbox) {
   let items = view m.items
   list.clear(mut m.items)                       // refused: OWN-10, items lasts to block end
@@ -231,6 +251,7 @@ relation governs views, reservations, `mut` loans, moves, assignments, replaceme
 arguments of one call and captures.
 
 ```hirsel
+type Pair { left: List[u8], right: List[u8] }
 fn swap_halves(mut p: Pair) { list.append(mut p.left, p.right) }   // distinct fields
 ```
 ```hirsel
@@ -251,6 +272,7 @@ extent, before the owners of the exited blocks are cleaned
 region, not to a place, and freezes nothing: stable storage is never written.
 
 ```hirsel
+type Inbox { items: List[String] }
 fn f(mut m: Inbox) -> u64 {
   let n = { let items = view m.items; list.len(items) }
   list.clear(mut m.items)
@@ -258,6 +280,7 @@ fn f(mut m: Inbox) -> u64 {
 }
 ```
 ```hirsel
+type Inbox { items: List[String] }
 fn f(take m: Inbox) -> Inbox { let v = view m.items; m }     // refused: OWN-10
 ```
 
@@ -302,6 +325,7 @@ without finalizing it ([T3.5](#own-26-the-transition-table)). It is the way to m
 out of a field.
 
 ```hirsel
+type Person { name: String, age: u64 }
 fn pop_name(mut p: Person) -> String { replace(mut p.name, string.new()) }
 ```
 
@@ -314,9 +338,11 @@ declaration order ([T3.7](#own-26-the-transition-table)). A resource is destruct
 its defining module; a transparent type anywhere it is visible.
 
 ```hirsel
+type Person { name: String, age: u64 }
 fn name_of(take p: Person) -> String { let Person(name: n, ..) = take p; n }
 ```
 ```hirsel
+type Person { name: String, age: u64 }
 fn name_of(take p: Person) -> String { take p.name }      // refused: OWN-14
 ```
 
@@ -421,9 +447,10 @@ fn keep(xs: List[String]) -> List[View[String]] { list.new() }  // refused: OWN-
 A function that returns a scoped value writes its anchors in the result type: `View[T] in
 p` for one, `R[in a, in b]` for a scoped type with several. Each names a view parameter.
 The caller's argument for each stays frozen for the result's extent. The result may denote
-the anchored argument, a part of it, or a sub-view that a call gave for that argument (OWN-8),
-including a core operation's; such a result has the argument's anchor and keeps the same
-freeze. It is a scoped value and copies as OWN-3 says. No anchor is inferred from a body.
+the anchored argument, a part of it (a field, element or payload, at any depth), or a
+sub-view that a call gave for the argument or for such a part (OWN-8), core operations'
+included, or a part or sub-view of such a sub-view, at any depth; such a result has the
+argument's anchor and keeps the same freeze. It is a scoped value and copies as OWN-3 says. No anchor is inferred from a body.
 
 ```hirsel
 fn first(xs: List[String]) -> Option[View[String]] in xs { list.get(xs, 0) }
@@ -473,6 +500,7 @@ scoped type Cursor { input: View[Bytes], pos: u64 }
 fn start(b: Bytes) -> Cursor in b { Cursor(input: view b, pos: 0) }
 ```
 ```hirsel
+scoped type Cursor { input: View[Bytes], pos: u64 }
 type Holder { c: Cursor }                                 // refused: OWN-19
 ```
 

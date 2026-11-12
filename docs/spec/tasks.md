@@ -24,6 +24,7 @@ scoped values, builders and task handles. The check reads declarations and captu
 type Job: send { id: u64, name: String }
 ```
 ```hirsel
+type Node: shareable { label: String }
 type Job: send { id: u64, cache: Rc[Node] }            // refused: CONC-2, Rc is not send
 ```
 
@@ -44,6 +45,7 @@ fn count(tasks: Tasks, take words: List[String]) -> Result[Task[u64], (Capacity,
 }
 ```
 ```hirsel
+type Node: shareable { label: String }
 fn count(tasks: Tasks, take words: List[Rc[Node]]) -> Result[Task[u64], (Capacity, List[Rc[Node]])] {
   task.spawn(tasks, bytes 4096, take words, fn(take w: List[Rc[Node]]) -> u64 { list.len(w) })
 }                                                          // refused: CONC-2, Rc is not send
@@ -76,6 +78,7 @@ is not observable. The blocks of a sent value stay charged to the limit that adm
 ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)).
 
 ```hirsel
+type Job: send { id: u64, name: String }
 fn pump(tx: Sender[Job], take jobs: List[Job]) -> Result[(), Closed[Job]] waits {
   for take j in jobs { channel.send(tx, take j)? }
   Ok(())
@@ -97,7 +100,7 @@ the joiner's cleanup (CONC-8).
 ```hirsel
 fn total(tasks: Tasks, take a: List[String]) -> Result[u64, JoinError] waits {
   let h = match task.spawn(tasks, bytes 4096, take a, fn(take w: List[String]) -> u64 { list.len(w) }) {
-    Ok(take h) => h, Error((_, take a)) => return Ok(list.len(a)),
+    Ok(take h) => h, Error((_, take back)) => return Ok(list.len(back)),
   }
   task.join(take h)
 }

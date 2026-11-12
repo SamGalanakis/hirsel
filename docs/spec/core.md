@@ -11,14 +11,15 @@ specification. `X?` in a comment marks the rule that governs the operation.
 type Capacity { requested: u64, available: u64 }               // MEM-24
 type Closed[T] { item: T }                                     // CONC-5
 type SendError[T] = Full(T) | Closed(T)                        // CONC-5
-type JoinError = Failed(List[Cause]) | Cancelled               // CONC-6
+type JoinError = Failed(Causes) | Cancelled                     // CONC-6
 type Cause { kind: CauseKind, site: Site }                     // FAIL-2, FAIL-10
 type CauseKind = Overflow | Bounds | Division | Unwrap | Fail(String) | Cancelled | Capacity
 type BuildError = Capacity(Capacity) | Overflow                // MEM-4
 ```
 
-`Site` is an opaque plain type naming a source position. `JoinError`'s `Failed` list
-holds the primary cause first.
+`Site` is an opaque plain type naming a source position. `Causes` is an opaque own
+sequence of `Cause` read with `for`, primary cause first; it is the chain's cause cells
+(FAIL-10), so delivering it allocates nothing.
 
 ## Integers and floats (SEM-1, SEM-2)
 
@@ -34,7 +35,7 @@ fn int.parse[T](s: String) -> Result[T, ParseError]
 fn float.mul_add[T](a: T, b: T, c: T) -> T
 fn float.to_i64[T](x: T) -> Result[i64, FloatError]            // and to the other widths
 fn float.total_order[T](a: T, b: T) -> Order
-fn fail(msg: String) -> Never                                  // FAIL-2
+fn fail(take msg: String) -> Never                            // FAIL-2
 ```
 
 `T` and `U` above range over the integer or float types only.

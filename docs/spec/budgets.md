@@ -22,7 +22,12 @@ grown (MEM-28): its refund goes to the same limit. When a limit ends (its bound 
 exits or its task finishes) while blocks charged to it survive, their charges pass to the
 limit's parent, and their later refunds go there; this repeats up to the root. Transferring
 or refunding across tasks is an event in the run's event order
-([CONC-10](tasks.md#conc-10-event-order)).
+([CONC-10](tasks.md#conc-10-event-order)). A sent value's blocks keep their limit through the
+sender, the queue, the receiver, an abandoned handle and `join`; because a limit's charges
+pass on when it ends and the root ends last, the limit a block is charged to always
+outlives the block. Queue storage is admitted when the channel is made and a task's result
+slot when it is spawned (MEM-26), so no `send`, `receive` or `join` admits after a value
+changes custody.
 
 ```hirsel
 fn make(n: u64) -> Result[List[u64], Capacity] {
@@ -75,7 +80,7 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 | `Map[K, V]` storage | capacity × (key size + value size + 16), rounded up to 8 |
 | counted node | payload size + 8 |
 | region allocation | its byte count, rounded up to 8 |
-| task | 256 + 32 for its primary cause |
+| task | 256 + the size of its result + 32 for its primary cause |
 | resource value | 32 for one cause, besides its storage |
 | channel | capacity × item size + 64 |
 
@@ -109,9 +114,13 @@ fn f() -> Result[u64, Capacity] { bound bytes { 1 } }       // refused: LANG-5, 
 
 ### MEM-28: Growth keeps the limit
 
-Growing a collection charges the new storage to the limit of its existing block, not to the
-current limit, and refunds the old storage there. A collection made outside a bound scope
-and grown inside it is not charged to the scope.
+A collection belongs to the limit current where it is made, even while it has no storage.
+Growing it charges the new storage to that limit, not to the current one, and refunds the
+old storage there. So growing an outer owner inside a bound scope never touches the scope's
+limit: whether the scope is exhausted makes no difference, and the growth is admitted or
+returns `Capacity` against the owner's limit, which has already lost the scope's
+reservation `n` (MEM-27). When the owner's limit has ended, its block's charges have passed
+to a parent (MEM-22), and growth is charged there.
 
 ### MEM-29: Finalizer grants
 

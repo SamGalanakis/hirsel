@@ -151,6 +151,13 @@ types (inline), `Text`, the spans of MEM-12, and `Link[U]` (MEM-10). Compact val
 built only through MEM-3 and MEM-4. Compact layout is the only layout a program can
 declare in v1; every other layout is private ([MEM-13](#mem-13-own-layout)).
 
+The language fixes, and an engine's backend may rely on: scalars are little-endian at
+their written width; a field's offset is the sum of the sizes of the fields before it; a
+tag's width as above; the extent words of MEM-12, each `W` wide; the link encoding of
+MEM-10; the blob cap `2^W − 1`; and that a destination of `n` bytes (MEM-4) receives a
+blob of at most `n` bytes at its start. Private: where a blob sits in its region and its
+alignment, region chunking, every non-compact layout and the calling convention.
+
 ```hirsel
 @compact(u32) stable type Entry { id: u64, name: Text, tags: SeqSpan[Text] }
 ```
@@ -187,9 +194,10 @@ variant of a published value is impossible (MEM-5); a new value is built instead
 ### MEM-12: Stable sequences
 
 There are three stable sequence types. `FixedSpan[T]` holds elements of one fixed size and
-supports `span.get(s, i)` with one bounds test. `SeqSpan[T]` stores a count and a byte
+supports `span.get(s, i)` with one bounds test. `FixedSpan[T]` stores a count then the elements. `SeqSpan[T]` stores a count and a byte
 extent, then the elements; it supports iteration and length only, never `s[i]`.
-`IndexedSpan[T]` adds an offset table with one `W`-width entry per element and supports
+`IndexedSpan[T]` adds, after the extent, an offset table with one `W`-width entry per
+element, each the distance from the table's start to the element, and supports
 `span.get`. `Text` is a `SeqSpan[u8]` of valid UTF-8 ([SEM-3](semantics.md#sem-3-text)).
 Skipping a nested sequence reads its stored extent and costs constant work.
 
@@ -248,8 +256,9 @@ so the count each operation observes is the count that order gives.
 
 ### MEM-16: Counting
 
-`share(h)` adds a holder and cannot fail: counts are 64-bit and cannot overflow, because
-every holder occupies storage. Dropping a holder decrements the count; at zero the payload
+`share(h)` adds a holder. Counts are 64-bit. A count never wraps and never becomes
+permanent: an increment past `2^64 − 1` is a run stop
+([FAIL-15](failure.md#fail-15-run-stops)), so `share` returns no error. Reaching it needs `2^64` holders at once. Dropping a holder decrements the count; at zero the payload
 is released with a worklist that uses constant stack, allocates nothing and cannot fail,
 and each node is refunded as it is freed ([T4](ownership.md#own-26-the-transition-table)).
 No user code runs during a release because shareable payloads hold no resources.

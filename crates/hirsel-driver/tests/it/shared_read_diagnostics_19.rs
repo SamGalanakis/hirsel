@@ -312,7 +312,7 @@ fn shared_read_diagnostics_19_imported_names_and_opacity() {
 
 #[test]
 fn shared_read_diagnostics_19_documented_read_copy_and_thaw() {
-    let docs = std::fs::read_to_string(root().join("docs/spec/memory.md")).unwrap();
+    let docs = std::fs::read_to_string(root().join("conformance/old-spec/memory.md")).unwrap();
     let block = docs
         .split("<!-- shared-read-diagnostics-19 -->")
         .nth(1)

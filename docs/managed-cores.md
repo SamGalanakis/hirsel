@@ -103,7 +103,7 @@ minus lost permits. `permit_wait_ns` is the mean acquisition time in B1's
 are enabled.
 
 The native Ordered startup/resize guarantee is specified in
-[CONC-1](spec/concurrency.md#conc-1-runtime). `worker_phase` distinguishes
+[CONC-1](../conformance/old-spec/concurrency.md#conc-1-runtime). `worker_phase` distinguishes
 `starting`, `running`, `draining` and `finished` (null for embeddings that do not
 supply it). The listener starts before `pool::grow`: a first socket reply such as
 requested 4, effective 3, pending 4 can sample registration of the third worker,

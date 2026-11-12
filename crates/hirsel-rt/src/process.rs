@@ -1,4 +1,4 @@
-//! The Process capability (docs/spec/core-library.md#processes): exact program rules
+//! The Process capability (conformance/old-spec/core-library.md#processes): exact program rules
 //! checked before any effect, scripted worlds, and the host provider.
 //!
 //! The host provider is Rust std's `Command` with an empty environment and an explicit
@@ -28,7 +28,7 @@ pub struct Deadline {
 }
 
 /// The grace a timed-out child has between SIGTERM and SIGKILL
-/// (docs/spec/core-library.md#processes).
+/// (conformance/old-spec/core-library.md#processes).
 pub const TERMINATION_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Which provider serves a Proc: the host, or a scripted world.
@@ -343,7 +343,7 @@ impl State {
             _ => Err(AdapterError::InvalidHandle(id)),
         }
     }
-    /// A command's checks (docs/spec/core-library.md#processes): program and environment,
+    /// A command's checks (conformance/old-spec/core-library.md#processes): program and environment,
     /// then a working directory a host provider cannot start in.
     fn command_error(
         &self,

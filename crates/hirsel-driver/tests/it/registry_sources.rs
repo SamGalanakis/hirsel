@@ -14,7 +14,7 @@ fn std_catalogue_signatures_match_the_complete_ordinary_source_contracts() {
 
     hirsel_intern::jobs::with_compiler_stack(|| {
         // Read the normative declarations independently of executable source.
-        let catalogue = include_str!("../../../../docs/spec/std-library.md")
+        let catalogue = include_str!("../../../../conformance/old-spec/std-library.md")
             .split("\n## The catalogue\n")
             .nth(1)
             .unwrap()

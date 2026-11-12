@@ -7,9 +7,9 @@ with the [tour](tour.md), [building and running programs](building.md) and
 
 ## Layout
 
-- `docs/spec/` is the specification, starting at `docs/spec/index.md`. Rule IDs
-  such as `OWN-6` are stable, each is defined once as a `### ID: Title`
-  heading, and every diagnostic cites one. `docs/spec/syntax.md` is the grammar.
+- `docs/spec/` is the specification of the v1 core language, starting at `docs/spec/index.md`.
+  Rule IDs such as `OWN-6` are defined once as a `### ID: Title` heading. `conformance/old-spec/`
+  is the previous specification, kept unchanged as test data of the old conformance corpus.
 - `crates/` is the Cargo workspace: lexer, parser, checker, typed IR, the
   interpreter, the reference-counting pass, the LLVM backend, the runtime and
   the driver. Each crate's `README.md` lists its invariants.

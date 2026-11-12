@@ -30,7 +30,7 @@ Commands (arguments use the shared lexopt parser):
   <escape>: <entry> -> ... -> <escape>` (exit 1), the shortest dependency path
   from the entry to an extern or `Unsafe` operation (CAP-6).
 - `hirsel run <file>` requires complete checking/lowering and writes exact stdout
-  bytes. Both engines use the shared [PROG-3 exit policy](../../docs/spec/programs.md#prog-3-entry).
+  bytes. Both engines use the shared [PROG-3 exit policy](../../conformance/old-spec/programs.md#prog-3-entry).
   Without `--run`, `--grants`, `--simulation` or `--replay` it admits the empty-grant
   record in either engine: an entry taking a root capability is refused at launch
   (`hirsel: launch: {"kind":"not_granted","root":"Io"}`, exit 3), followed by a line
@@ -55,12 +55,12 @@ Commands (arguments use the shared lexopt parser):
 - `hirsel precompute <package manifest.json> -o <directory>` checks the package
   and populates the ordinary query store. It requires V and refuses diagnostics.
   Toolchain packaging uses this same path for std (docs/building.md, "Ordinary std products").
-- `hirsel tapes check <tape>...` joins a set of linked runner tapes (docs/spec/runners.md,
+- `hirsel tapes check <tape>...` joins a set of linked runner tapes (conformance/old-spec/runners.md,
   RUN-11) without a program: it prints a `checked:` line per link whose ends are both in
   the set, an `unchecked:` line per link with one end missing, and a count (exit 0), or
   refuses the set on the first set of mismatches (`hirsel: tapes check: ...`, exit 1).
 - `hirsel serve <program> --host <json>` is a runner host for `remote.tls@1` callers
-  (docs/spec/runners.md, RUN-13): it listens at the host configuration's endpoint, prints
+  (conformance/old-spec/runners.md, RUN-13): it listens at the host configuration's endpoint, prints
   `hirsel serve: listening on <endpoint>` on stderr once it accepts connections, and runs
   each admitted call to one of the program's callee entries as its own callee run, until
   the process ends.
@@ -158,7 +158,7 @@ exceeds its memory budget prints `budget exceeded: memory` and exits 5 in every 
 `build` and `run --native` accept `--proofs <sidecar>` with any number of
 `--trust <tool@version>`: current `proved` records from a trusted checker
 remove their checks from the native program (PS-12/PS-13, the sidecar format in
-`docs/spec/proof-seam.md`). The proof report goes to stderr as
+`conformance/old-spec/proof-seam.md`). The proof report goes to stderr as
 `hirsel: proof <id>: removed` or `kept (<reason>)` lines and a count line.
 `--trust` needs `--proofs`, and `--proofs` needs a native engine. A malformed
 sidecar is a tool error.

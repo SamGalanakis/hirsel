@@ -1,4 +1,4 @@
-//! docs/spec/diagnostics.md: prerequisite guards live at query boundaries; select each operation's
+//! conformance/old-spec/diagnostics.md: prerequisite guards live at query boundaries; select each operation's
 //! property obligation before ordering independent sites by source path and byte.
 use hirsel_diag::{Diagnostic, Obligation, Severity};
 use hirsel_span::SourceMap;

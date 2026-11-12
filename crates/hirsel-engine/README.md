@@ -313,7 +313,7 @@ expression-index shifts. The opening source example still encounters phase-owned
 invariant failures.
 
 The mode adapter runs `hirsel_check::audit` after ownership and merges its source
-diagnostics through the same docs/spec/diagnostics.md selection. Representation decisions consume the
+diagnostics through the same conformance/old-spec/diagnostics.md selection. Representation decisions consume the
 checked source types and declared signatures before any TIR publication.
 
 Compile-time scalar materialization runs after H/J/I and before K publication.

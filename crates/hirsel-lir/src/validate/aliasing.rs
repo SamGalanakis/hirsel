@@ -1,6 +1,6 @@
 //! OWN-3 at call sites: a callee reaches a `mut` argument's place only through
 //! that argument (`CallAlias`). It is the evidence the native backends' `noalias`
-//! on `mut` place addresses rests on (`docs/spec/implementation.md`, Aliasing facts).
+//! on `mut` place addresses rests on (`conformance/old-spec/implementation.md`, Aliasing facts).
 //!
 //! A callee reaches caller storage through its arguments and its callee value. A
 //! `mut` argument names a slot place; every other argument, and the callee, is a

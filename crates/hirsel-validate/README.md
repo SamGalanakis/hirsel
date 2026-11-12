@@ -785,7 +785,7 @@ representations retain conservative summaries; recursive path closure is absent.
 
 Borrowed `for` protocol returns independently compose owned Data yields through
 unnamed owned preparation and cursor holders back to their selected sources
-(docs/spec/core-library.md). The exact validated association receipt supplies the holder roles; source
+(conformance/old-spec/core-library.md). The exact validated association receipt supplies the holder roles; source
 bounds, ownership, expiry and result-relation inclusion remain checked. Hand-built
 controls reject removal of the receipt, a different selected source and a borrowed return.
 

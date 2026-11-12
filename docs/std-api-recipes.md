@@ -4,8 +4,8 @@ Start with the task, then look up its public module in the selected
 [std manifest](../stdlib/std@1/hirsel.json). A source's `module` field assigns its
 namespace; its physical filename does not. For example, `time_format.hir`,
 `time_civil.hir` and `time.hir` all contribute to `time`. No imports are needed.
-The [full signature index](api.md), [std catalogue](spec/std-library.md) and
-[core catalogue](spec/core-library.md) are the complete references.
+The [full signature index](api.md), [std catalogue](../conformance/old-spec/std-library.md) and
+[core catalogue](../conformance/old-spec/core-library.md) are the complete references.
 
 | Task / search spelling that failed | Public spelling | Contract at the call |
 | --- | --- | --- |
@@ -26,7 +26,7 @@ Core supplies `string.from_bytes`, `string.as_bytes(s: String) -> Bytes in s`,
 `string.byte_len` and position/slice operations. Ordinary std source extends the
 same `string` head with `find`, `trim`, `concat`, `split` and others; see
 [string.hir](../stdlib/std@1/string.hir). Core and std heads merge under
-[LANG-4](spec/language.md#lang-4-names); full spellings such as
+[LANG-4](../conformance/old-spec/language.md#lang-4-names); full spellings such as
 `core@1/string.from_bytes` and `std@1/string.find` disambiguate definitions.
 A lookup failure is not permission to substitute a similarly spelled operation:
 `json.array_next` advances a streaming reader, not a DOM array lookup. Search
@@ -197,7 +197,7 @@ reads no clock. `Date` and `TimeOfDay` are opaque. Use their public checked cons
 `time_of_day.new(h: u8, m: u8, s: u8, ns: u32) -> Option[time.TimeOfDay] uses {}`.
 Both return `None()` for invalid fields. `DateTime` and `BrokenDownTime` are
 public records. For text input, see the parsers in the
-[std catalogue](spec/std-library.md).
+[std catalogue](../conformance/old-spec/std-library.md).
 For a timestamp use
 `time.broken_down(value: time.Timestamp, offset: i32) -> Result[time.BrokenDownTime, time.TimeError] uses {}`;
 its error is `OutOfRange`. This function, too, is registered under `time`.

@@ -1393,7 +1393,7 @@ impl<S: Stage> Checker<'_, '_, S> {
                         matches!((from, to), (Some(a), Some(b)) if widens(a, b))
                             && flag_kind.is_none()
                     }
-                    // truncate requires a no-wider destination (docs/spec/core-library.md).
+                    // truncate requires a no-wider destination (conformance/old-spec/core-library.md).
                     ConvertMode::Truncate => {
                         matches!((bits(from), bits(to)), (Some(a), Some(b)) if b <= a)
                             && flag_kind.is_none()

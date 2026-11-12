@@ -2,7 +2,7 @@
 
 Browse the [full signature index](api.md) for every public core and std declaration.
 
-Start here when writing Hirsel. The [specification](spec/index.md) defines the
+Start here when writing Hirsel. The [specification](../conformance/old-spec/index.md) defines the
 rules; [building](building.md) covers toolchains and launch details. The programs
 below are small enough to copy and run from the repository root with
 `hirsel run --simulation docs/tour/world.json <linked-source.hir>`, in a simulated
@@ -312,7 +312,7 @@ error. A mapper may also be a named one-argument borrowed or
 taken function; it cannot require `mut`. Every early exit still cleans up owned
 resources. An entry returning `Error` exits 1; the launcher prints `error: <e>` to stderr
 after flushing stdout. That launch report needs no stderr grant and is separate
-from explicit program output ([PROG-3](spec/programs.md#prog-3-entry)).
+from explicit program output ([PROG-3](../conformance/old-spec/programs.md#prog-3-entry)).
 
 <!-- tour: conformance/LANG/LANG-8-tour-03-errors-run.hir -->
 [Runnable source](../conformance/LANG/LANG-8-tour-03-errors-run.hir)
@@ -936,7 +936,7 @@ objects retain insertion order and duplicate keys are rejected. Construct or ins
 `Value`s. For application records, generate an explicit converter with
 `fn report_to_json(r: Report) -> json.Value uses {} = comptime derive.json_value(shape(Report))`.
 Nested record fields use their type's snake-case converter name (for example,
-`Summary` calls `summary_to_json`); see [derived bodies](spec/std-library.md#derived-bodies). A raw literal such
+`Summary` calls `summary_to_json`); see [derived bodies](../conformance/old-spec/std-library.md#derived-bodies). A raw literal such
 as `r#"{"n": 1}"#` writes JSON text without escaping its quotes.
 
 For typed input without a `json.Value` tree, declare both

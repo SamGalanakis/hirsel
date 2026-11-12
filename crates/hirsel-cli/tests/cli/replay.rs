@@ -469,7 +469,7 @@ fn process_recordings_replay_in_either_engine_without_spawning() {
 }
 
 /// A held process can only time out; the success run gets a fresh hour-long budget.
-/// See docs/spec/core-library.md#processes.
+/// See conformance/old-spec/core-library.md#processes.
 const DEADLINE_PROGRAM: &str = r#"fn grant(take e: GrantError) -> () {}
 fn clock_error(take e: ClockError) -> () {}
 

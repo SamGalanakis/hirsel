@@ -89,7 +89,7 @@ declares. `hirsel_store_authority::check` owns the per-provider members; a membe
 another provider takes refuses. `validate_authorities` reads the conformance
 `authorities` directive, which refuses `authority.log@1` (no host directory) and an
 `authority.objects@1` whose objects are not `objects.sim@1`.
-`inputs.scheduler` names `fifo`, `random` or `pct`, version 1 (docs/spec/determinism.md,
+`inputs.scheduler` names `fifo`, `random` or `pct`, version 1 (conformance/old-spec/determinism.md,
 "Scheduler"); any other refuses as Unsupported. `Config::scheduler` projects its launch
 word (`Scheduler::CONTRACTS`, shared with `hirsel_kernels::schedule::Algorithm::code`) and
 seed, and `Scheduler::parse` reads the `name@1:seed` spelling of `hirsel test --scheduler`.
@@ -197,7 +197,7 @@ returns it; budgets are host policy, part of run identity, and grant nothing. Te
 choose them. An adapter that cannot enforce one refuses the launch (`BudgetKind` names the
 budget a stopped run exceeded).
 
-`io.runners` (docs/spec/runners.md "Providers") lists the run's runners, sorted and
+`io.runners` (conformance/old-spec/runners.md "Providers") lists the run's runners, sorted and
 unique by lowercase `name`; the canonical bytes omit the member when the list is empty,
 so records without runners keep their identity. `local.threads@1` takes `threads`
 (default 1, nonzero) and `queue` (default 64); `sim@1` takes a `node`, the contract it
@@ -228,7 +228,7 @@ one from `HostAuthority::run_instance` for a run that names runners.
 tag, the complete FAIL-1 chain, Blocked waits, budget/environmental stops,
 refusal/replay causes and interpreter tooling diagnostics without depending on
 compiler types. `RunOutcome::exit_code()` is the only standalone exit policy;
-see the [PROG-3 table](../../docs/spec/programs.md#prog-3-entry). `Site::report`
+see the [PROG-3 table](../../conformance/old-spec/programs.md#prog-3-entry). `Site::report`
 formats complete human/JSON failures, and `Wait::encode`/`decode` carry native
 parked-wait reports. A multi-run host keeps outcomes and never exits for a run.
 

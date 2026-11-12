@@ -11,7 +11,7 @@ def invoke(argv,name,execution=False):
  (root/(name+'.exit')).write_text(str(out.returncode))
  return out
 def signal_projected(tape):
- # Read-only observer of the existing v8 envelope, docs/spec/determinism.md.
+ # Read-only observer of the existing v8 envelope, conformance/old-spec/determinism.md.
  # Trace events publish at completion; the tape flushes each completed event.
  if not tape.exists():return None
  data=tape.read_bytes()

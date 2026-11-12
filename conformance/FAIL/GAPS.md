@@ -1,11 +1,11 @@
 # Failure coverage dispositions
 
-[FAIL-1–4](../../docs/spec/failure.md#fail-1-kinds) and the
-[core concurrency types](../../docs/spec/core-library.md#concurrency) define
+[FAIL-1–4](../../conformance/old-spec/failure.md#fail-1-kinds) and the
+[core concurrency types](../../conformance/old-spec/core-library.md#concurrency) define
 `Failure`, `SourceSite` and `FailureKind`. Old section/issue numbers are historical.
 
 - **Implemented finite depth/cleanup controls — LANG-10 / FAIL-3:**
-  the [depth revision](../../docs/spec/index.md#deterministic-depth-revision) has
+  the [depth revision](../../conformance/old-spec/index.md#deterministic-depth-revision) has
   four-engine controls in [logical_depth_31](../../crates/hirsel-conformance/tests/it/logical_depth_31.rs)
   for pre-entry Take rejection, independent 64-invocation cleanup, nested field
   lifetime, primary/ordered causes, cancellation and isolate recovery. Independent

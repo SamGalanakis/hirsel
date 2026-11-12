@@ -201,8 +201,8 @@ fn execute_recipe(root: &Path, source: &str, expected_output: &[u8]) {
 #[test]
 fn contextual_error_guidance_24_documented_recipes_and_scalar_vectors() {
     let scratch = tempfile::tempdir().unwrap();
-    let language = include_str!("../../../../docs/spec/language.md");
-    let library = include_str!("../../../../docs/spec/std-library.md");
+    let language = include_str!("../../../../conformance/old-spec/language.md");
+    let library = include_str!("../../../../conformance/old-spec/std-library.md");
     for source in [
         language
             .split("```hirsel\n// contextual-error recipe\n")

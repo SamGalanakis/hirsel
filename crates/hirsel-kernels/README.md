@@ -26,7 +26,7 @@ The exact JSON control/quote/backslash set uses serde_json's eight-byte
 non-ASCII bytes and returns the first stop within the supplied extent.
 
 `schedule` holds the scheduler policies `fifo@1`, `random@1` and `pct@1`
-(docs/spec/determinism.md, "Scheduler"): a SplitMix64 state, `pct@1`'s depth, horizon and
+(conformance/old-spec/determinism.md, "Scheduler"): a SplitMix64 state, `pct@1`'s depth, horizon and
 change points, priorities for new tasks (`admit`), the change point a scheduling point hits
 (`point`) and the choice among runnable priorities (`choose`). Both engines call them at the
 same points; `//:hirsel-kernels-test-vectors` pins choices from an independent transcription.

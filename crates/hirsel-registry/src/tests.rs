@@ -36,7 +36,7 @@ fn every_declared_signature_matches_the_review_table_and_canonical_hash() {
 #[test]
 fn section22_ledger_is_a_complete_verbatim_transcription() {
     // Independent normative oracle: no runtime code or Builder is used here.
-    let spec = include_str!("../../../docs/spec/core-library.md");
+    let spec = include_str!("../../../conformance/old-spec/core-library.md");
     let section = spec
         .split("\n## The ledger\n")
         .nth(1)

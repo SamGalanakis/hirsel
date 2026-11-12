@@ -1,4 +1,4 @@
-//! The spec in docs/spec defines every rule ID exactly once, every corpus
+//! The spec in conformance/old-spec defines every rule ID exactly once, every corpus
 //! header and every rule ID the code cites resolves to that definition, and
 //! every relative link in the spec reaches an existing heading or file.
 //! It keeps its own test binary: it reads every crate's sources, which only

@@ -22,7 +22,7 @@ pub use compiler::Observation;
 pub type Rules = BTreeSet<RuleId>;
 
 /// The specification's directory, relative to the repository root.
-pub const SPEC_DIR: &str = "docs/spec";
+pub const SPEC_DIR: &str = "conformance/old-spec";
 
 /// The rule IDs one Markdown part of the spec defines: every `### ID: Title`
 /// heading outside fenced code blocks. A heading whose text before `: ` is one

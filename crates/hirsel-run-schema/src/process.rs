@@ -198,7 +198,7 @@ pub struct ChildRun {
     pub steps: Vec<ChildStep>,
 }
 
-/// `ChildStep`, in its docs/spec/core-library.md variant order.
+/// `ChildStep`, in its conformance/old-spec/core-library.md variant order.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ChildStep {
@@ -289,7 +289,7 @@ impl From<ProcessOutcome> for PipelineOutcome {
     }
 }
 
-/// A scripted world's pipeline (docs/spec/core-library.md#processes, scripted runs): each
+/// A scripted world's pipeline (conformance/old-spec/core-library.md#processes, scripted runs): each
 /// stage takes the first unused run entry whose program and args equal its own, all or
 /// none (`NotFound()` when one has none). The first error outcome in stage order is the
 /// pipeline's; otherwise the statuses are the outcomes', the output the last stage's and
@@ -348,7 +348,7 @@ pub struct GroupOutput {
     pub stderr: Vec<Vec<u8>>,
 }
 
-/// A scripted world's spawned pipeline (docs/spec/core-library.md#processes, scripted runs):
+/// A scripted world's spawned pipeline (conformance/old-spec/core-library.md#processes, scripted runs):
 /// each stage takes the first unused child entry whose program and args equal its own, all
 /// or none (`NotFound()` when one has none).
 pub fn take_children(
@@ -389,7 +389,7 @@ pub fn take_timed_children(
         .collect())
 }
 
-/// `ExitStatus`, in its docs/spec/core-library.md variant order.
+/// `ExitStatus`, in its conformance/old-spec/core-library.md variant order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExitStatus {
@@ -397,7 +397,7 @@ pub enum ExitStatus {
     Signaled(i32),
 }
 
-/// `ProcessError`, in its docs/spec/core-library.md variant order.
+/// `ProcessError`, in its conformance/old-spec/core-library.md variant order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProcessFailure {
@@ -438,7 +438,7 @@ pub fn canonical_program(path: &str) -> bool {
     })
 }
 
-/// One `Command` (docs/spec/core-library.md#processes): a program, its arguments, the
+/// One `Command` (conformance/old-spec/core-library.md#processes): a program, its arguments, the
 /// working directory's Dir handle (`None` is `/`), an exact environment (`None`
 /// inherits the granting rule's names from the launcher) and whether it runs in a process
 /// group of its own.

@@ -1,4 +1,4 @@
-//! Runner entries (RUN-1, RUN-13, docs/spec/runners.md "Providers"): the places a run
+//! Runner entries (RUN-1, RUN-13, conformance/old-spec/runners.md "Providers"): the places a run
 //! may call functions at, each a provider contract with its settings, its seam members
 //! and, for a place that runs Hirsel code with authority, the grant set and definition
 //! allowlist its callees run under. A member equal to its default is absent from

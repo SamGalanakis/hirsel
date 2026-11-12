@@ -572,7 +572,7 @@ impl Simulation {
         self.close_net(stream)
     }
     /// Close a scripted stream or listener: the Test report when a client it
-    /// leaves still expects bytes (docs/spec/core-library.md, scripted peers).
+    /// leaves still expects bytes (conformance/old-spec/core-library.md, scripted peers).
     pub(super) fn close_net(&mut self, id: u64) -> Option<String> {
         self.grants.remove(&id);
         self.udp_sockets.remove(&id);

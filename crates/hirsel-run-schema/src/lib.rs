@@ -204,7 +204,7 @@ pub struct Scheduler {
     pub seed: u64,
 }
 impl Scheduler {
-    /// The supported scheduler contracts by launch word (docs/spec/determinism.md);
+    /// The supported scheduler contracts by launch word (conformance/old-spec/determinism.md);
     /// `hirsel_kernels::schedule::Algorithm::code` uses the same words.
     pub const CONTRACTS: [(&'static str, u64); 3] = [("fifo", 0), ("random", 1), ("pct", 2)];
     /// The launch word of a supported contract, version 1.

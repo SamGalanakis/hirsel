@@ -1,8 +1,8 @@
 # Semantics coverage dispositions
 
-Current rules are [SEM-1–5](../../docs/spec/semantics.md), the
-[core contracts](../../docs/spec/core-library.md) and
-[CT-3/5](../../docs/spec/compile-time.md). The old v20 section numbers and
+Current rules are [SEM-1–5](../../conformance/old-spec/semantics.md), the
+[core contracts](../../conformance/old-spec/core-library.md) and
+[CT-3/5](../../conformance/old-spec/compile-time.md). The old v20 section numbers and
 issue numbers are historical, not current feature requirements.
 
 - **Resolved capability history:** integer conversions/division, float conversion

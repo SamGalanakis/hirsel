@@ -416,7 +416,7 @@ impl<'m, 'a> Signature<'m, 'a> {
     ///
     /// With `aliasing` (`Aliasing::of`), each `mut` place address is `noalias`: for
     /// the whole call the callee reaches the place's bytes only through it
-    /// (`docs/spec/implementation.md`, Aliasing facts). The blocks those bytes point to
+    /// (`conformance/old-spec/implementation.md`, Aliasing facts). The blocks those bytes point to
     /// are loaded pointers, which the attribute does not cover. The live place also
     /// grants its layout's extent and alignment (`dereferenceable` and `align`);
     /// underaligned fields use aligned ABI temporaries through either outcome.

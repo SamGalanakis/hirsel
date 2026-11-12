@@ -1,4 +1,4 @@
-//! Run budgets natively (`budgets.limits@3`, docs/spec/determinism.md "Budgets").
+//! Run budgets natively (`budgets.limits@3`, conformance/old-spec/determinism.md "Budgets").
 //!
 //! **Memory** is the run's logical storage ([`Meter`]), which depends only on requests and
 //! logical lifetimes: a small block is charged its size class ([`small_charge`]), a large one

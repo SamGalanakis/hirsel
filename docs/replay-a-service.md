@@ -6,7 +6,7 @@ replayed from its tape. This guide walks through
 store lives at one place, a `db@1` place whose head holds the store open and serves
 transaction entries, and whose client calls those entries through a runner.
 
-The rules are in [runners](spec/runners.md) (`db@1`) and [storage](spec/storage.md)
+The rules are in [runners](../conformance/old-spec/runners.md) (`db@1`) and [storage](../conformance/old-spec/storage.md)
 (STORE-12).
 
 ## The service

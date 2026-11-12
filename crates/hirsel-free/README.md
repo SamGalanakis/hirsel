@@ -1,6 +1,6 @@
 # hirsel-free
 
-The free-mode protocol of `tasks.free@1` (docs/spec/determinism.md, S-12): what an engine
+The free-mode protocol of `tasks.free@1` (conformance/old-spec/determinism.md, S-12): what an engine
 running tasks freely records, how a cut is taken while tasks run, and how a tape is replayed.
 It is backend-neutral: the runtime and the interpreter drive the same recorder and replayer,
 and F1's concurrent recorder uses the same gate, logs and claim words. Allowed dependencies: `std`

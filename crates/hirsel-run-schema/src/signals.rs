@@ -2,7 +2,7 @@
 //! deliveries of `signals.script@1`. Validation is hirsel-run-config's.
 use serde::{Deserialize, Serialize};
 
-/// A host signal a program can observe, in its docs/spec/core-library.md `SignalKind`
+/// A host signal a program can observe, in its conformance/old-spec/core-library.md `SignalKind`
 /// variant order. Closed: other host signals are never observed.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

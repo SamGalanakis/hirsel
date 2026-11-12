@@ -95,7 +95,7 @@ hooks resolve in its declaring module. Export hooks needed across module/package
 boundaries. Nested records inside containers still need their explicit hooks.
 Built-in scalar fields such as `String` and `u32` use the standard converters.
 An explicit `Policy.leaves` pair can name custom conversions; it does not
-introduce implicit discovery. See [paired structural generation](spec/schema.md#paired-structural-generation).
+introduce implicit discovery. See [paired structural generation](../conformance/old-spec/schema.md#paired-structural-generation).
 
 The generated body constructs the outer record, calling the written nested
 hooks. It does not generate those hook declarations. Here is the rejected
@@ -122,7 +122,7 @@ Wrong hook types retain their ordinary type or generic diagnostic, enriched with
 this context. Hooks are still explicit; the contract is guidance, not an
 additional signature restriction or a generated repair.
 
-Both missing-hook fixtures reject under [LANG-4](spec/language.md#lang-4-names),
+Both missing-hook fixtures reject under [LANG-4](../conformance/old-spec/language.md#lang-4-names),
 at the unresolved hook name in the generated outer body, with a secondary
 span on the original `comptime derive.schema_decode(...)` or
 `schema_encode(...)` expression. The tests pin those name spans and their
@@ -160,7 +160,7 @@ fn owned(name: String, attempts: u32) -> unique Outer uses {} {
 `unique name` obtains independent storage when needed; `take value` moves an
 owned result out of a match arm. `copy` shares counted storage and does not
 repair a borrowed-result lifetime. Follow the current
-[ownership rules](spec/ownership.md) and [modes](spec/ownership.md#passing-modes).
+[ownership rules](../conformance/old-spec/ownership.md) and [modes](../conformance/old-spec/ownership.md#passing-modes).
 Function-value uniqueness qualifiers must match exactly: storing these hooks in
 `schema.Boundary`'s ordinary-result callback fields requires a pure adapter
 that matches the hook result and returns `Ok(take value)`. Generated nested
@@ -205,7 +205,7 @@ name might still be unacceptable to an application; moving old fields into
 new nested records needs explicit application code and constructors.
 `schema_evolution.compare` reports directional compatibility findings. It does
 **not execute migration**, rewrite input, run an adapter or populate new fields.
-See [schema evolution](spec/schema.md#explicit-evolution) and
+See [schema evolution](../conformance/old-spec/schema.md#explicit-evolution) and
 [configctl's explicit migration](../examples/configctl/model.hir).
 
 ## Run the correctness tests

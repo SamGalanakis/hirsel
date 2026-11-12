@@ -68,7 +68,7 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
             &mut out,
         );
     }
-    // These inert, plain views/positions have intrinsic loop/brand rules (docs/spec/core-library.md).
+    // These inert, plain views/positions have intrinsic loop/brand rules (conformance/old-spec/core-library.md).
     for name in [
         "Instant",
         "Level",

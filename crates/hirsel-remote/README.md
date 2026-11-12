@@ -1,6 +1,6 @@
 # hirsel-remote
 
-The `remote.tls@1` runner provider (docs/spec/runners.md, RUN-13): runner calls
+The `remote.tls@1` runner provider (conformance/old-spec/runners.md, RUN-13): runner calls
 that cross to another host over TLS on a TCP or Unix stream socket, exactly
 once per call position, with cancellation, in-doubt outcomes and status
 queries. This crate is the frames, the caller's protocol state machine and

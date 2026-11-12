@@ -155,9 +155,9 @@ fn index_retains_source_contracts_comments_and_public_visibility() {
             .unwrap();
         let root = root_scratch.path().to_path_buf();
         std::fs::create_dir_all(root.join("stdlib/std@1")).unwrap();
-        std::fs::create_dir_all(root.join("docs/spec")).unwrap();
+        std::fs::create_dir_all(root.join("conformance/old-spec")).unwrap();
         for page in ["core-library.md", "std-library.md"] {
-            std::fs::write(root.join("docs/spec").join(page), "").unwrap();
+            std::fs::write(root.join("conformance/old-spec").join(page), "").unwrap();
         }
         std::fs::write(
             root.join("stdlib/std@1/hirsel.json"),

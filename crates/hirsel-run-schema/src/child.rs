@@ -1,4 +1,4 @@
-//! Scripted streaming children (docs/spec/core-library.md#processes, scripted runs): every
+//! Scripted streaming children (conformance/old-spec/core-library.md#processes, scripted runs): every
 //! provider plays `test.process` and process.script@1 children with [`ScriptChild`], and
 //! the connected stages of a spawned pipeline with [`ScriptGroup`].
 #[cfg(test)]
@@ -16,7 +16,7 @@ pub enum ChildStream {
     Stderr,
 }
 
-/// `Signal`, in its docs/spec/core-library.md variant order.
+/// `Signal`, in its conformance/old-spec/core-library.md variant order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Signal {
     Interrupt,

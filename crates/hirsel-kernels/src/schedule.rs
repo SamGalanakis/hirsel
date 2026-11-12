@@ -1,4 +1,4 @@
-//! The run scheduler's choice policies (`inputs.scheduler`, docs/spec/determinism.md): which
+//! The run scheduler's choice policies (`inputs.scheduler`, conformance/old-spec/determinism.md): which
 //! runnable task runs at each scheduling point. Both engines call these at the same points
 //! with their runnable queue in the same order, so a seed selects one schedule in either.
 //!

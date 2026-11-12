@@ -282,7 +282,7 @@ fn json_hook_guidance_24_cross_module_nominal() {
 #[test]
 fn json_hook_guidance_24_recipe_roundtrip_interpreter_checked_h_and_native() {
     with_compiler_stack(|| {
-        let docs = include_str!("../../../../docs/spec/std-library.md");
+        let docs = include_str!("../../../../conformance/old-spec/std-library.md");
         let recipe = docs
             .split("### Nested JSON helpers")
             .nth(1)

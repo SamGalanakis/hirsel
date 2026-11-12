@@ -55,7 +55,7 @@ at logical jobs 1/2/4. Provider waiting and physical placement/replay qualificat
 have separate receipts in the external lane report; ordinary engine agreement
 does not establish physical worker width.
 
-Physical width observations follow [CONC-1](../../docs/spec/concurrency.md#conc-1-runtime):
+Physical width observations follow [CONC-1](../../conformance/old-spec/concurrency.md#conc-1-runtime):
 the control socket can appear while workers are still being created. Qualification
 requires a retained `worker_phase: "running"` reply with the requested effective
 width and `width.pending: 0`, ideally while an application-ready handshake holds

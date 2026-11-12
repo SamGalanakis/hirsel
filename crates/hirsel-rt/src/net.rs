@@ -97,7 +97,7 @@ pub struct SocketAddr {
 }
 impl SocketAddr {
     /// The address of an unnamed Unix peer, and of every Unix stream or listener:
-    /// `0.0.0.0` with port 0 (docs/spec/core-library.md, Unix domain sockets).
+    /// `0.0.0.0` with port 0 (conformance/old-spec/core-library.md, Unix domain sockets).
     pub const UNNAMED: Self = Self {
         ip: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
         port: 0,
@@ -113,7 +113,7 @@ impl SocketAddr {
     }
 }
 
-/// `TlsFailure`, in its docs/spec/core-library.md variant order.
+/// `TlsFailure`, in its conformance/old-spec/core-library.md variant order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TlsFailure {
     UnknownIssuer,
@@ -166,7 +166,7 @@ impl From<TlsFailure> for hirsel_run_schema::TlsFailure {
     }
 }
 
-/// `NetError`, in its docs/spec/core-library.md variant order. Fault codes are capability inputs, not errno.
+/// `NetError`, in its conformance/old-spec/core-library.md variant order. Fault codes are capability inputs, not errno.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NetError {
     NotGranted,
@@ -1059,7 +1059,7 @@ impl crate::io::State {
         )
     }
     /// Check every grant before any provider effect (CAP-1), then ask the
-    /// provider of the Net's world. Input validation precedes the grant check (docs/spec/core-library.md).
+    /// provider of the Net's world. Input validation precedes the grant check (conformance/old-spec/core-library.md).
     pub(crate) fn execute_net(
         &mut self,
         host: &mut dyn NetProvider,
@@ -1335,7 +1335,7 @@ impl crate::io::State {
                     _ => unreachable!(),
                 };
                 // A write that contradicts a scripted client's Expect fails LANG-9 after
-                // its Test report (docs/spec/core-library.md, scripted peers).
+                // its Test report (conformance/old-spec/core-library.md, scripted peers).
                 if let NetWorld::Script(world) = world
                     && let Some(report) = self
                         .net_scripts

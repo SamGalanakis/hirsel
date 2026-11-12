@@ -320,7 +320,7 @@ The compiler's native entry wrapper registers the returned Error and its immutab
 
 ## Processes
 
-`process.rs` holds the Process capability (docs/spec/core-library.md#processes).
+`process.rs` holds the Process capability (conformance/old-spec/core-library.md#processes).
 `State::execute_process` checks every `proc.run` and every stage of a `proc.pipeline`
 (an empty one is InvalidInput) before any effect: the Proc and Dir handles, then `hirsel_run_schema::Command::check`: a canonical absolute program,
 NUL-free arguments and a well-formed exact environment (InvalidInput), then the exact
@@ -836,7 +836,7 @@ the linked program's immutable descriptor registry and runs one compiled
 granted on `HIRSEL_RT_ROOT` (without it, the root Io grants no mount and no projection), and
 returns the exit status of the run's outcome
 (`hirsel_run_schema::RunOutcome::exit_code`), using the
-[PROG-3 policy](../../docs/spec/programs.md#prog-3-entry) shared with interpreted
+[PROG-3 policy](../../conformance/old-spec/programs.md#prog-3-entry) shared with interpreted
 launches. Blocked reports retain parked tasks' spawn paths, source sites, wait
 kinds and target ordinals, before abandoning their contexts. Observation version
 4 carries those records in a `waits` JSON line beside `blocked` and

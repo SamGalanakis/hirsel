@@ -8,7 +8,7 @@ Invariants and boundary:
 
 - Consumes FileId + SourceMap; produces Vec<Token> plus diagnostics. Identifiers and labels are interned as process-global `Symbol`s.
 - Keep raw trivia/newlines and invalid tokens; no semicolon insertion (LANG-1).
-- Longest-match punctuation and literal grammar follow docs/spec/syntax.md, including invalid suffixes (SEM-1/3).
+- Longest-match punctuation and literal grammar follow conformance/old-spec/syntax.md, including invalid suffixes (SEM-1/3).
 - No parser, type information or filesystem assumptions; Invalid UTF-8 is SEM-3 at its original valid-prefix boundary; the driver rejects it before lexing. Oversize input is a tooling error.
 
 Public API:

@@ -101,4 +101,4 @@ records the attempted forms and repairs.
 Semver errors use `results.map_error` with a taken cause and an immutable row
 snapshot. The requirement and version callbacks select their exact `InputError`
 role; the JSON reader and unique `Row` flow retain their existing modes. See
-[LANG-8](../../docs/spec/language.md#lang-8-errors) for the complete recipe.
+[LANG-8](../../conformance/old-spec/language.md#lang-8-errors) for the complete recipe.

@@ -1,4 +1,4 @@
-//! `noalias` on `mut` place addresses (`docs/spec/implementation.md`, Aliasing facts):
+//! `noalias` on `mut` place addresses (`conformance/old-spec/implementation.md`, Aliasing facts):
 //! the Ready probes' `bump(mut x)` states it on its address parameter, its by-value
 //! parameters and runtime declarations state none, and the same program with a C
 //! callback named states none anywhere.

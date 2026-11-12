@@ -27,7 +27,7 @@ fn clean(source: &str) -> SyntaxFile {
 fn every_hirsel_block_in_the_spec_parses_cleanly() {
     // Fenced `hirsel` blocks are complete files; grammar fragments, ledgers and
     // schematic forms are `ebnf` or `text` blocks.
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/spec");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/old-spec");
     let mut parts: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|entry| entry.unwrap().path())

@@ -1,7 +1,7 @@
 # Incremental Base64 implementation notes
 
 The public contract and runnable example are in the Base64 section of
-[std-library.md](spec/std-library.md#base64-codec). Whole-buffer encode/decode
+[std-library.md](../conformance/old-spec/std-library.md#base64-codec). Whole-buffer encode/decode
 retain their implementations and signatures. No compiler, IR, validator, runtime
 ABI, HTTP server or byte bridge changes are needed.
 

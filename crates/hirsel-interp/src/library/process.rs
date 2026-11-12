@@ -765,7 +765,7 @@ impl Simulation {
         if open { script.close_stdin() } else { None }
     }
     /// `proc.spawn` and the streaming child operations of scripted worlds
-    /// (docs/spec/core-library.md#processes); a host child needs a host adapter.
+    /// (conformance/old-spec/core-library.md#processes); a host child needs a host adapter.
     fn child_call(
         &mut self,
         name: &str,

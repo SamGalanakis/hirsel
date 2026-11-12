@@ -2,7 +2,7 @@
 
 Two toy analyses that run out of process over the `hirsel.tir.export.v8` text
 and write a `hirsel.analysis.findings.v1` sidecar
-(`docs/spec/proof-seam.md`, PS-17 to PS-19). They are canaries:
+(`conformance/old-spec/proof-seam.md`, PS-17 to PS-19). They are canaries:
 `crates/hirsel-pipeline-tests/tests/front/analysis_canaries.rs` exports a
 passing and a failing fixture for each to a file, runs the analysis entry point
 the commands run over it and checks the findings, so a change to the seam that

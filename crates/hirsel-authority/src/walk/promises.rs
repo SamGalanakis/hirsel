@@ -407,7 +407,7 @@ impl Checker<'_> {
     /// result is bounded by its sources instead, the root of an argument or
     /// of an annotated binding receives its actual placement, and a plain
     /// value's placement is inert. A local arena value kept where a global is
-    /// required is PROV-4 too: docs/spec/diagnostics.md orders placement before required modes,
+    /// required is PROV-4 too: conformance/old-spec/diagnostics.md orders placement before required modes,
     /// and ownership judges a read's locality by current content, which may
     /// be Global under a written local storage contract. Only a part of a
     /// Local aggregate checked where it is constructed defers to that owner:

@@ -281,7 +281,7 @@ pub fn issued(chain: &[CertificateDer<'_>]) -> UnixTime {
 /// verified chain the peer presented, and the negotiated ALPN protocol.
 pub type Handshake = (Option<Vec<u8>>, Option<String>);
 
-/// A scripted client's answer to a server handshake (docs/spec/core-library.md, scripted
+/// A scripted client's answer to a server handshake (conformance/old-spec/core-library.md, scripted
 /// peers): the server selects a protocol from the client's offer, the client verifies the
 /// identity its SNI selects by name, then the server verifies the chain it presents, if
 /// asked, at `issued`.
@@ -317,7 +317,7 @@ pub fn scripted_accept(client: &crate::PeerTls, server: &Server) -> Result<Hands
 }
 
 /// A scripted peer's answer to a client handshake for `server_name` presenting `identity`
-/// when asked and offering the ALPN protocols `alpn` (docs/spec/core-library.md, scripted
+/// when asked and offering the ALPN protocols `alpn` (conformance/old-spec/core-library.md, scripted
 /// peers). A `Serves` server selects a protocol from the offer, refusing one it shares none
 /// with, presents the identity the SNI selects, which the client verifies by name alone,
 /// then verifies the client's chain, if it asks for one, at `issued`, refusing with the

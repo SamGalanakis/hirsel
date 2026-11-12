@@ -1,6 +1,6 @@
 # SER-2 version 1 evidence
 
-The normative format is MEM-12/SER-1/2 in `docs/spec/serialization.md`.
+The normative format is MEM-12/SER-1/2 in `conformance/old-spec/serialization.md`.
 `golden.tsv` contains the complete canonical descriptor, hand-specified payload
 hex and decoded data for 44 values. `malformed.tsv` names an accepted schema
 from that corpus, invalid payload bytes and the expected error. Every rejection

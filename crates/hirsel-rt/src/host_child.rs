@@ -1,4 +1,4 @@
-//! The host process provider (docs/spec/core-library.md#processes): one-shot runs,
+//! The host process provider (conformance/old-spec/core-library.md#processes): one-shot runs,
 //! streaming children spawned with three nonblocking pipes, and spawned pipelines whose
 //! stages' standard error a [`Capture`] thread drains. Without a cooperative scheduler a
 //! child operation that would block polls its one descriptor. Under one it records that

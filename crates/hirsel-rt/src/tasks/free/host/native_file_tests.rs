@@ -584,7 +584,7 @@ unsafe fn live_vectors(ctx: *mut TaskCtx) {
     close(twice);
     assert_eq!(read(&names[2]), [HELLO, HELLO].concat());
     // rewind_seek_position. Deviation from Tokio: Hirsel writes always append
-    // regardless of the seek position (docs/spec/core-library.md, file I/O).
+    // regardless of the seek position (conformance/old-spec/core-library.md, file I/O).
     let mut rewind = create(&names[3]);
     write(&mut rewind, HELLO);
     let mut unit = UnitResult {

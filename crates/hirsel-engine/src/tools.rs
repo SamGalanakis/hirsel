@@ -133,101 +133,101 @@ pub fn default_context() -> FileContext {
         modules: vec![],
     }
 }
-/// The spec's parts under docs/spec, by file name, which the spec hash covers.
+/// The spec's parts under conformance/old-spec, by file name, which the spec hash covers.
 /// The conformance spec_links test checks that they are the whole directory.
 pub const SPEC_PARTS: [(&str, &[u8]); 27] = [
-    ("brands.md", include_bytes!("../../../docs/spec/brands.md")),
+    ("brands.md", include_bytes!("../../../conformance/old-spec/brands.md")),
     (
         "capabilities.md",
-        include_bytes!("../../../docs/spec/capabilities.md"),
+        include_bytes!("../../../conformance/old-spec/capabilities.md"),
     ),
     (
         "closures.md",
-        include_bytes!("../../../docs/spec/closures.md"),
+        include_bytes!("../../../conformance/old-spec/closures.md"),
     ),
     (
         "compile-time.md",
-        include_bytes!("../../../docs/spec/compile-time.md"),
+        include_bytes!("../../../conformance/old-spec/compile-time.md"),
     ),
     (
         "concurrency.md",
-        include_bytes!("../../../docs/spec/concurrency.md"),
+        include_bytes!("../../../conformance/old-spec/concurrency.md"),
     ),
     (
         "contracts.md",
-        include_bytes!("../../../docs/spec/contracts.md"),
+        include_bytes!("../../../conformance/old-spec/contracts.md"),
     ),
     (
         "core-library.md",
-        include_bytes!("../../../docs/spec/core-library.md"),
+        include_bytes!("../../../conformance/old-spec/core-library.md"),
     ),
     (
         "determinism.md",
-        include_bytes!("../../../docs/spec/determinism.md"),
+        include_bytes!("../../../conformance/old-spec/determinism.md"),
     ),
     (
         "diagnostics.md",
-        include_bytes!("../../../docs/spec/diagnostics.md"),
+        include_bytes!("../../../conformance/old-spec/diagnostics.md"),
     ),
     (
         "failure.md",
-        include_bytes!("../../../docs/spec/failure.md"),
+        include_bytes!("../../../conformance/old-spec/failure.md"),
     ),
     (
         "generics.md",
-        include_bytes!("../../../docs/spec/generics.md"),
+        include_bytes!("../../../conformance/old-spec/generics.md"),
     ),
     (
         "implementation.md",
-        include_bytes!("../../../docs/spec/implementation.md"),
+        include_bytes!("../../../conformance/old-spec/implementation.md"),
     ),
-    ("index.md", include_bytes!("../../../docs/spec/index.md")),
+    ("index.md", include_bytes!("../../../conformance/old-spec/index.md")),
     (
         "language.md",
-        include_bytes!("../../../docs/spec/language.md"),
+        include_bytes!("../../../conformance/old-spec/language.md"),
     ),
-    ("memory.md", include_bytes!("../../../docs/spec/memory.md")),
+    ("memory.md", include_bytes!("../../../conformance/old-spec/memory.md")),
     (
         "ownership.md",
-        include_bytes!("../../../docs/spec/ownership.md"),
+        include_bytes!("../../../conformance/old-spec/ownership.md"),
     ),
     (
         "programs.md",
-        include_bytes!("../../../docs/spec/programs.md"),
+        include_bytes!("../../../conformance/old-spec/programs.md"),
     ),
     (
         "proof-seam.md",
-        include_bytes!("../../../docs/spec/proof-seam.md"),
+        include_bytes!("../../../conformance/old-spec/proof-seam.md"),
     ),
     (
         "runners.md",
-        include_bytes!("../../../docs/spec/runners.md"),
+        include_bytes!("../../../conformance/old-spec/runners.md"),
     ),
-    ("schema.md", include_bytes!("../../../docs/spec/schema.md")),
+    ("schema.md", include_bytes!("../../../conformance/old-spec/schema.md")),
     (
         "scoped-transport.md",
-        include_bytes!("../../../docs/spec/scoped-transport.md"),
+        include_bytes!("../../../conformance/old-spec/scoped-transport.md"),
     ),
     (
         "semantics.md",
-        include_bytes!("../../../docs/spec/semantics.md"),
+        include_bytes!("../../../conformance/old-spec/semantics.md"),
     ),
     (
         "serialization.md",
-        include_bytes!("../../../docs/spec/serialization.md"),
+        include_bytes!("../../../conformance/old-spec/serialization.md"),
     ),
     (
         "std-library.md",
-        include_bytes!("../../../docs/spec/std-library.md"),
+        include_bytes!("../../../conformance/old-spec/std-library.md"),
     ),
     (
         "storage.md",
-        include_bytes!("../../../docs/spec/storage.md"),
+        include_bytes!("../../../conformance/old-spec/storage.md"),
     ),
-    ("syntax.md", include_bytes!("../../../docs/spec/syntax.md")),
+    ("syntax.md", include_bytes!("../../../conformance/old-spec/syntax.md")),
     (
         "utf8-streaming.md",
-        include_bytes!("../../../docs/spec/utf8-streaming.md"),
+        include_bytes!("../../../conformance/old-spec/utf8-streaming.md"),
     ),
 ];
 pub fn default_environment() -> QueryEnvironment {

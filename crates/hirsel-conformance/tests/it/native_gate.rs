@@ -823,7 +823,7 @@ fn feature_collection_releases_each_cases_process_and_retains_check_errors() {
     ));
     for directory in [
         "conformance/LANG",
-        "docs/spec",
+        "conformance/old-spec",
         "native-tests/regressions",
         "native-tests/topology",
     ] {
@@ -838,7 +838,7 @@ fn feature_collection_releases_each_cases_process_and_retains_check_errors() {
     }
     std::fs::write(root.join(broken), "pub fn main( ???").unwrap();
     std::fs::write(root.join("conformance/pending.txt"), "").unwrap();
-    std::fs::write(root.join("docs/spec/language.md"), "### LANG-7: Types\n").unwrap();
+    std::fs::write(root.join("conformance/old-spec/language.md"), "### LANG-7: Types\n").unwrap();
     for path in [
         "native-tests/regressions/history.tsv",
         "native-tests/regressions/exclusions.tsv",

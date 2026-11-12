@@ -150,7 +150,7 @@ exceptional scalars retain the existing cmark man escaping rules.
 The existing commonmark.js container (`lib/blocks.js:95-115`) and inline
 (`lib/inlines.js:1012-1026`) passes at `8988869` remain the parser. Resource
 admission is a Hirsel adaptation, not an upstream feature. The cumulative units
-and root-one nesting convention are specified in `docs/spec/std-library.md`.
+and root-one nesting convention are specified in `conformance/old-spec/std-library.md`.
 
 Admission inventory:
 

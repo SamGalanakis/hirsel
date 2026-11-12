@@ -673,7 +673,7 @@ impl Io {
                 OpValue::Aggregate(vec![self.network_handle(id, true), address(a)])
             }),
             C::Unit(Ok(())) => OpValue::Unit,
-            // A scripted client's unmet Expect (docs/spec/core-library.md).
+            // A scripted client's unmet Expect (conformance/old-spec/core-library.md).
             C::Checked(false) if name == "join" => {
                 for half in &args[1..3] {
                     if let OpValue::Handle(h) = half {

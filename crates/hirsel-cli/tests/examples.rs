@@ -1960,7 +1960,7 @@ fn explore_finds_the_race_examples_lost_addition_and_its_replay_reproduces_it() 
     }
 }
 
-/// A seeded choice is a recorded scheduling input (docs/spec/determinism.md, "Scheduler"):
+/// A seeded choice is a recorded scheduling input (conformance/old-spec/determinism.md, "Scheduler"):
 /// under random@1 seed 1 the race example loses an addition, its tape carries `schedule`
 /// events, and the tape replays that output in every engine, whichever engine recorded it,
 /// while a tape whose first choice is altered is refused.

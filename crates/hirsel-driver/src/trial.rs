@@ -1,4 +1,4 @@
-//! `hirsel tapes trial`: an upgrade trial of recorded runner calls (docs/spec/runners.md,
+//! `hirsel tapes trial`: an upgrade trial of recorded runner calls (conformance/old-spec/runners.md,
 //! Upgrade trials). Each call a caller's tape recorded is issued again, in order, to a
 //! callee run of a candidate revision: the same entry, form, cause and argument bytes,
 //! admitted live under the grants a grants template's runner of that name holds (a fork of

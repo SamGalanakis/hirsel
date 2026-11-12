@@ -63,7 +63,7 @@ enum SimdOp {
     Add,
 }
 
-/// The scalar library operations (docs/spec/core-library.md) and the instruction each becomes.
+/// The scalar library operations (conformance/old-spec/core-library.md) and the instruction each becomes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ScalarOp {
     /// `widen`, `truncate`, `try_narrow` (into an `Option`) and `to_i32`

@@ -88,7 +88,7 @@ Lowering consumes these producer decisions after I/J:
   declaration (GEN-3) whose representation the signature view shows (PROG-2).
 
 Missing nominal capability arguments retain typed ordinary inputs/results and
-are diagnosed by authority checking under docs/spec/diagnostics.md, rather than a derivative arity
+are diagnosed by authority checking under conformance/old-spec/diagnostics.md, rather than a derivative arity
 error. Resource finalizers type their implicit local binder, enforce unit results,
 and reject propagation with the specialized DROP-3 diagnostic.
 
@@ -107,7 +107,7 @@ deterministic plans after symbol, mapping and signature-store reordering.
 body after J/I and before lowering. It rejects invalid growable fields and
 variable-size flat indexing/replacement, importing nominal representations with
 shared substitution and recording every consulted signature dependency. It
-produces source diagnostics; the driver alone selects their order under docs/spec/diagnostics.md.
+produces source diagnostics; the driver alone selects their order under conformance/old-spec/diagnostics.md.
 Stable flat byte encoding remains issue #1 and is not inferred from target ABI.
 
 Contract clauses receive ordinary body elaborations, calls and provider reads in

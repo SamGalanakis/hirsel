@@ -17,4 +17,4 @@ hirsel run examples/fetchjson/hirsel.json --grants examples/fetchjson/grants.jso
 
 The explicit monotonic clock supplies the client's 30-second idle expiry.
 Whole-request deadlines use `task.scope_until` around a call, as the HTTP module
-and [std documentation](../../docs/spec/std-library.md#http-client) show.
+and [std documentation](../../conformance/old-spec/std-library.md#http-client) show.

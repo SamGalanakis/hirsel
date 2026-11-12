@@ -1,4 +1,4 @@
-//! Core library integer kernels (docs/spec/core-library.md); all widths including i128/u128 use checked arithmetic.
+//! Core library integer kernels (conformance/old-spec/core-library.md); all widths including i128/u128 use checked arithmetic.
 use crate::{
     Integer, Value, conversion,
     scalar::{self, ScalarError},
@@ -110,7 +110,7 @@ pub fn divide(name: &str, a: Integer, b: Integer) -> Result<Integer, ScalarError
     let bits = if a.is_signed() {
         let (x, y) = (a.signed(), b.signed());
         let (min, _) = signed_bounds(a.width());
-        // Unlike operator %, all three library operations reject MIN/-1 (docs/spec/core-library.md).
+        // Unlike operator %, all three library operations reject MIN/-1 (conformance/old-spec/core-library.md).
         if x == min && y == -1 {
             return Err(ScalarError::Overflow);
         }

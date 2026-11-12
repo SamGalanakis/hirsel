@@ -3,7 +3,7 @@
 //! `smoke`, `smoke_failure`, `exit_reported_right`, `signal_reported_right`,
 //! `stdout_works`, `stdin_works`, `test_process_output_fail_to_start`,
 //! `test_process_output_output` and `env_empty`, `test_add_to_env`. Deadlines and
-//! cancellation follow docs/spec/core-library.md#processes.
+//! cancellation follow conformance/old-spec/core-library.md#processes.
 use hirsel_rt::io::*;
 use hirsel_rt::io_real::RealIo;
 use hirsel_rt::io_sim::SimIo;

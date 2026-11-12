@@ -1,4 +1,4 @@
-//! Signature-only provenance, authority and capture checking (docs/spec/ownership.md,
+//! Signature-only provenance, authority and capture checking (conformance/old-spec/ownership.md,
 //! brands.md, closures.md, capabilities.md and diagnostics.md).
 
 #[cfg(test)]

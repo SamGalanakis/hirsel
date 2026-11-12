@@ -111,7 +111,7 @@ pub fn entries(manifest: &Path) -> Result<Vec<Entry>, ToolError> {
         .and_then(Path::parent)
         .and_then(Path::parent);
     let catalogue = |name: &str| {
-        repo.and_then(|p| std::fs::read_to_string(p.join("docs/spec").join(name)).ok())
+        repo.and_then(|p| std::fs::read_to_string(p.join("conformance/old-spec").join(name)).ok())
             .unwrap_or_default()
     };
     let std_docs = if std {

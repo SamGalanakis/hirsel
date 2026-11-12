@@ -160,7 +160,7 @@ impl ScriptNet {
     }
     /// The Test report of closing `handle` while a scripted client it leaves still
     /// expects bytes: an accepted stream short of its Expect, or a listener with an
-    /// unaccepted client that has one (docs/spec/core-library.md, scripted peers).
+    /// unaccepted client that has one (conformance/old-spec/core-library.md, scripted peers).
     pub(crate) fn unmet(&mut self, handle: u64) -> Option<String> {
         if let Some(s) = self.streams.get_mut(&handle) {
             let Remote::Client {

@@ -114,7 +114,7 @@ the enclosing `Manifest.nodes` source field when `node_from_json` is missing
 or has the wrong contract. The label gives the canonical helper path and
 directional borrowed-argument signature, alongside the original rule, generated
 failure span and comptime origin. The explicit `node_from_json` helper remains
-necessary and is retained. See the [complete nested JSON helper recipe](../../docs/spec/std-library.md#nested-json-helpers).
+necessary and is retained. See the [complete nested JSON helper recipe](../../conformance/old-spec/std-library.md#nested-json-helpers).
 The earlier failed attempt above records the historical diagnostic unchanged.
 
 Resolution: String addition guidance landed in `eec112f76e8cef31bc5f11f10741f74689b1d4e2`. The original

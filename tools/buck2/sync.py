@@ -143,16 +143,16 @@ CORPUS_DATA = ["conformance/**", "packages/**", "stdlib/**", CORPUS_PACKAGES]
 RUNTIME_DATA = {
     "hirsel-cranelift": ["crates/hirsel-rt/include/**"],
     "hirsel-cli": [*CORPUS_DATA],
-    "hirsel-conformance": [*CORPUS_DATA, "bench/native/programs/**", "crates/hirsel-conformance/oracles/**", "docs/spec/**", "native-tests/**"],
+    "hirsel-conformance": [*CORPUS_DATA, "bench/native/programs/**", "crates/hirsel-conformance/oracles/**", "conformance/old-spec/**", "native-tests/**"],
     "hirsel-engine": ["stdlib/**"],
-    "hirsel-driver": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
-    "hirsel-candidate": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
-    "hirsel-observation-view": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
-    "hirsel-project-info": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
-    "hirsel-native": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
-    "hirsel-native-queries": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
-    "hirsel-native-cache": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
-    "hirsel-native-testing": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
+    "hirsel-driver": [*CORPUS_DATA, "conformance/old-spec/**", "native-tests/**"],
+    "hirsel-candidate": [*CORPUS_DATA, "conformance/old-spec/**", "native-tests/**"],
+    "hirsel-observation-view": [*CORPUS_DATA, "conformance/old-spec/**", "native-tests/**"],
+    "hirsel-project-info": [*CORPUS_DATA, "conformance/old-spec/**", "native-tests/**"],
+    "hirsel-native": [*CORPUS_DATA, "conformance/old-spec/**", "native-tests/**"],
+    "hirsel-native-queries": [*CORPUS_DATA, "conformance/old-spec/**", "native-tests/**"],
+    "hirsel-native-cache": [*CORPUS_DATA, "conformance/old-spec/**", "native-tests/**"],
+    "hirsel-native-testing": [*CORPUS_DATA, "conformance/old-spec/**", "native-tests/**"],
     "hirsel-host-io": [*CORPUS_DATA],
     "hirsel-heapcheck": ["native-tests/**", "stdlib/**"],
     "hirsel-interp": [*CORPUS_DATA],
@@ -162,10 +162,10 @@ RUNTIME_DATA = {
     "hirsel-llvm": ["Cargo.lock", "crates/hirsel-rt/include/**", "stdlib/**", "tools/native-toolchain/llvm-23.lock", "tools/native-toolchain/check", "tools/native-toolchain/fixtures/**"],
     "hirsel-authority": [*CORPUS_DATA],
     "hirsel-ownership": [*CORPUS_DATA, "bench/native/programs/**", "crates/hirsel-driver/tests/fixtures/**"],
-    "hirsel-parser": ["docs/spec/**"],
+    "hirsel-parser": ["conformance/old-spec/**"],
     "hirsel-pipeline-tests": [
         *CORPUS_DATA, "bench/native/programs/**", "crates/hirsel-driver/tests/fixtures/**", "crates/hirsel-rt/harness/**",
-        "crates/hirsel-rt/include/**", "docs/spec/**", "native-tests/**", "tools/native-toolchain/llvm-23.lock", "tools/native-toolchain/check", "tools/native-toolchain/fixtures/**",
+        "crates/hirsel-rt/include/**", "conformance/old-spec/**", "native-tests/**", "tools/native-toolchain/llvm-23.lock", "tools/native-toolchain/check", "tools/native-toolchain/fixtures/**",
     ],
     "hirsel-rc": [*CORPUS_DATA, "crates/hirsel-rt/include/**", "native-tests/**"],
     "hirsel-rt": [*CORPUS_DATA, "native-tests/**", "tools/native-toolchain/llvm-23.lock", "tools/native-toolchain/check", "tools/native-toolchain/fixtures/**", "Cargo.lock"],
@@ -179,11 +179,11 @@ RUNTIME_DATA = {
 # every test whose harness it changes.
 TEST_DATA = {
     "hirsel-core-front-unittest": ["core/front/**"],
-    "hirsel-cli-test-cli": ["tools/capped", "docs/spec/core-library.md", "docs/spec/std-library.md", "docs/dependency-card.schema.json"],
+    "hirsel-cli-test-cli": ["tools/capped", "conformance/old-spec/core-library.md", "conformance/old-spec/std-library.md", "docs/dependency-card.schema.json"],
     # The tasks and ledger-service examples run in place.
     "hirsel-cli-test-examples": ["examples/tasks/**", "examples/ledger-service/**"],
     "hirsel-conformance-test-it": ["crates/hirsel-conformance/tests/fixtures/**"],
-    # Every rule ID any crate cites must resolve in docs/spec.
+    # Every rule ID any crate cites must resolve in conformance/old-spec.
     # Relative spec links reach top-level docs, research notes, port reports and licenses.
     "hirsel-conformance-test-spec_links": ["crates/**", "docs/*.md", "docs/research/**", "reports/**"],
     # memcheck:: compiles a C program against the runtime header.
@@ -488,7 +488,7 @@ CORPUS = [
     "conformance/**",
     "crates/hirsel-conformance/Cargo.toml",
     "native-tests/**",
-    "docs/spec/**",
+    "conformance/old-spec/**",
     "packages/**",
     "stdlib/**",
     CORPUS_PACKAGES,

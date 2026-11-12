@@ -1,4 +1,4 @@
-//! Runners (docs/spec/runners.md). `io.runner` projects a runner the run's configuration
+//! Runners (conformance/old-spec/runners.md). `io.runner` projects a runner the run's configuration
 //! names; narrowing mints one over a subset of its grant set or allowlist. A call
 //! encodes its argument, checks authority (the allowlist, the place's code policy) and
 //! cancellation, then meets its place's contract: `local.threads@1` admits it up to its

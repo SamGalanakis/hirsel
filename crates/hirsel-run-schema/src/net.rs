@@ -131,7 +131,7 @@ pub fn check_net_listeners(listeners: &[NetListener]) -> Result<(), String> {
 }
 
 /// The Test report of a scripted client whose `Expect` the program's writes contradict
-/// (docs/spec/core-library.md, scripted peers), with its trailing newline.
+/// (conformance/old-spec/core-library.md, scripted peers), with its trailing newline.
 pub fn net_client_mismatch(client: usize, listener: &str, expected: &[u8], wrote: &[u8]) -> String {
     format!(
         "test failure: net client {client} of {listener} expected {} but the program wrote {}\n",
@@ -221,7 +221,7 @@ pub struct TlsIdentity {
     pub key: Vec<u8>,
 }
 
-/// `TlsFailure`, in its docs/spec/core-library.md variant order.
+/// `TlsFailure`, in its conformance/old-spec/core-library.md variant order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum TlsFailure {

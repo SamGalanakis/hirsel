@@ -54,7 +54,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), ()] {{
         (root/case).with_suffix('.hir.json').write_text(json.dumps(sidecar, indent=2)+'\n')
         (root/'conformance').mkdir(exist_ok=True)
         (root/'conformance/pending.txt').write_text('')
-        (root/'docs').mkdir(); (root/'docs/spec').symlink_to(repo/'docs/spec',target_is_directory=True)
+        (root/'docs').mkdir(); (root/'conformance/old-spec').symlink_to(repo/'conformance/old-spec',target_is_directory=True)
         (root/'native-tests/regressions').mkdir(parents=True)
         (root/'native-tests/regressions/exclusions.tsv').write_text('# case\tconfiguration\tclass\treason\n')
         (root/'native-tests/topology').mkdir()

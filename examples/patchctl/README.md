@@ -36,7 +36,7 @@ The application accepts an empty patch or a `--- ` / `+++ ` header pair followed
 immediately by `@@ -start[,count] +start[,count] @@` hunks (LF header endings,
 no function suffix). Std handles the hunk bodies, missing-newline markers and
 exact context matching. It may relocate a hunk to matching context with no fuzz,
-as documented by [diff.apply](../../docs/spec/std-library.md#line-diffs-and-patches).
+as documented by [diff.apply](../../conformance/old-spec/std-library.md#line-diffs-and-patches).
 Multi-file patches and arbitrary preambles are rejected. All rejected hunk
 indexes are reported in patch order, starting at zero. A partial std result
 produces **no stdout**, including when an earlier hunk succeeded.

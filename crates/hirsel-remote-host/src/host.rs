@@ -45,7 +45,7 @@
 //! `Canceled(Parent())` (RUN-9); the caller learns those outcomes through status queries.
 //!
 //! **Served calls.** At a `db@1` place a transact or query call is not decided here: its
-//! stream position is the store's ([STORE-12](../../../docs/spec/storage.md)). The host makes
+//! stream position is the store's ([STORE-12](../../../conformance/old-spec/storage.md)). The host makes
 //! RUN-8 checks 1, 2, 4 without the place's own list of served entries, 6 and 7 (the call
 //! key is the stream instance's), then hands the call to the place's head as an
 //! [`Arrival`]; the head makes checks 3, the served-entry list, 5 and 8, and the host sends

@@ -563,11 +563,11 @@ impl Fixture {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir_all(root.join("docs/spec")).unwrap();
+        fs::create_dir_all(root.join("conformance/old-spec")).unwrap();
         fs::create_dir_all(root.join("conformance/OWN/nested")).unwrap();
         let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
         for file in [
-            "docs/spec/ownership.md",
+            "conformance/old-spec/ownership.md",
             "conformance/OWN/OWN-6-accept.hir",
             "conformance/OWN/OWN-6-reject.hir",
             "conformance/OWN/OWN-6-fail.hir",

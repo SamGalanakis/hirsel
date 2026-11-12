@@ -1,5 +1,5 @@
 //! `Inst::Encode` and `Inst::Decode` (SER-2; LIR schema revision 29) over ledger values: the
-//! canonical codec reimplemented from the spec (`docs/spec/serialization.md`), since this crate
+//! canonical codec reimplemented from the spec (`conformance/old-spec/serialization.md`), since this crate
 //! never depends on `hirsel-types` or the runtime. Offsets come from the layout records the plan
 //! names, never from the runtime's codec program, so a lowering error disagrees here. Decoding
 //! validates the whole input before it allocates; the blocks it builds are fresh, zeroed as the

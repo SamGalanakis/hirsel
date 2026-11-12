@@ -85,7 +85,7 @@ The standalone `e2e/hirsel.json` program loads a named `data` object store from
 `--grants`, reports one conditional create's elapsed nanoseconds, reads the
 value back, checks that a second create is refused with `Exists()` and deletes
 the key. Grant stdout and a read-only credentials
-Dir alongside the `object_stores` declaration (see docs/spec/determinism.md).
+Dir alongside the `object_stores` declaration (see conformance/old-spec/determinism.md).
 Server contract probes against scratch release binaries found RustFS 1.0.3 returns
 200 then 412 for competing create-only PUTs and retains the first bytes. Garage
 2.4.1 returns 200 twice and replaces the bytes, so it cannot serve a store.

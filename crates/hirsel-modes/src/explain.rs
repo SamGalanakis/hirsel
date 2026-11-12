@@ -112,7 +112,7 @@ pub enum Cause {
     BorrowedPattern,
 }
 impl Cause {
-    /// The closed docs/spec/diagnostics.md vocabulary entry. Fine wording kinds remain
+    /// The closed conformance/old-spec/diagnostics.md vocabulary entry. Fine wording kinds remain
     /// private; every kind has an entry (#81).
     #[cfg(test)]
     pub fn spec_kind(self) -> &'static str {
@@ -433,7 +433,7 @@ pub enum Requirement {
     NotSendableType,
 }
 impl Requirement {
-    /// The closed docs/spec/diagnostics.md vocabulary entry. Fine wording kinds remain
+    /// The closed conformance/old-spec/diagnostics.md vocabulary entry. Fine wording kinds remain
     /// private; every kind has an entry (#81).
     #[cfg(test)]
     pub fn spec_kind(self) -> &'static str {
@@ -1033,7 +1033,7 @@ impl Explanation {
         for caution in &self.cautions {
             diagnostic.notes.push(caution.text());
         }
-        // docs/spec/diagnostics.md: the provided cause and its site alone identify a cascade.
+        // conformance/old-spec/diagnostics.md: the provided cause and its site alone identify a cascade.
         // Keep the definition-local root, and distinguish different creation
         // sites (for example two moves of the same reinitialised binding).
         if diagnostic.root_cause.is_none() {
@@ -1402,7 +1402,7 @@ mod tests {
     }
     /// The spec's cause vocabulary table as plain text, one string per side.
     fn spec_table() -> (String, String) {
-        let spec = include_str!("../../../docs/spec/diagnostics.md");
+        let spec = include_str!("../../../conformance/old-spec/diagnostics.md");
         let start = spec
             .find("\n### Cause vocabulary\n")
             .expect("cause vocabulary");

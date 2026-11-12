@@ -78,7 +78,7 @@ fn a_conversion_holds_only_between_the_kinds_its_mode_names() {
         },
         bad,
     );
-    // truncate takes a no-wider destination (docs/spec/core-library.md).
+    // truncate takes a no-wider destination (conformance/old-spec/core-library.md).
     pair(
         |m| {
             let (from, to) = if m {

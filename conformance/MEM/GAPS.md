@@ -6,7 +6,7 @@ cannot close those claims. See [UNTESTABLE.md](UNTESTABLE.md) and the
 [evidence index](../coverage-ledger.md#memory).
 
 - **Implemented finite depth controls — MEM-3 / LANG-10:**
-  the [depth revision](../../docs/spec/index.md#deterministic-depth-revision) has
+  the [depth revision](../../conformance/old-spec/index.md#deterministic-depth-revision) has
   four-engine controls in [logical_depth_31](../../crates/hirsel-conformance/tests/it/logical_depth_31.rs)
   for invocation and complete logical structural-depth boundaries, distinct
   wrappers, empty/mismatched operands, shared paths and Flat/Packed/column storage.
@@ -42,7 +42,7 @@ cannot close those claims. See [UNTESTABLE.md](UNTESTABLE.md) and the
 - **Resolved feature history — MEM-12:** flat bytes and field-only `@ growable`
   validation ship. Physical pointer-free layout/copy-cost auditing remains distinct
   from wire-codec tests. Complete layout composition/native data ABI remains
-  [unspecified](../../docs/spec/memory.md#mem-7-layout).
+  [unspecified](../../conformance/old-spec/memory.md#mem-7-layout).
 - **Partial model coverage — MEM-11/14:** exact root-count overflow and slot
   generation retirement have low-level controls. They do not establish weak-memory
   correctness or universal reclamation. The native corpus pending file contains

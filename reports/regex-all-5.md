@@ -4,7 +4,7 @@
 absolute UTF-8 byte spans using the existing ordered Pike VM. Language rules,
 TIR/LIR, runtime ABI, pattern syntax, `find` and `is_match` are unchanged.
 The full public contract and accounting are in the regex section of
-`docs/spec/std-library.md`; the runnable token extraction example is
+`conformance/old-spec/std-library.md`; the runnable token extraction example is
 `conformance/SEM/SEM-3-regex-all-5-extract-run.hir`.
 
 ## Sources and intentional deviations

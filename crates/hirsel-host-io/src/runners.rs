@@ -1,4 +1,4 @@
-//! Runner calls of a host run (docs/spec/runners.md). The library decides each call; this
+//! Runner calls of a host run (conformance/old-spec/runners.md). The library decides each call; this
 //! records it on the run's tape as one request and one completion (RUN-11): a call refused
 //! before it is sent completes at once, and a sent call parks until its callee run ends,
 //! when the execution delivers its outcome and the caller's next scheduling point re-issues

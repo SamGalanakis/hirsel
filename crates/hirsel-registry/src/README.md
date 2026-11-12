@@ -1,7 +1,7 @@
 # Core signature registry
 
 `BuiltinRegistry` is immutable declaration data served through SignatureProvider.
-`section22.txt` transcribes the function ledger of docs/spec/core-library.md verbatim. Type/error and
+`section22.txt` transcribes the function ledger of conformance/old-spec/core-library.md verbatim. Type/error and
 record declarations are explicit data in build.rs. No runtime implementation is
 consulted. Every signature carries the canonical v7 fingerprint. `DefPath::core`
 and `nominal_roles` provide nominal identities to adapters, with

@@ -1,5 +1,5 @@
 //! Indexed AST plus a lossless token/trivia tape (LANG-1, PROG-5).
-//! See docs/spec/syntax.md for syntax and README.md for ownership of comments.
+//! See conformance/old-spec/syntax.md for syntax and README.md for ownership of comments.
 
 #[cfg(test)]
 hirsel_guard::install!();

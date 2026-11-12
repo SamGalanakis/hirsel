@@ -1,4 +1,4 @@
-//! Loan sets (docs/spec/ownership.md, places and loans). A loan is a kind on a place, and each
+//! Loan sets (conformance/old-spec/ownership.md, places and loans). A loan is a kind on a place, and each
 //! carries the site that issued it, which diagnostics name as its cause.
 use super::*;
 

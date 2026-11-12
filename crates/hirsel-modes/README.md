@@ -96,7 +96,7 @@ temporary demand and traversal ranks. Nested graphs prepare their own inputs
 after earlier graphs publish their rows. Backward temporary demand starts in CFG postorder,
 so acyclic successors settle before their predecessors. `work::read(Counter::
 OwnershipLivenessSteps)` counts node transfers; cycles still iterate to convergence. Recovery types suppress dependent ownership diagnostics.
-Diagnostics follow docs/spec/diagnostics.md source/site/rule ordering and prerequisite suppression.
+Diagnostics follow conformance/old-spec/diagnostics.md source/site/rule ordering and prerequisite suppression.
 Capture layout is supplied by the separate authority pass: ownership refines the
 creation uses and checks mode/access constraints of the supplied captures.
 Authority types a borrowed or mutable non-plain capture as a Local view of its
@@ -334,7 +334,7 @@ roots have explicit, separate interpretations. Closure literal owners use
 Expression instead of Statement.
 
 Driver order is body check, authority/capture check, ownership with these capture
-rows, then lowering. Merge J and I diagnostics and select the first by docs/spec/diagnostics.md.
+rows, then lowering. Merge J and I diagnostics and select the first by conformance/old-spec/diagnostics.md.
 Task-handle obligations survive branch joins and are checked on each reachable
 exit; cancel does not consume a handle, while await and detach do. Runtime task
 execution, cancellation and joining are M2.
@@ -411,7 +411,7 @@ roots receive shared derived summaries; provider reads remain recorded even on
 failure. Function/Iter capture summaries retain J's explicit capture evidence.
 
 Ownership flow state is one private loan set per value (`hirsel-ownership/src/flow/loans.rs`,
-docs/spec/ownership.md, places and loans): a kind (identity, bound, read) on a place (a binding, a
+conformance/old-spec/ownership.md, places and loans): a kind (identity, bound, read) on a place (a binding, a
 lexical scope, the value's own environment or a placement a join lost), each with
 its issue site. A value holds its alias, sources, captures and environment loans
 itself, and its content holds read loans on bindings and scope loans by part. A

@@ -11,9 +11,9 @@ Its `Result` is `Ok` only when the payload and lifetime controls pass.
 | Give the peer the caller's last use of the input | `peer_taken(take data: Bytes) -> NetPeer`, with `Send(take data)` | Call `peer_taken(take data)`; the input binding is unavailable afterwards. The result can outlive that binding. | Ownership transfer adds no payload copy; fixture construction still has its own cost. |
 | Keep using the source independently of the peer | `peer_copied(data: Bytes) -> NetPeer`, calling `peer_taken(unique data)` | Source and result can be replaced and used independently; the result can escape the source binding. | A borrowed `Bytes` needs an explicit deep unique copy, O(payload size), potentially allocating. This is not equivalent in cost to transfer. |
 
-The authority is [MODE-1](spec/ownership.md#mode-1-locality),
-[MODE-2](spec/ownership.md#mode-2-uniqueness), and
-[copy and take](spec/ownership.md#on-copy-and-take).
+The authority is [MODE-1](../conformance/old-spec/ownership.md#mode-1-locality),
+[MODE-2](../conformance/old-spec/ownership.md#mode-2-uniqueness), and
+[copy and take](../conformance/old-spec/ownership.md#on-copy-and-take).
 `copy data` shares counted storage and retains a borrowed parameter's bounds;
 it is not the third repair. `unique` preserves arena/region placement, so this
 heap-input recipe does not promise to move arena data onto the heap.
@@ -112,7 +112,7 @@ its rule and exact primary span, including UTF-8 byte offsets.
 | dogfood8 F03: UTF-8 byte spelling | `byte-literal.hir`: `b"雪"` | `bindings_and_literals`: `b"\xE9\x9B\xAA" == string.as_bytes("雪")` | SEM-3 |
 | dogfood8 F04: integer receiver context | `numeric-context.hir`: `65537 - list.len(data)` | `bindings_and_literals`: `65537u64 - list.len(data)` gives `65534` for three bytes | LANG-2 |
 
-Since 81c2fd39, [LANG-2](spec/language.md#lang-2-prefix-law) defaults a
+Since 81c2fd39, [LANG-2](../conformance/old-spec/language.md#lang-2-prefix-law) defaults a
 context-free nonempty sequence to core `List` from its first element. The original
 `sequence-context.hir` is therefore an accepted control on H, checked heap, LLVM
 and Cranelift; the empty literal retains the missing-context rejection and exact

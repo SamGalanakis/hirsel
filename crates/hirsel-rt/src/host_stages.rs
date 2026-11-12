@@ -1,4 +1,4 @@
-//! The host children of one run, child or pipeline (docs/spec/core-library.md#processes),
+//! The host children of one run, child or pipeline (conformance/old-spec/core-library.md#processes),
 //! in stage order, and the process group they share when their commands ask for one
 //! (`own_group`). Every signal goes to the last stage first, so no stage can read an
 //! earlier stage's death as end of input before its own signal arrives, then to the whole

@@ -42,7 +42,7 @@ obligation of an export whether its record is current (revision and checksum),
 replayable (a checker the build trusts, a deterministic budget) and proved, and
 otherwise why it keeps its check (PS-13). The trust hook is an explicitly
 trusted external verdict; nothing is replayed. The driver maps accepted
-obligations to removal forms (`docs/spec/proof-seam.md`, PS-13).
+obligations to removal forms (`conformance/old-spec/proof-seam.md`, PS-13).
 
 Consumers read the text out of process; there is no plugin API. Interpreter and
 runtime reports retain attribution separately from the defining operation.

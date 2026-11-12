@@ -1,4 +1,4 @@
-//! `hirsel serve`: a runner host for `remote.tls@1` (docs/spec/runners.md RUN-13). It
+//! `hirsel serve`: a runner host for `remote.tls@1` (conformance/old-spec/runners.md RUN-13). It
 //! listens where its host configuration says, admits each TLS client as the caller its
 //! certificate (or its absence) names, checks every arriving call (RUN-8) against the
 //! callee entries its program defines, keeps each caller's call streams exactly once

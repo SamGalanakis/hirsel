@@ -353,7 +353,7 @@ fn cursor_diagnostics_16_owned_binding_chain_and_controls() {
 }
 
 fn cursor_lookup_recipe() -> String {
-    let docs = include_str!("../../../../docs/spec/language.md");
+    let docs = include_str!("../../../../conformance/old-spec/language.md");
     let recipe = docs
         .split("// cursor-owned-refill borrowing recipe\n")
         .nth(1)

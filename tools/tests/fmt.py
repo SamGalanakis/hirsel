@@ -101,7 +101,7 @@ else:
         self.assertEqual(self.run_fmt('--check'), 0)
 
     def test_exact_expected_syntax_rejection_remains_exempt(self):
-        self.write('docs/spec/language.md', '### LANG-1: Syntax\n\n### LANG-7: Types\n')
+        self.write('conformance/old-spec/language.md', '### LANG-1: Syntax\n\n### LANG-7: Types\n')
         self.write('conformance/LANG/case.hir',
                    '// rule: LANG-1\n// expect: reject LANG-1 at line 3\nfn f<T>() {}\n')
         self.assertEqual(self.run_fmt('--check'), 0)

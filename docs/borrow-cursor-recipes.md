@@ -3,8 +3,8 @@
 A borrowed cursor is a read-only view whose **whole local name** can be rebound
 within a fixed origin cover. An owned snapshot has its own counted shares and
 ordinary mutable value semantics. Choose by ownership, not by whether a loop
-looks like traversal. The authority is [LANG-15](spec/language.md#lang-15-bindings)
-and [snapshot loans](spec/ownership.md#own-3-exclusive-access); the
+looks like traversal. The authority is [LANG-15](../conformance/old-spec/language.md#lang-15-bindings)
+and [snapshot loans](../conformance/old-spec/ownership.md#own-3-exclusive-access); the
 [ownership repairs](ownership-repairs.md) explain copying, transfer and uniqueness.
 This guide changes no rule and assumes no extra relation inference.
 

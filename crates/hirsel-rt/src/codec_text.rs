@@ -1,6 +1,6 @@
 //! A canonical codec envelope as text, for tools that show recorded values (a runner call's
 //! outcome in `hirsel tapes trial`). The envelope's own descriptor names every record field,
-//! variant arm and nominal type (docs/spec/serialization.md, Concrete schema descriptor),
+//! variant arm and nominal type (conformance/old-spec/serialization.md, Concrete schema descriptor),
 //! so no program is needed: `Ok(Receipt(from: 1, to: 2, moved: 200))`. Every read is
 //! bounds-checked and nesting is bounded, so malformed or hostile bytes give an error,
 //! never a panic.

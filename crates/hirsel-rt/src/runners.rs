@@ -1,4 +1,4 @@
-//! Runners (docs/spec/runners.md) of a compiled run: runner handles, the places' contracts and
+//! Runners (conformance/old-spec/runners.md) of a compiled run: runner handles, the places' contracts and
 //! the callee runs a sent call starts in this process, decision for decision as the
 //! interpreter's `library/runners.rs` and `runs.rs` and the host provider's
 //! `hirsel-driver/src/network/runners.rs` make them.

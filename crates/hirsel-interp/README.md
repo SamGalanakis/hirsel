@@ -99,7 +99,7 @@ canonical floats. Equality of executions includes float bits and the selected tr
 The core dispatches no named numeric/string operations. In particular integer
 conversion signatures, float-to-integer behavior, explicit fused math, IEEE bits,
 float min/max/total order, scalar views are dependency
-owned by M against docs/spec/core-library.md (which settles #18). There is no conversion opcode in frozen `Rvalue`.
+owned by M against conformance/old-spec/core-library.md (which settles #18). There is no conversion opcode in frozen `Rvalue`.
 `copy_to` deep-copies semantic values; checked result bounds follow its allocator
 parameter. Sealed-region cleanup remains unavailable. Unavailable features are
 reported explicitly, never silently approximated.
@@ -605,7 +605,7 @@ abandoned payloads return to the evaluator's explicit cleanup worklist.
 ## Runs of one execution
 
 `runs::execute` drives the root run and every callee run its runner calls start
-(docs/spec/runners.md). Each run has its own `Scheduler` (frames, tasks, failures,
+(conformance/old-spec/runners.md). Each run has its own `Scheduler` (frames, tasks, failures,
 outcome) and its own Operations; `execute_frames` runs one until none of its tasks can
 proceed and returns `Step::Idle` where it would wait. Ready runs take turns in the
 order they became ready. With nothing ready, each run's provider `wait`s in run order,

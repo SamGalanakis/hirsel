@@ -1,4 +1,4 @@
-//! A run's `remote.tls@1` runners (docs/spec/runners.md, Providers), for any engine. Each
+//! A run's `remote.tls@1` runners (conformance/old-spec/runners.md, Providers), for any engine. Each
 //! runner's provider ([`Client`]) runs on its own thread with the TLS connection it opens,
 //! so the run never blocks on the network: the run hands it each sent call and each
 //! forwarded cancellation, and takes back each completion at its next scheduling point.

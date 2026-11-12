@@ -102,7 +102,7 @@ Invariants:
   receives `noalias`, `dereferenceable(size)` and `align alignment` from its layout:
   the place is live for the call and its ABI storage is aligned. No separate `nonnull`
   attribute is granted (`dereferenceable` implies it for a nonzero extent).
-- Aliasing (`docs/spec/implementation.md`, Aliasing facts): every Hirsel entry's
+- Aliasing (`conformance/old-spec/implementation.md`, Aliasing facts): every Hirsel entry's
   `ExclusiveAddress` parameter (a `mut` place's address, not a by-value root) is
   `noalias`, `dereferenceable(size)` and `align alignment` on its definition and on
   every declaration a call makes (`Signature::declare`, `Aliasing`). It is derived from the passing mode, never from

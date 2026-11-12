@@ -1,4 +1,4 @@
-//! A host run's `remote.tls@1` runners (docs/spec/runners.md, Providers), as the
+//! A host run's `remote.tls@1` runners (conformance/old-spec/runners.md, Providers), as the
 //! interpreter holds them: [`hirsel_remote::provider`]'s, with each completion announced by
 //! a byte on a socket the run's readiness watches for every parked remote call, so an idle
 //! run wakes for it.

@@ -1,4 +1,4 @@
-//! The signal sources behind `io.signals` and `signal.wait` (docs/spec/core-library.md).
+//! The signal sources behind `io.signals` and `signal.wait` (conformance/old-spec/core-library.md).
 //!
 //! `signals.host@1` observes the process's SIGINT, SIGTERM and SIGHUP. The handler runs no
 //! user code: it marks its kind pending with the next arrival number and writes one byte to a

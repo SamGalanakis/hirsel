@@ -27,7 +27,7 @@ implementation assignments; spec decisions remain with spec maintainers.
 | Undeclared correctly-rounded transcendental APIs | SEM-2 / named std contracts; contract boundary | Test each declared function's stated error contract; no invented “all transcendental operations correctly rounded” requirement | spec/std math maintainers |
 | Flat bytes (old #1) | MEM-12; resolved feature absence | `MEM/MEM-12-flat-bytes-field-run.hir`; native filtered control below. Physical flat bytes are private; SER-2 is a different contract | flat-layout maintainers |
 | Shape-driven generation (old #5) | CT-3/5; resolved feature absence | `CT/CT-3-shape-record-run.hir`, `CT-5-generated-ownership-{ok,bad}.hir`; generator landed `45215af7` | compile-time generation maintainers |
-| Ratified provisional markers / “section 22” | Historical references; resolved documentation | Use current named rules and [core contracts](../docs/spec/core-library.md); no new rule or blanket provisional exception | spec maintainers |
+| Ratified provisional markers / “section 22” | Historical references; resolved documentation | Use current named rules and [core contracts](../conformance/old-spec/core-library.md); no new rule or blanket provisional exception | spec maintainers |
 
 ## Memory
 
@@ -45,7 +45,7 @@ implementation assignments; spec decisions remain with spec maintainers.
 The 8 MiB cap is a settled per-worker idle-pool bound, not a new allocation budget.
 [MEM/UNTESTABLE.md](MEM/UNTESTABLE.md) retains universal address/count/layout obligations.
 Complete layout composition, native data ABI, logical frame charges and structural
-scratch levels stay in [Unspecified](../docs/spec/index.md#unspecified).
+scratch levels stay in [Unspecified](../conformance/old-spec/index.md#unspecified).
 
 ### Recovered arena controls
 

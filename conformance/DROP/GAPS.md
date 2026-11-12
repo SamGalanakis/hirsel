@@ -1,6 +1,6 @@
 # Destruction coverage dispositions
 
-[DROP-2/3](../../docs/spec/failure.md#drop-2-resources) define strict cleanup,
+[DROP-2/3](../../conformance/old-spec/failure.md#drop-2-resources) define strict cleanup,
 unit-only nonpropagating finalizers, bug failure during drop, declared `@noalloc`
 and structural `noalloc_drop`. These are settled rules, not v20 proposals.
 

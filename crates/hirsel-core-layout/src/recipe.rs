@@ -6,20 +6,21 @@
 //! one recipe so they agree). Compact types get the byte-aligned blob layout of
 //! MEM-9..12: positions are either constant or "after variable field j, plus k".
 
-use crate::shape::{Body, Field, FieldTy, FuncRef, Repr, Shape, TypeRef, Width};
+use crate::shape::{Body, Field, FieldTy, FuncRef, Handle, Repr, Shape, TypeRef, Width};
 
 /// Native size and alignment of a field slot of this type in a fixed layout.
 pub const POINTER: u64 = 8;
 /// `List`, `String`, `Bytes` carrier: data pointer, length, capacity (u64 each).
 pub const SEQ_CARRIER: u64 = 24;
-/// Closure carrier: code pointer, environment block pointer (null when no captures).
+/// `own fn` and `scoped fn` carrier: code pointer, environment pointer.
 pub const CLOSURE_CARRIER: u64 = 16;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Recipe {
     pub layout: Layout,
-    /// charge-v1 logical size (MEM-26): no padding; references count 8, carriers 24.
-    /// For a compact type, its constant extent when it has one, else `None`.
+    /// charge-v1 logical size (MEM-26): no padding; an own variant is 8 plus its
+    /// largest payload. For a compact type, its constant extent at its declared
+    /// width when it has one, else `None`.
     pub logical_size: Option<u64>,
     /// No cleanup is needed and the value may be copied bitwise (T2.2).
     pub plain: bool,
@@ -30,7 +31,25 @@ pub struct Recipe {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Layout {
     Fixed(Fixed),
-    Compact(Compact),
+    Compact(CompactSet),
+}
+
+/// A compact type's encodings. A compact value held inline or as a link target is
+/// encoded with its holder's width (MEM-9), so a type has one encoding per width.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactSet {
+    pub declared: Width,
+    /// Indexed by `Width::index`.
+    pub at: [Compact; 3],
+}
+
+impl CompactSet {
+    pub fn at(&self, w: Width) -> &Compact {
+        &self.at[w.index()]
+    }
+    pub fn declared(&self) -> &Compact {
+        self.at(self.declared)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,18 +81,18 @@ pub enum Pos {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Size {
     Fixed(u64),
-    /// `W` length, then that many UTF-8 bytes.
-    Text,
     /// `W` count, then `count * stride` bytes.
     FixedSpan {
         stride: u64,
     },
-    /// `W` count, `W` element-byte extent, then the elements.
+    /// `W` count, `W` element-byte extent, then the elements. `Text` is a
+    /// `SeqSpan[u8]` (MEM-12).
     SeqSpan,
-    /// `W` count, `W` element-byte extent, a table of `count` `W` offsets (relative to
-    /// the first element), then the elements.
+    /// `W` count, `W` element-byte extent, a table of `count` `W` entries (each the
+    /// distance from the table's start to its element), then the elements.
     IndexedSpan,
-    /// An inline compact value whose own extent is walked by its recipe.
+    /// An inline compact value whose extent is walked by its recipe at the holder's
+    /// width.
     Inline(TypeRef),
 }
 
@@ -123,6 +142,8 @@ pub enum LayoutError {
     },
     /// A constant extent exceeds the compact width's blob cap (MEM-9).
     TooLarge { ty: String },
+    /// A compact type that can encode to zero bytes (MEM-9).
+    Empty { ty: String },
 }
 
 /// The smallest tag of u8/u16/u32 that holds `cases` ordinals.
@@ -247,55 +268,46 @@ fn fixed(shapes: &[Shape], shape: &Shape, out: &[Option<Recipe>]) -> Result<Reci
     for row in &rows {
         let mut m = Vec::with_capacity(row.len());
         for f in row.iter() {
+            let refuse = |why| Err(err(shape, f, why));
             let (size, align, logical) = match &f.ty {
                 FieldTy::Scalar(s) => (s.size(), s.size(), s.size()),
                 FieldTy::Inline(t) => {
-                    if matches!(shapes[t.index()].repr, Repr::Compact(_)) {
-                        return Err(err(shape, f, "a compact value lives only in a blob"));
+                    let inner = &shapes[t.index()];
+                    if matches!(inner.repr, Repr::Compact(_)) {
+                        return refuse("a compact value lives only in a blob");
                     }
-                    if stable && shapes[t.index()].repr != Repr::Stable {
-                        return Err(err(shape, f, "a stable type holds only stable data"));
+                    if stable && inner.repr != Repr::Stable && !done(out, *t).plain {
+                        return refuse("a stable type's fields are plain or stable (MEM-2)");
                     }
                     let Layout::Fixed(l) = &done(out, *t).layout else {
                         unreachable!("non-compact shapes have fixed layouts")
                     };
                     (l.size, l.align, done(out, *t).logical_size.expect("fixed"))
                 }
-                FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_) | FieldTy::Handle(_)
-                    if stable =>
-                {
-                    return Err(err(
-                        shape,
-                        f,
-                        "a stable type holds no own, counted or resource data",
-                    ));
+                FieldTy::Stable(_) => (POINTER, POINTER, 16),
+                FieldTy::Fn => (POINTER, POINTER, 8),
+                FieldTy::Borrow if shape.repr != Repr::Scoped => {
+                    return refuse("views and scoped callables live only in scoped types");
                 }
-                FieldTy::Seq(_) | FieldTy::Closure if stable => {
-                    return Err(err(
-                        shape,
-                        f,
-                        "a stable type holds no own, counted or resource data",
-                    ));
+                FieldTy::Borrow => (CLOSURE_CARRIER, POINTER, 16),
+                _ if stable => {
+                    return refuse("a stable type's fields are plain or stable (MEM-2)");
                 }
                 FieldTy::Box(_)
                 | FieldTy::Rc(_)
                 | FieldTy::Arc(_)
-                | FieldTy::Stable(_)
                 | FieldTy::Region
-                | FieldTy::Handle(_) => (POINTER, POINTER, 8),
-                FieldTy::Seq(_) => (SEQ_CARRIER, 8, 24),
-                FieldTy::Closure => (CLOSURE_CARRIER, 8, 16),
+                | FieldTy::Handle(Handle::Task | Handle::Capability) => (POINTER, POINTER, 8),
+                FieldTy::Handle(Handle::Sender | Handle::Receiver) => (POINTER, POINTER, 24),
+                FieldTy::Seq(_) | FieldTy::Map(..) => (SEQ_CARRIER, POINTER, 24),
+                FieldTy::OwnFn => (CLOSURE_CARRIER, POINTER, 16),
                 FieldTy::Text
                 | FieldTy::FixedSpan(_)
                 | FieldTy::SeqSpan(_)
                 | FieldTy::IndexedSpan(_)
                 | FieldTy::Link(_)
                 | FieldTy::OptLink(_) => {
-                    return Err(err(
-                        shape,
-                        f,
-                        "compact field types need a compact declaration",
-                    ));
+                    return refuse("compact field types need a compact declaration");
                 }
             };
             m.push((size, align, logical));
@@ -326,7 +338,8 @@ fn fixed(shapes: &[Shape], shape: &Shape, out: &[Option<Recipe>]) -> Result<Reci
         offsets.push(row);
     }
     let size = align_up(end, align);
-    let logical = logical + tag.unwrap_or(0);
+    // MEM-26: an own variant is 8 plus its largest payload, whatever its tag width.
+    let logical = logical + if tag.is_some() { 8 } else { 0 };
     let drop = drop_recipe(shapes, shape, &rows, &offsets, out);
     Ok(Recipe {
         plain: drop.is_none() && shape.repr != Repr::Resource,
@@ -350,8 +363,9 @@ fn needs_drop(shapes: &[Shape], ty: &FieldTy, out: &[Option<Recipe>]) -> bool {
         | FieldTy::Seq(_)
         | FieldTy::Rc(_)
         | FieldTy::Arc(_)
-        | FieldTy::Closure
-        | FieldTy::Handle(_) => true,
+        | FieldTy::Map(..)
+        | FieldTy::OwnFn
+        | FieldTy::Handle(Handle::Task | Handle::Sender | Handle::Receiver) => true,
         _ => false,
     }
 }
@@ -388,55 +402,69 @@ fn drop_recipe(
 fn compact(
     shapes: &[Shape],
     shape: &Shape,
-    w: Width,
+    declared: Width,
     out: &[Option<Recipe>],
 ) -> Result<Recipe, LayoutError> {
     let rows = cases(shape);
-    let tag = matches!(shape.body, Body::Variant(_)).then(|| tag_width(rows.len()));
-    let start = tag.unwrap_or(0);
-    let mut fields = Vec::with_capacity(rows.len());
-    let mut extents = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let mut pos = Pos::At(start);
-        let mut cfs = Vec::with_capacity(row.len());
-        for (i, f) in row.iter().enumerate() {
-            let size = compact_size(shapes, shape, f, &f.ty, w, out)?;
-            let next = match (&size, pos) {
-                (Size::Fixed(n), Pos::At(o)) => Pos::At(o + n),
-                (Size::Fixed(n), Pos::After { field, plus }) => Pos::After {
-                    field,
-                    plus: plus + n,
-                },
-                (_, _) => Pos::After {
-                    field: i as u32,
-                    plus: 0,
-                },
-            };
-            cfs.push(CField { pos, size });
-            pos = next;
-        }
-        extents.push(match pos {
-            Pos::At(n) => Some(n),
-            Pos::After { .. } => None,
+    if matches!(shape.body, Body::Record(ref f) if f.is_empty()) {
+        return Err(LayoutError::Empty {
+            ty: shape.name.clone(),
         });
-        fields.push(cfs);
     }
-    let fixed_extent = match extents.first() {
-        Some(Some(e)) if extents.iter().all(|x| *x == Some(*e)) => Some(*e),
-        _ => None,
+    let encode = |w: Width| -> Result<Compact, LayoutError> {
+        let tag = matches!(shape.body, Body::Variant(_)).then(|| tag_width(rows.len()));
+        let start = tag.unwrap_or(0);
+        let mut fields = Vec::with_capacity(rows.len());
+        let mut extents = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let mut pos = Pos::At(start);
+            let mut cfs = Vec::with_capacity(row.len());
+            for (i, f) in row.iter().enumerate() {
+                let size = compact_size(shapes, shape, f, &f.ty, w, out)?;
+                let next = match (&size, pos) {
+                    (Size::Fixed(n), Pos::At(o)) => Pos::At(o + n),
+                    (Size::Fixed(n), Pos::After { field, plus }) => Pos::After {
+                        field,
+                        plus: plus + n,
+                    },
+                    (_, _) => Pos::After {
+                        field: i as u32,
+                        plus: 0,
+                    },
+                };
+                cfs.push(CField { pos, size });
+                pos = next;
+            }
+            extents.push(match pos {
+                Pos::At(n) => Some(n),
+                Pos::After { .. } => None,
+            });
+            fields.push(cfs);
+        }
+        let fixed_extent = match extents.first() {
+            Some(Some(e)) if extents.iter().all(|x| *x == Some(*e)) => Some(*e),
+            _ => None,
+        };
+        Ok(Compact {
+            width: w,
+            tag: tag.map(|width| Tag { offset: 0, width }),
+            fields,
+            fixed_extent,
+        })
     };
-    if fixed_extent.is_some_and(|e| e > w.max_blob()) {
+    let at = [
+        encode(Width::U16)?,
+        encode(Width::U32)?,
+        encode(Width::U64)?,
+    ];
+    let fixed_extent = at[declared.index()].fixed_extent;
+    if fixed_extent.is_some_and(|e| e > declared.max_blob()) {
         return Err(LayoutError::TooLarge {
             ty: shape.name.clone(),
         });
     }
     Ok(Recipe {
-        layout: Layout::Compact(Compact {
-            width: w,
-            tag: tag.map(|width| Tag { offset: 0, width }),
-            fields,
-            fixed_extent,
-        }),
+        layout: Layout::Compact(CompactSet { declared, at }),
         logical_size: fixed_extent,
         plain: true,
         drop: None,
@@ -463,18 +491,9 @@ fn compact_size(
             }
             Size::Fixed(w.bytes())
         }
-        FieldTy::Inline(t) => match (&shapes[t.index()].repr, &done(out, *t).layout) {
-            (Repr::Compact(tw), Layout::Compact(c)) => {
-                if *tw != w {
-                    return Err(err(
-                        shape,
-                        f,
-                        "an inline compact field has its holder's width",
-                    ));
-                }
-                c.fixed_extent.map_or(Size::Inline(*t), Size::Fixed)
-            }
-            _ => {
+        FieldTy::Inline(t) => match &done(out, *t).layout {
+            Layout::Compact(set) => set.at(w).fixed_extent.map_or(Size::Inline(*t), Size::Fixed),
+            Layout::Fixed(_) => {
                 return Err(err(
                     shape,
                     f,
@@ -482,7 +501,7 @@ fn compact_size(
                 ));
             }
         },
-        FieldTy::Text => Size::Text,
+        FieldTy::Text => Size::SeqSpan,
         FieldTy::FixedSpan(e) => match compact_size(shapes, shape, f, e, w, out)? {
             Size::Fixed(stride) => Size::FixedSpan { stride },
             _ => return Err(err(shape, f, "FixedSpan elements have one fixed size")),
@@ -495,14 +514,7 @@ fn compact_size(
                 Size::IndexedSpan
             }
         }
-        FieldTy::Box(_)
-        | FieldTy::Seq(_)
-        | FieldTy::Rc(_)
-        | FieldTy::Arc(_)
-        | FieldTy::Stable(_)
-        | FieldTy::Region
-        | FieldTy::Closure
-        | FieldTy::Handle(_) => {
+        _ => {
             return Err(err(
                 shape,
                 f,
@@ -519,13 +531,15 @@ fn compact_size(
 pub fn compact_extent(
     recipes: &[Recipe],
     ty: TypeRef,
+    w: Width,
     base: u64,
     read_w: &dyn Fn(u64) -> u64,
     read_tag: &dyn Fn(u64, u64) -> u64,
 ) -> u64 {
-    let Layout::Compact(c) = &recipes[ty.index()].layout else {
+    let Layout::Compact(set) = &recipes[ty.index()].layout else {
         panic!("compact_extent of a fixed layout")
     };
+    let c = set.at(w);
     if let Some(e) = c.fixed_extent {
         return e;
     }
@@ -573,11 +587,10 @@ fn field_ends(
         };
         let len = match &f.size {
             Size::Fixed(n) => *n,
-            Size::Text => w + read_w(start),
             Size::FixedSpan { stride } => w + read_w(start) * stride,
             Size::SeqSpan => 2 * w + read_w(start + w),
             Size::IndexedSpan => 2 * w + read_w(start) * w + read_w(start + w),
-            Size::Inline(t) => compact_extent(recipes, *t, start, read_w, read_tag),
+            Size::Inline(t) => compact_extent(recipes, *t, c.width, start, read_w, read_tag),
         };
         ends.push(start + len);
     }

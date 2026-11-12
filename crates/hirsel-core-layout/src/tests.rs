@@ -72,7 +72,8 @@ fn own_record_aligns_natively_and_charges_logically() {
 
 /// Bug: own variants not reserving the largest payload, or the tag overlapping it.
 /// `None | Some(u64) | Pair(u8, u32)`: tag u8@0; payload starts at 8 (max align 8);
-/// Some.v@8; Pair: u8@8, u32@12; size 16. Logical = tag 1 + max(0, 8, 5) = 9.
+/// Some.v@8; Pair: u8@8, u32@12; size 16. Logical (MEM-26: 8 plus the largest
+/// payload, whatever the tag width) = 8 + max(0, 8, 5) = 16.
 #[test]
 fn own_variant_reserves_the_largest_payload_after_its_tag() {
     let r = compute(&[variant(
@@ -97,7 +98,7 @@ fn own_variant_reserves_the_largest_payload_after_its_tag() {
         })
     );
     assert_eq!(f.offsets, vec![vec![], vec![8], vec![8, 12]]);
-    assert_eq!((f.size, r[0].logical_size), (16, Some(9)));
+    assert_eq!((f.size, r[0].logical_size), (16, Some(16)));
 }
 
 /// Bug: a by-value self-reference accepted (infinite size), or a reference through a
@@ -145,14 +146,14 @@ fn by_value_cycles_are_refused_and_collections_break_them() {
 
 /// Bug: cleanup in declaration order instead of reverse (FAIL-8), a plain field
 /// visited, or a resource without finalizer called plain.
-/// `resource Pair {a: File, n: u64, b: List[u8]}`: a@0, n@8, b@16; drops b then a.
+/// `resource Pair {a: Task[u64], n: u64, b: List[u8]}`: a@0, n@8, b@16; drops b then a.
 #[test]
 fn cleanup_visits_owned_fields_in_reverse_declaration_order() {
     let mut s = record(
         "Pair",
         Repr::Resource,
         vec![
-            field("a", FieldTy::Handle(Handle::Os)),
+            field("a", FieldTy::Handle(Handle::Task)),
             field("n", u(Scalar::U64)),
             field("b", FieldTy::Seq(Box::new(u(Scalar::U8)))),
         ],
@@ -185,9 +186,11 @@ fn le(bytes: &[u8], at: u64, n: u64) -> u64 {
 
 /// Bug: a field after a variable field placed at a constant offset, or a SeqSpan's
 /// extent skipped wrongly. `@compact(u32) Entry {id: u64, name: Text, tags:
-/// SeqSpan[Text]}` with id = 1, name "abc", tags ["ab", "c"]:
-/// id 8 bytes @0; name @8 = len 3 (4) + "abc" = 7 bytes; tags @15 = count 2 (4),
-/// extent 11 (4), then "ab" (4+2) and "c" (4+1) = 11; total 8 + 7 + 19 = 34.
+/// SeqSpan[Text]}` with id = 1, name "abc", tags ["ab", "c"]. `Text` is a
+/// `SeqSpan[u8]` (MEM-12): count, extent, bytes.
+/// id 8 bytes @0; name @8 = count 3 (4) + extent 3 (4) + "abc" = 11 bytes; tags @19
+/// = count 2 (4), extent 19 (4), then "ab" (4+4+2) and "c" (4+4+1) = 19; total
+/// 8 + 11 + 27 = 46.
 #[test]
 fn compact_record_walks_variable_fields_by_their_stored_lengths() {
     let entry = record(
@@ -200,24 +203,25 @@ fn compact_record_walks_variable_fields_by_their_stored_lengths() {
         ],
     );
     let r = compute(&[entry]).unwrap();
-    let Layout::Compact(c) = &r[0].layout else {
+    let Layout::Compact(set) = &r[0].layout else {
         panic!()
     };
+    let c = set.declared();
     assert_eq!(c.fields[0][0].pos, Pos::At(0));
     assert_eq!(c.fields[0][1].pos, Pos::At(8));
     assert_eq!(c.fields[0][2].pos, Pos::After { field: 1, plus: 0 });
     assert_eq!(c.fixed_extent, None);
     let mut b = vec![1, 0, 0, 0, 0, 0, 0, 0];
-    b.extend([3, 0, 0, 0, b'a', b'b', b'c']);
-    b.extend([
-        2, 0, 0, 0, 11, 0, 0, 0, 2, 0, 0, 0, b'a', b'b', 1, 0, 0, 0, b'c',
-    ]);
+    b.extend([3, 0, 0, 0, 3, 0, 0, 0, b'a', b'b', b'c']);
+    b.extend([2, 0, 0, 0, 19, 0, 0, 0]);
+    b.extend([2, 0, 0, 0, 2, 0, 0, 0, b'a', b'b']);
+    b.extend([1, 0, 0, 0, 1, 0, 0, 0, b'c']);
     let rw = |at| le(&b, at, 4);
     let rt = |at, n| le(&b, at, n);
-    assert_eq!(compact_extent(&r, TypeRef(0), 0, &rw, &rt), 34);
+    assert_eq!(compact_extent(&r, TypeRef(0), Width::U32, 0, &rw, &rt), 46);
     assert_eq!(
         compact_starts(&r, c, &c.fields[0], 0, &rw, &rt),
-        vec![0, 8, 15]
+        vec![0, 8, 19]
     );
 }
 
@@ -244,8 +248,27 @@ fn compact_variant_occupies_its_active_case_only() {
     ] {
         let rw = |at| le(bytes, at, 4);
         let rt = |at, n| le(bytes, at, n);
-        assert_eq!(compact_extent(&r, TypeRef(0), 0, &rw, &rt), extent);
+        assert_eq!(compact_extent(&r, TypeRef(0), Width::U32, 0, &rw, &rt), extent);
     }
+}
+
+/// Bug: an inline compact value encoded with its own declared width instead of its
+/// holder's (MEM-9). `@compact(u16) Name { t: Text }` inline in `@compact(u32) Row
+/// { n: Name, k: u8 }`: at u32, Name = count 4 + extent 4 + bytes; for "hi" that is
+/// 10 bytes, so k sits at 10 and Row's extent is 11 (at u16 it would be 6 and 7).
+#[test]
+fn inline_compact_values_use_the_holders_width() {
+    let name = record("Name", Repr::Compact(Width::U16), vec![field("t", FieldTy::Text)]);
+    let row = record(
+        "Row",
+        Repr::Compact(Width::U32),
+        vec![field("n", FieldTy::Inline(TypeRef(0))), field("k", u(Scalar::U8))],
+    );
+    let r = compute(&[name, row]).unwrap();
+    let b = [2u8, 0, 0, 0, 2, 0, 0, 0, b'h', b'i', 7];
+    let rw = |at| le(&b, at, 4);
+    let rt = |at, n| le(&b, at, n);
+    assert_eq!(compact_extent(&r, TypeRef(1), Width::U32, 0, &rw, &rt), 11);
 }
 
 /// Bug: representation refusals missing (MEM-9: own field in compact; MEM-17: counted
@@ -280,17 +303,32 @@ fn representation_refusals() {
         compute(&[blob, holder]),
         Err(LayoutError::Field { .. })
     ));
+    let empty = record("E", Repr::Compact(Width::U16), vec![]);
+    assert!(matches!(compute(&[empty]), Err(LayoutError::Empty { .. })));
+    // MEM-2: a plain own record is a legal field of a stable type; a String is not.
+    let pair = record("P", Repr::Own, vec![field("a", u(Scalar::U64))]);
+    let ok = record("S", Repr::Stable, vec![field("p", FieldTy::Inline(TypeRef(0)))]);
+    assert!(compute(&[pair.clone(), ok]).is_ok());
+    let s = record("Q", Repr::Own, vec![field("s", FieldTy::Seq(Box::new(u(Scalar::U8))))]);
+    let bad = record("S", Repr::Stable, vec![field("q", FieldTy::Inline(TypeRef(0)))]);
+    assert!(matches!(compute(&[s, bad]), Err(LayoutError::Field { .. })));
 }
 
 /// Bug: charge-v1 transcribed wrongly (MEM-26). Hand values: List of 3 three-byte
 /// elements: 9 → 16; Map of 4 entries u64→u64: 4 × (8+8+16) = 128; Rc of a 12-byte
-/// payload: 20; channel of 2 items of 24: 48 + 64 = 112; growth from 0 needing 1 is 4,
+/// payload: 20 → 24; channel of 2 items of 24: 48 + 64 = 112; growth from 0 needing 1 is 4,
 /// from 4 needing 5 is 8, from 8 needing 100 is 100; overflow is None, not a wrap.
+/// A task with an 8-byte result and `bytes 4096`: 256 + 8 + 32 + 4096 = 4392; a
+/// 16-byte resource with `grant bytes 256`: 16 + 32 + 256 = 304; a standalone
+/// IndexedSpan of 2 elements and 5 payload bytes: 16 + 16 + 5 = 37 → 40.
 #[test]
 fn charge_v1_matches_the_spec_table() {
     assert_eq!(charge::seq(3, 3), Some(16));
     assert_eq!(charge::map(4, 8, 8), Some(128));
-    assert_eq!(charge::counted(12), Some(20));
+    assert_eq!(charge::counted(12), Some(24));
+    assert_eq!(charge::task(8, 4096), Some(4392));
+    assert_eq!(charge::resource(16, 256), Some(304));
+    assert_eq!(charge::standalone_span(2, 5, true), Some(40));
     assert_eq!(charge::channel(2, 24), Some(112));
     assert_eq!(charge::grown_capacity(0, 1), Some(4));
     assert_eq!(charge::grown_capacity(4, 5), Some(8));

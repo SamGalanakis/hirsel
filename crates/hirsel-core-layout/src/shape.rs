@@ -85,6 +85,14 @@ pub enum Width {
     U64,
 }
 impl Width {
+    pub const ALL: [Width; 3] = [Width::U16, Width::U32, Width::U64];
+    pub const fn index(self) -> usize {
+        match self {
+            Width::U16 => 0,
+            Width::U32 => 1,
+            Width::U64 => 2,
+        }
+    }
     pub const fn bytes(self) -> u64 {
         match self {
             Width::U16 => 2,
@@ -103,17 +111,17 @@ impl Width {
 }
 
 /// A runtime-owned handle kind: an opaque pointer whose cleanup is a run-time call.
+/// Opaque engine-owned values held by pointer. Logical sizes per MEM-26: a task
+/// handle and a capability 8, a sender or receiver 24.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Handle {
     Task,
     Sender,
     Receiver,
-    /// An OS resource the run time closes (file, socket, lock); the capability
-    /// layer names which.
-    Os,
+    /// A capability (`Dir`, `Tasks`, ...).
+    Capability,
 }
 
-/// What a declaration says about representation (ruling 1; OWN-19, MEM-9).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Repr {
     /// `type`: one owner, mutated in place, capacity-based (MEM-13).
@@ -140,12 +148,18 @@ pub enum FieldTy {
     Seq(Box<FieldTy>),
     Rc(TypeRef),
     Arc(TypeRef),
-    /// A locator of a published stable value of this type.
+    /// A reference to a published stable value of this type (logically 16, MEM-26).
     Stable(TypeRef),
     Region,
-    /// A callable value: code pointer plus environment block (LANG-13).
-    Closure,
+    /// A plain `fn`: a code pointer, captures nothing (LANG-13).
+    Fn,
+    /// An `own fn`: code pointer and an owned environment block.
+    OwnFn,
+    /// A `scoped fn` or a `View`: borrowed, cleaned by nobody, only in scoped types.
+    Borrow,
     Handle(Handle),
+    /// `Map[K, V]`: a header like a `List`'s over its entry storage.
+    Map(Box<FieldTy>, Box<FieldTy>),
     // Compact-only field types (MEM-9..12).
     Text,
     FixedSpan(Box<FieldTy>),

@@ -1,0 +1,5 @@
+// OWN-5, the spec's pair: `t` takes `s`, then the tail reads the moved `s`.
+// expect: refuse OWN-5 at 5:47
+// expect: gap values of this type are not built
+fn ok(take s: String) -> String { let t = s; t }
+fn bad(take s: String) -> String { let t = s; s }

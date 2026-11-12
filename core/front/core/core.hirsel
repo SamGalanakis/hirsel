@@ -1,16 +1,27 @@
-// Fixture of the core prelude (core@1/core), declared as core/core/core.hirsel declares
-// it at spec revision 3. Role types are fixed by these paths.
+// Fixture of the core prelude (core@1/core): the subset of core/core/core.hirsel the
+// cases use, declared as it declares them at spec revision 4. Role types are fixed by
+// these paths.
 pub type Option[T] = None | Some(T)
 pub type Result[T, E] = Ok(T) | Error(E)
 pub opaque type Never
-pub opaque type View[T] {}
-pub opaque type Box[T] {}
-pub opaque type Rc[T: shareable] {}
-pub opaque type Arc[T: shareable + send] {}
-pub opaque type List[T] {}
-pub opaque type String {}
-pub opaque type Region {}
-pub opaque type Dir {}
+
+pub opaque type String
+pub opaque type List[T]
+pub opaque type Box[T]
+pub opaque type Rc[T: shareable]
+pub opaque type Arc[T: shareable + send]
+pub opaque type View[T]
+
+pub opaque type Region
+
+pub opaque type Task[R: send]
+pub opaque type Sender[T: send]
+pub opaque type Receiver[T: send]
+
+pub opaque type Dir
+
 pub type Capacity { requested: u64, available: u64 }
-pub fn replace[T](mut q: T, take v: T) -> T
+pub type Bytes = List[u8]
+
 pub fn fail(take msg: String) -> Never
+pub fn replace[T](mut q: T, take v: T) -> T

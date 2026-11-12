@@ -13,6 +13,7 @@ hirsel_guard::install!();
 mod body;
 mod decls;
 mod layout;
+mod own;
 mod types;
 
 pub use body::{CoreCheck, Counts, Emitter};
@@ -81,6 +82,9 @@ pub struct Program<'a> {
     /// Refusals of declarations and signatures, and the resolver's.
     pub refusals: Vec<Refusal>,
     pub gaps: Vec<Gap>,
+    /// The program's entry, as its manifest names it (PROG-3); `main` is always `waits`
+    /// (LANG-8).
+    pub entry: Option<DefPath>,
     pub(crate) pending: Vec<decls::Pending>,
     pub(crate) alias_state: Vec<u8>,
     /// Aliases being lowered, each with its reference continuing the chain.
@@ -120,6 +124,7 @@ impl<'a> Program<'a> {
             by_path: HashMap::new(),
             refusals,
             gaps: vec![],
+            entry: None,
             pending: vec![],
             alias_state: vec![],
             alias_stack: vec![],

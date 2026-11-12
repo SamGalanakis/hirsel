@@ -113,11 +113,12 @@ fn holds_names(h: u8) -> String {
 fn run_case(path: &Path) -> Vec<String> {
     let source = std::fs::read_to_string(path).expect("case reads");
     let (index, modules) = program_inputs(&source);
-    let p = Program::declare(&index, &modules);
+    let mut p = Program::declare(&index, &modules);
     let main = ModuleId {
         package: package("app"),
         modules: vec!["main".into()],
     };
+    p.entry = Some(main.definition("main"));
     // Every body of the application module, checked once, in order.
     let mut emitter = Emitter::new();
     let mut refusals = p.refusals.clone();
@@ -163,7 +164,7 @@ fn run_case(path: &Path) -> Vec<String> {
                         .summary
                         .kind_fixed
                         .map_or("-".into(), |k| kind_name(k).to_string()),
-                    "holds" => holds_names(d.summary.holds),
+                    "holds" => holds_names(d.holds_rigid()),
                     _ => d
                         .summary
                         .recipe
@@ -205,7 +206,9 @@ fn run_case(path: &Path) -> Vec<String> {
         failures.push(format!("refusals: want {want_refusals:?}, got {detail:?}"));
     }
     let mut got_gaps: Vec<String> = gaps.iter().map(|g| g.what.to_string()).collect();
+    // A gap is a kind of unbuilt construct: each kind is listed once per case.
     got_gaps.sort();
+    got_gaps.dedup();
     want_gaps.sort();
     if got_gaps != want_gaps {
         failures.push(format!("gaps: want {want_gaps:?}, got {got_gaps:?}"));

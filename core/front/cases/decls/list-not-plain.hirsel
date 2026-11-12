@@ -1,0 +1,3 @@
+// OWN-2 (spec attack 4, U1): List[u8] is own and never plain, whatever its element.
+// expect: kind Bufs own
+type Bufs { xs: List[u8], b: Box[u8] }

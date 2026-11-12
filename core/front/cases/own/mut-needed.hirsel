@@ -1,0 +1,5 @@
+// OWN-7: an argument for a `mut` parameter is `mut p`; a bare place is refused at it.
+// expect: refuse OWN-7 at 5:38
+// expect: gap calls to generic functions are not built
+// expect: gap mut parameters are not built
+fn f(mut xs: List[u64]) { list.clear(xs) }

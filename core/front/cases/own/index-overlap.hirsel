@@ -1,0 +1,8 @@
+// OWN-9, the spec's example: `xs[i]` is lent mut, then the next argument views `xs[j]`, which may be the same element; refused at that argument.
+// expect: refuse OWN-9 at 7:34
+// expect: gap calls to generic functions are not built
+// expect: gap mut arguments are not built
+// expect: gap mut parameters are not built
+fn f(mut xs: List[List[u8]], i: u64, j: u64) {
+  let _ = list.append(mut xs[i], xs[j])
+}

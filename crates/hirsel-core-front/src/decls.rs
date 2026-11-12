@@ -38,6 +38,18 @@ pub const H_CAPABILITY: u8 = 2;
 pub const H_SCOPED: u8 = 4;
 pub const H_STABLE: u8 = 8;
 
+/// What a rigid type parameter may hold (OWN-2): every category its bounds do not
+/// exclude. `plain` and `shareable` exclude resources, scoped values and stable
+/// references, and nothing excludes a capability.
+pub fn param_holds(bounds: u8) -> u8 {
+    let all = H_RESOURCE | H_CAPABILITY | H_SCOPED | H_STABLE;
+    if bounds & (PLAIN | SHAREABLE) != 0 {
+        all & !(H_RESOURCE | H_SCOPED | H_STABLE)
+    } else {
+        all
+    }
+}
+
 /// A kind (OWN-3). `Generic` is a rigid type parameter without the `plain` bound.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Kind {
@@ -181,6 +193,17 @@ pub struct TypeDecl {
     pub summary: Summary,
 }
 impl TypeDecl {
+    /// What the declaration's own type may hold with its parameters rigid (OWN-2): its
+    /// fields' categories, and each parameter named in them per [`param_holds`].
+    pub fn holds_rigid(&self) -> u8 {
+        let mut h = self.summary.holds;
+        for (i, g) in self.generics.iter().enumerate() {
+            if self.summary.holds_params & (1 << i) != 0 {
+                h |= param_holds(g.bounds);
+            }
+        }
+        h
+    }
     pub fn fields(&self, case: Option<usize>) -> &[FieldDecl] {
         match (&self.body, case) {
             (DeclBody::Record(f), None) => f,
@@ -1250,8 +1273,9 @@ pub fn has_bounds(decls: &[TypeDecl], t: &impl TyRead, ty: TyId, params: &[u8]) 
                     Some(Role::String) => KEY | ORDERED | SHAREABLE | SEND,
                     Some(Role::Text) => KEY | ORDERED,
                     Some(Role::Rc) => SHAREABLE | (meet(args) & (KEY | ORDERED)),
-                    Some(Role::Arc) => SHAREABLE | (meet(args) & (KEY | ORDERED | SEND)),
-                    Some(Role::Box) => meet(args) & (SHAREABLE | SEND),
+                    Some(Role::Arc) => SHAREABLE | SEND | (meet(args) & (KEY | ORDERED)),
+                    Some(Role::Box) => meet(args) & (SHAREABLE | SEND | KEY | ORDERED),
+                    Some(Role::Sender | Role::Receiver) => SEND,
                     Some(Role::Map) => meet(args) & (SHAREABLE | SEND),
                     Some(Role::Capability) => PLAIN | SHAREABLE | SEND,
                     Some(_) => 0,

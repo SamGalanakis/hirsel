@@ -1,0 +1,14 @@
+// OWN-17: every `continue` too leaves outer slots in their entry state; a `break` leaves for the exit, where the move joins.
+// expect: refuse OWN-17 at 6:38
+// expect: gap values of this type are not built
+fn f(take s: String, c: bool) {
+  loop {
+    if c { let _ = string.into_bytes(take s); continue }
+    break
+  }
+}
+fn g(take s: String, c: bool) {
+  loop {
+    if c { let _ = string.into_bytes(take s); break }
+  }
+}

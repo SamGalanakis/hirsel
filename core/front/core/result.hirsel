@@ -1,0 +1,3 @@
+// Module `result` (FAIL-2).
+
+pub fn unwrap[T, E](take x: Result[T, E]) -> T

@@ -1,0 +1,6 @@
+// expect: accept
+// core.md, Built-in types: Box[T] has shareable, send, key and ordered when T has them,
+// so Box[u64] is key and ordered; Arc[T] is always send; Sender and Receiver are send.
+type Keyed: key + ordered { b: Box[u64] }
+type Shared: send { a: Arc[u64] }
+type Ends: send { s: Sender[u64], r: Receiver[u64] }

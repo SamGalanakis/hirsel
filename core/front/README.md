@@ -7,7 +7,8 @@
 - `// expect: refuse RULE at LINE:COL`: one line per refusal; the set must match exactly.
 - `// expect: kind TYPE KIND`, `// expect: holds TYPE a,b`, `// expect: size TYPE N`: a
   published summary (OWN-2, OWN-3, MEM-24), hand-derived.
-- `// expect: gap WHAT`: one line per construct this implementation does not build yet.
+- `// expect: gap WHAT`: one line per kind of construct this implementation does not build
+  yet, however many times the case reaches it.
 - `// expect: run f(A,B) = R` or `= fail Cause`: every application body is checked and
   emitted; the emitted module must be well formed, and `f` run by the CoreIR evaluator
   must return `R` or fail with `Cause`. Values are written at the signature's types

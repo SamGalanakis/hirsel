@@ -1,0 +1,4 @@
+// CONC-2 via OWN-4 (spec attack 4, W1): a Task handle is not send, so a send record
+// may not hold one; refused at the field.
+// expect: refuse OWN-4 at 4:23
+type Transfer: send { handle: Task[u64] }

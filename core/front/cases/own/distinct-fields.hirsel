@@ -1,0 +1,14 @@
+// OWN-9: different fields of one record do not overlap (the spec's swap_halves; proto-872's safe program views p.a while assigning p.b).
+// expect: accept
+// expect: gap assignment to this place is not built
+// expect: gap calls to generic functions are not built
+// expect: gap mut arguments are not built
+// expect: gap mut parameters are not built
+// expect: gap values of this type are not built
+type Pair { left: List[u8], right: List[u8] }
+type P { a: u64, b: List[u8] }
+fn swap_halves(mut p: Pair) { let _ = list.append(mut p.left, p.right) }
+fn safe(mut p: P) {
+  let v = view p.b
+  p.a = 3
+}

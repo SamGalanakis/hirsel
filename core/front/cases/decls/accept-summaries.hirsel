@@ -10,14 +10,16 @@
 // expect: kind Handle resource
 // expect: kind Wraps own
 // expect: holds Wraps resource
+// expect: size Wraps 8
 // expect: holds G1 resource
 // expect: holds G2 resource
 // expect: kind Pick plain
 // expect: kind Leaf own
 // OWN-2/OWN-3/MEM-24 by hand: Point is two i64 (16 bytes); Mixed is u64 + u8 with no
 // padding (9); Named is a String carrier (24) plus Mixed inline (9). Tree reaches itself
-// only through List. G1 and G2 name each other through Box and Option, so they form one
-// holds group and both hold the resource G2's list holds.
+// only through List. A resource counts 8 in its holder (MEM-24), so Wraps is 8. G1 and
+// G2 name each other through Box and Option, so they form one holds group and both hold
+// the resource G2's list holds.
 type Point { x: i64, y: i64 }
 type Mixed { a: u64, b: u8 }
 type Named { s: String, m: Mixed }

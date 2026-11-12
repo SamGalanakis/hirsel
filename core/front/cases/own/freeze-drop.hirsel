@@ -1,0 +1,7 @@
+// OWN-10 and proto-872 `freeze`: moving `q` while `v` views it.
+// expect: refuse OWN-10 at 6:3
+// expect: gap values of this type are not built
+fn f(take q: String) -> String {
+  let v = view q
+  q
+}

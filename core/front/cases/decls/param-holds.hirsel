@@ -1,0 +1,8 @@
+// OWN-2 (A01): a type parameter holds every category its bounds do not exclude; `plain`
+// excludes resources, scoped values and stable references, but not capabilities.
+// expect: holds Wrap capability
+// expect: holds Any resource,capability,scoped,stable
+// expect: holds Bare -
+type Wrap[T: plain] { item: T }
+type Any[T] { item: T }
+type Bare[T: plain] { n: u64 }

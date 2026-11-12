@@ -1,14 +1,24 @@
 //! Bodies: one forward visit per function that types its body against the published
-//! signatures and summaries and emits CoreIR as it goes (LANG-8: nothing else is read).
+//! signatures and summaries, checks ownership and emits CoreIR as it goes (LANG-8:
+//! nothing else is read).
 //!
-//! Built so far (slice b): scalars and unit, blocks, `let` and `let mut`, assignment and
-//! compound assignment, the operators of SEM-1, SEM-2 and SEM-7, `if`, `loop`, `while`,
-//! labels, `break`, `continue`, `return`, direct calls of non-generic functions and the
-//! core integer operations. Anything else is a [`Gap`]: the body is still checked, but no
-//! code is emitted for it. An operation that can fail names no failure successor, so the
-//! failure leaves the function with its cause (FORM v1a); nothing here needs cleanup yet.
+//! Emitted so far: scalars and unit, blocks, `let` and `let mut`, assignment and compound
+//! assignment, the operators of SEM-1, SEM-2 and SEM-7, `if`, `loop`, `while`, labels,
+//! `break`, `continue`, `return`, direct calls of non-generic functions and the core
+//! integer operations. Checked but not yet emitted: values of own types, their places
+//! (fields, tuple components, `List` elements), `take`, `view`, `mut` arguments, and the
+//! ownership rules OWN-5 to OWN-17 over them. Anything else is a [`Gap`]: the body is
+//! still checked, but no code is emitted for it. An operation that can fail names no
+//! failure successor, so the failure leaves the function with its cause (FORM v1a).
+//!
+//! Ownership state is per body and indexed by binder id: the slot table, an undo log of
+//! availability changes (a branch's arms run from one state and join by OWN-16 without
+//! copying the table), and the freeze and reservation records (crate::own).
 
-use crate::decls::{FnDecl, KEY, ORDERED, copyable, has_bounds, is_core_prelude};
+use crate::decls::{
+    DeclBody, FnDecl, KEY, Kind, ORDERED, Repr, Role, copyable, has_bounds, is_core_prelude,
+};
+use crate::own::{Act, Avail, Extent, Freeze, Hold, Origin, PStep, Place, breaks, join, overlap};
 use crate::types::*;
 use crate::{Def, Gap, ItemRef, Program, refusal};
 use hirsel_core_ids::DefPath;
@@ -209,10 +219,50 @@ enum Binding {
     Value(Option<ValueId>),
     Slot(Option<AddressId>),
 }
+/// One row of the slot table (ownership.md, Checker state).
 #[derive(Clone, Copy)]
 struct Var {
     ty: TyId,
     binding: Binding,
+    origin: Origin,
+    avail: Avail,
+    /// Where its availability last changed.
+    at: NodeId,
+    /// Declaration order, so a loop tells the slots declared outside it (OWN-17).
+    born: u32,
+    /// It reached maybe at a join (OWN-18).
+    flagged: bool,
+    /// Freeze and reservation records naming it; with none, no record is searched.
+    holds: u32,
+}
+
+/// A place and its type.
+#[derive(Clone, Copy)]
+struct At {
+    place: Place,
+    ty: TyId,
+    /// Reached through a view or a stable value, so never written (OWN-12).
+    shared: bool,
+}
+
+/// What a use of a place does (OWN-6, OWN-7, OWN-8).
+#[derive(Clone, Copy)]
+enum Use {
+    /// A value position: a move when the type moves, else a copy.
+    Value,
+    /// `take p`.
+    Take,
+    View(Hold),
+    Mut(Hold),
+}
+
+/// Per-slot scratch of one join or loop check, found by generation, never cleared.
+#[derive(Clone, Copy)]
+struct Acc {
+    avail: Avail,
+    count: u32,
+    merge: u32,
+    edge: u32,
 }
 
 /// A block every one of whose predecessors is known only as they are emitted; it is
@@ -238,6 +288,11 @@ struct Frame {
     ty: Option<TyId>,
     /// Whether any exit names it, reachable or not.
     left: bool,
+    /// The undo log's length and the declaration count at its start.
+    mark: usize,
+    born: u32,
+    /// Where its exit edges begin in `exits`.
+    exits: usize,
 }
 
 struct Cx<'c, 'a> {
@@ -256,13 +311,37 @@ struct Cx<'c, 'a> {
     open_anchors: Vec<Option<Anchor>>,
     /// Emission stopped: a refusal or a gap was recorded.
     broken: bool,
-    vars: HashMap<u32, Var>,
+    /// The slot table, indexed by binder id.
+    vars: Vec<Option<Var>>,
+    /// Availability changes, undone to a mark when a branch ends: (slot, old, old site).
+    log: Vec<(u32, Avail, NodeId)>,
+    /// Join inputs: the slots one incoming edge changed and their states.
+    diffs: Vec<(u32, Avail)>,
+    /// Edges to open frames' exits: (frame, start, len) in `diffs`.
+    exits: Vec<(usize, u32, u32)>,
+    edge_buf: Vec<(u32, u32)>,
+    acc: Vec<Acc>,
+    touched: Vec<u32>,
+    merges: u32,
+    edges_seen: u32,
+    born: u32,
+    /// No path reaches this point (after `break`, `continue`, `return` or a Never call).
+    dead: bool,
+    /// Freeze and reservation records, and the steps of their places.
+    freezes: Vec<Freeze>,
+    steps: Vec<PStep>,
+    /// Block depth, and the slots of the open blocks in declaration order.
+    depth: u32,
+    scope_slots: Vec<u32>,
+    call_seq: u32,
     binder_at: HashMap<(u32, u32), u32>,
     frames: Vec<Frame>,
     joins: Vec<Join>,
     /// Per node: 0 unknown, 1 synthesises a type, 2 needs an expected type.
     synth: Vec<u8>,
     waited: bool,
+    /// The program's entry, which is always `waits` (LANG-8, PROG-3).
+    entry: bool,
     out: CoreCheck,
 }
 
@@ -293,12 +372,36 @@ impl<'c, 'a> Cx<'c, 'a> {
             open: vec![],
             open_anchors: vec![],
             broken: false,
-            vars: HashMap::new(),
+            vars: vec![None; info.resolution.binders.len()],
+            log: vec![],
+            diffs: vec![],
+            exits: vec![],
+            edge_buf: vec![],
+            acc: vec![
+                Acc {
+                    avail: Avail::Live,
+                    count: 0,
+                    merge: 0,
+                    edge: 0,
+                };
+                info.resolution.binders.len()
+            ],
+            touched: vec![],
+            merges: 0,
+            edges_seen: 0,
+            born: 0,
+            dead: false,
+            freezes: vec![],
+            steps: vec![],
+            depth: 0,
+            scope_slots: vec![],
+            call_seq: 0,
             binder_at,
             frames: vec![],
             joins: vec![],
             synth: vec![0; item.tree.nodes.len()],
             waited: false,
+            entry: p.entry.as_ref() == Some(&fd.path),
             out: CoreCheck::default(),
         }
     }
@@ -336,9 +439,12 @@ impl<'c, 'a> Cx<'c, 'a> {
         self.out.refusals.push(refusal(rule, site, message));
         self.halt();
     }
+    /// A construct not built yet; each one is reported once per body.
     fn gap(&mut self, n: NodeId, what: &'static str) {
-        let site = self.p.site(self.at, n);
-        self.out.gaps.push(Gap::new(site, what));
+        if !self.out.gaps.iter().any(|g| g.what == what) {
+            let site = self.p.site(self.at, n);
+            self.out.gaps.push(Gap::new(site, what));
+        }
         self.halt();
     }
     fn halt(&mut self) {
@@ -471,6 +577,444 @@ impl<'c, 'a> Cx<'c, 'a> {
         self.block_params(blk).first().copied()
     }
 
+    // ---- ownership state (OWN-5, OWN-9 to OWN-18)
+    fn var(&self, s: u32) -> Var {
+        self.vars[s as usize].expect("declared slot")
+    }
+    fn slot_name(&self, s: u32) -> &'c str {
+        let p: &'c Program<'a> = self.p;
+        &p.items[self.at.module as usize][self.at.item as usize]
+            .resolution
+            .binders[s as usize]
+            .name
+    }
+    fn declare(&mut self, b: u32, ty: TyId, binding: Binding, origin: Origin, n: NodeId) {
+        self.vars[b as usize] = Some(Var {
+            ty,
+            binding,
+            origin,
+            avail: Avail::Uninit,
+            at: n,
+            born: self.born,
+            flagged: false,
+            holds: 0,
+        });
+        self.born += 1;
+        self.set(b, Avail::Live, n);
+    }
+    fn set(&mut self, s: u32, a: Avail, n: NodeId) {
+        let v = self.vars[s as usize].as_mut().expect("declared slot");
+        if v.avail != a {
+            self.log.push((s, v.avail, v.at));
+            v.avail = a;
+            v.at = n;
+        }
+    }
+    fn undo(&mut self, mark: usize) {
+        while self.log.len() > mark {
+            let (s, a, at) = self.log.pop().expect("logged");
+            let v = self.vars[s as usize].as_mut().expect("declared slot");
+            v.avail = a;
+            v.at = at;
+        }
+    }
+    /// The current state of each slot changed since `mark`: one incoming edge of a join.
+    fn edge_state(&mut self, mark: usize) -> (u32, u32) {
+        let start = self.diffs.len() as u32;
+        for i in mark..self.log.len() {
+            let s = self.log[i].0;
+            let a = self.var(s).avail;
+            self.diffs.push((s, a));
+        }
+        (start, self.diffs.len() as u32 - start)
+    }
+    /// Join `edges` (OWN-16) into the state at `mark`; a slot no edge changed keeps its
+    /// state there. With no edge, nothing reaches the join.
+    fn merge(&mut self, mark: usize, edges: &[(u32, u32)], n: NodeId) {
+        self.undo(mark);
+        self.dead = edges.is_empty();
+        self.merges += 1;
+        let m = self.merges;
+        let mut touched = std::mem::take(&mut self.touched);
+        touched.clear();
+        for &(start, len) in edges {
+            self.edges_seen += 1;
+            let e = self.edges_seen;
+            for k in start..start + len {
+                let (s, a) = self.diffs[k as usize];
+                let x = &mut self.acc[s as usize];
+                if x.edge == e {
+                    continue;
+                }
+                x.edge = e;
+                if x.merge != m {
+                    *x = Acc {
+                        avail: a,
+                        count: 1,
+                        merge: m,
+                        edge: e,
+                    };
+                    touched.push(s);
+                } else {
+                    x.avail = join(x.avail, a);
+                    x.count += 1;
+                }
+            }
+        }
+        for &s in &touched {
+            let x = self.acc[s as usize];
+            let base = self.var(s).avail;
+            let a = if (x.count as usize) < edges.len() {
+                join(x.avail, base)
+            } else {
+                x.avail
+            };
+            if a == Avail::Maybe {
+                self.vars[s as usize].as_mut().unwrap().flagged = true;
+            }
+            self.set(s, a, n);
+        }
+        self.touched = touched;
+    }
+    /// OWN-17: at a back edge every slot declared outside loop `fi` is in its entry
+    /// state; the site is where it last changed.
+    fn back_edge(&mut self, fi: usize) {
+        if self.dead {
+            return;
+        }
+        let (mark, born) = (self.frames[fi].mark, self.frames[fi].born);
+        self.merges += 1;
+        let m = self.merges;
+        let end = self.log.len();
+        for i in mark..end {
+            let (s, entry, _) = self.log[i];
+            if self.acc[s as usize].merge == m {
+                continue;
+            }
+            self.acc[s as usize].merge = m;
+            let v = self.var(s);
+            if v.born < born && v.avail != entry {
+                let name = self.slot_name(s);
+                self.refuse(
+                    "OWN-17",
+                    v.at,
+                    format!("`{name}` is not in its loop-entry state when the loop repeats"),
+                );
+            }
+        }
+    }
+    /// Leave for frame `fi`'s exit, carrying this state to its join (OWN-16).
+    fn exit_edge(&mut self, fi: usize) {
+        if !self.dead {
+            let (start, len) = self.edge_state(self.frames[fi].mark);
+            self.exits.push((fi, start, len));
+        }
+    }
+    /// Join frame `fi`'s exit edges; it is the innermost open frame.
+    fn merge_exits(&mut self, fi: usize, n: NodeId) {
+        let from = self.frames[fi].exits;
+        let mut edges = std::mem::take(&mut self.edge_buf);
+        edges.clear();
+        edges.extend(
+            self.exits[from..]
+                .iter()
+                .filter(|e| e.0 == fi)
+                .map(|e| (e.1, e.2)),
+        );
+        self.exits.truncate(from);
+        let mark = self.frames[fi].mark;
+        self.merge(mark, &edges, n);
+        self.edge_buf = edges;
+    }
+
+    /// OWN-5, OWN-16: a read, view, loan or move needs a live slot.
+    fn need_live(&mut self, s: u32, n: NodeId) {
+        let v = self.var(s);
+        let name = self.slot_name(s);
+        match v.avail {
+            Avail::Live => return,
+            Avail::Maybe => {
+                self.refuse("OWN-16", n, format!("`{name}` may have been moved"));
+            }
+            Avail::Moved => self.refuse("OWN-5", n, format!("`{name}` was moved")),
+            Avail::Uninit => self.refuse("OWN-5", n, format!("`{name}` is not initialised")),
+        }
+        // Refused once; later uses are not refused again for it.
+        self.set(s, Avail::Live, n);
+    }
+    /// The freeze or reservation `p` crosses, if any (OWN-9 to OWN-12).
+    fn check_holds(&mut self, p: Place, act: Act, n: NodeId) -> bool {
+        if self.var(p.slot).holds == 0 {
+            return true;
+        }
+        for i in (0..self.freezes.len()).rev() {
+            let f = self.freezes[i];
+            if overlap(&self.steps, f.place, p)
+                && let Some(rule) = breaks(f.hold, act)
+            {
+                let name = self.slot_name(p.slot);
+                let why = match f.hold {
+                    Hold::View(_) => "is viewed",
+                    Hold::CallView(..) => "is viewed by an argument of this call",
+                    Hold::CallMut(_) => "is lent `mut` to this call",
+                    Hold::Assign => "is reserved by an assignment",
+                };
+                self.refuse(rule, n, format!("a place of `{name}` {why}"));
+                return false;
+            }
+        }
+        true
+    }
+    fn unfreeze_at(&mut self, i: usize) {
+        let x = self.freezes.remove(i);
+        self.vars[x.place.slot as usize].as_mut().unwrap().holds -= 1;
+    }
+    fn freeze(&mut self, place: Place, hold: Hold) {
+        self.vars[place.slot as usize].as_mut().unwrap().holds += 1;
+        self.freezes.push(Freeze { place, hold });
+    }
+    /// Rewrite or end the records from `from` on: `f` gives a record's new hold, or
+    /// None when it ends.
+    fn unfreeze(&mut self, from: usize, f: impl Fn(Hold) -> Option<Hold>) {
+        let mut w = from;
+        for r in from..self.freezes.len() {
+            let mut x = self.freezes[r];
+            match f(x.hold) {
+                Some(h) => {
+                    x.hold = h;
+                    self.freezes[w] = x;
+                    w += 1;
+                }
+                None => self.vars[x.place.slot as usize].as_mut().unwrap().holds -= 1,
+            }
+        }
+        self.freezes.truncate(w);
+    }
+
+    /// The place `n` denotes: a local and its field and index steps (OWN-9). None when
+    /// `n` is not a place; Err when it was refused or is not built.
+    fn place(&mut self, n: NodeId) -> Result<Option<At>, ()> {
+        match self.kind(n) {
+            NodeKind::Group => self.place(self.kids(n)[0]),
+            NodeKind::Path => {
+                let p: &'c Program<'a> = self.p;
+                let Some(u) = p.resolved(self.at, n) else {
+                    self.halt();
+                    return Err(());
+                };
+                let Target::Binder(b) = u.target else {
+                    return Ok(None);
+                };
+                let Some(var) = self.vars[b as usize] else {
+                    self.gap(n, "this kind of name is not built");
+                    return Err(());
+                };
+                self.out.counts.places += 1;
+                let start = self.steps.len() as u32;
+                let mut at = At {
+                    place: Place {
+                        slot: b,
+                        start,
+                        len: 0,
+                    },
+                    ty: var.ty,
+                    shared: false,
+                };
+                for name in &u.projections {
+                    self.field(&mut at, name, n)?;
+                }
+                Ok(Some(at))
+            }
+            NodeKind::Projection => {
+                let Some(mut at) = self.place(self.kids(n)[0])? else {
+                    return Ok(None);
+                };
+                self.field(&mut at, self.token_text(n), n)?;
+                Ok(Some(at))
+            }
+            NodeKind::Index => {
+                let c = self.kids(n);
+                let Some(mut at) = self.place(c[0])? else {
+                    return Ok(None);
+                };
+                if matches!(self.t.kind(at.ty), TyKind::View(_)) {
+                    self.gap(n, "indexing through a view is not built");
+                    return Err(());
+                }
+                let elem = match self.t.kind(at.ty).clone() {
+                    TyKind::Adt(d, args) if self.p.decls[d.index()].role == Some(Role::List) => {
+                        args[0]
+                    }
+                    _ => {
+                        self.gap(n, "indexing this type is not built");
+                        return Err(());
+                    }
+                };
+                // Index operands are evaluated before places are compared (OWN-9).
+                let (_, _) = self.expr(c[1], want_rule(scalar(Scalar::U64), "LANG-11"));
+                let (s, l) = (at.place.start as usize, at.place.len as usize);
+                if s + l != self.steps.len() {
+                    self.steps.extend_from_within(s..s + l);
+                    at.place.start = (self.steps.len() - l) as u32;
+                }
+                self.steps.push(PStep::Any);
+                at.place.len += 1;
+                at.ty = elem;
+                Ok(Some(at))
+            }
+            _ => Ok(None),
+        }
+    }
+    /// Step `at` to its field `name`; through a view, a field that is not plain reads
+    /// as a view (OWN-8).
+    fn field(&mut self, at: &mut At, name: &str, n: NodeId) -> Result<(), ()> {
+        let (inner, view) = match self.t.kind(at.ty) {
+            TyKind::View(x) => (*x, true),
+            _ => (at.ty, false),
+        };
+        let mut stable = false;
+        let found = match self.t.kind(inner).clone() {
+            TyKind::Adt(d, args) => {
+                let decl = &self.p.decls[d.index()];
+                stable = decl.repr == Repr::Stable;
+                match &decl.body {
+                    DeclBody::Record(fs) => fs
+                        .iter()
+                        .position(|f| f.name == name)
+                        .map(|i| (i, subst(&mut self.t, fs[i].ty, &args))),
+                    _ => None,
+                }
+            }
+            TyKind::Tuple(xs) => name
+                .parse::<usize>()
+                .ok()
+                .and_then(|i| xs.get(i).map(|&x| (i, x))),
+            _ => None,
+        };
+        let Some((i, ft)) = found else {
+            self.gap(n, "this field access is not built");
+            return Err(());
+        };
+        self.steps.push(PStep::Field(i as u32));
+        at.place.len += 1;
+        at.shared |= view || stable;
+        at.ty = if view && !self.copies(ft) && !matches!(self.t.kind(ft), TyKind::View(_)) {
+            self.t.mk(TyKind::View(ft))
+        } else {
+            ft
+        };
+        Ok(())
+    }
+    fn copies(&self, ty: TyId) -> bool {
+        copyable(&self.p.decls, &self.t, ty, &self.params)
+    }
+    /// Use place `at` at `n` (OWN-5 to OWN-14); its type.
+    fn use_place(&mut self, at: At, how: Use, n: NodeId) {
+        let s = at.place.slot;
+        let v = self.var(s);
+        let name = self.slot_name(s);
+        match how {
+            Use::Value | Use::Take => {
+                let copy = match how {
+                    Use::Value => self.copies(at.ty),
+                    _ => at.place.len > 0 && self.copies(at.ty),
+                };
+                if copy {
+                    self.need_live(s, n);
+                    self.check_holds(at.place, Act::Read, n);
+                    return;
+                }
+                if at.place.len > 0 {
+                    self.refuse(
+                        "OWN-14",
+                        n,
+                        "only a whole slot is moved; use `replace` or a whole destructure",
+                    );
+                    return;
+                }
+                match v.origin {
+                    Origin::ViewParam => {
+                        // The spec does not say which rule refuses this (Q23).
+                        self.refuse("OWN-7", n, format!("`{name}` is a view parameter"));
+                        return;
+                    }
+                    Origin::MutParam => {
+                        self.refuse("OWN-11", n, format!("`{name}` is a `mut` parameter"));
+                        return;
+                    }
+                    _ => {}
+                }
+                self.need_live(s, n);
+                if self.check_holds(at.place, Act::Write, n) {
+                    self.set(s, Avail::Moved, n);
+                }
+            }
+            Use::View(hold) => {
+                self.need_live(s, n);
+                if self.check_holds(at.place, Act::Read, n) {
+                    self.freeze(at.place, hold);
+                }
+            }
+            Use::Mut(hold) => {
+                if !v.origin.writable() {
+                    self.refuse("OWN-5", n, format!("`{name}` is not writable"));
+                    return;
+                }
+                self.need_live(s, n);
+                if self.check_holds(at.place, Act::Write, n) {
+                    self.freeze(at.place, hold);
+                }
+            }
+        }
+    }
+    /// The value of a used place, for the places emitted so far: a whole local.
+    fn emit_place(&mut self, at: At, n: NodeId) -> Option<ValueId> {
+        if at.place.len > 0 {
+            self.gap(n, "field and index places are not built");
+            return None;
+        }
+        let var = self.var(at.place.slot);
+        match var.binding {
+            Binding::Value(v) => v,
+            Binding::Slot(a) => {
+                let (Some(address), Ok(Some(t))) = (a, value_ty(&self.t, var.ty)) else {
+                    return None;
+                };
+                if !self.live() {
+                    return None;
+                }
+                let result = self.value(t);
+                self.inst(
+                    Inst::Read {
+                        result,
+                        address,
+                        mode: ReadMode::Bits,
+                    },
+                    n,
+                );
+                Some(result)
+            }
+        }
+    }
+    /// Close a block: its let-bound views end, then its live owners are dropped, which
+    /// a remaining freeze forbids (OWN-10).
+    fn close_scope(&mut self, start: usize, freezes: usize, n: NodeId) {
+        let d = self.depth;
+        self.unfreeze(freezes, |h| {
+            (h != Hold::View(Extent::Block(d))).then_some(h)
+        });
+        if !self.dead {
+            for i in start..self.scope_slots.len() {
+                let s = self.scope_slots[i];
+                let v = self.var(s);
+                if matches!(v.avail, Avail::Live | Avail::Maybe) && !self.copies(v.ty) {
+                    self.check_holds(Place::whole(s), Act::Write, n);
+                }
+            }
+        }
+        self.scope_slots.truncate(start);
+    }
+
     // ---- the definition
     fn run(&mut self, f: usize, body: NodeId) {
         match self.e.row(self.p, f) {
@@ -499,7 +1043,8 @@ impl<'c, 'a> Cx<'c, 'a> {
             vec![]
         };
         let mut k = 0;
-        let binders = &self.p.items[self.at.module as usize][self.at.item as usize]
+        let p: &'c Program<'a> = self.p;
+        let binders = &p.items[self.at.module as usize][self.at.item as usize]
             .resolution
             .binders;
         for pd in &self.fd.params {
@@ -514,13 +1059,12 @@ impl<'c, 'a> Cx<'c, 'a> {
                 .iter()
                 .find(|b| b.name == pd.name && b.kind == hirsel_core_resolve::BinderKind::Parameter)
             {
-                self.vars.insert(
-                    b.id,
-                    Var {
-                        ty: pd.ty,
-                        binding: Binding::Value(v),
-                    },
-                );
+                let origin = match pd.mode {
+                    Mode::View => Origin::ViewParam,
+                    Mode::Mut => Origin::MutParam,
+                    Mode::Take => Origin::TakeParam,
+                };
+                self.declare(b.id, pd.ty, Binding::Value(v), origin, body);
             }
         }
         let result = self.fd.result;
@@ -535,7 +1079,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             let r = PoolRange::push(&mut self.b.pools.values, v);
             self.end(Terminator::Return(r), Some(body));
         }
-        if self.fd.waits && !self.waited {
+        if self.fd.waits && !self.waited && !self.entry {
             let root = self.item.root;
             let w = self
                 .kids(root)
@@ -609,9 +1153,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 (ERROR, None)
             }
             NodeKind::Tuple => self.gap_ty(n, "tuples are not built"),
-            NodeKind::Index | NodeKind::Projection => {
-                self.gap_ty(n, "field and index places are not built")
-            }
+            NodeKind::Index | NodeKind::Projection => self.place_value(n),
             NodeKind::Try => self.gap_ty(n, "`?` is not built"),
             NodeKind::Match | NodeKind::ConditionLet => {
                 self.gap_ty(n, "match and patterns are not built")
@@ -622,6 +1164,17 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
             NodeKind::Closure | NodeKind::ScopedClosure => self.gap_ty(n, "closures are not built"),
             _ => self.gap_ty(n, "expression form is not built"),
+        }
+    }
+    /// A place in a value position: moved when its type moves, else copied (OWN-6).
+    fn place_value(&mut self, n: NodeId) -> (TyId, Option<ValueId>) {
+        match self.place(n) {
+            Ok(Some(at)) => {
+                self.use_place(at, Use::Value, n);
+                (at.ty, self.emit_place(at, n))
+            }
+            Ok(None) => self.gap_ty(n, "field and index places are not built"),
+            Err(()) => (ERROR, None),
         }
     }
     fn gap_ty(&mut self, n: NodeId, what: &'static str) -> (TyId, Option<ValueId>) {
@@ -779,37 +1332,8 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.halt();
             return (ERROR, None);
         };
-        if !u.projections.is_empty() {
-            return self.gap_ty(n, "field and index places are not built");
-        }
         match &u.target {
-            Target::Binder(b) => {
-                let Some(var) = self.vars.get(b).copied() else {
-                    return self.gap_ty(n, "this kind of name is not built");
-                };
-                match var.binding {
-                    Binding::Value(v) => (var.ty, v),
-                    Binding::Slot(a) => {
-                        self.out.counts.places += 1;
-                        let v = match (a, value_ty(&self.t, var.ty)) {
-                            (Some(address), Ok(Some(t))) if self.live() => {
-                                let result = self.value(t);
-                                self.inst(
-                                    Inst::Read {
-                                        result,
-                                        address,
-                                        mode: ReadMode::Bits,
-                                    },
-                                    n,
-                                );
-                                Some(result)
-                            }
-                            _ => None,
-                        };
-                        (var.ty, v)
-                    }
-                }
-            }
+            Target::Binder(_) => self.place_value(n),
             Target::Missing => {
                 self.halt();
                 (ERROR, None)
@@ -821,12 +1345,22 @@ impl<'c, 'a> Cx<'c, 'a> {
 
     // ---- blocks and control flow
     fn block(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        self.depth += 1;
+        let (scope, freezes) = (self.scope_slots.len(), self.freezes.len());
+        let r = self.statements(n, want);
+        self.close_scope(scope, freezes, n);
+        self.depth -= 1;
+        r
+    }
+    fn statements(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let stmts = self.kids(n);
         let mut diverged = false;
         for (i, &s) in stmts.iter().enumerate() {
             self.out.counts.nodes += 1;
             let last = i + 1 == stmts.len();
+            let freezes = self.freezes.len();
             match self.kind(s) {
+                // The tail's temporaries last to the end of the enclosing statement.
                 NodeKind::ExpressionStatement if last => {
                     return self.expr(self.kids(s)[0], want);
                 }
@@ -839,6 +1373,8 @@ impl<'c, 'a> Cx<'c, 'a> {
                 NodeKind::Error => self.halt(),
                 _ => self.gap(s, "statement form is not built"),
             }
+            // A temporary view ends with its statement (OWN-8).
+            self.unfreeze(freezes, |h| (h != Hold::View(Extent::Temp)).then_some(h));
         }
         let t = if diverged { NEVER } else { UNIT };
         match want {
@@ -862,14 +1398,25 @@ impl<'c, 'a> Cx<'c, 'a> {
             _ => None,
         };
         let Some((&value, rest)) = rest.split_first() else {
-            self.gap(s, "let without a value is not built");
-            return false;
+            return self.let_uninit(s, pat, declared);
         };
         if !rest.is_empty() {
             self.gap(rest[0], "let-else is not built");
         }
+        let freezes = self.freezes.len();
         let (t, v) = self.expr(value, declared.and_then(want));
         let ty = declared.unwrap_or(t);
+        // A let-bound view lasts to the end of its block (OWN-8).
+        if crate::decls::kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped {
+            let d = self.depth;
+            self.unfreeze(freezes, |h| {
+                Some(if h == Hold::View(Extent::Temp) {
+                    Hold::View(Extent::Block(d))
+                } else {
+                    h
+                })
+            });
+        }
         self.out.counts.nodes += 1;
         match self.kind(pat) {
             NodeKind::Wildcard => {}
@@ -881,16 +1428,45 @@ impl<'c, 'a> Cx<'c, 'a> {
                     self.halt();
                     return t == NEVER;
                 };
-                let binding = if self.kind(s) == NodeKind::LetMut {
-                    Binding::Slot(self.slot(ty, v, pat))
+                let (binding, origin) = if self.kind(s) == NodeKind::LetMut {
+                    (Binding::Slot(self.slot(ty, v, pat)), Origin::LetMut)
                 } else {
-                    Binding::Value(v)
+                    (Binding::Value(v), Origin::Let)
                 };
-                self.vars.insert(b, Var { ty, binding });
+                self.declare(b, ty, binding, origin, pat);
+                self.scope_slots.push(b);
             }
             _ => self.gap(pat, "patterns are not built"),
         }
         t == NEVER
+    }
+    /// `let x: T` with no value: an uninit slot (OWN-5), assigned before it is read.
+    fn let_uninit(&mut self, s: NodeId, pat: NodeId, declared: Option<TyId>) -> bool {
+        let Some(ty) = declared else {
+            self.gap(s, "a `let` with neither a type nor a value (Q26)");
+            return false;
+        };
+        if self.kind(pat) != NodeKind::BindPattern {
+            self.gap(pat, "patterns are not built");
+            return false;
+        }
+        if let Err(what) = value_ty(&self.t, ty) {
+            self.gap(pat, what);
+        }
+        let Some(b) = self.binder(pat) else {
+            self.halt();
+            return false;
+        };
+        let origin = if self.kind(s) == NodeKind::LetMut {
+            Origin::LetMut
+        } else {
+            Origin::Let
+        };
+        let binding = Binding::Slot(self.slot(ty, None, pat));
+        self.declare(b, ty, binding, origin, pat);
+        self.set(b, Avail::Uninit, pat);
+        self.scope_slots.push(b);
+        false
     }
     /// A `let mut` slot holding `v`; its address is evaluated once, where it begins.
     fn slot(&mut self, ty: TyId, v: Option<ValueId>, n: NodeId) -> Option<AddressId> {
@@ -921,89 +1497,104 @@ impl<'c, 'a> Cx<'c, 'a> {
         Some(address)
     }
 
-    /// `q = e` and `q op= e` (OWN-12) on a `let mut` local.
+    /// `q = e` and `q op= e` (OWN-12): `q` is writable (OWN-5), not frozen, and reserved
+    /// while `e` is evaluated.
     fn assign(&mut self, s: NodeId) -> bool {
         let c = self.kids(s);
         let (place, value) = (c[0], c[1]);
         let op = self.token_text(s);
         self.out.counts.uses += 1;
-        let target = match self.kind(place) {
-            NodeKind::Path => self.p.resolved(self.at, place).cloned(),
-            _ => None,
-        };
-        let Some(u) = target else {
-            self.gap(place, "field and index places are not built");
-            return false;
-        };
-        if !u.projections.is_empty() {
-            self.gap(place, "field and index places are not built");
-            return false;
-        }
-        let var = match u.target {
-            Target::Binder(b) => self.vars.get(&b).copied(),
-            Target::Missing => {
-                self.halt();
+        let at = match self.place(place) {
+            Ok(Some(at)) => at,
+            Ok(None) => {
+                self.gap(place, "assignment to this place is not built");
                 return false;
             }
-            _ => None,
+            Err(()) => return false,
         };
-        let Some(var) = var else {
-            self.gap(place, "assignment to this place is not built");
-            return false;
-        };
-        let Binding::Slot(address) = var.binding else {
+        let q = at.place.slot;
+        let var = self.var(q);
+        // OWN-12: a writable place, or a `let` declared without a value while uninit.
+        let fresh = var.origin == Origin::Let && var.avail == Avail::Uninit && at.place.len == 0;
+        if !(var.origin.writable() || fresh) || at.shared {
+            let name = self.slot_name(q);
             self.refuse(
                 "OWN-12",
                 place,
-                "only a `let mut` local is writable here (Q14)",
+                format!("this place of `{name}` is not writable"),
             );
             return false;
+        }
+        if at.place.len > 0 && var.avail != Avail::Live {
+            self.gap(place, "assignment into a slot that is not live (Q24)");
+        }
+        self.check_holds(at.place, Act::Write, place);
+        let compound = op != "=";
+        if compound {
+            self.need_live(q, place);
+        }
+        let reserved = self.freezes.len();
+        self.freeze(at.place, Hold::Assign);
+        let (address, emitted) = match var.binding {
+            Binding::Slot(a) if at.place.len == 0 => (a, true),
+            _ => (None, false),
         };
-        self.out.counts.places += 1;
-        if op == "=" {
-            let (t, v) = self.expr(value, want(var.ty));
+        if !emitted && value_ty(&self.t, at.ty).is_ok_and(|t| t.is_some()) {
+            self.gap(place, "assignment to this place is not built");
+        }
+        let diverged = if !compound {
+            let (t, v) = self.expr(value, want(at.ty));
             if let (Some(address), Some(value)) = (address, v) {
                 self.inst(Inst::Store { address, value }, s);
             }
-            return t == NEVER;
-        }
-        // Compound: resolve once, read the old value, evaluate the right side, compute,
-        // install (OWN-12); plain-only, and every type built here is plain.
-        let bop = op.trim_end_matches('=');
-        let old = match (address, value_ty(&self.t, var.ty)) {
-            (Some(address), Ok(Some(t))) if self.live() => {
-                let result = self.value(t);
+            t == NEVER
+        } else {
+            // Compound: resolve once, read the old value, evaluate the right side,
+            // compute, install; plain-only, and every type built here is plain.
+            self.out.counts.places += 1;
+            let bop = op.trim_end_matches('=');
+            let old = match (address, value_ty(&self.t, at.ty)) {
+                (Some(address), Ok(Some(t))) if self.live() => {
+                    let result = self.value(t);
+                    self.inst(
+                        Inst::Read {
+                            result,
+                            address,
+                            mode: ReadMode::Bits,
+                        },
+                        s,
+                    );
+                    Some(result)
+                }
+                _ => None,
+            };
+            let (t, rv) = self.expr(
+                value,
+                Some(Want {
+                    ty: at.ty,
+                    rule: "SEM-1",
+                }),
+            );
+            if let Some(new) = self.arith(bop, at.ty, old, rv, s)
+                && let Some(address) = address
+            {
                 self.inst(
-                    Inst::Read {
-                        result,
+                    Inst::Store {
                         address,
-                        mode: ReadMode::Bits,
+                        value: new,
                     },
                     s,
                 );
-                Some(result)
             }
-            _ => None,
+            t == NEVER
         };
-        let (t, rv) = self.expr(
-            value,
-            Some(Want {
-                ty: var.ty,
-                rule: "SEM-1",
-            }),
-        );
-        if let Some(new) = self.arith(bop, var.ty, old, rv, s)
-            && let Some(address) = address
-        {
-            self.inst(
-                Inst::Store {
-                    address,
-                    value: new,
-                },
-                s,
-            );
+        // The install ends the reservation; the record is the one pushed above, and
+        // `e`'s own temporaries after it stay to the statement's end.
+        self.unfreeze_at(reserved);
+        if at.place.len == 0 {
+            self.set(q, Avail::Live, s);
         }
-        t == NEVER
+        diverged
     }
 
     fn if_(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
@@ -1031,18 +1622,24 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.start(yes);
             no_block = Some(no);
         }
+        // The arms join by OWN-16; an arm that leaves contributes nothing.
+        let (was_dead, mark) = (self.dead, self.log.len());
         let Some(&other) = c.get(2) else {
             // Without `else` the type is unit (LANG-11).
             let (_, _) = self.expr(c[1], want_rule(UNIT, "LANG-11"));
+            let yes = self.arm_edge(mark);
             self.goto(join, UNIT, None, c[1]);
             if let Some(no) = no_block {
                 self.start(no);
             }
             self.goto(join, UNIT, None, n);
             self.land(join);
+            let no = Some((self.diffs.len() as u32, 0));
+            self.merge_arms(mark, [yes, no], was_dead, n);
             return (UNIT, None);
         };
         let (yt, yv) = self.expr(c[1], want);
+        let yes = self.arm_edge(mark);
         self.goto(join, yt, yv, c[1]);
         if let Some(no) = no_block {
             self.start(no);
@@ -1054,10 +1651,33 @@ impl<'c, 'a> Cx<'c, 'a> {
             want_rule(yt, "LANG-11")
         });
         let (ot, ov) = self.expr(other, other_want);
+        let no = self.arm_edge(mark);
         let ty = if yt == NEVER { ot } else { yt };
         self.goto(join, ty, ov, other);
         let v = self.land(join);
+        self.merge_arms(mark, [yes, no], was_dead, n);
         (ty, v)
+    }
+    /// The state an arm ends in, then back to the state at `mark` for the next arm.
+    fn arm_edge(&mut self, mark: usize) -> Option<(u32, u32)> {
+        let e = (!self.dead).then(|| self.edge_state(mark));
+        self.undo(mark);
+        self.dead = false;
+        e
+    }
+    fn merge_arms(
+        &mut self,
+        mark: usize,
+        arms: [Option<(u32, u32)>; 2],
+        was_dead: bool,
+        n: NodeId,
+    ) {
+        let mut edges = std::mem::take(&mut self.edge_buf);
+        edges.clear();
+        edges.extend(arms.into_iter().flatten());
+        self.merge(mark, &edges, n);
+        self.edge_buf = edges;
+        self.dead |= was_dead;
     }
 
     fn push_frame(&mut self, label: Option<String>, kind: FrameKind, ty: Option<TyId>) {
@@ -1069,7 +1689,16 @@ impl<'c, 'a> Cx<'c, 'a> {
             exit,
             ty,
             left: false,
+            mark: self.log.len(),
+            born: self.born,
+            exits: self.exits.len(),
         });
+    }
+    /// Pop the innermost frame, joining its exits (OWN-16).
+    fn pop_frame(&mut self, n: NodeId) -> Frame {
+        let fi = self.frames.len() - 1;
+        self.merge_exits(fi, n);
+        self.frames.pop().unwrap()
     }
 
     fn loop_(
@@ -1090,7 +1719,8 @@ impl<'c, 'a> Cx<'c, 'a> {
         if let Some(h) = self.frames.last().unwrap().header {
             self.jump(h, &[], body);
         }
-        let f = self.frames.pop().unwrap();
+        self.back_edge(self.frames.len() - 1);
+        let f = self.pop_frame(n);
         let v = self.land(f.exit);
         if !f.left {
             return (NEVER, None);
@@ -1120,6 +1750,8 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.frames.last_mut().unwrap().header = header;
         }
         let (_, cv) = self.expr(c[0], want_rule(BOOL, "LANG-11"));
+        // The condition's false edge leaves for the exit (OWN-17).
+        self.exit_edge(self.frames.len() - 1);
         let exit = self.frames.last().unwrap().exit;
         if self.live()
             && let Some(cv) = cv
@@ -1142,7 +1774,8 @@ impl<'c, 'a> Cx<'c, 'a> {
         if let Some(h) = header {
             self.jump(h, &[], c[1]);
         }
-        let f = self.frames.pop().unwrap();
+        self.back_edge(self.frames.len() - 1);
+        let f = self.pop_frame(n);
         self.land(f.exit);
         (UNIT, None)
     }
@@ -1174,7 +1807,8 @@ impl<'c, 'a> Cx<'c, 'a> {
                     None => t,
                 };
                 self.goto(exit, ty, v, e);
-                let f = self.frames.pop().unwrap();
+                self.exit_edge(self.frames.len() - 1);
+                let f = self.pop_frame(n);
                 let v = self.land(f.exit);
                 if t == NEVER && !f.left {
                     return (NEVER, None);
@@ -1231,6 +1865,8 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
         let (exit, ty) = (f.exit, f.ty.unwrap_or(t));
         self.goto(exit, ty, v, n);
+        self.exit_edge(i);
+        self.dead = true;
         (NEVER, None)
     }
 
@@ -1246,6 +1882,8 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.jump(h, &[], n);
         }
         self.cur = None;
+        self.back_edge(i);
+        self.dead = true;
         (NEVER, None)
     }
 
@@ -1265,6 +1903,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             let r = PoolRange::push(&mut self.b.pools.values, v);
             self.end(Terminator::Return(r), Some(n));
         }
+        self.dead = true;
         (NEVER, None)
     }
 
@@ -1328,7 +1967,34 @@ impl<'c, 'a> Cx<'c, 'a> {
                 }
                 (t, v)
             }
-            _ => self.gap_ty(n, "take, mut and view are not built"),
+            "take" => match self.place(e) {
+                // OWN-6: `take` moves a place.
+                Ok(Some(at)) => {
+                    self.use_place(at, Use::Take, n);
+                    (at.ty, self.emit_place(at, n))
+                }
+                Ok(None) => {
+                    let _ = self.expr(e, None);
+                    self.refuse("OWN-6", n, "`take` of an expression that is not a place");
+                    (ERROR, None)
+                }
+                Err(()) => (ERROR, None),
+            },
+            "view" => match self.place(e) {
+                // OWN-8: a temporary view, to the end of its statement unless bound.
+                Ok(Some(at)) => {
+                    self.use_place(at, Use::View(Hold::View(Extent::Temp)), n);
+                    let t = match self.t.kind(at.ty) {
+                        TyKind::View(_) => at.ty,
+                        _ => self.t.mk(TyKind::View(at.ty)),
+                    };
+                    self.gap(n, "values of this type are not built");
+                    (t, None)
+                }
+                Ok(None) => self.gap_ty(n, "`view` of a value that is not a place"),
+                Err(()) => (ERROR, None),
+            },
+            _ => self.gap_ty(n, "`mut` outside an argument (Q25)"),
         }
     }
     fn no_operator(&mut self, n: NodeId, t: TyId) -> (TyId, Option<ValueId>) {
@@ -1587,7 +2253,12 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.start(rb);
             right = Some(rb);
         }
+        // The right side runs on one path only: its effects join with none (OWN-16).
+        let (was_dead, mark) = (self.dead, self.log.len());
         let (rt, rv) = self.expr(c[1], None);
+        let ran = self.arm_edge(mark);
+        let skipped = Some((self.diffs.len() as u32, 0));
+        self.merge_arms(mark, [ran, skipped], was_dead, n);
         if rt != BOOL && rt != NEVER {
             return self.no_operator(n, rt);
         }
@@ -1628,7 +2299,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
         if g.waits {
             self.waited = true;
-            if !self.fd.waits {
+            if !self.fd.waits && !self.entry {
                 self.refuse(
                     "LANG-8",
                     n,
@@ -1642,14 +2313,26 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
         let mut vals: Vec<Option<ValueId>> = vec![None; args.len()];
         let mut later = vec![];
+        self.call_seq += 1;
+        let call = self.call_seq;
+        let holds = self.freezes.len();
         for (i, &a) in args.iter().enumerate() {
             if self.kind(a) != NodeKind::Argument {
-                return self.gap_ty(a, "labelled and bytes arguments are not built");
-            }
-            if g.params[i].mode == Mode::Mut {
-                return self.gap_ty(a, "mut arguments are not built");
+                self.gap(a, "labelled and bytes arguments are not built");
+                continue;
             }
             let e = self.kids(a)[0];
+            if self.argument(
+                g.params[i].mode,
+                g.params[i].ty,
+                call,
+                i,
+                e,
+                &mut found,
+                &mut vals[i],
+            ) {
+                continue;
+            }
             if self.bare_number(e).is_some() && !self.synthesises(e) {
                 later.push(i);
                 continue;
@@ -1687,13 +2370,137 @@ impl<'c, 'a> Cx<'c, 'a> {
                 "a type parameter of the callee is undetermined",
             );
         }
+        // The call completes: its arguments' holds end, except a view the scoped result
+        // is anchored to, which lasts for the result's extent (OWN-11, OWN-20).
+        let anchors = &g.anchors;
+        self.unfreeze(holds, |h| match h {
+            Hold::CallView(c, i) if c == call => {
+                anchors.contains(&i).then_some(Hold::View(Extent::Temp))
+            }
+            Hold::CallMut(c) if c == call => None,
+            h => Some(h),
+        });
         let result = subst(&mut self.t, g.result, &tys);
+        if result == NEVER {
+            self.dead = true;
+        }
         let v = if g.generics.is_empty() {
             self.emit_call(f, &vals, result, n)
         } else {
             self.intrinsic(f, &tys, &vals, n)
         };
         (result, v)
+    }
+
+    /// Check argument `e` for a parameter of mode `mode` and type `pt` when its mode
+    /// decides how (OWN-7): a `mut` loan, a place viewed or moved. False when `e` is an
+    /// ordinary value, checked by the caller.
+    #[allow(clippy::too_many_arguments)]
+    fn argument(
+        &mut self,
+        mode: Mode,
+        pt: TyId,
+        call: u32,
+        i: usize,
+        e: NodeId,
+        found: &mut [Option<TyId>],
+        val: &mut Option<ValueId>,
+    ) -> bool {
+        let unary = (self.kind(e) == NodeKind::Unary).then(|| self.token_text(e));
+        match mode {
+            Mode::Mut => {
+                if unary != Some("mut") {
+                    // Refused as written; a place here is neither read nor moved.
+                    if !matches!(self.place(e), Ok(Some(_)) | Err(())) {
+                        let _ = self.expr(e, None);
+                    }
+                    self.refuse("OWN-7", e, "an argument for a `mut` parameter is `mut p`");
+                    return true;
+                }
+                let p = self.kids(e)[0];
+                match self.place(p) {
+                    Ok(Some(at)) => {
+                        self.use_place(at, Use::Mut(Hold::CallMut(call)), e);
+                        self.arg_ty(pt, at.ty, e, found);
+                        self.gap(e, "mut arguments are not built");
+                    }
+                    Ok(None) => {
+                        let _ = self.expr(p, None);
+                        self.refuse("OWN-7", e, "`mut` of an expression that is not a place");
+                    }
+                    Err(()) => {}
+                }
+                true
+            }
+            _ if unary == Some("mut") => {
+                let _ = self.expr(self.kids(e)[0], None);
+                self.refuse("OWN-7", e, "`mut` is written only for a `mut` parameter");
+                true
+            }
+            Mode::View if unary == Some("view") => {
+                // An explicit view where the parameter views anyway.
+                let (t, _) = self.expr(e, None);
+                let t = match self.t.kind(t) {
+                    TyKind::View(x) if !matches!(self.t.kind(pt), TyKind::View(_)) => *x,
+                    _ => t,
+                };
+                self.arg_ty(pt, t, e, found);
+                true
+            }
+            Mode::View | Mode::Take if unary.is_none() => {
+                let at = match self.place(e) {
+                    Ok(Some(at)) => at,
+                    Ok(None) => return false,
+                    Err(()) => return true,
+                };
+                let ty = at.ty;
+                if self.copies(ty) {
+                    // A copyable value is copied (OWN-7).
+                    self.use_place(at, Use::Value, e);
+                    *val = self.emit_place(at, e);
+                } else if mode == Mode::Take {
+                    let name = self.slot_name(at.place.slot);
+                    self.refuse(
+                        "OWN-7",
+                        e,
+                        format!("a moving place is passed as `take {name}`"),
+                    );
+                    return true;
+                } else {
+                    // A bare place for an unmarked parameter is a view for the call.
+                    self.use_place(at, Use::View(Hold::CallView(call, i as u32)), e);
+                }
+                let t = match self.t.kind(ty) {
+                    TyKind::View(x) if !matches!(self.t.kind(pt), TyKind::View(_)) => *x,
+                    _ => ty,
+                };
+                self.arg_ty(pt, t, e, found);
+                true
+            }
+            _ => false,
+        }
+    }
+    /// An argument of type `at` for a parameter of type `pt` (LANG-11).
+    fn arg_ty(&mut self, pt: TyId, at: TyId, e: NodeId, found: &mut [Option<TyId>]) {
+        match self.known(pt, found) {
+            Some(t) => self.coerce(
+                at,
+                Want {
+                    ty: t,
+                    rule: "LANG-11",
+                },
+                e,
+            ),
+            None => {
+                if !self.unify(pt, at, found) {
+                    self.refuse(
+                        "LANG-11",
+                        e,
+                        "a type parameter is determined twice differently",
+                    );
+                }
+            }
+        }
     }
 
     /// `pt` with the type arguments found so far, when they determine it.

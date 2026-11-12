@@ -1,0 +1,15 @@
+// OWN-10: assigning a place a live view freezes; and OWN-12: nothing reached through a view is writable.
+// expect: refuse OWN-10 at 10:3
+// expect: refuse OWN-12 at 14:3
+// expect: gap assignment to this place is not built
+// expect: gap mut parameters are not built
+// expect: gap values of this type are not built
+type P { a: u64, b: List[u8] }
+fn f(mut p: P) {
+  let v = view p
+  p.a = 3
+}
+fn g(p: P) {
+  let mut v = view p
+  v.a = 3
+}

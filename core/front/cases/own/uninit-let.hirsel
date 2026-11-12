@@ -1,0 +1,18 @@
+// OWN-5/OWN-12: a `let` without a value is uninit: it may be assigned while uninit, and read only once live.
+// expect: refuse OWN-5 at 11:3
+// expect: refuse OWN-12 at 16:3
+fn ok(c: bool) -> u8 {
+  let x: u8
+  x = 3
+  x
+}
+fn bad() -> u8 {
+  let x: u8
+  x
+}
+fn twice() -> u8 {
+  let x: u8
+  x = 3
+  x = 4
+  x
+}

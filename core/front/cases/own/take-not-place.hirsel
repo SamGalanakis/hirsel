@@ -1,0 +1,4 @@
+// OWN-6: `take` of a call, which is not a place.
+// expect: refuse OWN-6 at 4:20
+// expect: gap values of this type are not built
+fn f() -> String { take string.new() }

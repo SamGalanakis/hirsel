@@ -1,0 +1,21 @@
+// OWN-16: an arm that leaves contributes nothing to the join after the `if`, a label's breaks join at its exit, and the right side of `&&` runs on one path only.
+// expect: refuse OWN-16 at 15:3
+// expect: refuse OWN-16 at 19:3
+// expect: gap values of this type are not built
+fn early(take s: String, c: bool) -> String {
+  if c { return string.new() } else { let _ = string.into_bytes(take s) }
+  string.new()
+}
+fn kept(take s: String, c: bool) -> String {
+  if c { let _ = string.into_bytes(take s); return string.new() }
+  s
+}
+fn label(take s: String, c: bool) -> String {
+  'b: { if c { let _ = string.into_bytes(take s); break 'b } }
+  s
+}
+fn both(take s: String, c: bool) -> String {
+  let _ = c && is_empty(take s)
+  s
+}
+fn is_empty(take s: String) -> bool { string.byte_len(s) == 0 }

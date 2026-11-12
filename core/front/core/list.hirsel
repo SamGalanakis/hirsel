@@ -4,3 +4,4 @@ pub fn get[T](xs: List[T], i: u64) -> Option[View[T]] in xs
 pub fn push[T](mut xs: List[T], take x: T) -> Result[(), (Capacity, T)]
 pub fn pop[T](mut xs: List[T]) -> Option[T]
 pub fn clear[T](mut xs: List[T])
+pub fn append[T: plain](mut xs: List[T], ys: List[T]) -> Result[(), Capacity]

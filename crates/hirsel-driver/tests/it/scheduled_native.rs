@@ -231,15 +231,17 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
                 .retained_bytes();
             assert_eq!(prepared.publication_bytes(), Some(decoded + archive_bytes));
             let retained = decoded + archive_bytes + metadata;
-            // Reuse settled producers, but give a fresh native owner exactly
-            // one prepared payload and archive reader's allowance. A byte less
-            // must refuse publication.
+            // Inputs and outputs share a request budget. Leave exactly one
+            // prepared payload, its original metadata and one archive reader
+            // free after input admission; a byte less must refuse publication.
             for (available, accepts) in [(retained - 1, false), (retained, true)] {
                 let inputs = program
                     .engine
                     .front_native_definition_inputs(&definitions, 16 << 20)
                     .unwrap();
-                let grant = inputs.input_bytes() + available;
+                let input_bytes = inputs.input_bytes();
+                let publication_budget =
+                    hirsel_engine_admission::ProcessBudget::new(input_bytes + available);
                 let bounded = program
                     .engine
                     .front_native_definition_queries_with_inputs(
@@ -247,10 +249,11 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
                         lower.clone(),
                         inputs,
                         weight,
-                        budget.reserve(grant).unwrap(),
+                        publication_budget.reserve(input_bytes).unwrap(),
                         errors,
                     )
                     .unwrap();
+                assert_eq!(publication_budget.free(), available);
                 assert_eq!(bounded.query(&program.entry), native.query(&program.entry));
                 let mut bounded_runtime = AdmittedRuntime::new(
                     hirsel_intern::jobs::Jobs::new(jobs),
@@ -480,6 +483,7 @@ fn native_catalogue_allows_lower_pressure_eviction_and_scoped_cold_reads() {
                 .engine
                 .front_body_queries(&definitions, weight, &budget, errors)
                 .unwrap();
+            let lower_budget = hirsel_engine_admission::ProcessBudget::new(limit);
             let lower = program
                 .engine
                 .front_lower_queries(
@@ -487,7 +491,7 @@ fn native_catalogue_allows_lower_pressure_eviction_and_scoped_cold_reads() {
                     front.clone(),
                     weight,
                     64,
-                    &hirsel_engine_admission::ProcessBudget::new(limit),
+                    &lower_budget,
                     errors,
                 )
                 .unwrap();
@@ -534,9 +538,9 @@ fn native_catalogue_allows_lower_pressure_eviction_and_scoped_cold_reads() {
             let second = runtime.wait(request);
             if mode == 0 {
                 second.unwrap();
-                // Publication reserves a conservative whole outcome-table node
-                // before it knows whether that node needs to grow.
-                limit = lower.retained_bytes() - bytes / 2;
+                // The request owns both metadata and live bodies. Keep room
+                // for one body, but force eviction when the second is retained.
+                limit = lower_budget.reserved().checked_sub(bytes / 2).unwrap();
                 continue;
             }
             if mode == 2 {

@@ -669,13 +669,25 @@ fn a_same_signature_body_edit_matches_a_fresh_build() {
         assert_eq!(first.reference.output, b"six\n");
         let old = digests(&first);
         let main = first.entry.clone();
-        let count = |engine: &QueryEngine| {
-            [QueryKind::Check, QueryKind::Modes, QueryKind::Lower]
-                .map(|kind| engine.recompute_count(&main, kind))
+        let mut callee = main.clone();
+        callee.0.name = "weight".into();
+        let callee = hirsel_syntax::DefId::intern(&callee);
+        let reads = |engine: &QueryEngine| {
+            [QueryKind::Check, QueryKind::Modes, QueryKind::Lower].map(|kind| {
+                let reads = engine.memo_reads(&main, kind).expect("main has a memo");
+                assert!(
+                    !reads.iter().any(|(key, _)| {
+                        *key == hirsel_query_products::reads::ReadKey::ExecutedBody(callee)
+                    }),
+                    "{kind:?} must not depend on the callee body"
+                );
+                reads.clone()
+            })
         };
-        let main_before = count(&engine);
+        let main_before = reads(&engine);
         let edited = checked_in(&mut engine, &after);
-        assert_eq!(count(&engine), main_before, "the edit rechecked main");
+        // Debug carry audits can recompute a memo. Its semantic reads stay fixed.
+        assert_eq!(reads(&engine), main_before);
         assert_eq!(edited.reference.output, b"other\n");
         let fresh = checked(&after);
         assert_eq!(edited.reference, fresh.reference);

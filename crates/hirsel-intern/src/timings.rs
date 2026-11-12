@@ -316,11 +316,35 @@ pub enum Count {
     ValidationRetentionRefusals,
     InstalledPackageOpens,
     ParseSyntaxDecodes,
+    /// Tokens the lexer produced, trivia, invalid and EOF included.
+    LexedTokens,
+    /// Expression, statement, pattern and type nodes the parser built.
+    ParsedNodes,
+    /// Path lookups the resolver asked its scopes.
+    ResolveLookups,
+    /// Callee function signatures imported into a checked body.
+    CalleeImports,
+    /// Property normalizations a checked body asked for.
+    PropertyQueries,
+    /// Property normalizations no earlier query in the body answered.
+    PropertyMisses,
+    /// Bodies the type checker walked, by any entry path.
+    BodyWalks,
+    /// Body walks entered from the Check query.
+    BodyWalksCheckQuery,
+    /// Body walks entered from structural production.
+    BodyWalksStructural,
+    /// Body walks of compile-time generator constants.
+    BodyWalksGenerator,
+    /// Body walks of generated (CT-5) bodies.
+    BodyWalksGenerated,
+    /// Body walks for headers declared without a body.
+    BodyWalksDeclaration,
 }
 
 impl Count {
     /// Every count, in declaration order.
-    pub const ALL: [Count; 94] = [
+    pub const ALL: [Count; 106] = [
         Count::Definitions,
         Count::Units,
         Count::VRuns,
@@ -415,12 +439,36 @@ impl Count {
         Count::ValidationRetentionRefusals,
         Count::InstalledPackageOpens,
         Count::ParseSyntaxDecodes,
+        Count::LexedTokens,
+        Count::ParsedNodes,
+        Count::ResolveLookups,
+        Count::CalleeImports,
+        Count::PropertyQueries,
+        Count::PropertyMisses,
+        Count::BodyWalks,
+        Count::BodyWalksCheckQuery,
+        Count::BodyWalksStructural,
+        Count::BodyWalksGenerator,
+        Count::BodyWalksGenerated,
+        Count::BodyWalksDeclaration,
     ];
     /// The stable name `--timings` prints.
     pub fn name(self) -> &'static str {
         match self {
             Count::InstalledPackageOpens => "installed package opens",
             Count::ParseSyntaxDecodes => "parse syntax decodes",
+            Count::LexedTokens => "lexed tokens",
+            Count::ParsedNodes => "parsed syntax nodes",
+            Count::ResolveLookups => "resolve lookups",
+            Count::CalleeImports => "callee signature imports",
+            Count::PropertyQueries => "property normalization queries",
+            Count::PropertyMisses => "property normalization misses",
+            Count::BodyWalks => "body walks",
+            Count::BodyWalksCheckQuery => "body walks: check query",
+            Count::BodyWalksStructural => "body walks: structural production",
+            Count::BodyWalksGenerator => "body walks: generator",
+            Count::BodyWalksGenerated => "body walks: generated body",
+            Count::BodyWalksDeclaration => "body walks: bodyless declaration",
             Count::ValidationRetentionRefusals => "validation retention refusals",
             Count::VerifierFactEvictions => "verifier fact evictions",
             Count::ExecutionValidationRequests => "execution validation requests",

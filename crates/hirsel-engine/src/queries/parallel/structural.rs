@@ -320,6 +320,7 @@ impl Worker<'_> {
                         produced.set(true);
                         census();
                         current.facets.clear();
+                        timings::count(Count::BodyWalksStructural);
                         let result = checker.check(
                             self.types,
                             self.memo,
@@ -359,6 +360,7 @@ impl Worker<'_> {
         };
         let production_scope = counted::scope(production);
         census();
+        timings::count(Count::BodyWalksStructural);
         let result = checker.check(
             self.types,
             self.memo,

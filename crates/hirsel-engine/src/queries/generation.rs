@@ -824,6 +824,7 @@ impl QueryEngine {
             return Err(QueryError::Diagnostics(resolution.diagnostics));
         }
         self.recorded(definition, reads, |t, m, r| {
+            timings::count(Count::BodyWalksGenerated);
             checker.check(t, m, syntax.clone(), resolution.value, signature, r)
         })
     }
@@ -961,6 +962,7 @@ impl QueryEngine {
                     return Err(QueryError::Diagnostics(resolution.diagnostics));
                 }
                 self.recorded(definition, &mut reads, |t, m, r| {
+                    timings::count(Count::BodyWalksDeclaration);
                     checker.check(t, m, file.clone(), resolution.value, &signature.value, r)
                 })
             });

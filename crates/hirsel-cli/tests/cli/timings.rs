@@ -210,6 +210,32 @@ fn timings_json_intervals_add_up_to_the_wall_time() {
     assert!(report["counts"]["V runs"].as_u64().unwrap() > 0, "{report}");
 }
 
+/// The reconciliation law for body walks: every body the checker walks is
+/// counted once inside the checker and once at the entry path that asked for
+/// it, so the paths sum to the checker's own count. A path that walks without
+/// counting, or counts a memo hit as a walk, breaks the sum. The program
+/// reaches the structural and generator paths.
+#[test]
+fn every_body_walk_is_counted_at_exactly_one_entry_path() {
+    let source = std_file(
+        "fn gen() -> Result[Body[fn(u64) -> u64 uses {}], String] {\n  Ok(codegen.body(\"fn(x: u64) -> u64 uses {} {\\n  x + 1u64\\n}\"))\n}\nfn next(n: u64) -> u64 uses {} = comptime gen()\npub fn main(rt: Io, args: Args) -> Result[(), GrantError] {\n  let text = std@1/u64.to_string(next(4u64))\n  let _ = out.print(io.stdout(rt)?, text)\n  Ok(())\n}\n",
+    );
+    let report = report(&build(&source, "--timings=json").stderr);
+    let count = |name: &str| report["counts"][name].as_u64().unwrap();
+    let paths = [
+        "body walks: check query",
+        "body walks: structural production",
+        "body walks: generator",
+        "body walks: generated body",
+        "body walks: bodyless declaration",
+    ];
+    for path in &paths[1..3] {
+        assert!(count(path) > 0, "{path} not reached: {report}");
+    }
+    let by_path: u64 = paths.iter().map(|path| count(path)).sum();
+    assert_eq!(by_path, count("body walks"), "{report}");
+}
+
 #[test]
 fn query_profile_exports_cpu_and_definition_labels_without_changing_the_check() {
     let source = super::file("fn add(x: u8) -> u8 { x + 1u8 }\nfn main() { let _ = add(2u8) }\n");

@@ -21,7 +21,7 @@ pub struct LexOutput {
 /// diagnostic, rather than indexing another snapshot.
 pub fn lex(file: FileId, sources: &SourceMap) -> LexOutput {
     let anchor = sources.file_anchor(file);
-    match sources.file(file) {
+    let output = match sources.file(file) {
         Some(source) => scan(anchor, source.text().as_bytes()),
         None => {
             let mut scanner = Scanner::new(anchor, &[]);
@@ -33,7 +33,12 @@ pub fn lex(file: FileId, sources: &SourceMap) -> LexOutput {
             );
             scanner.finish()
         }
-    }
+    };
+    hirsel_intern::timings::count_by(
+        hirsel_intern::timings::Count::LexedTokens,
+        output.tokens.len() as u64,
+    );
+    output
 }
 
 // The same byte scanner is exercised on arbitrary bytes by fuzz tests. Production

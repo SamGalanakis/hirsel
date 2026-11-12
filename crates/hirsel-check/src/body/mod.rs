@@ -574,6 +574,7 @@ impl Checker<'_, '_> {
             &self.body.resolution.generic_declarations,
             self.snapshots.len(),
         );
+        hirsel_intern::timings::count(hirsel_intern::timings::Count::PropertyQueries);
         if let Some(normalized) = self.property_normalizations.rows.get(&id).copied() {
             #[cfg(test)]
             assert_eq!(
@@ -583,6 +584,7 @@ impl Checker<'_, '_> {
             );
             return normalized;
         }
+        hirsel_intern::timings::count(hirsel_intern::timings::Count::PropertyMisses);
         match self.normalize_properties_uncached(id) {
             Ok(normalized) => {
                 self.property_normalizations.rows.insert(id, normalized);

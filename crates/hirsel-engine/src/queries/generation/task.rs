@@ -170,6 +170,7 @@ impl GeneratorInput {
         if has_errors(&resolution.diagnostics) {
             return Err(QueryError::Diagnostics(resolution.diagnostics));
         }
+        timings::count(Count::BodyWalksGenerator);
         let typed = phases.checker.check(
             types,
             memo,

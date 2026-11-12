@@ -95,6 +95,7 @@ impl CheckerPhase for BodyAdapter {
         signature: &Signature,
         provider: &mut dyn SignatureProvider,
     ) -> Result<QueryOutput<hirsel_query_products::TypedBody>, QueryError> {
+        hirsel_intern::timings::count(hirsel_intern::timings::Count::BodyWalks);
         let definition = signature.definition.path();
         let context = FileContext {
             package: definition.0.package.clone(),

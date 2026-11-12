@@ -76,6 +76,7 @@ impl Checker<'_, '_> {
         )
     }
     pub(super) fn import_function(&mut self, f: &FunctionType) -> Result<FunctionType, QueryError> {
+        hirsel_intern::timings::count(hirsel_intern::timings::Count::CalleeImports);
         let root = self.types.intern(Type {
             drop_allocation: DropAllocation::MayAllocate,
             ..Type::with_kind(TypeKind::Function(f.clone()))

@@ -304,6 +304,7 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
         self.lookup_using(path)
     }
     fn lookup_using(&mut self, path: &Path) -> Result<DefPath, LookupError> {
+        hirsel_intern::timings::count(hirsel_intern::timings::Count::ResolveLookups);
         let segments = path
             .segments
             .iter()

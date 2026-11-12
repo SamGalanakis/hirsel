@@ -1866,14 +1866,17 @@ impl QueryEngine {
         };
         let (types, memo) = (recorder.engine.types.clone(), recorder.engine.memo.clone());
         let result = match adapter {
-            Some(adapter) => adapter.check(
-                &types,
-                &memo,
-                snapshot.clone(),
-                resolution.value.clone(),
-                &signature.value,
-                &mut recorder,
-            ),
+            Some(adapter) => {
+                timings::count(Count::BodyWalksCheckQuery);
+                adapter.check(
+                    &types,
+                    &memo,
+                    snapshot.clone(),
+                    resolution.value.clone(),
+                    &signature.value,
+                    &mut recorder,
+                )
+            }
             None => recorder.engine.missing(QueryKind::Check),
         };
         let mut observed = recorder.observed;

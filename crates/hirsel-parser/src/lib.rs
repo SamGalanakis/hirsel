@@ -592,6 +592,13 @@ impl Parser<'_> {
             .unwrap_or("");
         let text_hash = ContentHash::of_bytes(bytes.as_bytes());
         let mut tree = std::mem::take(&mut self.tree);
+        hirsel_intern::timings::count_by(
+            hirsel_intern::timings::Count::ParsedNodes,
+            (tree.expressions.len()
+                + tree.statements.len()
+                + tree.patterns.len()
+                + tree.types.len()) as u64,
+        );
         tree.tokens = self.tokens[owned_start..owned_end]
             .iter()
             .map(|t| Token {

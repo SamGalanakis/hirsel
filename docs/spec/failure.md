@@ -50,7 +50,8 @@ fn put(mut q: List[File], take f: File) -> Result[(), (Capacity, File)] {
 ### FAIL-4: Constructor temporaries
 
 A record or variant construction evaluates its field expressions left to right into
-statement temporaries; a placed literal `T(..) in r` and `box.new` then admit their block.
+statement temporaries; a placed literal `T(..) in r`, a resource literal and `box.new` then
+admit their charge.
 If a field expression or the admission fails,
 the temporaries are dropped by the statement's cleanup in reverse evaluation order, their
 finalizers included; on admission failure the error is bare `Capacity`
@@ -127,7 +128,9 @@ resource type Temp { dir: Dir, path: Path }
   drop(t) { let _ = file.remove(t.dir, t.path) }
 ```
 
-A resource is cleaned exactly once: by its finalizer on implicit drop, or by an explicit
+A resource literal admits the resource's cause slot
+([MEM-26](budgets.md#mem-26-logical-charges)) and has type `Result[T, Capacity]`. A
+resource is cleaned exactly once: by its finalizer on implicit drop, or by an explicit
 consuming function. A consuming function in the defining module ends a resource without
 its finalizer by a whole destructure ([T3.7](ownership.md#own-26-the-transition-table)),
 which is how fallible finalisation (`close`, `commit`, `flush`) is written. There is no

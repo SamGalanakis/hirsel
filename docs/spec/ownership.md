@@ -453,7 +453,7 @@ column names the one owner of every surviving value after a failure
 | row | operation | success | failure | owner after failure |
 |---|---|---|---|---|
 | T1.1 | `T(a: take a, b: e)` | fields evaluated left to right into temporaries; value L, stored inline | `e` fails | temporaries dropped in reverse by statement cleanup; prop |
-| T1.2 | `T(..) in r`, `box.new(take x)` | as T1.1, then admission (commit) | admission: `Capacity` | as T1.1, and the error is bare `Capacity`; `box.new`: the error owns `x` |
+| T1.2 | `T(..) in r`, a resource literal, `box.new(take x)` | as T1.1, then admission (commit) | admission: `Capacity` | as T1.1, and the error is bare `Capacity`; `box.new`: the error owns `x` |
 | T1.3 | `rc.new(take x)` | node L, count 1; `chg(node)`; `ref` of `x`'s top block | `Capacity` | the error owns `x` |
 | T1.4 | `arc.new(take x)` | as T1.3; a recorded event ([CONC-10](tasks.md#conc-10-event-order)) | `Capacity`, recorded | the error owns `x` |
 | T1.5 | `clone(x)`, `clone_in(r, x)` | copy L; `chg` per own node; `share` per counted edge | `Capacity` at node k | copied nodes dropped and shares released in reverse, each refunded; `x` untouched |

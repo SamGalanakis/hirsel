@@ -42,6 +42,7 @@ MODE/MODE-2-loop-place-52-field-run.hir
 MODE/MODE-2-loop-place-52-index-field-run.hir
 MODE/MODE-2-loop-place-52-paths-run.hir
 MODE/MODE-2-loop-place-52-write-bad.hir
+MODE/MODE-2-unique-empty-function-field-run.hir
 MODE/MODE-6-recorder-arena-event-bad.hir
 MODE/MODE-6-recorder-arena-key-run.hir
 MODE/MODE-6-recorder-capture-bad.hir

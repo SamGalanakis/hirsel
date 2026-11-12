@@ -7340,11 +7340,15 @@ impl<'p, S: Stage> Machine<'p, S> {
         let mut offsets = Vec::new();
         while let Some((base, step)) = work.pop() {
             match step {
-                ScanStep::Counted { offset }
-                | ScanStep::Root { offset }
-                | ScanStep::Environment { offset } => {
+                ScanStep::Counted { offset } | ScanStep::Root { offset } => {
                     if owning && !slices {
                         offsets.push(base + offset);
+                    }
+                }
+                ScanStep::Environment { offset } => {
+                    let offset = base + offset;
+                    if owning && !slices && !self.image_environment_absent(image, offset)? {
+                        offsets.push(offset);
                     }
                 }
                 ScanStep::SliceOwner { offset } => {
@@ -10911,19 +10915,20 @@ impl<'p, S: Stage> Machine<'p, S> {
     /// A callable or iterator without captures stores an initialized null
     /// environment word beside its checked code word.
     fn environment_absent(&self, at: Ptr) -> Checked<bool> {
-        let word = self.word;
         let a = self.ledger.check(at)?;
-        a.extent.check_range(at.offset, word)?;
-        let code = at
-            .offset
-            .checked_sub(word)
-            .and_then(|o| a.extent.cells.get(&o));
-        let next = a.extent.cells.get(&(at.offset + word));
+        self.image_environment_absent(&a.extent, at.offset)
+    }
+
+    fn image_environment_absent(&self, image: &Extent, offset: u64) -> Checked<bool> {
+        let word = self.word;
+        image.check_range(offset, word)?;
+        let code = offset.checked_sub(word).and_then(|o| image.cells.get(&o));
+        let next = image.cells.get(&(offset + word));
         Ok(
             (matches!(code, Some(Cell::Code(_))) || matches!(next, Some(Cell::Code(_))))
-                && a.extent.all_init(at.offset, word)
-                && !a.extent.cells.contains_key(&at.offset)
-                && a.extent.read_bytes(at.offset, word).iter().all(|b| *b == 0),
+                && image.all_init(offset, word)
+                && !image.cells.contains_key(&offset)
+                && image.read_bytes(offset, word).iter().all(|b| *b == 0),
         )
     }
 
@@ -11276,3 +11281,6 @@ fn comparison(op: BinaryOp) -> bool {
         BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
     )
 }
+
+#[cfg(test)]
+mod unique_copy_tests;

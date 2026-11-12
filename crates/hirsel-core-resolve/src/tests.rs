@@ -14,6 +14,21 @@ fn fixture(
     sources: &[(&str, &str)],
 ) -> (NameIndex, Vec<(ModuleId, hirsel_core_syntax::SyntaxFile)>) {
     let mut index = NameIndex::default();
+    let core = ModuleId {
+        package: PackageId {
+            name: "core".into(),
+            version: "1".into(),
+        },
+        modules: vec!["core".into()],
+    };
+    let prelude = parse(
+        "pub type Option[T] = None | Some(T)\npub type Result[T, E] = Ok(T) | Error(E)",
+        ParseMode::Source,
+    );
+    for (i, item) in prelude.syntax.items.iter().enumerate() {
+        index.index_item(&core, i as u32, item);
+    }
+    index.configure_core(core.package);
     let mut files = vec![];
     for &(name, text) in sources {
         let module = module(name);
@@ -86,7 +101,7 @@ fn declaration_binders_and_contextual_variants_do_not_need_other_bodies() {
     let (module, file) = &files[0];
     let r = resolve(&index, module, 1, &file.items[1]);
     assert_eq!(r.diagnostics, vec![]);
-    assert!(r.names.iter().any(|r|matches!(&r.target,Target::ContextualVariant {name,candidates} if name=="One"&&candidates==&[module.definition("Choice")])));
+    assert!(r.names.iter().any(|r|matches!(&r.target,Target::ContextualConstructor {name,candidates} if name=="One"&&candidates==&[module.definition("Choice")])));
     assert_eq!(
         r.binders
             .iter()
@@ -177,30 +192,6 @@ fn dependencies_and_prelude_keep_neutral_definition_paths() {
 }
 
 #[test]
-fn brands_resolve_to_owner_binders_and_sibling_fields() {
-    let (index, files) = fixture(&[(
-        "m",
-        "pub opaque type Pool {}\ntype Id {}\ntype Row { pool: Pool, id: Id of .pool }\nresource type Owned of p { id: Id of p } drop(s, mut p) { p }\n",
-    )]);
-    let (m, f) = &files[0];
-    let row = resolve(&index, m, 2, &f.items[2]);
-    assert_eq!(row.diagnostics, vec![]);
-    assert!(row.names.iter().any(|u| u.target
-        == Target::Field {
-            owner: m.definition("Row"),
-            name: "pool".into()
-        }));
-    let owned = resolve(&index, m, 3, &f.items[3]);
-    assert_eq!(owned.diagnostics, vec![]);
-    assert!(
-        owned
-            .binders
-            .iter()
-            .any(|b| b.name == "p" && b.kind == BinderKind::Brand)
-    );
-}
-
-#[test]
 fn callable_result_anchors_and_missing_prelude_targets_are_reads() {
     let (mut index, files) =
         fixture(&[("m", "fn f(g: scoped fn(x: u64) -> u64 in x, z: Absent) {}")]);
@@ -232,90 +223,10 @@ fn long_expression_tree_has_an_explicit_compiler_resource_outcome() {
     assert_eq!(r.diagnostics, vec![]);
 }
 
-fn seed_corpus() -> Vec<ParsedModule> {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut modules = vec![];
-    for (dir, pkg, signatures) in [
-        ("core/std", "core", true),
-        ("core/syntax-examples", "example", false),
-    ] {
-        modules.extend(
-            PackageManifest::directory(
-                &root.join(dir),
-                PackageId {
-                    name: pkg.into(),
-                    version: "1".into(),
-                },
-                signatures,
-            )
-            .unwrap()
-            .read()
-            .unwrap(),
-        );
-    }
-    modules
-}
-#[test]
-fn seed_corpus_token_tapes_roundtrip_every_byte() {
-    let modules = seed_corpus();
-    assert!(!modules.is_empty());
-    for m in &modules {
-        let original = std::fs::read_to_string(&m.file).unwrap();
-        assert_eq!(m.parsed.syntax.text(), original, "{}", m.file.display());
-    }
-    println!(
-        "{} complete source files round-tripped through token tapes",
-        modules.len()
-    );
-}
-#[test]
-fn seed_corpus_parses_and_resolves_without_refusals() {
-    let modules = seed_corpus();
-    let mut environment = Environment::default();
-    for m in modules.iter().filter(|m| m.module.package.name == "core") {
-        let head = &m.module.modules[0];
-        environment
-            .dependencies
-            .entry(PackageId {
-                name: "example".into(),
-                version: "1".into(),
-            })
-            .or_default()
-            .insert(head.clone(), m.module.clone());
-    }
-    let mut index = NameIndex::new(environment);
-    for m in &modules {
-        index.add_module(&m.module);
-        for (i, item) in m.parsed.syntax.items.iter().enumerate() {
-            index.index_item(&m.module, i as u32, item);
-        }
-    }
-    let mut failures = vec![];
-    for m in &modules {
-        for d in &m.parsed.diagnostics {
-            failures.push(format!("{} {} {}", m.file.display(), d.rule, d.message));
-        }
-        assert!(m.parsed.resource_refusal.is_none());
-        for (i, item) in m.parsed.syntax.items.iter().enumerate() {
-            let r = resolve(&index, &m.module, i as u32, item);
-            assert!(r.resource_refusal.is_none());
-            for d in r.diagnostics {
-                failures.push(format!("{} {} {}", m.file.display(), d.rule, d.message));
-            }
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "{} refusals in the spec/seed corpus:\n{}",
-        failures.len(),
-        failures.join("\n")
-    );
-}
-
 #[test]
 fn locals_cannot_shadow_modules_dependencies_or_core_names() {
     let (mut index, files) = fixture(&[
-        ("lib", "pub type External {}"),
+        ("lib", "pub fn External() {}"),
         ("m", "fn f() { let lib = 1; let dep = 2; let CoreName = 3 }"),
     ]);
     let (m, f) = &files[1];
@@ -341,7 +252,7 @@ fn locals_cannot_shadow_modules_dependencies_or_core_names() {
 }
 
 #[test]
-fn missing_module_heads_are_incremental_reads_before_core_fallback() {
+fn prelude_functions_precede_modules_in_value_lookup() {
     let (mut index, files) = fixture(&[
         ("lib", "pub fn helper() -> u64 { 1 }"),
         ("m", "fn f() { helper }"),
@@ -351,30 +262,17 @@ fn missing_module_heads_are_incremental_reads_before_core_fallback() {
         .environment
         .prelude
         .insert("helper".into(), files[0].0.definition("helper"));
-    let before = resolve(&index, m, 0, &f.items[0]);
-    assert!(
-        before
-            .reads
-            .iter()
-            .any(|r| r.scope == LookupScope::Modules(m.package.clone())
-                && r.spelling == ["helper"]
-                && r.result == LookupResult::Missing)
-    );
-    let head = ModuleId {
+    index.add_module(&ModuleId {
         package: m.package.clone(),
         modules: vec!["helper".into()],
-    };
-    index.add_module(&head);
-    let after = resolve(&index, m, 0, &f.items[0]);
+    });
+    let r = resolve(&index, m, 0, &f.items[0]);
     assert!(
-        after
-            .names
+        r.names
             .iter()
-            .any(|u| u.target == Target::Module(head.clone()))
+            .any(|u| u.target == Target::Definition(files[0].0.definition("helper")))
     );
-    assert_ne!(before.names, after.names);
 }
-
 #[test]
 fn private_variants_do_not_steal_bare_pattern_binders() {
     let (index, files) = fixture(&[
@@ -388,4 +286,132 @@ fn private_variants_do_not_steal_bare_pattern_binders() {
     assert!(r.reads.iter().any(|r| r.scope == LookupScope::Variants
         && r.spelling == ["Only"]
         && r.result == LookupResult::Missing));
+}
+
+#[test]
+fn type_names_do_not_resolve_to_same_spelled_modules_or_values() {
+    let (index, files) = fixture(&[
+        ("char", "pub fn digit(c: char) -> u64 { 0 }"),
+        ("m", "fn f[T](T: u64, c: char) -> T { char.digit(c); T }"),
+    ]);
+    let (m, f) = &files[1];
+    let r = resolve(&index, m, 0, &f.items[0]);
+    assert_eq!(r.diagnostics, vec![]);
+    assert!(
+        r.names
+            .iter()
+            .any(|u| u.target == Target::Builtin("char".into()))
+    );
+    assert_eq!(r.binders.iter().filter(|b| b.name == "T").count(), 2);
+}
+#[test]
+fn qualified_variants_are_refused() {
+    let (index, files) = fixture(&[("m", "type Choice = A()\nfn f() { Choice.A() }")]);
+    let (m, f) = &files[0];
+    let r = resolve(&index, m, 1, &f.items[1]);
+    assert!(r.diagnostics.iter().any(|d| d.rule == "LANG-7"));
+}
+
+#[test]
+fn core_module_extensions_preserve_members_and_refuse_collisions() {
+    let (mut index, files) = fixture(&[("m", "fn f() { list.base(); list.extra() }")]);
+    let core = PackageId {
+        name: "core".into(),
+        version: "1".into(),
+    };
+    let std = PackageId {
+        name: "std".into(),
+        version: "1".into(),
+    };
+    let other = PackageId {
+        name: "other".into(),
+        version: "1".into(),
+    };
+    for (pkg, source) in [
+        (core.clone(), "pub fn base() {}"),
+        (std.clone(), "pub fn extra() {}"),
+        (other.clone(), "pub fn extra() {}"),
+    ] {
+        let m = ModuleId {
+            package: pkg,
+            modules: vec!["list".into()],
+        };
+        let p = parse(source, ParseMode::Source);
+        for (i, item) in p.syntax.items.iter().enumerate() {
+            index.index_item(&m, i as u32, item);
+        }
+    }
+    let (m, f) = &files[0];
+    for pkg in [&std, &other] {
+        index
+            .environment
+            .dependencies
+            .entry(m.package.clone())
+            .or_default()
+            .insert(
+                pkg.name.clone(),
+                ModuleId {
+                    package: pkg.clone(),
+                    modules: vec![],
+                },
+            );
+    }
+    index.configure_core(core.clone());
+    let r = resolve(&index, m, 0, &f.items[0]);
+    assert_eq!(r.diagnostics.len(), 1);
+    assert!(
+        r.reads
+            .iter()
+            .any(|r| matches!(&r.result,LookupResult::Ambiguous(paths) if paths.len()==2))
+    );
+    assert!(r.names.iter().any(|u| {
+        u.target
+            == Target::Definition(
+                ModuleId {
+                    package: core.clone(),
+                    modules: vec!["list".into()],
+                }
+                .definition("base"),
+            )
+    }));
+    let p = parse("pub fn base() {}", ParseMode::Source);
+    index.index_item(
+        &ModuleId {
+            package: std,
+            modules: vec!["list".into()],
+        },
+        0,
+        &p.syntax.items[0],
+    );
+    index.configure_core(core);
+    assert!(
+        index
+            .diagnostics
+            .iter()
+            .any(|d| d.message == "extension redeclares a core member")
+    );
+}
+#[test]
+fn enum_variant_with_its_types_name_is_still_contextual() {
+    let (index, files) = fixture(&[("m", "type Closed = Closed(u64)\nfn f() { Closed(1) }")]);
+    let (m, f) = &files[0];
+    let r = resolve(&index, m, 1, &f.items[1]);
+    assert_eq!(r.diagnostics, vec![]);
+    assert!(
+        r.names
+            .iter()
+            .any(|u| matches!(&u.target,Target::ContextualConstructor {name,..} if name=="Closed"))
+    );
+}
+
+#[test]
+fn record_and_variant_constructor_collision_waits_for_expected_type() {
+    let (index, files) = fixture(&[(
+        "m",
+        "type Capacity { n: u64 }\ntype Failure = Capacity(u64)\nfn f() { Capacity(1) }",
+    )]);
+    let (m, f) = &files[0];
+    let r = resolve(&index, m, 2, &f.items[2]);
+    assert_eq!(r.diagnostics, vec![]);
+    assert!(r.names.iter().any(|u|matches!(&u.target,Target::ContextualConstructor {candidates,..} if candidates.contains(&m.definition("Capacity"))&&candidates.contains(&m.definition("Failure")))));
 }

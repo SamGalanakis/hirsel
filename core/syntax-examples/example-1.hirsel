@@ -1,13 +1,20 @@
 type AppError = Io(WriteError) | Mem(Capacity)
 stable type Word { text: Text, len: u64 }
 
+fn mem[T](take r: Result[T, Capacity]) -> Result[T, AppError] {
+  match take r { Ok(take x) => Ok(take x), Error(c) => Error(Mem(c)) }
+}
+
+fn put(out: Stdout, s: String) -> Result[(), AppError] waits {
+  match stdout.write(out, s) { Ok(()) => Ok(()), Error(e) => Error(Io(e)) }
+}
+
 fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] waits {
-  let mut line = string.new()
-  string.push(mut line, label)?
-  string.push_u64(mut line, n)?
-  string.push(mut line, "\n")?
-  stdout.write(out, line)?
-  Ok(())
+  let mut buf = string.new()
+  mem(string.push(mut buf, label))?
+  mem(string.push_u64(mut buf, n))?
+  mem(string.push(mut buf, "\n"))?
+  put(out, buf)
 }
 
 fn word(r: Region, s: String) -> Result[Word in r, Capacity] {
@@ -25,7 +32,7 @@ fn measure(s: String, limit: u64) -> Result[u64, Capacity] {
 }
 
 pub fn main(out: Stdout) -> Result[(), AppError] waits {
-  say(out, "fits, length ", measure("hello", 64)?)?
+  say(out, "fits, length ", mem(measure("hello", 64))?)?
   match measure("hello", 8) {
     Ok(n) => say(out, "fits, length ", n),
     Error(c) => say(out, "refused, requested ", c.requested),

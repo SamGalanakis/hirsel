@@ -1,46 +1,30 @@
 # Core resolution
 
-Index each module's declarations with `NameIndex::index_item`, then resolve one item
-with `resolve`. The index holds names, visibility, field/variant names and declaration
-sites; it never holds a callee body. `Environment` supplies exact package exposures and
-core-prelude paths. `add_module` also registers empty modules.
+Build a `NameIndex` from declared headers, call `configure_core` with the core package
+identity, and resolve each item. The prelude is every public declaration in that
+package's `core` module. Type and value lookups have separate namespaces. Core modules
+merge visible extension members from the current package and its dependencies, retaining
+each member's neutral definition identity. Core-member redeclarations and ambiguous
+extension reads are LANG-7 refusals.
 
-Results name neutral `DefPath` identities, item-local lexical binders, module identities,
-written projections and expected-type variant candidate sets. `reads` records each
-successful, missing, private, opaque or shadowed lookup. Header indexing and lexical
-scopes adapt the old resolver's mechanisms; no old compiler crate is imported. Modes,
-representations, bounds, uses and waits remain syntax for the checking traversal.
+Index rows contain names, kind, visibility, fields, variants and declaration sites.
+They contain no callee body. Resolution records successful, failed, ambiguous and
+shadowed lookups with the namespace and primary site. Bare variants retain expected-type
+candidate sets for checking. Dotted paths never name variants. Modes, bounds, anchors
+and waits are parsed as written; ownership and semantic checking belong to the next stage.
+Resource refusal is an incomplete tool result, separate from source diagnostics.
 
-`Resolution::resource_refusal` is an incomplete compiler outcome, not a source diagnostic.
-Drivers must not publish incomplete results. Refusals serialize to JSON with one rule,
-primary module/item-relative site, causal sites and declared/required facts.
-
-The directory command is a test and measurement entry, not the installed compiler:
+The test/measurement command accepts an explicit JSON `CorpusManifest`, containing the
+core package identity and `PackageManifest` values with source/module mappings and exact
+dependencies. It discovers no installed old library and guesses no core declarations.
 
 ```sh
-.buck2/bin/buck2 run //:hirsel-core-resolve-bin-hirsel-core-resolve -- core --corpus
-.buck2/bin/buck2 run //:hirsel-core-resolve-bin-hirsel-core-resolve -- core/std --signatures
-.buck2/bin/buck2 run //:hirsel-core-resolve-bin-hirsel-core-resolve -- core/syntax-examples --library core/std
+.buck2/bin/buck2 run //:hirsel-core-resolve-bin-hirsel-core-resolve -- inputs.json --json results.json
 ```
 
-The directory convention uses relative filename components as module names. `--corpus`
-reads std signatures as core@1 modules and revision-2 examples as separate example@1
-modules, exposing core modules explicitly. `--prelude file.json` supplies an object
-mapping names to full neutral paths, such as `{"Capacity":"core@1/Capacity"}`. A mapping
-must select a declaration already supplied to the index. Missing core declarations and
-outdated seed spellings remain refusals; this command does not invent them.
-
-For an amortized instruction sample, build the binary with
-`--target-platforms //tools/buck2:release`, then run it directly under the memory cap
-and process-tree perf counter from core/MEASURE.md. `--phase parse --iterations 1000`
-repeats lexing, parsing, indexing and destruction; `--phase resolve --iterations 1000`
-repeats resolution and destruction over preparsed syntax and a header index. Source
-loading, one initial parse/index, line counting, final reporting and process startup
-remain in the whole-process count and are amortized. This is not an exclusive-stage
-counter or an end-to-end compiler cost. The line denominator counts physical lines
-containing a noncomment token, including brace-only lines.
-
-The corpus tests retain byte-identical token-tape round trips and the stronger requirement
-that every seed/example parse and resolve without refusals. The latter exposes current
-spec/seed disagreements rather than exempting files. Unit tests use independently written
-scope, identity, visibility, body-independence, brand and negative-read expectations.
+Each report refusal includes file, line, column, excerpt and the machine-readable rule
+and item-relative site. `--strip-comments` compacts trivia while preserving statement
+newlines and literal spellings. `--clean` selects files with no syntax/index/resolve
+refusal. `--phase parse|resolve --iterations N` repeats the selected stage. Parsing
+includes one corpus header-index build per iteration; resolution reuses one index and
+never rebuilds it per definition. Whole-process startup and reporting remain amortized.

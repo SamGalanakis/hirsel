@@ -122,7 +122,7 @@ fn signature_mode_is_explicit_and_diagnostics_are_machine_readable() {
 #[test]
 fn revised_callable_summaries_and_projection_tokenization() {
     let f = good(
-        "@twin(Stable) type Own {}\nstable type Stable {}\nresource type R uses Stdout { x: u64 } drop(r, mut context) {}\nfn f(g: own[send] fn(take u64) -> u64 uses Stdout waits, p: ((u64, u64), u64)) -> u64 { p.0.1 }\n",
+        "@twin(Stable) type Own {}\nstable type Stable {}\nresource type R { x: u64 } drop(r) {}\nfn f(g: own[send] fn(take u64) -> u64 waits, p: ((u64, u64), u64)) -> u64 { p.0.1 }\n",
     );
     assert!(
         f.items[3]
@@ -178,5 +178,36 @@ fn restricted_subjects_and_exit_labels_follow_revision_two() {
     assert_eq!(
         parse("const BAD: u64 = 1.", ParseMode::Source).diagnostics[0].rule,
         "LANG-3"
+    );
+}
+
+#[test]
+fn revision_three_deletions_and_sized_parameters() {
+    let s = "pub fn of(bytes n: u64, uses: u64) -> u64 { n + uses }";
+    let f = good(s);
+    assert!(
+        f.items[0]
+            .tree
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::BytesParameter)
+    );
+    for s in [
+        "type T of p",
+        "type T uses Cap",
+        "fn f(g: fn() uses Cap) {}",
+        "resource type R {} drop(r, mut owner) {}",
+        "fn f() { if true {} 1 }",
+        "fn f(g: fn[T]()) {}",
+    ] {
+        assert!(!parse(s, ParseMode::Source).diagnostics.is_empty(), "{s}");
+    }
+    assert_eq!(
+        lex("of uses")
+            .tokens
+            .iter()
+            .filter(|t| t.kind == TokenKind::Ident)
+            .count(),
+        2
     );
 }

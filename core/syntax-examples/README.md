@@ -1,6 +1,6 @@
 # Parser corpus
 
-The seven complete programs in spec-v1-880 revision 2, a46e3f51,
-`docs/spec/examples.md`, copied on 2026-11-12 for the core-syntax-891 parse/resolve corpus. These are source inputs, not
-executed conformance claims. The syntax lane's report records outstanding draft/seed
-conflicts. No old compiler harness discovers this directory.
+The seven complete programs in spec-v1-880 revision 3, commit 7f47d961,
+`docs/spec/examples.md`. These are parser, resolver and formatter inputs. Execution
+and semantic refusals belong to the new checker corpus. The acceptance command also
+reads the canonical core declarations and external seed from explicit source manifests.

@@ -74,17 +74,28 @@ pub struct Definition {
     pub fields: Vec<String>,
     pub variants: Vec<String>,
 }
-/// Explicit dependency exposures/prelude are supplied by the driver, never guessed from spelling.
+/// Namespace is chosen by syntax (LANG-7), never inferred from a type.
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
+pub enum Namespace {
+    Type,
+    Value,
+}
 #[derive(Clone, Debug, Default)]
 pub struct Environment {
     pub prelude: BTreeMap<String, DefPath>,
     pub dependencies: BTreeMap<PackageId, BTreeMap<String, ModuleId>>,
+    pub core: Option<PackageId>,
 }
+/// Header rows and module membership are built once, before any definition is resolved.
 #[derive(Clone, Debug, Default)]
 pub struct NameIndex {
-    definitions: BTreeMap<DefPath, Definition>,
-    module_heads: BTreeMap<PackageId, BTreeSet<String>>,
-    variants: BTreeMap<String, Vec<DefPath>>,
+    definitions: Vec<Definition>,
+    paths: BTreeMap<DefPath, usize>,
+    members: BTreeMap<ModuleId, BTreeMap<String, usize>>,
+    heads: BTreeMap<String, BTreeSet<ModuleId>>,
+    variants: BTreeMap<String, Vec<usize>>,
     pub environment: Environment,
     pub diagnostics: Vec<Refusal>,
 }
@@ -96,42 +107,157 @@ impl NameIndex {
         }
     }
     pub fn add_module(&mut self, module: &ModuleId) {
+        self.members.entry(module.clone()).or_default();
         if let Some(head) = module.modules.first() {
-            self.module_heads
-                .entry(module.package.clone())
+            self.heads
+                .entry(head.clone())
                 .or_default()
-                .insert(head.clone());
+                .insert(module.clone());
         }
     }
     pub fn has_module_head(&self, package: &PackageId, name: &str) -> bool {
-        self.module_heads
-            .get(package)
-            .is_some_and(|heads| heads.contains(name))
+        self.heads
+            .get(name)
+            .is_some_and(|ms| ms.iter().any(|m| &m.package == package))
     }
     pub fn definitions(&self) -> impl Iterator<Item = &Definition> {
-        self.definitions.values()
+        self.definitions.iter()
     }
     pub fn get(&self, path: &DefPath) -> Option<&Definition> {
-        self.definitions.get(path)
+        self.paths.get(path).map(|&i| &self.definitions[i])
     }
-    pub fn variants(&self, name: &str) -> &[DefPath] {
-        self.variants.get(name).map_or(&[], Vec::as_slice)
+    pub fn member(
+        &self,
+        module: &ModuleId,
+        name: &str,
+        namespace: Namespace,
+        constructor: bool,
+    ) -> Option<&Definition> {
+        let &i = self.members.get(module)?.get(name)?;
+        let d = &self.definitions[i];
+        (match namespace {
+            Namespace::Type => d.kind == DefinitionKind::Type,
+            Namespace::Value => d.kind != DefinitionKind::Type || constructor,
+        })
+        .then_some(d)
+    }
+    pub fn variants(&self, name: &str) -> impl Iterator<Item = &Definition> {
+        self.variants
+            .get(name)
+            .into_iter()
+            .flatten()
+            .map(|&i| &self.definitions[i])
+    }
+    pub fn reachable(&self, from: &ModuleId, package: &PackageId) -> bool {
+        package == &from.package
+            || self.environment.core.as_ref() == Some(package)
+            || self
+                .environment
+                .dependencies
+                .get(&from.package)
+                .is_some_and(|ds| ds.values().any(|m| &m.package == package))
+    }
+    pub fn core_module(&self, name: &str) -> Option<ModuleId> {
+        let package = self.environment.core.as_ref()?;
+        self.heads
+            .get(name)?
+            .iter()
+            .find(|m| &m.package == package && m.modules.len() == 1)
+            .cloned()
+    }
+    pub fn module_head(&self, from: &ModuleId, name: &str) -> Option<ModuleId> {
+        if self.has_module_head(&from.package, name) {
+            return Some(ModuleId {
+                package: from.package.clone(),
+                modules: vec![name.into()],
+            });
+        }
+        self.environment
+            .dependencies
+            .get(&from.package)
+            .and_then(|d| d.get(name))
+            .cloned()
+            .or_else(|| self.core_module(name))
+    }
+    /// Merge core module extensions by name while retaining every member's identity.
+    pub fn members_named(
+        &self,
+        from: &ModuleId,
+        module: &ModuleId,
+        name: &str,
+        ns: Namespace,
+        constructor: bool,
+    ) -> Vec<&Definition> {
+        if module.modules.len() == 1 && self.core_module(&module.modules[0]).is_some() {
+            self.heads
+                .get(&module.modules[0])
+                .into_iter()
+                .flatten()
+                .filter(|m| m.modules.len() == 1 && self.reachable(from, &m.package))
+                .filter_map(|m| self.member(m, name, ns, constructor))
+                .filter(|d| {
+                    d.site.module == *from
+                        || d.public
+                        || self.environment.core.as_ref() == Some(&d.path.0.package)
+                })
+                .collect()
+        } else {
+            self.member(module, name, ns, constructor)
+                .into_iter()
+                .collect()
+        }
+    }
+    pub fn configure_core(&mut self, package: PackageId) {
+        self.environment.core = Some(package.clone());
+        let prelude = ModuleId {
+            package,
+            modules: vec!["core".into()],
+        };
+        for d in &self.definitions {
+            if d.site.module == prelude && d.public {
+                self.environment
+                    .prelude
+                    .insert(d.path.0.name.clone(), d.path.clone());
+            }
+        }
+        for d in &self.definitions {
+            if d.site.module.modules.len() != 1
+                || Some(&d.path.0.package) == self.environment.core.as_ref()
+            {
+                continue;
+            }
+            let Some(core) = self.core_module(&d.site.module.modules[0]) else {
+                continue;
+            };
+            if let Some(&i) = self.members.get(&core).and_then(|m| m.get(&d.path.0.name)) {
+                let mut r = Refusal::new(
+                    "LANG-7",
+                    d.site.clone(),
+                    "extension redeclares a core member",
+                );
+                r.causal.push(self.definitions[i].site.clone());
+                self.diagnostics.push(r);
+            }
+        }
     }
     pub fn add(&mut self, definition: Definition) {
         self.add_module(&definition.site.module);
-        if let Some(old) = self.definitions.get(&definition.path) {
+        if let Some(old) = self.get(&definition.path) {
             let mut d = Refusal::new("LANG-7", definition.site.clone(), "duplicate definition");
             d.causal.push(old.site.clone());
             self.diagnostics.push(d);
             return;
         }
+        let i = self.definitions.len();
+        self.members
+            .get_mut(&definition.site.module)
+            .unwrap()
+            .insert(definition.path.0.name.clone(), i);
         for name in &definition.variants {
-            self.variants
-                .entry(name.clone())
-                .or_default()
-                .push(definition.path.clone());
+            self.variants.entry(name.clone()).or_default().push(i);
         }
-        self.definitions.insert(definition.path.clone(), definition);
+        self.paths.insert(definition.path.clone(), i);
+        self.definitions.push(definition);
     }
     pub fn index_item(&mut self, module: &ModuleId, ordinal: u32, item: &Item) {
         let root = item.tree.node(item.root);
@@ -147,7 +273,7 @@ impl NameIndex {
         let Some(name) = root.token else { return };
         let name_span = item.tree.tokens[name.0 as usize].span;
         let name = item.tree.token_text(&item.text, name);
-        let mut definition = Definition {
+        let mut d = Definition {
             path: module.definition(name),
             kind,
             public: false,
@@ -163,17 +289,17 @@ impl NameIndex {
         for &child in item.tree.children(item.root) {
             let n = item.tree.node(child);
             match n.kind {
-                NodeKind::Public => definition.public = true,
-                NodeKind::Opaque => definition.opaque = true,
+                NodeKind::Public => d.public = true,
+                NodeKind::Opaque => d.opaque = true,
                 NodeKind::Fields | NodeKind::Variants => {
                     for &field in item.tree.children(child) {
                         let n = item.tree.node(field);
                         if let Some(t) = n.token {
                             let name = item.tree.token_text(&item.text, t).into();
                             if n.kind == NodeKind::Field {
-                                definition.fields.push(name);
+                                d.fields.push(name);
                             } else if n.kind == NodeKind::Variant {
-                                definition.variants.push(name);
+                                d.variants.push(name);
                             }
                         }
                     }
@@ -181,7 +307,7 @@ impl NameIndex {
                 _ => {}
             }
         }
-        self.add(definition);
+        self.add(d);
     }
 }
 pub(crate) fn path_parts(item: &Item, node: NodeId) -> Vec<String> {

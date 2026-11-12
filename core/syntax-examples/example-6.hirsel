@@ -1,13 +1,24 @@
 type AppError = Io(WriteError) | Mem(Capacity) | Join(JoinError)
 type Ends: send { input: Receiver[u64], output: Sender[u64] }
 
+fn mem[T](take r: Result[T, Capacity]) -> Result[T, AppError] {
+  match take r { Ok(take x) => Ok(take x), Error(c) => Error(Mem(c)) }
+}
+
+fn put(out: Stdout, s: String) -> Result[(), AppError] waits {
+  match stdout.write(out, s) { Ok(()) => Ok(()), Error(e) => Error(Io(e)) }
+}
+
 fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] waits {
-  let mut line = string.new()
-  string.push(mut line, label)?
-  string.push_u64(mut line, n)?
-  string.push(mut line, "\n")?
-  stdout.write(out, line)?
-  Ok(())
+  let mut buf = string.new()
+  mem(string.push(mut buf, label))?
+  mem(string.push_u64(mut buf, n))?
+  mem(string.push(mut buf, "\n"))?
+  put(out, buf)
+}
+
+fn joined(take h: Task[u64]) -> Result[u64, AppError] waits {
+  match task.join(take h) { Ok(r) => Ok(r), Error(take e) => Error(Join(take e)) }
 }
 
 fn source(take tx: Sender[u64]) -> u64 waits {
@@ -27,8 +38,8 @@ fn square(take e: Ends) -> u64 waits {
 }
 
 pub fn main(out: Stdout, tasks: Tasks) -> Result[(), AppError] waits {
-  let (tx1, rx1): (Sender[u64], Receiver[u64]) = channel.new(2)?
-  let (tx2, rx2): (Sender[u64], Receiver[u64]) = channel.new(2)?
+  let (tx1, rx1): (Sender[u64], Receiver[u64]) = mem(channel.new(2))?
+  let (tx2, rx2): (Sender[u64], Receiver[u64]) = mem(channel.new(2))?
   let src = match task.spawn(tasks, bytes 4096, take tx1, source) {
     Ok(take h) => h,
     Error((c, _)) => return Error(Mem(c)),
@@ -40,7 +51,7 @@ pub fn main(out: Stdout, tasks: Tasks) -> Result[(), AppError] waits {
   }
   let mut total: u64 = 0
   while let Ok(y) = channel.receive(rx2) { total += y }
-  say(out, "sent ", task.join(take src)?)?
-  say(out, "squared ", task.join(take sq)?)?
+  say(out, "sent ", joined(take src)?)?
+  say(out, "squared ", joined(take sq)?)?
   say(out, "total ", total)
 }

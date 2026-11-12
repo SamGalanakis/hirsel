@@ -432,17 +432,6 @@ impl Parser<'_> {
         if self.eat(":") {
             c.push(self.bounds()?);
         }
-        if self.eat("uses") {
-            let st = self.pos - 1;
-            let mut us = vec![self.path(NodeKind::TypePath)?];
-            while self.eat("+") {
-                us.push(self.path(NodeKind::TypePath)?);
-            }
-            c.push(self.node(st, NodeKind::Uses, None, &us));
-        }
-        if self.eat("of") {
-            c.push(self.brand()?);
-        }
         if self.eat("grant") {
             let st = self.pos - 1;
             self.expect("bytes")?;
@@ -485,17 +474,9 @@ impl Parser<'_> {
             self.bump();
             self.expect("(")?;
             let n = self.name()?;
-            let mut drop_children = vec![];
-            if self.eat(",") {
-                self.expect("mut")?;
-                let ds = self.pos;
-                let context = self.name()?;
-                drop_children.push(self.node(ds, NodeKind::MutParameter, Some(context), &[]));
-            }
             self.expect(")")?;
             let body = self.block()?;
-            drop_children.push(body);
-            c.push(self.node(st, NodeKind::Drop, Some(n), &drop_children));
+            c.push(self.node(st, NodeKind::Drop, Some(n), &[body]));
         }
         Ok(self.node(s, kind, Some(name), &c))
     }
@@ -569,30 +550,22 @@ impl Parser<'_> {
     }
     fn header(&mut self, top: bool) -> Parsed<Vec<NodeId>> {
         let mut c = vec![];
-        if self.at("[") {
+        if top && self.at("[") {
             c.push(self.generics()?);
         }
         let s = self.pos;
         self.expect("(")?;
-        let ps = self.list(")", |p| p.parameter(top))?;
+        let ps = self.list(")", |p| p.parameter(top, top))?;
         c.push(self.node(s, NodeKind::Parameters, None, &ps));
         if self.eat("->") {
             let st = self.pos - 1;
             let t = self.ty()?;
             c.push(self.node(st, NodeKind::ResultType, None, &[t]));
         }
-        if self.eat("uses") {
-            let st = self.pos - 1;
-            let mut us = vec![self.path(NodeKind::TypePath)?];
-            while self.eat("+") {
-                us.push(self.path(NodeKind::TypePath)?);
-            }
-            c.push(self.node(st, NodeKind::Uses, None, &us));
-        }
         if self.eat("waits") {
             c.push(self.node(self.pos - 1, NodeKind::Waits, None, &[]));
         }
-        if self.eat("where") {
+        if top && self.eat("where") {
             let st = self.pos - 1;
             let mut cs = vec![];
             loop {
@@ -607,12 +580,15 @@ impl Parser<'_> {
         }
         Ok(c)
     }
-    fn parameter(&mut self, named: bool) -> Parsed<NodeId> {
+    fn parameter(&mut self, named: bool, sized: bool) -> Parsed<NodeId> {
         let s = self.pos;
         let k = if self.eat("take") {
             NodeKind::TakeParameter
         } else if self.eat("mut") {
             NodeKind::MutParameter
+        } else if sized && self.at("bytes") && self.word(1) != ":" {
+            self.bump();
+            NodeKind::BytesParameter
         } else {
             NodeKind::Parameter
         };
@@ -688,10 +664,6 @@ impl Parser<'_> {
                 path
             }
         };
-        if self.eat("of") {
-            let b = self.brand()?;
-            n = self.node(s, NodeKind::Brand, None, &[n, b]);
-        }
         if self.eat("in") {
             let b = self.path(NodeKind::Path)?;
             n = self.node(s, NodeKind::Anchor, None, &[n, b]);
@@ -703,16 +675,6 @@ impl Parser<'_> {
             self.text_token(self.significant[self.pos - 2])
         } else {
             ""
-        }
-    }
-    fn brand(&mut self) -> Parsed<NodeId> {
-        let s = self.pos;
-        if self.eat(".") {
-            let n = self.name()?;
-            Ok(self.node(s, NodeKind::FreshBrand, Some(n), &[]))
-        } else {
-            let p = self.path(NodeKind::Path)?;
-            Ok(self.node(s, NodeKind::Brand, None, &[p]))
         }
     }
     fn path(&mut self, kind: NodeKind) -> Parsed<NodeId> {
@@ -795,20 +757,7 @@ impl Parser<'_> {
             self.end(false)?;
             return Ok(self.node(s, NodeKind::Assign, Some(op), &[e, v]));
         }
-        let implicit = matches!(
-            self.tree.node(e).kind,
-            NodeKind::If
-                | NodeKind::Match
-                | NodeKind::Block
-                | NodeKind::Loop
-                | NodeKind::While
-                | NodeKind::For
-                | NodeKind::ForTake
-                | NodeKind::Region
-                | NodeKind::Bound
-                | NodeKind::Labelled
-        );
-        let discard = self.end(implicit)?;
+        let discard = self.end(false)?;
         Ok(self.node(
             s,
             if discard {

@@ -1226,7 +1226,7 @@ def first_party(meta: dict) -> str:
         out.append("\n" + call("hirsel_script_test", name=name, script="tools/checker-scaling.py", full=False,
                                args=["--family", family, "--hirsel", f"buck-out/tmp/cargo-bin-exe/{name}/hirsel"],
                                bin_exes={"hirsel": "//:hirsel-cli-bin-hirsel"}, runtime_archives=archive_views("x86_64-default"),
-                               data=["tools/checker-scaling.py"]))
+                               products=PRODUCTS, data=Raw('glob(["tools/checker-scaling.py", "stdlib/**"])')))
     out.append("\n" + call("hirsel_test", name="hirsel-test-tool-profile", crate="test_tool_profile",
                             crate_root="tools/tests/test_tool_profile.rs", srcs=["tools/tests/test_tool_profile.rs"],
                             features=[], deps=[], manifest_dir=".", package_name="test-tool-profile",

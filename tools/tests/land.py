@@ -123,6 +123,7 @@ class Land(unittest.TestCase):
                                'tools/main-runs': (ROOT / 'tools/main-runs').read_text(),
                                'tools/buck2/run_failures.py': (ROOT / 'tools/buck2/run_failures.py').read_text(),
                                'tools/buck2/rust_environment.py': (ROOT / 'tools/buck2/rust_environment.py').read_text(),
+                               'tools/buck2/priorities.bzl': (ROOT / 'tools/buck2/priorities.bzl').read_text(),
                                '.gitignore': '.buck2/\n__pycache__/\n'})
         for name, text in files.items():
             (self.lane / name).parent.mkdir(parents=True, exist_ok=True)
@@ -1317,6 +1318,13 @@ if not marker.exists():
 
 
 class Units(unittest.TestCase):
+    def test_land_uses_the_platforms_land_priority(self):
+        module = runpy.run_path(str(ROOT / 'tools/land'))
+        priority = runpy.run_path(str(ROOT / 'tools/buck2/priorities.bzl'))['LAND_PRIORITY']
+        self.assertEqual(priority, 150)
+        self.assertEqual([value for value in module['CONFIG'] if value.startswith('hirsel.priority=')],
+                         [f'hirsel.priority={priority}'])
+
     def test_round_check_reports_each_complete_event_once_then_marks_it_seen(self):
         module = runpy.run_path(str(ROOT / 'tools/land_events.py'))
         append, report = module['append_event'], module['report_events']

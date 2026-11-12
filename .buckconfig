@@ -46,8 +46,9 @@ clean_stale_low_disk_adaptive_unmaterialize_active = false
 ignore = .git, buck-out, .buck2, target, tools/buck2/bin
 [buck2_re_client]
 # Remote actions one daemon keeps in flight: each lane's share of the pool.
-# The pool (144 CPUs on 2026-11-10, shared with lash and others at a higher
-# priority) ran 141-144 CPUs reserved with 28-33 actions queued while about
+# The pool (144 CPUs on 2026-11-10, shared with Lash and others whose ordinary
+# lanes queue at 100, above Hirsel lanes at 50; tools/land alone uses 150)
+# ran 141-144 CPUs reserved with 28-33 actions queued while about
 # five Hirsel lanes were active; single lanes peaked at 55-80 CPUs, and
 # actions of 4+ CPUs or 4+ GiB (links, std precompute) waited 356 s at p90,
 # up to 20 min. At 32 actions (about 2 CPUs each) five lanes fit the pool.

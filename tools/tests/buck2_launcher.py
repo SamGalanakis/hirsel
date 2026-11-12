@@ -81,12 +81,17 @@ class TestExecutor(unittest.TestCase):
 
 
 class CpuRequests(unittest.TestCase):
-    def platforms(self, mode):
+    def platforms(self, mode, priority=None):
         source_dir = ROOT / 'tools/buck2'
         paths = {name: Path(os.environ.get('HIRSEL_TEST_' + name.upper(), source_dir / (name + '.bzl')))
-                 for name in ('platforms', 'test_requirements', 'test_sizes', 'exec_sizes')}
+                 for name in ('platforms', 'test_requirements', 'test_sizes', 'exec_sizes', 'priorities')}
         config = {'tests': mode, 'remote_properties': 'kiln_executor_runtime=fixture-runtime'}
+        if priority is not None:
+            config['priority'] = str(priority)
+        def fail(message):
+            raise ValueError(message)
         namespace = dict(read_root_config=lambda section, key, default: config.get(key, default),
+                         fail=fail,
                          CommandExecutorConfig=lambda **kwargs: kwargs,
                          ConfigurationInfo=object(), rule=lambda **kwargs: None,
                          attrs=SimpleNamespace(**{name: lambda *args, **kwargs: None
@@ -100,6 +105,30 @@ class CpuRequests(unittest.TestCase):
         # production request functions; Buck2 cquery also validates Starlark.
         exec(paths['platforms'].read_text(), namespace)
         return namespace
+
+    def test_priority_bounds_and_land_exception_reach_the_executors(self):
+        for priority in (None, 0, 40, 50, 99, 150):
+            with self.subTest(priority=priority):
+                module = self.platforms('pool', priority)
+                expected = 50 if priority is None else priority
+                self.assertEqual(module['test_executor'](1, 2097152, '')['priority'], expected)
+                self.assertEqual(module['doctest_properties']()['priority'], expected)
+                platforms = []
+                module.update(ConfigurationInfo=lambda **kwargs: SimpleNamespace(**kwargs),
+                              ExecutionPlatformInfo=lambda **kwargs: kwargs,
+                              ExecutionPlatformRegistrationInfo=lambda **kwargs: platforms.extend(kwargs['platforms']),
+                              DefaultInfo=lambda: None)
+                class Budget:
+                    label = SimpleNamespace(raw_target=lambda: 'pool')
+                    def __getitem__(self, key):
+                        return SimpleNamespace(constraints={})
+                module['_platforms'](SimpleNamespace(attrs=SimpleNamespace(
+                    constraints=[], budgets={'pool_1_1048576|1|1048576|': Budget()},
+                    host=Budget())))
+                self.assertEqual(platforms[0]['executor_config']['priority'], expected)
+        for priority in (-1, 100, 149, 151):
+            with self.subTest(priority=priority), self.assertRaisesRegex(ValueError, '0 to 99.*150'):
+                self.platforms('pool', priority)
 
     def test_exact_requirements_override_measurement_and_focus(self):
         for mode in ('pool', 'focus'):

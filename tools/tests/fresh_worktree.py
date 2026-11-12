@@ -64,7 +64,7 @@ class FreshWorktree(unittest.TestCase):
         self.assertEqual(self.buck2('uquery', TARGET).returncode, 0)
         self.script('prepare.py')
         self.assertTrue(generated.current(self.tree))
-        built = self.buck2('build', '-c', 'hirsel.priority=75', '--materializations', 'none', TARGET)
+        built = self.buck2('build', '--materializations', 'none', TARGET)
         self.assertEqual(built.returncode, 0, built.stderr[-4000:])
         self.assertEqual(subprocess.run(['git', 'status', '--porcelain'], cwd=self.tree, capture_output=True,
                                         text=True, check=True).stdout, '')

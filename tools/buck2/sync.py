@@ -1399,7 +1399,8 @@ def first_party(meta: dict) -> str:
                             data=["tools/land", "tools/land-run", "tools/land_events.py", "tools/tests/land.py", "tools/check-hot-files", "tools/main-runs",
                                   "//tools/buck2:run_failures.py", "//tools/buck2:generated.py",
                                   "//tools/buck2:merging.py", "//tools/buck2:clippy.py", "//tools/buck2:fmt.py",
-                                  "//tools/buck2:event_logs.py", "//tools/buck2:rust_environment.py"],
+                                  "//tools/buck2:event_logs.py", "//tools/buck2:rust_environment.py",
+                                  "//tools/buck2:priorities.bzl"],
                             files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-conformance-bin-hirsel-conformance"}))
     out.append("\n" + call("hirsel_test", name="test-report-fixture", crate="test_report_fixture",
                             crate_root="tools/tests/fixtures/test_report.rs",
@@ -1415,7 +1416,7 @@ def first_party(meta: dict) -> str:
                                        "HIRSEL_TEST_NATIVE_ENVIRONMENT": "//tools/buck2/native-toolchain:environment.tsv",
                                        "HIRSEL_TEST_PRIVATE_NATIVE_INPUTS": "//tools/buck2:private_native_inputs.py",
                                        **{f"HIRSEL_TEST_{name.upper()}": f"//tools/buck2:{name}.bzl"
-                                          for name in ("platforms", "test_requirements", "test_sizes", "exec_sizes")}}))
+                                          for name in ("platforms", "test_requirements", "test_sizes", "exec_sizes", "priorities")}}))
     out.append("\n" + call("hirsel_script_test", name="test-free-b1", script="tools/tests/free_b1.py", full=False,
                             data=["tools/tests/free_b1.py", "bench/multicore/b1.py", "bench/micro/measure.py"]))
     out.append("\n" + call("hirsel_script_test", name="test-tasks-bench", script="tools/tests/tasks_bench.py", full=False,

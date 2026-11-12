@@ -611,14 +611,14 @@ link replay after the original profile has been removed.
   properties. Only the critical-path compiles named in `CPU_CLASSES`
   (`action_sizes_from_log.py`), the std precheck (`PRECHECK_REQUEST`, 1 CPU
   and 2 GiB) and the conformance shards ask for `cpu_class=fast`; other tests
-  and gate shards run on any worker. Every
-  remote action, compile or test run, gate, focus or full, queues at priority
-  50: below the pool's lane and CI class (100), above its warming class (0),
-  which gets no reserved worker. One priority, since the scheduler merges
-  identical actions at the first submitter's priority; `-c hirsel.priority=N`
-  overrides it per invocation: tools/land at 75, so the batch every lane
-  waits on does not queue behind lanes' test runs, and main's hourly full
-  suite (tools/main-runs) at 40, below the lanes. A test run carries its
+  and gate shards run on any worker. Hirsel lanes queue remote compiles and
+  tests at priority 50, below the pool's ordinary lane class (100), above
+  its warming class (0), which gets no reserved worker. The scheduler merges
+  identical actions at the first submitter's priority. `-c hirsel.priority=N`
+  accepts 0-99, or exactly the land value defined in `priorities.bzl`.
+  Only tools/land uses 150, so the serial batch every lane waits on queues
+  above ordinary lane work across projects. Main runs (tools/main-runs)
+  use 40, below the lanes. A test run carries its
   own executor (`test_executor` in `platforms.bzl`): Buck2 runs tests with it,
   not with their platform's. The priority is not part of an action key. The
   platforms also include the invoking host for an explicit
@@ -899,7 +899,9 @@ exceeded the former 256 MiB reservation repeatedly. There is no fixed
 512 MiB anonymous-memory surcharge. special_requests in the same evidence
 sizes precheck, Clippy and native observation from their own measured peaks.
 
-Priority and lane attribution do not enter the action digest. Dependency
+Priority and lane attribution do not enter the action digest. An action
+already queued at 50 keeps 50 when land joins it; new land digests queue at
+150, without preempting running work. Dependency
 symlink trees are assembled in the daemon by the pinned prelude overlay,
 without remote compile-sized helper actions. Clippy twins share ordinary
 dependencies. The fast main run builds the same bounded workspace build set

@@ -11,3 +11,5 @@ ok wire vectors: engine commits
 ok wire vectors: each malformed group refused, its twin read
 ok wire vectors: checkpoint nodes
 ok wire vectors: damaged checkpoint nodes refused
+ok wire vectors: bootstrap
+ok wire vectors: each malformed bootstrap refused

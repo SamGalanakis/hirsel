@@ -947,6 +947,8 @@ fn authority.at(a: Authority, l: Bytes, from: u64, at: Level of a, max: u64) -> 
 fn authority.get(a: Authority, r: ObjectRef) -> Result[Option[Bytes], SeamError]
 fn authority.put(a: Authority, mut c: Claim of a, r: ObjectRef, take data: Bytes) -> Result[(), SeamError]
 fn authority.reclaim(a: Authority, mut c: Claim of a, budget: u64) -> Result[Reclaimed, SeamError]
+fn authority.select(a: Authority, mut c: Claim of a, first: u64, take boot: Bytes) -> Result[(), SeamError]
+fn authority.base(a: Authority) -> Result[List[HistoryRecord], SeamError]
 ```
 
 `SeamError` is the seam's own failure, a core type; the engine reports each as the
@@ -1117,6 +1119,33 @@ nothing. Deleting an absent object is success, so a call repeated after a lost r
 a takeover removes nothing a newer reading keeps. Recovery never depends on a listing: it
 may use one only to fetch in parallel what it then reaches by name. An incomplete listing
 leaves garbage for a later reclaim and never loses state.
+
+**Bases.** A **base** is what a reader needs of the history before a position `first`
+to recover from `first` - 1 on: the engine's **bootstrap** `boot`, its own state at
+`first` - 1, which no provider reads; the envelope chain's tip after the record at
+`first` - 1 (its digest, epoch, identity and newest append's locator); and the objects
+the records below `first` leave live, created by one and retired by none.
+`authority.select(a, c, first, boot)` makes the base at `first` carrying `boot` the
+store's **selected** base, folding the records from the selected base's `first` (or
+position 1) to `first` - 1 at the strongest declared level. It is `Refused(..)` with no
+effect when `first` is below 2, when `first` - 1 is past the claim's strongest-durable
+end, or when `first` is below the selected base's; at the selected base's own `first` it
+is `Ok(())` with no effect, so a selection repeated after a lost response changes
+nothing. A claim that no longer holds the store is `Fenced()`, and a selection the
+provider cannot settle is `Storage(..)` and ends the claim. The selected base's `first`
+never goes down, and a failure of any kind never loses it. `authority.base(a)` answers
+`[]` when no base is selected, otherwise one `Appended(boot, live, [])`: the bootstrap
+and the live objects in reference order. The provider's part is
+
+```text
+base = "HSBASE01" first:u64 digest:[32] epoch:u64 identity:[32] appended:locator
+       count:u32 ref* len:u32 boot
+ref  = lifetime:u64 epoch:u64 digest:[32]
+```
+
+where an `appended` of position 0 is none; a base whose fields contradict each other
+(`first` below 2, epoch 0, refs out of order or of a lifetime at or past `first`) is
+corruption of it, and another `HSBASE` version is `Format(..)`.
 
 **Providers.** The run configuration grants authorities by name
 ([determinism](determinism.md#authority-grants)); each entry names its provider and
@@ -1450,11 +1479,13 @@ decimal digits, `-` and the record's digest in lowercase hexadecimal, put only i
 The one mutable object is the head:
 
 ```text
-head = "HSOBJH02" attempt:[16] end:u64 digest:[32] revision:u64
+head = "HSOBJH03" attempt:[16] end:u64 digest:[32] first:u64 base:[32] revision:u64
        scanned:u64 index:u32 sweeping:u64 swept:u64 len:u32 cursor sum:[32]
 ```
 
-naming the newest claim's attempt, the history's end and the last record's digest, then
+naming the newest claim's attempt, the history's end and the last record's digest, the
+selected base's `first` and digest (0 and zeros when none; a `first` of 1 is corrupt),
+then
 reclamation's continuation: the revision, one up on every replace, the position up to
 which every retirement is deleted, how many of the next record's are, the epoch whose
 listing walk the cursor is in, the epoch whose walk reached the listing's end (0 before
@@ -1472,7 +1503,22 @@ lowercase hexadecimal, separated by `-`; on a local log it is the file of that n
 ```text
 reclaim = "HSLOGR01" revision:u64 scanned:u64 index:u32 sweeping:u64 swept:u64 len:u32
           cursor sum:[32]
-``` A record object no head's chain reaches, left by a writer fenced or
+```
+
+The selected base is the object `b/` followed by its `first` as 20 decimal digits, `-`
+and its digest in lowercase hexadecimal, put before the head names it; a reclaim walk
+removes a `b/` object whose `first` is below the head's, or equal with another digest, so
+a walk that read an older head never removes a newer one. On a local log the selected base
+is the file
+
+```text
+base = "HSLOGB01" base sum:[32]
+```
+
+replaced like `reclaim`: under the log's lock, after checking that no other claim wrote,
+through a temporary file, `fdatasync`, rename and a directory sync.
+
+A record object no head's chain reaches, left by a writer fenced or
 undecided before its head replace, is not history and is reclaimed. A listing only finds
 candidates: every object is checked against the digest that names it.
 

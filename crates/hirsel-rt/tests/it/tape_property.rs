@@ -332,6 +332,14 @@ fn seam_requests(n: u64, text: &str, bytes: &[u8]) -> Vec<hirsel_rt::authority::
         provider(Some(!n), W::Durable { at: level }),
         provider(Some(!n), W::Reclaim { budget: n }),
         provider(
+            Some(!n),
+            W::Select {
+                first: n,
+                boot: bytes.to_vec(),
+            },
+        ),
+        provider(None, W::Base),
+        provider(
             None,
             W::Read {
                 from: n,

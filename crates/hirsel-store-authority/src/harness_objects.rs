@@ -19,7 +19,10 @@
 //!    damages it;
 //! 5. a claim that died (`Fenced`, `Undecided`) is `Fenced` when used again;
 //! 6. an entry answered `Fenced` (nothing was appended) is not in the
-//!    recovered history.
+//!    recovered history;
+//! 7. the recovered base keeps `harness_log`'s law 8: a selection made it, at
+//!    or above every acknowledged one, with the tip and live objects of the
+//!    records below it.
 //!
 //! Each planted defect must break a law.
 //!
@@ -109,6 +112,8 @@ type Ledger = Arc<Mutex<BTreeMap<u64, Record>>>;
 /// The records of entries answered `Fenced`.
 type Denied = Arc<Mutex<Vec<Record>>>;
 type Hook = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
+/// Every selection tried, and the highest `first` one acknowledged.
+type Selections = Arc<Mutex<(Vec<(u64, Vec<u8>)>, u64)>>;
 
 /// Where a schedule's history lives.
 #[derive(Clone, Copy, Debug)]
@@ -365,6 +370,7 @@ fn writer(
     bug: Option<Bug>,
     ledger: Ledger,
     denied: Denied,
+    selections: Selections,
 ) -> Result<(), String> {
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9) ^ (me as u64 + 1) | 1);
     let mut h = Objects::new(store, "zone".into(), Level(0));
@@ -372,7 +378,7 @@ fn writer(
     let mut held: Option<Claim> = None;
     let mut n = 0u64;
     for _ in 0..steps {
-        match rng.below(10) {
+        match rng.below(11) {
             0 | 1 => {
                 let attempt = (rng.next() as u128).to_le_bytes();
                 match h.claim(attempt, [rng.next() as u8; 32]) {
@@ -458,6 +464,26 @@ fn writer(
                     held = None;
                 }
             }
+            10 => {
+                let Some(c) = held.as_mut() else {
+                    continue;
+                };
+                n += 1;
+                let first = 2 + rng.below(c.end());
+                let boot = entry((me as u64) << 32 | n, 1);
+                selections.lock().unwrap().0.push((first, boot.clone()));
+                match h.select(c, first, boot) {
+                    Ok(()) => {
+                        let mut s = selections.lock().unwrap();
+                        s.1 = s.1.max(first);
+                    }
+                    Err(e @ (Error::Corrupt(_) | Error::Format { .. })) => {
+                        return Err(format!("select refused the history: {e:?}"));
+                    }
+                    Err(Error::Refused(_)) => {}
+                    Err(_) => held = None,
+                }
+            }
             _ => {
                 let all = read_all(&mut h)?;
                 let l = ledger.lock().unwrap();
@@ -494,20 +520,22 @@ fn schedule(
     *media.hook.lock().unwrap() = Some(Arc::new(move || b.pass()));
     let ledger: Ledger = Arc::default();
     let denied: Denied = Arc::default();
+    let selections: Selections = Arc::default();
     let results: Vec<Result<(), String>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..writers)
             .map(|me| {
-                let (store, baton, ledger, denied) = (
+                let (store, baton, ledger, denied, selections) = (
                     media.handle(),
                     baton.clone(),
                     ledger.clone(),
                     denied.clone(),
+                    selections.clone(),
                 );
                 s.spawn(move || {
                     ME.set(me);
                     baton.wait(me);
                     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        writer(me, seed, steps, store, bug, ledger, denied)
+                        writer(me, seed, steps, store, bug, ledger, denied, selections)
                     }))
                     .unwrap_or_else(|_| Err(format!("writer {me} panicked")));
                     baton.exit(me);
@@ -543,7 +571,17 @@ fn schedule(
             ));
         }
     }
-    Ok(())
+    let (tried, selected) = &*selections.lock().unwrap();
+    // A refused read of the base decides nothing; retry it as reads are.
+    let mut got = fresh.base();
+    for _ in 0..1000 {
+        if !matches!(got, Err(Error::Refused(_))) {
+            break;
+        }
+        got = fresh.base();
+    }
+    crate::harness_log::check_base(&mut fresh, &all, got, tried, *selected)
+        .map_err(|e| format!("recovery: {e}"))
 }
 
 fn sweep(medium: Medium, bug: Option<Bug>, seeds: u64) -> Option<String> {
@@ -561,7 +599,7 @@ fn object_storage_law_holds() {
 
 #[test]
 fn every_planted_defect_breaks_the_object_storage_law() {
-    for bug in [Bug::NoCas, Bug::AnyEpoch, Bug::TrustListing] {
+    for bug in [Bug::NoCas, Bug::AnyEpoch, Bug::TrustListing, Bug::DropBase] {
         assert!(
             sweep(Medium::Sim, Some(bug), 400).is_some(),
             "{bug:?} went unnoticed"

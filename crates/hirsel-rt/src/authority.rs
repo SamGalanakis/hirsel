@@ -1187,6 +1187,49 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_reclaim(
     unsafe { provider(ctx, out, a.read(), Some(c.read()), request) }
 }
 
+/// `authority.select(a, mut c, first, take boot) -> Result[(), SeamError]`.
+/// # Safety
+/// Context bound; Authority and Claim borrowed; the bootstrap transfers one owner
+/// credit; out writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_rt_v2_authority_select(
+    ctx: *mut crate::TaskCtx,
+    _destination: *mut u8,
+    out: *mut SeamResult,
+    a: *const u64,
+    c: *mut u64,
+    first: u64,
+    owner: *mut crate::Header,
+    start: u64,
+    len: u64,
+) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
+    let boot = unsafe { crate::io::slice_bytes(owner, start, len) }.to_vec();
+    unsafe {
+        crate::release::hirsel_rt_v2_release(ctx, owner, (*owner).index(), std::ptr::null(), 0, 0)
+    };
+    let request = wire::Request::Select { first, boot };
+    unsafe { provider(ctx, out, a.read(), Some(c.read()), request) }
+}
+
+/// `authority.base(a) -> Result[List[HistoryRecord], SeamError]`.
+/// # Safety
+/// Context bound; Authority borrowed; out writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_rt_v2_authority_base(
+    ctx: *mut crate::TaskCtx,
+    _destination: *mut u8,
+    out: *mut SeamResult,
+    a: *const u64,
+) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
+    unsafe { provider(ctx, out, a.read(), None, wire::Request::Base) }
+}
+
 /// The tape form of a seam request and completion: one byte string each.
 impl SeamRequest {
     pub(crate) fn to_bytes(&self) -> Vec<u8> {

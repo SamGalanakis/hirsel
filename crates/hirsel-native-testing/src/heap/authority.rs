@@ -460,6 +460,14 @@ impl Io {
                                 budget: bits(budget)?,
                             },
                         ),
+                        ("select", [c, first, OpValue::Bytes(boot)]) => (
+                            Some(handle(c)?),
+                            wire::Request::Select {
+                                first: bits(first)?,
+                                boot: boot.clone(),
+                            },
+                        ),
+                        ("base", []) => (None, wire::Request::Base),
                         _ => return None,
                     };
                     let minted = self.next;

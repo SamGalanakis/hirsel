@@ -16,7 +16,8 @@
 //!
 //! A log representation also cuts its history at a chosen request, for tests
 //! that must reach every seam call in turn. Its requests (claim, wait,
-//! durable, read, get, put and reclaim, on every handle of one history) are
+//! durable, read, get, put, reclaim, select and base, on every handle of one
+//! history) are
 //! numbered from 1, and each of the faults [`CUTS`] names the request it
 //! fires at: `fail_at` refuses it before any effect; `lose_response_at` lets
 //! it take its whole effect and then answers that the history cannot be read,
@@ -25,8 +26,9 @@
 //! `crash_at` is a power failure right after its answer. A power failure
 //! loses everything not durable at the strongest level and ends every claim.
 //! A reclaim call is one request whatever its budget, its continuation kept
-//! in the world, which a failure never loses.
+//! in the world, which a failure never loses; so is a selection, and its base.
 
+use crate::base::{self, Base};
 use crate::envelope::{self, Chain};
 use crate::reclaim::{self, Found, Page, Space, Sweep};
 use crate::{
@@ -142,6 +144,8 @@ struct World {
     objects: BTreeMap<String, Vec<u8>>,
     /// Reclamation's continuation and its revision, which a failure keeps.
     sweep: (u64, Sweep),
+    /// The selected base, which a failure keeps.
+    base: Option<Base>,
     draws: Draws,
     faults: BTreeMap<String, u64>,
     /// Requests served so far, which number the cuts.
@@ -244,6 +248,7 @@ impl Sim {
             newest: None,
             objects: BTreeMap::new(),
             sweep: (0, Sweep::default()),
+            base: None,
             draws: Draws(config.seed),
             faults: config.faults,
             requests: 0,
@@ -514,6 +519,32 @@ impl Sim {
     }
 }
 
+impl Sim {
+    /// One selection, served whole inside the one request it counts as.
+    fn select_in(
+        &self,
+        w: &mut World,
+        c: &mut Claim,
+        first: u64,
+        boot: Vec<u8>,
+    ) -> Result<(), Error> {
+        let top = Level(self.levels.len() as u8 - 1);
+        let s = self.durable_in(w, c, top)?;
+        let prior = w.base.clone();
+        if !base::admit(prior.as_ref(), first, s)? {
+            return Ok(());
+        }
+        let owner = self.owner;
+        let b = base::build(&mut InWorld { w, owner }, prior, first, boot)?;
+        if !live(self.owner, c) || w.newest != Some(c.attempt) {
+            c.dead = true;
+            return Err(Error::Fenced);
+        }
+        w.base = Some(b);
+        Ok(())
+    }
+}
+
 /// The simulated log's objects and history as reclamation sees them.
 struct InWorld<'a> {
     w: &'a mut World,
@@ -564,6 +595,13 @@ impl Space for InWorld<'_> {
                     .map_err(|b| crate::bad(b, i as u64 + 1))
             })
             .collect()
+    }
+
+    fn locator(&mut self, position: u64) -> Result<Locator, Error> {
+        self.w
+            .follow((position as usize).min(self.w.entries.len()))?
+            .locator(position)
+            .ok_or_else(crate::invalid)
     }
 
     fn publish(&mut self, c: &mut Claim, sweep: &Sweep) -> Result<(), Error> {
@@ -741,6 +779,34 @@ impl Authority for Sim {
             w.power_fail();
         }
         r
+    }
+
+    fn select(&mut self, c: &mut Claim, first: u64, boot: Vec<u8>) -> Result<(), Error> {
+        let mut w = self.world.lock().unwrap();
+        let cut = w.cut();
+        let r = if cut.fail {
+            Err(Error::Refused(unreadable()))
+        } else if cut.tear {
+            w.power_fail();
+            c.dead = true;
+            Err(Error::Storage(unreadable()))
+        } else {
+            match self.select_in(&mut w, c, first, boot) {
+                Ok(_) if cut.lose => {
+                    c.dead = true;
+                    Err(Error::Storage(unreadable()))
+                }
+                r => r,
+            }
+        };
+        if cut.crash {
+            w.power_fail();
+        }
+        r
+    }
+
+    fn base(&mut self) -> Result<Option<Base>, Error> {
+        self.reading(|_, w| Ok(w.base.clone()))
     }
 }
 
@@ -974,5 +1040,11 @@ impl Authority for Client {
     }
     fn reclaim(&mut self, c: &mut Claim, budget: u64) -> Result<Reclaimed, Error> {
         self.serving().reclaim(c, budget)
+    }
+    fn select(&mut self, c: &mut Claim, first: u64, boot: Vec<u8>) -> Result<(), Error> {
+        self.serving().select(c, first, boot)
+    }
+    fn base(&mut self) -> Result<Option<Base>, Error> {
+        self.serving().base()
     }
 }

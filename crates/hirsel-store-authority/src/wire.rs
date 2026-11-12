@@ -54,6 +54,11 @@ pub enum Request {
         r: ObjectRef,
         data: Vec<u8>,
     },
+    Select {
+        first: u64,
+        boot: Vec<u8>,
+    },
+    Base,
 }
 
 impl Request {
@@ -71,6 +76,8 @@ impl Request {
             Request::At { .. } => "authority.at",
             Request::Get { .. } => "authority.get",
             Request::Put { .. } => "authority.put",
+            Request::Select { .. } => "authority.select",
+            Request::Base => "authority.base",
         }
     }
 
@@ -84,6 +91,7 @@ impl Request {
                 | Request::Reclaim { .. }
                 | Request::Locate { .. }
                 | Request::Put { .. }
+                | Request::Select { .. }
         )
     }
 
@@ -120,7 +128,17 @@ impl Request {
             }
             (Request::Get { .. }, Outcome::Get(_)) => true,
             (Request::Reclaim { .. }, Outcome::Reclaimed(_)) => true,
-            (Request::Put { .. }, Outcome::Unit(_)) => true,
+            (Request::Put { .. } | Request::Select { .. }, Outcome::Unit(_)) => true,
+            // A base is one record creating what is live below it, retiring nothing.
+            (Request::Base, Outcome::Read(r)) => r.as_ref().map_or(true, |all| match &all[..] {
+                [] => true,
+                [
+                    Record::Appended {
+                        created, retired, ..
+                    },
+                ] => retired.is_empty() && created.windows(2).all(|w| w[0] < w[1]),
+                _ => false,
+            }),
             _ => false,
         }
     }
@@ -177,6 +195,12 @@ impl Request {
                 object_ref(&mut w, r);
                 bytes(&mut w, data);
             }
+            Request::Select { first, boot } => {
+                w.push(17);
+                u64(&mut w, *first);
+                bytes(&mut w, boot);
+            }
+            Request::Base => w.push(18),
         }
         w
     }
@@ -215,6 +239,11 @@ impl Request {
                 r: r.object_ref()?,
                 data: r.bytes()?.to_vec(),
             },
+            17 => Request::Select {
+                first: r.u64()?,
+                boot: r.bytes()?.to_vec(),
+            },
+            18 => Request::Base,
             _ => return None,
         };
         r.0.is_empty().then_some(q)
@@ -268,6 +297,16 @@ pub fn serve(
         Request::At { l, from, at, max } => Outcome::Read(p.at(&l, from, Level(at), max)),
         Request::Get { r } => Outcome::Get(p.get(r)),
         Request::Put { r, data } => Outcome::Unit(p.put(claim()?, r, data)),
+        Request::Select { first, boot } => Outcome::Unit(p.select(claim()?, first, boot)),
+        Request::Base => Outcome::Read(p.base().map(|b| {
+            b.into_iter()
+                .map(|b| Record::Appended {
+                    payload: b.boot,
+                    created: b.live,
+                    retired: Vec::new(),
+                })
+                .collect()
+        })),
     };
     Ok((o, held))
 }
@@ -281,9 +320,11 @@ pub enum Outcome {
     /// `last`: the newest append's locator, none before the first; `locate`: always some.
     Located(Result<Option<Locator>, Error>),
     Advanced(Advanced),
+    /// `read` and `at`; `base`: none, or one record of the bootstrap creating
+    /// what is live below the base.
     Read(Result<Vec<Record>, Error>),
     Get(Result<Option<Vec<u8>>, Error>),
-    /// `put`.
+    /// `put` and `select`.
     Unit(Result<(), Error>),
     Reclaimed(Result<Reclaimed, Error>),
 }

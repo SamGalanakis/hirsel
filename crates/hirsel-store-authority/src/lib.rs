@@ -17,6 +17,7 @@
 #[cfg(test)]
 hirsel_guard::install!();
 
+pub mod base;
 pub mod envelope;
 #[cfg(test)]
 mod harness;
@@ -35,6 +36,7 @@ mod reclaim;
 pub mod sim;
 pub mod wire;
 
+pub use base::Base;
 pub use envelope::Record;
 pub use hirsel_object_storage::Worlds;
 pub use hirsel_run_schema::AuthorityGrant;
@@ -196,6 +198,9 @@ pub struct Claim {
     pub(crate) revision: u64,
     /// What the records up to the claim's last walk leave live.
     pub(crate) live: reclaim::Live,
+    /// `authority.objects@1`: the selected base's `first` and digest as the
+    /// claim loaded or last selected it, `(0, [0; 32])` for none.
+    pub(crate) base: (u64, [u8; 32]),
 }
 
 /// An entry [`Authority::submit`] queued: its record, built on the record
@@ -262,6 +267,7 @@ impl Claim {
             sweep: Sweep::default(),
             revision: 0,
             live: reclaim::Live::default(),
+            base: (0, [0; 32]),
         }
     }
 }
@@ -417,6 +423,16 @@ pub trait Authority: Send {
     /// stopped. `More` when the budget ran out first; a budget below 2 is
     /// refused.
     fn reclaim(&mut self, c: &mut Claim, budget: u64) -> Result<Reclaimed, Error>;
+    /// Make the base at `first` carrying `boot` the store's selected base
+    /// (see [`base`]), if `c` still holds the store, building it from the
+    /// strongest-durable records. Refused with no effect when `first` is
+    /// below 2, past the claim's strongest-durable end plus one, or below the
+    /// selected base's; the selected base's own `first` is success with no
+    /// effect. A selection whose outcome is unknown is a storage error and
+    /// the claim is dead.
+    fn select(&mut self, c: &mut Claim, first: u64, boot: Vec<u8>) -> Result<(), Error>;
+    /// The store's selected base, `None` when none is.
+    fn base(&mut self) -> Result<Option<Base>, Error>;
     /// The strongest declared level.
     fn top(&self) -> Level {
         Level(self.levels().len() as u8 - 1)

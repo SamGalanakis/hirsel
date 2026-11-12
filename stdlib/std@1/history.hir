@@ -159,6 +159,43 @@ pub type Tip {
   created: bool,
 }
 
+/// What a store keeps of its history below a base's `first` (STORE-11
+/// **Bases**), the store's bootstrap: the history after the record at
+/// `first` - 1 as a reader that followed it knows it. `last` is that record's
+/// version, `identity` the store's, `group` the digest of that record's group
+/// (the record at `first` - 1 is always a group), `creation` the Genesis's
+/// tuple, and `retain` and `deltas` the newest retention record before
+/// `first` and the ReaderDelta commits since the newest Retain. `retained` is
+/// the retention state then, none before the first Retain.
+pub type Boot {
+  first: u64,
+  last: u64,
+  identity: Bytes,
+  group: Bytes,
+  creation: Creation,
+  retain: Bytes,
+  deltas: u64,
+  retained: Option[Retained],
+}
+
+/// The retention state a bootstrap carries: the floor, the named pins, every
+/// reader pin holder by token, each with the version it holds and the locator
+/// its commit names, and the checkpoints the newest Retain keeps.
+pub type Retained {
+  floor: u64,
+  pins: List[Pin],
+  holders: List[Holding],
+  roots: List[Root],
+}
+
+/// One reader pin holder as a bootstrap records it.
+pub type Holding {
+  token: Bytes,
+  principal: Bytes,
+  version: u64,
+  at: Bytes,
+}
+
 /// One checkpoint node: a leaf of entries, or an index of children with
 /// each child's first key, object and leaf entry count.
 pub type Node = Leaf(List[(Bytes, Bytes)]) | Index(level: u8, children: List[Child])
@@ -189,6 +226,8 @@ pub type Fault = Corrupt() | Unsupported(found: Bytes)
 const GROUP_MAGIC: Bytes = b"HSGRUP04"
 
 const NODE_MAGIC: Bytes = b"HSNODE02"
+
+const BOOT_MAGIC: Bytes = b"HSBOOT01"
 
 /// The bytes of a group before its first commit: magic, count and the
 /// newest earlier retention record's locator.
@@ -227,6 +266,7 @@ pub fn default_bounds() -> Bounds uses {} {
 /// The SHA-256 of `data`, as 32 bytes.
 pub fn digest(data: Bytes) -> unique Bytes uses {} {
   bytes.from_inline(sha256.digest(data))
+
 }
 
 /// Thirty-two zero bytes: a descriptor's digest and root when it names none.
@@ -266,7 +306,6 @@ pub fn origin_tip() -> Tip uses {} {
 }
 
 // ---------------------------------------------------------------- encoding
-
 fn put_u8(mut out: List[u8], value: u8) -> () uses {} {
   list.push(mut out, value)
 }
@@ -533,6 +572,7 @@ fn encode_engine(mut out: List[u8], e: Engine) -> u8 uses {} {
     ReaderDelta(Free(token: token)) => {
       put_u8(mut out, 2)
       put_fixed(mut out, token)
+
       9
     },
   }
@@ -572,7 +612,6 @@ pub fn ref_key(r: ObjectRef) -> Bytes uses {} {
 }
 
 // ---------------------------------------------------------------- decoding
-
 // A cursor over a record's bytes. Every read checks the bounds first.
 type Cursor {
   at: u64,
@@ -1027,8 +1066,183 @@ pub fn follow(tip: Tip, g: Group) -> Result[Tip, ()] uses {} {
   )
 }
 
-// ---------------------------------------------------------------- checkpoints
+// ---------------------------------------------------------------- bootstrap
+/// A bootstrap's bytes:
+///
+/// ```text
+/// boot = "HSBOOT01" first:u64 last:u64 identity:[32] group:[32] creation
+///        retain:locator deltas:u64 retained:u8 [floor:u64
+///        pins:u32 (name version:u64)* holders:u32 holding* roots:u32 root*]
+/// holding = token:[16] principal version:u64 at:locator
+/// root    = descriptor after:locator
+/// ```
+pub fn encode_boot(b: Boot) -> Bytes uses {} {
+  let mut out: List[u8] = []
+  put_fixed(mut out, BOOT_MAGIC)
+  put_u64(mut out, b.first)
+  put_u64(mut out, b.last)
+  put_fixed(mut out, b.identity)
+  put_fixed(mut out, b.group)
+  put_creation(mut out, b.creation)
+  put_fixed(mut out, b.retain)
+  put_u64(mut out, b.deltas)
+  match b.retained {
+    None() => put_u8(mut out, 0),
+    Some(r) => {
+      put_u8(mut out, 1)
+      put_u64(mut out, r.floor)
+      put_len(mut out, list.len(r.pins))
+      for p in r.pins {
+        put_bytes(mut out, p.name)
+        put_u64(mut out, p.version)
+      }
+      put_len(mut out, list.len(r.holders))
+      for h in r.holders {
+        put_fixed(mut out, h.token)
+        put_bytes(mut out, h.principal)
+        put_u64(mut out, h.version)
+        put_fixed(mut out, h.at)
+      }
+      put_len(mut out, list.len(r.roots))
+      for k in r.roots {
+        put_descriptor(mut out, Some(copy k.desc))
+        put_fixed(mut out, k.after)
+      }
+    },
+  }
+  bytes.from_list(take out)
+}
 
+/// Decodes a bootstrap, checking every field: `first` at least 2 and `last`
+/// at least 1; every version it names at most `last`; every locator it names
+/// below `first`, and none only where nothing is retained; pins by name and
+/// holders by token, strictly ascending, within the Retain bounds.
+pub fn decode_boot(data: Bytes) -> Result[Boot, Fault] uses {} {
+  format(data, BOOT_MAGIC)?
+  corrupt(boot_fields(data))
+}
+
+// A locator of a record below `first`.
+fn get_below(data: Bytes, mut c: Cursor, first: u64) -> Result[Bytes, ()] uses {} {
+  let l = get_fixed(data, mut c, LOCATOR_BYTES)?
+  let p = locator_position(l)
+  if p == 0 || p >= first {
+    return Error(())
+  }
+  Ok(take l)
+}
+
+fn boot_fields(data: Bytes) -> Result[Boot, ()] uses {} {
+  let mut c = Cursor(at: 0, end: bytes.len(data))
+  magic(data, mut c, BOOT_MAGIC)?
+  let first = get_u64(data, mut c)?
+  let last = get_u64(data, mut c)?
+  let identity = get_fixed(data, mut c, 32)?
+  let group = get_fixed(data, mut c, 32)?
+  let creation = get_creation(data, mut c)?
+  if first < 2 || last == 0 {
+    return Error(())
+  }
+  let retain = get_fixed(data, mut c, LOCATOR_BYTES)?
+  let deltas = get_u64(data, mut c)?
+  let has = get_u8(data, mut c)?
+  let retained: Option[Retained] = if has == 0 {
+    if retain != no_locator() || deltas != 0 {
+      return Error(())
+    }
+    None()
+  } else if has == 1 {
+    let p = locator_position(retain)
+    if p == 0 || p >= first {
+      return Error(())
+    }
+    let floor = get_u64(data, mut c)?
+    let n: u64 = int.widen(get_u32(data, mut c)?)
+    if n > MAX_PINS {
+      return Error(())
+    }
+    let mut pins: List[Pin] = []
+    let mut prior_name: Option[Bytes] = None()
+    for _ in 0u64..n {
+      let name = get_bytes(data, mut c)?
+      let version = get_u64(data, mut c)?
+      if bytes.len(name) > MAX_PIN_NAME || version == 0 || version > last {
+        return Error(())
+      }
+      if let Some(prior) = prior_name {
+        if !(prior < name) {
+          return Error(())
+        }
+      }
+      prior_name = Some(copy name)
+      list.push(mut pins, Pin(name: take name, version: version))
+    }
+    let h: u64 = int.widen(get_u32(data, mut c)?)
+    if h > MAX_HOLDERS {
+      return Error(())
+    }
+    let mut holders: List[Holding] = []
+    let mut prior_token: Option[Bytes] = None()
+    for _ in 0u64..h {
+      let token = get_fixed(data, mut c, TOKEN_BYTES)?
+      let principal = get_bytes(data, mut c)?
+      let version = get_u64(data, mut c)?
+      let at = get_below(data, mut c, first)?
+      if bytes.len(principal) > MAX_PRINCIPAL || version == 0 || version > last {
+        return Error(())
+      }
+      if let Some(t) = prior_token {
+        if !(t < token) {
+          return Error(())
+        }
+      }
+      prior_token = Some(copy token)
+      list.push(
+        mut holders,
+        Holding(
+          token: take token,
+          principal: take principal,
+          version: version,
+          at: take at
+        )
+      )
+    }
+    let m: u64 = int.widen(get_u32(data, mut c)?)
+    let mut roots: List[Root] = []
+    for _ in 0u64..m {
+      let Some(d) = get_descriptor(data, mut c)? else {
+        return Error(())
+      }
+      let after = get_below(data, mut c, first)?
+      if d.version > last {
+        return Error(())
+      }
+      list.push(mut roots, Root(desc: take d, after: take after))
+    }
+    Some(
+      Retained(floor: floor, pins: take pins, holders: take holders, roots: take roots)
+    )
+  } else {
+    return Error(())
+  }
+  if c.at != c.end {
+    return Error(())
+  }
+  Ok(
+    Boot(
+      first: first,
+      last: last,
+      identity: take identity,
+      group: take group,
+      creation: creation,
+      retain: take retain,
+      deltas: deltas,
+      retained: take retained
+    )
+  )
+}
+
+// ---------------------------------------------------------------- checkpoints
 /// Whether node bounds can hold every entry the limits admit, and let index
 /// levels shrink: `node_min <= node_mean <= node_max`, a positive mean, the
 /// largest leaf entry fits a node, and two of the largest index entries do.

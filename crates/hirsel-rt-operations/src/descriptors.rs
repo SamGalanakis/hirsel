@@ -876,6 +876,8 @@ pub const ENTRIES: &[Entry] = &[
     ops("hirsel_rt_v2_authority_get", HOST),
     ops("hirsel_rt_v2_authority_put", HOST),
     ops("hirsel_rt_v2_authority_reclaim", HOST),
+    ops("hirsel_rt_v2_authority_select", HOST),
+    ops("hirsel_rt_v2_authority_base", HOST),
     // launch.rs
     entry("hirsel_rt_v2_launch_zero", Admission),
     entry("hirsel_rt_v2_launch", Admission),

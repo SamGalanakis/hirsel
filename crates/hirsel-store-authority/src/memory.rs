@@ -1,6 +1,7 @@
 //! `authority.memory@1`: the history in host memory. Its one level, `memory`,
 //! survives no failure. Handles made by [`Memory::share`] see one history.
 
+use crate::base::{self, Base};
 use crate::envelope::{self, Chain};
 use crate::reclaim::{self, Found, Page, Space, Sweep};
 use crate::{
@@ -22,6 +23,7 @@ struct World {
     objects: BTreeMap<String, Vec<u8>>,
     /// Reclamation's continuation and its revision.
     sweep: (u64, Sweep),
+    base: Option<Base>,
 }
 
 pub struct Memory {
@@ -152,6 +154,26 @@ impl Authority for Memory {
         let s = self.durable(c, Level(0))?;
         reclaim::run(self, c, s, budget)
     }
+
+    fn select(&mut self, c: &mut Claim, first: u64, boot: Vec<u8>) -> Result<(), Error> {
+        let s = self.durable(c, Level(0))?;
+        let prior = self.base()?;
+        if !base::admit(prior.as_ref(), first, s)? {
+            return Ok(());
+        }
+        let b = base::build(self, prior, first, boot)?;
+        let mut w = self.world.lock().unwrap();
+        if !live(self.owner, c) || w.newest != Some(c.attempt) {
+            c.dead = true;
+            return Err(Error::Fenced);
+        }
+        w.base = Some(b);
+        Ok(())
+    }
+
+    fn base(&mut self) -> Result<Option<Base>, Error> {
+        Ok(self.world.lock().unwrap().base.clone())
+    }
 }
 
 /// Object names one listing page holds.
@@ -187,6 +209,10 @@ impl Space for Memory {
 
     fn records(&mut self, from: u64, max: u64) -> Result<Vec<Record>, Error> {
         self.read(from, Level(0), max)
+    }
+
+    fn locator(&mut self, position: u64) -> Result<Locator, Error> {
+        self.followed_locator(position)
     }
 
     fn publish(&mut self, c: &mut Claim, sweep: &Sweep) -> Result<(), Error> {

@@ -7,16 +7,19 @@
 //! before it, and one mutable object, `head`:
 //!
 //! ```text
-//! head = "HSOBJH02" attempt:[16] end:u64 digest:[32] revision:u64
-//!        scanned:u64 index:u32 len:u32 cursor sum:[32]
+//! head = "HSOBJH03" attempt:[16] end:u64 digest:[32] first:u64 base:[32]
+//!        revision:u64 scanned:u64 index:u32 len:u32 cursor sum:[32]
 //! ```
 //!
 //! naming the newest claim's attempt, the history's end and the last entry's
-//! digest, then reclamation's continuation; `sum` is the SHA-256 of everything
-//! before it. The head changes only by a conditional replace on the entity tag
-//! the writer's own previous replace returned, and every replace, a claim's,
-//! an append's or a reclamation's, writes the revision one up, so no two heads
-//! have equal bytes and no tag recurs.
+//! digest, the selected base (`first` 0 for none) as the `first` and the
+//! SHA-256 of its object `b/<first as 20 digits>-<digest>`, then
+//! reclamation's continuation; `sum` is the SHA-256 of everything before it.
+//! The head changes only by a conditional replace on the entity tag the
+//! writer's own previous replace returned, and every replace, a claim's, an
+//! append's, a reclamation's or a selection's, carries the base forward and
+//! writes the revision one up, so no two heads have equal bytes and no tag
+//! recurs.
 //!
 //! An append of `k` entries is `k + 1` requests: create each record object if
 //! absent, then replace the head once, naming the newest. That record's digest
@@ -37,8 +40,11 @@
 //! removes a group object at a position the head has reached that the chain
 //! does not name: left by a writer fenced or undecided before its head replace.
 //! It never removes one past the head's end, which may be the current writer's
-//! append between its puts and its replace.
+//! append between its puts and its replace. It removes a base object of a
+//! `first` below the selected base's, or equal to it with another digest; one
+//! above it may be a later claim's selection between its put and its replace.
 
+use crate::base::{self, Base};
 use crate::envelope::{self, Chain};
 use crate::reclaim::{self, Found, Page, Space, Sweep};
 use crate::{
@@ -51,11 +57,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 const HEAD: &str = "head";
-const MAGIC: &[u8; 8] = b"HSOBJH02";
+const MAGIC: &[u8; 8] = b"HSOBJH03";
 /// The magic's family: other version digits are another format version.
 const FAMILY: &[u8; 6] = b"HSOBJH";
 /// The head's bytes before its continuation's cursor.
-const HEAD_FIXED: usize = 8 + 16 + 8 + 32 + 8 + 8 + 4 + 4;
+const HEAD_FIXED: usize = 8 + 16 + 8 + 32 + 8 + 32 + 8 + 8 + 4 + 4;
 /// Attempts of a claim whose head replace lost to the current writer's append.
 const CLAIM_TRIES: usize = 8;
 /// Reads of the head one request makes while each answers a state older than
@@ -77,6 +83,8 @@ pub(crate) enum Bug {
     /// Recovery takes a listing as complete: a group it does not show is
     /// missing.
     TrustListing,
+    /// A continuation's head replace drops the selected base.
+    DropBase,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -84,6 +92,8 @@ struct Head {
     attempt: [u8; 16],
     end: u64,
     digest: [u8; 32],
+    /// The selected base's `first` and digest; `first` 0 for none.
+    base: (u64, [u8; 32]),
     revision: u64,
     sweep: Sweep,
 }
@@ -96,6 +106,7 @@ impl Head {
             attempt: c.attempt,
             end,
             digest,
+            base: c.base,
             revision: c.revision + 1,
             sweep: sweep.clone(),
         }
@@ -107,6 +118,8 @@ impl Head {
         out.extend_from_slice(&self.attempt);
         out.extend_from_slice(&self.end.to_le_bytes());
         out.extend_from_slice(&self.digest);
+        out.extend_from_slice(&self.base.0.to_le_bytes());
+        out.extend_from_slice(&self.base.1);
         reclaim::encode(self.revision, &self.sweep, &mut out);
         let sum = Sha256::digest(&out);
         out.extend_from_slice(&sum);
@@ -128,13 +141,19 @@ impl Head {
         if Sha256::digest(body)[..] != *sum {
             return Err(corrupt());
         }
-        let Some((revision, sweep, [])) = reclaim::decode(&body[64..]) else {
+        let Some((revision, sweep, [])) = reclaim::decode(&body[104..]) else {
             return Err(corrupt());
         };
+        let first = u64::from_le_bytes(b[64..72].try_into().unwrap());
+        let base: [u8; 32] = b[72..104].try_into().unwrap();
+        if first == 1 || (first == 0 && base != [0; 32]) {
+            return Err(corrupt());
+        }
         Ok(Head {
             attempt: b[8..24].try_into().unwrap(),
             end: u64::from_le_bytes(b[24..32].try_into().unwrap()),
             digest: b[32..64].try_into().unwrap(),
+            base: (first, base),
             revision,
             sweep,
         })
@@ -165,6 +184,16 @@ pub fn parse_group_key(key: &str) -> Option<(u64, [u8; 32])> {
     (hex(&out) == digest).then_some((position, out))
 }
 
+/// The base object of `first` with `digest`.
+pub fn base_key(first: u64, digest: &[u8; 32]) -> String {
+    format!("b/{first:020}-{}", hex(digest))
+}
+
+/// The `first` and digest a base object's key names.
+fn parse_base_key(key: &str) -> Option<(u64, [u8; 32])> {
+    parse_group_key(&format!("h/{}", key.strip_prefix("b/")?))
+}
+
 /// The portable condition of an object-storage failure.
 fn failure(e: StorageError) -> AuthorityError {
     match e {
@@ -190,6 +219,8 @@ pub struct Objects {
     anchor: Option<Anchor>,
     /// The newest record `last` got, so an `at` of it gets it once.
     newest: Option<(Locator, Vec<u8>)>,
+    /// The selected base as the head a reclamation read named it.
+    selected: (u64, [u8; 32]),
     #[cfg(test)]
     pub(crate) bug: Option<Bug>,
 }
@@ -207,6 +238,7 @@ impl Objects {
             seen: 0,
             anchor: None,
             newest: None,
+            selected: (0, [0; 32]),
             #[cfg(test)]
             bug: None,
         }
@@ -491,9 +523,11 @@ impl Authority for Objects {
             let (end, digest) = read
                 .as_ref()
                 .map_or((0, [0; 32]), |(h, _)| (h.end, h.digest));
-            let (revision, sweep) = read.as_ref().map_or((0, Sweep::default()), |(h, _)| {
-                (h.revision, h.sweep.clone())
-            });
+            let (revision, sweep, selected) = read
+                .as_ref()
+                .map_or((0, Sweep::default(), (0, [0; 32])), |(h, _)| {
+                    (h.revision, h.sweep.clone(), h.base)
+                });
             let holder = read.as_ref().map(|(h, _)| h.attempt);
             let condition = match &read {
                 Some((_, tag)) => Condition::Matches(tag.clone()),
@@ -510,6 +544,7 @@ impl Authority for Objects {
                 attempt,
                 end: position,
                 digest: d,
+                base: selected,
                 revision: revision + 1,
                 sweep: sweep.clone(),
             };
@@ -531,6 +566,7 @@ impl Authority for Objects {
             claim.revision = revision + 1;
             self.wrote(&claim);
             claim.sweep = sweep;
+            claim.base = selected;
             return Ok(Claimed {
                 claim,
                 end: position,
@@ -707,72 +743,83 @@ impl Authority for Objects {
             }
         };
         self.catch_up(h.end, h.digest)?;
+        self.selected = h.base;
         reclaim::run(self, c, c.durable[0], budget)
+    }
+
+    fn select(&mut self, c: &mut Claim, first: u64, boot: Vec<u8>) -> Result<(), Error> {
+        let s = self.durable(c, Level(0))?;
+        let prior = match c.base {
+            (0, _) => None,
+            (b, d) => match self.get_base(b, &d)? {
+                Some(base) => Some(base),
+                None => return Err(Error::Corrupt(base_key(b, &d))),
+            },
+        };
+        if !base::admit(prior.as_ref(), first, s)? {
+            return Ok(());
+        }
+        let b = base::build(self, prior, first, boot)?;
+        let bytes = b.encode();
+        let d = envelope::digest(&bytes);
+        self.store
+            .put_new(&base_key(first, &d), &bytes)
+            .map_err(|e| Error::Refused(failure(e)))?;
+        let old = c.base;
+        c.base = (first, d);
+        let head = Head::next(c, c.end, c.digest, &c.sweep);
+        let published = self.publish_head(c, head);
+        if published.is_err() {
+            c.base = old;
+        }
+        published
+    }
+
+    /// The head, then the base it names; a base object missing under a head
+    /// that has moved on was removed after a later selection: read again.
+    fn base(&mut self) -> Result<Option<Base>, Error> {
+        let mut missing = None;
+        for _ in 0..HEAD_READS {
+            let Some((h, _)) = self.head()? else {
+                return Ok(None);
+            };
+            let (first, d) = h.base;
+            if first == 0 {
+                return Ok(None);
+            }
+            match self.get_base(first, &d)? {
+                Some(b) => return Ok(Some(b)),
+                None if missing == Some(h.base) => return Err(Error::Corrupt(base_key(first, &d))),
+                None => missing = Some(h.base),
+            }
+        }
+        Err(Error::Refused(unreachable()))
     }
 }
 
-impl Space for Objects {
-    fn page(&mut self, after: &str, s: u64) -> Result<Page, Error> {
-        #[cfg(test)]
-        let any_epoch = self.has(Bug::AnyEpoch);
-        #[cfg(not(test))]
-        let any_epoch = false;
-        let listing = self
-            .store
-            .list("", after)
-            .map_err(|e| Error::Storage(failure(e)))?;
-        let keys = listing
-            .keys
-            .into_iter()
-            .map(|key| {
-                let found = if let Some((p, d)) = parse_group_key(&key) {
-                    let named = p >= 1 && self.chain.digests.get(p as usize - 1) == Some(&d);
-                    // Past the head's end may be the current writer's put whose
-                    // head replace is still to come.
-                    if !named && (p <= s || any_epoch) {
-                        Found::Garbage
-                    } else {
-                        Found::Keep
-                    }
-                } else {
-                    key.strip_prefix("o/")
-                        .and_then(ObjectRef::parse)
-                        .map_or(Found::Keep, Found::Object)
-                };
-                (key, found)
-            })
-            .collect();
-        Ok(Page {
-            keys,
-            more: listing.truncated,
-        })
+impl Objects {
+    /// The base object of `first` and `digest`, checked; `None` when absent.
+    fn get_base(&mut self, first: u64, d: &[u8; 32]) -> Result<Option<Base>, Error> {
+        let key = base_key(first, d);
+        match self.store.get(&key) {
+            Ok(Some(b)) if envelope::digest(&b) == *d => {
+                let base = Base::decode(&b, &key)?;
+                if base.first != first {
+                    return Err(Error::Corrupt(key));
+                }
+                Ok(Some(base))
+            }
+            Ok(Some(_)) => Err(Error::Corrupt(key)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(Error::Refused(failure(e))),
+        }
     }
 
-    fn remove(&mut self, key: &str) -> Result<(), Error> {
-        self.store
-            .delete(key)
-            .map_err(|e| Error::Storage(failure(e)))
-    }
-
-    fn key(&self, r: &ObjectRef) -> String {
-        format!("o/{}", r.name())
-    }
-
-    /// Reclaim caught up to the head before it began, and reads only below
-    /// its strongest-durable end, so the followed chain answers without
-    /// reading the head again.
-    fn records(&mut self, from: u64, max: u64) -> Result<Vec<Record>, Error> {
-        let end = self.chain.end();
-        let stop = end.min(from.saturating_add(max));
-        self.followed(from.min(stop), stop)
-    }
-
-    /// Replaces the head with the claim's own end and `sweep`, on the claim's
-    /// own tag, settling an unanswered or mismatched replace by the head it
-    /// reads: its own new bytes landed, its own old bytes under another tag
-    /// retry, anything else is a later claim.
-    fn publish(&mut self, c: &mut Claim, sweep: &Sweep) -> Result<(), Error> {
-        let head = Head::next(c, c.end, c.digest, sweep);
+    /// Replaces the head with `head`, written by `c`, on the claim's own tag,
+    /// settling an unanswered or mismatched replace by the head it reads: its
+    /// own new bytes landed, its own old bytes under another tag retry,
+    /// anything else is a later claim.
+    fn publish_head(&mut self, c: &mut Claim, head: Head) -> Result<(), Error> {
         let bytes = head.encode();
         for _ in 0..REPLACE_TRIES {
             let tag = c
@@ -810,6 +857,85 @@ impl Space for Objects {
         }
         c.dead = true;
         Err(Error::Storage(unreachable()))
+    }
+}
+
+impl Space for Objects {
+    fn page(&mut self, after: &str, s: u64) -> Result<Page, Error> {
+        #[cfg(test)]
+        let any_epoch = self.has(Bug::AnyEpoch);
+        #[cfg(not(test))]
+        let any_epoch = false;
+        let listing = self
+            .store
+            .list("", after)
+            .map_err(|e| Error::Storage(failure(e)))?;
+        let keys = listing
+            .keys
+            .into_iter()
+            .map(|key| {
+                let found = if let Some((p, d)) = parse_group_key(&key) {
+                    let named = p >= 1 && self.chain.digests.get(p as usize - 1) == Some(&d);
+                    // Past the head's end may be the current writer's put whose
+                    // head replace is still to come.
+                    if !named && (p <= s || any_epoch) {
+                        Found::Garbage
+                    } else {
+                        Found::Keep
+                    }
+                } else if let Some((first, d)) = parse_base_key(&key) {
+                    let (selected, sd) = self.selected;
+                    if first < selected || (first == selected && d != sd) {
+                        Found::Garbage
+                    } else {
+                        Found::Keep
+                    }
+                } else {
+                    key.strip_prefix("o/")
+                        .and_then(ObjectRef::parse)
+                        .map_or(Found::Keep, Found::Object)
+                };
+                (key, found)
+            })
+            .collect();
+        Ok(Page {
+            keys,
+            more: listing.truncated,
+        })
+    }
+
+    fn remove(&mut self, key: &str) -> Result<(), Error> {
+        self.store
+            .delete(key)
+            .map_err(|e| Error::Storage(failure(e)))
+    }
+
+    fn key(&self, r: &ObjectRef) -> String {
+        format!("o/{}", r.name())
+    }
+
+    /// Reclaim caught up to the head before it began, and reads only below
+    /// its strongest-durable end, so the followed chain answers without
+    /// reading the head again.
+    fn records(&mut self, from: u64, max: u64) -> Result<Vec<Record>, Error> {
+        let end = self.chain.end();
+        let stop = end.min(from.saturating_add(max));
+        self.followed(from.min(stop), stop)
+    }
+
+    fn locator(&mut self, position: u64) -> Result<Locator, Error> {
+        self.chain.locator(position).ok_or_else(crate::invalid)
+    }
+
+    /// Replaces the head with the claim's own end and `sweep`.
+    fn publish(&mut self, c: &mut Claim, sweep: &Sweep) -> Result<(), Error> {
+        #[allow(unused_mut)]
+        let mut head = Head::next(c, c.end, c.digest, sweep);
+        #[cfg(test)]
+        if self.has(Bug::DropBase) {
+            head.base = (0, [0; 32]);
+        }
+        self.publish_head(c, head)
     }
 }
 

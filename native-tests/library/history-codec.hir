@@ -1233,6 +1233,157 @@ fn wire_vectors(stdout: Stdout) -> () {
   let (nodes, damage) = node_vectors()
   report(stdout, "wire vectors: checkpoint nodes", nodes)
   report(stdout, "wire vectors: damaged checkpoint nodes refused", damage)
+  let (boot, bad_boots) = boot_vectors()
+  report(stdout, "wire vectors: bootstrap", boot)
+  report(stdout, "wire vectors: each malformed bootstrap refused", bad_boots)
+}
+
+const V_ONE: Bytes = b"\x01\x00\x00\x00"
+
+// A u64 below 256, little-endian.
+fn le(n: u8) -> Bytes {
+  cat([bytes.from_list([n]), rep(0, 7)])
+}
+
+// A locator of position `p` (below 256) and digest 32 x `d`.
+fn loc(p: u8, d: u8) -> Bytes {
+  cat([le(p), rep(d, 32)])
+}
+
+// A bootstrap with first 9 at version 7, identity 32 x 0x31, group 32 x 0x32,
+// the default creation tuple, retention record at 5, two deltas since; floor
+// 0, pin "n" at `pin`, one holder (token 16 x 7, principal "p", version 6, at
+// `held`) and one root (version 7, digest 32 x 1, root object lifetime 9,
+// epoch 3, digest 32 x 5, height 2, 2 entries, 182 bytes, after the record at
+// 4). `first`, `retained` and `tail` vary it.
+fn boot_wire(
+  magic: Bytes,
+  first: Bytes,
+  pin: Bytes,
+  held: Bytes,
+  retained: bool,
+  tail: Bytes
+) -> Bytes {
+  let body = if retained {
+    cat(
+      [
+        b"\x01",
+        le(0),
+        V_ONE,
+        V_ONE,
+        b"n",
+        copy pin,
+        V_ONE,
+        rep(7, 16),
+        V_ONE,
+        b"p",
+        le(6),
+        copy held,
+        V_ONE,
+        le(7),
+        rep(1, 32),
+        le(9),
+        le(3),
+        rep(5, 32),
+        b"\x02",
+        le(2),
+        le(182),
+        loc(4, 43)
+      ]
+    )
+  } else {
+    b"\x00"
+  }
+  cat(
+    [
+      copy magic,
+      copy first,
+      le(7),
+      rep(49, 32),
+      rep(50, 32),
+      V_CREATION,
+      loc(5, 41),
+      le(2),
+      body,
+      copy tail
+    ]
+  )
+}
+
+fn boot_value() -> history.Boot {
+  history.Boot(
+    first: 9,
+    last: 7,
+    identity: rep(49, 32),
+    group: rep(50, 32),
+    creation: history.Creation(
+      limits: default_limits(),
+      bounds: history.default_bounds()
+    ),
+    retain: loc(5, 41),
+    deltas: 2,
+    retained: Some(
+      history.Retained(
+        floor: 0,
+        pins: [history.Pin(name: b"n", version: 3)],
+        holders: [
+          history.Holding(
+            token: rep(7, 16),
+            principal: b"p",
+            version: 6,
+            at: loc(8, 42)
+          )
+        ],
+        roots: [
+          history.Root(
+            desc: history.Descriptor(
+              version: 7,
+              digest: rep(1, 32),
+              root: ObjectRef(lifetime: 9, epoch: 3, digest: rep(5, 32)),
+              height: 2,
+              entries: 2,
+              bytes: 182
+            ),
+            after: loc(4, 43)
+          )
+        ]
+      )
+    )
+  )
+}
+
+// The bootstrap reads back as its value and its value encodes to it; another
+// version's magic is unsupported, and each other variant is corrupt: `first`
+// 1, a pin past `last`, a holder's locator at `first`, deltas with nothing
+// retained, one byte more, and one byte fewer.
+fn boot_vectors() -> (bool, bool) {
+  let m = b"HSBOOT01"
+  let wire = boot_wire(m, le(9), le(3), loc(8, 42), true, b"")
+  let round = match history.decode_boot(wire) {
+    Ok(b) => b == boot_value(),
+    Error(_) => false,
+  } && history.encode_boot(boot_value()) == wire
+  let other = match history.decode_boot(
+    boot_wire(b"HSBOOT02", le(9), le(3), loc(8, 42), true, b"")
+  ) {
+    Error(Unsupported(found: f)) => f == b"HSBOOT02",
+    _ => false,
+  }
+  let mut corrupt = other
+  for bad in [
+    boot_wire(m, le(1), le(3), loc(8, 42), true, b""),
+    boot_wire(m, le(9), le(8), loc(8, 42), true, b""),
+    boot_wire(m, le(9), le(3), loc(9, 42), true, b""),
+    boot_wire(m, le(9), le(3), loc(8, 42), false, b""),
+    boot_wire(m, le(9), le(3), loc(8, 42), true, b"\x00"),
+    bytes.slice(wire, 0, bytes.len(wire) - 1)
+  ] {
+    corrupt = corrupt && match history.decode_boot(bad) {
+      Error(Corrupt()) => true,
+      _ => false,
+    }
+  }
+  (round, corrupt)
 }
 
 fn report(stdout: Stdout, name: String, ok: bool) -> () {

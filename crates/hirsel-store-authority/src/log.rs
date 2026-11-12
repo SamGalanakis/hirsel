@@ -35,7 +35,15 @@
 //! claim read or last wrote, and under the lock writes the next revision to a
 //! temporary file, synchronizes it, renames it over `reclaim` and synchronizes
 //! the directory: a fenced writer never moves the continuation back.
+//!
+//! The selected base is the file `base`, published the same way under the
+//! lock by the history's holder:
+//!
+//! ```text
+//! base = "HSLOGB01" HSBASE01-base sum:[32]
+//! ```
 
+use crate::base::{self, Base};
 use crate::envelope::{self, Chain};
 use crate::reclaim::{self, Found, Page, Space, Sweep};
 use crate::{
@@ -62,6 +70,18 @@ const RECLAIM: &str = "reclaim";
 const RECLAIM_MAGIC: &[u8; 8] = b"HSLOGR01";
 /// The magic's family: other version digits are another format version.
 const RECLAIM_FAMILY: &[u8; 6] = b"HSLOGR";
+const BASE: &str = "base";
+const BASE_MAGIC: &[u8; 8] = b"HSLOGB01";
+const BASE_FAMILY: &[u8; 6] = b"HSLOGB";
+
+/// Deliberate defects the harness must catch (its negative controls).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Bug {
+    /// A selection renames its base into place without synchronizing the
+    /// directory, so a host failure can take the selection back.
+    BaseUnsynced,
+}
 /// Object names one listing page holds.
 const PAGE: usize = 1000;
 
@@ -172,6 +192,30 @@ fn frame(position: u64, entry: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The bytes of the summed file `name` before its sum: its magic `magic`,
+/// another version of `family` a format error.
+fn summed<'a>(
+    b: &'a [u8],
+    magic: &[u8; 8],
+    family: &[u8; 6],
+    name: &str,
+) -> Result<&'a [u8], Error> {
+    if b.len() >= 8 && &b[..8] != magic && &b[..6] == family {
+        return Err(Error::Format {
+            found: b[..8].try_into().unwrap(),
+            object: name.to_string(),
+        });
+    }
+    if b.len() < 8 + 32 || &b[..8] != magic {
+        return Err(Error::Corrupt(name.to_string()));
+    }
+    let (body, sum) = b.split_at(b.len() - 32);
+    if Sha256::digest(body)[..] != *sum {
+        return Err(Error::Corrupt(name.to_string()));
+    }
+    Ok(body)
+}
+
 fn io(e: std::io::Error) -> AuthorityError {
     AuthorityError::io(e.kind())
 }
@@ -216,6 +260,8 @@ pub struct Log {
     frames: std::collections::HashMap<u64, Frames>,
     /// What the newest `at` walk authenticated.
     anchor: Option<crate::Anchor>,
+    #[cfg(test)]
+    pub(crate) bug: Option<Bug>,
 }
 
 /// The whole frames a forward scan of one segment from its start has found,
@@ -356,6 +402,8 @@ impl Log {
             segment_max: SEGMENT_MAX,
             frames: std::collections::HashMap::new(),
             anchor: None,
+            #[cfg(test)]
+            bug: None,
         })
     }
 
@@ -861,6 +909,42 @@ impl Authority for Log {
         let s = self.durable(c, HOST)?;
         reclaim::run(self, c, s, budget)
     }
+
+    fn select(&mut self, c: &mut Claim, first: u64, boot: Vec<u8>) -> Result<(), Error> {
+        let s = self.durable(c, HOST)?;
+        let prior = self.base()?;
+        if !base::admit(prior.as_ref(), first, s)? {
+            return Ok(());
+        }
+        let b = base::build(self, prior, first, boot)?;
+        let mut out = BASE_MAGIC.to_vec();
+        out.extend_from_slice(&b.encode());
+        let _guard = self.lock().map_err(Error::Storage)?;
+        if !self.unchanged(c).map_err(Error::Storage)? {
+            c.dead = true;
+            return Err(Error::Fenced);
+        }
+        #[cfg(test)]
+        let sync = self.bug != Some(Bug::BaseUnsynced);
+        #[cfg(not(test))]
+        let sync = true;
+        if let Err(e) = self.replace_file(BASE, &c.attempt, out, sync) {
+            // A rename that may have happened leaves the selection unknown.
+            c.dead = true;
+            return Err(Error::Storage(io(e)));
+        }
+        Ok(())
+    }
+
+    fn base(&mut self) -> Result<Option<Base>, Error> {
+        let b = match fs::read(self.dir.join(BASE)) {
+            Ok(b) => b,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(Error::Storage(io(e))),
+        };
+        let body = summed(&b, BASE_MAGIC, BASE_FAMILY, BASE)?;
+        Base::decode(&body[8..], BASE).map(Some)
+    }
 }
 
 impl Space for Log {
@@ -903,6 +987,10 @@ impl Space for Log {
         self.read(from, HOST, max)
     }
 
+    fn locator(&mut self, position: u64) -> Result<Locator, Error> {
+        self.followed_locator(position)
+    }
+
     fn publish(&mut self, c: &mut Claim, sweep: &Sweep) -> Result<(), Error> {
         // What was removed stays removed before the continuation passes it.
         disk::sync_dir(&self.dir.join("objects")).map_err(|e| Error::Storage(io(e)))?;
@@ -914,29 +1002,7 @@ impl Space for Log {
         let revision = c.revision + 1;
         let mut out = RECLAIM_MAGIC.to_vec();
         reclaim::encode(revision, sweep, &mut out);
-        let sum = Sha256::digest(&out);
-        out.extend_from_slice(&sum);
-        let tmp = self.dir.join(format!(
-            ".{RECLAIM}-{}",
-            c.attempt
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        ));
-        let written = (|| {
-            let f = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o644)
-                .open(&tmp)?;
-            disk::write_all_at(&f, &out, 0)?;
-            disk::sync_data(&f)?;
-            disk::rename(&tmp, &self.dir.join(RECLAIM))?;
-            disk::sync_dir(&self.dir)
-        })();
-        if let Err(e) = written {
-            let _ = disk::remove_file(&tmp);
+        if let Err(e) = self.replace_file(RECLAIM, &c.attempt, out, true) {
             // A rename that may have happened leaves the file's revision unknown.
             c.dead = true;
             return Err(Error::Storage(io(e)));
@@ -954,24 +1020,51 @@ impl Log {
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok((0, Sweep::default())),
             Err(e) => return Err(Error::Storage(io(e))),
         };
-        let corrupt = || Error::Corrupt(RECLAIM.to_string());
-        if b.len() >= 8 && &b[..8] != RECLAIM_MAGIC && &b[..6] == RECLAIM_FAMILY {
-            return Err(Error::Format {
-                found: b[..8].try_into().unwrap(),
-                object: RECLAIM.to_string(),
-            });
-        }
-        if b.len() < 8 + 32 || &b[..8] != RECLAIM_MAGIC {
-            return Err(corrupt());
-        }
-        let (body, sum) = b.split_at(b.len() - 32);
-        if Sha256::digest(body)[..] != *sum {
-            return Err(corrupt());
-        }
+        let body = summed(&b, RECLAIM_MAGIC, RECLAIM_FAMILY, RECLAIM)?;
         match reclaim::decode(&body[8..]) {
             Some((revision, sweep, [])) => Ok((revision, sweep)),
-            _ => Err(corrupt()),
+            _ => Err(Error::Corrupt(RECLAIM.to_string())),
         }
+    }
+
+    /// Under the lock, makes `name` hold `body` and its sum: written to a
+    /// temporary file named for `attempt`, synchronized, renamed over `name`
+    /// and, when `sync`, the directory synchronized.
+    fn replace_file(
+        &self,
+        name: &str,
+        attempt: &[u8; 16],
+        mut body: Vec<u8>,
+        sync: bool,
+    ) -> std::io::Result<()> {
+        let sum = Sha256::digest(&body);
+        body.extend_from_slice(&sum);
+        let tmp = self.dir.join(format!(
+            ".{name}-{}",
+            attempt
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        ));
+        let written = (|| {
+            let f = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o644)
+                .open(&tmp)?;
+            disk::write_all_at(&f, &body, 0)?;
+            disk::sync_data(&f)?;
+            disk::rename(&tmp, &self.dir.join(name))?;
+            if sync {
+                disk::sync_dir(&self.dir)?;
+            }
+            Ok(())
+        })();
+        if written.is_err() {
+            let _ = disk::remove_file(&tmp);
+        }
+        written
     }
 
     /// Follow the history's records up to position `end`.

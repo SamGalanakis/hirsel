@@ -19,12 +19,15 @@
 //!    the commits counted, not the entries;
 //! 6. nothing here damages the history, so nothing is ever refused as corrupt;
 //! 7. an object put acknowledged survives every later failure with its bytes,
-//!    and any object present is whole.
+//!    and any object present is whole;
+//! 8. the selected base is one a selection made, its `first` never below an
+//!    acknowledged selection's, and its tip and live objects are those of the
+//!    history's records below it.
 
 use crate::harness::{Rng, append, entry, stays_dead, window};
 use crate::harness_disk::{self, KINDS};
-use crate::log::Log;
-use crate::{Advanced, Authority, Claim, Error, Level, Record};
+use crate::log::{Bug, Log};
+use crate::{Advanced, Authority, Claim, Error, Level, Locator, ObjectRef, Record};
 use std::collections::BTreeMap;
 use std::fs;
 
@@ -57,6 +60,7 @@ struct Writer {
 struct Run {
     dir: tempfile::TempDir,
     segment_max: u64,
+    bug: Option<Bug>,
     writers: Vec<Writer>,
     reader: Log,
     ledger: Ledger,
@@ -64,12 +68,16 @@ struct Run {
     never: Vec<(u64, Record)>,
     /// Every object put, by name: its bytes, and whether a put acknowledged it.
     objects: BTreeMap<String, (Vec<u8>, bool)>,
+    /// Every selection tried, and the highest `first` one acknowledged.
+    tried: Vec<(u64, Vec<u8>)>,
+    selected: u64,
 }
 
 impl Run {
     fn open(&self) -> Log {
         let mut log = Log::open(self.dir.path(), Level(0)).unwrap();
         log.segment_max = self.segment_max;
+        log.bug = self.bug;
         log
     }
 
@@ -102,13 +110,84 @@ impl Run {
     }
 }
 
+/// Law 8 for `got`, what `log`'s `base` answered, against `all`, the history
+/// `log` has just read whole.
+pub(crate) fn check_base(
+    log: &mut impl Authority,
+    all: &[Record],
+    got: Result<Option<crate::Base>, Error>,
+    tried: &[(u64, Vec<u8>)],
+    selected: u64,
+) -> Result<(), String> {
+    let b = match got {
+        Ok(None) if selected == 0 => return Ok(()),
+        Ok(None) => return Err(format!("the selection of {selected} is gone")),
+        Ok(Some(b)) => b,
+        Err(e @ (Error::Corrupt(_) | Error::Format { .. })) => {
+            return Err(format!("base refused: {e:?}"));
+        }
+        Err(_) => return Ok(()),
+    };
+    if b.first < selected {
+        return Err(format!(
+            "the base at {} is below the selection of {selected}",
+            b.first
+        ));
+    }
+    if !tried
+        .iter()
+        .any(|(t, boot)| *t == b.first && *boot == b.boot)
+    {
+        return Err(format!("no selection made the base at {}", b.first));
+    }
+    let below = &all[..(b.first as usize - 1).min(all.len())];
+    if below.len() as u64 != b.first - 1 {
+        return Err(format!("the base at {} is past the history", b.first));
+    }
+    // The fold: the newest claim's epoch and identity, the newest append, and
+    // what was created and not retired.
+    let (mut epoch, mut identity, mut newest) = (0, None, None);
+    let mut live = std::collections::BTreeSet::<ObjectRef>::new();
+    for (i, r) in below.iter().enumerate() {
+        match r {
+            Record::Claimed {
+                epoch: e,
+                identity: d,
+                ..
+            } => (epoch, identity) = (*e, Some(*d)),
+            Record::Appended {
+                created, retired, ..
+            } => {
+                live.extend(created.iter().copied());
+                for r in retired {
+                    live.remove(r);
+                }
+                newest = Some(i as u64 + 1);
+            }
+        }
+    }
+    let locate = |log: &mut _, p| -> Result<Locator, String> {
+        Authority::followed_locator(log, p).map_err(|e| format!("followed {p}: {e:?}"))
+    };
+    let appended = newest.map(|p| locate(log, p)).transpose()?;
+    let digest = locate(log, b.first - 1)?.digest;
+    let tip = (b.tip.epoch, b.tip.identity, b.tip.appended, b.tip.digest);
+    if tip != (epoch, identity, appended, digest) || b.tip.end != b.first - 1 {
+        return Err(format!("the base at {} names another tip", b.first));
+    }
+    if b.live != live.into_iter().collect::<Vec<_>>() {
+        return Err(format!("the base at {} names other live objects", b.first));
+    }
+    Ok(())
+}
+
 fn read_all(log: &mut Log) -> Result<Vec<Record>, String> {
     log.read(0, Level(0), u64::MAX)
         .map_err(|e| format!("read: {e:?}"))
 }
 
 /// One schedule; `Err` names the first broken law.
-fn schedule(seed: u64, steps: u32) -> Result<(), String> {
+fn schedule(seed: u64, steps: u32, bug: Option<Bug>) -> Result<(), String> {
     let mut rng = Rng(seed | 1);
     let mut odds = [0; KINDS];
     for o in &mut odds {
@@ -122,14 +201,18 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
     let dir = tempfile::tempdir().unwrap();
     let mut probe = Log::open(dir.path(), Level(0)).unwrap();
     probe.segment_max = 300 + rng.below(700);
+    probe.bug = bug;
     let mut run = Run {
         segment_max: probe.segment_max,
+        bug,
         dir,
         writers: Vec::new(),
         reader: probe,
         ledger: Ledger::new(),
         never: Vec::new(),
         objects: BTreeMap::new(),
+        tried: Vec::new(),
+        selected: 0,
     };
     run.writers = (0..3)
         .map(|_| Writer {
@@ -143,7 +226,7 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
         let w = rng.below(run.writers.len() as u64) as usize;
         let at = Level(rng.below(2) as u8);
         tag += 1;
-        match rng.below(14) {
+        match rng.below(15) {
             0 | 1 => {
                 let attempt = (rng.next() as u128).to_le_bytes();
                 let mut fresh = [0u8; 32];
@@ -350,6 +433,31 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
                     }
                 }
             }
+            14 => {
+                let wr = &mut run.writers[w];
+                let Some(c) = wr.claim.as_mut() else {
+                    continue;
+                };
+                let first = 2 + rng.below(c.end());
+                let boot = entry(tag << 2, 1);
+                run.tried.push((first, boot.clone()));
+                match wr.log.select(c, first, boot) {
+                    Ok(()) => {
+                        run.selected = run.selected.max(first);
+                        let all = read_all(&mut run.reader)?;
+                        let got = run.reader.base();
+                        check_base(&mut run.reader, &all, got, &run.tried, run.selected)?;
+                    }
+                    Err(e @ (Error::Corrupt(_) | Error::Format { .. })) => {
+                        return Err(format!("select refused the history: {e:?}"));
+                    }
+                    Err(Error::Refused(_)) => {}
+                    Err(Error::Fenced) => wr.dead = wr.claim.take(),
+                    // A storage failure leaves the claim usable or dead
+                    // without saying which.
+                    Err(_) => wr.claim = None,
+                }
+            }
             k => {
                 let host = k == 12;
                 if host {
@@ -369,6 +477,8 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
                     }
                 }
                 run.check(&all)?;
+                let got = run.reader.base();
+                check_base(&mut run.reader, &all, got, &run.tried, run.selected)?;
                 for (name, (data, owed)) in &run.objects {
                     match run.reader.get_object(name) {
                         Ok(Some(b)) if b == *data => {}
@@ -391,9 +501,9 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
     Ok(())
 }
 
-fn sweep(seeds: u64) -> Option<String> {
+fn sweep(seeds: u64, bug: Option<Bug>) -> Option<String> {
     let found = (1..=seeds).find_map(|seed| {
-        schedule(seed * 7919, 300)
+        schedule(seed * 7919, 300, bug)
             .err()
             .map(|e| format!("seed {seed}: {e}"))
     });
@@ -403,7 +513,12 @@ fn sweep(seeds: u64) -> Option<String> {
 
 #[test]
 fn the_log_keeps_the_crash_and_level_law_through_disk_faults() {
-    assert_eq!(sweep(400), None);
+    assert_eq!(sweep(400, None), None);
+}
+
+#[test]
+fn a_selection_the_directory_never_names_breaks_the_base_law() {
+    assert!(sweep(400, Some(Bug::BaseUnsynced)).is_some());
 }
 
 /// Runs reclamation until it is done.

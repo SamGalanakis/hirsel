@@ -89,6 +89,8 @@ pub(crate) trait Space {
     fn key(&self, r: &ObjectRef) -> String;
     /// Up to `max` records after `from`, strongest-durable.
     fn records(&mut self, from: u64, max: u64) -> Result<Vec<Record>, Error>;
+    /// The locator of a record [`Space::records`] has answered.
+    fn locator(&mut self, position: u64) -> Result<crate::Locator, Error>;
     /// Make `sweep` the store's continuation if `c` still holds the store and
     /// the continuation is the one `c` loaded or last published; moves
     /// `c.revision` one up.

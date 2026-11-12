@@ -327,6 +327,8 @@ uint8_t hirsel_rt_v2_authority_at(hirsel_rt_v2_ctx*, void*, void*, const uint64_
 uint8_t hirsel_rt_v2_authority_read(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, uint64_t, const uint64_t*, uint64_t);
 uint8_t hirsel_rt_v2_authority_get(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, const hirsel_rt_v2_object_ref*);
 uint8_t hirsel_rt_v2_authority_put(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, uint64_t*, const hirsel_rt_v2_object_ref*, hirsel_rt_v2_header*, uint64_t, uint64_t);
+uint8_t hirsel_rt_v2_authority_select(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, uint64_t*, uint64_t, hirsel_rt_v2_header*, uint64_t, uint64_t);
+uint8_t hirsel_rt_v2_authority_base(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*);
 uint8_t hirsel_rt_v2_authority_reclaim(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, uint64_t*, uint64_t);
 #ifdef __cplusplus
 }

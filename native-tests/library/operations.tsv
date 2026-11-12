@@ -93,6 +93,7 @@ atomic.create	70d6f500e3109d5317a6ce686188fc99b70aff726538649ea16c734e30c617cb	0
 atomic.load	241679ffb01e1e9d4549acc84d6f3927a34d8dc3572e799382d91bd6095347b6	0:b:n;1:b:n->n
 atomic.store	adedffc915f9d726048f51494daa4a677fd42051c82dbae8c73af9ff1dd20641	0:b:n;1:b:n;2:b:n->n
 authority.at	ce37eebe75f204c82ba0862154ec9ebce89b9321cd96b235e45ea637da238d00	0:b:n;1:b:n;2:b:n;3:b:n;4:b:n->n
+authority.base	b0220c0bf557798c84cfa4125b3a6a94221eee731bf5687852cd269391f010b8	0:b:n->n
 authority.claim	de48f4c5868db9905ebd2de92e89d9b9dc86893d423146d371c2dd81868e06c2	0:b:n->n
 authority.durable	7730ae5a6f1754bf59003d4079f50cc3f083a98824b702f56169e947ec83e63b	0:b:n;1:m:n;2:b:n->n
 authority.floor	acf2b2af2a44edc623753f38bc67fa7218e42efd92ea11fc8d05a995c9d10e25	0:b:n->n
@@ -105,6 +106,7 @@ authority.max_entry	b28a14973b9c62384644316177af524a1709d20918ffcb292a404283ee93
 authority.put	41c4cff49d7a604f9d4d198dbed244d3ed3eb12a8278499e336352fd358aa49b	0:b:n;1:m:n;2:b:n;3:t:n->n
 authority.read	c7d8e20871c198d0d0702ac09d1f619fcc3e30b3af01465e7525b39283562d7c	0:b:n;1:b:n;2:b:n;3:b:n->n
 authority.reclaim	5e4ad115c9759f2fdc94bcbf33391b54517cfb37e0aece9aec7ba1353c02c403	0:b:n;1:m:n;2:b:n->n
+authority.select	645a36ee447af61984cd73f3ca3e8c8f9d0840085bab78b3d7ac377923f1fd85	0:b:n;1:m:n;2:b:n;3:t:n->n
 authority.submit	f9bef5f9a6f7284c604e18652cb97f532f114f84550ae587e2c8dc6ca4aba9d6	0:b:n;1:m:n;2:t:n;3:b:n;4:b:n;5:b:n->n
 authority.wait	ab09cc5709b6d4cbea706f0a02b6b87d733e4ad12158c72f7535657d76ce0cd3	0:b:n;1:m:n;2:b:n->n
 bytes.append	b29ae84f6277a9dd7cf3cb64d73f0612af68c8453f2277cbe95cd48d87317729	0:m:n;1:b:n->n

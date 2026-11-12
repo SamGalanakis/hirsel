@@ -382,6 +382,11 @@ impl Library {
                 },
                 None => return Ok(None),
             },
+            "authority.select" => wire::Request::Select {
+                first: u64_arg(arg(a, 2)?, "first")?,
+                boot: bytes(arg(a, 3)?)?.to_vec(),
+            },
+            "authority.base" => wire::Request::Base,
             _ => return Ok(None),
         }))
     }
@@ -603,9 +608,11 @@ impl Library {
                     Value::Bytes(l.unwrap_or_default().encode().to_vec())
                 })
             }
-            "authority.read" | "authority.at" => {
+            "authority.read" | "authority.at" | "authority.base" => {
                 let name = self.authority_name(arg(a, 0)?)?;
-                let r = if op == "authority.at" {
+                let r = if op == "authority.base" {
+                    wire::Request::Base
+                } else if op == "authority.at" {
                     let Some(l) = Locator::decode(bytes(arg(a, 1)?)?) else {
                         return Ok(OperationResult::returned(no_object()));
                     };
@@ -659,9 +666,16 @@ impl Library {
                     )
                 })
             }
-            "authority.get" | "authority.put" => {
+            "authority.get" | "authority.put" | "authority.select" => {
                 let name = self.authority_name(arg(a, 0)?)?;
-                let (held, r) = if op == "authority.put" {
+                let (held, r) = if op == "authority.select" {
+                    let (_, held) = self.claim_arg(&name, arg(a, 1)?)?;
+                    let r = wire::Request::Select {
+                        first: u64_arg(arg(a, 2)?, "first")?,
+                        boot: bytes(arg(a, 3)?)?.to_vec(),
+                    };
+                    (Some(held), Some(r))
+                } else if op == "authority.put" {
                     let (_, held) = self.claim_arg(&name, arg(a, 1)?)?;
                     let data = bytes(arg(a, 3)?)?.to_vec();
                     let r = object_ref(arg(a, 2)?)?.map(|r| wire::Request::Put { r, data });

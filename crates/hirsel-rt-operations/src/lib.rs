@@ -599,6 +599,8 @@ pub const AUTHORITY_EXPORTS: &[&str] = &[
     "authority.get",
     "authority.put",
     "authority.reclaim",
+    "authority.select",
+    "authority.base",
 ];
 
 /// The `net.split` halves' operations and their entries: each is its stream operation's
@@ -2658,6 +2660,27 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
     },
     AbiExport {
         caller_site: false,
+        symbol: "hirsel_rt_v2_authority_select",
+        destination: true,
+        result: Some((64, 8)),
+        parameters: &[
+            Physical::Pointer,
+            Physical::Pointer,
+            Physical::I64,
+            Physical::Pointer,
+            Physical::I64,
+            Physical::I64,
+        ],
+    },
+    AbiExport {
+        caller_site: false,
+        symbol: "hirsel_rt_v2_authority_base",
+        destination: true,
+        result: Some((64, 8)),
+        parameters: &[Physical::Pointer],
+    },
+    AbiExport {
+        caller_site: false,
         symbol: "hirsel_rt_v2_io_signals",
         destination: true,
         result: Some((16, 8)),
@@ -3293,6 +3316,8 @@ pub const NATIVE_PATHS: &[&str] = &[
     "authority.get",
     "authority.put",
     "authority.reclaim",
+    "authority.select",
+    "authority.base",
     // A store's energy scopes (STORE-11 Energy, `hirsel-rt/src/energy.rs`).
     "energy.enter",
     "energy.leave",

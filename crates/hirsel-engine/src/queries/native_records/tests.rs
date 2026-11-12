@@ -827,3 +827,56 @@ fn lazy_archive_reader_drop_releases_rows_and_returns_exact_borrowed_partition()
     drop(grant);
     assert_eq!(pool.reserved(), 0);
 }
+
+#[test]
+fn placing_a_declaration_never_keeps_an_inherited_capture_that_names_a_specialization() {
+    // A header execution inherits the capture of an engine where only the
+    // specialization cited the original's anchor, then holds the original
+    // itself: a build selects the original. Placing an unrelated declaration
+    // must not leave the capture's specialization as the anchor's owner.
+    let mut engine = QueryEngine::new(crate::default_environment(), Default::default());
+    let file = engine
+        .sources
+        .add(
+            "generic.hir",
+            "fn keyed()->u8{1u8}\nfn other()->u8{2u8}".into(),
+        )
+        .unwrap();
+    let tokens = hirsel_lexer::lex(file, &engine.sources).tokens;
+    let context = crate::default_context();
+    let mut parsed = hirsel_parser::parse(file, tokens, &context, &mut engine.sources);
+    assert!(parsed.diagnostics.is_empty());
+    engine.index(&mut parsed.syntax, &context).unwrap();
+    let named = |engine: &QueryEngine, name: &str| {
+        engine
+            .items
+            .keys()
+            .find(|path| path.0.name == name)
+            .unwrap()
+            .clone()
+    };
+    let keyed = named(&engine, "keyed");
+    let other = named(&engine, "other");
+    let original = engine.items[&keyed].clone();
+    let mut specialization = (*original[0]).clone();
+    specialization.item.definition.0.name = "keyed$with$H=hash".into();
+    let specialization = Arc::new(specialization);
+    let specialized = specialization.item.definition.clone();
+    engine.items.remove(&keyed);
+    engine
+        .items
+        .insert(specialized.clone(), vec![specialization]);
+    let capture = engine.source_records();
+    assert_eq!(
+        capture.record_owner(original[0].anchor),
+        Some((specialized.clone(), 0))
+    );
+    engine.items.remove(&specialized);
+    engine.items.insert(keyed.clone(), original);
+    engine.inherit_source_records(capture);
+    let mut later = (*engine.items[&other][0]).clone();
+    later.item.definition.0.name = "zzz_other".into();
+    let path = later.item.definition.clone();
+    engine.materialize_syntax(&path, Arc::new(later));
+    assert_scalar_bindings(&engine);
+}

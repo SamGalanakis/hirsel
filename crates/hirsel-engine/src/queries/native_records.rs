@@ -259,6 +259,11 @@ struct SourceProjection {
     types: std::sync::Weak<hirsel_types::TypeInterner>,
     bindings: std::sync::Weak<SourceBindings>,
     scalar: Option<NativeRecordContext>,
+    /// An inherited capture is not what a build over this engine's tables
+    /// gives: a build prefers this engine's items, then its catalog, and the
+    /// capture fills only what both leave empty. Placement keeps only a
+    /// projection this engine built.
+    inherited: bool,
 }
 /// The engine releases its hold on bindings once a partition admits them, so
 /// the partition's charge ends with its last holder. When that holder drops
@@ -421,6 +426,7 @@ impl QueryEngine {
                 bindings: Arc::downgrade(&context.bindings),
                 // Hold the new delta until its next capture admits it.
                 scalar: Some(context),
+                inherited: false,
             });
         }
         // Each recheck rebuilds the whole projection, so the sample is far
@@ -454,7 +460,8 @@ impl QueryEngine {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             let projection = current.as_ref()?;
-            if projection.placement != self.sources.placement_revision()
+            if projection.inherited
+                || projection.placement != self.sources.placement_revision()
                 || !projection.types.ptr_eq(&Arc::downgrade(self.types()))
             {
                 return None;
@@ -587,6 +594,7 @@ impl QueryEngine {
             types: Arc::downgrade(&context.types),
             bindings: Arc::downgrade(&context.bindings),
             scalar: None,
+            inherited: true,
         });
         *self
             .source_ownership
@@ -631,6 +639,7 @@ impl QueryEngine {
             types: Arc::downgrade(&context.types),
             bindings: Arc::downgrade(&context.bindings),
             scalar: (!context.bindings.admitted()).then(|| context.clone()),
+            inherited: false,
         });
         context
     }

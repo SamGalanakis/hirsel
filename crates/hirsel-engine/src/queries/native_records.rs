@@ -259,11 +259,6 @@ struct SourceProjection {
     types: std::sync::Weak<hirsel_types::TypeInterner>,
     bindings: std::sync::Weak<SourceBindings>,
     scalar: Option<NativeRecordContext>,
-    /// An inherited capture is not what a build over this engine's tables
-    /// gives: a build prefers this engine's items, then its catalog, and the
-    /// capture fills only what both leave empty. Placement keeps only a
-    /// projection this engine built.
-    inherited: bool,
 }
 /// The engine releases its hold on bindings once a partition admits them, so
 /// the partition's charge ends with its last holder. When that holder drops
@@ -426,7 +421,6 @@ impl QueryEngine {
                 bindings: Arc::downgrade(&context.bindings),
                 // Hold the new delta until its next capture admits it.
                 scalar: Some(context),
-                inherited: false,
             });
         }
         // Each recheck rebuilds the whole projection, so the sample is far
@@ -460,8 +454,7 @@ impl QueryEngine {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             let projection = current.as_ref()?;
-            if projection.inherited
-                || projection.placement != self.sources.placement_revision()
+            if projection.placement != self.sources.placement_revision()
                 || !projection.types.ptr_eq(&Arc::downgrade(self.types()))
             {
                 return None;
@@ -581,21 +574,13 @@ impl QueryEngine {
             );
         }
     }
+    /// Takes `context` as this engine's inherited base. A capture is not what
+    /// a build over this engine's tables gives: a build prefers this engine's
+    /// items, then its catalog, and the base fills only what both leave
+    /// empty. So the next read builds the projection with the base, rather
+    /// than answering from the capture as it stands.
     pub(crate) fn inherit_source_records(&self, context: NativeRecordContext) {
-        // Both reconstruction paths install the capture's exact source tables
-        // before binding its records. A later source mutation invalidates this
-        // projection and builds a successor against the inherited bindings.
-        *self
-            .source_ownership
-            .current
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(SourceProjection {
-            placement: self.sources.placement_revision(),
-            types: Arc::downgrade(&context.types),
-            bindings: Arc::downgrade(&context.bindings),
-            scalar: None,
-            inherited: true,
-        });
+        self.source_ownership.changed();
         *self
             .source_ownership
             .inherited
@@ -639,7 +624,6 @@ impl QueryEngine {
             types: Arc::downgrade(&context.types),
             bindings: Arc::downgrade(&context.bindings),
             scalar: (!context.bindings.admitted()).then(|| context.clone()),
-            inherited: false,
         });
         context
     }

@@ -829,11 +829,12 @@ fn lazy_archive_reader_drop_releases_rows_and_returns_exact_borrowed_partition()
 }
 
 #[test]
-fn placing_a_declaration_never_keeps_an_inherited_capture_that_names_a_specialization() {
+fn an_inherited_capture_never_answers_for_an_owner_this_engine_selects_differently() {
     // A header execution inherits the capture of an engine where only the
     // specialization cited the original's anchor, then holds the original
-    // itself: a build selects the original. Placing an unrelated declaration
-    // must not leave the capture's specialization as the anchor's owner.
+    // itself: a build selects the original. Neither before nor after placing
+    // an unrelated declaration may the capture's specialization answer as the
+    // anchor's owner.
     let mut engine = QueryEngine::new(crate::default_environment(), Default::default());
     let file = engine
         .sources
@@ -874,6 +875,7 @@ fn placing_a_declaration_never_keeps_an_inherited_capture_that_names_a_specializ
     engine.items.remove(&specialized);
     engine.items.insert(keyed.clone(), original);
     engine.inherit_source_records(capture);
+    assert_scalar_bindings(&engine);
     let mut later = (*engine.items[&other][0]).clone();
     later.item.definition.0.name = "zzz_other".into();
     let path = later.item.definition.clone();

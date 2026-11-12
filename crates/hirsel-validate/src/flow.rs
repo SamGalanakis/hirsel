@@ -5142,6 +5142,17 @@ impl Checker<'_, '_> {
         }
     }
     fn mutable_storage_exit(&mut self, model: &Model, state: &State, report: bool) {
+        // MODE-2: a borrow-only share excuses a hand-back only while nothing
+        // that outlives the call holds it: the returned value and every
+        // `mut` parameter (a scoped capture included) are such holders.
+        let outliving = |root: usize| -> bool {
+            model.returning_shares.borrow().contains(&root)
+                || (0..model.mutable_parameters.len()).any(|other| {
+                    other != root
+                        && model.mutable_parameters[other]
+                        && state.borrowed_shares[other].held().contains(&root)
+                })
+        };
         for root in 0..model.mutable_parameters.len() {
             if !model.mutable_parameters[root] {
                 continue;
@@ -5160,9 +5171,7 @@ impl Checker<'_, '_> {
                 && !model.releasing.get()
                 && needs_release(self, ty, self.t)
                 && !super::handle_root(self.t, ty)
-                && (state.shared[root]
-                    && !(state.borrow_only[root]
-                        && !model.returning_shares.borrow().contains(&root))
+                && (state.shared[root] && !(state.borrow_only[root] && !outliving(root))
                     || !state.current_unique[root])
             {
                 self.flow_error(
@@ -5177,7 +5186,7 @@ impl Checker<'_, '_> {
                 );
             }
             if state.nested_shared[root]
-                && !(state.borrow_only[root] && !model.returning_shares.borrow().contains(&root))
+                && !(state.borrow_only[root] && !outliving(root))
                 && self.has_unique_parts(self.t, ty)
             {
                 self.flow_error(

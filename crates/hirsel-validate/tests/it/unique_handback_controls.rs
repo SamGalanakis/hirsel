@@ -1751,3 +1751,297 @@ fn await_preserves_only_the_unique_result_contract_of_its_consumed_task() {
         );
     }
 }
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Sink {
+    /// `put(mut out, take fresh)`; the view's share dies in the body.
+    Fresh,
+    /// `put(mut out, take view(x))`.
+    Whole,
+    /// `put(mut out.0, take view(x))`.
+    Field,
+    /// `put(mut out, take view(x))`, then a call that may fail.
+    Failing,
+}
+
+/// `fn main(mut x: unique String, mut out: String)` storing `view(x)`, or a
+/// fresh string, in the sibling `mut` receiver `out` through
+/// `put(mut out: String, take s: String)` (oldv-attack-770 candidate 3:
+/// `leak(mut xs, mut out)` handed `xs` back unique while `out` shared it).
+fn view_into_sibling(sink: Sink) -> Fixture {
+    let (mut f, x) = handback(true);
+    let string = TypeKind::Primitive(Primitive::String);
+    let out = if sink == Sink::Field {
+        let part = f.definition.types.push(ty(string.clone()));
+        param(&mut f, TypeKind::Tuple(vec![part].into()))
+    } else {
+        param(&mut f, string.clone())
+    };
+    let target = if sink == Sink::Field {
+        let root = f.body().places[out as usize].root;
+        let field = f.body().places.len() as u32;
+        let ty = f.definition.types.push(ty(string.clone()));
+        f.body().places.push(Place {
+            root,
+            projection: vec![Projection::Field(0)].into(),
+            ty,
+            loan: None,
+            binding: None,
+        });
+        field
+    } else {
+        out
+    };
+    let entry = f.cleanup(vec![]);
+    f.emit(InstructionKind::BeginLoan {
+        id: LoanId(0),
+        place: PlaceId(x),
+        mutable: false,
+        if_inactive: false,
+    });
+    f.body().blocks[0]
+        .instructions
+        .last_mut()
+        .unwrap()
+        .on_failure = CleanupId(entry);
+    let via = f.through_loan(x, 0);
+    let view = f.slot(string.clone(), Storage::Temporary);
+    let lent = f.cleanup(vec![CleanupAction::EndLoan {
+        loan: LoanId(0),
+        if_active: false,
+    }]);
+    f.body().blocks[0].terminator = Terminator::Call {
+        callee: Callee::Definition {
+            path: path("view"),
+            arguments: vec![],
+        },
+        arguments: vec![CallArgument {
+            parameter: ParamId(0),
+            value: operand(via, UseKind::Borrow),
+        }],
+        returns: Some(CallReturn {
+            destination: PlaceId(view),
+            next: BlockId(1),
+        }),
+        on_failure: CleanupId(lent),
+    };
+    let holding = f.cleanup(vec![drop(view)]);
+    let mut after = vec![inst(
+        InstructionKind::EndLoan {
+            loan: LoanId(0),
+            if_active: false,
+        },
+        holding,
+    )];
+    let stored = if sink == Sink::Fresh {
+        after.push(inst(
+            InstructionKind::Drop {
+                place: PlaceId(view),
+                if_live: false,
+            },
+            entry,
+        ));
+        let n = f.slot(string.clone(), Storage::Temporary);
+        let rid = RvalueId(f.body().rvalues.len() as u32);
+        f.body()
+            .rvalues
+            .push(Rvalue::Constant(Constant::String("fresh".into())));
+        after.push(inst(
+            InstructionKind::Assign {
+                destination: PlaceId(n),
+                value: rid,
+            },
+            entry,
+        ));
+        n
+    } else {
+        view
+    };
+    // `put(mut out, take stored)` leaves `stored`'s shares in `out`.
+    let unit = f.slot(TypeKind::Tuple(vec![].into()), Storage::Temporary);
+    let failing = sink == Sink::Failing;
+    f.body().blocks.push(block(
+        after,
+        Terminator::Call {
+            callee: Callee::Definition {
+                path: path("put"),
+                arguments: vec![],
+            },
+            arguments: vec![
+                CallArgument {
+                    parameter: ParamId(0),
+                    value: operand(target, UseKind::Mut),
+                },
+                CallArgument {
+                    parameter: ParamId(1),
+                    value: take(stored),
+                },
+            ],
+            returns: Some(CallReturn {
+                destination: PlaceId(unit),
+                next: BlockId(2),
+            }),
+            on_failure: CleanupId(entry),
+        },
+    ));
+    let done = f.cleanup(vec![drop(unit)]);
+    if failing {
+        let again = f.slot(TypeKind::Tuple(vec![].into()), Storage::Temporary);
+        let both = f.cleanup(vec![drop(again), drop(unit)]);
+        f.body().blocks.push(block(
+            vec![],
+            Terminator::Call {
+                callee: Callee::Definition {
+                    path: path("fallible"),
+                    arguments: vec![],
+                },
+                arguments: vec![],
+                returns: Some(CallReturn {
+                    destination: PlaceId(again),
+                    next: BlockId(3),
+                }),
+                on_failure: CleanupId(done),
+            },
+        ));
+        f.body().blocks.push(block(vec![], ret(0, both)));
+        let fallible = function_signature("fallible", vec![], TypeKind::Tuple(vec![].into()));
+        f.signatures.insert(id("fallible"), fallible);
+    } else {
+        f.body().blocks.push(block(vec![], ret(0, done)));
+    }
+    let put = function_signature(
+        "put",
+        vec![
+            (PassingMode::Mut, string.clone()),
+            (PassingMode::Take, string),
+        ],
+        TypeKind::Tuple(vec![].into()),
+    );
+    f.signatures.insert(id("put"), put);
+    owner_sig(&mut f, &[PassingMode::Mut, PassingMode::Mut]);
+    view_and_need(&mut f);
+    f
+}
+
+#[test]
+fn a_sibling_mut_receiver_holding_a_view_keeps_the_handback_shared() {
+    // The view's share dies with `put`'s fresh argument: `x` leaves unique.
+    view_into_sibling(Sink::Fresh).valid();
+    // `out` outlives the call and holds a share of `x`, wholly or in a field:
+    // every exit after `put` refuses, `put`'s failure edge included.
+    for (sink, exits) in [(Sink::Whole, 2), (Sink::Field, 2), (Sink::Failing, 3)] {
+        assert_eq!(
+            view_into_sibling(sink).kinds(),
+            vec![
+                ViolationKind::TypeMismatch {
+                    entity: "mutable unique hand-back"
+                };
+                exits
+            ],
+            "{sink:?}"
+        );
+    }
+}
+
+/// `fn main(p: String) -> unique String { let x = view(p); unique copy x }`,
+/// or with the deep copy fused into a move (`fused`): `take x`.
+fn unique_of_a_view(fused: bool) -> Fixture {
+    let mut f = Fixture::unit();
+    let string = TypeKind::Primitive(Primitive::String);
+    let p = param(&mut f, string.clone());
+    let mut row = ty(string.clone());
+    row.modes.uniqueness = Uniqueness::Unique;
+    let row = f.definition.types.push(row);
+    f.body().blocks[0].instructions.remove(0);
+    f.body().rvalues.clear();
+    f.body().result = row;
+    f.body().locals[0].ty = row;
+    f.body().places[0].ty = row;
+    let entry = f.cleanup(vec![]);
+    f.emit(InstructionKind::BeginLoan {
+        id: LoanId(0),
+        place: PlaceId(p),
+        mutable: false,
+        if_inactive: false,
+    });
+    f.body().blocks[0]
+        .instructions
+        .last_mut()
+        .unwrap()
+        .on_failure = CleanupId(entry);
+    let via = f.through_loan(p, 0);
+    let x = f.slot(string.clone(), Storage::Temporary);
+    let lent = f.cleanup(vec![CleanupAction::EndLoan {
+        loan: LoanId(0),
+        if_active: false,
+    }]);
+    f.body().blocks[0].terminator = Terminator::Call {
+        callee: Callee::Definition {
+            path: path("view"),
+            arguments: vec![],
+        },
+        arguments: vec![CallArgument {
+            parameter: ParamId(0),
+            value: operand(via, UseKind::Borrow),
+        }],
+        returns: Some(CallReturn {
+            destination: PlaceId(x),
+            next: BlockId(1),
+        }),
+        on_failure: CleanupId(lent),
+    };
+    let holding = f.cleanup(vec![drop(x)]);
+    let rid = RvalueId(f.body().rvalues.len() as u32);
+    f.body().rvalues.push(if fused {
+        Rvalue::Use(take(x))
+    } else {
+        Rvalue::Unary {
+            op: hirsel_syntax::UnaryOp::Unique,
+            value: copy(x),
+        }
+    });
+    let mut after = vec![
+        inst(
+            InstructionKind::EndLoan {
+                loan: LoanId(0),
+                if_active: false,
+            },
+            holding,
+        ),
+        inst(
+            InstructionKind::Assign {
+                destination: PlaceId(0),
+                value: rid,
+            },
+            holding,
+        ),
+    ];
+    if !fused {
+        let returning = f.cleanup(vec![drop(0)]);
+        after.push(inst(
+            InstructionKind::Drop {
+                place: PlaceId(x),
+                if_live: false,
+            },
+            returning,
+        ));
+    }
+    f.body().blocks.push(block(after, ret(0, entry)));
+    owner_sig(&mut f, &[PassingMode::Borrow]);
+    view_and_need(&mut f);
+    f
+}
+
+#[test]
+fn a_deep_unique_copy_of_a_view_is_independent_but_its_move_is_not() {
+    // MODE-2: `unique copy x` is a deep copy, so the result owns no block of
+    // `p` and leaves unique (flow clears its sources).
+    unique_of_a_view(false).valid();
+    // A consumer that fused the copy into `take x` would return `p`'s block.
+    assert_eq!(
+        unique_of_a_view(true).kinds(),
+        vec![ViolationKind::TypeMismatch {
+            entity: "value modes"
+        }]
+    );
+}

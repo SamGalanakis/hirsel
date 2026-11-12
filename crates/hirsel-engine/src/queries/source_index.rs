@@ -731,7 +731,9 @@ mod tests {
                 paths: vec![],
             },
         );
-        engine.register_specializations(std::slice::from_ref(&path));
+        engine
+            .register_specializations(std::slice::from_ref(&path))
+            .unwrap();
         assert!(engine.specialization_dependencies.contains_key(&id));
     }
     #[test]

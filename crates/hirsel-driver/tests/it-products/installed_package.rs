@@ -290,3 +290,77 @@ fn foreign_demanded_body_is_rejected_on_its_first_use() {
         compile("restored").unwrap();
     });
 }
+
+/// An installed body's semantic record carries the specializations it closes
+/// (GEN-6), which a request registers before selecting its roots. Bug: a
+/// refused record was skipped there, and the request compiled without its
+/// registration. Oracle: the refusal is the request's error, and the same
+/// request compiles once the record is restored.
+#[test]
+fn a_refused_installed_specialization_registration_is_the_request_error() {
+    hirsel_intern::jobs::with_compiler_stack(|| {
+        let directory = tempfile::tempdir().unwrap();
+        let package = PackageId {
+            name: "std".into(),
+            version: "1".into(),
+        };
+        let source_root = directory.path().join("std");
+        std::fs::create_dir(&source_root).unwrap();
+        let manifest = source_root.join("hirsel.json");
+        std::fs::write(
+            source_root.join("math.hir"),
+            "pub signature Source {\n  size width\n}\npub implementation five: Source {\n  size width = 5\n}\n\
+             fn inner[A: implementation Source]() -> u64 uses {} { A.width }\n\
+             pub fn outer() -> u64 uses {} { inner with (A = five)() }\n",
+        )
+        .unwrap();
+        std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"std","version":"1"},"sources":[{"path":"math.hir","module":["math"]}],"dependencies":[]}"#).unwrap();
+        let products = directory.path().join("products");
+        COMPILER.precompute_package(&manifest, &products).unwrap();
+        std::fs::remove_dir_all(&source_root).unwrap();
+        let outer = hirsel_syntax::DefPath(hirsel_syntax::ItemPath {
+            package: package.clone(),
+            modules: vec!["math".into()],
+            name: "outer".into(),
+        });
+        let installed = DirStore::new(directory.path().join("index"))
+            .with_read_only_root(products.clone())
+            .installed_package(&package, COMPILER.identity())
+            .unwrap();
+        let semantic = installed.definition(&outer).unwrap().unwrap().record;
+        drop(installed);
+        let compile = |name: &str| {
+            let config = CompileConfig {
+                store: Arc::new(
+                    DirStore::new(directory.path().join(name))
+                        .with_read_only_root(products.clone()),
+                ),
+                ..Default::default()
+            };
+            CompilerRequests::for_host(COMPILER, config).execute_request(&CompileRequest::source(
+                "pub fn main()->Result[(),()]{if std@1/math.outer()==5u64{Ok(())}else{Error(())}}\n",
+                &hirsel_engine::default_context(),
+                CompileOperation::Tir { definition: None },
+            ))
+        };
+        let store = hirsel_artifact_store::Store::new(products.clone());
+        let path = store.output_path(semantic);
+        let payload = store.get_owned(semantic).unwrap().to_vec();
+        let original = std::fs::read(&path).unwrap();
+        let at = original
+            .windows(payload.len())
+            .position(|bytes| bytes == payload)
+            .unwrap();
+        let mut damaged = original.clone();
+        damaged[at] ^= 1;
+        std::fs::write(&path, damaged).unwrap();
+        // Damaged first: a compile in this process memoizes what it verified.
+        let Err(error) = compile("damaged") else {
+            panic!("a refused installed semantic record compiled");
+        };
+        let error = error.to_string();
+        assert!(error.contains("installed semantic input"), "{error}");
+        std::fs::write(&path, original).unwrap();
+        compile("restored").unwrap();
+    });
+}

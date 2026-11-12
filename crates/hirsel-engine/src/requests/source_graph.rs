@@ -559,7 +559,7 @@ fn plan_source(
     let selection = planner.selection;
     // Capturing the footprint and the Run and native inputs can still name a
     // specialization (GEN-6); select again until no new root appears.
-    let mut definitions = selected_definitions(engine);
+    let mut definitions = selected_definitions(engine)?;
     let mut run_error = None;
     let (footprint, run_inputs, catalogue) = loop {
         let footprint = match engine.front_input_footprint(&definitions) {
@@ -608,7 +608,7 @@ fn plan_source(
         } else {
             None
         };
-        let selected = selected_definitions(engine);
+        let selected = selected_definitions(engine)?;
         if selected == definitions {
             break (footprint, run_inputs, catalogue);
         }
@@ -662,7 +662,7 @@ pub fn prepare_source_scope(
     }
     // Headers this request produces are charged to its existing partition.
     engine.headers_hosted = true;
-    let definitions = selected_definitions(engine);
+    let definitions = selected_definitions(engine)?;
     let generators = engine
         .front_generator_roots(&definitions)
         .map_err(|error| engine_error(engine, error))?;
@@ -852,7 +852,7 @@ pub fn install(
             );
         }
     }
-    let current_definitions = selected_definitions(engine);
+    let current_definitions = selected_definitions(engine)?;
     if current_definitions != definitions {
         let mismatch = definitions
             .iter()
@@ -1488,12 +1488,17 @@ fn runtime_failure(
 
 /// Every indexed definition and required source root, after registering the
 /// specializations they name.
-pub fn selected_definitions(engine: &mut QueryEngine) -> Vec<DefPath> {
+pub fn selected_definitions(engine: &mut QueryEngine) -> Result<Vec<DefPath>, ToolError> {
+    let register = |engine: &mut QueryEngine, roots: &[DefPath]| {
+        engine
+            .register_specializations(roots)
+            .map_err(|error| engine_error(engine, error))
+    };
     let indexed = engine.indexed_definitions();
-    engine.register_specializations(&indexed);
+    register(engine, &indexed)?;
     let required = engine.front_source_roots();
-    engine.register_specializations(&required);
-    indexed
+    register(engine, &required)?;
+    Ok(indexed
         .into_iter()
         .chain(engine.front_source_roots())
         .chain(
@@ -1509,7 +1514,7 @@ pub fn selected_definitions(engine: &mut QueryEngine) -> Vec<DefPath> {
         )
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
-        .collect()
+        .collect())
 }
 
 type FrontWork = std::collections::BTreeMap<(DefPath, hirsel_query_products::QueryKind), u64>;

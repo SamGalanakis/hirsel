@@ -1873,9 +1873,13 @@ impl QueryEngine {
         self.catalog
             .installed
             .get(&path.0.package)
-            // A refused descriptor is installed, not absent: its refusal
-            // surfaces when the definition is read, never as a source fallback.
-            // Callers enumerate every source path, so this decodes nothing.
+            // A refused descriptor is installed, not absent, so no user or
+            // other package source can supply the path, and every read of its
+            // descriptor, semantic record, body or registration is refused.
+            // Its resolution and signature read only the image's own source
+            // text, which the header authenticates and which needs no
+            // descriptor (`materialize_resolution_input`). Callers enumerate
+            // every source path, so this decodes nothing.
             .is_some_and(|owner| owner.installs(path))
     }
     pub(crate) fn installed_semantic_input(

@@ -316,7 +316,7 @@ fn registered_capture(
         .load_program(&manifest)
         .unwrap();
     let indexed = program.engine.indexed_definitions();
-    program.engine.register_specializations(&indexed);
+    program.engine.register_specializations(&indexed).unwrap();
     let roots = program.engine.front_source_roots();
     let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
     let weight = MemoryWeight {

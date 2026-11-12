@@ -2769,8 +2769,11 @@ impl QueryEngine {
     /// is installed before the immutable signature snapshot is captured, and
     /// each becomes a required source root. Callers register before selecting
     /// their roots. Only resolution runs here; a body that fails to resolve or names an
-    /// unavailable specialization reports it from its own worker outcome.
-    pub fn register_specializations(&mut self, definitions: &[DefPath]) {
+    /// unavailable specialization reports it from its own worker outcome. An
+    /// installed definition whose semantic record is refused fails the
+    /// registration: its specializations are not known, so nothing selected
+    /// after it would be complete.
+    pub fn register_specializations(&mut self, definitions: &[DefPath]) -> Result<(), QueryError> {
         let mut pending: Vec<_> = definitions.iter().map(DefId::intern).collect();
         let mut seen = hirsel_syntax::DefMap::default();
         while let Some(id) = pending.pop() {
@@ -2787,8 +2790,8 @@ impl QueryEngine {
             let dependencies = if self.installed_definition(definition) {
                 // The immutable package already published exact registrations.
                 // Reading them does not resolve or reconstruct its With body.
-                let Ok(Some(record)) = self
-                    .installed_semantic_input(definition, hirsel_engine_store::MAX_RECORD as u64)
+                let Some(record) = self
+                    .installed_semantic_input(definition, hirsel_engine_store::MAX_RECORD as u64)?
                 else {
                     continue;
                 };
@@ -2818,6 +2821,7 @@ impl QueryEngine {
                 }
             }
         }
+        Ok(())
     }
     /// Capture only demanded body inputs and immutable phase handles. Body
     /// checking starts on the admitted worker, using the same ordinary worker

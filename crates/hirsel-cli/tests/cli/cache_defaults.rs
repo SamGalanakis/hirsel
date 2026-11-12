@@ -457,9 +457,15 @@ fn check_root_and_dependency_cache(
                 .load_package_declarations(library)
                 .unwrap();
             let indexed = declarations.engine.indexed_definitions();
-            declarations.engine.register_specializations(&indexed);
+            declarations
+                .engine
+                .register_specializations(&indexed)
+                .unwrap();
             let required = declarations.engine.front_source_roots();
-            declarations.engine.register_specializations(&required);
+            declarations
+                .engine
+                .register_specializations(&required)
+                .unwrap();
             indexed
                 .into_iter()
                 .chain(declarations.engine.front_source_roots())

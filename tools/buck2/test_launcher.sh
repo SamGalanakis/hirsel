@@ -9,9 +9,7 @@
 #
 # TEST_SHARD_INDEX=<i> of TEST_TOTAL_SHARDS=<n> (Bazel's variables, i from 0)
 # runs the i-th of n cost-balanced parts of the listed cases, weighted by
-# HIRSEL_TEST_COSTS when it names a cost table. Given a filter or a value
-# argument other than `--skip`, every shard but the first runs nothing, and
-# the first runs the whole selection.
+# HIRSEL_TEST_COSTS when it names a cost table. Filters intersect that deal.
 set -eu
 if [ -n "${HIRSEL_TEST_REPORTER:-}" ] && [ -z "${HIRSEL_TEST_REPORT_ACTIVE:-}" ]; then
   exec python3 "$HIRSEL_TEST_REPORTER" sh "$0" "$@"
@@ -468,9 +466,9 @@ if "$inventory"; then
   fi
 fi
 # A binary with per-case widths has one shard set per width group, and the
-# measured shards (empty group) for its undeclared cases. An unfiltered shard
-# deals only its own group's cases.
-if [ -n "$case_cpus" ] && [ -n "$shard" ] && ! "$filtered"; then
+# measured shards (empty group) for its undeclared cases. Every shard deals
+# only its own group's cases, including when filters are present.
+if [ -n "$case_cpus" ] && [ -n "$shard" ]; then
   cases="$(printf '%s\n' "$cases" | awk -v declared="$case_cpus" -v group="$cpu_group" '
     BEGIN { n = split(declared, rows, " "); for (i = 1; i <= n; i++) { split(rows[i], f, "="); width[f[1]] = f[2] } }
     NF && (($0 in width) ? width[$0] : "") == group')"
@@ -478,52 +476,50 @@ fi
 if [ -n "$shard" ]; then
   index="${shard%/*}"
   count="${shard#*/}"
-  if "$filtered"; then
-    [ "$index" -eq 1 ] || { echo "shard $shard: arguments select the cases; shard 1 runs them"; report_empty_partition; exit 0; }
-  else
-    # Deal only the bodies this run executes. A case ignored in this mode
-    # would leave a shard holding only it running nothing, and the reporter
-    # refuses a zero-body run that is not an empty partition.
+  # Deal only the bodies this run executes. A case ignored in this mode
+  # would leave a shard holding only it running nothing, and the reporter
+  # refuses a zero-body run that is not an empty partition.
+  if ! "$filtered"; then
     case " $* " in
-      *" --ignored "* | *" --include-ignored "*) ;;
-      *)
-        ignored="$(list_cases --ignored "$@")"
-        if [ -n "$ignored" ]; then
-          cases="$(printf '%s\n' "$cases" | awk -v ignored="$ignored" '
-            BEGIN { n = split(ignored, rows, "\n"); for (i = 1; i <= n; i++) skip[rows[i]] = 1 }
-            NF && !($0 in skip)')"
-        fi ;;
+    *" --ignored "* | *" --include-ignored "*) ;;
+    *)
+      ignored="$(list_cases --ignored "$@")"
+      if [ -n "$ignored" ]; then
+        cases="$(printf '%s\n' "$cases" | awk -v ignored="$ignored" '
+          BEGIN { n = split(ignored, rows, "\n"); for (i = 1; i <= n; i++) skip[rows[i]] = 1 }
+          NF && !($0 in skip)')"
+      fi ;;
     esac
-    # Longest-first greedy assignment of the cost table's rows
-    # (HIRSEL_TEST_COSTS: `case<TAB>seconds`, tools/buck2/test_costs.py) in
-    # this shard set's width group; a listed case without a row goes to the
-    # shard its name hashes to. A case's shard depends only on the table and
-    # its name, never on which other cases are live, so tools/consumers maps a
-    # case to its shard without building the harness. A binary without a
-    # table deals the live cases at equal cost in name order.
-    if [ -n "$costs" ]; then
-      owned="$(awk -F '\t' -v declared="$case_cpus" -v group="$cpu_group" '
-        BEGIN { n = split(declared, rows, " "); for (i = 1; i <= n; i++) { split(rows[i], f, "="); width[f[1]] = f[2] } }
-        NF && (($1 in width) ? width[$1] : "") == group { printf "%.3f\t%s\n", $2 + 0, $1 }' "$costs" |
-        LC_ALL=C sort -t "$(printf '\t')" -k1,1nr -k2,2 |
-        awk -F '\t' -v index_="$index" -v count="$count" '{
-          best = 1; for (s = 2; s <= count; s++) if (load[s] < load[best]) best = s
-          load[best] += $1; if (best == index_) print $2 }')"
-      cases="$(printf '%s\n' "$cases" | awk -F '\t' -v costs="$costs" -v owned="$owned" -v index_="$index" -v count="$count" '
-        BEGIN {
-          for (i = 1; i < 256; i++) code[sprintf("%c", i)] = i
-          while ((getline row < costs) > 0) { split(row, f, "\t"); measured[f[1]] = 1 }
-          n = split(owned, rows, "\n"); for (i = 1; i <= n; i++) mine[rows[i]] = 1
-        }
-        NF {
-          if ($0 in measured) { if ($0 in mine) print; next }
-          h = 0; for (i = 1; i <= length($0); i++) h = (h * 31 + code[substr($0, i, 1)]) % 2147483647
-          if (h % count + 1 == index_) print
-        }' | LC_ALL=C sort)"
-    else
-      cases="$(printf '%s\n' "$cases" | awk 'NF' | LC_ALL=C sort |
-        awk -v index_="$index" -v count="$count" '{ if ((NR - 1) % count + 1 == index_) print }')"
-    fi
+  fi
+  # Longest-first greedy assignment of the cost table's rows
+  # (HIRSEL_TEST_COSTS: `case<TAB>seconds`, tools/buck2/test_costs.py) in
+  # this shard set's width group; a listed case without a row goes to the
+  # shard its name hashes to. A case's shard depends only on the table and
+  # its name, never on which other cases are live, so tools/consumers maps a
+  # case to its shard without building the harness. A binary without a
+  # table deals the live cases at equal cost in name order.
+  if [ -n "$costs" ]; then
+    owned="$(awk -F '\t' -v declared="$case_cpus" -v group="$cpu_group" '
+      BEGIN { n = split(declared, rows, " "); for (i = 1; i <= n; i++) { split(rows[i], f, "="); width[f[1]] = f[2] } }
+      NF && (($1 in width) ? width[$1] : "") == group { printf "%.3f\t%s\n", $2 + 0, $1 }' "$costs" |
+      LC_ALL=C sort -t "$(printf '\t')" -k1,1nr -k2,2 |
+      awk -F '\t' -v index_="$index" -v count="$count" '{
+        best = 1; for (s = 2; s <= count; s++) if (load[s] < load[best]) best = s
+        load[best] += $1; if (best == index_) print $2 }')"
+    cases="$(printf '%s\n' "$cases" | awk -F '\t' -v costs="$costs" -v owned="$owned" -v index_="$index" -v count="$count" '
+      BEGIN {
+        for (i = 1; i < 256; i++) code[sprintf("%c", i)] = i
+        while ((getline row < costs) > 0) { split(row, f, "\t"); measured[f[1]] = 1 }
+        n = split(owned, rows, "\n"); for (i = 1; i <= n; i++) mine[rows[i]] = 1
+      }
+      NF {
+        if ($0 in measured) { if ($0 in mine) print; next }
+        h = 0; for (i = 1; i <= length($0); i++) h = (h * 31 + code[substr($0, i, 1)]) % 2147483647
+        if (h % count + 1 == index_) print
+      }' | LC_ALL=C sort)"
+  else
+    cases="$(printf '%s\n' "$cases" | awk 'NF' | LC_ALL=C sort |
+      awk -v index_="$index" -v count="$count" '{ if ((NR - 1) % count + 1 == index_) print }')"
   fi
 fi
 # Deal every original case before removing isolated bodies, so unrelated

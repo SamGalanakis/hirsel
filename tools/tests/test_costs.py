@@ -40,7 +40,7 @@ class Costs(unittest.TestCase):
 
     def test_inventory_keeps_macro_and_ignored_names_and_stops_at_other_targets(self):
         binary = costs.SHARDED[0]
-        lines = [f'[date] ✓ Pass: root//:{binary}-shard-1 (1:02.3s)',
+        lines = [f'[date] ✓ Pass: root//:{binary}-inventory (1:02.3s)',
                  '---- STDOUT ----', 'generated::case_0: test', 'ignored::slow: test',
                  '✓ Pass: root//:other (0.1s)', 'unrelated: test']
         self.assertEqual(costs.inventory(lines), {binary: {'generated::case_0', 'ignored::slow'}})

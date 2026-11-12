@@ -17,8 +17,9 @@ The stamp records, for each part of the build inputs, what its generation
 read (`Reads`: file contents, existence tests and glob matches, including the
 generator's own code) and the outputs it wrote. A part is stale when an output
 is missing or edited or when anything it read reads differently, so an edit
-to a file generation never reads (documentation, a corpus program) regenerates
-nothing, and generation writes an output only when its bytes change.
+to a file generation never reads, such as documentation, regenerates nothing.
+Corpus headers supply swept-run counts for the weighted conformance plan.
+Generation writes an output only when its bytes change.
 """
 
 from __future__ import annotations

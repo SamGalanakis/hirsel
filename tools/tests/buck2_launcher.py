@@ -104,9 +104,10 @@ class CpuRequests(unittest.TestCase):
     def test_exact_requirements_override_measurement_and_focus(self):
         for mode in ('pool', 'focus'):
             module = self.platforms(mode)
-            # A whole-binary width, and one width group of a per-case binary.
-            for binary, group, cpu in [('hirsel-cli-test-free', 0, 8), ('hirsel-cli-test-cli', 4, 4)]:
-                measured = module['TEST_REQUESTS'][binary]
+            # Physical widths of two per-case groups and a whole binary.
+            for binary, group, cpu in [('hirsel-cli-test-free', 8, 8),
+                                       ('hirsel-cli-test-cli', 4, 4), ('hirsel-cli-test-cpu_pool_8', 0, 8)]:
+                measured = module['TEST_REQUESTS'].get(binary, module['DEFAULT_TEST_REQUEST'])
                 request = module['test_request'](binary, group)
                 self.assertEqual(request, [cpu, *measured[1:]])
                 props = module['test_executor'](*request, exact_cpus=cpu)['remote_execution_properties']
@@ -344,6 +345,17 @@ class LauncherReporting(LauncherFixture):
                 self.assertIn('root//:fixture-test-it', result.stderr)
                 self.assertIn('executed zero test bodies', result.stderr)
 
+    def test_filtered_ignored_only_body_is_not_an_empty_partition(self):
+        self.env['CASES'] = json.dumps({'pool::ignored': True})
+        statuses = []
+        for index in ('0', '1'):
+            self.env.update(TEST_TOTAL_SHARDS='2', TEST_SHARD_INDEX=index)
+            result = self.run_report(('pool::ignored',))
+            statuses.append(result.returncode)
+            if result.returncode:
+                self.assertIn('executed zero test bodies', result.stderr)
+        self.assertCountEqual(statuses, [2, 0])
+
     def test_an_unfiltered_shard_deals_only_the_bodies_its_run_executes(self):
         # A shard whose deal held only a body ignored outside the full gate ran
         # nothing and failed (hirsel-driver-test-it-shard-564).
@@ -524,8 +536,9 @@ class LauncherSelection(LauncherFixture):
         after = [self.run_cases(shard=f'{i}/2')[0]['cases'] for i in (1, 2)]
         for original, selected in zip(before, after):
             self.assertEqual(selected, [case for case in original if case != 'pool::smoke'])
-        explicit, _ = self.run_cases('--exact', 'pool::smoke', shard='1/2')
-        self.assertEqual(explicit['cases'], ['pool::smoke'])
+        explicit = [case for i in (1, 2)
+                    for case in self.run_cases('--exact', 'pool::smoke', shard=f'{i}/2')[0]['cases']]
+        self.assertEqual(explicit, ['pool::smoke'])
         self.env.pop('HIRSEL_TEST_ISOLATED_CASES')
         dedicated, _ = self.run_cases('--exact', 'pool::smoke')
         combined = [case for part in after for case in part] + dedicated['cases']
@@ -549,10 +562,16 @@ class LauncherSelection(LauncherFixture):
         wide, _ = self.run_cases(shard='1/1')
         self.assertEqual(wide['cases'], ['pool::smoke'])
         self.assertCountEqual([case for part in measured for case in part] + wide['cases'], everything)
-        # Any selection on fewer CPUs than a selected case declares is refused,
-        # sharded or not, and names the case; discovery still lists it.
+        # Filters on a narrow shard leave a wide case to its owning group.
         self.env |= dict(HIRSEL_TEST_CPU_GROUP='', HIRSEL_TEST_CPUS='1')
-        for args, shard in [(('--exact', 'pool::smoke'), '1/2'), (('pool::smoke',), ''), ((), '')]:
+        selected, _ = self.run_cases('--exact', 'pool::smoke', shard='1/2')
+        self.assertEqual(selected['cases'], [])
+        self.env |= dict(HIRSEL_TEST_CPU_GROUP='2', HIRSEL_TEST_CPUS='2')
+        selected, _ = self.run_cases('--exact', 'pool::smoke', shard='1/1')
+        self.assertEqual(selected['cases'], ['pool::smoke'])
+        # An unpartitioned selection still refuses insufficient physical width.
+        self.env |= dict(HIRSEL_TEST_CPU_GROUP='', HIRSEL_TEST_CPUS='1')
+        for args, shard in [(('pool::smoke',), ''), ((), '')]:
             self.observed.unlink(missing_ok=True)
             env = self.env | ({'TEST_SHARD_INDEX': '0', 'TEST_TOTAL_SHARDS': '2'} if shard else {})
             run = subprocess.run(['sh', str(LAUNCHER), 'harness', *args], cwd=self.root, env=env, capture_output=True, text=True)
@@ -704,10 +723,11 @@ class LauncherSelection(LauncherFixture):
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertEqual(json.loads(run.stdout), list(args))
 
-    def test_every_native_case_runs_on_the_pool_even_under_exact(self):
+    def test_every_native_case_runs_once_on_the_pool_even_under_exact(self):
         for case in CASES:
-            result, _ = self.run_cases(case, '--exact', '--include-ignored', shard='1/3')
-            self.assertEqual(result['cases'], [case])
+            actual = [name for i in (1, 2, 3) for name in
+                      self.run_cases(case, '--exact', '--include-ignored', shard=f'{i}/3')[0]['cases']]
+            self.assertEqual(actual, [case])
 
     def test_shards_cover_all_selected_cases_once(self):
         actual = []
@@ -752,11 +772,18 @@ class LauncherSelection(LauncherFixture):
             actual.extend(result['cases'])
         self.assertCountEqual(actual, CASES)
 
-    def test_filtered_shards_use_first_shard_only(self):
-        for shard in ('1/3', '2/3', '3/3'):
-            result, _ = self.run_cases('full_gate_', '--ignored', shard=shard)
-            self.assertEqual(set(result['cases']),
-                             {name for name in CASES if 'full_gate_' in name} if shard == '1/3' else set())
+    def test_filtered_cases_keep_their_cost_table_owner(self):
+        costs = self.root / 'costs.tsv'
+        costs.write_text('pool::full_gate_heap\t9\npool::full_gate_prefix\t1\npool::smoke\t2\n')
+        self.env['HIRSEL_TEST_COSTS'] = str(costs)
+        for shard in ('1/2', '2/2'):
+            baseline, _ = self.run_cases('--include-ignored', shard=shard)
+            selected, _ = self.run_cases('pool::', '--include-ignored', shard=shard)
+            self.assertEqual(selected['cases'], [name for name in baseline['cases'] if name.startswith('pool::')])
+            for name in selected['cases']:
+                exact, _ = self.run_cases('--exact', name, '--include-ignored', shard=shard)
+                self.assertEqual(exact['cases'], [name])
+        self.assertTrue(self.run_cases('full_gate_', '--ignored', shard='2/2')[0]['cases'])
 
     def test_shard_listing_names_the_same_cases_as_shard_execution(self):
         for shard in ('1/2', '2/2'):
@@ -880,7 +907,7 @@ print(json.dumps(dict(cache=str(cache), results=os.environ['HIRSEL_RESULTS_DIR']
 
     def test_failure_and_filtered_empty_shard_clean_up_and_preserve_exit(self):
         for args, env in [((), {}), (('only-this',), dict(TEST_TOTAL_SHARDS='2', TEST_SHARD_INDEX='1'))]:
-            run = self.launch_probe("import os, sys\nif '--list' in sys.argv:\n    print('only-this: test'); sys.exit(0)\nprint(os.environ['XDG_CACHE_HOME'])\nsys.exit(17)\n",
+            run = self.launch_probe("import os, sys\nif '--list' in sys.argv:\n    print('only-this: test'); sys.exit(0)\nif '' in sys.argv: sys.exit(0)\nprint(os.environ['XDG_CACHE_HOME'])\nsys.exit(17)\n",
                                     args=args, env=self.env | env)
             if not args:
                 self.assertEqual(run.returncode, 17, run.stderr)
@@ -936,6 +963,7 @@ class LauncherBinaries(unittest.TestCase):
             harness.chmod(0o755)
             env = os.environ | dict(
                 HIRSEL_TEST_TMPDIR='buck-out/tmp/cargo-target-tmpdir', HIRSEL_TEST_CWD='crates/pkg',
+                HIRSEL_SCRATCH_OWNER=str(SCRATCH_OWNER),
                 LLVM_SYS_231_PREFIX=str(root / 'llvm'),
                 HIRSEL_TEST_BIN_EXE_DIR='buck-out/tmp/cargo-bin-exe/pkg-test-it-harness',
                 HIRSEL_TEST_BIN_EXES='tool=buck-out/art/__pkg-bin-tool__/tool')

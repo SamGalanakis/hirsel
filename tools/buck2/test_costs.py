@@ -37,7 +37,7 @@ CASE = event_logs.CASE_COST
 
 def binary_of(target):
     """A test target's binary: its shards and its per-case width shards."""
-    return re.sub(r'(-cpus-\d+)?-shard-\d+$', '', target)
+    return re.sub(r'(-cpus-\d+)?-shard-\d+$', '', target.removesuffix('-inventory'))
 
 
 def inventory(lines):

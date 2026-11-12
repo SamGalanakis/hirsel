@@ -375,7 +375,7 @@ def select(root, paths, graph, inventories, owners=None, reasons=None, limit=LIM
     """Affected targets, nearest owner first; the first `limit` (0: all) are kept.
     `cut` receives the targets past the limit."""
     sys.path.insert(0, str(root / 'tools/buck2'))
-    from sync import CONFORMANCE_SHARDS, CONSUMER_CASES
+    from sync import conformance_plan, CONSUMER_CASES
     mapped = assignments(root, graph, inventories)
     replay_cells = {target for target, attrs in graph.items()
                     if 'HIRSEL_REPLAY_CELL' in attrs.get('extra_env', {})}
@@ -437,7 +437,11 @@ def select(root, paths, graph, inventories, owners=None, reasons=None, limit=LIM
     for file in conformance:
         if any(re.search(r'\b' + re.escape(module) + r'\.', file.read_text()) for module in modules):
             chosen.add(file.relative_to(root).as_posix())
-    ordinary |= {f'root//:gate-conformance-shard-{corpus_shard(path, CONFORMANCE_SHARDS)}' for path in chosen}
+    if chosen:
+        plan = conformance_plan()
+        ordinary |= {f'root//:gate-conformance-shard-{index}' for path in chosen
+                     for index, part in enumerate(plan, 1)
+                     if corpus_shard(path, part['count']) == part['index']}
     # Ownership is established by Buck's source graph, never by test status.
     direct = {}
     for target, attrs in graph.items():

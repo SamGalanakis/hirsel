@@ -318,12 +318,15 @@ class GeneratedParts(unittest.TestCase):
     def buck(self):
         return (self.root / 'BUCK').read_text()
 
-    def test_a_documentation_or_corpus_program_edit_regenerates_nothing(self):
+    def test_a_documentation_edit_regenerates_nothing(self):
         self.edit('README.md', 'A different readme\n')
         self.edit('docs/notes.md', 'notes\n')
-        program = next((self.root / 'conformance').rglob('*.hir')).relative_to(self.root)
-        self.edit(program, '// edited\n')
         self.assertEqual(self.sync('--if-stale'), [])
+
+    def test_a_swept_corpus_case_regenerates_the_weighted_shard_inputs(self):
+        self.edit('conformance/plan-fixture.hir', '// cuts: 1..=40\nfn main() {}\n')
+        self.assertEqual(self.sync('--if-stale'), ['first-party'])
+        self.assertIn('gate-conformance-shard-', self.buck())
 
     def test_a_manifest_edit_regenerates_both_parts_and_rewrites_only_what_changed(self):
         # Cargo's dev profile reaches no Buck configuration: both parts are
@@ -365,10 +368,33 @@ class GeneratedParts(unittest.TestCase):
         self.assertIn('doctests = True', self.library(crate.parents[1].name))
 
 
+class ConformanceShards(unittest.TestCase):
+    def test_timing_weighted_refinement_covers_every_hash_once(self):
+        # One old bucket took 1200 s over twelve runs; another took 120 s.
+        samples = [(1200.0, 12), (120.0, 12)]
+        cases = {f'conformance/CASE-{i}.hir': 1 for i in range(24)}
+        plan = sync.conformance_plan(cases, samples=samples, target_seconds=480)
+        self.assertGreater(len(plan), 2)
+        for name in [*cases, 'conformance/deleted-pending-case.hir']:
+            owners = [part for part in plan if sync.corpus_hash(name) % part['count'] == part['index'] - 1]
+            self.assertEqual(len(owners), 1, name)
+        self.assertLessEqual(max(part['seconds'] for part in plan), 480)
+        self.assertEqual(plan, sync.conformance_plan(dict(reversed(list(cases.items()))), samples=samples, target_seconds=480))
+
+    def test_current_corpus_plan_fits_the_eight_minute_prediction(self):
+        plan = sync.conformance_plan()
+        self.assertLessEqual(max(part['seconds'] for part in plan), 480)
+
+    def test_indivisible_slow_case_is_reported_without_unbounded_refinement(self):
+        plan = sync.conformance_plan({'conformance/slow.hir': 20}, samples=[(100.0, 1)], target_seconds=480)
+        self.assertEqual(len(plan), 1)
+        self.assertEqual(plan[0]['seconds'], 2000)
+
+
 class NativePoolRouting(unittest.TestCase):
     def test_no_campaign_implicitly_selects_the_host(self):
         self.assertTrue(sync.GATE_TESTS)
-        for stage in sync.GATE_TESTS:
+        for stage in sync.GATE_TESTS + sync.conformance_tests():
             self.assertFalse(stage.get('host', False), stage['name'])
 
     def test_filtered_native_entry_has_no_global_cover_dependency(self):

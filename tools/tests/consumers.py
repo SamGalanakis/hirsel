@@ -130,8 +130,10 @@ class Consumers(unittest.TestCase):
         selected = consumers.select(ROOT, [path], graph, inventories)
         mapped = consumers.assignments(ROOT, graph, inventories)
         self.assertIn(mapped['hirsel-driver-test-it-stdlib', 'toml_upstream_25::generated_00'], selected)
-        from sync import CONFORMANCE_SHARDS
-        target = f'root//:gate-conformance-shard-{consumers.corpus_shard(corpus, CONFORMANCE_SHARDS)}'
+        from sync import conformance_plan
+        index, = [i for i, part in enumerate(conformance_plan(), 1)
+                  if consumers.corpus_shard(corpus, part['count']) == part['index']]
+        target = f'root//:gate-conformance-shard-{index}'
         self.assertIn(target, selected)
         self.assertNotIn('root//:hirsel-llvm-unittest', selected)
 

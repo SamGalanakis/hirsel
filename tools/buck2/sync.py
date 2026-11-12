@@ -468,14 +468,13 @@ def cost_coverage(inventories: dict[str, set[str]]) -> list[str]:
 def check_cost_coverage() -> list[str]:
     """Ask libtest on the pool, including macro-generated and ignored cases.
 
-    An empty positional filter makes shard 1 list the whole binary. This runs
-    no test bodies, and avoids maintaining a second Rust/macro parser here.
+    Each unsharded inventory target lists the whole binary, including every
+    CPU width. This runs no bodies and does not bypass execution sharding.
     """
-    from test_costs import configured_targets, inventory
+    from test_costs import inventory
 
-    targets = [f"//:{configured_targets(binary)[0]}" for binary in SHARDED]
-    command = [str(ROOT / ".buck2/bin/buck2"), "test", "-c", "hirsel.tests=focus", *targets, "--",
-               "--test-arg=--list", "--test-arg=--include-ignored", "--test-arg=--format=terse", "--test-arg="]
+    targets = [f"//:{binary}-inventory" for binary in SHARDED]
+    command = [str(ROOT / ".buck2/bin/buck2"), "test", "-c", "hirsel.tests=focus", *targets]
     result = subprocess.run(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if result.returncode:
         return ["cost inventory failed:\n" + result.stdout]
@@ -496,9 +495,89 @@ CORPUS = [
     CORPUS_PACKAGES,
 ]
 GATE = dict(cwd="crates/hirsel-conformance")
-# The conformance stage runs as shards of the corpus by path hash, each well
-# under ten minutes on a loaded pool; tools/buck2/conformance.py sums their counts.
-CONFORMANCE_SHARDS = 16
+# Worst observed seconds per completed run in each of the old sixteen FNV
+# buckets, checked profile, census test-exec-deadline-829 (2026-11-12).
+# Buck reports aggregate corpus timings, not per-case times. Partial runs use
+# their completed corpus-case phase count, so interrupted work is charged too.
+CONFORMANCE_COST_SAMPLES = [
+    (1776.430034, 242), (2544.987386, 408), (2600.338646, 417), (2743.064426, 379),
+    (3373.085511, 374), (3326.110960, 411), (2525.621114, 371), (1521.658543, 559),
+    (2154.984391, 386), (1457.521846, 386), (1080.463428, 209), (2370.187586, 364),
+    (3205.234071, 419), (2989.816911, 410), (1906.374952, 367), (161.364401, 19),
+]
+CONFORMANCE_SHARD_SECONDS = 480
+
+
+def corpus_hash(path: str) -> int:
+    """hirsel-cli-args Shard::holds, including its u64 wrap."""
+    value = 0xcbf29ce484222325
+    for byte in path.encode():
+        value = ((value ^ byte) * 0x100000001b3) & ((1 << 64) - 1)
+    return value
+
+
+def conformance_plan(cases=None, *, samples=CONFORMANCE_COST_SAMPLES,
+                     target_seconds=CONFORMANCE_SHARD_SECONDS, reads=None):
+    """Refine each measured hash bucket until its largest predicted part fits.
+
+    A bucket r mod B is the disjoint union of r+B*j mod B*K, j in 0..K.
+    Thus the existing runner partitions execution, formatting and pending-path
+    checks identically. Selected-prefix shards retain their independent split.
+    Swept files are weighted by their number of runs, but remain indivisible.
+    """
+    if cases is None:
+        reads = reads or generated.Reads(ROOT)
+        cases = {}
+        for file in reads.glob(ROOT / "conformance", "**/*.hir"):
+            if "reports" in file.relative_to(ROOT / "conformance").parts:
+                continue
+            header = reads.text(file).splitlines()
+            runs = 1
+            for line in header:
+                line = line.strip()
+                if not line:
+                    continue
+                if not line.startswith("//"):
+                    break
+                if match := re.fullmatch(r"//\s*cuts:\s*(\d+)\.\.=(\d+)", line):
+                    runs = int(match[2]) - int(match[1]) + 1
+            cases[file.relative_to(ROOT).as_posix()] = runs
+    buckets = [[] for _ in samples]
+    for path, runs in sorted(cases.items()):
+        hashed = corpus_hash(path)
+        bucket = hashed % len(samples)
+        seconds, count = samples[bucket]
+        buckets[bucket].append((hashed, runs * seconds / count))
+    plan = []
+    for bucket, files in enumerate(buckets):
+        indivisible = collections.defaultdict(float)
+        for hashed, seconds in files:
+            indivisible[hashed] += seconds
+        limit = max(target_seconds, max(indivisible.values(), default=0))
+        parts = max(1, math.ceil(sum(indivisible.values()) / limit))
+        while True:
+            loads = [0.0] * parts
+            counts = [0] * parts
+            for hashed, seconds in files:
+                part = hashed // len(samples) % parts
+                loads[part] += seconds
+                counts[part] += 1
+            if max(loads) <= limit:
+                break
+            parts += 1
+        plan.extend(dict(index=bucket + 1 + len(samples) * part,
+                         count=len(samples) * parts, seconds=seconds, files=counts[part])
+                    for part, seconds in enumerate(loads))
+    return plan
+
+
+def conformance_tests(reads=None):
+    return [dict(name=f"gate-conformance-shard-{index}",
+                 binary="//:hirsel-conformance-bin-hirsel-conformance",
+                 args=["--check-format", "--shard", f"{part['index']}/{part['count']}"], **GATE)
+            for index, part in enumerate(conformance_plan(reads=reads), 1)]
+
+
 # The hourly run's native coverage stages (tools/main-runs). One process over
 # all of std took 931 s and 3.0 GiB, about 160 s of it the first module's source
 # audit, which each std shard pays once. 16 corpus shards took 838-1503 s each.
@@ -610,9 +689,6 @@ GATE_TESTS = [
            args=["--corpus", "--shard", f"{index}/{NATIVE_CORPUS_SHARDS}"],
            runtime_archives=archive_views(*CRANELIFT_VIEWS), **GATE)
       for index in range(1, NATIVE_CORPUS_SHARDS + 1)),
-    *(dict(name=f"gate-conformance-shard-{index}", binary="//:hirsel-conformance-bin-hirsel-conformance",
-           args=["--check-format", "--shard", f"{index}/{CONFORMANCE_SHARDS}"], **GATE)
-      for index in range(1, CONFORMANCE_SHARDS + 1)),
     *(dict(name=f"gate-conformance-selected-shard-{index}", binary="//:hirsel-conformance-bin-hirsel-conformance",
            args=["--check-format"], selected=["conformance_paths", "--path", index],
            measured_as="gate-conformance", **GATE)
@@ -1236,7 +1312,7 @@ def first_party(meta: dict) -> str:
         raise SystemExit("these binary and test roots do not install the memory guard; add "
                          "`hirsel_guard::install!();` (`#[cfg(test)]` in a library): " + ", ".join(unguarded))
     out.append("\n" + call("hirsel_native_selection", name="native-selection", collector="//:hirsel-conformance-bin-native-select", products=PRODUCTS, data=Raw(f"glob({starlark(expand(CORPUS), 4)})")))
-    for gate in GATE_TESTS:
+    for gate in GATE_TESTS + conformance_tests(READS):
         out.append("\n" + call("hirsel_command_test", **gate, products=PRODUCTS, data=Raw(f"glob({starlark(expand(CORPUS), 4)})")))
     for index, family in enumerate(("match_try_fields", "record_fields", "nested_loops_try", "closure_captures", "if_chain", "deep_nesting"), 1):
         name = f"gate-checker-scaling-shard-{index}"

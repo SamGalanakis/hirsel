@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Run the conformance validation and ratchet as its Buck2 shards and sum their counts.
 
-Each `//:gate-conformance-shard-<i>` runs `hirsel-conformance --check-format
---shard <i>/<n>` over the corpus files whose path hashes to it (tools/buck2/sync.py,
-CONFORMANCE_SHARDS). Buck2 prints a test's output only when it fails, so this
+Each `//:gate-conformance-shard-<i>` runs `hirsel-conformance --check-format`
+over a timing-weighted refinement of the corpus path hash (sync.py's
+conformance_plan). Buck2 prints a test's output only when it fails, so this
 reads the shards' output from the run's event log and prints the whole run's
 counts in `cargo run -p hirsel-conformance -- --check-format`'s lines. It fails
 when a shard fails or a shard's counts are missing.
@@ -26,7 +26,7 @@ BUCK2 = ROOT / '.buck2/bin/buck2'
 # The configuration tools/main-runs runs Buck2 with, so the daemon keeps one state.
 CONFIG = os.environ.get('HIRSEL_BUCK2_CONFIG', '').split()
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from sync import CONFORMANCE_SHARDS  # noqa: E402
+from sync import conformance_plan  # noqa: E402
 
 COUNTS = re.compile(r'^(whole corpus|in-gate corpus): (\d+) validated / (\d+) passing / (\d+) failing / (\d+) not implemented$')
 EXEMPT = re.compile(r'^corpus formatting: (\d+) intentional syntax rejections exempt$')
@@ -123,18 +123,19 @@ def main():
     if sys.argv[1:]:
         print(__doc__, file=sys.stderr)
         return 2
-    targets = [f'//:gate-conformance-shard-{index}' for index in range(1, CONFORMANCE_SHARDS + 1)]
+    shards = len(conformance_plan())
+    targets = [f'//:gate-conformance-shard-{index}' for index in range(1, shards + 1)]
     with event_logs.recorded('conformance') as event_log:
         status = subprocess.call([str(BUCK2), 'test', *CONFIG, '--event-log', str(event_log), *targets], cwd=ROOT)
         if status != 0:
             return status
         outputs = shard_outputs(event_log)
     try:
-        lines = summarize(outputs, CONFORMANCE_SHARDS)
+        lines = summarize(outputs, shards)
     except ValueError as error:
         print(f'conformance.py: {error}', file=sys.stderr)
         return 1
-    print(f'conformance.py: {CONFORMANCE_SHARDS} shards')
+    print(f'conformance.py: {shards} shards')
     print('\n'.join(lines))
     return 0
 

@@ -301,7 +301,8 @@ repository executor passes it to the stock runner because this pin ignores
 executor's absolute checkout path; no Buck patch or per-target override is used.
 
 Arguments after `--` go to Buck2's test runner: `--test-arg=<a>` passes one
-libtest argument. Test commands use the shared outer bound without overrides. A sharded binary given a case filter runs it all in shard 1. Check the output
+libtest argument. Test commands use the shared outer bound without overrides. A case filter intersects each shard's cost-table assignment and CPU-width group.
+Select the owning shards from `tools/consumers`, or every shard of the binary. Check the output
 for a nonzero case count. Every test runs on the pool by default, including
 native and full-gate cases. `-c hirsel.tests=host` explicitly opts into host
 execution; it still uses the pinned tool inputs. There are no implicit host
@@ -673,20 +674,20 @@ python3 tools/buck2/test_costs.py /tmp/costs.log   # writes the tables, prints w
 python3 tools/buck2/sync.py
 ```
 
-Shard flags never select cases; only positional filters do, and a filtered
-run executes in shard 1.
+Shard flags partition cases; positional filters intersect that partition.
+A filtered run keeps each measured case on its ordinary owning shard.
 
 `ISOLATED_TEST_CASES` in `test_requirements.bzl` gives an indivisible slow body
 its own `<binary>-isolated-<n>` target with the binary's existing resource request
 and deadline. The launcher removes it after ordinary cost assignment, preserving
-every other partition. Explicit body filters still work through shard 1. Main's
+every other partition. Explicit body filters run on their owning shards. Main's
 test query includes the dedicated targets, and full-gate selection cannot make
 one of them execute other bodies. The URI file vectors use this partition to
 avoid spending the stdlib aggregate's deadline on repeated checked executions.
 
 After regenerating stale build files, `sync.py --check` lists each cost-balanced
-binary's cases on the pool (including ignored and macro-generated cases, without
-running test bodies). It fails if more than 5% of the driver's cases have no
+binary's unsharded `-inventory` target on the pool, including ignored and
+macro-generated cases, without running test bodies. It fails if more than 5% of the driver's cases have no
 cost row, or if listing fails. The stdlib, front, rc and rt binaries warn at
 the same threshold until real gate results refresh their stale tables; no extra
 measurement campaigns run for them. Stale rows do not contribute to coverage. Prepare the worktree first;

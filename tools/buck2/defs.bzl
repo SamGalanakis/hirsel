@@ -323,6 +323,16 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
                 **common
             )
     isolated_common = {key: value for key, value in common.items() if key != "args"}
+    if costs:
+        _rust_test(
+            name = name + "-inventory",
+            args = common["args"] + ["--list", "--include-ignored"],
+            labels = [],
+            exec_compatible_with = _test_platform(name),
+            request = _request(name),
+            pool = not TESTS_ON_HOST,
+            **isolated_common
+        )
     for index, case in enumerate(isolated):
         _rust_test(
             name = "{}-isolated-{}".format(name, index + 1),

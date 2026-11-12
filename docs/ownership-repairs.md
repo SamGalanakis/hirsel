@@ -67,10 +67,10 @@ source spans without a rendering snapshot:
 ```sh
 python3 tools/buck2/prepare.py
 .buck2/bin/buck2 targets 'root//:'
-.buck2/bin/buck2 test //:hirsel-driver-test-it-shard-1 -- --test-arg=ownership_repairs_6
+.buck2/bin/buck2 test $(tools/consumers crates/hirsel-driver/tests/it/ownership_repairs_6.rs) -- --test-arg=ownership_repairs_6
 ```
 
-With a positional filter, shard 1 runs the complete selection (two Rust tests),
+The owning shards together run the filtered selection of two Rust tests,
 including the six reject fixtures and three execution configurations. These
 lane-private fixtures are not source-corpus/native-campaign registrations.
 No corpus selector is needed; a zero-test run is not evidence.

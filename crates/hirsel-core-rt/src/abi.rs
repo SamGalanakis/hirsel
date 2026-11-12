@@ -13,6 +13,64 @@ use crate::{
     Capacity, Context,
     block::{allocate, free, funding},
 };
+
+/// Open an empty explicit region. Opening admits nothing.
+#[unsafe(no_mangle)]
+pub extern "C" fn hirsel_core_region_open(chunk_bytes: usize) -> *mut crate::region::Region {
+    Box::into_raw(Box::new(crate::region::Region::new(chunk_bytes)))
+}
+
+/// # Safety
+/// Context and region are live, task-local, and exclusively used during this call.
+/// Size, alignment and charge describe the emitter's stable allocation. A null
+/// result is Capacity; under a grant the emitter routes it to failure cleanup.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_region_alloc(
+    context: *const Context,
+    region: *mut crate::region::Region,
+    bytes: usize,
+    align: usize,
+    charge: u64,
+    overflow: bool,
+) -> Allocation {
+    // SAFETY: emitter supplies live task-local region and context.
+    match unsafe { (&mut *region).allocate(&*context, bytes, align, (!overflow).then_some(charge)) }
+    {
+        Ok(p) => Allocation {
+            pointer: p.as_ptr(),
+            capacity: Capacity {
+                requested: 0,
+                available: 0,
+            },
+        },
+        Err(capacity) => Allocation {
+            pointer: ptr::null_mut(),
+            capacity,
+        },
+    }
+}
+
+/// Lower a live region allocation's charge, without moving published bytes.
+/// # Safety
+/// The sole destination writer owns a live allocation and proves its unused tail;
+/// retained is its new charge, no larger than its current charge.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_region_lower_charge(pointer: NonNull<u8>, retained: u64) {
+    // SAFETY: the caller holds the live allocation's sole writer.
+    unsafe {
+        crate::region::Region::lower_charge(pointer, retained);
+    }
+}
+
+/// # Safety
+/// Caller transfers sole ownership of an open region; its views have ended.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_region_close(region: *mut crate::region::Region) {
+    // SAFETY: every stable locator into this region has ended.
+    unsafe {
+        drop(Box::from_raw(region));
+    }
+}
 use std::ptr::{self, NonNull};
 
 #[repr(C)]

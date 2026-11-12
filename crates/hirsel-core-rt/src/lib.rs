@@ -7,6 +7,7 @@ hirsel_guard::install!();
 pub mod abi;
 pub mod block;
 pub mod limit;
+pub mod region;
 
 use limit::Funding;
 
@@ -68,5 +69,7 @@ impl Drop for Context {
     }
 }
 
+#[cfg(test)]
+mod region_tests;
 #[cfg(test)]
 mod tests;

@@ -750,9 +750,18 @@ impl SignatureSnapshot {
     }
     fn validation_state(&self) -> Result<Arc<ValidationState>, hirsel_validate::ViewRefusal> {
         let state = self.validation_universe()?;
+        let entry = self.validation_entry();
+        entry.hit();
         self.published
-            .get_or_init(|| self.publish_dependency_universes(&state));
+            .get_or_init(|| entry.filling(|| self.publish_dependency_universes(&state)));
         Ok(state)
+    }
+    /// The traced work that builds this snapshot's validation universe.
+    fn validation_entry(&self) -> hirsel_intern::attribution::Filled {
+        hirsel_intern::attribution::Filled::keyed(
+            hirsel_intern::attribution::layer::VALIDATION_UNIVERSE,
+            std::ptr::from_ref(self) as usize,
+        )
     }
     /// Publish the summary of every source dependency this snapshot computed
     /// from its full table. A dependency is never under check here: its
@@ -827,14 +836,23 @@ impl SignatureSnapshot {
         Ok(demand)
     }
     fn validation_universe(&self) -> Result<Arc<ValidationState>, hirsel_validate::ViewRefusal> {
+        let entry = self.validation_entry();
         if let Some(state) = self.validation.lock().unwrap().clone() {
+            entry.hit();
             return Ok(state);
         }
         // The input lock serializes builders; a later one finds the state.
         let mut inputs = self.validation_inputs.lock().unwrap();
         if let Some(state) = self.validation.lock().unwrap().clone() {
+            entry.hit();
             return Ok(state);
         }
+        entry.filling(|| self.build_validation_locked(&mut inputs))
+    }
+    fn build_validation_locked(
+        &self,
+        inputs: &mut std::sync::MutexGuard<'_, Option<ValidationCandidates>>,
+    ) -> Result<Arc<ValidationState>, hirsel_validate::ViewRefusal> {
         let previous = inputs
             .as_ref()
             .expect("validation inputs remain until a universe is published")
@@ -854,7 +872,7 @@ impl SignatureSnapshot {
             *demand.state.lock().unwrap() = Some(state.clone());
         }
         hirsel_intern::work::count(hirsel_intern::work::Counter::ValidationBaseBuilds);
-        *inputs = None;
+        **inputs = None;
         *self.validation.lock().unwrap() = Some(state.clone());
         Ok(state)
     }

@@ -91,7 +91,11 @@ impl TypeRecords {
         let mut todo = roots.to_vec();
         todo.reverse();
         while let Some(id) = todo.pop() {
-            if known.contains_key(&id) || numbers.contains_key(&id) {
+            if let Some(reference) = known.get(&id) {
+                entry(reference.output).hit();
+                continue;
+            }
+            if numbers.contains_key(&id) {
                 continue;
             }
             let value = row(id)?;
@@ -198,7 +202,14 @@ impl TypeRecords {
                 &dependencies,
                 order.len() > 1 || graph[root].contains(&root),
             )?;
-            let output = self.store.put_content(DOMAIN, &bytes)?;
+            let content = DOMAIN.identify(&bytes)?;
+            let written = entry(content.reference().output.0);
+            let output = written.filling(|| {
+                for dependency in &dependencies {
+                    entry(dependency.output).hit();
+                }
+                self.store.put_identified_content(content)
+            })?;
             for (member, id) in order.into_iter().enumerate() {
                 known.insert(
                     id,
@@ -220,30 +231,36 @@ impl TypeRecords {
             return None;
         }
         let mut known = self.decoded.lock().unwrap_or_else(|e| e.into_inner());
-        if !known.contains_key(&reference.key()) {
+        if known.contains_key(&reference.key()) {
+            entry(reference.output).hit();
+        } else {
             // Explicit DFS avoids growing a Rust/serde call stack with a deep
             // chain of components. External references must form a DAG.
             let mut active = HashSet::from([reference.output]);
             let mut stack = vec![(
                 reference,
-                component(self.store.as_ref(), reference)?,
+                entry(reference.output).filling(|| component(self.store.as_ref(), reference))?,
                 0usize,
             )];
-            while let Some((_, component, next)) = stack.last_mut() {
+            while let Some((reader, component, next)) = stack.last_mut() {
                 if let Some(dependency) = component.dependency((*next).try_into().ok()?) {
                     *next += 1;
+                    let reader = entry(reader.output);
                     if self.base.contains_key(&dependency) {
                         continue;
                     }
                     if let Some(ids) = known.get(&dependency.key()) {
+                        reader.filling(|| entry(dependency.output).hit());
                         ids.get(dependency.member as usize)?;
                     } else {
+                        reader.filling(|| entry(dependency.output).filling(|| ()));
                         if !active.insert(dependency.output) {
                             return None;
                         }
                         stack.push((
                             dependency,
-                            self::component(self.store.as_ref(), dependency)?,
+                            entry(dependency.output)
+                                .filling(|| self::component(self.store.as_ref(), dependency))?,
                             0,
                         ));
                     }
@@ -293,6 +310,13 @@ impl TypeRecords {
             .get(reference.member as usize)
             .copied()
     }
+}
+/// The traced work of one type component: its write or first read.
+fn entry(output: ContentHash) -> hirsel_intern::attribution::Filled {
+    hirsel_intern::attribution::Filled::keyed(
+        hirsel_intern::attribution::layer::TYPE_COMPONENT,
+        output,
+    )
 }
 pub(super) fn component(store: &dyn Contents, reference: TypeRef) -> Option<CheckedTypeComponent> {
     CheckedTypeComponent::open(store.get_content(reference.reference()).ok()?, reference)

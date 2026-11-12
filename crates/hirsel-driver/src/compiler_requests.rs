@@ -6,7 +6,16 @@ use std::path::Path;
 /// Explicit checks preserve this compiler's policy on immutable request graphs.
 pub trait CompilerRequestsExt {
     /// Populate per-definition source products without requiring a launch entry.
-    fn precompute_package(&self, manifest: &Path, output: &Path) -> Result<(), ToolError>;
+    fn precompute_package(&self, manifest: &Path, output: &Path) -> Result<(), ToolError> {
+        self.precompute_package_observed(manifest, output).map(drop)
+    }
+    /// Precompute, returning what the published products' work used, by
+    /// part; None when the root already held exactly this Precompute.
+    fn precompute_package_observed(
+        &self,
+        manifest: &Path,
+        output: &Path,
+    ) -> Result<Option<hirsel_engine_store::Observations>, ToolError>;
     /// Check a source or package, returning its current source diagnostics.
     fn check_path(&self, path: &Path) -> Result<CheckOutput, ToolError>;
     /// Check the source, then observe the accepted launch entry's unsafe reach.
@@ -22,7 +31,11 @@ pub trait CompilerRequestsExt {
     >;
 }
 impl CompilerRequestsExt for Compiler {
-    fn precompute_package(&self, manifest: &Path, output: &Path) -> Result<(), ToolError> {
+    fn precompute_package_observed(
+        &self,
+        manifest: &Path,
+        output: &Path,
+    ) -> Result<Option<hirsel_engine_store::Observations>, ToolError> {
         use crate::requests::{CompileOperation, CompileResult, CompilerRequests};
         use hirsel_engine::Verify;
         use hirsel_engine::memo::Retention;
@@ -45,6 +58,10 @@ impl CompilerRequestsExt for Compiler {
             store = store.with_installation_verifier(std::sync::Arc::default());
         }
         let store = std::sync::Arc::new(store);
+        // Recording is on for exactly the work that publishes: everything
+        // from here to the published header, on every thread it reaches.
+        let edges = std::sync::Arc::new(hirsel_intern::attribution::Edges::default());
+        let _traced = hirsel_intern::attribution::traced(edges.clone());
         config.store = store.clone();
         config.retention = Retention::Batch;
         config.hold_bytes = 0;
@@ -56,7 +73,7 @@ impl CompilerRequestsExt for Compiler {
         if installation_current(self, output, requests.input_limits()) {
             // The root already holds exactly this Precompute, and V's own
             // registration of its products loads. Nothing is written.
-            return Ok(());
+            return Ok(None);
         }
         let completed = requests.execute(manifest, CompileOperation::Precompute)?;
         if !matches!(completed.result, CompileResult::Precomputed { .. }) {
@@ -85,7 +102,11 @@ impl CompilerRequestsExt for Compiler {
             // V binds the header this run published, not what the root holds.
             let _ = installation.finish(header);
         }
-        Ok(())
+        drop(_traced);
+        Ok(Some(hirsel_engine_store::Observations::of(
+            &edges.take(),
+            &store.take_installation_uses(),
+        )))
     }
     fn check_path(&self, path: &Path) -> Result<CheckOutput, ToolError> {
         let config = self.configuration();

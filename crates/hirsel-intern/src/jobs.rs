@@ -128,8 +128,11 @@ fn map_with_state_spawn<T: Send, R: Send, S>(
     let stopped = AtomicBool::new(false);
     // Workers carry the spawning thread's instruction owner.
     let owner = crate::timings::instructions::current();
+    // And its traced work, so their store uses belong to it.
+    let traced = crate::attribution::carried();
     let worker = || {
         let _owner = crate::timings::instructions::carry(owner);
+        let _traced = traced.clone().enter();
         let mut state = initialize();
         let mut panicked = None;
         while !stopped.load(Ordering::Relaxed) {
@@ -252,6 +255,7 @@ pub fn with_compiler_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
         return work();
     }
     let owner = crate::timings::instructions::current();
+    let traced = crate::attribution::carried();
     std::thread::scope(|scope| {
         let thread = std::thread::Builder::new()
             .name("hirsel-compiler".into())
@@ -259,6 +263,7 @@ pub fn with_compiler_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
             .spawn_scoped(scope, || {
                 COMPILER_THREAD.set(true);
                 let _owner = crate::timings::instructions::carry(owner);
+                let _traced = traced.enter();
                 work()
             })
             .unwrap_or_else(|error| hirsel_guard::spawn_failed(COMPILER_STACK_BYTES, error));

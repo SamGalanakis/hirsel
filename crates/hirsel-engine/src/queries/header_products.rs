@@ -607,6 +607,7 @@ impl HeaderProducts {
     ) -> Option<Result<Arc<HeaderProduct>, QueryError>> {
         let cell = self.rows.get(&id)?;
         if let Some(product) = cell.get() {
+            header_entry(id).hit();
             return Some(Ok(product));
         }
         let demanded = self.produce(&mut self.signature_execution(), id);
@@ -627,6 +628,7 @@ impl HeaderProducts {
         let mut credit = 0;
         loop {
             if let Some(product) = cell.get() {
+                header_entry(id).hit();
                 return Some(Ok(product));
             }
             let mut working = None;
@@ -732,7 +734,7 @@ impl HeaderProducts {
             Arc::as_ptr(self)
         ));
         let outer = engine.take_header_refusal();
-        let result = engine.signature_query_local(id);
+        let result = header_entry(id).filling(|| engine.signature_query_local(id));
         let refusal = engine.take_header_refusal();
         engine.record_header_refusal(outer.or_else(|| refusal.clone()));
         if let Some(refusal) = refusal {
@@ -813,6 +815,7 @@ impl HeaderProducts {
         id: DefId,
         product: &HeaderProduct,
     ) -> SignatureOutput {
+        header_entry(id).hit();
         if engine.header_products.is_none() {
             engine.adopt_header_product(id, product);
         } else if let Some(entry) = &product.entry {
@@ -2296,4 +2299,9 @@ mod retention_tests {
             assert_eq!(budget.free(), 1 << 19);
         }
     }
+}
+
+/// The traced work that fills `id`'s row: one node per definition per run.
+fn header_entry(id: DefId) -> hirsel_intern::attribution::Filled {
+    hirsel_intern::attribution::Filled::keyed(hirsel_intern::attribution::layer::HEADER_PRODUCT, id)
 }

@@ -5,6 +5,7 @@
 #[cfg(test)]
 hirsel_guard::install!();
 
+pub mod attribution;
 pub mod jobs;
 pub mod memory;
 pub mod persist;

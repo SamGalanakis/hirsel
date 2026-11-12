@@ -22,6 +22,9 @@ pub trait RuntimeObserver: Send + Sync {
 fn key(id: QueryId) -> Key {
     (id.kind, id.address.0)
 }
+fn node(key: Key) -> hirsel_intern::attribution::Node {
+    (key.0, key.1.0)
+}
 fn id(key: Key) -> QueryId {
     QueryId {
         kind: key.0,
@@ -466,7 +469,10 @@ impl State {
                 query,
                 scratch: weight.scratch,
             };
-            let ran = catch_unwind(AssertUnwindSafe(|| task.run(&mut cx)));
+            let ran = catch_unwind(AssertUnwindSafe(|| {
+                let _running = hirsel_intern::attribution::run_as(node(query));
+                task.run(&mut cx)
+            }));
             let cpu_ns = thread_cpu_ns().saturating_sub(start);
             let elapsed_ns = self.elapsed();
             let charged = self.charged;
@@ -581,6 +587,7 @@ impl QueryContext for Context<'_> {
         Some(path.iter().map(|(query, _)| id(*query)).collect())
     }
     fn read(&mut self, dependency: QueryId) -> Outcome {
+        hirsel_intern::attribution::read(node(key(dependency)));
         self.state.stats.edges += 1;
         self.state.event(RuntimeEvent::Read {
             query: id(self.query),

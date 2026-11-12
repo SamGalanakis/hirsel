@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 mod dir;
 mod installed;
+mod observations;
 mod remote;
 mod request;
 pub mod scratch;
@@ -35,6 +36,7 @@ pub use installed::{
     InstalledSemanticInput, InstalledSpecializations, SEMANTIC_BODY, SEMANTIC_HEADER,
     SEMANTIC_INPUT, SEMANTIC_SOURCE,
 };
+pub use observations::{Observations, Used, Uses};
 pub use remote::RemoteStore;
 pub use request::RequestStore;
 

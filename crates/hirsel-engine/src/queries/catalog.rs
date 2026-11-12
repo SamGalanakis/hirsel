@@ -946,6 +946,14 @@ impl QueryEngine {
     /// Index an immutable source's ordinary declaration heads. A hit restores
     /// names and anchors only. Explicit parse/body queries demand syntax later.
     pub fn index_source(&mut self, file: FileId, context: &FileContext) -> Result<(), QueryError> {
+        hirsel_intern::attribution::Filled::of(self.file_part(file, context))
+            .filling(|| self.index_source_in_part(file, context))
+    }
+    fn index_source_in_part(
+        &mut self,
+        file: FileId,
+        context: &FileContext,
+    ) -> Result<(), QueryError> {
         let environment = self.package_environment(&context.package);
         if let Some((previous, inputs)) = self.indexed_sources.get_mut(&file)
             && previous == context

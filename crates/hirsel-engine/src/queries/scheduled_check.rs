@@ -78,6 +78,7 @@ struct RootInput {
 }
 #[derive(Clone)]
 struct FileInput {
+    part: hirsel_intern::attribution::Node,
     paths: Vec<RootInput>,
     lowering: LoweringPolicy,
     diagnostics: Vec<Diagnostic>,
@@ -457,6 +458,17 @@ enum Publication {
     Finished(Result<ProductRef, Reference>),
 }
 impl Publication {
+    /// The file whose part of the check this step does, if any.
+    fn file(&self) -> Option<usize> {
+        match *self {
+            Self::Roots { file, .. }
+            | Self::SelectInstances { file }
+            | Self::Instances { file, .. }
+            | Self::SelectStaged { file }
+            | Self::RuntimeStaged { file, .. } => Some(file),
+            _ => None,
+        }
+    }
     fn roots(file: usize) -> Self {
         Self::Roots { file, root: 0 }
     }
@@ -490,6 +502,13 @@ impl QueryTask for Task {
 impl Task {
     fn advance(&mut self, cx: &mut dyn QueryContext) -> Result<(), Reference> {
         loop {
+            // Each file's part of the check is its own traced work, so its
+            // store rows are found by reachability from that part.
+            let _part = self
+                .publication
+                .file()
+                .and_then(|file| self.files.get(file))
+                .map(|file| hirsel_intern::attribution::run_as(check_part(file)));
             match &mut self.publication {
                 Publication::Roots { file, root } => {
                     let file_index = *file;
@@ -1123,6 +1142,7 @@ impl QueryEngine {
             }
 
             let mut input = FileInput {
+                part: self.file_part(*file, context),
                 paths: Vec::new(),
                 lowering: *lowering,
                 diagnostics: Vec::new(),
@@ -1261,5 +1281,28 @@ impl QueryEngine {
             errors,
             _allowance: Arc::new(allowance),
         }))
+    }
+}
+
+/// The traced work of one file's part of the check. Its kind is no query's.
+fn check_part(file: &File) -> hirsel_intern::attribution::Node {
+    file.input.part
+}
+impl QueryEngine {
+    /// The check part of one source file, named by its package and logical
+    /// path, so indexing it and checking it are the same part in every order.
+    pub(crate) fn file_part(
+        &self,
+        file: FileId,
+        context: &FileContext,
+    ) -> hirsel_intern::attribution::Node {
+        let mut name = format!("{:?}\0", context.package).into_bytes();
+        if let Some(source) = self.sources.file(file) {
+            name.extend(source.logical_path().as_os_str().as_encoded_bytes());
+        }
+        (
+            hirsel_intern::attribution::PART,
+            hirsel_syntax::ContentHash::of_bytes(&name).0,
+        )
     }
 }

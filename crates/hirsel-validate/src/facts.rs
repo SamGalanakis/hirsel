@@ -143,12 +143,19 @@ impl<K: Clone + Eq + Hash + Debug, V, E: Clone + From<FactError>> FactTable<K, V
         compute: impl FnOnce() -> Result<Arc<V>, E>,
         retain: impl FnOnce(&Result<Arc<V>, E>) -> bool,
     ) -> Result<Arc<V>, E> {
+        let entry = hirsel_intern::attribution::Filled::keyed(
+            hirsel_intern::attribution::layer::FACT_TABLE,
+            (std::ptr::from_ref(self) as usize, &key),
+        );
         let mut lease = None;
         let mut admit = Some(admit);
         let token = loop {
             let mut rows = self.rows.lock().unwrap();
             match rows.get(&key).map(|row| &row.slot) {
-                Some(Slot::Ready(value)) => return value.clone(),
+                Some(Slot::Ready(value)) => {
+                    entry.hit();
+                    return value.clone();
+                }
                 Some(Slot::Pending { owner, token }) => {
                     let token = token.clone();
                     self.graph.wait(*owner, &token, &key)?;
@@ -187,7 +194,7 @@ impl<K: Clone + Eq + Hash + Debug, V, E: Clone + From<FactError>> FactTable<K, V
             token,
             completed: false,
         };
-        let value = compute();
+        let value = entry.filling(compute);
         let keep = retain(&value);
         let removed = {
             let mut rows = self.rows.lock().unwrap();

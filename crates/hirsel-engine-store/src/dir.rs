@@ -84,7 +84,12 @@ struct InstallationRecorder {
     >,
     contents: std::collections::BTreeMap<hirsel_syntax::ContentHash, super::Reference>,
     cache_only: std::collections::BTreeSet<hirsel_syntax::ContentHash>,
+    /// Every use of a row or content, by the traced work running when it
+    /// was used, so a part's rows are found by reachability over the trace's
+    /// edges rather than by which reader came first.
+    uses: super::Uses,
 }
+
 impl InstallationRecorder {
     /// Project to one variant per entry. Query-record contents (entry blobs
     /// and variant payloads) are listed only when a published row reaches
@@ -291,6 +296,19 @@ impl DirStore {
             .project(&store)?;
         package.publish(&store, &records)
     }
+    /// The uses this installation recorded so far.
+    pub fn take_installation_uses(&self) -> super::Uses {
+        self.installation
+            .as_ref()
+            .map_or_else(super::Uses::default, |records| {
+                std::mem::take(
+                    &mut records
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .uses,
+                )
+            })
+    }
     fn record(&self, change: impl FnOnce(&mut InstallationRecorder)) {
         if let Some(records) = &self.installation {
             change(&mut records.lock().unwrap_or_else(|error| error.into_inner()));
@@ -298,6 +316,7 @@ impl DirStore {
     }
     fn record_content(&self, reference: super::Reference) {
         self.record(|records| {
+            records.uses.content(reference.output.0);
             if !records.cache_only.contains(&reference.output.0) {
                 records.contents.insert(reference.output.0, reference);
             }
@@ -308,6 +327,7 @@ impl DirStore {
                 .unwrap_or_default()
             {
                 if candidate == reference {
+                    records.uses.row(address);
                     records.products.insert(address, (action, reference));
                 }
             }
@@ -321,6 +341,7 @@ impl DirStore {
     ) {
         self.record_content(reference);
         self.record(|records| {
+            records.uses.row(address.0);
             records.products.insert(address.0, (action, reference));
         });
     }
@@ -516,6 +537,7 @@ impl DirStore {
         match write().and_then(|reference| batch.finish().map(|()| reference)) {
             Ok(reference) if self.get(key).is_some_and(|stored| &*stored == value) => {
                 self.record(|records| {
+                    records.uses.row(key.0);
                     records.entries.insert(key.0, (*key, action, reference));
                 });
                 super::WriteOutcome::Stored(reference)
@@ -829,6 +851,7 @@ impl ResultStore for DirStore {
     fn adopt(&self, key: &EntryKey) {
         self.record(|records| {
             if let Some((action, reference)) = records.looked.get(&key.0).copied() {
+                records.uses.row(key.0);
                 records.entries.insert(key.0, (*key, action, reference));
             }
         });

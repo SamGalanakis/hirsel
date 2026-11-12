@@ -530,11 +530,12 @@ pub struct Cuts {
     /// the claim [`MemoryObjects::on_claim`] installs runs first, its own
     /// requests counted, so a claim can land inside one advance.
     pub claim_at: Option<u64>,
-    /// A get of a key whose latest write replaced or deleted bytes answers
-    /// those bytes, as a cache or lagging replica serving the previous version
-    /// would; a key its latest write created reads as it is, and any other
-    /// request is served as usual.
-    pub stale_read_at: Option<u64>,
+    /// The requests at which a get of a key whose latest write replaced or
+    /// deleted bytes answers those bytes, as a cache or lagging replica serving
+    /// the previous version would; a key its latest write created reads as it
+    /// is, and any other request is served as usual. Consecutive requests
+    /// answer one reader stale again and again.
+    pub stale_read_at: Vec<u64>,
 }
 
 /// The objects, and the bytes each key's latest write replaced or deleted,
@@ -586,14 +587,14 @@ pub struct Delay {
 }
 
 /// The names of the request-number [`Cuts`] members in an `objects.sim@1`
-/// entry; `delays` is a list of `{"at": .., "lands": ..}`.
-pub const CUTS: [&str; 6] = [
+/// entry; `delays` is a list of `{"at": .., "lands": ..}` and `stale_read_at`
+/// a list of request numbers.
+pub const CUTS: [&str; 5] = [
     "claim_at",
     "crash_at",
     "fail_at",
     "lose_response_at",
     "lose_unapplied_at",
-    "stale_read_at",
 ];
 
 #[derive(Debug, Default)]
@@ -757,7 +758,7 @@ impl MemoryObjects {
         } else {
             Fate::Serve {
                 lost: at.lose_response_at == n,
-                stale: at.stale_read_at == n,
+                stale: at.stale_read_at.contains(requests),
             }
         };
         if c.at.crash_at == n {
@@ -1022,7 +1023,7 @@ pub fn provider(entry: &serde_json::Value, worlds: Option<&Worlds>) -> Result<Pr
             crash_at: request("crash_at")?,
             delays: delays(provider, members.get("delays"))?,
             claim_at: request("claim_at")?,
-            stale_read_at: request("stale_read_at")?,
+            stale_read_at: requests(provider, members.get("stale_read_at"))?,
         })
     };
     let make = || -> Result<MemoryObjects, String> {
@@ -1038,6 +1039,22 @@ pub fn provider(entry: &serde_json::Value, worlds: Option<&Worlds>) -> Result<Pr
     let worlds =
         worlds.ok_or_else(|| format!("{provider} world {name:?} needs a run to share it"))?;
     worlds.client(name, entry, make).map(Provider::Sim)
+}
+
+/// An `objects.sim@1` entry's `stale_read_at`: a nonempty list of request
+/// numbers, each from 1.
+fn requests(provider: &str, value: Option<&serde_json::Value>) -> Result<Vec<u64>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let shape = || format!("{provider} stale_read_at is a nonempty list of request numbers from 1");
+    let list = value
+        .as_array()
+        .filter(|l| !l.is_empty())
+        .ok_or_else(shape)?;
+    list.iter()
+        .map(|v| v.as_u64().filter(|n| *n > 0).ok_or_else(shape))
+        .collect()
 }
 
 /// An `objects.sim@1` entry's `delays`: a list of `{"at": k, "lands": m}`,

@@ -1132,9 +1132,10 @@ before the same request land in the order the list gives; `crash_at` ends the cl
 client fails with no effect, and the authority continues as a new client that keeps
 nothing of the old one and whose old claims are dead; `claim_at` has another client of
 the same objects claim the history just before request `k` is served, its own requests
-counted, so a later claim can land between the requests of one advance; `stale_read_at`
-answers a get of a key whose latest write replaced or deleted bytes with those bytes, as
-a lagging replica would. Entries in one run that name the same `world` (a nonempty
+counted, so a later claim can land between the requests of one advance; `stale_read_at`,
+a nonempty list of request numbers rather than one, answers a get at each of them of a key
+whose latest write replaced or deleted bytes with those bytes, as a lagging replica would,
+so consecutive numbers answer one reader stale again and again. Entries in one run that name the same `world` (a nonempty
 name) are clients of one bucket and must be the same entry: they share its objects, its
 request count, its cuts and its held writes, so request `k` is the world's `k`th
 whichever client sends it, and `crash_at` ends only the client that sent request `k`. An

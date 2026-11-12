@@ -457,11 +457,10 @@ fn steady_state_requests_allocate_only_what_they_return() {
 fn request_cuts_are_taken_by_the_simulated_objects_and_refused_by_real_storage() {
     let dir = tempfile::tempdir().unwrap();
     let delays = serde_json::json!([{"at": 3, "lands": 4}]);
-    for (cut, value) in CUTS
-        .iter()
-        .map(|c| (*c, serde_json::json!(3)))
-        .chain([("delays", delays)])
-    {
+    for (cut, value) in CUTS.iter().map(|c| (*c, serde_json::json!(3))).chain([
+        ("delays", delays),
+        ("stale_read_at", serde_json::json!([3, 4])),
+    ]) {
         let sim = serde_json::json!({"provider": "objects.sim@1", cut: value});
         assert!(open(&sim).is_ok(), "{cut}");
         for real in [
@@ -539,22 +538,33 @@ fn a_cut_fires_at_its_request_and_a_crash_holds_until_restart() {
     assert!(late.replace("x", b"1", zero).is_err());
     assert_eq!(late.delete("x"), Ok(()));
     assert_eq!(late.get("x").unwrap(), None);
-    // A stale get answers the bytes the key's latest write replaced; the next
-    // get, and a key its latest write created, answer as they are.
-    let stale = |at: u64| {
+    // A stale get answers the bytes the key's latest write replaced, at each
+    // request listed; the other gets, and a key its latest write created,
+    // answer as they are.
+    let stale = |at: Vec<u64>| {
         let o = MemoryObjects::new().with_cuts(Cuts {
-            stale_read_at: Some(at),
+            stale_read_at: at,
             ..Cuts::default()
         });
         assert_eq!(o.put_new("x", b"0"), Ok(Put::Created));
         let zero = Condition::Matches(content_tag(b"0"));
         assert!(o.replace("x", b"1", zero).is_ok());
-        (o.get("x").unwrap(), o.get("x").unwrap())
+        [(); 3].map(|()| o.get("x").unwrap())
     };
-    assert_eq!(stale(3), (Some(b"0".to_vec()), Some(b"1".to_vec())));
-    assert_eq!(stale(4), (Some(b"1".to_vec()), Some(b"0".to_vec())));
+    let (old, new) = (Some(b"0".to_vec()), Some(b"1".to_vec()));
+    assert_eq!(stale(vec![3]), [old.clone(), new.clone(), new.clone()]);
+    assert_eq!(stale(vec![4]), [new.clone(), old.clone(), new.clone()]);
+    assert_eq!(stale(vec![3, 4]), [old.clone(), old.clone(), new.clone()]);
+    for one in [
+        serde_json::json!(3),
+        serde_json::json!([]),
+        serde_json::json!([0]),
+    ] {
+        let sim = serde_json::json!({"provider": "objects.sim@1", "stale_read_at": one});
+        assert!(open(&sim).is_err(), "{one}");
+    }
     let created = at(Cuts {
-        stale_read_at: Some(2),
+        stale_read_at: vec![2],
         ..Cuts::default()
     });
     assert_eq!(created.put_new("x", b"0"), Ok(Put::Created));

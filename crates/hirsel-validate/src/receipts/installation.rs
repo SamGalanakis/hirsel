@@ -36,6 +36,8 @@ type Header = (
 pub struct Registered {
     pub verifier: Arc<VerifierCache>,
     pub header: AuthenticatedHeader,
+    /// The program-record authority of this same registration.
+    pub authority: Authority,
 }
 /// The header association a registration authenticated. Only `registered`
 /// constructs one, so a reader that trusts an image lazily on its strength
@@ -45,6 +47,55 @@ pub struct AuthenticatedHeader(Header);
 impl AuthenticatedHeader {
     pub fn header(self) -> Header {
         self.0
+    }
+}
+/// One root's authenticated registration as an authority for program
+/// records (B). Constructed only by `Installation::rows`, after the
+/// registration's MAC, root, filesystem, verifier and current header checks
+/// hold, so holding one is proof that the registration authenticated.
+/// Its epoch is the registration generation and the verifier key's id:
+/// replacing or revoking the registration changes it, so every association
+/// made under the old epoch misses.
+#[derive(Clone)]
+pub struct Authority {
+    key: [u8; 32],
+    pub(super) directory: PathBuf,
+    root: PathBuf,
+    filesystem: (u64, u64),
+    generation: String,
+    epoch: ContentHash,
+}
+impl std::fmt::Debug for Authority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Authority")
+            .field("root", &self.root)
+            .field("generation", &self.generation)
+            .field("epoch", &self.epoch)
+            .finish_non_exhaustive()
+    }
+}
+impl Authority {
+    pub fn epoch(&self) -> ContentHash {
+        self.epoch
+    }
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    /// A MAC under this registration's key, bound to its root, filesystem
+    /// and generation as well as `payload`.
+    pub(super) fn mac(&self, payload: &[u8]) -> [u8; 32] {
+        let mut bound = Vec::with_capacity(payload.len() + 160);
+        for part in [
+            self.root.as_os_str().as_encoded_bytes(),
+            &self.filesystem.0.to_le_bytes(),
+            &self.filesystem.1.to_le_bytes(),
+            self.generation.as_bytes(),
+            payload,
+        ] {
+            bound.extend_from_slice(&(part.len() as u64).to_le_bytes());
+            bound.extend_from_slice(part);
+        }
+        mac(&self.key, &bound)
     }
 }
 /// Issuance is private to VerifierCache::publish_bytes. Imported associations
@@ -213,7 +264,7 @@ impl Installation {
         // adopt its own rows from it (see adopt.rs); nothing else reads it.
         let previous = Self::rows(&root, &state, verifier)
             .ok()
-            .map(|(rows, _)| rows);
+            .map(|(rows, _, _)| rows);
         let cache = Arc::new(VerifierCache(
             Backend::Hosted(rows.clone(), rows.clone(), previous),
             Mutex::default(),
@@ -294,8 +345,9 @@ impl Installation {
         verifier: ContentHash,
         local: Arc<VerifierCache>,
     ) -> Option<Registered> {
-        let (rows, header) = Self::rows(root, state, verifier).ok()?;
+        let (rows, header, authority) = Self::rows(root, state, verifier).ok()?;
         Some(Registered {
+            authority,
             verifier: Arc::new(VerifierCache(
                 Backend::Registered(local, rows),
                 Mutex::default(),
@@ -308,7 +360,11 @@ impl Installation {
     }
     /// The authenticated, read-only rows of the root's current registration,
     /// and the header association it authenticated.
-    fn rows(root: &Path, state: &Path, verifier: ContentHash) -> io::Result<(Arc<Rows>, Header)> {
+    fn rows(
+        root: &Path,
+        state: &Path,
+        verifier: ContentHash,
+    ) -> io::Result<(Arc<Rows>, Header, Authority)> {
         hirsel_intern::work::count(hirsel_intern::work::Counter::VerifierRegistrationReads);
         check_private(state)?;
         let root = root.canonicalize()?;
@@ -352,6 +408,18 @@ impl Installation {
             return Err(invalid());
         }
         let (address, action, reference) = registration.header;
+        let key: [u8; 32] = key.try_into().map_err(|_| invalid())?;
+        let authority = Authority {
+            epoch: ContentHash::of_parts(
+                "hirsel.program.authority-epoch.v1",
+                [registration.generation.as_bytes(), &Sha256::digest(key)[..]],
+            ),
+            key,
+            directory: directory.clone(),
+            root: root.clone(),
+            filesystem: registration.filesystem,
+            generation: registration.generation.clone(),
+        };
         Ok((
             Arc::new(Rows {
                 store: Store::new(directory.join("receipts")),
@@ -366,6 +434,7 @@ impl Installation {
                     reference,
                 },
             ),
+            authority,
         ))
     }
 }
@@ -376,7 +445,7 @@ impl Drop for Installation {
         }
     }
 }
-fn invalid() -> io::Error {
+pub(super) fn invalid() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         "invalid local verifier registration",
@@ -435,7 +504,7 @@ fn separate(state: &Path, root: &Path) -> io::Result<()> {
     Ok(())
 }
 #[cfg(unix)]
-fn check_private(path: &Path) -> io::Result<()> {
+pub(super) fn check_private(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let meta = fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() || meta.permissions().mode() & 0o077 != 0 {
@@ -444,7 +513,7 @@ fn check_private(path: &Path) -> io::Result<()> {
     Ok(())
 }
 #[cfg(not(unix))]
-fn check_private(_: &Path) -> io::Result<()> {
+pub(super) fn check_private(_: &Path) -> io::Result<()> {
     Err(invalid())
 }
 pub(super) fn private_directory(path: &Path) -> io::Result<()> {
@@ -457,7 +526,7 @@ pub(super) fn private_directory(path: &Path) -> io::Result<()> {
     }
     check_private(path)
 }
-fn private_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(super) fn private_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -470,7 +539,7 @@ fn private_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 /// Open (creating if absent) a private lock file; a symlink is refused.
-fn private_lock(path: &Path) -> io::Result<fs::File> {
+pub(super) fn private_lock(path: &Path) -> io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(false);
     #[cfg(unix)]
@@ -482,7 +551,7 @@ fn private_lock(path: &Path) -> io::Result<fs::File> {
     check_private(path)?;
     Ok(file)
 }
-fn private_read(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
+pub(super) fn private_read(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
     check_private(path)?;
     let file = fs::File::open(path)?;
     if !file.metadata()?.is_file() || file.metadata()?.len() > limit as u64 {
@@ -495,12 +564,12 @@ fn private_read(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-fn random() -> io::Result<[u8; 32]> {
+pub(super) fn random() -> io::Result<[u8; 32]> {
     let mut bytes = [0; 32];
     fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     Ok(bytes)
 }
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 // RFC 2104, RustCrypto hmac/src/simple.rs:29-41,60-65. Fixed local keys

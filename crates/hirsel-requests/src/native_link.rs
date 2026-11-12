@@ -112,6 +112,10 @@ impl FrozenPlatform {
     pub fn identity(&self) -> ContentHash {
         self.linker_options
     }
+    /// The captured platform's own identity.
+    pub fn platform_identity(&self) -> ContentHash {
+        self.inputs.platform.identity()
+    }
     /// Run this for reopened Link hits too, before exposing any executable.
     pub fn validate_image(&self, image: &Path) -> Result<(), String> {
         self.validate_image_on(&self.inputs.platform, image)

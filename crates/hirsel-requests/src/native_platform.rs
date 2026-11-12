@@ -186,64 +186,19 @@ impl NativePlatformSelection {
         let policy = inputs
             .policy
             .ok_or_else(|| failed("native executable has no selected platform policy".into()))?;
-        let (loader_name, emulator) = match target.triple.as_str() {
-            "x86_64-unknown-linux-gnu" => ("ld-linux-x86-64.so.2", None),
-            "aarch64-unknown-linux-gnu" => (
-                "ld-linux-aarch64.so.1",
-                Some(
-                    inputs
-                        .tools
-                        .qemu_aarch64
-                        .clone()
-                        .ok_or_else(|| failed("missing selected AArch64 emulator".into()))?,
-                ),
-            ),
-            _ => {
-                return Err(failed(
-                    "native executable capture requires a supported ELF target".into(),
-                ));
-            }
-        };
-        let floor = inputs
-            .tools
-            .glibc_floor
-            .as_ref()
-            .unwrap_or(&policy.floor)
-            .join(&target.triple);
-        let (loader, libraries) = inputs
-            .tools
-            .loader(target)?
-            .unwrap_or_else(|| (floor.join(loader_name), floor));
-        let auditor = policy.auditors.join(format!("{}.so", target.triple));
-        let stripped = inputs
-            .tools
-            .archive(&target.triple)
-            .ok_or_else(|| failed(format!("no runtime archive for {}", target.triple)))?;
-        let archive = hirsel_native::runtime_archive(
+        let spec = executable_spec(
             inputs.tools,
-            &target.triple,
-            stripped,
-            options.debug_tables,
-        )?;
-        let foreign = hirsel_native::selected_foreign_inputs(inputs.tools, target, inputs.links)?;
-        let spec = PlatformSpec {
-            target: target.clone(),
-            linker: policy.linker.clone(),
-            kit: inputs.tools.kit.clone(),
-            runtime_archive: archive.to_path_buf(),
-            foreign,
-            loader,
-            auditor,
-            library_path: libraries.into_os_string(),
-            emulator: emulator.clone(),
-            timeout: inputs.tools.launch_timeout,
-            events_bytes: runtime_limits.name_bytes as u64,
-            runtime_limits,
+            policy,
+            options,
+            inputs.links,
             limits,
-            debug_tables: options.debug_tables,
-        };
+            runtime_limits,
+        )?;
+        let emulator = spec.emulator.clone();
         let mode = options.capture_mode().map_err(failed)?;
-        let selected = spec.select(store.as_ref(), mode).map_err(failed)?;
+        let selected = spec
+            .select_handed(request.platform.as_deref(), store.as_ref(), mode)
+            .map_err(failed)?;
         let allowance: Arc<hirsel_engine_admission::MemoryReservation> = allowance.into();
         let new = |platform, record| {
             FrozenPlatform::new(
@@ -310,6 +265,98 @@ impl NativePlatformSelection {
     }
 }
 
+/// The platform an executable build of `options` captures, as selected by the
+/// host's tools and policy before any capture runs.
+fn executable_spec(
+    tools: &Toolchain,
+    policy: &NativePlatformPolicy,
+    options: &hirsel_native::BuildOptions,
+    links: &[LinkInput],
+    limits: CaptureLimits,
+    runtime_limits: RuntimeLimits,
+) -> Result<PlatformSpec, NativeError> {
+    let failed = |message| NativeError::new(StageName::Link, message);
+    let target = &options.passes.target;
+    let (loader_name, emulator) = match target.triple.as_str() {
+        "x86_64-unknown-linux-gnu" => ("ld-linux-x86-64.so.2", None),
+        "aarch64-unknown-linux-gnu" => (
+            "ld-linux-aarch64.so.1",
+            Some(
+                tools
+                    .qemu_aarch64
+                    .clone()
+                    .ok_or_else(|| failed("missing selected AArch64 emulator".into()))?,
+            ),
+        ),
+        _ => {
+            return Err(failed(
+                "native executable capture requires a supported ELF target".into(),
+            ));
+        }
+    };
+    let floor = tools
+        .glibc_floor
+        .as_ref()
+        .unwrap_or(&policy.floor)
+        .join(&target.triple);
+    let (loader, libraries) = tools
+        .loader(target)?
+        .unwrap_or_else(|| (floor.join(loader_name), floor));
+    let auditor = policy.auditors.join(format!("{}.so", target.triple));
+    let stripped = tools
+        .archive(&target.triple)
+        .ok_or_else(|| failed(format!("no runtime archive for {}", target.triple)))?;
+    let archive =
+        hirsel_native::runtime_archive(tools, &target.triple, stripped, options.debug_tables)?;
+    let foreign = hirsel_native::selected_foreign_inputs(tools, target, links)?;
+    Ok(PlatformSpec {
+        target: target.clone(),
+        linker: policy.linker.clone(),
+        kit: tools.kit.clone(),
+        runtime_archive: archive.to_path_buf(),
+        foreign,
+        loader,
+        auditor,
+        library_path: libraries.into_os_string(),
+        emulator,
+        timeout: tools.launch_timeout,
+        events_bytes: runtime_limits.name_bytes as u64,
+        runtime_limits,
+        limits,
+        debug_tables: options.debug_tables,
+    })
+}
+
+/// The platform a host executable build of `options` with no foreign link
+/// inputs selects now, under the capture mode that build selects (release and
+/// `HIRSEL_PLATFORM_CAPTURE=cold` capture cold), captured into `store`, the
+/// operation store the build's request store reads through. A program record
+/// keys a linked executable by its identity, selected exactly as the build
+/// selects it and before any record is read; a miss hands it to the build.
+pub fn host_executable_platform(
+    store: &Arc<dyn ResultStore>,
+    options: &hirsel_native::BuildOptions,
+) -> Result<hirsel_native::object_queries::platform::record::HandedPlatform, NativeError> {
+    let failed = |message| NativeError::new(StageName::Link, message);
+    let tools = Toolchain::for_host_request(&options.passes.target, store.clone())?;
+    let policy = NativePlatformPolicy::capture()?;
+    let (_, cap) = super::selector::host_budget();
+    // The bound a host request's native selection captures under.
+    let limits = CaptureLimits {
+        archive_bytes: hirsel_engine::requests::source_graph::host_limits(cap)
+            .disk_bytes()
+            .ok_or_else(|| failed("request limits overflow".into()))?,
+        files: 4096,
+    };
+    let runtime_limits = RuntimeLimits {
+        aliases: 4096,
+        name_bytes: 64 << 10,
+    };
+    let spec = executable_spec(&tools, &policy, options, &[], limits, runtime_limits)?;
+    let mode = options.capture_mode().map_err(failed)?;
+    spec.hand_off(store.as_ref(), mode).map_err(failed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +375,7 @@ mod tests {
             run: None,
 
             evidence: None,
+            platform: None,
         };
         let base = hirsel_native::BuildProfile::Default
             .options(

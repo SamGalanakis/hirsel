@@ -85,7 +85,7 @@ CLIPPY_TWINS = 'attrregexfilter(name, "-clippy$", kind("^rust_(library|binary)$"
 MANIFESTS = 'kind("_rust_test", attrregexfilter(name, "^test-package-manifests(-shard-[0-9]+)?$", root//:))'
 # These reuse the existing harnesses with source data only.
 SOURCE_AUDITS = ('//:land-audit-workspace-layering', '//:land-audit-runtime-schema',
-                 '//:land-audit-runtime-descriptors')
+                 '//:land-audit-runtime-descriptors', '//:land-audit-environment-inventory')
 # A target literal in a tools/land: the tool on main checks every batch this
 # tree joins, so each one it names must exist in the tree submitted.
 NAMED = re.compile(r'''['"](?:root)?//:([A-Za-z0-9_.+-]+)['"]''')

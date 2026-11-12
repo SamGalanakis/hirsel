@@ -63,6 +63,7 @@ fn native_upsert_initializer_preserves_prepared_map_entry_addresses() {
                     run: None,
 
                     evidence: None,
+                    platform: None,
                 }),
             };
             let mut selected = selector.select(&request).unwrap();

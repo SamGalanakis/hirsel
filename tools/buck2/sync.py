@@ -196,6 +196,8 @@ TEST_DATA = {
     "hirsel-rt-test-it": ["crates/hirsel-rt/include/**"],
     # The operation descriptor checks read the runtime's source.
     "hirsel-rt-test-descriptors": ["crates/hirsel-rt/src/**", "crates/hirsel-lir/src/runtime_abi.rs"],
+    # Every HIRSEL_ variable the compiler's crates read has a program-record class.
+    "hirsel-driver-test-environment_inventory": ["crates/*/src/**"],
     "hirsel-types-test-wire": ["crates/hirsel-types/tests/wire/**"],
 }
 
@@ -280,6 +282,7 @@ RUNTIME_ARCHIVE_VIEWS = {
     "hirsel-driver-test-it-stdlib": X86_VIEWS + AARCH64_VIEWS,
     "hirsel-driver-test-stack_depth": ["x86_64-default"],
     "hirsel-driver-test-validate_memory": ["x86_64-default"],
+    "hirsel-driver-test-environment_inventory": ["x86_64-default"],
     "hirsel-llvm-unittest": X86_VIEWS + AARCH64_VIEWS,
     "hirsel-llvm-test-it": X86_VIEWS + AARCH64_VIEWS,
     "hirsel-native-unittest": X86_VIEWS + AARCH64_VIEWS,
@@ -1068,7 +1071,7 @@ def test_data(binary: str, package: str, package_dir: pathlib.Path, src: pathlib
     The package manifest keeps the directory the test runs from in its inputs."""
     paths = expand(RUNTIME_DATA.get(package, [])) + TEST_DATA.get(binary, []) + [relative(package_dir / "Cargo.toml")]
     expression = f"glob({starlark(paths, 4)})"
-    if binary == "hirsel-lir-test-it":
+    if binary in ("hirsel-lir-test-it", "hirsel-driver-test-environment_inventory"):
         expression += ' + ["//tools/buck2:workspace-metadata.json"]'
     if binary == "hirsel-conformance-test-spec_links":
         # A root glob cannot cross the third-party Buck package boundary.
@@ -1298,6 +1301,8 @@ def first_party(meta: dict) -> str:
          ["crates/hirsel-lir/Cargo.toml", "crates/hirsel-rt/include/hirsel_rt_v2.h"]),
         ("runtime-descriptors", "hirsel-rt-test-descriptors", "crates/hirsel-rt", [],
          Raw('glob(["crates/hirsel-rt/src/**"]) + ["crates/hirsel-rt/Cargo.toml", "crates/hirsel-lir/src/runtime_abi.rs"]')),
+        ("environment-inventory", "hirsel-driver-test-environment_inventory", "crates/hirsel-driver", [],
+         Raw('glob(["crates/*/src/**"]) + ["crates/hirsel-driver/Cargo.toml", "//tools/buck2:workspace-metadata.json"]')),
     ):
         out.append("\n" + call("hirsel_source_audit", name="land-audit-" + name,
                                binary=binary, cwd=cwd, args=args, data=data))

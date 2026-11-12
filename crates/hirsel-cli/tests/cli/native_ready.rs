@@ -38,6 +38,7 @@ pub(crate) fn supplier(
                     run: None,
 
                     evidence: None,
+                    platform: None,
                 }),
             )
             .map_err(|error| failed(error.to_string()))?;

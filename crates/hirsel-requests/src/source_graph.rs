@@ -1089,11 +1089,7 @@ pub(super) fn install(
         0
     };
     let mut loading = budget.begin(limits, may_wait, native_transport_bytes)?;
-    let disk_bytes = limits
-        .runtime_bytes
-        .checked_add(limits.snapshot_bytes)
-        .and_then(|bytes| bytes.checked_add(limits.transport_bytes))
-        .ok_or_else(|| uninstalled())?;
+    let disk_bytes = limits.disk_bytes().ok_or_else(|| uninstalled())?;
     let store = match RequestStore::with_scratch_and_verifier_transport(
         config.store.clone(),
         loading.take_transport(),

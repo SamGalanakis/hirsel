@@ -33,6 +33,15 @@ pub struct RequestLimits {
     pub snapshot_bytes: u64,
     pub transport_bytes: u64,
 }
+impl RequestLimits {
+    /// The scratch disk one request may write: its runtime, snapshot and
+    /// transport ceilings. A native capture's archive bound is this too.
+    pub fn disk_bytes(&self) -> Option<u64> {
+        self.runtime_bytes
+            .checked_add(self.snapshot_bytes)?
+            .checked_add(self.transport_bytes)
+    }
+}
 
 // Every host in a process shares one allowance, including different
 // sessions and the engine's own checks. Capturing the guard policy once

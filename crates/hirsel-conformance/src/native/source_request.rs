@@ -227,6 +227,7 @@ impl Source {
                     run: None,
 
                     evidence: None,
+                    platform: None,
                 }),
             })
             .map_err(|error| failure(error.to_string()))?;

@@ -84,6 +84,7 @@ fn actual_native_selector_coalesces_build_and_bound_run_without_a_retained_contr
                 run: None,
 
                 evidence: None,
+                platform: None,
             };
             let launch = crate::HostLaunch::empty();
             let mut bound = None;
@@ -219,6 +220,7 @@ fn native_test_table_order_seed_and_definition_are_request_inputs() {
         run: None,
 
         evidence: None,
+        platform: None,
     };
     let plain = request_key(&request, NativePurpose::Build).unwrap();
     request.test_entries = vec![(path.clone(), 73), (other.clone(), 91)];
@@ -259,6 +261,7 @@ fn native_source_text_context_and_name_are_request_inputs() {
         run: None,
 
         evidence: None,
+        platform: None,
     };
     let plain = request_key(&request, NativePurpose::Build).unwrap();
     request
@@ -315,6 +318,7 @@ fn native_object_roots_and_emission_level_are_request_inputs() {
         run: None,
 
         evidence: None,
+        platform: None,
     };
     let executable = request_key(&request, NativePurpose::Build).unwrap();
     let mut executable_weight = hirsel_query_products::retained::MetadataWeight::default();

@@ -51,6 +51,8 @@ struct Registration {
 struct Selected {
     verifier: std::sync::Arc<hirsel_validate::VerifierCache>,
     headers: std::collections::BTreeMap<PathBuf, hirsel_validate::AuthenticatedHeader>,
+    /// The program-record domain of the registrations selected here.
+    programs: Option<hirsel_validate::programs::ProgramAuthority>,
     /// An operation's read-only roots' index generations, pinned before their
     /// registrations are read and held while it opens their headers.
     _leases: Vec<hirsel_artifact_store::Batch>,
@@ -232,6 +234,7 @@ impl DirStore {
             };
             let mut verifier = self.verifier.clone();
             let mut headers = std::collections::BTreeMap::new();
+            let mut authorities = vec![];
             for root in self
                 .physical
                 .iter()
@@ -246,11 +249,13 @@ impl DirStore {
                 ) {
                     verifier = registered.verifier;
                     headers.insert(root.root().to_owned(), registered.header);
+                    authorities.push(registered.authority);
                 }
             }
             Selected {
                 verifier,
                 headers,
+                programs: hirsel_validate::programs::ProgramAuthority::new(authorities),
                 _leases: leases,
             }
         }))
@@ -625,6 +630,14 @@ impl ResultStore for DirStore {
             None => selected,
         };
         Some(std::sync::Arc::new(selected))
+    }
+    fn program_authority(&self) -> Option<hirsel_validate::programs::ProgramAuthority> {
+        // Only an operation's own selection; a store without a registration,
+        // or an installation producer's output root, has no domain.
+        if !self.operation || self.installation.is_some() {
+            return None;
+        }
+        self.selection()?.programs.clone()
     }
     fn for_compiler(
         &self,

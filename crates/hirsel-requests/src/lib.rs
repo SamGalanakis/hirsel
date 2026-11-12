@@ -39,6 +39,8 @@ mod safe_check;
 mod selector;
 mod source_graph;
 mod tir_products;
+pub use native_platform::host_executable_platform;
+pub use native_products::evidence_identity;
 pub use output::{
     CompileInspection, CompileOutput, CompileResult, CompilerReadiness, DefinitionWork,
     NativeExecution, NativeObjectOutput, NativeObservation, NativeReady, PrecomputedSources,
@@ -252,6 +254,13 @@ pub struct NativeRequest {
     /// Independently assessed source evidence; its selected discharge policy
     /// participates in native actions, never a launch-time fallback.
     pub evidence: Option<std::sync::Arc<hirsel_native::Evidence>>,
+    /// A platform selection made for this request before it ran (a program
+    /// record lookup's). Outside request identity: the platform identity
+    /// already keys every link action. Taken only by a selection with the
+    /// same key and capture mode, so a request with foreign links or another
+    /// mode captures for itself.
+    pub platform:
+        Option<std::sync::Arc<hirsel_native::object_queries::platform::record::HandedPlatform>>,
 }
 
 /// Immutable source input, never a body, task, or validation capability.

@@ -104,6 +104,7 @@ fn ready_view(
             run: None,
 
             evidence: None,
+            platform: None,
         }),
     )?;
     match &output.result {

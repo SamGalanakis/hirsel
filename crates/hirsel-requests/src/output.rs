@@ -338,6 +338,10 @@ impl NativeExecution {
     pub fn validate_image(&self, path: &std::path::Path) -> Result<(), String> {
         self.platform.validate_image(path)
     }
+    /// Identity of the platform capture this build linked against.
+    pub fn platform_identity(&self) -> hirsel_syntax::ContentHash {
+        self.platform.platform_identity()
+    }
     pub fn executable(&self, path: PathBuf) -> Result<hirsel_native::Runnable, String> {
         self.platform.executable(path)
     }

@@ -215,6 +215,7 @@ fn run_native(
                 test_entries: vec![],
                 supplemental_sources: vec![],
                 output: crate::requests::NativeOutput::Executable,
+                platform: None,
             },
         ))?;
         match &selected.result {

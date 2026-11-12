@@ -108,27 +108,19 @@ pub fn build_path_native_backend_with_validation(
         Ok(options) => options,
         Err(error) => return Ok(Err(error)),
     };
-    let selected = crate::session::request(
-        source,
-        policy,
-        crate::requests::CompileOperation::NativeBuild(crate::requests::NativeRequest {
-            options,
-            run: None,
-            definition: None,
-            test_entries: vec![],
-            supplemental_sources: vec![],
-            output: crate::requests::NativeOutput::Executable,
-
-            evidence: evidence.cloned().map(std::sync::Arc::new),
-        }),
-    )?;
-    match &selected.result {
-        crate::requests::CompileResult::Native(input) => {
-            Ok(super::request_output::materialize_output(input, output))
-        }
-        crate::requests::CompileResult::NativeError(error) => Ok(Err(error.clone())),
-        _ => Err(ToolError::Runtime(
-            "native build request returned another operation".into(),
-        )),
-    }
+    crate::session::with_session(source, policy, |session| {
+        crate::program_record::build(
+            session,
+            source,
+            policy,
+            crate::program_record::Build {
+                output,
+                options,
+                evidence,
+                profile,
+                backend,
+                validation,
+            },
+        )
+    })
 }

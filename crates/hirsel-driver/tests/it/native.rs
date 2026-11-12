@@ -1062,6 +1062,7 @@ fn requested_ready_views_agree_with_the_reference_under_the_smoke_matrix() {
                                 run: None,
 
                                 evidence: None,
+                                platform: None,
                             }),
                         )
                         .map_err(|error| failed(error.to_string()))?;

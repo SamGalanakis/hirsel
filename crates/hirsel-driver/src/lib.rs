@@ -42,6 +42,7 @@ pub mod native;
 pub mod ownership_trace;
 #[cfg(test)]
 mod prepared_host_152;
+mod program_record;
 #[cfg(not(test))]
 use hirsel_requests as requests;
 #[cfg(test)]
@@ -63,7 +64,9 @@ use hirsel_front_phases::load_program;
 
 /// A partial pipeline can produce rejection diagnostics, but never a clean acceptance.
 pub fn check_path(path: &Path, policy: session::Policy) -> Result<CheckOutput, ToolError> {
-    session::with_session(path, policy, session::Session::check)
+    session::with_session(path, policy, |session| {
+        program_record::check(session, path, policy)
+    })
 }
 /// `check_path`, then the escape from capability checking an accepted program's
 /// entry reaches (CAP-6).

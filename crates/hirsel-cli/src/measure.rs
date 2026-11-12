@@ -243,6 +243,9 @@ fn table(command: &str, wall: Duration, report: &timings::Report) -> String {
     for (count, value) in &report.counts {
         text += &format!("  {:<18}{value:>10}\n", count.name());
     }
+    if let Some(reason) = &report.program_bypass {
+        text += &format!("program record bypass: {reason}\n");
+    }
     text += &instructions_table(&report.instructions);
     text += &budget_table();
     let runner = hirsel_native::counts();
@@ -366,6 +369,7 @@ fn json(
             .iter()
             .map(|(count, value)| (count.name().to_string(), (*value).into()))
             .collect::<serde_json::Map<_, _>>(),
+        "program_record_bypass": report.program_bypass,
     });
     value["instructions"] = instructions_json(&report.instructions);
     value["budget"] = budget_json();

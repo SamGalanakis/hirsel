@@ -28,6 +28,7 @@ fn production_release_has_zero_scoped_closure_environment_allocations() {
                         .unwrap(),
                     run: None,
                     evidence: None,
+                    platform: None,
                 }),
             )
             .unwrap();

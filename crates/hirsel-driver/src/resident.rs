@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex, Weak};
 mod compilation_session;
 pub use compilation_session::CompilationSession;
 mod observed_session;
-pub use observed_session::{ObservedEngine, ObservedSession};
+pub(crate) use observed_session::check_error;
+pub use observed_session::{ObservedEngine, ObservedSession, ProgramFacts};
 
 /// Transport-owned host. Keeping this alive retains the engine's shared handles,
 /// without retaining a second program, verdict, output or invalidation cache.

@@ -113,9 +113,64 @@ pub struct Selected {
     pub hit: bool,
 }
 
+/// One selection made before a request that would otherwise make it again:
+/// a program record's lookup keys a build by the platform it selects now, and
+/// a miss hands that selection to the build. It answers only a selection with
+/// the same key (so the same tools, archive, foreign inputs and compiler) and
+/// the same capture mode, and only once; any other selection captures for
+/// itself.
+pub struct HandedPlatform {
+    key: Vec<u8>,
+    mode: CaptureMode,
+    identity: ContentHash,
+    selected: std::sync::Mutex<Option<Selected>>,
+}
+impl HandedPlatform {
+    /// The selected platform's identity.
+    pub fn identity(&self) -> ContentHash {
+        self.identity
+    }
+}
+
 impl PlatformSpec {
     pub fn select(&self, store: &dyn ResultStore, mode: CaptureMode) -> Result<Selected, String> {
         self.select_in(store, &cache_directory(), mode, SystemTime::now())
+    }
+    /// Select now, for a later request to take with `select_handed`.
+    pub fn hand_off(
+        &self,
+        store: &dyn ResultStore,
+        mode: CaptureMode,
+    ) -> Result<HandedPlatform, String> {
+        let key = self.key()?;
+        let selected = self.select(store, mode)?;
+        Ok(HandedPlatform {
+            key,
+            mode,
+            identity: selected.platform.identity,
+            selected: std::sync::Mutex::new(Some(selected)),
+        })
+    }
+    /// `handed`'s selection when it was made for this selection and mode and
+    /// is still untaken, else a selection of its own.
+    pub fn select_handed(
+        &self,
+        handed: Option<&HandedPlatform>,
+        store: &dyn ResultStore,
+        mode: CaptureMode,
+    ) -> Result<Selected, String> {
+        if let Some(handed) = handed
+            && handed.mode == mode
+            && handed.key == self.key()?
+            && let Some(selected) = handed
+                .selected
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+        {
+            return Ok(selected);
+        }
+        self.select(store, mode)
     }
     /// After a hit was shown wrong (`reason`) before it fed any output:
     /// delete its record, verify fully and record again.

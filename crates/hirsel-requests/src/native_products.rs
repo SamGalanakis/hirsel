@@ -317,7 +317,7 @@ fn observation_metadata(
 
 /// Canonical identity of selected evidence: every record field in sidecar
 /// order and the trusted checkers. Equal identities assess equal sidecars.
-pub(super) fn evidence_identity(evidence: &hirsel_native::Evidence) -> ContentHash {
+pub fn evidence_identity(evidence: &hirsel_native::Evidence) -> ContentHash {
     let records = evidence
         .records
         .iter()

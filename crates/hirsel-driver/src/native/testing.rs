@@ -103,6 +103,7 @@ impl Executable {
                 run: None,
 
                 evidence: None,
+                platform: None,
             }),
         };
         let output = selector

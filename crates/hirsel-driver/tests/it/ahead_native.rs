@@ -789,6 +789,7 @@ fn cli_request_builds_define_and_adopt_ahead_on_both_backends() {
                     run: None,
 
                     evidence: None,
+                    platform: None,
                 }))
                 .unwrap();
             let CompileResult::Native(execution) = &selected.result else {

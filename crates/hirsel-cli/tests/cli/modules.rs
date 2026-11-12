@@ -27,6 +27,7 @@ mod schema;
 mod select_race;
 mod signals;
 mod split;
+mod program_record;
 mod store;
 mod tape_identity;
 mod telemetry;

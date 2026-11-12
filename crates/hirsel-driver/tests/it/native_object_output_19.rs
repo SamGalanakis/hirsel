@@ -67,6 +67,7 @@ fn object_requests_emit_generic_helpers_without_link_or_launch() {
                     run: None,
 
                     evidence: None,
+                    platform: None,
                 }),
             };
             let mut selected = selector.select(&request).unwrap();

@@ -61,6 +61,16 @@ where
     delivery_error: Option<std::io::Error>,
     pending_discovery_delivery: bool,
     logical_entry: Option<hirsel_syntax::DefPath>,
+    /// What the last discovery selected, kept across source-only refreshes.
+    program: Option<ProgramFacts>,
+}
+
+/// What discovery selected beyond the observed inputs: the resolved entry and
+/// whether any selected package is `unsafe ffi`.
+#[derive(Clone, Debug)]
+pub struct ProgramFacts {
+    pub entry: hirsel_syntax::DefPath,
+    pub foreign: bool,
 }
 
 struct InvocationGuard<'a, E: ObservedEngine> {
@@ -112,6 +122,7 @@ where
             delivery_error: None,
             pending_discovery_delivery: false,
             logical_entry: None,
+            program: None,
         }
     }
     /// Capture a replacement immutable compiler policy while preserving delivered
@@ -285,12 +296,16 @@ where
         let prior = self.observer.current().cloned();
         let compiler = &self.compiler;
         let entry = &self.entry;
+        let facts = &mut self.program;
         let (discovery, observed) = self
             .observer
             .observe(self.limits, self.attempts, |capture| {
-                compiler
-                    .load_check_package_inputs(entry, capture, false)
-                    .map(|program| program.source_paths())
+                let loaded = compiler.load_check_package_inputs(entry, capture, false);
+                *facts = loaded.as_ref().ok().map(|program| ProgramFacts {
+                    entry: program.entry.clone(),
+                    foreign: !program.unsafe_ffi.is_empty(),
+                });
+                loaded.map(|program| program.source_paths())
             })
             .map_err(ToolError::Io)?;
         self.stats.loads += observed.work.discoveries;
@@ -327,6 +342,31 @@ where
         // reobserved, a later same-byte delivery is again an idempotent edit.
         self.polled_metadata.get_mut().clear();
         discovery
+    }
+    /// Run `f` as one invocation: under the operation's store, which selects
+    /// the registration, with every request in it sharing one observation.
+    pub fn invocation<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        self.with_invocation(f)
+    }
+    /// Observe the actual filesystem now; requests applied after it answer
+    /// these inputs.
+    pub fn observe_inputs(&mut self) -> Result<(), ToolError> {
+        self.delivery_error = None;
+        self.observe()
+    }
+    /// The inputs the last observation froze, when it was complete.
+    pub fn current_inputs(&self) -> Option<&hirsel_engine::loader_inputs::FrozenInputs> {
+        self.observer
+            .current()
+            .filter(|_| !self.observer.requires_discovery())
+    }
+    /// What the last successful discovery selected.
+    pub fn program_facts(&self) -> Option<&ProgramFacts> {
+        self.program.as_ref()
+    }
+    /// The compiler requests run under (in an invocation, its operation store).
+    pub fn compiler(&self) -> &Compiler {
+        &self.compiler
     }
     /// Observe the actual filesystem before selecting the shared graph.
     pub fn check(&mut self) -> Result<CheckOutput, ToolError> {
@@ -455,7 +495,7 @@ where
     }
 }
 
-fn check_error(error: ToolError) -> Result<CheckOutput, ToolError> {
+pub(crate) fn check_error(error: ToolError) -> Result<CheckOutput, ToolError> {
     match error {
         ToolError::Query {
             error: hirsel_engine::QueryError::Diagnostics(diagnostics),

@@ -80,6 +80,7 @@ fn compile_objects(source: &str) {
                     run: None,
 
                     evidence: None,
+                    platform: None,
                 }),
             };
             let mut selected = selector.select(&request).unwrap();

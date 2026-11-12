@@ -981,6 +981,14 @@ pub fn validate_link_input(store: &dyn ResultStore, reference: Reference) -> Res
     Ok(())
 }
 
+/// The linked executable's bytes as the store holds them.
+pub fn executable_bytes(
+    store: &dyn ResultStore,
+    product: &LinkedProduct,
+) -> Result<Vec<u8>, String> {
+    read_blob(store, product.executable)
+}
+
 fn read_blob(store: &dyn ResultStore, reference: Reference) -> Result<Vec<u8>, String> {
     let blob = blob_record(store, reference)?;
     let len = usize::try_from(blob.len).map_err(|_| "native blob exceeds host address space")?;
@@ -1054,7 +1062,18 @@ fn materialize_blob(
     {
         return Ok(file);
     }
-    let parent = destination.parent().ok_or("executable has no parent")?;
+    // A bare file name's parent is the empty path, which names no directory
+    // to create, write beside or sync: it is the current directory.
+    let parent = destination
+        .parent()
+        .ok_or("executable has no parent")
+        .map(|parent| {
+            if parent.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                parent
+            }
+        })?;
     std::fs::create_dir_all(parent).map_err(error)?;
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let temporary = parent.join(format!(

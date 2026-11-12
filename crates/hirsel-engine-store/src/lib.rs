@@ -256,6 +256,12 @@ pub trait ResultStore: Send + Sync {
             reads: self.read_scope().into_iter().collect(),
         }
     }
+    /// The authenticated program-record domain of this operation's selected
+    /// installation registrations (native rerun design §3). None for every
+    /// provider without one: such an operation neither reads nor publishes B.
+    fn program_authority(&self) -> Option<hirsel_validate::programs::ProgramAuthority> {
+        None
+    }
     /// Bind optional local installation authority to this exact compiler.
     /// Explicit providers retain their configured authority by default.
     fn for_compiler(&self, _identity: ContentHash) -> Option<Arc<dyn ResultStore>> {
@@ -1169,6 +1175,9 @@ impl ResultStore for MemStore {
     }
     fn read_scope(&self) -> Option<Box<dyn Send + Sync>> {
         self.installed.as_ref()?.read_scope()
+    }
+    fn program_authority(&self) -> Option<hirsel_validate::programs::ProgramAuthority> {
+        self.installed.as_ref()?.program_authority()
     }
     fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
         Some(self.verifier.clone())

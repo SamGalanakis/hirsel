@@ -112,6 +112,7 @@ fn native_measurement(source: &str, label: &str) -> String {
                 run: None,
 
                 evidence: None,
+                platform: None,
             }),
         )
         .unwrap_or_else(|error| panic!("native JSON request: {error}"));

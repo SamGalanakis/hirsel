@@ -433,6 +433,56 @@ fn a_platform_record_is_reused_until_switched_off_aged_or_shown_wrong() {
             reference_program
         );
     }
+    // A selection handed ahead to a request (a program record lookup's, for
+    // its miss) answers only that selection and capture mode, once. Bug: a
+    // request with foreign inputs or another mode links against a platform
+    // captured for another selection. Oracle: whether capture children run,
+    // and the other selection's own cold capture.
+    let empty_source = directory.path().join("empty.s");
+    let empty = directory.path().join("empty.o");
+    std::fs::write(&empty_source, "").unwrap();
+    run(Command::new(llvm.join("bin/llvm-mc"))
+        .args(["-triple=x86_64-unknown-linux-gnu", "-filetype=obj", "-o"])
+        .arg(&empty)
+        .arg(&empty_source));
+    let handed = spec.hand_off(&store, CaptureMode::Cold).unwrap();
+    let mut foreign = spec.clone();
+    foreign.foreign = vec![empty];
+    let own = foreign
+        .select(&store, CaptureMode::Cold)
+        .unwrap()
+        .platform
+        .identity;
+    assert_ne!(own, handed.identity());
+    let before = children();
+    let other = foreign
+        .select_handed(Some(&handed), &store, CaptureMode::Cold)
+        .unwrap();
+    assert!(children() > before, "foreign inputs capture for themselves");
+    assert_eq!(other.platform.identity, own);
+    let before = RECORD_READS.get();
+    spec.select_handed(Some(&handed), &store, CaptureMode::Record)
+        .unwrap();
+    assert_eq!(
+        RECORD_READS.get(),
+        before + 1,
+        "another capture mode selects for itself"
+    );
+    let before = children();
+    let taken = spec
+        .select_handed(Some(&handed), &store, CaptureMode::Cold)
+        .unwrap();
+    assert_eq!(children(), before, "the handed selection runs no capture");
+    assert_eq!(taken.platform.identity, handed.identity());
+    assert_eq!(
+        link(&taken.platform, &store, "handed").unwrap(),
+        reference_program
+    );
+    let before = children();
+    spec.select_handed(Some(&handed), &store, CaptureMode::Cold)
+        .unwrap();
+    assert!(children() > before, "a handed selection answers once");
+
     // SAFETY: this proof runs alone, as at its initial environment setup.
     unsafe { std::env::set_var("HIRSEL_PLATFORM_CAPTURE", "cold") };
     let before = (RECORD_READS.get(), children());

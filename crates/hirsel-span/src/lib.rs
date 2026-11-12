@@ -484,6 +484,20 @@ impl SourceMap {
             .ordinal = ordinal;
         Some(id)
     }
+    /// A replayed snapshot that a stored result named `ordinal`: output that
+    /// names a file by its ordinal reads as it did in the process that stored it.
+    pub fn add_replayed(
+        &mut self,
+        path: impl AsRef<Path>,
+        logical_path: impl AsRef<Path>,
+        text: String,
+        ordinal: u32,
+    ) -> Option<FileId> {
+        let id = self.add_logical(path, logical_path, text)?;
+        std::sync::Arc::make_mut(&mut std::sync::Arc::make_mut(&mut self.files)[id.0 as usize])
+            .ordinal = ordinal;
+        Some(id)
+    }
     /// The shared handle of a file, for a witness that it is still this one.
     pub fn file_handle(&self, id: FileId) -> Option<&std::sync::Arc<SourceFile>> {
         self.files.get(id.0 as usize)

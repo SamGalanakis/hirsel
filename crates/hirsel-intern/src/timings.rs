@@ -97,11 +97,25 @@ pub enum Phase {
     SignatureNormalize,
     /// Host-side link preparation and linker invocation, excluding nested codegen.
     Link,
+    /// Selecting the registration and its program record domain.
+    ProgramRegistration,
+    /// Observing inputs and computing a program record's key.
+    ProgramKey,
+    /// The platform capture a build record's key needs.
+    ProgramPlatform,
+    /// Reading and authenticating a program record.
+    ProgramLookup,
+    /// Decoding a record's diagnostics and report.
+    ProgramReplay,
+    /// Writing a recorded executable to its output.
+    ProgramMaterialize,
+    /// Publishing a program record after a fresh run.
+    ProgramPublish,
 }
 
 impl Phase {
     /// Every phase, in declaration order.
-    pub const ALL: [Phase; 22] = [
+    pub const ALL: [Phase; 29] = [
         Phase::Parse,
         Phase::Resolve,
         Phase::Signatures,
@@ -124,6 +138,13 @@ impl Phase {
         Phase::Declarations,
         Phase::SignatureNormalize,
         Phase::Link,
+        Phase::ProgramRegistration,
+        Phase::ProgramKey,
+        Phase::ProgramPlatform,
+        Phase::ProgramLookup,
+        Phase::ProgramReplay,
+        Phase::ProgramMaterialize,
+        Phase::ProgramPublish,
     ];
     /// The stable name `--timings` prints.
     pub fn name(self) -> &'static str {
@@ -150,6 +171,13 @@ impl Phase {
             Phase::Declarations => "declarations",
             Phase::SignatureNormalize => "signature normalize",
             Phase::Link => "link",
+            Phase::ProgramRegistration => "program registration",
+            Phase::ProgramKey => "program key",
+            Phase::ProgramPlatform => "program platform",
+            Phase::ProgramLookup => "program lookup",
+            Phase::ProgramReplay => "program replay",
+            Phase::ProgramMaterialize => "program materialize",
+            Phase::ProgramPublish => "program publish",
         }
     }
 }
@@ -340,11 +368,19 @@ pub enum Count {
     BodyWalksGenerated,
     /// Body walks for headers declared without a body.
     BodyWalksDeclaration,
+    /// Program record lookups answered from a stored record.
+    ProgramRecordHits,
+    /// Program record lookups that found no usable record.
+    ProgramRecordMisses,
+    /// Program records committed after a fresh run.
+    ProgramRecordPublications,
+    /// Requests that did not use program records; the reason is in the report.
+    ProgramRecordBypasses,
 }
 
 impl Count {
     /// Every count, in declaration order.
-    pub const ALL: [Count; 106] = [
+    pub const ALL: [Count; 110] = [
         Count::Definitions,
         Count::Units,
         Count::VRuns,
@@ -451,6 +487,10 @@ impl Count {
         Count::BodyWalksGenerator,
         Count::BodyWalksGenerated,
         Count::BodyWalksDeclaration,
+        Count::ProgramRecordHits,
+        Count::ProgramRecordMisses,
+        Count::ProgramRecordPublications,
+        Count::ProgramRecordBypasses,
     ];
     /// The stable name `--timings` prints.
     pub fn name(self) -> &'static str {
@@ -469,6 +509,10 @@ impl Count {
             Count::BodyWalksGenerator => "body walks: generator",
             Count::BodyWalksGenerated => "body walks: generated body",
             Count::BodyWalksDeclaration => "body walks: bodyless declaration",
+            Count::ProgramRecordHits => "program record hits",
+            Count::ProgramRecordMisses => "program record misses",
+            Count::ProgramRecordPublications => "program record publications",
+            Count::ProgramRecordBypasses => "program record bypasses",
             Count::ValidationRetentionRefusals => "validation retention refusals",
             Count::VerifierFactEvictions => "verifier fact evictions",
             Count::ExecutionValidationRequests => "execution validation requests",
@@ -567,6 +611,8 @@ impl Count {
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static CPU_START: AtomicU64 = AtomicU64::new(0);
+/// Why the last request did not use program records.
+static PROGRAM_BYPASS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 struct Totals {
     intervals: [AtomicU64; Interval::ALL.len()],
@@ -614,6 +660,13 @@ pub fn enable() {
     ENABLED.store(true, Relaxed);
 }
 
+/// Record that this request did not use program records, and why. Recorded
+/// whether or not timings are enabled, so a debug line can name it too.
+pub fn program_bypass(reason: String) {
+    count(Count::ProgramRecordBypasses);
+    *PROGRAM_BYPASS.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason);
+}
+
 /// Start a fresh request recording. The caller serializes requests and drains prior work.
 pub fn start_request() {
     for cell in TOTALS
@@ -627,6 +680,7 @@ pub fn start_request() {
         cell.store(0, Relaxed);
     }
     CPU_START.store(process_cpu().map_or(0, |d| d.as_nanos() as u64), Relaxed);
+    *PROGRAM_BYPASS.lock().unwrap_or_else(|e| e.into_inner()) = None;
     ENABLED.store(true, Relaxed);
     instructions::start_request();
 }
@@ -866,6 +920,8 @@ pub struct Report {
     pub comptime_verify: PhaseRow,
     pub wait: Duration,
     pub counts: Vec<(Count, u64)>,
+    /// Why this request did not use program records, if it did not.
+    pub program_bypass: Option<String>,
     /// Exclusive instruction attribution, charged up to this report.
     pub instructions: instructions::Report,
 }
@@ -904,6 +960,10 @@ pub fn report() -> Report {
             .iter()
             .map(|&c| (c, TOTALS.counts[c as usize].load(Relaxed)))
             .collect(),
+        program_bypass: PROGRAM_BYPASS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone(),
         instructions: instructions::report(),
     }
 }

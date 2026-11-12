@@ -959,6 +959,7 @@ fn visit_test_suite(
                             run: None,
 
                             evidence: None,
+                            platform: None,
                         }),
                     })
                     .map_err(|e| failure(e.to_string()))?;

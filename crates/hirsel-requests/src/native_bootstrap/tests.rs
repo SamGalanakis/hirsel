@@ -999,6 +999,7 @@ fn native_bootstrap_policy_case(bind_run: bool) {
                 run: validated_run,
 
                 evidence: None,
+                platform: None,
             };
             let NativePlatformSelection { mut plan, platform } = NativePlatformSelection::capture(
                 store.clone(),

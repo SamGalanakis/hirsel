@@ -987,8 +987,8 @@ fn a_closure_capturing_a_closure_local_to_its_environment_is_local_to_the_same_e
 #[test]
 fn a_counted_closure_result_ends_the_uniqueness_of_a_global_borrowed_capture() {
     // MODE-2 (#80): calling a closure for a counted result shares what its
-    // environment borrows, whatever its result relation, as reading the part
-    // directly does. Hand-built control: each body is lowered against a `bump`
+    // environment borrows, whatever its result relation, as explicitly sharing
+    // the part does. Hand-built control: each body is lowered against a `bump`
     // that accepts any Rec, then validated against one that requires a unique
     // Rec, as the rejected program declares it.
     with_compiler_stack(|| {
@@ -1006,7 +1006,7 @@ fn a_counted_closure_result_ends_the_uniqueness_of_a_global_borrowed_capture() {
         for read in [
             "(fn() { r.items })()",
             "(fn() { copy r.items })()",
-            "r.items",
+            "copy r.items",
         ] {
             let (shared, signatures) = lowered(&probe(read, false), "probe");
             let signatures = with(&signatures, unique, "bump");

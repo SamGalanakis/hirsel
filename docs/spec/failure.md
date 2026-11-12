@@ -66,7 +66,10 @@ belongs to a type declared in a package marked `unsafe ffi`, the process ends in
 A failure inside the check of a checked serializable type
 ([SER-1](serialization.md#ser-1-serializable-schemas)) is the failure of the decode that
 called it: the reconstructed value is released, and the failure unwinds from the decode
-like any other.
+like any other. Inside a store body it ends the body as any failure does (`Faulted`, or
+`Limit(Energy())` when the check ran out of energy). A served call's argument is decoded
+by `store.serve` before the body starts, outside it, so a failure there unwinds
+`store.serve` itself.
 
 The primary failure stays primary; failures during later cleanup extend its ordered cause
 chain. Cleanup continues across siblings after a failure in one of them. Shielding

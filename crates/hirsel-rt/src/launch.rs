@@ -3296,6 +3296,8 @@ pub(crate) unsafe fn execute(
     }
     // A failure recorded where no compiled frame can unwind it (`Stop::Failed`) reports as a
     // failed entry, but its tasks still hold their storage, so it is abandoned like a stopped run.
+    // A codec check's failure can still arrive here indirectly: one inside a runner entry is
+    // caught by the entry and sent as REPLY_FAILED, which callee replay turns into this stop.
     let ended = matches!(ran, Err(crate::stop::Stop::Failed));
     let ran = if ended { Ok(STATUS_FAILURE) } else { ran };
     let outcome = if let Some(outcome) = replay_outcome {

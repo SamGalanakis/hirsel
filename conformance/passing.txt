@@ -1275,6 +1275,7 @@ conformance/FAIL/FAIL-3-pqcombined-push-pop-first-fail.hir
 conformance/FAIL/FAIL-3-pqcombined-push-pop-late-fail.hir
 conformance/FAIL/FAIL-3-pqcombined-replace-first-fail.hir
 conformance/FAIL/FAIL-3-pqcombined-replace-late-fail.hir
+conformance/FAIL/FAIL-3-serializable-check-nested-run.hir
 conformance/FAIL/FAIL-3-serializable-check-unwinds-run.hir
 conformance/FAIL/FAIL-3-sorted-insert-taken-callback.hir
 conformance/FAIL/FAIL-3-std-priority-queue-fail.hir

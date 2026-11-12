@@ -494,3 +494,104 @@ fn a_map_codec_rejects_payload_in_a_tombstone_arm() {
         *k == K::Type("codec plan")
     });
 }
+
+/// How a decode's failure edge is cleaned up (FAIL-3): the decode borrows its bytes
+/// and defines its result only on its normal edge, so the edge's cleanup owes exactly
+/// what was live before it.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Edge {
+    /// The failure edge passes the decode's result, which it never defines.
+    UsesResult,
+    /// The cleanup drops a parameter the decode's bytes were only lent from.
+    DropsBorrowed,
+    /// The cleanup leaves the bytes' owning slot undropped.
+    OmitsOwner,
+    /// The cleanup leaves the loan the bytes are read through open.
+    LeavesLoan,
+}
+
+/// `codec.decode(bytes)` of bytes read through a loan on parameter slot `s`, owned
+/// (`OmitsOwner`) or borrowed, whose failure edge runs a cleanup. Valid unless
+/// `broken`.
+fn decode_edge(edge: Edge, broken: bool) -> Vec<K> {
+    let passing = if edge == Edge::OmitsOwner {
+        Passing::Take
+    } else {
+        Passing::Borrow
+    };
+    let mut t = Lir::<Value>::new(&[(passing, l::SLICE)], None);
+    let (plan, result) = plan(&mut t, true, false, Mutant::None);
+    t.builder.unit.tables.codecs.push(plan);
+    let abi = t.abi(&[(passing, l::SLICE)], Some(result));
+    t.builder.unit.header.abi = abi;
+    let s = t.slot(l::SLICE, SlotKind::Parameter(0), ROOT);
+    let version = t.version_of(s);
+    t.param(version);
+    let owned = passing == Passing::Take;
+    let undo: &[Undo] = if owned { &[Undo::Drop(s)] } else { &[] };
+    let at = t.at(ENTRY, s, &[], undo);
+    let loan = t.loan(at, false);
+    t.begin(ENTRY, loan);
+    let x = t.read(ENTRY, at, version, ReadMode::Borrow, Some(loan));
+    let r = t.plain(result);
+    let failure = if edge == Edge::UsesResult {
+        let params = if broken {
+            vec![t.plain(result)]
+        } else {
+            vec![]
+        };
+        let b = t.builder.block(BlockKind::FailureCleanup, &params);
+        t.end(b, loan);
+        t.builder.term(b, Terminator::Propagate);
+        let args: &[ValueId] = if broken { &[r] } else { &[] };
+        t.failure_disposing(b, args, &[])
+    } else {
+        let mut steps = vec![];
+        if !(edge == Edge::LeavesLoan && broken) {
+            steps.push(Undo::End(loan));
+        }
+        if owned && !broken || edge == Edge::DropsBorrowed && broken {
+            steps.push(Undo::Drop(s));
+        }
+        let target = t.cleanup(&steps);
+        t.failure(target)
+    };
+    t.builder.push(
+        ENTRY,
+        Inst::Decode {
+            result: r,
+            value: x,
+            codec: CodecId(0),
+            failure,
+        },
+    );
+    t.end(ENTRY, loan);
+    if owned {
+        let retry = t.cleanup(&[Undo::Drop(s)]);
+        t.run(ENTRY, &[Undo::Drop(s)], retry);
+    }
+    t.builder.ret(ENTRY, Some(r));
+    t.check()
+}
+
+/// Each broken cleanup is refused for its own ownership violation. With `Decode`
+/// left out of `Inst::failure`, its edge goes unchecked and every one is accepted.
+#[test]
+fn a_decode_failure_edge_owes_what_was_live_before_it() {
+    pair(
+        |b| decode_edge(Edge::UsesResult, b),
+        |k| matches!(k, K::Undefined(_) | K::NotDominated(_)),
+    );
+    pair(
+        |b| decode_edge(Edge::DropsBorrowed, b),
+        |k| matches!(k, K::BorrowedStorage(_)),
+    );
+    pair(
+        |b| decode_edge(Edge::OmitsOwner, b),
+        |k| matches!(k, K::LeakedStorage(_)),
+    );
+    pair(
+        |b| decode_edge(Edge::LeavesLoan, b),
+        |k| matches!(k, K::LoanOpenAtExit(_)),
+    );
+}

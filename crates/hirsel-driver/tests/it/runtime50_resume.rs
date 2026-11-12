@@ -158,6 +158,39 @@ pub(crate) fn routing(
     (exported, entered)
 }
 
+fn fixture_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/std_source/main.hir")
+        .canonicalize()
+        .unwrap()
+}
+
+fn fixture_engine(source: &str) -> QueryEngine {
+    let mut program =
+        crate::source_std::load_program_source(&fixture_path(), Some(source)).unwrap();
+    let checked = program
+        .check(hirsel_query_products::LoweringPolicy::Reachable)
+        .unwrap();
+    assert_eq!(checked.completion, CheckCompletion::Complete);
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    program.engine
+}
+
+fn observe_fixture(
+    source: &str,
+    run: &RunConfiguration,
+    simulation: hirsel_engine::SimulationConfig,
+) -> Result<hirsel_engine::ObservedExecution, hirsel_engine::ToolError> {
+    let input = crate::source_std::tir(&fixture_path(), Some(source), Some(&run.entry.0.name))?;
+    hirsel_driver::testing::observe_tir(
+        &input,
+        run,
+        simulation,
+        hirsel_interp::Limits::default(),
+        false,
+    )
+}
+
 /// Every native backend agrees with the reference under `fixture`, and with
 /// `replay`, its recorded run replays to the same observation.
 pub(crate) fn agree(source: &str, fixture: &Fixture, label: &str) {
@@ -178,12 +211,9 @@ pub(crate) fn agree_on(
     replay: bool,
     heap: &[bool],
 ) -> Observation {
-    let mut engine = crate::source_std::engine();
-    let file = engine.sources.add("main.hir", source.into()).unwrap();
-    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
-    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let _engine = fixture_engine(source);
     let entry = entry_path(&default_context());
-    let reference = crate::source_std::observe(
+    let reference = observe_fixture(
         source,
         &RunConfiguration {
             entry: entry.clone(),
@@ -312,12 +342,9 @@ fn runtime50_migrate_every_suspension_continuations() {
 
 /// Checked H alone beside already qualified native observations.
 pub(crate) fn checked_heap_agrees(source: &str) {
-    let mut engine = crate::source_std::engine();
-    let file = engine.sources.add("main.hir", source.into()).unwrap();
-    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
-    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let _engine = fixture_engine(source);
     let entry = entry_path(&default_context());
-    let reference = crate::source_std::observe(
+    let reference = observe_fixture(
         source,
         &RunConfiguration {
             entry: entry.clone(),
@@ -392,12 +419,9 @@ pub(crate) fn compact_runs_recording(
     tasks: &str,
     recording: bool,
 ) -> Vec<Vec<Line>> {
-    let mut engine = crate::source_std::engine();
-    let file = engine.sources.add("main.hir", source.into()).unwrap();
-    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
-    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let mut engine = fixture_engine(source);
     let entry = entry_path(&default_context());
-    let reference = crate::source_std::observe(
+    let reference = observe_fixture(
         source,
         &RunConfiguration {
             entry: entry.clone(),

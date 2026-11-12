@@ -5,26 +5,34 @@ of 1,048,576 bytes. **Output** is the exact text the program writes to standard 
 and **outcome** is how the run ends ([PROG-3](programs.md#prog-3-entry)). Each refusal is an
 edit of the program; the site is `line:column` in the edited program, at the start of the
 token the rule names ([PROG-7](diagnostics.md#prog-7-one-rule-one-site)). Examples are
-informative; the rules they cite are normative.
+informative; the rules they cite are normative. `?` never converts an error
+([LANG-18](language.md#lang-18-errors)), so each program converts with `mem` and `put`.
 
 ## 1. Bounded scratch in a region
 
 A word is copied into a region inside a bound scope. With 64 bytes it fits: the `Text`
-copy of `"hello"` charges 24 (8 count + 8 extent + 5 bytes, rounded up to 8) and the `Word`
-record 24 (16 for the `Text` reference + 8). With 8 bytes the `Text` copy is refused, and
-the scope returns that `Capacity` value.
+copy of `"hello"` charges 16 (8 count + 5 bytes, rounded up to 8) and the `Word` record 24
+(16 for the `Text` reference + 8). With 8 bytes the `Text` copy is refused, and the scope
+returns that `Capacity` value.
 
 ```hirsel
 type AppError = Io(WriteError) | Mem(Capacity)
 stable type Word { text: Text, len: u64 }
 
+fn mem[T](take r: Result[T, Capacity]) -> Result[T, AppError] {
+  match take r { Ok(take x) => Ok(take x), Error(c) => Error(Mem(c)) }
+}
+
+fn put(out: Stdout, s: String) -> Result[(), AppError] waits {
+  match stdout.write(out, s) { Ok(()) => Ok(()), Error(e) => Error(Io(e)) }
+}
+
 fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] waits {
-  let mut line = string.new()
-  string.push(mut line, label)?
-  string.push_u64(mut line, n)?
-  string.push(mut line, "\n")?
-  stdout.write(out, line)?
-  Ok(())
+  let mut buf = string.new()
+  mem(string.push(mut buf, label))?
+  mem(string.push_u64(mut buf, n))?
+  mem(string.push(mut buf, "\n"))?
+  put(out, buf)
 }
 
 fn word(r: Region, s: String) -> Result[Word in r, Capacity] {
@@ -42,7 +50,7 @@ fn measure(s: String, limit: u64) -> Result[u64, Capacity] {
 }
 
 pub fn main(out: Stdout) -> Result[(), AppError] waits {
-  say(out, "fits, length ", measure("hello", 64)?)?
+  say(out, "fits, length ", mem(measure("hello", 64))?)?
   match measure("hello", 8) {
     Ok(n) => say(out, "fits, length ", n),
     Error(c) => say(out, "refused, requested ", c.requested),
@@ -54,16 +62,16 @@ Output:
 
 ```text
 fits, length 5
-refused, requested 24
+refused, requested 16
 ```
 
 Outcome: success.
 
 Refused edits:
 
-- Make the region block's value `w` instead of `w.len`: refused, MEM-7 at 22:7, a value
+- Make the region block's value `w` instead of `w.len`: refused, MEM-7 at 29:7, a value
   whose type mentions `r` leaves its block.
-- Drop the placement `in r` from the literal in `word`: refused, MEM-2 at 15:3, a stable
+- Drop the placement `in r` from the literal in `word`: refused, MEM-2 at 22:3, a stable
   literal needs a region.
 
 ## 2. Expression tree in one compact blob
@@ -72,26 +80,33 @@ Refused edits:
 by following links. Each node is 9 bytes: a `u8` tag, then a `u64` or two `u32` links. The
 puts land at offsets 0, 9, 18, 27 and 36, and the root is the last, at 36, so the tree
 needs 45 bytes. In 32 bytes the fourth put (27 + 9 > 32) writes nothing and returns
-`Overflow`.
+`Overflow`. Each `Child` carries the destination's identity, and every put checks it.
 
 ```hirsel
 type AppError = Io(WriteError) | Mem(Capacity)
 @compact(u32) stable type Expr = Num(u64) | Add(Link[Expr], Link[Expr])
 
+fn mem[T](take r: Result[T, Capacity]) -> Result[T, AppError] {
+  match take r { Ok(take x) => Ok(take x), Error(c) => Error(Mem(c)) }
+}
+
+fn put(out: Stdout, s: String) -> Result[(), AppError] waits {
+  match stdout.write(out, s) { Ok(()) => Ok(()), Error(e) => Error(Io(e)) }
+}
+
 fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] waits {
-  let mut line = string.new()
-  string.push(mut line, label)?
-  string.push_u64(mut line, n)?
-  string.push(mut line, "\n")?
-  stdout.write(out, line)?
-  Ok(())
+  let mut buf = string.new()
+  mem(string.push(mut buf, label))?
+  mem(string.push_u64(mut buf, n))?
+  mem(string.push(mut buf, "\n"))?
+  put(out, buf)
 }
 
 fn eval(e: Expr) -> u64 {
   match e { Num(n) => n, Add(a, b) => eval(a) + eval(b) }
 }
 
-fn write(mut d: Dest[Expr]) -> Result[Child[Expr] of d, BuildError] {
+fn write(mut d: Dest[Expr]) -> Result[Child[Expr], BuildError] {
   let two = dest.put(mut d, Num(2))?
   let three = dest.put(mut d, Num(3))?
   let sum = dest.put(mut d, Add(two, three))?
@@ -101,16 +116,16 @@ fn write(mut d: Dest[Expr]) -> Result[Child[Expr] of d, BuildError] {
 
 fn run(n: u64) -> Result[u64, BuildError] {
   region r {
-    let b = build_in(r, bytes n, fn(mut d: Dest[Expr]) -> Result[Child[Expr] of d, BuildError] { write(mut d) })?
+    let b = build_in(r, bytes n, fn(mut d: Dest[Expr]) -> Result[Child[Expr], BuildError] { write(mut d) })?
     Ok(eval(finish(take b)))
   }
 }
 
 pub fn main(out: Stdout) -> Result[(), AppError] waits {
-  let v = match run(64) { Ok(v) => v, Error(_) => 0 }
+  let v = match run(64) { Ok(w) => w, Error(_) => 0 }
   say(out, "value ", v)?
   match run(32) {
-    Ok(v) => say(out, "value ", v),
+    Ok(w) => say(out, "value ", w),
     Error(Overflow) => say(out, "overflow at ", 32),
     Error(Capacity(c)) => say(out, "capacity ", c.requested),
   }
@@ -129,7 +144,7 @@ Outcome: success.
 Refused edits:
 
 - Bind a link as a value: replace `eval(a)` with `{ let k: Link[Expr] = a; eval(k) }`:
-  refused, MEM-10 at 14:61, a link is never a value.
+  refused, MEM-10 at 21:48, a link is never a value.
 - Add a variant `Str(String)` to `Expr`: refused, MEM-9 at 2:79, a compact type has no own
   field.
 
@@ -143,27 +158,34 @@ push hands its value, 4, back.
 ```hirsel
 type AppError = Io(WriteError) | Mem(Capacity)
 
-fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] waits {
-  let mut line = string.new()
-  string.push(mut line, label)?
-  string.push_u64(mut line, n)?
-  string.push(mut line, "\n")?
-  stdout.write(out, line)?
-  Ok(())
+fn mem[T](take r: Result[T, Capacity]) -> Result[T, AppError] {
+  match take r { Ok(take x) => Ok(take x), Error(c) => Error(Mem(c)) }
 }
 
-fn add(mut ws: List[String], take w: String) -> Result[(), Capacity] {
-  match list.push(mut ws, take w) { Ok(()) => Ok(()), Error((c, _)) => Error(c) }
+fn put(out: Stdout, s: String) -> Result[(), AppError] waits {
+  match stdout.write(out, s) { Ok(()) => Ok(()), Error(e) => Error(Io(e)) }
+}
+
+fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] waits {
+  let mut buf = string.new()
+  mem(string.push(mut buf, label))?
+  mem(string.push_u64(mut buf, n))?
+  mem(string.push(mut buf, "\n"))?
+  put(out, buf)
+}
+
+fn add(mut ws: List[String], take w: String) -> Result[(), AppError] {
+  match list.push(mut ws, take w) { Ok(()) => Ok(()), Error((c, _)) => Error(Mem(c)) }
 }
 
 fn tally(ws: List[String]) -> Result[Map[String, u64], Capacity] {
   let mut m: Map[String, u64] = map.new()
   for w in ws {
     let n: u64 = match map.get(m, w) { Some(v) => v, None => 0 }
-    let k = string.copy(w)?
+    let k = string.from(w)?
     match map.insert(mut m, take k, n + 1) { Ok(()) => {}, Error((c, _, _)) => return Error(c) }
   }
-  Ok(m)
+  Ok(take m)
 }
 
 fn first_refused(limit: u64) -> Result[u64, Capacity] {
@@ -185,10 +207,10 @@ pub fn main(out: Stdout) -> Result[(), AppError] waits {
   add(mut ws, "a")?
   add(mut ws, "c")?
   add(mut ws, "a")?
-  let m = tally(ws)?
+  let m = mem(tally(ws))?
   say(out, "a ", match map.get(m, "a") { Some(v) => v, None => 0 })?
   say(out, "distinct ", map.len(m))?
-  say(out, "first refused push ", first_refused(64)?)
+  say(out, "first refused push ", mem(first_refused(64))?)
 }
 ```
 
@@ -204,10 +226,10 @@ Outcome: success.
 
 Refused edits:
 
-- Drop the `?` after `add(mut ws, "c")`: refused, LANG-18 at 43:3, an expression statement
+- Drop the `?` after `add(mut ws, "c")`: refused, LANG-18 at 50:3, an expression statement
   whose value is a `Result`.
 - Grow `ws` while iterating it: insert `for w in ws { add(mut ws, "d")? }` before `let m`:
-  refused, OWN-10 at 45:21, `ws` is frozen by the loop.
+  refused, OWN-10 at 52:21, `ws` is frozen by the loop.
 
 ## 4. Pieces shared between a document and its undo list
 
@@ -218,22 +240,29 @@ and returns the handle.
 type AppError = Io(WriteError) | Mem(Capacity)
 type Piece: shareable { text: String }
 
+fn mem[T](take r: Result[T, Capacity]) -> Result[T, AppError] {
+  match take r { Ok(take x) => Ok(take x), Error(c) => Error(Mem(c)) }
+}
+
+fn put(out: Stdout, s: String) -> Result[(), AppError] waits {
+  match stdout.write(out, s) { Ok(()) => Ok(()), Error(e) => Error(Io(e)) }
+}
+
 fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] waits {
-  let mut line = string.new()
-  string.push(mut line, label)?
-  string.push_u64(mut line, n)?
-  string.push(mut line, "\n")?
-  stdout.write(out, line)?
-  Ok(())
+  let mut buf = string.new()
+  mem(string.push(mut buf, label))?
+  mem(string.push_u64(mut buf, n))?
+  mem(string.push(mut buf, "\n"))?
+  put(out, buf)
 }
 
-fn piece(s: String) -> Result[Rc[Piece], Capacity] {
-  let t = string.from(s)?
-  match rc.new(Piece(text: take t)) { Ok(take h) => Ok(take h), Error((c, _)) => Error(c) }
+fn piece(s: String) -> Result[Rc[Piece], AppError] {
+  let t = mem(string.from(s))?
+  match rc.new(Piece(text: take t)) { Ok(take h) => Ok(take h), Error((c, _)) => Error(Mem(c)) }
 }
 
-fn keep(mut xs: List[Rc[Piece]], take h: Rc[Piece]) -> Result[(), Capacity] {
-  match list.push(mut xs, take h) { Ok(()) => Ok(()), Error((c, _)) => Error(c) }
+fn keep(mut xs: List[Rc[Piece]], take h: Rc[Piece]) -> Result[(), AppError] {
+  match list.push(mut xs, take h) { Ok(()) => Ok(()), Error((c, _)) => Error(Mem(c)) }
 }
 
 fn bytes_of(ps: List[Rc[Piece]]) -> u64 {
@@ -252,8 +281,8 @@ pub fn main(out: Stdout) -> Result[(), AppError] waits {
   say(out, "undo ", bytes_of(undo))?
   let first = match list.pop(mut undo) { Some(take h) => h, None => return Ok(()) }
   match rc.try_unwrap(take first) {
-    Ok(_) => stdout.write(out, "unique\n")?,
-    Error(_) => stdout.write(out, "shared\n")?,
+    Ok(_) => put(out, "unique\n")?,
+    Error(_) => put(out, "shared\n")?,
   }
   Ok(())
 }
@@ -274,29 +303,37 @@ Refused edits:
 - Insert `type Doc: send { pieces: List[Rc[Piece]] }` as line 3: refused, CONC-2 at 3:31,
   `Rc` is not `send`.
 - Use `first` after `try_unwrap`: insert `let again = rc.share(first)` before the last
-  `Ok(())`: refused, OWN-5 at 41:24, `first` was moved.
+  `Ok(())`: refused, OWN-5 at 48:24, `first` was moved.
 
 ## 5. Cleanup order and fallible close
 
-`Step` is a resource whose finalizer reports its name; finalizers may wait. `close` ends a
-step without its finalizer. Values are cleaned in reverse order on every exit edge; the
-second call fails after two steps exist, so they are dropped before the failure reaches
-the run.
+`Step` is a resource that holds its `Stdout` as a field; its finalizer reports its name and
+may call waiting operations. `close` ends a step without its finalizer. Values are cleaned
+in reverse order on every exit edge; the second call fails after two steps exist, so they
+are dropped before the failure reaches the run.
 
 ```hirsel
 type AppError = Io(WriteError) | Mem(Capacity)
 
-resource type Step uses Stdout { name: String, out: Stdout }
+resource type Step { name: String, out: Stdout }
   drop(s) { let _ = stdout.write(s.out, "drop "); let _ = stdout.write(s.out, s.name) }
 
-fn step(out: Stdout, take name: String) -> Result[Step, Capacity] {
-  Step(name: take name, out: out)
+fn mem[T](take r: Result[T, Capacity]) -> Result[T, AppError] {
+  match take r { Ok(take x) => Ok(take x), Error(c) => Error(Mem(c)) }
 }
 
-fn close(take s: Step) -> Result[(), WriteError] waits {
+fn put(out: Stdout, s: String) -> Result[(), AppError] waits {
+  match stdout.write(out, s) { Ok(()) => Ok(()), Error(e) => Error(Io(e)) }
+}
+
+fn step(out: Stdout, take name: String) -> Result[Step, AppError] {
+  mem(Step(name: take name, out: out))
+}
+
+fn close(take s: Step) -> Result[(), AppError] waits {
   let Step(name: n, out: o) = take s
-  stdout.write(o, "close ")?
-  stdout.write(o, n)
+  put(o, "close ")?
+  put(o, n)
 }
 
 fn steps(out: Stdout, fail_at: u64) -> Result[(), AppError] waits {
@@ -324,12 +361,12 @@ drop b
 drop a
 ```
 
-Outcome: failure, primary cause `Fail("stop")` at 19:21; the first call printed its three
+Outcome: failure, primary cause `Fail("stop")` at 27:21; the first call printed its three
 lines, the second dropped `b` then `a` before the failure ended the run.
 
 Refused edits:
 
-- Close `c` twice: repeat the line `close(take c)?`: refused, OWN-5 at 22:14, `c` was
+- Close `c` twice: repeat the line `close(take c)?`: refused, OWN-5 at 30:14, `c` was
   moved.
 - Use `?` in the finalizer: `drop(s) { stdout.write(s.out, s.name)? }`: refused, FAIL-11 at
   4:40, no `?` in a finalizer.
@@ -337,20 +374,32 @@ Refused edits:
 ## 6. Three tasks with bounded channels
 
 A source sends 1 to 5 through a channel of two slots, a second task squares them into
-another, and `main` sums what arrives. Each task's last sender closes its channel when the
-task is cleaned, which ends the next loop. The output does not depend on the schedule.
+another, and `main` sums what arrives. The endpoints travel as spawn payloads. Each task's
+last sender closes its channel when the task is cleaned, which ends the next loop. The
+output does not depend on the schedule.
 
 ```hirsel
 type AppError = Io(WriteError) | Mem(Capacity) | Join(JoinError)
 type Ends: send { input: Receiver[u64], output: Sender[u64] }
 
+fn mem[T](take r: Result[T, Capacity]) -> Result[T, AppError] {
+  match take r { Ok(take x) => Ok(take x), Error(c) => Error(Mem(c)) }
+}
+
+fn put(out: Stdout, s: String) -> Result[(), AppError] waits {
+  match stdout.write(out, s) { Ok(()) => Ok(()), Error(e) => Error(Io(e)) }
+}
+
 fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] waits {
-  let mut line = string.new()
-  string.push(mut line, label)?
-  string.push_u64(mut line, n)?
-  string.push(mut line, "\n")?
-  stdout.write(out, line)?
-  Ok(())
+  let mut buf = string.new()
+  mem(string.push(mut buf, label))?
+  mem(string.push_u64(mut buf, n))?
+  mem(string.push(mut buf, "\n"))?
+  put(out, buf)
+}
+
+fn joined(take h: Task[u64]) -> Result[u64, AppError] waits {
+  match task.join(take h) { Ok(r) => Ok(r), Error(take e) => Error(Join(take e)) }
 }
 
 fn source(take tx: Sender[u64]) -> u64 waits {
@@ -370,8 +419,8 @@ fn square(take e: Ends) -> u64 waits {
 }
 
 pub fn main(out: Stdout, tasks: Tasks) -> Result[(), AppError] waits {
-  let (tx1, rx1): (Sender[u64], Receiver[u64]) = channel.new(2)?
-  let (tx2, rx2): (Sender[u64], Receiver[u64]) = channel.new(2)?
+  let (tx1, rx1): (Sender[u64], Receiver[u64]) = mem(channel.new(2))?
+  let (tx2, rx2): (Sender[u64], Receiver[u64]) = mem(channel.new(2))?
   let src = match task.spawn(tasks, bytes 4096, take tx1, source) {
     Ok(take h) => h,
     Error((c, _)) => return Error(Mem(c)),
@@ -383,8 +432,8 @@ pub fn main(out: Stdout, tasks: Tasks) -> Result[(), AppError] waits {
   }
   let mut total: u64 = 0
   while let Ok(y) = channel.receive(rx2) { total += y }
-  say(out, "sent ", task.join(take src)?)?
-  say(out, "squared ", task.join(take sq)?)?
+  say(out, "sent ", joined(take src)?)?
+  say(out, "squared ", joined(take sq)?)?
   say(out, "total ", total)
 }
 ```
@@ -402,13 +451,13 @@ Outcome: success.
 Refused edits:
 
 - Receive from `rx1` after it moved into `ends`: insert `let _ = channel.receive(rx1)`
-  before `let mut total`: refused, OWN-5 at 41:27, `rx1` was moved.
+  before `let mut total`: refused, OWN-5 at 52:27, `rx1` was moved.
 - Give `Ends` a field `seen: Rc[u64]`: refused, CONC-2 at 2:68, `Rc` is not `send`.
 
 ## 7. A child's failure is a value at join
 
 The child adds two `u8` values of 200 and fails with `Overflow`. Its cleanup runs in the
-child; the joiner receives the cause chain as an error value and carries on.
+child; the joiner receives `Failed` with the cause chain as an error value and carries on.
 
 ```hirsel
 type AppError = Io(WriteError) | Mem(Capacity)
@@ -419,21 +468,29 @@ fn sum(take xs: List[u8]) -> u8 {
   t
 }
 
+fn mem[T](take r: Result[T, Capacity]) -> Result[T, AppError] {
+  match take r { Ok(take x) => Ok(take x), Error(c) => Error(Mem(c)) }
+}
+
+fn put(out: Stdout, s: String) -> Result[(), AppError] waits {
+  match stdout.write(out, s) { Ok(()) => Ok(()), Error(e) => Error(Io(e)) }
+}
+
 pub fn main(out: Stdout, tasks: Tasks) -> Result[(), AppError] waits {
   let mut xs: List[u8] = list.new()
-  list.fill(mut xs, 2, 200)?
+  mem(list.fill(mut xs, 2, 200))?
   let h = match task.spawn(tasks, bytes 4096, take xs, sum) {
-    Ok(take h) => h,
+    Ok(take k) => k,
     Error((c, _)) => return Error(Mem(c)),
   }
   match task.join(take h) {
-    Ok(_) => stdout.write(out, "sum fits\n")?,
-    Error(Failed(causes)) => {
+    Ok(_) => put(out, "sum fits\n")?,
+    Error(Failed(take causes)) => {
       for c in causes {
-        match c.kind { Overflow => stdout.write(out, "child failed: Overflow\n")?, _ => stdout.write(out, "child failed\n")? }
+        match c.kind { Overflow => put(out, "child failed: Overflow\n")?, _ => put(out, "child failed\n")? }
       }
     }
-    Error(Cancelled(causes)) => stdout.write(out, "child cancelled\n")?,
+    Error(Cancelled(_)) => put(out, "child cancelled\n")?,
   }
   Ok(())
 }
@@ -450,6 +507,6 @@ Outcome: success. The child's cause is `Overflow` (SEM-1) at the `+=` in `t += x
 Refused edits:
 
 - Use `xs` after the spawn: insert `let n = list.len(xs)` before `match task.join`:
-  refused, OWN-5 at 16:20, `xs` was moved.
-- Pass `xs` to the spawn without `take`: refused, OWN-7 at 12:47, a `take` parameter needs
+  refused, OWN-5 at 24:20, `xs` was moved.
+- Pass `xs` to the spawn without `take`: refused, OWN-7 at 20:47, a `take` parameter needs
   `take xs` for a place.

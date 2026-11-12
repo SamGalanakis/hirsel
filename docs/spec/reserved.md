@@ -13,11 +13,11 @@ v1 meets it.
 
 **R1.** `send` is checked from declarations and capture lists; `Rc`, scoped and stable
 values are never `send`; every sent block keeps a limit that outlives its holders,
-ultimately the root. *v1:* CONC-2, MEM-22.
+ultimately the root. *v1:* CONC-2, MEM-20.
 
 **R2.** Sent, received and joined values keep their original charge and are refunded to
 that limit; queue storage is admitted at creation; spawn fails before the task exists;
-join admits nothing; cross-task charges and refunds are ordered events. *v1:* MEM-22,
+join admits nothing; cross-task charges and refunds are ordered events. *v1:* MEM-20,
 CONC-4, CONC-6, CONC-10, with per-task limits whose records hand over to their parent
 instead of a separate shared domain.
 
@@ -39,10 +39,11 @@ environmental termination. Unsafe/foreign operations require explicit authority 
 outside replay unless an explicit model/provider contract admits them." *v1:* no foreign
 code; FAIL-15 makes stack exhaustion a run stop.
 
-**R6.** `String`/`List` and `Text`/spans are distinct types; `FixedSpan`, `SeqSpan` and
-`IndexedSpan` are distinct and only fixed and indexed spans index; compact fields declare
+**R6.** `String`/`List` and `Text`/`FixedSpan` are distinct types; compact fields declare
 inline or linked storage and links stay in one blob; wire formats are separate;
-optimisation keeps declared shapes. *v1:* MEM-9 to MEM-12, MEM-30.
+optimisation keeps declared shapes. Sequences of variable-size or stable elements, and an
+indexed form of them, are later and will be new types; v1 builds such data from compact
+types and links. *v1:* MEM-9 to MEM-12, MEM-28.
 
 **R7.** Literals evaluate fields before admission; `build_in` admits before its writer
 runs; `prepare_in` copies; only completed builders are public; `finish` cannot fail or
@@ -59,7 +60,7 @@ that admission fails, the recovery returns a bare `Capacity` and leaves the chai
 
 **R9.** Recording a failure and its causes never admits: cause storage is admitted with
 each task and resource; causes are never truncated and cleanup is never skipped. *v1:*
-FAIL-10, MEM-26, MEM-29.
+FAIL-10, MEM-24, MEM-27.
 
 **R10.** Every outside input and every scheduling or cross-task choice passes the replay
 point, which can supply outcomes without host effects; pure code needs no events or
@@ -92,9 +93,9 @@ cleanup-allocation summaries; omission conservatively permits allocation. `noall
 is an explicit generic obligation. Absence of Capacity in Result proves nothing. Future
 `@noalloc` means no own/counted/region allocation or growth admission on any path,
 including cleanup; fixed local scalar storage is permitted." *v1:* every v1 callable type
-omits the invocation summary, so a call through it may allocate (MEM-23), and its cleanup
+omits the invocation summary, so a call through it may allocate (MEM-21), and its cleanup
 summary is fixed: a closure's cleanup admits nothing (FAIL-13); finalizer allocation is
-declared by `grant` (MEM-29).
+declared by `grant` (MEM-27).
 
 **R15.** "`View[T]` promises typed access and an anchor, not a contiguous aligned pointer.
 A raw-byte/FFI operation requires an explicit contiguous/alignment contract or conversion;
@@ -120,8 +121,10 @@ is written through a view".
 of a private implementation-authority ceiling, including captured/destructor grants.
 Projection restores a field's authority; narrowing cannot regain a parent's grant. No
 body's inferred effect list or public concrete grant list substitutes for that declared
-facade contract." *v1:* CAP-3 has one declared `uses` per type and function, checked
-against fields and captures; the private ceiling is later. CAP-7.
+facade contract." *v1:* there are no authority summaries: a function's authority is
+exactly the capabilities in its arguments, and an owning closure captures none (CAP-3,
+LANG-14), so a later declared facade restricts only what v1 already passes explicitly.
+CAP-7.
 
 **R20 (amended).** Every allocation is charged to the current limit; a bound scope covers
 own, counted, region and task storage; its reservation debits the parent and all of its
@@ -129,7 +132,7 @@ cleanup precedes its refund. *Amended clause:* values a scope funded may leave i
 the scope's limit record is handed over to its parent, which already holds those bytes,
 so every surviving block is funded by a live limit, refunds stay constant amortised, and
 `Capacity.available` names the limit the admission was tried against. This replaces the
-audit's "child-domain/root values cannot escape". *v1:* MEM-22, MEM-27, MEM-28.
+audit's "child-domain/root values cannot escape". *v1:* MEM-20, MEM-25, MEM-26.
 
 **R21.** "Borrowed reader/cursor/yield signatures name their anchors; a yield rooted in
 input and a yield rooted in mutable cursor state are distinct contracts. Generic consumers
@@ -148,12 +151,17 @@ Shielding never promises rollback/exactly-once effects across process death; rev
 and external readiness are explicit provider outcomes." *v1:* CAP-5, CAP-8; `WriteError`
 states the committed prefix of a write; cancellation reaches an operation only at issue.
 
+**R24.** Static pool brands may later let a pool skip its identity check. *v1:* a pool is
+library code whose handles are plain data checked at run time (MEM-18); no rule, keyword or
+checker state names a brand, so a later brand form will be written with contextual words
+and changes the meaning of no v1 program.
+
 ## Hooks for later libraries
 
 | hook | v1 | state |
 |---|---|---|
-| O, scoped ownership and authority | scoped types and callbacks, declared anchors, regions and limits, declared `uses` | settled; later adapters only admit forms v1 refuses |
-| F, failure boundary | cleanup on every exit edge; one owner per survivor; ordered causes; FAIL-14 promises no task end | settled for `isolate`; `shield` open: its cancellation deferral has no v1 form |
+| O, scoped ownership and authority | scoped types and callbacks, declared anchors, regions and limits; authority only through arguments | open: authority facades (R19) and static brands (R24) |
+| F, failure boundary | cleanup on every exit edge; one owner per survivor; ordered causes; FAIL-14 promises no task end | open: `isolate` has its v1 obligations (R8); `shield` has no v1 form |
 | C, derivation and codecs | nominal identity, opacity, rigid bounds, declaration field order | open: the content hash of a declaration for stored data is not specified |
 | D, code descriptors | code identity; instance identity; no address or order dependence | open: the semantic revision hash is not specified |
 | L, append-only log | the R18 exception named in OWN-8 | open: the `Log[E]` type |
@@ -166,7 +174,8 @@ User-made shared limits; mutexes, atomics and cells; weak counted references; ca
 failures; deadlines and timeouts; task sets and selection; `@noalloc`; compile-time
 evaluation beyond `const`; unsafe code and foreign functions; layout declarations other
 than `@compact`; methods, traits and implementation contracts; imports; list literals;
-format strings; `forget`; persistent mutable views; derivation and codecs; contracts and
+format strings; `forget`; static brands; sequences of variable-size or stable elements;
+conversion of errors by `?`; persistent mutable views; derivation and codecs; contracts and
 facts; the store, runners and places; recording formats. A later opt-in execution-budget
 scope may stop code at a loop back edge or a call while such a scope is present; no v1
 rule assumes that code cannot be stopped there.

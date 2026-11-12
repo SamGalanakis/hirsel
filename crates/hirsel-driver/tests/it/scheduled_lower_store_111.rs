@@ -561,12 +561,7 @@ fn lower_package(
         .collect();
     let errors = crate::scheduled_front::errors();
     let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
-    let mut runtime = AdmittedRuntime::new(
-        hirsel_intern::jobs::Jobs::ONE,
-        budget.reserve(512 << 20).unwrap(),
-        errors,
-    )
-    .unwrap();
+    let mut runtime = AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
     let weight = MemoryWeight {
         retained: 2 << 20,
         scratch: 8 << 20,
@@ -817,12 +812,7 @@ fn lower_client(directory: &std::path::Path, internal: &str, store: &Arc<MemStor
     let definitions = [main.clone(), width.clone()];
     let errors = crate::scheduled_front::errors();
     let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
-    let mut runtime = AdmittedRuntime::new(
-        hirsel_intern::jobs::Jobs::ONE,
-        budget.reserve(512 << 20).unwrap(),
-        errors,
-    )
-    .unwrap();
+    let mut runtime = AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
     let weight = MemoryWeight {
         retained: 2 << 20,
         scratch: 8 << 20,

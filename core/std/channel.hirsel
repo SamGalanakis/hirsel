@@ -1,0 +1,39 @@
+// Module `channel`: the bounded channel (CONC-4, CONC-5, CONC-9). Every operation is CORE;
+// this file restates them with their contracts and adds nothing. There is no wrapper
+// type: the core channel is already bounded, admits all its storage at creation and never
+// allocates afterwards, which is what a wrapper would add. Field legend: API.md.
+//
+// Charges: channel.new admits cap x size(T) + 64 for the queue at the current limit
+// (MEM-26), plus nothing for the endpoints, whose 24-byte headers are inline in their
+// owners. Items keep the limit that admitted their blocks while queued (MEM-22).
+// Backpressure: `send` waits while the queue holds cap items; `try_send` returns Full(x).
+// Dropped endpoints: when the last Sender is cleaned the channel closes for receiving
+// after its queued items; when the Receiver is cleaned it closes for sending and the
+// queued items are cleaned from the highest queue index down (CONC-9).
+
+/// CORE. A channel of cap slots (cap 0 is unspecified in core.md, G17; use cap >= 1).
+/// Fails: Error(c); nothing made. Alloc: cap x size(T) + 64, current limit.
+/// Ex: `let (tx, rx): (Sender[Batch], Receiver[Batch]) = channel.new(8)?`
+pub fn new[T: send](cap: u64) -> Result[(Sender[T], Receiver[T]), Capacity]
+
+/// CORE. Another Sender for the same channel. Cannot fail; allocates nothing.
+/// Ex: `let tx2 = channel.sender(tx)`
+/// PROVISIONAL (F13): duplication will either be fallible, `-> Result[Sender[T], Capacity]` admitting its 2 x 32-byte share, or be explicitly exempt; the spelling follows the revised core.md.
+pub fn sender[T](tx: Sender[T]) -> Sender[T]
+
+/// CORE. Waits for a free slot, then publishes x. Fails: Error(Closed { item: x }) when the
+/// channel is closed; a cancellation observed before publication is a failure and x is
+/// cleaned by the sender's cleanup. Alloc: nothing. Cost: O(1) plus waiting.
+/// Ex: `channel.send(tx, take batch)?`
+pub fn send[T](tx: Sender[T], take x: T) -> Result[(), Closed[T]] waits
+
+/// CORE. Publishes x if a slot is free. Fails: Error(Full(x)) or Error(Closed(x)).
+/// Never waits. Alloc: nothing. Cost: O(1).
+/// Ex: `match channel.try_send(tx, take b) { Error(Full(take b)) => .., _ => .. }`
+pub fn try_send[T](tx: Sender[T], take x: T) -> Result[(), SendError[T]]
+
+/// CORE. Waits for an item and moves it out, in publication order. Fails:
+/// Error(Closed { item: () }) once the channel is closed and empty; cancellation while waiting
+/// is a failure. Alloc: nothing. Cost: O(1) plus waiting.
+/// Ex: `while let Ok(take b) = channel.receive(rx) { .. }`
+pub fn receive[T](rx: Receiver[T]) -> Result[T, Closed[()]] waits

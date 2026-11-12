@@ -1,0 +1,9 @@
+// Module `clock`: Clock is a plain, `send` capability. Provider operations (CAP-5, P4);
+// each reading passes the replay point, so a replay returns the recorded value (CAP-8).
+// Neither waits nor allocates nor fails.
+
+/// Wall-clock milliseconds since 1970-01-01 UTC; may go backwards. Ex: `clock.now_ms(c)`
+pub fn now_ms(c: Clock) -> u64
+
+/// Monotonic nanoseconds from an unspecified origin fixed for the run. Ex: `clock.monotonic_ns(c)`
+pub fn monotonic_ns(c: Clock) -> u64

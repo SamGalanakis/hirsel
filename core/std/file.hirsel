@@ -1,0 +1,101 @@
+// Module `file`: files below a Dir. Every operation is a provider operation (CAP-5, P4 in
+// SPEC-GAPS), passes the replay point at issue and at delivery (CAP-8), and when marked
+// `waits` is a cancellation point (CONC-7). Field legend: API.md; "Prefix:" says what has
+// happened on the host when the operation fails or is cancelled part way.
+//
+// File is a `send` resource: an open host handle with a position. Making one admits the
+// resource charge, 32 bytes for its cause cell (MEM-26, FAIL-10), at the current limit;
+// it has no grant because its finalizer allocates nothing. The finalizer closes the
+// handle and ignores a close error, as Rust's File does; call `close` to see the error.
+// It runs exactly once, shielded (FAIL-11), unless `close` consumed the file.
+
+pub opaque resource type File: send { h: u64 }
+  drop(f) { host_close(f.h) }                      // P4 primitive; result discarded
+
+/// How open_with opens. Plain.
+pub type OpenOptions { read: bool, write: bool, create: Create }
+pub type Create = Existing | IfMissing | New | Truncate
+
+/// Opens p for reading. Fails: Error(NotFound | InvalidPath | Denied | Os(_) | Capacity(c)),
+/// admission first, so on Capacity the host was not asked. Alloc: 32 (resource), current
+/// limit. Prefix: nothing on failure; a cancellation at delivery closes the handle.
+/// Ex: `let src = file.open(d, path.of(take "source.txt"))?`
+pub fn open(d: Dir, p: Path) -> Result[File, IoError] waits
+
+/// Opens p for writing, creating it or truncating it. Errors and alloc as open.
+/// Prefix: a cancellation at delivery closes the handle; the file stays created/truncated.
+/// Ex: `let out = file.create(d, path.of(take "out.txt"))?`
+pub fn create(d: Dir, p: Path) -> Result[File, IoError] waits
+
+/// Creates p for writing; Error(Exists) when it exists. Otherwise as create.
+/// Ex: `let dst = file.create_new(d, path.of(take "dest.txt"))?`
+pub fn create_new(d: Dir, p: Path) -> Result[File, IoError] waits
+
+/// Opens p as o says. Fails: Bounds (failure) when neither read nor write is set;
+/// otherwise as open, plus Exists for New. Prefix: as create.
+/// Ex: `let lf = file.open_with(d, path.of(take "copy.lock"), OpenOptions { read: true, write: true, create: IfMissing })?`
+pub fn open_with(d: Dir, p: Path, o: OpenOptions) -> Result[File, IoError] waits
+
+/// Reads at most capacity(buf) - len(buf) bytes from f's position and appends them to buf;
+/// Ok(0) at end of file or when buf has no spare capacity.
+/// Fails: Error(InvalidData | Denied | Os(_)); buf unchanged. Alloc: nothing; buf never grows.
+/// Prefix: on failure nothing was read. Cost: O(n) bytes.
+/// Ex: `bytes.clear(mut buf); let n = file.read_into(mut src, mut buf)?`
+pub fn read_into(mut f: File, mut buf: Bytes) -> Result[u64, IoError] waits
+
+/// Writes all of data at f's position. Fails: Error(WriteError { written: n, error: e }).
+/// Prefix: the first n bytes are written and stay written; the position moved by n.
+/// Alloc: nothing. Cost: O(len). Ex: `file.write_all(mut dst, buf)?`
+pub fn write_all(mut f: File, data: Bytes) -> Result[(), WriteError] waits
+
+/// Closes f and reports the host's close error, which on some hosts is the first report
+/// of a failed earlier write. Fails: Error(Os(_) | Denied). Either way f is ended and its
+/// handle released; its finalizer does not run. Alloc: nothing; the cause cell is refunded.
+/// Ex: `file.close(take src)?`
+pub fn close(take f: File) -> Result[(), IoError] waits
+
+/// Reads the whole file p. Admits the host-reported size first; if the file is longer
+/// than reported the Bytes grows by GROWTH. Fails: Error(NotFound | InvalidPath | Denied |
+/// Os(_) | Capacity(c)); bytes read so far are cleaned and refunded (FAIL-5).
+/// Alloc: the Bytes, current limit. Prefix: nothing on the host changes.
+/// Cost: O(size). Ex: `let raw = file.read(d, path.of(take "input.txt"))?`
+pub fn read(d: Dir, p: Path) -> Result[Bytes, IoError] waits
+
+/// As read, then string.from_utf8; Error(InvalidData) when not UTF-8 (the bytes are
+/// cleaned). Ex: `let s = file.read_string(d, p)?`
+pub fn read_string(d: Dir, p: Path) -> Result[String, IoError] waits
+
+/// Creates or truncates p and writes all of data, then closes it.
+/// Fails: Error(...) as create and write_all; Prefix: the file may exist holding a prefix
+/// of data of unknown length (use create, write_all and close to learn it).
+/// Alloc: 32 (the transient File's cause cell), refunded on return.
+/// Ex: `file.write(d, path.of(take "source.txt"), data)?`
+pub fn write(d: Dir, p: Path, data: Bytes) -> Result[(), IoError] waits
+
+/// Removes the file p. Fails: Error(NotFound | InvalidPath | Denied | Os(_)).
+/// Prefix: a cancellation at delivery leaves it removed. Ex: `file.remove(d, p)?`
+pub fn remove(d: Dir, p: Path) -> Result[(), IoError] waits
+
+// The OS file lock: advisory, exclusive, whole-file (flock semantics, as Rust's
+// File::try_lock and the fs4 crate). Lock is a `send` resource that owns the locked File,
+// so the lock is released exactly once: by `unlock`, or by its finalizer, which unlocks
+// (ignoring the error) and then cleans the File field, whose finalizer closes the handle;
+// closing also drops an flock. Making a Lock admits 32 bytes for its cause cell.
+
+pub opaque resource type Lock: send { f: File }
+  drop(l) { host_unlock(l.f.h) }                   // P4 primitive; result discarded
+
+/// Held: another handle holds the lock. Io: the host refused for another reason.
+pub type LockError = Held | Io(IoError)
+
+/// Takes the lock on f without waiting.
+/// Fails: Error((Held, f)) or Error((Io(e), f)), f returned unlocked; Error((Io(Capacity(c)), f))
+/// when the cause cell is refused, before the host is asked. Alloc: 32, current limit.
+/// Prefix: on failure the lock is not held. Cost: one host call; never waits.
+/// Ex: `let l = match file.try_lock(take lf) { Ok(take l) => l, Error((e, take lf)) => .. }`
+pub fn try_lock(take f: File) -> Result[Lock, (LockError, File)]
+
+/// Unlocks and returns the File, still open. Fails: Error((e, f)): the unlock failed and the
+/// lock state is the host's; closing f releases it. Either way l is ended exactly once.
+/// Alloc: nothing; the cause cell is refunded. Ex: `let lf = file.unlock(take l)?`
+pub fn unlock(take l: Lock) -> Result[File, (IoError, File)] waits

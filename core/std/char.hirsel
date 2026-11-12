@@ -1,0 +1,21 @@
+// Module `char`: Unicode scalar values (SEM-3). `char` is plain, 4 bytes, key + ordered.
+// from_u32 and to_u32 are core primitives (P3 in SPEC-GAPS): `char` is not an integer
+// type, so int.widen does not apply. The rest is ordinary source over them.
+
+/// The scalar with value n, or None for a surrogate or n > 0x10FFFF. Cost: O(1).
+/// Ex: `char.from_u32(0x1F600)`
+pub fn from_u32(n: u32) -> Option[char]
+
+/// The scalar's value. Cost: O(1). Ex: `char.to_u32('A')` is 65
+pub fn to_u32(c: char) -> u32
+
+/// Number of UTF-8 bytes, 1 to 4. Cost: O(1). Ex: `char.utf8_len('é')` is 2
+pub fn utf8_len(c: char) -> u64
+
+/// 'a'..='z' mapped to 'A'..='Z'; every other scalar unchanged. Cost: O(1).
+/// Ex: `string.push_char(mut out, char.to_ascii_upper(c))?`
+pub fn to_ascii_upper(c: char) -> char
+
+/// The value of an ASCII digit in `base` (2 to 36), or None. Cost: O(1).
+/// Ex: `char.digit('f', 16)` is Some(15)
+pub fn digit(c: char, base: u32) -> Option[u32]

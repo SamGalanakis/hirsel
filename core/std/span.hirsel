@@ -1,0 +1,57 @@
+// Module `span`: the stable sequences (MEM-12) and their builders (MEM-3), plus the
+// region helpers. Field legend: API.md; region patterns: API.md, "Regions and builders".
+//
+// FixedSpan[T]: count, then fixed-size elements; span.get by index. SeqSpan[T]: count,
+// byte extent, elements; iteration and length only. IndexedSpan[T]: a SeqSpan plus an
+// offset table; span.get by index. Elements are plain or stable. A span reference counts
+// 16 bytes; its bytes are region storage freed when the region closes. `for x in s`
+// iterates every span (SEM-6); spans are never frozen.
+//
+// A Builder is opaque and affine. A push that outgrows the builder's block continues in a
+// new block of twice the size (from 4 elements); the abandoned block stays charged to
+// the region until it closes (MEM-3, FAIL-6). That waste is why `reserve` and `copy_in`
+// exist: they admit the final size once.
+
+/// CORE. A builder of a SeqSpan in r. Alloc: nothing until the first push.
+/// Ex: `let mut b = span.builder(r)`
+/// PROVISIONAL (F02, F07): builders may sit on the built-in destination writer with a fresh destination brand; names and failures are kept, the brand in the type may change.
+pub fn builder[T](r: Region) -> Builder[SeqSpan[T] in r]
+
+/// CORE. A builder of a FixedSpan in r. Ex: `let mut b = span.fixed_builder(r)`
+/// PROVISIONAL (F02, F07): builders may sit on the built-in destination writer with a fresh destination brand; names and failures are kept, the brand in the type may change.
+pub fn fixed_builder[T](r: Region) -> Builder[FixedSpan[T] in r]
+
+/// CORE. A builder of an IndexedSpan in r. Ex: `let mut b = span.indexed_builder(r)`
+/// PROVISIONAL (F02, F07): builders may sit on the built-in destination writer with a fresh destination brand; names and failures are kept, the brand in the type may change.
+pub fn indexed_builder[T](r: Region) -> Builder[IndexedSpan[T] in r]
+
+/// CORE. Appends x. Fails: Error((c, x)) when a new block is refused; b unchanged.
+/// Alloc: region block growth as above, current limit. Cost: amortised O(1).
+/// Ex: `span.push(mut b, take h)?`
+/// PROVISIONAL (F02, F07): builders may sit on the built-in destination writer with a fresh destination brand; names and failures are kept, the brand in the type may change.
+pub fn push[S, T](mut b: Builder[S], take x: T) -> Result[(), (Capacity, T)]
+
+/// Makes room for n more elements in one block, so that the next n pushes do not
+/// allocate. Fails: Error(c); b unchanged. Alloc: one region block; the block it leaves
+/// stays charged until the region closes. Cost: O(elements so far).
+/// Ex: `span.reserve(mut b, list.len(rows))?`
+/// PROVISIONAL (F02, F07): builders may sit on the built-in destination writer with a fresh destination brand; names and failures are kept, the brand in the type may change.
+pub fn reserve[S](mut b: Builder[S], n: u64) -> Result[(), Capacity]
+
+/// CORE. Publishes the span; cannot fail or allocate (MEM-3). Ex: `let hs = span.finish(take b)`
+/// PROVISIONAL (F02, F07): builders may sit on the built-in destination writer with a fresh destination brand; names and failures are kept, the brand in the type may change.
+pub fn finish[S](take b: Builder[S]) -> S
+
+/// Publishes a FixedSpan holding a copy of xs in r with one exact admission (no abandoned
+/// blocks). Fails: Error(c); nothing published. Alloc: header + len x size(T), rounded to 8,
+/// in r at the current limit. Cost: O(len). Ex: `let ids = span.copy_in(r, xs)?`
+/// PROVISIONAL (F02, F07): builders may sit on the built-in destination writer with a fresh destination brand; names and failures are kept, the brand in the type may change.
+pub fn copy_in[T: plain](r: Region, xs: List[T]) -> Result[FixedSpan[T] in r, Capacity]
+
+/// CORE. Number of elements, for every span type. Cost: O(1). Ex: `span.len(hs)`
+pub fn len[T](s: SeqSpan[T]) -> u64
+
+/// CORE. Element i of an IndexedSpan or FixedSpan, or None. Elements are plain or stable,
+/// so the result is the value (a stable one is read as a view of its region).
+/// Cost: O(1). Ex: `span.get(ids, 0)`
+pub fn get[T](s: IndexedSpan[T], i: u64) -> Option[T]

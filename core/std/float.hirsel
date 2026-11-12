@@ -1,0 +1,15 @@
+// Module `float`: f32 and f64 (SEM-2). CORE operations (mul_add, to_i64 and siblings,
+// total_order) are in core.md. `T` ranges over the float types. Nothing here allocates.
+
+/// Parses the whole of s as a decimal float: optional '-', digits with an optional
+/// fraction, an optional exponent (JSON number syntax; "inf" and "nan" are refused).
+/// Correctly rounded (round-to-nearest-even). A value too large for T is Ok(infinity);
+/// callers that need a finite number test `float.is_finite`.
+/// Fails: Error(Empty | Invalid(i)). Alloc: nothing; the slow path keeps at most 768
+/// significant digits in a fixed-size local record, as Rust's dec2flt does.
+/// Cost: O(len); Eisel-Lemire fast path, big-decimal slow path linear in the digits.
+/// Ex: `let x: f64 = float.parse(token)?`
+pub fn parse[T](s: String) -> Result[T, int.ParseError]
+
+/// Whether x is neither infinite nor NaN. Cost: O(1). Ex: `float.is_finite(x)`
+pub fn is_finite[T](x: T) -> bool

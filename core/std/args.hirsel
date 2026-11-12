@@ -1,0 +1,10 @@
+// Module `args`: Args, the run's argument strings (PROG-3), granted to `main` and passed
+// as a view. The strings are owned by the run, never charged to a task limit.
+
+/// Number of arguments, the program name excluded. Cost: O(1). Ex: `args.len(a)`
+pub fn len(a: Args) -> u64
+
+/// A view of argument i (0 is the first after the program name), or None.
+/// View: anchored to a; FREEZE a (it is never written anyway). Cost: O(1).
+/// Ex: `let Some(input) = args.get(a, 0) else { return Error(Usage) }`
+pub fn get(a: Args, i: u64) -> Option[View[String]] in a

@@ -1,0 +1,106 @@
+// Module `list`: the growable own sequence List[T].
+// Signatures and contracts only; bodies come later. Field legend and the terms
+// GROWTH, FREEZE and CORE are defined in API.md, section "Reading a contract".
+//
+// Representation (MEM-13, MEM-26): `List[T]` is own; its header is 24 bytes held inline
+// by its owner; its storage is one block of capacity x size(T), rounded up to 8,
+// charged to the limit current where the list was made (MEM-28). A new list has no
+// storage. GROWTH doubles capacity from 4. Removing elements never allocates and never
+// shrinks storage; storage is refunded when the list is cleaned.
+
+/// CORE. An empty list with no storage.
+/// Fails: never. Alloc: nothing. Cost: O(1).
+/// Ex: `let mut xs: List[u64] = list.new()`
+pub fn new[T]() -> List[T]
+
+/// CORE. An empty list with storage for exactly `n` elements.
+/// Fails: Error(c) when n x size(T) is refused; nothing allocated.
+/// Alloc: n x size(T) rounded to 8, current limit. Cost: O(1).
+/// Ex: `let xs: List[u64] = list.with_capacity(64)?`
+pub fn with_capacity[T](n: u64) -> Result[List[T], Capacity]
+
+/// CORE. Number of elements. Cost: O(1). Ex: `list.len(xs)`
+pub fn len[T](xs: List[T]) -> u64
+
+/// Number of elements the storage holds without growing. Needs primitive P1 (SPEC-GAPS).
+/// Cost: O(1). Ex: `list.capacity(xs)`
+pub fn capacity[T](xs: List[T]) -> u64
+
+/// CORE. A view of element i, or None when i >= len.
+/// View: anchored to xs; FREEZE xs for the view's extent. Cost: O(1).
+/// `xs[i]` is the same read failing with Bounds instead of None.
+/// Ex: `match list.get(xs, 0) { Some(v) => v, None => 0 }`
+pub fn get[T](xs: List[T], i: u64) -> Option[View[T]] in xs
+
+/// CORE. Appends x.
+/// Fails: Error((c, x)) when GROWTH is refused; xs unchanged.
+/// Alloc: GROWTH. Cost: amortised O(1); O(len) on the growing call (moves).
+/// Ex: `list.push(mut xs, take s)?` (a `?` here drops the returned x; match to keep it)
+pub fn push[T](mut xs: List[T], take x: T) -> Result[(), (Capacity, T)]
+
+/// CORE. Removes and returns the last element, None when empty.
+/// Alloc: nothing; storage kept. Cost: O(1). Ex: `while let Some(take x) = list.pop(mut xs) { .. }`
+pub fn pop[T](mut xs: List[T]) -> Option[T]
+
+/// CORE. Installs x at i and returns the old element without cleaning it.
+/// Fails: Bounds (failure) when i >= len; x is cleaned by the failing statement's cleanup.
+/// Alloc: nothing. Cost: O(1). Ex: `let old = list.set(mut xs, 2, take s)`
+pub fn set[T](mut xs: List[T], i: u64, take x: T) -> T
+
+/// CORE. Cleans every element, from the highest index down; keeps storage.
+/// Alloc: nothing. Cost: O(len) cleanups. Ex: `list.clear(mut xs)`
+pub fn clear[T](mut xs: List[T])
+
+/// CORE. Appends copies of x until len is n (no change when len >= n).
+/// Fails: Error(c) when the one growth to capacity max(n, GROWTH) is refused; xs unchanged.
+/// Alloc: at most one block, owner's limit. Cost: O(n). Ex: `list.fill(mut parent, n, NONE)?   // const NONE: u64 = 18446744073709551615`
+pub fn fill[T: plain](mut xs: List[T], n: u64, x: T) -> Result[(), Capacity]
+
+/// CORE. Sum of integer elements. Fails: Overflow (failure). Cost: O(len).
+/// Ex: `list.sum(xs)`
+pub fn sum[T](xs: List[T]) -> T
+
+/// Ensures capacity >= len + n. New capacity is max(len + n, 2 x capacity, 4).
+/// Needs primitive P1. Fails: Error(c) when refused; xs unchanged.
+/// Alloc: one block at the owner's limit (MEM-28), old storage refunded there.
+/// Cost: O(len) when it grows, else O(1). Ex: `list.reserve(mut xs, 16)?`
+pub fn reserve[T](mut xs: List[T], n: u64) -> Result[(), Capacity]
+
+/// Inserts x at index i, shifting elements i.. up by one.
+/// Fails: Bounds (failure) when i > len, checked before any growth; Error((c, x)) when
+/// GROWTH is refused, xs unchanged.
+/// Alloc: GROWTH. Cost: O(len - i) moves plus amortised growth.
+/// Ex: `list.insert(mut xs, 0, take s)?`
+pub fn insert[T](mut xs: List[T], i: u64, take x: T) -> Result[(), (Capacity, T)]
+
+/// Removes and returns element i, shifting i+1.. down; order kept.
+/// Fails: Bounds (failure) when i >= len. Alloc: nothing.
+/// Cost: O(len - i) moves (linear; use swap_remove for O(1)). Ex: `let oldest = list.remove(mut undo, 0)`
+pub fn remove[T](mut xs: List[T], i: u64) -> T
+
+/// Removes and returns element i, moving the last element into its place; order not kept.
+/// Fails: Bounds (failure) when i >= len. Alloc: nothing. Cost: O(1).
+/// Ex: `let x = list.swap_remove(mut xs, i)`
+pub fn swap_remove[T](mut xs: List[T], i: u64) -> T
+
+/// Exchanges elements i and j (no change when i == j).
+/// Fails: Bounds (failure) when either is >= len. Alloc: nothing. Cost: O(1).
+/// Ex: `list.swap(mut xs, 0, list.len(xs) - 1)`
+pub fn swap[T](mut xs: List[T], i: u64, j: u64)
+
+/// Cleans elements n.. from the highest index down; no change when n >= len. Keeps storage.
+/// Alloc: nothing. Cost: O(len - n) cleanups. Ex: `list.truncate(mut xs, 64)`
+pub fn truncate[T](mut xs: List[T], n: u64)
+
+/// Reverses the order of the elements in place.
+/// Alloc: nothing. Cost: O(len) swaps. Ex: `list.reverse(mut path)`
+pub fn reverse[T](mut xs: List[T])
+
+/// Sorts in place by `before`, which returns Less when a goes before b. Not stable.
+/// The order must be a total order; if it is not, xs still holds each element exactly once,
+/// in an unspecified order. A failure inside `before` propagates; xs then holds each
+/// element exactly once. Pattern-defeating quicksort with a heapsort fallback.
+/// Alloc: nothing. Cost: O(len log len) comparisons and swaps, worst case.
+/// Ex: `list.sort(mut xs, fn(a: u64, b: u64) -> Order { int.compare(a, b) })`
+/// PROVISIONAL (F15): the callable type gains its environment, send and authority summaries and `waits`; `before` will be declared non-waiting and authority-free.
+pub fn sort[T](mut xs: List[T], before: scoped fn(T, T) -> Order)

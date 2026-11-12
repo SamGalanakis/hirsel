@@ -1,0 +1,23 @@
+// Module `set`: Set[K: key], own, insertion-ordered: a Map[K, ()] in source.
+// Charges are the map's with size(V) = 0: capacity x (size(K) + 16). `for k in s` binds a
+// view of each live key in insertion order and FREEZES s. Field legend: API.md.
+
+pub opaque type Set[K: key] { m: Map[K, ()] }
+
+/// An empty set with no storage. Ex: `let mut seen: Set[u64] = set.new()`
+pub fn new[K: key]() -> Set[K]
+
+/// Number of keys. Cost: O(1). Ex: `set.len(seen)`
+pub fn len[K: key](s: Set[K]) -> u64
+
+/// Whether k is present. Cost: expected O(1). Ex: `set.contains(seen, id)`
+pub fn contains[K: key](s: Set[K], k: K) -> bool
+
+/// Adds k; Ok(true) when added, Ok(false) when already present (k is then dropped).
+/// Fails: Error((c, k)) when growth is refused; s unchanged.
+/// Alloc: GROWTH as map.insert. Cost: amortised O(1). Ex: `set.insert(mut seen, take id)?`
+pub fn insert[K: key](mut s: Set[K], take k: K) -> Result[bool, (Capacity, K)]
+
+/// Removes k; true when it was present. Alloc: nothing. Cost: expected O(1).
+/// Ex: `set.remove(mut seen, id)`
+pub fn remove[K: key](mut s: Set[K], k: K) -> bool

@@ -1,0 +1,8 @@
+// Module `stdout`: the run's standard output. Stdout is a plain, `send` capability
+// (core.md); copying it copies the designation. Provider operation (CAP-5, P4).
+
+/// CORE. Writes s. Fails: Error(BrokenPipe | Os(_)). Alloc: nothing.
+/// Prefix: on failure a prefix of s of unknown length may have been written (G15).
+/// Cost: O(len) plus one host call; the provider may buffer, and flushes before `main`'s
+/// cleanup ends. Ex: `stdout.write(out, line)?`
+pub fn write(out: Stdout, s: String) -> Result[(), IoError] waits

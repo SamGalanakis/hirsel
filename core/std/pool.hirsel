@@ -1,0 +1,79 @@
+// Module `pool`: a generation-checked slot pool, built only from what MEM-19 allows:
+// opaque types, brands (MEM-18), checked 64-bit arithmetic, checked indexing of its own
+// list and its own resource cleanup (MEM-20). Field legend: API.md, "Reading a contract";
+// design: API.md, "Pool".
+//
+// Representation: `slots` is a List[Slot[T]] (24-byte header; storage capacity x
+// size(Slot[T]) with size(Slot[T]) = 8 + max(8 + size(T), 16)), charged like any list to
+// the limit where the pool was made (MEM-28). Vacant slots form an intrusive free list,
+// so removing never allocates. Each slot's generation starts at 0 and rises by one on
+// every removal; a slot whose generation reaches 2^64 - 1 is retired: never reused,
+// its storage kept until the pool is cleaned. Cleaning the pool cleans each live value
+// in slot order from the highest index down; a pool never runs a value's finalizer
+// early, and `remove` hands the value (a resource included) to the caller.
+
+pub opaque type Pool[T] { slots: List[Slot[T]], free: u64, live: u64 }
+type Slot[T] = Occupied(u64, T) | Vacant(u64, u64)        // (generation, value | next free)
+
+/// A branded handle: valid only with the pool it was issued by (MEM-18). Plain, 16 bytes.
+/// Moving, assigning or ending the pool's place ends it. Stored in a sibling field as
+/// `Id[T] of .pool`.
+pub opaque type Id[T]: plain + key { index: u64, generation: u64 }
+
+/// An unbranded handle for storage inside the pool's own values (G7): same bits as Id,
+/// usable only after `resolve` checks its generation. Plain + key, 16 bytes.
+pub opaque type Handle[T]: plain + key { index: u64, generation: u64 }
+
+/// The slot the handle names was removed (or retired) since the handle was issued.
+pub type Stale {}
+
+/// An empty pool with no storage. Ex: `let mut p: Pool[Entry] = pool.new()`
+pub fn new[T]() -> Pool[T]
+
+/// An empty pool with storage for n slots.
+/// Fails: Error(c). Alloc: n x size(Slot[T]) rounded to 8, current limit.
+/// Ex: `let mut p: Pool[Entry] = pool.with_capacity(64)?`
+pub fn with_capacity[T](n: u64) -> Result[Pool[T], Capacity]
+
+/// Number of live values. Cost: O(1). Ex: `pool.len(p)`
+pub fn len[T](p: Pool[T]) -> u64
+
+/// Stores x in a vacant slot (the most recently vacated first) or a new one.
+/// Fails: Error((c, x)) when a new slot is needed and GROWTH is refused; p unchanged.
+/// Alloc: GROWTH of slots only when no slot is vacant. Cost: amortised O(1).
+/// Ex: `let id = pool.insert(mut l.pool, take entry)?`
+pub fn insert[T](mut p: Pool[T], take x: T) -> Result[Id[T] of p, (Capacity, T)]
+
+/// A view of id's value, or Stale. The result is scoped: it carries the view or Stale.
+/// View: anchored to p; FREEZE p for the result's extent. Cost: O(1).
+/// Ex: `match pool.get(l.pool, id) { Ok(e) => string.byte_len(e.value), Error(_) => 0 }`
+pub fn get[T](p: Pool[T], id: Id[T] of p) -> Result[View[T], Stale] in p
+
+/// id's value copied out, or x when stale. Cost: O(1). Ex: `pool.get_or(b, i, 0)`
+pub fn get_or[T: plain](p: Pool[T], id: Id[T] of p, x: T) -> T
+
+/// Whether id is live. Cost: O(1). Ex: `pool.contains(p, id)`
+pub fn contains[T](p: Pool[T], id: Id[T] of p) -> bool
+
+/// Calls f with id's value in place and returns its result, or Error(Stale) without
+/// calling f. f must not reach p (it is lent for the call). A failure in f propagates;
+/// the value keeps whatever f installed. Alloc: nothing. Cost: O(1) plus f.
+/// Ex: `pool.update(mut l.pool, id, fn(mut e: Entry) { e.prev = None })?`
+/// PROVISIONAL (F15): as map.update.
+pub fn update[T, R](mut p: Pool[T], id: Id[T] of p, f: scoped fn(mut T) -> R) -> Result[R, Stale]
+
+/// Removes id's value and returns it; the slot's generation rises by one, so every
+/// handle to it is stale from now on; at 2^64 - 1 the slot retires instead of joining the
+/// free list. Fails: Error(Stale), p unchanged. Alloc: nothing. Cost: O(1).
+/// Ex: `let old = pool.remove(mut l.pool, tail)?`
+pub fn remove[T](mut p: Pool[T], id: Id[T] of p) -> Result[T, Stale]
+
+/// The unbranded form of id, for storing inside the pool's values. Cost: O(1).
+/// Ex: `let h = pool.handle(l.pool, head)`
+pub fn handle[T](p: Pool[T], id: Id[T] of p) -> Handle[T]
+
+/// Checks h's generation against p and returns the branded Id, or Error(Stale).
+/// A Handle from another pool is caught only when its generation differs; brands are
+/// what keep pools apart, so store Handles only inside the pool that issued them.
+/// Cost: O(1). Ex: `let next = pool.resolve(l.pool, h)?`
+pub fn resolve[T](p: Pool[T], h: Handle[T]) -> Result[Id[T] of p, Stale]

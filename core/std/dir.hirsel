@@ -1,0 +1,36 @@
+// Module `dir`: Dir, the capability for one directory tree (CAP-1, CAP-2, CAP-7).
+// Dir is plain and `send`, 8 bytes: a designation the provider resolves; copying it
+// copies the designation. A run's Dirs come only from `main`'s granted parameters (CAP-4)
+// and from `narrow`. Every operation is a provider operation (CAP-5, P4 in SPEC-GAPS),
+// passes the replay point at issue and at delivery (CAP-8), and when marked `waits` is a
+// cancellation point (CONC-7). Field legend: API.md; "Prefix:" says what has happened on
+// the host when the operation fails or is cancelled part way.
+
+/// A Dir for the subdirectory p of d; never more authority than d (CAP-7).
+/// Fails: Error(NotFound | InvalidPath | Denied | Os(_)). Alloc: nothing charged; the
+/// provider keeps the designation until the run ends (host memory, stated retention).
+/// Prefix: none; nothing on the host changes. Ex: `let logs = dir.narrow(d, path.of(take "logs"))?`
+pub fn narrow(d: Dir, p: Path) -> Result[Dir, IoError] waits
+
+/// Creates the directory p (its parent must exist).
+/// Fails: Error(Exists | NotFound | InvalidPath | Denied | Os(_)).
+/// Prefix: on failure nothing was created; a cancellation observed at delivery leaves the
+/// directory created. Alloc: nothing. Ex: `dir.create_dir(d, path.of(take "tmp"))?`
+pub fn create_dir(d: Dir, p: Path) -> Result[(), IoError] waits
+
+/// Removes p and everything below it, depth first.
+/// Fails: Error(NotFound | InvalidPath | Denied | Os(_)) at the first entry that cannot be
+/// removed. Prefix: entries removed before the failure stay removed; not atomic.
+/// Alloc: nothing charged (the provider walks with host memory). Cost: O(entries).
+/// Ex: `dir.remove_all(d, path.of(take "tmp"))?`
+pub fn remove_all(d: Dir, p: Path) -> Result[(), IoError] waits
+
+/// Creates a new, private (owner-only) directory named prefix followed by 16 random hex
+/// digits directly below d, and returns its path (Go os.MkdirTemp). The provider draws a
+/// new suffix on Exists, at most 16 times. The directory is not removed automatically.
+/// Fails: Error(Exists) after 16 collisions; Error(Denied | InvalidPath | Os(_));
+/// Error(Capacity(c)) when the Path's String is refused, before any host effect.
+/// Alloc: the Path's String, len(prefix) + 16 bytes, current limit. Prefix: on failure
+/// nothing was created; a cancellation observed at delivery leaves the directory created.
+/// Ex: `let tmp = dir.create_temp(d, take string.from("hirsel-files-")?)?`
+pub fn create_temp(d: Dir, take prefix: String) -> Result[Path, IoError] waits

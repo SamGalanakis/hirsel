@@ -16,7 +16,7 @@ impl TypeRef {
 pub struct FuncRef(pub u32);
 
 /// A scalar as the language sees it (SEM-1, SEM-2): its logical width is its
-/// written width; `bool` is 1 byte and `char` 4 (MEM-26).
+/// written width; `bool` is 1 byte and `char` 4 (MEM-24).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Scalar {
     Bool,
@@ -111,7 +111,7 @@ impl Width {
 }
 
 /// A runtime-owned handle kind: an opaque pointer whose cleanup is a run-time call.
-/// Opaque engine-owned values held by pointer. Logical sizes per MEM-26: a task
+/// Opaque engine-owned values held by pointer. Logical sizes per MEM-24: a task
 /// handle and a capability 8, a sender or receiver 24, a `Causes` chain 8.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Handle {
@@ -150,7 +150,7 @@ pub enum FieldTy {
     Seq(Box<FieldTy>),
     Rc(TypeRef),
     Arc(TypeRef),
-    /// A reference to a published stable value of this type (logically 16, MEM-26).
+    /// A reference to a published stable value of this type (logically 16, MEM-24).
     Stable(TypeRef),
     Region,
     /// A plain `fn`: a code pointer, captures nothing (LANG-13).
@@ -197,7 +197,7 @@ pub struct Shape {
     pub body: Body,
     /// A resource's finalizer (FAIL-11), called with the value's address.
     pub finalizer: Option<FuncRef>,
-    /// `grant bytes n` (MEM-29).
+    /// `grant bytes n` (MEM-27).
     pub grant: u64,
 }
 

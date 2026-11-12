@@ -1,5 +1,5 @@
 //! Each test names the bug it catches; every expected number is derived by hand
-//! from MEM-9..13 and MEM-26 in the comments, not read back from the code.
+//! from MEM-9..13 and MEM-24 in the comments, not read back from the code.
 
 use crate::*;
 
@@ -72,7 +72,7 @@ fn own_record_aligns_natively_and_charges_logically() {
 
 /// Bug: own variants not reserving the largest payload, or the tag overlapping it.
 /// `None | Some(u64) | Pair(u8, u32)`: tag u8@0; payload starts at 8 (max align 8);
-/// Some.v@8; Pair: u8@8, u32@12; size 16. Logical (MEM-26: 8 plus the largest
+/// Some.v@8; Pair: u8@8, u32@12; size 16. Logical (MEM-24: 8 plus the largest
 /// payload, whatever the tag width) = 8 + max(0, 8, 5) = 16.
 #[test]
 fn own_variant_reserves_the_largest_payload_after_its_tag() {
@@ -336,7 +336,7 @@ fn representation_refusals() {
     assert!(matches!(compute(&[s, bad]), Err(LayoutError::Field { .. })));
 }
 
-/// Bug: charge-v1 transcribed wrongly (MEM-26). Hand values: List of 3 three-byte
+/// Bug: charge-v1 transcribed wrongly (MEM-24). Hand values: List of 3 three-byte
 /// elements: 9 → 16; Map of 4 entries u64→u64: 4 × (8+8+16) = 128; Rc of a 12-byte
 /// payload: 20 → 24; channel of 2 items of 24: 48 + 64 = 112; growth from 0 needing 1 is 4,
 /// from 4 needing 5 is 8, from 8 needing 100 is 100; overflow is None, not a wrap.
@@ -360,7 +360,7 @@ fn charge_v1_matches_the_spec_table() {
 }
 
 /// Bug: a resource is laid out inline in its holder, so its cause cell and grant
-/// (FAIL-10, MEM-29) have no block to live in, or a resource without a finalizer or
+/// (FAIL-10, MEM-27) have no block to live in, or a resource without a finalizer or
 /// owned fields gets no cleanup and its block, cell and grant are never refunded.
 /// `Temp { id: u64 }` held as `{a: u8, t: Temp}`: t is a block pointer @8, size 16.
 #[test]

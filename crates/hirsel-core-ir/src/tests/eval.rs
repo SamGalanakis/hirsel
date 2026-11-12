@@ -1,5 +1,5 @@
 //! A test-only evaluator, written from the op documentation (SEM-1, SEM-2, LIR's op
-//! docs; for the FORM v1 draft FAIL-8..14, MEM-21..29 and CONC-3..9) so the
+//! docs; for the FORM v1 draft FAIL-8..14, MEM-19..29 and CONC-3..9) so the
 //! samples' hand-derived run lines can be checked. Memory is blocks of bytes laid
 //! out by the layout recipes. Limits keep exact `used` totals and hand over by
 //! forwarding. A spawned child runs to its end at the spawn, so the event order is
@@ -20,7 +20,7 @@ pub enum Outcome {
 
 pub struct Report {
     pub outcome: Outcome,
-    /// The root limit's `used` after the run (MEM-21).
+    /// The root limit's `used` after the run (MEM-19).
     pub used: u64,
     /// The first u64 field of each resource, in the order its cleanup started.
     pub trace: Vec<u64>,
@@ -240,7 +240,7 @@ impl Machine<'_> {
         });
         self.limits.len() - 1
     }
-    /// MEM-22: refund the unused part to the parent and forward the record to it.
+    /// MEM-20: refund the unused part to the parent and forward the record to it.
     fn end_limit(&mut self, l: usize) {
         let p = self.find(self.limits[l].parent.expect("not the root"));
         let unused = self.limits[l].cap - self.limits[l].used;

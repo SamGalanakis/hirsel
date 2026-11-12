@@ -18,7 +18,7 @@ pub const CLOSURE_CARRIER: u64 = 16;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Recipe {
     pub layout: Layout,
-    /// charge-v1 logical size (MEM-26): no padding; an own variant is 8 plus its
+    /// charge-v1 logical size (MEM-24): no padding; an own variant is 8 plus its
     /// largest payload. For a compact type, its constant extent at its declared
     /// width when it has one, else `None`.
     pub logical_size: Option<u64>,
@@ -281,7 +281,7 @@ fn fixed(shapes: &[Shape], shape: &Shape, out: &[Option<Recipe>]) -> Result<Reci
                     }
                     if inner.repr == Repr::Resource {
                         // A resource value is a pointer to its block, which carries
-                        // the cause cell and grant (FAIL-10, MEM-29).
+                        // the cause cell and grant (FAIL-10, MEM-27).
                         m.push((POINTER, POINTER, 8));
                         continue;
                     }
@@ -346,7 +346,7 @@ fn fixed(shapes: &[Shape], shape: &Shape, out: &[Option<Recipe>]) -> Result<Reci
         offsets.push(row);
     }
     let size = align_up(end, align);
-    // MEM-26: an own variant is 8 plus its largest payload, whatever its tag width.
+    // MEM-24: an own variant is 8 plus its largest payload, whatever its tag width.
     let logical = logical + if tag.is_some() { 8 } else { 0 };
     let drop = drop_recipe(shapes, shape, &rows, &offsets, out);
     Ok(Recipe {

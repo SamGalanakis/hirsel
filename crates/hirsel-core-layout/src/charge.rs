@@ -1,10 +1,10 @@
-//! The logical storage policy `charge-v1` (MEM-26). Every admission and refund the
+//! The logical storage policy `charge-v1` (MEM-24). Every admission and refund the
 //! front end emits computes its amount with these functions, from logical sizes
 //! (`Recipe::logical_size`), never from native sizes, alignments or allocator
 //! classes, so a program reaches `Capacity` at the same point on every engine.
 //! A later policy is a new module with a new name; packages state which they use.
 //!
-//! Arithmetic is exact (MEM-24): a `None` result is a charge past `2^64 - 1`, which
+//! Arithmetic is exact (MEM-22): a `None` result is a charge past `2^64 - 1`, which
 //! every admission refuses with `requested = 2^64 - 1`.
 
 /// The policy's name as packages and cache keys spell it.
@@ -67,7 +67,7 @@ pub const fn closure_env(captures: u64) -> Option<u64> {
     round8(captures)
 }
 
-/// A resource value: its storage, its cause cell and its finalizer grant (MEM-29).
+/// A resource value: its storage, its cause cell and its finalizer grant (MEM-27).
 pub const fn resource(storage: u64, grant: u64) -> Option<u64> {
     match storage.checked_add(CAUSE_CELL) {
         Some(n) => n.checked_add(grant),

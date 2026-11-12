@@ -11,7 +11,7 @@
 ; Dropping `t` after the call returned is the cleanup of the normal exit: the u64
 ; result is pending (FAIL-9); when the finalizer fails, the result is discarded and
 ; the failure propagates (FAIL-12: the fields are cleaned and the block freed).
-; Temp's charge is 40: storage 8, cause cell 32, grant 0 (MEM-26, FAIL-10). A used
+; Temp's charge is 40: storage 8, cause cell 32, grant 0 (MEM-24, FAIL-10). A used
 ; cell leaves with the chain, so after a finalizer failure the root still holds 32.
 ;
 ; Behaviour, derived by hand (trace: Temp ids in the order their cleanup started):

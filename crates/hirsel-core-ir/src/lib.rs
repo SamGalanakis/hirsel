@@ -23,7 +23,7 @@
 //! `rt.cancel`, `rt.check_cancel`, `rt.channel_new`, `rt.channel_sender`,
 //! `rt.send`, `rt.try_send`, `rt.receive`). Rule texts: failure.md, budgets.md and
 //! tasks.md at spec revision 2 and the failure-model report (FAIL-2..14,
-//! MEM-14..16, MEM-21..29, CONC-3..9).
+//! MEM-14..16, MEM-19..29, CONC-3..9).
 //!
 //! **FORM v1b (draft, not frozen; round 3 of the spec is simplifying these):**
 //! regions (`region_open`, `region_close`, `alloc .. in`); stable, scoped and
@@ -46,18 +46,18 @@
 //! failing finalizer appends its cause, its resource's fields are still cleaned and
 //! its block freed (FAIL-12); a pending result is discarded. Mechanical cleanup
 //! (fields, boxes, counted releases, handles) never fails (FAIL-13). `Capacity` is
-//! a failure only inside a finalizer, against its grant (MEM-29); everywhere else a
+//! a failure only inside a finalizer, against its grant (MEM-27); everywhere else a
 //! refused admission is a value: `alloc` yields null and the room left in the
-//! limit it tried (MEM-24 `available`).
+//! limit it tried (MEM-22 `available`).
 //!
 //! # Storage and admission (FORM v1a)
 //!
 //! Every charge is a `charge-v1` logical size computed by the producer and passed
 //! to `alloc`; `free` refunds the same amount to the limit the block's record now
-//! leads to (MEM-22, MEM-25). `limit_enter b` admits `b` and makes a limit of `b`
+//! leads to (MEM-20, MEM-23). `limit_enter b` admits `b` and makes a limit of `b`
 //! current; `limit_exit` returns its unused part and forwards its record to the
-//! parent, so blocks made inside stay charged (MEM-27). `alloc .. like v` admits
-//! against the limit `v` was charged to (MEM-28), except inside a finalizer, where
+//! parent, so blocks made inside stay charged (MEM-25). `alloc .. like v` admits
+//! against the limit `v` was charged to (MEM-26), except inside a finalizer, where
 //! the grant takes precedence. A resource value is a pointer to its block, charged
 //! storage + cause cell + grant; its finalizer runs under a limit of its grant,
 //! whose used part is handed over at the end. A counted node is a u64 count at

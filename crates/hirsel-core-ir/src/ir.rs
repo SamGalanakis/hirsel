@@ -401,9 +401,9 @@ pub enum Inst {
 
     // ---- FORM v1 draft (not frozen) ----
     /// Admit `charge` and allocate a block of `size` bytes aligned to `align`
-    /// (MEM-23). On refusal `result` is null and `available` is the room left in the
-    /// limit tried (MEM-24), and nothing is allocated. Under a finalizer's grant a
-    /// refusal is a failure with cause `Capacity` instead (MEM-29).
+    /// (MEM-21). On refusal `result` is null and `available` is the room left in the
+    /// limit tried (MEM-22), and nothing is allocated. Under a finalizer's grant a
+    /// refusal is a failure with cause `Capacity` instead (MEM-27).
     Alloc {
         result: ValueId,
         available: ValueId,
@@ -415,7 +415,7 @@ pub enum Inst {
         fail: Option<BlockId>,
     },
     /// Free an own, counted or resource block and refund `charge` to the limit its
-    /// record leads to (MEM-22, MEM-25). Never fails. A resource's refund leaves out
+    /// record leads to (MEM-20, MEM-23). Never fails. A resource's refund leaves out
     /// a cause cell that holds a cause and a grant its finalizer already settled.
     Free {
         block: ValueId,
@@ -440,7 +440,7 @@ pub enum Inst {
     },
     // ---- FORM v1a again ----
     /// Enter `bound bytes n`: admit `bytes` against the current limit and make a new
-    /// limit of that size current (MEM-27). `admitted` is false, `available` the
+    /// limit of that size current (MEM-25). `admitted` is false, `available` the
     /// room, and no limit is entered when the admission is refused.
     LimitEnter {
         admitted: ValueId,
@@ -448,7 +448,7 @@ pub enum Inst {
         bytes: ValueId,
     },
     /// Leave the innermost bound scope: refund its unused part to the parent and
-    /// hand its record over (MEM-22). Never fails.
+    /// hand its record over (MEM-20). Never fails.
     LimitExit,
     /// Clean the value at `address` by its type's drop recipe (FAIL-8): the
     /// finalizer under its grant, then fields in reverse declaration order, then
@@ -498,9 +498,9 @@ pub enum AllocKind {
 /// Which limit an `Alloc` is charged to (FORM v1 draft).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum AllocPlace {
-    /// The current limit (MEM-21).
+    /// The current limit (MEM-19).
     Current,
-    /// The limit the block's record leads to: growth keeps the limit (MEM-28).
+    /// The limit the block's record leads to: growth keeps the limit (MEM-26).
     Like(ValueId),
     /// FORM v1b draft: in this region, charged to the current limit until it closes (MEM-1).
     Region(ValueId),

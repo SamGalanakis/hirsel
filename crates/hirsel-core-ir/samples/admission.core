@@ -1,5 +1,5 @@
 ; CoreIR sample, family: admission and refund (Alloc, Free, LimitEnter, LimitExit,
-; growth `like`, a finalizer's grant). FORM v1a, MEM-21..29, N03.
+; growth `like`, a finalizer's grant). FORM v1a, MEM-19..29, N03.
 ;
 ; Source (package samples@0, module admission):
 ;   i0  fn twice(n: u64) -> (bool, u64)            ; two n-byte owners; the second's result
@@ -9,14 +9,14 @@
 ;       fn finish(k: u64) { let b = Big { k } }
 ;
 ; A refused allocation is an error value, never a failure (FAIL-2): `alloc` yields a
-; null pointer and the room left in the limit it tried (MEM-24 `available`); on
+; null pointer and the room left in the limit it tried (MEM-22 `available`); on
 ; success `available` is the room before the charge. `limit_enter b` admits b against
 ; the current limit and makes a limit of b current; `limit_exit` returns its unused
 ; part to the parent and forwards its record there, so live blocks made inside stay
-; charged and are refunded to the parent later (MEM-22, MEM-27). Growth `like v`
-; admits against the limit v was charged to, not the current one (MEM-28), except
+; charged and are refunded to the parent later (MEM-20, MEM-25). Growth `like v`
+; admits against the limit v was charged to, not the current one (MEM-26), except
 ; inside a finalizer, whose grant takes precedence (N03); there, a refusal is the
-; failure `Capacity` in the resource's cell (MEM-29). Big is charged 72: storage 8,
+; failure `Capacity` in the resource's cell (MEM-27). Big is charged 72: storage 8,
 ; cell 32, grant 32.
 ; f1 probes the parent's room after the exit with a `limit_enter` of 2^64 - 1, which a
 ; finite limit refuses, so it is run under a limit. f2 and f3 elide refusal branches;

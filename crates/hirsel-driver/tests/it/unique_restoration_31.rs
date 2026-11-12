@@ -657,15 +657,14 @@ fn unique_restoration_31_diagnostics_name_unproved_evidence() {
 }
 
 /// MODE-1 with MODE-2: `unique x` of an operand already unique is `x`
-/// itself, so a producer may elide the copy, and the result keeps `x`'s
-/// relation. Eliding it under a global result returns content local to its
+/// itself, so Lower moves it (`OwnershipFacts::unique_identities`), and the
+/// result keeps `x`'s relation. The move under a global result returns content local to its
 /// argument (MODE-1-unique-local-taken-stays-local-bad), which V must refuse
 /// on its own whatever the front end judged. The elided body under the
-/// declared `in x` is the control: only the dropped relation differs. Written
+/// declared `in x` is the control: only the relation differs. Written
 /// against the validator entry so v3 carries it unchanged.
 #[test]
 fn unique_restoration_31_v_rejects_elided_unique_returned_global() {
-    use hirsel_tir::*;
     with_compiler_stack(|| {
         let source = "fn preserve(take x: unique Bytes in x) -> unique Bytes in x { unique x }";
         let mut engine = checked(source);
@@ -675,22 +674,8 @@ fn unique_restoration_31_v_rejects_elided_unique_returned_global() {
         let validate = |global: bool| {
             let mut signatures = hirsel_validate::SignatureMap::new(input.types.clone());
             signatures.extend_signatures(input.signatures.values().map(|s| s.as_ref().clone()));
+            // `x` is proved unique, so Lower itself moves it (no deep copy).
             let mut forged = (*input.definitions[&path]).clone();
-            let mut changed = false;
-            for rvalue in &mut forged.bodies[0].rvalues {
-                if let Rvalue::Unary {
-                    op: hirsel_syntax::UnaryOp::Unique,
-                    value,
-                } = rvalue
-                {
-                    *rvalue = Rvalue::Use(Operand {
-                        place: value.place,
-                        usage: hirsel_types::UseKind::Take,
-                    });
-                    changed = true;
-                }
-            }
-            assert!(changed);
             if global {
                 let signature = signatures.get_mut(&path).unwrap();
                 let hirsel_types::SignatureKind::Function(function) = &mut signature.kind else {

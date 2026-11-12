@@ -21,6 +21,9 @@ pub struct Input<'a> {
     pub signature: &'a Signature,
     pub call_allocations: &'a [(ExprId, Allocation)],
     pub allocating_mutations: &'a [ExprId],
+    /// `unique x` sites the ownership pass proved to be `x` itself; Lower
+    /// moves them, so they allocate nothing (MEM-5).
+    pub unique_identities: &'a [ExprId],
     pub checked: &'a CheckedBody,
     pub loops: &'a [hirsel_check_protocol::body::ForPlan],
 }

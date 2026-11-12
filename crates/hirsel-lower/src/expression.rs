@@ -546,9 +546,16 @@ impl Builder<'_, '_> {
                         value.usage = row.usage;
                         value
                     }
+                    UnaryOp::Unique if self.input.ownership.unique_identities.contains(&id) => {
+                        // MODE-1/MODE-2: the ownership pass proved the operand
+                        // unique here, so `unique x` is `x` itself: move it into
+                        // the unique row. V checks the current unique fact.
+                        value.usage = UseKind::Take;
+                        self.transport_typed(value, row.ty, Storage::Temporary, span)
+                    }
                     UnaryOp::Unique => {
-                        // MODE-2 (D4): source `unique x` is an explicit deep copy.
-                        // Only V's UniqueDecision may remove it (SPEC 4.4).
+                        // MODE-2 (D4): `unique x` of an operand not proved
+                        // unique is an explicit deep copy.
                         value.usage = UseKind::Copy;
                         let _ = self.loan(&mut value, span);
                         let failure = self.cleanup();

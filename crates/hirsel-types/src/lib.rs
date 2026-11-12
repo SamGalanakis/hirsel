@@ -1046,6 +1046,12 @@ pub struct OwnershipFacts {
     /// compose (MODE-1), so the result holds the binding's content loans and
     /// no access loan on the binding. Lowering alone reads it.
     pub composed_arguments: Vec<ExprId>,
+    /// `unique x` sites whose operand this pass proved unique there: the
+    /// expression is `x` itself, not a deep copy (MODE-1, MODE-2). Lowering
+    /// alone reads it, to move `x`; V checks that move into the unique row
+    /// against its own current unique fact.
+    #[serde(default)]
+    pub unique_identities: Vec<ExprId>,
     pub captures: Vec<CaptureMode>,
     /// Callee consumption, independent of evaluating the source operand.
     pub call_arguments: Vec<(ExprId, ExprId, UseKind)>,

@@ -2045,3 +2045,48 @@ fn a_deep_unique_copy_of_a_view_is_independent_but_its_move_is_not() {
         }]
     );
 }
+
+/// `fn main(p: String) -> unique String { let x = <fresh "a" | copy p>; take x }`:
+/// the move Lower emits for `unique x` when the ownership pass proved `x`
+/// unique (`OwnershipFacts::unique_identities`). V judges it on its own fact.
+fn unique_identity_move(shared: bool) -> Fixture {
+    let mut f = Fixture::unit();
+    let string = TypeKind::Primitive(Primitive::String);
+    let p = param(&mut f, string.clone());
+    let mut row = ty(string.clone());
+    row.modes.uniqueness = Uniqueness::Unique;
+    let row = f.definition.types.push(row);
+    f.body().blocks[0].instructions.remove(0);
+    f.body().rvalues.clear();
+    f.body().result = row;
+    f.body().locals[0].ty = row;
+    f.body().places[0].ty = row;
+    let entry = f.cleanup(vec![]);
+    let x = f.slot(string, Storage::Temporary);
+    let value = if shared {
+        Rvalue::Use(copy(p))
+    } else {
+        Rvalue::Constant(Constant::String("a".into()))
+    };
+    f.assign(x, value, entry);
+    let holding = f.cleanup(vec![drop(x)]);
+    f.assign(0, Rvalue::Use(take(x)), holding);
+    f.body().blocks[0].terminator = ret(0, entry);
+    owner_sig(&mut f, &[PassingMode::Borrow]);
+    f
+}
+
+#[test]
+fn a_unique_identity_move_needs_the_operand_unique_where_it_moves() {
+    // MODE-1/MODE-2: `unique x` of a provably unique `x` is `x` itself, so
+    // Lower moves it; a fresh value is unique where it moves.
+    unique_identity_move(false).valid();
+    // The same move of a counted share of `p` must not enter the unique row,
+    // whatever the producer claimed.
+    assert_eq!(
+        unique_identity_move(true).kinds(),
+        vec![ViolationKind::TypeMismatch {
+            entity: "value modes"
+        }]
+    );
+}

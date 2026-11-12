@@ -5884,6 +5884,13 @@ impl Checker<'_, '_> {
                         {
                             value.deep_copy = true;
                         }
+                        if self.emit
+                            && !value.deep_copy
+                            && !property.plain
+                            && !self.facts.unique_identities.contains(expression)
+                        {
+                            self.facts.unique_identities.push(*expression);
+                        }
                         if value.deep_copy {
                             if !property.copyable {
                                 let site = self.span_of(*expression);

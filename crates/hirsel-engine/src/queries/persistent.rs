@@ -385,6 +385,7 @@ fn valid_ownership(syntax: &ItemSyntax, facts: &OwnershipFacts) -> bool {
     let site = |id| valid_site(syntax, id);
     facts.field_loans.iter().all(|(id, _)| expression(*id))
         && facts.composed_arguments.iter().copied().all(expression)
+        && facts.unique_identities.iter().copied().all(expression)
         && facts
             .captures
             .iter()

@@ -198,6 +198,7 @@ impl Weight<'_> {
             silent_drop_types,
             field_loans,
             composed_arguments,
+            unique_identities,
             captures,
             call_arguments,
             identity_joins,
@@ -238,6 +239,7 @@ impl Weight<'_> {
         }
         self.flat_vec(field_loans);
         self.flat_vec(composed_arguments);
+        self.flat_vec(unique_identities);
         self.flat_vec(captures);
         self.flat_vec(call_arguments);
         self.vec(identity_joins, |w, (_, _, origin)| w.origin(origin));

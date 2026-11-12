@@ -337,6 +337,7 @@ impl ModesPhase for ModeAdapter {
                 loops: &typed.plans.loops,
                 call_allocations: &output.call_allocations,
                 allocating_mutations: &owned.value.allocating_mutations,
+                unique_identities: &owned.value.unique_identities,
             },
             provider,
         )?;

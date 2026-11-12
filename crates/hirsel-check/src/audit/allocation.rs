@@ -1211,14 +1211,16 @@ impl<'a> Audit<'a, '_> {
                         .execution
                         .add(expression.origin.span, AllocationReasonKind::Call);
                 }
-                // MODE-2 (D4): `unique x` lowers to a deep copy until V elides it.
+                // MODE-2 (D4): `unique x` lowers to a deep copy unless the
+                // ownership pass proved `x` unique there (then it is a move).
                 if matches!(
                     expression.kind,
                     ast::ExprKind::Unary {
                         op: ast::UnaryOp::Unique,
                         ..
                     }
-                ) && !self.placed(&row.modes.relation)
+                ) && !self.input.unique_identities.contains(&e)
+                    && !self.placed(&row.modes.relation)
                     && self.copy_has_blocks(ty)?
                 {
                     result

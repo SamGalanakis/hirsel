@@ -19,7 +19,7 @@ fn admitted_staged_declarations_match_scalar_without_executing_or_publishing() {
         )
         .unwrap();
         std::fs::write(&manifest,r#"{"schema":1,"package":{"name":"stage","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
-        for jobs in [1, 2] {
+        {
             for output_bytes in [1, 64 << 10] {
                 let mut program = COMPILER
                     .with_config(CompileConfig {
@@ -43,12 +43,8 @@ fn admitted_staged_declarations_match_scalar_without_executing_or_publishing() {
                     scratch: 8 << 20,
                     stack: 0,
                 };
-                let mut runtime = AdmittedRuntime::new(
-                    hirsel_intern::jobs::Jobs::new(jobs),
-                    budget.reserve(512 << 20).unwrap(),
-                    errors,
-                )
-                .unwrap();
+                let mut runtime =
+                    AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
                 let front = program
                     .engine
                     .front_body_queries(&definitions, weight, &budget, errors)
@@ -162,12 +158,7 @@ fn staged_acceptance_checks_all_reads_and_admits_the_installed_copy() {
             errors,
         )
         .unwrap();
-        let mut runtime = AdmittedRuntime::new(
-            hirsel_intern::jobs::Jobs::new(2),
-            budget.reserve(512 << 20).unwrap(),
-            errors,
-        )
-        .unwrap();
+        let mut runtime = AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
         runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
         runtime.register(FRONT_STAGE_KIND, stage.factory()).unwrap();
         let request = runtime.request(&[stage.query(scaled).unwrap()]);

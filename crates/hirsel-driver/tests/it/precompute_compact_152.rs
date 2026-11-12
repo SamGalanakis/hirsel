@@ -217,12 +217,8 @@ fn cached_front_retains_no_more_metadata_than_the_same_cold_front() {
                     errors,
                 )
                 .unwrap();
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::ONE,
-                budget.reserve(512 << 20).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             runtime
                 .register(hirsel_engine::FRONT_BODY_KIND, front.factory())
                 .unwrap();

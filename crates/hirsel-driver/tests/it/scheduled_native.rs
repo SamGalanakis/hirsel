@@ -24,12 +24,7 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
         std::fs::write(&path,"pub type Secret{level:u64}\nconst A:u64=comptime 3u64;\nfn view(x:Secret)->u64{x.level}\npub fn main()->u64{A+view(Secret(level:4u64))}\n").unwrap();
         std::fs::write(&manifest,r#"{"schema":1,"package":{"name":"catalogue","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
         let mut previous_products = BTreeMap::new();
-        for (jobs, verify) in [
-            (1, Verify::On),
-            (2, Verify::On),
-            (1, Verify::Off),
-            (2, Verify::Off),
-        ] {
+        for verify in [Verify::On, Verify::Off] {
             let store = Arc::new(MemStore::default());
             let mut program = COMPILER
                 .with_config(CompileConfig {
@@ -49,12 +44,8 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
                 scratch: 8 << 20,
                 stack: 0,
             };
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(jobs),
-                budget.reserve(512 << 20).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             let front = program
                 .engine
                 .front_body_queries(&definitions, weight, &budget, errors)
@@ -129,11 +120,7 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
                     ),
                     bytes.to_vec(),
                 ) {
-                    assert_eq!(
-                        previous.as_slice(),
-                        &*bytes,
-                        "unchanged native product, jobs={jobs}"
-                    );
+                    assert_eq!(previous.as_slice(), &*bytes, "unchanged native product");
                 }
             }
             assert!(
@@ -255,12 +242,8 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
                     .unwrap();
                 assert_eq!(publication_budget.free(), available);
                 assert_eq!(bounded.query(&program.entry), native.query(&program.entry));
-                let mut bounded_runtime = AdmittedRuntime::new(
-                    hirsel_intern::jobs::Jobs::new(jobs),
-                    budget.reserve(512 << 20).unwrap(),
-                    errors,
-                )
-                .unwrap();
+                let mut bounded_runtime =
+                    AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
                 bounded_runtime
                     .register(FRONT_BODY_KIND, front.factory())
                     .unwrap();
@@ -373,7 +356,7 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
                 let expected_bytes = observations(&scalar_codec, &scalar.engine, &expected);
                 assert_eq!(
                     actual_bytes, expected_bytes,
-                    "native observations for {path},jobs={jobs}"
+                    "native observations for {path}"
                 );
                 assert_eq!(
                     actual.source.summary_identity, expected.source.summary_identity,
@@ -473,12 +456,8 @@ fn native_catalogue_allows_lower_pressure_eviction_and_scoped_cold_reads() {
             let entries = definitions.len() * 6;
             let runtime_bytes =
                 hirsel_intern::jobs::COMPILER_STACK_BYTES as u64 + 2 * weight.scratch;
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::ONE,
-                budget.reserve(runtime_bytes).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(runtime_bytes).unwrap(), errors).unwrap();
             let front = program
                 .engine
                 .front_body_queries(&definitions, weight, &budget, errors)

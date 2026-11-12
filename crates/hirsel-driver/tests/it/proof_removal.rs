@@ -977,12 +977,8 @@ fn native_discovery_reports_actual_removals_on_cold_and_body_free_fresh_hits() {
                 protocol: denied,
                 panicked: denied,
             };
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(1),
-                budget.reserve(runtime_bytes).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(runtime_bytes).unwrap(), errors).unwrap();
             let trace = hirsel_lir::construction::ValueTrace::default();
             struct Traced(
                 Arc<InstanceTaskFactory>,

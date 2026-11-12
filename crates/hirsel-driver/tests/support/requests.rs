@@ -8,7 +8,6 @@ use hirsel_engine_store::*;
 use hirsel_query_products::reads::Reads;
 use hirsel_query_products::{LoweringPolicy, QueryKind};
 
-use hirsel_intern::jobs::Jobs;
 use std::{collections::BTreeMap, sync::Arc};
 
 pub struct Graph {
@@ -20,10 +19,10 @@ pub struct Graph {
     failure_sources: Option<hirsel_span::SourceMap>,
 }
 impl Graph {
-    pub fn new(engine: &mut QueryEngine, jobs: Jobs) -> Self {
-        Self::try_new(engine, jobs).unwrap()
+    pub fn new(engine: &mut QueryEngine) -> Self {
+        Self::try_new(engine).unwrap()
     }
-    pub fn try_new(engine: &mut QueryEngine, jobs: Jobs) -> Result<Self, ToolError> {
+    pub fn try_new(engine: &mut QueryEngine) -> Result<Self, ToolError> {
         let (budget, cap) = host_budget();
         let limits = host_limits(cap);
         let mut loading = LoadingAdmission::reserve(budget, limits, 0).unwrap();
@@ -103,7 +102,7 @@ impl Graph {
                 return Err(error);
             }
         };
-        let mut runtime = AdmittedRuntime::new(jobs, allowance, installed.errors).unwrap();
+        let mut runtime = AdmittedRuntime::new(allowance, installed.errors).unwrap();
         installed.register(&mut runtime, &check).unwrap();
         let owned = std::mem::replace(
             engine,
@@ -262,8 +261,8 @@ impl Drop for Graph {
     }
 }
 
-pub fn front(engine: &mut QueryEngine, paths: Vec<DefPath>, jobs: Jobs) -> Vec<ModeResult> {
-    let mut graph = Graph::new(engine, jobs);
+pub fn front(engine: &mut QueryEngine, paths: Vec<DefPath>) -> Vec<ModeResult> {
+    let mut graph = Graph::new(engine);
     let outputs = graph.bodies(&paths);
     graph.finish();
     outputs
@@ -271,11 +270,10 @@ pub fn front(engine: &mut QueryEngine, paths: Vec<DefPath>, jobs: Jobs) -> Vec<M
 pub fn publications(
     engine: &mut QueryEngine,
     paths: Vec<DefPath>,
-    jobs: Jobs,
     retention: hirsel_engine::memo::Retention,
 ) -> Vec<PublishedResult> {
     engine.set_retention(retention);
-    let mut graph = Graph::new(engine, jobs);
+    let mut graph = Graph::new(engine);
     let outputs = graph.publications(&paths);
     graph.finish();
     outputs
@@ -299,9 +297,8 @@ pub struct ConstantOutcome {
 pub fn constants(
     engine: &mut QueryEngine,
     paths: Vec<DefPath>,
-    jobs: Jobs,
 ) -> Vec<Result<hirsel_tir::Materialized, QueryError>> {
-    let mut graph = Graph::new(engine, jobs);
+    let mut graph = Graph::new(engine);
     let outputs = paths
         .iter()
         .map(|path| graph.constant(engine, path))
@@ -309,12 +306,8 @@ pub fn constants(
     graph.finish();
     outputs
 }
-pub fn constant_outcomes(
-    engine: &mut QueryEngine,
-    paths: Vec<DefPath>,
-    jobs: Jobs,
-) -> Vec<ConstantOutcome> {
-    let mut graph = Graph::new(engine, jobs);
+pub fn constant_outcomes(engine: &mut QueryEngine, paths: Vec<DefPath>) -> Vec<ConstantOutcome> {
+    let mut graph = Graph::new(engine);
     let outputs = paths
         .into_iter()
         .map(|definition| {
@@ -344,24 +337,21 @@ pub fn constant_outcomes(
 pub fn lowers(
     engine: &mut QueryEngine,
     paths: Vec<DefPath>,
-    jobs: Jobs,
 ) -> Vec<LowerOutcome<hirsel_tir::DefinitionRef>> {
-    lower_requests(engine, paths, jobs, false)
+    lower_requests(engine, paths, false)
 }
 pub fn lower_prefix(
     engine: &mut QueryEngine,
     paths: Vec<DefPath>,
-    jobs: Jobs,
 ) -> Vec<LowerOutcome<hirsel_tir::DefinitionRef>> {
-    lower_requests(engine, paths, jobs, true)
+    lower_requests(engine, paths, true)
 }
 fn lower_requests(
     engine: &mut QueryEngine,
     paths: Vec<DefPath>,
-    jobs: Jobs,
     prefix: bool,
 ) -> Vec<LowerOutcome<hirsel_tir::DefinitionRef>> {
-    let mut graph = Graph::new(engine, jobs);
+    let mut graph = Graph::new(engine);
     let mut outcomes = Vec::new();
     for definition in paths {
         let (result, reads, depth, phase) = match graph.lower(engine, &definition) {
@@ -413,12 +403,8 @@ fn missing_reads(definition: &DefPath, phase: QueryKind) -> QueryError {
     })
 }
 
-pub fn checked_prefix(
-    engine: &mut QueryEngine,
-    paths: Vec<DefPath>,
-    jobs: Jobs,
-) -> Vec<LowerOutcome<()>> {
-    lower_prefix(engine, paths, jobs)
+pub fn checked_prefix(engine: &mut QueryEngine, paths: Vec<DefPath>) -> Vec<LowerOutcome<()>> {
+    lower_prefix(engine, paths)
         .into_iter()
         .map(|outcome| LowerOutcome {
             definition: outcome.definition,

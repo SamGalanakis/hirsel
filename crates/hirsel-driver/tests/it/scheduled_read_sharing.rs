@@ -41,13 +41,9 @@ fn front_complete_reads_share_equal_phase_allocations_without_merging_phase_keys
                 errors,
             )
             .unwrap();
-        let mut runtime = AdmittedRuntime::with_reservation(
-            hirsel_intern::jobs::Jobs::new(1),
-            budget.reserve(32 << 20).unwrap(),
-            errors,
-            2 << 20,
-        )
-        .unwrap();
+        let mut runtime =
+            AdmittedRuntime::with_reservation(budget.reserve(32 << 20).unwrap(), errors, 2 << 20)
+                .unwrap();
         runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
         let request = runtime.request(&[front.query(&program.entry).unwrap()]);
         let product = runtime.wait(request).unwrap()[0].clone();

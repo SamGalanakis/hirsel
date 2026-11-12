@@ -31,7 +31,6 @@ fn errors() -> RuntimeErrors {
 fn runtime() -> AdmittedRuntime {
     let budget = 1 << 30;
     AdmittedRuntime::with_reservation(
-        Jobs::ONE,
         hirsel_engine_admission::ProcessBudget::new(budget)
             .reserve(budget)
             .unwrap(),

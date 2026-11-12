@@ -43,7 +43,7 @@ fn refusal_case(refused_kind: u32) {
         .unwrap();
         std::fs::write(&manifest,r#"{"schema":1,"package":{"name":"refusal","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
         let errors = crate::scheduled_front::errors();
-        for jobs in [1, 2] {
+        {
             for refused in [
                 errors.resource,
                 errors.cycle,
@@ -73,12 +73,8 @@ fn refusal_case(refused_kind: u32) {
                     .engine
                     .front_lower_queries(&definitions, front.clone(), weight, 32, &budget, errors)
                     .unwrap();
-                let mut runtime = AdmittedRuntime::new(
-                    hirsel_intern::jobs::Jobs::new(jobs),
-                    budget.reserve(512 << 20).unwrap(),
-                    errors,
-                )
-                .unwrap();
+                let mut runtime =
+                    AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
                 if refused_kind == FRONT_BODY_KIND {
                     runtime
                         .register(FRONT_BODY_KIND, Arc::new(Refuse(refused)))
@@ -104,7 +100,7 @@ fn refusal_case(refused_kind: u32) {
                 assert_eq!(
                     actual,
                     refused,
-                    "preserve runtime refusal, jobs={jobs}; fabricated error={:?}",
+                    "preserve runtime refusal, fabricated error={:?}",
                     lower.failure(actual)
                 );
                 assert!(

@@ -32,7 +32,7 @@ fn check_size_instances(nested: bool) {
         };
         std::fs::write(directory.path().join("main.hir"), source).unwrap();
         std::fs::write(&manifest,r#"{"schema":1,"package":{"name":"stage","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[]}"#).unwrap();
-        for jobs in [1, 2, 8] {
+        {
             let store = Arc::new(MemStore::default());
             let mut selected_hidden = None;
             for warm in [false, true] {
@@ -59,12 +59,8 @@ fn check_size_instances(nested: bool) {
                     scratch: 8 << 20,
                     stack: 0,
                 };
-                let mut runtime = AdmittedRuntime::new(
-                    hirsel_intern::jobs::Jobs::new(jobs),
-                    budget.reserve(512 << 20).unwrap(),
-                    errors,
-                )
-                .unwrap();
+                let mut runtime =
+                    AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
                 let front = program
                     .engine
                     .front_body_queries(&definitions, weight, &budget, errors)
@@ -105,12 +101,8 @@ fn check_size_instances(nested: bool) {
                     .engine
                     .front_lower_queries(&definitions, front.clone(), weight, 4096, &budget, errors)
                     .unwrap();
-                let mut runtime = AdmittedRuntime::new(
-                    hirsel_intern::jobs::Jobs::new(jobs),
-                    budget.reserve(512 << 20).unwrap(),
-                    errors,
-                )
-                .unwrap();
+                let mut runtime =
+                    AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
                 runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
                 runtime
                     .register_local(FRONT_LOWER_KIND, lower.factory())
@@ -131,10 +123,7 @@ fn check_size_instances(nested: bool) {
                 drop(program);
                 let request = runtime.request(&roots);
                 let products = runtime.wait(request).unwrap_or_else(|reference| {
-                    panic!(
-                        "jobs={jobs} warm={warm}: {reference:?}: {:?}",
-                        lower.failure(reference)
-                    )
+                    panic!("warm={warm}: {reference:?}: {:?}", lower.failure(reference))
                 });
                 assert_eq!(
                     products[0], products[2],
@@ -192,7 +181,7 @@ fn check_size_instances(nested: bool) {
                 assert_eq!(
                     lower.settled_constant(&hidden, &[2]).unwrap().root.kind,
                     hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(4)),
-                    "jobs={jobs} warm={warm} selected={hidden}"
+                    "warm={warm} selected={hidden}"
                 );
                 assert_eq!(
                     lower.settled_constant(&hidden, &[4]).unwrap().root.kind,

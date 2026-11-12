@@ -18,7 +18,7 @@ fn admitted_native_roots_preserve_selection_constants_and_detached_metadata_owne
         let manifest = directory.path().join("hirsel.json");
         std::fs::write(&path,"pub type Secret{level:u64}\nconst A:u64=comptime B;\nconst B:u64=comptime 3u64;\nfn view(x:Secret)->u64{x.level}\nfn orphan(x:u64)->u64{x}\nfn ct_body()->Result[Body[fn(u64)->u64 uses {}],String]{Ok(codegen.body(\"fn(x:u64)->u64 uses {} {9u64/x}\"))}\npub fn main()->u64{A+view(Secret(level:4u64))}\n").unwrap();
         std::fs::write(&manifest,r#"{"schema":1,"package":{"name":"roots","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
-        for jobs in [1, 2] {
+        {
             for explicit in [false, true] {
                 let store = Arc::new(MemStore::default());
                 let mut program = COMPILER
@@ -44,12 +44,8 @@ fn admitted_native_roots_preserve_selection_constants_and_detached_metadata_owne
                     scratch: 8 << 20,
                     stack: 0,
                 };
-                let mut runtime = AdmittedRuntime::new(
-                    hirsel_intern::jobs::Jobs::new(jobs),
-                    budget.reserve(512 << 20).unwrap(),
-                    errors,
-                )
-                .unwrap();
+                let mut runtime =
+                    AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
                 let front = program
                     .engine
                     .front_body_queries(&paths, weight, &budget, errors)

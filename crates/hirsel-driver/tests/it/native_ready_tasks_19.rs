@@ -425,12 +425,8 @@ fn ready_case_inner_mutation(
                 protocol: tasks.failure("runtime dependency protocol refused"),
                 panicked: tasks.failure("runtime worker panicked"),
             };
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(1),
-                budget.reserve(runtime_bytes).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(runtime_bytes).unwrap(), errors).unwrap();
             let traced = Arc::new(Traced(factory.clone(), trace.clone()));
             for kind in [
                 INSTANCE_KIND,
@@ -713,12 +709,8 @@ fn ready_case_inner_mutation(
                 Arc::new(NativeTaskFactory::new(ready_tasks.clone())),
                 trace.clone(),
             ));
-            let mut ready_runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(1),
-                budget.reserve(runtime_bytes).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut ready_runtime =
+                AdmittedRuntime::new(budget.reserve(runtime_bytes).unwrap(), errors).unwrap();
             for kind in [
                 INSTANCE_KIND,
                 CALLABLE_VALUE_KIND,

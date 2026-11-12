@@ -15,7 +15,6 @@ use hirsel_engine_runtime::QueryTask;
 use hirsel_engine_runtime::RuntimeErrors;
 use hirsel_engine_store::{MemStore, ResultStore};
 
-use hirsel_intern::jobs::Jobs;
 use hirsel_syntax::ContentHash;
 use std::path::PathBuf;
 use std::sync::{
@@ -148,8 +147,8 @@ impl RequestEngine for Engine {
                     .unwrap(),
             );
             let reservation = self.budget.reserve(ALLOWANCE).map_err(|e| e.to_string())?;
-            let mut runtime = AdmittedRuntime::new(Jobs::new(1), reservation, errors())
-                .map_err(|e| e.to_string())?;
+            let mut runtime =
+                AdmittedRuntime::new(reservation, errors()).map_err(|e| e.to_string())?;
             runtime
                 .register(
                     root().kind,
@@ -319,7 +318,6 @@ impl RequestEngine for FrozenEngine {
                 .unwrap(),
         );
         let mut runtime = AdmittedRuntime::new(
-            Jobs::new(1),
             self.budget.reserve(ALLOWANCE).map_err(|e| e.to_string())?,
             errors(),
         )

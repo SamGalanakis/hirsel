@@ -130,12 +130,8 @@ fn native_demand_tasks_import_and_reuse_actual_settled_source_without_a_controll
                 protocol: denied,
                 panicked: denied,
             };
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(1),
-                budget.reserve(runtime_bytes).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(runtime_bytes).unwrap(), errors).unwrap();
             let traced = Arc::new(Traced(factory.clone(), trace.clone()));
             for kind in [
                 INSTANCE_KIND,

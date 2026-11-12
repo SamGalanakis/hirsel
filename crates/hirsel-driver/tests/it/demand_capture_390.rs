@@ -105,12 +105,7 @@ fn lower_captures_only_its_demand_and_full_check_still_rejects_unused_body() {
             .engine
             .front_lower_queries(&definitions, front.clone(), weight, 32, &budget, errors)
             .unwrap();
-        let mut runtime = AdmittedRuntime::new(
-            hirsel_intern::jobs::Jobs::new(1),
-            budget.reserve(512 << 20).unwrap(),
-            errors,
-        )
-        .unwrap();
+        let mut runtime = AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
         runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
         runtime
             .register_local(FRONT_LOWER_KIND, lower.factory())
@@ -252,12 +247,7 @@ fn native_catalogue_is_lazy_and_store_off_archives_require_export() {
                 .signatures()
                 .header_ready(hirsel_syntax::DefId::intern(&unused))
         );
-        let mut runtime = AdmittedRuntime::new(
-            hirsel_intern::jobs::Jobs::new(1),
-            budget.reserve(512 << 20).unwrap(),
-            errors,
-        )
-        .unwrap();
+        let mut runtime = AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
         runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
         runtime
             .register_local(FRONT_LOWER_KIND, lower.factory())

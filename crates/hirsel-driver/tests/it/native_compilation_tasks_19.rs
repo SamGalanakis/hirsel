@@ -279,42 +279,35 @@ impl QueryTask for TraceTask {
 
 #[test]
 fn immutable_native_compilation_links_both_backends_and_reopens_body_free_hits_after_edits() {
-    with_compiler_stack(|| run(4));
+    with_compiler_stack(|| run());
 }
 #[test]
 fn immutable_native_compilation_at_width_one() {
-    with_compiler_stack(|| run(1));
+    with_compiler_stack(|| run());
 }
 #[test]
 fn immutable_root_observation_uses_only_admitted_portable_summaries() {
-    with_compiler_stack(|| run_case(1, true, false, false, false));
+    with_compiler_stack(|| run_case(true, false, false, false));
 }
 #[test]
 #[ignore = "requires root-plan-proof frozen linker package"]
 fn frozen_root_plans_run_both_backends_without_live_linker_inputs() {
-    with_compiler_stack(|| run_case(1, false, true, false, false));
+    with_compiler_stack(|| run_case(false, true, false, false));
 }
 #[test]
 #[ignore = "requires root-frozen-kit-proof selected linker inputs"]
 fn admitted_root_plans_bind_the_kit_before_codegen() {
-    with_compiler_stack(|| run_case(1, false, true, true, false));
+    with_compiler_stack(|| run_case(false, true, true, false));
 }
-fn run(jobs: usize) {
-    run_case(jobs, false, false, false, false);
+fn run() {
+    run_case(false, false, false, false);
 }
 #[test]
 fn selected_object_and_link_verification_recomputes_fresh_hits_without_source_work() {
-    with_compiler_stack(|| run_case(1, false, false, false, true));
+    with_compiler_stack(|| run_case(false, false, false, true));
 }
-fn run_case(
-    jobs: usize,
-    observation_only: bool,
-    frozen_plan: bool,
-    use_frozen_kit: bool,
-    verify_objects: bool,
-) {
+fn run_case(observation_only: bool, frozen_plan: bool, use_frozen_kit: bool, verify_objects: bool) {
     run_program_case(
-        jobs,
         observation_only,
         frozen_plan,
         use_frozen_kit,
@@ -355,7 +348,6 @@ fn same_summary_callee_edits_preserve_debug_callers_and_invalidate_optimizer_cop
     with_compiler_stack(|| {
         for optimized in [false, true] {
             run_program_case(
-                1,
                 false,
                 false,
                 false,
@@ -366,7 +358,6 @@ fn same_summary_callee_edits_preserve_debug_callers_and_invalidate_optimizer_cop
     });
 }
 fn run_program_case(
-    jobs: usize,
     observation_only: bool,
     frozen_plan: bool,
     use_frozen_kit: bool,
@@ -374,7 +365,6 @@ fn run_program_case(
     case: ProgramCase,
 ) {
     run_program_case_with_frame(
-        jobs,
         observation_only,
         frozen_plan,
         use_frozen_kit,
@@ -388,7 +378,6 @@ fn run_program_case(
 fn shared_native_selections_fit_a_small_continuation_frame() {
     with_compiler_stack(|| {
         run_program_case_with_frame(
-            1,
             false,
             false,
             false,
@@ -400,7 +389,6 @@ fn shared_native_selections_fit_a_small_continuation_frame() {
 }
 
 fn run_program_case_with_frame(
-    jobs: usize,
     observation_only: bool,
     frozen_plan: bool,
     use_frozen_kit: bool,
@@ -665,7 +653,6 @@ fn run_program_case_with_frame(
         assert_eq!(calls.load(Ordering::Relaxed), 0);
         drop(task);
         let mut runtime = AdmittedRuntime::new(
-            hirsel_intern::jobs::Jobs::new(jobs),
             budget.reserve(672 << 20).unwrap(),
             RuntimeErrors {
                 resource: denied,
@@ -684,7 +671,7 @@ fn run_program_case_with_frame(
         let request = runtime.request(&[compilation.query_id()]);
         let selected = runtime.wait(request).unwrap_or_else(|error| {
             panic!(
-                "jobs={jobs} literal={literal} fresh={fresh}: {}",
+                "literal={literal} fresh={fresh}: {}",
                 String::from_utf8_lossy(&store.get_content(error).unwrap())
             )
         })[0]

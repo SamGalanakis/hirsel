@@ -4,7 +4,7 @@
 //! or parked continuation. A read of a producer still on the demand stack is
 //! the cycle error. S0 owns semantic validity.
 use super::*;
-use hirsel_intern::jobs::{COMPILER_STACK_BYTES, Jobs};
+use hirsel_intern::jobs::COMPILER_STACK_BYTES;
 use hirsel_syntax::ContentHash;
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -177,15 +177,13 @@ impl AdmittedRuntime {
     /// the configured jobs; request reservations are sized for this many.
     pub const WORKERS: usize = 1;
     pub fn new(
-        jobs: Jobs,
         reservation: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> std::io::Result<Self> {
-        Self::with_reservation(jobs, reservation, errors, COMPILER_STACK_BYTES)
+        Self::with_reservation(reservation, errors, COMPILER_STACK_BYTES)
     }
     /// Construct a runtime whose producers must fit `stack`.
     pub fn with_reservation(
-        _jobs: Jobs,
         reservation: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
         stack: usize,

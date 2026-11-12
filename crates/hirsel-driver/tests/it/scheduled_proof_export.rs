@@ -25,7 +25,7 @@ fn export_case_with_ownership(
         let manifest = directory.path().join("hirsel.json");
         std::fs::write(directory.path().join("main.hir"), source).unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"scope","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
-        for jobs in [1, 2] {
+        {
             use hirsel_engine_store::{Bytes, EntryKey, ResultStore};
             use std::sync::atomic::{AtomicUsize, Ordering};
             struct CountReads {
@@ -88,12 +88,8 @@ fn export_case_with_ownership(
                 scratch: 8 << 20,
                 stack: 0,
             };
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(jobs),
-                budget.reserve(512 << 20).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             let front = program
                 .engine
                 .front_body_queries(&definitions, weight, &budget, errors)

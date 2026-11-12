@@ -62,7 +62,7 @@ fn products_case_with_decode_layout(
         let manifest = directory.path().join("hirsel.json");
         std::fs::write(directory.path().join("main.hir"), source).unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"scope","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
-        for jobs in [1, 2] {
+        {
             use hirsel_engine_store::{Bytes, EntryKey, ResultStore};
             use std::sync::atomic::{AtomicUsize, Ordering};
             struct CountReads {
@@ -125,12 +125,8 @@ fn products_case_with_decode_layout(
                 scratch: 8 << 20,
                 stack: 0,
             };
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(jobs),
-                budget.reserve(512 << 20).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             let front = program
                 .engine
                 .front_body_queries(&definitions, weight, &budget, errors)
@@ -514,12 +510,8 @@ fn products_case_with_decode_layout(
             assert_eq!(front.work_snapshot(), before_front);
             runtime.shutdown();
             let oracle_errors = crate::scheduled_front::errors();
-            let mut oracle_runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(jobs),
-                budget.reserve(512 << 20).unwrap(),
-                oracle_errors,
-            )
-            .unwrap();
+            let mut oracle_runtime =
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), oracle_errors).unwrap();
             let oracle_front = program
                 .engine
                 .front_body_queries(&definitions, weight, &budget, oracle_errors)

@@ -70,12 +70,8 @@ fn admitted_source_storage_root_matches_scalar_and_rejects_root_escape() {
                     scratch: 8 << 20,
                     stack: 0,
                 };
-                let mut runtime = AdmittedRuntime::new(
-                    hirsel_intern::jobs::Jobs::new(jobs),
-                    budget.reserve(512 << 20).unwrap(),
-                    errors,
-                )
-                .unwrap();
+                let mut runtime =
+                    AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
                 let recipe_claims = Arc::new(RecipeClaims::default());
                 runtime.observe(recipe_claims.clone()).unwrap();
                 let front = program

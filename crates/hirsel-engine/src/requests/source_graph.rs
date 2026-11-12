@@ -1206,8 +1206,7 @@ impl QueryEngine {
             scope,
         )?;
         let check = installed.check(self, selection)?;
-        let mut runtime =
-            AdmittedRuntime::new(jobs, runtime, installed.errors).map_err(ToolError::Io)?;
+        let mut runtime = AdmittedRuntime::new(runtime, installed.errors).map_err(ToolError::Io)?;
         installed.register(&mut runtime, &check)?;
         let front_before = front_work(&installed.front);
         let lower_before = installed

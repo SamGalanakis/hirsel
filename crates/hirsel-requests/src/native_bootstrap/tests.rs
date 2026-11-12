@@ -115,8 +115,7 @@ fn bootstrap_link_refusal(test_table: bool, emit_only: bool) {
                 stack: 0,
             };
             let mut runtime =
-                AdmittedRuntime::new(Jobs::new(jobs), budget.reserve(512 << 20).unwrap(), errors)
-                    .unwrap();
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             let front = program
                 .engine
                 .front_body_queries(&paths, weight, &budget, errors)
@@ -436,8 +435,7 @@ fn actual_native_bootstrap_links_both_backends_and_restores_after_runtime_drop()
                 stack: 0,
             };
             let mut runtime =
-                AdmittedRuntime::new(Jobs::new(jobs), budget.reserve(512 << 20).unwrap(), errors)
-                    .unwrap();
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             let front = program
                 .engine
                 .front_body_queries(&paths, weight, &budget, errors)
@@ -871,8 +869,7 @@ fn native_bootstrap_policy_case(bind_run: bool) {
                 stack: 0,
             };
             let mut runtime =
-                AdmittedRuntime::new(Jobs::new(jobs), budget.reserve(512 << 20).unwrap(), errors)
-                    .unwrap();
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             let front = program
                 .engine
                 .front_body_queries(&paths, weight, &budget, errors)
@@ -1292,8 +1289,7 @@ fn proof_graph(
         .unwrap();
     let paths = program.engine.front_source_roots();
     let entry = program.entry.clone();
-    let mut runtime =
-        AdmittedRuntime::new(Jobs::ONE, budget.reserve(512 << 20).unwrap(), errors).unwrap();
+    let mut runtime = AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
     let front = program
         .engine
         .front_body_queries(&paths, weight, &budget, errors)
@@ -1713,8 +1709,7 @@ fn original_plan_inputs_bind_source_edits_membership_options_and_foreign_bytes()
                 )
                 .unwrap();
             let mut runtime =
-                AdmittedRuntime::new(Jobs::ONE, budget.reserve(512 << 20).unwrap(), errors)
-                    .unwrap();
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             runtime
                 .register(hirsel_engine::FRONT_BODY_KIND, front.factory())
                 .unwrap();

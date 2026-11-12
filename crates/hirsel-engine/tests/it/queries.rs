@@ -509,7 +509,7 @@ impl AdmittedFront {
         outcomes.into_iter().map(Option::unwrap).collect()
     }
 }
-fn admitted_front(engine: &mut QueryEngine, definitions: &[DefPath], jobs: usize) -> AdmittedFront {
+fn admitted_front(engine: &mut QueryEngine, definitions: &[DefPath]) -> AdmittedFront {
     let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
     let errors = runtime_errors();
     let queries = engine
@@ -524,12 +524,7 @@ fn admitted_front(engine: &mut QueryEngine, definitions: &[DefPath], jobs: usize
             errors,
         )
         .unwrap();
-    let mut runtime = AdmittedRuntime::new(
-        hirsel_intern::jobs::Jobs::new(jobs),
-        budget.reserve(512 << 20).unwrap(),
-        errors,
-    )
-    .unwrap();
+    let mut runtime = AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
     runtime
         .register(FRONT_BODY_KIND, queries.factory())
         .unwrap();
@@ -733,23 +728,21 @@ fn scalar_queries_preserve_phase_order_and_stop_at_every_error_boundary() {
 #[test]
 fn frozen_signature_preflight_preserves_resolution_rejection_precedence() {
     with_compiler_stack(|| {
-        for jobs in [1, 2, 8] {
-            let (mut engine, events) = make_engine_with_store(Some("resolve+signature"), false);
-            parse(&mut engine, "fn a () { 1 }\n");
-            let definitions = vec![path("a")];
-            let mut front = admitted_front(&mut engine, &definitions, jobs);
-            let outcomes = front.request(&definitions);
-            assert_eq!(outcomes[0].outcome.phase, Some(QueryKind::Resolve));
-            let Err(QueryError::Diagnostics(diagnostics)) = &outcomes[0].outcome.result else {
-                panic!("expected resolution rejection");
-            };
-            assert_eq!(diagnostics.len(), 1);
-            assert_eq!(diagnostics[0].message, "resolve fixture rejection");
-            assert_eq!(
-                *events.lock().unwrap(),
-                ["lex", "parse", "signature", "resolve"]
-            );
-        }
+        let (mut engine, events) = make_engine_with_store(Some("resolve+signature"), false);
+        parse(&mut engine, "fn a () { 1 }\n");
+        let definitions = vec![path("a")];
+        let mut front = admitted_front(&mut engine, &definitions);
+        let outcomes = front.request(&definitions);
+        assert_eq!(outcomes[0].outcome.phase, Some(QueryKind::Resolve));
+        let Err(QueryError::Diagnostics(diagnostics)) = &outcomes[0].outcome.result else {
+            panic!("expected resolution rejection");
+        };
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message, "resolve fixture rejection");
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["lex", "parse", "signature", "resolve"]
+        );
     });
 }
 #[test]
@@ -1246,84 +1239,82 @@ fn signature_hits_track_later_duplicate_headers_and_positions() {
 #[test]
 fn frozen_frontier_preserves_reads_failures_and_warm_hits() {
     with_compiler_stack(|| {
-        for jobs in [1, 2, 8] {
-            for reject in [
-                None,
-                Some("resolve"),
-                Some("signature"),
-                Some("check"),
-                Some("modes"),
-            ] {
-                let (mut serial, _) = make_engine(reject, false);
-                let (mut parallel, _) = make_engine_with_store(reject, false);
-                let text = "fn a () { 1 }\nfn b () { 2 }\n";
-                parse(&mut serial, text);
-                parse(&mut parallel, text);
-                let paths = vec![path("b"), path("a"), path("b")];
-                let expected: Vec<_> = paths
-                    .iter()
-                    .map(|path| serial.mode_definition(path))
-                    .collect();
-                let mut front = admitted_front(&mut parallel, &paths, jobs);
-                let results = front.request(&paths);
-                for ((path, expected), actual) in paths.iter().zip(expected).zip(results) {
-                    let actual = actual.outcome;
-                    assert_eq!(&actual.definition, path);
-                    let phase = match reject {
-                        Some("resolve") => QueryKind::Resolve,
-                        Some("signature") if path.0.name == "b" => QueryKind::Resolve,
-                        Some("signature") => QueryKind::Signature,
-                        Some("check") => QueryKind::Check,
-                        _ => QueryKind::Modes,
-                    };
-                    assert_eq!(actual.phase, Some(phase));
-                    match (expected, actual.result) {
-                        (Ok(a), Ok(b)) => {
-                            assert_eq!(a.dependencies, b.dependencies);
-                            assert_eq!(a.diagnostics.len(), b.diagnostics.len());
-                            assert_eq!(
-                                a.value.typed.checked.resolution,
-                                b.value.typed.checked.resolution
-                            );
-                        }
-                        (Err(QueryError::Diagnostics(a)), Err(QueryError::Diagnostics(b))) => {
-                            assert_eq!(a.len(), b.len());
-                            for (a, b) in a.iter().zip(&b) {
-                                assert_eq!((&a.rule, &a.message), (&b.rule, &b.message));
-                                let a = serial.sources.resolve(a.primary);
-                                let b = parallel.sources.resolve(b.primary);
-                                assert_eq!((a.start, a.end), (b.start, b.end));
-                            }
-                        }
-                        (a, b) => panic!("jobs {jobs}, reject {reject:?}: {a:?} != {b:?}"),
-                    }
-                    for kind in [QueryKind::Resolve, QueryKind::Check, QueryKind::Modes] {
-                        let scalar_reads = serial.memo_reads(path, kind);
-                        let scheduled_reads = admitted_memo_reads(&front, path, kind);
+        for reject in [
+            None,
+            Some("resolve"),
+            Some("signature"),
+            Some("check"),
+            Some("modes"),
+        ] {
+            let (mut serial, _) = make_engine(reject, false);
+            let (mut parallel, _) = make_engine_with_store(reject, false);
+            let text = "fn a () { 1 }\nfn b () { 2 }\n";
+            parse(&mut serial, text);
+            parse(&mut parallel, text);
+            let paths = vec![path("b"), path("a"), path("b")];
+            let expected: Vec<_> = paths
+                .iter()
+                .map(|path| serial.mode_definition(path))
+                .collect();
+            let mut front = admitted_front(&mut parallel, &paths);
+            let results = front.request(&paths);
+            for ((path, expected), actual) in paths.iter().zip(expected).zip(results) {
+                let actual = actual.outcome;
+                assert_eq!(&actual.definition, path);
+                let phase = match reject {
+                    Some("resolve") => QueryKind::Resolve,
+                    Some("signature") if path.0.name == "b" => QueryKind::Resolve,
+                    Some("signature") => QueryKind::Signature,
+                    Some("check") => QueryKind::Check,
+                    _ => QueryKind::Modes,
+                };
+                assert_eq!(actual.phase, Some(phase));
+                match (expected, actual.result) {
+                    (Ok(a), Ok(b)) => {
+                        assert_eq!(a.dependencies, b.dependencies);
+                        assert_eq!(a.diagnostics.len(), b.diagnostics.len());
                         assert_eq!(
-                            scalar_reads,
-                            scheduled_reads.as_deref(),
-                            "jobs {jobs}, reject {reject:?}, {kind:?}, {path:?}"
+                            a.value.typed.checked.resolution,
+                            b.value.typed.checked.resolution
                         );
                     }
+                    (Err(QueryError::Diagnostics(a)), Err(QueryError::Diagnostics(b))) => {
+                        assert_eq!(a.len(), b.len());
+                        for (a, b) in a.iter().zip(&b) {
+                            assert_eq!((&a.rule, &a.message), (&b.rule, &b.message));
+                            let a = serial.sources.resolve(a.primary);
+                            let b = parallel.sources.resolve(b.primary);
+                            assert_eq!((a.start, a.end), (b.start, b.end));
+                        }
+                    }
+                    (a, b) => panic!("reject {reject:?}: {a:?} != {b:?}"),
                 }
-                let before: Vec<_> = paths
-                    .iter()
-                    .flat_map(|p| {
-                        [QueryKind::Resolve, QueryKind::Check, QueryKind::Modes]
-                            .map(|k| front.queries.recompute_count(p, k))
-                    })
-                    .collect();
-                let _ = front.request(&paths);
-                let after: Vec<_> = paths
-                    .iter()
-                    .flat_map(|p| {
-                        [QueryKind::Resolve, QueryKind::Check, QueryKind::Modes]
-                            .map(|k| front.queries.recompute_count(p, k))
-                    })
-                    .collect();
-                assert_eq!(before, after, "warm jobs {jobs}, reject {reject:?}");
+                for kind in [QueryKind::Resolve, QueryKind::Check, QueryKind::Modes] {
+                    let scalar_reads = serial.memo_reads(path, kind);
+                    let scheduled_reads = admitted_memo_reads(&front, path, kind);
+                    assert_eq!(
+                        scalar_reads,
+                        scheduled_reads.as_deref(),
+                        "reject {reject:?}, {kind:?}, {path:?}"
+                    );
+                }
             }
+            let before: Vec<_> = paths
+                .iter()
+                .flat_map(|p| {
+                    [QueryKind::Resolve, QueryKind::Check, QueryKind::Modes]
+                        .map(|k| front.queries.recompute_count(p, k))
+                })
+                .collect();
+            let _ = front.request(&paths);
+            let after: Vec<_> = paths
+                .iter()
+                .flat_map(|p| {
+                    [QueryKind::Resolve, QueryKind::Check, QueryKind::Modes]
+                        .map(|k| front.queries.recompute_count(p, k))
+                })
+                .collect();
+            assert_eq!(before, after, "warm reject {reject:?}");
         }
     });
 }
@@ -1331,51 +1322,48 @@ fn frozen_frontier_preserves_reads_failures_and_warm_hits() {
 #[test]
 fn frozen_frontier_reports_each_missing_phase_and_retries_it() {
     with_compiler_stack(|| {
-        for jobs in [1, 2, 8] {
-            for missing in [
-                QueryKind::Resolve,
-                QueryKind::Signature,
-                QueryKind::Check,
-                QueryKind::Modes,
-            ] {
-                let paths = vec![path("b"), path("a")];
-                let mut attempts = vec![0; paths.len()];
-                for _ in 0..2 {
-                    let (mut engine, _) = make_engine_with_store(None, false);
-                    match missing {
-                        QueryKind::Resolve => engine.adapters.resolver = None,
-                        QueryKind::Signature => engine.adapters.signature = None,
-                        QueryKind::Check => engine.adapters.checker = None,
-                        QueryKind::Modes => engine.adapters.modes = None,
-                        _ => unreachable!(),
-                    }
-                    parse(&mut engine, "fn a () { 1 }\nfn b () { 2 }\n");
+        for missing in [
+            QueryKind::Resolve,
+            QueryKind::Signature,
+            QueryKind::Check,
+            QueryKind::Modes,
+        ] {
+            let paths = vec![path("b"), path("a")];
+            let mut attempts = vec![0; paths.len()];
+            for _ in 0..2 {
+                let (mut engine, _) = make_engine_with_store(None, false);
+                match missing {
+                    QueryKind::Resolve => engine.adapters.resolver = None,
+                    QueryKind::Signature => engine.adapters.signature = None,
+                    QueryKind::Check => engine.adapters.checker = None,
+                    QueryKind::Modes => engine.adapters.modes = None,
+                    _ => unreachable!(),
+                }
+                parse(&mut engine, "fn a () { 1 }\nfn b () { 2 }\n");
 
-                    let mut front = admitted_front(&mut engine, &paths, jobs);
-                    for result in front.request(&paths) {
-                        assert_eq!(result.outcome.phase, Some(missing));
-                        assert!(matches!(
-                            result.outcome.result,
-                            Err(QueryError::NotImplemented)
-                        ));
-                        assert!(
-                            admitted_memo_reads(&front, &result.outcome.definition, missing)
-                                .is_none(),
-                            "missing {missing:?} memo for {} with jobs={jobs}",
-                            result.outcome.definition
-                        );
-                    }
-                    for (attempts, path) in attempts.iter_mut().zip(&paths) {
-                        *attempts += if missing == QueryKind::Signature {
-                            u64::try_from(engine.recompute_count(path, missing)).unwrap()
-                        } else {
-                            front.queries.recompute_count(path, missing)
-                        };
-                    }
+                let mut front = admitted_front(&mut engine, &paths);
+                for result in front.request(&paths) {
+                    assert_eq!(result.outcome.phase, Some(missing));
+                    assert!(matches!(
+                        result.outcome.result,
+                        Err(QueryError::NotImplemented)
+                    ));
+                    assert!(
+                        admitted_memo_reads(&front, &result.outcome.definition, missing).is_none(),
+                        "missing {missing:?} memo for {}",
+                        result.outcome.definition
+                    );
                 }
-                for count in attempts {
-                    assert!(count >= 2);
+                for (attempts, path) in attempts.iter_mut().zip(&paths) {
+                    *attempts += if missing == QueryKind::Signature {
+                        u64::try_from(engine.recompute_count(path, missing)).unwrap()
+                    } else {
+                        front.queries.recompute_count(path, missing)
+                    };
                 }
+            }
+            for count in attempts {
+                assert!(count >= 2);
             }
         }
     });
@@ -1412,44 +1400,38 @@ fn frozen_frontier_retries_operational_headers_only_in_the_next_snapshot() {
         }
     }
     with_compiler_stack(|| {
-        for jobs in [1, 2, 8] {
-            let (mut engine, _) = make_engine_with_store(None, false);
-            let adapter = Arc::new(Flaky {
-                original: engine.adapters.signature.take().unwrap(),
-                calls: std::sync::atomic::AtomicU32::new(0),
-            });
-            engine.adapters.signature = Some(adapter.clone());
-            parse(&mut engine, "fn a () { 1 }\nfn b () { 2 }\n");
-            let paths = vec![path("b"), path("a")];
-            let mut front = admitted_front(&mut engine, &paths, jobs);
-            let results = front.request(&paths);
-            assert!(
-                results
-                    .iter()
-                    .all(|r| matches!(r.outcome.result, Err(QueryError::Operational(_))))
-            );
-            assert_eq!(
-                adapter.calls.load(std::sync::atomic::Ordering::Relaxed),
-                1,
-                "no post-freeze retry"
-            );
-            for p in &paths {
-                assert!(admitted_memo_reads(&front, p, QueryKind::Modes).is_none());
-            }
-            drop(front);
-            let (mut engine, _) = make_engine_with_store(None, false);
-            engine.adapters.signature = Some(adapter.clone());
-            parse(&mut engine, "fn a () { 1 }\nfn b () { 2 }\n");
-            engine.item_signature(&path("a")).unwrap();
-            let mut front = admitted_front(&mut engine, &paths, jobs);
-            let results = front.request(&paths);
-            assert!(results.iter().all(|r| r.outcome.result.is_ok()));
-            assert_eq!(
-                adapter.calls.load(std::sync::atomic::Ordering::Relaxed),
-                2,
-                "jobs={jobs}"
-            );
+        let (mut engine, _) = make_engine_with_store(None, false);
+        let adapter = Arc::new(Flaky {
+            original: engine.adapters.signature.take().unwrap(),
+            calls: std::sync::atomic::AtomicU32::new(0),
+        });
+        engine.adapters.signature = Some(adapter.clone());
+        parse(&mut engine, "fn a () { 1 }\nfn b () { 2 }\n");
+        let paths = vec![path("b"), path("a")];
+        let mut front = admitted_front(&mut engine, &paths);
+        let results = front.request(&paths);
+        assert!(
+            results
+                .iter()
+                .all(|r| matches!(r.outcome.result, Err(QueryError::Operational(_))))
+        );
+        assert_eq!(
+            adapter.calls.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "no post-freeze retry"
+        );
+        for p in &paths {
+            assert!(admitted_memo_reads(&front, p, QueryKind::Modes).is_none());
         }
+        drop(front);
+        let (mut engine, _) = make_engine_with_store(None, false);
+        engine.adapters.signature = Some(adapter.clone());
+        parse(&mut engine, "fn a () { 1 }\nfn b () { 2 }\n");
+        engine.item_signature(&path("a")).unwrap();
+        let mut front = admitted_front(&mut engine, &paths);
+        let results = front.request(&paths);
+        assert!(results.iter().all(|r| r.outcome.result.is_ok()));
+        assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::Relaxed), 2);
     });
 }
 
@@ -1462,7 +1444,7 @@ fn compact_release_does_not_retry_an_unavailable_phase_through_an_old_checked_bo
         engine.adapters.resolver = None;
         parse(&mut engine, "fn a () { 2 }\n");
         let definitions = vec![path("a")];
-        let mut front = admitted_front(&mut engine, &definitions, 2);
+        let mut front = admitted_front(&mut engine, &definitions);
         let outputs = front.request(&definitions);
         assert!(matches!(
             outputs[0].outcome.result,
@@ -1597,14 +1579,12 @@ fn scheduled_scc_run(
     text: &str,
     calls: &[(&str, &[&str])],
     store: Arc<dyn hirsel_engine_store::ResultStore>,
-    jobs: usize,
     output_bytes: u64,
 ) -> (FrontGrowthOutput, u64, u64) {
     scheduled_scc_run_with_capacity(
         text,
         calls,
         store,
-        jobs,
         output_bytes,
         None,
         hirsel_engine_admission::ProcessBudget::new(1 << 30),
@@ -1614,7 +1594,6 @@ fn scheduled_scc_run_with_capacity(
     text: &str,
     calls: &[(&str, &[&str])],
     store: Arc<dyn hirsel_engine_store::ResultStore>,
-    jobs: usize,
     output_bytes: u64,
     capacity: Option<usize>,
     budget: Arc<hirsel_engine_admission::ProcessBudget>,
@@ -1663,12 +1642,7 @@ fn scheduled_scc_run_with_capacity(
             errors,
         )
         .unwrap();
-    let mut runtime = AdmittedRuntime::new(
-        hirsel_intern::jobs::Jobs::new(jobs),
-        budget.reserve(512 << 20).unwrap(),
-        errors,
-    )
-    .unwrap();
+    let mut runtime = AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
     runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
     runtime
         .register(FRONT_GROWTH_KIND, growth.factory())
@@ -1755,7 +1729,7 @@ fn scheduled_scc_equal_edit_solves_no_downstream_or_unaffected_component() {
         ("caller", &["a"]),
         ("main", &["caller"]),
     ];
-    let (first, solves, memberships) = scheduled_scc_run(text, calls, store.clone(), 1, 8 << 20);
+    let (first, solves, memberships) = scheduled_scc_run(text, calls, store.clone(), 8 << 20);
     assert_eq!((solves, memberships), (3, 1));
     let changed_text = text.replace("{b}", "{a;b}");
     let changed_calls: &[(&str, &[&str])] = &[
@@ -1765,7 +1739,7 @@ fn scheduled_scc_equal_edit_solves_no_downstream_or_unaffected_component() {
         ("main", &["caller"]),
     ];
     let (changed, solves, memberships) =
-        scheduled_scc_run(&changed_text, changed_calls, store, 2, 8 << 20);
+        scheduled_scc_run(&changed_text, changed_calls, store, 8 << 20);
     assert_eq!(
         solves, 1,
         "only the edited SCC is solved; downstream and unrelated SCCs reuse products"
@@ -1795,7 +1769,6 @@ fn scheduled_scc_equal_edit_solves_no_downstream_or_unaffected_component() {
         &changed_text,
         changed_calls,
         Arc::new(MemStore::default()),
-        1,
         8 << 20,
     );
     assert_eq!(scc_products(&changed), scc_products(&cold));
@@ -1808,7 +1781,7 @@ fn scheduled_scc_split_merge_and_durable_reopen_agree_with_cold_solve() {
             directory.path().to_path_buf(),
         )) as Arc<dyn hirsel_engine_store::ResultStore>
     };
-    let run = |text: &str, calls: &[(&str, &[&str])], jobs| {
+    let run = |text: &str, calls: &[(&str, &[&str])]| {
         let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         // Directory retention is disk-backed. Fund live transport from the
         // same process budget as the Front, growth and runtime reservations.
@@ -1821,7 +1794,7 @@ fn scheduled_scc_split_merge_and_durable_reopen_agree_with_cold_solve() {
             )
             .unwrap(),
         );
-        scheduled_scc_run_with_capacity(text, calls, store, jobs, 8 << 20, None, budget)
+        scheduled_scc_run_with_capacity(text, calls, store, 8 << 20, None, budget)
     };
     let cases: &[(&str, &[(&str, &[&str])])] = &[
         (
@@ -1840,7 +1813,7 @@ fn scheduled_scc_split_merge_and_durable_reopen_agree_with_cold_solve() {
     let mut previous_membership = None;
     let mut seen_inputs = std::collections::BTreeSet::new();
     for (text, calls) in cases {
-        let (resident, _, memberships) = run(text, calls, 1);
+        let (resident, _, memberships) = run(text, calls);
         // The final merge revisits the first case's exact text and call edges.
         // Its durable membership already exists; only distinct inputs solve.
         assert_eq!(memberships, u64::from(seen_inputs.insert((*text, *calls))));
@@ -1859,10 +1832,9 @@ fn scheduled_scc_split_merge_and_durable_reopen_agree_with_cold_solve() {
             cached_membership.reference.domain,
             hirsel_engine::products::LIVE_SOURCE_MEMBERSHIP
         );
-        let (cold, _, _) =
-            scheduled_scc_run(text, calls, Arc::new(MemStore::default()), 1, 8 << 20);
+        let (cold, _, _) = scheduled_scc_run(text, calls, Arc::new(MemStore::default()), 8 << 20);
         assert_eq!(scc_products(&resident), scc_products(&cold));
-        let (reopened, solves, memberships) = run(text, calls, 2);
+        let (reopened, solves, memberships) = run(text, calls);
         assert_eq!(
             resident.facets.membership.action, reopened.facets.membership.action,
             "membership observes the same checked inputs after reopening"
@@ -1884,7 +1856,7 @@ fn scheduled_scc_products_fit_the_existing_complete_growth_output_grant() {
     }
     text.push_str("fn main {}\n");
     let (output, solves, memberships) =
-        scheduled_scc_run(&text, &[], Arc::new(MemStore::default()), 1, 106_172);
+        scheduled_scc_run(&text, &[], Arc::new(MemStore::default()), 106_172);
     assert_eq!(output.facets.components.len(), 257);
     assert_eq!((solves, memberships), (257, 1));
 }
@@ -1914,7 +1886,6 @@ fn scheduled_scc_stream_exceeds_8192_with_store_off_and_unchanged_inventory() {
         &text,
         &[],
         store,
-        1,
         8 << 20,
         Some(8192),
         hirsel_engine_admission::ProcessBudget::new(1 << 30),
@@ -1954,9 +1925,8 @@ fn scheduled_scc_store_off_edit_split_merge_and_reopen_agree_with_cold_solve() {
         ),
     ];
     for (text, calls) in cases {
-        let (resident, _, _) = scheduled_scc_run(text, calls, store.clone(), 1, 8 << 20);
-        let (cold, _, _) =
-            scheduled_scc_run(text, calls, Arc::new(MemStore::default()), 1, 8 << 20);
+        let (resident, _, _) = scheduled_scc_run(text, calls, store.clone(), 8 << 20);
+        let (cold, _, _) = scheduled_scc_run(text, calls, Arc::new(MemStore::default()), 8 << 20);
         assert_eq!(scc_products(&resident), scc_products(&cold));
         assert_eq!(*resident.reads, *cold.reads);
     }

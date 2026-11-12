@@ -54,7 +54,7 @@ fn selected(name: &str) -> bool {
     matches!(name, "first" | "second" | "wrapper")
 }
 
-fn observe(store: Arc<dyn ResultStore>, text: &str, fresh: bool, jobs: usize) -> Observed {
+fn observe(store: Arc<dyn ResultStore>, text: &str, fresh: bool) -> Observed {
     let transport = hirsel_engine_admission::ProcessBudget::new(24 << 20);
     let store: Arc<dyn ResultStore> = Arc::new(
         store::RequestStore::with_scratch(
@@ -120,12 +120,7 @@ fn observe(store: Arc<dyn ResultStore>, text: &str, fresh: bool, jobs: usize) ->
         protocol: tasks.failure("recursive arena protocol refusal"),
         panicked: tasks.failure("recursive arena worker panic"),
     };
-    let mut runtime = AdmittedRuntime::new(
-        hirsel_intern::jobs::Jobs::new(jobs),
-        budget.reserve(runtime_bytes).unwrap(),
-        errors,
-    )
-    .unwrap();
+    let mut runtime = AdmittedRuntime::new(budget.reserve(runtime_bytes).unwrap(), errors).unwrap();
     let factory = Arc::new(Traced(
         Arc::new(InstanceTaskFactory::new(tasks.clone())),
         trace.clone(),
@@ -232,18 +227,18 @@ fn native_arena_recursive_source_edit_propagates_through_both_strata_without_rei
     let after = include_str!("../fixtures/native-arena-19/recursive-after.hir");
     with_compiler_stack(|| {
         let mut width_one = None;
-        for jobs in [1, 2] {
+        {
             let directory = tempfile::tempdir().unwrap();
             let store: Arc<dyn ResultStore> =
                 Arc::new(store::DirStore::new(directory.path().to_path_buf()));
-            let initial = observe(store.clone(), before, false, jobs);
-            assert_eq!(initial, observe(store.clone(), before, true, jobs));
+            let initial = observe(store.clone(), before, false);
+            assert_eq!(initial, observe(store.clone(), before, true));
             for name in ["first", "second", "wrapper"] {
                 assert_eq!(initial.candidates[name].1, [0], "{name}");
                 assert_eq!(initial.chosen[name].1, [0], "{name}");
             }
-            let edited = observe(store.clone(), after, false, jobs);
-            assert_eq!(edited, observe(store, after, true, jobs));
+            let edited = observe(store.clone(), after, false);
+            assert_eq!(edited, observe(store, after, true));
             assert_ne!(initial.values["first"], edited.values["first"]);
             for name in ["first", "second", "wrapper"] {
                 assert!(edited.candidates[name].1.is_empty(), "{name}");

@@ -293,12 +293,7 @@ fn semantic_source_products_do_not_require_a_launch_or_program_check() {
         let codec = NativeRecords::new(program.engine.types().clone(), store);
         let anchors = NativeRecordContext::capture(&program.engine);
         drop(program);
-        let mut runtime = AdmittedRuntime::new(
-            hirsel_intern::jobs::Jobs::new(2),
-            budget.reserve(192 << 20).unwrap(),
-            errors,
-        )
-        .unwrap();
+        let mut runtime = AdmittedRuntime::new(budget.reserve(192 << 20).unwrap(), errors).unwrap();
         runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
         runtime
             .register_local(FRONT_LOWER_KIND, lower.factory())

@@ -90,8 +90,7 @@ fn fixture(text: &str, verify: Verify, jobs: usize) -> Fixture {
         scratch: 16 << 20,
         stack: 0,
     };
-    let mut runtime =
-        AdmittedRuntime::new(Jobs::new(jobs), budget.reserve(256 << 20).unwrap(), errors).unwrap();
+    let mut runtime = AdmittedRuntime::new(budget.reserve(256 << 20).unwrap(), errors).unwrap();
     let front = program
         .engine
         .front_body_queries(&paths, weight, &budget, errors)

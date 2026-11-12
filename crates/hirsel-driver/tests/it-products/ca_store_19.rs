@@ -49,7 +49,7 @@ fn staged_lower_products_restore_own_declarations_before_admission_without_modes
         let path = definition("value");
         let store = Arc::new(store::MemStore::default());
         let mut seed = signature_session(store.clone(), source, true);
-        let mut seed_products = StagedProducts::capture(&mut seed, 1).unwrap();
+        let mut seed_products = StagedProducts::capture(&mut seed).unwrap();
         let request = seed_products
             .runtime
             .request(&[seed_products.lower.query(&path).unwrap()]);
@@ -74,7 +74,7 @@ fn staged_lower_products_restore_own_declarations_before_admission_without_modes
         let mut fresh = signature_session(store.clone(), source, false);
         fresh.adapters.modes = None;
         fresh.adapters.lowering = None;
-        let mut products = StagedProducts::capture(&mut fresh, 1).unwrap();
+        let mut products = StagedProducts::capture(&mut fresh).unwrap();
         let query = products.lower.query(&path).unwrap();
         let request = products.runtime.request(&[query]);
         products.runtime.wait(request).unwrap();
@@ -121,7 +121,7 @@ fn staged_lower_products_restore_own_declarations_before_admission_without_modes
             let mut invalid = signature_session(provider, &text, normalize);
             invalid.adapters.modes = None;
             invalid.adapters.lowering = None;
-            let accepted = match StagedProducts::capture(&mut invalid, 1) {
+            let accepted = match StagedProducts::capture(&mut invalid) {
                 Err(_) => false,
                 Ok(mut products) => {
                     let request = products
@@ -148,7 +148,7 @@ fn lower_hits_replay_exact_staged_values_and_preserve_completion_authority() {
         let root = definition("value");
         let store = Arc::new(store::MemStore::default());
         let mut seed = signature_session(store.clone(), source, true);
-        let mut seed_products = StagedProducts::capture(&mut seed, 1).unwrap();
+        let mut seed_products = StagedProducts::capture(&mut seed).unwrap();
         let request = seed_products.runtime.request(&[
             seed_products.lower.query(&definition("scaled")).unwrap(),
             seed_products.lower.query(&root).unwrap(),
@@ -177,7 +177,7 @@ fn lower_hits_replay_exact_staged_values_and_preserve_completion_authority() {
         let mut fresh = signature_session(store.clone(), source, false);
         fresh.adapters.modes = None;
         fresh.adapters.lowering = None;
-        let mut products = StagedProducts::capture(&mut fresh, 1).unwrap();
+        let mut products = StagedProducts::capture(&mut fresh).unwrap();
         let query = products.lower.query(&root).unwrap();
         for _ in 0..2 {
             let request = products.runtime.request(&[query]);
@@ -221,7 +221,7 @@ fn lower_hits_replay_exact_staged_values_and_preserve_completion_authority() {
         let mut remote = signature_session(copied, source, false);
         remote.adapters.modes = None;
         remote.adapters.lowering = None;
-        let accepted = match StagedProducts::capture(&mut remote, 1) {
+        let accepted = match StagedProducts::capture(&mut remote) {
             Err(_) => false,
             Ok(mut products) => {
                 let request = products
@@ -256,7 +256,7 @@ fn ordinary_staged_registrations_restore_from_heads_without_syntax_or_execution_
             .add("staged-heads.hir", source.into())
             .unwrap();
         writer.index_source(file, &default_context()).unwrap();
-        let mut products = StagedProducts::capture(&mut writer, 1).unwrap();
+        let mut products = StagedProducts::capture(&mut writer).unwrap();
         let request = products
             .runtime
             .request(&[products.lower.query(&owner).unwrap()]);
@@ -299,7 +299,7 @@ fn ordinary_staged_registrations_restore_from_heads_without_syntax_or_execution_
             reader
         };
         let mut reader = open(store.clone());
-        let mut products = StagedProducts::capture(&mut reader, 1).unwrap();
+        let mut products = StagedProducts::capture(&mut reader).unwrap();
         let request = products
             .runtime
             .request(&[products.lower.query(&owner).unwrap()]);
@@ -339,7 +339,7 @@ fn ordinary_staged_registrations_restore_from_heads_without_syntax_or_execution_
             store::ResultStore::put(&*store, &key, &bytes);
         }
         let mut untrusted = open(copied);
-        let mut products = StagedProducts::capture(&mut untrusted, 1).unwrap();
+        let mut products = StagedProducts::capture(&mut untrusted).unwrap();
         let query = products.lower.staged_query(&hidden, &[2]).unwrap();
         let request = products.runtime.request(&[query]);
         assert!(
@@ -411,7 +411,6 @@ fn ordinary_read_only_executed_helper_keeps_its_check_product() {
             root.0.name = name.into();
             reader.engine.semantic_program_revision(&root).unwrap();
             let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(1),
                 budget.reserve(512 << 20).unwrap(),
                 crate::staged_product_fixture::errors(),
             )
@@ -452,7 +451,7 @@ fn constant_product(
     QueryError,
 > {
     let mut products =
-        crate::staged_product_fixture::StagedProducts::capture_with_budget(engine, 1, budget)?;
+        crate::staged_product_fixture::StagedProducts::capture_with_budget(engine, budget)?;
     let query = products
         .lower
         .evaluate_query(path)
@@ -480,7 +479,7 @@ fn unexecuted_lower_completion_requires_the_entire_private_universe() {
             for change in ["copied", "hidden", "unobserved"] {
                 let store = Arc::new(store::MemStore::default());
                 let mut writer = signature_session(store.clone(), source, true);
-                let mut products = StagedProducts::capture(&mut writer, 1).unwrap();
+                let mut products = StagedProducts::capture(&mut writer).unwrap();
                 let request = products
                     .runtime
                     .request(&[products.lower.query(&path).unwrap()]);
@@ -508,7 +507,7 @@ fn unexecuted_lower_completion_requires_the_entire_private_universe() {
                     reader.adapters.modes = None;
                     reader.adapters.lowering = None;
                 }
-                let mut products = StagedProducts::capture(&mut reader, 1).unwrap();
+                let mut products = StagedProducts::capture(&mut reader).unwrap();
                 let request = products
                     .runtime
                     .request(&[products.lower.query(&path).unwrap()]);
@@ -541,7 +540,7 @@ fn unexecuted_and_executed_lower_completion_subjects_do_not_alias() {
         let path = definition("value");
         let store = Arc::new(store::MemStore::default());
         let mut writer = signature_session(store.clone(), source, true);
-        let mut products = StagedProducts::capture(&mut writer, 1).unwrap();
+        let mut products = StagedProducts::capture(&mut writer).unwrap();
         let request = products
             .runtime
             .request(&[products.lower.query(&path).unwrap()]);
@@ -552,7 +551,7 @@ fn unexecuted_and_executed_lower_completion_subjects_do_not_alias() {
         let mut reader = signature_session(store.clone(), source, true);
         reader.adapters.modes = None;
         reader.adapters.lowering = None;
-        let mut products = StagedProducts::capture(&mut reader, 1).unwrap();
+        let mut products = StagedProducts::capture(&mut reader).unwrap();
         let request = products
             .runtime
             .request(&[products.lower.query(&path).unwrap()]);

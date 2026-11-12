@@ -55,12 +55,7 @@ pub fn main()->Result[(),()] {let n=bump([1u32,2u32],1u64,3u32);Ok(())}
             scratch: 8 << 20,
             stack: 0,
         };
-        let mut runtime = AdmittedRuntime::new(
-            hirsel_intern::jobs::Jobs::new(jobs),
-            budget.reserve(512 << 20).unwrap(),
-            errors,
-        )
-        .unwrap();
+        let mut runtime = AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
         let front = program
             .engine
             .front_body_queries(&definitions, weight, &budget, errors)
@@ -269,12 +264,7 @@ pub fn main()->Result[(),()] {let n=bump([1u32,2u32],1u64,3u32);Ok(())}
             budget.reserve(64 << 20).unwrap(),
         )
         .unwrap();
-        let mut runtime = AdmittedRuntime::new(
-            hirsel_intern::jobs::Jobs::new(1),
-            budget.reserve(512 << 20).unwrap(),
-            errors,
-        )
-        .unwrap();
+        let mut runtime = AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
         let factory = Arc::new(
             hirsel_native_queries::instance_tasks::InstanceTaskFactory::new(tasks.clone()),
         );

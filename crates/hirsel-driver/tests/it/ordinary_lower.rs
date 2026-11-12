@@ -103,7 +103,6 @@ fn program_check_reuses_current_ordinary_lower_products_without_worker_relowerin
             let output = crate::request_graph::lower_prefix(
                 &mut failed.engine,
                 vec![path("missing"), path("second")],
-                hirsel_intern::jobs::Jobs::new(jobs),
             );
             assert_eq!(output.len(), 1);
             assert!(output[0].result.is_err());

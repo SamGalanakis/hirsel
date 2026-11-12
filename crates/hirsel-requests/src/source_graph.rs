@@ -1910,7 +1910,7 @@ pub(super) fn install(
         }
     }
     let native_budget = runtime.bytes();
-    let mut runtime = AdmittedRuntime::new(config.jobs, runtime, errors).map_err(ToolError::Io)?;
+    let mut runtime = AdmittedRuntime::new(runtime, errors).map_err(ToolError::Io)?;
     if (native.is_some() || native_artifacts.is_some()) && hirsel_intern::timings::enabled() {
         use hirsel_intern::timings::{Count, count_peak};
         let workers = runtime.stats().workers as u64;

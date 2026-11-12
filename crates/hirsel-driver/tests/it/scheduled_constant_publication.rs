@@ -15,7 +15,7 @@ fn ordinary_and_opaque_constants_publish_original_lower_and_evaluate_products() 
         let manifest = directory.path().join("hirsel.json");
         std::fs::write(&path, "pub opaque type ExitCode: plain + inert + noalloc_drop uses {} { code:u8, }\npub const SUCCESS:ExitCode=ExitCode(code:0u8)\nconst N:u8=7u8\npub fn main()->u8{N}\n").unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"constants","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
-        for jobs in [1, 2] {
+        {
             let store = Arc::new(MemStore::default());
             let mut program = COMPILER
                 .with_config(CompileConfig {
@@ -33,12 +33,8 @@ fn ordinary_and_opaque_constants_publish_original_lower_and_evaluate_products() 
                 scratch: 8 << 20,
                 stack: 0,
             };
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(jobs),
-                budget.reserve(512 << 20).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             let front = program
                 .engine
                 .front_body_queries(&definitions, weight, &budget, errors)
@@ -69,14 +65,14 @@ fn ordinary_and_opaque_constants_publish_original_lower_and_evaluate_products() 
                         .encode(&program.engine, &actual.output.value)
                         .unwrap(),
                     records.encode(&program.engine, &expected).unwrap(),
-                    "original Lower {path}, jobs={jobs}"
+                    "original Lower {path}"
                 );
                 let scalar = program.engine.materialize_value(&path).unwrap();
                 let actual = lower.settled_constant(&path, &[]).unwrap();
                 assert_eq!(
                     records.encode(&program.engine, &*actual).unwrap(),
                     records.encode(&program.engine, &scalar).unwrap(),
-                    "Evaluate {path}, jobs={jobs}"
+                    "Evaluate {path}"
                 );
             }
             runtime.shutdown();
@@ -90,7 +86,7 @@ fn std_opaque_constant_publishes_original_lower_and_evaluate_products() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("main.hir");
         std::fs::write(&path, "pub fn main(){}\n").unwrap();
-        for jobs in [1, 2] {
+        {
             let store = Arc::new(MemStore::default());
             let mut program = COMPILER
                 .with_config(CompileConfig {
@@ -116,12 +112,8 @@ fn std_opaque_constant_publishes_original_lower_and_evaluate_products() {
                 scratch: 8 << 20,
                 stack: 0,
             };
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(jobs),
-                budget.reserve(512 << 20).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             let front = program
                 .engine
                 .front_body_queries(&definitions, weight, &budget, errors)
@@ -150,14 +142,14 @@ fn std_opaque_constant_publishes_original_lower_and_evaluate_products() {
                         .encode(&program.engine, &actual.output.value)
                         .unwrap(),
                     records.encode(&program.engine, &expected).unwrap(),
-                    "original Lower {path}, jobs={jobs}"
+                    "original Lower {path}"
                 );
                 let scalar = program.engine.materialize_value(&path).unwrap();
                 let actual = lower.settled_constant(&path, &[]).unwrap();
                 assert_eq!(
                     records.encode(&program.engine, &*actual).unwrap(),
                     records.encode(&program.engine, &scalar).unwrap(),
-                    "Evaluate {path}, jobs={jobs}"
+                    "Evaluate {path}"
                 );
             }
             runtime.shutdown();
@@ -171,7 +163,7 @@ fn std_constant_publishes_after_full_namespace_capture_and_body_eviction() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("main.hir");
         std::fs::write(&path, "pub fn main(){}\n").unwrap();
-        for jobs in [1, 2] {
+        {
             let store = Arc::new(MemStore::default());
             let mut program = COMPILER
                 .with_config(CompileConfig {
@@ -198,12 +190,8 @@ fn std_constant_publishes_after_full_namespace_capture_and_body_eviction() {
                 scratch: 8 << 20,
                 stack: 0,
             };
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(jobs),
-                budget.reserve(512 << 20).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             let front = program
                 .engine
                 .front_body_queries(&definitions, weight, &budget, errors)
@@ -232,14 +220,14 @@ fn std_constant_publishes_after_full_namespace_capture_and_body_eviction() {
                         .encode(&program.engine, &actual.output.value)
                         .unwrap(),
                     records.encode(&program.engine, &expected).unwrap(),
-                    "original Lower {path}, jobs={jobs}"
+                    "original Lower {path}"
                 );
                 let scalar = program.engine.materialize_value(&path).unwrap();
                 let actual = lower.settled_constant(&path, &[]).unwrap();
                 assert_eq!(
                     records.encode(&program.engine, &*actual).unwrap(),
                     records.encode(&program.engine, &scalar).unwrap(),
-                    "Evaluate {path}, jobs={jobs}"
+                    "Evaluate {path}"
                 );
             }
             runtime.shutdown();
@@ -253,7 +241,7 @@ fn immutable_check_loader_std_constant_keeps_lower_and_evaluate_bindings() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("main.hir");
         std::fs::write(&path, "pub fn main(){}\n").unwrap();
-        for jobs in [1, 2] {
+        {
             let store = Arc::new(MemStore::default());
             let compiler = COMPILER
                 .with_config(CompileConfig {
@@ -301,12 +289,8 @@ fn immutable_check_loader_std_constant_keeps_lower_and_evaluate_bindings() {
                 scratch: 8 << 20,
                 stack: 0,
             };
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(jobs),
-                budget.reserve(512 << 20).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             let front = program
                 .engine
                 .front_body_queries(&definitions, weight, &budget, errors)
@@ -335,14 +319,14 @@ fn immutable_check_loader_std_constant_keeps_lower_and_evaluate_bindings() {
                         .encode(&program.engine, &actual.output.value)
                         .unwrap(),
                     records.encode(&program.engine, &expected).unwrap(),
-                    "original Lower {path}, jobs={jobs}"
+                    "original Lower {path}"
                 );
                 let scalar = program.engine.materialize_value(&path).unwrap();
                 let actual = lower.settled_constant(&path, &[]).unwrap();
                 assert_eq!(
                     records.encode(&program.engine, &*actual).unwrap(),
                     records.encode(&program.engine, &scalar).unwrap(),
-                    "Evaluate {path}, jobs={jobs}"
+                    "Evaluate {path}"
                 );
             }
             runtime.shutdown();

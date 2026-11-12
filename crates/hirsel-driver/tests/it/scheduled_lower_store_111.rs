@@ -146,12 +146,8 @@ fn check_lower_reuse(carry_across_stores: bool) {
                         .collect();
                     let errors = crate::scheduled_front::errors();
                     let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
-                    let mut runtime = AdmittedRuntime::new(
-                        hirsel_intern::jobs::Jobs::new(jobs),
-                        budget.reserve(512 << 20).unwrap(),
-                        errors,
-                    )
-                    .unwrap();
+                    let mut runtime =
+                        AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
                     let weight = MemoryWeight {
                         retained: 2 << 20,
                         scratch: 8 << 20,
@@ -312,12 +308,8 @@ fn check_live_lower_observations(live_only: bool) {
                 .unwrap();
             let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::ONE,
-                budget.reserve(512 << 20).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             let weight = MemoryWeight {
                 retained: 2 << 20,
                 scratch: 8 << 20,

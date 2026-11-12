@@ -50,7 +50,6 @@ fn batch_release_releases_resolution_and_later_demand_recomputes_it() {
             crate::request_graph::publications(
                 &mut producer.engine,
                 vec![path.clone()],
-                hirsel_intern::jobs::Jobs::ONE,
                 memo::Retention::Batch
             )
             .iter()

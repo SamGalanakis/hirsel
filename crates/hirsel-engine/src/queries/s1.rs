@@ -666,12 +666,8 @@ mod tests {
                 ));
                 let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
                 let budget = hirsel_engine_admission::ProcessBudget::new(256 << 20);
-                let mut runtime = AdmittedRuntime::new(
-                    hirsel_intern::jobs::Jobs::new(1),
-                    budget.reserve(256 << 20).unwrap(),
-                    errors(),
-                )
-                .unwrap();
+                let mut runtime =
+                    AdmittedRuntime::new(budget.reserve(256 << 20).unwrap(), errors()).unwrap();
                 runtime.register(1, Arc::new(Leaf(fail))).unwrap();
                 runtime
                     .register_local(

@@ -24,10 +24,10 @@ struct Fixture {
     _directory: Arc<tempfile::TempDir>,
 }
 impl Fixture {
-    fn new(source: &str, jobs: usize) -> Self {
-        Self::in_directory(source, jobs, Arc::new(tempfile::tempdir().unwrap()))
+    fn new(source: &str) -> Self {
+        Self::in_directory(source, Arc::new(tempfile::tempdir().unwrap()))
     }
-    fn in_directory(source: &str, jobs: usize, directory: Arc<tempfile::TempDir>) -> Self {
+    fn in_directory(source: &str, directory: Arc<tempfile::TempDir>) -> Self {
         let manifest = directory.path().join("hirsel.json");
         std::fs::write(directory.path().join("main.hir"), source).unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"phase_admission","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
@@ -49,12 +49,7 @@ impl Fixture {
             stack: 0,
         };
         let errors = crate::scheduled_front::errors();
-        let mut runtime = AdmittedRuntime::new(
-            hirsel_intern::jobs::Jobs::new(jobs),
-            budget.reserve(512 << 20).unwrap(),
-            errors,
-        )
-        .unwrap();
+        let mut runtime = AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
         let front = program
             .engine
             .front_body_queries(&paths, weight, &budget, errors)
@@ -136,49 +131,47 @@ impl Fixture {
 #[test]
 fn failed_check_withholds_acceptance_but_independent_lower_still_runs() {
     with_compiler_stack(|| {
-        for jobs in [1, 2, 8] {
-            let mut f = Fixture::new("pub fn bad()->u8{true}\npub fn main()->u8{7u8}\n", jobs);
-            let run = f.run();
-            f.runtime.register(FRONT_RUN_KIND, run.factory()).unwrap();
-            let request = f.runtime.request(&[run.query(&f.program.entry).unwrap()]);
-            let refusal = f.runtime.wait(request).unwrap_err();
-            assert!(matches!(
-                run.failure(refusal),
-                Some(QueryError::Diagnostics(_))
-            ));
-            let checked = f
-                .events
-                .0
-                .lock()
-                .unwrap()
-                .iter()
-                .find_map(|event| match event {
-                    RuntimeEvent::Settled {
-                        query,
-                        result: Ok(product),
-                    } if *query == f.check.query() => Some(product.clone()),
-                    _ => None,
-                })
-                .expect("an early semantic failure still joins the complete ordered source Check");
-            let output = f.check.outcome(checked.clone()).unwrap();
-            assert_eq!(f.check.accepted(checked), Some(false));
-            assert!(!output.checked.diagnostics.is_empty());
-            assert!(
-                output.lowered.is_empty(),
-                "a failed file publishes no executable source prefix"
-            );
-            assert_eq!(
-                f.lower.work(&f.path("bad")).lowerings,
-                0,
-                "a rejected unit cannot lower"
-            );
-            assert_eq!(
-                f.lower.work(&f.program.entry).lowerings,
-                1,
-                "an independent ready unit can lower"
-            );
-            f.runtime.shutdown();
-        }
+        let mut f = Fixture::new("pub fn bad()->u8{true}\npub fn main()->u8{7u8}\n");
+        let run = f.run();
+        f.runtime.register(FRONT_RUN_KIND, run.factory()).unwrap();
+        let request = f.runtime.request(&[run.query(&f.program.entry).unwrap()]);
+        let refusal = f.runtime.wait(request).unwrap_err();
+        assert!(matches!(
+            run.failure(refusal),
+            Some(QueryError::Diagnostics(_))
+        ));
+        let checked = f
+            .events
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|event| match event {
+                RuntimeEvent::Settled {
+                    query,
+                    result: Ok(product),
+                } if *query == f.check.query() => Some(product.clone()),
+                _ => None,
+            })
+            .expect("an early semantic failure still joins the complete ordered source Check");
+        let output = f.check.outcome(checked.clone()).unwrap();
+        assert_eq!(f.check.accepted(checked), Some(false));
+        assert!(!output.checked.diagnostics.is_empty());
+        assert!(
+            output.lowered.is_empty(),
+            "a failed file publishes no executable source prefix"
+        );
+        assert_eq!(
+            f.lower.work(&f.path("bad")).lowerings,
+            0,
+            "a rejected unit cannot lower"
+        );
+        assert_eq!(
+            f.lower.work(&f.program.entry).lowerings,
+            1,
+            "an independent ready unit can lower"
+        );
+        f.runtime.shutdown();
     });
 }
 

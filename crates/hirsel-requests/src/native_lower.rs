@@ -39,8 +39,6 @@ mod tests {
     use hirsel_engine_store::Reference;
     use hirsel_engine_store::ResultStore;
 
-    use hirsel_intern::jobs::Jobs;
-
     #[derive(Default)]
     struct EvictableVerifier {
         contents: MemStore,
@@ -188,8 +186,7 @@ mod tests {
             assert!(bridge.products.lower_product(&main, absent).is_err());
             drop(engine);
             let mut runtime =
-                AdmittedRuntime::new(Jobs::ONE, budget.reserve(192 << 20).unwrap(), errors)
-                    .unwrap();
+                AdmittedRuntime::new(budget.reserve(192 << 20).unwrap(), errors).unwrap();
             runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
             runtime
                 .register_local(FRONT_LOWER_KIND, lower.factory())

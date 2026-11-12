@@ -11,13 +11,12 @@ pub(super) struct StagedProducts {
     pub budget: Arc<hirsel_engine_admission::ProcessBudget>,
 }
 impl StagedProducts {
-    pub fn capture(engine: &mut QueryEngine, jobs: usize) -> Result<Self, QueryError> {
+    pub fn capture(engine: &mut QueryEngine) -> Result<Self, QueryError> {
         let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
-        Self::capture_with_budget(engine, jobs, budget)
+        Self::capture_with_budget(engine, budget)
     }
     pub fn capture_with_budget(
         engine: &mut QueryEngine,
-        jobs: usize,
         budget: Arc<hirsel_engine_admission::ProcessBudget>,
     ) -> Result<Self, QueryError> {
         let errors = errors();
@@ -37,12 +36,8 @@ impl StagedProducts {
                 budget.reserve(1 << 20).unwrap(),
                 errors,
             )?;
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(jobs),
-                budget.reserve(512 << 20).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
             runtime.register(FRONT_STAGE_KIND, stage.factory()).unwrap();
             for path in roots {
@@ -67,12 +62,7 @@ impl StagedProducts {
             &budget,
             errors,
         )?;
-        let mut runtime = AdmittedRuntime::new(
-            hirsel_intern::jobs::Jobs::new(jobs),
-            budget.reserve(512 << 20).unwrap(),
-            errors,
-        )
-        .unwrap();
+        let mut runtime = AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
         runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
         runtime
             .register_local(FRONT_LOWER_KIND, lower.factory())

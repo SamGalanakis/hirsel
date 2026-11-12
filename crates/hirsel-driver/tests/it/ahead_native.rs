@@ -235,7 +235,6 @@ fn request_objects(
     .unwrap();
     let error = instances.failure("ahead request resource refusal");
     let mut runtime = AdmittedRuntime::new(
-        hirsel_intern::jobs::Jobs::new(2),
         budget.reserve(672 << 20).unwrap(),
         RuntimeErrors {
             resource: error,

@@ -20,7 +20,7 @@ fn admitted_lower_retains_actual_metadata_and_refuses_a_request_without_room_for
         )
         .unwrap();
         std::fs::write(&manifest,r#"{"schema":1,"package":{"name":"debit","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
-        for jobs in [1, 2] {
+        {
             for output_bytes in [1, 64 << 10] {
                 let mut program = COMPILER
                     .with_config(CompileConfig {
@@ -38,12 +38,8 @@ fn admitted_lower_retains_actual_metadata_and_refuses_a_request_without_room_for
                     scratch: 8 << 20,
                     stack: 0,
                 };
-                let mut runtime = AdmittedRuntime::new(
-                    hirsel_intern::jobs::Jobs::new(jobs),
-                    budget.reserve(512 << 20).unwrap(),
-                    errors,
-                )
-                .unwrap();
+                let mut runtime =
+                    AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
                 let front = program
                     .engine
                     .front_body_queries(&definitions, weight, &budget, errors)
@@ -113,7 +109,7 @@ fn admitted_lower_retains_actual_metadata_and_refuses_a_request_without_room_for
 fn admitted_lower_consumes_many_constant_dependencies_with_original_mailbox_bound() {
     with_compiler_stack(|| {
         let manifest = crate::image_fixture::std_manifest();
-        for jobs in [1, 2] {
+        {
             let mut program = COMPILER
                 .with_config(CompileConfig {
                     store: Arc::new(MemStore::default()),
@@ -142,12 +138,8 @@ fn admitted_lower_consumes_many_constant_dependencies_with_original_mailbox_boun
                 scratch: 8 << 20,
                 stack: 0,
             };
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(jobs),
-                budget.reserve(512 << 20).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             let front = program
                 .engine
                 .front_body_queries(&definitions, weight, &budget, errors)
@@ -257,7 +249,7 @@ fn original_body_decode_admission_precedes_provider_reads_and_preserves_scalar_t
         let manifest = directory.path().join("hirsel.json");
         std::fs::write(&path, "pub fn main()->u64{let (a,b)=(1u64,2u64);a+b}\n").unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"decode","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
-        for jobs in [1, 2] {
+        {
             let store = Arc::new(CountReads {
                 inner: MemStore::default(),
                 reads: AtomicUsize::new(0),
@@ -279,12 +271,8 @@ fn original_body_decode_admission_precedes_provider_reads_and_preserves_scalar_t
                 scratch: 8 << 20,
                 stack: 0,
             };
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(jobs),
-                budget.reserve(512 << 20).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             let front = program
                 .engine
                 .front_body_queries(&definitions, weight, &budget, errors)

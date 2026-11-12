@@ -959,14 +959,11 @@ fn imaged_frontier_replay_budget_matrix() -> String {
             let mut fresh = load(&client, None);
 
             let expected = fresh.engine.lower_to_tir(&path).unwrap();
-            let expected_depth = crate::request_graph::lowers(
-                &mut fresh.engine,
-                vec![path.clone()],
-                hirsel_intern::jobs::Jobs::new(jobs),
-            )
-            .remove(0)
-            .depth
-            .unwrap();
+            let expected_depth =
+                crate::request_graph::lowers(&mut fresh.engine, vec![path.clone()])
+                    .remove(0)
+                    .depth
+                    .unwrap();
             assert!(
                 expected_depth.height > 0,
                 "fixture must exercise real transparent requests"
@@ -974,11 +971,8 @@ fn imaged_frontier_replay_budget_matrix() -> String {
             // A missing worker adapter forces the scalar path; image lowering
             // still succeeds before consulting that adapter.
             let lowering = fallback.then(|| cached.engine.adapters.lowering.take().unwrap());
-            let outcomes = crate::request_graph::lowers(
-                &mut cached.engine,
-                vec![path.clone(), path.clone()],
-                hirsel_intern::jobs::Jobs::new(jobs),
-            );
+            let outcomes =
+                crate::request_graph::lowers(&mut cached.engine, vec![path.clone(), path.clone()]);
             if fallback {
                 cached.engine.adapters.lowering = lowering;
             }

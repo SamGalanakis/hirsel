@@ -607,7 +607,6 @@ mod tests {
                 panicked: reference,
             };
             let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::ONE,
                 self.budget
                     .reserve((128 << 20) + (1 << 20))
                     .map_err(ToolError::Io)?,

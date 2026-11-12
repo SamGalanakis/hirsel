@@ -3,8 +3,6 @@
 //! worker-local function work from completed products. Hirsel uses jobs::map
 //! and publishes by DefPath because subscriber and diagnostic order is semantic.
 use super::*;
-#[cfg(test)]
-use hirsel_intern::jobs::Jobs;
 mod signature_reads;
 use hirsel_types::SignatureRef;
 pub(crate) use signature_reads::OrderedSignatureReads;
@@ -1224,12 +1222,8 @@ mod frozen_task_tests {
             let store = Arc::new(hirsel_engine_store::MemStore::default());
             engine = engine.with_result_store(store.clone());
             let budget = hirsel_engine_admission::ProcessBudget::new(512 << 20);
-            let mut runtime = AdmittedRuntime::new(
-                Jobs::new(1),
-                budget.reserve(256 << 20).unwrap(),
-                runtime_errors(),
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(256 << 20).unwrap(), runtime_errors()).unwrap();
             let queries = engine
                 .front_body_queries(
                     &[path.clone()],

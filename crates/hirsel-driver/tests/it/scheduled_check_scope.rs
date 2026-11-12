@@ -16,7 +16,7 @@ fn scope_case(source: &str, failed_front: bool, failed_lower: bool) {
         let manifest = directory.path().join("hirsel.json");
         std::fs::write(directory.path().join("main.hir"), source).unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"scope","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
-        for jobs in [1, 2] {
+        {
             let mut program = COMPILER
                 .with_config(CompileConfig {
                     store: Arc::new(MemStore::default()),
@@ -34,12 +34,8 @@ fn scope_case(source: &str, failed_front: bool, failed_lower: bool) {
                 scratch: 8 << 20,
                 stack: 0,
             };
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(jobs),
-                budget.reserve(512 << 20).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             let front = program
                 .engine
                 .front_body_queries(&definitions, weight, &budget, errors)
@@ -169,12 +165,8 @@ fn scope_case(source: &str, failed_front: bool, failed_lower: bool) {
             assert_eq!(front.live_body_count(), 0);
             runtime.shutdown();
             let oracle_errors = crate::scheduled_front::errors();
-            let mut oracle_runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(jobs),
-                budget.reserve(512 << 20).unwrap(),
-                oracle_errors,
-            )
-            .unwrap();
+            let mut oracle_runtime =
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), oracle_errors).unwrap();
             let oracle_front = program
                 .engine
                 .front_body_queries(&definitions, weight, &budget, oracle_errors)

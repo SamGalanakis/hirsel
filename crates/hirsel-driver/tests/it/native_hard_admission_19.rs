@@ -2,7 +2,7 @@
 use hirsel_engine_runtime::*;
 use hirsel_engine_store::*;
 
-use hirsel_intern::jobs::{COMPILER_STACK_BYTES, Jobs};
+use hirsel_intern::jobs::COMPILER_STACK_BYTES;
 use hirsel_syntax::ContentHash;
 use std::sync::{
     Arc,
@@ -83,8 +83,7 @@ fn one_byte_short_refuses_with_resource_error_and_exact_need_executes() {
     for bytes in [need - 1, need] {
         let budget = hirsel_engine_admission::ProcessBudget::new(need);
         let polls = Arc::new(AtomicUsize::new(0));
-        let mut runtime =
-            AdmittedRuntime::new(Jobs::ONE, budget.reserve(bytes).unwrap(), errors).unwrap();
+        let mut runtime = AdmittedRuntime::new(budget.reserve(bytes).unwrap(), errors).unwrap();
         runtime
             .register(
                 query.kind,

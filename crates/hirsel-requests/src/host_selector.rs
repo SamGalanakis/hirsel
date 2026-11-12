@@ -342,12 +342,8 @@ impl GraphSelections {
                 let bytes = hirsel_intern::jobs::COMPILER_STACK_BYTES as u64;
                 let reservation = GraphBudget::reserve_product(&self.retention.budget, bytes)
                     .map_err(ToolError::Io)?;
-                let runtime = AdmittedRuntime::new(
-                    hirsel_intern::jobs::Jobs::ONE,
-                    reservation,
-                    metadata.errors,
-                )
-                .map_err(ToolError::Io)?;
+                let runtime =
+                    AdmittedRuntime::new(reservation, metadata.errors).map_err(ToolError::Io)?;
                 let graph = Arc::new(InstalledGraph {
                     path: metadata.path.clone(),
                     inputs: metadata.inputs.clone(),
@@ -862,7 +858,6 @@ mod tests {
             .reference(b"fixture error")
             .unwrap();
             let runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::ONE,
                 admission.runtime,
                 RuntimeErrors {
                     resource: error,

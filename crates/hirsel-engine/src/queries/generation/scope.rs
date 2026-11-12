@@ -7,6 +7,7 @@ use hirsel_intern::jobs::Jobs;
 pub struct FrontDemandAdmission {
     pub carry: Option<Arc<FrontCarry>>,
     pub lower_carry: Option<Arc<crate::queries::scheduled_lower::LowerCarry>>,
+    /// Kept to preserve the size-based admission footprint.
     pub jobs: Jobs,
     pub weight: MemoryWeight,
     pub max_reads: usize,
@@ -164,7 +165,7 @@ impl QueryEngine {
         let FrontDemandAdmission {
             carry,
             lower_carry,
-            jobs,
+            jobs: _,
             weight,
             max_reads,
             runtime,
@@ -220,7 +221,7 @@ impl QueryEngine {
             .map_err(|error| {
                 FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(error))
             })?;
-        let mut runtime = AdmittedRuntime::new(jobs, runtime, errors)
+        let mut runtime = AdmittedRuntime::new(runtime, errors)
             .map_err(|_| admission_error("runtime partition"))?;
         runtime
             .register(FRONT_BODY_KIND, initial.body_front().factory())

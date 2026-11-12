@@ -16,7 +16,7 @@ fn admitted_dictionary_matches_scalar_named_callables_and_resumes_data_dependenc
         let manifest = directory.path().join("hirsel.json");
         std::fs::write(&source, "type Op { run:fn(u64)->u64 uses {}, tag:u64 }\nfn identity(x:u64)->u64 uses {} {x}\nfn seed()->u64 uses {} {7u64}\nconst OP:Op=Op(run:identity,tag:seed())\npub fn main()->u64 {7u64}\n").unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"dictionary","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
-        for jobs in [1, 2] {
+        {
             let store = Arc::new(MemStore::default());
             let mut program = COMPILER
                 .with_config(CompileConfig {
@@ -36,12 +36,8 @@ fn admitted_dictionary_matches_scalar_named_callables_and_resumes_data_dependenc
                 scratch: 8 << 20,
                 stack: 0,
             };
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(jobs),
-                budget.reserve(512 << 20).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             let front = program
                 .engine
                 .front_body_queries(&paths, weight, &budget, errors)

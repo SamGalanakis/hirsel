@@ -81,7 +81,6 @@ mod tests {
     use super::*;
     use hirsel_engine_runtime::*;
     use hirsel_engine_store::{Action, Address, Domain};
-    use hirsel_intern::jobs::Jobs;
     use hirsel_syntax::ContentHash;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -189,8 +188,7 @@ mod tests {
             protocol: failure,
             panicked: failure,
         };
-        let mut runtime =
-            AdmittedRuntime::new(Jobs::ONE, budget.reserve(192 << 20).unwrap(), errors).unwrap();
+        let mut runtime = AdmittedRuntime::new(budget.reserve(192 << 20).unwrap(), errors).unwrap();
         for (kind, factory) in routing.factories() {
             runtime.register(kind, factory).unwrap();
         }

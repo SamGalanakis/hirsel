@@ -70,7 +70,6 @@ fn ordinary(program: &mut LoadedProgram) -> Vec<DefPath> {
 fn front(
     program: &mut LoadedProgram,
     budget: &Arc<hirsel_engine_admission::ProcessBudget>,
-    jobs: usize,
     accepted: &[Arc<AcceptedFrontRegistration>],
 ) -> Arc<FrontBodyQueries> {
     let mut paths = ordinary(program);
@@ -86,7 +85,6 @@ fn front(
         )
         .unwrap();
     let mut runtime = AdmittedRuntime::new(
-        hirsel_intern::jobs::Jobs::new(jobs),
         budget.reserve(256 << 20).unwrap(),
         crate::scheduled_front::errors(),
     )
@@ -111,7 +109,6 @@ fn front(
 fn execute(
     program: &mut LoadedProgram,
     budget: &Arc<hirsel_engine_admission::ProcessBudget>,
-    jobs: usize,
     front: Arc<FrontBodyQueries>,
     paths: &[DefPath],
     run: impl FnOnce(&mut LoadedProgram, Vec<FrontRegistrationOutput>),
@@ -126,12 +123,7 @@ fn execute(
         .engine
         .front_registration_queries(paths, lower.clone(), weight(), &budget, errors)
         .unwrap();
-    let mut runtime = AdmittedRuntime::new(
-        hirsel_intern::jobs::Jobs::new(jobs),
-        budget.reserve(256 << 20).unwrap(),
-        errors,
-    )
-    .unwrap();
+    let mut runtime = AdmittedRuntime::new(budget.reserve(256 << 20).unwrap(), errors).unwrap();
     runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
     runtime
         .register_local(FRONT_LOWER_KIND, lower.factory())
@@ -207,17 +199,16 @@ fn closed_instances_accept_two_types_deduplicate_and_select_nested_instances_bef
                 + &SOURCE[SOURCE.find("fn make").unwrap()..SOURCE.find("fn generated").unwrap()]
                     .replace("make[T]", "inner_make[T]");
             fixture(&source, jobs, |program, budget| {
-                let first = front(program, budget, jobs, &[]);
+                let first = front(program, budget, &[]);
                 let round = discovery(program, budget, &[first]);
                 assert_eq!(round.requests().len(), 2);
                 let paths = register(program, budget, &round);
                 assert_eq!(paths.len(), 2);
                 let mut accepted = vec![];
-                let before_execution = front(program, budget, jobs, &[]);
+                let before_execution = front(program, budget, &[]);
                 execute(
                     program,
                     budget,
-                    jobs,
                     before_execution,
                     &paths,
                     |program, outputs| {
@@ -231,7 +222,7 @@ fn closed_instances_accept_two_types_deduplicate_and_select_nested_instances_bef
                         }
                     },
                 );
-                let second = front(program, budget, jobs, &accepted);
+                let second = front(program, budget, &accepted);
                 let round = discovery(program, budget, &[second.clone()]);
                 assert_eq!(round.requests().len(), 4);
                 let nested: Vec<_> = round
@@ -259,11 +250,10 @@ fn closed_instances_accept_two_types_deduplicate_and_select_nested_instances_bef
                 accepted.clear();
                 let mut final_paths = paths.clone();
                 final_paths.extend(nested);
-                let before_execution = front(program, budget, jobs, &[]);
+                let before_execution = front(program, budget, &[]);
                 execute(
                     program,
                     budget,
-                    jobs,
                     before_execution,
                     &final_paths,
                     |program, outputs| {
@@ -277,7 +267,7 @@ fn closed_instances_accept_two_types_deduplicate_and_select_nested_instances_bef
                         }
                     },
                 );
-                let final_front = front(program, budget, jobs, &accepted);
+                let final_front = front(program, budget, &accepted);
                 let done = discovery(program, budget, &[final_front]);
                 assert!(
                     done.pending_bodies().is_empty(),
@@ -308,7 +298,7 @@ fn closed_instance_registration_and_acceptance_enforce_exact_grants() {
             let mut required_accepted = 0;
             for phase in 0..3 {
                 fixture(SOURCE, jobs, |program, budget| {
-                    let first = front(program, budget, jobs, &[]);
+                    let first = front(program, budget, &[]);
                     let round = discovery(program, budget, &[first]);
                     let request = &round.requests()[0];
                     if phase == 1 {
@@ -344,44 +334,37 @@ fn closed_instance_registration_and_acceptance_enforce_exact_grants() {
                         .register_front_instance(request, &budget)
                         .unwrap();
                     assert_eq!(input.definition(), repeated.definition());
-                    let next = front(program, budget, jobs, &[]);
-                    execute(
-                        program,
-                        budget,
-                        jobs,
-                        next,
-                        &[path],
-                        |program, mut outputs| {
-                            let output = outputs.pop().unwrap();
-                            if phase == 1 {
-                                let before = program.engine.sources.retained_payload_bytes();
-                                assert!(
-                                    program
-                                        .engine
-                                        .accept_front_registration(
-                                            output.clone(),
-                                            &hirsel_engine_admission::ProcessBudget::new(
-                                                required_accepted - 1
-                                            )
+                    let next = front(program, budget, &[]);
+                    execute(program, budget, next, &[path], |program, mut outputs| {
+                        let output = outputs.pop().unwrap();
+                        if phase == 1 {
+                            let before = program.engine.sources.retained_payload_bytes();
+                            assert!(
+                                program
+                                    .engine
+                                    .accept_front_registration(
+                                        output.clone(),
+                                        &hirsel_engine_admission::ProcessBudget::new(
+                                            required_accepted - 1
                                         )
-                                        .is_err()
-                                );
-                                assert_eq!(program.engine.sources.retained_payload_bytes(), before);
-                            }
-                            let accepted = program
-                                .engine
-                                .accept_front_registration(
-                                    output,
-                                    &hirsel_engine_admission::ProcessBudget::new(if phase == 0 {
-                                        16 << 20
-                                    } else {
-                                        required_accepted
-                                    }),
-                                )
-                                .unwrap();
-                            required_accepted = accepted.retained_bytes();
-                        },
-                    );
+                                    )
+                                    .is_err()
+                            );
+                            assert_eq!(program.engine.sources.retained_payload_bytes(), before);
+                        }
+                        let accepted = program
+                            .engine
+                            .accept_front_registration(
+                                output,
+                                &hirsel_engine_admission::ProcessBudget::new(if phase == 0 {
+                                    16 << 20
+                                } else {
+                                    required_accepted
+                                }),
+                            )
+                            .unwrap();
+                        required_accepted = accepted.retained_bytes();
+                    });
                 });
             }
         }
@@ -393,11 +376,11 @@ fn closed_instance_views_reject_stale_generator_helper_and_declaring_header_read
         for jobs in [1, 2] {
             for edit in [0, 1, 2] {
                 fixture(SOURCE, jobs, |program, budget| {
-                    let first = front(program, budget, jobs, &[]);
+                    let first = front(program, budget, &[]);
                     let round = discovery(program, budget, &[first]);
                     let paths = register(program, budget, &round);
-                    let before = front(program, budget, jobs, &[]);
-                    execute(program, budget, jobs, before, &paths, |program, outputs| {
+                    let before = front(program, budget, &[]);
+                    execute(program, budget, before, &paths, |program, outputs| {
                         let capture = outputs[0].namespace().clone();
                         let accepted: Vec<_> = outputs
                             .iter()
@@ -484,7 +467,7 @@ fn closed_instance_discovery_refuses_stale_summaries_and_exact_output_budget() {
     with_compiler_stack(|| {
         for jobs in [1, 2] {
             fixture(SOURCE, jobs, |program, budget| {
-                let first = front(program, budget, jobs, &[]);
+                let first = front(program, budget, &[]);
                 let round = discovery(program, budget, &[first.clone()]);
                 let bytes = round.retained_bytes();
                 let roots = [program.entry.clone()];
@@ -708,7 +691,6 @@ fn bounded_instance_bootstrap_reuses_one_grant_and_refreshes_nested_final_univer
                     )
                     .unwrap();
                 let mut runtime = AdmittedRuntime::new(
-                    hirsel_intern::jobs::Jobs::new(jobs),
                     budget.reserve(256 << 20).unwrap(),
                     crate::scheduled_front::errors(),
                 )
@@ -939,7 +921,6 @@ fn instance_bootstrap_keeps_ordinary_failure_local_until_selected_front_demand()
                     )
                     .unwrap();
                 let mut runtime = AdmittedRuntime::new(
-                    hirsel_intern::jobs::Jobs::new(jobs),
                     budget.reserve(256 << 20).unwrap(),
                     crate::scheduled_front::errors(),
                 )

@@ -53,12 +53,8 @@ fn admitted_generator_text_waits_on_lower_with_one_worker_and_keeps_detached_evi
                 scratch: 8 << 20,
                 stack: 0,
             };
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(jobs),
-                budget.reserve(512 << 20).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             let front = program
                 .engine
                 .front_body_queries(&ordinary, weight, &budget, errors)
@@ -183,12 +179,8 @@ fn generator_refusal_control(zero_depth: bool) {
                 scratch: 8 << 20,
                 stack: 0,
             };
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(jobs),
-                budget.reserve(512 << 20).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             let front = program
                 .engine
                 .front_body_queries(&ordinary, weight, &budget, errors)
@@ -306,12 +298,8 @@ fn accepted_generator_view_checks_and_lowers_the_literal_without_changing_raw_so
                 scratch: 8 << 20,
                 stack: 0,
             };
-            let mut runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(jobs),
-                budget.reserve(512 << 20).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut runtime =
+                AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
             let front = program
                 .engine
                 .front_body_queries(&ordinary, weight, &budget, errors)
@@ -385,12 +373,8 @@ fn accepted_generator_view_checks_and_lowers_the_literal_without_changing_raw_so
                 .engine
                 .front_lower_queries(&all, accepted_front.clone(), weight, 64, &budget, errors)
                 .unwrap();
-            let mut checked_runtime = AdmittedRuntime::new(
-                hirsel_intern::jobs::Jobs::new(jobs),
-                budget.reserve(256 << 20).unwrap(),
-                errors,
-            )
-            .unwrap();
+            let mut checked_runtime =
+                AdmittedRuntime::new(budget.reserve(256 << 20).unwrap(), errors).unwrap();
             checked_runtime
                 .register(FRONT_BODY_KIND, accepted_front.factory())
                 .unwrap();
@@ -490,12 +474,7 @@ pub(super) fn accepted_output_control_with(
         scratch: 8 << 20,
         stack: 0,
     };
-    let mut runtime = AdmittedRuntime::new(
-        hirsel_intern::jobs::Jobs::new(jobs),
-        budget.reserve(512 << 20).unwrap(),
-        errors,
-    )
-    .unwrap();
+    let mut runtime = AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
     let front = program
         .engine
         .front_body_queries(&ordinary, weight, &budget, errors)
@@ -913,12 +892,8 @@ fn accepted_generated_native_catalogue_preserves_raw_source_and_actual_lower_aut
                         errors,
                     )
                     .unwrap();
-                let mut runtime = AdmittedRuntime::new(
-                    hirsel_intern::jobs::Jobs::new(jobs),
-                    budget.reserve(512 << 20).unwrap(),
-                    errors,
-                )
-                .unwrap();
+                let mut runtime =
+                    AdmittedRuntime::new(budget.reserve(512 << 20).unwrap(), errors).unwrap();
                 runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
                 runtime
                     .register_local(FRONT_LOWER_KIND, lower.factory())

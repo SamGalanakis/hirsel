@@ -377,7 +377,7 @@ fn compile_settled<R>(
         panicked: denied,
     };
     let mut discovery =
-        AdmittedRuntime::new(jobs, budget.reserve(runtime_bytes).unwrap(), errors).unwrap();
+        AdmittedRuntime::new(budget.reserve(runtime_bytes).unwrap(), errors).unwrap();
     let factory = Arc::new(InstanceTaskFactory::new(instances.clone()));
     for kind in [
         hirsel_native::query_model::INSTANCE_KIND,
@@ -448,8 +448,7 @@ fn compile_settled<R>(
         .collect::<Vec<_>>();
     let objects = CodegenTasks::new(native.clone(), keys.clone(), weight).unwrap();
     drop(discovery);
-    let mut runtime =
-        AdmittedRuntime::new(jobs, budget.reserve(runtime_bytes).unwrap(), errors).unwrap();
+    let mut runtime = AdmittedRuntime::new(budget.reserve(runtime_bytes).unwrap(), errors).unwrap();
     let factory = Arc::new(NativeTaskFactory::new(native.clone()));
     for kind in [
         hirsel_native::query_model::INSTANCE_KIND,

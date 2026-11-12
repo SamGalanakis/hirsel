@@ -75,6 +75,7 @@ fn string.from(s: String) -> Result[String, Capacity]          // copies a liter
 fn string.copy(s: String) -> Result[String, Capacity]
 fn string.byte_len(s: String) -> u64
 fn string.push(mut s: String, t: String) -> Result[(), Capacity]
+fn string.push_u64(mut s: String, n: u64) -> Result[(), Capacity]   // decimal digits
 fn text.len(t: Text) -> u64
 fn text.copy_in(r: Region, s: String) -> Result[Text in r, Capacity]
 fn map.new[K: key, V]() -> Map[K, V]
@@ -99,7 +100,8 @@ fn span.push[S, T](mut b: Builder[S], take x: T) -> Result[(), (Capacity, T)]
 fn span.finish[S](take b: Builder[S]) -> S                     // MEM-3; cannot fail
 fn span.len[T](s: SeqSpan[T]) -> u64                           // and the other spans
 fn span.get[T](s: IndexedSpan[T], i: u64) -> Option[T]         // and FixedSpan
-fn build_in[T](r: Region, bytes n: u64, w: scoped fn(mut Dest[T]) -> Result[(), BuildError]) -> Result[Builder[T in r], BuildError]
+fn build_in[T](r: Region, bytes n: u64, w: scoped fn(mut Dest[T]) -> Result[Child[T], BuildError]) -> Result[Builder[T in r], BuildError]
+fn dest.put[T, U](mut d: Dest[T], take v: U) -> Result[Child[U], BuildError]   // MEM-4; Overflow past n
 fn prepare_in[T, U](r: Region, staging: U) -> Result[Builder[T in r], BuildError]
 fn finish[T](take b: Builder[T]) -> T                          // MEM-3
 ```
@@ -123,4 +125,8 @@ fn channel.receive[T](rx: Receiver[T]) -> Result[T, Closed[()]] waits
 The core capability types are `Dir`, `Net`, `Clock`, `Random`, `Stdout`, `Stderr`, `Stdin`,
 `Env`, `Process` and `Tasks`. Their operations are library contracts and are not part of
 this specification, except that each takes its capability as an argument, states its
-allocation in its result type, and is marked `waits` when it may wait.
+allocation in its result type, and is marked `waits` when it may wait. `Stdout`, `Stderr` and `Tasks` are plain and `send`. The examples use one operation:
+
+```hirsel
+fn stdout.write(out: Stdout, s: String) -> Result[(), IoError] waits   // allocates nothing
+```

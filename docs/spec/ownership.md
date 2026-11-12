@@ -79,7 +79,7 @@ declared; it is OWN-2.
 
 ```hirsel
 type Leaf: shareable + send { n: u64 }
-type Tree: shareable + send { kids: List[Rc[Tree]] }  // refused: OWN-4, Rc is not send
+type Tree: shareable { kids: List[Rc[Tree]], log: File }  // refused: OWN-4, File is a resource
 ```
 
 ### OWN-5: Availability

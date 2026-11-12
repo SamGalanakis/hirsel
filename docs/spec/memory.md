@@ -65,16 +65,20 @@ fn digits(n: u64, r: Region) -> Result[SeqSpan[u8] in r, Capacity] {
 ### MEM-4: Sized destinations
 
 `build_in(r, bytes n, writer)` admits one allocation of `n` bytes in `r`, then calls the
-scoped callback `writer` with a private destination into which nested constructions are
-written in place; it returns `Result[Builder[T], BuildError]`, where `BuildError` is
-`Capacity` or the destination overflowing `n`. `prepare_in(r, staging)` admits an
+scoped callback `writer` with a destination `d: Dest[T]`; it returns
+`Result[Builder[T], BuildError]`, where `BuildError` is `Capacity` or the destination
+overflowing `n`. `dest.put(mut d, v)` writes a compact value `v` completely at the
+destination's next byte and returns a `Child[U]`, a token scoped to `d`; in `v`, a
+`Link[U]` field takes a `Child[U]` of the same destination, and an inline `Text` or span
+field takes a view of a `String` or `List` whose contents are copied in place. The
+`Child[T]` the writer returns is the value `finish` publishes. `prepare_in(r, staging)` admits an
 allocation of the staging value's exact size and copies it; it returns the same type.
 Neither runs `finish`. Bytes of an unused or failed destination stay charged until the
 region closes. A destination cannot be stored, returned or passed to `finish`.
 
 ```hirsel
 fn doc(r: Region, n: u64) -> Result[Doc in r, BuildError] {
-  let b = build_in(r, bytes 4096, fn(d: Dest[Doc]) -> Result[(), BuildError] { write_doc(mut d, n) })?
+  let b = build_in(r, bytes 4096, fn(mut d: Dest[Doc]) -> Result[Child[Doc], BuildError] { write_doc(mut d, n) })?
   Ok(finish(take b))
 }
 ```
@@ -170,8 +174,7 @@ alignment, region chunking, every non-compact layout and the calling convention.
 A compact field of compact type, `Text` or span type is stored inline: its bytes are part
 of the blob. A `Link[U]` field refers to a `U` earlier in the same blob and is stored as
 the `W`-width byte distance back from the field to its target; `Option[Link[U]]` uses zero
-for `None`. Links are formed only from the tokens a destination returns for completed
-children, and a child is always completed before its parent refers to it, so every
+for `None`. Links are formed only from the `Child` tokens of MEM-4, and a child is always completed before its parent refers to it, so every
 distance is positive and in bounds. Reading a link field through a view of its holder
 yields a view of the target, at the cost of one load and one subtraction with no check; a
 link is never a value apart from its field, and no integer converts to one. Edges to other

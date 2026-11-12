@@ -438,6 +438,11 @@ mod tests {
         let fresh = || hirsel_artifact_store::Store::new(directory.path().to_owned());
         let opened =
             InstalledPackage::open_header(&fresh(), Some(header), &package, compiler).unwrap();
+        // Membership reads the index only: catalog enumerations ask it of
+        // every source path, and must neither decode nor meet a bad chunk.
+        let sources = opened.package.source_records().unwrap();
+        assert!(sources.installs(&item(&package, "b", "three")));
+        assert!(!sources.installs(&item(&package, "b", "absent")));
         let one = opened
             .package
             .definition(&item(&package, "a", "one"))

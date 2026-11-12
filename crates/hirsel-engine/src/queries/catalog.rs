@@ -1875,7 +1875,8 @@ impl QueryEngine {
             .get(&path.0.package)
             // A refused descriptor is installed, not absent: its refusal
             // surfaces when the definition is read, never as a source fallback.
-            .is_some_and(|owner| !matches!(owner.definition(path), Ok(None)))
+            // Callers enumerate every source path, so this decodes nothing.
+            .is_some_and(|owner| owner.installs(path))
     }
     pub(crate) fn installed_semantic_input(
         &self,

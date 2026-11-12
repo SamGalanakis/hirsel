@@ -441,25 +441,37 @@ impl Definitions {
     fn entry(&self, at: usize) -> &[u8] {
         &self.index[8 + at * ENTRY..8 + (at + 1) * ENTRY]
     }
-    /// The definition at `path`, or none when the image lists no definition
-    /// there. A definition whose chunk or descriptor fails its checks is
-    /// refused, never reported absent.
-    pub(crate) fn get(&self, path: &DefPath) -> Result<Option<&InstalledDefinition>, String> {
+    /// The index entry whose fingerprint is `path`'s. Open checked the order.
+    fn find(&self, path: &DefPath) -> Option<usize> {
         let fingerprint = path.fingerprint().0;
         let order = &self.index[8 + self.count * ENTRY..];
         let position = |k: usize| u32_at(order, 4 * k) as usize;
         let mut range = 0..self.count;
-        let at = loop {
+        loop {
             if range.is_empty() {
-                return Ok(None);
+                return None;
             }
             let middle = range.start + range.len() / 2;
             let at = position(middle);
             match self.entry(at)[..32].cmp(&fingerprint) {
-                std::cmp::Ordering::Equal => break at,
+                std::cmp::Ordering::Equal => return Some(at),
                 std::cmp::Ordering::Less => range.start = middle + 1,
                 std::cmp::Ordering::Greater => range.end = middle,
             }
+        }
+    }
+    /// Whether the image lists a definition at `path`, without reading or
+    /// checking it. The fingerprint is a domain-separated digest of the full
+    /// path and construction refused two paths sharing one.
+    pub(crate) fn installs(&self, path: &DefPath) -> bool {
+        self.find(path).is_some()
+    }
+    /// The definition at `path`, or none when the image lists no definition
+    /// there. A definition whose chunk or descriptor fails its checks is
+    /// refused, never reported absent.
+    pub(crate) fn get(&self, path: &DefPath) -> Result<Option<&InstalledDefinition>, String> {
+        let Some(at) = self.find(path) else {
+            return Ok(None);
         };
         let definition = self.slots[at]
             .get_or_init(|| self.load(at))

@@ -231,6 +231,13 @@ pub(super) fn check_definition(
 }
 
 impl InstalledSourceRecords {
+    /// Whether the image lists a definition at `path`, listed but refused
+    /// included. Reads no chunk, so enumerating paths decodes nothing.
+    pub fn installs(&self, path: &DefPath) -> bool {
+        self.definitions
+            .as_ref()
+            .is_some_and(|definitions| definitions.installs(path))
+    }
     /// See `InstalledPackage::definition`.
     pub fn definition(&self, path: &DefPath) -> Result<Option<&InstalledDefinition>, String> {
         match &self.definitions {

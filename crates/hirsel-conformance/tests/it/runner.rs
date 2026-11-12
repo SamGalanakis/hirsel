@@ -821,7 +821,7 @@ fn path_selection_runs_only_matches_and_gates_them() {
             }
         )
         .unwrap_err()
-        .contains("matched no corpus files globally")
+        .contains("no cases matched: ")
     );
     // Global validation is independent of shard membership and invokes no driver
     // when even one request is absent (including several typos together).
@@ -857,10 +857,7 @@ fn path_selection_runs_only_matches_and_gates_them() {
                 },
             )
             .unwrap_err();
-            assert_eq!(
-                error,
-                format!("--path prefixes matched no corpus files globally: {absent:?}")
-            );
+            assert_eq!(error, format!("no cases matched: {}", absent.join("|")));
         }
     }
     let overlaps = [
@@ -950,7 +947,7 @@ fn path_selection_runs_only_matches_and_gates_them() {
         let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(
             json["errors"][0],
-            format!("--path prefixes matched no corpus files globally: {absent:?}")
+            format!("no cases matched: {}", absent.join("|"))
         );
         assert!(json.get("tests").is_none());
     }
@@ -1024,7 +1021,7 @@ fn path_selection_runs_only_matches_and_gates_them() {
     fs::remove_dir_all(root.0.join("conformance/OWN")).unwrap();
     assert_eq!(
         run_suite(&root.0, &MustNotRun).unwrap_err(),
-        "global corpus selection contains no files"
+        "no cases matched: <all>"
     );
     assert!(
         run_suite_selected(&root.0, &MustNotRun, selection)

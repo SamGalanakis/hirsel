@@ -49,7 +49,11 @@ fn main() -> ExitCode {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(message) => {
-            eprintln!("native: {message}");
+            if message.starts_with("no cases matched: ") {
+                eprintln!("{message}");
+            } else {
+                eprintln!("native: {message}");
+            }
             ExitCode::from(2)
         }
     }
@@ -85,6 +89,23 @@ impl Filter {
     /// cases.
     fn empty_fails<'a>(&self, mut ids: impl Iterator<Item = &'a str>) -> bool {
         self.1.is_none() || !ids.any(|id| self.matches(id))
+    }
+
+    fn require_match<'a>(&self, mut ids: impl Iterator<Item = &'a str>) -> Result<(), String> {
+        if ids.any(|id| self.matches(id)) {
+            return Ok(());
+        }
+        let selection = if self.is_empty() {
+            "<all>".to_owned()
+        } else {
+            self.0
+                .iter()
+                .chain(&self.2)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("|")
+        };
+        Err(format!("no cases matched: {selection}"))
     }
 
     /// No text selects: the run covers every case of its shard.
@@ -1342,24 +1363,24 @@ fn full(
         .filter(|c| engine.is_none_or(|e| e.keeps(c)))
         .collect();
     configs.check(&matrix)?;
+    let exclusions = native::read_exclusions(root)?;
+    let mut cases = native::baseline(root)?;
+    let baseline_before = cases.len();
+    let mut generated = generated_cases(seed, 64, &filter);
+    let mut partitioned = listed(root, "native-tests/topology/cases.txt")?;
+    filter.require_match(
+        cases
+            .iter()
+            .chain(&generated)
+            .chain(&partitioned)
+            .map(|c| c.id.as_str()),
+    )?;
     let toolchain = toolchain(&matrix)?;
     let selection = if exhaustive || !filter.is_empty() {
         None
     } else {
         Some(native::diet::Selection::load(root)?)
     };
-    let exclusions = native::read_exclusions(root)?;
-    let mut cases = native::baseline(root)?;
-    let baseline_before = cases.len();
-    let mut generated = generated_cases(seed, 64, &filter);
-    let mut partitioned = listed(root, "native-tests/topology/cases.txt")?;
-    let empty_fails = filter.empty_fails(
-        cases
-            .iter()
-            .chain(&generated)
-            .chain(&partitioned)
-            .map(|c| c.id.as_str()),
-    );
     let complete = filter.is_empty() && engine.is_none() && configs.is_all();
     // Only the whole run must find every campaign non-empty; a shard may hold
     // no topology or generated case.
@@ -1617,16 +1638,6 @@ fn full(
     // unrestricted run checks every campaign (all_agree refuses an empty one).
     if matrix.is_empty() || whole && cases.is_empty() {
         eprintln!("native: the matrix selected no cases or no configurations");
-        ok = false;
-    }
-    if !complete
-        && cases.is_empty()
-        && partitioned.is_empty()
-        && generated.is_empty()
-        && empty_fails
-        && configs.cases.is_none()
-    {
-        eprintln!("native: --filter {:?} selected no cases", filter.0);
         ok = false;
     }
     let mut json = report.json();

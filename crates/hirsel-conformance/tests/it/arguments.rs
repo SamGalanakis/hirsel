@@ -254,3 +254,82 @@ fn native_smoke_refuses_no_verify() {
     refuses_no_verify(env!("CARGO_BIN_EXE_native"), &["--smoke"]);
     refuses_no_verify(env!("CARGO_BIN_EXE_native"), &["--cranelift"]);
 }
+
+#[test]
+fn conformance_selection_rejects_no_match_and_executes_one_file() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let case = "conformance/MODE/MODE-2-unique-empty-function-field-run.hir";
+    let missing = format!("../../{case}");
+    let run = |selection: &str| {
+        Command::new(env!("CARGO_BIN_EXE_hirsel-conformance"))
+            .arg("--root")
+            .arg(&root)
+            .args(["--path", selection, "--json", "--shard", "1/1"])
+            .output()
+            .unwrap()
+    };
+    let empty = run(&missing);
+    assert!(!empty.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&empty.stdout).unwrap();
+    assert_eq!(report["errors"][0], format!("no cases matched: {missing}"));
+    let text_error = Command::new(env!("CARGO_BIN_EXE_hirsel-conformance"))
+        .arg("--root")
+        .arg(&root)
+        .args(["--path", &missing])
+        .output()
+        .unwrap();
+    assert!(!text_error.status.success());
+    assert_eq!(
+        text_error.stderr,
+        format!("no cases matched: {missing}\n").as_bytes()
+    );
+    let one = run(case);
+    assert!(one.status.success(), "{one:?}");
+    let report: serde_json::Value = serde_json::from_slice(&one.stdout).unwrap();
+    assert_eq!(report["summary"]["validated"], 1);
+    assert_eq!(report["tests"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn native_selection_rejects_no_match_and_executes_one_file() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let case = "conformance/MODE/MODE-2-unique-empty-function-field-run.hir";
+    let missing = format!("../../{case}");
+    let run = |selection: &str| {
+        Command::new(env!("CARGO_BIN_EXE_native"))
+            .arg("--root")
+            .arg(&root)
+            .args([
+                "--full",
+                "--filter",
+                selection,
+                "--case-part",
+                "1/1",
+                "--config",
+                "x86_64/regions/elide/reuse/flat-walk/heap+inject",
+                "--seed",
+                "1",
+            ])
+            .output()
+            .unwrap()
+    };
+    let empty = run(&missing);
+    assert!(!empty.status.success(), "{empty:?}");
+    assert!(
+        String::from_utf8_lossy(&empty.stderr)
+            .lines()
+            .any(|line| line == format!("no cases matched: {missing}")),
+        "{empty:?}"
+    );
+    let one = run(case);
+    assert!(one.status.success(), "{one:?}");
+    let text = String::from_utf8(one.stdout).unwrap();
+    let start = text.find("\n{\n").unwrap() + 1;
+    let report = serde_json::Deserializer::from_str(&text[start..])
+        .into_iter::<serde_json::Value>()
+        .next()
+        .unwrap()
+        .unwrap();
+    assert_eq!(report["baseline_executable"], 1);
+    assert_eq!(report["configuration_attempts"], 1);
+}

@@ -517,7 +517,7 @@ def main():
     prefixes = [p.rstrip('/') + '/' if (ROOT / p).is_dir() else p for p in args.prefixes]
     unmatched = [p for p in prefixes if not runs_of(corpus, [p])]
     if unmatched or any('|' in p or ';' in p for p in prefixes):
-        print(f'corpus: no corpus case matches {unmatched or prefixes}', file=sys.stderr)
+        print('no cases matched: ' + '|'.join(unmatched or prefixes), file=sys.stderr)
         return 2
     if any('|' in c or ';' in c for c in args.config):
         print(f'corpus: bad configuration name in {args.config}', file=sys.stderr)
@@ -582,7 +582,7 @@ def main():
             print(f'corpus: {problem}', file=sys.stderr)
     for name, output in sorted(outputs.items()):
         for line in output.splitlines():
-            if line.startswith('conformance/') or line.startswith('--path ') or 'matched no corpus' in line:
+            if line.startswith('conformance/') or line.startswith(('--path ', 'no cases matched:')) or 'matched no corpus' in line:
                 print(f'{name.rsplit("-", 1)[-1]}: {line}')
     try:
         lines = conformance.summarize(outputs, slices)

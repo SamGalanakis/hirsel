@@ -1116,11 +1116,16 @@ impl Selection<'_> {
             .collect();
         if !unmatched.is_empty() {
             return Err(format!(
-                "--path prefixes matched no corpus files globally: {unmatched:?}"
+                "no cases matched: {}",
+                unmatched
+                    .iter()
+                    .map(|path| path.as_str())
+                    .collect::<Vec<_>>()
+                    .join("|")
             ));
         }
         if files.is_empty() {
-            return Err("global corpus selection contains no files".into());
+            return Err("no cases matched: <all>".into());
         }
         let globally_matched = files.len();
         files.retain(|file| in_shard(self.shard, &relative(root, file)));

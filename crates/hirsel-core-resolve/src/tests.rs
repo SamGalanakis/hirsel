@@ -504,3 +504,82 @@ fn revision_four_builtin_names_and_visible_modules() {
     let (index, _) = fixture(&[("bytes", "fn f() {}")]);
     assert_eq!(index.diagnostics[0].rule, "LANG-2");
 }
+
+#[test]
+fn numeric_bounds_only_on_bodiless_core_type_parameters() {
+    let core = module("core");
+    let mut index = NameIndex::default();
+    index.configure_core(core.package.clone());
+    for (source, mode, allowed) in [
+        (
+            "pub fn f[T: integer, F: float](x: T) -> F",
+            ParseMode::Signatures,
+            true,
+        ),
+        (
+            "pub opaque type Numeric[T: integer]",
+            ParseMode::Signatures,
+            true,
+        ),
+        (
+            "fn f[T: integer](x: T) -> T { x }",
+            ParseMode::Source,
+            false,
+        ),
+        ("type Numeric[T: float] { n: T }", ParseMode::Source, false),
+        ("type Numeric: integer", ParseMode::Signatures, false),
+    ] {
+        let p = parse(source, mode);
+        assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+        let r = resolve(&index, &core, 0, &p.syntax.items[0]);
+        assert_eq!(
+            r.diagnostics.iter().any(|d| d.rule == "OWN-4"),
+            !allowed,
+            "{source}: {:?}",
+            r.diagnostics
+        );
+        if allowed {
+            let external = ModuleId {
+                package: PackageId {
+                    name: "other".into(),
+                    version: "1".into(),
+                },
+                modules: vec!["api".into()],
+            };
+            assert!(
+                resolve(&index, &external, 0, &p.syntax.items[0])
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.rule == "OWN-4")
+            );
+        }
+    }
+}
+#[test]
+fn exits_resolve_only_to_legal_targets_in_the_current_function() {
+    for source in [
+        "fn f() { break }",
+        "fn f() { continue }",
+        "fn f() { 'b: { continue 'b } }",
+        "fn f() { while true { break 1 } }",
+        "fn f() { 'w: while true { break 'w 1 } }",
+        "fn f() { loop { let g = fn() { break }; } }",
+    ] {
+        let (i, f) = fixture(&[("m", source)]);
+        let r = resolve(&i, &f[0].0, 0, &f[0].1.items[0]);
+        assert!(
+            r.diagnostics.iter().any(|d| d.rule == "LANG-15"),
+            "{source}: {:?}",
+            r.diagnostics
+        );
+    }
+    let (i, f) = fixture(&[(
+        "m",
+        "fn f() { 'b: { break 'b 1 }; 'w: while true { continue 'w }; loop { break 2 } }",
+    )]);
+    assert!(
+        resolve(&i, &f[0].0, 0, &f[0].1.items[0])
+            .diagnostics
+            .is_empty()
+    );
+}

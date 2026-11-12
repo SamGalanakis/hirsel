@@ -96,6 +96,32 @@ pub fn resolve(index: &NameIndex, module: &ModuleId, ordinal: u32, item: &Item) 
         ordinal,
         scopes: vec![BTreeMap::new()],
         labels: vec![],
+        label_kinds: vec![],
+        loops: vec![],
+        numeric_parameter: false,
+        numeric_declaration: index.environment.core.as_ref() == Some(&module.package)
+            && matches!(
+                item.tree.node(item.root).kind,
+                NodeKind::Function
+                    | NodeKind::TypeDecl
+                    | NodeKind::StableType
+                    | NodeKind::ResourceType
+                    | NodeKind::ScopedType
+            )
+            && item.tree.children(item.root).iter().all(|&c| {
+                matches!(
+                    item.tree.node(c).kind,
+                    NodeKind::Public
+                        | NodeKind::Opaque
+                        | NodeKind::Attribute
+                        | NodeKind::Generics
+                        | NodeKind::Bounds
+                        | NodeKind::Parameters
+                        | NodeKind::ResultType
+                        | NodeKind::Waits
+                        | NodeKind::Outlives
+                )
+            }),
         depth: 0,
         out: Resolution::default(),
     };
@@ -109,6 +135,10 @@ struct Resolver<'a> {
     ordinal: u32,
     scopes: Vec<BTreeMap<(Namespace, String), u32>>,
     labels: Vec<BTreeMap<String, u32>>,
+    label_kinds: Vec<NodeKind>,
+    loops: Vec<NodeKind>,
+    numeric_parameter: bool,
+    numeric_declaration: bool,
     depth: usize,
     out: Resolution,
 }
@@ -569,6 +599,8 @@ impl Resolver<'_> {
     }
     fn function(&mut self, n: NodeId) {
         let old_labels = std::mem::take(&mut self.labels);
+        let old_kinds = std::mem::take(&mut self.label_kinds);
+        let old_loops = std::mem::take(&mut self.loops);
         self.scope(|r| {
             let children = r.children(n);
             for &c in &children {
@@ -592,6 +624,8 @@ impl Resolver<'_> {
             }
         });
         self.labels = old_labels;
+        self.label_kinds = old_kinds;
+        self.loops = old_loops;
     }
     fn condition(&mut self, n: NodeId) {
         if self.item.tree.node(n).kind == NodeKind::ConditionLet {
@@ -648,9 +682,12 @@ impl Resolver<'_> {
                         BinderKind::Region
                     },
                 );
+                let old = self.numeric_parameter;
+                self.numeric_parameter = kind == NodeKind::Generic;
                 for child in c {
                     self.visit(child);
                 }
+                self.numeric_parameter = old;
             }
             NodeKind::Path => self.use_path(n, false, false),
             NodeKind::TypePath => self.use_path(n, true, false),
@@ -664,17 +701,32 @@ impl Resolver<'_> {
                 self.visit(c[1]);
                 self.scope(|r| {
                     r.pattern(c[0]);
+                    r.loops.push(kind);
                     r.visit(c[2]);
+                    r.loops.pop();
                 });
             }
             NodeKind::If | NodeKind::While => {
                 self.scope(|r| {
                     r.condition(c[0]);
+                    if kind == NodeKind::While {
+                        r.loops.push(kind);
+                    }
                     r.visit(c[1]);
+                    if kind == NodeKind::While {
+                        r.loops.pop();
+                    }
                 });
                 for &child in &c[2..] {
                     self.visit(child);
                 }
+            }
+            NodeKind::Loop => {
+                self.loops.push(kind);
+                for child in c {
+                    self.visit(child);
+                }
+                self.loops.pop();
             }
             NodeKind::Arm => self.scope(|r| {
                 r.pattern(c[0]);
@@ -742,12 +794,49 @@ impl Resolver<'_> {
                     site: self.site(n),
                 });
                 self.labels.push(BTreeMap::from([(name, id)]));
+                self.label_kinds.push(self.item.tree.node(c[0]).kind);
                 for child in c {
                     self.visit(child);
                 }
                 self.labels.pop();
+                self.label_kinds.pop();
             }
             NodeKind::Break | NodeKind::Continue => {
+                let target = if let Some(t) = token {
+                    let name = self.name(t);
+                    self.labels
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .find_map(|(i, s)| s.contains_key(&name).then_some(self.label_kinds[i]))
+                } else {
+                    self.loops.last().copied()
+                };
+                if token.is_none() && target.is_none() {
+                    self.out.diagnostics.push(Refusal::new(
+                        "LANG-15",
+                        self.site(n),
+                        "exit has no enclosing loop",
+                    ));
+                } else if kind == NodeKind::Continue && target == Some(NodeKind::Block) {
+                    self.out.diagnostics.push(Refusal::new(
+                        "LANG-15",
+                        self.site(n),
+                        "continue target is a block",
+                    ));
+                } else if kind == NodeKind::Break
+                    && !c.is_empty()
+                    && matches!(
+                        target,
+                        Some(NodeKind::While | NodeKind::For | NodeKind::ForTake)
+                    )
+                {
+                    self.out.diagnostics.push(Refusal::new(
+                        "LANG-15",
+                        self.site(n),
+                        "while and for do not accept a break value",
+                    ));
+                }
                 if let Some(t) = token {
                     let name = self.name(t);
                     let b = self.labels.iter().rev().find_map(|s| s.get(&name).copied());
@@ -771,7 +860,14 @@ impl Resolver<'_> {
                     self.visit(child);
                 }
             }
-            NodeKind::Error | NodeKind::BoundName => {}
+            NodeKind::BoundName => {
+                if matches!(self.name(token.unwrap()).as_str(), "integer" | "float")
+                    && !(self.numeric_declaration && self.numeric_parameter)
+                {
+                    self.out.diagnostics.push(Refusal::new("OWN-4",self.site(n),"numeric bounds are only permitted on type parameters of bodiless core declarations"));
+                }
+            }
+            NodeKind::Error => {}
             _ => {
                 for child in c {
                     self.visit(child);

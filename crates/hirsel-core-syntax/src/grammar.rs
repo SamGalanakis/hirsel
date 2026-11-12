@@ -3,7 +3,15 @@ pub const ITEM_START: &[&str] = &[
     "@", "pub", "fn", "type", "stable", "resource", "scoped", "const",
 ];
 pub const PREFIX: &[&str] = &["-", "!", "~", "take", "mut", "copy", "view"];
-pub const BOUNDS: &[&str] = &["plain", "shareable", "send", "key", "ordered"];
+pub const BOUNDS: &[&str] = &[
+    "plain",
+    "shareable",
+    "send",
+    "key",
+    "ordered",
+    "integer",
+    "float",
+];
 pub const ASSIGN: &[&str] = &[
     "=", "+=", "-=", "*=", "/=", "%=", "<<=", ">>=", "&=", "|=", "^=",
 ];

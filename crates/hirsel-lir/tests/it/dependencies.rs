@@ -57,6 +57,10 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-lir", Class::Data),
     ("hirsel-layout", Class::Data),
     ("hirsel-core-contract", Class::Data),
+    // CoreIR: neutral identities, the IR and layout recipes, below both pipelines.
+    ("hirsel-core-ids", Class::Data),
+    ("hirsel-core-ir", Class::Data),
+    ("hirsel-core-layout", Class::Data),
     ("hirsel-rt-operations", Class::Data),
     ("hirsel-run-config", Class::Data),
     ("hirsel-run-schema", Class::Data),
@@ -160,6 +164,8 @@ const NO_EXTERNAL_PRODUCTION: &[&str] = &[
     "hirsel-lir",
     "hirsel-layout",
     "hirsel-core-contract",
+    "hirsel-core-ir",
+    "hirsel-core-layout",
     "hirsel-codec",
 ];
 

@@ -308,16 +308,14 @@ impl Task {
                                     *value = StorageValue::Unknown;
                                     continue;
                                 }
-                                let Some(query) = owner.lower.evaluate_query(definition.path())
-                                else {
-                                    return Err(owner.fail(invalid(format!(
-                                        "missing source constant producer for {}",
-                                        definition.path()
-                                    ))));
-                                };
-                                match self.read(cx, query) {
-                                    Err(error) => return Err(error),
-                                    Ok(_) => (),
+                                // Reviewed builtin dictionaries have no source Evaluate
+                                // producer. settled_constant materializes their actual
+                                // fields and still refuses unavailable source constants.
+                                if let Some(query) = owner.lower.evaluate_query(definition.path()) {
+                                    match self.read(cx, query) {
+                                        Err(error) => return Err(error),
+                                        Ok(_) => (),
+                                    }
                                 }
                                 let materialized =
                                     match owner.lower.settled_constant(definition.path(), &[]) {
@@ -336,6 +334,12 @@ impl Task {
                                     definition.path().0.package.clone(),
                                     &mut self.reads,
                                 );
+                                if let Err(error) = hirsel_types::SignatureProvider::signature(
+                                    &mut provider,
+                                    *definition,
+                                ) {
+                                    return Err(owner.fail(error));
+                                }
                                 *value = match crate::storage_graph::constant_value(
                                     snapshot.types(),
                                     &materialized,

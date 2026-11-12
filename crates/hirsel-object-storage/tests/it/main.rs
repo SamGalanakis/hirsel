@@ -562,6 +562,38 @@ fn a_cut_fires_at_its_request_and_a_crash_holds_until_restart() {
 }
 
 #[test]
+fn clients_of_one_world_share_objects_count_and_script_and_crash_alone() {
+    let sim = |world: &str, crash_at: u64| serde_json::json!({"provider": "objects.sim@1", "world": world, "crash_at": crash_at, "fail_at": 3});
+    let client = |worlds: &Worlds, entry: &serde_json::Value| match provider(entry, Some(worlds)) {
+        Ok(Provider::Sim(o)) => o,
+        _ => panic!("a sim client"),
+    };
+    let worlds = Worlds::default();
+    let a = client(&worlds, &sim("w", 2));
+    let b = client(&worlds, &sim("w", 2));
+    // One count: a sends request 1, b request 2 (and crashes after it), a
+    // request 3 (refused).
+    assert_eq!(a.put_new("x", b"1"), Ok(Put::Created));
+    assert_eq!(b.get("x").unwrap().as_deref(), Some(&b"1"[..]));
+    assert!(matches!(a.put_new("y", b"2"), Err(StorageError::Io(_))));
+    // b alone is down; a is served, and b's restart serves b again.
+    assert!(b.get("x").is_err());
+    assert_eq!(a.put_new("y", b"2"), Ok(Put::Created));
+    assert!(!a.restart());
+    assert!(b.restart());
+    assert_eq!(b.get("y").unwrap().as_deref(), Some(&b"2"[..]));
+    // Another world, and an entry without one, are objects of their own.
+    let other = client(&worlds, &sim("v", 2));
+    let private = client(&worlds, &serde_json::json!({"provider": "objects.sim@1"}));
+    for o in [&other, &private] {
+        assert_eq!(o.get("x").unwrap(), None);
+    }
+    // A world is named by one entry, and only inside a run.
+    assert!(provider(&sim("w", 5), Some(&worlds)).is_err());
+    assert!(provider(&sim("u", 2), None).is_err());
+}
+
+#[test]
 fn delayed_writes_stay_outstanding_together_and_land_in_script_order_across_a_restart() {
     // Request 1 puts x and request 3 deletes it, both held; request 2 crashes
     // the client, which restarts. The delete is listed first, so when both

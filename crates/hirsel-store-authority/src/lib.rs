@@ -36,6 +36,7 @@ pub mod sim;
 pub mod wire;
 
 pub use envelope::Record;
+pub use hirsel_object_storage::Worlds;
 pub use hirsel_run_schema::AuthorityGrant;
 pub use reclaim::{Reclaimed, Sweep};
 use std::io::ErrorKind;
@@ -495,10 +496,13 @@ pub fn check(g: &AuthorityGrant) -> Result<(Vec<String>, Level), ConfigError> {
 }
 
 /// The provider a checked grant names. `dir` is the host directory a log keeps its
-/// history in, which the caller resolved from the grant's mount.
+/// history in, which the caller resolved from the grant's mount. `worlds` are the
+/// run's named `objects.sim@1` worlds: one per run, so that grants naming the same
+/// world are clients of the same objects.
 pub fn open(
     g: &AuthorityGrant,
     dir: Option<&std::path::Path>,
+    worlds: &Worlds,
 ) -> Result<Box<dyn Authority>, ConfigError> {
     let (_, floor) = check(g)?;
     Ok(match g.provider.as_str() {
@@ -517,7 +521,7 @@ pub fn open(
                 .as_ref()
                 .expect("checked: objects@1 has its entry");
             let level = g.level.clone().expect("checked: objects@1 names its level");
-            match hirsel_object_storage::provider(entry)
+            match hirsel_object_storage::provider(entry, Some(worlds))
                 .map_err(|e| ConfigError(format!("authority objects: {e}")))?
             {
                 hirsel_object_storage::Provider::Dir(store) => Box::new(objects::Objects::new(

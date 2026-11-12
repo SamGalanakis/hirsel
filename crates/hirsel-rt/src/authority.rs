@@ -320,6 +320,8 @@ pub(crate) struct Providers {
     draws: Draws,
     attempts: u64,
     open: BTreeMap<usize, Box<dyn hirsel_store_authority::Authority>>,
+    /// The run's named objects.sim@1 worlds, which its providers share.
+    worlds: hirsel_store_authority::Worlds,
     claims: BTreeMap<u64, hirsel_store_authority::Claim>,
     /// Resolves a log grant's mount and path to its host directory.
     directory: Box<dyn Fn(&AuthorityGrant) -> Result<std::path::PathBuf, String> + Send>,
@@ -334,6 +336,7 @@ impl Providers {
             draws,
             attempts: 0,
             open: BTreeMap::new(),
+            worlds: hirsel_store_authority::Worlds::default(),
             claims: BTreeMap::new(),
             directory,
         }
@@ -360,7 +363,7 @@ impl Providers {
             } else {
                 None
             };
-            let p = hirsel_store_authority::open(grant, dir.as_deref())
+            let p = hirsel_store_authority::open(grant, dir.as_deref(), &self.worlds)
                 .map_err(|e| AdapterError::Unsupported(e.0))?;
             self.open.insert(index, p);
         }

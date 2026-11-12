@@ -13,7 +13,7 @@ use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "testing")]
@@ -442,12 +442,59 @@ impl ObjectStorage for DirObjects {
 /// The objects also cut their client at a chosen request, for tests that must
 /// reach every request in turn ([`Cuts`]). Requests (each get, put, replace,
 /// listing and delete, one per key) are numbered from 1.
+///
+/// A value is one client of its objects' world. [`client`](Self::client)
+/// opens another client of the same world, as a second process of one bucket
+/// is: the clients share the objects, the request count, the cut script, its
+/// held-back writes and the faults, and each has its own crash and restart.
+/// A cut at request `n` falls on whichever client sends the world's `n`th
+/// request.
 #[derive(Debug, Default)]
 pub struct MemoryObjects {
+    world: Arc<World>,
+    /// This client has crashed and not restarted.
+    down: AtomicBool,
+}
+
+/// What every client of one simulated bucket shares.
+#[derive(Debug, Default)]
+struct World {
     objects: Mutex<Keyed>,
     faults: Mutex<Option<Faults>>,
     cuts: Mutex<Cutting>,
     foreign: Mutex<Option<Foreign>>,
+}
+
+/// The named worlds of one run: grants whose `objects.sim@1` entries name the
+/// same `world` open clients of one [`MemoryObjects`] world. The first entry
+/// to name a world makes it; a later one must be the same entry.
+#[derive(Debug, Default)]
+pub struct Worlds {
+    named: Mutex<BTreeMap<String, (serde_json::Value, Arc<World>)>>,
+}
+
+impl Worlds {
+    /// A client of the world `name`, made from `entry` by `make` if it is the
+    /// first entry to name it.
+    fn client(
+        &self,
+        name: &str,
+        entry: &serde_json::Value,
+        make: impl FnOnce() -> Result<MemoryObjects, String>,
+    ) -> Result<MemoryObjects, String> {
+        let mut named = self.named.lock().expect("worlds");
+        if let Some((first, world)) = named.get(name) {
+            if first != entry {
+                return Err(format!(
+                    "objects.sim@1 world {name:?} is named by two different entries"
+                ));
+            }
+            return Ok(MemoryObjects::of(world.clone()));
+        }
+        let objects = make()?;
+        named.insert(name.into(), (entry.clone(), objects.world.clone()));
+        Ok(objects)
+    }
 }
 
 /// What [`Cuts::claim_at`] runs: another client's claim of the history.
@@ -472,8 +519,9 @@ pub struct Cuts {
     /// Take the request's effect and lose its reply: the client hears
     /// [`StorageError::Unavailable`].
     pub lose_response_at: Option<u64>,
-    /// The client dies right after the request: every later request fails
-    /// with no effect, uncounted, until [`MemoryObjects::restart`].
+    /// The client sending the request dies right after it: every later
+    /// request of that client fails with no effect, uncounted, until its
+    /// [`MemoryObjects::restart`]. Other clients are served.
     pub crash_at: Option<u64>,
     /// The requests held back in transit, any number outstanding at once:
     /// see [`Delay`].
@@ -552,7 +600,6 @@ pub const CUTS: [&str; 6] = [
 struct Cutting {
     at: Cuts,
     requests: u64,
-    down: bool,
     /// The held-back writes, each under the index of its delay in the script,
     /// in that order.
     held: Vec<(usize, Held)>,
@@ -641,7 +688,7 @@ impl MemoryObjects {
     pub fn with_faults(seed: u64, one_in: u64) -> Self {
         let objects = Self::new();
         if one_in > 0 {
-            *objects.faults.lock().expect("faults") = Some(Faults {
+            *objects.world.faults.lock().expect("faults") = Some(Faults {
                 state: seed,
                 one_in,
             });
@@ -649,35 +696,45 @@ impl MemoryObjects {
         objects
     }
     /// Objects that cut their client at the requests `at` names.
-    pub fn with_cuts(mut self, at: Cuts) -> Self {
-        self.cuts.get_mut().expect("cuts").at = at;
+    pub fn with_cuts(self, at: Cuts) -> Self {
+        self.world.cuts.lock().expect("cuts").at = at;
         self
     }
-    /// The claim [`Cuts::claim_at`] runs.
-    pub fn on_claim(&self, claim: Arc<dyn Fn() + Send + Sync>) {
-        *self.foreign.lock().expect("foreign") = Some(Foreign(claim));
+    fn of(world: Arc<World>) -> Self {
+        MemoryObjects {
+            world,
+            down: AtomicBool::new(false),
+        }
     }
-    /// Start a new client after a crash: true when one had happened, and
+    /// Another client of these objects' world, up.
+    pub fn client(&self) -> Self {
+        Self::of(self.world.clone())
+    }
+    /// The claim [`Cuts::claim_at`] runs, for the whole world.
+    pub fn on_claim(&self, claim: Arc<dyn Fn() + Send + Sync>) {
+        *self.world.foreign.lock().expect("foreign") = Some(Foreign(claim));
+    }
+    /// Start a new client after this one crashed: true when it had, and its
     /// requests are served again.
     pub fn restart(&self) -> bool {
-        std::mem::take(&mut self.cuts.lock().expect("cuts").down)
+        self.down.swap(false, Ordering::SeqCst)
     }
     /// Count a request and say what the cuts make of it. The held-back writes
     /// due before this request take effect first.
     fn fate(&self) -> Fate {
-        let mut c = self.cuts.lock().expect("cuts");
-        if c.down {
+        if self.down.load(Ordering::SeqCst) {
             return Fate::Fail(StorageError::Unavailable);
         }
+        let mut c = self.world.cuts.lock().expect("cuts");
         c.requests += 1;
         let n = Some(c.requests);
         if c.at.claim_at == n {
             drop(c);
-            let foreign = self.foreign.lock().expect("foreign").clone();
+            let foreign = self.world.foreign.lock().expect("foreign").clone();
             if let Some(Foreign(claim)) = foreign {
                 claim();
             }
-            c = self.cuts.lock().expect("cuts");
+            c = self.world.cuts.lock().expect("cuts");
         }
         let Cutting {
             at, requests, held, ..
@@ -686,7 +743,7 @@ impl MemoryObjects {
             .into_iter()
             .partition(|(d, _)| at.delays[*d].lands == *requests);
         *held = kept;
-        let mut objects = self.objects.lock().expect("objects");
+        let mut objects = self.world.objects.lock().expect("objects");
         for (_, write) in due {
             write.apply(&mut objects);
         }
@@ -703,7 +760,9 @@ impl MemoryObjects {
                 stale: at.stale_read_at == n,
             }
         };
-        c.down = c.at.crash_at == n;
+        if c.at.crash_at == n {
+            self.down.store(true, Ordering::SeqCst);
+        }
         fate
     }
     /// The next fault decision: None, or whether the faulted operation's
@@ -727,7 +786,7 @@ impl MemoryObjects {
             Fate::Fail(error) => return Err(error(format!("cut at {operation} {key}"))),
             Fate::Defer { delay } => {
                 if let Some(w) = write() {
-                    let held = &mut self.cuts.lock().expect("cuts").held;
+                    let held = &mut self.world.cuts.lock().expect("cuts").held;
                     let place = held.partition_point(|(d, _)| *d < delay);
                     held.insert(place, (delay, w));
                 }
@@ -738,7 +797,7 @@ impl MemoryObjects {
             Fate::Serve { lost: true, stale } => return Ok((Some(true), stale)),
             Fate::Serve { lost: false, stale } => stale,
         };
-        let mut faults = self.faults.lock().expect("faults");
+        let mut faults = self.world.faults.lock().expect("faults");
         let Some(faults) = faults.as_mut() else {
             return Ok((None, stale));
         };
@@ -750,7 +809,8 @@ impl MemoryObjects {
     }
     /// Replace an object's bytes, as a hostile or broken medium would.
     pub fn overwrite(&self, key: &str, bytes: Vec<u8>) {
-        self.objects
+        self.world
+            .objects
             .lock()
             .expect("objects")
             .now
@@ -758,7 +818,7 @@ impl MemoryObjects {
     }
     /// Every object, read past any fault.
     pub fn contents(&self) -> BTreeMap<String, Vec<u8>> {
-        self.objects.lock().expect("objects").now.clone()
+        self.world.objects.lock().expect("objects").now.clone()
     }
 }
 
@@ -773,7 +833,7 @@ impl ObjectStorage for MemoryObjects {
         if fault.is_some() {
             return Err(unavailable("get", key));
         }
-        let objects = self.objects.lock().expect("objects");
+        let objects = self.world.objects.lock().expect("objects");
         let got = if stale {
             objects.stale(key)
         } else {
@@ -798,7 +858,7 @@ impl ObjectStorage for MemoryObjects {
         if fault == Some(false) {
             return Err(unavailable("replace", key));
         }
-        let mut objects = self.objects.lock().expect("objects");
+        let mut objects = self.world.objects.lock().expect("objects");
         let current = objects.get(key).map(|b| content_tag(b));
         let holds = match &condition {
             Condition::Absent => current.is_none(),
@@ -820,7 +880,7 @@ impl ObjectStorage for MemoryObjects {
         if fault == Some(false) {
             return Err(unavailable("list", prefix));
         }
-        let objects = self.objects.lock().expect("objects");
+        let objects = self.world.objects.lock().expect("objects");
         let mut keys: Vec<String> = objects
             .keys()
             .filter(|k| k.starts_with(prefix) && k.as_str() > after)
@@ -841,7 +901,7 @@ impl ObjectStorage for MemoryObjects {
         if fault == Some(false) {
             return Err(unavailable("delete", key));
         }
-        self.objects.lock().expect("objects").remove(key);
+        self.world.objects.lock().expect("objects").remove(key);
         match fault {
             Some(_) => Err(unavailable("delete reply", key)),
             None => Ok(()),
@@ -858,7 +918,7 @@ impl ObjectStorage for MemoryObjects {
         if fault == Some(false) {
             return Err(unavailable("put", key));
         }
-        let mut objects = self.objects.lock().expect("objects");
+        let mut objects = self.world.objects.lock().expect("objects");
         let put = if objects.contains_key(key) {
             Put::Exists
         } else {
@@ -872,16 +932,17 @@ impl ObjectStorage for MemoryObjects {
     }
 }
 
-/// Open an object storage provider entry: `{"provider": "objects.dir@1",
-/// "path": "<absolute directory>"}`, `{"provider": "objects.sim@1",
-/// "seed": <u64>, "fail_one_in": <u64>}` (both members optional, default
-/// 0) or `{"provider": "objects.s3@1", "endpoint": "http[s]://host[:port]",
+/// Open an object storage provider entry outside a run: `{"provider":
+/// "objects.dir@1", "path": "<absolute directory>"}`, `{"provider":
+/// "objects.sim@1", "seed": <u64>, "fail_one_in": <u64>}` (both members
+/// optional, default 0; a `world` is refused, as there is no run to share it)
+/// or `{"provider": "objects.s3@1", "endpoint": "http[s]://host[:port]",
 /// "bucket": .., "region": .., "prefix": .., "credentials": "<absolute JSON
 /// file>", "roots": "<absolute PEM file>", "connect_timeout_ms": ..,
 /// "request_timeout_ms": ..}` (`prefix`, `roots` and the timeouts optional; see
 /// [`S3Objects`]). Unknown members and providers are refused.
 pub fn open(entry: &serde_json::Value) -> Result<Arc<dyn ObjectStorage>, String> {
-    Ok(match provider(entry)? {
+    Ok(match provider(entry, None)? {
         Provider::Dir(objects) => Arc::new(objects),
         Provider::S3(objects) => Arc::new(objects),
         Provider::Sim(objects) => Arc::new(objects),
@@ -897,7 +958,9 @@ pub enum Provider {
 }
 
 /// Open an object storage entry as [`open`] does, keeping the provider's kind.
-pub fn provider(entry: &serde_json::Value) -> Result<Provider, String> {
+/// An `objects.sim@1` entry naming a `world` opens a client of that world in
+/// `worlds`, the run's; an entry without one opens a world of its own.
+pub fn provider(entry: &serde_json::Value, worlds: Option<&Worlds>) -> Result<Provider, String> {
     let members = entry
         .as_object()
         .ok_or("an object storage entry is a JSON object")?;
@@ -919,6 +982,7 @@ pub fn provider(entry: &serde_json::Value) -> Result<Provider, String> {
             "delays",
             "claim_at",
             "stale_read_at",
+            "world",
         ],
         other => return Err(format!("unsupported object storage provider {other}")),
     };
@@ -950,18 +1014,30 @@ pub fn provider(entry: &serde_json::Value) -> Result<Provider, String> {
         0 => Ok(None),
         n => Ok(Some(n)),
     };
-    let cuts = Cuts {
-        fail_at: request("fail_at")?,
-        lose_unapplied_at: request("lose_unapplied_at")?,
-        lose_response_at: request("lose_response_at")?,
-        crash_at: request("crash_at")?,
-        delays: delays(provider, members.get("delays"))?,
-        claim_at: request("claim_at")?,
-        stale_read_at: request("stale_read_at")?,
+    let cuts = || -> Result<Cuts, String> {
+        Ok(Cuts {
+            fail_at: request("fail_at")?,
+            lose_unapplied_at: request("lose_unapplied_at")?,
+            lose_response_at: request("lose_response_at")?,
+            crash_at: request("crash_at")?,
+            delays: delays(provider, members.get("delays"))?,
+            claim_at: request("claim_at")?,
+            stale_read_at: request("stale_read_at")?,
+        })
     };
-    Ok(Provider::Sim(
-        MemoryObjects::with_faults(uint("seed")?, uint("fail_one_in")?).with_cuts(cuts),
-    ))
+    let make = || -> Result<MemoryObjects, String> {
+        Ok(MemoryObjects::with_faults(uint("seed")?, uint("fail_one_in")?).with_cuts(cuts()?))
+    };
+    let Some(world) = members.get("world") else {
+        return make().map(Provider::Sim);
+    };
+    let name = world
+        .as_str()
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| format!("{provider} world is a nonempty name"))?;
+    let worlds =
+        worlds.ok_or_else(|| format!("{provider} world {name:?} needs a run to share it"))?;
+    worlds.client(name, entry, make).map(Provider::Sim)
 }
 
 /// An `objects.sim@1` entry's `delays`: a list of `{"at": k, "lands": m}`,

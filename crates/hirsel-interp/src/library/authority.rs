@@ -28,6 +28,8 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone, Default)]
 pub(super) struct Authorities {
     providers: BTreeMap<String, Arc<Mutex<Box<dyn Authority>>>>,
+    /// The run's named objects.sim@1 worlds, which its providers share.
+    worlds: Arc<hirsel_store_authority::Worlds>,
     /// Authority handle to grant name.
     handles: BTreeMap<u64, String>,
     claims: BTreeMap<u64, Claimed>,
@@ -229,7 +231,7 @@ impl Library {
                 "authority.objects@1 here keeps its objects in objects.sim@1".into(),
             ));
         }
-        let p = hirsel_store_authority::open(grant, None)
+        let p = hirsel_store_authority::open(grant, None, &self.authorities.worlds)
             .map_err(|e| invalid(format!("authority grant: {}", e.0)))?;
         let p = Arc::new(Mutex::new(p));
         self.authorities

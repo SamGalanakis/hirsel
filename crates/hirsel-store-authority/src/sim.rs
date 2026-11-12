@@ -858,8 +858,11 @@ impl Client {
         let (foreign_level, foreign_floor) = (level.clone(), floor);
         bucket.on_claim(Arc::new(move || {
             if let Some(bucket) = weak.upgrade() {
-                let mut other =
-                    crate::objects::Objects::new(bucket, foreign_level.clone(), foreign_floor);
+                let mut other = crate::objects::Objects::new(
+                    Arc::new(bucket.client()),
+                    foreign_level.clone(),
+                    foreign_floor,
+                );
                 let _ = other.claim([0xc1; 16], [0xc2; 32]);
             }
         }));

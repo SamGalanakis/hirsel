@@ -21,6 +21,9 @@ struct Request {
 #[derive(Default)]
 struct Live {
     providers: BTreeMap<usize, Box<dyn Authority>>,
+    /// The run's named objects.sim@1 worlds. A replay rebuilds them with the
+    /// providers, serving every grant's requests in their recorded order.
+    worlds: hirsel_store_authority::Worlds,
     claims: BTreeMap<u64, (usize, Claim)>,
     attempts: u64,
 }
@@ -74,8 +77,8 @@ impl Authorities {
             return None;
         }
         if !live.providers.contains_key(&r.index) {
-            live.providers
-                .insert(r.index, hirsel_store_authority::open(grant, None).ok()?);
+            let p = hirsel_store_authority::open(grant, None, &live.worlds).ok()?;
+            live.providers.insert(r.index, p);
         }
         let claim = match r.claim {
             Some(id) => {

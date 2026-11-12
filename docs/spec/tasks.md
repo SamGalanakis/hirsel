@@ -68,7 +68,7 @@ publishes `x`; after publication the queue owns `x`. If the channel is closed th
 owns `x`. `send` is a cancellation point: cancellation observed before publication is a
 failure, and the sender's cleanup drops `x` ([T7.2, T7.3](ownership.md#own-26-the-transition-table)).
 `channel.try_send(tx, take x) -> Result[(), SendError[T]]` never waits and returns
-`Full(x)` or `Closed(x)`. `channel.receive(rx) -> Result[T, Closed]` waits for an item and
+`Full(x)` or `Closed(x)`. `channel.receive(rx) -> Result[T, Closed[()]]` waits for an item and
 is a cancellation point; it returns `Closed` once the channel is closed and empty.
 Items are received in publication order. The blocks of a sent value stay charged to the
 limit that admitted them ([MEM-22](budgets.md#mem-22-each-block-remembers-its-limit)).

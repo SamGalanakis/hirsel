@@ -52,7 +52,7 @@ failure fail the test. Test functions cannot be called from code that is not a t
 
 ```hirsel
 @test
-fn adds() -> Result[(), Text] { if 1u64 + 1 == 2 { Ok(()) } else { fail("arithmetic") } }
+fn adds() -> Result[(), ()] { if 1u64 + 1 == 2 { Ok(()) } else { fail("arithmetic") } }
 ```
 
 ### PROG-5: Code identity

@@ -210,6 +210,7 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
                 | "hirsel-core-syntax"
                 | "hirsel-core-resolve"
                 | "hirsel-guard"
+                | "hirsel-graph"
         ),
         _ if from == "hirsel-core-syntax" => {
             matches!(to, "hirsel-core-ids" | "hirsel-guard" | "hirsel-graph")

@@ -17,8 +17,10 @@ use hirsel_engine_runtime::*;
 use hirsel_engine_store::{Action, Address, Domain};
 use hirsel_native::object_queries::CODEGEN_KIND;
 use hirsel_native::object_queries::CodegenKey;
+use hirsel_native::object_queries::CodegenSpec;
 use hirsel_native::object_queries::LINK_KIND;
 use hirsel_native::object_queries::LinkKey;
+use hirsel_native::object_queries::LinkSpec;
 use hirsel_native::object_queries::ObjectTaskFactory;
 use hirsel_native::root_source::NativeLinkSource;
 use std::{collections::BTreeMap, sync::OnceLock};
@@ -345,13 +347,15 @@ impl CompilationTasks {
         {
             let fragments = owners
                 .iter()
-                .map(|owner| CodegenKey {
-                    owner: owner.clone(),
-                    backend: backend.backend.clone(),
-                    backend_version: backend.backend_version,
-                    target_features: backend.target_features,
-                    profile_options: backend.profile_options,
-                    runtime_abi: backend.runtime_abi,
+                .map(|owner| {
+                    CodegenKey::new(CodegenSpec {
+                        owner: owner.clone(),
+                        backend: backend.backend.clone(),
+                        backend_version: backend.backend_version,
+                        target_features: backend.target_features,
+                        profile_options: backend.profile_options,
+                        runtime_abi: backend.runtime_abi,
+                    })
                 })
                 .collect::<Vec<_>>();
             match backend.executor.codegen_partition() {
@@ -373,11 +377,11 @@ impl CompilationTasks {
             if self.output == CompilationOutput::Objects {
                 continue;
             }
-            let key = LinkKey {
+            let key = LinkKey::new(LinkSpec {
                 roots: owners.clone().into(),
                 target: self.root.target_abi,
                 linker_options: backend.linker_options,
-            };
+            });
             links.push(key.query_id());
             plans.push(NativeLinkPlan {
                 key,
@@ -392,13 +396,15 @@ impl CompilationTasks {
             .backends
             .iter()
             .filter(|_| needs_execution && self.output != CompilationOutput::Ready)
-            .map(|backend| CodegenKey {
-                owner: owners[0].clone(),
-                backend: backend.backend.clone(),
-                backend_version: backend.backend_version,
-                target_features: backend.target_features,
-                profile_options: backend.profile_options,
-                runtime_abi: backend.runtime_abi,
+            .map(|backend| {
+                CodegenKey::new(CodegenSpec {
+                    owner: owners[0].clone(),
+                    backend: backend.backend.clone(),
+                    backend_version: backend.backend_version,
+                    target_features: backend.target_features,
+                    profile_options: backend.profile_options,
+                    runtime_abi: backend.runtime_abi,
+                })
             })
             .collect::<Vec<_>>();
         let mut execution =

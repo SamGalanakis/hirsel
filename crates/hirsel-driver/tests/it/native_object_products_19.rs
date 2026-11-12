@@ -8,6 +8,7 @@ use hirsel_engine_runtime::*;
 use hirsel_engine_store::ResultStore;
 
 use hirsel_native::object_queries::CodegenKey;
+use hirsel_native::object_queries::CodegenSpec;
 use hirsel_native::object_queries::ObjectTaskFactory;
 use hirsel_native::object_queries::fragment_product;
 use hirsel_native::object_queries::load_object;
@@ -433,13 +434,15 @@ fn compile_settled<R>(
     .unwrap();
     let keys = completed
         .iter()
-        .map(|(owner, _)| CodegenKey {
-            owner: owner.clone(),
-            backend: backend.name().into(),
-            backend_version: ContentHash::of_bytes(&COMPILER_IDENTITY),
-            target_features: target.digest(),
-            profile_options: ContentHash::of_bytes(format!("{opt:?}/{debug}").as_bytes()),
-            runtime_abi: ContentHash::of_bytes(&hirsel_lir::RUNTIME_ABI_VERSION.to_le_bytes()),
+        .map(|(owner, _)| {
+            CodegenKey::new(CodegenSpec {
+                owner: owner.clone(),
+                backend: backend.name().into(),
+                backend_version: ContentHash::of_bytes(&COMPILER_IDENTITY),
+                target_features: target.digest(),
+                profile_options: ContentHash::of_bytes(format!("{opt:?}/{debug}").as_bytes()),
+                runtime_abi: ContentHash::of_bytes(&hirsel_lir::RUNTIME_ABI_VERSION.to_le_bytes()),
+            })
         })
         .collect::<Vec<_>>();
     let previous = keys

@@ -361,15 +361,14 @@ pub fn register_result(_layouts: &LayoutTable, abi: &FnAbi) -> Option<ScalarKind
 /// Independently bind the receipt to the unit and its actual reached input rows.
 /// Unrelated layouts, ABIs, manifest rows and program input digests do not affect
 /// a unit. Neither a producer-stamped UnitKey nor cached LayoutKeys is a proof.
+/// The receipt's unit digest needs no comparison here: `ValidatedUnit` is sealed
+/// only by its validator, from the digest of the very unit it holds immutably.
 pub fn check_receipt(unit: &ValidatedUnit<Ready>, inputs: &EmitInputs<'_>) -> Result<(), String> {
     let raw = unit.receipt().raw();
     let header = &unit.unit().header;
     let reject = |problem: &str| Err(problem.to_owned());
     if raw.stage != StageKind::Ready || header.stage != StageKind::Ready {
         return reject("the receipt is not for the Ready stage");
-    }
-    if raw.unit != unit.unit().digest() {
-        return reject("the receipt names another unit");
     }
     if raw.lir_version != crate::LIR_VERSION || header.lir_version != crate::LIR_VERSION {
         return reject("the unit is of another LIR version");

@@ -973,11 +973,12 @@ fn validate_plans(
     plans: &ContinuationPlans,
     certificates: bool,
 ) -> Result<(), ContinuationError> {
-    let index: BTreeMap<_, _> = units
+    let accepted: BTreeMap<_, _> = units
         .iter()
-        .map(|u| (u.unit().header.instance, u.unit()))
+        .map(|u| (u.unit().header.instance, *u))
         .collect();
-    let digests = PlanDigests::new(&index, inputs);
+    let index: BTreeMap<_, _> = accepted.iter().map(|(id, u)| (*id, u.unit())).collect();
+    let digests = PlanDigests::new(&accepted, inputs);
     // Suspension propagates from callees to callers over reverse call edges.
     let mut callers: BTreeMap<ContentHash, BTreeSet<ContentHash>> = BTreeMap::new();
     let mut suspends = BTreeSet::new();
@@ -2251,11 +2252,12 @@ pub(super) fn isolate_frame(
         .find(|u| u.unit().header.instance == id)
         .ok_or(ContinuationError::Body(id))?;
     let u = wrapper.unit();
-    let index: BTreeMap<_, _> = units
+    let accepted: BTreeMap<_, _> = units
         .iter()
-        .map(|u| (u.unit().header.instance, u.unit()))
+        .map(|u| (u.unit().header.instance, *u))
         .collect();
-    let digests = PlanDigests::new(&index, inputs);
+    let index: BTreeMap<_, _> = accepted.iter().map(|(id, u)| (*id, u.unit())).collect();
+    let digests = PlanDigests::new(&accepted, inputs);
     if plan.body != id || plan.digest != digests.unit(u) {
         return Err(ContinuationError::Body(id));
     }

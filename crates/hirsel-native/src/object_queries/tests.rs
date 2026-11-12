@@ -33,8 +33,11 @@ fn product(store: &dyn ResultStore, s: &str) -> ProductRef {
     fixture_product(store, Address(hash(s)), Action(hash(s)), input(store, s))
 }
 fn key(name: &str) -> CodegenKey {
+    CodegenKey::new(spec(name))
+}
+fn spec(name: &str) -> CodegenSpec {
     let types = hirsel_types::TypeInterner::new(None);
-    CodegenKey {
+    CodegenSpec {
         owner: InstanceAddress {
             instance: hirsel_layout::instance::InstanceKey::new(
                 &hirsel_syntax::DefPath::core(name),
@@ -96,8 +99,11 @@ fn inputs(store: &dyn ResultStore, fragments: Vec<FragmentProduct>) -> LinkInput
     }
 }
 fn link_key() -> LinkKey {
-    LinkKey {
-        roots: vec![key("main").owner].into(),
+    LinkKey::new(link_spec())
+}
+fn link_spec() -> LinkSpec {
+    LinkSpec {
+        roots: vec![spec("main").owner].into(),
         target: object().target,
         linker_options: hash("linker"),
     }
@@ -105,11 +111,13 @@ fn link_key() -> LinkKey {
 
 #[test]
 fn addresses_cover_every_option_and_canonical_roots() {
+    // Each key's address is held from construction: a key built from a spec
+    // that differs on any axis must hold a different address.
     let original = key("main");
     for axis in 0..9 {
-        let mut changed = original.clone();
+        let mut changed = spec("main");
         match axis {
-            0 => changed.owner = key("other").owner,
+            0 => changed.owner = spec("other").owner,
             1 => changed.owner.target_abi = hash("target2"),
             2 => changed.owner.policy = hash("VerifyOff"),
             3 => changed.backend = "cranelift".into(),
@@ -117,23 +125,30 @@ fn addresses_cover_every_option_and_canonical_roots() {
             5 => changed.target_features = hash("features2"),
             6 => changed.profile_options = hash("release"),
             7 => changed.runtime_abi = hash("abi2"),
-            8 => changed.owner.instance = key("other").owner.instance,
+            8 => changed.owner.instance = spec("other").owner.instance,
             _ => unreachable!(),
         }
-        assert_ne!(original.address(), changed.address(), "axis {axis}");
+        assert_ne!(
+            original.address(),
+            CodegenKey::new(changed).address(),
+            "axis {axis}"
+        );
     }
-    let mut a = link_key();
+    let mut a = link_spec();
     let mut roots = a.roots.to_vec();
-    roots.push(key("other").owner);
+    roots.push(spec("other").owner);
     a.roots = roots.into();
     let mut b = a.clone();
     Arc::make_mut(&mut b.roots).reverse();
-    assert_eq!(a.address(), b.address());
+    let held = LinkKey::new(a.clone()).address();
+    assert_eq!(held, LinkKey::new(b.clone()).address());
     b.target = hash("different target");
-    assert_ne!(a.address(), b.address());
+    assert_ne!(held, LinkKey::new(b).address());
     b = a.clone();
     b.linker_options = hash("different linker");
-    assert_ne!(a.address(), b.address());
+    assert_ne!(held, LinkKey::new(b).address());
+    // A link key over fewer roots is a different input, not the held one.
+    assert_ne!(held, link_key().address());
 }
 
 #[test]
@@ -185,8 +200,10 @@ fn optimizer_body_reads_invalidate_release_but_not_ordinary_debug_calls() {
     let debug = key("caller");
     let ordinary = ready(&store);
     let d = codegen(&store, &debug, &ordinary, || Ok(object())).unwrap();
-    let mut release = debug.clone();
-    release.profile_options = hash("release");
+    let release = CodegenKey::new(CodegenSpec {
+        profile_options: hash("release"),
+        ..spec("caller")
+    });
     let mut copied = ordinary.clone();
     copied.optimizer_reads = vec![product(&store, "callee before")];
     let r = codegen(&store, &release, &copied, || Ok(object())).unwrap();
@@ -414,16 +431,17 @@ fn static_foreign_launch_runtime_and_linker_changes_invalidate() {
     let first = link(&store, &key, &original, &mut compute).unwrap();
     for axis in 0..5 {
         let mut changed = original.clone();
-        let mut changed_key = key.clone();
+        let mut changed_spec = link_spec();
         let next = input(&store, &format!("manifest-{axis}"));
         match axis {
             0 => changed.static_manifest = next,
             1 => changed.foreign_inputs.push(next),
             2 => changed.launch_manifest = next,
             3 => changed.runtime_archives[0] = next,
-            4 => changed_key.linker_options = hash("new linker"),
+            4 => changed_spec.linker_options = hash("new linker"),
             _ => unreachable!(),
         }
+        let changed_key = LinkKey::new(changed_spec);
         let after = link(&store, &changed_key, &changed, &mut compute).unwrap();
         assert_ne!(first.product.action, after.product.action, "axis {axis}");
     }

@@ -18,8 +18,17 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+/// A Codegen query key. Immutable once built, so its address is computed once,
+/// in [`CodegenKey::new`], and every reader gets that held value.
 #[derive(Clone, Debug)]
 pub struct CodegenKey {
+    spec: CodegenSpec,
+    address: Address,
+}
+
+/// What a Codegen key names; readable through the key, never writable.
+#[derive(Clone, Debug)]
+pub struct CodegenSpec {
     pub owner: InstanceAddress,
     pub backend: String,
     pub backend_version: ContentHash,
@@ -35,8 +44,17 @@ pub struct FragmentProduct {
     pub summary: Reference,
 }
 
+/// A Link query key. Immutable once built, so its address (over every root's
+/// encoding) is computed once, in [`LinkKey::new`].
 #[derive(Clone, Debug)]
 pub struct LinkKey {
+    spec: LinkSpec,
+    address: Address,
+}
+
+/// What a Link key names; readable through the key, never writable.
+#[derive(Clone, Debug)]
+pub struct LinkSpec {
     pub roots: Arc<[InstanceAddress]>,
     pub target: ContentHash,
     /// Exact linker implementation, options, ABI and implicit toolchain inputs.
@@ -73,38 +91,60 @@ pub trait ObjectProducts {
 }
 
 impl CodegenKey {
-    pub fn address(&self) -> Address {
-        Address(hirsel_codec::digest(
+    pub fn new(spec: CodegenSpec) -> Self {
+        let address = Address(hirsel_codec::digest(
             "hirsel.codegen.address.v1",
             "Codegen",
             &CodegenAddress {
                 compiler: hirsel_compiler_identity::COMPILER_IDENTITY.to_vec(),
-                owner: instance_bytes(&self.owner),
-                backend: self.backend.clone(),
-                backend_version: self.backend_version,
-                target_features: self.target_features,
-                profile_options: self.profile_options,
-                runtime_abi: self.runtime_abi,
+                owner: instance_bytes(&spec.owner),
+                backend: spec.backend.clone(),
+                backend_version: spec.backend_version,
+                target_features: spec.target_features,
+                profile_options: spec.profile_options,
+                runtime_abi: spec.runtime_abi,
             },
-        ))
+        ));
+        Self { spec, address }
+    }
+    pub fn address(&self) -> Address {
+        self.address
+    }
+}
+
+impl std::ops::Deref for CodegenKey {
+    type Target = CodegenSpec;
+    fn deref(&self) -> &CodegenSpec {
+        &self.spec
     }
 }
 
 impl LinkKey {
-    pub fn address(&self) -> Address {
-        let mut roots: Vec<_> = self.roots.iter().map(instance_bytes).collect();
+    pub fn new(spec: LinkSpec) -> Self {
+        let mut roots: Vec<_> = spec.roots.iter().map(instance_bytes).collect();
         roots.sort();
         roots.dedup();
-        Address(hirsel_codec::digest(
+        let address = Address(hirsel_codec::digest(
             "hirsel.link.address.v1",
             "Link",
             &LinkAddress {
                 compiler: hirsel_compiler_identity::COMPILER_IDENTITY.to_vec(),
                 roots,
-                target: self.target,
-                linker_options: self.linker_options,
+                target: spec.target,
+                linker_options: spec.linker_options,
             },
-        ))
+        ));
+        Self { spec, address }
+    }
+    pub fn address(&self) -> Address {
+        self.address
+    }
+}
+
+impl std::ops::Deref for LinkKey {
+    type Target = LinkSpec;
+    fn deref(&self) -> &LinkSpec {
+        &self.spec
     }
 }
 

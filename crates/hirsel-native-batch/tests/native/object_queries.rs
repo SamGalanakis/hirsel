@@ -236,14 +236,14 @@ fn actual_ready_fixture_emits_links_restores_and_exits_on_both_backends() {
                         std::fs::read(path).map_err(|error| error.to_string())
                     },
                 );
-                let key = CodegenKey {
+                let key = CodegenKey::new(CodegenSpec {
                     owner: address.clone(),
                     backend: backend.name().into(),
                     backend_version: hash(&crate::llvm_version()),
                     target_features: hash("default target features"),
                     profile_options: hash(&format!("{opt:?},debug=true")),
                     runtime_abi: hash("current ABI"),
-                };
+                });
                 let cold = queries.codegen(&key).unwrap();
                 let warm = queries.codegen(&key).unwrap();
                 assert_eq!(cold.product, warm.product);
@@ -261,11 +261,11 @@ fn actual_ready_fixture_emits_links_restores_and_exits_on_both_backends() {
                     store_link_input(link_store.as_ref(), &std::fs::read(archive).unwrap())
                         .unwrap(),
                 ];
-                let key = LinkKey {
+                let key = LinkKey::new(LinkSpec {
                     roots: vec![address.clone()].into(),
                     target: program.target.digest(),
                     linker_options: hash("actual pinned lld+kit fixture"),
-                };
+                });
                 let cold = queries.link(&key, &manifest).unwrap();
                 let warm = queries.link(&key, &manifest).unwrap();
                 assert_eq!(cold.product, warm.product);

@@ -21,7 +21,6 @@
 //!
 //! [`validate`] recomputes every plan with its own analyses: a plan imported
 //! from a cache or another partition is never trusted by its identity alone.
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use hirsel_core_contract::Passing;
@@ -292,35 +291,38 @@ pub struct PlanInputs<'a> {
 
 /// Digests of the immutable inputs to one planning or validation pass.
 /// Import validation constructs its own set instead of trusting the producer's.
+/// Unit digests are the ones each unit's validator sealed with it: the planned
+/// index holds exactly these accepted units, so nothing is encoded again.
 struct PlanDigests<'a> {
-    units: &'a BTreeMap<ContentHash, &'a LirUnit<Ready>>,
-    digests: RefCell<BTreeMap<*const LirUnit<Ready>, (&'a LirUnit<Ready>, ContentHash)>>,
+    units: &'a BTreeMap<ContentHash, &'a ValidatedUnit<Ready>>,
     table: ContentHash,
     target: ContentHash,
 }
 
 impl<'a> PlanDigests<'a> {
-    fn new(units: &'a BTreeMap<ContentHash, &'a LirUnit<Ready>>, inputs: &PlanInputs<'_>) -> Self {
+    fn new(
+        units: &'a BTreeMap<ContentHash, &'a ValidatedUnit<Ready>>,
+        inputs: &PlanInputs<'_>,
+    ) -> Self {
         Self {
             units,
-            digests: RefCell::new(BTreeMap::new()),
             table: inputs.table.digest(),
             target: inputs.target.digest(),
         }
     }
 
-    fn unit(&self, unit: &'a LirUnit<Ready>) -> ContentHash {
-        self.digests
-            .borrow_mut()
-            .entry(std::ptr::from_ref(unit))
-            .or_insert_with(|| (unit, unit.digest()))
-            .1
+    /// The sealed digest of a planned body, which is always in the index.
+    fn unit(&self, unit: &LirUnit<Ready>) -> ContentHash {
+        self.units
+            .get(&unit.header.instance)
+            .expect("a planned body is one of the accepted units")
+            .digest()
     }
 
     fn callee(&self, id: &ContentHash) -> ContentHash {
         self.units
             .get(id)
-            .map(|unit| self.unit(unit))
+            .map(|unit| unit.digest())
             .unwrap_or_default()
     }
 }
@@ -1838,11 +1840,12 @@ impl ContinuationPlans {
     /// Plan every body that can reach a boundary. Partitioning cannot change
     /// a plan: it reads only the complete Ready bodies given here.
     pub fn build(units: &[&ValidatedUnit<Ready>], inputs: &PlanInputs<'_>) -> Self {
-        let index: BTreeMap<_, _> = units
+        let accepted: BTreeMap<_, _> = units
             .iter()
-            .map(|u| (u.unit().header.instance, u.unit()))
+            .map(|u| (u.unit().header.instance, *u))
             .collect();
-        let digests = PlanDigests::new(&index, inputs);
+        let index: BTreeMap<_, _> = accepted.iter().map(|(id, u)| (*id, u.unit())).collect();
+        let digests = PlanDigests::new(&accepted, inputs);
         let suspends = suspending(&index, inputs.table, inputs.classify, inputs.environments);
         let mut plans = BTreeMap::new();
         for id in &suspends {

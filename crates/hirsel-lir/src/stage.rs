@@ -249,6 +249,13 @@ impl<S: Stage> ValidatedUnit<S> {
     pub fn receipt(&self) -> &NativeReceipt {
         &self.receipt
     }
+    /// The unit's full content digest, computed once by the validator that
+    /// sealed it. The unit is immutable behind this proof, so it is exactly
+    /// `self.unit().digest()` without encoding the unit again. This holds only
+    /// while the proof offers no mutable access to its unit.
+    pub fn digest(&self) -> ContentHash {
+        self.receipt.raw.unit
+    }
     /// Give up the proof to transform the unit; the result must be revalidated.
     pub fn into_raw(self) -> LirUnit<S> {
         self.unit

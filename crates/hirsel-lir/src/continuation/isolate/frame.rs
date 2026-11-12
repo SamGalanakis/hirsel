@@ -26,11 +26,12 @@ impl IsolateProtocol {
         let cleanup = self
             .synchronous_cleanup(wrapper, inputs.table)
             .ok_or("isolate cleanup requires a certified entered protocol")?;
-        let index: BTreeMap<_, _> = units
+        let accepted: BTreeMap<_, _> = units
             .iter()
-            .map(|u| (u.unit().header.instance, u.unit()))
+            .map(|u| (u.unit().header.instance, *u))
             .collect();
-        let digests = PlanDigests::new(&index, inputs);
+        let index: BTreeMap<_, _> = accepted.iter().map(|(id, u)| (*id, u.unit())).collect();
+        let digests = PlanDigests::new(&accepted, inputs);
         let suspends = ordinary.plans.keys().copied().collect();
         // The source-proved begin is entered, not an opaque retry. This
         // classification is local to the inactive proposal; ordinary callers

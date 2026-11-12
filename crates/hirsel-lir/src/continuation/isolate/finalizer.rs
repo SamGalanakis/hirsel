@@ -25,18 +25,18 @@ impl FinalizerSource {
         layout: LayoutId,
         body: ContentHash,
     ) -> Result<Self, &'static str> {
-        let unit = units
+        let validated = units
             .iter()
             .find(|u| u.unit().header.instance == body)
-            .ok_or("missing finalizer source")?
-            .unit();
+            .ok_or("missing finalizer source")?;
+        let unit = validated.unit();
         let [borrowed_self] = unit.parameters.as_slice() else {
             return Err("finalizer source parameter count");
         };
         let source = Self {
             layout,
             body,
-            digest: unit.digest(),
+            digest: validated.digest(),
             abi: unit.header.abi,
             borrowed_self: *borrowed_self,
         };
@@ -55,13 +55,13 @@ impl FinalizerSource {
             .layout(self.layout)
             .ok_or("unknown finalizer layout")?;
         let declared = record.finalizer.as_ref().ok_or("layout has no finalizer")?;
-        let unit = units
+        let validated = units
             .iter()
             .find(|u| u.unit().header.instance == self.body)
-            .ok_or("unavailable finalizer body")?
-            .unit();
+            .ok_or("unavailable finalizer body")?;
+        let unit = validated.unit();
         if unit.header.definition != declared.definition
-            || unit.digest() != self.digest
+            || validated.digest() != self.digest
             || unit.header.abi != self.abi
             || !unit.captures.is_empty()
         {

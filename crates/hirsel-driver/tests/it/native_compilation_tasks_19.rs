@@ -752,23 +752,25 @@ fn run_program_case_with_frame(
                 hirsel_native::Backend::Cranelift,
             ]
             .map(|backend| {
-                let key = hirsel_native::object_queries::CodegenKey {
-                    owner: owner.clone(),
-                    backend: backend.name().into(),
-                    backend_version: ContentHash::of_parts(
-                        "fixture backend",
-                        [backend.name().as_bytes(), COMPILER_IDENTITY.as_slice()],
-                    ),
-                    target_features: target.digest(),
-                    profile_options: ContentHash::of_bytes(if optimized {
-                        b"optimized"
-                    } else {
-                        b"debug opt none"
-                    }),
-                    runtime_abi: ContentHash::of_bytes(
-                        &hirsel_lir::RUNTIME_ABI_VERSION.to_le_bytes(),
-                    ),
-                };
+                let key = hirsel_native::object_queries::CodegenKey::new(
+                    hirsel_native::object_queries::CodegenSpec {
+                        owner: owner.clone(),
+                        backend: backend.name().into(),
+                        backend_version: ContentHash::of_parts(
+                            "fixture backend",
+                            [backend.name().as_bytes(), COMPILER_IDENTITY.as_slice()],
+                        ),
+                        target_features: target.digest(),
+                        profile_options: ContentHash::of_bytes(if optimized {
+                            b"optimized"
+                        } else {
+                            b"debug opt none"
+                        }),
+                        runtime_abi: ContentHash::of_bytes(
+                            &hirsel_lir::RUNTIME_ABI_VERSION.to_le_bytes(),
+                        ),
+                    },
+                );
                 store.lookup_product(key.address()).unwrap()
             });
             if let Some(old) = &caller_fragments {

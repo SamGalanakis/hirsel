@@ -113,6 +113,17 @@ fn runtime50_resume_import_mutations_refused() {
             hirsel_native::continuation::plans(&program),
             "plans are deterministic"
         );
+        // Planning and import validation share one digest source, so a plan
+        // bound to another accepted body would validate; the body's fresh
+        // encoding is the independent check.
+        for plan in plans.plans.values() {
+            let body = program
+                .units
+                .iter()
+                .find(|u| u.unit().header.instance == plan.body)
+                .expect("a planned body is one of the program's units");
+            assert_eq!(plan.digest, body.unit().digest(), "{:?}", plan.body);
+        }
         let plan = child(&plans);
         let id = plan.body;
         // Both states retain the unique buffer and the sender as owners, at

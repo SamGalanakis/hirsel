@@ -47,6 +47,7 @@ fn pressure(reclaim_idle: bool) {
                 budget.clone(),
                 RequestLimits {
                     runtime_bytes: 160 << 20,
+                    loader_bytes: 32 << 20,
                     snapshot_bytes: 32 << 20,
                     transport_bytes: 8 << 20,
                 },
@@ -69,6 +70,7 @@ fn pressure(reclaim_idle: bool) {
             budget.clone(),
             RequestLimits {
                 runtime_bytes: 192 << 20,
+                loader_bytes: 64 << 20,
                 snapshot_bytes: 64 << 20,
                 transport_bytes: 16 << 20,
             },
@@ -139,6 +141,7 @@ fn retained_checked_products_results_release_their_graph_admission() {
         };
         let limits = RequestLimits {
             runtime_bytes: 160 << 20,
+            loader_bytes: 32 << 20,
             snapshot_bytes: 32 << 20,
             transport_bytes: 8 << 20,
         };

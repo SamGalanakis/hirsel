@@ -151,7 +151,7 @@ impl GraphBudget {
     ) -> Result<LoadingAdmission, ToolError> {
         let fits_alone = limits
             .runtime_bytes
-            .checked_add(limits.snapshot_bytes)
+            .checked_add(limits.loader_bytes)
             .and_then(|bytes| bytes.checked_add(limits.transport_bytes))
             .and_then(|bytes| bytes.checked_add(native_transport))
             .is_some_and(|bytes| bytes <= self.budget.limit());
@@ -615,6 +615,7 @@ mod tests {
         let budget = hirsel_engine_admission::ProcessBudget::new(8320);
         let limits = RequestLimits {
             runtime_bytes: 64,
+            loader_bytes: 64,
             snapshot_bytes: 64,
             transport_bytes: 8192,
         };
@@ -652,6 +653,7 @@ mod tests {
     fn loading_admission_transfers_charge_and_holds_failed_diagnostic_sources() {
         let limits = RequestLimits {
             runtime_bytes: 40,
+            loader_bytes: 40,
             snapshot_bytes: 40,
             transport_bytes: 20,
         };
@@ -764,6 +766,7 @@ mod tests {
             .begin(
                 RequestLimits {
                     runtime_bytes: 20,
+                    loader_bytes: 40,
                     snapshot_bytes: 40,
                     transport_bytes: 0,
                 },
@@ -845,6 +848,7 @@ mod tests {
         let create = |owner: &GraphBudget, request: &CompileRequest| {
             let limits = RequestLimits {
                 runtime_bytes: bytes,
+                loader_bytes: 2,
                 snapshot_bytes: 2,
                 transport_bytes: 0,
             };
@@ -947,6 +951,7 @@ mod tests {
                         let loading = owner.begin(
                             RequestLimits {
                                 runtime_bytes: bytes,
+                                loader_bytes: 2,
                                 snapshot_bytes: 2,
                                 transport_bytes: 0,
                             },
@@ -1029,6 +1034,7 @@ fn native_transport_is_admitted_before_source_work_and_transfers_without_a_secon
     let owner = GraphBudget::shared(&budget);
     let limits = RequestLimits {
         runtime_bytes: 10,
+        loader_bytes: 50,
         snapshot_bytes: 50,
         transport_bytes: 10,
     };

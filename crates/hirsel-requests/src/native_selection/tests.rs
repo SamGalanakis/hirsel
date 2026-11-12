@@ -56,6 +56,7 @@ fn actual_native_selector_coalesces_build_and_bound_run_without_a_retained_contr
                 budget.clone(),
                 RequestLimits {
                     runtime_bytes: 512 << 20,
+                    loader_bytes: 256 << 20,
                     snapshot_bytes: 256 << 20,
                     transport_bytes: 32 << 20,
                 },

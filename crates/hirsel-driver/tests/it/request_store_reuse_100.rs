@@ -100,6 +100,7 @@ fn selected_request_keeps_one_read_epoch_and_releases_it_before_retained_outputs
             hirsel_engine_admission::ProcessBudget::new(1 << 30),
             RequestLimits {
                 runtime_bytes: 256 << 20,
+                loader_bytes: 64 << 20,
                 snapshot_bytes: 64 << 20,
                 transport_bytes: 32 << 20,
             },
@@ -254,6 +255,7 @@ fn unfinished_equal_requests_have_independent_abort_owners_and_completed_graphs_
             hirsel_engine_admission::ProcessBudget::new(1 << 30),
             RequestLimits {
                 runtime_bytes: 256 << 20,
+                loader_bytes: 64 << 20,
                 snapshot_bytes: 64 << 20,
                 transport_bytes: 32 << 20,
             },

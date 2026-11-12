@@ -408,6 +408,7 @@ fn source_requests_discover_closed_instances_from_lazy_declarations() {
                 hirsel_engine_admission::ProcessBudget::new(512 << 20),
                 RequestLimits {
                     runtime_bytes: 256 << 20,
+                    loader_bytes: 128 << 20,
                     snapshot_bytes: 128 << 20,
                     transport_bytes: 64 << 20,
                 },

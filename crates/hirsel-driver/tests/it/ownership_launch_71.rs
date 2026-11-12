@@ -31,6 +31,7 @@ fn ownership_native_granted_args_record_and_replay_keep_the_selected_resource_li
             budget.clone(),
             RequestLimits {
                 runtime_bytes: 256 << 20,
+                loader_bytes: 64 << 20,
                 snapshot_bytes: 64 << 20,
                 transport_bytes: 32 << 20,
             },

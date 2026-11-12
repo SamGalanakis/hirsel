@@ -34,6 +34,7 @@ fn selector(budget: Arc<hirsel_engine_admission::ProcessBudget>) -> CompilerRequ
         budget,
         RequestLimits {
             runtime_bytes: 192 << 20,
+            loader_bytes: 16 << 20,
             snapshot_bytes: 16 << 20,
             transport_bytes: 16 << 20,
         },
@@ -329,6 +330,7 @@ fn run_selector(budget: Arc<hirsel_engine_admission::ProcessBudget>) -> Compiler
         budget,
         RequestLimits {
             runtime_bytes: 256 << 20,
+            loader_bytes: 64 << 20,
             snapshot_bytes: 64 << 20,
             transport_bytes: 32 << 20,
         },
@@ -515,6 +517,7 @@ fn selected_private_layout_cache_matches_cold_and_preserves_unread_reader_work()
                     budget.clone(),
                     RequestLimits {
                         runtime_bytes: 192 << 20,
+                        loader_bytes: 32 << 20,
                         snapshot_bytes: 32 << 20,
                         transport_bytes: 32 << 20,
                     },
@@ -687,6 +690,7 @@ fn selected_footprint_planner_admits_many_small_definitions_under_the_same_snaps
             budget.clone(),
             RequestLimits {
                 runtime_bytes: 192 << 20,
+                loader_bytes: 4 << 20,
                 snapshot_bytes: 4 << 20,
                 transport_bytes: 16 << 20,
             },

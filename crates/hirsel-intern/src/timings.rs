@@ -264,6 +264,10 @@ pub enum Count {
     SnapshotBudgetBytes,
     /// Largest share of it that request kept for its source and Run owners.
     SnapshotKeptBytes,
+    /// Peak bytes a request store charged against its transport grant.
+    TransportUsedBytes,
+    /// Times a request store evicted its read or verifier caches to admit a charge.
+    TransportEvictions,
     ValueDecodes,
     ValueDecodeBytes,
     ValueRebinds,
@@ -316,7 +320,7 @@ pub enum Count {
 
 impl Count {
     /// Every count, in declaration order.
-    pub const ALL: [Count; 92] = [
+    pub const ALL: [Count; 94] = [
         Count::Definitions,
         Count::Units,
         Count::VRuns,
@@ -370,6 +374,8 @@ impl Count {
         Count::RuntimeChargedBytes,
         Count::SnapshotBudgetBytes,
         Count::SnapshotKeptBytes,
+        Count::TransportUsedBytes,
+        Count::TransportEvictions,
         Count::ValueDecodes,
         Count::ValueDecodeBytes,
         Count::ValueRebinds,
@@ -505,6 +511,8 @@ impl Count {
             Count::RuntimeChargedBytes => "query runtime charged bytes peak",
             Count::SnapshotBudgetBytes => "snapshot reservation bytes",
             Count::SnapshotKeptBytes => "snapshot kept bytes",
+            Count::TransportUsedBytes => "store transport used bytes peak",
+            Count::TransportEvictions => "store transport evictions",
         }
     }
 }

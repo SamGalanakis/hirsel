@@ -59,11 +59,18 @@ impl Admission {
                     used.checked_add(bytes)
                         .filter(|next| *next <= self.memory.bytes())
                 })
+                .inspect(|used| {
+                    hirsel_intern::timings::count_peak(
+                        hirsel_intern::timings::Count::TransportUsedBytes,
+                        used + bytes,
+                    )
+                })
                 .is_ok()
         };
         if reserve() {
             return true;
         }
+        hirsel_intern::timings::count(hirsel_intern::timings::Count::TransportEvictions);
         if let Some(reads) = self.reads.get().and_then(Weak::upgrade) {
             reads.evict();
             if reserve() {

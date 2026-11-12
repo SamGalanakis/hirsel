@@ -698,6 +698,7 @@ mod matrix {
                     hirsel_engine_admission::ProcessBudget::new(2 << 30),
                     super::requests::RequestLimits {
                         runtime_bytes: 512 << 20,
+                        loader_bytes: 64 << 20,
                         snapshot_bytes: 64 << 20,
                         transport_bytes: 256 << 20,
                     },

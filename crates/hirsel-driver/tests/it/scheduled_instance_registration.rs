@@ -1030,6 +1030,7 @@ fn source_requests_install_nested_instance_views_for_check_run_and_native_owners
                 budget.clone(),
                 RequestLimits {
                     runtime_bytes: 512 << 20,
+                    loader_bytes: 128 << 20,
                     snapshot_bytes: 128 << 20,
                     transport_bytes: 32 << 20,
                 },

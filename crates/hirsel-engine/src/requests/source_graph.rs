@@ -25,6 +25,11 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug)]
 pub struct RequestLimits {
     pub runtime_bytes: u64,
+    /// What a request holds before S0 for its loader view and front input
+    /// captures, which allocate before the plan charges them.
+    pub loader_bytes: u64,
+    /// The ceiling the snapshot plan sizes its partitions from. Installation
+    /// holds exactly the planned partitions, not this ceiling.
     pub snapshot_bytes: u64,
     pub transport_bytes: u64,
 }
@@ -37,11 +42,15 @@ pub fn host_budget() -> (&'static Arc<hirsel_engine_admission::ProcessBudget>, u
 }
 /// A request's executor holds the compiler stack of each query worker; a
 /// fan-out reserves its own workers' stacks while it runs (`jobs::map`).
+/// The loader grant is cap/16: S0's loader view measured 18-27 MB and all
+/// heap growth from S0 to the snapshot plan at most 64 MB on hello, Tasks,
+/// fresh std and LangArena at a 2 GiB cap (docs/building.md).
 pub fn host_limits(cap: u64) -> RequestLimits {
     RequestLimits {
         runtime_bytes: (AdmittedRuntime::WORKERS as u64)
             .saturating_mul(hirsel_intern::jobs::COMPILER_STACK_BYTES as u64)
             .saturating_add(cap / 16),
+        loader_bytes: cap / 16,
         snapshot_bytes: cap / 8,
         transport_bytes: cap / 32,
     }
@@ -62,9 +71,9 @@ pub struct GraphAdmission {
     pub native_transport: hirsel_engine_admission::MemoryReservation,
 }
 
-/// Charge the whole selected snapshot partition before S0 allocates a loader
-/// view. Partitioning transfers that existing charge to immutable producers;
-/// source maps returned on a loader failure keep their own charge as well.
+/// Charge the loader grant before S0 allocates a loader view. Finishing keeps
+/// exactly the planned partitions, reserving any shortfall; source maps
+/// returned on a loader failure keep their own charge as well.
 pub struct LoadingAdmission {
     runtime: hirsel_engine_admission::MemoryReservation,
     snapshot: hirsel_engine_admission::MemoryReservation,
@@ -94,7 +103,7 @@ impl LoadingAdmission {
     ) -> Result<Self, ToolError> {
         Ok(Self {
             runtime: reserve(limits.runtime_bytes).map_err(ToolError::Io)?,
-            snapshot: reserve(limits.snapshot_bytes).map_err(ToolError::Io)?,
+            snapshot: reserve(limits.loader_bytes).map_err(ToolError::Io)?,
             transport: reserve(limits.transport_bytes).map_err(ToolError::Io)?,
             native_transport: reserve(native_transport).map_err(ToolError::Io)?,
         })
@@ -126,17 +135,27 @@ impl LoadingAdmission {
         let _ = self.runtime.join(runtime);
         let _ = self.snapshot.join(snapshot);
     }
-    /// Keep the source and Run owners and release the rest of the loading
-    /// charge, which producers then reserve from as they hold it.
+    /// Keep exactly the source and Run owners: reserve what the loading
+    /// charge lacks and release the rest, which producers then reserve from
+    /// as they hold it.
     pub fn finish(mut self, plan: SnapshotPlan) -> Result<GraphAdmission, ToolError> {
         let refusal = || ToolError::Runtime("compiler snapshot footprint exceeds admission".into());
+        let kept = plan.source.checked_add(plan.run).ok_or_else(refusal)?;
         {
             use hirsel_intern::timings::{Count, count_peak};
             count_peak(Count::SnapshotBudgetBytes, self.snapshot.bytes());
-            count_peak(
-                Count::SnapshotKeptBytes,
-                plan.source.saturating_add(plan.run),
-            );
+            count_peak(Count::SnapshotKeptBytes, kept);
+        }
+        if let Some(shortfall) = kept
+            .checked_sub(self.snapshot.bytes())
+            .filter(|bytes| *bytes != 0)
+        {
+            let more = self
+                .snapshot
+                .budget()
+                .reserve(shortfall)
+                .map_err(|_| refusal())?;
+            let _ = self.snapshot.join(more);
         }
         let source = self.snapshot.split(plan.source).ok_or_else(refusal)?;
         let run = self.snapshot.split(plan.run).ok_or_else(refusal)?;
@@ -694,12 +713,14 @@ pub fn prepare_source_scope(
             errors,
         )
         .map_err(|error| instance_bootstrap_error(engine, error, errors))?;
-    let snapshot_bytes = lent.1.min(request.free());
-    host.readmit(loading, lent.0, snapshot_bytes)?;
+    // The plan's ceiling shrinks to what the budget can still give, as the
+    // loader grant does; finishing reserves the planned rest.
+    let free = request.free();
+    host.readmit(loading, lent.0, lent.1.min(free))?;
     Ok((
         Some(scope),
         RequestLimits {
-            snapshot_bytes,
+            snapshot_bytes: limits.snapshot_bytes.min(free),
             ..limits
         },
     ))
@@ -1545,6 +1566,37 @@ fn record_lower_work(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A request holds its loader grant through S0, then exactly its planned
+    /// partitions, whether the plan needs more than the grant or less.
+    #[test]
+    fn a_finished_loading_holds_exactly_its_planned_partitions() {
+        let budget = hirsel_engine_admission::ProcessBudget::new(1000);
+        let limits = RequestLimits {
+            runtime_bytes: 100,
+            loader_bytes: 50,
+            snapshot_bytes: 400,
+            transport_bytes: 10,
+        };
+        for (source, run) in [(30, 90), (5, 15)] {
+            let loading = LoadingAdmission::reserve(&budget, limits, 0).unwrap();
+            assert_eq!(budget.reserved(), 160);
+            let graph = loading.finish(SnapshotPlan { source, run }).unwrap();
+            assert_eq!((graph.source.bytes(), graph.run.bytes()), (source, run));
+            assert_eq!(budget.reserved(), 110 + source + run);
+        }
+        // A plan the budget cannot hold refuses instead of overdrawing it.
+        let loading = LoadingAdmission::reserve(&budget, limits, 0).unwrap();
+        assert!(
+            loading
+                .finish(SnapshotPlan {
+                    source: 500,
+                    run: 400
+                })
+                .is_err()
+        );
+        assert_eq!(budget.reserved(), 0);
+    }
 
     #[test]
     fn unavailable_registration_reports_its_phase_declaration_and_source_location() {

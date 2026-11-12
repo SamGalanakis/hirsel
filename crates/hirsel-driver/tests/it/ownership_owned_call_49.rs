@@ -114,6 +114,7 @@ fn source_calls_selected(
             budget.clone(),
             RequestLimits {
                 runtime_bytes: 256 << 20,
+                loader_bytes: 64 << 20,
                 snapshot_bytes: 64 << 20,
                 transport_bytes: 32 << 20,
             },

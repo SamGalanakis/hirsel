@@ -513,6 +513,17 @@ in what is free, so a busy process runs fewer workers instead of refusing. No wa
 is printed for this. Queries run one at a time on the compiler thread, so a request
 reserves one stack whatever `HIRSEL_JOBS` says.
 
+Before S0 loads its sources, a request holds a loader grant of a sixteenth of
+the cap (128 MiB at 2 GiB) for the loader view and front input captures, which
+allocate before anything charges them. At 2 GiB those measured 18–27 MB, and all
+heap growth up to the snapshot plan at most 64 MB, on hello, Tasks, fresh std
+and LangArena. The snapshot plan sizes its partitions under an eighth of the cap.
+Once planned, the request holds exactly those partitions: it reserves what the
+loader grant lacks and releases the rest. The `snapshot reservation bytes` and
+`snapshot kept bytes` timing counts show both. `store transport used bytes peak` and
+`store transport evictions` show how much of its transport grant a request store
+used, and how often it evicted cached reads to admit more.
+
 This follows Rust's fallible scoped-thread builder and explicit join contract
 ([Rust `scoped.rs:256–268,293–323`](https://github.com/rust-lang/rust/blob/a7c37f9f0ee5e93396106e9de20f4a86b4154e63/library/std/src/thread/scoped.rs#L256));
 the panic-payload controls follow

@@ -261,7 +261,7 @@ pub trait ResultStore: Send + Sync {
     /// The authenticated program-record domain of this operation's selected
     /// installation registrations (native rerun design §3). None for every
     /// provider without one: such an operation neither reads nor publishes B.
-    fn program_authority(&self) -> Option<hirsel_validate::programs::ProgramAuthority> {
+    fn program_authority(&self) -> Option<hirsel_artifact_store::programs::ProgramAuthority> {
         None
     }
     /// Bind optional local installation authority to this exact compiler.
@@ -1178,7 +1178,7 @@ impl ResultStore for MemStore {
     fn read_scope(&self) -> Option<Box<dyn Send + Sync>> {
         self.installed.as_ref()?.read_scope()
     }
-    fn program_authority(&self) -> Option<hirsel_validate::programs::ProgramAuthority> {
+    fn program_authority(&self) -> Option<hirsel_artifact_store::programs::ProgramAuthority> {
         self.installed.as_ref()?.program_authority()
     }
     fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {

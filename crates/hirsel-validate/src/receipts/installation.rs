@@ -36,8 +36,6 @@ type Header = (
 pub struct Registered {
     pub verifier: Arc<VerifierCache>,
     pub header: AuthenticatedHeader,
-    /// The program-record authority of this same registration.
-    pub authority: Authority,
 }
 /// The header association a registration authenticated. Only `registered`
 /// constructs one, so a reader that trusts an image lazily on its strength
@@ -47,55 +45,6 @@ pub struct AuthenticatedHeader(Header);
 impl AuthenticatedHeader {
     pub fn header(self) -> Header {
         self.0
-    }
-}
-/// One root's authenticated registration as an authority for program
-/// records (B). Constructed only by `Installation::rows`, after the
-/// registration's MAC, root, filesystem, verifier and current header checks
-/// hold, so holding one is proof that the registration authenticated.
-/// Its epoch is the registration generation and the verifier key's id:
-/// replacing or revoking the registration changes it, so every association
-/// made under the old epoch misses.
-#[derive(Clone)]
-pub struct Authority {
-    key: [u8; 32],
-    pub(super) directory: PathBuf,
-    root: PathBuf,
-    filesystem: (u64, u64),
-    generation: String,
-    epoch: ContentHash,
-}
-impl std::fmt::Debug for Authority {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Authority")
-            .field("root", &self.root)
-            .field("generation", &self.generation)
-            .field("epoch", &self.epoch)
-            .finish_non_exhaustive()
-    }
-}
-impl Authority {
-    pub fn epoch(&self) -> ContentHash {
-        self.epoch
-    }
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-    /// A MAC under this registration's key, bound to its root, filesystem
-    /// and generation as well as `payload`.
-    pub(super) fn mac(&self, payload: &[u8]) -> [u8; 32] {
-        let mut bound = Vec::with_capacity(payload.len() + 160);
-        for part in [
-            self.root.as_os_str().as_encoded_bytes(),
-            &self.filesystem.0.to_le_bytes(),
-            &self.filesystem.1.to_le_bytes(),
-            self.generation.as_bytes(),
-            payload,
-        ] {
-            bound.extend_from_slice(&(part.len() as u64).to_le_bytes());
-            bound.extend_from_slice(part);
-        }
-        mac(&self.key, &bound)
     }
 }
 /// Issuance is private to VerifierCache::publish_bytes. Imported associations
@@ -264,7 +213,7 @@ impl Installation {
         // adopt its own rows from it (see adopt.rs); nothing else reads it.
         let previous = Self::rows(&root, &state, verifier)
             .ok()
-            .map(|(rows, _, _)| rows);
+            .map(|(rows, _)| rows);
         let cache = Arc::new(VerifierCache(
             Backend::Hosted(rows.clone(), rows.clone(), previous),
             Mutex::default(),
@@ -345,9 +294,8 @@ impl Installation {
         verifier: ContentHash,
         local: Arc<VerifierCache>,
     ) -> Option<Registered> {
-        let (rows, header, authority) = Self::rows(root, state, verifier).ok()?;
+        let (rows, header) = Self::rows(root, state, verifier).ok()?;
         Some(Registered {
-            authority,
             verifier: Arc::new(VerifierCache(
                 Backend::Registered(local, rows),
                 Mutex::default(),
@@ -360,11 +308,7 @@ impl Installation {
     }
     /// The authenticated, read-only rows of the root's current registration,
     /// and the header association it authenticated.
-    fn rows(
-        root: &Path,
-        state: &Path,
-        verifier: ContentHash,
-    ) -> io::Result<(Arc<Rows>, Header, Authority)> {
+    fn rows(root: &Path, state: &Path, verifier: ContentHash) -> io::Result<(Arc<Rows>, Header)> {
         hirsel_intern::work::count(hirsel_intern::work::Counter::VerifierRegistrationReads);
         check_private(state)?;
         let root = root.canonicalize()?;
@@ -408,18 +352,6 @@ impl Installation {
             return Err(invalid());
         }
         let (address, action, reference) = registration.header;
-        let key: [u8; 32] = key.try_into().map_err(|_| invalid())?;
-        let authority = Authority {
-            epoch: ContentHash::of_parts(
-                "hirsel.program.authority-epoch.v1",
-                [registration.generation.as_bytes(), &Sha256::digest(key)[..]],
-            ),
-            key,
-            directory: directory.clone(),
-            root: root.clone(),
-            filesystem: registration.filesystem,
-            generation: registration.generation.clone(),
-        };
         Ok((
             Arc::new(Rows {
                 store: Store::new(directory.join("receipts")),
@@ -434,7 +366,6 @@ impl Installation {
                     reference,
                 },
             ),
-            authority,
         ))
     }
 }

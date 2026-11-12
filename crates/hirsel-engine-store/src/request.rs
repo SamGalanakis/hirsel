@@ -455,7 +455,7 @@ impl ResultStore for RequestStore {
     }
     /// The operation's own registrations: a platform record selected inside
     /// the request is keyed by them as one selected before it.
-    fn program_authority(&self) -> Option<hirsel_validate::programs::ProgramAuthority> {
+    fn program_authority(&self) -> Option<hirsel_artifact_store::programs::ProgramAuthority> {
         self.backend.program_authority()
     }
     fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {

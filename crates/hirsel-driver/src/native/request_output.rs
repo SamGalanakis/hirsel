@@ -81,7 +81,7 @@ impl<'a> Execution<'a> {
     /// is a miss: nothing has been launched or printed.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn recorded(
-        hit: &hirsel_validate::programs::ProgramHit,
+        hit: &hirsel_artifact_store::programs::ProgramHit,
         launcher: &'a crate::requests::HostLauncher,
         report: &'a [String],
         run: [u8; 32],

@@ -46,17 +46,16 @@ impl CompilerRequestsExt for Compiler {
                 "package precomputation requires V".into(),
             ));
         }
-        let installation = hirsel_validate::Installation::default_state().and_then(|state| {
-            hirsel_validate::Installation::begin(output, &state, self.identity()).ok()
-        });
-        let mut store = DirStore::installation(output.to_path_buf());
-        if let Some(installation) = &installation {
-            store = store.with_installation(installation);
-        } else {
-            // Even an unavailable private state directory must not make an
-            // existing producer-selected output root a source of V authority.
-            store = store.with_installation_verifier(std::sync::Arc::default());
-        }
+        let installation = hirsel_artifact_store::registration::Installation::default_state()
+            .and_then(|state| {
+                hirsel_artifact_store::registration::Installation::begin(
+                    output,
+                    &state,
+                    self.identity(),
+                )
+                .ok()
+            });
+        let store = DirStore::installation(output.to_path_buf());
         let store = std::sync::Arc::new(store);
         // Recording is on for exactly the work that publishes: everything
         // from here to the published header, on every thread it reaches.
@@ -155,12 +154,11 @@ fn installation_current(
     if compiler.installation_key(&replayed) != recorded.key {
         return false;
     }
-    hirsel_validate::Installation::default_state().is_some_and(|state| {
-        hirsel_validate::Installation::registered(
+    hirsel_artifact_store::registration::Installation::default_state().is_some_and(|state| {
+        hirsel_artifact_store::registration::Installation::registered(
             output,
             &state,
             compiler.identity(),
-            std::sync::Arc::default(),
         )
         .is_some()
     })

@@ -275,7 +275,7 @@ impl ResultStore for ScratchStore {
         self.selected.verifier()
     }
     /// Scratch transport keeps the selected store's registration domain.
-    fn program_authority(&self) -> Option<hirsel_validate::programs::ProgramAuthority> {
+    fn program_authority(&self) -> Option<hirsel_artifact_store::programs::ProgramAuthority> {
         self.selected.program_authority()
     }
     fn get(&self, key: &EntryKey) -> Option<Bytes> {

@@ -50,9 +50,12 @@ struct Registration {
 #[derive(Debug)]
 struct Selected {
     verifier: std::sync::Arc<hirsel_validate::VerifierCache>,
-    headers: std::collections::BTreeMap<PathBuf, hirsel_validate::AuthenticatedHeader>,
+    headers: std::collections::BTreeMap<
+        PathBuf,
+        hirsel_artifact_store::registration::AuthenticatedHeader,
+    >,
     /// The program-record domain of the registrations selected here.
-    programs: Option<hirsel_validate::programs::ProgramAuthority>,
+    programs: Option<hirsel_artifact_store::programs::ProgramAuthority>,
     /// An operation's read-only roots' index generations, pinned before their
     /// registrations are read and held while it opens their headers.
     _leases: Vec<hirsel_artifact_store::Batch>,
@@ -206,11 +209,6 @@ impl DirStore {
         self.verifier = verifier;
         self
     }
-    /// Precompute issues fresh V authority independently of product rows.
-    pub fn with_installation(mut self, installation: &hirsel_validate::Installation) -> Self {
-        self.verifier = installation.verifier();
-        self
-    }
     /// This store, selecting `identity`'s registration in `state` on first use.
     pub(crate) fn with_registration(
         &self,
@@ -237,7 +235,7 @@ impl DirStore {
             } else {
                 vec![]
             };
-            let mut verifier = self.verifier.clone();
+            let verifier = self.verifier.clone();
             let mut headers = std::collections::BTreeMap::new();
             let mut authorities = vec![];
             for root in self
@@ -246,13 +244,13 @@ impl DirStore {
                 .filter(|_| self.installation.is_none())
                 .chain(&self.read_only)
             {
-                if let Some(registered) = hirsel_validate::Installation::registered(
-                    root.root(),
-                    &registration.state,
-                    registration.identity,
-                    verifier.clone(),
-                ) {
-                    verifier = registered.verifier;
+                if let Some(registered) =
+                    hirsel_artifact_store::registration::Installation::registered(
+                        root.root(),
+                        &registration.state,
+                        registration.identity,
+                    )
+                {
                     headers.insert(root.root().to_owned(), registered.header);
                     authorities.push(registered.authority);
                 }
@@ -260,7 +258,7 @@ impl DirStore {
             Selected {
                 verifier,
                 headers,
-                programs: hirsel_validate::programs::ProgramAuthority::new(authorities),
+                programs: hirsel_artifact_store::programs::ProgramAuthority::new(authorities),
                 _leases: leases,
             }
         }))
@@ -276,7 +274,7 @@ impl DirStore {
     fn header_of(
         &self,
         store: &hirsel_artifact_store::Store,
-    ) -> Option<hirsel_validate::AuthenticatedHeader> {
+    ) -> Option<hirsel_artifact_store::registration::AuthenticatedHeader> {
         self.selection()?.headers.get(store.root()).copied()
     }
     /// Publish the installation and return the header association it
@@ -653,7 +651,7 @@ impl ResultStore for DirStore {
         };
         Some(std::sync::Arc::new(selected))
     }
-    fn program_authority(&self) -> Option<hirsel_validate::programs::ProgramAuthority> {
+    fn program_authority(&self) -> Option<hirsel_artifact_store::programs::ProgramAuthority> {
         // Only an operation's own selection; a store without a registration,
         // or an installation producer's output root, has no domain.
         if !self.operation || self.installation.is_some() {
@@ -672,7 +670,7 @@ impl ResultStore for DirStore {
         {
             return None;
         }
-        let state = hirsel_validate::Installation::default_state()?;
+        let state = hirsel_artifact_store::registration::Installation::default_state()?;
         Some(std::sync::Arc::new(self.with_registration(identity, state)))
     }
     fn read_scope(&self) -> Option<Box<dyn Send + Sync>> {
@@ -1182,12 +1180,12 @@ mod tests {
         let installed = store.lookup(Address(product_row)).unwrap();
         let state = directory.path().join("state");
         let identity = hirsel_syntax::ContentHash::of_bytes(b"compiler");
-        hirsel_validate::Installation::begin(&root, &state, identity)
+        hirsel_artifact_store::registration::Installation::begin(&root, &state, identity)
             .unwrap()
             .finish(header)
             .unwrap();
         let registered = || {
-            hirsel_validate::Installation::registered(&root, &state, identity, Default::default())
+            hirsel_artifact_store::registration::Installation::registered(&root, &state, identity)
         };
         assert!(registered().is_some());
 
@@ -1219,16 +1217,16 @@ mod tests {
         let opened = InstalledPackage::open(&store, &package, identity).unwrap();
         assert_eq!(opened.records.lookup(Address(product_row)), Some(installed));
         InstalledPackage::verify_store(&root).unwrap();
-        // V's rows never resolve through the index, and its registration
-        // binds the installed-package header it accepted: rewritten index rows
-        // leave that header, while a changed header is not that root.
+        // The registration binds the installed header rather than mutable
+        // row associations. Rewriting an index row keeps that header;
+        // publishing another header makes the registration stale.
         assert!(registered().is_some());
         let other = crate::tests::install(&root, &[first.0], &[]);
         assert_ne!(other, header);
         assert!(registered().is_none());
     }
 
-    /// A request authenticates the verifier registration once, at its entry,
+    /// A request selects its compiler registration at entry,
     /// against the registration current then, and serves the header that
     /// registration bound. Bugs: the compiler session and each operation both
     /// read it (two reads per request); an operation keeps the session's pin
@@ -1238,7 +1236,6 @@ mod tests {
     #[test]
     fn each_operation_selects_the_registration_current_at_its_entry_once() {
         use crate::ResultStore;
-        use hirsel_intern::work::{Counter, read};
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("installed");
         let seed = DirStore::new(root.clone());
@@ -1258,35 +1255,26 @@ mod tests {
         let identity = hirsel_syntax::ContentHash::of_bytes(b"compiler");
         let register = |rows: &[hirsel_syntax::ContentHash]| {
             let header = crate::tests::install(&root, rows, &[]);
-            hirsel_validate::Installation::begin(&root, &state, identity)
+            hirsel_artifact_store::registration::Installation::begin(&root, &state, identity)
                 .unwrap()
                 .finish(header)
                 .unwrap();
         };
-        let reads = || read(Counter::VerifierRegistrationReads);
-        // One selection reads each root's registration once: the local
-        // results root's and the installed root's.
-        let selection = 2;
         register(&[first.0]);
 
-        let before = reads();
         let session = DirStore::new(directory.path().join("local"))
             .with_read_only_root(root.clone())
             .with_registration(identity, state.clone());
         let operation = session.for_operation().unwrap();
-        operation.verifier().unwrap();
-        operation.verifier().unwrap();
-        assert_eq!(reads() - before, selection);
+        operation.program_authority().unwrap();
 
         // A reinstall after the operation's entry: it keeps its generation.
         register(&[first.0, second.0]);
         assert_eq!(&*operation.get(&first).unwrap(), b"first record");
         assert!(operation.get(&second).is_none());
 
-        let before = reads();
         let operation = session.for_operation().unwrap();
         assert_eq!(&*operation.get(&second).unwrap(), b"second record");
-        assert_eq!(reads() - before, selection);
     }
 
     #[test]

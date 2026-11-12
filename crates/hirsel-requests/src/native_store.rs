@@ -88,7 +88,7 @@ impl ResultStore for NativeStore {
     }
     /// The object cache has no registration of its own; the operation's is
     /// the source's.
-    fn program_authority(&self) -> Option<hirsel_validate::programs::ProgramAuthority> {
+    fn program_authority(&self) -> Option<hirsel_artifact_store::programs::ProgramAuthority> {
         self.source.program_authority()
     }
     fn read_scope(&self) -> Option<Box<dyn Send + Sync>> {

@@ -75,13 +75,13 @@ fn registered_installation_and_deleted_private_state_preserve_diagnostics_and_ti
             let products = std::path::PathBuf::from(std::env::var_os("HIRSEL_PRODUCTS").unwrap());
             if mode == "install" {
                 COMPILER.precompute_package(&manifest, &products).unwrap();
-                let state = hirsel_validate::Installation::default_state().unwrap();
+                let state =
+                    hirsel_artifact_store::registration::Installation::default_state().unwrap();
                 assert!(
-                    hirsel_validate::Installation::registered(
+                    hirsel_artifact_store::registration::Installation::registered(
                         &products,
                         &state,
-                        COMPILER.identity(),
-                        std::sync::Arc::default()
+                        COMPILER.identity()
                     )
                     .is_some()
                 );

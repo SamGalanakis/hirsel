@@ -6,7 +6,6 @@ mod adopt;
 mod execution_product;
 mod installation;
 mod outputs;
-pub mod programs;
 use bincode::Options;
 pub use execution_product::{ExecutionProductBinding, ExecutionProductInputs};
 use hirsel_artifact_store::{Action, Address, Domain, Store};
@@ -14,7 +13,7 @@ use hirsel_span::Anchor;
 use hirsel_syntax::{ContentHash, DefPath, PackageId};
 use hirsel_tir::Definition;
 use hirsel_types::TypeInterner;
-pub use installation::{AuthenticatedHeader, Authority, Installation, Registered};
+pub use installation::{AuthenticatedHeader, Installation, Registered};
 pub use outputs::{
     SourceInvocation, StoredDefinitionOutput, VerifiedDefinitionOutput, VerifiedInvocations,
 };

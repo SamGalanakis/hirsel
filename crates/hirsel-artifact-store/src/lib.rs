@@ -1700,3 +1700,6 @@ fn verified_container(
         payload.with_reference(reference)
     })
 }
+
+pub mod programs;
+pub mod registration;

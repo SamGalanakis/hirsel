@@ -622,7 +622,7 @@ fn a_platform_record_is_reused_until_switched_off_aged_or_shown_wrong() {
 }
 
 /// A registration whose authority keys this proof's platform records.
-fn registered(directory: &Path) -> hirsel_validate::programs::ProgramAuthority {
+fn registered(directory: &Path) -> hirsel_artifact_store::programs::ProgramAuthority {
     use hirsel_artifact_store::{Action, Address, Association, Domain, Store};
     let root = directory.join("registered");
     let state = directory.join("registration-state");
@@ -640,13 +640,14 @@ fn registered(directory: &Path) -> hirsel_validate::programs::ProgramAuthority {
         .unwrap();
     let address = Address(ContentHash::of_bytes(b"ordinary"));
     let action = Action(ContentHash::default());
-    let install = hirsel_validate::Installation::begin(&root, &state, verifier).unwrap();
+    let install =
+        hirsel_artifact_store::registration::Installation::begin(&root, &state, verifier).unwrap();
     store.associate(address, action, reference).unwrap();
     install
         .finish((address, Association { action, reference }))
         .unwrap();
     let registered =
-        hirsel_validate::Installation::registered(&root, &state, verifier, Default::default())
+        hirsel_artifact_store::registration::Installation::registered(&root, &state, verifier)
             .unwrap();
-    hirsel_validate::programs::ProgramAuthority::new(vec![registered.authority]).unwrap()
+    hirsel_artifact_store::programs::ProgramAuthority::new(vec![registered.authority]).unwrap()
 }

@@ -1005,7 +1005,7 @@ type Records = Result<RecordPlace, String>;
 #[derive(Clone)]
 struct RecordPlace {
     directory: PathBuf,
-    authority: hirsel_validate::programs::ProgramAuthority,
+    authority: hirsel_artifact_store::programs::ProgramAuthority,
     clock: Clock,
 }
 

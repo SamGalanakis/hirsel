@@ -15,15 +15,15 @@
 //! unclassified `HIRSEL_*` that is set bypasses B.
 use crate::launch_binding;
 use crate::session::{Policy, Session};
+use hirsel_artifact_store::programs::{
+    Lookup, ProgramAuthority, ProgramHit, ProgramKind, ProgramOperation, ProgramRecord,
+    ProgramRecords, image_binding,
+};
 use hirsel_engine::{CheckCompletion, CheckOutput, QueryError, ToolError};
 use hirsel_intern::timings::{self, Count, Phase};
 use hirsel_native::{BuildOptions, NativeError};
 use hirsel_span::{AnchorCodec, SourceMap};
 use hirsel_syntax::ContentHash;
-use hirsel_validate::programs::{
-    Lookup, ProgramAuthority, ProgramHit, ProgramKind, ProgramOperation, ProgramRecord,
-    ProgramRecords, image_binding,
-};
 use std::path::{Path, PathBuf};
 
 /// How P treats one environment variable.
@@ -547,7 +547,7 @@ fn bypassed(reason: String) {
 /// published.
 fn compiler_guard(authority: &ProgramAuthority) -> Result<(Vec<u8>, Vec<u8>, Vec<Held>), String> {
     use std::os::unix::ffi::OsStrExt;
-    let cache = hirsel_validate::Installation::default_state()
+    let cache = hirsel_artifact_store::registration::Installation::default_state()
         .map(|state| state.join("compiler-digests"))
         .filter(|dir| {
             use std::os::unix::fs::DirBuilderExt;
@@ -936,7 +936,7 @@ fn publish(keyed: &Keyed, record: ProgramRecord<'_>, generation: u64) {
         ));
         return;
     }
-    if let Ok(hirsel_validate::programs::Published::Committed { .. }) =
+    if let Ok(hirsel_artifact_store::programs::Published::Committed { .. }) =
         keyed.records.publish(&record, generation)
     {
         timings::count(Count::ProgramRecordPublications);
@@ -2146,7 +2146,9 @@ mod tests {
     }
 
     /// A registration whose authority seals this test's digest entries.
-    fn registered(directory: &std::path::Path) -> hirsel_validate::programs::ProgramAuthority {
+    fn registered(
+        directory: &std::path::Path,
+    ) -> hirsel_artifact_store::programs::ProgramAuthority {
         use hirsel_artifact_store::{Action, Address, Association, Domain, Store};
         let root = directory.join("registered");
         let state = directory.join("registration-state");
@@ -2164,14 +2166,16 @@ mod tests {
             .unwrap();
         let address = Address(ContentHash::of_bytes(b"ordinary"));
         let action = Action(ContentHash::default());
-        let install = hirsel_validate::Installation::begin(&root, &state, verifier).unwrap();
+        let install =
+            hirsel_artifact_store::registration::Installation::begin(&root, &state, verifier)
+                .unwrap();
         store.associate(address, action, reference).unwrap();
         install
             .finish((address, Association { action, reference }))
             .unwrap();
         let registered =
-            hirsel_validate::Installation::registered(&root, &state, verifier, Default::default())
+            hirsel_artifact_store::registration::Installation::registered(&root, &state, verifier)
                 .unwrap();
-        hirsel_validate::programs::ProgramAuthority::new(vec![registered.authority]).unwrap()
+        hirsel_artifact_store::programs::ProgramAuthority::new(vec![registered.authority]).unwrap()
     }
 }

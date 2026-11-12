@@ -534,7 +534,7 @@ mod tests {
     ) -> impl Fn() -> Result<Arc<InstalledPackage>, String> {
         use crate::ResultStore;
         let state = directory.join("state");
-        hirsel_validate::Installation::begin(root, &state, compiler)
+        hirsel_artifact_store::registration::Installation::begin(root, &state, compiler)
             .unwrap()
             .finish(header)
             .unwrap();
@@ -758,12 +758,12 @@ mod tests {
         state: &Path,
         compiler: ContentHash,
         header: (Address, Association),
-    ) -> hirsel_validate::AuthenticatedHeader {
-        hirsel_validate::Installation::begin(root, state, compiler)
+    ) -> hirsel_artifact_store::registration::AuthenticatedHeader {
+        hirsel_artifact_store::registration::Installation::begin(root, state, compiler)
             .unwrap()
             .finish(header)
             .unwrap();
-        hirsel_validate::Installation::registered(root, state, compiler, Arc::default())
+        hirsel_artifact_store::registration::Installation::registered(root, state, compiler)
             .unwrap()
             .header
     }
@@ -1567,12 +1567,12 @@ impl InstalledPackage {
     /// open before any section is (`image::read`).
     fn read_header(
         store: &hirsel_artifact_store::Store,
-        header: Option<hirsel_validate::AuthenticatedHeader>,
+        header: Option<hirsel_artifact_store::registration::AuthenticatedHeader>,
         expected: Option<(&PackageId, ContentHash)>,
         admit: &mut dyn FnMut(u64) -> bool,
     ) -> Result<Self, String> {
         let (at, row) = header
-            .map(hirsel_validate::AuthenticatedHeader::header)
+            .map(hirsel_artifact_store::registration::AuthenticatedHeader::header)
             .or_else(|| Some((address(), store.lookup_owned(address())?)))
             .ok_or("missing installed package product")?;
         if at != address() {
@@ -1633,7 +1633,7 @@ impl InstalledPackage {
     /// allocation; see `read_header`.
     pub(crate) fn open_header(
         store: &hirsel_artifact_store::Store,
-        header: Option<hirsel_validate::AuthenticatedHeader>,
+        header: Option<hirsel_artifact_store::registration::AuthenticatedHeader>,
         package: &PackageId,
         compiler: ContentHash,
         admit: &mut dyn FnMut(u64) -> bool,
@@ -1651,7 +1651,7 @@ impl InstalledPackage {
     /// resolve only through this header, never through the root's index.
     pub(crate) fn open_records(
         store: &hirsel_artifact_store::Store,
-        header: Option<hirsel_validate::AuthenticatedHeader>,
+        header: Option<hirsel_artifact_store::registration::AuthenticatedHeader>,
     ) -> Result<Arc<InstalledRecords>, String> {
         let scope = store.batch();
         // An ordinary reader's records are not a request's to charge.

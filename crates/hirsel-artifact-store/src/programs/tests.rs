@@ -1,7 +1,6 @@
 use super::*;
-use crate::receipts::Installation;
-use hirsel_artifact_store::{Action, Address, Association as Header, Domain, Store};
-use std::sync::Arc;
+use crate::registration::Installation;
+use crate::{Action, Address, Association as Header, Domain, Store};
 
 struct Domain_ {
     _root: tempfile::TempDir,
@@ -46,8 +45,7 @@ impl Domain_ {
             .unwrap();
     }
     fn authority(&self) -> Option<ProgramAuthority> {
-        let registered =
-            Installation::registered(&self.root, &self.state, self.verifier, Arc::default())?;
+        let registered = Installation::registered(&self.root, &self.state, self.verifier)?;
         ProgramAuthority::new(vec![registered.authority])
     }
     fn records(&self) -> ProgramRecords {

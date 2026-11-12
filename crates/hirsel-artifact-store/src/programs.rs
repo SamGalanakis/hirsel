@@ -20,7 +20,7 @@
 //! Deferred detection: a hit opens H and D, and a run hit R. The executable is
 //! hashed as it is copied out; the absent A, O, I, E, M and X sections are never
 //! read.
-use super::installation::{
+use super::registration::{
     Authority, check_private, hex, invalid, private_directory, private_read, random,
 };
 use hirsel_syntax::ContentHash;
@@ -383,7 +383,7 @@ impl ProgramRecords {
         self.root.join("pins").join(hex(id))
     }
     fn gc_lock(&self) -> io::Result<fs::File> {
-        super::installation::private_lock(&self.root.join("gc.lock"))
+        super::registration::private_lock(&self.root.join("gc.lock"))
     }
     fn encode(&self, a: &Association) -> [u8; JOURNAL_BYTES] {
         let mut out = [0; JOURNAL_BYTES];
@@ -675,7 +675,7 @@ impl ProgramRecords {
         }
         crash_at!(AfterContent);
         // (3) One CAS commit on the address's generation journal.
-        let lock = super::installation::private_lock(
+        let lock = super::registration::private_lock(
             &self.journal(record.address).with_extension("lock"),
         )?;
         lock.lock()?;
@@ -887,7 +887,7 @@ impl ProgramHit {
     }
 }
 fn write_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    super::installation::private_write(path, bytes)?;
+    super::registration::private_write(path, bytes)?;
     synced(path);
     Ok(())
 }

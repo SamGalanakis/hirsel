@@ -1,42 +1,35 @@
-// Module `pool`: a generation-checked slot pool, built only from what MEM-19 allows:
-// opaque types, brands (MEM-18), checked 64-bit arithmetic, checked indexing of its own
-// list and its own resource cleanup (MEM-20). Field legend: API.md, "Reading a contract";
-// design: API.md, "Pool". Everything here is library code.
+// Module `pool`: a generational slot pool (Rust slotmap / generational-arena). Field legend:
+// API.md, "Reading a contract"; design: API.md, "Pool". Everything here is library code
+// over core list operations, checked 64-bit arithmetic and one core primitive, `Unique`
+// (P6 in SPEC-GAPS), which gives each pool its identity.
 //
 // Representation: `slots` is a List[Slot[T]] (24-byte header; storage capacity x
 // size(Slot[T]) with size(Slot[T]) = 8 + max(8 + size(T), 16)), charged like any list to
 // the limit where the pool was made (MEM-28). Vacant slots form an intrusive free list,
 // so removing never allocates. Each slot's generation starts at 0 and rises by one on
-// every removal; a slot whose generation reaches 2^64 - 1 is retired: never reused,
-// its storage kept until the pool is cleaned. Cleaning the pool cleans each live value
-// in slot order from the highest index down; `remove` hands the value (a resource
-// included) to the caller.
+// every removal; a slot whose generation reaches 2^64 - 1 is retired: never reused, its
+// storage kept until the pool is cleaned.
 //
-// Brands: `Id[T] of p` is checked at compile time against the pool place and at run time
-// by generation. A record stores it as `Id[T] of .pool`, also inside a sibling field's
-// type arguments (`Map[String, Id[Entry] of .pool]`, MEM-18). Links inside the pool's own
-// values are unbranded `Handle`s (MEM-19), turned back into views or Ids by `resolve` and
-// `id`. Outside this module a `mut Pool` cannot be assigned or replaced (MEM-18), so a
-// callee cannot swap the pool under its caller's Ids.
+// Checking: an Id is plain data, the pool's identity, a slot index and a generation. Every
+// access compares all three at run time and returns Error(Stale) on any mismatch. There
+// is no static brand, so an Id may be stored anywhere: in a local, a record, a Map's
+// values, or inside the pool's own values. Removal is explicit; cleaning the pool cleans
+// every live value in slot order from the highest index down.
 
-pub opaque type Pool[T] { slots: List[Slot[T]], free: u64, live: u64 }
+pub opaque type Pool[T] { me: Unique, slots: List[Slot[T]], free: u64, live: u64 }
 type Slot[T] = Occupied(u64, T) | Vacant(u64, u64)        // (generation, value | next free)
 
-/// A branded handle: valid only with the pool place it was issued by (MEM-18). Plain,
-/// 16 bytes. Assigning, replacing, moving or ending the pool's place ends it.
-pub opaque type Id[T]: plain + key { index: u64, generation: u64 }
+/// A handle to one value in one pool. Plain + key, 24 bytes. Equal Ids name the same slot
+/// of the same pool at the same generation.
+pub opaque type Id[T]: plain + key { pool: Unique, index: u64, generation: u64 }
 
-/// An unbranded handle, for links inside the pool's own values and for anything kept
-/// beyond the pool place's epoch (MEM-19): same bits as Id, checked by index and
-/// generation at each `resolve` or `id`. Plain + key, 16 bytes.
-pub opaque type Handle[T]: plain + key { index: u64, generation: u64 }
+/// Why an Id did not resolve. WrongPool: it was issued by another pool, or by this place
+/// before it was assigned a new pool. Removed: its value was removed (the slot may hold a
+/// newer value, or be vacant or retired).
+pub type Stale = WrongPool | Removed
 
-/// A live slot that its owner removes when cleaned (MEM-20). Its finalizer is
-/// `drop(s, mut p)`: it removes the slot and cleans the value; p must be neither frozen,
-/// lent nor moved wherever a SlotOwner may be cleaned.
-pub resource type SlotOwner[T] of p { id: Id[T] of p }
-
-/// An empty pool with no storage. Ex: `let mut p: pool.Pool[Entry] = pool.new()`
+/// An empty pool with no storage and a fresh identity (`unique.new`).
+/// Alloc: nothing. Ex: `let mut p: pool.Pool[Entry] = pool.new()`
 pub fn new[T]() -> Pool[T]
 
 /// An empty pool with storage for n slots: `list.with_capacity` of slots.
@@ -50,51 +43,31 @@ pub fn len[T](p: Pool[T]) -> u64
 /// Stores x in a vacant slot (the most recently vacated first) or a new one.
 /// Fails: Error((c, x)) when a new slot is needed and GROWTH is refused; p unchanged.
 /// Alloc: GROWTH of slots only when no slot is vacant. Cost: amortised O(1).
-/// Ex: `let id = pool.insert(mut l.pool, take entry)?`
-pub fn insert[T](mut p: Pool[T], take x: T) -> Result[Id[T] of p, (Capacity, T)]
+/// Ex: `let h = pool.insert(mut l.pool, take entry)?`
+pub fn insert[T](mut p: Pool[T], take x: T) -> Result[Id[T], (Capacity, T)]
 
-/// As insert, but the slot is owned: the returned SlotOwner removes it when cleaned.
-/// Fails: as insert. Ex: `let so = pool.insert_owned(mut p, string.from("a")?)?`
-pub fn insert_owned[T](mut p: Pool[T], take x: T) -> Result[SlotOwner[T] of p, (Capacity, T)]
+/// A view of h's value. Fails: Error(Stale). View: anchored to p; FREEZE p. Cost: O(1).
+/// Ex: `match pool.get(l.pool, h) { Ok(e) => string.byte_len(e.value), Error(_) => 0 }`
+pub fn get[T](p: Pool[T], h: Id[T]) -> Result[View[T], Stale] in p
 
-/// The Id a SlotOwner holds. Cost: O(1). Ex: `let id = pool.owned_id(so)`
-pub fn owned_id[T](s: SlotOwner[T] of p) -> Id[T] of p
+/// h's value copied out, or x when h is stale. Cost: O(1). Ex: `pool.get_or(b, i, 0)`
+pub fn get_or[T: plain](p: Pool[T], h: Id[T], x: T) -> T
 
-/// A view of id's value, or None when it is stale. View: anchored to p; FREEZE p.
-/// Cost: O(1). Ex: `match pool.get(l.pool, id) { Some(e) => string.byte_len(e.value), None => 0 }`
-pub fn get[T](p: Pool[T], id: Id[T] of p) -> Option[View[T]] in p
+/// Whether h resolves. Cost: O(1). Ex: `pool.contains(p, h)`
+pub fn contains[T](p: Pool[T], h: Id[T]) -> bool
 
-/// id's value copied out, or x when stale. Cost: O(1). Ex: `pool.get_or(b, i, 0)`
-pub fn get_or[T: plain](p: Pool[T], id: Id[T] of p, x: T) -> T
+/// Calls f with h's value as an owned local and puts the value back; returns f's result.
+/// The value is taken out with `list.set` of a Vacant placeholder and installed again
+/// after f, so no mutable view is needed. f is a `scoped fn` (OWN-21): it may view or
+/// lend `mut` the caller's locals but not p, which is lent for the call. If f fails, the
+/// failure propagates, the value is cleaned with the local, and the slot is left vacant at
+/// a new generation, so h is stale from then on.
+/// Fails: Error(Stale) without calling f. Alloc: nothing. Cost: O(1) plus f.
+/// Ex: `pool.update(mut l.pool, h, fn(mut e: Entry) { e.prev = None })?`
+pub fn update[T, R](mut p: Pool[T], h: Id[T], f: scoped fn(mut T) -> R) -> Result[R, Stale]
 
-/// Whether id is live. Cost: O(1). Ex: `pool.contains(p, id)`
-pub fn contains[T](p: Pool[T], id: Id[T] of p) -> bool
-
-/// Calls f with id's value as an owned local and puts the value back; returns Some of
-/// f's result, or None without calling f when id is stale. Library code: the value is
-/// taken out with `list.set` of a Vacant placeholder and installed again after f, so no
-/// mutable view is needed. f must not reach p (it is lent for the call). If f fails,
-/// the failure propagates and the value is cleaned with the local; the slot is left
-/// vacant and every handle to it is stale. Alloc: nothing. Cost: O(1) plus f.
-/// Ex: `pool.update(mut l.pool, id, fn(mut e: Entry) { e.prev = None })`
-pub fn update[T, R](mut p: Pool[T], id: Id[T] of p, f: scoped fn(mut T) -> R) -> Option[R]
-
-/// Removes id's value and returns it; the slot's generation rises by one, so every
-/// handle to it is stale from now on; at 2^64 - 1 the slot retires instead of joining the
-/// free list. None when stale, p unchanged. Alloc: nothing. Cost: O(1).
-/// Ex: `let old = pool.remove(mut l.pool, tail)`
-pub fn remove[T](mut p: Pool[T], id: Id[T] of p) -> Option[T]
-
-/// The unbranded form of id, for storing inside the pool's values. Cost: O(1).
-/// Ex: `let h = pool.handle(l.pool, head)`
-pub fn handle[T](p: Pool[T], id: Id[T] of p) -> Handle[T]
-
-/// A view of h's value, or None when h is stale (MEM-19's form). A Handle from another
-/// pool is caught only when its index or generation differs; brands keep pools apart,
-/// so store Handles only inside the pool that issued them. View: anchored to p; FREEZE p.
-/// Cost: O(1). Ex: `match e.next { Some(h) => pool.resolve(p, h), None => None }`
-pub fn resolve[T](p: Pool[T], h: Handle[T]) -> Option[View[T]] in p
-
-/// The branded Id for h, or None when h is stale; the form to use before `update` or
-/// `remove`. Cost: O(1). Ex: `let Some(next) = pool.id(l.pool, h) else { return Error(Broken) }`
-pub fn id[T](p: Pool[T], h: Handle[T]) -> Option[Id[T] of p]
+/// Removes h's value and returns it; the slot's generation rises by one, so every Id to
+/// it is stale from now on; at 2^64 - 1 the slot retires instead of joining the free
+/// list. Fails: Error(Stale), p unchanged. Alloc: nothing. Cost: O(1).
+/// Ex: `let old = pool.remove(mut l.pool, tail)?`
+pub fn remove[T](mut p: Pool[T], h: Id[T]) -> Result[T, Stale]

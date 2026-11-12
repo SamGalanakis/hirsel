@@ -34,7 +34,7 @@ where the shape was taken from and which rule forced each difference.
 | float | float.hirsel | | float parsing |
 | map | map.hirsel | (Map is core) | insertion-ordered hash map |
 | set | set.hirsel | Set | insertion-ordered hash set |
-| pool | pool.hirsel | Pool, Id, Handle, SlotOwner | generation-checked slot pool |
+| pool | pool.hirsel | Pool, Id, Stale | generation-checked slot pool |
 | dir | dir.hirsel | | directory operations on a Dir |
 | file | file.hirsel | Error, Lock, LockError | files and the OS lock |
 | stdout | stdout.hirsel | | standard output (core, restated) |
@@ -114,8 +114,8 @@ host is asked (`file.try_lock` makes its Lock before calling `host.try_lock`).
 - No operation grows a container the caller did not pass as `mut`. `file.read_into` fills only
   spare capacity and never grows `buf`, as `host.read` does.
 
-**Option for absence, Result for refusal.** `list.get`, `pool.get` and `pool.resolve` give
-`Option`: absence is a normal answer. `int.parse` gives `Result`: the error says why.
+**Option for absence, Result for refusal.** `list.get` and `map.get` give `Option`: absence is a
+normal answer. `int.parse` and `pool.get` give `Result`: the error says why.
 
 **Capability operations are library code over host primitives.** core.md lists the provider
 operations (CAP-5) as `host.*` and states that the standard library builds its capability modules
@@ -240,35 +240,37 @@ returns whether the key was new, and on refusal returns `(Capacity, K)`. A set i
 
 ## Pool
 
-**Shape.** This is a slotmap: `Pool[T] { slots: List[Slot[T]], free: u64, live: u64 }`, where
-`Slot[T] = Occupied(generation, T) | Vacant(generation, next_free)`.
+**Shape.** This is a slotmap: `Pool[T] { me: Unique, slots: List[Slot[T]], free: u64, live: u64 }`,
+where `Slot[T] = Occupied(generation, T) | Vacant(generation, next_free)`.
 - Vacant slots form an intrusive free list, so `remove` never allocates and `insert` reuses
   the most recently vacated slot first.
 - A slot's generation rises by one on each removal. A slot whose generation reaches 2^64 - 1 is
-  retired and never reused, so an old handle can never validate against a later occupant.
-- The pool is built only from what MEM-19 allows: opaque fields, brands, checked arithmetic,
-  checked indexing of its own list, and its own resource cleanup.
+  retired and never reused, so an old Id can never validate against a later occupant.
+  slotmap wraps 32-bit versions instead, which can alias.
 
-**Handles.**
-- `Id[T] of p` is branded (MEM-18). The checker ties it to the pool place `p` and its epoch, so an
-  id from one pool is refused at compile time on another. `pool.get` still checks the generation at
-  run time. A record stores it as `Id[T] of .pool`, also inside a sibling field's type arguments:
-  lru's index is `Map[String, Id[Entry] of .pool]`.
-- `Handle[T]` is the same 16 bytes without a brand. It is what a pool entry stores to link to
-  another entry (lru's prev and next, MEM-19) and what outlives the pool place's epoch (lru's saved
-  first handle). `pool.handle(p, id)` drops the brand. `pool.resolve(p, h)` gives MEM-19's
-  `Option[View[T]] in p`, and `pool.id(p, h)` gives `Option[Id[T] of p]`, the form `update` and
-  `remove` need.
-- Outside the pool module a `mut Pool` cannot be assigned or replaced as a whole (MEM-18), so a
-  callee cannot swap the pool under its caller's Ids.
+**One handle, checked at run time** (round-3 ruling: no static brands in the first version).
+`Id[T]` is plain data: the pool's identity, a slot index and a generation, 24 bytes, `plain + key`.
+Every access (`get`, `get_or`, `contains`, `update`, `remove`) compares all three and returns
+`Error(Stale)` on a mismatch, with `Stale = WrongPool | Removed`. Because an Id is plain, it is
+stored anywhere: lru's index is a `Map[String, pool.Id[Entry]]`, its entries link with
+`Option[pool.Id[Entry]]`, and its saved first handle is an Id. Dropping the pool cleans what is
+left; removal is explicit. There is no `of p`, no SlotOwner and no second handle type.
 
-**Update without a mutable view.** `pool.update(mut p, id, f)` takes the value out of its slot with
+**Pool identity needs one core primitive (P6).** A library cannot make a value unique within
+a run: there are no cells, no global state and no address facts. The pool asks core for
+`type Unique` (plain, `key`, 8 bytes, equality only, no order and no conversion to an integer)
+and `unique.new() -> Unique`, which never repeats within a run and allocates nothing. Equality
+only keeps the value unobservable apart from "same or not", so a task-schedule-dependent counter
+does not leak into output or replay. The pool also needs `list.with_capacity`, `len`, `get`,
+`push` and `set` (core) and checked 64-bit arithmetic; nothing else. Assigning a new pool to a
+place gives the place a new identity, so old Ids answer `WrongPool`. A `clone` of a pool
+(MEM-17) would copy the identity, so the original's Ids resolve in the copy to equal values, as
+in slotmap's `Clone`.
+
+**Update without a mutable view.** `pool.update(mut p, h, f)` takes the value out of its slot with
 `list.set` and a `Vacant` placeholder, calls `f` on the owned local, and installs it again. This is
 legal library code because the pool owns its slot list. If `f` fails, the value is cleaned with
 the local and the slot is left vacant at a new generation.
-
-**SlotOwner.** `pool.insert_owned(mut p, take x) -> Result[SlotOwner[T] of p, (Capacity, T)]`
-(MEM-20): a resource whose finalizer `drop(s, mut p)` removes the slot. `pool.owned_id` reads its Id.
 
 **Not in the seed:** `pool.clear` and pool iteration.
 
@@ -351,6 +353,8 @@ verdict on each of G1 to G18 and P1 to P4: `SPEC-GAPS.md`. Open after revision 2
 - **N6** core.md: "None of them admits"; budgets.md: a resource value charges 32 bytes. Change:
   say which applies to `host.open`, and whether a failed admission is an `IoError`.
 - **P5** No in-place map update. Change: add `map.set(mut m, k, take v) -> Result[V, V]`.
+- **P6** Pool identity. Change: core `type Unique` (plain, key, equality only) and
+  `unique.new() -> Unique`.
 - **G14** CAP-6 says the map hash "may" be keyed by a per-run seed. Change: "is keyed", so that
   HashDoS is ruled out rather than left to the engine.
 - **G7, G10, G12, G18** are intended gaps; the seed writes what revision 2 says to write instead.
@@ -372,11 +376,11 @@ Generated from the `.hirsel` files: module, operation count, how many are CORE, 
 | float | 2 | 0 | parse!, is_finite |
 | map | 7 | 5 | new*, len*, get*, contains, insert*, set!, remove* |
 | set | 5 | 0 | new, len, contains, insert, remove |
-| pool | 14 | 0 | new, with_capacity, len, insert, insert_owned, owned_id, get, get_or, contains, update, remove, handle, resolve, id |
+| pool | 9 | 0 | new, with_capacity, len, insert, get, get_or, contains, update, remove |
 | dir | 3 | 0 | create_dir, remove_all, create_temp |
 | file | 10 | 0 | open, read_into, write_all, close, read, read_string, write, remove, try_lock, unlock |
 | stdout | 1 | 1 | write* |
 | args | 2 | 2 | len*, get* |
 | channel | 5 | 5 | new*, sender*, send*, try_send*, receive* |
 | task | 4 | 4 | spawn*, join*, cancel*, check_cancel* |
-| **total** | **114** | **55** | 2 marked NEEDS CORE |
+| **total** | **109** | **55** | 2 marked NEEDS CORE |

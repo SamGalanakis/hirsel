@@ -100,8 +100,8 @@ pub fn reverse[T](mut xs: List[T])
 
 /// Sorts in place; `before(a, b)` returns Less when a goes first. Not stable.
 /// Pattern-defeating quicksort with a heapsort fallback (Rust sort_unstable).
-/// `before` is a `scoped fn` that does not wait and holds no authority (LANG-13); if it
-/// is not a total order, xs still holds each element exactly once, in an unspecified
+/// `before` is a `scoped fn` (OWN-21): it may view the caller's locals and does not wait;
+/// it does not escape the call. If it is not a total order, xs still holds each element exactly once, in an unspecified
 /// order. A failure inside `before` propagates with the same guarantee.
 /// Alloc: nothing. Cost: O(len log len) worst case.
 /// Ex: `list.sort(mut xs, fn(a: u64, b: u64) -> Order { int.compare(a, b) })`

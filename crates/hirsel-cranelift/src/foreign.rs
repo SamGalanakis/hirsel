@@ -184,12 +184,8 @@ impl FnEmitter<'_, '_, '_> {
                 self.em.inputs.target.c_convention,
             ));
         }
-        self.em.manifest_import(
-            name,
-            ObjectSymbolKind::Foreign,
-            Some(&symbol.definition),
-            Some(abi),
-        );
+        self.em
+            .manifest_import(name, ObjectSymbolKind::Foreign, Some(&symbol.definition));
         let function = self.em.import_function(name, &sig)?;
         let call_site = self.anchor_code(site.anchor)?;
         let site_value = self.u64c(call_site);

@@ -33,6 +33,8 @@ pub struct CaptureRecipe {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RootPlan {
+    /// The root unit's FnAbi, which its alternate entry keeps.
+    pub abi: crate::abi_types::FnAbiId,
     pub graph: ScalarGraph,
     pub recipe: CaptureRecipe,
     pub host: Option<HostReturnGraph>,
@@ -283,6 +285,7 @@ impl AheadPlan {
                     host.graph = graph.clone();
                 }
                 Ok(RootPlan {
+                    abi: unit.header.abi,
                     graph,
                     recipe,
                     host,

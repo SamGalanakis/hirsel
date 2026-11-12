@@ -196,15 +196,40 @@ fn layouts(target: &TargetSpec) -> LayoutTable {
 }
 
 fn object(target: &TargetSpec) -> (Vec<u8>, String) {
-    let table = layouts(target);
+    let mut table = layouts(target);
     let input = InputIdentity {
         interface_version: hirsel_lir::INTERFACE_VERSION,
         digest: ContentHash::of_bytes(b"probe"),
     };
+    let abi = FnAbi {
+        receipts: None,
+        nonretaining: Vec::new(),
+        nonretaining_captures: Vec::new(),
+        scoped_contract: hirsel_lir::abi::scoped_contract_digest(&[], &[]),
+        scoped_entries: Vec::new(),
+        key: FnAbiKey {
+            receipt_contract: None,
+            callable: input.digest,
+            abi_version: hirsel_lir::ABI_VERSION,
+        },
+        shape: CallableShape::Definition,
+        multiplicity: CallMultiplicity::Many,
+        context: true,
+        environment: false,
+        caller_site: false,
+        destination: false,
+        result: None,
+        diverges: false,
+        result_arena: None,
+        parameters: vec![],
+        version: hirsel_lir::ABI_VERSION,
+    };
+    table.fn_abis.push(abi.clone());
     let manifest = Manifest::skeleton([]);
     let failures = FailureCodes::default();
     let instance = ContentHash::of_bytes(b"drop instance");
     let finalizers = BTreeMap::from([(LayoutId(2), instance)]);
+    let units = BTreeMap::from([(instance, FnAbiId(0))]);
     let empty = BTreeSet::new();
     let registry = DescriptorRegistry::new(&table, &finalizers);
     let keys = hirsel_lir::LayoutKeys::new(&table);
@@ -216,6 +241,7 @@ fn object(target: &TargetSpec) -> (Vec<u8>, String) {
         registry: registry.clone(),
         finalizers: &finalizers,
         charged_finalizers: &Default::default(),
+        units: &units,
         glue: &glue,
         failures: &failures,
         statics: &[],
@@ -252,29 +278,6 @@ fn object(target: &TargetSpec) -> (Vec<u8>, String) {
         false,
     )
     .unwrap();
-    let abi = FnAbi {
-        receipts: None,
-        nonretaining: Vec::new(),
-        nonretaining_captures: Vec::new(),
-        scoped_contract: hirsel_lir::abi::scoped_contract_digest(&[], &[]),
-        scoped_entries: Vec::new(),
-        key: FnAbiKey {
-            receipt_contract: None,
-            callable: input.digest,
-            abi_version: hirsel_lir::ABI_VERSION,
-        },
-        shape: CallableShape::Definition,
-        multiplicity: CallMultiplicity::Many,
-        context: true,
-        environment: false,
-        caller_site: false,
-        destination: false,
-        result: None,
-        diverges: false,
-        result_arena: None,
-        parameters: vec![],
-        version: hirsel_lir::ABI_VERSION,
-    };
     let mut unit = LirUnit::<Ready>::new(UnitHeader {
         source_count: 1,
         key: hirsel_lir::objects::UnitKey(hirsel_syntax::ContentHash([0; 32])),

@@ -169,20 +169,71 @@ pub fn register_kind(kind: &crate::layout_types::LayoutKind) -> Option<ScalarKin
         .filter(|kind| !matches!(kind, ScalarKind::U128 | ScalarKind::I128))
 }
 
-/// The physical ABI digest: everything callers and callees must agree on,
-/// without table-local layout indices. Equal digests mean interchangeable
-/// entries.
-pub fn abi_digest(abi: &FnAbi) -> ContentHash {
-    let mut physical = abi.clone();
-    // Body placement proofs do not change the callable machine convention.
-    physical.result_arena = None;
-    for parameter in &mut physical.parameters {
-        parameter.layout = LayoutId(0);
+/// What a Hirsel function entry's link name stands for. One body can have
+/// several entries, each under its own name; an entry's digest names its kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum EntryKind {
+    /// The body's direct-call entry: `X.roots9` when it has root parameters,
+    /// `X` otherwise.
+    Value,
+    /// `X` of a body with root parameters: the address form that closures,
+    /// finalizers and other stored codes call.
+    Slot,
+    /// The function-reference thunk `_H1T...`.
+    FunctionRef,
+    /// The C callback thunk.
+    Callback,
+    /// An ahead plan's alternate body.
+    Ahead,
+    /// A resumable body's execution entry.
+    Resume,
+}
+
+impl EntryKind {
+    /// The kind of the entry `X` of a body whose root parameters are `rooted`.
+    pub fn of_plain(rooted: bool) -> EntryKind {
+        if rooted {
+            EntryKind::Slot
+        } else {
+            EntryKind::Value
+        }
     }
-    if let Some(result) = &mut physical.result {
-        result.layout = LayoutId(0);
+
+    fn tag(self) -> &'static str {
+        match self {
+            EntryKind::Value => "value",
+            EntryKind::Slot => "slot",
+            EntryKind::FunctionRef => "function-ref",
+            EntryKind::Callback => "callback",
+            EntryKind::Ahead => "ahead",
+            EntryKind::Resume => "resume",
+        }
     }
-    snapshot::digest("fn-abi-physical", &physical)
+}
+
+/// The version of the entry conventions: a change to how any entry kind
+/// passes its arguments bumps it.
+pub const ENTRY_CONVENTION_VERSION: u32 = 1;
+
+/// The physical entry digest: the entry's kind, whether it is a charged
+/// wrapper, the convention version and its signature, the FnAbi content key
+/// with layout content keys (`LayoutKeys::fn_abi`) where the kind's
+/// convention reads one. An import and the export it binds to carry equal
+/// digests, or Link refuses them. It names no contract, sequence or effect
+/// fact.
+pub fn entry_digest(kind: EntryKind, charged: bool, signature: Option<ContentHash>) -> ContentHash {
+    let version = ENTRY_CONVENTION_VERSION.to_le_bytes();
+    let charged = [u8::from(charged)];
+    let signature = signature.map(|s| s.0);
+    ContentHash::of_parts(
+        "hirsel.entry.v1",
+        [
+            kind.tag().as_bytes(),
+            &charged[..],
+            &version[..],
+            signature.as_ref().map_or(&[][..], |s| &s[..]),
+        ],
+    )
 }
 
 /// Contract identity is part of serialized and linked callable identity, even

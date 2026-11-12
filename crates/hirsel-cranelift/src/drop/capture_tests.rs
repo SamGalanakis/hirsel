@@ -364,6 +364,7 @@ fn probe(target: &TargetSpec, once: bool, usage: CaptureUse, malformed: u8) -> (
         registry: registry.clone(),
         finalizers: &finalizers,
         charged_finalizers: &Default::default(),
+        units: &Default::default(),
         glue: &glue,
         failures: &failures,
         statics: &[],

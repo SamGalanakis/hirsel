@@ -17,7 +17,7 @@ use cranelift_codegen::ir::{
 use cranelift_frontend::{FunctionBuilder, Switch};
 use cranelift_module::{DataId, FuncId, Module};
 use hirsel_core_contract::{Disposition, Engine, Passing};
-use hirsel_lir::abi::abi_digest;
+use hirsel_lir::abi::EntryKind;
 use hirsel_lir::abi_types::{CallableShape, FnAbi, ParameterPassing};
 use hirsel_lir::emission::{register_result, site_code, symbol_name};
 use hirsel_lir::ir::*;
@@ -2174,12 +2174,13 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
         } else {
             symbol_name(&symbol.definition, symbol.instance.as_ref())
         };
-        self.em.manifest_import(
-            &name,
-            ObjectSymbolKind::Function,
-            Some(&symbol.definition),
-            Some(abi),
-        );
+        // Cranelift bodies have no root-value entry: `X` is the value entry.
+        let kind = if name == symbol_name(&symbol.definition, symbol.instance.as_ref()) {
+            EntryKind::Value
+        } else {
+            EntryKind::Ahead
+        };
+        self.import_entry(&name, &symbol.definition, kind, Some(abi));
         Ok(name)
     }
 
@@ -2269,7 +2270,6 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
                             &symbol,
                             ObjectSymbolKind::Runtime,
                             Some(&id.definition),
-                            Some(abi),
                         );
                         runtime_primitive = true;
                         (None, None, Some(symbol))
@@ -2299,12 +2299,8 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
                         &symbol.definition,
                         symbol.instance.unwrap(),
                     );
-                    self.em.manifest_import(
-                        &name,
-                        ObjectSymbolKind::Function,
-                        Some(&symbol.definition),
-                        Some(abi),
-                    );
+                    self.em
+                        .import_entry(&name, &symbol.definition, EntryKind::Ahead, Some(abi));
                     name
                 });
                 (Some(code), Some(env), name)
@@ -2573,16 +2569,11 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
             let abi = self.em.fn_abi(source_abi, &source.definition)?;
             let signature = self.em.entry_signature(abi, &source.definition)?;
             let id = self.em.import_function(&name, &signature.ir)?;
-            self.em.manifest_import(
-                &name,
-                ObjectSymbolKind::Function,
-                Some(&source.definition),
-                Some(abi),
-            );
+            self.import_entry(&name, &source.definition, EntryKind::Value, Some(abi));
             let expected = self.func_addr(id);
             let metadata = hirsel_lir::ahead::metadata_name(root, identity);
             self.em
-                .manifest_import(&metadata, ObjectSymbolKind::Data, None, None);
+                .manifest_import(&metadata, ObjectSymbolKind::Data, None);
             let (id, _) = self
                 .em
                 .declare_data(&metadata, cranelift_module::Linkage::Import)?;
@@ -2613,13 +2604,12 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
             } else {
                 hirsel_lir::continuation::resume_name(&symbol.definition, callee.body, None)
             };
-            self.em
-                .manifest_import(&name, ObjectSymbolKind::Function, None, None);
+            self.import_entry(&name, &symbol.definition, EntryKind::Resume, Some(abi));
             Some(name)
         } else if let Some((root, identity)) = ahead_root {
             let metadata = hirsel_lir::ahead::metadata_name(root, identity);
             self.em
-                .manifest_import(&metadata, ObjectSymbolKind::Data, None, None);
+                .manifest_import(&metadata, ObjectSymbolKind::Data, None);
             let (id, _) = self
                 .em
                 .declare_data(&metadata, cranelift_module::Linkage::Import)?;
@@ -2627,7 +2617,7 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
             physical_signature.params.push(ir::AbiParam::new(PTR));
             let name = RuntimeEntry::TaskSpawnAhead.declaration().symbol.to_owned();
             self.em
-                .manifest_import(&name, ObjectSymbolKind::Runtime, None, None);
+                .manifest_import(&name, ObjectSymbolKind::Runtime, None);
             Some(name)
         } else {
             name
@@ -2640,12 +2630,12 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
             );
             let helper = entry.declaration().symbol.to_owned();
             self.em
-                .manifest_import(&helper, ObjectSymbolKind::Runtime, None, None);
+                .manifest_import(&helper, ObjectSymbolKind::Runtime, None);
             Some(helper)
         } else if let Some(entry) = self.ordered_host(call) {
             let helper = entry.declaration().symbol.to_owned();
             self.em
-                .manifest_import(&helper, ObjectSymbolKind::Runtime, None, None);
+                .manifest_import(&helper, ObjectSymbolKind::Runtime, None);
             Some(helper)
         } else if let Some(align) = self.ordered_join_align(call) {
             args.push(self.b.ins().iconst(types::I32, align as i64));
@@ -2654,7 +2644,7 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
                 .push(ir::AbiParam::new(types::I32));
             let helper = "hirsel_rt_v2_ordered_join".to_owned();
             self.em
-                .manifest_import(&helper, ObjectSymbolKind::Runtime, None, None);
+                .manifest_import(&helper, ObjectSymbolKind::Runtime, None);
             Some(helper)
         } else {
             name
@@ -2787,21 +2777,16 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
         register_result(self.em.layouts(), abi)
     }
 
-    /// Records the import of `name`, a function of `definition`, for the manifest.
-    pub(crate) fn import_definition(
+    /// Records the import of the `kind` entry `name` of a body of `definition`
+    /// at `abi` for the manifest.
+    pub(crate) fn import_entry(
         &mut self,
         name: &str,
         definition: &DefPath,
+        kind: EntryKind,
         abi: Option<&FnAbi>,
     ) {
-        self.em
-            .manifest_import(name, ObjectSymbolKind::Function, Some(definition), abi);
-    }
-
-    /// The digest of `abi`.
-    #[allow(dead_code)]
-    pub(crate) fn digest(abi: &FnAbi) -> hirsel_syntax::ContentHash {
-        abi_digest(abi)
+        self.em.import_entry(name, definition, kind, abi);
     }
 }
 

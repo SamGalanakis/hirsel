@@ -554,6 +554,7 @@ fn canonical_caller_keeps_an_ordinary_call_to_a_cpu_mapper() {
         plan.roots.insert(
             caller_id,
             RootPlan {
+                abi: caller.header.abi,
                 graph: graph.clone(),
                 recipe: cpu_root.recipe.clone(),
                 host: Some(HostReturnGraph {

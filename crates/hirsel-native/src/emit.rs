@@ -96,6 +96,11 @@ pub fn emit_glue(
         .filter(|(_, body)| instances.contains(&hirsel_lir::energy::charged_digest(**body)))
         .map(|(&layout, _)| layout)
         .collect();
+    let units = program
+        .summaries
+        .iter()
+        .map(|s| (s.instance, s.abi))
+        .collect();
     let inputs = GlueInputs {
         target: &program.target,
         layouts: &program.table,
@@ -103,6 +108,7 @@ pub fn emit_glue(
         registry: registry.clone(),
         finalizers: &program.finalizers,
         charged_finalizers: &charged_finalizers,
+        units: &units,
         glue: &glue,
         failures: &failures,
         statics: &program.statics,

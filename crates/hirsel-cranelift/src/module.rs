@@ -10,7 +10,7 @@ use cranelift_codegen::{Context, ir::Function};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use hirsel_lir::abi::abi_digest;
+use hirsel_lir::abi::EntryKind;
 use hirsel_lir::abi_types::{CallableShape, FnAbi, PhysicalType, ScalarExtension};
 use hirsel_lir::emission::{
     EmitInputs, GlueInputs, Manifested, OptLevel, artifact, function_thunk_name, register_result,
@@ -433,23 +433,26 @@ pub(crate) fn emit(
         let id = emitter.declare_function(&name, linkage, &sig.ir)?;
         let thunk = (!inputs.alternate && abi.shape == CallableShape::Definition)
             .then(|| function_thunk_name(&header.definition, Some(&header.instance)));
-        let record = |name: &String| ObjectSymbol {
-            name: name.clone(),
-            kind: ObjectSymbolKind::Function,
-            definition: Some(header.definition.clone()),
-            abi: Some(abi_digest(abi)),
-        };
         // A template's own object retains weak definitions; callers import them.
         // The owner participates in the same link manifest as an ordinary source unit.
+        // Cranelift bodies have no root-value entry: `X` is the value entry.
+        let kind = if inputs.alternate {
+            EntryKind::Ahead
+        } else {
+            EntryKind::Value
+        };
+        let entry = emitter.inputs.keys.entry(kind, false, Some(abi));
         emitter
             .manifested
-            .exports
-            .insert(name.clone(), record(&name));
+            .export_entry(&name, &header.definition, entry);
         if let Some(thunk) = &thunk {
+            let entry = emitter
+                .inputs
+                .keys
+                .entry(EntryKind::FunctionRef, false, None);
             emitter
                 .manifested
-                .exports
-                .insert(thunk.clone(), record(thunk));
+                .export_entry(thunk, &header.definition, entry);
         }
         if let Some(thunk) = thunk {
             let thunk_sig = thunk_signature(&sig.ir, abi.caller_site);
@@ -481,15 +484,13 @@ pub(crate) fn emit(
                 return Err(CodegenError::DuplicateSymbol { name });
             }
             let id = emitter.declare_function(&name, Linkage::Export, &sig.ir)?;
-            emitter.manifested.exports.insert(
-                name.clone(),
-                ObjectSymbol {
-                    name: name.clone(),
-                    kind: ObjectSymbolKind::Function,
-                    definition: Some(header.definition.clone()),
-                    abi: None,
-                },
-            );
+            let entry = emitter
+                .inputs
+                .keys
+                .entry(EntryKind::Resume, false, Some(abi));
+            emitter
+                .manifested
+                .export_entry(&name, &header.definition, entry);
             resumed.push((unit, plan, name, id, sig));
         }
     }
@@ -983,15 +984,29 @@ impl<'a> Emitter<'a> {
         Ok(id)
     }
 
-    /// Records a function import for the manifest.
+    /// Records the import of `name`, which is no Hirsel function entry, for the
+    /// manifest.
     pub(crate) fn manifest_import(
         &mut self,
         name: &str,
         kind: ObjectSymbolKind,
         definition: Option<&DefPath>,
+    ) {
+        self.manifested.import(name, kind, definition);
+    }
+
+    /// Records the import of the `kind` entry `name` of a body of `definition`
+    /// at `abi` for the manifest. No entry is a charged wrapper: a charged
+    /// twin is an instance of its own.
+    pub(crate) fn import_entry(
+        &mut self,
+        name: &str,
+        definition: &DefPath,
+        kind: EntryKind,
         abi: Option<&FnAbi>,
     ) {
-        self.manifested.import_at(name, kind, definition, abi);
+        let entry = self.inputs.keys.entry(kind, false, abi);
+        self.manifested.import_entry(name, definition, entry);
     }
 }
 

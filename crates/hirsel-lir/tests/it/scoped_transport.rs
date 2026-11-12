@@ -182,10 +182,8 @@ fn contract_serialization_and_stripping_changes_identity() {
         }],
     );
     let scoped = t.table.fn_abis[t.builder.unit.header.abi.0 as usize].clone();
-    assert_ne!(
-        hirsel_lir::abi::abi_digest(&old),
-        hirsel_lir::abi::abi_digest(&scoped)
-    );
+    let keys = hirsel_lir::LayoutKeys::new(&t.table);
+    assert_ne!(keys.fn_abi(&old), keys.fn_abi(&scoped));
     let text = hirsel_codec::to_text(&scoped);
     let copy: hirsel_lir::FnAbi = hirsel_codec::from_text(&text).unwrap();
     assert_eq!(copy, scoped);

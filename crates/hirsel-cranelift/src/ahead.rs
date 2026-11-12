@@ -91,6 +91,7 @@ pub(crate) fn metadata(
 ) -> Emitted<hirsel_lir::stage::ObjectArtifact> {
     use crate::module::{Emitter, Inputs};
     use cranelift_module::{DataDescription, Linkage, Module};
+    use hirsel_lir::abi::EntryKind;
     use hirsel_lir::emission::{artifact, symbol_name};
     use hirsel_lir::stage::{ObjectSymbol, ObjectSymbolKind};
     let mut em = Emitter::new(Inputs::units(inputs), false)?;
@@ -125,7 +126,7 @@ pub(crate) fn metadata(
                     name,
                     kind: ObjectSymbolKind::Data,
                     definition: None,
-                    abi: None,
+                    entry: None,
                 },
             );
             read_ids.insert((unit, call), data);
@@ -191,12 +192,12 @@ pub(crate) fn metadata(
             let abi = &inputs.layouts.fn_abis[recipe.source_abi.0 as usize];
             let sig = em.entry_signature(abi, &recipe.source_code.definition)?;
             let code = em.import_function(&source, &sig.ir)?;
-            em.manifest_import(
-                &source,
-                ObjectSymbolKind::Function,
-                Some(&recipe.source_code.definition),
-                Some(abi),
-            );
+            let kind = if recipe.source_environment {
+                EntryKind::Value
+            } else {
+                EntryKind::FunctionRef
+            };
+            em.import_entry(&source, &recipe.source_code.definition, kind, Some(abi));
             let f = em.module.declare_func_in_data(code, &mut image);
             image.write_function_addr(32, f);
             let (recipe_id, _) = em.declare_data(&recipe_name, Linkage::Local)?;
@@ -243,20 +244,22 @@ pub(crate) fn metadata(
             description.define(info.into_boxed_slice());
             description.set_align(8);
             let symbol = &plan.symbols[id];
-            let alternate = if resumable.is_some() {
-                hirsel_lir::ahead::alternate_resume_name(&symbol.definition, *id)
+            let root_abi = &inputs.layouts.fn_abis[root.abi.0 as usize];
+            let (alternate, kind) = if resumable.is_some() {
+                (
+                    hirsel_lir::ahead::alternate_resume_name(&symbol.definition, *id),
+                    EntryKind::Resume,
+                )
             } else {
-                hirsel_lir::ahead::alternate_name(&symbol.definition, *id)
+                (
+                    hirsel_lir::ahead::alternate_name(&symbol.definition, *id),
+                    EntryKind::Ahead,
+                )
             };
             // Only an address relocation: the real definition keeps its original ABI.
             let sig = ir::Signature::new(em.call_conv);
             let code = em.import_function(&alternate, &sig)?;
-            em.manifest_import(
-                &alternate,
-                ObjectSymbolKind::Function,
-                Some(&symbol.definition),
-                None,
-            );
+            em.import_entry(&alternate, &symbol.definition, kind, Some(root_abi));
             let f = em.module.declare_func_in_data(code, &mut description);
             description.write_function_addr(8, f);
             let data = em.module.declare_data_in_data(recipe_id, &mut description);
@@ -292,11 +295,11 @@ pub(crate) fn metadata(
                     hirsel_lir::continuation::resume_name(&symbol.definition, *id, None);
                 let sig = ir::Signature::new(em.call_conv);
                 let code = em.import_function(&dispatcher, &sig)?;
-                em.manifest_import(
+                em.import_entry(
                     &dispatcher,
-                    ObjectSymbolKind::Function,
-                    Some(&symbol.definition),
-                    None,
+                    &symbol.definition,
+                    EntryKind::Resume,
+                    Some(root_abi),
                 );
                 let f = em.module.declare_func_in_data(code, &mut description);
                 description.write_function_addr(48, f);
@@ -313,7 +316,7 @@ pub(crate) fn metadata(
                 name,
                 kind: ObjectSymbolKind::Data,
                 definition: None,
-                abi: None,
+                entry: None,
             },
         );
     }
@@ -366,8 +369,7 @@ impl FnEmitter<'_, '_, '_> {
         }) else {
             return Ok(());
         };
-        self.em
-            .manifest_import(&name, ObjectSymbolKind::Data, None, None);
+        self.em.manifest_import(&name, ObjectSymbolKind::Data, None);
         let (id, _) = self
             .em
             .declare_data(&name, cranelift_module::Linkage::Import)?;

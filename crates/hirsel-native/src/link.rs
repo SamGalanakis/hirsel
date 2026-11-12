@@ -2256,29 +2256,44 @@ fn check_link_manifest(
     let (symbol, _, _) = entry_result(program, entry)?;
     // Link manifest: each definition instance has exactly one implementation
     // across the objects, the entry among them, and every import is another
-    // object's export, a runtime entry or a toolchain routine.
-    let mut exported = std::collections::BTreeSet::new();
+    // object's export, a runtime entry or a toolchain routine. An import of a
+    // Hirsel function entry binds only to an export with the same entry digest.
+    let mut exported = std::collections::BTreeMap::new();
     for export in objects.iter().flat_map(|o| &o.exports) {
-        if !exported.insert(export.name.as_str()) {
+        if exported.insert(export.name.as_str(), export).is_some() {
             return Err(NativeError::new(
                 StageName::Link,
                 format!("two objects implement `{}`", export.name),
             ));
         }
     }
-    if !exported.contains(symbol.as_str()) {
+    if !exported.contains_key(symbol.as_str()) {
         return Err(NativeError::new(
             StageName::Link,
             "no object exports the launch entry",
         ));
     }
     for import in objects.iter().flat_map(|o| &o.imports) {
+        if let Some(export) = exported.get(import.name.as_str()) {
+            if (export.entry.is_some() || import.entry.is_some()) && import.entry != export.entry {
+                return Err(NativeError::new(
+                    StageName::Link,
+                    match import.entry {
+                        None => format!("`{}` is imported with no entry digest", import.name),
+                        Some(_) => format!(
+                            "`{}` is imported at another entry digest than its export",
+                            import.name
+                        ),
+                    },
+                ));
+            }
+            continue;
+        }
         let declared = matches!(
             import.kind,
             hirsel_lir::stage::ObjectSymbolKind::Runtime
                 | hirsel_lir::stage::ObjectSymbolKind::Foreign
-        ) || exported.contains(import.name.as_str())
-            || hirsel_lir::emission::TOOLCHAIN_IMPORTS.contains(&import.name.as_str());
+        ) || hirsel_lir::emission::TOOLCHAIN_IMPORTS.contains(&import.name.as_str());
         if !declared {
             return Err(NativeError::new(
                 StageName::Link,

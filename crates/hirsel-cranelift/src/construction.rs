@@ -6,6 +6,7 @@
 use cranelift_codegen::ir::{InstBuilder, Value, condcodes::IntCC, types};
 use cranelift_frontend::Switch;
 
+use hirsel_lir::abi::EntryKind;
 use hirsel_lir::emission::{
     IMMORTAL_PREFIX_BYTES, function_thunk_name, slice_storage_with_index, symbol_name,
 };
@@ -269,11 +270,11 @@ impl<'a> FnEmitter<'_, 'a, '_> {
                 &symbol.definition,
                 symbol.instance.as_ref(),
             );
-            self.import_definition(&name, &symbol.definition, None);
+            self.import_entry(&name, &symbol.definition, EntryKind::Callback, None);
             return Ok(V::One(self.function_address(&name, None)?));
         }
         let name = function_thunk_name(&symbol.definition, symbol.instance.as_ref());
-        self.import_definition(&name, &symbol.definition, None);
+        self.import_entry(&name, &symbol.definition, EntryKind::FunctionRef, None);
         let code = self.function_address(&name, None)?;
         let environment = self.empty_environment()?;
         let layout = self.value_type(result)?.layout;
@@ -347,18 +348,27 @@ impl<'a> FnEmitter<'_, 'a, '_> {
                 let Some(symbol) = unit.tables.symbols.get(c.symbol.index()) else {
                     return self.invalid("closure code outside the symbol table");
                 };
-                let name = if self.em.inputs.unit().alternate
+                let (name, kind) = if self.em.inputs.unit().alternate
                     && self.em.inputs.unit().ahead.is_some_and(|plan| {
                         symbol.instance.is_some_and(|callee| {
                             plan.cpu_private_edge(unit.header.instance, callee)
                         })
                     }) {
-                    hirsel_lir::ahead::alternate_name(&symbol.definition, symbol.instance.unwrap())
+                    (
+                        hirsel_lir::ahead::alternate_name(
+                            &symbol.definition,
+                            symbol.instance.unwrap(),
+                        ),
+                        EntryKind::Ahead,
+                    )
                 } else {
-                    symbol_name(&symbol.definition, symbol.instance.as_ref())
+                    (
+                        symbol_name(&symbol.definition, symbol.instance.as_ref()),
+                        EntryKind::Value,
+                    )
                 };
                 let abi = self.em.fn_abi(c.abi, self.definition())?;
-                self.import_definition(&name, &symbol.definition, Some(abi));
+                self.import_entry(&name, &symbol.definition, kind, Some(abi));
                 let sig = self.em.entry_signature(abi, self.definition())?.ir;
                 self.function_address(&name, Some(&sig))?
             }

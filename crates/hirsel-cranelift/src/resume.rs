@@ -16,6 +16,7 @@ use cranelift_codegen::Context;
 use cranelift_codegen::ir::{self, InstBuilder, Value, condcodes::IntCC, types};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{Linkage, Module};
+use hirsel_lir::abi::EntryKind;
 use hirsel_lir::abi_types::ParameterPassing;
 use hirsel_lir::continuation::{
     ContinuationPlan, ContinuationPlans, ExclusiveSlot, LiveOwnedSlot, NestedFrame, Representation,
@@ -177,8 +178,8 @@ impl FnEmitter<'_, '_, '_> {
         let name = resume_name(&header.definition, header.instance, None);
         let mut signature = self.sig.ir.clone();
         signature.params.push(ir::AbiParam::new(PTR));
-        self.em
-            .manifest_import(&name, ObjectSymbolKind::Function, None, None);
+        let abi = self.em.fn_abi(header.abi, &header.definition)?;
+        self.import_entry(&name, &header.definition, EntryKind::Resume, Some(abi));
         let id = self.em.import_function(&name, &signature)?;
         let dispatcher = self.func_addr(id);
         let Ok(bytes) = i64::try_from(plan.cost.frame_bytes) else {
@@ -627,8 +628,7 @@ impl FnEmitter<'_, '_, '_> {
             signature.params.push(ir::AbiParam::new(PTR));
             let name = resume_name(&definition, frame.source.body, None);
             let target = self.em.import_function(&name, &signature)?;
-            self.em
-                .manifest_import(&name, ObjectSymbolKind::Function, Some(&definition), None);
+            self.import_entry(&name, &definition, EntryKind::Resume, Some(abi));
             let mut thunk_sig = ir::Signature::new(self.em.call_conv);
             thunk_sig.params.extend(
                 [PTR, PTR, types::I64, types::I64, PTR]
@@ -648,8 +648,7 @@ impl FnEmitter<'_, '_, '_> {
                 &self.em.inputs.keys.key(frame.source.layout),
             );
             let (cell, _) = self.em.declare_data(&key, Linkage::Import)?;
-            self.em
-                .manifest_import(&key, ObjectSymbolKind::Data, None, None);
+            self.em.manifest_import(&key, ObjectSymbolKind::Data, None);
             let data_ref = self.em.module.declare_data_in_data(cell, &mut description);
             let function = self.em.module.declare_func_in_data(thunk, &mut description);
             let offset = (i * 24) as u32;
@@ -738,15 +737,13 @@ pub(crate) fn emit(
         {
             let name = resume_name(&header.definition, header.instance, state);
             let id = emitter.declare_function(&name, Linkage::Export, &sig.ir)?;
-            emitter.manifested.exports.insert(
-                name.clone(),
-                ObjectSymbol {
-                    name: name.clone(),
-                    kind: ObjectSymbolKind::Function,
-                    definition: Some(header.definition.clone()),
-                    abi: None,
-                },
-            );
+            let entry = emitter
+                .inputs
+                .keys
+                .entry(EntryKind::Resume, false, Some(abi));
+            emitter
+                .manifested
+                .export_entry(&name, &header.definition, entry);
             ids.push((name, id));
         }
         bodies.push((unit, plan, sig, ids));

@@ -324,7 +324,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 name: declaration.symbol.to_owned(),
                 kind: ObjectSymbolKind::Runtime,
                 definition: None,
-                abi: None,
+                entry: None,
             });
         Ok(function)
     }

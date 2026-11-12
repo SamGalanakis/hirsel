@@ -68,7 +68,7 @@ fn the_scalar_program_exports_every_case_on_every_target() {
                     .iter()
                     .all(|s| s.kind == ObjectSymbolKind::Function
                         && s.definition.is_some()
-                        && s.abi.is_some())
+                        && s.entry.is_some())
             );
             // Failure starts the runtime's failure state with a rule's code from its glue
             // cell; i128 division and float remainder are toolchain routines; nothing else
@@ -242,6 +242,7 @@ fn a_forged_or_foreign_program_descriptor_assignment_is_rejected() {
     let program = heap_program(&x86());
     let codes = failure_codes();
     let keys = &program.table.keys;
+    let units = program.unit_abis();
     let glue = hirsel_lir::glue::UnitGlue::default();
     let valid = hirsel_lir::emission::GlueInputs {
         target: &program.table.target,
@@ -253,6 +254,7 @@ fn a_forged_or_foreign_program_descriptor_assignment_is_rejected() {
         ),
         finalizers: &program.finalizers,
         charged_finalizers: &Default::default(),
+        units: &units,
         glue: &glue,
         failures: &codes,
         statics: &program.statics,
@@ -284,6 +286,7 @@ fn a_forged_or_foreign_program_descriptor_assignment_is_rejected() {
 fn different_registry_layouts_cannot_share_an_index_cell() {
     use hirsel_lir::{LayoutId, LayoutKeys, descriptor_registry::DescriptorRegistry};
     let mut program = scalar_program(&x86());
+    let units = program.unit_abis();
     let table = &mut program.table.table;
     let original = LayoutId(0);
     let duplicate = LayoutId(table.layouts.len() as u32);
@@ -310,6 +313,7 @@ fn different_registry_layouts_cannot_share_an_index_cell() {
         registry: DescriptorRegistry::new(table, &program.finalizers),
         finalizers: &program.finalizers,
         charged_finalizers: &Default::default(),
+        units: &units,
         glue: &glue,
         failures: &codes,
         statics: &program.statics,

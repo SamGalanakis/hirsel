@@ -5,6 +5,7 @@
 //! unit object never depends on the program it is linked into.
 use cranelift_codegen::ir::{AbiParam, types};
 use cranelift_module::{DataDescription, Linkage, Module};
+use hirsel_lir::abi::EntryKind;
 use hirsel_lir::emission::{GlueCallback, GlueInputs, glue_artifact, symbol_name};
 use hirsel_lir::glue::{
     GlueCodec, codec_symbol, descriptor_index_symbol, failure_code_symbol, literal_symbol,
@@ -33,7 +34,7 @@ impl Emitter<'_> {
                 name: name.to_owned(),
                 kind: ObjectSymbolKind::Data,
                 definition: None,
-                abi: None,
+                entry: None,
             },
         );
     }
@@ -145,8 +146,7 @@ impl Emitter<'_> {
             let definition = check.definition.clone();
             let abi = self.fn_abi(check.abi, &definition)?;
             let name = symbol_name(&definition, check.instance.as_ref());
-            self.manifested
-                .import(&name, ObjectSymbolKind::Function, Some(&definition));
+            self.import_entry(&name, &definition, EntryKind::Value, Some(abi));
             let signature = self.entry_signature(abi, &definition)?;
             if signature
                 .hidden
@@ -302,26 +302,11 @@ impl Emitter<'_> {
         let name = symbol_name(definition, callback.instance.as_ref());
         let sig = self.entry_signature(abi, definition)?;
         let target = self.import_function(&name, &sig.ir)?;
-        self.manifested.imports.insert(
-            name.clone(),
-            ObjectSymbol {
-                name,
-                kind: ObjectSymbolKind::Function,
-                definition: Some(definition.clone()),
-                abi: Some(hirsel_lir::abi::abi_digest(abi)),
-            },
-        );
+        self.import_entry(&name, definition, EntryKind::Value, Some(abi));
         let thunk =
             hirsel_lir::emission::callback_thunk_name(definition, callback.instance.as_ref());
-        self.manifested.exports.insert(
-            thunk.clone(),
-            ObjectSymbol {
-                name: thunk.clone(),
-                kind: ObjectSymbolKind::Function,
-                definition: Some(definition.clone()),
-                abi: Some(hirsel_lir::abi::abi_digest(abi)),
-            },
-        );
+        let entry = self.inputs.keys.entry(EntryKind::Callback, false, None);
+        self.manifested.export_entry(&thunk, definition, entry);
         self.define_callback(&thunk, target, &sig, Linkage::Export, definition)
     }
 }

@@ -173,7 +173,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 name: name.clone(),
                 kind: ObjectSymbolKind::Foreign,
                 definition: Some(symbol.definition.clone()),
-                abi: Some(abi_digest(abi)),
+                entry: None,
             });
         // C may reach any storage it is handed and call back into Hirsel code:
         // deferred counts are stored and must-unique facts dropped first.

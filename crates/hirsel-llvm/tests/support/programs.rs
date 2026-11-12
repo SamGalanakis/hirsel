@@ -30,6 +30,14 @@ impl Program {
         self.units.iter().collect()
     }
 
+    /// The FnAbi of each unit, by instance, as the glue object's inputs take them.
+    pub fn unit_abis(&self) -> BTreeMap<ContentHash, hirsel_lir::FnAbiId> {
+        self.units
+            .iter()
+            .map(|u| (u.unit().header.instance, u.unit().header.abi))
+            .collect()
+    }
+
     /// The program's glue object (`hirsel_lir::glue`) with the fixture failure codes: the
     /// registry, cells, codecs, statics, literals and callbacks its unit objects import.
     pub fn glue(&self) -> Vec<u8> {
@@ -64,6 +72,7 @@ impl Program {
             })
             .collect();
         let failures = failure_codes();
+        let units = self.unit_abis();
         let inputs = hirsel_lir::emission::GlueInputs {
             target: &self.table.target,
             layouts: &self.table.table,
@@ -74,6 +83,7 @@ impl Program {
             ),
             finalizers: &self.finalizers,
             charged_finalizers: &Default::default(),
+            units: &units,
             glue: &glue,
             failures: &failures,
             statics: &self.statics,

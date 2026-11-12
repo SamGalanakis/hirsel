@@ -10,6 +10,7 @@
 //! member already reached as its discovery ordinal. A record's local content is its
 //! snapshot with every reference erased, so a key depends on content and field-order
 //! edges only, never on `LayoutId`s, request order or unrelated layouts.
+use crate::abi::{EntryKind, entry_digest};
 use crate::abi_types::{FnAbi, FnAbiId};
 use crate::layout_types::{
     DropStep, LayoutId, LayoutKey, LayoutKind, LayoutRecord, LayoutTable, ScanStep,
@@ -305,8 +306,7 @@ impl LayoutKeys {
     }
 
     /// The content key of an FnAbi: the ABI with its parameter and result layouts
-    /// replaced by their keys. Unlike `abi::abi_digest`, which names only the machine
-    /// convention, it covers what emission reads through those layouts.
+    /// replaced by their keys, so it covers what emission reads through those layouts.
     pub fn fn_abi(&self, abi: &FnAbi) -> ContentHash {
         let mut erased = abi.clone();
         let mut references = Vec::new();
@@ -323,6 +323,26 @@ impl LayoutKeys {
             "hirsel.fn-abi.v2",
             std::iter::once(text.as_bytes()).chain(references.iter().map(|k| &k.0.0[..])),
         )
+    }
+
+    /// The entry digest (`abi::entry_digest`) of a `kind` entry of a body at
+    /// `abi`. Function-reference and callback thunks follow a fixed protocol,
+    /// and their importers do not know the body's FnAbi, so their digests have
+    /// no signature and `abi` is not read. Any other entry's
+    /// signature is `fn_abi` without the body placement proof, which does not
+    /// change the convention.
+    pub fn entry(&self, kind: EntryKind, charged: bool, abi: Option<&FnAbi>) -> ContentHash {
+        let signature = match kind {
+            EntryKind::FunctionRef | EntryKind::Callback => None,
+            EntryKind::Value | EntryKind::Slot | EntryKind::Ahead | EntryKind::Resume => {
+                abi.map(|abi| {
+                    let mut physical = abi.clone();
+                    physical.result_arena = None;
+                    self.fn_abi(&physical)
+                })
+            }
+        };
+        entry_digest(kind, charged, signature)
     }
 
     /// `fn_abi` of the table's FnAbi `id`.

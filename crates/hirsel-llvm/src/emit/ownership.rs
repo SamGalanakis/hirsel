@@ -201,7 +201,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                     name: name.to_owned(),
                     kind: ObjectSymbolKind::Runtime,
                     definition: None,
-                    abi: None,
+                    entry: None,
                 });
             Some(function)
         } else {

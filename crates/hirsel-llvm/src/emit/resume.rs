@@ -435,8 +435,9 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                     definition: definition.clone(),
                     what,
                 })?;
+            let entry = entry_of(self.inputs.keys, EntryKind::Resume, Some(abi));
             self.manifested
-                .import(&target_name, ObjectSymbolKind::Function, Some(definition));
+                .import_entry(&target_name, definition, entry);
             let name = format!("{target_name}_drop_adapter");
             let fresh = !self.module.defines(&name);
             let thunk_ty = self.module.function_type(
@@ -505,15 +506,9 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         } else {
             resume_name(&symbol.definition, callee.body, None)
         };
+        let entry = entry_of(self.inputs.keys, EntryKind::Resume, Some(signature.abi));
         self.manifested
-            .imports
-            .entry(name.clone())
-            .or_insert_with(|| ObjectSymbol {
-                name: name.clone(),
-                kind: ObjectSymbolKind::Function,
-                definition: Some(symbol.definition.clone()),
-                abi: None,
-            });
+            .import_entry(&name, &symbol.definition, entry);
         self.module
             .function(&name, resume_type(self.module, signature))
             .map_err(|what| CodegenError::Invalid {
@@ -858,15 +853,13 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         }
         let header = &self.unit.header;
         let name = resume_name(&header.definition, header.instance, None);
+        let entry = entry_of(
+            self.inputs.keys,
+            EntryKind::Resume,
+            Some(self.signature.abi),
+        );
         self.manifested
-            .imports
-            .entry(name.clone())
-            .or_insert_with(|| ObjectSymbol {
-                name: name.clone(),
-                kind: ObjectSymbolKind::Function,
-                definition: Some(header.definition.clone()),
-                abi: None,
-            });
+            .import_entry(&name, &header.definition, entry);
         let dispatcher = self
             .module
             .function(&name, resume_type(self.module, &self.signature))
@@ -936,14 +929,10 @@ pub(super) fn declare<'m, 'a>(
             module.add_attribute(function, AttributeSlot::Function, Attribute::NoRedZone);
             module.string_attribute(function, "disable-tail-calls", "true");
             module.string_attribute(function, "frame-pointer", "all");
-            manifested.exports.insert(
-                name.clone(),
-                ObjectSymbol {
-                    name,
-                    kind: ObjectSymbolKind::Function,
-                    definition: Some(header.definition.clone()),
-                    abi: None,
-                },
+            manifested.export_entry(
+                &name,
+                &header.definition,
+                entry_of(inputs.keys, EntryKind::Resume, Some(abi)),
             );
             states.push((unit, plan, 0, function));
             continue;
@@ -963,14 +952,10 @@ pub(super) fn declare<'m, 'a>(
                     what,
                 })?;
             module.add_attribute(function, AttributeSlot::Function, Attribute::NoUnwind);
-            manifested.exports.insert(
-                name.clone(),
-                ObjectSymbol {
-                    name,
-                    kind: ObjectSymbolKind::Function,
-                    definition: Some(header.definition.clone()),
-                    abi: None,
-                },
+            manifested.export_entry(
+                &name,
+                &header.definition,
+                entry_of(inputs.keys, EntryKind::Resume, Some(abi)),
             );
             declared.push(function);
         }

@@ -140,7 +140,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
             for function in &block.functions {
                 let symbol = &function.symbol;
                 let thunk = function_thunk_name(&symbol.definition, symbol.instance.as_ref());
-                self.import_function(&thunk, &symbol.definition, None);
+                self.import_entry(&thunk, &symbol.definition, EntryKind::FunctionRef, None);
                 let code = self.module.function_address(&thunk);
                 let environment = self.empty_environment()?;
                 references.push((function.offset, code));

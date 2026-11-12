@@ -691,6 +691,7 @@ pub(super) fn propose(
         ],
     );
     Ok(RootPlan {
+        abi: u.header.abi,
         graph,
         recipe,
         host: None,

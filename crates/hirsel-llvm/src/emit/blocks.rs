@@ -172,7 +172,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                     name: name.into(),
                     kind: ObjectSymbolKind::Runtime,
                     definition: None,
-                    abi: None,
+                    entry: None,
                 });
         }
         self.builder

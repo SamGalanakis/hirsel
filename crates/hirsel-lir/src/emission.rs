@@ -11,7 +11,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use hirsel_core_contract::Manifest;
 use hirsel_syntax::{ContentHash, DefPath};
 
-use crate::abi::abi_digest;
 use crate::abi_types::FnAbi;
 use crate::ir::SiteRange;
 use crate::layout_types::{
@@ -136,6 +135,9 @@ pub struct GlueInputs<'a> {
     /// The layouts among `finalizers` whose drop body also has a charged
     /// instance (STORE-11 energy), chosen at each drop by the running context.
     pub charged_finalizers: &'a std::collections::BTreeSet<LayoutId>,
+    /// The FnAbi of each of the program's units, by instance: what glue's
+    /// imports of drop bodies record in their entry digests.
+    pub units: &'a BTreeMap<ContentHash, crate::FnAbiId>,
     /// What the program's units need from glue, merged.
     pub glue: &'a crate::glue::UnitGlue,
     /// Every rule's code: `glue::failure_codes` of `glue.failure_rules`.
@@ -422,27 +424,33 @@ pub struct Manifested {
 }
 
 impl Manifested {
-    /// Records an import of `name` unless it is already recorded.
+    /// Records an import of `name`, which is no Hirsel function entry, unless it
+    /// is already recorded.
     pub fn import(&mut self, name: &str, kind: ObjectSymbolKind, definition: Option<&DefPath>) {
-        self.import_at(name, kind, definition, None);
-    }
-
-    /// `import` of a function at `abi`.
-    pub fn import_at(
-        &mut self,
-        name: &str,
-        kind: ObjectSymbolKind,
-        definition: Option<&DefPath>,
-        abi: Option<&FnAbi>,
-    ) {
         self.imports
             .entry(name.to_owned())
             .or_insert_with(|| ObjectSymbol {
                 name: name.to_owned(),
                 kind,
                 definition: definition.cloned(),
-                abi: abi.map(abi_digest),
+                entry: None,
             });
+    }
+
+    /// Records an import of the Hirsel function entry `name` of `definition`,
+    /// whose entry digest is `entry`, unless it is already recorded.
+    pub fn import_entry(&mut self, name: &str, definition: &DefPath, entry: ContentHash) {
+        self.imports
+            .entry(name.to_owned())
+            .or_insert_with(|| ObjectSymbol::entry(name, definition, entry));
+    }
+
+    /// Records the export of the Hirsel function entry `name` of `definition`.
+    pub fn export_entry(&mut self, name: &str, definition: &DefPath, entry: ContentHash) {
+        self.exports.insert(
+            name.to_owned(),
+            ObjectSymbol::entry(name, definition, entry),
+        );
     }
 
     /// An import the object also defines is internal to it.
@@ -450,6 +458,18 @@ impl Manifested {
         let (exports, library) = (&self.exports, &self.library);
         self.imports
             .retain(|name, _| !exports.contains_key(name) && !library.contains(name));
+    }
+}
+
+impl ObjectSymbol {
+    /// The Hirsel function entry `name` of `definition` at `entry`.
+    pub fn entry(name: &str, definition: &DefPath, entry: ContentHash) -> ObjectSymbol {
+        ObjectSymbol {
+            name: name.to_owned(),
+            kind: ObjectSymbolKind::Function,
+            definition: Some(definition.clone()),
+            entry: Some(entry),
+        }
     }
 }
 
@@ -546,7 +566,7 @@ fn checked_artifact(
                 name: name.clone(),
                 kind: ObjectSymbolKind::Function,
                 definition: None,
-                abi: None,
+                entry: None,
             },
             None => {
                 return Err(format!(
@@ -572,10 +592,10 @@ fn checked_artifact(
         .collect();
     let exports: Vec<ObjectSymbol> = manifested.exports.into_values().collect();
     let abi = ContentHash::of_parts(
-        "hirsel.object-abi.v1",
+        "hirsel.object-abi.v2",
         exports
             .iter()
-            .filter_map(|s| s.abi.as_ref())
+            .filter_map(|s| s.entry.as_ref())
             .map(|h| h.0.as_slice()),
     );
     Ok(ObjectArtifact {
@@ -693,7 +713,7 @@ mod tests {
                     name: name.to_string(),
                     kind: ObjectSymbolKind::Function,
                     definition: None,
-                    abi: None,
+                    entry: None,
                 },
             )
         };
@@ -774,6 +794,7 @@ mod tests {
             plan.roots.insert(
                 identity,
                 RootPlan {
+                    abi: crate::abi_types::FnAbiId(0),
                     host: None,
                     cpu: None,
                     graph: ScalarGraph {

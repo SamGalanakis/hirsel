@@ -856,6 +856,100 @@ fn a_rooted_source_callee_in_another_object_returns_its_roots_on_both_outcomes()
     });
 }
 
+/// Link binds an import of a Hirsel entry only to an export with an equal entry
+/// digest (784 L1). The caller of `grow` in its own object is mutated three ways:
+/// its import of `grow.roots9` loses its digest; it carries the digest of the same
+/// FnAbi over a parameter layout of other content; and both after the caller object
+/// has gone through the object store's record codec, as a cached object does.
+#[test]
+fn link_refuses_an_entry_import_with_a_missing_or_other_digest() {
+    use hirsel_lir::abi::EntryKind;
+    use hirsel_lir::stage::ObjectArtifact;
+    use hirsel_native::OptLevel;
+    use hirsel_native::Options;
+    use hirsel_native::partition_objects;
+    use hirsel_native_testing::Runtime;
+    let configuration = Configuration {
+        options: Options::new(x86()),
+        engine: Engine::Native {
+            opt: OptLevel::None,
+            partition: Partition::Singleton,
+            runtime: Runtime::Diagnostic,
+        },
+    };
+    with_compiler_stack(move || {
+        let tools = toolchain(&[configuration]);
+        let program = checked(ROOTS_ACROSS_OBJECTS);
+        let ready = hirsel_native_batch::build(&program.validated, &Options::new(x86())).unwrap();
+        let registry = hirsel_lir::descriptor_registry::DescriptorRegistry::new(
+            &ready.table,
+            &ready.finalizers,
+        );
+        let mut grow = program.entry.clone();
+        grow.0.name = "grow".into();
+        let objects = partition_objects(
+            &ready,
+            OptLevel::None,
+            Partition::Singleton,
+            &registry,
+            false,
+            None,
+        )
+        .unwrap();
+        let caller = objects
+            .iter()
+            .position(|o| {
+                o.exports
+                    .iter()
+                    .any(|s| s.definition.as_ref() == Some(&program.entry))
+            })
+            .unwrap();
+        let import = objects[caller]
+            .imports
+            .iter()
+            .position(|s| s.definition.as_ref() == Some(&grow))
+            .unwrap();
+        // The same FnAbi over a `rows` layout of other content.
+        let summary = ready
+            .summaries
+            .iter()
+            .find(|s| s.definition == grow)
+            .unwrap();
+        let abi = &ready.table.fn_abis[summary.abi.0 as usize];
+        let mut forged = ready.table.clone();
+        let rows = abi.parameters[0].layout;
+        forged.layouts[rows.0 as usize].key.instance = Some(hirsel_syntax::ContentHash::of_bytes(
+            b"other layout content",
+        ));
+        let other = hirsel_lir::LayoutKeys::new(&forged).entry(EntryKind::Value, false, Some(abi));
+        assert_ne!(Some(other), objects[caller].imports[import].entry);
+        let cached = |object: &ObjectArtifact| {
+            hirsel_codec::from_text::<ObjectArtifact>(&hirsel_codec::to_text(object)).unwrap()
+        };
+        let dir = scratch("link-entry-digest");
+        hirsel_native::link_objects(&ready, &program.entry, &objects, &tools, &dir).unwrap();
+        for (mutant, digest, through_cache) in [
+            ("missing", None, false),
+            ("other signature", Some(other), false),
+            ("missing, cached", None, true),
+            ("other signature, cached", Some(other), true),
+        ] {
+            let mut mutated = objects.clone();
+            mutated[caller].imports[import].entry = digest;
+            if through_cache {
+                mutated[caller] = cached(&mutated[caller]);
+            }
+            let error = hirsel_native::link_objects(&ready, &program.entry, &mutated, &tools, &dir)
+                .unwrap_err();
+            assert_eq!(error.stage, StageName::Link, "{mutant}: {error:?}");
+            assert!(
+                error.message.contains("grow") && error.message.contains("entry digest"),
+                "{mutant}: {error:?}"
+            );
+        }
+    });
+}
+
 /// A failing index in statement position fails at the index expression, by
 /// line and column, in all three engines (the diagnostics part's primary site is the
 /// operation that fails; corpus headers pin only the line).

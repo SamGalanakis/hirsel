@@ -12,7 +12,7 @@ use hirsel_lir::layout_types::{Endian, FinalizerRef, LayoutId};
 use hirsel_lir::rt_program;
 use hirsel_lir::runtime_abi::{COUNT_IMMORTAL, LAYOUT_DESCRIPTOR_VERSION, LAYOUT_MAGIC};
 use hirsel_lir::stage::ObjectSymbolKind;
-use hirsel_syntax::DefPath;
+use hirsel_syntax::{ContentHash, DefPath};
 
 use crate::CodegenError;
 use crate::module::{CheckThunk, Emitted, Emitter, Helper, PTR};
@@ -60,6 +60,30 @@ fn descriptor_bytes(
 }
 
 impl Emitter<'_> {
+    /// Imports the drop body `name`, the entry `X` of the unit `instance` of
+    /// `definition`.
+    fn import_drop_body(
+        &mut self,
+        name: &str,
+        definition: &DefPath,
+        instance: &ContentHash,
+    ) -> Emitted {
+        let Some(&abi) = self.inputs.glue().units.get(instance) else {
+            return Self::invalid_at(
+                definition,
+                format!("the drop body `{name}` is no unit of the program"),
+            );
+        };
+        let abi = self.fn_abi(abi, definition)?;
+        self.import_entry(
+            name,
+            definition,
+            hirsel_lir::abi::EntryKind::Value,
+            Some(abi),
+        );
+        Ok(())
+    }
+
     fn invalid_at<T>(definition: &DefPath, what: impl Into<String>) -> Emitted<T> {
         Err(CodegenError::Invalid {
             definition: definition.clone(),
@@ -338,11 +362,7 @@ impl Emitter<'_> {
                 );
             }
         };
-        self.manifested.import(
-            &body_name,
-            ObjectSymbolKind::Function,
-            Some(&finalizer.definition),
-        );
+        self.import_drop_body(&body_name, &finalizer.definition, instance)?;
         let charged = if self.inputs.glue().charged_finalizers.contains(&layout) {
             let name = symbol_name(
                 &finalizer.definition,
@@ -354,11 +374,11 @@ impl Emitter<'_> {
                     format!("the charged drop body `{name}` does not take (context, self address)"),
                 );
             };
-            self.manifested.import(
+            self.import_drop_body(
                 &name,
-                ObjectSymbolKind::Function,
-                Some(&finalizer.definition),
-            );
+                &finalizer.definition,
+                &hirsel_lir::energy::charged_digest(*instance),
+            )?;
             Some(charged)
         } else {
             None
@@ -472,10 +492,11 @@ impl Emitter<'_> {
                     &symbol.definition,
                     symbol.instance.as_ref(),
                 );
-                self.manifested.import(
+                self.import_entry(
                     &thunk,
-                    hirsel_lir::stage::ObjectSymbolKind::Function,
-                    Some(&symbol.definition),
+                    &symbol.definition,
+                    hirsel_lir::abi::EntryKind::FunctionRef,
+                    None,
                 );
                 let signature = self.module.make_signature();
                 let target = self.import_function(&thunk, &signature)?;

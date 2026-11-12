@@ -133,10 +133,6 @@ fn nested_contract_identity_is_serialized_and_caches_by_content() {
     });
     let text = hirsel_codec::to_text(&b);
     assert_eq!(hirsel_codec::from_text::<FnAbi>(&text).unwrap(), b);
-    assert_ne!(
-        hirsel_lir::abi::abi_digest(&a),
-        hirsel_lir::abi::abi_digest(&b)
-    );
     let keys = hirsel_lir::layout_keys::LayoutKeys::new(&t.table);
     assert_ne!(keys.fn_abi(&a), keys.fn_abi(&b));
     let old = hirsel_lir::abi::scoped_entry_identity(&a, &t.table);

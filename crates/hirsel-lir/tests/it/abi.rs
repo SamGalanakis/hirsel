@@ -3,7 +3,7 @@
 //! mutations.
 use hirsel_core_contract::Passing;
 use hirsel_layout::layout::{LayoutBuilder, OwnerRepresentation, Owners};
-use hirsel_lir::abi::abi_digest;
+use hirsel_lir::abi::EntryKind;
 use hirsel_lir::abi_types::*;
 use hirsel_lir::layout::*;
 use hirsel_lir::layout_types::*;
@@ -296,8 +296,9 @@ fn thunks_take_an_environment_and_keep_multiplicity() {
     assert!(!get(def).environment);
     assert!(get(clo).environment && get(next).environment);
     assert_eq!(get(onc).multiplicity, CallMultiplicity::Once);
-    assert_ne!(abi_digest(get(clo)), abi_digest(get(onc)));
-    assert_ne!(abi_digest(get(def)), abi_digest(get(clo)));
+    let keys = hirsel_lir::LayoutKeys::new(&table);
+    assert_ne!(keys.fn_abi(get(clo)), keys.fn_abi(get(onc)));
+    assert_ne!(keys.fn_abi(get(def)), keys.fn_abi(get(clo)));
 }
 
 #[test]
@@ -432,7 +433,7 @@ fn owners_with_id(shape: &[Primitive]) -> Owners {
 }
 
 #[test]
-fn defining_and_public_views_agree_and_private_changes_move_only_layout_keys() {
+fn defining_and_public_views_agree_and_private_changes_move_the_entry_digest() {
     let derive = |owners: &Owners, padding| {
         let (t, f) = signature(padding);
         let mut b = LayoutBuilder::new(&x86(), owners);
@@ -440,7 +441,8 @@ fn defining_and_public_views_agree_and_private_changes_move_only_layout_keys() {
         let table = checked(b);
         let abi = table.fn_abis[id.0 as usize].clone();
         let key = table.layout(abi.parameters[0].layout).unwrap().key.clone();
-        (abi_digest(&abi), key)
+        let entry = hirsel_lir::LayoutKeys::new(&table).entry(EntryKind::Value, false, Some(&abi));
+        (entry, key)
     };
     let narrow = owners_with_id(&[Primitive::U32]);
     let wide = owners_with_id(&[Primitive::U64, Primitive::String]);
@@ -448,14 +450,17 @@ fn defining_and_public_views_agree_and_private_changes_move_only_layout_keys() {
     let public = derive(&narrow, 7);
     assert_eq!(
         defining, public,
-        "defining and public views produce identical ABI digests and layouts"
+        "defining and public views produce identical entry digests and layouts"
     );
     let changed = derive(&wide, 0);
-    assert_eq!(
-        changed.0, defining.0,
-        "a private representation change keeps the ABI digest"
+    assert_ne!(
+        changed.1, defining.1,
+        "a private representation change moves the layout key"
     );
-    assert_ne!(changed.1, defining.1, "and moves the native layout key");
+    assert_ne!(
+        changed.0, defining.0,
+        "and the entry digest, which carries the parameters' layout content"
+    );
 }
 
 #[test]

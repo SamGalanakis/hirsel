@@ -1045,7 +1045,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                             name: "hirsel_rt_v2_path_compare".into(),
                             kind: ObjectSymbolKind::Runtime,
                             definition: None,
-                            abi: None,
+                            entry: None,
                         });
                 }
                 // Both operands are read in place: each spilled to a slot of the layout.

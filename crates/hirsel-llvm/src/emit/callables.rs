@@ -47,22 +47,17 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         Ok((code, environment))
     }
 
-    /// Imports a function symbol the object calls or refers to, unless the object defines it.
-    pub(super) fn import_function(
+    /// Imports the `kind` entry `name` of a body of `definition` at `abi`, which
+    /// the object calls or refers to, unless the object defines it.
+    pub(super) fn import_entry(
         &mut self,
         name: &str,
         definition: &DefPath,
-        abi: Option<ContentHash>,
+        kind: EntryKind,
+        abi: Option<&FnAbi>,
     ) {
-        self.manifested
-            .imports
-            .entry(name.to_owned())
-            .or_insert_with(|| ObjectSymbol {
-                name: name.to_owned(),
-                kind: ObjectSymbolKind::Function,
-                definition: Some(definition.clone()),
-                abi,
-            });
+        let entry = entry_of(self.inputs.keys, kind, abi);
+        self.manifested.import_entry(name, definition, entry);
     }
 
     /// `FunctionRef`: the definition's function-reference thunk with the static empty
@@ -76,14 +71,14 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
             == LayoutKind::Scalar(ScalarKind::Pointer)
         {
             let name = callback_thunk_name(&symbol.definition, symbol.instance.as_ref());
-            self.import_function(&name, &symbol.definition, None);
+            self.import_entry(&name, &symbol.definition, EntryKind::Callback, None);
             self.manifested
                 .kept
                 .insert(symbol_name(&symbol.definition, symbol.instance.as_ref()));
             return Ok(self.module.function_address(&name));
         }
         let name = function_thunk_name(&symbol.definition, symbol.instance.as_ref());
-        self.import_function(&name, &symbol.definition, None);
+        self.import_entry(&name, &symbol.definition, EntryKind::FunctionRef, None);
         let code = self.module.function_address(&name);
         let environment = self.empty_environment()?;
         let layout = self.value_type(result)?.layout;
@@ -140,18 +135,27 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 let Some(symbol) = unit.tables.symbols.get(c.symbol.index()) else {
                     return self.invalid("closure code outside the symbol table");
                 };
-                let name = if self.inputs.alternate
+                let abi = fn_abi(self.inputs.layouts, c.abi, self.definition())?;
+                let (name, kind) = if self.inputs.alternate
                     && self.inputs.ahead.is_some_and(|plan| {
                         symbol.instance.is_some_and(|callee| {
                             plan.cpu_private_edge(unit.header.instance, callee)
                         })
                     }) {
-                    hirsel_lir::ahead::alternate_name(&symbol.definition, symbol.instance.unwrap())
+                    (
+                        hirsel_lir::ahead::alternate_name(
+                            &symbol.definition,
+                            symbol.instance.unwrap(),
+                        ),
+                        EntryKind::Ahead,
+                    )
                 } else {
-                    symbol_name(&symbol.definition, symbol.instance.as_ref())
+                    (
+                        symbol_name(&symbol.definition, symbol.instance.as_ref()),
+                        plain_entry(self.inputs.layouts, abi),
+                    )
                 };
-                let abi = fn_abi(self.inputs.layouts, c.abi, self.definition())?;
-                self.import_function(&name, &symbol.definition, Some(abi_digest(abi)));
+                self.import_entry(&name, &symbol.definition, kind, Some(abi));
                 // A bound call may name this same entry later in the unit. Declare
                 // its actual ABI now, as Cranelift does, rather than introducing
                 // an untyped address placeholder that conflicts with that call.

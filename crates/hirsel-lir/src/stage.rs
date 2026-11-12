@@ -273,13 +273,15 @@ pub enum ObjectSymbolKind {
     Foreign,
 }
 
-/// A symbol an object exports or imports, with the ABI digest it was built for.
+/// A symbol an object exports or imports. A Hirsel function entry carries its
+/// entry digest (`abi::entry_digest`); Link binds an import only to an export
+/// with an equal one.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ObjectSymbol {
     pub name: String,
     pub kind: ObjectSymbolKind,
     pub definition: Option<DefPath>,
-    pub abi: Option<ContentHash>,
+    pub entry: Option<ContentHash>,
 }
 
 /// A relocation the linker needs, as emitted by the object writer.
@@ -356,7 +358,7 @@ snapshot_struct!(ObjectSymbol {
     name,
     kind,
     definition,
-    abi
+    entry
 });
 snapshot_struct!(Relocation {
     offset,

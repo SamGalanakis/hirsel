@@ -106,10 +106,6 @@ fn receipt_namespace_memoizes_without_changing_ordinary_prefix_or_request() {
     assert_eq!(new.result, old.result);
     assert_eq!(new.receipts, Some(contract()));
     assert_ne!(
-        hirsel_lir::abi::abi_digest(new),
-        hirsel_lir::abi::abi_digest(&old)
-    );
-    assert_ne!(
         hirsel_lir::LayoutKeys::new(builder.table()).fn_abi(new),
         hirsel_lir::LayoutKeys::new(builder.table()).fn_abi(&old)
     );

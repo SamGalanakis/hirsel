@@ -449,15 +449,11 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                                 "runtime template `{template}` names no symbol for this call"
                             ));
                         };
-                        self.manifested
-                            .imports
-                            .entry(symbol.clone())
-                            .or_insert_with(|| ObjectSymbol {
-                                name: symbol.clone(),
-                                kind: ObjectSymbolKind::Runtime,
-                                definition: Some(id.definition.clone()),
-                                abi: Some(abi_digest(abi)),
-                            });
+                        self.manifested.import(
+                            &symbol,
+                            ObjectSymbolKind::Runtime,
+                            Some(&id.definition),
+                        );
                         (
                             self.module.const_zero(self.module.ptr_type()),
                             None,
@@ -505,7 +501,17 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         } else {
             signature
         };
-        // A Hirsel callee is imported under the entry the call selects.
+        // A Hirsel callee is imported under the entry the call selects: an
+        // alternate body or a value entry with ahead state is the ahead kind.
+        let ahead =
+            self.inputs.alternate && (value_entry || matches!(site.callee, Callee::Indirect(_)));
+        let kind = if ahead {
+            EntryKind::Ahead
+        } else if value_entry {
+            EntryKind::Value
+        } else {
+            plain_entry(self.inputs.layouts, abi)
+        };
         let name = name.map(|(name, definition)| {
             let name = if value_entry {
                 format!("{name}{ROOTS_SUFFIX}")
@@ -513,15 +519,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 name
             };
             if let Some(definition) = definition {
-                self.manifested
-                    .imports
-                    .entry(name.clone())
-                    .or_insert_with(|| ObjectSymbol {
-                        name: name.clone(),
-                        kind: ObjectSymbolKind::Function,
-                        definition: Some(definition),
-                        abi: Some(abi_digest(abi)),
-                    });
+                self.import_entry(&name, &definition, kind, Some(abi));
             }
             name
         });
@@ -818,7 +816,12 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
             let actual = self.builder.load(self.module.ptr_type(), slot.ptr, 8);
             let name = symbol_name(&source.definition, source.instance.as_ref());
             let abi = fn_abi(self.inputs.layouts, source_abi, self.definition())?;
-            self.import_function(&name, &source.definition, Some(abi_digest(abi)));
+            self.import_entry(
+                &name,
+                &source.definition,
+                plain_entry(self.inputs.layouts, abi),
+                Some(abi),
+            );
             Signature::of(self.module, self.inputs.layouts, abi, &source.definition)?.declare(
                 self.module,
                 self.inputs.layouts,

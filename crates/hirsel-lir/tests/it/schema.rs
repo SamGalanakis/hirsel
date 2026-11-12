@@ -1355,20 +1355,20 @@ fn receipts_artifacts_and_manifests_round_trip_and_bind_the_unit_key() {
             name: "hirsel_f".into(),
             kind: ObjectSymbolKind::Function,
             definition: Some(path("f")),
-            abi: Some(hash("abi")),
+            entry: Some(hash("entry")),
         }],
         imports: vec![
             ObjectSymbol {
                 name: RuntimeEntry::Alloc.declaration().symbol.into(),
                 kind: ObjectSymbolKind::Runtime,
                 definition: None,
-                abi: None,
+                entry: None,
             },
             ObjectSymbol {
                 name: "hirsel_table".into(),
                 kind: ObjectSymbolKind::Data,
                 definition: None,
-                abi: None,
+                entry: None,
             },
         ],
         relocations: vec![Relocation {

@@ -98,6 +98,6 @@ fn hook(
         .params
         .extend(params.iter().copied().map(AbiParam::new));
     signature.returns.extend(result.map(AbiParam::new));
-    em.manifest_import(name, ObjectSymbolKind::Runtime, None, None);
+    em.manifest_import(name, ObjectSymbolKind::Runtime, None);
     em.import_function(name, &signature)
 }

@@ -184,7 +184,7 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
                 name: name.to_owned(),
                 kind: ObjectSymbolKind::Data,
                 definition: None,
-                abi: None,
+                entry: None,
             },
         );
     }
@@ -479,15 +479,7 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
                 ));
             }
         };
-        self.manifested
-            .imports
-            .entry(body_name.clone())
-            .or_insert_with(|| ObjectSymbol {
-                name: body_name.clone(),
-                kind: ObjectSymbolKind::Function,
-                definition: Some(finalizer.definition.clone()),
-                abi: None,
-            });
+        self.import_drop_body(&body_name, &finalizer.definition, instance)?;
         // STORE-11 energy: where the finalizer has a charged instance, the
         // running context picks the instance at each drop: the charged one
         // inside a budget (an allowance other than unbounded), else this one.
@@ -504,15 +496,11 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
                     ));
                 }
             };
-            self.manifested
-                .imports
-                .entry(name.clone())
-                .or_insert_with(|| ObjectSymbol {
-                    name,
-                    kind: ObjectSymbolKind::Function,
-                    definition: Some(finalizer.definition.clone()),
-                    abi: None,
-                });
+            self.import_drop_body(
+                &name,
+                &finalizer.definition,
+                &hirsel_lir::energy::charged_digest(*instance),
+            )?;
             Some(charged)
         } else {
             None
@@ -566,6 +554,24 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
         Ok(wrapper.value)
     }
 
+    /// Imports the drop body `name`, the entry `X` of the unit `instance` of
+    /// `definition`.
+    fn import_drop_body(
+        &mut self,
+        name: &str,
+        definition: &DefPath,
+        instance: &ContentHash,
+    ) -> Glued {
+        let Some(&abi) = self.inputs.units.get(instance) else {
+            return invalid(format!("the drop body `{name}` is no unit of the program"));
+        };
+        let abi = fn_abi(self.inputs.layouts, abi, definition)?;
+        let kind = plain_entry(self.inputs.layouts, abi);
+        let entry = entry_of(self.inputs.keys, kind, Some(abi));
+        self.manifested.import_entry(name, definition, entry);
+        Ok(())
+    }
+
     /// The `hirsel_rt_v2_check_thunk` of a codec check (SER-1): `(ctx, value, verdict) ->
     /// status` calling the check on the borrowed value at `value`, of `layout`, and storing
     /// its bool verdict as a byte.
@@ -577,15 +583,12 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
         let definition = check.definition.clone();
         let abi = fn_abi(self.inputs.layouts, check.abi, &definition)?;
         let name = symbol_name(&definition, check.instance.as_ref());
-        self.manifested
-            .imports
-            .entry(name.clone())
-            .or_insert_with(|| ObjectSymbol {
-                name: name.clone(),
-                kind: ObjectSymbolKind::Function,
-                definition: Some(definition.clone()),
-                abi: Some(abi_digest(abi)),
-            });
+        let entry = entry_of(
+            self.inputs.keys,
+            plain_entry(self.inputs.layouts, abi),
+            Some(abi),
+        );
+        self.manifested.import_entry(&name, &definition, entry);
         let wrapper_name = format!("hirsel.check.{name}");
         let (ptr, i8_ty) = (self.module.ptr_type(), self.module.int_type(8));
         let ty = self.module.function_type(i8_ty, &[ptr, ptr, ptr]);
@@ -775,11 +778,9 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
             for function in &block.functions {
                 let symbol = &function.symbol;
                 let thunk = function_thunk_name(&symbol.definition, symbol.instance.as_ref());
-                self.manifested.import(
-                    &thunk,
-                    ObjectSymbolKind::Function,
-                    Some(&symbol.definition),
-                );
+                let entry = entry_of(self.inputs.keys, EntryKind::FunctionRef, None);
+                self.manifested
+                    .import_entry(&thunk, &symbol.definition, entry);
                 let code = self.module.function_address(&thunk);
                 let descriptor = self.module.const_int(self.module.int_type(32), 2);
                 let (_, environment) = static_block(
@@ -862,15 +863,12 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
             false,
             Aliasing::of(self.inputs.aliasing_unstated),
         )?;
-        self.manifested
-            .imports
-            .entry(name.clone())
-            .or_insert_with(|| ObjectSymbol {
-                name: name.clone(),
-                kind: ObjectSymbolKind::Function,
-                definition: Some(definition.clone()),
-                abi: Some(abi_digest(abi)),
-            });
+        let digest = entry_of(
+            self.inputs.keys,
+            plain_entry(self.inputs.layouts, abi),
+            Some(abi),
+        );
+        self.manifested.import_entry(&name, definition, digest);
         let thunk = callback_thunk_name(definition, callback.instance.as_ref());
         foreign::define_callback_thunk(
             self.module,
@@ -882,15 +880,8 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
             &external,
             definition,
         )?;
-        self.manifested.exports.insert(
-            thunk.clone(),
-            ObjectSymbol {
-                name: thunk,
-                kind: ObjectSymbolKind::Function,
-                definition: Some(definition.clone()),
-                abi: Some(abi_digest(abi)),
-            },
-        );
+        let entry = entry_of(self.inputs.keys, EntryKind::Callback, None);
+        self.manifested.export_entry(&thunk, definition, entry);
         Ok(())
     }
 }

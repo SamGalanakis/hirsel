@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hirsel_core_contract::{Disposition, Engine, Manifest, Passing};
-use hirsel_lir::abi::abi_digest;
+use hirsel_lir::abi::EntryKind;
 use hirsel_lir::abi_types::{
     CallableShape, FnAbi, ParameterPassing, PhysicalType, ScalarExtension,
 };
@@ -26,6 +26,7 @@ use hirsel_lir::layout::{
     SEQUENCE_CAPACITY_OFFSET, align_up, payload_offset, sequence_elements_offset,
     sequence_slice_start, sequential_elements_offset,
 };
+use hirsel_lir::layout_keys::LayoutKeys;
 use hirsel_lir::layout_types::{
     DropStep, Endian, FieldLayout, FinalizerRef, LayoutId, LayoutKind, LayoutRecord, LayoutTable,
     ObjectFormat, ScalarKind, ScanStep, SizeSpec, SizeTerm, TagForm, TargetSpec,
@@ -624,7 +625,8 @@ fn lower<T>(
         })?;
     }
     let mut manifested = Manifested::default();
-    let mut optimizer_only = BTreeSet::new();
+    // Copied entries: optimizer-only bodies whose residual references import the owner's.
+    let mut optimizer_only = BTreeMap::new();
     let finished = {
         let machine = machine(inputs.target, inputs.opt != OptLevel::None)?;
         if inputs.alternate {
@@ -661,6 +663,12 @@ fn lower<T>(
             {
                 return Err(CodegenError::DuplicateSymbol { name });
             }
+            // The kinds of the entries `name` and, with roots, `X.roots9`.
+            let (name_kind, body_kind) = if inputs.alternate {
+                (EntryKind::Ahead, EntryKind::Ahead)
+            } else {
+                (plain_entry(inputs.layouts, abi), EntryKind::Value)
+            };
             let external = Signature::of(&module, inputs.layouts, abi, &unit.header.definition)?;
             let private_roots = inputs.alternate && ahead_value_entry(&unit.header.definition);
             // Every body defines its value entry (`X.roots9` when it has roots); ahead
@@ -728,15 +736,7 @@ fn lower<T>(
                 );
                 if signature.ahead.is_some() {
                     let name = RuntimeEntry::AheadState.declaration().symbol.to_owned();
-                    manifested
-                        .imports
-                        .entry(name.clone())
-                        .or_insert_with(|| ObjectSymbol {
-                            name,
-                            kind: ObjectSymbolKind::Runtime,
-                            definition: None,
-                            abi: None,
-                        });
+                    manifested.import(&name, ObjectSymbolKind::Runtime, None);
                 }
                 if profile.debug {
                     module.string_attribute(entry, "frame-pointer", "all");
@@ -749,13 +749,17 @@ fn lower<T>(
                 }
                 if copy {
                     module.make_available_externally(entry);
-                    optimizer_only.insert(name.clone());
-                    optimizer_only.insert(body_name.clone());
+                    let definition = &unit.header.definition;
+                    for (name, kind) in [(&name, name_kind), (&body_name, body_kind)] {
+                        let entry = entry_of(inputs.keys, kind, Some(abi));
+                        optimizer_only
+                            .insert(name.clone(), ObjectSymbol::entry(name, definition, entry));
+                    }
                 } else if template {
                     module.make_weak_odr(entry);
                 }
                 module.add_attribute(entry, AttributeSlot::Function, Attribute::InlineHint);
-                manifested.library.insert(body_name);
+                manifested.library.insert(body_name.clone());
                 // The adapter has its unit's scope, so a body inlined into it keeps its
                 // locations.
                 if let Some(debug) = debug.as_ref() {
@@ -830,7 +834,11 @@ fn lower<T>(
             if template {
                 if copy {
                     module.make_available_externally(function);
-                    optimizer_only.insert(name.clone());
+                    let entry = entry_of(inputs.keys, body_kind, Some(abi));
+                    optimizer_only.insert(
+                        body_name.clone(),
+                        ObjectSymbol::entry(&body_name, &unit.header.definition, entry),
+                    );
                 } else {
                     module.make_weak_odr(function);
                 }
@@ -888,7 +896,11 @@ fn lower<T>(
                     let thunk = define_function_thunk(&module, &name, entry, &external);
                     if copy {
                         module.make_available_externally(thunk);
-                        optimizer_only.insert(name.clone());
+                        let entry = entry_of(inputs.keys, EntryKind::FunctionRef, None);
+                        optimizer_only.insert(
+                            name.clone(),
+                            ObjectSymbol::entry(&name, &unit.header.definition, entry),
+                        );
                     } else {
                         module.make_weak_odr(thunk);
                     }
@@ -898,28 +910,17 @@ fn lower<T>(
                 functions.push((unit, function, signature));
                 continue;
             }
-            manifested.exports.insert(
-                name.clone(),
-                ObjectSymbol {
-                    name,
-                    kind: ObjectSymbolKind::Function,
-                    definition: Some(unit.header.definition.clone()),
-                    abi: Some(abi_digest(abi)),
-                },
+            let definition = &unit.header.definition;
+            manifested.export_entry(
+                &name,
+                definition,
+                entry_of(inputs.keys, name_kind, Some(abi)),
             );
             if !inputs.alternate && abi.shape == CallableShape::Definition {
-                let thunk =
-                    function_thunk_name(&unit.header.definition, Some(&unit.header.instance));
+                let thunk = function_thunk_name(definition, Some(&unit.header.instance));
                 define_function_thunk(&module, &thunk, entry, &external);
-                manifested.exports.insert(
-                    thunk.clone(),
-                    ObjectSymbol {
-                        name: thunk,
-                        kind: ObjectSymbolKind::Function,
-                        definition: Some(unit.header.definition.clone()),
-                        abi: Some(abi_digest(abi)),
-                    },
-                );
+                let entry = entry_of(inputs.keys, EntryKind::FunctionRef, None);
+                manifested.export_entry(&thunk, definition, entry);
             }
             functions.push((unit, function, signature));
         }
@@ -1087,23 +1088,15 @@ fn lower<T>(
         let kept: Vec<_> = manifested
             .kept
             .iter()
-            .filter(|name| module.defines(name) && !optimizer_only.contains(*name))
+            .filter(|name| module.defines(name) && !optimizer_only.contains_key(*name))
             .map(|name| module.function_address(name))
             .collect();
         module.keep(&kept);
         // Copied root bodies were visible during lowering for the private root ABI.
         // They are optimizer-only: residual calls resolve to the template's owner.
-        for name in &optimizer_only {
-            manifested.library.remove(name);
-            manifested
-                .imports
-                .entry(name.clone())
-                .or_insert_with(|| ObjectSymbol {
-                    name: name.clone(),
-                    kind: ObjectSymbolKind::Function,
-                    definition: None,
-                    abi: None,
-                });
+        for (name, symbol) in optimizer_only {
+            manifested.library.remove(&name);
+            manifested.imports.entry(name).or_insert(symbol);
         }
         // The retained owner symbols are visible to other objects' link manifests.
         // `library` also tracks the private root ABI while lowering, so promote only
@@ -1115,22 +1108,21 @@ fn lower<T>(
             }
             let name = symbol_name(&header.definition, Some(&header.instance));
             let abi = fn_abi(inputs.layouts, header.abi, &header.definition)?;
-            for name in [
-                format!("{name}{ROOTS_SUFFIX}"),
-                name,
-                function_thunk_name(&header.definition, Some(&header.instance)),
-                callback_thunk_name(&header.definition, Some(&header.instance)),
+            for (name, kind) in [
+                (format!("{name}{ROOTS_SUFFIX}"), EntryKind::Value),
+                (name, plain_entry(inputs.layouts, abi)),
+                (
+                    function_thunk_name(&header.definition, Some(&header.instance)),
+                    EntryKind::FunctionRef,
+                ),
+                (
+                    callback_thunk_name(&header.definition, Some(&header.instance)),
+                    EntryKind::Callback,
+                ),
             ] {
                 if manifested.library.remove(&name) {
-                    manifested.exports.insert(
-                        name.clone(),
-                        ObjectSymbol {
-                            name,
-                            kind: ObjectSymbolKind::Function,
-                            definition: Some(header.definition.clone()),
-                            abi: Some(abi_digest(abi)),
-                        },
-                    );
+                    let entry = entry_of(inputs.keys, kind, Some(abi));
+                    manifested.export_entry(&name, &header.definition, entry);
                 }
             }
         }
@@ -1288,6 +1280,18 @@ fn fn_abi<'a>(
 }
 
 /// Bytes of a `hirsel_rt_v2_region` record (`HIRSEL_RT_V2_ASSERT_SIZE` in the header).
+
+/// The entry digest of a `kind` entry at `abi`. No entry is a charged wrapper:
+/// a charged twin is an instance of its own, under its own names.
+pub(super) fn entry_of(keys: &LayoutKeys, kind: EntryKind, abi: Option<&FnAbi>) -> ContentHash {
+    keys.entry(kind, false, abi)
+}
+
+/// The kind of a body's entry `X` at `abi`: the value entry, or the slot form
+/// beside `X.roots9` when the body has root parameters.
+pub(super) fn plain_entry(layouts: &LayoutTable, abi: &FnAbi) -> EntryKind {
+    EntryKind::of_plain(!root_parameters(layouts, abi).is_empty())
+}
 
 /// The ahead bodies that keep their value entry: these checked sequence helpers
 /// inline into both their adapter and callers, so the root companions keep length

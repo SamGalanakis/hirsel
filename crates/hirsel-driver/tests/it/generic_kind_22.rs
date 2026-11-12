@@ -52,7 +52,7 @@ fn generic_kind_22_bound_spelling_and_prefix_neighbors() {
                     format!("{prefix}fn probe[T: {bound}](x: T) {{}}\npub fn main() {{}}\n");
                 let output = reject(&source, bound, "expected structural bound");
                 let d = &output.diagnostics[0];
-                assert!(d.notes.iter().any(|n| n == "help: use a supported structural bound: `plain`, `flat`, `data`, `key`, `sendable`, `inert`, `copyable`, `noalloc_drop`, `serializable`; or use `[T]` if no bound is required"));
+                assert!(d.notes.iter().any(|n| n == "help: use a supported structural bound: `plain`, `flat`, `data`, `key`, `sendable`, `inert`, `copyable`, `noalloc_drop`, `serializable`, `ordered`; or use `[T]` if no bound is required"));
                 assert_eq!(d.fix.as_ref().map(|f| f.replacement.as_str()), suggestion);
                 assert_eq!(
                     d.notes
@@ -78,6 +78,7 @@ fn generic_kind_22_bound_spelling_and_prefix_neighbors() {
             "copyable",
             "noalloc_drop",
             "serializable",
+            "ordered",
         ] {
             let source = format!("fn probe[T: {bound}](x: T) {{}}\npub fn main() {{}}");
             assert!(check(&source).1.diagnostics.is_empty(), "{source}");

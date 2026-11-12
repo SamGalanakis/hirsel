@@ -74,13 +74,15 @@ fn a_preserves_unique_body_is_proved_with_its_selection_entering_unique() {
 }
 
 /// `@preserves_unique(x) fn main(mut x: String)` calling `callee(mut x, take s)`,
-/// where `s` is a fresh literal or, when `aliased`, a copy of a parameter `y`.
+/// where `s` is a fresh literal or, when `aliased`, a copy of a taken
+/// parameter `y` (a borrowed one's copy would stay local, MODE-7).
 fn preserving_call(preserves: bool, aliased: bool) -> Fixture {
     let (mut f, x) = handback(false);
     let y = param(&mut f, TypeKind::Primitive(Primitive::String));
     let s = f.slot(TypeKind::Primitive(Primitive::String), Storage::Temporary);
+    let owned = if aliased { f.cleanup(vec![drop(y)]) } else { 0 };
     if aliased {
-        f.assign(s, Rvalue::Use(copy(y)), 0);
+        f.assign(s, Rvalue::Use(copy(y)), owned);
     } else {
         f.assign(s, Rvalue::Constant(Constant::String("fresh".into())), 0);
     }
@@ -104,10 +106,15 @@ fn preserving_call(preserves: bool, aliased: bool) -> Fixture {
             destination: PlaceId(result),
             next: BlockId(1),
         }),
-        on_failure: CleanupId(0),
+        on_failure: CleanupId(owned),
     };
-    f.body().blocks.push(block(vec![], ret(result, 0)));
-    owner_sig(&mut f, &[PassingMode::Mut, PassingMode::Borrow]);
+    f.body().blocks.push(block(vec![], ret(result, owned)));
+    let y_passing = if aliased {
+        PassingMode::Take
+    } else {
+        PassingMode::Borrow
+    };
+    owner_sig(&mut f, &[PassingMode::Mut, y_passing]);
     promise(&mut f);
     let mut callee = function_signature(
         "callee",
@@ -2046,16 +2053,18 @@ fn a_deep_unique_copy_of_a_view_is_independent_but_its_move_is_not() {
     );
 }
 
-/// `fn main(s: String) { let rows: List[String] = [e, fresh]; need(mut rows[0]) }`
+/// `fn main(take s: String) { let rows: List[String] = [e, fresh]; need(mut rows[0]) }`
 /// for `need(mut x: unique String)`, where `e` is `copy s` (`shared`) or a
-/// fresh string (oldv-attack-770 candidate 1:
+/// fresh string; `s` is taken because a borrowed one's copy stays local
+/// (MODE-7) (oldv-attack-770 candidate 1:
 /// `[copy xs, [[2]]]` then `demand(mut rows[0])` trapped in checked H).
 fn sequence_element_needed(shared: bool) -> Fixture {
     let mut f = Fixture::unit();
     let string = TypeKind::Primitive(Primitive::String);
     let s = param(&mut f, string.clone());
+    let owned_s = f.cleanup(vec![drop(s)]);
     let index = f.slot(TypeKind::Primitive(Primitive::U32), Storage::Temporary);
-    f.assign(index, Rvalue::Constant(Constant::Integer(0)), 0);
+    f.assign(index, Rvalue::Constant(Constant::Integer(0)), owned_s);
     let element = f.definition.types.push(ty(string.clone()));
     let list = TypeKind::Builtin {
         kind: BuiltinType::List,
@@ -2065,10 +2074,14 @@ fn sequence_element_needed(shared: bool) -> Fixture {
         copy(s)
     } else {
         let a = f.slot(string.clone(), Storage::Temporary);
-        f.assign(a, Rvalue::Constant(Constant::String("a".into())), 0);
+        f.assign(a, Rvalue::Constant(Constant::String("a".into())), owned_s);
         take(a)
     };
-    let held: Vec<_> = (!shared).then(|| drop(first.place.0)).into_iter().collect();
+    let held: Vec<_> = (!shared)
+        .then(|| drop(first.place.0))
+        .into_iter()
+        .chain([drop(s)])
+        .collect();
     let b = f.slot(string.clone(), Storage::Temporary);
     let c = f.cleanup(held.clone());
     f.assign(b, Rvalue::Constant(Constant::String("b".into())), c);
@@ -2092,7 +2105,7 @@ fn sequence_element_needed(shared: bool) -> Fixture {
         },
         c,
     );
-    let owned = f.cleanup(vec![drop(rows)]);
+    let owned = f.cleanup(vec![drop(rows), drop(s)]);
     f.emit(InstructionKind::BeginLoan {
         id: LoanId(0),
         place: PlaceId(rows),
@@ -2119,7 +2132,7 @@ fn sequence_element_needed(shared: bool) -> Fixture {
         loan: LoanId(0),
         if_active: false,
     };
-    let failed = f.cleanup(vec![lent.clone(), drop(rows)]);
+    let failed = f.cleanup(vec![lent.clone(), drop(rows), drop(s)]);
     f.body().blocks[0].terminator = Terminator::Call {
         callee: Callee::Definition {
             path: path("need"),
@@ -2135,9 +2148,9 @@ fn sequence_element_needed(shared: bool) -> Fixture {
         }),
         on_failure: CleanupId(failed),
     };
-    let exit = f.cleanup(vec![drop(unit), lent, drop(rows)]);
+    let exit = f.cleanup(vec![drop(unit), lent, drop(rows), drop(s)]);
     f.body().blocks.push(block(vec![], ret(0, exit)));
-    owner_sig(&mut f, &[PassingMode::Borrow]);
+    owner_sig(&mut f, &[PassingMode::Take]);
     let mut need = function_signature(
         "need",
         vec![(PassingMode::Mut, string)],
@@ -2166,9 +2179,304 @@ fn a_sequence_element_is_unique_only_if_every_element_is() {
     );
 }
 
-/// `fn main(p: String) -> unique String { let x = <fresh "a" | copy p>; take x }`:
+/// `fn main() { let xs = "x"; let mut out = "o"; (fn() { out = <copy xs | "f"> })();
+/// need(mut xs) }` for `need(mut x: unique String)`: a scoped closure writes
+/// a share of its borrowed capture into its `mut` capture (oldv-attack-770
+/// candidate 4). CLO-1 refuses the source form; this is the TIR the closure
+/// would lower to, with the captures' environment rows or, when `forged`,
+/// plain Global rows.
+fn captured_share_written(shared: bool, forged: bool) -> Fixture {
+    let string = TypeKind::Primitive(Primitive::String);
+    let mut f = Fixture::unit();
+    let unit = f.body().result;
+    let mut child = Fixture::unit();
+    child.definition.types = f.definition.types.clone();
+    let out_capture = child.slot(string.clone(), Storage::Capture);
+    let xs_capture = child.slot(string.clone(), Storage::Capture);
+    for capture in [out_capture, xs_capture] {
+        if forged {
+            continue;
+        }
+        let mut row = interner()
+            .get(child.body().places[capture as usize].ty)
+            .unwrap()
+            .clone();
+        row.modes.relation = Relation::environment();
+        let row = child.definition.types.push(row);
+        let root = child.body().places[capture as usize].root;
+        child.body().locals[root.0 as usize].ty = row;
+        child.body().places[capture as usize].ty = row;
+    }
+    let written = child.slot(string.clone(), Storage::Temporary);
+    if shared {
+        let local = child.body().places[xs_capture as usize].ty;
+        let root = child.body().places[written as usize].root;
+        child.body().locals[root.0 as usize].ty = local;
+        child.body().places[written as usize].ty = local;
+    }
+    let value = if shared {
+        Rvalue::Use(copy(xs_capture))
+    } else {
+        Rvalue::Constant(Constant::String("f".into()))
+    };
+    child.assign(written, value, 0);
+    let displaced = child.slot(string.clone(), Storage::Temporary);
+    let holding = child.cleanup(vec![drop(written)]);
+    child.body().blocks[0].instructions.push(inst(
+        InstructionKind::Replace {
+            destination: PlaceId(out_capture),
+            value: take(written),
+            displaced: PlaceId(displaced),
+            if_live: false,
+        },
+        holding,
+    ));
+    child.body().blocks[0].instructions.push(inst(
+        InstructionKind::Drop {
+            place: PlaceId(displaced),
+            if_live: false,
+        },
+        0,
+    ));
+    child.body().blocks[0].terminator = ret(0, 0);
+    f.definition.types = child.definition.types;
+    f.definition.bodies.push(child.definition.bodies.remove(0));
+
+    let xs = f.slot(string.clone(), Storage::Local);
+    f.assign(xs, Rvalue::Constant(Constant::String("x".into())), 0);
+    let out = f.slot(string.clone(), Storage::Local);
+    let c = f.cleanup(vec![drop(xs)]);
+    f.assign(out, Rvalue::Constant(Constant::String("o".into())), c);
+    let owned = f.cleanup(vec![drop(out), drop(xs)]);
+    f.body().blocks[0].instructions.push(inst(
+        InstructionKind::BeginLoan {
+            id: LoanId(0),
+            place: PlaceId(out),
+            mutable: true,
+            if_inactive: false,
+        },
+        owned,
+    ));
+    let end_out = CleanupAction::EndLoan {
+        loan: LoanId(0),
+        if_active: false,
+    };
+    let lent_out = f.cleanup(vec![end_out.clone(), drop(out), drop(xs)]);
+    f.body().blocks[0].instructions.push(inst(
+        InstructionKind::BeginLoan {
+            id: LoanId(1),
+            place: PlaceId(xs),
+            mutable: false,
+            if_inactive: false,
+        },
+        lent_out,
+    ));
+    let end_xs = CleanupAction::EndLoan {
+        loan: LoanId(1),
+        if_active: false,
+    };
+    let out_loan = f.through_loan(out, 0);
+    let xs_loan = f.through_loan(xs, 1);
+    let mut fun = fn_type(vec![], unit);
+    fun.uses = Uses::Unrestricted;
+    fun.allocation = Allocation::MayAllocate;
+    let closure = f.slot(TypeKind::Function(fun), Storage::Temporary);
+    let mut row = interner()
+        .get(f.body().places[closure as usize].ty)
+        .unwrap()
+        .clone();
+    row.modes.relation = Relation::environment();
+    row.modes.sendability = Sendability::NotSendable;
+    let row = f.definition.types.push(row);
+    f.body().places[closure as usize].ty = row;
+    let root = f.body().places[closure as usize].root;
+    f.body().locals[root.0 as usize].ty = row;
+    let lent = f.cleanup(vec![end_xs.clone(), end_out.clone(), drop(out), drop(xs)]);
+    f.assign(
+        closure,
+        Rvalue::Closure {
+            context: CaptureContext::Scoped,
+            body: BodyId(1),
+            captures: vec![
+                operand(out_loan, UseKind::Mut),
+                operand(xs_loan, UseKind::Borrow),
+            ],
+            destination: Destination::Inferred,
+        },
+        lent,
+    );
+    let called = f.slot(TypeKind::Tuple(vec![].into()), Storage::Temporary);
+    let failed = f.cleanup(vec![
+        drop(closure),
+        end_xs.clone(),
+        end_out.clone(),
+        drop(out),
+        drop(xs),
+    ]);
+    f.body().blocks[0].terminator = Terminator::Call {
+        callee: Callee::Indirect {
+            forward_caller: false,
+            value: operand(closure, UseKind::Borrow),
+            arguments: vec![],
+        },
+        arguments: vec![],
+        returns: Some(CallReturn {
+            destination: PlaceId(called),
+            next: BlockId(1),
+        }),
+        on_failure: CleanupId(failed),
+    };
+    let done = f.slot(TypeKind::Tuple(vec![].into()), Storage::Temporary);
+    let after = f.cleanup(vec![drop(out), drop(xs)]);
+    let released = vec![
+        inst(
+            InstructionKind::Drop {
+                place: PlaceId(called),
+                if_live: false,
+            },
+            failed,
+        ),
+        inst(
+            InstructionKind::Drop {
+                place: PlaceId(closure),
+                if_live: false,
+            },
+            failed,
+        ),
+        inst(
+            InstructionKind::EndLoan {
+                loan: LoanId(1),
+                if_active: false,
+            },
+            0,
+        ),
+        inst(
+            InstructionKind::EndLoan {
+                loan: LoanId(0),
+                if_active: false,
+            },
+            0,
+        ),
+        inst(
+            InstructionKind::BeginLoan {
+                id: LoanId(2),
+                place: PlaceId(xs),
+                mutable: true,
+                if_inactive: false,
+            },
+            after,
+        ),
+    ];
+    let needed = f.through_loan(xs, 2);
+    let end_need = CleanupAction::EndLoan {
+        loan: LoanId(2),
+        if_active: false,
+    };
+    let need_failed = f.cleanup(vec![end_need.clone(), drop(out), drop(xs)]);
+    f.body().blocks.push(block(
+        released,
+        Terminator::Call {
+            callee: Callee::Definition {
+                path: path("need"),
+                arguments: vec![],
+            },
+            arguments: vec![CallArgument {
+                parameter: ParamId(0),
+                value: operand(needed, UseKind::Mut),
+            }],
+            returns: Some(CallReturn {
+                destination: PlaceId(done),
+                next: BlockId(2),
+            }),
+            on_failure: CleanupId(need_failed),
+        },
+    ));
+    let exit = f.cleanup(vec![drop(done), end_need, drop(out), drop(xs)]);
+    f.body().blocks.push(block(vec![], ret(0, exit)));
+    owner_sig(&mut f, &[]);
+    let mut need = function_signature(
+        "need",
+        vec![(PassingMode::Mut, string)],
+        TypeKind::Tuple(vec![].into()),
+    );
+    let SignatureKind::Function(fun) = &mut need.kind else {
+        panic!()
+    };
+    let mut row = interner().get(fun.parameters[0].ty).unwrap().clone();
+    row.modes.uniqueness = Uniqueness::Unique;
+    fun.parameters[0].ty = interner().intern(row);
+    f.signatures.insert(id("need"), need);
+    f
+}
+
+/// `fn main(xs: String, mut out: String) { out = <copy xs | "f"> }` with `xs`
+/// borrowed under a forged Global row: the function form of
+/// oldv-attack-770 candidate 4.
+fn borrowed_share_written(shared: bool) -> Fixture {
+    let string = TypeKind::Primitive(Primitive::String);
+    let mut f = Fixture::unit();
+    let xs = param(&mut f, string.clone());
+    let out = param(&mut f, string.clone());
+    let written = f.slot(string.clone(), Storage::Temporary);
+    let value = if shared {
+        Rvalue::Use(copy(xs))
+    } else {
+        Rvalue::Constant(Constant::String("f".into()))
+    };
+    f.assign(written, value, 0);
+    let displaced = f.slot(string, Storage::Temporary);
+    let holding = f.cleanup(vec![drop(written)]);
+    f.body().blocks[0].instructions.push(inst(
+        InstructionKind::Replace {
+            destination: PlaceId(out),
+            value: take(written),
+            displaced: PlaceId(displaced),
+            if_live: false,
+        },
+        holding,
+    ));
+    f.body().blocks[0].instructions.push(inst(
+        InstructionKind::Drop {
+            place: PlaceId(displaced),
+            if_live: false,
+        },
+        0,
+    ));
+    f.body().blocks[0].terminator = ret(0, 0);
+    owner_sig(&mut f, &[PassingMode::Borrow, PassingMode::Mut]);
+    f
+}
+
+#[test]
+fn a_borrowed_slot_is_a_view_whatever_its_row_claims() {
+    // MODE-7, CLO-1: a borrowed parameter or capture is the caller's view, so
+    // a share of it stays local and cannot be written into `mut` storage,
+    // even when the TIR row claims Global. Otherwise the caller keeps `xs`
+    // unique after the write and `need(mut xs)` sees a counted share.
+    for forged in [false, true] {
+        captured_share_written(false, forged).valid();
+        assert!(
+            captured_share_written(true, forged)
+                .kinds()
+                .iter()
+                .any(|k| matches!(k, ViolationKind::InvalidResultSource(_))),
+            "forged={forged}"
+        );
+    }
+    borrowed_share_written(false).valid();
+    assert!(
+        borrowed_share_written(true)
+            .kinds()
+            .iter()
+            .any(|k| matches!(k, ViolationKind::InvalidResultSource(_)))
+    );
+}
+
+/// `fn main(take p: String) -> unique String { let x = <fresh "a" | copy p>; take x }`:
 /// the move Lower emits for `unique x` when the ownership pass proved `x`
 /// unique (`OwnershipFacts::unique_identities`). V judges it on its own fact.
+/// `p` is taken: a borrowed one's copy stays local (MODE-7) and could not
+/// be returned at all.
 fn unique_identity_move(shared: bool) -> Fixture {
     let mut f = Fixture::unit();
     let string = TypeKind::Primitive(Primitive::String);
@@ -2181,7 +2489,7 @@ fn unique_identity_move(shared: bool) -> Fixture {
     f.body().result = row;
     f.body().locals[0].ty = row;
     f.body().places[0].ty = row;
-    let entry = f.cleanup(vec![]);
+    let entry = f.cleanup(vec![drop(p)]);
     let x = f.slot(string, Storage::Temporary);
     let value = if shared {
         Rvalue::Use(copy(p))
@@ -2189,10 +2497,10 @@ fn unique_identity_move(shared: bool) -> Fixture {
         Rvalue::Constant(Constant::String("a".into()))
     };
     f.assign(x, value, entry);
-    let holding = f.cleanup(vec![drop(x)]);
+    let holding = f.cleanup(vec![drop(x), drop(p)]);
     f.assign(0, Rvalue::Use(take(x)), holding);
     f.body().blocks[0].terminator = ret(0, entry);
-    owner_sig(&mut f, &[PassingMode::Borrow]);
+    owner_sig(&mut f, &[PassingMode::Take]);
     f
 }
 

@@ -802,6 +802,11 @@ fn closure_fixture() -> Fixture {
         if_inactive: false,
     });
     let capture_ty = f.body().places[1].ty;
+    // CLO-1: the body knows its borrowed capture as a view, so its copy is
+    // an environment-local result.
+    let mut local = interner().get(capture_ty).unwrap().clone();
+    local.modes.relation = Relation::environment();
+    let local = f.definition.types.push(local);
     let nested = Body {
         arena_scope_grant: None,
         scoped_parameters: Vec::new(),
@@ -836,7 +841,7 @@ fn closure_fixture() -> Fixture {
         cleanups: vec![Cleanup::default()],
         entry: BlockId(0),
         parameters: vec![],
-        result: capture_ty,
+        result: local,
         borrow_cursors: vec![],
         tail_sites: vec![],
         matches: vec![],
@@ -846,7 +851,7 @@ fn closure_fixture() -> Fixture {
         SignatureKind::Function(f) => f,
         _ => unreachable!(),
     };
-    fun.result = capture_ty;
+    fun.result = local;
     let closure = f.slot(TypeKind::Tuple(vec![].into()), Storage::Temporary);
     let mut scoped = ty(TypeKind::Function(fun));
     scoped.modes.relation = Relation::environment();
@@ -2939,6 +2944,15 @@ fn nominal_copy_fixture(payload: TypeKind, resource: bool) -> Fixture {
     };
     let source = f.slot(kind.clone(), Storage::Parameter);
     let destination = f.slot(kind, Storage::Temporary);
+    // A copy of the borrowed parameter stays local to the call (MODE-7).
+    let mut local = interner()
+        .get(f.body().places[destination as usize].ty)
+        .unwrap()
+        .clone();
+    local.modes.relation = Relation::environment();
+    let local = f.definition.types.push(local);
+    f.body().locals[destination as usize].ty = local;
+    f.body().places[destination as usize].ty = local;
     f.body().parameters.push(LocalId(source));
     owner_signature(&mut f, PassingMode::Borrow);
     let types = interner();
@@ -5874,13 +5888,18 @@ fn mutable_parameter_replacement_requires_owned_storage() {
             fun.parameters[1].passing = PassingMode::Take;
         }
         let kinds = f.kinds();
-        if usage == UseKind::Borrow {
-            assert!(
+        match usage {
+            UseKind::Borrow => assert!(
                 kinds.contains(&ViolationKind::BorrowedMove(PlaceId(h))),
                 "{kinds:?}"
-            );
-        } else {
-            assert!(kinds.is_empty(), "{kinds:?}");
+            ),
+            // A copy of the borrowed `x` shares the caller's blocks, which
+            // stay local to the call whatever its row claims (MODE-7).
+            UseKind::Copy => assert!(
+                kinds.contains(&ViolationKind::InvalidResultSource(PlaceId(h))),
+                "{kinds:?}"
+            ),
+            _ => assert!(kinds.is_empty(), "{kinds:?}"),
         }
     }
 }

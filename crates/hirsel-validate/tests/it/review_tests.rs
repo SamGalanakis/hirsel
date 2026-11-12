@@ -286,6 +286,8 @@ fn p5a_closure_type_forges_authority_of_its_captures() {
             TypeKind::Function(fn_type(vec![], unit)),
             Storage::Temporary,
         ); // authority inert, uses {}
+        // An owned parameter: a borrowed one's copy stays local (MODE-7).
+        let owned = f.cleanup(vec![drop(d)]);
         f.assign(
             c,
             Rvalue::Closure {
@@ -294,12 +296,12 @@ fn p5a_closure_type_forges_authority_of_its_captures() {
                 captures: vec![copy(d)],
                 destination: Destination::Inferred,
             },
-            0,
+            owned,
         );
         let cty = f.body().places[c as usize].ty;
         f.body().result = cty;
-        f.body().blocks[0].terminator = ret(c, 0);
-        owner_sig(&mut f, &[PassingMode::Borrow]);
+        f.body().blocks[0].terminator = ret(c, owned);
+        owner_sig(&mut f, &[PassingMode::Take]);
         assert!(f.kinds().contains(&ViolationKind::TypeMismatch {
             entity: "closure authority"
         }));
@@ -309,6 +311,7 @@ fn p5a_closure_type_forges_authority_of_its_captures() {
                     AuthoritySummary::Known(vec![AuthorityTerm::Capability(path("Dir"))].into());
             }
         });
+        owner_sig(&mut f, &[PassingMode::Take]);
         assert!(f.kinds().contains(&ViolationKind::TypeMismatch {
             entity: "closure uses"
         }));
@@ -319,6 +322,7 @@ fn p5a_closure_type_forges_authority_of_its_captures() {
                 ));
             }
         });
+        owner_sig(&mut f, &[PassingMode::Take]);
         f.valid();
     }
 }
@@ -343,6 +347,8 @@ fn p5b_closure_type_forges_sendability() {
     let cl = f.body().places[c as usize].root;
     f.body().locals[cl.0 as usize].ty = ct2;
     f.body().places[c as usize].ty = ct2;
+    // An owned parameter: a borrowed one's copy stays local (MODE-7).
+    let owned = f.cleanup(vec![drop(x)]);
     f.assign(
         c,
         Rvalue::Closure {
@@ -351,17 +357,18 @@ fn p5b_closure_type_forges_sendability() {
             captures: vec![copy(x)],
             destination: Destination::Inferred,
         },
-        0,
+        owned,
     );
     f.body().result = ct2;
-    f.body().blocks[0].terminator = ret(c, 0);
-    owner_sig(&mut f, &[PassingMode::Borrow]);
+    f.body().blocks[0].terminator = ret(c, owned);
+    owner_sig(&mut f, &[PassingMode::Take]);
     assert!(f.kinds().contains(&ViolationKind::TypeMismatch {
         entity: "closure sendability"
     }));
     replace_closure_row(&mut f, |row| {
         row.modes.sendability = Sendability::NotSendable;
     });
+    owner_sig(&mut f, &[PassingMode::Take]);
     f.valid();
 }
 
@@ -768,7 +775,18 @@ fn p1_borrowed_parameter_laundered_into_owned_global_aggregate() {
     let Rvalue::Construct { fields, .. } = &mut f.body().rvalues[value.0 as usize] else {
         unreachable!()
     };
+    // A copy of a borrowed parameter shares the caller's blocks, which stay
+    // local to the call whatever relation the row claims (MODE-7).
     fields[0].value.usage = UseKind::Copy;
+    assert!(
+        f.kinds()
+            .contains(&ViolationKind::InvalidResultSource(PlaceId(t)))
+    );
+    let Rvalue::Construct { fields, .. } = &mut f.body().rvalues[value.0 as usize] else {
+        unreachable!()
+    };
+    fields[0].value.usage = UseKind::Take;
+    owner_signature(&mut f, PassingMode::Take);
     f.valid();
 }
 
@@ -2877,6 +2895,15 @@ fn comparison_of_captured_generics_requires_the_outer_data_proof() {
         let ct = f.definition.types.push(row);
         f.body().places[2].ty = ct;
         f.body().locals[2].ty = ct;
+        // A non-plain copy of the borrowed capture stays local (CLO-1).
+        let mut copied = interner()
+            .get(f.definition.bodies[1].places[2].ty)
+            .unwrap()
+            .clone();
+        copied.modes.relation = Relation::environment();
+        let copied = f.definition.types.push(copied);
+        f.definition.bodies[1].locals[2].ty = copied;
+        f.definition.bodies[1].places[2].ty = copied;
         let b = &mut f.definition.bodies[1];
         let bool_ty = f
             .definition
@@ -4977,7 +5004,10 @@ fn local_owned_receivers_accept_owned_content_without_changing_caller_storage_ru
                         &[PassingMode::Mut, PassingMode::Borrow]
                     },
                 );
-                if usage == UseKind::Copy && (owned_receiver || !local_source) {
+                // A copy of a borrowed parameter stays local to the call
+                // whatever its row claims (MODE-7): only a frame-owned
+                // receiver may hold it.
+                if usage == UseKind::Copy && owned_receiver {
                     f.valid();
                 } else {
                     let kinds = f.kinds();
@@ -5411,8 +5441,20 @@ fn contract_clauses_independently_require_borrowed_formals_and_readonly_access()
     }
     for alias in [None, Some(UseKind::Borrow), Some(UseKind::Copy)] {
         let mut f = contract_clause_fixture(PassingMode::Borrow);
+        // A copy of the borrowed formal stays local to the clause (MODE-7),
+        // and `poke` takes a `mut` view, as source declares both.
+        let mut view = interner()
+            .get(f.definition.bodies[1].locals[1].ty)
+            .unwrap()
+            .clone();
+        view.modes.relation = Relation::environment();
+        let view = f.definition.types.push(view);
         let source = if let Some(usage) = alias {
-            let string = f.definition.bodies[1].locals[1].ty;
+            let string = if usage == UseKind::Copy {
+                view
+            } else {
+                f.definition.bodies[1].locals[1].ty
+            };
             let child = &mut f.definition.bodies[1];
             let place = add_capture(child, string);
             child.locals[place as usize].storage = Storage::Temporary;
@@ -5446,14 +5488,13 @@ fn contract_clauses_independently_require_borrowed_formals_and_readonly_access()
             PlaceId(child.places.len() as u32 - 1)
         };
         let unit = unit_ty(&mut f);
-        let string = f.definition.bodies[1].locals[1].ty;
         let mut signature = function_signature("poke", vec![], TypeKind::Tuple(vec![].into()));
         signature.kind = SignatureKind::Function(fn_type(
             vec![Parameter {
                 name: None,
                 label: None,
                 passing: PassingMode::Mut,
-                ty: string,
+                ty: view,
             }],
             unit,
         ));
@@ -9483,6 +9524,8 @@ fn copying_a_borrowed_qualified_owner_keeps_its_callable_field_proof() {
     );
     let mut row = interner().get(callable).unwrap().clone();
     row.modes.sendability = Sendability::Sendable;
+    // A copy of a borrowed parameter's part stays local (MODE-7).
+    row.modes.relation = Relation::environment();
     let proved = f.definition.types.push(row);
     f.body().places[copied as usize].ty = proved;
     let root = f.body().places[copied as usize].root;

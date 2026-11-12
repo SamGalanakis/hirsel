@@ -334,6 +334,10 @@ pub(super) struct Plan {
     roots: Vec<usize>,
     loans: Vec<(LoanId, PlaceId, bool)>,
     borrowed: Vec<bool>,
+    /// MODE-7, CLO-1: roots a body knows only as a caller's view, borrowed
+    /// parameters and borrowed captures, whose counted copies stay local
+    /// whatever relation their row claims.
+    views: Vec<bool>,
     mutable_parameters: Vec<bool>,
     state_promises: Vec<state_proof::Selection>,
     release: Vec<bool>,
@@ -624,6 +628,7 @@ impl Plan {
             .collect();
         let mut borrowed = vec![false; body.locals.len()];
         let mut mutable_parameters = vec![false; body.locals.len()];
+        let mut views = vec![false; body.locals.len()];
         let function = if checker.site.body == checker.definition.entry {
             checker
                 .signatures
@@ -659,6 +664,7 @@ impl Plan {
             for (p, l) in f.parameters.iter().zip(&body.parameters) {
                 borrowed[l.0 as usize] = p.passing != PassingMode::Take;
                 mutable_parameters[l.0 as usize] = p.passing == PassingMode::Mut;
+                views[l.0 as usize] = p.passing == PassingMode::Borrow;
             }
         }
         // The independent entry/use proof runs before any flow model is built.
@@ -666,6 +672,7 @@ impl Plan {
         if let Some(grant) = &body.arena_scope_grant {
             if let Some(local) = body.parameters.get(grant.arena_parameter.0 as usize) {
                 borrowed[local.0 as usize] = false;
+                views[local.0 as usize] = false;
             }
         }
         if checker.site.body == checker.definition.entry
@@ -709,6 +716,7 @@ impl Plan {
                 borrowed[index] =
                     lends_captures || matches!(operand.usage, UseKind::Borrow | UseKind::Mut);
                 mutable_parameters[index] = operand.usage == UseKind::Mut;
+                views[index] = operand.usage == UseKind::Borrow;
             }
         }
         let mut environment_paths = inputs.environment_paths.clone();
@@ -1143,6 +1151,7 @@ impl Plan {
             roots,
             loans,
             borrowed,
+            views,
             mutable_parameters,
             state_promises,
             creation,
@@ -3720,6 +3729,8 @@ impl Checker<'_, '_> {
             // A share of global counted storage acquires its own owner, also
             // through borrowed staging slots. Local/arena sources remain bounded.
             // A global function value owns its captures and shares the same way.
+            // A borrowed parameter or capture is a view whatever its row
+            // claims (MODE-7, CLO-1): its share stays local to the call.
             let mut pending = sources.clone();
             let mut seen = BTreeSet::new();
             let mut global = true;
@@ -3728,7 +3739,7 @@ impl Checker<'_, '_> {
                     continue;
                 }
                 let source_ty = self.t.get(self.body.locals[source].ty).unwrap();
-                if !source_ty.modes.relation.is_global() {
+                if !source_ty.modes.relation.is_global() || model.views[source] {
                     global = false;
                     break;
                 }

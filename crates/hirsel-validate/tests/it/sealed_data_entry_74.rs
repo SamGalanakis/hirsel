@@ -4,13 +4,15 @@ use hirsel_tir::LocalId;
 use hirsel_tir::*;
 use hirsel_types::*;
 
-fn returned(scoped: bool, copied: bool, unary: bool) -> Fixture {
+/// `fn main(root: String) -> String`, returning `unique copy root` when
+/// `copied`, else an independent string.
+fn returned(scoped: bool, copied: bool) -> Fixture {
     let mut f = Fixture::unit();
     let kind = TypeKind::Primitive(Primitive::String);
     let root = f.slot(kind.clone(), Storage::Parameter);
     let result = f.slot(kind.clone(), Storage::Temporary);
     f.body().parameters = vec![LocalId(root)];
-    if unary {
+    if copied {
         let mut row = interner().row(f.body().locals[result as usize].ty).clone();
         row.modes.uniqueness = Uniqueness::Unique;
         let ty = f.definition.types.push(row);
@@ -29,13 +31,9 @@ fn returned(scoped: bool, copied: bool, unary: bool) -> Fixture {
     f.assign(
         result,
         if copied {
-            if unary {
-                Rvalue::Unary {
-                    op: hirsel_syntax::UnaryOp::Unique,
-                    value: copy(root),
-                }
-            } else {
-                Rvalue::Use(copy(root))
+            Rvalue::Unary {
+                op: hirsel_syntax::UnaryOp::Unique,
+                value: copy(root),
             }
         } else {
             Rvalue::Constant(Constant::String("independent".into()))
@@ -43,7 +41,7 @@ fn returned(scoped: bool, copied: bool, unary: bool) -> Fixture {
         0,
     );
     f.body().blocks[0].terminator = ret(result, 0);
-    if unary {
+    if copied {
         owner_signature(&mut f, PassingMode::Borrow);
         let SignatureKind::Function(function) = &mut f.signatures.get_mut(id("main")).unwrap().kind
         else {
@@ -77,22 +75,22 @@ fn qualified(f: &Fixture) -> Vec<hirsel_validate::ViolationKind> {
 
 #[test]
 fn a_data_contract_accepts_an_independent_result_and_rejects_a_retained_root() {
-    assert_eq!(qualified(&returned(true, false, false)), []);
-    for unary in [false, true] {
-        assert_eq!(qualified(&returned(false, true, unary)), []);
-        let kinds = qualified(&returned(true, true, unary));
-        assert!(
-            kinds.contains(&hirsel_validate::ViolationKind::TypeMismatch {
-                entity: "scoped nonretaining result"
-            }),
-            "{kinds:?}"
-        );
-    }
+    assert_eq!(qualified(&returned(true, false)), []);
+    // A plain copy of the borrowed root cannot be a global result at all
+    // (MODE-7); a `unique` copy can, but not under the data contract.
+    assert_eq!(qualified(&returned(false, true)), []);
+    let kinds = qualified(&returned(true, true));
+    assert!(
+        kinds.contains(&hirsel_validate::ViolationKind::TypeMismatch {
+            entity: "scoped nonretaining result"
+        }),
+        "{kinds:?}"
+    );
 }
 
 #[test]
 fn a_data_selector_cannot_decorate_a_taken_parameter() {
-    let mut f = returned(true, false, false);
+    let mut f = returned(true, false);
     f.valid();
     let signature = f.signatures.get_mut(id("main")).unwrap();
     let SignatureKind::Function(function) = &mut signature.kind else {

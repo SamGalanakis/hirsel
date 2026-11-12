@@ -21,7 +21,7 @@ fn actual_lower_products_have_checked_indexed_body_and_instruction_rows() {
             "fn choose(x:bool)->u32{if x{7u32}else{9u32}}\npub fn main()->u32{choose(true)}\n",
         )
         .unwrap();
-        let store = Arc::new(MemStore::default());
+        let store = Arc::new(MemStore::default().with_installed_products());
         let mut program = COMPILER
             .with_config(CompileConfig {
                 store: store.clone(),

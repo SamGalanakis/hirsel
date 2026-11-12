@@ -47,7 +47,7 @@ pub(super) fn synthetic_fixture(
     domain: Domain,
     bytes: &[u8],
 ) -> ProductRef {
-    let store = MemStore::default();
+    let store = MemStore::default().with_installed_products();
     let reference = store.put_content(domain, bytes).unwrap();
     imported_fixture(&store, address, action, reference)
 }
@@ -89,7 +89,7 @@ fn admitted_real_front_tasks_match_scalar_modes_and_complete_reads() {
         )
         .unwrap();
         for jobs in [1, 2] {
-            let store = Arc::new(MemStore::default());
+            let store = Arc::new(MemStore::default().with_installed_products());
             let config = CompileConfig {
                 store: store.clone(),
                 jobs: hirsel_intern::jobs::Jobs::new(jobs),
@@ -209,7 +209,7 @@ fn admitted_lower_saved_work_and_native_metadata_survive_dependency_suspension()
         let warm = tempfile::tempdir().unwrap();
         std::fs::write(warm.path().join("main.hir"), "pub fn main()->u8{0u8}\n").unwrap();
         for jobs in [1, 2] {
-            let store = Arc::new(MemStore::default());
+            let store = Arc::new(MemStore::default().with_installed_products());
             let compiler = COMPILER
                 .with_config(CompileConfig {
                     store: store.clone(),
@@ -456,7 +456,7 @@ fn admitted_lower_depth_matches_scalar_after_warm_constant_dependencies() {
         for jobs in [1, 2] {
             for limit in [0, 1, 2, 3, 4] {
                 for warm in [false, true] {
-                    let store = Arc::new(MemStore::default());
+                    let store = Arc::new(MemStore::default().with_installed_products());
                     let mut program = COMPILER
                         .with_config(CompileConfig {
                             store: store.clone(),
@@ -620,7 +620,7 @@ fn admitted_front_store_hits_validate_signature_reads_before_materializing_bodie
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("main.hir");
-        let store = Arc::new(MemStore::default());
+        let store = Arc::new(MemStore::default().with_installed_products());
         for (source, main_hit, spare_hit, verify_cache) in [
             (
                 "fn spare()->u8{1u8}\npub fn main(){let _=spare()}\n",
@@ -751,6 +751,14 @@ fn admitted_front_zero_hold_retains_only_archives_after_settlement() {
         std::fs::write(&path, "pub fn main()->u8{1u8}\n").unwrap();
         struct ContentOnly(MemStore);
         impl ResultStore for ContentOnly {
+            fn installed_package(
+                &self,
+                package: &hirsel_syntax::PackageId,
+                compiler: hirsel_syntax::ContentHash,
+            ) -> Result<Arc<hirsel_engine_store::InstalledPackage>, String> {
+                self.0.installed_package(package, compiler)
+            }
+
             fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
                 self.0.admit_product_memory(bytes)
             }
@@ -786,7 +794,7 @@ fn admitted_front_zero_hold_retains_only_archives_after_settlement() {
                 "active-content-only-test"
             }
         }
-        let store = Arc::new(ContentOnly(MemStore::default()));
+        let store = Arc::new(ContentOnly(MemStore::default().with_installed_products()));
         let mut program = COMPILER
             .with_config(CompileConfig {
                 store,
@@ -941,7 +949,7 @@ fn admitted_front_pressure_refused_citation_caches_nothing_and_recomputes_the_ci
         for mode in 0..2 {
             let mut program = COMPILER
                 .with_config(CompileConfig {
-                    store: Arc::new(Transport(MemStore::default())),
+                    store: Arc::new(Transport(MemStore::default().with_installed_products())),
                     hold_bytes: 0,
                     ..Default::default()
                 })
@@ -1615,7 +1623,7 @@ fn admitted_storage_recipe_waits_for_checked_body_and_matches_scalar_adapter() {
         )
         .unwrap();
         for jobs in [1, 2] {
-            let store = Arc::new(MemStore::default());
+            let store = Arc::new(MemStore::default().with_installed_products());
             let mut program = COMPILER
                 .with_config(CompileConfig {
                     store: store.clone(),

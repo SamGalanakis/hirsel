@@ -16,7 +16,7 @@ fn ordinary_and_opaque_constants_publish_original_lower_and_evaluate_products() 
         std::fs::write(&path, "pub opaque type ExitCode: plain + inert + noalloc_drop uses {} { code:u8, }\npub const SUCCESS:ExitCode=ExitCode(code:0u8)\nconst N:u8=7u8\npub fn main()->u8{N}\n").unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"constants","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
         {
-            let store = Arc::new(MemStore::default());
+            let store = Arc::new(MemStore::default().with_installed_products());
             let mut program = COMPILER
                 .with_config(CompileConfig {
                     store: store.clone(),
@@ -87,7 +87,7 @@ fn std_opaque_constant_publishes_original_lower_and_evaluate_products() {
         let path = directory.path().join("main.hir");
         std::fs::write(&path, "pub fn main(){}\n").unwrap();
         {
-            let store = Arc::new(MemStore::default());
+            let store = Arc::new(MemStore::default().with_installed_products());
             let mut program = COMPILER
                 .with_config(CompileConfig {
                     store: store.clone(),
@@ -164,7 +164,7 @@ fn std_constant_publishes_after_full_namespace_capture_and_body_eviction() {
         let path = directory.path().join("main.hir");
         std::fs::write(&path, "pub fn main(){}\n").unwrap();
         {
-            let store = Arc::new(MemStore::default());
+            let store = Arc::new(MemStore::default().with_installed_products());
             let mut program = COMPILER
                 .with_config(CompileConfig {
                     store: store.clone(),
@@ -242,7 +242,7 @@ fn immutable_check_loader_std_constant_keeps_lower_and_evaluate_bindings() {
         let path = directory.path().join("main.hir");
         std::fs::write(&path, "pub fn main(){}\n").unwrap();
         {
-            let store = Arc::new(MemStore::default());
+            let store = Arc::new(MemStore::default().with_installed_products());
             let compiler = COMPILER
                 .with_config(CompileConfig {
                     store: store.clone(),

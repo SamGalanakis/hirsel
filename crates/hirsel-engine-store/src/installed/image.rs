@@ -70,8 +70,8 @@ const ENTRY: usize = 44;
 /// The section directory, frozen for every land of the cutover.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Sections {
-    rows: Reference,
-    contents: Reference,
+    pub(super) rows: Reference,
+    pub(super) contents: Reference,
     pub(super) index: Reference,
     pub(super) chunks: Vec<Reference>,
     /// One per source, in source order.
@@ -349,6 +349,23 @@ pub(super) fn read(
         .ok_or_else(invalid)?;
     let index = section(sections.index)?;
     let count = table(&index, ENTRY + 4).ok_or_else(invalid)?.len() / (ENTRY + 4);
+    // Every lookup binary-searches these, so a misordered section would
+    // report a listed row, content or definition absent. Strict order also
+    // refuses two rows at one address, as `attach` did.
+    let fingerprints = &index[8..8 + count * ENTRY];
+    let fingerprint = |k: usize| {
+        let at = u32_at(&index, 8 + count * ENTRY + 4 * k) as usize;
+        (at < count).then(|| &fingerprints[at * ENTRY..at * ENTRY + 32])
+    };
+    if !rows.windows(2).all(|pair| pair[0].0 < pair[1].0)
+        || !contents.windows(2).all(|pair| pair[0] < pair[1])
+        || !(0..count)
+            .map(fingerprint)
+            .collect::<Option<Vec<_>>>()
+            .is_some_and(|order| order.windows(2).all(|pair| pair[0] < pair[1]))
+    {
+        return Err(invalid());
+    }
     let sources = header
         .sources
         .into_iter()
@@ -438,9 +455,6 @@ impl Definitions {
             }
             let middle = range.start + range.len() / 2;
             let at = position(middle);
-            if at >= self.count {
-                return Err("invalid installed definition index".into());
-            }
             match self.entry(at)[..32].cmp(&fingerprint) {
                 std::cmp::Ordering::Equal => break at,
                 std::cmp::Ordering::Less => range.start = middle + 1,
@@ -512,4 +526,21 @@ impl Definitions {
             + std::mem::size_of_val(&*self.slots)
             + chunks.saturating_mul(2)
     }
+}
+
+/// Replace the sections of the header at `header` as `edit` says and store the
+/// new header: a test publisher's image that construction would not write.
+#[cfg(test)]
+pub(super) fn republish(
+    store: &hirsel_artifact_store::Store,
+    header: Reference,
+    edit: impl FnOnce(&mut Sections),
+) -> Reference {
+    let mut header: Header = options()
+        .deserialize(&store.get_owned(header).unwrap())
+        .unwrap();
+    edit(&mut header.sections);
+    store
+        .put(PACKAGE, &options().serialize(&header).unwrap())
+        .unwrap()
 }

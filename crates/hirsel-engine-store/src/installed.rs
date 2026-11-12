@@ -495,6 +495,84 @@ mod tests {
             );
         }
     }
+    /// The image of `header` with one section rewritten by `edit`, under a new
+    /// header that the root now associates.
+    fn rewritten(
+        store: &hirsel_artifact_store::Store,
+        header: (Address, Association),
+        section: fn(&mut image::Sections) -> &mut Reference,
+        edit: impl FnOnce(&mut [u8]),
+    ) -> (Address, Association) {
+        let reference = image::republish(store, header.1.reference, |sections| {
+            let reference = section(sections);
+            let mut bytes = store.get_owned(*reference).unwrap().to_vec();
+            edit(&mut bytes);
+            *reference = store.put(reference.domain, &bytes).unwrap();
+        });
+        let row = Association {
+            action: Action(reference.output.0),
+            reference,
+        };
+        store.associate(address(), row.action, reference).unwrap();
+        (address(), row)
+    }
+    /// Lookups binary-search the rows, contents and fingerprint order, so an
+    /// authenticated image that misorders one is refused at open rather than
+    /// answering "absent" for what it lists. An index entry that points into
+    /// another definition's bytes refuses its own path; the definition it
+    /// points at still loads.
+    #[test]
+    fn a_misordered_or_misdirected_section_is_refused_never_reported_absent() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, compiler, package, header, _) = imaged(directory.path(), false);
+        let open = |header| InstalledPackage::open_header(&store, Some(header), &package, compiler);
+        let swap = |width: usize, at: usize| {
+            move |bytes: &mut [u8]| {
+                let (first, second) = bytes[at..at + 2 * width].split_at_mut(width);
+                first.swap_with_slice(second);
+            }
+        };
+        // Three definitions: three rows, and the order after three entries.
+        for (section, edit) in [
+            (
+                (|s| &mut s.rows) as fn(&mut image::Sections) -> &mut Reference,
+                swap(112, 8),
+            ),
+            (|s| &mut s.contents, swap(48, 8)),
+            (|s| &mut s.index, swap(4, 8 + 3 * 44)),
+        ] {
+            let refused = open(rewritten(&store, header, section, edit)).unwrap_err();
+            assert!(
+                refused.contains("invalid installed package section"),
+                "{refused}"
+            );
+        }
+        // Entries are in path order: a.one, a.two, b.three. Point a.one's
+        // chunk, offset and length at a.two's descriptor.
+        let misdirected = rewritten(
+            &store,
+            header,
+            |s| &mut s.index,
+            |bytes| {
+                bytes.copy_within(8 + 44 + 32..8 + 2 * 44, 8 + 32);
+            },
+        );
+        let opened = open(misdirected).unwrap();
+        let refused = opened
+            .package
+            .definition(&item(&package, "a", "one"))
+            .unwrap_err();
+        assert!(
+            refused.contains("invalid installed definition index"),
+            "{refused}"
+        );
+        let two = opened
+            .package
+            .definition(&item(&package, "a", "two"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(two.key.definition, item(&package, "a", "two"));
+    }
     #[test]
     fn demanded_expanded_content_refuses_before_allocating_and_remains_usable() {
         let directory = tempfile::tempdir().unwrap();

@@ -88,7 +88,8 @@
 //! against the limit `v` was charged to (MEM-26), except inside a finalizer, where
 //! the grant takes precedence. A resource value is a pointer to its block, charged
 //! storage + cause cell + grant; its finalizer runs under a limit of its grant,
-//! whose used part is handed over at the end. A counted node is a u64 count at
+//! whose used part is handed over at the end. A whole destructure moves the fields
+//! out with `copy` and `free`s the block, refunding that complete charge (MEM-23). A counted node is a u64 count at
 //! offset 0 and the payload at offset 8; `deref` of an rc or arc field names the
 //! payload. A counted payload holds no resource, so a release runs no user code.
 //!

@@ -120,10 +120,12 @@ pub struct FieldDrop {
     pub ty: FieldTy,
 }
 
-/// FAIL-8: the finalizer runs first, then fields in reverse declaration order.
-/// Collections drop elements from the highest index down, then free; an inline
-/// array (`FieldTy::Array`) cleans its elements from index 0 up (SEM-9), at the
-/// stride `field_size` gives. Those loops are in the glue built from this recipe.
+/// FAIL-8: the finalizer runs first, then fields in reverse declaration order,
+/// then the block is freed and refunded. A `List` (`Seq`) and an inline array
+/// (`FieldTy::Array`, at the stride `field_size` gives) clean their completed
+/// elements from index 0 up (SEM-9, core.md); a `Map` cleans entry by entry in
+/// insertion order, each key before its value. Those loops are in the glue built
+/// from this recipe.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DropRecipe {
     pub finalizer: Option<FuncRef>,

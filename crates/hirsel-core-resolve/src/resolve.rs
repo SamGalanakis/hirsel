@@ -70,10 +70,11 @@ pub struct Resolution {
     pub diagnostics: Vec<Refusal>,
     pub resource_refusal: Option<Site>,
 }
-fn builtin(n: &str) -> bool {
+pub(crate) fn builtin(n: &str) -> bool {
     matches!(
         n,
-        "bool"
+        "Inline"
+            | "bool"
             | "char"
             | "u8"
             | "u16"
@@ -158,6 +159,14 @@ impl Resolver<'_> {
         } else {
             Namespace::Value
         };
+        if ns == Namespace::Type && builtin(&name) {
+            self.out.diagnostics.push(Refusal::new(
+                "LANG-7",
+                self.site(n),
+                "builtin type name cannot be redeclared",
+            ));
+            return;
+        }
         let local = self.local_in(&name, ns);
         self.record(
             n,
@@ -340,6 +349,14 @@ impl Resolver<'_> {
         } else {
             Namespace::Value
         };
+        if type_context && parts.len() == 1 && builtin(&parts[0]) {
+            self.out.names.push(ResolvedUse {
+                node: n,
+                target: Target::Builtin(parts[0].clone()),
+                projections: vec![],
+            });
+            return;
+        }
         let first_ns = if parts.len() > 1 {
             Namespace::Value
         } else {

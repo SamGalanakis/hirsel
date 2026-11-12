@@ -35,6 +35,7 @@ struct Role {
     close: bool,
     unary: bool,
     attach: bool,
+    inline_semicolon: bool,
 }
 
 fn item_text(item: &Item) -> String {
@@ -62,6 +63,13 @@ fn item_text(item: &Item) -> String {
             }
             NodeKind::Attribute => roles[range.end - 1].line_after = true,
             NodeKind::Parameters => roles[range.start].attach = true,
+            NodeKind::RepeatArray => {
+                let end = tree.node(children[0]).origin.tokens.end as usize;
+                let semicolon = (end..range.end)
+                    .find(|&i| tree.tokens[i].kind == TokenKind::Punct(Punct::Semicolon))
+                    .unwrap();
+                roles[semicolon].inline_semicolon = true;
+            }
             NodeKind::Unary => {
                 if let Some(token) = node.token {
                     roles[token.0 as usize].unary = true;
@@ -145,7 +153,7 @@ fn print(text: &str, tokens: &[Token], roles: &[Role]) -> String {
         );
         line = (trailing && line)
             || role.line_after
-            || token.kind == TokenKind::Punct(Punct::Semicolon)
+            || (token.kind == TokenKind::Punct(Punct::Semicolon) && !role.inline_semicolon)
             || line_comment
             || (comment && original_newline);
         previous = Some((token.kind, role));

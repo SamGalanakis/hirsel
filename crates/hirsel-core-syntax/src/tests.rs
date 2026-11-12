@@ -357,3 +357,35 @@ fn malformed_numeric_point_primary_site_excludes_trailing_comment() {
     );
     assert_eq!(p.diagnostics[0].rule, "LANG-3");
 }
+
+#[test]
+fn revision_four_inline_arrays_and_bytes_keyword() {
+    let f = good(
+        "const POW10: Inline[u64, 4] = [1, 10, 100, 1000]\nfn f() { let a = [2; 4]; let b = []; a[1] }",
+    );
+    let kinds: Vec<_> = f
+        .items
+        .iter()
+        .flat_map(|i| i.tree.nodes.iter().map(|n| n.kind))
+        .collect();
+    assert!(kinds.contains(&NodeKind::Array));
+    assert!(kinds.contains(&NodeKind::RepeatArray));
+    assert_eq!(
+        lex("bytes").tokens[0].kind,
+        TokenKind::Keyword(Keyword::Bytes)
+    );
+    assert!(
+        !parse("fn bytes() {}", ParseMode::Source)
+            .diagnostics
+            .is_empty()
+    );
+    assert!(
+        !parse("fn f() { [1; n] }", ParseMode::Source)
+            .diagnostics
+            .is_empty()
+    );
+    assert_eq!(
+        formatted("fn f(){ [2; 4] }", ParseMode::Source),
+        "fn f() {\n    [2; 4]\n}\n"
+    );
+}

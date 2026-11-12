@@ -588,8 +588,7 @@ impl Parser<'_> {
             NodeKind::TakeParameter
         } else if self.eat("mut") {
             NodeKind::MutParameter
-        } else if sized && self.at("bytes") && self.word(1) != ":" {
-            self.bump();
+        } else if sized && self.eat("bytes") {
             NodeKind::BytesParameter
         } else {
             NodeKind::Parameter
@@ -653,6 +652,10 @@ impl Parser<'_> {
                         let st = p.pos - 1;
                         let path = p.path(NodeKind::Path)?;
                         Ok(p.node(st, NodeKind::Anchor, None, &[path]))
+                    } else if p.token(0).kind == TokenKind::Integer {
+                        let st = p.pos;
+                        let token = p.bump();
+                        Ok(p.node(st, NodeKind::Literal, Some(token), &[]))
                     } else {
                         p.ty()
                     }
@@ -909,6 +912,36 @@ impl Parser<'_> {
         }
         if self.at("{") {
             return self.block();
+        }
+        if self.eat("[") {
+            self.whitespace += 1;
+            let result = (|| {
+                let mut children = vec![];
+                if self.eat("]") {
+                    return Ok(self.node(s, NodeKind::Array, None, &children));
+                }
+                children.push(self.expr(0)?);
+                if self.eat(";") {
+                    if self.token(0).kind != TokenKind::Integer {
+                        return self.fail("LANG-5", "array repeat count is an integer literal");
+                    }
+                    let st = self.pos;
+                    let token = self.bump();
+                    children.push(self.node(st, NodeKind::Literal, Some(token), &[]));
+                    self.expect("]")?;
+                    return Ok(self.node(s, NodeKind::RepeatArray, None, &children));
+                }
+                while !self.eat("]") {
+                    self.expect(",")?;
+                    if self.eat("]") {
+                        break;
+                    }
+                    children.push(self.expr(0)?);
+                }
+                Ok(self.node(s, NodeKind::Array, None, &children))
+            })();
+            self.whitespace -= 1;
+            return result;
         }
         if self.eat("(") {
             let c = self.list(")", |p| p.expr(0))?;

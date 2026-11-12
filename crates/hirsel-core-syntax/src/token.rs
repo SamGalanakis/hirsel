@@ -29,6 +29,7 @@ pub enum Keyword {
     Where,
     True,
     False,
+    Bytes,
 }
 impl Keyword {
     pub fn from_spelling(s: &str) -> Option<Self> {
@@ -61,6 +62,7 @@ impl Keyword {
             "where" => Self::Where,
             "true" => Self::True,
             "false" => Self::False,
+            "bytes" => Self::Bytes,
             _ => return None,
         })
     }
@@ -94,6 +96,7 @@ impl Keyword {
             Self::Where => "where",
             Self::True => "true",
             Self::False => "false",
+            Self::Bytes => "bytes",
         }
     }
 }

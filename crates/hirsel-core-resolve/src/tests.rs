@@ -465,3 +465,42 @@ fn clean_measurement_keeps_valid_members_of_a_partly_refused_module() {
     assert!(r.files.iter().all(|f| f.resolved));
     assert_eq!(r.files.iter().map(|f| f.items).sum::<usize>(), 2);
 }
+
+#[test]
+fn revision_four_builtin_names_and_visible_modules() {
+    let (index, files) = fixture(&[
+        (
+            "main",
+            "type u64 {}\nfn main(args: u64) -> Inline[u64, 2] { [args; 2] }",
+        ),
+        ("args", "fn count() -> u64 { 0 }"),
+    ]);
+    assert_eq!(index.diagnostics.len(), 1);
+    assert_eq!(index.diagnostics[0].rule, "LANG-7");
+    let (module, file) = &files[0];
+    let r = resolve(&index, module, 1, &file.items[1]);
+    assert!(
+        r.diagnostics
+            .iter()
+            .any(|d| d.rule == "LANG-7" && d.message.contains("shadows"))
+    );
+    assert!(
+        r.names
+            .iter()
+            .any(|u| u.target == Target::Builtin("Inline".into()))
+    );
+    assert!(
+        r.names
+            .iter()
+            .any(|u| u.target == Target::Builtin("u64".into()))
+    );
+    let p = parse("fn f[u64](x: u64) {}", ParseMode::Source);
+    assert!(
+        resolve(&index, module, 0, &p.syntax.items[0])
+            .diagnostics
+            .iter()
+            .any(|d| d.message == "builtin type name cannot be redeclared")
+    );
+    let (index, _) = fixture(&[("bytes", "fn f() {}")]);
+    assert_eq!(index.diagnostics[0].rule, "LANG-2");
+}

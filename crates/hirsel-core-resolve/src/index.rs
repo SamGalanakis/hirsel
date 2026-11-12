@@ -107,6 +107,22 @@ impl NameIndex {
         }
     }
     pub fn add_module(&mut self, module: &ModuleId) {
+        if !self.members.contains_key(module)
+            && module
+                .modules
+                .iter()
+                .any(|n| hirsel_core_syntax::Keyword::from_spelling(n).is_some())
+        {
+            self.diagnostics.push(Refusal::new(
+                "LANG-2",
+                Site {
+                    module: module.clone(),
+                    item: u32::MAX,
+                    span: Span::default(),
+                },
+                "module name is a reserved keyword",
+            ));
+        }
         self.members.entry(module.clone()).or_default();
         if let Some(head) = module.modules.first() {
             self.heads
@@ -242,6 +258,16 @@ impl NameIndex {
     }
     pub fn add(&mut self, definition: Definition) {
         self.add_module(&definition.site.module);
+        if definition.kind == DefinitionKind::Type
+            && crate::resolve::builtin(&definition.path.0.name)
+        {
+            self.diagnostics.push(Refusal::new(
+                "LANG-7",
+                definition.site.clone(),
+                "builtin type name cannot be redeclared",
+            ));
+            return;
+        }
         if let Some(old) = self.get(&definition.path) {
             let mut d = Refusal::new("LANG-7", definition.site.clone(), "duplicate definition");
             d.causal.push(old.site.clone());

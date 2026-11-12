@@ -111,6 +111,8 @@ pub enum NodeKind {
     Unit,
     Group,
     Tuple,
+    Array,
+    RepeatArray,
     Call,
     Argument,
     LabelledArgument,

@@ -732,6 +732,7 @@ fn fixture_unit<S: Stage>(table: &LayoutTable) -> LirUnit<S> {
         Inst::FunctionRef {
             result: v(5),
             symbol: SymbolId(0),
+            abi: FnAbiId(0),
         },
         Inst::ReadStatic {
             result: v(11),

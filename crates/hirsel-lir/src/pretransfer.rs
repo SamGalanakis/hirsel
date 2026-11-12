@@ -117,7 +117,7 @@ pub fn required<S: Stage>(
             inputs[to.index()].push(from);
         } else {
             match *inst {
-                Inst::FunctionRef { result, symbol } => {
+                Inst::FunctionRef { result, symbol, .. } => {
                     constants[result.index()] = if is_adapter(&unit.tables.symbols[symbol.index()])
                     {
                         Targets::Adapter

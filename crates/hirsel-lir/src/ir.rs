@@ -583,6 +583,8 @@ pub enum Inst {
     FunctionRef {
         result: ValueId,
         symbol: SymbolId,
+        /// Typed declaration signature expected by this reference.
+        abi: FnAbiId,
     },
     /// Program-lifetime static data: a constant or materialized shape.
     ReadStatic {
@@ -2412,7 +2414,16 @@ impl Inst {
                 f(R::Value(result));
                 f(R::Constant(constant));
             }
-            Self::FunctionRef { result, symbol } | Self::ReadStatic { result, symbol } => {
+            Self::FunctionRef {
+                result,
+                symbol,
+                abi,
+            } => {
+                f(R::Value(result));
+                f(R::Symbol(symbol));
+                f(R::Abi(abi));
+            }
+            Self::ReadStatic { result, symbol } => {
                 f(R::Value(result));
                 f(R::Symbol(symbol));
             }
@@ -3594,7 +3605,7 @@ snapshot_enum!(FlatFieldOp {
 });
 snapshot_enum!(Inst {
     Const { result, constant },
-    FunctionRef { result, symbol },
+    FunctionRef { result, symbol, abi },
     ReadStatic { result, symbol },
     Unary { result, op, operand, failure },
     Binary { result, op, left, right, failure },

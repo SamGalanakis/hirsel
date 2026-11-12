@@ -477,6 +477,7 @@ fn send(
     b.push(Inst::FunctionRef {
         result: code,
         symbol,
+        abi: main.0.abi,
     });
     let (main_slot, main_address) = local(b, code)?;
     let form = b.u64(form)?;

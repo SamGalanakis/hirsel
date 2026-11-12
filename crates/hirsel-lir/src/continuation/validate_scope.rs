@@ -109,7 +109,7 @@ fn code_at(u: &LirUnit<Ready>, at: ValueId) -> Option<Symbol> {
                             Code::Known(u.tables.symbols.get(code.symbol.index())?.clone());
                     }
                 }
-                Inst::FunctionRef { result, symbol } => {
+                Inst::FunctionRef { result, symbol, .. } => {
                     constants[result.index()] =
                         Code::Known(u.tables.symbols.get(symbol.index())?.clone())
                 }

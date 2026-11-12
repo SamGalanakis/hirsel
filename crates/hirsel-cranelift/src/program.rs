@@ -305,7 +305,10 @@ impl Emitter<'_> {
         self.import_entry(&name, definition, EntryKind::Value, Some(abi));
         let thunk =
             hirsel_lir::emission::callback_thunk_name(definition, callback.instance.as_ref());
-        let entry = self.inputs.keys.entry(EntryKind::Callback, false, None);
+        let entry = self
+            .inputs
+            .keys
+            .entry(EntryKind::Callback, false, Some(abi));
         self.manifested.export_entry(&thunk, definition, entry);
         self.define_callback(&thunk, target, &sig, Linkage::Export, definition)
     }

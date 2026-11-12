@@ -1193,7 +1193,7 @@ fn check_entries<S: Stage>(
                 continue;
             }
             let entry = match *inst {
-                Inst::FunctionRef { result, symbol } => Some((result, symbol, None)),
+                Inst::FunctionRef { result, symbol, .. } => Some((result, symbol, None)),
                 Inst::Closure {
                     result, closure, ..
                 } => u.tables.closures[closure.index()]

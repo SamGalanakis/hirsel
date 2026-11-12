@@ -1295,7 +1295,7 @@ impl<S: Stage> Checker<'_, '_, S> {
                 }
                 facts.statics[result.index()] = true;
             }
-            Inst::FunctionRef { result, symbol } => {
+            Inst::FunctionRef { result, symbol, .. } => {
                 // A callable, or a definition's C callback address (PROG-4).
                 if unit.tables.symbols[symbol.index()].kind != SymbolKind::Function
                     || !matches!(

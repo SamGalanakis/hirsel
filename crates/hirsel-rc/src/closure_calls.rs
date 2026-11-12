@@ -641,7 +641,7 @@ fn discover(
                     );
                 }
             }
-            Inst::FunctionRef { result, symbol } => {
+            Inst::FunctionRef { result, symbol, .. } => {
                 let s = &u.tables.symbols[symbol.index()];
                 if let Some(entry) = entries.get(s) {
                     eq.set(

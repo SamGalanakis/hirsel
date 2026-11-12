@@ -325,23 +325,23 @@ impl LayoutKeys {
         )
     }
 
-    /// The entry digest (`abi::entry_digest`) of a `kind` entry of a body at
-    /// `abi`. Function-reference and callback thunks follow a fixed protocol,
-    /// and their importers do not know the body's FnAbi, so their digests have
-    /// no signature and `abi` is not read. Any other entry's
-    /// signature is `fn_abi` without the body placement proof, which does not
-    /// change the convention.
+    /// The entry digest of a typed entry. Placement proofs do not change the
+    /// convention. Function-reference and C callback thunks retain the typed
+    /// declaration ABI from which their physical signatures are emitted.
     pub fn entry(&self, kind: EntryKind, charged: bool, abi: Option<&FnAbi>) -> ContentHash {
-        let signature = match kind {
-            EntryKind::FunctionRef | EntryKind::Callback => None,
-            EntryKind::Value | EntryKind::Slot | EntryKind::Ahead | EntryKind::Resume => {
-                abi.map(|abi| {
-                    let mut physical = abi.clone();
-                    physical.result_arena = None;
-                    self.fn_abi(&physical)
-                })
+        let signature = abi.map(|abi| {
+            let mut physical = abi.clone();
+            physical.result_arena = None;
+            if kind == EntryKind::FunctionRef {
+                // Every function-reference thunk inserts the environment and
+                // caller-site slots, regardless of the direct body's shape.
+                physical.shape = crate::abi_types::CallableShape::Closure;
+                physical.environment = true;
+                physical.caller_site = true;
+                physical.key.callable = ContentHash::default();
             }
-        };
+            self.fn_abi(&physical)
+        });
         entry_digest(kind, charged, signature)
     }
 

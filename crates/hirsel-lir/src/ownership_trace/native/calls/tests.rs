@@ -34,7 +34,14 @@ fn symbol(unit: &mut UnitBuilder<Ready>, name: &str) -> SymbolId {
 fn reference(unit: &mut UnitBuilder<Ready>, name: &str) -> ValueId {
     let result = value(unit);
     let symbol = symbol(unit, name);
-    unit.push(BlockId(0), Inst::FunctionRef { result, symbol });
+    unit.push(
+        BlockId(0),
+        Inst::FunctionRef {
+            result,
+            symbol,
+            abi: FnAbiId(0),
+        },
+    );
     result
 }
 fn invoke(unit: &mut UnitBuilder<Ready>, target: &str, input: ValueId, output: ValueId) {

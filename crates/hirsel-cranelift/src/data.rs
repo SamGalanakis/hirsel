@@ -488,6 +488,7 @@ impl Emitter<'_> {
                     return Self::invalid_at(definition, "a static callable outside its block");
                 }
                 let symbol = &function.symbol;
+                let abi = self.fn_abi(function.abi, &symbol.definition)?;
                 let thunk = hirsel_lir::emission::function_thunk_name(
                     &symbol.definition,
                     symbol.instance.as_ref(),
@@ -496,7 +497,7 @@ impl Emitter<'_> {
                     &thunk,
                     &symbol.definition,
                     hirsel_lir::abi::EntryKind::FunctionRef,
-                    None,
+                    Some(abi),
                 );
                 let signature = self.module.make_signature();
                 let target = self.import_function(&thunk, &signature)?;

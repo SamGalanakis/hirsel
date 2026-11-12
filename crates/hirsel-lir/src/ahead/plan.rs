@@ -865,7 +865,7 @@ fn code_values_inner(
                         .code
                         .and_then(|c| u.tables.symbols[c.symbol.index()].instance),
                 )),
-                Inst::FunctionRef { result, symbol } => {
+                Inst::FunctionRef { result, symbol, .. } => {
                     Some((result, u.tables.symbols[symbol.index()].instance))
                 }
                 _ => None,

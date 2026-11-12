@@ -1834,6 +1834,7 @@ impl DemandInstances {
             .map_err(|e| e.to_string())?,
         )?;
         let keys = LayoutKeys::new(&table);
+        let mut static_abis = Vec::new();
         let portable_statics = statics
             .into_iter()
             .map(|mut data| {
@@ -1845,7 +1846,19 @@ impl DemandInstances {
                 for (i, block) in data.blocks.iter_mut().enumerate() {
                     block.layout = hirsel_lir::LayoutId(i as u32);
                 }
-                (layouts, hirsel_codec::to_text(&data))
+                let abis = data
+                    .blocks
+                    .iter_mut()
+                    .flat_map(|block| &mut block.functions)
+                    .enumerate()
+                    .map(|(i, function)| {
+                        static_abis.push(function.abi);
+                        let key = keys.fn_abi(&table.fn_abis[function.abi.0 as usize]);
+                        function.abi = hirsel_lir::FnAbiId(i as u32);
+                        key
+                    })
+                    .collect::<Vec<_>>();
+                (layouts, abis, hirsel_codec::to_text(&data))
             })
             .collect::<Vec<_>>();
 
@@ -1853,6 +1866,7 @@ impl DemandInstances {
             .iter()
             .map(|(_, f)| f.abi)
             .collect::<Vec<_>>();
+        additional_abis.extend(static_abis);
         additional_abis.extend(operations.pretransfer_adapters.iter().map(|r| r.abi));
         let mut portable_finalizers = reached_finalizers
             .into_iter()

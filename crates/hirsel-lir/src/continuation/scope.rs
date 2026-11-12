@@ -68,7 +68,7 @@ fn code(u: &LirUnit<Ready>, value: ValueId, active: &mut BTreeSet<ValueId>) -> O
                 let code = u.tables.closures.get(closure.index())?.code?;
                 found = Some(u.tables.symbols.get(code.symbol.index())?.clone());
             }
-            Inst::FunctionRef { result, symbol } if result == value => {
+            Inst::FunctionRef { result, symbol, .. } if result == value => {
                 found = Some(u.tables.symbols.get(symbol.index())?.clone());
             }
             Inst::Read {

@@ -1088,7 +1088,7 @@ impl DemandInstances {
                 .map_err(|e| e.to_string())?,
             )?;
             drop(discovery_requests);
-            let (_, finalizers): (
+            let (statics, finalizers): (
                 super::super::local::StaticRows,
                 super::super::local::FinalizerRows,
             ) = serde_json::from_slice(
@@ -1108,6 +1108,13 @@ impl DemandInstances {
                         .ok_or("missing callable finalizer ABI")
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            for key in statics.iter().flat_map(|(_, abis, _)| abis) {
+                let abi = (0..table.fn_abis.len())
+                    .map(|i| hirsel_lir::FnAbiId(i as u32))
+                    .find(|id| layout_keys.fn_abi(&table.fn_abis[id.0 as usize]) == *key)
+                    .ok_or("missing callable static ABI")?;
+                additional_abis.push(abi);
+            }
             let original_request: Request =
                 read_json(self.store.as_ref(), request_records[origin])?;
             let original_operations = self.operations_input(

@@ -257,8 +257,12 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 let value = self.read_static(result, symbol)?;
                 self.define(result, value)
             }
-            Inst::FunctionRef { result, symbol } => {
-                let value = self.function_ref(result, symbol)?;
+            Inst::FunctionRef {
+                result,
+                symbol,
+                abi,
+            } => {
+                let value = self.function_ref(result, symbol, abi)?;
                 self.define(result, value)
             }
             // Its environment allocation cannot fail (runtime ABI 3), so the failure edge is

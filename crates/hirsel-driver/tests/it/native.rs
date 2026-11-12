@@ -857,10 +857,9 @@ fn a_rooted_source_callee_in_another_object_returns_its_roots_on_both_outcomes()
 }
 
 /// Link binds an import of a Hirsel entry only to an export with an equal entry
-/// digest (784 L1). The caller of `grow` in its own object is mutated three ways:
-/// its import of `grow.roots9` loses its digest; it carries the digest of the same
-/// FnAbi over a parameter layout of other content; and both after the caller object
-/// has gone through the object store's record codec, as a cached object does.
+/// digest (784 L1). Imports with missing or changed digests, both sides missing
+/// together, and launch-only exports with missing or changed digests refuse.
+/// Cross-object mutations also pass through the cached object record codec.
 #[test]
 fn link_refuses_an_entry_import_with_a_missing_or_other_digest() {
     use hirsel_lir::abi::EntryKind;
@@ -928,16 +927,26 @@ fn link_refuses_an_entry_import_with_a_missing_or_other_digest() {
         };
         let dir = scratch("link-entry-digest");
         hirsel_native::link_objects(&ready, &program.entry, &objects, &tools, &dir).unwrap();
-        for (mutant, digest, through_cache) in [
-            ("missing", None, false),
-            ("other signature", Some(other), false),
-            ("missing, cached", None, true),
-            ("other signature, cached", Some(other), true),
+        for (mutant, digest, through_cache, clear_export) in [
+            ("missing", None, false, false),
+            ("other signature", Some(other), false, false),
+            ("missing, cached", None, true, false),
+            ("other signature, cached", Some(other), true, false),
+            ("both missing", None, false, true),
+            ("both missing, cached", None, true, true),
         ] {
             let mut mutated = objects.clone();
             mutated[caller].imports[import].entry = digest;
+            if clear_export {
+                let name = objects[caller].imports[import].name.as_str();
+                for export in mutated.iter_mut().flat_map(|o| &mut o.exports) {
+                    if export.name == name {
+                        export.entry = None;
+                    }
+                }
+            }
             if through_cache {
-                mutated[caller] = cached(&mutated[caller]);
+                mutated = mutated.iter().map(cached).collect();
             }
             let error = hirsel_native::link_objects(&ready, &program.entry, &mutated, &tools, &dir)
                 .unwrap_err();
@@ -947,6 +956,222 @@ fn link_refuses_an_entry_import_with_a_missing_or_other_digest() {
                 "{mutant}: {error:?}"
             );
         }
+        let root_name =
+            hirsel_lir::emission::symbol_name(&program.entry, ready.functions.get(&program.entry));
+        assert!(
+            !objects
+                .iter()
+                .flat_map(|o| &o.imports)
+                .any(|i| i.name == root_name)
+        );
+        for digest in [None, Some(other)] {
+            let mut mutated = objects.clone();
+            let export = mutated
+                .iter_mut()
+                .flat_map(|o| &mut o.exports)
+                .find(|e| e.name == root_name)
+                .unwrap();
+            export.entry = digest;
+            let error = hirsel_native::link_objects(&ready, &program.entry, &mutated, &tools, &dir)
+                .unwrap_err();
+            assert_eq!(error.stage, StageName::Link);
+            assert!(error.message.contains("entry digest"), "{error:?}");
+        }
+    });
+}
+
+/// An object under the expected thunk name must implement its typed signature.
+/// Both ordinary and static function references, C callbacks and root-only
+/// table references reject a u64/f64 signature substitution.
+#[test]
+fn link_refuses_a_thunk_with_another_machine_signature() {
+    use hirsel_lir::abi::EntryKind;
+    use hirsel_native::{OptLevel, Options};
+    use hirsel_native_testing::Runtime;
+    let configuration = Configuration {
+        options: Options::new(x86()),
+        engine: Engine::Native {
+            opt: OptLevel::None,
+            partition: Partition::Singleton,
+            runtime: Runtime::Diagnostic,
+        },
+    };
+    with_compiler_stack(move || {
+        let program = checked(
+            r#"
+type Context { n: u64 }
+fn integer(x: u64) -> u64 { x }
+fn float(x: f64) -> f64 { x }
+fn callback(mut ctx: unique Context, x: u64) -> u64 { x }
+fn apply(f: fn(x: u64) -> u64, x: u64) -> u64 { f(x) }
+pub fn main() -> Result[(), ()] {
+  let f: fn(x: u64) -> u64 = integer
+  let c: FnPtr[fn(mut ctx: unique Context, x: u64) -> u64] = callback
+  let n = apply(f, 7u64) + apply(f, 9u64)
+  let v = float(1.0f64)
+  if n == 16u64 && v == 1.0f64 { Ok(()) } else { Error(()) }
+}
+"#,
+        );
+        let mut ready =
+            hirsel_native_batch::build(&program.validated, &Options::new(x86())).unwrap();
+        // CT-2 deliberately refuses source callable constants. Exercise the
+        // backend's static relocation input directly, with the same checked
+        // callable layout and declaration ABI as the ordinary reference.
+        let (layout, function, abi) = ready
+            .units
+            .iter()
+            .find_map(|unit| {
+                unit.unit().instructions.iter().find_map(|inst| {
+                    let hirsel_lir::ir::Inst::FunctionRef {
+                        result,
+                        symbol,
+                        abi,
+                    } = *inst
+                    else {
+                        return None;
+                    };
+                    let function = &unit.unit().tables.symbols[symbol.index()];
+                    (function.definition.0.name == "integer").then(|| {
+                        (
+                            unit.unit().types[unit.unit().values[result.index()].ty.index()].layout,
+                            function.clone(),
+                            abi,
+                        )
+                    })
+                })
+            })
+            .unwrap();
+        let mut definition = program.entry.clone();
+        definition.0.name = "static_callable".into();
+        let symbol = hirsel_lir::ir::Symbol {
+            kind: hirsel_lir::ir::SymbolKind::Constant,
+            definition,
+            instance: None,
+            charged: false,
+        };
+        let data = hirsel_lir::statics::StaticData {
+            symbol: symbol.clone(),
+            blocks: vec![hirsel_lir::statics::StaticBlock {
+                layout,
+                bytes: vec![0; 16],
+                references: vec![],
+                functions: vec![hirsel_lir::statics::StaticFunction {
+                    offset: 0,
+                    symbol: function,
+                    abi,
+                }],
+            }],
+        };
+        data.validate(&ready.table, 8).unwrap();
+        ready.statics.push(data);
+        ready
+            .summaries
+            .iter_mut()
+            .find(|s| s.definition == program.entry)
+            .unwrap()
+            .glue
+            .statics
+            .insert(symbol);
+        let tools = toolchain(&[configuration]);
+        let registry = hirsel_lir::descriptor_registry::DescriptorRegistry::new(
+            &ready.table,
+            &ready.finalizers,
+        );
+        let objects = hirsel_native::partition_objects(
+            &ready,
+            OptLevel::None,
+            Partition::Singleton,
+            &registry,
+            false,
+            None,
+        )
+        .unwrap();
+        let dir = scratch("link-thunk-signature");
+        hirsel_native::link_objects(&ready, &program.entry, &objects, &tools, &dir).unwrap();
+        let integer = ready
+            .summaries
+            .iter()
+            .find(|s| s.definition.0.name == "integer")
+            .unwrap();
+        let float = ready
+            .summaries
+            .iter()
+            .find(|s| s.definition.0.name == "float")
+            .unwrap();
+        let callback = ready
+            .summaries
+            .iter()
+            .find(|s| s.definition.0.name == "callback")
+            .unwrap();
+        let float_abi = &ready.table.fn_abis[float.abi.0 as usize];
+        let integer_name =
+            hirsel_lir::emission::function_thunk_name(&integer.definition, Some(&integer.instance));
+        let callback_name = hirsel_lir::emission::callback_thunk_name(
+            &callback.definition,
+            Some(&callback.instance),
+        );
+        // Check the emitted import expectation as well as Link's comparison.
+        let integer_digest = ready.keys.entry(
+            EntryKind::FunctionRef,
+            false,
+            Some(&ready.table.fn_abis[integer.abi.0 as usize]),
+        );
+        let imports: Vec<_> = objects
+            .iter()
+            .flat_map(|o| &o.imports)
+            .filter(|i| i.name == integer_name)
+            .collect();
+        assert!(
+            imports.len() >= 2,
+            "ordinary and static relocation importers"
+        );
+        assert!(imports.iter().all(|i| i.entry == Some(integer_digest)));
+        for (name, kind, abi) in [
+            (&integer_name, EntryKind::FunctionRef, float_abi.clone()),
+            (&callback_name, EntryKind::Callback, {
+                let mut abi = ready.table.fn_abis[callback.abi.0 as usize].clone();
+                abi.parameters[1] = float_abi.parameters[0].clone();
+                abi
+            }),
+        ] {
+            let other = ready.keys.entry(kind, false, Some(&abi));
+            let mut mutated = objects.clone();
+            let export = mutated
+                .iter_mut()
+                .flat_map(|o| &mut o.exports)
+                .find(|e| e.name == *name)
+                .unwrap();
+            assert_ne!(export.entry, Some(other));
+            export.entry = Some(other);
+            let error = hirsel_native::link_objects(&ready, &program.entry, &mutated, &tools, &dir)
+                .unwrap_err();
+            assert_eq!(error.stage, StageName::Link);
+            assert!(error.message.contains("entry digest"), "{error:?}");
+        }
+        // The launcher alone refers to this thunk after the object imports are
+        // removed. Its expected digest still comes from the checked summary.
+        let mut root_only = objects.clone();
+        for object in &mut root_only {
+            object.imports.retain(|i| i.name != integer_name);
+        }
+        let export = root_only
+            .iter_mut()
+            .flat_map(|o| &mut o.exports)
+            .find(|e| e.name == integer_name)
+            .unwrap();
+        export.entry = Some(
+            ready
+                .keys
+                .entry(EntryKind::FunctionRef, false, Some(float_abi)),
+        );
+        let error = hirsel_native::link_objects(&ready, &program.entry, &root_only, &tools, &dir)
+            .unwrap_err();
+        assert_eq!(error.stage, StageName::Link);
+        assert!(
+            error.message.contains("launcher") && error.message.contains("entry digest"),
+            "{error:?}"
+        );
     });
 }
 

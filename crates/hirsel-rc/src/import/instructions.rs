@@ -675,7 +675,7 @@ impl Importer<'_> {
                     false,
                     definition,
                 )?;
-                let (symbol, _) = if let Some(request) =
+                let (symbol, abi) = if let Some(request) =
                     crate::library::keyed::request(self.program, definition, actuals.arguments)?
                 {
                     let direct = self.require(request)?;
@@ -692,7 +692,11 @@ impl Importer<'_> {
                     self.direct(definition, arguments)?
                 };
                 let result = self.fresh(ty);
-                self.push(Inst::FunctionRef { result, symbol });
+                self.push(Inst::FunctionRef {
+                    result,
+                    symbol,
+                    abi,
+                });
                 result
             }
             V::Size(parameter) => {

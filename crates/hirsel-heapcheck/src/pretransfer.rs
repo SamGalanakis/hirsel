@@ -25,7 +25,7 @@ pub(crate) fn audit<S: Stage>(
         }
         for i in &u.instructions {
             match *i {
-                Inst::FunctionRef { result, symbol } if result == v => {
+                Inst::FunctionRef { result, symbol, .. } if result == v => {
                     return !refs
                         .iter()
                         .any(|r| r.adapter == u.tables.symbols[symbol.index()]);

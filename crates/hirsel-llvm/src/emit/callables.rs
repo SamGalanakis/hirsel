@@ -62,7 +62,13 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
 
     /// `FunctionRef`: the definition's function-reference thunk with the static empty
     /// environment, a Plain static callable.
-    pub(super) fn function_ref(&mut self, result: ValueId, symbol: SymbolId) -> Emitted<Value<'m>> {
+    pub(super) fn function_ref(
+        &mut self,
+        result: ValueId,
+        symbol: SymbolId,
+        abi: hirsel_lir::FnAbiId,
+    ) -> Emitted<Value<'m>> {
+        let abi = fn_abi(self.inputs.layouts, abi, self.definition())?;
         let Some(symbol) = self.unit.tables.symbols.get(symbol.index()) else {
             return self.invalid("a function reference outside the symbol table");
         };
@@ -71,14 +77,14 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
             == LayoutKind::Scalar(ScalarKind::Pointer)
         {
             let name = callback_thunk_name(&symbol.definition, symbol.instance.as_ref());
-            self.import_entry(&name, &symbol.definition, EntryKind::Callback, None);
+            self.import_entry(&name, &symbol.definition, EntryKind::Callback, Some(abi));
             self.manifested
                 .kept
                 .insert(symbol_name(&symbol.definition, symbol.instance.as_ref()));
             return Ok(self.module.function_address(&name));
         }
         let name = function_thunk_name(&symbol.definition, symbol.instance.as_ref());
-        self.import_entry(&name, &symbol.definition, EntryKind::FunctionRef, None);
+        self.import_entry(&name, &symbol.definition, EntryKind::FunctionRef, Some(abi));
         let code = self.module.function_address(&name);
         let environment = self.empty_environment()?;
         let layout = self.value_type(result)?.layout;

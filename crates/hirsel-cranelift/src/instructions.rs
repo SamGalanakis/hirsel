@@ -61,8 +61,12 @@ impl FnEmitter<'_, '_, '_> {
                 let value = self.read_static(result, symbol)?;
                 self.define(result, value)
             }
-            Inst::FunctionRef { result, symbol } => {
-                let value = self.function_ref(result, symbol)?;
+            Inst::FunctionRef {
+                result,
+                symbol,
+                abi,
+            } => {
+                let value = self.function_ref(result, symbol, abi)?;
                 self.define(result, value)
             }
             // Its environment allocation cannot fail, so the failure edge is never taken.

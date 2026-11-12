@@ -884,7 +884,7 @@ fn discharged(
 fn entries(unit: &hirsel_lir::ir::LirUnit<Ready>) -> impl Iterator<Item = (String, String)> + '_ {
     use hirsel_lir::ir::{Inst, ValueRepr};
     unit.instructions.iter().filter_map(|inst| match *inst {
-        Inst::FunctionRef { result, symbol }
+        Inst::FunctionRef { result, symbol, .. }
             if unit.types[unit.values[result.index()].ty.index()].repr
                 != ValueRepr::Scalar(hirsel_lir::layout_types::ScalarKind::Pointer) =>
         {
@@ -905,7 +905,7 @@ fn entries(unit: &hirsel_lir::ir::LirUnit<Ready>) -> impl Iterator<Item = (Strin
 pub fn callbacks<S>(unit: &hirsel_lir::ir::LirUnit<S>) -> impl Iterator<Item = DefPath> + '_ {
     use hirsel_lir::ir::{Inst, ValueRepr};
     unit.instructions.iter().filter_map(|inst| match *inst {
-        Inst::FunctionRef { result, symbol }
+        Inst::FunctionRef { result, symbol, .. }
             if unit.types[unit.values[result.index()].ty.index()].repr
                 == ValueRepr::Scalar(hirsel_lir::layout_types::ScalarKind::Pointer) =>
         {

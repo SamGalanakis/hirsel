@@ -154,6 +154,7 @@ pub struct StaticBlock {
 pub struct StaticFunction {
     pub offset: u64,
     pub symbol: Symbol,
+    pub abi: crate::FnAbiId,
 }
 
 impl Snapshot for StaticFunction {
@@ -161,14 +162,20 @@ impl Snapshot for StaticFunction {
         w.open("function");
         w.uint(u128::from(self.offset));
         self.symbol.write(w);
+        self.abi.write(w);
         w.close();
     }
     fn read(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
         r.open("function")?;
         let offset = u64::try_from(r.uint()?).map_err(|_| r.error("function offset"))?;
         let symbol = Symbol::read(r)?;
+        let abi = crate::FnAbiId::read(r)?;
         r.close()?;
-        Ok(Self { offset, symbol })
+        Ok(Self {
+            offset,
+            symbol,
+            abi,
+        })
     }
 }
 

@@ -17,7 +17,7 @@ use hirsel_lir::{
 use hirsel_rc::arena_credit::equations::Function;
 use std::collections::BTreeMap;
 
-pub type StaticRows = Vec<(Vec<ContentHash>, String)>;
+pub type StaticRows = Vec<(Vec<ContentHash>, Vec<ContentHash>, String)>;
 pub type FinalizerRows = Vec<(
     ContentHash,
     hirsel_syntax::DefPath,
@@ -44,7 +44,7 @@ fn bind_statics(
 ) -> Result<Vec<hirsel_lir::statics::StaticData>, String> {
     statics
         .into_iter()
-        .map(|(layouts, text)| {
+        .map(|(layouts, abis, text)| {
             let mut data: hirsel_lir::statics::StaticData =
                 hirsel_codec::from_text(&text).map_err(|e| format!("local static: {e:?}"))?;
             if data.blocks.len() != layouts.len() {
@@ -57,6 +57,20 @@ fn bind_statics(
                 block.layout = binding
                     .layout(layout)
                     .ok_or("missing local static layout")?;
+            }
+            let mut functions = data
+                .blocks
+                .iter_mut()
+                .flat_map(|block| &mut block.functions);
+            for (i, key) in abis.into_iter().enumerate() {
+                let function = functions.next().ok_or("local static ABI count differs")?;
+                if function.abi.0 as usize != i {
+                    return Err("noncanonical local static ABI index".into());
+                }
+                function.abi = binding.abi(key).ok_or("missing local static ABI")?;
+            }
+            if functions.next().is_some() {
+                return Err("local static ABI count differs".into());
             }
             Ok(data)
         })

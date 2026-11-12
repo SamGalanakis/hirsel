@@ -354,6 +354,7 @@ fn for_each_table_id<S>(unit: &mut LirUnit<S>, f: &mut impl FnMut(TableId<'_>)) 
     }
     for inst in &mut unit.instructions {
         match inst {
+            Inst::FunctionRef { abi, .. } => f(TableId::Abi(abi)),
             Inst::Compare { layout, .. }
             | Inst::FlatCopy { layout, .. }
             | Inst::Hash { layout, .. }
@@ -440,6 +441,9 @@ pub fn references<S>(unit: &LirUnit<S>) -> (Vec<LayoutId>, Vec<FnAbiId>) {
     layouts.extend(unit.types.iter().map(|ty| ty.layout));
     for inst in &unit.instructions {
         match *inst {
+            Inst::FunctionRef { abi, .. } => {
+                abis.insert(abi);
+            }
             Inst::Compare { layout, .. }
             | Inst::FlatCopy { layout, .. }
             | Inst::Hash { layout, .. }
@@ -705,6 +709,17 @@ fn unit_digest<S: crate::stage::Stage + Clone>(
         for block in &mut data.blocks {
             parts.push(inputs.keys.key(block.layout).0.0.to_vec());
             block.layout = LayoutId(0);
+            for function in &mut block.functions {
+                parts.push(
+                    inputs
+                        .keys
+                        .fn_abi_of(inputs.layouts, function.abi)
+                        .ok_or("static callable ABI outside the table")?
+                        .0
+                        .to_vec(),
+                );
+                function.abi = FnAbiId(0);
+            }
         }
         parts.push(hirsel_codec::to_text(&data).into_bytes());
     }

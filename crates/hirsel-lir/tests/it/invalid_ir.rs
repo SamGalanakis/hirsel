@@ -2106,8 +2106,14 @@ fn function_ref(repr: ValueRepr, layout: LayoutId) -> Vec<K> {
     let mut t = Lir::<Value>::new(&[], None);
     let symbol = t.builder.symbol(SymbolKind::Function, path("visit"));
     let f = t.value_as(repr, layout, Holding::Plain);
-    t.builder
-        .push(ENTRY, Inst::FunctionRef { result: f, symbol });
+    t.builder.push(
+        ENTRY,
+        Inst::FunctionRef {
+            result: f,
+            symbol,
+            abi: hirsel_lir::FnAbiId(0),
+        },
+    );
     t.builder.ret(ENTRY, None);
     t.check()
 }

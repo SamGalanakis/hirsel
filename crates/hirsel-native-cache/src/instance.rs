@@ -18,7 +18,7 @@ pub const INSTANCE_DISCOVERY_DOMAIN: Domain = Domain {
 };
 pub const STATICS_FINALIZERS_DOMAIN: Domain = Domain {
     kind: 0x4e00_0012,
-    schema: 1,
+    schema: 2,
 };
 
 /// The rewritten Value is a distinct semantic query stage while retaining the

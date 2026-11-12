@@ -107,7 +107,7 @@ fn target(
                         environment: Some(closure.environment),
                     });
                 }
-                Inst::FunctionRef { result, symbol } if result == value => {
+                Inst::FunctionRef { result, symbol, .. } if result == value => {
                     let symbol = unit.tables.symbols.get(symbol.index())?;
                     if symbol.definition != body.header.definition
                         || symbol.instance != Some(body.header.instance)

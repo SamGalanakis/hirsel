@@ -150,7 +150,7 @@ fn discover_seeded<S>(u: &LirUnit<S>, seeds: &[Code], finite: bool) -> Vec<Code>
                         });
                     }
                 }
-                Inst::FunctionRef { result, symbol } => {
+                Inst::FunctionRef { result, symbol, .. } => {
                     constants[result.index()] = Code::Known(Target {
                         symbol: u.tables.symbols[symbol.index()].clone(),
                         abi: None,

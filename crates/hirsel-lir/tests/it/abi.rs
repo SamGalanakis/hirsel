@@ -464,6 +464,58 @@ fn defining_and_public_views_agree_and_private_changes_move_the_entry_digest() {
 }
 
 #[test]
+fn thunk_digests_bind_typed_parameters_and_results() {
+    let owners = Owners::default();
+    let mut b = LayoutBuilder::new(&x86(), &owners);
+    let mut t = crate::support::ty();
+    let integer = t.p(Primitive::U64);
+    let float = t.p(Primitive::F64);
+    let mut ids = Vec::new();
+    for (parameter, result) in [(integer, integer), (float, integer), (integer, float)] {
+        let function = t.function(
+            &[(PassingMode::Borrow, parameter)],
+            result,
+            Multiplicity::Many,
+            0,
+        );
+        let definition = b
+            .fn_abi(&t.store, function, CallableShape::Definition)
+            .unwrap();
+        let callable = b
+            .fn_abi(&t.store, function, CallableShape::Closure)
+            .unwrap();
+        ids.push((definition, callable));
+    }
+    let table = checked(b);
+    let keys = hirsel_lir::LayoutKeys::new(&table);
+    for kind in [EntryKind::FunctionRef, EntryKind::Callback] {
+        let digests: Vec<_> = ids
+            .iter()
+            .map(|(definition, _)| {
+                keys.entry(kind, false, Some(&table.fn_abis[definition.0 as usize]))
+            })
+            .collect();
+        assert_ne!(digests[0], digests[1], "{kind:?}: u64 and f64 parameters");
+        assert_ne!(digests[0], digests[2], "{kind:?}: u64 and f64 returns");
+    }
+    for (definition, callable) in ids {
+        assert_eq!(
+            keys.entry(
+                EntryKind::FunctionRef,
+                false,
+                Some(&table.fn_abis[definition.0 as usize])
+            ),
+            keys.entry(
+                EntryKind::FunctionRef,
+                false,
+                Some(&table.fn_abis[callable.0 as usize])
+            ),
+            "the declaration and callable type describe the same thunk"
+        );
+    }
+}
+
+#[test]
 fn the_validator_rejects_abi_mutations() {
     let owners = Owners::default();
     let mut b = LayoutBuilder::new(&x86(), &owners);

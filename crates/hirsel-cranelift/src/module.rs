@@ -446,7 +446,7 @@ pub(crate) fn emit(
             let entry = emitter
                 .inputs
                 .keys
-                .entry(EntryKind::FunctionRef, false, None);
+                .entry(EntryKind::FunctionRef, false, Some(abi));
             emitter
                 .manifested
                 .export_entry(thunk, &header.definition, entry);

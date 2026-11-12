@@ -3961,7 +3961,7 @@ impl<'p, S: Stage> Machine<'p, S> {
                 };
                 self.define_fresh(f, result, val)?;
             }
-            Inst::FunctionRef { result, symbol } => {
+            Inst::FunctionRef { result, symbol, .. } => {
                 let ty = self.lir_type(unit, u.values[result.index()].ty)?;
                 if ty.repr == ValueRepr::Scalar(ScalarKind::Pointer) {
                     return fail(V::Unsupported, "a C callback: H does not run C");

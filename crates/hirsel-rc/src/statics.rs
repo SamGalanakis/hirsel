@@ -56,6 +56,7 @@ pub fn encode_functions(
         .layout(types, value.root.ty)
         .map_err(|e| StaticError(format!("the constant's layout: {e:?}")))?;
     let mut encoder = Encoder {
+        types,
         layouts,
         blocks: Vec::new(),
         functions,
@@ -131,6 +132,7 @@ pub fn nullary_variant(
 }
 
 struct Encoder<'a, 'o> {
+    types: &'a hirsel_types::TypeInterner,
     layouts: &'a mut LayoutBuilder<'o>,
     blocks: Vec<StaticBlock>,
     functions: &'a mut dyn FnMut(
@@ -409,6 +411,14 @@ impl Encoder<'_, '_> {
                 },
             ) => {
                 let symbol = (self.functions)(definition, arguments)?;
+                let abi = self
+                    .layouts
+                    .fn_abi(
+                        self.types,
+                        node.ty,
+                        hirsel_lir::abi_types::CallableShape::Definition,
+                    )
+                    .map_err(|e| StaticError(format!("static callable signature: {e:?}")))?;
                 let code = record
                     .fields
                     .iter()
@@ -427,6 +437,7 @@ impl Encoder<'_, '_> {
                 self.blocks[block as usize].functions.push(StaticFunction {
                     offset: offset + code,
                     symbol,
+                    abi,
                 });
                 Ok(())
             }

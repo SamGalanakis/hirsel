@@ -213,7 +213,7 @@ impl EntryKind {
 
 /// The version of the entry conventions: a change to how any entry kind
 /// passes its arguments bumps it.
-pub const ENTRY_CONVENTION_VERSION: u32 = 1;
+pub const ENTRY_CONVENTION_VERSION: u32 = 2;
 
 /// The physical entry digest: the entry's kind, whether it is a charged
 /// wrapper, the convention version and its signature, the FnAbi content key

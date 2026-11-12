@@ -892,7 +892,7 @@ fn lower<T>(
                     let thunk = define_function_thunk(&module, &name, entry, &external);
                     if copy {
                         module.make_available_externally(thunk);
-                        let entry = entry_of(inputs.keys, EntryKind::FunctionRef, None);
+                        let entry = entry_of(inputs.keys, EntryKind::FunctionRef, Some(abi));
                         optimizer_only.insert(
                             name.clone(),
                             ObjectSymbol::entry(&name, &unit.header.definition, entry),
@@ -913,7 +913,7 @@ fn lower<T>(
             if !inputs.alternate && abi.shape == CallableShape::Definition {
                 let thunk = function_thunk_name(definition, Some(&unit.header.instance));
                 define_function_thunk(&module, &thunk, entry, &external);
-                let entry = entry_of(inputs.keys, EntryKind::FunctionRef, None);
+                let entry = entry_of(inputs.keys, EntryKind::FunctionRef, Some(abi));
                 manifested.export_entry(&thunk, definition, entry);
             }
             functions.push((unit, function, signature));

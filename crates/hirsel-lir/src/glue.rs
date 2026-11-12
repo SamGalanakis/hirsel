@@ -290,7 +290,7 @@ impl UnitGlue {
                             .clone(),
                     );
                 }
-                Inst::FunctionRef { result, symbol }
+                Inst::FunctionRef { result, symbol, .. }
                     if unit.types[unit.values[result.index()].ty.index()].repr
                         == ValueRepr::Scalar(ScalarKind::Pointer) =>
                 {

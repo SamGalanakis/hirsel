@@ -258,7 +258,13 @@ impl<'a> FnEmitter<'_, 'a, '_> {
 
     /// `FunctionRef`: the definition's function-reference thunk with the static empty
     /// environment.
-    pub(crate) fn function_ref(&mut self, result: ValueId, symbol: SymbolId) -> Emitted<V> {
+    pub(crate) fn function_ref(
+        &mut self,
+        result: ValueId,
+        symbol: SymbolId,
+        abi: hirsel_lir::FnAbiId,
+    ) -> Emitted<V> {
+        let abi = self.em.fn_abi(abi, self.definition())?;
         let Some(symbol) = self.unit.tables.symbols.get(symbol.index()) else {
             return self.invalid("a function reference outside the symbol table");
         };
@@ -270,11 +276,11 @@ impl<'a> FnEmitter<'_, 'a, '_> {
                 &symbol.definition,
                 symbol.instance.as_ref(),
             );
-            self.import_entry(&name, &symbol.definition, EntryKind::Callback, None);
+            self.import_entry(&name, &symbol.definition, EntryKind::Callback, Some(abi));
             return Ok(V::One(self.function_address(&name, None)?));
         }
         let name = function_thunk_name(&symbol.definition, symbol.instance.as_ref());
-        self.import_entry(&name, &symbol.definition, EntryKind::FunctionRef, None);
+        self.import_entry(&name, &symbol.definition, EntryKind::FunctionRef, Some(abi));
         let code = self.function_address(&name, None)?;
         let environment = self.empty_environment()?;
         let layout = self.value_type(result)?.layout;

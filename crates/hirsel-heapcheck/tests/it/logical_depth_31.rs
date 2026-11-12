@@ -117,6 +117,7 @@ fn generated_callback_rejects_deleting_both_events_independently() {
     main.inst(Inst::FunctionRef {
         result: fun,
         symbol,
+        abi: callback.header.abi,
     });
     let admission = main.raises("LANG-10", main.propagate);
     main.inst(Inst::FrameEnter { failure: admission });

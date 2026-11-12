@@ -841,8 +841,14 @@ pub fn ready_program(target: &TargetSpec) -> Program {
     let symbol = u.symbol(SymbolKind::Function, "inc");
     // An owned callable over the static empty environment, released like any other.
     let f = u.value(fun_l, Holding::Owned);
-    u.builder
-        .push(ENTRY, Inst::FunctionRef { result: f, symbol });
+    u.builder.push(
+        ENTRY,
+        Inst::FunctionRef {
+            result: f,
+            symbol,
+            abi: table.abi("i64 -> i64"),
+        },
+    );
     let normal = u.builder.block(BlockKind::Body, &[]);
     let cleanup = u.builder.block(BlockKind::FailureCleanup, &[]);
     u.release_callable(cleanup, f, box_fun_l, &[]);

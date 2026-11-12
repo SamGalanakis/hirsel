@@ -1781,21 +1781,7 @@ done:
     // cached units retain: a closure body's `X` (its FnAbi has an environment) and the
     // function-ref thunk of each escaping definition. These diagnostic relocations do
     // not extend the RUN-3 entries table.
-    let mut value_codes = std::collections::BTreeSet::new();
-    for unit in &program.summaries {
-        if program.table.fn_abis[unit.abi.0 as usize].environment {
-            value_codes.insert(hirsel_lir::emission::symbol_name(
-                &unit.definition,
-                Some(&unit.instance),
-            ));
-        }
-        for (path, instance) in &unit.glue.entries {
-            value_codes.insert(hirsel_lir::emission::function_thunk_name(
-                path,
-                instance.as_ref(),
-            ));
-        }
-    }
+    let value_codes = launcher_value_codes(program);
     let callee_facts = program
         .callee_facts
         .as_ref()
@@ -2252,18 +2238,48 @@ fn kit_plan(
     })
 }
 
+/// Stored code relocations emitted by the launcher, also checked at Link.
+fn launcher_value_codes(program: &ReadyProgram) -> std::collections::BTreeSet<String> {
+    let mut value_codes = std::collections::BTreeSet::new();
+    for unit in &program.summaries {
+        if program.table.fn_abis[unit.abi.0 as usize].environment {
+            value_codes.insert(hirsel_lir::emission::symbol_name(
+                &unit.definition,
+                Some(&unit.instance),
+            ));
+        }
+        for (path, instance) in &unit.glue.entries {
+            value_codes.insert(hirsel_lir::emission::function_thunk_name(
+                path,
+                instance.as_ref(),
+            ));
+        }
+    }
+    value_codes
+}
+
 fn check_link_manifest(
     program: &ReadyProgram,
     entry: &DefPath,
     objects: &[hirsel_lir::stage::ObjectArtifact],
 ) -> Result<(), NativeError> {
     let (symbol, _, _) = entry_result(program, entry)?;
+    use hirsel_lir::{abi::EntryKind, stage::ObjectSymbolKind};
     // Link manifest: each definition instance has exactly one implementation
     // across the objects, the entry among them, and every import is another
     // object's export, a runtime entry or a toolchain routine. An import of a
     // Hirsel function entry binds only to an export with the same entry digest.
     let mut exported = std::collections::BTreeMap::new();
     for export in objects.iter().flat_map(|o| &o.exports) {
+        if export.kind == ObjectSymbolKind::Function
+            && export.definition.is_some()
+            && export.entry.is_none()
+        {
+            return Err(NativeError::new(
+                StageName::Link,
+                format!("`{}` is exported with no entry digest", export.name),
+            ));
+        }
         if exported.insert(export.name.as_str(), export).is_some() {
             return Err(NativeError::new(
                 StageName::Link,
@@ -2277,9 +2293,81 @@ fn check_link_manifest(
             "no object exports the launch entry",
         ));
     }
+    // Launcher objects are raw backend bytes. Validate their source-derived
+    // entry expectations here, including tables of root-only stored callables.
+    let mut expected = std::collections::BTreeSet::from([symbol.clone()]);
+    expected.extend(program.entries.iter().map(|(name, _)| name.clone()));
+    expected.extend(launcher_value_codes(program));
+    let mut signatures = BTreeMap::new();
+    let cranelift = cranelift_objects(objects);
+    for unit in &program.summaries {
+        let abi = &program.table.fn_abis[unit.abi.0 as usize];
+        let plain = hirsel_lir::emission::symbol_name(&unit.definition, Some(&unit.instance));
+        let kind = if cranelift {
+            EntryKind::Value
+        } else {
+            EntryKind::of_plain(abi.parameters.iter().any(|p| {
+                p.passing == ParameterPassing::ExclusiveAddress
+                    && matches!(
+                        program.table.layout(p.layout).map(|l| &l.kind),
+                        Some(
+                            hirsel_lir::layout_types::LayoutKind::Block { .. }
+                                | hirsel_lir::layout_types::LayoutKind::Box { .. }
+                        )
+                    )
+            }))
+        };
+        if expected.contains(&plain) {
+            signatures.insert(plain, program.keys.entry(kind, false, Some(abi)));
+        }
+        let thunk =
+            hirsel_lir::emission::function_thunk_name(&unit.definition, Some(&unit.instance));
+        if expected.contains(&thunk) {
+            signatures.insert(
+                thunk,
+                program.keys.entry(EntryKind::FunctionRef, false, Some(abi)),
+            );
+        }
+    }
+    for name in expected {
+        let digest = signatures.get(&name).ok_or_else(|| {
+            NativeError::new(
+                StageName::Link,
+                format!("`{name}` has no typed launcher entry digest"),
+            )
+        })?;
+        let export = exported.get(name.as_str()).ok_or_else(|| {
+            NativeError::new(
+                StageName::Link,
+                format!("`{name}` is imported by the launcher and no object implements it"),
+            )
+        })?;
+        if export.entry.as_ref() != Some(digest) {
+            return Err(NativeError::new(
+                StageName::Link,
+                format!(
+                    "`{name}` is imported by the launcher at another entry digest than its export"
+                ),
+            ));
+        }
+    }
     for import in objects.iter().flat_map(|o| &o.imports) {
+        let hirsel = import.kind == ObjectSymbolKind::Function && import.definition.is_some();
+        if hirsel && import.entry.is_none() {
+            return Err(NativeError::new(
+                StageName::Link,
+                format!("`{}` is imported with no entry digest", import.name),
+            ));
+        }
         if let Some(export) = exported.get(import.name.as_str()) {
-            if (export.entry.is_some() || import.entry.is_some()) && import.entry != export.entry {
+            if ((import.kind == ObjectSymbolKind::Function && import.definition.is_some())
+                || (export.kind == ObjectSymbolKind::Function && export.definition.is_some())
+                || export.entry.is_some()
+                || import.entry.is_some())
+                && (import.entry.is_none()
+                    || export.entry.is_none()
+                    || import.entry != export.entry)
+            {
                 return Err(NativeError::new(
                     StageName::Link,
                     match import.entry {
@@ -2293,11 +2381,12 @@ fn check_link_manifest(
             }
             continue;
         }
-        let declared = matches!(
-            import.kind,
-            hirsel_lir::stage::ObjectSymbolKind::Runtime
-                | hirsel_lir::stage::ObjectSymbolKind::Foreign
-        ) || hirsel_lir::emission::TOOLCHAIN_IMPORTS.contains(&import.name.as_str());
+        let declared = !hirsel
+            && (matches!(
+                import.kind,
+                hirsel_lir::stage::ObjectSymbolKind::Runtime
+                    | hirsel_lir::stage::ObjectSymbolKind::Foreign
+            ) || hirsel_lir::emission::TOOLCHAIN_IMPORTS.contains(&import.name.as_str()));
         if !declared {
             return Err(NativeError::new(
                 StageName::Link,

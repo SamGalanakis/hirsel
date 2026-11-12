@@ -1,19 +1,18 @@
 // Module `file`: files below a Dir, as library code over core's host primitives
-// (core.md, "Capabilities and host primitives"). Every operation passes the replay point
+// (core/core/host.hirsel; core.md, "Host"). Every operation passes the replay point
 // at issue and at delivery (CAP-8) and, when marked `waits`, is a cancellation point
 // (CONC-7). Field legend: API.md; "Prefix:" says what has happened on the host when the
 // operation fails or is cancelled part way.
 //
-// The open file is core's HostFile: a `send` resource with a position, whose finalizer
-// closes it and ignores the outcome, as Rust's File does; call `close` to see the error.
-// The seed writes it `HostFile` and adds no wrapper. core.md says no host primitive
-// admits, yet a resource value charges 32 bytes for its cause cell (budgets.md); which
-// one holds for `host.open` is N6 in SPEC-GAPS. The contracts below assume host.open
-// admits nothing.
+// The open file is core's HostFile: a `send` mechanical resource with a position (MEM-24):
+// making one admits nothing, and its finalizer closes it and ignores the outcome, as Rust's
+// File does; call `close` to see the error. The seed writes it `HostFile` and adds no
+// wrapper.
 //
-// OpenMode's arms are named but not defined (N5): the seed assumes Read opens an existing
-// file for reading, Write creates or truncates for writing, Append creates or appends,
-// and CreateNew creates and fails with Exists. There is no read-write mode.
+// OpenMode (core.md, "Host"): Read opens an existing file for reading; Write creates or
+// empties a file for writing; Append creates or opens one for writing at the end;
+// CreateNew creates one for writing and fails with Exists. There is no read-write mode,
+// so a program that reads back what it wrote opens the file twice.
 //
 // IoError has no arm for Capacity or invalid data, so the operations that allocate
 // return `file.Error`.
@@ -23,8 +22,8 @@
 pub type Error = Io(IoError) | Capacity(Capacity) | NotUtf8
 
 /// Opens p in mode. `host.open`. Fails: Error(NotFound | Denied | Exists | Other(_)).
-/// Prefix: nothing on failure, except that Write may have created or truncated p (N5); a
-/// cancellation at delivery closes the handle.
+/// Prefix: nothing on failure; on success Write and CreateNew may have created p and Write
+/// emptied it. A cancellation at delivery closes the handle.
 /// Ex: `let src = file.open(d, "source.txt", Read)?`
 pub fn open(d: Dir, p: String, mode: OpenMode) -> Result[HostFile, IoError] waits
 

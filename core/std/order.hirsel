@@ -1,0 +1,14 @@
+// Module `order`: comparisons over the `ordered` bound (OWN-4, SEM-7). Order is the core
+// type `Less | Equal | Greater`. These are generic over every ordered type (integers,
+// bool, char, (), String, Text, and tuples, Option, Result, List and FixedSpan of
+// ordered types), so integers and strings need no comparison of their own.
+
+/// Three-way order, the order of `<`. Cost: O(1) for scalars; O(min len) for sequences.
+/// Ex: `list.sort(mut ids, fn(a: u64, b: u64) -> Order { order.compare(a, b) })`
+pub fn compare[T: ordered](a: T, b: T) -> Order
+
+/// The smaller of a and b; a when equal. Cost: O(1). Ex: `order.min(n, 64)`
+pub fn min[T: ordered + plain](a: T, b: T) -> T
+
+/// The larger of a and b; b when equal. Cost: O(1). Ex: `order.max(width, 4)`
+pub fn max[T: ordered + plain](a: T, b: T) -> T

@@ -1,49 +1,23 @@
-// Module `map`: Map[K: key, V], own, insertion-ordered (SEM-5). Field legend, GROWTH,
-// FREEZE and CORE: API.md, "Reading a contract"; the layout and the tombstone and
-// compaction rule: API.md, "Map and Set". CORE operations are core.md's, restated.
+// Module `map`, extended (LANG-7): library members of the core module `map` (SEM-5). The
+// core members (new, len, get, insert, set, remove) are declared in core/core/map.hirsel.
+// Field legend: API.md, "Reading a contract"; layout, tombstones and compaction: API.md,
+// "Map and Set".
 //
 // Representation: 24-byte header inline; one storage block of capacity x (size(K) +
-// size(V) + 16), rounded up to 8 (MEM-26), charged to the limit where the map was made
-// (MEM-28). The 16 bytes per entry pay for its 8-byte hash and two 4-byte index slots
-// (the index has twice the entry capacity). GROWTH doubles capacity from 4 entries. The
-// hash is private and fixed per key type (SEM-5); CAP-6 lets the engine key it with a
-// per-run seed (G14 asks that it must). `for (k, v) in m` binds `(View[K], View[V])` for
-// each live entry in insertion order (SEM-6) and FREEZES m for the loop.
+// size(V) + 16), rounded up to 8, charged to the limit where the map was made (MEM-26).
+// The 16 bytes per entry pay for its 8-byte hash and two 4-byte index slots (the index has
+// twice the entry capacity). GROWTH doubles capacity from 4 entries. The hash is fixed per
+// key type and keyed by a per-run seed (SEM-5); no operation reveals it. `for (k, v) in m`
+// binds `(View[K], View[V])` for each live entry in insertion order (SEM-6) and FREEZES m.
 //
-// There is no in-place update: core has no mutable view and no operation that replaces
-// a present key's value without a key, and Map's fields are not the library's, so
-// `map.update` cannot be library code (P5 in SPEC-GAPS). `set` below is the smallest
-// core addition that makes it library code; until it exists a repeat costs a key copy.
-
-/// CORE. An empty map with no storage. Ex: `let mut m: Map[String, u64] = map.new()`
-pub fn new[K: key, V]() -> Map[K, V]
-
-/// CORE. Number of live entries. Cost: O(1). Ex: `map.len(m)`
-pub fn len[K: key, V](m: Map[K, V]) -> u64
-
-/// CORE. A view of k's value, or None. View: anchored to m; FREEZE m.
-/// Cost: expected O(1); O(len) when keys collide. Ex: `match map.get(m, w) { Some(v) => v, None => 0 }`
-pub fn get[K: key, V](m: Map[K, V], k: K) -> Option[View[V]] in m
+// A present key's value is replaced with core `map.set`, which takes no key and admits
+// nothing; a count is bumped with `map.get` then `map.set`. There is no `map.update` with
+// a callback: taking the value out needs a placeholder V to leave behind, and V has none
+// in general.
 
 /// Whether k is present: `map.get(m, k) != None`. Cost: as get. Ex: `map.contains(seen, k)`
 pub fn contains[K: key, V](m: Map[K, V], k: K) -> bool
 
-/// CORE. Adds (k, v) at the end of the order; when k is present, replaces its value in
-/// place, keeps the stored key and its position, cleans the old value, then drops k.
-/// When the entry array is full: compacts in place if at least half its slots are
-/// tombstones (no admission), else grows (GROWTH; the copy also drops tombstones).
-/// Fails: Error((c, k, v)) when growth is refused; m unchanged.
-/// Alloc: GROWTH only. Cost: amortised O(1); a growing or compacting call is O(capacity).
-/// Ex: `map.insert(mut m, take key, string.from("x")?)?` (`take` for a place, bare for a fresh value)
-pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (Capacity, K, V)]
-
-/// NEEDS CORE (P5). Replaces the value of a present k in place and returns the old one,
-/// uncleaned; Error(v) when k is absent, m unchanged. The map twin of `list.set`: no key
-/// is taken, so a repeat allocates nothing. Alloc: nothing. Cost: as get.
-/// Ex: `let n = match map.get(counts, w) { Some(n) => n, None => 0 }; map.set(mut counts, w, n + 1)`
-pub fn set[K: key, V](mut m: Map[K, V], k: K, take v: V) -> Result[V, V]
-
-/// CORE. Removes k and returns its value; the stored key is cleaned. The entry becomes a
-/// tombstone, so the remaining entries keep their order. Alloc: nothing; storage kept.
-/// Cost: as get. Ex: `let old = map.remove(mut index, k)`
-pub fn remove[K: key, V](mut m: Map[K, V], k: K) -> Option[V]
+/// k's value copied out, or x when absent. Cost: as get.
+/// Ex: `let n = map.get_or(counts, w, 0); let _ = map.set(mut counts, w, n + 1)`
+pub fn get_or[K: key, V: plain](m: Map[K, V], k: K, x: V) -> V

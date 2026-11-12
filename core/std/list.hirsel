@@ -1,73 +1,24 @@
-// Module `list`: the growable own sequence List[T] (SEM-4). `Bytes` is `List[u8]` (SEM-3),
-// so every operation here applies to Bytes. Field legend, GROWTH, FREEZE and CORE: API.md,
-// "Reading a contract". CORE operations are core.md's, restated; the others are library
-// code over them (N1 in SPEC-GAPS asks where a library adds members to a core module).
+// Module `list`, extended (LANG-7): library members of the core module `list` (SEM-4). The
+// core members (new, with_capacity, len, capacity, reserve, get, slice, push, pop, set,
+// clear, fill, append, sum) are declared in core/core/list.hirsel; a call names both sets
+// the same way, `list.push` and `list.sort`. `Bytes` is `List[u8]` (SEM-3), so every
+// operation here applies to Bytes. Field legend, GROWTH and FREEZE: API.md, "Reading a
+// contract".
 //
-// Representation (MEM-26): own; a 24-byte header inline in its owner; one block of
-// capacity x size(T), rounded up to 8, charged to the limit current where the list was
-// made (MEM-28). GROWTH: max(needed, 4, 2 x capacity), admitted before the old block is
-// refunded (B01). Removing never allocates or shrinks; storage is refunded when the list
-// is cleaned. Element cleanup is always from the highest index down (FAIL-8 order).
+// Representation (MEM-13, MEM-24, MEM-26): own; a 24-byte header inline in its owner; one
+// block of capacity x size(T), rounded up to 8, charged to the limit current where the list
+// was made. GROWTH: max(needed, 4, 2 x capacity), admitted before the old block is
+// refunded. Removing never allocates or shrinks; storage is refunded when the list is
+// cleaned.
 
-/// CORE. An empty list with no storage. Alloc: nothing. Ex: `let mut xs: List[u64] = list.new()`
-pub fn new[T]() -> List[T]
+/// A view of the first element, or None when empty: `list.get(xs, 0)`, returned under
+/// OWN-20. View: anchored to xs; FREEZE xs. Cost: O(1).
+/// Ex: `let Some(h) = list.first(lines) else { return Error(Empty) }`
+pub fn first[T](xs: List[T]) -> Option[View[T]] in xs
 
-/// CORE. An empty list with storage for exactly n elements.
-/// Fails: Error(c); nothing allocated. Alloc: n x size(T) rounded to 8, current limit.
-/// Cost: O(1). Ex: `let mut queue: List[u64] = list.with_capacity(v)?`
-pub fn with_capacity[T](n: u64) -> Result[List[T], Capacity]
-
-/// CORE. Number of elements. Cost: O(1). Ex: `list.len(xs)`
-pub fn len[T](xs: List[T]) -> u64
-
-/// CORE. Elements the storage holds without growing. Cost: O(1). Ex: `list.capacity(buf)`
-pub fn capacity[T](xs: List[T]) -> u64
-
-/// CORE. Ensures capacity >= len + n by one GROWTH to max(len + n, 4, 2 x capacity).
-/// Fails: Error(c); xs unchanged. Alloc: one block, owner's limit (MEM-28).
-/// Cost: O(len) when it grows, else O(1). Ex: `list.reserve(mut xs, 16)?`
-pub fn reserve[T](mut xs: List[T], n: u64) -> Result[(), Capacity]
-
-/// CORE. A view of element i, or None when i >= len. View: anchored to xs; FREEZE xs.
-/// `xs[i]` is the same read failing with Bounds. Cost: O(1).
-/// Ex: `let first = match list.get(xs, 0) { Some(v) => v, None => 0 }`
-pub fn get[T](xs: List[T], i: u64) -> Option[View[T]] in xs
-
-/// CORE. A sub-view of elements from..to (OWN-8). Fails: Bounds (failure) unless
-/// from <= to <= len. View: anchored to xs; FREEZE xs. Alloc: nothing. Cost: O(1).
-/// Ex: `file.write_all(mut dst, list.slice(buf, 0, 17))?`
-pub fn slice[T](xs: List[T], from: u64, to: u64) -> View[List[T]] in xs
-
-/// CORE. Appends x. Fails: Error((c, x)) when GROWTH is refused; xs unchanged.
-/// Alloc: GROWTH. Cost: amortised O(1). Ex: `list.push(mut path, v)?`
-pub fn push[T](mut xs: List[T], take x: T) -> Result[(), (Capacity, T)]
-
-/// CORE. Removes and returns the last element; None when empty. Alloc: nothing.
-/// Cost: O(1). Ex: `while let Some(x) = list.pop(mut xs) { .. }`
-pub fn pop[T](mut xs: List[T]) -> Option[T]
-
-/// CORE. Installs x at i and returns the old element, uncleaned.
-/// Fails: Bounds (failure) when i >= len. Alloc: nothing. Cost: O(1).
-/// Ex: `let old = list.set(mut xs, 2, take s)`
-pub fn set[T](mut xs: List[T], i: u64, take x: T) -> T
-
-/// CORE. Cleans every element from the highest index down; keeps storage.
-/// Alloc: nothing. Cost: O(len). Ex: `list.clear(mut buf)`
-pub fn clear[T](mut xs: List[T])
-
-/// CORE. Appends copies of x until len is n; no change when len >= n.
-/// Fails: Error(c); xs unchanged. Alloc: at most one GROWTH. Cost: O(n).
-/// Ex: `list.fill(mut parent, v, NONE)?` (with `const NONE: u64 = 18446744073709551615`)
-pub fn fill[T: plain](mut xs: List[T], n: u64, x: T) -> Result[(), Capacity]
-
-/// CORE. Appends a copy of every element of ys (Rust extend_from_slice).
-/// Fails: Error(c); xs unchanged. Alloc: at most one GROWTH. Cost: O(len(ys)).
-/// Ex: `list.append(mut out, chunk)?`
-pub fn append[T: plain](mut xs: List[T], ys: List[T]) -> Result[(), Capacity]
-
-/// CORE. Sum of integer elements in T. Fails: Overflow (failure). Cost: O(len).
-/// For bytes use `bytes.sum`, which sums in u64. Ex: `list.sum(counts)`
-pub fn sum[T](xs: List[T]) -> T
+/// A view of the last element, or None when empty. View: anchored to xs; FREEZE xs.
+/// Cost: O(1). Ex: `if let Some(top) = list.last(stack) { .. }`
+pub fn last[T](xs: List[T]) -> Option[View[T]] in xs
 
 /// Removes and returns element i, shifting i+1.. down; order kept. Library code: a chain
 /// of `list.set` from the end after a `list.pop`.
@@ -104,5 +55,5 @@ pub fn reverse[T](mut xs: List[T])
 /// it does not escape the call. If it is not a total order, xs still holds each element exactly once, in an unspecified
 /// order. A failure inside `before` propagates with the same guarantee.
 /// Alloc: nothing. Cost: O(len log len) worst case.
-/// Ex: `list.sort(mut xs, fn(a: u64, b: u64) -> Order { int.compare(a, b) })`
+/// Ex: `list.sort(mut xs, fn(a: u64, b: u64) -> Order { order.compare(a, b) })`
 pub fn sort[T](mut xs: List[T], before: scoped fn(T, T) -> Order)

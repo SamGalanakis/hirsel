@@ -1,19 +1,18 @@
-// Module `int`: integer operations (SEM-1). The CORE arithmetic and conversions
-// (wrapping_, checked_, saturating_, widen, narrow, try_narrow, truncate) are core.md's and
-// not repeated; `parse` is restated for its contract. `T` ranges over the integer types.
-// ParseError and Order are core types. Parsing reads a String, so a `string.slice` of a
-// line parses without a copy. Nothing here allocates.
+// Module `int`, extended (LANG-7): library members of the core module `int` (SEM-1). The
+// core members (wrapping_, checked_, saturating_, widen, narrow, try_narrow, truncate,
+// parse) are declared in core/core/int.hirsel, generic over the integer types.
+//
+// A library function cannot be generic over the integer types: no bound names them
+// (OWN-4), so a library `[T]` admits every type and its body cannot do arithmetic on T.
+// Radix parsing is therefore written once at u64 and once at i64, as Go's ParseUint and
+// ParseInt; a narrower result is `int.try_narrow` of it. Nothing here allocates.
 
-/// CORE. Parses the whole of s in decimal: an optional '-' for signed T, then ASCII
-/// digits; no '+', spaces or '_'.
-/// Fails: Error(Empty | Invalid(i) | OutOfRange), i the byte position. Cost: O(len).
-/// Ex: `let n: u64 = int.parse(field)?`
-pub fn parse[T](s: String) -> Result[T, ParseError]
+/// Parses the whole of s as an unsigned number in `base` (2 to 36), digits as char.digit
+/// reads them; no sign, prefix, spaces or '_'.
+/// Fails: Bounds (failure) when base is outside 2..=36; Error(Empty | Invalid(i) |
+/// OutOfRange), i the byte position. Cost: O(len).
+/// Ex: `let cp: Option[u32] = int.try_narrow(int.parse_uint(hex4, 16)?)`
+pub fn parse_uint(s: String, base: u32) -> Result[u64, ParseError]
 
-/// Parses the whole of s in `base` (2 to 36), digits as char.digit reads them.
-/// Fails: Bounds (failure) when base is outside 2..=36; otherwise as parse.
-/// Cost: O(len). Ex: `let cp: u32 = int.parse_radix(hex4, 16)?`
-pub fn parse_radix[T](s: String, base: u32) -> Result[T, ParseError]
-
-/// Three-way numeric order (the order of `<`). Cost: O(1). Ex: `int.compare(a, b)`
-pub fn compare[T](a: T, b: T) -> Order
+/// As parse_uint, with an optional leading '-'. Ex: `let d = int.parse_int(field, 10)?`
+pub fn parse_int(s: String, base: u32) -> Result[i64, ParseError]

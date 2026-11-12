@@ -198,6 +198,7 @@ impl SemanticTask {
             queries.publish_installed_input(
                 &self.node.root,
                 self.node.input.as_ref().ok_or(QueryError::NotImplemented)?,
+                &dependencies,
             )?;
         }
         let mut entry = GraphEntry {

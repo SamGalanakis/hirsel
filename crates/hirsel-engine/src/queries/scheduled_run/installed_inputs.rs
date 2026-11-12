@@ -11,6 +11,7 @@ impl FrontRunQueries {
         &self,
         path: &DefPath,
         input: &Input,
+        resolved: &BTreeSet<DefPath>,
     ) -> Result<(), QueryError> {
         let Some(writer) = self.store.installation_output() else {
             return Ok(());
@@ -60,6 +61,7 @@ impl FrontRunQueries {
             dependencies: header.output.dependencies.clone(),
             reads,
             semantic_dependencies: input.dependencies.iter().cloned().collect(),
+            resolved: resolved.iter().cloned().collect(),
             discovery,
             specializations: input.specializations.as_deref().cloned(),
             ownership: InstalledDefinitionOwnership {

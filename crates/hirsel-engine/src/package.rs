@@ -1,6 +1,7 @@
 //! PROG-1: explicit source packages and the toolchain std for manifestless sources.
 mod dependency_card;
 pub(crate) mod diagnostic_guidance;
+mod reach;
 mod slots;
 pub use dependency_card::render_dependency_cards;
 pub use slots::{ImplementationSlot, PackageSlots};
@@ -155,6 +156,9 @@ pub struct LoadedProgram {
     /// selects another package graph, so a resident session loads again.
     pub inputs: Vec<std::path::PathBuf>,
     pub package_kinds: BTreeMap<PackageId, DependencyKind>,
+    /// Each installed package's opened image: its N, E and K choose the
+    /// files a request adopts (`reach`).
+    installed_images: BTreeMap<PackageId, std::sync::Arc<hirsel_engine_store::InstalledPackage>>,
 }
 /// Package selection is a build input, independent of cache availability.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -400,9 +404,13 @@ impl LoadedProgram {
     /// Observe every source in check order, as loading does. Ordinary heads
     /// avoid parsing unchanged bytes; changed invalid bytes fail as on a fresh load.
     pub fn parse_sources(&mut self) -> Result<(), ToolError> {
+        let reach = reach::reached_files(&self.installed_images, &self.files, &self.engine.sources);
+        self.engine.unreached_installed = reach.unreached;
+        let reached = reach.files;
         for (file, context) in self.files.clone() {
             let indexed = if self.package_kinds[&context.package] == DependencyKind::Installed {
-                self.engine.index_installed_source(file, &context)
+                self.engine
+                    .index_installed_source(file, &context, reached.contains(&file))
             } else {
                 self.engine.index_source(file, &context)
             };
@@ -898,6 +906,11 @@ pub(crate) fn load_program_inputs_with_source_index(
                 )
             })
             .collect(),
+        installed_images: graph
+            .packages
+            .iter()
+            .filter_map(|(id, package)| Some((id.clone(), package.products.clone()?)))
+            .collect(),
         inputs: path
             .extension()
             .is_none_or(|e| e != "json")
@@ -923,9 +936,18 @@ pub(crate) fn load_program_inputs_with_source_index(
                 .map_err(|e| program.error(e))?;
             program.engine.indexed_sources.remove(&retired);
         }
+        let reach = reach::reached_files(
+            &program.installed_images,
+            &program.files,
+            &program.engine.sources,
+        );
+        program.engine.unreached_installed = reach.unreached;
+        let reached = reach.files;
         for (file, context) in &program.files {
             let indexed = if graph.packages[&context.package].products.is_some() {
-                program.engine.index_installed_source(*file, context)
+                program
+                    .engine
+                    .index_installed_source(*file, context, reached.contains(file))
             } else {
                 program.engine.index_source(*file, context)
             };

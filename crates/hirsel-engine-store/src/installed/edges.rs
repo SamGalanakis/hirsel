@@ -1,8 +1,8 @@
-//! The image's signature and representation edges (E): per installed name,
-//! the names its checked definitions read, from each semantic input's
-//! signature `dependencies` and `semantic_dependencies`. The checker records
-//! those reads whether or not a call survives lowering, so a request's
-//! closure over E reaches every file a header or representation probe needs.
+//! The image's edges (E): per installed name, the names its checked
+//! definitions read, from each semantic input's signature `dependencies` and
+//! `resolved` reads, body included. The checker records those reads whether
+//! or not a call survives lowering, so a request's closure over E reaches
+//! every file a header, body or representation probe needs.
 //! A specialization's edges are its generic definition's, and every path is
 //! its generic base: reach adopts files, not instances.
 use hirsel_syntax::DefPath;

@@ -733,10 +733,13 @@ impl QueryEngine {
             })
             .collect();
     }
+    /// Register an installed source; only a `reached` one decodes and adopts
+    /// its parse heads (`package::reach`).
     pub fn index_installed_source(
         &mut self,
         file: FileId,
         context: &FileContext,
+        reached: bool,
     ) -> Result<(), QueryError> {
         let missing = || {
             QueryError::Operational(hirsel_types::OperationalFailure {
@@ -759,6 +762,14 @@ impl QueryEngine {
             self.catalog
                 .installed
                 .insert(context.package.clone(), records);
+        }
+        if !reached {
+            self.indexed_sources.insert(
+                file,
+                (context.clone(), self.package_environment(&context.package)),
+            );
+            self.installed_sources.insert(file);
+            return Ok(());
         }
         let key = self.catalog_key(file, context).ok_or_else(missing)?;
         let bytes = self.source_record(&key, context).ok_or_else(missing)?;
@@ -1225,6 +1236,18 @@ impl QueryEngine {
                 self.materialize_source(file)?;
             }
             return Ok(());
+        }
+        if self.unadopted_installed(path) {
+            // Reach's boundary (`NamespaceCapture::reach_escape` guards the
+            // scheduled reads): a demand outside the reached files is a
+            // compiler failure, never a missing or failed definition.
+            return Err(QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "installed package".into(),
+                message: format!(
+                    "internal error: installed definition {path} was demanded outside the \
+                     request's reached files"
+                ),
+            }));
         }
         if self.declared(path) && self.installed_definition(path) {
             let record = self
@@ -1923,9 +1946,17 @@ impl QueryEngine {
         }
         hirsel_engine_store::ImageNames::new(package, &names)
     }
+    /// An installed name its image's N declares whose file the request did
+    /// not reach, so its heads were never adopted.
+    pub(crate) fn unadopted_installed(&self, path: &DefPath) -> bool {
+        DefId::get(path).is_some_and(|id| self.unreached_installed.contains(&id))
+            && !self.items.contains_key(path)
+            && !self.catalog.candidates.contains_key(path)
+    }
     pub(crate) fn declared(&self, path: &DefPath) -> bool {
         self.items.contains_key(path)
             || self.catalog.body(path).is_some()
+            || self.unadopted_installed(path)
             || self
                 .header_products
                 .as_ref()

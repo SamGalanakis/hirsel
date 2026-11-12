@@ -896,6 +896,15 @@ impl Task {
                 &format!("Check observations are inconsistent: {error:?}"),
             )
         })?;
+        // The union holds every Front and Lower reader this Check consumed.
+        if let Some(escape) = queries.plan.front.reach_escape(&reads) {
+            return Err(crate::requests::source_graph::protocol_failure(
+                &*queries.store,
+                queries.errors,
+                Some(queries.query()),
+                &escape,
+            ));
+        }
         let stopped = self.files.iter().find_map(|file| match &file.error {
             Some(error) if *error != QueryError::NotImplemented => {
                 Some((error.clone(), file.input.phase))

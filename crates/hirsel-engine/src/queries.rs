@@ -287,6 +287,8 @@ pub struct QueryEngine {
     /// The instance-bodied names of every installed package with a name
     /// index (N), whether or not the request adopted their files.
     pub(crate) installed_instance_bodied: BTreeSet<DefPath>,
+    /// Installed names whose files the request did not reach (reach.rs).
+    pub(crate) unreached_installed: Arc<BTreeSet<DefId>>,
     pub(crate) registry: hirsel_registry::BuiltinRegistry,
     pub(crate) builtins: BTreeMap<DefPath, hirsel_types::SignatureRef>,
     syntax_keys: BTreeMap<(DefPath, QueryKind), ContentHash>,
@@ -719,6 +721,7 @@ impl QueryEngine {
             parsed: BTreeMap::new(),
             installed_sources: BTreeSet::new(),
             installed_instance_bodied: BTreeSet::new(),
+            unreached_installed: Arc::default(),
             registry,
             builtins: BTreeMap::new(),
             syntax_keys: BTreeMap::new(),

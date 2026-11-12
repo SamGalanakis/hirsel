@@ -6,7 +6,7 @@ use hirsel_syntax::DefPath;
 
 pub const SEMANTIC_INPUT: Domain = Domain {
     kind: 0x4601_000c,
-    schema: 2,
+    schema: 3,
 };
 pub const SEMANTIC_HEADER: Domain = Domain {
     kind: 0x4601_000d,
@@ -78,6 +78,9 @@ pub struct InstalledSemanticInput {
     pub dependencies: Vec<hirsel_types::SignatureDependency>,
     pub reads: Vec<u8>,
     pub semantic_dependencies: Vec<DefPath>,
+    /// Every definition the checked definition resolved, body included:
+    /// its callees and the reads behind them. E is built from these.
+    pub resolved: Vec<DefPath>,
     pub discovery: hirsel_query_products::SourceFacts,
     pub specializations: Option<InstalledSpecializations>,
     pub ownership: InstalledDefinitionOwnership,
@@ -88,6 +91,7 @@ impl InstalledSemanticInput {
             &self.dependencies,
             &self.reads,
             &self.semantic_dependencies,
+            &self.resolved,
             &self.specializations,
         ))
         .map_err(std::io::Error::other)?;
@@ -116,7 +120,7 @@ impl InstalledPackage {
     }
     /// Index the semantic inputs among `records`' contents, adding each one's
     /// row, and refuse two inputs for one path. Also returns the image's
-    /// edges (E): each input's recorded reads, by generic base.
+    /// edges (E): each input's signature and resolved reads, by generic base.
     pub(super) fn index_definitions(
         &self,
         store: &hirsel_artifact_store::Store,
@@ -160,7 +164,7 @@ impl InstalledPackage {
                 .dependencies
                 .iter()
                 .map(|dependency| edges::base(dependency.definition.path()))
-                .chain(record.semantic_dependencies.iter().map(edges::base))
+                .chain(record.resolved.iter().map(edges::base))
                 .filter(|target| *target != source)
                 .collect::<Vec<_>>();
             edges.entry(source).or_default().extend(reads);

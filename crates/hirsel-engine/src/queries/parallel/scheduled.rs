@@ -1126,6 +1126,10 @@ impl FrontBodyQueries {
     }
     /// Successful lookup targets are semantic closure edges even when a
     /// primitive/alias adds no normalized signature fingerprint dependency.
+    /// `NamespaceCapture::reach_escape` for this view's request.
+    pub(crate) fn reach_escape(&self, reads: &Reads) -> Option<String> {
+        self.namespace.reach_escape(reads)
+    }
     pub(crate) fn lookup_definition(
         &self,
         key: hirsel_query_products::reads::LookupKey,
@@ -2544,6 +2548,11 @@ impl BodyTask {
             reads: published.reads.clone(),
             diagnostic_phases: published.diagnostic_phases.clone(),
         };
+        // Every outcome, failed or not, is refused before it is published or
+        // compared with a cached one when it reads outside the reached files.
+        if let Some(escape) = queries.namespace.reach_escape(&outcome.reads) {
+            return Err(queries.protocol_failure(self.query, &escape).into());
+        }
         // A front failure is an immutable diagnostic record, never a successful
         // mode output, and includes source/phase/ordered-read provenance.
         let failed = published.result.is_err();

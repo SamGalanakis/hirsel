@@ -67,6 +67,9 @@ pub struct NamespaceCapture {
     consumer_scope: std::sync::OnceLock<ContentHash>,
     capture_inputs: CaptureInputs,
     pub(crate) operation: Arc<operation_inputs::OperationOwner>,
+    /// Installed definitions whose files this request did not adopt
+    /// (`package::reach`); `reach_escape` refuses any read of one.
+    unreached: Arc<std::collections::BTreeSet<DefId>>,
 }
 
 pub(crate) struct CaptureDelta {
@@ -354,6 +357,43 @@ impl Manifest {
 }
 
 impl NamespaceCapture {
+    /// Reach's soundness boundary. Name reads (`Lookup`, `NameSet`) answer
+    /// from the image's N whether or not a file was adopted, but every read
+    /// keyed on a definition observes its adopted heads, which an unreached
+    /// file lacks: such a read would observe a missing definition, not the
+    /// installed one. So a read set naming one is refused as a compiler
+    /// protocol failure, never cached or reported as a failed definition.
+    pub(crate) fn reach_escape(&self, reads: &Reads) -> Option<String> {
+        if self.unreached.is_empty() {
+            return None;
+        }
+        reads.iter().find_map(|(key, _)| {
+            let id = match *key {
+                ReadKey::Signature(d)
+                | ReadKey::FailedSignature(d)
+                | ReadKey::DeclaredSignature(d)
+                | ReadKey::ExecutedSignature(d)
+                | ReadKey::Representation(d)
+                | ReadKey::ExecutedBody(d)
+                | ReadKey::LayoutBody(d)
+                | ReadKey::CitedText(d)
+                | ReadKey::DeclarationCandidates(d)
+                | ReadKey::ValidationView(_, d) => d,
+                ReadKey::Lookup(_)
+                | ReadKey::NameSet(..)
+                | ReadKey::UniverseErrors(_)
+                | ReadKey::HeapRole(_)
+                | ReadKey::Environment
+                | ReadKey::ValidationUniverse(_) => return None,
+            };
+            self.unreached.contains(&id).then(|| {
+                format!(
+                    "installed definition {} was demanded outside the request's reached files",
+                    id.path()
+                )
+            })
+        })
+    }
     pub(crate) fn demand_validation(
         &self,
     ) -> Result<Arc<crate::snapshot::ValidationDemand>, QueryError> {
@@ -1241,6 +1281,7 @@ impl QueryEngine {
         weight.add(size_of_val(&*source_paths) + size_of_val(&*roots));
         weight.flat_vec(&manifest_inputs.dependencies);
         weight.flat_vec(&manifest_inputs.trace);
+        weight.tree::<DefId, ()>(self.unreached_installed.len());
         let mut capture_inputs = CaptureInputs::new(
             self,
             definitions,
@@ -1322,6 +1363,7 @@ impl QueryEngine {
             consumer_scope: std::sync::OnceLock::new(),
             capture_inputs,
             operation: self.operation.clone(),
+            unreached: self.unreached_installed.clone(),
         });
         let mut captures = self
             .operation

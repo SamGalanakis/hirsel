@@ -177,7 +177,9 @@ fn pick[T: integer](a: T) -> T { a }                      // refused: OWN-4, int
 Each owning slot is in one of four states at each point of a body: **uninit**, **live**,
 **moved** or **maybe**. `let x: T` without an initializer is uninit; an initialization or
 assignment makes it live; a move makes it moved; [OWN-16](#own-16-joins) makes maybe.
-Reading, viewing, lending `mut`, moving and destructuring need live. A slot is
+Reading, viewing, lending `mut`, moving and destructuring need live, and so does assigning
+a part of a slot (a field, component or element); only a whole slot is assigned while it is
+not live. A slot is
 **writable** when it is declared `let mut` or is a `mut` or `take` parameter; assigning,
 replacing or lending `mut` any place requires its slot to be writable.
 
@@ -186,6 +188,10 @@ fn f(take s: String) -> String { let t = s; t }
 ```
 ```hirsel
 fn f(take s: String) -> String { let t = s; s }        // refused: OWN-5, s moved at 1:39
+```
+```hirsel
+type P { a: u64, b: u64 }
+fn f(take p: P) { let q = p; p.a = 1 }                    // refused: OWN-5, at p.a: p moved
 ```
 
 ### OWN-6: let, take and copy
@@ -211,7 +217,9 @@ A parameter is a view for the call when unmarked, lent for the call when marked 
 and owned by the callee when marked `take`. An argument for a `mut` parameter is written
 `mut p`; an argument for a `take` parameter is written `take p` when it is a place of a
 moving type and bare otherwise; every other argument is bare. A bare place argument for
-an unmarked parameter is a view; a copyable value is copied.
+an unmarked parameter is a view; a copyable value is copied. `mut p` is written nowhere
+but as such an argument, and a view parameter of a moving type is never moved; either is
+refused here, at the `mut p` or at the move.
 
 ```hirsel
 fn len(xs: List[u64]) -> u64 { list.len(xs) }
@@ -222,6 +230,12 @@ fn use_all(take xs: List[u64]) { let n = len(xs); let _ = add(mut xs, n); eat(ta
 ```hirsel
 fn eat(take xs: List[u64]) {}
 fn f(take xs: List[u64]) { eat(xs) }                      // refused: OWN-7, needs take xs
+```
+```hirsel
+fn f(s: String) -> String { s }                           // refused: OWN-7, at s: a view
+```
+```hirsel
+fn f(mut x: u64) { let y = mut x }                        // refused: OWN-7, mut outside an argument
 ```
 
 ### OWN-8: Views
@@ -284,7 +298,9 @@ A live view **freezes** every place in its anchor set, whatever the place's kind
 view's extent: moving, lending `mut`, assigning, replacing, destructuring or dropping an
 overlapping place is refused. Several views of overlapping places may coexist. Copying a
 view into another slot or aggregate extends its anchors' freezes to that slot's extent,
-which must end before every anchor's scope does. A freeze ends on every exit edge of its
+which must end before every anchor's scope does: a view whose extent outlives the scope of
+an anchor is refused at the closing `}` of the block whose cleanup would drop the frozen
+place, with the view as a secondary site. A freeze ends on every exit edge of its
 extent, before the owners of the exited blocks are cleaned
 ([FAIL-8](failure.md#fail-8-exit-edge-cleanup)). A view of a stable value is anchored to its
 region, not to a place, and freezes nothing: stable storage is never written.
@@ -300,6 +316,10 @@ fn f(mut m: Inbox) -> u64 {
 ```hirsel
 type Inbox { items: List[String] }
 fn f(take m: Inbox) -> Inbox { let v = view m.items; m }     // refused: OWN-10
+```
+```hirsel
+fn f() -> u64 { let n = string.byte_len({ let s = string.new(); view s }); n }
+                                                // refused: OWN-10, at the inner block's }
 ```
 
 ### OWN-11: Call arguments
@@ -423,8 +443,10 @@ The state of every slot at a loop head is its state on entry; a `for take` sourc
 before the head. Every `continue` and the end of the loop body must leave every slot
 declared outside the loop in its entry state, and may not end a view or anchor that was live
 at the head: a slot moved in the body must be reassigned before the
-back edge. A `while` condition's false edge and each `break` merge into the loop's exit
-state by OWN-16. Nothing is iterated to a fixpoint.
+back edge. A refusal is reported at the `continue`, or at the closing `}` of the body, whose
+edge breaks this; the change it undoes is a secondary site
+([PROG-7](diagnostics.md#prog-7-one-rule-one-site)). A `while` condition's false edge and
+each `break` merge into the loop's exit state by OWN-16. Nothing is iterated to a fixpoint.
 
 ```hirsel
 fn drain(mut q: List[String]) {
@@ -436,7 +458,7 @@ fn drain(mut q: List[String]) {
 }
 ```
 ```hirsel
-fn f(take s: String) { loop { let _ = string.into_bytes(take s) } }   // refused: OWN-17
+fn f(take s: String) { loop { let _ = string.into_bytes(take s) } }   // refused: OWN-17, at the body's }
 ```
 
 ### OWN-18: Drop flags

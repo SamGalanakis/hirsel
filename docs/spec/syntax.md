@@ -260,7 +260,8 @@ syntax and are told apart by name resolution; braces after a condition begin a b
 because records are built with parentheses. On the right of a type definition, two or more
 `|`-separated variants or one name followed by `(` declare variants; anything else is an
 alias. A `let` without `=` declares an uninitialized slot and must have a name pattern and
-a type ([OWN-5](ownership.md#own-5-availability)). A `let else` initializer and an `if`, `while`
+a type ([OWN-5](ownership.md#own-5-availability)); `let x` alone is refused here, at
+`let`. A `let else` initializer and an `if`, `while`
 or `match` subject cannot end in an unparenthesized block. `for` patterns, `let` patterns
 without `else`, and `let`-condition patterns are checked for refutability after parsing
 ([LANG-17](language.md#lang-17-match)). An attribute applies only to its own target:

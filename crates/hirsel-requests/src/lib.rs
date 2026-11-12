@@ -39,7 +39,7 @@ mod safe_check;
 mod selector;
 mod source_graph;
 mod tir_products;
-pub use native_platform::host_executable_platform;
+pub use native_platform::{HostLauncher, HostPlatform, host_executable_platform};
 pub use native_products::evidence_identity;
 pub use output::{
     CompileInspection, CompileOutput, CompileResult, CompilerReadiness, DefinitionWork,

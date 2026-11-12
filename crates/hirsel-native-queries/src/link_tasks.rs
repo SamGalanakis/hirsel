@@ -608,9 +608,9 @@ impl ObjectTaskSnapshot for LinkTasks {
                 .iter()
                 .map(|read| super::ready_product(self.store(), read.clone()).map(Arc::new))
                 .collect::<Result<Vec<_>, _>>()?;
-            // This boundary is executed before ObjectQueries selects either a
-            // cached Link or a miss. Keep actual admitted refs, never reconstruct
-            // them later from a mutable current association.
+            // Link always links (an unchanged run is answered by its program
+            // record). Keep actual admitted refs, never reconstruct them later
+            // from a mutable current association.
             let scope = (root_ref, reads.to_vec());
             if let Err(other) = self.observation_scope.set(scope)
                 && self.observation_scope.get() != Some(&other)

@@ -1,17 +1,19 @@
-//! Program record B (native rerun design v4.1, N1). A check or build computes
-//! its key P from the observed inputs without opening a stored product, then
-//! looks up one record in the domain its registration authenticates. A hit
-//! replays the record's diagnostics, report and status; a build hit also
-//! materializes the recorded executable. A miss runs as before and publishes
-//! one record. Only the registration grants authority: with no registration,
+//! Program record B (native rerun design v4.1, N1 and N1b). A check, build
+//! or `run --native` computes its key P from the observed inputs without
+//! opening a stored product, then looks up one record in the domain its
+//! registration authenticates. A hit replays the record's diagnostics, report
+//! and status; a build hit also materializes the recorded executable, and a
+//! run hit launches it from its execution descriptor R with no request. A
+//! miss runs as before and publishes one record. Only the registration grants authority: with no registration,
 //! a copied store or a replaced one, every lookup misses.
 //!
 //! P is an explicit inventory. Every `HIRSEL_*` and tool variable is in one
-//! class: key (its value is in P), native (its value is in a build's P, never
-//! a check's), owner (its canonical identity is in P), bypass (B is not used),
-//! acquisition (how work is scheduled or admitted, never what it produces),
-//! telemetry, or launch-only. An unclassified `HIRSEL_*` that is set bypasses
-//! B.
+//! class: key (its value is in P), native (its value is in a build's and a
+//! run's success key, never a check's), owner (its canonical identity is in
+//! P), bypass (B is not used), acquisition (how work is scheduled or
+//! admitted, never what it produces), telemetry, or launch-only. An
+//! unclassified `HIRSEL_*` that is set bypasses B.
+use crate::launch_binding;
 use crate::session::{Policy, Session};
 use hirsel_engine::{CheckCompletion, CheckOutput, QueryError, ToolError};
 use hirsel_intern::timings::{self, Count, Phase};
@@ -63,7 +65,8 @@ const VARIABLES: &[(&str, Class)] = &[
     ("HIRSEL_GUARD_ORACLE", Class::Key),
     ("HIRSEL_LINK_KIT", Class::Native),
     ("HIRSEL_RUNTIME_ARCHIVES", Class::Native),
-    // The emulator runs a built aarch64 program; no build reads it.
+    // The emulator runs a built aarch64 program; no build reads it, and
+    // `run --native` launches only x86_64 programs.
     ("HIRSEL_QEMU_AARCH64", Class::Launch),
     // Memcheck runtimes are built and launched only by `test --native`,
     // which does not use B.
@@ -917,6 +920,7 @@ pub(crate) fn check(
                     image: None,
                     diagnostics: &diagnostics,
                     executable: None,
+                    execution: None,
                 },
                 generation,
             );
@@ -1039,11 +1043,11 @@ pub(crate) fn build(
                     ProgramKind::SourceDiagnostics => Some(keyed.source),
                     ProgramKind::Success => {
                         let _phase = timings::phase(Phase::ProgramPlatform);
-                        let handed =
+                        let host =
                             crate::requests::host_executable_platform(&store, &build.options)
                                 .ok()?;
-                        let platform = handed.identity();
-                        captured = Some(std::sync::Arc::new(handed));
+                        let platform = host.identity();
+                        captured = Some(std::sync::Arc::new(host.into_handed()));
                         Some(success(platform))
                     }
                 })
@@ -1111,6 +1115,7 @@ pub(crate) fn build(
                         image,
                         diagnostics: &diagnostics,
                         executable,
+                        execution: None,
                     },
                     generation,
                 );
@@ -1212,6 +1217,684 @@ fn replay_build(hit: &ProgramHit, platform: Option<ContentHash>, output: &Path) 
             hit.materialize(output).ok()?;
             Some(Ok(Ok(report)))
         }
+    }
+}
+
+/// One `hirsel run --native` request.
+pub(crate) struct Run<'a, 'o> {
+    pub launch: crate::HostLaunch<'a>,
+    pub evidence: Option<&'a hirsel_native::Evidence>,
+    pub backend: hirsel_native::Backend,
+    pub validation: hirsel_native::Validation,
+    pub output: crate::native::Output<'o>,
+    pub trace_events: Option<&'a Path>,
+    pub place: Option<std::os::fd::BorrowedFd<'a>>,
+}
+
+type Ran = Result<Result<crate::RunOutcome, NativeError>, ToolError>;
+
+/// `hirsel run --native` of `entry` through B. A run record is its own
+/// operation: a build record never answers a run, nor the reverse. A source
+/// failure is keyed by the source key alone; a success by the source key, the
+/// native options, the evidence, the platform the lookup captures and the
+/// launch inputs (the linker embeds the bound run's identity in the
+/// executable). A hit binds the launch to the program facts R holds, writes
+/// the recorded executable and launches it with no request. The program's
+/// exit status is never part of a record.
+pub(crate) fn run(
+    session: &mut Session,
+    entry: &Path,
+    policy: Policy,
+    mut run: Run<'_, '_>,
+) -> Ran {
+    session.invocation(|session| {
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+        // A served place's head is a deployment, linked as `hirsel build
+        // --release` links one (scoped specialization); Cranelift stays the
+        // unoptimized debug loop.
+        let options = match (run.place, run.backend) {
+            (Some(_), hirsel_native::Backend::Llvm) => hirsel_native::BuildProfile::Release
+                .options(run.backend, target, run.validation)
+                .unwrap_or_else(|_| unreachable!("release admits LLVM")),
+            _ => hirsel_native::BuildProfile::run_options(run.backend, target, run.validation),
+        };
+        let observed = {
+            let _phase = timings::phase(Phase::ProgramKey);
+            session.observe_inputs()
+        };
+        if observed.is_err() {
+            bypassed("inputs not observed".into());
+        }
+        observed?;
+        let launch_key = match run.launch {
+            crate::HostLaunch::Live { config, .. } => config.key(),
+            _ => None,
+        };
+        // A served place, a replay and a callee bind against a launch the
+        // record does not hold. Stage validation and the Cargo runtime
+        // fallback bypass as a build does.
+        let keyed = if run.place.is_some() {
+            Err("served place".to_owned())
+        } else if !matches!(run.launch, crate::HostLaunch::Live { .. }) {
+            Err("replay or callee launch".to_owned())
+        } else if run.validation == hirsel_native::Validation::EveryStage {
+            Err("validate stages".to_owned())
+        } else if std::env::var_os("HIRSEL_RUNTIME_ARCHIVES").is_none() {
+            Err("runtime archives from the Cargo fallback".to_owned())
+        } else if launch_key.is_none() {
+            Err("launch inputs unreadable".to_owned())
+        } else {
+            keyed(session, entry, policy)
+        };
+        let keyed = match keyed {
+            Ok(keyed) => keyed,
+            Err(reason) => {
+                bypassed(reason);
+                return fresh(session, &mut run, options, None, None);
+            }
+        };
+        let launch_key = launch_key.unwrap_or_default();
+        let evidence = run
+            .evidence
+            .map(crate::requests::evidence_identity)
+            .unwrap_or_default();
+        let address = ContentHash::of_parts(
+            "hirsel.program.address.v1",
+            [
+                b"run".as_slice(),
+                keyed.package.as_bytes(),
+                format!(
+                    "{:?}/{:?}/{:?}",
+                    options.passes.target, run.backend, run.validation
+                )
+                .as_bytes(),
+                &evidence.0,
+            ],
+        );
+        let rendered = format!("{options:?}").into_bytes();
+        let success = |platform: ContentHash| {
+            ContentHash::of_parts(
+                "hirsel.program.run-key.v1",
+                [
+                    &keyed.source.0[..],
+                    rendered.as_slice(),
+                    &evidence.0,
+                    &platform.0,
+                    launch_key.as_slice(),
+                ],
+            )
+        };
+        let store = session.compiler().configuration().store.clone();
+        let mut captured = None;
+        let looked = {
+            let _phase = timings::phase(Phase::ProgramLookup);
+            keyed
+                .records
+                .lookup(address, ProgramOperation::Run, |kind| match kind {
+                    ProgramKind::SourceDiagnostics => Some(keyed.source),
+                    ProgramKind::Success => {
+                        let _phase = timings::phase(Phase::ProgramPlatform);
+                        let host =
+                            crate::requests::host_executable_platform(&store, &options).ok()?;
+                        let platform = host.identity();
+                        captured = Some(host);
+                        Some(success(platform))
+                    }
+                })
+        };
+        let generation = match looked {
+            Lookup::Hit(hit) => match replay_run(&hit, captured.as_ref(), &mut run) {
+                Ok(ran) => {
+                    timings::count(Count::ProgramRecordHits);
+                    return ran;
+                }
+                Err(()) => None,
+            },
+            Lookup::Miss { generation } => Some(generation),
+        };
+        timings::count(Count::ProgramRecordMisses);
+        let handed = captured.map(|host| std::sync::Arc::new(host.into_handed()));
+        let Some(generation) = generation else {
+            return fresh(session, &mut run, options, handed, None);
+        };
+        let record = |kind: ProgramKind,
+                      key: ContentHash,
+                      image: Option<ContentHash>,
+                      diagnostics: &[u8],
+                      executable: Option<&[u8]>,
+                      execution: Option<&[u8]>| {
+            publish(
+                &keyed,
+                ProgramRecord {
+                    operation: ProgramOperation::Run,
+                    kind,
+                    status: (kind == ProgramKind::SourceDiagnostics) as u8,
+                    address,
+                    key,
+                    image,
+                    diagnostics,
+                    executable,
+                    execution,
+                },
+                generation,
+            )
+        };
+        fresh(
+            session,
+            &mut run,
+            options,
+            handed,
+            Some(&|recorded: RunRecorded<'_>| match recorded {
+                RunRecorded::Source {
+                    diagnostics,
+                    sources,
+                } => {
+                    if let Some(diagnostics) = encode(diagnostics, sources, &[]) {
+                        record(
+                            ProgramKind::SourceDiagnostics,
+                            keyed.source,
+                            None,
+                            &diagnostics,
+                            None,
+                            None,
+                        );
+                    }
+                }
+                RunRecorded::Success {
+                    input,
+                    descriptor,
+                    executable,
+                } => {
+                    let platform = descriptor.platform;
+                    if let (Some(diagnostics), Some(execution)) = (
+                        encode(&[], &SourceMap::default(), &input.report),
+                        descriptor.encode(),
+                    ) {
+                        record(
+                            ProgramKind::Success,
+                            success(platform),
+                            Some(image_binding(ContentHash::of_bytes(executable), platform)),
+                            &diagnostics,
+                            Some(executable),
+                            Some(&execution),
+                        );
+                    }
+                }
+            }),
+        )
+    })
+}
+
+/// What a fresh run may record.
+enum RunRecorded<'a> {
+    /// The source request completed with diagnostics.
+    Source {
+        diagnostics: &'a [hirsel_diag::Diagnostic],
+        sources: &'a SourceMap,
+    },
+    /// The executable is written and validated, and the launch has not begun.
+    Success {
+        input: &'a crate::requests::NativeExecution,
+        descriptor: Descriptor<'a>,
+        executable: &'a [u8],
+    },
+}
+
+/// Run `run` with no record answering it: select the source facts, bind the
+/// launch to them, compile, link and launch. `record` sees a source failure,
+/// or a success once its image is written and validated; a native failure, a
+/// launch refusal before the image and any other error are never recorded.
+fn fresh(
+    session: &mut Session,
+    run: &mut Run<'_, '_>,
+    mut options: BuildOptions,
+    platform: Option<
+        std::sync::Arc<hirsel_native::object_queries::platform::record::HandedPlatform>,
+    >,
+    record: Option<&dyn Fn(RunRecorded<'_>)>,
+) -> Ran {
+    let launch = run.launch;
+    let selection = launch_binding::LaunchSelection::read(launch)?;
+    let definition = selection.entry().cloned();
+    // Source launch facts and native roots select exactly the same frozen
+    // observations. Do not poll disk between binding and native selection.
+    let selected_facts = match session.request_applied(crate::requests::CompileOperation::Tir {
+        definition: definition.clone(),
+    }) {
+        Ok(selected) => selected,
+        Err(ToolError::Query {
+            error: QueryError::Diagnostics(diagnostics),
+            phase,
+            sources,
+        }) => {
+            if let Some(record) = record {
+                record(RunRecorded::Source {
+                    diagnostics: &diagnostics,
+                    sources: &sources,
+                });
+            }
+            return Err(ToolError::Query {
+                error: QueryError::Diagnostics(diagnostics),
+                phase,
+                sources,
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    let crate::requests::CompileResult::Tir(facts) = &selected_facts.result else {
+        return Err(ToolError::Runtime(
+            "native launch facts returned another operation".into(),
+        ));
+    };
+    let unmodeled = facts
+        .foreign
+        .unmodeled
+        .first_key_value()
+        .map(|(user, extern_)| (user.to_string(), extern_.to_string()));
+    if selection.requires_replayable(launch)
+        && let Some((user, extern_)) = &unmodeled
+    {
+        return Err(ToolError::Runtime(format!(
+            "launch: {user} calls the extern {extern_} and is not a wrapper with a \
+             deterministic model, so this run cannot be recorded or replayed (PROG-4)"
+        )));
+    }
+    let entry_facts = selection.facts(
+        launch,
+        &facts.runtime.types,
+        &facts.signature,
+        &facts.revision,
+        facts.code.clone(),
+    )?;
+    let bound = selection.bind_facts(launch, &entry_facts)?;
+    let revision = facts.revision.digest();
+    // Binding owns the compact launch record. Release the completed TIR
+    // closure before the native request admits its own source graph.
+    drop(selected_facts);
+    let bound_run = bound.run();
+    options.passes.launch = bound_run.record().inputs.clone();
+    let selected = session.request_applied(crate::requests::CompileOperation::NativeRun(
+        crate::requests::NativeRequest {
+            definition,
+            options,
+            run: Some(std::sync::Arc::new(bound_run.clone())),
+            evidence: run.evidence.cloned().map(std::sync::Arc::new),
+            test_entries: vec![],
+            supplemental_sources: vec![],
+            output: crate::requests::NativeOutput::Executable,
+            platform,
+        },
+    ))?;
+    match &selected.result {
+        crate::requests::CompileResult::Native(input) => {
+            // The launch was bound before compilation against these exact
+            // observations; the compiler cannot substitute another revision.
+            if input.revision.digest() != revision {
+                return Err(ToolError::Runtime(
+                    "native launch revision changed during selection".into(),
+                ));
+            }
+            let published = |input: &crate::requests::NativeExecution| {
+                let Some(record) = record else { return };
+                let (Some(facts), Some(run)) = (entry_facts.program_facts(), &input.run) else {
+                    return;
+                };
+                let Ok(linked) = hirsel_native::object_queries::linked_product(
+                    input.store.as_ref(),
+                    input.product.clone(),
+                ) else {
+                    return;
+                };
+                let Ok(executable) =
+                    hirsel_native::object_queries::executable_bytes(input.store.as_ref(), &linked)
+                else {
+                    return;
+                };
+                record(RunRecorded::Success {
+                    input,
+                    descriptor: Descriptor {
+                        platform: input.platform_identity(),
+                        run: run.identity(),
+                        emulator: input.emulator().map(Path::to_path_buf),
+                        facts,
+                        unmodeled: unmodeled.clone(),
+                        observation: std::borrow::Cow::Borrowed(&**input.observation),
+                        sources: std::borrow::Cow::Borrowed(&input.sources),
+                    },
+                    executable: &executable,
+                });
+            };
+            let mut execution = crate::native::request_output::Execution::request(input);
+            execution.validated = Some(&published);
+            crate::native::request_output::run_bound_output(
+                execution,
+                launch,
+                bound,
+                run.output.reborrow(),
+                run.trace_events,
+                run.place,
+            )
+        }
+        crate::requests::CompileResult::NativeError(error) => Ok(Err(error.clone())),
+        _ => Err(ToolError::Runtime(
+            "native run request returned another operation".into(),
+        )),
+    }
+}
+
+/// Answer a run from its record, or `Err` for a miss. A source failure
+/// replays its diagnostics. A success answers only when R decodes, R's
+/// platform is the one this lookup captured and its runtime still validates,
+/// the record binds its image validation to that platform, the emulator is
+/// unchanged, the launch binds to R's program facts with R's run identity,
+/// and the executable and runtime are written with the record's checks.
+/// Nothing is printed or launched before that.
+fn replay_run(
+    hit: &ProgramHit,
+    host: Option<&crate::requests::HostPlatform>,
+    run: &mut Run<'_, '_>,
+) -> Result<Ran, ()> {
+    let (diagnostics, sources, report) = {
+        let _phase = timings::phase(Phase::ProgramReplay);
+        decode(&hit.diagnostics).ok_or(())?
+    };
+    if hit.header.kind == ProgramKind::SourceDiagnostics {
+        return Ok(Err(ToolError::Query {
+            error: QueryError::Diagnostics(diagnostics),
+            phase: None,
+            sources,
+        }));
+    }
+    let _phase = timings::phase(Phase::ProgramMaterialize);
+    let descriptor = Descriptor::decode(hit.execution.as_deref().ok_or(())?).ok_or(())?;
+    let host = host.ok_or(())?;
+    let (digest, _) = hit.header.executable.ok_or(())?;
+    if descriptor.platform != host.identity()
+        || hit.header.image != Some(image_binding(digest, descriptor.platform))
+    {
+        return Err(());
+    }
+    let launcher = host.launcher().map_err(drop)?;
+    if launcher.identity() != descriptor.platform
+        || launcher.emulator() != descriptor.emulator.as_deref()
+    {
+        return Err(());
+    }
+    let selection = launch_binding::LaunchSelection::read(run.launch).map_err(drop)?;
+    if selection.requires_replayable(run.launch) && descriptor.unmodeled.is_some() {
+        // The fresh path refuses this launch before binding it.
+        return Err(());
+    }
+    let bound = selection
+        .bind_facts(
+            run.launch,
+            &launch_binding::EntryFacts::recorded(descriptor.facts),
+        )
+        .map_err(drop)?;
+    if bound.run().identity() != descriptor.run {
+        return Err(());
+    }
+    let execution = crate::native::request_output::Execution::recorded(
+        hit,
+        &launcher,
+        &report,
+        descriptor.run,
+        descriptor.unmodeled,
+        &descriptor.observation,
+        &descriptor.sources,
+    )
+    .map_err(drop)?;
+    drop(_phase);
+    Ok(crate::native::request_output::run_bound_output(
+        execution,
+        run.launch,
+        bound,
+        run.output.reborrow(),
+        run.trace_events,
+        run.place,
+    ))
+}
+
+/// R, the execution descriptor (`Section::R`, inner version 2): what a run
+/// record needs to bind and launch its executable without the build's
+/// products.
+struct Descriptor<'a> {
+    platform: ContentHash,
+    /// The identity of the bound run the executable embeds.
+    run: [u8; 32],
+    emulator: Option<PathBuf>,
+    facts: hirsel_run_config::ProgramFacts,
+    unmodeled: Option<(String, String)>,
+    observation: std::borrow::Cow<'a, hirsel_native::NativeObservation>,
+    sources: std::borrow::Cow<'a, SourceMap>,
+}
+
+const EXECUTION_VERSION: u32 = 2;
+
+/// R's launch binding facts.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Facts {
+    program: [u8; 32],
+    entry: String,
+    launch: hirsel_run_schema::LaunchKind,
+    /// `Root`s as Io 0, Args 1, Env 2, Unsafe 3, Test 4.
+    roots: Vec<u8>,
+    /// None is `CodeReach::Safe`.
+    code: Option<Vec<String>>,
+}
+
+/// R's observation tables, with the source files their anchors cite.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Tables {
+    /// Path, logical path, text and ordinal of each cited source.
+    files: Vec<(PathBuf, PathBuf, String, u32)>,
+    failure_rules: Vec<String>,
+    /// Site code, definition and range (source, start, end).
+    sites: Vec<(u64, hirsel_syntax::DefPath, u32, u32, u32)>,
+    /// Each sited definition's anchors, as (file index, base).
+    anchors: Vec<(hirsel_syntax::DefPath, Vec<(u32, u32)>)>,
+}
+
+impl Descriptor<'_> {
+    fn encode(&self) -> Option<Vec<u8>> {
+        use hirsel_run_config::Root;
+        use std::os::unix::ffi::OsStrExt;
+        let facts = Facts {
+            program: self.facts.program,
+            entry: self.facts.entry.clone(),
+            launch: self.facts.launch,
+            roots: self
+                .facts
+                .roots
+                .iter()
+                .map(|root| match root {
+                    Root::Io => 0,
+                    Root::Args => 1,
+                    Root::Env => 2,
+                    Root::Unsafe => 3,
+                    Root::Test => 4,
+                })
+                .collect(),
+            code: match &self.facts.code {
+                hirsel_run_schema::CodeReach::Safe => None,
+                hirsel_run_schema::CodeReach::Escapes(path) => Some(path.clone()),
+            },
+        };
+        // Only a sited definition's anchors are read when a launch is observed.
+        let sited: std::collections::BTreeSet<&hirsel_syntax::DefPath> = self
+            .observation
+            .sites
+            .values()
+            .map(|(id, _)| id.path())
+            .collect();
+        let mut files: Vec<(PathBuf, PathBuf, String, u32)> = vec![];
+        let mut ids = vec![];
+        let mut anchors = vec![];
+        for (path, list) in &self.observation.anchors {
+            if !sited.contains(path) {
+                continue;
+            }
+            let mut placed = vec![];
+            for &anchor in list {
+                let (file, base) = self.sources.anchor(anchor)?;
+                let index = match ids.iter().position(|id| *id == file) {
+                    Some(index) => index,
+                    None => {
+                        let source = self.sources.file(file)?;
+                        files.push((
+                            source.path.clone(),
+                            source.logical_path().to_owned(),
+                            source.text().to_owned(),
+                            source.ordinal(),
+                        ));
+                        ids.push(file);
+                        ids.len() - 1
+                    }
+                };
+                placed.push((index as u32, base));
+            }
+            anchors.push((path.clone(), placed));
+        }
+        let tables = Tables {
+            files,
+            failure_rules: self.observation.failure_rules.clone(),
+            sites: self
+                .observation
+                .sites
+                .iter()
+                .map(|(code, (id, range))| {
+                    (
+                        *code,
+                        id.path().clone(),
+                        range.source,
+                        range.start,
+                        range.end,
+                    )
+                })
+                .collect(),
+            anchors,
+        };
+        let mut bytes = EXECUTION_VERSION.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&self.platform.0);
+        bytes.extend_from_slice(&self.run);
+        let mut part = |part: &[u8]| {
+            bytes.extend_from_slice(&(u32::try_from(part.len()).ok()?).to_le_bytes());
+            bytes.extend_from_slice(part);
+            Some(())
+        };
+        part(
+            self.emulator
+                .as_deref()
+                .map_or(&[][..], |path| path.as_os_str().as_bytes()),
+        )?;
+        part(&serde_json::to_vec(&facts).ok()?)?;
+        part(
+            self.unmodeled
+                .as_ref()
+                .map_or(vec![], |(user, extern_)| {
+                    format!("{user}\0{extern_}").into_bytes()
+                })
+                .as_slice(),
+        )?;
+        part(&serde_json::to_vec(&tables).ok()?)?;
+        Some(bytes)
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Descriptor<'static>> {
+        use hirsel_run_config::Root;
+        use std::os::unix::ffi::OsStrExt;
+        let mut rest = bytes;
+        let mut take = |n: usize| -> Option<&[u8]> {
+            let (head, tail) = (rest.get(..n)?, rest.get(n..)?);
+            rest = tail;
+            Some(head)
+        };
+        if u32::from_le_bytes(take(4)?.try_into().ok()?) != EXECUTION_VERSION {
+            return None;
+        }
+        let platform = ContentHash(take(32)?.try_into().ok()?);
+        let run: [u8; 32] = take(32)?.try_into().ok()?;
+        let mut part = || -> Option<&[u8]> {
+            let length = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+            take(length)
+        };
+        let emulator = part()?;
+        let emulator =
+            (!emulator.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(emulator)));
+        let facts: Facts = serde_json::from_slice(part()?).ok()?;
+        let unmodeled = part()?;
+        let unmodeled = if unmodeled.is_empty() {
+            None
+        } else {
+            let (user, extern_) = std::str::from_utf8(unmodeled).ok()?.split_once('\0')?;
+            Some((user.to_owned(), extern_.to_owned()))
+        };
+        let tables: Tables = serde_json::from_slice(part()?).ok()?;
+        if !rest.is_empty() {
+            return None;
+        }
+        let roots = facts
+            .roots
+            .iter()
+            .map(|root| {
+                Some(match root {
+                    0 => Root::Io,
+                    1 => Root::Args,
+                    2 => Root::Env,
+                    3 => Root::Unsafe,
+                    4 => Root::Test,
+                    _ => return None,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let mut sources = SourceMap::default();
+        let mut ids = vec![];
+        for (path, logical, text, ordinal) in tables.files {
+            ids.push(sources.add_replayed(path, logical, text, ordinal)?);
+        }
+        let mut anchors = std::collections::BTreeMap::new();
+        for (path, placed) in tables.anchors {
+            let mut list = vec![];
+            for (index, base) in placed {
+                list.push(sources.item_anchor(*ids.get(index as usize)?, base));
+            }
+            anchors.insert(path, list);
+        }
+        let observation = hirsel_native::NativeObservation {
+            failure_rules: tables.failure_rules,
+            sites: tables
+                .sites
+                .into_iter()
+                .map(|(code, path, source, start, end)| {
+                    (
+                        code,
+                        (
+                            hirsel_syntax::DefId::intern(&path),
+                            hirsel_lir::ir::SiteRange { source, start, end },
+                        ),
+                    )
+                })
+                .collect(),
+            anchors,
+        };
+        Some(Descriptor {
+            platform,
+            run,
+            emulator,
+            facts: hirsel_run_config::ProgramFacts {
+                program: facts.program,
+                entry: facts.entry,
+                launch: facts.launch,
+                roots,
+                code: facts.code.map_or(
+                    hirsel_run_schema::CodeReach::Safe,
+                    hirsel_run_schema::CodeReach::Escapes,
+                ),
+            },
+            unmodeled,
+            observation: std::borrow::Cow::Owned(observation),
+            sources: std::borrow::Cow::Owned(sources),
+        })
     }
 }
 

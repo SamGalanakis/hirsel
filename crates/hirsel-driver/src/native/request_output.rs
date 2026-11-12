@@ -2,7 +2,7 @@
 //! the selected ordinary provider; runs share the existing process launcher
 //! and observation decoder without reconstructing a native program.
 use crate::requests::NativeExecution;
-use crate::{BoundHostRun, HostLaunch, RunOutcome, ToolError, launch_binding::LaunchSelection};
+use crate::{BoundHostRun, HostLaunch, RunOutcome, ToolError};
 use hirsel_host_io::launch::BoundHostRunParts;
 use hirsel_native::NativeError;
 use hirsel_native::Scratch;
@@ -24,40 +24,119 @@ pub(crate) fn materialize_output(
     Ok(input.report.clone())
 }
 
-pub(crate) fn run_output(
-    input: &NativeExecution,
-    launch: HostLaunch<'_>,
-    selection: LaunchSelection,
-    output: super::tool::Output<'_>,
-    trace_events: Option<&Path>,
-) -> Result<Result<RunOutcome, NativeError>, ToolError> {
-    if selection.requires_replayable(launch) {
-        if let Some((user, extern_)) = input.foreign.unmodeled.first_key_value() {
-            return Err(ToolError::Runtime(format!(
-                "launch: {user} calls the extern {extern_} and is not a wrapper with a \
-                 deterministic model, so this run cannot be recorded or replayed (PROG-4)"
-            )));
+/// What one run launches: a program image and the tables its launch reads. A
+/// fresh request ([`Execution::request`]) and a run that a program record
+/// answers ([`Execution::recorded`]) each construct one; [`run_bound_output`]
+/// launches either the same way.
+pub(crate) struct Execution<'a> {
+    image: Image<'a>,
+    pub target: &'a hirsel_native::TargetSpec,
+    pub toolchain: &'a hirsel_native::Toolchain,
+    /// The build's report lines, printed before the launch.
+    pub report: &'a [String],
+    /// The identity of the validated run the image was linked for.
+    pub run: Option<[u8; 32]>,
+    /// A reachable definition that calls an extern with no deterministic
+    /// model, beside that extern.
+    pub unmodeled: Option<(String, String)>,
+    pub observation: &'a hirsel_native::NativeObservation,
+    pub sources: &'a hirsel_span::SourceMap,
+    /// Called once the image is written and validated, before the launch.
+    pub validated: Option<&'a dyn Fn(&NativeExecution)>,
+}
+
+enum Image<'a> {
+    /// A fresh request's linked product, validated as it is written.
+    Request(&'a NativeExecution),
+    /// A record's executable, already written to its scratch with the
+    /// record's checks before the run committed to the record.
+    Written {
+        scratch: Scratch,
+        runnable: hirsel_native::Runnable,
+    },
+}
+
+impl<'a> Execution<'a> {
+    pub(crate) fn request(input: &'a NativeExecution) -> Self {
+        Self {
+            image: Image::Request(input),
+            target: &input.request.options.passes.target,
+            toolchain: &input.toolchain,
+            report: &input.report,
+            run: input.run.as_ref().map(|run| run.identity()),
+            unmodeled: input
+                .foreign
+                .unmodeled
+                .first_key_value()
+                .map(|(user, extern_)| (user.to_string(), extern_.to_string())),
+            observation: &input.observation,
+            sources: &input.sources,
+            validated: None,
         }
     }
-    if matches!(launch, HostLaunch::Callee { .. }) {
-        return Err(ToolError::Runtime(
-            "launch: a runner host runs its callees interpreted".into(),
-        ));
+
+    /// Write `hit`'s executable to a new scratch as `program`, hashed against
+    /// the record, with `launcher`'s runtime. The caller has checked that
+    /// `hit` binds its image validation to `launcher`'s platform. An error
+    /// is a miss: nothing has been launched or printed.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn recorded(
+        hit: &hirsel_validate::programs::ProgramHit,
+        launcher: &'a crate::requests::HostLauncher,
+        report: &'a [String],
+        run: [u8; 32],
+        unmodeled: Option<(String, String)>,
+        observation: &'a hirsel_native::NativeObservation,
+        sources: &'a hirsel_span::SourceMap,
+    ) -> Result<Self, String> {
+        let scratch = Scratch::new().map_err(|error| error.to_string())?;
+        let program = scratch.0.join("program");
+        hit.materialize(&program)
+            .map_err(|error| error.to_string())?;
+        let runnable = launcher.executable(program)?;
+        Ok(Self {
+            image: Image::Written { scratch, runnable },
+            target: launcher.target(),
+            toolchain: launcher.toolchain(),
+            report,
+            run: Some(run),
+            unmodeled,
+            observation,
+            sources,
+            validated: None,
+        })
     }
-    // The executable admits the bound run exactly once, as the ordinary native
-    // launcher does. Binding source facts here never performs host admission.
-    let bound = selection.bind(
-        launch,
-        &input.types,
-        &input.signature,
-        &input.revision,
-        input.code.clone(),
-    )?;
-    run_bound_output(input, launch, bound, output, trace_events, None)
+}
+
+impl Image<'_> {
+    /// The scratch the run launches in and its launchable image; a request's
+    /// image is written and validated here, then `validated` sees it.
+    fn write(
+        self,
+        validated: Option<&dyn Fn(&NativeExecution)>,
+    ) -> Result<(Scratch, hirsel_native::Runnable), NativeError> {
+        match self {
+            Image::Request(input) => {
+                let scratch = Scratch::new()?;
+                #[cfg(test)]
+                super::tool::before_request_link(&scratch.0);
+                let program = scratch.0.join("program");
+                materialize_output(input, &program)?;
+                let runnable = input
+                    .executable(program)
+                    .map_err(|message| NativeError::new(StageName::Launch, message))?;
+                if let Some(validated) = validated {
+                    validated(input);
+                }
+                Ok((scratch, runnable))
+            }
+            Image::Written { scratch, runnable } => Ok((scratch, runnable)),
+        }
+    }
 }
 
 pub(crate) fn run_bound_output(
-    input: &NativeExecution,
+    input: Execution<'_>,
     launch: HostLaunch<'_>,
     bound: BoundHostRun,
     output: super::tool::Output<'_>,
@@ -79,7 +158,7 @@ pub(crate) fn run_bound_output(
                 ..
             }
         ))
-        && let Some((user, extern_)) = input.foreign.unmodeled.first_key_value()
+        && let Some((user, extern_)) = &input.unmodeled
     {
         return Err(ToolError::Runtime(format!(
             "launch: {user} calls the extern {extern_} and is not a wrapper with a \
@@ -128,35 +207,24 @@ pub(crate) fn run_bound_output(
         super::tool::Output::Streams { stdout, stderr } => (false, false, stdout, stderr),
     };
     let observed = (|| {
-        if input
-            .run
-            .as_ref()
-            .is_none_or(|selected| selected.identity() != run.identity())
-        {
+        if input.run != Some(run.identity()) {
             return Err(NativeError::new(
                 StageName::Launch,
                 "native launch differs from the selected validated run",
             ));
         }
 
-        let scratch = Scratch::new()?;
-        #[cfg(test)]
-        super::tool::before_request_link(&scratch.0);
+        let (scratch, runnable) = input.image.write(input.validated)?;
         std::fs::write(scratch.0.join("run.json"), run.launch_bytes())
             .map_err(|error| NativeError::new(StageName::Launch, error.to_string()))?;
-        let executable = scratch.0.join("program");
-        materialize_output(input, &executable)?;
-        for line in &input.report {
+        for line in input.report {
             writeln!(stderr, "hirsel: {line}")
                 .map_err(|e| NativeError::new(StageName::Launch, e.to_string()))?;
         }
-        let runnable = input
-            .executable(executable)
-            .map_err(|message| NativeError::new(StageName::Launch, message))?;
         let launched = link::launch_live(
             &runnable,
-            &input.request.options.passes.target,
-            &input.toolchain,
+            input.target,
+            input.toolchain,
             &scratch.0,
             tape,
             link::LiveRun {
@@ -168,7 +236,7 @@ pub(crate) fn run_bound_output(
                 place,
             },
         )?;
-        link::observe_request(&launched, &input.observation, &input.sources)
+        link::observe_request(&launched, input.observation, input.sources)
     })();
     match observed {
         Ok(link::Observed::Stopped(outcome)) => Ok(Ok(outcome)),
@@ -180,7 +248,7 @@ pub(crate) fn run_bound_output(
         }
         Ok(link::Observed::Ran(observation, waits)) => Ok((|| {
             let sites = super::Sites::from_anchors(
-                &input.sources,
+                input.sources,
                 input
                     .observation
                     .anchors

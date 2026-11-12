@@ -117,6 +117,11 @@ impl ProgramRevision {
     ) -> Result<Self, RevisionError> {
         ProgramGraph::new(nodes)?.revision(entry)
     }
+    /// A revision a stored record names: its entry and closure digest, as the encoder minted
+    /// them for that record's source. Only the record's authentication vouches for the pair.
+    pub fn recorded(entry: String, digest: [u8; 32]) -> Self {
+        Self { entry, digest }
+    }
     pub fn entry(&self) -> &str {
         &self.entry
     }

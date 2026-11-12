@@ -19,6 +19,45 @@ pub enum LaunchConfig<'a> {
     },
 }
 impl LaunchConfig<'_> {
+    /// What this config binds a run from, for a program record's key: its form,
+    /// the record or grants bytes (inline, or those of the file it names), the
+    /// argument snapshot and the cores. The run it binds to a revision is then
+    /// confirmed by identity, so a file that changes after this read misses.
+    /// None when a named file cannot be read.
+    pub fn key(self) -> Option<Vec<u8>> {
+        let (form, input, arguments, cores) = match self {
+            Self::Cores {
+                input,
+                grants,
+                arguments,
+                cores,
+            } => (if grants { 3 } else { 4 }, input, arguments, Some(cores)),
+            Self::Record(input) => (1, input, None, None),
+            Self::Grants { input, arguments } => (2, input, arguments, None),
+        };
+        let spelled = input.as_encoded_bytes();
+        let named = if spelled.starts_with(b"{") {
+            None
+        } else {
+            Some(std::fs::read(Path::new(input)).ok()?)
+        };
+        let mut key = vec![form, named.is_some() as u8];
+        let mut put = |bytes: &[u8]| {
+            key.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            key.extend_from_slice(bytes);
+        };
+        put(spelled);
+        put(named.as_deref().unwrap_or_default());
+        put(&[arguments.is_some() as u8]);
+        put(&(arguments.unwrap_or_default().len() as u64).to_le_bytes());
+        for argument in arguments.unwrap_or_default() {
+            put(argument.as_encoded_bytes());
+        }
+        put(&[cores.is_some() as u8]);
+        put(&cores.unwrap_or_default().to_le_bytes());
+        Some(key)
+    }
+
     fn read(
         self,
         revision: &hirsel_run_schema::ProgramRevision,

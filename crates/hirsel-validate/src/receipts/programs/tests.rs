@@ -68,6 +68,7 @@ fn record<'a>(executable: &'a [u8], diagnostics: &'a [u8]) -> ProgramRecord<'a> 
         image: None,
         diagnostics,
         executable: Some(executable),
+        execution: None,
     }
 }
 fn hit(records: &ProgramRecords) -> Option<ProgramHit> {
@@ -176,6 +177,7 @@ fn records_answer_only_their_operation_and_kind() {
         image: None,
         diagnostics: b"error",
         executable: None,
+        execution: None,
     };
     records.publish(&failure, 0).unwrap();
     let keyed = |kind| match kind {
@@ -196,6 +198,63 @@ fn records_answer_only_their_operation_and_kind() {
         records.lookup(ADDRESS, ProgramOperation::Build, |_| Some(build_p)),
         Lookup::Miss { .. }
     ));
+}
+
+/// Bug: a run answered without its execution descriptor, or with one that is
+/// not the descriptor H names. A run success is published only with R; a
+/// stored run record whose R entry is gone, or whose R bytes changed, misses;
+/// a run record never answers a build, nor a build record a run.
+#[test]
+fn a_run_answers_only_with_the_execution_descriptor_h_names() {
+    let domain = Domain_::new();
+    let records = domain.records();
+    let run = |execution| ProgramRecord {
+        operation: ProgramOperation::Run,
+        execution,
+        ..record(b"E", b"d")
+    };
+    assert!(records.publish(&run(None), 0).is_err());
+    assert!(
+        records
+            .publish(
+                &ProgramRecord {
+                    execution: Some(b"R"),
+                    ..record(b"E", b"d")
+                },
+                0
+            )
+            .is_err(),
+        "a build record took R"
+    );
+    records.publish(&run(Some(b"descriptor")), 0).unwrap();
+    let run_hit = || match records.lookup(ADDRESS, ProgramOperation::Run, |_| Some(KEY)) {
+        Lookup::Hit(hit) => Some(hit),
+        Lookup::Miss { .. } => None,
+    };
+    let found = run_hit().expect("a run record answered its run");
+    assert_eq!(found.execution.as_deref(), Some(&b"descriptor"[..]));
+    let directory = tempfile::tempdir().unwrap();
+    assert_eq!(executable_bytes(&found, directory.path()), b"E");
+    drop(found);
+    assert!(hit(&records).is_none(), "a run record answered a build");
+
+    let association = records.current(ADDRESS).unwrap();
+    let path = records.blob(association.record);
+    let original = fs::read(&path).unwrap();
+    // R's bytes changed under the same H.
+    let mut changed = original.clone();
+    let at = original.len() - 1;
+    changed[at] ^= 1;
+    fs::write(&path, &changed).unwrap();
+    assert!(run_hit().is_none(), "a changed R answered");
+    // R's directory entry cleared, as a record written without R reads.
+    let mut stripped = original.clone();
+    let entry = 16 + Section::R as usize * 24;
+    stripped[entry + 4..entry + 24].fill(0);
+    fs::write(&path, &stripped).unwrap();
+    assert!(run_hit().is_none(), "a run record without R answered");
+    fs::write(&path, &original).unwrap();
+    assert!(run_hit().is_some());
 }
 
 /// Bug: a losing publisher unpinning the winner, or both committing.

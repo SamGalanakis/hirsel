@@ -164,6 +164,97 @@ pub fn admit_run(
     bind_run(t, signature, revision, launch, requested, code)?.admit(host, now)
 }
 
+/// What binding a run needs from the checked program: the revision, the selected launch
+/// kind, the entry's roots for that kind, whether the signature is the revision's entry, and
+/// the code reach. A program record stores the bindable form ([`EntryFacts::program_facts`]), so
+/// a run it answers binds without the checked types.
+#[derive(Clone, Debug)]
+pub struct EntryFacts {
+    revision: ProgramRevision,
+    launch: LaunchKind,
+    roots: Result<Vec<Root>, RunRefusal>,
+    entry_matches: bool,
+    code: CodeReach,
+}
+
+impl EntryFacts {
+    pub fn of(
+        t: &TypeInterner,
+        signature: &Signature,
+        revision: &ProgramRevision,
+        launch: LaunchKind,
+        code: CodeReach,
+    ) -> Self {
+        Self {
+            revision: revision.clone(),
+            launch,
+            roots: entry_roots(t, signature, launch),
+            entry_matches: signature.definition.path().to_string() == revision.entry(),
+            code,
+        }
+    }
+
+    /// The facts a record stored for a program whose run bound.
+    pub fn recorded(facts: ProgramFacts) -> Self {
+        Self {
+            revision: ProgramRevision::recorded(facts.entry, facts.program),
+            launch: facts.launch,
+            roots: Ok(facts.roots),
+            entry_matches: true,
+            code: facts.code,
+        }
+    }
+
+    pub fn revision(&self) -> &ProgramRevision {
+        &self.revision
+    }
+
+    pub fn launch(&self) -> LaunchKind {
+        self.launch
+    }
+
+    pub fn roots(&self) -> Result<Vec<Root>, RunRefusal> {
+        self.roots.clone()
+    }
+
+    pub fn code(&self) -> &CodeReach {
+        &self.code
+    }
+
+    /// The bindable facts, when the entry binds at all.
+    pub fn program_facts(&self) -> Option<ProgramFacts> {
+        let roots = self.roots.as_ref().ok()?;
+        self.entry_matches.then(|| {
+            ProgramFacts::of(
+                &self.revision,
+                self.launch,
+                roots.clone(),
+                self.code.clone(),
+            )
+        })
+    }
+
+    /// Bind the requested run (or the program's default record) to these facts.
+    pub fn bind(&self, requested: Option<&ValidatedRun>) -> Result<BoundRun, RunRefusal> {
+        let roots = self.roots()?;
+        if !self.entry_matches {
+            return Err(RunRefusal::Binding {
+                field: "entry.signature".into(),
+            });
+        }
+        let run = match requested {
+            Some(run) => run.clone(),
+            None => RunConfig::for_program(&self.revision, self.launch).validated()?,
+        };
+        run.bind(&ProgramFacts::of(
+            &self.revision,
+            self.launch,
+            roots,
+            self.code.clone(),
+        ))
+    }
+}
+
 /// Bind the requested run (or the program's default record) to the checked code it would
 /// execute, with no host consulted: the entry's signature, binding, roots and code policy. A
 /// launcher that admits the run elsewhere (a native executable) binds here only.
@@ -175,15 +266,5 @@ pub fn bind_run(
     requested: Option<&ValidatedRun>,
     code: CodeReach,
 ) -> Result<BoundRun, RunRefusal> {
-    let roots = entry_roots(t, signature, launch)?;
-    if signature.definition.path().to_string() != revision.entry() {
-        return Err(RunRefusal::Binding {
-            field: "entry.signature".into(),
-        });
-    }
-    let run = match requested {
-        Some(run) => run.clone(),
-        None => RunConfig::for_program(revision, launch).validated()?,
-    };
-    run.bind(&ProgramFacts::of(revision, launch, roots, code))
+    EntryFacts::of(t, signature, revision, launch, code).bind(requested)
 }

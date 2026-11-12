@@ -1,6 +1,6 @@
 //! Program records (B, native rerun design §1, §3, §7). One record per
-//! program address (operation, package, profile, target) answers a check or
-//! build whose key P equals the one it was published under. Records live in
+//! program address (operation, package, profile, target) answers a check,
+//! build or run whose key P equals the one it was published under. Records live in
 //! the authenticated domain of the installation registration that bound the
 //! operation's installed header: the association is MAC'd under that
 //! registration's key and names its epoch, so a copied store, a store without
@@ -17,8 +17,9 @@
 //! - `gc.lock`: collection holds it exclusively; publication, lookup's lease
 //!   acquisition and nothing else hold it shared.
 //!
-//! Deferred detection: a hit opens H and D only. The executable is hashed as
-//! it is copied out; the absent A, O, I, E, M, X and R sections are never read.
+//! Deferred detection: a hit opens H and D, and a run hit R. The executable is
+//! hashed as it is copied out; the absent A, O, I, E, M and X sections are never
+//! read.
 use super::installation::{
     Authority, check_private, hex, invalid, private_directory, private_read, random,
 };
@@ -29,12 +30,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// The record operations. A check record never answers a build, nor the
-/// reverse: the operation is in the address and in H, and both are compared.
+/// The record operations. No operation's record answers another: the
+/// operation is in the address and in H, and both are compared. A reader that
+/// does not know an operation's byte reads the record as absent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProgramOperation {
     Check = 1,
     Build = 2,
+    /// A build followed by its launch: the success holds the executable and R.
+    Run = 3,
 }
 /// What a record holds: a complete source success, or a request that
 /// completed with source diagnostics (no executable).
@@ -48,8 +52,13 @@ impl ProgramOperation {
         match byte {
             1 => Some(Self::Check),
             2 => Some(Self::Build),
+            3 => Some(Self::Run),
             _ => None,
         }
+    }
+    /// Whether a success of this operation holds an executable.
+    fn executes(self) -> bool {
+        matches!(self, Self::Build | Self::Run)
     }
 }
 impl ProgramKind {
@@ -81,23 +90,26 @@ pub enum Section {
     M = 6,
     /// Execution, link and whole-program table rows.
     X = 7,
-    /// Reserved: the execution descriptor, `hirsel.program.execution.v1`,
-    /// that lets a run record launch its executable without the build's
-    /// products (N1b). Absent in every record N1 writes; a reader that does
-    /// not know it checks its directory entry and never reads it.
+    /// The execution descriptor, `hirsel.program.execution`: what a run
+    /// record needs to bind and launch its executable without the build's
+    /// products. Present exactly in a run success; a run record without it
+    /// never answers a run. A reader that does not know it checks its
+    /// directory entry and never reads it. The driver encodes and decodes
+    /// it (`hirsel-driver` `program_record::Execution`); this crate checks
+    /// its digest in H.
     ///
-    /// Layout (little-endian; parts marked provisional are fixed by the land
-    /// that first writes R, which then bumps the inner version):
-    /// - `u32` inner version (1);
-    /// - 32 bytes: platform identity (`CapturedPlatform::identity`), equal
-    ///   to the platform row of the record's key;
-    /// - 32 bytes: launch manifest digest;
-    /// - emulator: `u32` argument count, then per argument `u32` length and
-    ///   UTF-8 bytes; count 0 means the host runs it directly (provisional);
-    /// - launch binding inputs: `u32` length, then the bound launch's
-    ///   signature and revision rows (provisional);
-    /// - observation anchors: `u32` count, then per anchor a 32-byte digest
-    ///   and `u32`-length-prefixed logical path (provisional).
+    /// Layout (little-endian; every length is a `u32`):
+    /// - `u32` inner version (2; 1 was the reserved draft, never written);
+    /// - 32 bytes: platform identity (`HandedPlatform` identity), equal to
+    ///   the platform row of the record's key;
+    /// - 32 bytes: the bound run's identity (`ValidatedRun::identity`), which
+    ///   the linker embeds in the executable;
+    /// - emulator: length and UTF-8 path; length 0 means the host runs it;
+    /// - launch binding inputs: the entry's binding facts (program digest,
+    ///   entry, launch kind, roots, code reach);
+    /// - unmodeled foreign symbol: length and `user\0extern`, or length 0;
+    /// - observation anchors: length and the observation tables (failure
+    ///   rules, site ranges, anchors) with the source files they cite.
     R = 8,
 }
 const SECTIONS: usize = 9;
@@ -125,7 +137,7 @@ pub struct ProgramHeader {
     pub address: ContentHash,
     pub key: ContentHash,
     pub epoch: ContentHash,
-    /// The executable's digest and length, for a build success.
+    /// The executable's digest and length, for a build or run success.
     pub executable: Option<(ContentHash, u64)>,
     /// `image_binding(executable, platform identity)` when this record's
     /// executable passed `validate_image` under that platform.
@@ -205,6 +217,8 @@ pub struct ProgramRecord<'a> {
     pub image: Option<ContentHash>,
     pub diagnostics: &'a [u8],
     pub executable: Option<&'a [u8]>,
+    /// R, for a run success.
+    pub execution: Option<&'a [u8]>,
 }
 
 /// The authenticated domain of one operation: every registration it
@@ -276,6 +290,8 @@ pub enum Lookup {
 pub struct ProgramHit {
     pub header: ProgramHeader,
     pub diagnostics: Vec<u8>,
+    /// R, for a run hit.
+    pub execution: Option<Vec<u8>>,
     executable: Option<PathBuf>,
     _lease: fs::File,
 }
@@ -433,10 +449,11 @@ impl ProgramRecords {
         }
         drop(gc);
         match self.read(&association) {
-            Some((header, diagnostics)) => Lookup::Hit(ProgramHit {
+            Some((header, diagnostics, execution)) => Lookup::Hit(ProgramHit {
                 executable: header.executable.map(|(digest, _)| self.blob(digest)),
                 header,
                 diagnostics,
+                execution,
                 _lease: lease,
             }),
             None => miss,
@@ -451,9 +468,11 @@ impl ProgramRecords {
                 u64::from_le_bytes(bytes[8..16].try_into().unwrap())
             })
     }
-    /// H and D of the associated record, bounds-checked against its
-    /// directory; H must restate the association and D its digest.
-    fn read(&self, association: &Association) -> Option<(ProgramHeader, Vec<u8>)> {
+    /// H, D and (for a run success) R of the associated record,
+    /// bounds-checked against its directory; H must restate the association
+    /// and D's and R's digests.
+    #[allow(clippy::type_complexity)]
+    fn read(&self, association: &Association) -> Option<(ProgramHeader, Vec<u8>, Option<Vec<u8>>)> {
         use std::os::unix::fs::FileExt;
         let path = self.blob(association.record);
         check_private(&path).ok()?;
@@ -503,8 +522,7 @@ impl ProgramRecords {
             || header.key != association.key
             || header.epoch != association.epoch
             || header.executable.is_some()
-                != (header.kind == ProgramKind::Success
-                    && header.operation == ProgramOperation::Build)
+                != (header.kind == ProgramKind::Success && header.operation.executes())
         {
             return None;
         }
@@ -512,6 +530,18 @@ impl ProgramRecords {
         if section_digest(Section::D, &d) != header.sections[0] {
             return None;
         }
+        // A run success answers only with its execution descriptor.
+        let execution =
+            if header.operation == ProgramOperation::Run && header.kind == ProgramKind::Success {
+                let r = section(Section::R)?;
+                if section_digest(Section::R, &r) != header.sections[Section::R as usize - 1] {
+                    return None;
+                }
+                Some(r)
+            } else {
+                entry(Section::R)?;
+                None
+            };
         // Later lands' sections stay unread; each must still be well-formed.
         for later in [
             Section::A,
@@ -520,11 +550,10 @@ impl ProgramRecords {
             Section::E,
             Section::M,
             Section::X,
-            Section::R,
         ] {
             entry(later)?;
         }
-        Some((header, d))
+        Some((header, d, execution))
     }
     /// Publish `record` as `address`'s next generation if the journal still
     /// holds `expected` (the generation the caller's lookup saw): content,
@@ -535,14 +564,20 @@ impl ProgramRecords {
             .map(|bytes| (ContentHash::of_bytes(bytes), bytes.len() as u64));
         if executable.is_some_and(|(_, len)| len > MAX_EXECUTABLE)
             || executable.is_some()
+                != (record.kind == ProgramKind::Success && record.operation.executes())
+            || record.execution.is_some()
                 != (record.kind == ProgramKind::Success
-                    && record.operation == ProgramOperation::Build)
-            || record.diagnostics.len() as u64 > MAX_RECORD / 2
+                    && record.operation == ProgramOperation::Run)
+            || (record.diagnostics.len() + record.execution.map_or(0, <[u8]>::len)) as u64
+                > MAX_RECORD / 2
         {
             return Err(invalid());
         }
         let mut sections = [ContentHash::default(); SECTIONS - 1];
         sections[0] = section_digest(Section::D, record.diagnostics);
+        if let Some(execution) = record.execution {
+            sections[Section::R as usize - 1] = section_digest(Section::R, execution);
+        }
         let header = ProgramHeader {
             operation: record.operation,
             kind: record.kind,
@@ -561,12 +596,14 @@ impl ProgramRecords {
         bytes.extend_from_slice(&(SECTIONS as u32).to_le_bytes());
         let mut offset = DIRECTORY_BYTES as u64;
         for tag in 0..SECTIONS as u32 {
-            let length = match tag {
-                0 => h.len() as u64,
-                1 => record.diagnostics.len() as u64,
-                _ => 0,
+            let present = match tag {
+                0 => Some(&h[..]),
+                1 => Some(record.diagnostics),
+                8 => record.execution,
+                _ => None,
             };
-            let present = tag <= 1;
+            let length = present.map_or(0, |bytes| bytes.len() as u64);
+            let present = present.is_some();
             bytes.extend_from_slice(&tag.to_le_bytes());
             bytes.extend_from_slice(&(present as u32).to_le_bytes());
             bytes.extend_from_slice(&(if present { offset } else { 0 }).to_le_bytes());
@@ -575,6 +612,7 @@ impl ProgramRecords {
         }
         bytes.extend_from_slice(&h);
         bytes.extend_from_slice(record.diagnostics);
+        bytes.extend_from_slice(record.execution.unwrap_or_default());
         let digest = ContentHash::of_bytes(&bytes);
         let association = Association {
             generation: expected.checked_add(1).ok_or_else(invalid)?,

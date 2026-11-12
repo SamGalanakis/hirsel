@@ -20,7 +20,7 @@ struct Home {
     compiler: PathBuf,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Answer {
     status: Option<i32>,
     stdout: Vec<u8>,
@@ -120,7 +120,33 @@ impl Home {
         args: &[&str],
         env: &[(&str, &str)],
     ) -> (Answer, Counts, u64) {
-        let output: Output = self.request(state, cwd, args, env).output().unwrap();
+        self.report_in(state, cwd, args, env, b"")
+    }
+    /// [`Home::report`] with `input` on the command's stdin.
+    fn report_in(
+        &self,
+        state: &Path,
+        cwd: &Path,
+        args: &[&str],
+        env: &[(&str, &str)],
+        input: &[u8],
+    ) -> (Answer, Counts, u64) {
+        let mut child = self
+            .request(state, cwd, args, env)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let input = input.to_vec();
+        let writer = std::thread::spawn(move || {
+            use std::io::Write;
+            // A program that stops reading early closes the pipe.
+            let _ = stdin.write_all(&input);
+        });
+        let output: Output = child.wait_with_output().unwrap();
+        writer.join().unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();
         let trimmed = stderr.trim_end_matches('\n');
         let (rest, report) = trimmed.rsplit_once('\n').unwrap_or(("", trimmed));
@@ -220,10 +246,17 @@ impl Home {
     fn warm(&self, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> (Answer, Counts) {
         self.run(&self.state(), cwd, args, env)
     }
+    fn warm_in(&self, cwd: &Path, args: &[&str], input: &[u8]) -> (Answer, Counts) {
+        let (answer, counts, _) = self.report_in(&self.state(), cwd, args, &[], input);
+        (answer, counts)
+    }
     /// The forced cold oracle: a state home with no registration.
     fn cold(&self, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Answer {
+        self.cold_in(cwd, args, env, b"")
+    }
+    fn cold_in(&self, cwd: &Path, args: &[&str], env: &[(&str, &str)], input: &[u8]) -> Answer {
         let state = tempfile::tempdir().unwrap();
-        let (answer, counts) = self.run(state.path(), cwd, args, env);
+        let (answer, counts, _) = self.report_in(state.path(), cwd, args, env, input);
         assert_eq!(
             counts,
             bypassed("no registration"),
@@ -523,7 +556,8 @@ fn copy_tree(from: &Path, to: &Path) {
     for entry in std::fs::read_dir(from).unwrap() {
         let entry = entry.unwrap();
         let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
+        // Followed: a Buck2 output tree links its files.
+        if std::fs::metadata(entry.path()).unwrap().is_dir() {
             copy_tree(&entry.path(), &target);
         } else {
             std::fs::copy(entry.path(), target).unwrap();
@@ -874,4 +908,227 @@ fn only_a_build_keys_the_mapped_libllvm_and_native_tools() {
         "check, another link kit path"
     );
     flips_then_hits(&home, root, &build, &env, "build, another link kit path");
+}
+
+/// A program that prints its arguments, then up to 64 bytes of its stdin, then
+/// a line on stderr, and traps when given three or more arguments.
+fn pipe(root: &Path) -> PathBuf {
+    let pipe = root.join("pipe");
+    std::fs::create_dir_all(&pipe).unwrap();
+    std::fs::write(
+        pipe.join("main.hir"),
+        r#"pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
+  let input = io.stdin(rt)?
+  let output = io.stdout(rt)?
+  let diagnostics = io.stderr(rt)?
+  for i in 0u64..arg.len(args) {
+    let text = match arg.text(args, i) { Ok(t) => t, Error(_) => "?" }
+    let _ = out.print(output, "arg ")
+    let _ = out.print(output, text)
+    let _ = out.print(output, "\n")
+  }
+  let mut buffer: List[u8] = []
+  let _ = stdin.read(input, mut buffer, 64u64)
+  let _ = out.write(output, bytes.from_list(take buffer))
+  let _ = err.print(diagnostics, "done\n")
+  failure.check(arg.len(args) < 3, Arithmetic())
+  Ok(())
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(pipe.join("hirsel.json"), r#"{"schema":1,"package":{"name":"pipe","version":"1"},"entry":{"module":[],"name":"main"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[]}"#).unwrap();
+    std::fs::write(
+        pipe.join("grants.json"),
+        r#"{"io":{"stdin":"stdin.bytes@1","stdout":"stdout.bytes@1","stderr":"stderr.bytes@1","dirs":[]},"args":[]}"#,
+    )
+    .unwrap();
+    pipe
+}
+
+/// The one recorded executable of a run record, found by its ELF magic in
+/// the record domain.
+fn recorded_executables(home: &Home) -> Vec<PathBuf> {
+    fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, found);
+            } else if std::fs::read(&path).is_ok_and(|bytes| bytes.starts_with(b"\x7fELF")) {
+                found.push(path);
+            }
+        }
+    }
+    let mut found = vec![];
+    walk(&home.state().join("hirsel/verifier"), &mut found);
+    found
+}
+
+/// Bug caught: a run hit that launches with the recorded run's stdin or
+/// arguments instead of this run's, a run key without the launch inputs the
+/// linker embeds (other arguments answered by the old executable), an exit
+/// status taken from the record, a run answered by a build or check record
+/// or the reverse, a hit that launches a damaged recorded executable, or a
+/// launch-only variable that changes the key.
+#[test]
+fn a_run_record_launches_its_executable_with_this_runs_inputs() {
+    let home = Home::new();
+    let root = home.path();
+    pipe(root);
+    let run = |args: &[&'static str]| -> Vec<&'static str> {
+        let mut all = vec![
+            "run",
+            "--native",
+            "pipe/hirsel.json",
+            "--grants",
+            "pipe/grants.json",
+            "--",
+        ];
+        all.extend_from_slice(args);
+        all
+    };
+    let one = run(&["a"]);
+    // Check and build records of the same sources do not answer the run.
+    flips_then_hits(&home, root, &["check", "pipe/hirsel.json"], &[], "check");
+    flips_then_hits(
+        &home,
+        root,
+        &["build", "pipe/hirsel.json", "-o", "pipe.exe"],
+        &[],
+        "build",
+    );
+    let cold = home.cold_in(root, &one, &[], b"first\n");
+    assert_eq!(cold.status, Some(0), "{cold:?}");
+    assert_eq!(cold.stdout, b"arg a\nfirst\n", "{cold:?}");
+    let (answer, counts) = home.warm_in(root, &one, b"first\n");
+    assert_eq!((answer, counts), (cold, MISS), "first run");
+    // Other stdin: the record answers, and the program reads this run's input.
+    for input in [&b"second\n"[..], b"", b"\x00\xff\n"] {
+        let (answer, counts) = home.warm_in(root, &one, input);
+        assert_eq!(
+            (answer, counts),
+            (home.cold_in(root, &one, &[], input), HIT),
+            "stdin {input:?}"
+        );
+    }
+    // Other arguments are other launch inputs: the linker embeds the bound
+    // run, so the first run with them misses and publishes, then hits.
+    let two = run(&["a", "b"]);
+    let cold = home.cold_in(root, &two, &[], b"x");
+    assert_eq!(cold.stdout, b"arg a\narg b\nx", "{cold:?}");
+    let (answer, counts) = home.warm_in(root, &two, b"x");
+    assert_eq!((answer, counts), (cold.clone(), MISS), "other arguments");
+    let (answer, counts) = home.warm_in(root, &two, b"x");
+    assert_eq!((answer, counts), (cold, HIT), "other arguments again");
+    // A run that traps is recorded like any built run: its exit status is
+    // the program's, never the record's.
+    let three = run(&["a", "b", "c"]);
+    let cold = home.cold_in(root, &three, &[], b"y");
+    assert_ne!(cold.status, Some(0), "{cold:?}");
+    let (answer, counts) = home.warm_in(root, &three, b"y");
+    assert_eq!((answer, counts), (cold.clone(), MISS), "trap");
+    let (answer, counts) = home.warm_in(root, &three, b"y");
+    assert_eq!((answer, counts), (cold, HIT), "trap again");
+    // The check and build records still answer their own operations.
+    let (_, counts) = home.warm(root, &["check", "pipe/hirsel.json"], &[]);
+    assert_eq!(counts, HIT, "check after runs");
+    let (_, counts) = home.warm(root, &["build", "pipe/hirsel.json", "-o", "pipe.exe"], &[]);
+    assert_eq!(counts, HIT, "build after runs");
+    // One record per address: the last run's arguments replaced the first
+    // run's record, so the first arguments miss once and are recorded again.
+    let (answer, counts) = home.warm_in(root, &one, b"z");
+    assert_eq!(
+        (answer, counts),
+        (home.cold_in(root, &one, &[], b"z"), MISS),
+        "first arguments again"
+    );
+    // Launch-only variables: run --native is x86_64 only, so no emulator is
+    // selected, and memcheck runtimes are test --native's. Neither keys a run
+    // nor changes what it launches.
+    let tools = [
+        ("HIRSEL_QEMU_AARCH64", "/nonexistent/qemu"),
+        ("HIRSEL_VALGRIND", "/nonexistent/valgrind"),
+        ("VALGRIND_LIB", "/nonexistent/lib"),
+        ("HIRSEL_VALGRIND_RUNTIME", "/nonexistent/runtime"),
+    ];
+    let (answer, counts, _) = home.report_in(&home.state(), root, &one, &tools, b"z");
+    assert_eq!(
+        (answer, counts),
+        (home.cold_in(root, &one, &tools, b"z"), HIT),
+        "launch-only variables"
+    );
+    // A damaged recorded executable never launches: the run is answered
+    // fresh, as cold.
+    use std::os::unix::fs::PermissionsExt;
+    let recorded = recorded_executables(&home);
+    assert!(!recorded.is_empty(), "the run record holds its executable");
+    let damage: [(&str, &dyn Fn(&Path)); 3] = [
+        ("chmod -x", &|path| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400)).unwrap()
+        }),
+        ("modified", &|path| {
+            let mut bytes = std::fs::read(path).unwrap();
+            let last = bytes.len() - 1;
+            bytes[last] ^= 1;
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o600);
+            std::fs::set_permissions(path, permissions).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }),
+        ("deleted", &|path| std::fs::remove_file(path).unwrap()),
+    ];
+    for (what, damage) in damage {
+        for path in &recorded {
+            if path.exists() {
+                damage(path);
+            }
+        }
+        let (answer, counts) = home.warm_in(root, &one, b"w");
+        assert_eq!(answer, home.cold_in(root, &one, &[], b"w"), "{what}");
+        if what == "chmod -x" {
+            // The record's bytes are copied out and made executable.
+            assert_eq!(counts, HIT, "{what}");
+        } else {
+            assert_eq!(counts.hits, 0, "{what}: {counts:?}");
+        }
+    }
+    // Flips with this run's inputs, each answer compared with a cold run.
+    let flips = |env: &[(&str, &str)], input: &[u8], what: &str| {
+        let cold = home.cold_in(root, &one, env, input);
+        let (answer, counts, _) = home.report_in(&home.state(), root, &one, env, input);
+        assert_eq!((answer, counts), (cold.clone(), MISS), "{what}");
+        let (answer, counts, _) = home.report_in(&home.state(), root, &one, env, input);
+        assert_eq!((answer, counts), (cold, HIT), "{what}: rerun");
+    };
+    // A regenerated std image (the installed products registered again).
+    home.register("pub fn regenerated() -> u8 {\n  9u8\n}\n");
+    flips(&[], b"r", "std image regenerated");
+    // The runtime archives: first at another path, then at that same path
+    // with other bytes (the first member header's date, which no link reads).
+    let archives =
+        std::path::absolute(std::env::var_os("HIRSEL_RUNTIME_ARCHIVES").expect("runtime archives"))
+            .unwrap();
+    let runtime = root.join("runtime");
+    copy_tree(&archives, &runtime);
+    let env = [("HIRSEL_RUNTIME_ARCHIVES", runtime.to_str().unwrap())];
+    flips(&env, b"p", "runtime archives at another path");
+    fn grow(dir: &Path) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                grow(&path);
+            } else if path.extension().is_some_and(|e| e == "a") {
+                let mut bytes = std::fs::read(&path).unwrap();
+                assert!(bytes.starts_with(b"!<arch>\n"), "{path:?}");
+                // `!<arch>\n`, then the member name (16 bytes), then its date (12).
+                bytes[24..36].copy_from_slice(b"1234567890  ");
+                let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+                permissions.set_readonly(false);
+                std::fs::set_permissions(&path, permissions).unwrap();
+                std::fs::write(&path, bytes).unwrap();
+            }
+        }
+    }
+    grow(&runtime);
+    flips(&env, b"q", "runtime archives replaced at the same path");
 }

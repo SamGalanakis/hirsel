@@ -1147,7 +1147,7 @@ fn native_bootstrap_policy_case(bind_run: bool) {
                 let mut stdout = Vec::new();
                 let mut stderr = Vec::new();
                 let first = native::request_output::run_bound_output(
-                    &execution,
+                    native::request_output::Execution::request(&execution),
                     launch,
                     bound.take().unwrap(),
                     native::Output::Streams {
@@ -1177,7 +1177,7 @@ fn native_bootstrap_policy_case(bind_run: bool) {
                     )
                     .unwrap();
                 let second = native::request_output::run_bound_output(
-                    &execution,
+                    native::request_output::Execution::request(&execution),
                     launch,
                     rebound,
                     native::Output::Streams {

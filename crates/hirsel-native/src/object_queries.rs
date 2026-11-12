@@ -621,22 +621,19 @@ fn link_checked(
             validate_link_input(store, *read)?;
         }
     }
-    // Validate the entire fragment closure even on a linked-output hit. Missing
-    // objects must not be hidden by an old successful executable association.
+    // Link always links: an unchanged run is answered by its program record,
+    // before any request. Under Recompute the stored output is compared with
+    // the fresh one.
     let address = key.address();
     let action = action("hirsel.link.action.v1", address, &reads);
-    let mut cached = None;
-    if let Some(previous) = store.lookup_product(address).filter(|p| p.action == action)
+    let cached = if verify_store == VerifyStore::Recompute
+        && let Some(previous) = store.lookup_product(address).filter(|p| p.action == action)
         && let Ok(archive) = store.copy_product_archive(previous.reference)
     {
-        let product = ProductRef::import_archive(address, action, archive);
-        if let Ok(linked) = linked_product(store, product) {
-            if verify_store == VerifyStore::Off {
-                return Ok(linked);
-            }
-            cached = Some(linked);
-        }
-    }
+        linked_product(store, ProductRef::import_archive(address, action, archive)).ok()
+    } else {
+        None
+    };
     let objects = inputs
         .fragments
         .iter()

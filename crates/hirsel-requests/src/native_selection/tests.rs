@@ -140,7 +140,7 @@ fn actual_native_selector_coalesces_build_and_bound_run_without_a_retained_contr
                     let mut stdout = Vec::new();
                     let mut stderr = Vec::new();
                     let result = native::request_output::run_bound_output(
-                        execution,
+                        native::request_output::Execution::request(execution),
                         launch,
                         bound.take().unwrap(),
                         native::Output::Streams {

@@ -345,6 +345,10 @@ impl NativeExecution {
     pub fn executable(&self, path: PathBuf) -> Result<hirsel_native::Runnable, String> {
         self.platform.executable(path)
     }
+    /// The emulator this build's executables launch under; None runs them on the host.
+    pub fn emulator(&self) -> Option<&std::path::Path> {
+        self.platform.emulator()
+    }
     /// Keep admitted executable/launch owners alive through a child process.
     pub fn retain(&self) -> Arc<dyn Send + Sync> {
         self.owner.clone()

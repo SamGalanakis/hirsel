@@ -116,6 +116,10 @@ impl FrozenPlatform {
     pub fn platform_identity(&self) -> ContentHash {
         self.inputs.platform.identity()
     }
+    /// The emulator its executables launch under; None runs them on the host.
+    pub fn emulator(&self) -> Option<&Path> {
+        self.inputs.emulator.as_deref()
+    }
     /// Run this for reopened Link hits too, before exposing any executable.
     pub fn validate_image(&self, image: &Path) -> Result<(), String> {
         self.validate_image_on(&self.inputs.platform, image)

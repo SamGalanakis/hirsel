@@ -17,6 +17,19 @@ pub enum Output<'a> {
     },
 }
 
+impl Output<'_> {
+    /// The same destinations, for one launch.
+    pub(crate) fn reborrow(&mut self) -> Output<'_> {
+        match self {
+            Output::Inherit { json } => Output::Inherit { json: *json },
+            Output::Streams { stdout, stderr } => Output::Streams {
+                stdout: &mut **stdout,
+                stderr: &mut **stderr,
+            },
+        }
+    }
+}
+
 /// Check `path` exactly as `run` does (the same first static diagnostics),
 /// then build it for x86-64 Linux with every optimization, link it against
 /// the in-tree runtime and launch it under the empty-grant record, as a launch
@@ -159,88 +172,21 @@ fn run_native(
             "launch: a runner host runs its callees interpreted".into(),
         ));
     }
-    let selection = crate::launch_binding::LaunchSelection::read(launch)?;
-    let definition = selection.entry().cloned();
     crate::session::with_session(path, policy, |session| {
-        // Source launch facts and native roots select exactly the same frozen
-        // observations. Do not poll disk between binding and native selection.
-        let selected_facts = session.request(crate::requests::CompileOperation::Tir {
-            definition: definition.clone(),
-        })?;
-        let crate::requests::CompileResult::Tir(facts) = &selected_facts.result else {
-            return Err(ToolError::Runtime(
-                "native launch facts returned another operation".into(),
-            ));
-        };
-        if selection.requires_replayable(launch) {
-            if let Some((user, extern_)) = facts.foreign.unmodeled.first_key_value() {
-                return Err(ToolError::Runtime(format!(
-                    "launch: {user} calls the extern {extern_} and is not a wrapper with a \
-                     deterministic model, so this run cannot be recorded or replayed (PROG-4)"
-                )));
-            }
-        }
-        let bound = selection.bind(
-            launch,
-            &facts.runtime.types,
-            &facts.signature,
-            &facts.revision,
-            facts.code.clone(),
-        )?;
-        let revision = facts.revision.digest();
-        // Binding owns the compact launch record. Release the completed TIR
-        // closure before the native request admits its own source graph.
-        drop(selected_facts);
-        let run = bound.run();
-        let selected = session.request_applied(crate::requests::CompileOperation::NativeRun(
-            crate::requests::NativeRequest {
-                definition,
-                options: {
-                    let target = super::TargetSpec::x86_64_unknown_linux_gnu();
-                    // A served place's head is a deployment, linked as `hirsel build
-                    // --release` links one (scoped specialization); Cranelift stays the
-                    // unoptimized debug loop.
-                    let mut options = match (place, backend) {
-                        (Some(_), super::Backend::Llvm) => super::BuildProfile::Release
-                            .options(backend, target, validation)
-                            .unwrap_or_else(|_| unreachable!("release admits LLVM")),
-                        _ => super::BuildProfile::run_options(backend, target, validation),
-                    };
-                    options.passes.launch = run.record().inputs.clone();
-                    options
-                },
-                run: Some(std::sync::Arc::new(run.clone())),
-
-                evidence: evidence.cloned().map(std::sync::Arc::new),
-                test_entries: vec![],
-                supplemental_sources: vec![],
-                output: crate::requests::NativeOutput::Executable,
-                platform: None,
+        crate::program_record::run(
+            session,
+            path,
+            policy,
+            crate::program_record::Run {
+                launch,
+                evidence,
+                backend,
+                validation,
+                output,
+                trace_events,
+                place,
             },
-        ))?;
-        match &selected.result {
-            crate::requests::CompileResult::Native(input) => {
-                // The launch was bound before compilation against these exact
-                // observations; the compiler cannot substitute another revision.
-                if input.revision.digest() != revision {
-                    return Err(ToolError::Runtime(
-                        "native launch revision changed during selection".into(),
-                    ));
-                }
-                super::request_output::run_bound_output(
-                    input,
-                    launch,
-                    bound,
-                    output,
-                    trace_events,
-                    place,
-                )
-            }
-            crate::requests::CompileResult::NativeError(error) => Ok(Err(error.clone())),
-            _ => Err(ToolError::Runtime(
-                "native run request returned another operation".into(),
-            )),
-        }
+        )
     })
 }
 

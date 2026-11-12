@@ -12,7 +12,8 @@ use hirsel_native::NativeError;
 use hirsel_native::StageName;
 use hirsel_native::Toolchain;
 use hirsel_native::object_queries::capture::CaptureLimits;
-use hirsel_native::object_queries::platform::record::PlatformSpec;
+use hirsel_native::object_queries::platform::CapturedPlatform;
+use hirsel_native::object_queries::platform::record::{CaptureMode, HandedPlatform, PlatformSpec};
 use hirsel_native::object_queries::runtime::RuntimeLimits;
 use hirsel_native_queries::compilation_tasks::CompilationOutput;
 use hirsel_syntax::{ContentHash, DefPath};
@@ -332,11 +333,12 @@ fn executable_spec(
 /// `HIRSEL_PLATFORM_CAPTURE=cold` capture cold), captured into `store`, the
 /// operation store the build's request store reads through. A program record
 /// keys a linked executable by its identity, selected exactly as the build
-/// selects it and before any record is read; a miss hands it to the build.
+/// selects it and before any record is read; a miss hands it to the build,
+/// and a run hit launches the recorded executable on it.
 pub fn host_executable_platform(
     store: &Arc<dyn ResultStore>,
     options: &hirsel_native::BuildOptions,
-) -> Result<hirsel_native::object_queries::platform::record::HandedPlatform, NativeError> {
+) -> Result<HostPlatform, NativeError> {
     let failed = |message| NativeError::new(StageName::Link, message);
     let tools = Toolchain::for_host_request(&options.passes.target, store.clone())?;
     let policy = NativePlatformPolicy::capture()?;
@@ -354,7 +356,103 @@ pub fn host_executable_platform(
     };
     let spec = executable_spec(&tools, &policy, options, &[], limits, runtime_limits)?;
     let mode = options.capture_mode().map_err(failed)?;
-    spec.hand_off(store.as_ref(), mode).map_err(failed)
+    let handed = spec.hand_off(store.as_ref(), mode).map_err(failed)?;
+    Ok(HostPlatform {
+        handed,
+        spec,
+        mode,
+        tools: Arc::new(tools),
+        store: store.clone(),
+    })
+}
+
+/// One host executable platform selection ([`host_executable_platform`]).
+pub struct HostPlatform {
+    handed: HandedPlatform,
+    spec: PlatformSpec,
+    mode: CaptureMode,
+    tools: Arc<Toolchain>,
+    store: Arc<dyn ResultStore>,
+}
+impl HostPlatform {
+    /// The selected platform's identity.
+    pub fn identity(&self) -> ContentHash {
+        self.handed.identity()
+    }
+    /// The selection, for the request a miss runs.
+    pub fn into_handed(self) -> HandedPlatform {
+        self.handed
+    }
+    /// Launch on this selection, taking it. Its runtime is checked as a
+    /// request's platform checks it before any use; a request run after this
+    /// selects for itself.
+    pub fn launcher(&self) -> Result<HostLauncher, String> {
+        let selected =
+            self.spec
+                .select_handed(Some(&self.handed), self.store.as_ref(), self.mode)?;
+        if selected.platform.identity() != self.identity() {
+            return Err("the selected platform changed after the lookup".into());
+        }
+        selected.platform.runtime().validate(
+            self.store.as_ref(),
+            &self.spec.target,
+            self.spec.runtime_limits,
+        )?;
+        Ok(HostLauncher {
+            platform: selected.platform,
+            spec: self.spec.clone(),
+            tools: self.tools.clone(),
+            store: self.store.clone(),
+        })
+    }
+}
+
+/// Launches images linked against one checked host platform: a run that a
+/// program record answers, with no request.
+pub struct HostLauncher {
+    platform: CapturedPlatform,
+    spec: PlatformSpec,
+    tools: Arc<Toolchain>,
+    store: Arc<dyn ResultStore>,
+}
+impl HostLauncher {
+    pub fn identity(&self) -> ContentHash {
+        self.platform.identity()
+    }
+    pub fn emulator(&self) -> Option<&std::path::Path> {
+        self.spec.emulator.as_deref()
+    }
+    pub fn target(&self) -> &hirsel_native::TargetSpec {
+        &self.spec.target
+    }
+    pub fn toolchain(&self) -> &Arc<Toolchain> {
+        &self.tools
+    }
+    /// `validate_image` of `image` under this platform, as a build runs it.
+    pub fn validate_image(&self, image: &std::path::Path) -> Result<(), String> {
+        self.platform.validate_image(
+            self.store.as_ref(),
+            &self.spec.target,
+            image,
+            self.spec.emulator.as_deref(),
+            self.spec.timeout,
+            self.spec.runtime_limits,
+        )
+    }
+    /// A launchable of `image`, which this platform validated: now, or as the
+    /// record that holds it binds that validation to this platform.
+    pub fn executable(&self, image: PathBuf) -> Result<hirsel_native::Runnable, String> {
+        let runtime = self.platform.runtime().materialize(
+            self.store.as_ref(),
+            &self.spec.target,
+            self.spec.runtime_limits,
+        )?;
+        Ok(hirsel_native::Runnable::closed(
+            image,
+            runtime,
+            self.spec.emulator.clone(),
+        ))
+    }
 }
 
 #[cfg(test)]

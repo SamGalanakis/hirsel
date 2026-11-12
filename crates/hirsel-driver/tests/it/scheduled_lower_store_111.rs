@@ -502,8 +502,24 @@ fn check_live_lower_observations(live_only: bool) {
 
 /// What one scheduled Lower request answered for each definition: how many
 /// times it lowered the body, and its canonical TIR bytes, V's verdict and
-/// any diagnostic.
-type Answers = std::collections::BTreeMap<String, (u64, Result<(Vec<u8>, bool), String>)>;
+/// its diagnostics (a success's warnings, or the failure).
+type Answers = std::collections::BTreeMap<String, (u64, Result<(Vec<u8>, bool, String), String>)>;
+
+/// `debug` with each process-local anchor dropped: the one source file's
+/// offsets place each diagnostic.
+fn without_anchors(debug: String) -> String {
+    debug
+        .split("Anchor(")
+        .enumerate()
+        .map(|(i, part)| {
+            if i == 0 {
+                part
+            } else {
+                part.split_once(')').map_or(part, |(_, rest)| rest)
+            }
+        })
+        .collect()
+}
 
 /// Lower every named definition of `source` against `store`.
 fn lower_all(
@@ -594,21 +610,10 @@ fn lower_package(
                         .encode(&program.engine, &actual.output.value)
                         .unwrap(),
                     actual.verified.is_some(),
+                    without_anchors(format!("{:?}", actual.output.diagnostics)),
                 ))
             }
-            // Anchors are process-local; the one source file's offsets place
-            // each diagnostic.
-            Err(error) => Err(format!("{:?}", lower.failure(error))
-                .split("Anchor(")
-                .enumerate()
-                .map(|(i, part)| {
-                    if i == 0 {
-                        part
-                    } else {
-                        part.split_once(')').map_or(part, |(_, rest)| rest)
-                    }
-                })
-                .collect()),
+            Err(error) => Err(without_anchors(format!("{:?}", lower.failure(error)))),
         };
         answers.insert(name.to_string(), (0, answer));
     }
@@ -681,7 +686,7 @@ fn warm_lower_reruns_only_bodies_whose_validation_reads_changed() {
             let cold = lower_all(warm_dir.path(), &history, &names, warm.clone());
             assert!(
                 cold.values()
-                    .all(|(n, answer)| *n == 1 && matches!(answer, Ok((_, true))))
+                    .all(|(n, answer)| *n == 1 && matches!(answer, Ok((_, true, _))))
             );
             for (source, expected) in &edits {
                 let fresh_dir = tempfile::tempdir().unwrap();
@@ -735,7 +740,7 @@ fn warm_lower_reruns_a_body_that_reaches_an_opaque_type_only_through_the_checker
         );
         assert!(
             cold.values()
-                .all(|(n, answer)| *n == 1 && matches!(answer, Ok((_, true))))
+                .all(|(n, answer)| *n == 1 && matches!(answer, Ok((_, true, _))))
         );
         // (ptr module source, the bodies a correct cutoff reruns, hand-derived)
         // Back at the base, operations reruns again: restore resolves the

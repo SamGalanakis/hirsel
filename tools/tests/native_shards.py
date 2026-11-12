@@ -171,14 +171,16 @@ class NativeShards(unittest.TestCase):
         # The reader-table law's two cases sweep cuts 1..=40 in 40 shares;
         # with shares 1..=30 passed, the open ones are 31..=40 and commit
         # 0x00000000000c... takes index 12 % 10 = 2: share 33, cut 33 of each
-        # case. With nothing else passed, full coverage takes the most shares
-        # left in any family: checkpoint-nodes' 20, not the law's 10. A swept
-        # case under no row is refused.
+        # case. Every other family is cut in 20 shares here, none passed, so
+        # full coverage takes the most shares left in any family: 20, not the
+        # law's 10. A swept case under no row is refused.
         corpus = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'corpus'))
         family = 'conformance/STORE/STORE-8-reader-table-law-'
         swept = [c for c in corpus['cases'](corpus['ROOT']) if c.startswith('conformance/STORE/')
                  and '// cuts:' in (corpus['ROOT'] / c).read_text()]
-        with tempfile.TemporaryDirectory() as tmp:
+        rows = [(key, 40 if key == family else 20) for key, _ in corpus['milestone_rows']()]
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.dict(corpus['milestone_shares'].__globals__, milestone_rows=lambda: rows):
             ledger = Path(tmp) / 'milestones.tsv'
             ledger.write_text(''.join(f'2026-11-12T00:00:00Z\tc\t{family}\t{n}/40\tpass\n' for n in range(1, 31)))
             shares = corpus['milestone_shares'](sorted(swept), '00000000000c' + '0' * 28, ledger)
@@ -189,7 +191,6 @@ class NativeShards(unittest.TestCase):
                     contextlib.redirect_stdout(out):
                 corpus['plan_selection']([run for _, _, runs in shares.values() for run in runs], shares)
             self.assertEqual(out.getvalue().splitlines()[-1], 'plan: full coverage after 20 milestones')
-            rows = corpus['milestone_rows']()
             with patch.dict(corpus['milestone_shares'].__globals__, milestone_rows=lambda: rows[1:]):
                 with self.assertRaises(ValueError):
                     corpus['milestone_shares'](sorted(swept), '0' * 40, ledger)

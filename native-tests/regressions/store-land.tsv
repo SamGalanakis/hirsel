@@ -7,4 +7,4 @@
 # `tools/corpus --native --selection store-land --plan` prints the CPU-h these rows plan before anything runs.
 conformance/STORE/STORE-11-crash-cuts-crash-run.hir	7	a seventh of its 21 cuts a land, so a land plans under 7 CPU-h (orchestrator, 2026-11-12)
 conformance/STORE/STORE-11-fence-cuts-fail-run.hir	4	a quarter of its cuts a land, so a land plans under 7 CPU-h (orchestrator, 2026-11-12)
-conformance/STORE/STORE-11-objects-cuts-	9	a ninth of one kind's 54 cuts, so a land plans under 7 CPU-h (orchestrator, 2026-11-12)
+conformance/STORE/STORE-11-objects-cuts-	18	an eighteenth of one kind's 54 cuts, so a land plans under 7 CPU-h at the costs measured at 4203ddee (orchestrator, 2026-11-12)

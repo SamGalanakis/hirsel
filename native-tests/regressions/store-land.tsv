@@ -2,8 +2,9 @@
 # One row each, tab-separated: key (a case, or a prefix naming a family's cases), N, and a note naming the
 # ruling. A land runs one case of the key and the cuts at positions i % N == s of its declared cuts, both from
 # n, the count of commits up to the land's parent: s = n % N, the case the (n // N) % cases'th, so consecutive
-# lands take different shares and every (case, share) comes round. Milestones run every family whole.
+# lands take different shares and every (case, share) comes round. A milestone runs an open share of every
+# family instead (store-milestone.tsv).
 # `tools/corpus --native --selection store-land --plan` prints the CPU-h these rows plan before anything runs.
-conformance/STORE/STORE-11-crash-cuts-crash-run.hir	6	a sixth of its cuts a land, so a land plans under 7 CPU-h (orchestrator, 2026-11-12)
+conformance/STORE/STORE-11-crash-cuts-crash-run.hir	7	a seventh of its 21 cuts a land, so a land plans under 7 CPU-h (orchestrator, 2026-11-12)
 conformance/STORE/STORE-11-fence-cuts-fail-run.hir	4	a quarter of its cuts a land, so a land plans under 7 CPU-h (orchestrator, 2026-11-12)
-conformance/STORE/STORE-11-objects-cuts-	6	a sixth of one kind's cuts (orchestrator, 2026-11-12)
+conformance/STORE/STORE-11-objects-cuts-	9	a ninth of one kind's 54 cuts, so a land plans under 7 CPU-h (orchestrator, 2026-11-12)

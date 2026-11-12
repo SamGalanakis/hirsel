@@ -195,33 +195,35 @@ class NativeShards(unittest.TestCase):
                     corpus['milestone_shares'](sorted(swept), '0' * 40, ledger)
 
     def test_store_land_rotation_covers_each_family_cut_once_a_cycle(self):
-        # Rows: crash-cuts-crash (cuts 1..=17) in thirds, the five objects-cuts
-        # kinds (cuts 1..=38 each) in sixths. Commit count n picks third n % 3
-        # and the (n // 6) % 5'th kind's sixth n % 6. At n = 6463: third 2 is
-        # cuts 2, 5, ..., 17; 6463 // 6 = 1077, 1077 % 5 = 2, the third kind in
-        # name order (crash, drop, lose, ...): lose, sixth 2, cuts 2, 8, ..., 38.
-        # Over 30 consecutive commits each row selects every cut of its family
-        # exactly once, and no two consecutive commits select the same cuts.
+        # Rows: crash-cuts-crash in thirds, the five objects-cuts kinds in
+        # sixths, each over the cuts its `// cuts:` header declares. Commit
+        # count n picks third n % 3 and the (n // 6) % 5'th kind's sixth n % 6.
+        # At n = 6463: third 2 is the 2nd, 5th, ... declared cut; 6463 // 6 =
+        # 1077, 1077 % 5 = 2, the third kind in name order (crash, drop, lose,
+        # ...): lose, sixth 2, its 2nd, 8th, ... declared cut. Over 30
+        # consecutive commits each row selects every cut of its family exactly
+        # once, and no two consecutive commits select the same cuts.
         corpus = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'corpus'))
         store = 'conformance/STORE/STORE-11-'
         crash, objects = store + 'crash-cuts-crash-run.hir', store + 'objects-cuts-'
         corpus['named_selection'].__globals__['land_rows'] = lambda: [(crash, 3), (objects, 6)]
         cases = corpus['cases'](corpus['ROOT'])
+        kinds = ['crash', 'drop', 'lose', 'refuse', 'vanish']
+
+        def declared(case):
+            return corpus['conformance'].run_ids(case, (corpus['ROOT'] / case).read_text())
 
         def chosen(count):
             with patch('subprocess.check_output', return_value=f'{count}\n'), \
                     contextlib.redirect_stderr(io.StringIO()):
                 return corpus['named_selection']('store-land', cases, 'HEAD^')[0]
 
-        self.assertEqual(chosen(6463), [f'{crash}@{k}' for k in range(2, 18, 3)]
-                         + [f'{objects}lose-run.hir@{k}' for k in range(2, 39, 6)])
+        self.assertEqual(chosen(6463), declared(crash)[1::3] + declared(f'{objects}lose-run.hir')[1::6])
         selections = [chosen(n) for n in range(6463, 6493)]
         every = sorted(run for runs in selections for run in runs)
-        crashes = [run for run in every if run.startswith(crash)]
-        self.assertEqual(crashes, sorted(f'{crash}@{k}' for k in range(1, 18) for _ in range(10)))
-        kinds = ['crash', 'drop', 'lose', 'refuse', 'vanish']
+        self.assertEqual([run for run in every if run.startswith(crash)], sorted(declared(crash) * 10))
         self.assertEqual([run for run in every if run.startswith(objects)],
-                         sorted(f'{objects}{kind}-run.hir@{k}' for kind in kinds for k in range(1, 39)))
+                         sorted(run for kind in kinds for run in declared(f'{objects}{kind}-run.hir')))
         self.assertTrue(all(a != b for a, b in zip(selections, selections[1:])))
 
     def test_corpus_refuses_a_selection_whose_slices_outrun_the_budget(self):

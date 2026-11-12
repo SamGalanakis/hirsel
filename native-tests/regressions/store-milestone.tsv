@@ -7,10 +7,10 @@
 # passing milestones run every run of the family once. N here is sized to 40 CPU-h a milestone in all (orchestrator,
 # 2026-11-12): `tools/corpus --native --selection store-milestone --plan` prints its CPU-h, each family's cycle in
 # milestones and how many milestones full coverage takes; re-print it rather than re-plan by hand when costs move.
-conformance/STORE/STORE-11-checkpoint-cuts-	14	3-4 of 55 runs a milestone, about 2.1 CPU-h (orchestrator, 2026-11-12)
-conformance/STORE/STORE-11-checkpoint-nodes-	20	5-6 of 109 runs a milestone, every site, about 2.9 CPU-h (orchestrator, 2026-11-12)
-conformance/STORE/STORE-11-crash-cuts-	14	4-5 of 68 runs a milestone, about 3.4 CPU-h (orchestrator, 2026-11-12)
-conformance/STORE/STORE-11-fence-cuts-	16	one cut of each of 4 cases a milestone, about 1.0 CPU-h (orchestrator, 2026-11-12)
-conformance/STORE/STORE-11-objects-cuts-	14	13-14 of 190 runs a milestone, about 7.0 CPU-h (orchestrator, 2026-11-12)
-conformance/STORE/STORE-11-objects-fence-cuts-	14	13-14 of 190 runs a milestone, about 7.0 CPU-h (orchestrator, 2026-11-12)
+conformance/STORE/STORE-11-checkpoint-cuts-	20	4-5 of 83 runs a milestone, about 2.2 CPU-h (orchestrator, 2026-11-12)
+conformance/STORE/STORE-11-checkpoint-nodes-	20	6-7 of 138 runs a milestone, every site, about 3.7 CPU-h (orchestrator, 2026-11-12)
+conformance/STORE/STORE-11-crash-cuts-	20	4-5 of 84 runs a milestone, about 3.0 CPU-h (orchestrator, 2026-11-12)
+conformance/STORE/STORE-11-fence-cuts-	20	3-4 of 76 runs a milestone, about 1.0 CPU-h (orchestrator, 2026-11-12)
+conformance/STORE/STORE-11-objects-cuts-	20	13-14 of 270 runs a milestone, about 6.9 CPU-h (orchestrator, 2026-11-12)
+conformance/STORE/STORE-11-objects-fence-cuts-	20	10-11 of 205 runs a milestone, about 5.3 CPU-h (orchestrator, 2026-11-12)
 conformance/STORE/STORE-8-reader-table-law-	40	one window of each provider a milestone, about 15.2 CPU-h (orchestrator, 2026-11-12)

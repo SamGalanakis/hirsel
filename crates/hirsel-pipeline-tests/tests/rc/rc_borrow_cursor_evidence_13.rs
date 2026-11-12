@@ -6,7 +6,7 @@ use hirsel_intern::jobs::with_compiler_stack;
 fn borrow_cursor_evidence_13_environment_diagnostic_preserves_ordinary_bindings() {
     for (source, rule) in [
         (
-            "fn f(a:List[u64])->u64 {let mut c:List[u64] in env=a; c=a; list.len(c)}",
+            "fn f(a:List[u64])->u64 {let mut c:List[u64] in env=a; c=copy a; list.len(c)}",
             "LANG-15",
         ),
         (

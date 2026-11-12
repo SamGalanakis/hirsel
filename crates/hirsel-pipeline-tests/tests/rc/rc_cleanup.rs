@@ -825,7 +825,7 @@ fn versions_that_meet_only_at_a_drop_get_a_join_for_its_release() {
 }
 pub fn main() -> u64 {
   let mut r = Rec(items: [1, 2])
-  let old = r.items
+  let old = copy r.items
   r.items[0] = 9
   if old[0] == 1 {
     7

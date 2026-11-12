@@ -46,7 +46,7 @@ fn make()->once fn()->String {
   let token:String in heap="token"
   let text:String in heap="x"
   let holder=Holder(text:take text,n:1u8)
-  fn(){let consumed=take token;holder.text}
+  fn(){let consumed=take token;copy holder.text}
 }
 pub fn main(t:Test)->Result[(),()] {
   let f=make()

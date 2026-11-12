@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check Buck2 inventories and exclusive temporary-file publication."""
 import importlib.util
+import ast
 import contextlib
 import io
 from pathlib import Path
@@ -71,6 +72,97 @@ class ProductionFeatures(unittest.TestCase):
         self.assertEqual(sync.check_production_features(graph, policy, strict=True), [])
         graph = graph.replace('features = [],', 'features = ["testing"],')
         with self.assertRaisesRegex(SystemExit, 'archives: unapproved test feature fixture/testing'):
+            sync.check_production_features(graph, policy, strict=True)
+
+
+class CargoUnits(unittest.TestCase):
+    def test_dev_features_fork_transitive_users_but_share_unchanged_leaves(self):
+        from cargo_units import Resolution, calls, literal
+        r = Resolution.__new__(Resolution)
+        r.packages = {name: {'name': name, 'version': '1'} for name in ('leaf', 'fixture', 'app')}
+        r.members = set(r.packages)
+        r.units, r.names, r.preferred, r.test_binaries = {}, {}, {}, {}
+        def unit(package, features=(), deps=(), mode='build'):
+            return dict(pkg_id=package, target=dict(name=package, kind=['lib']), mode=mode,
+                        features=list(features), dependencies=[dict(index=i, extern_crate_name=name) for name, i in deps])
+        graph = {'units': [unit('leaf'), unit('fixture', deps=[('leaf', 0)]),
+                           unit('app', deps=[('fixture', 1)]),
+                           unit('fixture', ['testing'], [('leaf', 0)]),
+                           unit('app', deps=[('fixture', 3)]),
+                           unit('app', deps=[('fixture', 3)], mode='test')]}
+        keys = r.add(graph)
+        for index in (0, 1, 2, 5):
+            r.preferred[r.base(r.units[keys[index]])] = keys[index]
+        for key, value in r.units.items():
+            base = r.base(value)
+            r.names[key] = base if r.preferred.get(base) == key else base + '-features-' + key[:12]
+        source = ''.join(sync.call('hirsel_library' if name != 'app-unittest' else 'hirsel_test',
+                                   name=name, package_name=name.split('-')[0], features=['testing'],
+                                   deps=['//:fixture'], crate_root='src/lib.rs')
+                         for name in ('leaf', 'fixture', 'app', 'app-unittest'))
+        rules = {literal(call, 'name'): {name: ast.literal_eval(value) for name, value in attrs.items()}
+                 for _, call, attrs in calls(r.first_party(source, sync.starlark))}
+        self.assertEqual(rules['fixture']['features'], [])
+        self.assertEqual(rules['app']['deps'], ['//:fixture'])
+        test_fixture = rules['app-unittest']['deps'][0].removeprefix('//:')
+        self.assertEqual(rules[test_fixture]['features'], ['testing'])
+        self.assertEqual(rules[test_fixture]['deps'], ['//:leaf'])
+        self.assertEqual(sum(name.startswith('leaf') for name in rules), 1)
+        self.assertEqual(rules[r.names[keys[4]]]['deps'], ['//:' + test_fixture])
+
+    def test_external_build_script_and_host_features_follow_their_own_units(self):
+        from cargo_units import Resolution, calls, literal
+        import ast
+        r = Resolution.__new__(Resolution)
+        r.packages = {'ext': {'name': 'ext', 'version': '1.0.0'}}
+        r.members, r.units, r.names = set(), {}, {}
+        graph = {'units': [
+            dict(pkg_id='ext', target=dict(name='ext', kind=['lib']), mode='build', features=[], dependencies=[]),
+            dict(pkg_id='ext', target=dict(name='build-script-build', kind=['custom-build']), mode='build',
+                 features=['testing'], dependencies=[]),
+            dict(pkg_id='ext', target=dict(name='build-script-build', kind=['custom-build']), mode='run-custom-build',
+                 features=['testing'], dependencies=[dict(index=1, extern_crate_name='build_script_build')]),
+            dict(pkg_id='ext', target=dict(name='ext', kind=['lib']), mode='build', features=['testing'],
+                 dependencies=[dict(index=2, extern_crate_name='build_script_build')])]}
+        keys = r.add(graph)
+        source = (sync.call('third_party_rust_library', name='ext-1', features=['testing'], deps=[],
+                            env={'CARGO_PKG_NAME': 'ext', 'CARGO_PKG_VERSION': '1.0.0',
+                                 'OUT_DIR': '$(location :ext-1-build-script-run[out_dir])'})
+                  + sync.call('third_party_rust_binary', name='ext-1-build-script-build', features=['testing'], deps=[])
+                  + sync.call('third_party_buildscript_run', name='ext-1-build-script-run', features=['testing'],
+                              buildscript_rule=':ext-1-build-script-build'))
+        projected = {literal(call, 'name'): {name: ast.literal_eval(value) for name, value in attrs.items()}
+                     for _, call, attrs in calls(r.third_party(source))}
+        self.assertEqual(projected[r.names[keys[0]]]['features'], [])
+        selected = projected[r.names[keys[3]]]
+        self.assertEqual(selected['features'], ['testing'])
+        self.assertEqual(selected['env']['OUT_DIR'], '$(location :' + r.names[keys[2]] + '[out_dir])')
+        self.assertEqual(projected[r.names[keys[2]]]['buildscript_rule'], ':' + r.names[keys[1]])
+
+    def test_external_aliases_use_the_resolved_unit_and_drop_inactive_dependencies(self):
+        from cargo_units import Resolution, calls, literal
+        import ast
+        r = Resolution.__new__(Resolution)
+        r.packages = {name: {'name': name, 'version': '1.0.0'} for name in ('external', 'leaf')}
+        r.members, r.units, r.names = set(), {}, {}
+        keys = r.add({'units': [
+            dict(pkg_id='leaf', target=dict(name='leaf', kind=['lib']), mode='build', features=[], dependencies=[]),
+            dict(pkg_id='external', target=dict(name='external', kind=['lib']), mode='build', features=[],
+                 dependencies=[dict(index=0, extern_crate_name='renamed_leaf')])]})
+        source = ''.join(sync.call('third_party_rust_library', name=name + '-1', features=['testing'], deps=[],
+                                  named_deps={'renamed_leaf': ':leaf-1', 'unused': ':leaf-1'} if name == 'external' else {},
+                                  env={'CARGO_PKG_NAME': name, 'CARGO_PKG_VERSION': '1.0.0'})
+                         for name in ('leaf', 'external'))
+        projected = {literal(call, 'name'): attrs for _, call, attrs in calls(r.third_party(source))}
+        self.assertEqual(ast.literal_eval(projected[r.names[keys[1]]]['named_deps']),
+                         {'renamed_leaf': '//third-party:' + r.names[keys[0]]})
+
+    def test_arm_archive_dependencies_are_audited(self):
+        graph = (sync.call('hirsel_runtime_archives', name='archives', package_name='runtime', features=[], deps=[],
+                           target_deps={'aarch64-unknown-linux-gnu': ['//:arm-only']})
+                 + sync.call('hirsel_library', name='arm-only', package_name='fixture', features=['testing'], deps=[]))
+        policy = {'features': {'fixture/testing': 'test-only'}, 'roots': {'archives': []}}
+        with self.assertRaisesRegex(SystemExit, 'arm-only/testing'):
             sync.check_production_features(graph, policy, strict=True)
 
 

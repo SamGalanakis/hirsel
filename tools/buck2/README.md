@@ -484,8 +484,19 @@ the old copy.
   under `PROPTEST_RNG_SEED` from `-c hirsel.test_seed` (default 1), which is in
   that key: a cached pass covers its seed only. `tools/main-runs` draws a new
   seed each run and prints it; `HIRSEL_TEST_SEED=<n>` reproduces one.
-- Features are Cargo's workspace-wide resolution (`cargo build --workspace
-  --all-targets`): one feature set per crate, dev-dependency features included.
+- `cargo_units.py` asks the pinned Cargo for unit-graph v1, without compiling,
+  for each package's normal build and its package-local tests. Production
+  receives only normal dependency features; tests receive their own declared
+  dev features. Build-script and proc-macro host contexts stay separate when
+  Cargo resolves them differently. Runtime dependencies resolve for both
+  architectures. Units share a Buck identity only when their features and
+  dependency identities match; additional identities use `-features-<hash>`.
+  Resource requests continue to use the original crate's measured budget.
+  Reindeer supplies source, build-script and native-fixup templates, whose
+  Rust feature sets and dependency edges come from those Cargo units.
+  `third-party/units.json` keeps external labels available when only the
+  first-party source inventory needs regeneration. The production feature
+  audit admits no exceptions.
 - All first-party targets are in the root package, so a compile action's source
   tree keeps repository paths and `include_str!("../../../conformance/x")`
   works unchanged. A target's sources are its directory (`src/`, `tests/it/`,

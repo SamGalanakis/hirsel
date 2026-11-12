@@ -47,7 +47,7 @@ pub(super) struct State {
     #[cfg(test)]
     crash_after_segment: bool,
     /// Index publications still to report skipped, as if contended.
-    #[cfg(all(feature = "test-support", debug_assertions))]
+    #[cfg(feature = "test-support")]
     skip_publications: usize,
 }
 #[derive(Clone)]
@@ -173,7 +173,7 @@ impl Store {
     /// features, so `test-support` alone does not keep this out of shipped
     /// binaries; every shipped profile (release, runtime, dist, profiling)
     /// turns debug assertions off, and tests run only under dev or checked.
-    #[cfg(all(feature = "test-support", debug_assertions))]
+    #[cfg(feature = "test-support")]
     pub fn skip_index_publications_for_test(&self, count: usize) {
         self.state().skip_publications = count;
     }
@@ -435,14 +435,14 @@ impl Store {
         let mut conflict_retry = true;
         loop {
             self.count(Counter::IndexPublicationAttempts, 1);
-            #[cfg(all(feature = "test-support", debug_assertions))]
+            #[cfg(feature = "test-support")]
             let outcome = if state.skip_publications != 0 {
                 state.skip_publications -= 1;
                 index::PublishOutcome::Skipped(index::SkipReason::Contended)
             } else {
                 index::publish_delta(&self.root, &delta, epoch)?
             };
-            #[cfg(not(all(feature = "test-support", debug_assertions)))]
+            #[cfg(not(feature = "test-support"))]
             let outcome = index::publish_delta(&self.root, &delta, epoch)?;
             match outcome {
                 index::PublishOutcome::Published {

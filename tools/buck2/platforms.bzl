@@ -135,6 +135,7 @@ def compile_request(profile, name):
     # If this profile has not run recently, use the other profile's measured
     # memory rather than dropping a known large crate to the generic floor.
     # CPU parallelism must be established in this profile; a fallback gets one.
+    name = name.split("-features-")[0]
     other = "release" if profile == "dev" else "dev"
     cpu, memory_kb = COMPILE_REQUESTS[profile].get(name, [1, COMPILE_REQUESTS[other].get(name, DEFAULT_REQUEST)[1]])
     cpu_class = COMPILE_CLASSES[profile].get(name, "")

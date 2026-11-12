@@ -55,6 +55,7 @@ import tomllib
 
 from action_sizes_from_log import CALIBRATED_CPUS, CPU_CLASSES, MAX_CPUS, compile_cpus
 import generated
+from cargo_units import Resolution
 from test_sizes_from_usage import requests_bzl
 
 
@@ -775,10 +776,10 @@ def third_party_manifest(meta: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-THIRD_PARTY_OUTPUTS = ("BUCK", "Cargo.toml", "Cargo.lock", "lib.rs")
+THIRD_PARTY_OUTPUTS = ("BUCK", "Cargo.toml", "Cargo.lock", "lib.rs", "units.json")
 
 
-def write_third_party(meta: dict, out: pathlib.Path) -> generated.Reads:
+def write_third_party(meta: dict, out: pathlib.Path, resolution: Resolution) -> generated.Reads:
     """Run Reindeer in a scratch package, then replace the outputs whose bytes
     changed; returns what it read."""
     reads = generated.Reads(ROOT)
@@ -808,6 +809,8 @@ def write_third_party(meta: dict, out: pathlib.Path) -> generated.Reads:
             [str(REINDEER), "--config", str(work / "reindeer.toml"), "buckify"],
             check=True, cwd=work, stdout=subprocess.DEVNULL,
         )
+        write(work / "BUCK", resolution.third_party((work / "BUCK").read_text()))
+        write(work / "units.json", resolution.external_json())
         for name in THIRD_PARTY_OUTPUTS:
             write(out / name, (work / name).read_bytes())
     return reads
@@ -1075,8 +1078,8 @@ def first_party(meta: dict) -> str:
                                  "//tools/buck2:llvm-cxx-headers-lock.json", "//tools/buck2:llvm-runtime-lock.json",
                                  "//tools/buck2:pins.json", "tools/native-toolchain/llvm-23.lock"]))
     out.append("\n" + call("hirsel_script_test", name="test-native-scratch-tools", script="tools/tests/buck2_sync.py", full=False,
-                           args=["AtomicScratch", "ProductionFeatures"],
-                           data=["//tools/buck2:sync.py", "//tools/buck2:generated.py",
+                           args=["AtomicScratch", "ProductionFeatures", "CargoUnits"],
+                           data=["//tools/buck2:sync.py", "//tools/buck2:cargo_units.py", "//tools/buck2:rust_environment.py", "//tools/buck2:generated.py",
                                  "//tools/buck2:action_sizes_from_log.py", "//tools/buck2:test_sizes_from_usage.py"]))
     out.append("\n" + call("hirsel_script_test", name="test-consumers", script="tools/tests/consumers.py", full=False,
                            args=["-v"],
@@ -1432,20 +1435,27 @@ def generate(out_root: pathlib.Path, parts=tuple(generated.PARTS)) -> dict[str, 
     """Write the named parts' outputs under `out_root`, each only where its
     bytes change; returns what each part read."""
     meta = metadata(ROOT / "Cargo.toml")
+    resolution = Resolution(ROOT, meta)
+    # Both generators use the same exact Cargo identities, including when only
+    # the first-party inventory is stale. Reindeer templates remain available
+    # from the current third-party output for that case.
     found = {}
     if "third-party" in parts:
-        found["third-party"] = write_third_party(meta, out_root / "third-party")
+        found["third-party"] = write_third_party(meta, out_root / "third-party", resolution)
     if "first-party" in parts:
-        found["first-party"] = write_first_party(meta, out_root)
+        if "third-party" not in parts:
+            resolution.load_external((out_root / "third-party/units.json").read_text())
+        found["first-party"] = write_first_party(meta, out_root, resolution)
     for reads in found.values():
         code_reads(reads)
     return found
 
 
-def write_first_party(meta: dict, out_root: pathlib.Path) -> generated.Reads:
+def write_first_party(meta: dict, out_root: pathlib.Path, resolution: Resolution) -> generated.Reads:
     global READS
     READS = generated.Reads(ROOT)
     corpus_packages.cache_clear()
+    READS.text(out_root / "third-party/units.json")
     cargo_reads(READS, meta, layout=True)
     workspace = {p["id"] for p in meta["packages"] if p["id"] in meta["workspace_members"]}
     packages = [{"name": p["name"], "dependencies": [
@@ -1454,7 +1464,7 @@ def write_first_party(meta: dict, out_root: pathlib.Path) -> generated.Reads:
         for dependency in p["dependencies"]]} for p in meta["packages"] if p["id"] in workspace]
     contents = {
         "tools/buck2/workspace-metadata.json": json.dumps({"packages": packages}, indent=2, sort_keys=True) + "\n",
-        "BUCK": root_buck(meta),
+        "BUCK": root_buck(meta, resolution),
         "tools/buck2/exec_sizes.bzl": execution_sizes(),
         "tools/buck2/test_sizes.bzl": requests_bzl(json.loads(READS.text(HERE / "test-sizes.json"))),
         "tools/native-toolchain/pins.bzl": native_toolchain_pins(),
@@ -1465,8 +1475,8 @@ def write_first_party(meta: dict, out_root: pathlib.Path) -> generated.Reads:
     return READS
 
 
-def root_buck(meta: dict) -> str:
-    buck = first_party(meta)
+def root_buck(meta: dict, resolution: Resolution) -> str:
+    buck = resolution.first_party(first_party(meta), starlark)
     check_classes(buck)
     check_test_data(buck)
     policy = json.loads(READS.text(HERE / "production-features.json"))
@@ -1499,7 +1509,7 @@ def check_production_features(buck: str, policy: dict, strict: bool = False) -> 
                 "hirsel_library", "hirsel_binary", "hirsel_build_script", "hirsel_runtime_archives"}:
             continue
         attrs = {k.arg: ast.literal_eval(k.value) for k in call.keywords
-                 if k.arg in {"name", "package_name", "features", "deps", "build_script"}}
+                 if k.arg in {"name", "package_name", "features", "deps", "build_script", "target_deps"}}
         rules[attrs["name"]] = attrs
     findings, errors = [], []
     for root, exceptions in policy["roots"].items():
@@ -1518,7 +1528,8 @@ def check_production_features(buck: str, policy: dict, strict: bool = False) -> 
                     raise SystemExit(f"production feature audit has no classification: {key}")
                 if policy["features"][key] == "test-only":
                     leaks.add(f"{name}/{feature}")
-            for dep in attrs.get("deps", []) + ([attrs["build_script"]] if attrs.get("build_script") else []):
+            dependencies = attrs.get("deps", []) + [dep for deps in attrs.get("target_deps", {}).values() for dep in deps]
+            for dep in dependencies + ([attrs["build_script"]] if attrs.get("build_script") else []):
                 if dep.startswith("//:") or dep.startswith(":"):
                     pending.append(dep.split(":", 1)[1])
         findings += [f"{root}: {leak}" for leak in sorted(leaks)]

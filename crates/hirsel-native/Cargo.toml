@@ -52,5 +52,6 @@ tempfile = "3"
 
 
 [dev-dependencies]
+hirsel-intern = { path = "../hirsel-intern", features = ["id-salt"] }
 hirsel-native-queries = { path = "../hirsel-native-queries" }
 hirsel-front-phases = { path = "../hirsel-front-phases" }

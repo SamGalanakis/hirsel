@@ -35,7 +35,7 @@ import sys
 # Reindeer) and first-party inventory generation (Cargo metadata, then source
 # inspection) are stamped apart, so neither reruns for the other's inputs.
 PARTS = {
-    'third-party': ('third-party/BUCK', 'third-party/Cargo.toml', 'third-party/Cargo.lock', 'third-party/lib.rs'),
+    'third-party': ('third-party/BUCK', 'third-party/Cargo.toml', 'third-party/Cargo.lock', 'third-party/lib.rs', 'third-party/units.json'),
     'first-party': ('BUCK', 'tools/buck2/exec_sizes.bzl', 'tools/buck2/test_sizes.bzl',
                     'tools/buck2/workspace-metadata.json', 'tools/native-toolchain/pins.bzl'),
 }

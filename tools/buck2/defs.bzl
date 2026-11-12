@@ -99,6 +99,7 @@ def _release_codegen_units(name):
     # A measured release compile's codegen units match its reservation, and a
     # one-CPU compile keeps two: its slot share covers them
     # (action_sizes_from_log.py). Unmeasured targets keep Cargo's defaults.
+    name = name.split("-features-")[0]
     if name not in COMPILE_REQUESTS["release"] and not (PROBE_CPUS and name in COMPILE_CLASSES["release"]):
         return []
     return ["-Ccodegen-units={}".format(max(2, compile_request("release", name)[0]))]
@@ -930,7 +931,7 @@ RUNTIME_TARGETS = {
     "x86_64-unknown-linux-gnu": "root//tools/buck2:runtime-x86_64",
 }
 
-def hirsel_runtime_archives(name, crate, crate_root, srcs, features, deps, feature_deps, manifest_dir, package_name, version, edition):
+def hirsel_runtime_archives(name, crate, crate_root, srcs, features, deps, feature_deps, manifest_dir, package_name, version, edition, target_deps = {}):
     """Every runtime archive the native pipeline links.
 
     Panic-abort release code with cold-crate size overrides, fat LTO for the
@@ -965,7 +966,7 @@ def hirsel_runtime_archives(name, crate, crate_root, srcs, features, deps, featu
             crate_root = crate_root,
             srcs = srcs,
             features = features + chosen,
-            deps = deps + extra,
+            deps = (select({"prelude//cpu/constraints:arm64": target_deps["aarch64-unknown-linux-gnu"], "DEFAULT": target_deps["x86_64-unknown-linux-gnu"]}) if target_deps else deps) + extra,
             edition = edition,
             env = _cargo_env(package_name, crate, version),
             rustc_flags = _flags(manifest_dir, target = library) + ([] if variant in OPTIMIZED_RUNTIME_VARIANTS else TEST_RUNTIME_FLAGS),

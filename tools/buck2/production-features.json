@@ -1,6 +1,6 @@
 {
-  "scope": "First-party Cargo features in generated Buck production roots. Shared literal attributes cover checked, release and dist, both runtime architectures, the std producer and installed bundle. Explicit runtime diagnostic/sanitizer variants are intentional; audit their common dependency closure here. Third-party resolution still needs the production/test graph split.",
-  "baseline": "318e92d66c3f8a1345469b60f034eca9feecf1d6; test-features-prod-816 audit-only slice. Each listed leak remains a defect, not a production feature contract. Remove exceptions when splitting the graph; strict mode admits none.",
+  "scope": "First-party features in generated production roots across checked, release and dist, installed toolchains, std production and both runtime architectures. Cargo compilation units also enforce exact external and host-context feature resolution. Explicit diagnostic and sanitizer runtime selections remain intentional.",
+  "baseline": "Production and package-test compilation units resolve independently; no production exceptions.",
   "features": {
     "hirsel-artifact-store/test-support": "test-only",
     "hirsel-authority/testing": "test-only",
@@ -33,25 +33,7 @@
     "hirsel-types/testing": "test-only"
   },
   "roots": {
-    "hirsel-cli-bin-hirsel": [
-      "hirsel-artifact-store/test-support",
-      "hirsel-authority/testing",
-      "hirsel-engine-admission/test-alloc",
-      "hirsel-engine-runtime/test-support",
-      "hirsel-intern/id-salt",
-      "hirsel-lir/testing",
-      "hirsel-object-storage/testing",
-      "hirsel-query-products/test-support",
-      "hirsel-rc/testing",
-      "hirsel-rt/diagnostic",
-      "hirsel-syntax/id-salt",
-      "hirsel-types/testing"
-    ],
-    "hirsel-rt-archives": [
-      "hirsel-intern/id-salt",
-      "hirsel-object-storage/testing",
-      "hirsel-syntax/id-salt",
-      "hirsel-types/testing"
-    ]
+    "hirsel-cli-bin-hirsel": [],
+    "hirsel-rt-archives": []
   }
 }

@@ -117,6 +117,10 @@ fn run_ended(
 fn pending_finalizer_retains_one_admission_and_shield_until_original_body_finishes() {
     for fail in [false, true] {
         run(move |ctx| unsafe {
+            let mut foreground = Vec::new();
+            for _ in 0..1023 {
+                foreground.push((*ctx).activations.admit().unwrap());
+            }
             let (mut cursor, token) = cursor(ctx);
             let mut frame = crate::continuation::OwnedResumeFrame::new(16);
             frame.as_mut_ptr().add(8).write(u8::from(fail));
@@ -129,7 +133,7 @@ fn pending_finalizer_retains_one_admission_and_shield_until_original_body_finish
             );
             assert!(matches!(driver.poll(ctx), Ok(Poll::Pending)));
             assert_eq!(token.value.cast::<u64>().read(), 1);
-            assert_eq!((*ctx).activations.live(), (0, 1));
+            assert_eq!((*ctx).activations.live(), (1023, 1));
             assert_eq!((*ctx).shield, 1);
             assert!(
                 matches!(cursor.poll_finalizers(&mut *ctx), FinalizerPoll::Finalizer(t) if t == token)
@@ -142,13 +146,24 @@ fn pending_finalizer_retains_one_admission_and_shield_until_original_body_finish
             assert_eq!((*ctx).shield, 0);
             assert_eq!(
                 (*ctx).activations.live(),
-                (0, 1),
+                (1023, 1),
                 "fields retain original activation"
             );
             cursor.finalized(&mut *ctx, token, status);
             assert!(
                 matches!(cursor.poll_finalizers(&mut *ctx), FinalizerPoll::Complete(done) if done.status == status)
             );
+            assert_eq!((*ctx).activations.live(), (1023, 0));
+            let last = (*ctx)
+                .activations
+                .admit()
+                .expect("exact foreground restoration");
+            assert!((*ctx).activations.admit().is_none());
+            assert_eq!((*ctx).activations.live(), (1024, 0));
+            (*ctx).activations.retire(last);
+            for token in foreground {
+                (*ctx).activations.retire(token);
+            }
             assert_eq!((*ctx).activations.live(), (0, 0));
             assert_eq!((*ctx).cleanup_invocations.len(), 0);
             if fail {

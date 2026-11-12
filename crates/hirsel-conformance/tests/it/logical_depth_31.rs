@@ -96,7 +96,56 @@ fn agreement(name: &str, source: &str, rules: &[&str]) {
 }
 
 fn agreement_output(name: &str, source: &str, rules: &[&str], output: Option<&[u8]>) {
-    let matrix = matrix();
+    agreement_in(matrix(), name, source, rules, output);
+}
+
+/// The 1024/64 limits determine the invoking frame and source call independently
+/// of the interpreter. All native engines must also match its full observation.
+fn agreement_release(
+    name: &str,
+    source: &str,
+    rules: &[&str],
+    output: Option<&[u8]>,
+    sites: &[(&str, &str)],
+) {
+    let mut matrix = matrix();
+    let options = matrix[0].options.clone();
+    matrix.push(Configuration {
+        options,
+        engine: Engine::Native {
+            opt: hirsel_native::OptLevel::Speed,
+            partition: hirsel_native::Partition::Whole,
+            runtime: hirsel_native_testing::Runtime::Diagnostic,
+        },
+    });
+    let observation = agreement_in(matrix, name, source, rules, output);
+    assert_eq!(observation.failures.len(), sites.len(), "{name}");
+    for (failure, &(definition, call)) in observation.failures.iter().zip(sites) {
+        let at = source.find(call).expect("unique expected source call");
+        assert_eq!(source.matches(call).count(), 1, "ambiguous oracle: {call}");
+        let prefix = &source[..at];
+        let line = prefix.bytes().filter(|&b| b == b'\n').count() as u32 + 1;
+        let column = prefix.rsplit('\n').next().unwrap().chars().count() as u32 + 1;
+        assert_eq!(
+            failure.definition.0.name.as_str(),
+            definition,
+            "{name}: {failure:?}"
+        );
+        assert_eq!(
+            (failure.line, failure.column),
+            (line, column),
+            "{name}: {failure:?}"
+        );
+    }
+}
+
+fn agreement_in(
+    matrix: Vec<Configuration>,
+    name: &str,
+    source: &str,
+    rules: &[&str],
+    output: Option<&[u8]>,
+) -> hirsel_native::Observation {
     let toolchain = hirsel_native_testing::toolchain_for_matrix(
         &hirsel_conformance::native::runtime_cache().unwrap(),
         &matrix,
@@ -129,14 +178,18 @@ fn agreement_output(name: &str, source: &str, rules: &[&str], output: Option<&[u
     if let Some(output) = output {
         assert_eq!(observation.output, output, "{name}: cleanup effects");
     }
-    assert_eq!(result.outcomes.len(), 3, "{name}");
+    assert_eq!(result.outcomes.len(), matrix.len(), "{name}");
     for (configuration, _, outcome) in &result.outcomes {
         assert!(
             matches!(outcome, Outcome::Agree),
             "{name}/{configuration}: {outcome:?}"
         );
     }
-    eprintln!("logical-depth case {name}: all four engines agree");
+    eprintln!(
+        "logical-depth case {name}: interpreter and {} configurations agree",
+        matrix.len()
+    );
+    observation.clone()
 }
 
 #[test]
@@ -1285,6 +1338,305 @@ fn short_circuit_self_restarts_preserve_the_invocation_boundary() {
                 "fn f(n:u64)->bool {{ {expression} }}\npub fn main()->Result[(), ()] {{let actual = f({iterations}u64); let _ = 1u64 / (if actual == {expected} {{1u64}} else {{0u64}}); Ok(())}}"
             );
             agreement(name, &source, rules);
+        }
+    });
+}
+
+const MODES_HEADER: &str = r#"
+fn even(n:u64)->u64 { if n==0u64 {0u64} else {1u64+odd(n-1u64)} }
+fn odd(n:u64)->u64 { if n==0u64 {0u64} else {1u64+even(n-1u64)} }
+fn f(n:u64)->u64 { if n==0u64 {0u64} else {1u64+f(n-1u64)} }
+resource type Even {n:u64}
+drop(x) {let _ = even(x.n)}
+resource type Single {n:u64}
+drop(x) {let _ = f(x.n)}
+"#;
+
+/// One body serves both depth modes: it selects its counter and limit from the
+/// cleanup mode it is entered in. The same self- and mutually recursive groups
+/// reach exactly 1,024 activations in foreground and exactly 64 inside a
+/// finalizer, also when that finalizer runs under 1,000 foreground frames that
+/// call the same group (the foreground counter read in cleanup mode fails at once;
+/// the foreground limit applied to the cleanup counter never fails).
+#[test]
+fn one_body_selects_its_mode_counter_and_limit_at_entry() {
+    hirsel_intern::jobs::with_compiler_stack(|| {
+        // Foreground: main and n + 1 group frames.
+        for (group, n, rules) in [
+            ("f", 1022, &[][..]),
+            ("f", 1023, &["LANG-10"][..]),
+            ("even", 1022, &[][..]),
+            ("even", 1023, &["LANG-10"][..]),
+        ] {
+            let source = format!(
+                "{MODES_HEADER}\npub fn main()->Result[(), ()] {{let _ = {group}({n}u64); Ok(())}}"
+            );
+            let sites = if rules.is_empty() {
+                vec![]
+            } else {
+                vec![(
+                    group,
+                    if group == "f" {
+                        "f(n-1u64)"
+                    } else {
+                        "odd(n-1u64)"
+                    },
+                )]
+            };
+            agreement_release(
+                &format!("modes-foreground-{group}-{n}"),
+                &source,
+                rules,
+                None,
+                &sites,
+            );
+        }
+        // Cleanup: the finalizer and n + 1 group frames. `dive` holds
+        // FinalizeBegin/End and calls the group in foreground before and after.
+        for (resource, group, n, rules) in [
+            ("Single", "f", 62, &[][..]),
+            ("Single", "f", 63, &["LANG-10"][..]),
+            ("Even", "even", 62, &[][..]),
+            ("Even", "even", 63, &["LANG-10"][..]),
+        ] {
+            let source = format!(
+                r#"{MODES_HEADER}
+fn dive(n:u64)->u64 {{
+  if n==0u64 {{ let a={group}(3u64); {{ let r={resource}(n:{n}u64); () }}; a+{group}(5u64) }}
+  else {{ 1u64+{group}(1u64)+dive(n-1u64) }}
+}}
+pub fn main()->Result[(), ()] {{let _ = dive(1000u64); Ok(())}}
+"#
+            );
+            let sites = if rules.is_empty() {
+                vec![]
+            } else {
+                vec![(
+                    group,
+                    if group == "f" {
+                        "f(n-1u64)"
+                    } else {
+                        "odd(n-1u64)"
+                    },
+                )]
+            };
+            agreement_release(
+                &format!("modes-cleanup-{group}-{n}"),
+                &source,
+                rules,
+                None,
+                &sites,
+            );
+        }
+        // A task body entered through its dispatcher: its finalizer runs the
+        // group in cleanup mode, then the task runs it in foreground.
+        for (n, rules) in [(62, &[][..]), (63, &["LANG-10"][..])] {
+            let source = format!(
+                r#"{MODES_HEADER}
+pub fn main(rt:Io)->Result[(),GrantError] {{
+  let tasks=io.tasks(rt)?
+  let _=task.scope(tasks, fn(s:Scope)->u64 {{
+    let h=task.async(s, fn()->u64 {{ {{ let r=Even(n:{n}u64); () }}; even(900u64) }})
+    task.await(s, take h)
+  }})
+  Ok(())
+}}
+"#
+            );
+            let sites = if rules.is_empty() {
+                vec![]
+            } else {
+                vec![("even", "odd(n-1u64)")]
+            };
+            agreement_release(&format!("modes-task-{n}"), &source, rules, None, &sites);
+        }
+    });
+}
+
+/// A collection element is finalized by the runtime release walk, without an
+/// inline FinalizeBegin. Its cleanup count alone must select the 64-frame mode.
+#[test]
+fn transition_runtime_release_selects_cleanup_without_an_inline_hold() {
+    hirsel_intern::jobs::with_compiler_stack(|| {
+        for (n, rules, sites) in [
+            (62, &[][..], &[][..]),
+            (63, &["LANG-10"][..], &[("f", "f(n-1u64)")][..]),
+        ] {
+            let source = format!(
+                r#"{MODES_HEADER}
+fn dive(n:u64)->u64 {{
+ if n==0u64 {{ let xs:List[Single]=[Single(n:{n}u64)]; list.len(xs) }}
+ else {{1u64+dive(n-1u64)}}
+}}
+pub fn main()->Result[(),()] {{let _=dive(1000u64); Ok(())}}
+"#
+            );
+            agreement_release(
+                &format!("transition-release-{n}"),
+                &source,
+                rules,
+                None,
+                sites,
+            );
+        }
+    });
+}
+
+/// At dive(0), main plus 1001 dive frames leave exactly 22 admissions.
+/// f(21) fits after either inline or runtime cleanup; f(22) must fail in f.
+#[test]
+fn transition_cleanup_restores_the_exact_foreground_allowance() {
+    hirsel_intern::jobs::with_compiler_stack(|| {
+        for heap in [false, true] {
+            for (n, rules, sites) in [
+                (21, &[][..], &[][..]),
+                (22, &["LANG-10"][..], &[("f", "f(n-1u64)")][..]),
+            ] {
+                let cleanup = if heap {
+                    "{let xs:List[Single]=[Single(n:62u64)]; let _=list.len(xs); ()}"
+                } else {
+                    "{let r=Single(n:62u64); ()}"
+                };
+                let source = format!(
+                    r#"{MODES_HEADER}
+fn dive(n:u64)->u64 {{if n==0u64 {{ {cleanup}; f({n}u64) }} else {{1u64+dive(n-1u64)}}}}
+pub fn main()->Result[(),()] {{let _=dive(1000u64); Ok(())}}
+"#
+                );
+                agreement_release(
+                    &format!("transition-restore-{heap}-{n}"),
+                    &source,
+                    rules,
+                    None,
+                    sites,
+                );
+            }
+        }
+    });
+}
+
+/// The runtime finalizer contains another inline finalizer. Nested cleanup
+/// shares the allowance and must leave the suspended foreground count intact.
+#[test]
+fn transition_nested_inline_cleanup_preserves_the_outer_runtime_finalizer() {
+    hirsel_intern::jobs::with_compiler_stack(|| {
+        for (n, rules, sites) in [
+            (21, &[][..], &[][..]),
+            (22, &["LANG-10"][..], &[("f", "f(n-1u64)")][..]),
+        ] {
+            let source = format!(
+                r#"{MODES_HEADER}
+resource type Nested {{n:u64}}
+drop(x) {{{{let r=Single(n:61u64); ()}}; let _=f(x.n)}}
+fn dive(n:u64)->u64 {{
+ if n==0u64 {{{{let xs:List[Nested]=[Nested(n:62u64)];let _=list.len(xs);()}}; f({n}u64)}}
+ else {{1u64+dive(n-1u64)}}
+}}
+pub fn main()->Result[(),()] {{let _=dive(1000u64); Ok(())}}
+"#
+            );
+            agreement_release(
+                &format!("transition-nested-{n}"),
+                &source,
+                rules,
+                None,
+                sites,
+            );
+        }
+    });
+}
+
+/// The failed finalizer must retire its cleanup token before the sibling uses
+/// all 64 cleanup frames. The print occurs only after the sibling's recursion.
+#[test]
+fn transition_failed_finalizer_retires_before_sibling_cleanup() {
+    hirsel_intern::jobs::with_compiler_stack(|| {
+        let source = r#"
+fn f(n:u64)->u64 {if n==0u64 {0u64}else {1u64+f(n-1u64)}}
+resource type Trace {stdout:Stdout,n:u64}
+drop(x) {let _=f(x.n);let _=out.print(x.stdout,"sibling\n")}
+fn dive(n:u64,stdout:Stdout)->u64 {
+ if n==0u64 {let sibling:List[Trace]=[Trace(stdout:stdout,n:62u64)];let failing:List[Trace]=[Trace(stdout:stdout,n:63u64)];0u64}
+ else {1u64+dive(n-1u64,stdout)}
+}
+pub fn main(rt:Io)->Result[(),GrantError] {let stdout=io.stdout(rt)?;let _=dive(1000u64,stdout);Ok(())}
+"#;
+        agreement_release(
+            "transition-failed-sibling",
+            source,
+            &["LANG-10"],
+            Some(b"sibling\n"),
+            &[("f", "f(n-1u64)")],
+        );
+    });
+}
+
+/// arena.with contributes its primitive invocation and a callback invocation.
+/// At the deepest f frame, finalizer + f frames + those two total 64 or 65.
+#[test]
+fn transition_runtime_callback_inherits_cleanup_mode() {
+    hirsel_intern::jobs::with_compiler_stack(|| {
+        for (n, rules, sites) in [
+            (60, &[][..], &[][..]),
+            (61, &["LANG-10"][..], &[("f", "arena.with(")][..]),
+        ] {
+            let source = format!(
+                r#"
+fn f(n:u64)->u64 {{if n==0u64 {{arena.with(fn(a:Arena)->u64 {{0u64}})}}else {{1u64+f(n-1u64)}}}}
+resource type Callback {{n:u64}}
+drop(x) {{let _=f(x.n)}}
+fn dive(n:u64)->u64 {{if n==0u64 {{let xs:List[Callback]=[Callback(n:{n}u64)];list.len(xs)}}else {{1u64+dive(n-1u64)}}}}
+pub fn main()->Result[(),()] {{let _=dive(1000u64);Ok(())}}
+"#
+            );
+            agreement_release(
+                &format!("transition-callback-{n}"),
+                &source,
+                rules,
+                None,
+                sites,
+            );
+        }
+    });
+}
+
+/// A finalizer joins a task before consuming its cleanup allowance. The child
+/// independently reaches 1023 foreground frames, then its entry completes.
+/// The runtime entered-driver Pending path has a separate unit-test oracle.
+#[test]
+fn transition_awaiting_finalizer_and_sibling_keep_task_local_allowances() {
+    hirsel_intern::jobs::with_compiler_stack(|| {
+        for (n, rules, sites) in [
+            (62, &[][..], &[][..]),
+            (63, &["LANG-10"][..], &[("f", "f(n-1u64)")][..]),
+        ] {
+            let source = format!(
+                r#"{MODES_HEADER}
+resource type Wait {{tasks:Tasks,n:u64}}
+drop(x) {{
+ let _=task.scope(x.tasks,fn(s:Scope)->u64 {{
+   let h=task.async(s,fn()->u64 {{f(1021u64)}})
+   task.await(s,take h)
+ }})
+ let _=f(x.n)
+}}
+pub fn main(rt:Io)->Result[(),GrantError] {{
+ let tasks=io.tasks(rt)?
+ let _=task.scope(tasks,fn(s:Scope)->u64 {{
+   let h=task.async(s,fn()->u64 {{{{let xs:List[Wait]=[Wait(tasks:tasks,n:{n}u64)];let _=list.len(xs);()}}; f(1022u64)}})
+   task.await(s,take h)
+ }})
+ Ok(())
+}}
+"#
+            );
+            agreement_release(
+                &format!("transition-await-{n}"),
+                &source,
+                rules,
+                None,
+                sites,
+            );
         }
     });
 }

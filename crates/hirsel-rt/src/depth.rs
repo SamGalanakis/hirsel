@@ -193,6 +193,66 @@ pub unsafe extern "C" fn hirsel_rt_v2_structural_hash(
 mod tests {
     use super::*;
 
+    /// A foreground token can retire while nested holds remain live. Exercise
+    /// both the core token rule and the native assembly retirement path.
+    #[test]
+    fn foreground_retirement_during_nested_cleanup_restores_the_full_allowance() {
+        for native in [false, true] {
+            // SAFETY: BodyRun owns the live task; every admitted token and hold
+            // is retired exactly once before its terminal state is inspected.
+            let outcome = crate::host::BodyRun::new(1, false).run(
+                |_| {},
+                move |ctx| unsafe {
+                    let token = if native {
+                        assert_eq!(hirsel_rt_v2_depth_enter(ctx), STATUS_OK);
+                        None
+                    } else {
+                        Some((*ctx).activations.admit().unwrap())
+                    };
+                    crate::finalize::hirsel_rt_v2_finalize_begin(ctx, 0);
+                    crate::finalize::hirsel_rt_v2_finalize_begin(ctx, 0);
+                    if let Some(token) = token {
+                        (*ctx).activations.retire(token);
+                    } else {
+                        hirsel_rt_v2_depth_leave(ctx);
+                    }
+                    assert_eq!((*ctx).activations.live(), (0, 0));
+                    crate::finalize::hirsel_rt_v2_finalize_end(ctx, 0);
+                    assert_eq!(hirsel_rt_v2_depth_enter(ctx), STATUS_OK);
+                    assert_eq!((*ctx).activations.live(), (0, 1));
+                    hirsel_rt_v2_depth_leave(ctx);
+                    crate::finalize::hirsel_rt_v2_finalize_end(ctx, 0);
+                    assert_eq!((*ctx).activations.live(), (0, 0));
+                    assert_eq!((*ctx).cleanup_depth, 0);
+                    for _ in 0..hirsel_core_contract::depth::FOREGROUND_LIMIT {
+                        assert_eq!(hirsel_rt_v2_depth_enter(ctx), STATUS_OK);
+                    }
+                    assert_eq!(hirsel_rt_v2_depth_enter(ctx), STATUS_FAILURE);
+                    assert_eq!((*ctx).activations.live(), (1024, 0));
+                    for _ in 0..hirsel_core_contract::depth::FOREGROUND_LIMIT {
+                        hirsel_rt_v2_depth_leave(ctx);
+                    }
+                    let tokens: Vec<_> = (0..64)
+                        .map(|_| (*ctx).activations.admit_finalizer().unwrap())
+                        .collect();
+                    assert!((*ctx).activations.admit_finalizer().is_none());
+                    assert!((*ctx).activations.admit().is_none());
+                    assert_eq!((*ctx).activations.live(), (0, 64));
+                    for token in tokens {
+                        (*ctx).activations.retire(token);
+                    }
+                    // Terminal state is observed directly, before any next entry.
+                    assert_eq!((*ctx).activations.live(), (0, 0));
+                    assert_eq!((*ctx).cleanup_depth, 0);
+                    assert_eq!((*ctx).invocation_depth, 0);
+                    assert_eq!((*ctx).shield, 0);
+                    STATUS_OK
+                },
+            );
+            assert_eq!(outcome.ended, Ok(STATUS_OK));
+        }
+    }
+
     #[test]
     fn fixed_storage_preserves_both_allowances_tokens_and_sites_at_the_bound() {
         use hirsel_core_contract::depth::{CLEANUP_LIMIT, FOREGROUND_LIMIT};

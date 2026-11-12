@@ -36,9 +36,11 @@ fn make(n: u64) -> Result[List[u64], Capacity] {
 Every operation that allocates admits its charge before any write: `used + n ≤ limit`
 gives `used += n`; otherwise the operation fails with `Capacity` and nothing has been
 allocated ([T5.6](ownership.md#own-26-the-transition-table)). Admission is the commit point
-of every allocating operation ([FAIL-3](failure.md#fail-3-commit-points)). An operation that
-may allocate states it in its type: its result is `Result[_, Capacity]`, or an error type
-that includes `Capacity`. No other operation allocates.
+of every allocating operation ([FAIL-3](failure.md#fail-3-commit-points)). Every core
+operation that may allocate says so in its result type, `Result[_, Capacity]` or an error
+type that holds `Capacity` ([core](core.md)). A user function may allocate and handle the
+`Capacity` itself, so a result type without `Capacity` does not show that a function
+allocates nothing.
 
 ```hirsel
 fn grow(mut xs: List[u64]) -> Result[(), Capacity] { list.push(mut xs, 1) }
@@ -73,7 +75,8 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 | `Map[K, V]` storage | capacity × (key size + value size + 16), rounded up to 8 |
 | counted node | payload size + 8 |
 | region allocation | its byte count, rounded up to 8 |
-| task | its environment's size + 256 |
+| task | 256 + 32 for its primary cause |
+| resource value | 32 for one cause, besides its storage |
 | channel | capacity × item size + 64 |
 
 Scalar sizes are their widths; `bool` and `char` are 1 and 4; an own reference to a block

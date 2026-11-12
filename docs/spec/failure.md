@@ -114,7 +114,9 @@ whose continuation never runs ([T6.3](ownership.md#own-26-the-transition-table))
 A failure keeps its primary cause. A further failure during cleanup (a finalizer failing,
 FAIL-12) appends its cause to the chain in the order it happens, and cleanup continues with
 the next value. The chain is delivered whole to the joiner (FAIL-14). Cleaning never
-replaces the primary cause.
+replaces the primary cause, and no cause is dropped. Storage for every cause a task can
+record is admitted in advance, with the task and with each resource
+([MEM-26](budgets.md#mem-26-logical-charges)), so recording a cause never admits.
 
 ### FAIL-11: Resources
 

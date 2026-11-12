@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Measure one already-built release compiler against a frozen std source.
+"""Measure one already-built release compiler against this checkout's stdlib.
 
-    tools/fresh-std-sample --toolchain DIR --source FROZEN/stdlib/std@1/hirsel.json \
+    tools/fresh-std-sample --toolchain DIR \
         --commit BUILT_SHA --cpu 8 --output NEW_DIRECTORY
 
 Build every compared compiler with the same release profile and toolchain.
-Use the same frozen source and CPU for every sample. This runs only fresh std,
-once, with absent products, none@1, caches off, jobs1 and 2 GiB.
+Use this checkout's stdlib and the same CPU for every compared compiler.
+This runs only fresh std, once, with absent products, none@1, caches off, jobs1 and 2 GiB.
 Samples using this command share a per-user lock; the wall timer starts after admission.
 """
 import argparse
@@ -16,13 +16,13 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import time
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--toolchain', type=Path, required=True)
-    parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--commit', required=True, help='commit built into the supplied release bundle')
     parser.add_argument('--cpu', type=int, required=True)
     parser.add_argument('--output', type=Path, required=True, help='new evidence directory')
@@ -33,9 +33,10 @@ def main():
     loader.exec_module(trend)
     if args.cpu not in os.sched_getaffinity(0) or args.cpu in trend.FORBIDDEN:
         parser.error('CPU must be available and outside 12-15 and 28-31')
-    toolchain, source = args.toolchain.resolve(), args.source.resolve()
+    toolchain = args.toolchain.resolve()
+    source = root / 'stdlib/std@1/hirsel.json'
     if not (toolchain / 'hirsel').is_file() or not source.is_file():
-        parser.error('release hirsel binary and frozen source manifest must exist')
+        parser.error('release hirsel binary and checkout std manifest must exist')
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     runtime = Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'))
@@ -43,6 +44,7 @@ def main():
     with (lock_directory / f'hirsel-fresh-std-{os.getuid()}.lock').open('a') as lock:
         print('Waiting for the shared fresh-std measurement lock.', flush=True)
         fcntl.flock(lock, fcntl.LOCK_EX)
+        source_revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
         started = time.monotonic()
         values, error = trend.measure(toolchain, source, args.cpu, output, True)
         elapsed = time.monotonic() - started
@@ -55,7 +57,7 @@ def main():
         if isinstance(report, dict) and report.get('schema') == 1 and 'phases' in report:
             reports.append(report)
     report = reports[-1] if reports else {}
-    result = dict(sha=args.commit, cpu=args.cpu, source=str(source), values=values,
+    result = dict(sha=args.commit, source_revision=source_revision, cpu=args.cpu, source=str(source), values=values,
                   phase_calls={phase['phase']: phase['calls'] for phase in report.get('phases', [])},
                   process_cpu_ns=report.get('process_cpu_ns'),
                   compiler_wall_ns=report.get('wall_ns'),

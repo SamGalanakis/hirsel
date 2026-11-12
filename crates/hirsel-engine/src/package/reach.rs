@@ -23,6 +23,54 @@ pub(crate) struct Reach {
     pub unreached: Arc<BTreeSet<DefId>>,
 }
 
+impl crate::QueryEngine {
+    /// A source-only request can add text after package loading computed reach.
+    /// Include that request's source seeds before it can demand installed heads.
+    pub(crate) fn reach_source(
+        &mut self,
+        file: FileId,
+        context: &FileContext,
+    ) -> Result<(), crate::QueryError> {
+        if self.unreached_installed.is_empty() {
+            return Ok(());
+        }
+        let mut files: Vec<_> = self
+            .indexed_sources
+            .iter()
+            .map(|(file, (context, _))| (*file, context.clone()))
+            .collect();
+        files.push((file, context.clone()));
+        let packages: BTreeSet<_> = files
+            .iter()
+            .filter(|(file, _)| self.installed_sources.contains(file))
+            .map(|(_, context)| context.package.clone())
+            .collect();
+        let mut images = BTreeMap::new();
+        for package in packages {
+            let image = self
+                .result_store
+                .as_ref()
+                .ok_or(crate::QueryError::NotImplemented)?
+                .installed_package(&package, self.store_identity, &mut |_| true)
+                .map_err(|message| {
+                    crate::QueryError::Operational(hirsel_types::OperationalFailure {
+                        operation: "installed package".into(),
+                        message,
+                    })
+                })?;
+            images.insert(package, image);
+        }
+        let reach = reached_files(&images, &files, &self.sources);
+        self.unreached_installed = reach.unreached;
+        for (file, context) in files {
+            if reach.files.contains(&file) {
+                self.index_installed_source(file, &context, true)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn reached_files(
     images: &BTreeMap<PackageId, Arc<InstalledPackage>>,
     files: &[(FileId, FileContext)],

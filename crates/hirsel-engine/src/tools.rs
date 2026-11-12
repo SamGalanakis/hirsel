@@ -345,6 +345,7 @@ pub fn source_check_request(
     file: FileId,
     context: &FileContext,
 ) -> Result<CheckOutput, QueryError> {
+    engine.reach_source(file, context)?;
     match engine.index_source(file, context) {
         Ok(()) => {}
         Err(QueryError::Diagnostics(diagnostics)) => {

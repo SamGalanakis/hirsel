@@ -2,8 +2,7 @@
 //! llvm, lower, rt, code_store), linked
 //! as one binary. A module named `<crate>_<file>` holds what was
 //! `crates/hirsel-<crate>/tests/it/<file>.rs`, and `<crate>_<module>` the
-//! driver- or interpreter-using unit tests of `src/<module>`; hirsel-rc's suites
-//! link separately (tests/rc).
+//! driver- or interpreter-using unit tests of `src/<module>`.
 
 hirsel_guard::install!();
 

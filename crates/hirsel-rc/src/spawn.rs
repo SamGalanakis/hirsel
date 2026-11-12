@@ -4,7 +4,7 @@
 type Function = (hirsel_syntax::DefPath, hirsel_syntax::ContentHash);
 use crate::insert::Lay;
 use hirsel_lir::{ir::*, layout_types::LayoutTable, stage::Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 pub(crate) use hirsel_lir::runtime_abi::{
     SPAWN_IMMEDIATE_AWAIT as IMMEDIATE, SPAWN_OP_FREE as OP_FREE,
@@ -167,97 +167,6 @@ pub fn settle_operation_freedom(
         }
     }
     Ok(owners.into_iter().zip(safe).collect())
-}
-
-pub(crate) fn op_free(units: &[LirUnit<Value>], table: &LayoutTable) -> HashMap<Symbol, bool> {
-    let symbols: Vec<_> = units
-        .iter()
-        .map(|u| Symbol {
-            kind: SymbolKind::Function,
-            definition: u.header.definition.clone(),
-            instance: Some(u.header.instance),
-        })
-        .collect();
-    let indices: HashMap<_, _> = symbols
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(i, s)| (s, i))
-        .collect();
-    let mut safe = vec![true; units.len()];
-    let mut users = vec![Vec::new(); units.len()];
-    let lay = Lay(table);
-    for (index, u) in units.iter().enumerate() {
-        safe[index] = u
-            .values
-            .iter()
-            .all(|v| !lay.anchored(u.types[v.ty.index()].layout))
-            && u.instructions.iter().all(|i| {
-                matches!(
-                    i,
-                    Inst::Const { .. }
-                        | Inst::FunctionRef { .. }
-                        | Inst::ReadStatic { .. }
-                        | Inst::Unary { .. }
-                        | Inst::Binary { .. }
-                        | Inst::Compare { .. }
-                        | Inst::Convert { .. }
-                        | Inst::IntArith { .. }
-                        | Inst::MulAdd { .. }
-                        | Inst::ScalarUnary { .. }
-                        | Inst::Check { .. }
-                        | Inst::Read { .. }
-                        | Inst::Copy { .. }
-                        | Inst::Store { .. }
-                        | Inst::Replace { .. }
-                        | Inst::StorageLive { .. }
-                        | Inst::StorageDead { .. }
-                        | Inst::EndScope { .. }
-                        | Inst::Address { .. }
-                        | Inst::Construct { .. }
-                        | Inst::Closure { .. }
-                        | Inst::Weaken { .. }
-                        | Inst::BeginLoan { .. }
-                        | Inst::EndLoan { .. }
-                        | Inst::BindOrigin { .. }
-                        | Inst::BindFields { .. }
-                        | Inst::EndOrigin { .. }
-                        | Inst::Drop { .. }
-                        | Inst::Recast { .. }
-                )
-            })
-            && table.fn_abis[u.header.abi.0 as usize]
-                .result
-                .as_ref()
-                .is_none_or(|r| lay.trivial(r.layout));
-        for call in &u.tables.calls {
-            match call.callee {
-                Callee::Direct(s) | Callee::Bound { code: s, .. } => {
-                    if let Some(&callee) = indices.get(&u.tables.symbols[s.index()]) {
-                        users[callee].push(index);
-                    } else {
-                        safe[index] = false;
-                    }
-                }
-                Callee::Indirect(_) | Callee::Operation(_) => safe[index] = false,
-            }
-        }
-    }
-    // Same widening/worklist structure as closure_calls::discover: each body
-    // changes at most once. A recursive pure SCC is safe; one op poisons it.
-    let mut queue: std::collections::VecDeque<_> = safe
-        .iter()
-        .enumerate()
-        .filter_map(|(i, s)| (!s).then_some(i))
-        .collect();
-    while let Some(callee) = queue.pop_front() {
-        for &user in &users[callee] {
-            if std::mem::replace(&mut safe[user], false) {
-                queue.push_back(user);
-            }
-        }
-    }
-    symbols.into_iter().zip(safe).collect()
 }
 
 /// A narrow normal-path proof. The first call after spawn must await its exact

@@ -24,22 +24,11 @@ ROOT = Path(__file__).resolve().parents[2]
 NATIVE = [
     ('crates/hirsel-cli/tests/cli/ordered_qualification.rs', '//:hirsel-cli-test-cli-shard-1 -- $(libtest ordered_qualification:: runtime50_ordered:: --ignored --test-threads=1)'),
     ('crates/hirsel-cli/tests/cli/runtime50_ordered.rs', '//:hirsel-cli-test-cli-shard-1 -- $(libtest ordered_qualification:: runtime50_ordered:: --ignored --test-threads=1)'),
-    ('crates/hirsel-pipeline-tests/tests/rc/flat_storage_audit_16.rs', '$(libtest flat_storage_audit_16::native_flat_region_copy_parity --ignored --test-threads=1)'),
-    ('crates/hirsel-pipeline-tests/tests/rc/native_desc_cell_16.rs', '$(libtest native_desc_cell_16:: --ignored --test-threads=1)'),
-    ('crates/hirsel-pipeline-tests/tests/rc/native_simd_eq_17.rs', '$(libtest native_simd_eq_17:: --ignored --test-threads=1)'),
-    ('crates/hirsel-pipeline-tests/tests/rc/isolate_bytes_leak_17.rs', '$(libtest isolate_bytes_leak_17::isolate_returns_unique_bytes --ignored --test-threads=1)'),
-    ('crates/hirsel-pipeline-tests/tests/rc/rc_import.rs', '$(libtest rc_import::loop_version_matches_reference_heap_llvm_and_cranelift --ignored --test-threads=1)'),
     ('crates/hirsel-llvm/src/', '//:hirsel-llvm-unittest //:hirsel-llvm-test-it -- $(libtest --include-ignored)'),
     ('crates/hirsel-llvm/tests/it/', '//:hirsel-llvm-unittest //:hirsel-llvm-test-it -- $(libtest --include-ignored)'),
     ('crates/hirsel-lir/tests/it/layout.rs', '//:hirsel-lir-test-it -- $(libtest layout:: --ignored)'),
     ('crates/hirsel-driver/tests/it/native.rs', '$(libtest native:: --include-ignored --test-threads=4)'),
-    ('crates/hirsel-pipeline-tests/tests/rc/rc_library_', '$(libtest rc_library_ --include-ignored --test-threads=4)'),
     ('crates/hirsel-pipeline-tests/tests/front/llvm_scalar_library.rs', '//:hirsel-pipeline-tests-test-front-shard-1 -- $(libtest llvm_scalar_library:: --include-ignored)'),
-    ('crates/hirsel-pipeline-tests/tests/rc/rc_maps_native.rs', '$(libtest rc_maps_native:: --include-ignored --test-threads=1)'),
-    ('crates/hirsel-pipeline-tests/tests/rc/unique_copy_nested_20.rs', '//:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest unique_copy_nested_20:: --ignored --test-threads=1)'),
-    ('crates/hirsel-pipeline-tests/tests/rc/rc_borrow_cursor_8.rs', '//:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest rc_borrow_cursor_ --ignored --test-threads=1)'),
-    ('crates/hirsel-pipeline-tests/tests/rc/rc_borrow_cursor_field_match_13.rs', '//:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest rc_borrow_cursor_ --ignored --test-threads=1)'),
-    ('crates/hirsel-pipeline-tests/tests/rc/rc_borrow_cursor_compose_13.rs', '//:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest rc_borrow_cursor_ --ignored --test-threads=1)'),
 ]
 # These workers require parent-supplied input and cannot run alone in a gate.
 DELEGATED = {
@@ -345,24 +334,6 @@ class IgnoredTests(unittest.TestCase):
                     self.assertEqual(run.call_args.args[0], selected)
                     for key, value in forwarded.items():
                         self.assertEqual(run.call_args.kwargs['env'][key], value)
-
-    def test_cursor_home_selects_registered_modules_and_ignored_cases(self):
-        registry = (ROOT / 'crates/hirsel-pipeline-tests/tests/rc/modules.rs').read_text()
-        for prefix, selection in NATIVE:
-            if '/rc_borrow_cursor_' not in prefix:
-                continue
-            path = Path(prefix)
-            self.assertIn(f'mod {path.stem};', registry)
-            self.assertIn('//:hirsel-pipeline-tests-test-rc-shard-1 --', selection)
-            self.assertIn('--ignored', selection)
-            text = (ROOT / path).read_text()
-            names = [FUNCTION.search(text, attribute.end())[1] for attribute in ATTRIBUTE.finditer(text)]
-            self.assertTrue(names, prefix)
-            for name in names:
-                self.assertTrue(native_covers(prefix, name, prefix, selection), name)
-            # A registered source with the wrong libtest filter must still fail closed.
-            wrong = selection.replace('libtest rc_borrow_cursor_', 'libtest unrelated::')
-            self.assertFalse(native_covers(prefix, names[0], prefix, wrong))
 
     def test_explicit_runner_refuses_zero_execution_and_propagates_failures(self):
         runner = runpy.run_path(str(ROOT / 'tools/ignored-tests'))

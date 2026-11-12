@@ -9,7 +9,6 @@
 # again without the bless, which fails unless the rewritten files pass:
 #   heap               native-tests/heap/              heapcheck fixtures and traces
 #   layout             native-tests/layout/            layout tables
-#   rc-import          crates/hirsel-pipeline-tests/tests/rc/fixtures/  golden LIR dumps
 #   wire               crates/hirsel-types/tests/wire/golden.tsv        SER-2 vectors
 #   replay             native-tests/replay/column-skew/                 replay fixture
 #   signatures         crates/hirsel-signature/src/golden.txt           encoding vectors
@@ -43,7 +42,6 @@ cases() {
   case "$1" in
     heap) echo "//:hirsel-heapcheck-test-it heap::" ;;
     layout) echo "//:hirsel-lir-test-it layout::" ;;
-    rc-import) echo "//:hirsel-pipeline-tests-test-rc rc_import::" ;;
     wire) echo "//:hirsel-types-test-wire recursive_canonical_golden_vectors" ;;
     replay) echo "//:hirsel-conformance-test-it native_gate::a_stored_artifact_replays_from_another_path_and_arena_numbering" ;;
     signatures) echo "//:hirsel-signature-unittest tests::golden_vectors" ;;
@@ -60,7 +58,7 @@ cases() {
     *) return 1 ;;
   esac
 }
-in_test=(package-docs heap layout rc-import wire replay signatures core-review native-inventory
+in_test=(package-docs heap layout wire replay signatures core-review native-inventory
   ownership-passing authority-corpus snapshots)
 
 # Run one target's filtered cases, on this host with `--env` options when

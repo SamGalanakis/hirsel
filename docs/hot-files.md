@@ -97,7 +97,6 @@ is excluded: its edits are not independent registrations.
 | `crates/hirsel-interp/tests/it/main.rs` | 3 | Line-set `modules.rs` |
 | `crates/hirsel-free/tests/it/main.rs` | 3 | Line-set `modules.rs` |
 | `crates/hirsel-{validate,parser,lir,conformance}/tests/it/main.rs` | 2 each | Line-set `modules.rs` |
-| `crates/hirsel-pipeline-tests/tests/rc/main.rs` | 2 | Line-set `modules.rs` |
 | `crates/hirsel-{object-storage,code-store}/tests/it/main.rs` | 2 each | Actual test bodies, not registries; unchanged |
 | `crates/hirsel-driver/tests/it-precheck/main.rs` | 2 | Historical path, removed on main |
 | `crates/hirsel-modes/src/ownership/tests/passing.txt` | 2 | Historical path, moved to hirsel-ownership |

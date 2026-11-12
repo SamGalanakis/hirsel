@@ -2162,30 +2162,6 @@
           1792510498
         ]
       },
-      "hirsel-driver-example-native_fixture_snapshot": {
-        "cpu_count": 2,
-        "mean_cores": 1.8060905924053885,
-        "memory_kb": 3014656,
-        "p95_cores": 1.9097534772182254,
-        "p99_peak_bytes": 902438912,
-        "phases": {
-          "link [pic]": {
-            "cpu_seconds": 1686.564,
-            "max_wall_seconds": 67.437,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 51,
-            "wall_seconds": 940.582
-          }
-        },
-        "pss_peak_bytes": 2537972736,
-        "samples": 51,
-        "window": [
-          1794277001,
-          1794361168
-        ]
-      },
       "hirsel-driver-example-package_profile": {
         "cpu_count": 1,
         "mean_cores": 1.518541862694197,
@@ -4663,81 +4639,6 @@
           1794362107
         ]
       },
-      "hirsel-native-batch": {
-        "cpu_count": 1,
-        "mean_cores": 1.422516248323574,
-        "memory_kb": 458752,
-        "p95_cores": 1.807879658952497,
-        "p99_peak_bytes": 149237760,
-        "phases": {
-          "check": {
-            "cpu_seconds": 69.216,
-            "max_wall_seconds": 1.654,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 103,
-            "wall_seconds": 85.095
-          },
-          "diag": {
-            "cpu_seconds": 41.744,
-            "max_wall_seconds": 1.883,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 61,
-            "wall_seconds": 51.985
-          },
-          "metadata [pic]": {
-            "cpu_seconds": 229.839,
-            "max_wall_seconds": 2.532,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 230,
-            "wall_seconds": 280.423
-          },
-          "rlib [pic]": {
-            "cpu_seconds": 1600.239,
-            "max_wall_seconds": 12.183,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 226,
-            "wall_seconds": 1029.03
-          }
-        },
-        "pss_peak_bytes": 355291136,
-        "samples": 620,
-        "window": [
-          1794277112,
-          1794362084
-        ]
-      },
-      "hirsel-native-batch-unittest-harness": {
-        "cpu_count": 2,
-        "mean_cores": 1.7094013444289984,
-        "memory_kb": 1376256,
-        "p95_cores": 1.851666564417178,
-        "p99_peak_bytes": 448479232,
-        "phases": {
-          "link [pic]": {
-            "cpu_seconds": 1795.316,
-            "max_wall_seconds": 25.917,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 63,
-            "wall_seconds": 1059.851
-          }
-        },
-        "pss_peak_bytes": 1121864704,
-        "samples": 63,
-        "window": [
-          1794276935,
-          1794361133
-        ]
-      },
       "hirsel-native-build-bin-hirsel-native-build": {
         "cpu_count": 1,
         "mean_cores": 1.5967690637758694,
@@ -5414,30 +5315,6 @@
         "window": [
           1794277037,
           1794361149
-        ]
-      },
-      "hirsel-pipeline-tests-test-rc-harness": {
-        "cpu_count": 2,
-        "mean_cores": 2.996487108755268,
-        "memory_kb": 2555904,
-        "p95_cores": 3.3067613746537394,
-        "p99_peak_bytes": 1559158784,
-        "phases": {
-          "link [pic]": {
-            "cpu_seconds": 13844.34,
-            "max_wall_seconds": 165.445,
-            "requested_cpus": [
-              2
-            ],
-            "samples": 61,
-            "wall_seconds": 4627.248
-          }
-        },
-        "pss_peak_bytes": 2147662848,
-        "samples": 61,
-        "window": [
-          1794277110,
-          1794361152
         ]
       },
       "hirsel-product-codec": {
@@ -13074,39 +12951,6 @@
           1794362109
         ]
       },
-      "hirsel-native-batch": {
-        "cpu_count": 1,
-        "mean_cores": 1.417639957100429,
-        "memory_kb": 458752,
-        "p95_cores": 1.777570786516854,
-        "p99_peak_bytes": 142610432,
-        "phases": {
-          "metadata [pic]": {
-            "cpu_seconds": 29.155,
-            "max_wall_seconds": 2.695,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 24,
-            "wall_seconds": 36.801
-          },
-          "rlib [pic]": {
-            "cpu_seconds": 228.6,
-            "max_wall_seconds": 9.887,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 24,
-            "wall_seconds": 154.292
-          }
-        },
-        "pss_peak_bytes": 338582528,
-        "samples": 48,
-        "window": [
-          1794323841,
-          1794362090
-        ]
-      },
       "hirsel-native-cache": {
         "cpu_count": 2,
         "mean_cores": 1.6448815125155625,
@@ -17712,12 +17556,6 @@
     {
       "phase": "link [pic]",
       "profile": "dev",
-      "samples": 10,
-      "target": "hirsel-driver-example-native_fixture_snapshot"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
       "samples": 5,
       "target": "hirsel-driver-example-package_profile"
     },
@@ -17750,12 +17588,6 @@
       "profile": "dev",
       "samples": 1,
       "target": "hirsel-native"
-    },
-    {
-      "phase": "rlib [pic]",
-      "profile": "dev",
-      "samples": 2,
-      "target": "hirsel-native-batch"
     },
     {
       "phase": "link [pic]",

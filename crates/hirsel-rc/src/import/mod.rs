@@ -36,12 +36,11 @@ mod payload_receipts;
 
 use crate::PassError;
 use crate::instance::{Actuals, InstanceError, InstanceId, Instances, Program, substitute};
-use crate::library::builder::Layouts as _;
 use crate::normalize::{Declined, Facts, Home, LoopPlan, LoopSite, NormalizeError};
 use hirsel_core_contract::{OperationId, Passing};
 use hirsel_layout::layout::LayoutBuilder;
 use hirsel_lir::abi_types::{CallableShape, FnAbiId};
-use hirsel_lir::discharge::{Discharge, Discharged, Form};
+use hirsel_lir::discharge::{Discharged, Form};
 use hirsel_lir::effect::Effects;
 use hirsel_lir::ir::{
     AddressBase, AddressId, AddressInfo, ArgumentValue, BinaryOp, Block, BlockId, BlockKind,
@@ -53,9 +52,7 @@ use hirsel_lir::ir::{
     SourceAnchor, SourceAnchorId, SwitchArm, Symbol, SymbolId, SymbolKind, Terminator, UnaryOp,
     UnitHeader, UnitOrigin, ValueId, ValueInfo, ValueRepr,
 };
-use hirsel_lir::layout_types::{
-    CopyRecipe, LayoutId, LayoutKind, LayoutTable, SizeSpec, TargetSpec,
-};
+use hirsel_lir::layout_types::{CopyRecipe, LayoutId, LayoutKind, LayoutTable, SizeSpec};
 use hirsel_lir::persistent::{Element, PVec};
 use hirsel_lir::stage::{StageKind, Value};
 use hirsel_span::Span;
@@ -93,39 +90,7 @@ fn malformed<T>(what: impl Into<String>) -> R<T> {
     Err(PassError::Malformed(what.into()))
 }
 
-/// A lowered program: its instances, their loop plans and declined
-/// published sites, one Value unit per instance, and the layout table the
-/// units name.
-pub struct Lowered {
-    pub source: SourceData,
-    pub instances: Instances,
-    pub plans: Vec<Option<LoopPlan>>,
-    pub declined: Vec<(InstanceId, Declined)>,
-    pub units: Vec<LirUnit<Value>>,
-    pub table: LayoutTable,
-    /// The static data of every constant a unit reads (`ReadStatic`).
-    pub statics: Vec<hirsel_lir::statics::StaticData>,
-    /// Original signature/placement proof owner of every unit. Specialization
-    /// appends Value units without adding source instances: a unit index must
-    /// be mapped through this table before indexing `instances`.
-    pub unit_origins: Vec<InstanceId>,
-    /// Each unit's own instance key, whose digest is its instance.
-    pub unit_keys: Vec<hirsel_layout::instance::InstanceKey>,
-    /// Explicit semantic owner of each native definition. None denotes a planned
-    /// library body covered by the shared runtime node in ProgramRevision.
-    pub semantic_owners: BTreeMap<DefPath, Option<DefPath>>,
-    /// Source bodies available for inlining in every calling partition.
-    pub inline_instances: std::collections::BTreeSet<ContentHash>,
-    /// Per unit imported under a nonempty plan: the instance, the
-    /// definition, the reference import that kept every check, and the unit
-    /// as discharged, for `validate_discharge`. The unit then continues
-    /// through `units` like any other.
-    pub discharged: Vec<DischargedUnit>,
-    /// Accepted source sites keyed by native definition, including derived forms.
-    pub native_discharge: Discharge,
-}
-
-/// One unit imported twice, as `Lowered::discharged` describes.
+/// One unit imported twice: its reference import and the unit as discharged.
 pub struct DischargedUnit {
     pub instance: InstanceId,
     pub definition: DefPath,
@@ -154,205 +119,6 @@ impl std::fmt::Display for LowerError {
             Self::Static(path, error) => write!(f, "static {path}: {error:?}"),
         }
     }
-}
-
-/// Expand, normalize and import a whole program for one target.
-pub fn lower(program: &Program, target: &TargetSpec) -> Result<Lowered, LowerError> {
-    lower_with_options(program, target, &crate::flat_walk::Options::default())
-}
-
-/// Import with a matrix-selectable variable-flat loop rewrite.
-pub fn lower_with_options(
-    program: &Program,
-    target: &TargetSpec,
-    flat_walk: &crate::flat_walk::Options,
-) -> Result<Lowered, LowerError> {
-    lower_discharging(program, target, flat_walk, &Discharge::default())
-}
-
-/// `lower_with_options` under a PS-13 check-removal plan: each planned
-/// definition's units import without its licensed checks, after a reference
-/// import that keeps them all (`Lowered::discharged`).
-pub fn lower_discharging(
-    program: &Program,
-    target: &TargetSpec,
-    flat_walk: &crate::flat_walk::Options,
-    discharge: &Discharge,
-) -> Result<Lowered, LowerError> {
-    lower_with_roots(program, target, flat_walk, discharge, true, &[])
-}
-
-/// Batch reference import with explicit specialization policy and library roots.
-/// Demand queries import individual instances through `import_instance`. This
-/// middle-end oracle enters at every source function so a test can read any
-/// unit; native builds pass their launch entries to `lower_with_sources`.
-pub fn lower_with_roots(
-    program: &Program,
-    target: &TargetSpec,
-    flat_walk: &crate::flat_walk::Options,
-    discharge: &Discharge,
-    scoped_specialization: bool,
-    roots: &[crate::library::Request],
-) -> Result<Lowered, LowerError> {
-    lower_with_sources(
-        program,
-        target,
-        flat_walk,
-        discharge,
-        scoped_specialization,
-        &crate::instance::source_functions(program),
-        roots,
-        &mut |_, _| Ok(Default::default()),
-    )
-}
-
-#[derive(Default)]
-pub struct SourceData {
-    pub expectations: BTreeMap<(DefPath, ContentHash), crate::sealed_source::SourceExpectation>,
-    pub receipts:
-        BTreeMap<(DefPath, ContentHash), hirsel_lir::sealed_payload_source::ReceiptSource>,
-}
-
-pub fn lower_with_sources(
-    program: &Program,
-    target: &TargetSpec,
-    flat_walk: &crate::flat_walk::Options,
-    discharge: &Discharge,
-    scoped_specialization: bool,
-    entries: &std::collections::BTreeSet<DefPath>,
-    roots: &[crate::library::Request],
-    source: &mut impl FnMut(&mut Instances, &mut LayoutBuilder<'_>) -> Result<SourceData, String>,
-) -> Result<Lowered, LowerError> {
-    hirsel_intern::timings::count(hirsel_intern::timings::Count::NativeAppendExpand);
-    // Source calls retain their admissions, targets and failure ordering.
-    // Building an append result directly in its consumer would change all
-    // three under LANG-10, including mutations observed during cleanup.
-    let native_discharge = discharge.clone();
-    let mut discharged = Vec::new();
-    // The library's native representations lie over the program's owners.
-    let owners = crate::library::owners(&program.types, &program.signatures).over(&program.owners);
-    let mut layouts = LayoutBuilder::new(target, &owners);
-    layouts.prepare_native_controls();
-    let mut instances =
-        crate::instance::expand(program, &mut layouts, entries).map_err(LowerError::Instance)?;
-    for root in roots {
-        crate::library::instantiate(&mut layouts, &mut instances, root.clone())
-            .map_err(LowerError::Instance)?;
-    }
-    let source = source(&mut instances, &mut layouts)
-        .map_err(|e| LowerError::Instance(InstanceError::Malformed(e)))?;
-    let mut source_registry = program.operation_registry();
-    source_registry.receipt_sources = source.receipts.clone();
-    source_registry.seal_sources = source
-        .expectations
-        .iter()
-        .map(|(key, expected)| (key.clone(), expected.source()))
-        .collect();
-    let mut plans = Vec::new();
-    let mut declined = Vec::new();
-    let mut units = Vec::new();
-    // Importing a unit or building a library body may require further
-    // library instances, which join the end of the list.
-    let mut next = 0;
-    loop {
-        if next == instances.len() {
-            break;
-        }
-        let id = InstanceId(next as u32);
-        next += 1;
-        let definition = instances.view(id).key.definition().clone();
-        let sites = discharge.sites(&definition);
-        let key = (definition.clone(), instances.view(id).key.digest());
-        if let Some(expected) = source.expectations.get(&key) {
-            instances.bind_payload_sources(id, expected.payloads().to_vec());
-        }
-        let mut imported = import_instance(program, &mut instances, id, sites, &mut layouts)?;
-        if !instances.roles[id.index()].is_library()
-            && let Some(expected) = source.expectations.get(&key)
-        {
-            imported.unit = crate::sealed_source::inventory::emit(
-                imported.unit,
-                expected,
-                &source_registry,
-                layouts.table(),
-                target,
-            )
-            .map_err(|e| {
-                LowerError::Import(
-                    id,
-                    PassError::Unsupported(format!("source inventory: {e:?}")),
-                )
-            })?;
-        }
-        plans.push(imported.plan);
-        declined.extend(imported.declined.into_iter().map(|d| (id, d)));
-        if let Some(reference) = imported.discharged {
-            discharged.push(reference);
-        }
-        for request in imported.required {
-            crate::library::instantiate(&mut layouts, &mut instances, request)
-                .map_err(LowerError::Instance)?;
-        }
-        units.push(imported.unit);
-    }
-    let statics = statics(program, &instances, &units, &mut layouts)?;
-    // Units name the table by digest: seal them once no layout is added.
-    // The block header is the layout of a reuse token, which a
-    // later stage creates after sealing.
-    layouts.header();
-    let table = layouts.finish();
-    for unit in &mut units {
-        unit.header.target = table.target;
-    }
-    let units = units
-        .into_iter()
-        .map(|u| crate::flat_walk::rewrite(u, &table, flat_walk))
-        .collect();
-    let semantic_owners = instances
-        .ids()
-        .map(|id| {
-            let path = instances.view(id).key.definition().clone();
-            let owner = if instances.roles[id.index()].is_library() {
-                None
-            } else {
-                Some(path.clone())
-            };
-            (path, owner)
-        })
-        .collect();
-    let mut lowered = Lowered {
-        source,
-        instances,
-        plans,
-        declined,
-        units,
-        table,
-        statics,
-        unit_origins: Vec::new(),
-        unit_keys: Vec::new(),
-        semantic_owners,
-        inline_instances: Default::default(),
-        discharged,
-        native_discharge,
-    };
-    let specialized = crate::closure_calls::specialize_scoped(
-        &mut lowered,
-        program,
-        target,
-        scoped_specialization,
-    );
-    specialized.assert_origins(&lowered);
-    lowered.unit_origins = specialized.origins;
-    lowered.unit_keys = specialized.keys;
-    lowered.inline_instances = specialized.inline;
-    let registry = lowered.operation_registry(program);
-    prune_pretransfer(
-        &mut lowered.units,
-        &lowered.table,
-        &registry.pretransfer_adapters,
-    );
-    crate::arena_credit::summarize(&mut lowered.units, &mut lowered.table);
-    Ok(lowered)
 }
 
 /// Finish code-target-dependent cleanup before any strict C qualification.
@@ -452,112 +218,6 @@ pub fn import_instance(
         required,
         discharged,
     })
-}
-
-impl Lowered {
-    pub fn operation_registry(
-        &self,
-        program: &Program,
-    ) -> hirsel_layout::operation::OperationRegistry {
-        let mut registry = invocation_registry(
-            program,
-            &self.instances,
-            &self.semantic_owners,
-            &self.units,
-            &self.unit_origins,
-        );
-        registry
-            .receipt_sources
-            .extend(self.source.receipts.clone());
-        registry.seal_sources.extend(
-            self.source
-                .expectations
-                .iter()
-                .map(|(key, expected)| (key.clone(), expected.source())),
-        );
-        // Reviewed library events are declarations of the selected original
-        // request even when this caller uses the plain RC import API.
-        for id in self.instances.ids() {
-            let key = &self.instances.view(id).key;
-            let path = key.definition();
-            if !self.instances.roles[id.index()].is_library()
-                || (!path.is_core("arena.seal") && !path.is_core("region.with"))
-            {
-                continue;
-            }
-            if let Ok(expected) = crate::library::sealed_region::source_expectation(
-                program,
-                path,
-                self.instances.actuals[id.index()].arguments.clone(),
-            ) && expected.witness().instance == key.digest()
-            {
-                registry
-                    .seal_sources
-                    .entry((path.clone(), key.digest()))
-                    .or_insert_with(|| expected.source());
-            }
-        }
-        registry
-    }
-}
-
-/// Bind expected bodies from the independent source instance and specialization
-/// plan. Candidate anchor coordinates never select the expected inventory.
-pub(crate) fn invocation_registry(
-    program: &Program,
-    instances: &Instances,
-    owners: &BTreeMap<DefPath, Option<DefPath>>,
-    units: &[LirUnit<Value>],
-    origins: &[InstanceId],
-) -> hirsel_layout::operation::OperationRegistry {
-    let mut registry = program.operation_registry();
-    assert_eq!(
-        units.len(),
-        origins.len(),
-        "independent unit/body association"
-    );
-    for (unit, &origin) in units.iter().zip(origins) {
-        if instances.roles[origin.index()].is_library() {
-            continue;
-        }
-        let view = instances.view(origin);
-        let owner = owners
-            .get(&unit.header.definition)
-            .and_then(Option::as_ref)
-            .unwrap_or_else(|| view.key.definition());
-        let original = program
-            .definitions
-            .get(owner)
-            .expect("original source selection exists outside candidate units");
-        let rows = registry
-            .invocations
-            .get(owner)
-            .cloned()
-            .expect("original source invocation inventory exists");
-        let evidence = crate::invocations::bind_source(
-            original,
-            rows,
-            &Symbol {
-                kind: SymbolKind::Function,
-                definition: unit.header.definition.clone(),
-                instance: Some(unit.header.instance),
-            },
-            view.body,
-        )
-        .expect("independent source instance plan is valid");
-        registry
-            .invocations
-            .insert(evidence.body.definition.clone(), evidence.invocations);
-        if !registry.invocation_bodies.contains(&evidence.body) {
-            registry.invocation_bodies.push(evidence.body);
-        }
-    }
-    bind_pretransfer_inventory(&mut registry, program, instances)
-        .expect("independent adapter instance plan is valid");
-    registry
-        .invocation_bodies
-        .sort_by(|a, b| (&a.definition, a.instance).cmp(&(&b.definition, b.instance)));
-    registry
 }
 
 /// Bind materialized keyed adapters from the independent instance plan, never

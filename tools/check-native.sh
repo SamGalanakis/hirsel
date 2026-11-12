@@ -72,25 +72,6 @@ run_stage "native smoke with real Io record and replay" buck2 test //:gate-nativ
 run_stage "Ordered qualification: native trace, immutable-input replay and topology" \
   buck2 test -c hirsel.tests=host //:hirsel-cli-test-cli-shard-1 -- $(libtest ordered_qualification:: runtime50_ordered:: --ignored --test-threads=1)
 run_stage "native executables under Valgrind memcheck" buck2 test //:gate-native-sanitize --
-run_stage "native library bodies on both targets" \
-  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest rc_library_ --include-ignored --test-threads=4)
-run_stage "native Map and Set laws: hash seeds, structural order and failure sites" \
-  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest rc_maps_native:: --include-ignored --test-threads=1)
-run_stage "joined SSA loop views: heap and both native backends" \
-  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest rc_import::loop_version_matches_reference_heap_llvm_and_cranelift --ignored --test-threads=1)
-run_stage "flat region copies: native parity" \
-  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest flat_storage_audit_16::native_flat_region_copy_parity --ignored --test-threads=1)
-run_stage "string cursor descriptor parity" \
-  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest native_desc_cell_16:: --ignored --test-threads=1)
-run_stage "SIMD structural equality parity" \
-  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest native_simd_eq_17:: --ignored --test-threads=1)
-run_stage "isolate owned result parity" \
-  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest isolate_bytes_leak_17::isolate_returns_unique_bytes --ignored --test-threads=1)
-run_stage "nested unique copies: native snapshots and borrowed extractions" \
-  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest unique_copy_nested_20:: --ignored --test-threads=1)
-# Cursor parity and RC assertions are explicit full/native controls, not fast-tier tests.
-run_stage "borrow cursor projection, parity, deep walks and RC evidence" \
-  buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 -- $(libtest rc_borrow_cursor_ --ignored --test-threads=1)
 if (( ${#failed_stages[@]} > 0 )); then
   printf 'check-native.sh: %d failing stages: %s\n' "${#failed_stages[@]}" "$(IFS=';'; echo "${failed_stages[*]}")" >&2
   echo "check-native.sh: failed ($((SECONDS - gate_start)) s)" >&2

@@ -730,11 +730,11 @@ fn a_same_signature_body_edit_matches_a_fresh_build() {
     };
     with_compiler_stack(move || {
         let (before, after) = (source("n + n"), source("n * 2u64 + 1u64"));
-        let digests = |program: &Checked| {
+        let digests = |program: &Checked, text: &str| {
             let ready = {
                 let options = &Options::new(x86());
                 hirsel_requests::source_ready_supplier(
-                    &after,
+                    text,
                     "native.hir",
                     &program.entry,
                     &hirsel_native_testing::ready_toolchain(&options.target),
@@ -750,7 +750,7 @@ fn a_same_signature_body_edit_matches_a_fresh_build() {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let first = checked_in(&mut engine, &before);
         assert_eq!(first.reference.output, b"six\n");
-        let old = digests(&first);
+        let old = digests(&first, &before);
         let main = first.entry.clone();
         let mut callee = main.clone();
         callee.0.name = "weight".into();
@@ -774,7 +774,7 @@ fn a_same_signature_body_edit_matches_a_fresh_build() {
         assert_eq!(edited.reference.output, b"other\n");
         let fresh = checked(&after);
         assert_eq!(edited.reference, fresh.reference);
-        let (rebuilt, clean) = (digests(&edited), digests(&fresh));
+        let (rebuilt, clean) = (digests(&edited, &after), digests(&fresh, &after));
         assert_eq!(rebuilt, clean);
         assert_ne!(rebuilt, old);
         // The rebuilt program also runs as the fresh one does.

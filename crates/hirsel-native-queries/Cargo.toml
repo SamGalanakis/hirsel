@@ -39,4 +39,3 @@ tempfile = "3"
 hirsel-native-testing = { path = "../hirsel-native-testing" }
 hirsel-artifact-store = { path = "../hirsel-artifact-store" }
 hirsel-rt = { path = "../hirsel-rt" }
-hirsel-native-batch = { path = "../hirsel-native-batch" }

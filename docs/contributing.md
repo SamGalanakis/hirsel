@@ -199,8 +199,7 @@ T='-c hirsel.tests=focus'
 ```
 
 A crate's own tests are `//:hirsel-<crate>-unittest` and `-test-it`; source
-compiled through the driver is tested in `//:hirsel-pipeline-tests-test-front`
-and `-test-rc`. Focus books one CPU per test run, so it starts at once where a
+compiled through the driver is tested in `//:hirsel-pipeline-tests-test-front`. Focus books one CPU per test run, so it starts at once where a
 whole-shard request waits for a worker to free its CPUs (median edit-to-result
 38 s against 114 s over twelve paired edits). Leave `-c hirsel.full=true` to
 main's runs.
@@ -413,23 +412,8 @@ under Cranelift, LLVM O0 and LLVM O2, and the totals.
 
 Native and scaling targets catch defects that the interpreted corpus cannot.
 Main's full suite runs them by hand before milestones; the fast tier runs every 2 h. Run the parts your change can break:
-the `gate-std-native` shard holding a std module you changed
-(`--std-compile --filter <module>` names one module),
 `gate-native-bugs` for lowering, backend or runtime changes, and the
 checker-scaling shards for front-end changes.
-
-`gate-std-native-shard-<i>` (`native --std-compile`, four module shards)
-builds every public std@1 function through the native stage validators and
-both Cranelift and LLVM at O0, without linking or running anything. Generic
-functions get monomorphic wrappers at representative types (`u64`, size 4),
-and the compile-time generators of `std.derive` compile their generated bodies
-for a representative record. One process over all of std (114 modules, 930
-public functions, 4604 units) took 931 seconds and 3.0 GiB on the dev
-compiler, about 160 seconds of it the first module's source audit, which each
-shard pays once; the four shards took at most 333 seconds each. With their std
-workarounds reverted, `http2.drain_frames` failed its import validator
-(CleanupOrder) and `hpack.lookup` its ready validator (MovedPart) before
-2c871f85 fixed both.
 
 `gate-native-corpus-shard-<i>` (`native --corpus`, 32 shards) runs every
 runnable corpus case (run, fail, blocked and test headers; about 2,560)

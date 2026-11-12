@@ -12,7 +12,6 @@ hirsel-query-products = { path = "../hirsel-query-products" }
 hirsel-engine-admission = { path = "../hirsel-engine-admission" }
 hirsel-requests = { path = "../hirsel-requests" }
 hirsel-compiler-identity = { path = "../hirsel-compiler-identity" }
-hirsel-native-batch = { path = "../hirsel-native-batch" }
 hirsel-front-phases = { path = "../hirsel-front-phases" }
 hirsel-native = { path = "../hirsel-native" }
 hirsel-native-queries = { path = "../hirsel-native-queries" }

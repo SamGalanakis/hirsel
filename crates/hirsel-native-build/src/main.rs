@@ -11,7 +11,6 @@ use hirsel_native::Toolchain;
 use hirsel_native::emit_objects;
 use hirsel_native::link_profile;
 use hirsel_native::link_standalone_objects;
-use hirsel_native_batch::build;
 use std::{path::Path, time::Instant};
 
 const CONFIGURATIONS: [&str; 4] = [
@@ -55,10 +54,18 @@ fn compile() -> Result<(), Box<dyn std::error::Error>> {
         .export_native_input()
         .map_err(|e| format!("{e:?}"))?;
     let sources = hirsel_native::profile_sources(&input);
-    let validated = loaded
-        .engine
-        .import_native_input(input)
-        .map_err(|e| format!("{e:?}"))?;
+    let target = TargetSpec::x86_64_unknown_linux_gnu();
+    // The request pipeline builds each configuration's Ready, as `hirsel build` does.
+    let ready_toolchain = Toolchain::in_tree(
+        &std::env::temp_dir().join(format!("hirsel-native-build-{}", std::process::id())),
+        &[&target],
+    )?;
+    let mut build = hirsel_requests::ready_supplier(
+        Path::new(&args[0]),
+        None,
+        &loaded.entry,
+        &ready_toolchain,
+    )?;
     let source_seconds = source_start.elapsed().as_secs_f64();
     let all = args[2] == "all";
     let configs = if all {
@@ -66,7 +73,6 @@ fn compile() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         vec![args[2].as_str()]
     };
-    let target = TargetSpec::x86_64_unknown_linux_gnu();
     let mut records = serde_json::Map::new();
     for config in configs {
         let mut options = Options::new(target.clone());
@@ -88,7 +94,7 @@ fn compile() -> Result<(), Box<dyn std::error::Error>> {
             _ => return Err("unsupported configuration".into()),
         };
         let build_start = Instant::now();
-        let ready = match build(&validated, &options) {
+        let ready = match build(&options) {
             Ok(ready) => ready,
             Err(error) if all => {
                 records.insert(
@@ -142,18 +148,24 @@ fn compile() -> Result<(), Box<dyn std::error::Error>> {
             let standalone = std::env::var_os("HIRSEL_BENCH_STANDALONE").is_some();
             let result = if standalone {
                 emit_objects(
-                    &ready,
+                    &ready.program,
                     OptLevel::Speed,
                     partition,
                     measurement,
                     measurement.then_some(&sources),
                 )
                 .and_then(|emitted| {
-                    link_standalone_objects(&ready, &loaded.entry, &emitted, &toolchain, &objects)
+                    link_standalone_objects(
+                        &ready.program,
+                        &loaded.entry,
+                        &emitted,
+                        &toolchain,
+                        &objects,
+                    )
                 })
             } else {
                 link_profile(
-                    &ready,
+                    &ready.program,
                     &loaded.entry,
                     OptLevel::Speed,
                     partition,

@@ -152,7 +152,6 @@ RUNTIME_DATA = {
     "hirsel-native": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
     "hirsel-native-queries": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
     "hirsel-native-cache": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
-    "hirsel-native-batch": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
     "hirsel-native-testing": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
     "hirsel-host-io": [*CORPUS_DATA],
     "hirsel-heapcheck": ["native-tests/**", "stdlib/**"],
@@ -207,7 +206,7 @@ TEST_DATA["hirsel-driver-test-it"].append("examples/ownership-repairs/**")
 # Crates whose tests link native programs: each of their test binaries reads
 # the runtime archives it declares in RUNTIME_ARCHIVE_VIEWS (HIRSEL_RUNTIME_ARCHIVES)
 # instead of building them with Cargo.
-NATIVE_TESTS = {"hirsel-native-batch", "hirsel-native-queries", "hirsel-cranelift", "hirsel-cli", "hirsel-conformance", "hirsel-driver", "hirsel-native", "hirsel-native-testing", "hirsel-llvm", "hirsel-pipeline-tests", "hirsel-rc", "hirsel-rt"}
+NATIVE_TESTS = {"hirsel-native-queries", "hirsel-cranelift", "hirsel-cli", "hirsel-conformance", "hirsel-driver", "hirsel-native", "hirsel-native-testing", "hirsel-llvm", "hirsel-pipeline-tests", "hirsel-rc", "hirsel-rt"}
 RUNTIME_ARCHIVES = "//:hirsel-rt-archives"
 # hirsel_runtime_archives' views, `<arch>-<variant>`: every feature subset on both
 # targets, and memcheck and ownership-trace on x86-64 only (defs.bzl).
@@ -286,11 +285,9 @@ RUNTIME_ARCHIVE_VIEWS = {
     "hirsel-llvm-unittest": X86_VIEWS + AARCH64_VIEWS,
     "hirsel-llvm-test-it": X86_VIEWS + AARCH64_VIEWS,
     "hirsel-native-unittest": X86_VIEWS + AARCH64_VIEWS,
-    "hirsel-native-batch-unittest": X86_VIEWS + AARCH64_VIEWS,
     "hirsel-native-queries-unittest": X86_VIEWS + AARCH64_VIEWS,
     "hirsel-native-testing-unittest": X86_VIEWS + AARCH64_VIEWS,
     "hirsel-pipeline-tests-test-front": X86_VIEWS + AARCH64_VIEWS,
-    "hirsel-pipeline-tests-test-rc": X86_VIEWS + AARCH64_VIEWS,
     "hirsel-rc-unittest": X86_VIEWS + AARCH64_VIEWS,
     "hirsel-rt-test-descriptors": ["x86_64-default"],
     "hirsel-rt-test-it": X86_VIEWS + AARCH64_VIEWS,
@@ -305,7 +302,7 @@ def archive_views(*names: str) -> list[str]:
 # Ordinary std products: precomputed once by the built CLI,
 # then loaded by the tests and campaigns that run std programs (HIRSEL_PRODUCTS).
 PRODUCTS = "//:hirsel-std-products"
-PRODUCT_TESTS = {"hirsel-native-cache", "hirsel-native-batch", "hirsel-native", "hirsel-native-queries", "hirsel-native-testing", "hirsel-candidate", "hirsel-observation-view", "hirsel-project-info", "hirsel-front-phases", "hirsel-cli", "hirsel-conformance", "hirsel-driver", "hirsel-ownership", "hirsel-pipeline-tests"}
+PRODUCT_TESTS = {"hirsel-native-cache", "hirsel-native", "hirsel-native-queries", "hirsel-native-testing", "hirsel-candidate", "hirsel-observation-view", "hirsel-project-info", "hirsel-front-phases", "hirsel-cli", "hirsel-conformance", "hirsel-driver", "hirsel-ownership", "hirsel-pipeline-tests"}
 
 # Cases that call full_matrix (44 configurations) for toolchain or configuration
 # discovery: every run outside the full gate skips them by name, and
@@ -364,14 +361,12 @@ SHARDED = [
     "hirsel-host-io-unittest",
     "hirsel-native-queries-unittest",
     "hirsel-native-cache-unittest",
-    "hirsel-native-batch-unittest",
     "hirsel-native-testing-unittest",
     "hirsel-native-unittest",
     "hirsel-cli-test-cli",
     "hirsel-driver-test-it",
     "hirsel-driver-test-it-stdlib",
     "hirsel-pipeline-tests-test-front",
-    "hirsel-pipeline-tests-test-rc",
     "hirsel-rt-test-it",
 ]
 # Example and Free matrix cases each build and exercise programs. Keep one
@@ -584,7 +579,6 @@ def conformance_tests(reads=None):
 # The hourly run's native coverage stages (tools/main-runs). One process over
 # all of std took 931 s and 3.0 GiB, about 160 s of it the first module's source
 # audit, which each std shard pays once. 16 corpus shards took 838-1503 s each.
-STD_NATIVE_SHARDS = 4
 NATIVE_CORPUS_SHARDS = 32
 # The seed-1 sample whose variants of chosen corpus cases the agreement
 # slices run.
@@ -682,10 +676,6 @@ HISTORY_SHARDS = 32
 GATE_TESTS = [
     dict(name="gate-native-bugs", binary="//:hirsel-conformance-bin-native", args=["--bugs"],
          runtime_archives=archive_views(*CRANELIFT_VIEWS), measured_as="gate-native-smoke", **GATE),
-    # Every public std function lowered, validated and emitted by both backends.
-    *(dict(name=f"gate-std-native-shard-{index}", binary="//:hirsel-conformance-bin-native",
-           args=["--std-compile", "--shard", f"{index}/{STD_NATIVE_SHARDS}"], **GATE)
-      for index in range(1, STD_NATIVE_SHARDS + 1)),
     # Every runnable corpus case on Cranelift and a rotating LLVM slice against
     # the interpreter.
     *(dict(name=f"gate-native-corpus-shard-{index}", binary="//:hirsel-conformance-bin-native",

@@ -17,19 +17,14 @@ signatures from the driver's `BuiltinRegistry`) depend on `hirsel-driver`.
 
 Layout:
 
-- Two binaries, each a third to two thirds of the former single harness, so a
-  check or modes edit relinks them in parallel:
-  `tests/rc/main.rs` links hirsel-rc's suites and `tests/front/main.rs` those of
+- One binary, `tests/front/main.rs`, links the suites of
   check, modes, lir, lower, rt and code-store, and `analysis_canaries`, which exports
   `front/fixtures/analysis/` and runs hirsel-analysis-canary's analyses over the
   export files. A module named `<crate>_<file>` holds what was
-  `crates/hirsel-<crate>/tests/it/<file>.rs`, so `rc::cleanup::x` became
-  `rc_cleanup::x` (`.buck2/bin/buck2 test //:hirsel-pipeline-tests-test-rc-shard-1 --
-  --test-arg=rc_cleanup::x --test-arg=--exact`). A crate prefix such as `modes_` selects one crate's tests.
-- Each binary keeps its helpers local: `rc/support.rs` (compile a source program
-  and adapt its validated native input into an rc `Program`), `rc/fixtures/`
-  (golden LIR dumps, `tools/bless.sh rc-import` rewrites them), `rc/maps/seed.c`,
-  `front/check_support.rs` and `front/rt_replay.rs` (independent replay of
+  `crates/hirsel-<crate>/tests/it/<file>.rs`, so `lower::x::y` became
+  `lower_x::y` (`.buck2/bin/buck2 test //:hirsel-pipeline-tests-test-front-shard-1 --
+  --test-arg=lower_x::y --test-arg=--exact`). A crate prefix such as `modes_` selects one crate's tests.
+- The binary keeps its helpers local: `front/check_support.rs` and `front/rt_replay.rs` (independent replay of
   runtime completion tapes in the interpreter).
 - Shared files of other crates are included by path: the driver's
   `tests/support/source_std.rs`, the runtime's `tests/support/mod.rs` (its

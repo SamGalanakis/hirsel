@@ -147,28 +147,6 @@ fn profile_sources_for_owners<'a>(
         .collect()
 }
 
-#[cfg(test)]
-#[path = "../tests/native-validation/smoke.rs"]
-pub mod smoke_validation_tests;
-#[cfg(test)]
-#[path = "../tests/native-validation/roots.rs"]
-pub mod validation_tests;
-
-/// Checked registry schemas accompany native runner metadata, so request hashes
-/// use the same SER-2 envelopes as interpreted and remote calls.
-fn callee_metadata(
-    engine: &mut hirsel_engine::QueryEngine,
-    entry: &hirsel_engine::DefPath,
-) -> Result<hirsel_rt::program::CalleeMetadata, NativeError> {
-    let failed = |error: String| NativeError::new(StageName::Launch, error);
-    let facts = hirsel_engine::callee_facts(engine, entry)
-        .map_err(|e| failed(format!("callee facts: {e:?}")))?;
-    let runtime = engine
-        .runtime_types()
-        .map_err(|e| failed(format!("runner request types: {e:?}")))?;
-    settled_callee_metadata(facts, &runtime)
-}
-
 /// Encode the same checked runner schemas from an already settled Run root.
 /// This boundary cannot demand source queries or reconstruct runtime types.
 pub fn settled_callee_metadata(

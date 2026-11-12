@@ -671,7 +671,6 @@ dependencies = [
  "hirsel-intern",
  "hirsel-interp",
  "hirsel-native",
- "hirsel-native-batch",
  "hirsel-native-queries",
  "hirsel-native-testing",
  "hirsel-proof-export",
@@ -791,7 +790,6 @@ dependencies = [
  "hirsel-llvm",
  "hirsel-lower",
  "hirsel-native",
- "hirsel-native-batch",
  "hirsel-native-cache",
  "hirsel-native-queries",
  "hirsel-native-testing",
@@ -1209,43 +1207,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hirsel-native-batch"
-version = "0.1.0"
-dependencies = [
- "hirsel-artifact-store",
- "hirsel-codec",
- "hirsel-compiler-identity",
- "hirsel-core-contract",
- "hirsel-engine",
- "hirsel-engine-admission",
- "hirsel-engine-runtime",
- "hirsel-engine-store",
- "hirsel-front-phases",
- "hirsel-graph",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-layout",
- "hirsel-lir",
- "hirsel-native",
- "hirsel-native-batch",
- "hirsel-native-queries",
- "hirsel-native-testing",
- "hirsel-rc",
- "hirsel-rt",
- "hirsel-run-config",
- "hirsel-run-schema",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-types",
- "hirsel-validate",
- "object",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
 name = "hirsel-native-build"
 version = "0.1.0"
 dependencies = [
@@ -1255,9 +1216,9 @@ dependencies = [
  "hirsel-guard",
  "hirsel-intern",
  "hirsel-native",
- "hirsel-native-batch",
  "hirsel-native-queries",
  "hirsel-native-testing",
+ "hirsel-requests",
  "serde_json",
 ]
 
@@ -1313,7 +1274,6 @@ dependencies = [
  "hirsel-layout",
  "hirsel-lir",
  "hirsel-native",
- "hirsel-native-batch",
  "hirsel-native-cache",
  "hirsel-native-testing",
  "hirsel-query-products",
@@ -1470,7 +1430,6 @@ dependencies = [
  "hirsel-llvm",
  "hirsel-lower",
  "hirsel-native",
- "hirsel-native-batch",
  "hirsel-native-cache",
  "hirsel-native-queries",
  "hirsel-native-testing",
@@ -1666,7 +1625,6 @@ dependencies = [
  "hirsel-llvm",
  "hirsel-lower",
  "hirsel-native",
- "hirsel-native-batch",
  "hirsel-native-cache",
  "hirsel-native-queries",
  "hirsel-native-testing",

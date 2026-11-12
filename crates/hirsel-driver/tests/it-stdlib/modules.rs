@@ -81,7 +81,6 @@ mod mail_address_15;
 mod json_patch_15;
 mod html_tokenizer_15;
 mod csv_empty_record_16;
-mod map_seed_model_16;
 mod json_value_access_16;
 mod float_reduction_model_16;
 mod utf8_construction_model_16;

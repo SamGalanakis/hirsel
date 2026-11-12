@@ -254,8 +254,8 @@ export CARGO_BUILD_JOBS=4 HIRSEL_JOBS=4 RUST_TEST_THREADS=4
 .buck2/bin/buck2 test //:hirsel-lir-unittest //:hirsel-lir-test-it \
   //:hirsel-lir           # one crate, including doctests
 .buck2/bin/buck2 test -c hirsel.tests=focus //:hirsel-lir-test-it -- --test-arg=layout::recursive_layouts_do_not_depend_on_request_order --test-arg=--exact
-.buck2/bin/buck2 test //:hirsel-pipeline-tests-test-rc-shard-2  # one shard of a sharded test binary
-.buck2/bin/buck2 test -c hirsel.tests=host //:hirsel-pipeline-tests-test-rc-shard-1   # run tests on this host
+.buck2/bin/buck2 test //:hirsel-pipeline-tests-test-front-shard-2  # one shard of a sharded test binary
+.buck2/bin/buck2 test -c hirsel.tests=host //:hirsel-pipeline-tests-test-front-shard-1   # run tests on this host
 .buck2/bin/buck2 test //:gate-native-smoke          # the native smoke
 .buck2/bin/buck2 test //:gate-link-hosts            # native-tests/link built here and on a pool worker, byte-compared
 python3 tools/buck2/conformance.py                # the whole conformance campaign's shards (full suite only)

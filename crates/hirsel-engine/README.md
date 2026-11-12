@@ -634,7 +634,7 @@ Import, placement, insertion, elision, reuse and Ready lowering consume only
 outputs sealed by the corresponding `hirsel-lir` validator. Native options
 select the target, regions, elision, reuse and flat walking.
 `hirsel-native-queries` owns source reconstruction and query continuations;
-`hirsel-native-batch` drives batch builds; `hirsel-native-testing` owns checked
+`hirsel-native-testing` owns checked
 heap execution and differential campaigns. Source-path entry points remain in
 `hirsel-driver`, and `hirsel-requests` selects keyed artifact requests.
 The LLVM backend requires LLVM 23.1.5 at

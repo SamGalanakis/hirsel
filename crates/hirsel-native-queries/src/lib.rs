@@ -1,7 +1,6 @@
 //! Native source and instance producers over validated native pipeline inputs.
 use hirsel_native::query_model::*;
 pub mod arena_tasks;
-pub mod batch_sources;
 pub mod compilation_tasks;
 pub mod demand;
 mod dispatch;

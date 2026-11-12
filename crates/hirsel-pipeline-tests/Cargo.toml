@@ -16,7 +16,6 @@ hirsel-registry = { path = "../hirsel-registry" }
 hirsel-host-io = { path = "../hirsel-host-io" }
 hirsel-requests = { path = "../hirsel-requests" }
 hirsel-native-cache = { path = "../hirsel-native-cache" }
-hirsel-native-batch = { path = "../hirsel-native-batch" }
 hirsel-front-phases = { path = "../hirsel-front-phases" }
 hirsel-compiler-identity = { path = "../hirsel-compiler-identity" }
 hirsel-native = { path = "../hirsel-native" }

@@ -37,9 +37,7 @@ The runner makes these adaptations explicit:
 
 The Rust suites check `decimal-vectors.hir` once per suite, then execute
 parameterized rows in the interpreter with a 100-million-step per-row budget.
-Native decimal compilation currently hits the independently tracked RC importer
-panic (`gate-std-native-shard-1` in `tools/known-failures.tsv`); the interpreter
-covers all selected arithmetic now. The large BigInt suite uses a separately
+The interpreter covers all selected arithmetic. The large BigInt suite uses a separately
 compiled native `numeric-vectors.hir` checker.
 
 Each suite asserts its total row count and execution/exclusion counts so a

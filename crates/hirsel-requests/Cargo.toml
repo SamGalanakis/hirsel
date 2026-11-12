@@ -15,7 +15,6 @@ hirsel-engine-runtime = { path = "../hirsel-engine-runtime" }
 hirsel-engine-admission = { path = "../hirsel-engine-admission" }
 hirsel-project-info = { path = "../hirsel-project-info" }
 hirsel-native-cache = { path = "../hirsel-native-cache" }
-hirsel-native-batch = { path = "../hirsel-native-batch" }
 hirsel-front-phases = { path = "../hirsel-front-phases" }
 hirsel-compiler-identity = { path = "../hirsel-compiler-identity" }
 hirsel-host-io = { path = "../hirsel-host-io" }

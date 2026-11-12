@@ -100,7 +100,6 @@ CPU_CLASSES = {
         "hirsel-ownership": "fast",
         "hirsel-ownership-unittest-harness": "fast",
         "hirsel-pipeline-tests-test-front-harness": "fast",
-        "hirsel-pipeline-tests-test-rc-harness": "fast",
         "hirsel-rc": "fast",
         "hirsel-rc-unittest-harness": "fast",
         "hirsel-types": "fast",

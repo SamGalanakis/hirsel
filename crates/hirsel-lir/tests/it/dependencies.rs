@@ -93,7 +93,6 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-native", Class::Wiring),
     ("hirsel-native-cache", Class::Wiring),
     ("hirsel-native-queries", Class::Wiring),
-    ("hirsel-native-batch", Class::Wiring),
     ("hirsel-native-testing", Class::Wiring),
     ("hirsel-project-info", Class::Wiring),
     ("hirsel-requests", Class::Wiring),
@@ -144,7 +143,6 @@ const ENGINE_STORE_CONSUMERS: &[&str] = &[
     "hirsel-driver",
     "hirsel-engine",
     "hirsel-native",
-    "hirsel-native-batch",
     "hirsel-native-cache",
     "hirsel-native-queries",
     "hirsel-native-testing",
@@ -243,17 +241,9 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
                 to,
                 "hirsel-engine" | "hirsel-front-phases" | "hirsel-native" | "hirsel-native-cache"
             ),
-            "hirsel-native-batch" => matches!(
-                to,
-                "hirsel-engine" | "hirsel-front-phases" | "hirsel-native" | "hirsel-native-queries"
-            ),
             "hirsel-native-testing" => matches!(
                 to,
-                "hirsel-engine"
-                    | "hirsel-front-phases"
-                    | "hirsel-native"
-                    | "hirsel-native-queries"
-                    | "hirsel-native-batch"
+                "hirsel-engine" | "hirsel-front-phases" | "hirsel-native" | "hirsel-native-queries"
             ),
             "hirsel-requests" | "hirsel-driver" => {
                 matches!(
@@ -264,7 +254,6 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
                         | "hirsel-native"
                         | "hirsel-native-cache"
                         | "hirsel-native-queries"
-                        | "hirsel-native-batch"
                         | "hirsel-native-testing"
                         | "hirsel-project-info"
                 ) || from == "hirsel-driver" && to == "hirsel-requests"

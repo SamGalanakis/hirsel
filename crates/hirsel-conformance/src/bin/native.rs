@@ -34,7 +34,7 @@ use hirsel_native_testing::topology_matrix;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: native --std-compile [--filter MODULE] [--shard I/N] | --corpus [--seed N] [--shard I/N] | --bugs | --smoke [--filter TEXT]... | --sanitize [--filter TEXT]... | --cranelift [--clif] [--aarch64] [--filter TEXT]... [--shard I/N] | --cranelift-times [--filter TEXT]... | --trace-roots [--filter TEXT]... [--shard I/N] | --migrate [--filter TEXT]... [--shard I/N] | --full [--bless] [--filter TEXT]... [--shard I/N] [--engine heap|llvm|diagnostic|default|system] [--seed N] [--exhaustive] [--config NAME|smoke]... [--config-part K/N] [--case-part K/N] [--heap-part K/N [--heap-skip K/N] | --heap-sites-max N] | --hash-sweep [--filter TEXT]... | --replay DIR | --reduce DIR\n\
+const USAGE: &str = "usage: native --corpus [--seed N] [--shard I/N] | --bugs | --smoke [--filter TEXT]... | --sanitize [--filter TEXT]... | --cranelift [--clif] [--aarch64] [--filter TEXT]... [--shard I/N] | --cranelift-times [--filter TEXT]... | --trace-roots [--filter TEXT]... [--shard I/N] | --migrate [--filter TEXT]... [--shard I/N] | --full [--bless] [--filter TEXT]... [--shard I/N] [--engine heap|llvm|diagnostic|default|system] [--seed N] [--exhaustive] [--config NAME|smoke]... [--config-part K/N] [--case-part K/N] [--heap-part K/N [--heap-skip K/N] | --heap-sites-max N] | --hash-sweep [--filter TEXT]... | --replay DIR | --reduce DIR\n\
                      options: [--case ID]... [--root PATH] [--jobs N] [--out DIR] [--hash-seed N]";
 
 fn main() -> ExitCode {
@@ -513,8 +513,7 @@ fn run() -> Result<bool, String> {
             match arg {
                 Long(
                     name @ ("smoke" | "full" | "sanitize" | "hash-sweep" | "cranelift"
-                    | "cranelift-times" | "trace-roots" | "migrate" | "std-compile"
-                    | "corpus" | "bugs"),
+                    | "cranelift-times" | "trace-roots" | "migrate" | "corpus" | "bugs"),
                 ) => {
                     mode = Some((format!("--{name}"), PathBuf::new()));
                 }
@@ -602,12 +601,11 @@ fn run() -> Result<bool, String> {
     if filter.1.is_some()
         && !matches!(
             mode.as_str(),
-            "--full" | "--cranelift" | "--trace-roots" | "--migrate" | "--std-compile" | "--corpus"
+            "--full" | "--cranelift" | "--trace-roots" | "--migrate" | "--corpus"
         )
     {
         return Err(
-            "--shard requires --full, --cranelift, --trace-roots, --migrate, --std-compile or --corpus"
-                .into(),
+            "--shard requires --full, --cranelift, --trace-roots, --migrate or --corpus".into(),
         );
     }
     match mode.as_str() {
@@ -727,68 +725,6 @@ fn run() -> Result<bool, String> {
                 serde_json::json!({"selected":selected_count,"built":results.len(),"excluded":skipped,"llvm_slice":seed % 16,"unlisted":report.unlisted.len(),"stale":report.stale.len(),"shard":filter.1.map(|s| (s.index,s.count))})
             );
             Ok(report.ok())
-        }
-        "--std-compile" => {
-            let started = std::time::Instant::now();
-            let mut surface =
-                hirsel_native_batch::StdSurface::load(&root.join("stdlib/std@1/hirsel.json"))?;
-            for name in &surface.compile_time {
-                eprintln!(
-                    "std compile: {name}: comptime generator: native generated body for NativeCoverageSample {{ count: u64, name: String, flag: bool }}"
-                );
-            }
-            let modules: Vec<_> = surface
-                .modules
-                .keys()
-                .filter(|m| {
-                    (filter.0.is_empty() || filter.0.iter().any(|text| text == *m))
-                        && filter.1.as_ref().is_none_or(|shard| shard.holds(m))
-                })
-                .cloned()
-                .collect();
-            if modules.is_empty() {
-                return Err("std compile: selected no modules".into());
-            }
-            let mut ok = true;
-            // Modules share one engine, so a broken surface repeats its error.
-            let mut first_failure: Option<(String, String)> = None;
-            for module in modules {
-                let before = std::time::Instant::now();
-                let functions = surface.modules[&module].len();
-                // A panicking stage names its module; the shared engine may be
-                // inconsistent after it, so later modules still report.
-                let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    surface.compile(&module)
-                }))
-                .unwrap_or_else(|panic| {
-                    Err(format!(
-                        "a native stage panicked: {}",
-                        panic
-                            .downcast_ref::<String>()
-                            .map(String::as_str)
-                            .or_else(|| panic.downcast_ref::<&str>().copied())
-                            .unwrap_or("(no message)")
-                    ))
-                });
-                match compiled {
-                    Ok(units) => println!(
-                        "std compile: {module}: {functions} public functions, {units} units, both backends, {:.3}s",
-                        before.elapsed().as_secs_f64()
-                    ),
-                    Err(error) => {
-                        match &first_failure {
-                            Some((first, text)) if *text == error => {
-                                eprintln!("std compile: {module}: the same failure as {first}")
-                            }
-                            _ => eprintln!("std compile: {module}: {error}"),
-                        }
-                        first_failure.get_or_insert((module.clone(), error));
-                        ok = false;
-                    }
-                }
-            }
-            println!("std compile: {:.3}s", started.elapsed().as_secs_f64());
-            Ok(ok)
         }
         "--smoke" => {
             // Both targets, every launch at the glibc floor (floor_toolchain).

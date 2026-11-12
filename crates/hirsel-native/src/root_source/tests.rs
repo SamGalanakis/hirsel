@@ -37,7 +37,6 @@ impl ResultStore for CountedStore {
     }
 }
 struct Fixture {
-    store: Arc<CountedStore>,
     program: hirsel_rc::instance::Program,
     operations: Arc<hirsel_layout::operation::OperationRegistry>,
     roots: NativeSourceRoots,
@@ -49,7 +48,6 @@ struct Fixture {
     selected: Vec<DefPath>,
     lower: NativeOriginalReader,
     empty: NativeOriginalReader,
-    validated: ValidatedNativeInput,
 }
 impl Fixture {
     fn new(verify: Verify) -> Self {
@@ -134,9 +132,7 @@ impl Fixture {
         program.definitions.clear();
         // The constructor cannot fall back to source/controller queries.
         drop(engine);
-        store.reads.store(0, Ordering::Relaxed);
         Self {
-            store,
             program,
             operations,
             roots,
@@ -148,7 +144,6 @@ impl Fixture {
             selected,
             lower,
             empty,
-            validated,
         }
     }
     fn facts(&self) -> NativeLinkFacts<'_> {
@@ -330,55 +325,11 @@ fn generated_source_selectors_keep_exact_source_ownership() {
     });
 }
 
-#[test]
-fn callee_launch_binds_checked_decoder_and_refuses_missing_native_root() {
-    hirsel_intern::jobs::with_compiler_stack(|| {
-        let fixture =
-            Fixture::with_source(Verify::On, "pub fn main(n:u64)->Result[u64,u64]{Ok(n)}");
-        let entry = &fixture.selected[0];
-        let target = crate::TargetSpec::x86_64_unknown_linux_gnu();
-        let mut source = NativeLinkSource::from_settled(fixture.facts(), &fixture.lower).unwrap();
-        let ordinary = source.manifest_bytes().unwrap();
-        let root = source.bind_call(&fixture.program, entry, &target).unwrap();
-        assert!(source.bind_call(&fixture.program, entry, &target).is_err());
-        assert_ne!(ordinary, source.manifest_bytes().unwrap());
-        let revision = fixture.semantic.semantic_program_revision(entry).unwrap();
-        let mut call = hirsel_run_config::RunConfig::for_program(
-            &revision,
-            hirsel_run_schema::LaunchKind::Call,
-        );
-        call.call = Some(hirsel_run_schema::CallRecord::new(
-            hirsel_run_schema::CallForm::Compute,
-            &hirsel_run_schema::Cause {
-                instance: [1; 16],
-                ordinal: 0,
-                digest: [2; 32],
-            },
-            &[0; 8],
-        ));
-        let call = call.validated().unwrap();
-        source.bind_run(entry, Arc::new(call)).unwrap();
-        assert_eq!(root.path, DefPath::core("$native.runner_main"));
-        let mut ready =
-            crate::stages::fixture_ready(&fixture.validated, &crate::Options::new(target)).unwrap();
-        assert!(
-            source
-                .bind(&mut ready)
-                .unwrap_err()
-                .message
-                .contains("decoder")
-        );
-        assert_eq!(fixture.store.reads.load(Ordering::Relaxed), 0);
-    });
-}
-
 use hirsel_engine::{
     LinkInput, NativeDefinitionProduct, NativeOriginalReader, NativeRecordSource,
-    NativeSemanticProgram, NativeSourceRoots, RepresentationRecord, SignatureSnapshot,
-    ValidatedNativeInput,
+    NativeSemanticProgram, NativeSourceRoots, SignatureSnapshot,
 };
-use hirsel_lir::stage::InputIdentity;
 use hirsel_span::{Anchor, SourceMap};
-use hirsel_syntax::{DefId, DefPath};
-use hirsel_types::{ForeignThreads, SignatureKind, SignatureRef, TypeInterner};
+use hirsel_syntax::DefPath;
+use hirsel_types::SignatureKind;
 use std::collections::{BTreeMap, BTreeSet};

@@ -52,7 +52,7 @@ toolchain_proof(name = "linker-store-proof", tools = [":linker", "toolchains//:l
     script = "linker_store_probe.py", interpreter = "python3")
 toolchain_proof(name = "linker-store-unit-proof", tools = ["toolchains//:llvm", "root//:hirsel-native-unittest-harness"],
     script = "linker_store_units.py", interpreter = "python3")
-toolchain_proof(name = "source-entry-proof", tools = [":llvm", "root//:hirsel-native-unittest-harness", "root//:hirsel-native-batch-unittest-harness"], script = "source_entry_proof.sh")
+toolchain_proof(name = "source-entry-proof", tools = [":llvm", "root//:hirsel-native-unittest-harness"], script = "source_entry_proof.sh")
 export_file(name = "environment.tsv", visibility = ["PUBLIC"])
 
 export_file(name = "lld-input-main.cpp")
@@ -71,9 +71,9 @@ toolchain_proof(name = "frozen-kit-proof", tools = [":linker", "toolchains//:llv
 
 toolchain_proof(name = "scratch-linker-proof", tools = [":linker", "toolchains//:llvm", "root//:hirsel-native-unittest-harness"], script = "scratch_linker_proof.py", interpreter = "python3")
 
-toolchain_proof(name = "scratch-transport-units", tools = [":llvm", ":kit", "root//:hirsel-rt-archives", "root//:hirsel-engine-unittest-harness", "root//:hirsel-native-unittest-harness", "root//:hirsel-native-batch-unittest-harness"], script = "scratch_transport_units.sh")
+toolchain_proof(name = "scratch-transport-units", tools = [":llvm", ":kit", "root//:hirsel-rt-archives", "root//:hirsel-engine-unittest-harness", "root//:hirsel-native-unittest-harness"], script = "scratch_transport_units.sh")
 
-toolchain_proof(name = "scratch-ready-fixture-proof", tools = [":llvm", ":kit", "root//:hirsel-rt-archives", "root//:hirsel-native-unittest-harness", "root//:hirsel-native-batch-unittest-harness"], script = "scratch_ready_fixture_proof.sh")
+toolchain_proof(name = "scratch-ready-fixture-proof", tools = [":llvm", ":kit", "root//:hirsel-rt-archives", "root//:hirsel-native-unittest-harness"], script = "scratch_ready_fixture_proof.sh")
 toolchain_proof(name = "runtime-discovery-proof", tools = [":llvm", ":runtime-auditor", ":glibc_floor", ":qemu", "root//:hirsel-native-unittest-harness"], script = "runtime_discovery_proof.py", interpreter = "python3")
 
 toolchain_proof(name = "runtime-identity-case-proof", tools = [":llvm", ":runtime-auditor", ":glibc_floor", ":qemu", "root//:hirsel-native-unittest-harness"], script = "runtime_identity_case_proof.py", interpreter = "python3")

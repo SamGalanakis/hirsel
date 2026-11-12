@@ -782,7 +782,11 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
                 let symbol = &function.symbol;
                 let abi = fn_abi(self.inputs.layouts, function.abi, &symbol.definition)?;
                 let thunk = function_thunk_name(&symbol.definition, symbol.instance.as_ref());
-                let entry = entry_of(self.inputs.layouts.keys(), EntryKind::FunctionRef, Some(abi));
+                let entry = entry_of(
+                    self.inputs.layouts.keys(),
+                    EntryKind::FunctionRef,
+                    Some(abi),
+                );
                 self.manifested
                     .import_entry(&thunk, &symbol.definition, entry);
                 let code = self.module.function_address(&thunk);

@@ -358,7 +358,7 @@ Ok(())
         invocations: ready.operations.invocations.clone(),
         pretransfer_adapters: ready.operations.pretransfer_adapters.clone(),
         target: target(),
-        layouts: ready.table,
+        layouts: ready.table.into_table(),
         units,
         statics: ready.statics,
     };

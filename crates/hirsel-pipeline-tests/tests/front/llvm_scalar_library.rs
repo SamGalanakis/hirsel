@@ -1004,7 +1004,7 @@ fn heap_lines(program: &Program, case: &Case, unit: &ValidatedUnit<Ready>) -> St
         invocations: Default::default(),
         pretransfer_adapters: Vec::new(),
         target: program.table.target.clone(),
-        layouts: program.table.table.clone(),
+        layouts: program.table.table.table().clone(),
         units: vec![unit.unit().clone()],
         statics: Vec::new(),
     };

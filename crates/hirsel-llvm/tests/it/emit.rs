@@ -240,7 +240,6 @@ fn two_units_with_one_link_name_are_rejected() {
 fn a_forged_or_foreign_program_descriptor_assignment_is_rejected() {
     let program = heap_program(&x86());
     let codes = failure_codes();
-    let keys = &program.table.table.keys();
     let units = program.unit_abis();
     let glue = hirsel_lir::glue::UnitGlue::default();
     let valid = hirsel_lir::emission::GlueInputs {

@@ -132,12 +132,10 @@ mod tests {
             TargetSpec::aarch64_unknown_linux_gnu(),
         ] {
             for opt in [OptLevel::None, OptLevel::Speed] {
-                let layouts = LayoutTable::new(&target);
-                let keys = hirsel_lir::LayoutKeys::new(&layouts);
+                let layouts = hirsel_lir::SealedLayoutTable::seal(LayoutTable::new(&target));
                 let inputs = Inputs {
                     target: &target,
                     layouts: &layouts,
-                    keys: &keys,
                     opt,
                     unit: None,
                     glue: None,

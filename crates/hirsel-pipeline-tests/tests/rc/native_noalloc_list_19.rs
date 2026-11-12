@@ -196,7 +196,7 @@ fn parity(cases: &[(&str, &str)]) {
                     invocations: ready.operations.invocations.clone(),
                     pretransfer_adapters: ready.operations.pretransfer_adapters.clone(),
                     target: ready.target.clone(),
-                    layouts: ready.table.clone(),
+                    layouts: ready.table.table().clone(),
                     units,
                     statics: ready.statics.clone(),
                 };

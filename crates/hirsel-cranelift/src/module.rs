@@ -440,11 +440,12 @@ pub(crate) fn emit(
             .manifested
             .export_entry(&name, &header.definition, entry);
         if let Some(thunk) = &thunk {
-            let entry = emitter
-                .inputs
-                .layouts
-                .keys()
-                .entry(EntryKind::FunctionRef, false, Some(abi));
+            let entry =
+                emitter
+                    .inputs
+                    .layouts
+                    .keys()
+                    .entry(EntryKind::FunctionRef, false, Some(abi));
             emitter
                 .manifested
                 .export_entry(thunk, &header.definition, entry);

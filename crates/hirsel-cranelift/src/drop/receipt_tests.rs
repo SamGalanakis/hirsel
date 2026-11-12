@@ -207,7 +207,6 @@ fn probe(target: &TargetSpec, malformed: bool, nested: bool) -> Vec<u8> {
         table.layouts.push(parent);
     }
     let table = hirsel_lir::SealedLayoutTable::seal(table);
-    let keys = table.keys();
     let manifest = Manifest::skeleton([]);
     let input = InputIdentity {
         interface_version: hirsel_lir::INTERFACE_VERSION,

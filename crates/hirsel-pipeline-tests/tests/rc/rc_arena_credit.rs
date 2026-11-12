@@ -138,7 +138,7 @@ fn check(source: &str, expected: &[(&str, Option<u32>)], elided: &[(&str, bool)]
                 invocations: built.operations.invocations.clone(),
                 pretransfer_adapters: built.operations.pretransfer_adapters.clone(),
                 target: built.target.clone(),
-                layouts: built.table.clone(),
+                layouts: built.table.table().clone(),
                 units: built.raw_units(),
                 statics: built.statics.clone(),
             },

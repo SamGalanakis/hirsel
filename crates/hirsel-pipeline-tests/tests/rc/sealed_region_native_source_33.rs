@@ -40,20 +40,20 @@ fn execute(source: &str, root: TypeKind, native: NativeType) {
                 .unwrap_or_else(|e| panic!("Ready C: {:?}", e.violations))
         })
         .collect();
-    let keys = hirsel_lir::LayoutKeys::new(&h.layouts);
+    let layouts = hirsel_lir::SealedLayoutTable::seal(h.layouts.clone());
     let mut glue = hirsel_lir::glue::UnitGlue::default();
     for unit in &units {
         glue.extend(
-            &hirsel_lir::glue::UnitGlue::of(unit.unit(), &h.layouts, &keys, &manifest).unwrap(),
+            &hirsel_lir::glue::UnitGlue::of(unit.unit(), &layouts, layouts.keys(), &manifest)
+                .unwrap(),
         );
     }
     let failures = hirsel_lir::glue::failure_codes(&glue.failure_rules);
     let finalizers = BTreeMap::new();
-    let registry =
-        hirsel_lir::descriptor_registry::DescriptorRegistry::new(&h.layouts, &finalizers);
+    let registry = hirsel_lir::descriptor_registry::DescriptorRegistry::new(&layouts, &finalizers);
     let glue_inputs = GlueInputs {
         target: &h.target,
-        layouts: &h.layouts,
+        layouts: &layouts,
         registry,
         finalizers: &finalizers,
         charged_finalizers: &Default::default(),
@@ -77,7 +77,7 @@ fn execute(source: &str, root: TypeKind, native: NativeType) {
         index: None,
         input: &input,
         target: &h.target,
-        layouts: &h.layouts,
+        layouts: &layouts,
         manifest: &manifest,
         statics: &h.statics,
         inline_instances: &empty,

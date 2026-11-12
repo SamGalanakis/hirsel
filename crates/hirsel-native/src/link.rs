@@ -2318,14 +2318,17 @@ fn check_link_manifest(
             }))
         };
         if expected.contains(&plain) {
-            signatures.insert(plain, program.keys.entry(kind, false, Some(abi)));
+            signatures.insert(plain, program.table.keys().entry(kind, false, Some(abi)));
         }
         let thunk =
             hirsel_lir::emission::function_thunk_name(&unit.definition, Some(&unit.instance));
         if expected.contains(&thunk) {
             signatures.insert(
                 thunk,
-                program.keys.entry(EntryKind::FunctionRef, false, Some(abi)),
+                program
+                    .table
+                    .keys()
+                    .entry(EntryKind::FunctionRef, false, Some(abi)),
             );
         }
     }

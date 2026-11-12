@@ -219,7 +219,7 @@ fn callback_recipe_h_rejects_dispatch_and_both_events_erased() {
         .unwrap();
         let mut heap = hirsel_heapcheck::Program {
             target: ready.target.clone(),
-            layouts: ready.table.clone(),
+            layouts: ready.table.table().clone(),
             units: ready.raw_units(),
             statics: ready.statics.clone(),
             invocation_bodies: ready.operations.invocation_bodies.clone(),

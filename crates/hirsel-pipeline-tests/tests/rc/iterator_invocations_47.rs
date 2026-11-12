@@ -38,7 +38,7 @@ pub fn main() -> u64 {
     .unwrap();
     let heap = hirsel_heapcheck::Program {
         target: target(),
-        layouts: ready.table.clone(),
+        layouts: ready.table.table().clone(),
         units: ready.raw_units(),
         statics: ready.statics.clone(),
         invocation_bodies: ready.operations.invocation_bodies.clone(),

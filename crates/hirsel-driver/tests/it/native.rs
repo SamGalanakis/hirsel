@@ -179,9 +179,10 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
                     for op in words.chunks_exact(WORDS).filter(|op| op[0] == VALUE) {
                         kinds.insert(op[1]);
                     }
-                    let name =
-                        hirsel_lir::glue::descriptor_name(&ready.keys.key(descriptor.layout))
-                            .replace("hirsel.layout.", "hirsel.scan.");
+                    let name = hirsel_lir::glue::descriptor_name(
+                        &ready.table.keys().key(descriptor.layout),
+                    )
+                    .replace("hirsel.layout.", "hirsel.scan.");
                     let symbol = object
                         .symbol_by_name(&name)
                         .unwrap_or_else(|| panic!("{backend:?}: missing {name}"));
@@ -915,7 +916,7 @@ fn link_refuses_an_entry_import_with_a_missing_or_other_digest() {
             .find(|s| s.definition == grow)
             .unwrap();
         let abi = &ready.table.fn_abis[summary.abi.0 as usize];
-        let mut forged = ready.table.clone();
+        let mut forged = ready.table.table().clone();
         let rows = abi.parameters[0].layout;
         forged.layouts[rows.0 as usize].key.instance = Some(hirsel_syntax::ContentHash::of_bytes(
             b"other layout content",
@@ -1112,7 +1113,7 @@ pub fn main() -> Result[(), ()] {
             Some(&callback.instance),
         );
         // Check the emitted import expectation as well as Link's comparison.
-        let integer_digest = ready.keys.entry(
+        let integer_digest = ready.table.keys().entry(
             EntryKind::FunctionRef,
             false,
             Some(&ready.table.fn_abis[integer.abi.0 as usize]),
@@ -1135,7 +1136,7 @@ pub fn main() -> Result[(), ()] {
                 abi
             }),
         ] {
-            let other = ready.keys.entry(kind, false, Some(&abi));
+            let other = ready.table.keys().entry(kind, false, Some(&abi));
             let mut mutated = objects.clone();
             let export = mutated
                 .iter_mut()
@@ -1160,11 +1161,11 @@ pub fn main() -> Result[(), ()] {
             .flat_map(|o| &mut o.exports)
             .find(|e| e.name == integer_name)
             .unwrap();
-        export.entry = Some(
-            ready
-                .keys
-                .entry(EntryKind::FunctionRef, false, Some(float_abi)),
-        );
+        export.entry = Some(ready.table.keys().entry(
+            EntryKind::FunctionRef,
+            false,
+            Some(float_abi),
+        ));
         let error = hirsel_native::link_objects(&ready, &program.entry, &root_only, &tools, &dir)
             .unwrap_err();
         assert_eq!(error.stage, StageName::Link);

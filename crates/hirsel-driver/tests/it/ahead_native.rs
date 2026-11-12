@@ -555,7 +555,7 @@ fn certificates_bind_transitive_bodies_layouts_helpers_and_target_options() {
         let helper = ContentHash::of_bytes(b"helper assembly v1");
         let proposed = |p: &hirsel_native::ReadyProgram,
                         helpers,
-                        table: &hirsel_lir::layout_types::LayoutTable,
+                        table: &hirsel_lir::SealedLayoutTable,
                         target: &hirsel_native::TargetSpec| {
             hirsel_lir::ahead::AheadPlan::build(
                 &p.units.iter().collect::<Vec<_>>(),
@@ -578,8 +578,9 @@ fn certificates_bind_transitive_bodies_layouts_helpers_and_target_options() {
             )
             .identity
         );
-        let mut layout = program.table.clone();
+        let mut layout = program.table.table().clone();
         layout.layout_version += 1;
+        let layout = hirsel_lir::SealedLayoutTable::seal(layout);
         assert_ne!(
             original.identity,
             proposed(&program, helper, &layout, &program.target).identity

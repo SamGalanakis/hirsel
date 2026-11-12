@@ -54,14 +54,10 @@ fn actual_root_rejects_changed_owner_policy_and_c_bound_ready_summary() {
             VerifyStore::Off,
             false,
             |view, root, readies| {
-                let (summaries, table, _keys) = view
+                let (summaries, table) = view
                     .with_link_context(root, readies, |program| {
                         assert!(program.units.is_empty());
-                        Ok((
-                            program.summaries.clone(),
-                            program.table.clone(),
-                            program.keys.clone(),
-                        ))
+                        Ok((program.summaries.clone(), program.table.clone()))
                     })
                     .unwrap();
                 let mut missing = (**root).clone();
@@ -98,7 +94,7 @@ fn actual_root_rejects_changed_owner_policy_and_c_bound_ready_summary() {
                 // only current C can authorize their complete metadata.
                 for mutation in 0..4 {
                     let mut summary = original.clone();
-                    let mut table = table.clone();
+                    let mut table = table.table().clone();
                     match mutation {
                         0 => summary.recovers = !summary.recovers,
                         1 => {

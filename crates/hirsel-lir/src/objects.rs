@@ -713,7 +713,8 @@ fn unit_digest<S: crate::stage::Stage + Clone>(
             for function in &mut block.functions {
                 parts.push(
                     inputs
-                        .keys
+                        .layouts
+                        .keys()
                         .fn_abi_of(inputs.layouts, function.abi)
                         .ok_or("static callable ABI outside the table")?
                         .0

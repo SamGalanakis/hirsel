@@ -193,7 +193,7 @@ fn retained_and_owning_callbacks_keep_heap_fallback() {
             before.units.iter().map(|u| u.digest()).collect::<Vec<_>>(),
             after.units.iter().map(|u| u.digest()).collect::<Vec<_>>()
         );
-        assert_eq!(before.table.digest(), after.table.digest());
+        assert_eq!(before.table, after.table);
         let (before, after) = pair(&s, true);
         assert_eq!(before.counters.allocations, after.counters.allocations);
         assert_eq!(before.counters.finalizers, after.counters.finalizers);

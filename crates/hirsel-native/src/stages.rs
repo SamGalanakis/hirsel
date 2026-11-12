@@ -8,7 +8,7 @@ use hirsel_engine::ValidatedNativeInput;
 use hirsel_intern::timings::{self, Count, Interval, Phase};
 use hirsel_lir::discharge::Discharge;
 use hirsel_lir::ir::LirUnit;
-use hirsel_lir::layout_types::{LayoutId, LayoutTable, TargetSpec};
+use hirsel_lir::layout_types::{LayoutId, TargetSpec};
 use hirsel_lir::stage::{InputIdentity, Ready, Stage, ValidatedUnit};
 use hirsel_lir::validate::{Inputs, Rejected};
 use hirsel_rc::cleanup::Finalizers;

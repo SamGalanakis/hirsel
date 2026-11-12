@@ -48,7 +48,7 @@ fn execute_with_collisions(body: &str, expected: u64, collisions: bool) {
             invocations: ready.operations.invocations.clone(),
             pretransfer_adapters: ready.operations.pretransfer_adapters.clone(),
             target: ready.target.clone(),
-            layouts: ready.table.clone(),
+            layouts: ready.table.table().clone(),
             units: ready.units.iter().map(|u| u.unit().clone()).collect(),
             statics: ready.statics.clone(),
         };
@@ -218,7 +218,7 @@ fn heap_independently_rejects_undeclared_borrowed_returns_and_early_loan_end() {
             invocations: ready.operations.invocations.clone(),
             pretransfer_adapters: ready.operations.pretransfer_adapters.clone(),
             target: ready.target,
-            layouts: ready.table,
+            layouts: ready.table.into_table(),
             units: ready.units.iter().map(|u| u.unit().clone()).collect(),
             statics: ready.statics,
         };

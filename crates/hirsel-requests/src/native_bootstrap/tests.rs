@@ -53,7 +53,7 @@ fn fixture_store() -> Arc<dyn ResultStore> {
     Arc::new(
         hirsel_engine_store::RequestStore::with_scratch(
             Arc::new(MemStore::default()),
-            budget.reserve(64 << 20).unwrap(),
+            budget.reserve(48 << 20).unwrap(),
             &std::env::temp_dir(),
             1 << 30,
         )

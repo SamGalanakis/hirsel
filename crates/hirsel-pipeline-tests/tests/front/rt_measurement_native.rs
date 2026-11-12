@@ -219,50 +219,158 @@ fn free_worker_reports_include_the_allocation_population_at_widths_1_and_8() {
     });
 }
 
+fn smoke_entries(path: &Path) -> Vec<(hirsel_engine::LoadedProgram, u64)> {
+    use hirsel_requests::CompilerRequests;
+    let source = std::fs::read_to_string(path).unwrap();
+    if !source.lines().any(|line| line.trim() == "// expect: test") {
+        return vec![(hirsel_front_phases::load_program(path).unwrap(), 0)];
+    }
+    let compiler = hirsel_front_phases::COMPILER;
+    let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
+    let (_, inputs) = hirsel_engine::requests::observe_inputs(
+        requests.input_limits(),
+        requests.capture_attempts(),
+        |inputs| compiler.load_program_inputs(path, inputs, false),
+    )
+    .unwrap();
+    let discovery = hirsel_driver::testing::discover(
+        &mut requests,
+        path,
+        inputs,
+        &[],
+        None,
+        hirsel_driver::testing::Selection::Tests,
+    )
+    .unwrap();
+    assert!(
+        !discovery.tests.is_empty(),
+        "{} selected no tests",
+        path.display()
+    );
+    let inputs = discovery
+        .execution_inputs(requests.input_limits().bytes)
+        .unwrap();
+    discovery
+        .tests
+        .iter()
+        .map(|test| {
+            let mut loaded = compiler.load_program_inputs(path, &inputs, true).unwrap();
+            loaded.entry = test.entry.clone();
+            (loaded, test.seed)
+        })
+        .collect()
+}
+
+fn smoke_paths(shard: &str) -> Vec<&'static str> {
+    let (index, count) = shard
+        .split_once('/')
+        .expect("runtime smoke shard must be i/n");
+    let index: usize = index.parse().expect("runtime smoke shard index");
+    let count: usize = count.parse().expect("runtime smoke shard count");
+    assert!(
+        index > 0 && count > 0 && index <= count,
+        "invalid runtime smoke shard {shard}"
+    );
+    let paths: Vec<_> = include_str!("../../../../native-tests/regressions/smoke.txt")
+        .lines()
+        .filter(|path| !path.is_empty() && !path.starts_with('#'))
+        .enumerate()
+        .filter_map(|(offset, path)| (offset % count == index - 1).then_some(path))
+        .collect();
+    assert!(
+        !paths.is_empty(),
+        "runtime smoke shard {shard} selected no programs"
+    );
+    paths
+}
+
 #[test]
-#[ignore = "full gate"]
+fn runtime_smoke_shards_cover_each_program_once() {
+    let all = smoke_paths("1/1");
+    let shards: Vec<_> = (1..=8)
+        .flat_map(|index| smoke_paths(&format!("{index}/8")))
+        .collect();
+    assert_eq!(shards.len(), all.len());
+    let unique: std::collections::BTreeSet<_> = shards.into_iter().collect();
+    assert_eq!(unique.len(), all.len());
+    assert_eq!(unique, all.into_iter().collect());
+}
+
+#[test]
+#[ignore = "full gate; HIRSEL_RUNTIME_SMOKE_SHARD=i/n selects one partition"]
 fn full_gate_every_native_smoke_case_preserves_its_observation_in_all_runtime_variants() {
     with_compiler_stack(|| {
         let target = TargetSpec::x86_64_unknown_linux_gnu();
         let cache = Path::new(env!("CARGO_TARGET_TMPDIR")).join("measurement-runtime-cache");
         let variants = variants(&cache, &target, true);
         let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
-        for path in include_str!("../../../../native-tests/regressions/smoke.txt")
-            .lines()
-            .filter(|p| !p.is_empty() && !p.starts_with('#'))
-        {
-            let source = std::fs::read_to_string(root.join(path)).unwrap();
-            let (input, entry, reference) = checked(&source);
-            let program =
-                hirsel_native_batch::build(&input, &Options::new(target.clone())).unwrap();
-            let sites = hirsel_native::Sites::new(input.snapshot());
-            for tools in &variants {
-                let name = format!(
-                    "runtime-smoke-{}-{}-{}",
-                    Path::new(path).file_stem().unwrap().to_str().unwrap(),
-                    tools.runtime_build.system_allocator,
-                    tools.runtime_build.measurement
-                );
-                // Each variant toolchain links its own archive, the optimized
-                // executable as one object, under the diagnostic checks.
-                let dir = scratch(&name);
-                let observed = hirsel_native::link(
-                    &program,
-                    &entry,
-                    OptLevel::Speed,
-                    Partition::Whole,
-                    tools,
-                    &dir,
+        let mut programs = 0;
+        let mut entries = 0;
+        let mut observations = 0;
+        let shard = std::env::var("HIRSEL_RUNTIME_SMOKE_SHARD").unwrap_or_else(|_| "1/1".into());
+        for path in smoke_paths(&shard) {
+            let _progress =
+                hirsel_intern::test_progress::enter("runtime-smoke-case", || path.to_owned());
+            programs += 1;
+            for (mut loaded, test_seed) in smoke_entries(&root.join(path)) {
+                entries += 1;
+                loaded
+                    .check_for_execution()
+                    .unwrap_or_else(|error| panic!("{path}: {error}"));
+                let entry = loaded.entry.clone();
+                let execution = run_observed_snapshot(
+                    &mut loaded.engine,
+                    &RunConfiguration {
+                        entry: entry.clone(),
+                        hash_seed: 0,
+                        inputs: vec![],
+                    },
+                    SimulationConfig {
+                        test_seed,
+                        ..Default::default()
+                    },
                 )
-                .and_then(|exe| hirsel_native::launch(&exe, &target, tools, &dir, true))
-                .and_then(|launched| hirsel_native::observe(&launched, &program, &sites));
-                assert!(
-                    observed.as_ref() == Ok(&reference),
-                    "{path}, {:?}: {observed:?}",
-                    tools.runtime_build
-                );
+                .unwrap();
+                let reference = Observation::of_reference(execution.observation.as_ref().unwrap());
+                let raw = loaded.engine.export_native_input().unwrap();
+                let input = loaded.engine.import_native_input(raw).unwrap();
+                let mut options = Options::new(target.clone());
+                options.launch.test_seed = test_seed;
+                let program = hirsel_native_batch::build(&input, &options).unwrap();
+                let sites = hirsel_native::Sites::new(input.snapshot());
+                for tools in &variants {
+                    let name = format!(
+                        "runtime-smoke-{}-{}-{}",
+                        Path::new(path).file_stem().unwrap().to_str().unwrap(),
+                        tools.runtime_build.system_allocator,
+                        tools.runtime_build.measurement
+                    );
+                    // Each variant toolchain links its own archive, the optimized
+                    // executable as one object, under the diagnostic checks.
+                    let dir = scratch(&name);
+                    let observed = hirsel_native::link(
+                        &program,
+                        &entry,
+                        OptLevel::Speed,
+                        Partition::Whole,
+                        tools,
+                        &dir,
+                    )
+                    .and_then(|exe| hirsel_native::launch(&exe, &target, tools, &dir, true))
+                    .and_then(|launched| hirsel_native::observe(&launched, &program, &sites));
+                    assert!(
+                        observed.as_ref() == Ok(&reference),
+                        "{path}, {:?}: {observed:?}",
+                        tools.runtime_build
+                    );
+                    observations += 1;
+                }
             }
         }
+        assert!(programs > 0 && observations > 0);
+        eprintln!(
+            "runtime smoke: {programs} programs, {entries} entries, {observations} variant observations"
+        );
     });
 }
 

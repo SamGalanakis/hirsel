@@ -1,0 +1,33 @@
+// expect: accept
+// expect: kind Point plain
+// expect: size Point 16
+// expect: kind Mixed plain
+// expect: size Mixed 9
+// expect: kind Named own
+// expect: size Named 33
+// expect: kind Tree own
+// expect: holds Tree -
+// expect: kind Handle resource
+// expect: kind Wraps own
+// expect: holds Wraps resource
+// expect: holds G1 resource
+// expect: holds G2 resource
+// expect: kind Pick plain
+// expect: kind Leaf own
+// OWN-2/OWN-3/MEM-24 by hand: Point is two i64 (16 bytes); Mixed is u64 + u8 with no
+// padding (9); Named is a String carrier (24) plus Mixed inline (9). Tree reaches itself
+// only through List. G1 and G2 name each other through Box and Option, so they form one
+// holds group and both hold the resource G2's list holds.
+type Point { x: i64, y: i64 }
+type Mixed { a: u64, b: u8 }
+type Named { s: String, m: Mixed }
+type Tree { label: String, kids: List[Tree] }
+resource type Handle { fd: u64 }
+type Wraps { h: Handle }
+type G1 { next: Box[G2] }
+type G2 { hs: List[Handle], back: Option[Box[G1]] }
+type Pick = Two(u32, bool) | Zero
+type Leaf: shareable + send { n: List[u64] }
+type Ids = List[u64]
+type Rec: shareable { kids: List[Rc[Rec]] }
+fn first(xs: List[String]) -> Option[View[String]] in xs { list.get(xs, 0) }

@@ -1,0 +1,12 @@
+// Fixture of the core prelude (core@1/core). Role types are fixed by these paths.
+pub opaque type View[T] {}
+pub opaque type Box[T] {}
+pub opaque type Rc[T: shareable] {}
+pub opaque type Arc[T: shareable + send] {}
+pub opaque type List[T] {}
+pub opaque type String {}
+pub opaque type Region {}
+pub opaque type Dir {}
+pub type Capacity { requested: u64, available: u64 }
+pub fn replace[T](mut q: T, take v: T) -> T
+pub fn fail(take msg: String) -> Never

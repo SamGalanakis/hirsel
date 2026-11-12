@@ -1,0 +1,2 @@
+pub fn new() -> String
+pub fn byte_len(s: String) -> u64

@@ -1,0 +1,3 @@
+pub fn new[T: shareable](take x: T) -> Result[Rc[T], (Capacity, T)]
+pub fn share[T: shareable](h: Rc[T]) -> Rc[T]
+pub fn try_unwrap[T: shareable](take h: Rc[T]) -> Result[T, Rc[T]]

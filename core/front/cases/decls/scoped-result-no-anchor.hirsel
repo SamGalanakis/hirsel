@@ -1,0 +1,3 @@
+// expect: refuse OWN-20 at 3:31
+// OWN-20's example: a scoped result names its anchor.
+fn first(xs: List[String]) -> Option[View[String]] { list.get(xs, 0) }

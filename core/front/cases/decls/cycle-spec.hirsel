@@ -1,0 +1,4 @@
+// expect: refuse OWN-2 at 3:10
+// OWN-2's own example: refused at A's field b.
+type A { b: B }
+type B { a: A }

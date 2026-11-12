@@ -1,0 +1,4 @@
+// expect: refuse OWN-4 at 4:21
+// OWN-4: `Rc` requires a shareable payload; Note is own and declares no bounds.
+type Note { s: String }
+type Holder { r: Rc[Note] }

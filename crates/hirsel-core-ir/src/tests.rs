@@ -248,6 +248,8 @@ fn coreir_data_crates_depend_only_on_neutral_crates() {
         "hirsel-core-ids",
         "hirsel-core-layout",
         "hirsel-core-ir",
+        "hirsel-core-syntax",
+        "hirsel-core-resolve",
         "hirsel-intern",
         "hirsel-guard",
     ];

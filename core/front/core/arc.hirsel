@@ -1,0 +1,3 @@
+pub fn new[T: shareable + send](take x: T) -> Result[Arc[T], (Capacity, T)]
+pub fn share[T: shareable + send](h: Arc[T]) -> Arc[T]
+pub fn try_unwrap[T: shareable + send](take h: Arc[T]) -> Result[T, Arc[T]]

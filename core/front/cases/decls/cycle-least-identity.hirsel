@@ -1,0 +1,6 @@
+// expect: refuse OWN-2 at 5:10
+// OWN-2: an inline cycle is refused once, at the continuing field of the member whose
+// identity is least (B: smaller byte offset), not where a traversal first meets it.
+type C { a: A }
+type B { a: A, n: u64 }
+type A { n: u64, b: B }

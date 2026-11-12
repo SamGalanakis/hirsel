@@ -694,6 +694,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hirsel-core-front"
+version = "0.1.0"
+dependencies = [
+ "hirsel-core-ids",
+ "hirsel-core-ir",
+ "hirsel-core-layout",
+ "hirsel-core-resolve",
+ "hirsel-core-syntax",
+ "hirsel-guard",
+]
+
+[[package]]
 name = "hirsel-core-ids"
 version = "0.1.0"
 dependencies = [

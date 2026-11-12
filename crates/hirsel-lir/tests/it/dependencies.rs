@@ -61,6 +61,7 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-core-ids", Class::Data),
     ("hirsel-core-syntax", Class::Data),
     ("hirsel-core-resolve", Class::Implementation),
+    ("hirsel-core-front", Class::Implementation),
     ("hirsel-core-ir", Class::Data),
     ("hirsel-core-layout", Class::Data),
     ("hirsel-rt-operations", Class::Data),
@@ -200,6 +201,15 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
         _ if from == "hirsel-core-resolve" => matches!(
             to,
             "hirsel-core-syntax" | "hirsel-core-ids" | "hirsel-guard" | "hirsel-graph"
+        ),
+        _ if from == "hirsel-core-front" => matches!(
+            to,
+            "hirsel-core-ids"
+                | "hirsel-core-ir"
+                | "hirsel-core-layout"
+                | "hirsel-core-syntax"
+                | "hirsel-core-resolve"
+                | "hirsel-guard"
         ),
         _ if from == "hirsel-core-syntax" => {
             matches!(to, "hirsel-core-ids" | "hirsel-guard" | "hirsel-graph")

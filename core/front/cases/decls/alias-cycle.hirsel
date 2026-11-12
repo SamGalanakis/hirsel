@@ -1,0 +1,4 @@
+// expect: refuse LANG-9 at 3:10
+// LANG-9: an alias chain that reaches itself.
+type X = Y
+type Y = X

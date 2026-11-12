@@ -386,10 +386,14 @@ class IgnoredTests(unittest.TestCase):
         cases += [case for case, home in EXPLICIT.items() if 'cpu_overlap' in home]
         for case in cases:
             environment = {key: f'/retained/{key} with spaces' for key in EXPLICIT[case]['inputs']}
+            receipt = '' if 'cpu_overlap' in EXPLICIT[case] else '\ntest-filter: executed exactly 1 selected bodies\n'
             for status, output, expected in [
-                    (0, 'test result: ok. 1 passed; 0 failed; 0 ignored;', 0),
+                    (0, 'test result: ok. 1 passed; 0 failed; 0 ignored;' + receipt, 0),
                     (0, 'test result: ok. 0 passed; 0 failed; 0 ignored;', 1),
                     (0, 'test result: ok. 0 passed; 0 failed; 1 ignored;', 1),
+                    (0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n' * 2 + receipt,
+                     1 if 'cpu_overlap' in EXPLICIT[case] else 0),
+                    (0, 'test-filter: executed exactly 2 selected bodies\n', 1),
                     (0, '', 1),
                     (32, 'test result: FAILED. 0 passed; 1 failed; 0 ignored;', 32),
                     (101, 'host-blocked: not exclusive', 101)]:

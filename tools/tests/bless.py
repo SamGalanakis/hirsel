@@ -18,6 +18,7 @@ if os.environ.get('REFUSE'):
     print('selector matched no runnable test bodies', file=sys.stderr)
     sys.exit(2)
 print('test result: ok. 1 passed; 0 failed; 0 ignored;')
+print('test-filter: executed exactly 1 selected bodies')
 '''
 
 

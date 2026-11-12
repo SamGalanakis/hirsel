@@ -100,6 +100,13 @@ def has_positive_filter(arguments):
     return False
 
 
+def completed_bodies(details):
+    # Buck keeps stdout and stderr separately. Some outer tests forward a
+    # nested libtest's transcript to stderr; those are not outer case results.
+    stdout = re.split(r'^---- STDERR ----$', details, maxsplit=1, flags=re.M)[0]
+    return re.findall(r'^test (\S+)(?: - should panic)? \.\.\. (ok|FAILED)\b', stdout, re.M)
+
+
 def plan(binaries, config, arguments):
     graph = graph_for(binaries, config)
     inventories, dealt = {}, {}
@@ -156,7 +163,7 @@ def main(argv=None):
         results = event_logs.test_results(log)
         for target, result in results.items():
             binary = family(target)
-            actual += [(binary, m[1]) for m in re.finditer(r'^test (\S+)(?: - should panic)? \.\.\. (?:ok|FAILED)\b', result['details'], re.M)]
+            actual += [(binary, name) for name, _ in completed_bodies(result['details'])]
         print(f'test-filter: event log {log}', flush=True)
     if set(actual) != expected or len(actual) != len(expected):
         print(f'test-filter: expected {len(expected)} bodies, observed {len(actual)}; '

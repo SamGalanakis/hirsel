@@ -73,9 +73,12 @@ def main():
     print(result.stdout, end='')
     if result.returncode:
         return result.returncode
-    counts = re.findall(r'test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;',
-                        result.stdout)
-    if counts != [('1', '0', '0')]:
+    if 'cpu_overlap' in REGISTRY[args.case]:
+        counts = re.findall(r'test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;', result.stdout)
+        complete = counts == [('1', '0', '0')]
+    else:
+        complete = re.findall(r'^test-filter: executed exactly (\d+) selected bodies$', result.stdout, re.M) == ['1']
+    if not complete:
         print('ignored-tests: expected exactly one executed passing test', file=sys.stderr)
         return 1
     return 0

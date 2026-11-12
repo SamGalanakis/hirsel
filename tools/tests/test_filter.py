@@ -91,6 +91,16 @@ class FilterOwners(unittest.TestCase):
                          ['--format=terse', '--color=never', '--exact', '--skip', 'skip value',
                           '--', '--format=literal'])
 
+    def test_nested_harness_results_on_stderr_are_not_counted_as_outer_bodies(self):
+        details = ('---- STDOUT ----\n'
+                   'test outer::case ... ok <21.640s>\n'
+                   '---- STDERR ----\n'
+                   'test outer::case ... ok\n'
+                   'test child::other_case ... FAILED\n')
+        self.assertEqual(self.tool['completed_bodies'](details), [('outer::case', 'ok')])
+        self.assertEqual(self.tool['completed_bodies']('test outer::case ... FAILED\n'),
+                         [('outer::case', 'FAILED')])
+
 
 if __name__ == '__main__':
     unittest.main()

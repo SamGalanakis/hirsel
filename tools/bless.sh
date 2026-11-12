@@ -80,7 +80,7 @@ run_cases() {
     exit 1
   fi
   local passed
-  passed="$(sed -n 's/.*test result: ok\. \([0-9]*\) passed.*/\1/p' "$log" | awk '{ n += $1 } END { print n + 0 }')"
+  passed="$(sed -n 's/^test-filter: executed exactly \([0-9]*\) selected bodies$/\1/p' "$log" | awk '{ n += $1 } END { print n + 0 }')"
   if (( passed == 0 )); then
     echo "bless.sh: no case of $target matches $filter" >&2
     exit 1

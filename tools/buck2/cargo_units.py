@@ -219,6 +219,8 @@ class Resolution:
                     if self.packages[unit['pkg_id']]['name'] == 'hirsel-llvm':
                         deps.append('//crates/hirsel-llvm/bridge:bridge')
                     fields = dict(name=name, features=unit['features'], deps=sorted(deps))
+                    if call.func.id == 'hirsel_build_script':
+                        fields['compile_features'] = compiled['features']
                     if call.func.id != 'hirsel_build_script':
                         fields['build_script'] = self.script(key)
                     if 'bin_exes' in attrs:

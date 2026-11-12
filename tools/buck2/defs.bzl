@@ -99,7 +99,8 @@ def _release_codegen_units(name):
     # A measured release compile's codegen units match its reservation, and a
     # one-CPU compile keeps two: its slot share covers them
     # (action_sizes_from_log.py). Unmeasured targets keep Cargo's defaults.
-    name = name.split("-features-")[0]
+    parts = name.split("-features-")
+    name = parts[0] + parts[1][12:] if len(parts) == 2 else name
     if name not in COMPILE_REQUESTS["release"] and not (PROBE_CPUS and name in COMPILE_CLASSES["release"]):
         return []
     return ["-Ccodegen-units={}".format(max(2, compile_request("release", name)[0]))]
@@ -157,7 +158,7 @@ def _rust(rule, name, **attrs):
     if attrs.get("crate") == "hirsel_rt":
         if read_root_config("hirsel", "operation_latency", "false") == "true":
             attrs["features"] = attrs.get("features", []) + ["operation-latency"]
-        if name == "hirsel-rt" and read_root_config("hirsel", "ownership_trace", "false") == "true" and "ownership-trace" not in attrs.get("features", []):
+        if name.split("-features-")[0] == "hirsel-rt" and read_root_config("hirsel", "ownership_trace", "false") == "true" and "ownership-trace" not in attrs.get("features", []):
             attrs["features"] = attrs.get("features", []) + ["ownership-trace"]
         attrs["features"] = attrs.get("features", []) + select({
             "root//tools/buck2:sanitizer_thread": ["tsan"],
@@ -888,7 +889,7 @@ _workspace_build_script_run = rule(
     },
 )
 
-def hirsel_build_script(name, crate_root, srcs, deps, inputs, features, manifest_dir, package_name, version, edition, input_paths = {}):
+def hirsel_build_script(name, crate_root, srcs, deps, inputs, features, manifest_dir, package_name, version, edition, input_paths = {}, compile_features = None):
     """A Cargo build script: compiled once, then run over its declared inputs.
 
     Its output directory is the library's OUT_DIR. Cargo rerun directives are
@@ -901,6 +902,7 @@ def hirsel_build_script(name, crate_root, srcs, deps, inputs, features, manifest
         name = name + "-bin",
         incoming_transition = "root//tools/buck2:host_transition",
         crate = "build_script_build",
+        features = features if compile_features == None else compile_features,
         crate_root = crate_root,
         srcs = srcs,
         deps = deps,

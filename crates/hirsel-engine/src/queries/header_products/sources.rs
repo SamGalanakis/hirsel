@@ -63,6 +63,13 @@ struct SyntaxOwner {
 }
 struct LiveSyntax {
     declarations: crate::snapshot::DeclarationFile,
+    /// Whether this file's text disagrees with a catalog, and the identity of
+    /// that catalog. The items are immutable and every catalog change replaces
+    /// the candidate table the check reads, so a matching identity answers as
+    /// a recomputation would.
+    stale: Option<(catalog::CatalogIdentity, bool)>,
+    /// The identity bytes the charge covers; a larger identity is not kept.
+    stale_room: u64,
     _charge: Charge,
 }
 impl LiveSyntax {
@@ -70,13 +77,38 @@ impl LiveSyntax {
         self.declarations.items()
     }
 
+    /// Whether any first occurrence's text hash or anchor disagrees with the
+    /// catalog, answered once per catalog identity.
+    fn stale(&mut self, catalog: &catalog::Catalog) -> bool {
+        if let Some((identity, stale)) = &self.stale
+            && identity.matches(catalog)
+        {
+            return *stale;
+        }
+        let stale = self.items().iter().any(|syntax| {
+            syntax.occurrence == 0
+                && catalog
+                    .body(&syntax.item.definition)
+                    .is_some_and(|expected| {
+                        syntax.text_hash != expected
+                            || catalog.anchor(&syntax.item.definition, syntax.occurrence)
+                                != Some(syntax.anchor)
+                    })
+        });
+        let identity = catalog.identity();
+        self.stale = (identity.retained_bytes() <= self.stale_room).then_some((identity, stale));
+        stale
+    }
+
     fn new(
         file: FileId,
         items: Vec<Arc<ItemSyntax>>,
         sources: &SourceMap,
+        catalog: &catalog::Catalog,
         charge: impl FnOnce(u64) -> Result<Charge, QueryError>,
     ) -> Result<Self, QueryError> {
         let declarations = crate::snapshot::DeclarationFile::new(file, items, sources);
+        let stale_room = catalog.identity().retained_bytes();
         let bytes = declarations
             .items()
             .iter()
@@ -86,10 +118,13 @@ impl LiveSyntax {
                 ))
             })
             .and_then(|n| n.checked_add(declarations.retained_bytes() as u64))
+            .and_then(|n| n.checked_add(stale_room))
             .ok_or_else(|| source_refusal("syntax size overflow"))?;
         let charge = charge(bytes)?;
         Ok(Self {
             declarations,
+            stale: None,
+            stale_room,
             _charge: charge,
         })
     }
@@ -618,13 +653,19 @@ impl HeaderSources {
                         live: std::sync::Mutex::new(
                             written
                                 .map(|items| {
-                                    LiveSyntax::new(file, items, &engine.sources, |bytes| {
-                                        if indexed {
-                                            standalone_syntax(bytes)
-                                        } else {
-                                            Ok(Charge::engine())
-                                        }
-                                    })
+                                    LiveSyntax::new(
+                                        file,
+                                        items,
+                                        &engine.sources,
+                                        &engine.catalog,
+                                        |bytes| {
+                                            if indexed {
+                                                standalone_syntax(bytes)
+                                            } else {
+                                                Ok(Charge::engine())
+                                            }
+                                        },
+                                    )
                                 })
                                 .transpose(),
                         ),
@@ -915,30 +956,24 @@ impl HeaderSources {
                 if items.is_empty() {
                     return Err(refused());
                 }
-                *live = Some(LiveSyntax::new(*file, items, &engine.sources, |bytes| {
-                    engine.header_products.as_ref().map_or_else(
-                        || standalone_syntax(bytes),
-                        |headers| headers.admit_source(bytes),
-                    )
-                })?);
+                *live = Some(LiveSyntax::new(
+                    *file,
+                    items,
+                    &engine.sources,
+                    &engine.catalog,
+                    |bytes| {
+                        engine.header_products.as_ref().map_or_else(
+                            || standalone_syntax(bytes),
+                            |headers| headers.admit_source(bytes),
+                        )
+                    },
+                )?);
             }
-            let product = live.as_ref().unwrap();
-            let syntaxes = product.items();
-            if syntaxes.iter().any(|syntax| {
-                syntax.occurrence == 0
-                    && engine
-                        .catalog
-                        .body(&syntax.item.definition)
-                        .is_some_and(|expected| {
-                            syntax.text_hash != expected
-                                || engine
-                                    .catalog
-                                    .anchor(&syntax.item.definition, syntax.occurrence)
-                                    != Some(syntax.anchor)
-                        })
-            }) {
+            let product = live.as_mut().unwrap();
+            if product.stale(&engine.catalog) {
                 return Ok(false);
             }
+            let syntaxes = product.items();
             // A single-header execution starts empty and is dropped after
             // one demand: siblings it reads are installed when demanded.
             // Longer-lived engines keep the whole file, so their item table
@@ -959,5 +994,73 @@ impl HeaderSources {
         // being one of that file's parsed items. Its ordinary materializer
         // must still construct the requested body from the captured base.
         Ok(engine.items.contains_key(path))
+    }
+}
+
+#[cfg(test)]
+mod stale_tests {
+    use super::*;
+
+    // A live file outlives the catalog it was checked against: its verdict must
+    // follow the catalog it is asked about, not the first one it saw.
+    #[test]
+    fn a_live_file_cached_against_one_catalog_answers_for_an_edited_one() {
+        hirsel_intern::jobs::with_compiler_stack(|| {
+            let store = Arc::new(hirsel_engine_store::MemStore::default());
+            let engine = || {
+                QueryEngine::new(
+                    crate::default_environment(),
+                    crate::PhaseAdapters {
+                        lexer: Some(Arc::new(crate::LexerAdapter)),
+                        parser: Some(Arc::new(crate::ParserAdapter)),
+                        ..Default::default()
+                    },
+                )
+                .with_result_store(store.clone())
+            };
+            let context = crate::default_context();
+            // Indexing a file stores its heads, so a later engine over the same
+            // sources catalogs them without parsing.
+            let catalogued = |text: &str| {
+                let mut cold = engine();
+                let file = cold.sources.add("a.hir", text.into()).unwrap();
+                cold.index_source(file, &context).unwrap();
+                let mut warm = engine();
+                warm.sources = cold.sources.clone();
+                warm.index_source(file, &context).unwrap();
+                assert!(warm.catalog.paths().next().is_some());
+                (warm, file)
+            };
+            let (original, _) = catalogued("fn f()->u8{1u8}");
+            let (mut live_engine, file) = catalogued("fn f()->u8{1u8}");
+            live_engine.materialize_source(file).unwrap();
+            let mut items: Vec<_> = live_engine.items.values().flatten().cloned().collect();
+            assert_eq!(items.len(), 1);
+            // Anchors are numbered per process; bind the live item to the anchor
+            // the original catalog gives it.
+            let item = Arc::make_mut(&mut items[0]);
+            item.anchor = original.catalog.anchor(&item.item.definition, 0).unwrap();
+            let mut live = LiveSyntax::new(
+                file,
+                items,
+                &live_engine.sources,
+                &live_engine.catalog,
+                |_| Ok(Charge::engine()),
+            )
+            .unwrap();
+            let (edited, _) = catalogued("fn f()->u8{2u8}");
+            assert!(
+                !live.stale(&original.catalog),
+                "the live text's own catalog"
+            );
+            assert!(
+                live.stale(&edited.catalog),
+                "the edited body no longer matches the live text"
+            );
+            assert!(
+                !live.stale(&original.catalog),
+                "back to the live text's catalog"
+            );
+        });
     }
 }

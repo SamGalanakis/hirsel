@@ -59,8 +59,6 @@ fn observed() -> BTreeSet<String> {
         .env("XDG_STATE_HOME", directory.join("state"))
         .env("XDG_CACHE_HOME", directory.join("cache"))
         .env("HIRSEL_RESULTS", "none@1")
-        // Several workers, so worker threads are part of the run.
-        .env("HIRSEL_JOBS", "4")
         .env_remove("HIRSEL_VERIFY_CACHE")
         .output()
         .unwrap();

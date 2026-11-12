@@ -813,10 +813,18 @@ fn hello_on_installed_std_answers_v_universe_questions_without_reading_std_rows(
             hold_bytes: 0,
             ..Default::default()
         };
-        COMPILER
+        let observations = COMPILER
             .with_config(config)
-            .precompute_package(&manifest, &products)
-            .unwrap();
+            .precompute_package_observed(&manifest, &products)
+            .unwrap()
+            .expect("a cold precompute publishes");
+        // Precompute's work runs on the one compiler thread the trace is
+        // carried to; a store use on any other thread would show here.
+        assert_eq!(
+            observations.untraced,
+            Default::default(),
+            "std's publication made uses no trace reached"
+        );
         for name in ["aaa", "zzz"] {
             let package_dir = dir.path().join(name);
             std::fs::create_dir(&package_dir).unwrap();

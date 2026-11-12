@@ -140,12 +140,18 @@ pub enum Step {
     /// Follow the pointer stored at this place.
     Deref,
     Field(u32),
-    /// A field of one case of a variant; the tag test precedes it (FORM v1).
+    /// A field of one case of a variant (FORM v1b): the payload projection. The
+    /// producer tests the case first (`case`); the step itself checks nothing.
     CaseField {
         case: u32,
         field: u32,
     },
+    /// Raw storage: the element at this index, at the stride of the address's place
+    /// type. Unchecked; a collection's producer tests its length first.
     Index(ValueId),
+    /// An element of an inline array place (`Inline[T, n]`, SEM-9, FORM v1b): fails
+    /// with `Bounds` when the index is not below `n`, at the `Address` instruction.
+    Element(ValueId),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -399,7 +405,7 @@ pub enum Inst {
         call: CallId,
     },
 
-    // ---- FORM v1 draft (not frozen) ----
+    // ---- FORM v1a ----
     /// Admit `charge` and allocate a block of `size` bytes aligned to `align`
     /// (MEM-21). On refusal `result` is null and `available` is the room left in the
     /// limit tried (MEM-22), and nothing is allocated. Under a finalizer's grant a
@@ -429,8 +435,22 @@ pub enum Inst {
         from: AddressId,
         bytes: ValueId,
     },
-    // ---- FORM v1b draft (not frozen: regions serve stable values and builders) ----
-    /// Open a region (MEM-1); `result` is its handle.
+    // ---- FORM v1b (frozen) ----
+    /// The case number (`u32`, declaration order from 0) of the variant value at
+    /// `address`, a place of an own, resource, stable or scoped variant type. Its
+    /// layout is private (MEM-13); a producer never reads the tag bytes itself.
+    Case {
+        result: ValueId,
+        address: AddressId,
+    },
+    /// Make the variant place at `address` hold case `case`; its payload fields are
+    /// then stored through `CaseField` addresses. Constructing writes the case first
+    /// or last, as the producer likes: nothing reads the place until it is complete.
+    SetCase {
+        address: AddressId,
+        case: u32,
+    },
+    /// Open a region (MEM-1); `result` is its handle, a value never stored.
     RegionOpen {
         result: ValueId,
     },
@@ -438,7 +458,7 @@ pub enum Inst {
     RegionClose {
         region: ValueId,
     },
-    // ---- FORM v1a again ----
+    // ---- FORM v1a ----
     /// Enter `bound bytes n`: admit `bytes` against the current limit and make a new
     /// limit of that size current (MEM-25). `admitted` is false, `available` the
     /// room, and no limit is entered when the admission is refused.
@@ -482,7 +502,7 @@ pub enum Inst {
     },
 }
 
-/// What an `Alloc` makes (FORM v1 draft). The block's bookkeeping (its limit record,
+/// What an `Alloc` makes. The block's bookkeeping (its limit record,
 /// and for a resource its cause cell and grant) is the engine's.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum AllocKind {
@@ -495,14 +515,14 @@ pub enum AllocKind {
     },
 }
 
-/// Which limit an `Alloc` is charged to (FORM v1 draft).
+/// Which limit an `Alloc` is charged to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum AllocPlace {
     /// The current limit (MEM-19).
     Current,
     /// The limit the block's record leads to: growth keeps the limit (MEM-26).
     Like(ValueId),
-    /// FORM v1b draft: in this region, charged to the current limit until it closes (MEM-1).
+    /// FORM v1b: in this region, charged to the current limit until it closes (MEM-1).
     Region(ValueId),
 }
 
@@ -513,7 +533,7 @@ pub enum Counted {
     Arc,
 }
 
-/// Engine operations a call can name (FORM v1 draft). Rows are in the crate docs;
+/// Engine operations a call can name. Rows are in the crate docs;
 /// a `take` argument is passed by address and is the callee's only after the
 /// operation's commit point (FAIL-3), so a refused operation leaves it in place.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -582,6 +602,7 @@ impl RtOp {
             params,
             results,
             dest: None,
+            never: false,
         }
     }
 
@@ -612,7 +633,7 @@ impl Inst {
                     .get(&b.pools.steps)
                     .unwrap_or_default()
                     .iter()
-                    .any(|s| matches!(s, Step::Index(_)))
+                    .any(|s| matches!(s, Step::Index(_) | Step::Element(_)))
             }),
             Inst::Alloc { .. } | Inst::Drop { .. } | Inst::Call { .. } => true,
             _ => false,
@@ -638,7 +659,7 @@ pub enum Callee {
     Direct(FuncId),
     /// A code pointer value, called with the call site's signature.
     Indirect(ValueId),
-    /// An engine operation (FORM v1 draft).
+    /// An engine operation.
     Runtime(RtOp),
 }
 
@@ -655,7 +676,7 @@ pub struct CallSite {
     pub signature: SigId,
     pub args: PoolRange<Arg>,
     pub results: PoolRange<ValueId>,
-    /// Where a failure of the callee continues (FORM v1 draft); None propagates it
+    /// Where a failure of the callee continues; None propagates it
     /// out of this function with no cleanup here.
     pub fail: Option<BlockId>,
 }
@@ -688,7 +709,9 @@ pub enum Terminator {
     },
     /// The signature's results, in order.
     Return(PoolRange<ValueId>),
-    // ---- FORM v1 draft (not frozen) ----
+    /// FORM v1a: the point after a call whose signature is `never`, which is its
+    /// block's last instruction. Nothing reaches it: such a call only fails.
+    Unreachable,
     /// Record a cause in the chain (FAIL-10), then continue at `cleanup`, or
     /// propagate when there is none.
     Raise {
@@ -753,11 +776,15 @@ pub enum Param {
 
 /// An instantiated signature. `dest` is the declared type of a result returned
 /// through a caller-provided destination, passed as a leading pointer parameter.
+/// `never` (FORM v1a) is a function whose result type is `Never`: it has no results
+/// and no `dest`, its body never returns, and a call of it ends its block, followed
+/// by `Unreachable`.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Signature {
     pub params: Vec<Param>,
     pub results: Vec<Ty>,
     pub dest: Option<TypeId>,
+    pub never: bool,
 }
 
 /// The identity of one instantiation (see the crate docs, "Instances").

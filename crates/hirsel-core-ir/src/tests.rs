@@ -20,6 +20,7 @@ const SAMPLES: &[(&str, &str)] = &[
     ("admission", include_str!("../samples/admission.core")),
     ("counted", include_str!("../samples/counted.core")),
     ("custody", include_str!("../samples/custody.core")),
+    ("variants", include_str!("../samples/variants.core")),
 ];
 
 fn load(name: &str, text: &str) -> Module {
@@ -62,10 +63,12 @@ fn every_sample_is_well_formed() {
 /// Each case is a one-line edit of a correct body and the rule it breaks.
 #[test]
 fn well_formedness_rejects_producer_mistakes() {
-    let head = "core v1\nsig g0 = (i32, i32) -> (i32)\nsig g1 = (u64) -> (ptr)\ninst n0 = p@0/m/f [] []\nfn f0 = n0 g0 {\n";
+    let head = "core v1\nsig g0 = (i32, i32) -> (i32)\nsig g1 = (u64) -> (ptr)\nsig g2 = (u64) -> never\ninst n0 = p@0/m/f [] []\ninst n1 = p@0/m/stop [] []\nfn f0 = n0 g0 {\n";
+    let tail = "fn f1 = n1 g2 extern\n";
     let ok =
         "b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1 fail b1\n  return v2\nb1:\n  propagate\n}\n";
-    wf::module(&parse(&format!("{head}{ok}")).unwrap()).expect("the base case is well formed");
+    wf::module(&parse(&format!("{head}{ok}{tail}")).unwrap())
+        .expect("the base case is well formed");
     let cases = [
         // a failure path that returns would catch the failure (FAIL-14)
         (
@@ -99,6 +102,11 @@ fn well_formedness_rejects_producer_mistakes() {
         ),
         // entry parameters must be the signature's
         ("b0(v0: i32):\n  return v0\n}\n", "entry"),
+        // a call that returns Never followed by anything but `unreachable` (Q21)
+        (
+            "b0(v0: i32, v1: i32):\n  v2: u64 = const 1\n  call f1 g2 (v2)\n  propagate\n}\n",
+            "never call",
+        ),
         // mixed widths (SEM-1) never reach CoreIR
         (
             "b0(v0: i32, v1: i32):\n  v2: i64 = widen v0\n  v3: i64 = add v2, v1 fail b1\n  return v0\nb1:\n  return v0\n}\n",
@@ -106,7 +114,7 @@ fn well_formedness_rejects_producer_mistakes() {
         ),
     ];
     for (body, why) in cases {
-        let m = parse(&format!("{head}{body}")).unwrap();
+        let m = parse(&format!("{head}{body}{tail}")).unwrap();
         let err = wf::module(&m).expect_err(why);
         assert!(err.contains(why), "expected `{why}`, got `{err}`");
     }

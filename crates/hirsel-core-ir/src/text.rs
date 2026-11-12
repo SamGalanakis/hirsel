@@ -9,6 +9,7 @@
 //! type t0 = "app@1/geo/Point"             ; declared types, canonical text
 //! static d0 = align 1 hex 6869            ; read-only data
 //! sig g0 = (i32, &t0) -> (i32) dest t0    ; params: scalar, ptr or &tN (by address)
+//! sig g1 = (u64) -> never                 ; FORM v1: a function whose result is Never
 //! inst n0 = app@1/main/add ["i32"] []     ; instance key: definition, types, dictionaries
 //! fn f0 = n0 g0 extern                    ; defined in another module
 //! fn f1 = n1 g1 {
@@ -64,17 +65,21 @@ impl ConvertMode {
 
 names!(Counted { Rc = "rc", Arc = "arc" });
 
-/// Whether the module uses a FORM v1 draft construct; it then prints as `core v1`,
+/// Whether the module uses a FORM v1 construct; it then prints as `core v1`,
 /// and a `core v0` text that uses one is refused.
 pub fn uses_v1(m: &Module) -> bool {
     !m.types.is_empty()
+        || m.signatures.iter().any(|s| s.never)
         || m.functions.iter().filter_map(|f| f.body.as_ref()).any(|b| {
             b.calls
                 .iter()
                 .any(|c| c.fail.is_some() || matches!(c.callee, Callee::Runtime(_)))
-                || b.terminators
-                    .iter()
-                    .any(|t| matches!(t, Terminator::Raise { .. } | Terminator::Propagate))
+                || b.terminators.iter().any(|t| {
+                    matches!(
+                        t,
+                        Terminator::Raise { .. } | Terminator::Propagate | Terminator::Unreachable
+                    )
+                })
                 || b.insts.iter().any(|i| {
                     // v0 names a failure block on every fallible instruction.
                     (i.can_fail(b) && i.fail(b).is_none() && !matches!(i, Inst::Call { .. }))
@@ -91,6 +96,8 @@ pub fn uses_v1(m: &Module) -> bool {
                                 | Inst::Share { .. }
                                 | Inst::Release { .. }
                                 | Inst::TryUnwrap { .. }
+                                | Inst::Case { .. }
+                                | Inst::SetCase { .. }
                         )
                 })
         })
@@ -142,7 +149,7 @@ fn field_ty(f: &FieldTy) -> String {
         FieldTy::Rc(t) => format!("rc t{}", t.0),
         FieldTy::Arc(t) => format!("arc t{}", t.0),
         FieldTy::Stable(t) => format!("stable t{}", t.0),
-        FieldTy::Region => "region".into(),
+        FieldTy::Array(e, n) => format!("array {n} {}", field_ty(e)),
         FieldTy::Fn => "fn".into(),
         FieldTy::OwnFn => "ownfn".into(),
         FieldTy::Borrow => "borrow".into(),
@@ -151,6 +158,7 @@ fn field_ty(f: &FieldTy) -> String {
         FieldTy::Handle(Handle::Receiver) => "receiver".into(),
         FieldTy::Handle(Handle::Capability) => "cap".into(),
         FieldTy::Handle(Handle::Causes) => "causes".into(),
+        FieldTy::Handle(Handle::HostFile) => "hostfile".into(),
         FieldTy::Map(k, v) => format!("map {} {}", field_ty(k), field_ty(v)),
         FieldTy::Text => "text".into(),
         FieldTy::FixedSpan(e) => format!("fixed {}", field_ty(e)),
@@ -256,12 +264,16 @@ impl Printer {
                 Param::Value(t) => ty(*t).into(),
                 Param::Address(t) => format!("&t{}", t.0),
             });
-            let results = list(&s.results, |t| ty(*t).into());
+            let results = if s.never {
+                "never".into()
+            } else {
+                format!("({})", list(&s.results, |t| ty(*t).into()))
+            };
             let dest = s
                 .dest
                 .map(|t| format!(" dest t{}", t.0))
                 .unwrap_or_default();
-            self.line(&format!("sig g{i} = ({params}) -> ({results}){dest}"));
+            self.line(&format!("sig g{i} = ({params}) -> {results}{dest}"));
         }
         for (i, k) in m.instances.iter().enumerate() {
             let types = list(&k.types, |t| quote(t));
@@ -298,6 +310,7 @@ impl Printer {
                     Step::Field(f) => format!(" field {f}"),
                     Step::CaseField { case, field } => format!(" case {case} {field}"),
                     Step::Index(v) => format!(" index v{}", v.0),
+                    Step::Element(v) => format!(" element v{}", v.0),
                 };
             }
             l += &format!(" : {}", place(a.ty));
@@ -523,6 +536,10 @@ impl Printer {
                     Inst::Copy { to, from, bytes } => {
                         format!("copy a{}, a{}, {}", to.0, from.0, v(bytes))
                     }
+                    Inst::Case { result, address } => {
+                        format!("{} = case a{}", def(*result), address.0)
+                    }
+                    Inst::SetCase { address, case } => format!("set_case a{}, {case}", address.0),
                     Inst::RegionOpen { result } => format!("{} = region_open", def(*result)),
                     Inst::RegionClose { region } => format!("region_close {}", v(region)),
                     Inst::LimitEnter {
@@ -586,6 +603,7 @@ impl Printer {
                     format!("raise {cause}{cleanup}")
                 }
                 Terminator::Propagate => "propagate".into(),
+                Terminator::Unreachable => "unreachable".into(),
             };
             self.line(&format!("  {term}{}", anchor(block.anchor)));
         }
@@ -797,10 +815,14 @@ impl<'a> Line<'a> {
                 self.next()?;
                 FieldTy::Map(boxed(self)?, boxed(self)?)
             }
+            "array" => {
+                self.next()?;
+                let n = self.num::<u64>()?;
+                FieldTy::Array(boxed(self)?, n)
+            }
             w => {
                 self.next()?;
                 match w {
-                    "region" => FieldTy::Region,
                     "fn" => FieldTy::Fn,
                     "ownfn" => FieldTy::OwnFn,
                     "borrow" => FieldTy::Borrow,
@@ -809,6 +831,7 @@ impl<'a> Line<'a> {
                     "receiver" => FieldTy::Handle(Handle::Receiver),
                     "cap" => FieldTy::Handle(Handle::Capability),
                     "causes" => FieldTy::Handle(Handle::Causes),
+                    "hostfile" => FieldTy::Handle(Handle::HostFile),
                     "text" => FieldTy::Text,
                     w => match (Scalar::from_name(w), w.strip_prefix('t').map(str::parse)) {
                         (Some(s), _) => FieldTy::Scalar(s),
@@ -1056,6 +1079,15 @@ impl BodyParser {
                     bytes: l.value()?,
                 });
             }
+            Some("set_case") => {
+                l.next()?;
+                let address = AddressId(l.id('a')?);
+                l.expect(",")?;
+                return Ok(Inst::SetCase {
+                    address,
+                    case: l.num()?,
+                });
+            }
             Some("region_close") => {
                 l.next()?;
                 return Ok(Inst::RegionClose { region: l.value()? });
@@ -1166,6 +1198,12 @@ impl BodyParser {
                 admitted,
                 available,
                 bytes: l.value()?,
+            }
+        } else if op == "case" {
+            one(&defs)?;
+            Inst::Case {
+                result,
+                address: AddressId(l.id('a')?),
             }
         } else if op == "region_open" {
             one(&defs)?;
@@ -1410,6 +1448,10 @@ impl BodyParser {
                 l.next()?;
                 Terminator::Propagate
             }
+            Some("unreachable") => {
+                l.next()?;
+                Terminator::Unreachable
+            }
             _ => return Ok(None),
         };
         Ok(Some(t))
@@ -1498,7 +1540,12 @@ impl Parser {
                         }
                     })?;
                     l.expect("->")?;
-                    let results = l.seq("(", ")", Line::ty)?;
+                    let never = l.eat("never");
+                    let results = if never {
+                        Vec::new()
+                    } else {
+                        l.seq("(", ")", Line::ty)?
+                    };
                     let dest = if l.eat("dest") {
                         Some(TypeId(l.id('t')?))
                     } else {
@@ -1509,6 +1556,7 @@ impl Parser {
                         params,
                         results,
                         dest,
+                        never,
                     });
                 }
                 "inst" => {
@@ -1609,6 +1657,7 @@ impl Parser {
                                 field: l.num()?,
                             },
                             "index" => Step::Index(l.value()?),
+                            "element" => Step::Element(l.value()?),
                             s => return Err(format!("unknown step `{s}`")),
                         });
                     }

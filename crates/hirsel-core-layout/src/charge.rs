@@ -83,24 +83,28 @@ pub const fn task(result: u64, n: u64) -> Option<u64> {
     }
 }
 
-/// A `Text` or span made outside a compact type: count, extent, one offset per
-/// element when `indexed`, then the payload bytes, rounded up to 8.
-pub const fn standalone_span(elements: u64, payload: u64, indexed: bool) -> Option<u64> {
-    let table = if indexed {
-        elements.checked_mul(8)
-    } else {
-        Some(0)
-    };
-    match table {
-        Some(t) => match (16 + t).checked_add(payload) {
-            Some(n) => round8(n),
+/// A `Text` or `FixedSpan` made outside a compact type: its 8-byte count and its
+/// payload bytes, rounded up to 8 (it is encoded with `W = u64`, MEM-9).
+pub const fn standalone(payload: u64) -> Option<u64> {
+    match payload.checked_add(8) {
+        Some(n) => round8(n),
+        None => None,
+    }
+}
+
+/// A span builder's allocation: a region allocation of `capacity` elements of
+/// logical size `elem` plus its 8-byte count (MEM-24, MEM-3).
+pub const fn span_builder(capacity: u64, elem: u64) -> Option<u64> {
+    match capacity.checked_mul(elem) {
+        Some(n) => match n.checked_add(8) {
+            Some(m) => round8(m),
             None => None,
         },
         None => None,
     }
 }
 
-/// A region allocation (a placed literal, a builder chunk, a sized destination).
+/// A region allocation (a placed literal, a sized destination).
 pub const fn region(bytes: u64) -> Option<u64> {
     round8(bytes)
 }

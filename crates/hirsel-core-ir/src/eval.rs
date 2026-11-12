@@ -8,7 +8,9 @@
 //! data are not modelled and panic.
 
 use crate::*;
-use hirsel_core_layout::{FieldTy, Handle, Layout, Recipe, Repr, TypeRef, charge, compute};
+use hirsel_core_layout::{
+    Body as Shaped, FieldTy, Handle, Layout, Recipe, Repr, TypeRef, charge, compute, field_size,
+};
 use std::collections::VecDeque;
 
 #[derive(Debug, PartialEq)]
@@ -93,6 +95,8 @@ enum At {
     Ptr(TypeRef),
     /// Holds an Rc/Arc node pointer; the payload is at node + 8.
     Counted(TypeRef),
+    /// An inline array: its element type and length are `Machine::arrays[i]`.
+    Array(usize),
     Other,
 }
 
@@ -106,7 +110,18 @@ struct Machine<'m> {
     chans: Vec<Chan>,
     /// Each delivered `Causes`: the cells it owns, None once dropped.
     causes: Vec<Option<Vec<(usize, u64)>>>,
+    /// Every inline array field type of the module: element and length.
+    arrays: Vec<(FieldTy, u64)>,
     trace: Vec<u64>,
+}
+
+fn collect_arrays(ty: &FieldTy, out: &mut Vec<(FieldTy, u64)>) {
+    if let FieldTy::Array(e, n) = ty {
+        if !out.iter().any(|(x, k)| x == &**e && k == n) {
+            out.push(((**e).clone(), *n));
+        }
+        collect_arrays(e, out);
+    }
 }
 
 pub fn run(m: &Module, f: FuncId, args: &[u64], limit: u64) -> Report {
@@ -125,8 +140,18 @@ pub fn run(m: &Module, f: FuncId, args: &[u64], limit: u64) -> Report {
         children: Vec::new(),
         chans: Vec::new(),
         causes: Vec::new(),
+        arrays: Vec::new(),
         trace: Vec::new(),
     };
+    for shape in &m.types {
+        let fields: Vec<&hirsel_core_layout::Field> = match &shape.body {
+            Shaped::Record(f) => f.iter().collect(),
+            Shaped::Variant(c) => c.iter().flat_map(|c| &c.fields).collect(),
+        };
+        for f in fields {
+            collect_arrays(&f.ty, &mut mach.arrays);
+        }
+    }
     let mut task = Task {
         limits: vec![0],
         chain: Vec::new(),
@@ -283,6 +308,24 @@ impl Machine<'_> {
             At::Decl(t)
         }
     }
+    /// What a place of field type `f` holds, for the steps that follow it.
+    fn at_field(&self, f: &FieldTy) -> At {
+        match f {
+            FieldTy::Inline(x) => self.at_of(*x),
+            FieldTy::Box(x) => At::Ptr(*x),
+            FieldTy::Rc(x) | FieldTy::Arc(x) => At::Counted(*x),
+            FieldTy::Array(e, n) => At::Array(
+                self.arrays
+                    .iter()
+                    .position(|(x, k)| x == &**e && k == n)
+                    .expect("collected"),
+            ),
+            _ => At::Other,
+        }
+    }
+    fn stride(&self, e: &FieldTy) -> u64 {
+        field_size(&self.m.types, &self.recipes, e).0
+    }
     fn place_size(&self, p: PlaceTy) -> u64 {
         match p {
             PlaceTy::Value(t) => bytes_of(t) as u64,
@@ -316,6 +359,17 @@ impl Machine<'_> {
     fn drop_field(&mut self, t: &mut Task, at: u64, ty: &FieldTy) -> bool {
         match ty {
             FieldTy::Inline(x) => self.drop_value(t, at, *x),
+            // SEM-9: an inline array is cleaned from index 0 up.
+            FieldTy::Array(e, n) => {
+                let stride = self.stride(e);
+                let mut failed = false;
+                for i in 0..*n {
+                    failed |= self.drop_field(t, at + i * stride, e);
+                }
+                failed
+            }
+            // The provider closes the file and ignores the outcome (MEM-24).
+            FieldTy::Handle(Handle::HostFile) => false,
             FieldTy::Box(x) => {
                 let p = self.load(at, 8);
                 let failed = self.drop_value(t, p, *x);
@@ -643,6 +697,7 @@ impl Machine<'_> {
                     }
                 }
                 Terminator::Propagate => break 'blocks,
+                Terminator::Unreachable => panic!("a never call returned"),
             };
         }
         assert_eq!(t.limits.len(), depth, "a failure left a bound scope open");
@@ -656,7 +711,7 @@ impl Machine<'_> {
         vals: &[u64],
         places: &[(u64, At)],
         a: AddressId,
-    ) -> (u64, At) {
+    ) -> X<(u64, At)> {
         let info = &b.addresses[a.index()];
         let (mut p, mut at) = match info.base {
             AddressBase::Slot(s) => match b.slots[s.index()] {
@@ -685,6 +740,19 @@ impl Machine<'_> {
                 }
                 Step::Field(f) => (None, f),
                 Step::CaseField { case, field } => (Some(case), field),
+                Step::Element(i) => {
+                    let At::Array(k) = at else {
+                        panic!("element of a place that is not an inline array")
+                    };
+                    let (e, n) = &self.arrays[k];
+                    let i = vals[i.index()];
+                    if i >= *n {
+                        return Err(Stop::Cause("Bounds"));
+                    }
+                    p += i * self.stride(e);
+                    at = self.at_field(e);
+                    continue;
+                }
                 Step::Index(i) => {
                     // Raw storage of elements of the address's type.
                     p += vals[i.index()] * self.place_size(info.ty);
@@ -700,15 +768,10 @@ impl Machine<'_> {
             };
             let off = self.fixed(t).offsets[case.unwrap_or(0) as usize][field as usize];
             let fty = &self.shape(t).fields(case).unwrap()[field as usize].ty;
-            at = match fty {
-                FieldTy::Inline(x) => self.at_of(*x),
-                FieldTy::Box(x) => At::Ptr(*x),
-                FieldTy::Rc(x) | FieldTy::Arc(x) => At::Counted(*x),
-                _ => At::Other,
-            };
+            at = self.at_field(fty);
             p += off;
         }
-        (p, at)
+        Ok((p, at))
     }
 
     fn inst(
@@ -903,7 +966,21 @@ impl Machine<'_> {
                 };
             }
             Inst::Address { address, .. } => {
-                places[address.index()] = self.address(b, slots, vals, places, address);
+                places[address.index()] = self.address(b, slots, vals, places, address)?;
+            }
+            Inst::Case { result, address } => {
+                let (p, At::Decl(ty)) = places[address.index()] else {
+                    panic!("case of an untyped place")
+                };
+                let tag = self.fixed(ty).tag.expect("a variant");
+                vals[result.index()] = self.load(p + tag.offset, tag.width as usize);
+            }
+            Inst::SetCase { address, case } => {
+                let (p, At::Decl(ty)) = places[address.index()] else {
+                    panic!("set_case of an untyped place")
+                };
+                let tag = self.fixed(ty).tag.expect("a variant");
+                self.store(p + tag.offset, tag.width as usize, u64::from(case));
             }
             Inst::Read {
                 result, address, ..

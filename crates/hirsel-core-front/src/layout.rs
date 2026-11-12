@@ -113,7 +113,6 @@ impl Shapes<'_> {
                 Some(Role::Arc) => FieldTy::Arc(self.shape(args[0])?),
                 Some(Role::List) => FieldTy::Seq(Box::new(self.field(args[0])?)),
                 Some(Role::String) => FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8))),
-                Some(Role::Region) => FieldTy::Region,
                 Some(Role::Task) => FieldTy::Handle(Handle::Task),
                 Some(Role::Sender) => FieldTy::Handle(Handle::Sender),
                 Some(Role::Receiver) => FieldTy::Handle(Handle::Receiver),

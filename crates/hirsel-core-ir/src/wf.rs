@@ -23,7 +23,9 @@ fn refs_ok(f: &hirsel_core_layout::FieldTy, n: usize) -> bool {
         | F::Stable(t)
         | F::Link(t)
         | F::OptLink(t) => t.index() < n,
-        F::Seq(e) | F::FixedSpan(e) | F::SeqSpan(e) | F::IndexedSpan(e) => refs_ok(e, n),
+        F::Seq(e) | F::FixedSpan(e) | F::SeqSpan(e) | F::IndexedSpan(e) | F::Array(e, _) => {
+            refs_ok(e, n)
+        }
         F::Map(k, v) => refs_ok(k, n) && refs_ok(v, n),
         _ => true,
     }
@@ -48,6 +50,7 @@ pub fn module(m: &Module) -> R {
                 params: vec![Param::Value(Ty::Ptr)],
                 results: vec![],
                 dest: None,
+                never: false,
             };
             need(sig == Some(&want), || {
                 format!("t{i}: finalizer is not (ptr) -> ()")
@@ -61,6 +64,10 @@ pub fn module(m: &Module) -> R {
             Param::Value(_) => true,
         }) && s.dest.is_none_or(|t| t.index() < m.types.len());
         need(types_ok, || format!("g{i}: unknown type"))?;
+        need(
+            !s.never || (s.results.is_empty() && s.dest.is_none()),
+            || format!("g{i}: a never signature has results"),
+        )?;
     }
     for (i, f) in m.functions.iter().enumerate() {
         need(f.instance.index() < m.instances.len(), || {
@@ -158,6 +165,20 @@ impl Ctx<'_> {
     fn is(&self, v: ValueId, t: Ty) -> R {
         need(self.ty(v)? == t, || format!("v{} is not {t:?}", v.0))
     }
+    /// The case count of the non-compact variant type the address names.
+    fn cases(&self, a: AddressId) -> Result<usize, String> {
+        let PlaceTy::Declared(t) = self.place(a)? else {
+            return Err(format!("a{}: case of a scalar place", a.0));
+        };
+        let shape = self.m.types.get(t.index()).ok_or("unknown type")?;
+        match (&shape.body, shape.repr) {
+            (_, hirsel_core_layout::Repr::Compact(_)) => {
+                Err(format!("a{}: compact variants are read through views", a.0))
+            }
+            (hirsel_core_layout::Body::Variant(c), _) => Ok(c.len()),
+            _ => Err(format!("a{}: case of a record", a.0)),
+        }
+    }
     fn place(&self, a: AddressId) -> Result<PlaceTy, String> {
         self.b
             .addresses
@@ -208,7 +229,7 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
             })?,
         }
         for s in a.steps.get(&b.pools.steps).ok_or("steps out of pool")? {
-            if let Step::Index(v) = s {
+            if let Step::Index(v) | Step::Element(v) = s {
                 need(c.ty(*v)?.int().is_some(), || {
                     format!("a{i}: index is not an integer")
                 })?;
@@ -240,6 +261,22 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
         {
             inst_wf(&mut c, inst).map_err(|e| format!("b{bi}: {e}"))?;
         }
+        // A call of a `never` signature is its block's last instruction, and only
+        // `unreachable` follows it.
+        let insts = block.insts.get(&b.insts).unwrap_or_default();
+        let never_at = insts.iter().position(|i| match i {
+            Inst::Call { call } => b
+                .calls
+                .get(call.index())
+                .and_then(|s| m.signatures.get(s.signature.index()))
+                .is_some_and(|s| s.never),
+            _ => false,
+        });
+        let unreachable = matches!(b.terminators[bi], Terminator::Unreachable);
+        need(
+            never_at.map(|i| i + 1 == insts.len()) == unreachable.then_some(true),
+            || format!("b{bi}: a never call must end its block, before unreachable"),
+        )?;
         match &b.terminators[bi] {
             Terminator::Jump(e) => c.edge(*e)?,
             Terminator::Branch { condition, yes, no } => {
@@ -272,8 +309,9 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
                     c.place(*a)?;
                 }
             }
-            Terminator::Propagate => {}
+            Terminator::Propagate | Terminator::Unreachable => {}
             Terminator::Return(r) => {
+                need(!sig.never, || format!("b{bi}: a never function returns"))?;
                 let types: Vec<Ty> = c
                     .vals(*r)?
                     .iter()
@@ -321,7 +359,7 @@ fn no_catch(b: &Body) -> R {
                 out.push(edge(otherwise));
             }
             Terminator::Raise { cleanup, .. } => out.extend(*cleanup),
-            Terminator::Return(_) | Terminator::Propagate => {}
+            Terminator::Return(_) | Terminator::Propagate | Terminator::Unreachable => {}
         }
         out
     };
@@ -543,14 +581,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
         }
         Inst::Address { address, fail } => {
             c.place(address)?;
-            let a = &c.b.addresses[address.index()];
-            let indexed = a
-                .steps
-                .get(&c.b.pools.steps)
-                .unwrap_or_default()
-                .iter()
-                .any(|s| matches!(s, Step::Index(_)));
-            c.fail(fail, indexed)
+            c.fail(fail, inst.can_fail(c.b))
         }
         Inst::Read {
             result,
@@ -614,6 +645,17 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             c.place(to)?;
             c.place(from)?;
             c.is(bytes, Ty::Scalar(Scalar::U64))
+        }
+        Inst::Case { result, address } => {
+            c.def(result)?;
+            c.is(result, Ty::Scalar(Scalar::U32))?;
+            c.cases(address).map(|_| ())
+        }
+        Inst::SetCase { address, case } => {
+            let n = c.cases(address)?;
+            need((case as usize) < n, || {
+                format!("set_case {case} of {n} cases")
+            })
         }
         Inst::RegionOpen { result } => {
             c.def(result)?;

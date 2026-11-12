@@ -184,13 +184,12 @@ fn le(bytes: &[u8], at: u64, n: u64) -> u64 {
         .fold(0u64, |acc, b| (acc << 8) | u64::from(*b))
 }
 
-/// Bug: a field after a variable field placed at a constant offset, or a SeqSpan's
-/// extent skipped wrongly. `@compact(u32) Entry {id: u64, name: Text, tags:
-/// SeqSpan[Text]}` with id = 1, name "abc", tags ["ab", "c"]. `Text` is a
-/// `SeqSpan[u8]` (MEM-12): count, extent, bytes.
-/// id 8 bytes @0; name @8 = count 3 (4) + extent 3 (4) + "abc" = 11 bytes; tags @19
-/// = count 2 (4), extent 19 (4), then "ab" (4+4+2) and "c" (4+4+1) = 19; total
-/// 8 + 11 + 27 = 46.
+/// Bug: a field after a variable field placed at a constant offset, or a Text or
+/// SeqSpan skipped wrongly. `@compact(u32) Entry {id: u64, name: Text, tags:
+/// SeqSpan[Text]}` with id = 1, name "abc", tags ["ab", "c"]. `Text` is a `W`
+/// byte count, then the bytes (MEM-12); SeqSpan (draft) is count, extent, elements.
+/// id 8 bytes @0; name @8 = count 3 (4) + "abc" = 7 bytes; tags @15 = count 2 (4),
+/// extent 11 (4), then "ab" (4+2) and "c" (4+1) = 19; total 8 + 7 + 19 = 34.
 #[test]
 fn compact_record_walks_variable_fields_by_their_stored_lengths() {
     let entry = record(
@@ -212,16 +211,16 @@ fn compact_record_walks_variable_fields_by_their_stored_lengths() {
     assert_eq!(c.fields[0][2].pos, Pos::After { field: 1, plus: 0 });
     assert_eq!(c.fixed_extent, None);
     let mut b = vec![1, 0, 0, 0, 0, 0, 0, 0];
-    b.extend([3, 0, 0, 0, 3, 0, 0, 0, b'a', b'b', b'c']);
-    b.extend([2, 0, 0, 0, 19, 0, 0, 0]);
-    b.extend([2, 0, 0, 0, 2, 0, 0, 0, b'a', b'b']);
-    b.extend([1, 0, 0, 0, 1, 0, 0, 0, b'c']);
+    b.extend([3, 0, 0, 0, b'a', b'b', b'c']);
+    b.extend([2, 0, 0, 0, 11, 0, 0, 0]);
+    b.extend([2, 0, 0, 0, b'a', b'b']);
+    b.extend([1, 0, 0, 0, b'c']);
     let rw = |at| le(&b, at, 4);
     let rt = |at, n| le(&b, at, n);
-    assert_eq!(compact_extent(&r, TypeRef(0), Width::U32, 0, &rw, &rt), 46);
+    assert_eq!(compact_extent(&r, TypeRef(0), Width::U32, 0, &rw, &rt), 34);
     assert_eq!(
         compact_starts(&r, c, &c.fields[0], 0, &rw, &rt),
-        vec![0, 8, 19]
+        vec![0, 8, 15]
     );
 }
 
@@ -257,8 +256,8 @@ fn compact_variant_occupies_its_active_case_only() {
 
 /// Bug: an inline compact value encoded with its own declared width instead of its
 /// holder's (MEM-9). `@compact(u16) Name { t: Text }` inline in `@compact(u32) Row
-/// { n: Name, k: u8 }`: at u32, Name = count 4 + extent 4 + bytes; for "hi" that is
-/// 10 bytes, so k sits at 10 and Row's extent is 11 (at u16 it would be 6 and 7).
+/// { n: Name, k: u8 }`: at u32, Name = count 4 + bytes; for "hi" that is 6 bytes,
+/// so k sits at 6 and Row's extent is 7 (at u16 it would be 4 and 5).
 #[test]
 fn inline_compact_values_use_the_holders_width() {
     let name = record(
@@ -275,10 +274,10 @@ fn inline_compact_values_use_the_holders_width() {
         ],
     );
     let r = compute(&[name, row]).unwrap();
-    let b = [2u8, 0, 0, 0, 2, 0, 0, 0, b'h', b'i', 7];
+    let b = [2u8, 0, 0, 0, b'h', b'i', 7];
     let rw = |at| le(&b, at, 4);
     let rt = |at, n| le(&b, at, n);
-    assert_eq!(compact_extent(&r, TypeRef(1), Width::U32, 0, &rw, &rt), 11);
+    assert_eq!(compact_extent(&r, TypeRef(1), Width::U32, 0, &rw, &rt), 7);
 }
 
 /// Bug: representation refusals missing (MEM-9: own field in compact; MEM-17: counted
@@ -341,8 +340,9 @@ fn representation_refusals() {
 /// payload: 20 → 24; channel of 2 items of 24: 48 + 64 = 112; growth from 0 needing 1 is 4,
 /// from 4 needing 5 is 8, from 8 needing 100 is 100; overflow is None, not a wrap.
 /// A task with an 8-byte result and `bytes 4096`: 256 + 8 + 32 + 4096 = 4392; a
-/// 16-byte resource with `grant bytes 256`: 16 + 32 + 256 = 304; a standalone
-/// IndexedSpan of 2 elements and 5 payload bytes: 16 + 16 + 5 = 37 → 40.
+/// 16-byte resource with `grant bytes 256`: 16 + 32 + 256 = 304; a standalone Text
+/// of 5 bytes: 8 + 5 = 13 → 16; a span builder of capacity 3 for u32: 12 + 8 = 20 →
+/// 24.
 #[test]
 fn charge_v1_matches_the_spec_table() {
     assert_eq!(charge::seq(3, 3), Some(16));
@@ -350,7 +350,8 @@ fn charge_v1_matches_the_spec_table() {
     assert_eq!(charge::counted(12), Some(24));
     assert_eq!(charge::task(8, 4096), Some(4392));
     assert_eq!(charge::resource(16, 256), Some(304));
-    assert_eq!(charge::standalone_span(2, 5, true), Some(40));
+    assert_eq!(charge::standalone(5), Some(16));
+    assert_eq!(charge::span_builder(3, 4), Some(24));
     assert_eq!(charge::channel(2, 24), Some(112));
     assert_eq!(charge::grown_capacity(0, 1), Some(4));
     assert_eq!(charge::grown_capacity(4, 5), Some(8));
@@ -385,4 +386,56 @@ fn a_resource_is_a_cleaned_block_its_holder_points_to() {
         .expect("the holder cleans its resource")
         .fields[0];
     assert_eq!(fields.iter().map(|f| f.field).collect::<Vec<_>>(), [1]);
+}
+
+/// Bug: an inline array laid out or charged as one element, at the wrong stride, or
+/// not aligned to its element (SEM-9). `{a: u8, xs: Inline[u32, 3], b: u16}`: a @0,
+/// xs @4 (align 4) for 12 bytes, b @16, size 18 → 20; logical 1 + 12 + 2 = 15. An
+/// array of a record needing cleanup needs cleanup; of resources or in a compact
+/// type it is refused.
+#[test]
+fn inline_arrays_hold_n_elements_without_a_block() {
+    let arr = |e, n| FieldTy::Array(Box::new(e), n);
+    let r = compute(&[record(
+        "A",
+        Repr::Own,
+        vec![
+            field("a", u(Scalar::U8)),
+            field("xs", arr(u(Scalar::U32), 3)),
+            field("b", u(Scalar::U16)),
+        ],
+    )])
+    .unwrap();
+    assert_eq!(fixed(&r[0]).offsets[0], [0, 4, 16]);
+    assert_eq!((fixed(&r[0]).size, r[0].logical_size), (20, Some(15)));
+    assert!(r[0].plain);
+    let owner = record(
+        "O",
+        Repr::Own,
+        vec![field("s", FieldTy::Seq(Box::new(u(Scalar::U8))))],
+    );
+    let holds = record(
+        "H",
+        Repr::Own,
+        vec![field("os", arr(FieldTy::Inline(TypeRef(0)), 2))],
+    );
+    let r = compute(&[owner.clone(), holds]).unwrap();
+    assert_eq!(r[1].logical_size, Some(48));
+    assert!(r[1].drop.is_some(), "an array of owners is cleaned");
+    let temp = record("T", Repr::Resource, vec![field("id", u(Scalar::U64))]);
+    let bad = record(
+        "H",
+        Repr::Own,
+        vec![field("ts", arr(FieldTy::Inline(TypeRef(0)), 2))],
+    );
+    assert!(matches!(
+        compute(&[temp, bad]),
+        Err(LayoutError::Field { .. })
+    ));
+    let bad = record(
+        "C",
+        Repr::Compact(Width::U32),
+        vec![field("xs", arr(u(Scalar::U8), 2))],
+    );
+    assert!(matches!(compute(&[bad]), Err(LayoutError::Field { .. })));
 }

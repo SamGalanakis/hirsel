@@ -18,20 +18,48 @@
 //! kept by `UpdateMask`; resources as blocks with a cause cell and a finalizer
 //! grant; Rc/Arc nodes (`alloc counted`, `share`, `release`, `try_unwrap`);
 //! failure successors (`fail bN` on the instructions that can fail, `raise`,
-//! `propagate`); logical admission and refund with bound scopes (`limit_enter`,
+//! `propagate`); `never` signatures, whose calls end their block before
+//! `unreachable`; logical admission and refund with bound scopes (`limit_enter`,
 //! `limit_exit`); task custody through runtime calls (`rt.spawn`, `rt.join`,
 //! `rt.cancel`, `rt.check_cancel`, `rt.channel_new`, `rt.channel_sender`,
 //! `rt.send`, `rt.try_send`, `rt.receive`). Rule texts: failure.md, budgets.md and
-//! tasks.md at spec revision 2 and the failure-model report (FAIL-2..14,
-//! MEM-14..16, MEM-19..29, CONC-3..9).
+//! tasks.md (FAIL-2..14, MEM-14..16, MEM-19..28, CONC-3..9).
 //!
-//! **FORM v1b (draft, not frozen; round 3 of the spec is simplifying these):**
-//! regions (`region_open`, `region_close`, `alloc .. in`); stable, scoped and
-//! compact types with their span, text, link and builder recipes, and the
-//! destination writer; callable environments (`ownfn`, `closure_env`); provider
-//! operations and host-resource admission. Producers emit none of these yet.
-//! Static brands, branded resources, `SlotOwner` and `uses` lists are not in
-//! FORM v1 at all: a pool handle is plain data checked at run time.
+//! **FORM v1b (frozen at spec revision 4):**
+//! - Variants: `case` reads a variant place's case number (`u32`), `set_case`
+//!   writes it, and `case c f` address steps reach a case's payload. Own, resource,
+//!   stable and scoped variants; `Option` and `Result` are ordinary variant rows of
+//!   the type table, one per instantiation. The tag's place and width stay private
+//!   (MEM-13): a producer never names the tag bytes.
+//! - Inline arrays `Inline[T, n]` (SEM-9): field type `array n T`, `n` elements at
+//!   `T`'s native stride, no block and no charge of their own; the `element v`
+//!   step fails with `Bounds` at its `address` when `v` is not below `n`; cleanup
+//!   goes from index 0 up.
+//! - Regions (`region_open`, `region_close`, `alloc .. in`). A region handle is a
+//!   value and never a field (MEM-1).
+//! - Stable and scoped records, compact records and active-size compact variants
+//!   (MEM-9..11), links (MEM-10), `Text` (`W` count, then bytes) and `FixedSpan`
+//!   (`W` count, then elements at a fixed stride) (MEM-12), with the charges
+//!   `charge::standalone` and `charge::span_builder` (MEM-24). Span builders are
+//!   ordinary code over these: `alloc .. in`, `copy`.
+//! - Callable environments: an `own fn` is a code pointer and an environment
+//!   pointer (logically 16). The environment block is one word naming its drop
+//!   glue, then the captures in the order the body first names them; it is
+//!   charged `charge::closure_env` of the captures' sizes (the glue word is never
+//!   charged, MEM-24) and its glue cleans the captures in reverse, frees the block
+//!   and refunds it. A captureless `own fn` has a null environment. Captures hold
+//!   no resource, so this cleanup never fails and runs no finalizer.
+//! - Providers (CAP-5): a provider operation is a call of an engine function by
+//!   its signature row, a cancellation point when it `waits` (so it can fail),
+//!   admitting nothing. `HostFile` is a handle (`hostfile`) of a mechanical
+//!   resource: no cause cell, cleaned by closing it and ignoring the outcome.
+//!
+//! **Still draft (MEM-12 is OPEN on compact sequences):** `SeqSpan` and
+//! `IndexedSpan` and their extent and index encodings, reading compact values
+//! through views, the destination writer (`build_in`, `Dest`, `Child`, `Builder`)
+//! and its runtime state. Nothing frozen assumes a fixed element stride or that a
+//! writer makes one fixed-size child. Brands, `SlotOwner` and `uses` lists are not
+//! in FORM v1 at all: a pool handle is plain data checked at run time.
 //!
 //! # Failure (FORM v1a)
 //!

@@ -1,0 +1,142 @@
+; CoreIR sample, family: variants (case, set_case, payload by `case` steps), inline
+; arrays (`element`, SEM-9) and a call of a function returning Never. FORM v1b and
+; v1a (`never`, `unreachable`).
+;
+; Source (package samples@0, module variants):
+;   i0  resource Res { id: u64 }                       ; no finalizer: mechanical cleanup
+;       type Cell { r: Res }
+;       enum Maybe { None, Some(r: Res) }
+;       type Row { cells: Inline[Cell, 3] }
+;       fn maybe(x: u64) -> u32 { let m = if x == 0 { None } else { Some(mk(x)) }; case of m }
+;       fn row(i: u64) -> u64 { let row = Row { cells: [Cell(mk(1)), Cell(mk(2)), Cell(mk(3))] };
+;                               row.cells[i].r.id }
+;       fn stop(x: u64) -> Never { unwrap_failed() }
+;       fn guard(x: u64) -> u64 { if x == 0 { stop(x) }; x }
+;
+; f0 is `mk` (Res is charged 40: storage 8, cause cell 32). A variant's case is read
+; and written only by `case` and `set_case`: the tag's place and width are the
+; layout's (MEM-13). Cleaning a variant cleans its current case's payload. An inline
+; array is cleaned from index 0 up (SEM-9), unlike fields and owners, which go in
+; reverse; `element` fails with Bounds at its `address` when the index is not
+; below 3, and the failure successor cleans the row. `stop` has a `never`
+; signature: its call ends its block, followed by `unreachable`.
+;
+; Behaviour, derived by hand (trace: Res ids in the order their cleanup started):
+; run: f1(5) -> 1 | used 0 | trace 5                  ; Some: its Res is cleaned
+; run: f1(0) -> 0 | used 0                            ; None holds nothing
+; run: f2(0) -> 1 | used 0 | trace 1, 2, 3            ; cells[0], then index order
+; run: f2(2) -> 3 | used 0 | trace 1, 2, 3
+; run: f2(3) -> fail Bounds | used 0 | trace 1, 2, 3  ; the row is still cleaned
+; run: f4(9) -> 9 | used 0
+; run: f4(0) -> fail Unwrap | used 0
+core v1
+item i0 = samples@0/variants/row
+type t0 = resource "Res" { id: u64 }
+type t1 = own "Cell" { r: t0 }
+type t2 = own "Maybe" | None { } | Some { r: t0 }
+type t3 = own "Row" { cells: array 3 t1 }
+sig g0 = (u64) -> (ptr)
+sig g1 = (u64) -> (u32)
+sig g2 = (u64) -> (u64)
+sig g3 = (u64) -> never
+inst n0 = samples@0/variants/mk [] []
+inst n1 = samples@0/variants/maybe [] []
+inst n2 = samples@0/variants/row [] []
+inst n3 = samples@0/variants/stop [] []
+inst n4 = samples@0/variants/guard [] []
+fn f0 = n0 g0 {
+  addr a0 = v2 : t0
+  addr a1 = a0 field 0 : u64
+b0(v0: u64):
+  v1: u64 = const 40
+  v2: ptr, v3: u64 = alloc resource grant 0 8 align 8 charge v1
+  address a0
+  address a1
+  store a1, v0
+  return v2
+}
+fn f1 = n1 g1 {
+  slot s0 = t2                         ; m
+  addr a0 = s0 : t2
+  addr a1 = s0 case 1 0 : ptr          ; Some.r
+b0(v0: u64):
+  live s0
+  address a0
+  address a1
+  v1: u64 = const 0
+  v2: bool = eq v0, v1
+  branch v2, b1, b2
+b1:
+  set_case a0, 0
+  jump b3
+b2:
+  v3: ptr = call f0 g0 (v0)            ; nothing is live yet: no successor
+  set_case a0, 1
+  store a1, v3
+  jump b3
+b3:
+  v4: u32 = case a0
+  drop a0 t2
+  dead s0
+  return v4
+}
+fn f2 = n2 g2 {
+  slot s0 = t3                         ; row
+  addr a0 = s0 : t3
+  addr a1 = s0 field 0 element v1 field 0 : ptr          ; cells[0].r
+  addr a2 = s0 field 0 element v3 field 0 : ptr          ; cells[1].r
+  addr a3 = s0 field 0 element v5 field 0 : ptr          ; cells[2].r
+  addr a4 = s0 field 0 element v1 : t1                   ; cells[0]
+  addr a5 = s0 field 0 element v3 : t1                   ; cells[1]
+  addr a6 = s0 field 0 element v0 field 0 deref field 0 : u64   ; cells[i].r.id
+b0(v0: u64):
+  live s0
+  v1: u64 = const 0
+  v2: u64 = const 1
+  v3: u64 = const 1
+  v4: u64 = const 3
+  v5: u64 = const 2
+  address a1
+  address a2
+  address a3
+  address a4
+  address a5
+  v6: ptr = call f0 g0 (v2)
+  store a1, v6
+  v7: u64 = const 2
+  v8: ptr = call f0 g0 (v7) fail b2
+  store a2, v8
+  v9: ptr = call f0 g0 (v4) fail b3
+  store a3, v9
+  address a0
+  address a6 fail b1
+  v10: u64 = read a6
+  drop a0 t3
+  dead s0
+  return v10
+b1:
+  drop a0 t3                           ; the index was out of bounds: clean the row
+  propagate
+b2:
+  drop a4 t1                           ; only cells[0] was made
+  propagate
+b3:
+  drop a4 t1                           ; cells[0], cells[1], in index order
+  drop a5 t1
+  propagate
+}
+fn f3 = n3 g3 {
+b0(v0: u64):
+  raise unwrap
+}
+fn f4 = n4 g2 {
+b0(v0: u64):
+  v1: u64 = const 0
+  v2: bool = eq v0, v1
+  branch v2, b1, b2
+b1:
+  call f3 g3 (v0)
+  unreachable
+b2:
+  return v0
+}

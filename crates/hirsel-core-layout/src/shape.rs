@@ -111,8 +111,8 @@ impl Width {
 }
 
 /// A runtime-owned handle kind: an opaque pointer whose cleanup is a run-time call.
-/// Opaque engine-owned values held by pointer. Logical sizes per MEM-24: a task
-/// handle and a capability 8, a sender or receiver 24, a `Causes` chain 8.
+/// Logical sizes per core's built-in types: a task handle, a capability, a
+/// `Causes` chain and a `HostFile` 8, a sender or receiver 24.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Handle {
     Task,
@@ -122,6 +122,9 @@ pub enum Handle {
     Capability,
     /// A delivered cause chain (`Causes`, CONC-6): cleaning it refunds its used cells.
     Causes,
+    /// A host file (CAP-5): a mechanical resource with no cause cell; cleaning it
+    /// closes the file through its provider and ignores the outcome (MEM-24).
+    HostFile,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -152,7 +155,11 @@ pub enum FieldTy {
     Arc(TypeRef),
     /// A reference to a published stable value of this type (logically 16, MEM-24).
     Stable(TypeRef),
-    Region,
+    /// `Inline[T, n]` (SEM-9): `n` values of a plain or own `T` held inline, with no
+    /// block. Its size is `n` times `T`'s; it charges nothing of its own; it is
+    /// cleaned from index 0 up. (`Region` is never a field: it is scoped and never
+    /// stored, MEM-1.)
+    Array(Box<FieldTy>, u64),
     /// A plain `fn`: a code pointer, captures nothing (LANG-13).
     Fn,
     /// An `own fn`: code pointer and an owned environment block.
@@ -163,9 +170,14 @@ pub enum FieldTy {
     /// `Map[K, V]`: a header like a `List`'s over its entry storage.
     Map(Box<FieldTy>, Box<FieldTy>),
     // Compact-only field types (MEM-9..12).
+    /// `W` byte count, then that many bytes of UTF-8 (MEM-12).
     Text,
+    /// `W` count, then the elements at the element's fixed stride (MEM-12).
     FixedSpan(Box<FieldTy>),
+    /// FORM v1b draft, waiting on MEM-12's OPEN compact sequences: variable-size
+    /// elements, `W` count and `W` payload extent, then the elements.
     SeqSpan(Box<FieldTy>),
+    /// FORM v1b draft, as `SeqSpan`, with a table of `W` offsets.
     IndexedSpan(Box<FieldTy>),
     Link(TypeRef),
     OptLink(TypeRef),

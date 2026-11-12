@@ -81,12 +81,12 @@ pub enum Pos {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Size {
     Fixed(u64),
-    /// `W` count, then `count * stride` bytes.
+    /// `W` count, then `count * stride` bytes: a `FixedSpan`, or a `Text` (stride 1).
     FixedSpan {
         stride: u64,
     },
-    /// `W` count, `W` element-byte extent, then the elements. `Text` is a
-    /// `SeqSpan[u8]` (MEM-12).
+    /// FORM v1b draft (MEM-12 OPEN): `W` count, `W` element-byte extent, then the
+    /// elements.
     SeqSpan,
     /// `W` count, `W` element-byte extent, a table of `count` `W` entries (each the
     /// distance from the table's start to its element), then the elements.
@@ -121,8 +121,9 @@ pub struct FieldDrop {
 }
 
 /// FAIL-8: the finalizer runs first, then fields in reverse declaration order.
-/// Sequences drop elements from the highest index down, then free; that loop is in
-/// the glue built from this recipe, not here.
+/// Collections drop elements from the highest index down, then free; an inline
+/// array (`FieldTy::Array`) cleans its elements from index 0 up (SEM-9), at the
+/// stride `field_size` gives. Those loops are in the glue built from this recipe.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DropRecipe {
     pub finalizer: Option<FuncRef>,
@@ -226,6 +227,7 @@ fn inline_deps(shape: &Shape) -> impl Iterator<Item = TypeRef> + '_ {
 fn inline_target(ty: &FieldTy) -> Option<TypeRef> {
     match ty {
         FieldTy::Inline(t) => Some(*t),
+        FieldTy::Array(e, _) => inline_target(e),
         FieldTy::FixedSpan(e) | FieldTy::SeqSpan(e) | FieldTy::IndexedSpan(e) => inline_target(e),
         _ => None,
     }
@@ -260,65 +262,15 @@ fn err(shape: &Shape, f: &Field, why: &'static str) -> LayoutError {
 }
 
 fn fixed(shapes: &[Shape], shape: &Shape, out: &[Option<Recipe>]) -> Result<Recipe, LayoutError> {
-    let stable = shape.repr == Repr::Stable;
     let rows = cases(shape);
     let tag = matches!(shape.body, Body::Variant(_)).then(|| tag_width(rows.len()));
     // (size, align, logical) per field, per case.
+    let get = |t: TypeRef| done(out, t);
     let mut measured = Vec::with_capacity(rows.len());
     for row in &rows {
         let mut m = Vec::with_capacity(row.len());
         for f in row.iter() {
-            let refuse = |why| Err(err(shape, f, why));
-            let (size, align, logical) = match &f.ty {
-                FieldTy::Scalar(s) => (s.size(), s.size(), s.size()),
-                FieldTy::Inline(t) => {
-                    let inner = &shapes[t.index()];
-                    if matches!(inner.repr, Repr::Compact(_)) {
-                        return refuse("a compact value lives only in a blob");
-                    }
-                    if stable && inner.repr != Repr::Stable && !done(out, *t).plain {
-                        return refuse("a stable type's fields are plain or stable (MEM-2)");
-                    }
-                    if inner.repr == Repr::Resource {
-                        // A resource value is a pointer to its block, which carries
-                        // the cause cell and grant (FAIL-10, MEM-27).
-                        m.push((POINTER, POINTER, 8));
-                        continue;
-                    }
-                    let Layout::Fixed(l) = &done(out, *t).layout else {
-                        unreachable!("non-compact shapes have fixed layouts")
-                    };
-                    (l.size, l.align, done(out, *t).logical_size.expect("fixed"))
-                }
-                FieldTy::Stable(_) => (POINTER, POINTER, 16),
-                FieldTy::Fn => (POINTER, POINTER, 8),
-                FieldTy::Borrow if shape.repr != Repr::Scoped => {
-                    return refuse("views and scoped callables live only in scoped types");
-                }
-                FieldTy::Borrow => (CLOSURE_CARRIER, POINTER, 16),
-                _ if stable => {
-                    return refuse("a stable type's fields are plain or stable (MEM-2)");
-                }
-                FieldTy::Box(_)
-                | FieldTy::Rc(_)
-                | FieldTy::Arc(_)
-                | FieldTy::Region
-                | FieldTy::Handle(Handle::Task | Handle::Capability | Handle::Causes) => {
-                    (POINTER, POINTER, 8)
-                }
-                FieldTy::Handle(Handle::Sender | Handle::Receiver) => (POINTER, POINTER, 24),
-                FieldTy::Seq(_) | FieldTy::Map(..) => (SEQ_CARRIER, POINTER, 24),
-                FieldTy::OwnFn => (CLOSURE_CARRIER, POINTER, 16),
-                FieldTy::Text
-                | FieldTy::FixedSpan(_)
-                | FieldTy::SeqSpan(_)
-                | FieldTy::IndexedSpan(_)
-                | FieldTy::Link(_)
-                | FieldTy::OptLink(_) => {
-                    return refuse("compact field types need a compact declaration");
-                }
-            };
-            m.push((size, align, logical));
+            m.push(measure(shapes, shape.repr, &f.ty, &get).map_err(|why| err(shape, f, why))?);
         }
         measured.push(m);
     }
@@ -362,6 +314,90 @@ fn fixed(shapes: &[Shape], shape: &Shape, out: &[Option<Recipe>]) -> Result<Reci
     })
 }
 
+/// Native size, native alignment and logical size (MEM-24) of a field of type `ty`
+/// in a fixed layout whose holder has representation `holder`, or why the holder
+/// refuses it.
+fn measure<'r>(
+    shapes: &[Shape],
+    holder: Repr,
+    ty: &FieldTy,
+    get: &dyn Fn(TypeRef) -> &'r Recipe,
+) -> Result<(u64, u64, u64), &'static str> {
+    let stable = holder == Repr::Stable;
+    Ok(match ty {
+        FieldTy::Scalar(s) => (s.size(), s.size(), s.size()),
+        FieldTy::Inline(t) => {
+            let inner = &shapes[t.index()];
+            if matches!(inner.repr, Repr::Compact(_)) {
+                return Err("a compact value lives only in a blob");
+            }
+            if stable && inner.repr != Repr::Stable && !get(*t).plain {
+                return Err("a stable type's fields are plain or stable (MEM-2)");
+            }
+            if inner.repr == Repr::Resource {
+                // A resource value is a pointer to its block, which carries the
+                // cause cell and grant; it counts 8 in its holder (MEM-24).
+                return Ok((POINTER, POINTER, 8));
+            }
+            let Layout::Fixed(l) = &get(*t).layout else {
+                unreachable!("non-compact shapes have fixed layouts")
+            };
+            (l.size, l.align, get(*t).logical_size.expect("fixed"))
+        }
+        FieldTy::Array(e, n) => {
+            if !array_element(shapes, e) {
+                return Err("an inline array holds plain or own values (SEM-9)");
+            }
+            let (size, align, logical) = measure(shapes, holder, e, get)?;
+            match (size.checked_mul(*n), logical.checked_mul(*n)) {
+                (Some(s), Some(l)) => (s, align, l),
+                _ => return Err("an inline array larger than 2^64 - 1 bytes"),
+            }
+        }
+        FieldTy::Stable(_) => (POINTER, POINTER, 16),
+        FieldTy::Fn => (POINTER, POINTER, 8),
+        FieldTy::Borrow if holder != Repr::Scoped => {
+            return Err("views and scoped callables live only in scoped types");
+        }
+        FieldTy::Borrow => (CLOSURE_CARRIER, POINTER, 16),
+        _ if stable => return Err("a stable type's fields are plain or stable (MEM-2)"),
+        FieldTy::Box(_)
+        | FieldTy::Rc(_)
+        | FieldTy::Arc(_)
+        | FieldTy::Handle(Handle::Task | Handle::Capability | Handle::Causes | Handle::HostFile) => {
+            (POINTER, POINTER, 8)
+        }
+        FieldTy::Handle(Handle::Sender | Handle::Receiver) => (POINTER, POINTER, 24),
+        FieldTy::Seq(_) | FieldTy::Map(..) => (SEQ_CARRIER, POINTER, 24),
+        FieldTy::OwnFn => (CLOSURE_CARRIER, POINTER, 16),
+        FieldTy::Text
+        | FieldTy::FixedSpan(_)
+        | FieldTy::SeqSpan(_)
+        | FieldTy::IndexedSpan(_)
+        | FieldTy::Link(_)
+        | FieldTy::OptLink(_) => return Err("compact field types need a compact declaration"),
+    })
+}
+
+/// SEM-9: an inline array's element is plain or own, never a resource or scoped.
+fn array_element(shapes: &[Shape], ty: &FieldTy) -> bool {
+    match ty {
+        FieldTy::Inline(t) => matches!(shapes[t.index()].repr, Repr::Own | Repr::Stable),
+        FieldTy::Array(e, _) => array_element(shapes, e),
+        FieldTy::Borrow
+        | FieldTy::Handle(Handle::Task | Handle::Sender | Handle::Receiver | Handle::HostFile) => {
+            false
+        }
+        _ => true,
+    }
+}
+
+/// Native size, native alignment and logical size of an own-held field of type `ty`
+/// whose shape is already accepted: what drop glue needs for an array's stride.
+pub fn field_size(shapes: &[Shape], recipes: &[Recipe], ty: &FieldTy) -> (u64, u64, u64) {
+    measure(shapes, Repr::Own, ty, &|t| &recipes[t.index()]).expect("an accepted field type")
+}
+
 fn needs_drop(shapes: &[Shape], ty: &FieldTy, out: &[Option<Recipe>]) -> bool {
     match ty {
         FieldTy::Inline(t) => {
@@ -373,9 +409,10 @@ fn needs_drop(shapes: &[Shape], ty: &FieldTy, out: &[Option<Recipe>]) -> bool {
         | FieldTy::Arc(_)
         | FieldTy::Map(..)
         | FieldTy::OwnFn
-        | FieldTy::Handle(Handle::Task | Handle::Sender | Handle::Receiver | Handle::Causes) => {
-            true
-        }
+        | FieldTy::Handle(
+            Handle::Task | Handle::Sender | Handle::Receiver | Handle::Causes | Handle::HostFile,
+        ) => true,
+        FieldTy::Array(e, n) => *n > 0 && needs_drop(shapes, e, out),
         _ => false,
     }
 }
@@ -513,7 +550,14 @@ fn compact_size(
                 ));
             }
         },
-        FieldTy::Text => Size::SeqSpan,
+        FieldTy::Text => Size::FixedSpan { stride: 1 },
+        FieldTy::Array(..) => {
+            return Err(err(
+                shape,
+                f,
+                "a compact type holds no inline array (MEM-9)",
+            ));
+        }
         FieldTy::FixedSpan(e) => match compact_size(shapes, shape, f, e, w, out)? {
             Size::Fixed(stride) => Size::FixedSpan { stride },
             _ => return Err(err(shape, f, "FixedSpan elements have one fixed size")),

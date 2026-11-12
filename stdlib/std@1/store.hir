@@ -633,20 +633,20 @@ fn boot_table(holders: List[history.Holding]) -> Result[
   ordered_map.OrderedMap[Bytes, Reading],
   ()
 ] uses {} {
-  let mut table: ordered_map.OrderedMap[Bytes, Reading] = ordered_map.empty(
-    compare_keys
-  )
+  let mut entries: List[(Bytes, Reading)] = []
   for h in holders {
     let Ok(principal) = string.from_bytes(unique h.principal) else {
       return Error(())
     }
-    ordered_map.insert(
-      mut table,
-      unique h.token,
-      Reading(principal: take principal, version: h.version, at: unique h.at)
+    list.push(
+      mut entries,
+      (
+        unique h.token,
+        Reading(principal: take principal, version: h.version, at: unique h.at)
+      )
     )
   }
-  Ok(take table)
+  ordered_map.from_sorted(compare_keys, take entries)
 }
 
 // A pass at the selected base, or at the history's start when none is
@@ -1069,11 +1069,8 @@ fn load_checkpoint(
         expects = take more
       },
       Ok(Leaves(entries)) => {
-        let mut state: ordered_map.OrderedMap[Bytes, Bytes] = ordered_map.empty(
-          compare_keys
-        )
-        for (k, v) in entries {
-          ordered_map.insert(mut state, unique k, unique v)
+        let Ok(state) = ordered_map.from_sorted(compare_keys, take entries) else {
+          return Error(stop(mut s, Corrupt(entry_name(here))))
         }
         s.live = take live
         return Ok(take state)
@@ -2776,11 +2773,8 @@ fn read_tree(a: Authority, desc: history.Descriptor) -> Result[
         expects = take more
       },
       Ok(Leaves(entries)) => {
-        let mut state: ordered_map.OrderedMap[Bytes, Bytes] = ordered_map.empty(
-          compare_keys
-        )
-        for (k, v) in entries {
-          ordered_map.insert(mut state, unique k, unique v)
+        let Ok(state) = ordered_map.from_sorted(compare_keys, take entries) else {
+          return Error(Failed(Corrupt("hirsel.checkpoint")))
         }
         return Ok((take state, take refs))
       },

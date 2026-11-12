@@ -37,6 +37,91 @@ pub fn empty[K: copyable, V: copyable](take by: fn(K, K) -> i32 uses {}) -> Orde
   OrderedMap(by: by, root: Node(keys: [], values: [], kids: []), count: 0)
 }
 
+// Rust 1.99.0 alloc/src/collections/btree/append.rs:9-64 and fix.rs:105-121.
+// The rightmost path is an owned stack instead of raw parent pointers. Full
+// nodes are finished once; only the final right border needs redistribution.
+/// Builds a map in one pass over strictly ascending entries. Equal or
+/// descending neighbours return Error(()); entries are never sorted or deduplicated.
+pub fn from_sorted[K: copyable, V: copyable](
+  take by: fn(K, K) -> i32 uses {},
+  take entries: List[(K, V)]
+) -> Result[OrderedMap[K, V], ()] uses {entries} {
+  let count = list.len(entries)
+  let mut spine: List[Node[K, V]] = [Node(keys: [], values: [], kids: [])]
+  let mut previous: Option[K] = None()
+  for (key, value) in take entries {
+    if let Some(prior) = previous {
+      if by(prior, key) >= 0 {
+        return Error(())
+      }
+    }
+    previous = Some(copy key)
+    let (remaining, leaf) = pop_spine(replace(mut spine, []))
+    spine = take remaining
+    let mut node = take leaf
+    if list.len(node.keys) < 2 * DEGREE - 1 {
+      list.push(mut node.keys, take key)
+      list.push(mut node.values, take value)
+      list.push(mut spine, take node)
+    } else {
+      let mut levels: u64 = 0
+      while true {
+        let mut parent: Node[K, V] = if list.len(spine) == 0 {
+          Node(keys: [], values: [], kids: [])
+        } else {
+          let (ancestors, parent) = pop_spine(replace(mut spine, []))
+          spine = take ancestors
+          take parent
+        }
+        list.push(mut parent.kids, take node)
+        if list.len(parent.keys) < 2 * DEGREE - 1 {
+          list.push(mut parent.keys, take key)
+          list.push(mut parent.values, take value)
+          list.push(mut spine, take parent)
+          for _ in 0u64..=levels {
+            list.push(mut spine, Node(keys: [], values: [], kids: []))
+          }
+          break
+        }
+        node = take parent
+        levels += 1
+      }
+    }
+  }
+  let (remaining, tip) = pop_spine(replace(mut spine, []))
+  spine = take remaining
+  let mut root = take tip
+  while list.len(spine) > 0 {
+    let (ancestors, upper) = pop_spine(replace(mut spine, []))
+    spine = take ancestors
+    let mut parent = take upper
+    list.push(mut parent.kids, take root)
+    root = take parent
+  }
+  finish_right(mut root)
+  Ok(OrderedMap(by: take by, root: take root, count: count))
+}
+
+fn pop_spine[K: copyable, V: copyable](take xs: List[Node[K, V]]) -> (
+  List[Node[K, V]],
+  Node[K, V]
+) uses {xs} {
+  let at = list.len(xs) - 1
+  extract_at(take xs, at)
+}
+
+fn finish_right[K: copyable, V: copyable](mut n: Node[K, V]) -> () uses {n} {
+  if list.len(n.kids) == 0 {
+    return
+  }
+  let final_kid = list.len(n.kids) - 1
+  // Every left sibling on this border is full before this walk reaches it.
+  while list.len(n.kids[final_kid].keys) < DEGREE - 1 {
+    rotate_right(mut n, final_kid)
+  }
+  finish_right(mut n.kids[final_kid])
+}
+
 @noalloc
 pub fn len[K: copyable, V: copyable](m: OrderedMap[K, V]) -> u64 uses {} {
   m.count

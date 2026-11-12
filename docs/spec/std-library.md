@@ -1519,6 +1519,7 @@ operation experiment](../priority-queue-combined.md).
 Bound[K] = Unbounded | Included(K) | Excluded(K)
 Direction = Ascending | Descending
 fn ordered_map.empty[K: copyable, V: copyable](take by: fn(K, K) -> i32 uses {}) -> ordered_map.OrderedMap[K, V] uses {}
+fn ordered_map.from_sorted[K: copyable, V: copyable](take by: fn(K, K) -> i32 uses {}, take entries: List[(K, V)]) -> Result[ordered_map.OrderedMap[K, V], ()] uses {entries}
 fn ordered_map.len[K: copyable, V: copyable](m: ordered_map.OrderedMap[K, V]) -> u64 uses {}
 fn ordered_map.get[K: copyable, V: copyable](m: ordered_map.OrderedMap[K, V], key: K) -> Option[V] in m uses {}
 fn ordered_map.contains[K: copyable, V: copyable](m: ordered_map.OrderedMap[K, V], key: K) -> bool uses {}
@@ -1540,6 +1541,10 @@ take O(log n) comparisons, and insert and remove move O(log n) node entries inst
 O(n). `insert` replaces the value of an equal key; `remove` returns the removed value or
 `None()` and leaves every node, and so every copy's sharing, untouched when the key is
 absent. `first` and `last` return the least and greatest entries.
+
+`from_sorted` consumes strictly ascending entries in O(n), returning `Error(())` for
+any equal or descending adjacent keys under its comparator. It never sorts or
+deduplicates input. Its result supports the same mutations and snapshots as `empty`.
 
 `fold_range` visits, in `direction` order, every entry whose key lies between `from` and
 `to` (each bound included, excluded or open), passing the accumulator through `step`,

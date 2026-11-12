@@ -283,7 +283,10 @@ impl Sim {
 
 impl Sim {
     /// A reading request under the cut its request number draws.
-    fn reading<T>(&self, run: impl FnOnce(&Sim, &mut World) -> Result<T, Error>) -> Result<T, Error> {
+    fn reading<T>(
+        &self,
+        run: impl FnOnce(&Sim, &mut World) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         let mut w = self.world.lock().unwrap();
         let cut = w.cut();
         let r = if cut.fail {

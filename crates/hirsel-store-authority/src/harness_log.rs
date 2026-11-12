@@ -162,6 +162,53 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
                             wr.dead = Some(old);
                         }
                         let record = all[end as usize - 1].clone();
+                        // The claim names the newest append before it, by the
+                        // forward read; a client that has read nothing finds
+                        // that append from `last` and reads back to Genesis
+                        // from it alone.
+                        let newest = all[..end as usize - 1]
+                            .iter()
+                            .rposition(|r| matches!(r, Record::Appended { .. }))
+                            .map(|i| wr.log.followed_locator(i as u64 + 1))
+                            .transpose()
+                            .map_err(|e| format!("followed: {e:?}"))?;
+                        if !matches!(&record, Record::Claimed { appended, .. } if *appended == newest)
+                        {
+                            return Err(format!(
+                                "the claim at {end} names another append than {newest:?}"
+                            ));
+                        }
+                        let mut cold = run.open();
+                        match cold.last(Level(0)) {
+                            Ok(l) if l == newest => {
+                                if let Some(l) = l {
+                                    match cold.at(&l, 0, Level(0), u64::MAX) {
+                                        Ok(back) if back[..] == all[..l.position as usize] => {}
+                                        Ok(back) => {
+                                            return Err(format!(
+                                                "a cold read back from {l:?} after the claim at {end} has {} records",
+                                                back.len()
+                                            ));
+                                        }
+                                        Err(e @ (Error::Corrupt(_) | Error::Format { .. })) => {
+                                            return Err(format!(
+                                                "a cold read after the claim at {end}: {e:?}"
+                                            ));
+                                        }
+                                        Err(_) => {}
+                                    }
+                                }
+                            }
+                            Ok(l) => {
+                                return Err(format!(
+                                    "a cold last after the claim at {end} is {l:?}, not {newest:?}"
+                                ));
+                            }
+                            Err(e @ (Error::Corrupt(_) | Error::Format { .. })) => {
+                                return Err(format!("a cold last after the claim at {end}: {e:?}"));
+                            }
+                            Err(_) => {}
+                        }
                         owe(&mut run.ledger, end, &record, HOST.0)?;
                         run.check(&all)?;
                     }
@@ -184,6 +231,7 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
                     .collect();
                 let newest = rng.below(2) == 0;
                 let mut dead = false;
+                let mut located = Vec::new();
                 for ((e, at), (p, answer)) in
                     entries
                         .iter()
@@ -195,7 +243,15 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
                         retired: vec![],
                     };
                     match answer {
-                        Advanced::Advanced(_) => owe(&mut run.ledger, p, &e, at.0)?,
+                        Advanced::Advanced(_) => {
+                            // The writer names what it appended with no read.
+                            let l = wr
+                                .log
+                                .locate(c, p)
+                                .map_err(|e| format!("locate {p} after its append: {e:?}"))?;
+                            located.push(l);
+                            owe(&mut run.ledger, p, &e, at.0)?
+                        }
                         Advanced::Refused(_) | Advanced::Fenced => {
                             run.never.push((p, e));
                             dead = true;
@@ -205,6 +261,27 @@ fn schedule(seed: u64, steps: u32) -> Result<(), String> {
                 }
                 if dead {
                     wr.dead = wr.claim.take();
+                }
+                // A handle that never wrote follows the records forward and
+                // names each the same.
+                if !located.is_empty() {
+                    let mut cold = run.open();
+                    match cold.read(0, Level(0), u64::MAX) {
+                        Ok(_) => {
+                            for l in located {
+                                let want = cold.followed_locator(l.position);
+                                if want.as_ref().ok() != Some(&l) {
+                                    return Err(format!(
+                                        "the writer locates {l:?}, a forward read {want:?}"
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e @ (Error::Corrupt(_) | Error::Format { .. })) => {
+                            return Err(format!("a forward read after an append: {e:?}"));
+                        }
+                        Err(_) => {}
+                    }
                 }
             }
             7 => {

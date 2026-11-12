@@ -564,14 +564,21 @@ impl Authority for Objects {
             0 => Advanced::Fenced,
             _ => self.replace_head(c, &batch[put - 1]),
         };
-        let mut out: Vec<Advanced> = batch
-            .iter()
-            .take(put)
-            .map(|q| match &head {
-                Advanced::Advanced(_) => Advanced::Advanced(q.position),
+        let mut out: Vec<Advanced> = Vec::with_capacity(batch.len());
+        for q in batch.iter().take(put) {
+            out.push(match &head {
+                Advanced::Advanced(_) => {
+                    // The handle follows what it appended, so `locate` names it
+                    // with no request; a settle that caught up followed it already.
+                    if self.chain.end() + 1 == q.position {
+                        let followed = self.chain.follow(&q.record);
+                        debug_assert!(followed.is_ok(), "an append follows its tip");
+                    }
+                    Advanced::Advanced(q.position)
+                }
                 other => other.clone(),
-            })
-            .collect();
+            });
+        }
         if let Some(f) = failed {
             c.dead = true;
             out.push(f);

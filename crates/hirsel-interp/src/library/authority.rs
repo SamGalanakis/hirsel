@@ -19,7 +19,8 @@ use super::dispatch::{arg, bytes, error, none, ok, some, text, u32_value, u64_va
 use crate::{Error, OperationCall, OperationContext, OperationResult, Value, invalid};
 use hirsel_store_authority::wire::{self, Outcome};
 use hirsel_store_authority::{
-    Advanced, Authority, AuthorityError, Claim, Error as SeamError, Locator, ObjectRef, Reclaimed, Record,
+    Advanced, Authority, AuthorityError, Claim, Error as SeamError, Locator, ObjectRef, Reclaimed,
+    Record,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -598,7 +599,9 @@ impl Library {
                     unreachable!("admitted")
                 };
                 // No locator is 40 zero bytes, the encoding a record gives it.
-                result(&r, |l| Value::Bytes(l.unwrap_or_default().encode().to_vec()))
+                result(&r, |l| {
+                    Value::Bytes(l.unwrap_or_default().encode().to_vec())
+                })
             }
             "authority.read" | "authority.at" => {
                 let name = self.authority_name(arg(a, 0)?)?;

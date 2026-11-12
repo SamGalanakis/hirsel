@@ -1,6 +1,7 @@
 mod budgets;
 mod cache_defaults;
 mod candidate;
+mod cold_pin;
 mod compiler_workers;
 mod command_help_12;
 mod deadlines;

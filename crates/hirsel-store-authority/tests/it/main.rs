@@ -4,7 +4,7 @@
 
 hirsel_guard::install!();
 use hirsel_store_authority::log::Log;
-use hirsel_store_authority::{Advanced, envelope, Authority, Error, Level, Locator, Record};
+use hirsel_store_authority::{Advanced, Authority, Error, Level, Locator, Record, envelope};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::sync::Barrier;
@@ -140,12 +140,19 @@ fn a_cut_in_the_newest_frame_answers_the_append_before_it() {
         let mut b = Log::open(dir.path(), HOST).unwrap();
         assert_eq!(b.last(HOST), Ok(Some(appended)), "{what}");
         let mut b = Log::open(dir.path(), HOST).unwrap();
-        assert_eq!(b.at(&appended, 1, HOST, 1), Ok(vec![append.clone()]), "{what}");
+        assert_eq!(
+            b.at(&appended, 1, HOST, 1),
+            Ok(vec![append.clone()]),
+            "{what}"
+        );
     };
 
     // A claim after the append: its frame's 8 header bytes, then its 145-byte
     // record, whose last 40 bytes are the locator of the append.
-    Log::open(dir.path(), HOST).unwrap().claim([2; 16], [8; 32]).unwrap();
+    Log::open(dir.path(), HOST)
+        .unwrap()
+        .claim([2; 16], [8; 32])
+        .unwrap();
     let whole = fs::read(segment(dir.path())).unwrap();
     assert_eq!(whole.len(), two.len() + 8 + 145);
     assert_eq!(&whole[whole.len() - 32..], &appended.digest);

@@ -65,16 +65,19 @@ pub type StoreLimits {
 /// longer retains, and `PinReleased()` a reader pin `at_pin` reads that the
 /// store no longer holds; both are definite and close nothing.
 @serializable
-pub type StoreError = Storage(AuthorityError) | Refused(AuthorityError) | Corrupt(String) | Fenced | Closed | Unsupported(
-  Unsupported
-) | NoLevel | Foreign | InvalidInput | NotRetained | PinReleased
+pub type StoreError = Storage(AuthorityError) | Refused(AuthorityError) | Corrupt(
+  String
+) | Fenced | Closed | Unsupported(Unsupported) | NoLevel | Foreign | InvalidInput | NotRetained | PinReleased
 
 /// What a store cannot do: open a record of another history format version
 /// (`Format`, carrying the magic found and the record's name), create a store
 /// whose groups would exceed the authority's largest entry (`Size`), or use
 /// an object store that does not honour conditional writes (`Conditional`).
 @serializable
-pub type Unsupported = Format(found: Bytes, object: String) | Size(needed: u64, max_entry: u64) | Conditional
+pub type Unsupported = Format(found: Bytes, object: String) | Size(
+  needed: u64,
+  max_entry: u64
+) | Conditional
 
 /// How a transaction ended without its outcome: `Aborted(e)` when the body
 /// returned `Error(e)` and its writes were discarded; `Canceled(cause)` before
@@ -212,7 +215,10 @@ type Kept {
 }
 
 // What a reader pin entry asks of the commit that records it.
-type PinOp = Acquire(token: Bytes, principal: String) | Release(token: Bytes) | Pin(name: Bytes, version: u64) | Unpin(name: Bytes)
+type PinOp = Acquire(token: Bytes, principal: String) | Release(token: Bytes) | Pin(
+  name: Bytes,
+  version: u64
+) | Unpin(name: Bytes)
 
 /// What a store's head states about one transaction (STORE-4), the same for
 /// every run of it: the caller's principal (empty for a local call), the
@@ -588,13 +594,17 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
   // table it and the ReaderDelta commits since record, how many those are,
   // and the newest record holding either kind.
   let mut retention: Option[(u64, List[history.Pin], List[history.Root])] = None()
-  let mut table: ordered_map.OrderedMap[Bytes, Reading] = ordered_map.empty(compare_keys)
+  let mut table: ordered_map.OrderedMap[Bytes, Reading] = ordered_map.empty(
+    compare_keys
+  )
   let mut deltas: u64 = 0
   let mut retain_loc = history.no_locator()
   let mut epoch: u64 = 0
   // The objects the records created and none retired, and the position of
   // the newest checkpoint's record.
-  let mut made: ordered_map.OrderedMap[Bytes, ObjectRef] = ordered_map.empty(compare_keys)
+  let mut made: ordered_map.OrderedMap[Bytes, ObjectRef] = ordered_map.empty(
+    compare_keys
+  )
   let mut checkpoint_at: u64 = 0
   let mut here: u64 = 0
   while here < end {
@@ -621,7 +631,10 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
       let g = match history.decode_group(e) {
         Ok(x) => x,
         Error(Unsupported(found: found)) => return Error(
-          stop(mut s, Unsupported(Format(found: unique found, object: entry_name(here))))
+          stop(
+            mut s,
+            Unsupported(Format(found: unique found, object: entry_name(here)))
+          )
         ),
         Error(Corrupt()) => return Error(stop(mut s, Corrupt(entry_name(here)))),
       }
@@ -682,7 +695,7 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
           Engine(Retain(floor: f, creation: c, pins: p, readers: r, checkpoints: k)) => {
             // A fold repeats the creation tuple the Genesis recorded.
             let same = match recorded {
-              Some(g) => g == c,
+              Some(recorded_creation) => recorded_creation == c,
               None() => false,
             }
             let Ok(folded) = reading_table(r, here_loc) else {
@@ -698,7 +711,9 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
           },
           Engine(ReaderDelta(change)) => {
             // A delta changes the table a Retain before it recorded.
-            if retention == None() || reading_change(mut table, change, here_loc) != Ok(()) {
+            if retention == None() || reading_change(mut table, change, here_loc) != Ok(
+              ()
+            ) {
               return Error(stop(mut s, Corrupt(entry_name(here))))
             }
             deltas += 1
@@ -802,11 +817,13 @@ fn adopt(
       match read_tree(a, d) {
         Ok((_, refs)) => take refs,
         // A tree is fetched by digest: nothing in it moves.
-        Error(Missing()) | Error(Moved()) => return Error(stop(mut s, Corrupt("hirsel.checkpoint"))),
+        Error(Missing()) | Error(Moved()) => return Error(
+          stop(mut s, Corrupt("hirsel.checkpoint"))
+        ),
         Error(Failed(e)) => return Error(stop(mut s, take e)),
       }
     }
-    list.push(mut out, Kept(desc: unique d, after: copy k.after, refs: take refs))
+    list.push(mut out, Kept(desc: unique d, after: unique k.after, refs: take refs))
   }
   s.kept = take out
   Ok(())
@@ -814,11 +831,11 @@ fn adopt(
 
 // The locator a retention commit in the record at `here` names: its own,
 // `here`, for `no_locator()`.
-fn resolved(at: Bytes, here: Bytes) -> Bytes uses {} {
-  if at == history.no_locator() {
-    copy here
+fn resolved(loc: Bytes, here: Bytes) -> Bytes uses {} {
+  if loc == history.no_locator() {
+    unique here
   } else {
-    copy at
+    unique loc
   }
 }
 
@@ -828,7 +845,9 @@ fn reading_table(readers: List[history.Reader], here: Bytes) -> Result[
   ordered_map.OrderedMap[Bytes, Reading],
   ()
 ] uses {} {
-  let mut table: ordered_map.OrderedMap[Bytes, Reading] = ordered_map.empty(compare_keys)
+  let mut table: ordered_map.OrderedMap[Bytes, Reading] = ordered_map.empty(
+    compare_keys
+  )
   for r in readers {
     for h in r.holders {
       let Ok(principal) = string.from_bytes(unique h.principal) else {
@@ -853,14 +872,18 @@ fn reading_change(
   here: Bytes
 ) -> Result[(), ()] uses {} {
   match change {
-    Hold(token: token, principal: principal, version: held, at: at) => {
+    Hold(token: token, principal: principal, version: held, at: loc) => {
       let Ok(who) = string.from_bytes(unique principal) else {
         return Error(())
       }
       if ordered_map.contains(table, token) || ordered_map.len(table) >= history.MAX_HOLDERS {
         return Error(())
       }
-      ordered_map.insert(mut table, unique token, Reading(principal: take who, version: held, at: resolved(at, here)))
+      ordered_map.insert(
+        mut table,
+        unique token,
+        Reading(principal: take who, version: held, at: resolved(loc, here))
+      )
     },
     Free(token: token) => {
       if let None() = ordered_map.remove(mut table, token) {
@@ -883,7 +906,9 @@ fn load_checkpoint(
   made: ordered_map.OrderedMap[Bytes, ObjectRef],
   here: u64
 ) -> Result[ordered_map.OrderedMap[Bytes, Bytes], StoreError] {
-  let mut live: ordered_map.OrderedMap[Bytes, ObjectRef] = ordered_map.empty(compare_keys)
+  let mut live: ordered_map.OrderedMap[Bytes, ObjectRef] = ordered_map.empty(
+    compare_keys
+  )
   let mut expects = [history.root_expect(desc)]
   while true {
     let mut blobs: List[Bytes] = []
@@ -904,7 +929,9 @@ fn load_checkpoint(
         expects = take more
       },
       Ok(Leaves(entries)) => {
-        let mut state: ordered_map.OrderedMap[Bytes, Bytes] = ordered_map.empty(compare_keys)
+        let mut state: ordered_map.OrderedMap[Bytes, Bytes] = ordered_map.empty(
+          compare_keys
+        )
         for (k, v) in entries {
           ordered_map.insert(mut state, unique k, unique v)
         }
@@ -931,7 +958,11 @@ fn creatable(limits: StoreLimits, nodes: history.Bounds, max_entry: u64) -> Resu
   if limits.key_bytes > most || limits.value_bytes > most || limits.transaction_bytes > most || limits.range_rows > most {
     return Error(InvalidInput())
   }
-  if !history.bounds_fit(int.narrow(limits.key_bytes), int.narrow(limits.value_bytes), nodes) {
+  if !history.bounds_fit(
+    int.narrow(limits.key_bytes),
+    int.narrow(limits.value_bytes),
+    nodes
+  ) {
     return Error(InvalidInput())
   }
   let needed = limits.transaction_bytes + GROUP_OVERHEAD
@@ -949,7 +980,9 @@ fn genesis(a: Authority, mut s: Store, limits: StoreLimits, bounds: history.Boun
 ] {
   s.limits = limits
   s.bounds = copy bounds
-  let body: history.Body = Engine(Genesis(history.Creation(limits: recorded_as(limits), bounds: take bounds)))
+  let body: history.Body = Engine(
+    Genesis(history.Creation(limits: recorded_as(limits), bounds: take bounds))
+  )
   let t = serial(mut s)
   let _ = commit(mut s, take t, take body, None()) ? unreleased
   strongest(a, mut s) ? unreleased
@@ -1102,7 +1135,10 @@ pub fn ticket(s: Store) -> Ticket uses {} {
 /// advancing the pending group if needed. `NoLevel()` when `s` does not keep
 /// `a`, and `Foreign()` for a ticket of another store; neither changes the
 /// store. Any other error closes it and never claims the commit is lost.
-pub fn durable(a: Authority, mut s: Store, t: Ticket, here: Level of a) -> Result[(), StoreError] {
+pub fn durable(a: Authority, mut s: Store, t: Ticket, here: Level of a) -> Result[
+  (),
+  StoreError
+] {
   if s.closed {
     return Error(Closed())
   }
@@ -1122,7 +1158,10 @@ pub fn durable(a: Authority, mut s: Store, t: Ticket, here: Level of a) -> Resul
 /// The state at `D(at)` (STORE-8): every commit durable at `at`, no later
 /// one. It waits for nothing and costs O(1); reading one's own write takes
 /// `durable` on its ticket first. `NoLevel()` when `s` does not keep `a`.
-pub fn snapshot(a: Authority, mut s: Store, here: Level of a) -> Result[Snapshot of a, StoreError] {
+pub fn snapshot(a: Authority, mut s: Store, here: Level of a) -> Result[
+  Snapshot of a,
+  StoreError
+] {
   if s.closed {
     return Error(Closed())
   }
@@ -1132,11 +1171,20 @@ pub fn snapshot(a: Authority, mut s: Store, here: Level of a) -> Result[Snapshot
   let Some((wanted, share)) = durable_state(mut s, i) else {
     return Error(Corrupt("snapshot"))
   }
-  Ok(Snapshot(version: wanted, index: take share, limits: s.limits, energy: s.config.energy))
+  Ok(
+    Snapshot(
+      version: wanted,
+      index: take share,
+      limits: s.limits,
+      energy: s.config.energy
+    )
+  )
 }
 
 // The version durable at the `i`th declared level and a share of its state.
-fn durable_state(mut s: Store, i: u64) -> Option[(u64, ordered_map.OrderedMap[Bytes, Bytes])] {
+fn durable_state(mut s: Store, i: u64) -> Option[
+  (u64, ordered_map.OrderedMap[Bytes, Bytes])
+] {
   let wanted = s.durable[i]
   for k in 0u64..list.len(s.held) {
     if s.held[k].version == wanted {
@@ -1312,7 +1360,8 @@ pub fn compact(mut s: Store) -> Result[(), StoreError] {
   // The state at V is the state after the newest group: a claim since writes
   // nothing, and so do the Objects commits.
   let last = s.group_last
-  let last_at = located(a, mut s, s.group_at)?
+  let group_at = s.group_at
+  let last_at = located(a, mut s, group_at)?
   let group = copy s.digest
   let placement = history.Placement(
     // Every failure below closes the store; success sets the new live nodes.
@@ -1325,7 +1374,9 @@ pub fn compact(mut s: Store) -> Result[(), StoreError] {
   let tree = history.checkpoint_tree(copy s.bounds, take placement, s.index)
   let desc = history.descriptor(tree, last, group)
   // The new tree's nodes and those of the checkpoints pinned versions rely on.
-  let mut held: ordered_map.OrderedMap[Bytes, ObjectRef] = ordered_map.empty(compare_keys)
+  let mut held: ordered_map.OrderedMap[Bytes, ObjectRef] = ordered_map.empty(
+    compare_keys
+  )
   for r in tree.refs {
     ordered_map.insert(mut held, history.ref_key(r), copy r)
   }
@@ -1380,7 +1431,9 @@ pub fn compact(mut s: Store) -> Result[(), StoreError] {
     strongest(a, mut s) ? unreleased
     i += 1
   }
-  let mut live: ordered_map.OrderedMap[Bytes, ObjectRef] = ordered_map.empty(compare_keys)
+  let mut live: ordered_map.OrderedMap[Bytes, ObjectRef] = ordered_map.empty(
+    compare_keys
+  )
   for r in tree.refs {
     ordered_map.insert(mut live, copy r.digest, copy r)
   }
@@ -1473,7 +1526,10 @@ fn pin_token(p: ReaderPin) -> Bytes uses {} {
 /// `drop_reader_pin` take. Served with `served_transact`, a caller asks it on
 /// its own call stream, and asking the same stream position again returns the
 /// recorded reply.
-pub fn acquire_reader_pin(mut tx: Tx, info: CallInfo, p: ReaderPin) -> Result[HeldPin, PinError] {
+pub fn acquire_reader_pin(mut tx: Tx, info: CallInfo, p: ReaderPin) -> Result[
+  HeldPin,
+  PinError
+] {
   let token = pin_token(p)
   if ordered_map.contains(tx.txn.readers, token) {
     return Error(Taken())
@@ -1502,13 +1558,20 @@ pub fn drop_reader_pin(mut tx: Tx, info: CallInfo, p: HeldPin) -> Result[(), ()]
 
 /// The reader pins the store holds, for its operator: each holder's version,
 /// principal and id, `H("hirsel.pin.v1", token)`. No call shows a token.
-pub fn reader_pins(a: Authority, mut s: Store) -> Result[List[PinHolder of a], StoreError] {
+pub fn reader_pins(a: Authority, mut s: Store) -> Result[
+  List[PinHolder of a],
+  StoreError
+] {
   if s.closed {
     return Error(Closed())
   }
   let mut out: List[PinHolder of a] = []
   for (token, r) in reading_rows(s.readers) {
-    let h: PinHolder of a = PinHolder(version: r.version, principal: unique r.principal, id: pin_id(token))
+    let h: PinHolder of a = PinHolder(
+      version: r.version,
+      principal: unique r.principal,
+      id: pin_id(token)
+    )
     list.push(mut out, take h)
   }
   Ok(take out)
@@ -1523,7 +1586,10 @@ fn reading_rows(m: ordered_map.OrderedMap[Bytes, Reading]) -> List[(Bytes, Readi
     Unbounded(),
     Ascending(),
     take first,
-    fn(take acc: List[(Bytes, Reading)], k: Bytes, r: Reading) -> (List[(Bytes, Reading)], bool) {
+    fn(take acc: List[(Bytes, Reading)], k: Bytes, r: Reading) -> (
+      List[(Bytes, Reading)],
+      bool
+    ) {
       let mut out = take acc
       list.push(mut out, (unique k, unique r))
       (take out, true)
@@ -1586,7 +1652,10 @@ pub fn release_reader_pin(mut s: Store, h: PinHolder) -> Result[bool, StoreError
 /// store holds already moves to `v`. A name over 255 bytes, a 1025th name or
 /// a version below the floor is `InvalidInput()`, and a version the store no
 /// longer retains is `NotRetained()`, as `store.at` answers it.
-pub fn pin(a: Authority, mut s: Store, name: String, v: Version of a) -> Result[(), StoreError] {
+pub fn pin(a: Authority, mut s: Store, name: String, v: Version of a) -> Result[
+  (),
+  StoreError
+] {
   if s.closed {
     return Error(Closed())
   }
@@ -1683,9 +1752,20 @@ fn retained(s: Store, op: PinOp, base: u64) -> Result[Retention, StoreError] use
       // The commit recording the holder is in the pending group; its record
       // is at or after the one holding `base`.
       if !ordered_map.contains(readers, token) {
-        change = Some(Hold(token: unique token, principal: unique name, version: base, at: history.no_locator()))
+        change = Some(
+          Hold(
+            token: unique token,
+            principal: unique name,
+            version: base,
+            at: history.no_locator()
+          )
+        )
       }
-      ordered_map.insert(mut readers, unique token, Reading(principal: unique principal, version: base, at: b""))
+      ordered_map.insert(
+        mut readers,
+        unique token,
+        Reading(principal: unique principal, version: base, at: b"")
+      )
     },
     Release(token: token) => {
       if let Some(_) = ordered_map.remove(mut readers, token) {
@@ -1750,14 +1830,14 @@ fn retained(s: Store, op: PinOp, base: u64) -> Result[Retention, StoreError] use
     list.push(mut checkpoints, history.Root(desc: unique k.desc, after: copy k.after))
   }
   let body: history.Body = Engine(
-    Retain(
+    (Retain(
       floor: s.retain_floor,
       // The tuple recover took from the Genesis: equal to it by construction.
       creation: history.Creation(limits: recorded_as(s.limits), bounds: copy s.bounds),
       pins: copy pins,
       readers: take table,
       checkpoints: take checkpoints
-    )
+    ))
   )
   Ok(
     Retention(
@@ -1776,44 +1856,68 @@ fn retained(s: Store, op: PinOp, base: u64) -> Result[Retention, StoreError] use
 // version below every checkpoint relies on none: it replays from the genesis.
 // One sort, so a commit at a full table costs O(n log n), and the newest
 // checkpoint's nodes are listed at most once.
-fn relied(s: Store, readers: ordered_map.OrderedMap[Bytes, Reading], pins: List[history.Pin]) -> (
-  List[history.Reader],
-  List[Kept]
-) uses {} {
+fn relied(
+  s: Store,
+  readers: ordered_map.OrderedMap[Bytes, Reading],
+  pins: List[history.Pin]
+) -> (List[history.Reader], List[Kept]) uses {} {
   let mut rows: List[PinRow] = []
   for (k, r) in reading_rows(readers) {
-    list.push(mut rows, PinRow(version: r.version, token: unique k, principal: unique r.principal, at: unique r.at))
+    list.push(
+      mut rows,
+      PinRow(
+        version: r.version,
+        token: unique k,
+        principal: unique r.principal,
+        at: unique r.at
+      )
+    )
   }
   list.sort(mut rows, by_version)
   let mut table: List[history.Reader] = []
   let mut holders: List[history.Holder] = []
   let mut ver: u64 = 0
-  let mut at = b""
+  let mut loc = b""
   let mut kept: List[Kept] = []
   let mut newest_kept = false
   for h in rows {
     if list.len(holders) > 0 && h.version != ver {
-      list.push(mut table, history.Reader(version: ver, at: written_at(at), holders: replace(mut holders, [])))
+      list.push(
+        mut table,
+        history.Reader(
+          version: ver,
+          at: written_at(loc),
+          holders: replace(mut holders, [])
+        )
+      )
     }
     if list.len(holders) == 0 {
       ver = h.version
-      at = b""
+      loc = b""
       let (more, has) = keep(s, ver, take kept, newest_kept)
       kept = take more
       newest_kept = has
     }
     // The nearest record after the version's of those its holders name: a
     // pending one is the newest.
-    if at == b"" || (h.at != b"" && history.locator_position(h.at) < history.locator_position(at)) {
-      at = unique h.at
+    if loc == b"" || h.at != b"" && history.locator_position(h.at) < history.locator_position(
+      loc
+    ) {
+      loc = unique h.at
     }
     list.push(
       mut holders,
-      history.Holder(principal: unique string.as_bytes(h.principal), token: unique h.token)
+      history.Holder(
+        principal: unique string.as_bytes(h.principal),
+        token: unique h.token
+      )
     )
   }
   if list.len(holders) > 0 {
-    list.push(mut table, history.Reader(version: ver, at: written_at(at), holders: take holders))
+    list.push(
+      mut table,
+      history.Reader(version: ver, at: written_at(loc), holders: take holders)
+    )
   }
   // A named pin's version relies on a checkpoint as a reader's does.
   for p in pins {
@@ -1847,7 +1951,10 @@ fn holds(s: Store, v: u64) -> bool uses {} {
 
 // `kept`, oldest first, with the checkpoint a pinned version `v` relies on,
 // once, and whether it now holds the newest checkpoint.
-fn keep(s: Store, v: u64, take kept: List[Kept], newest_kept: bool) -> (List[Kept], bool) uses {} {
+fn keep(s: Store, v: u64, take kept: List[Kept], newest_kept: bool) -> (
+  List[Kept],
+  bool
+) uses {} {
   match relied_on(s, v) {
     Some(Older(k)) => {
       let mut have = false
@@ -1863,7 +1970,13 @@ fn keep(s: Store, v: u64, take kept: List[Kept], newest_kept: bool) -> (List[Kep
       if newest_kept {
         return (take kept, true)
       }
-      (by_age(take kept, Kept(desc: take d, after: copy s.newest_after, refs: made_refs(s.live))), true)
+      (
+        by_age(
+          take kept,
+          Kept(desc: take d, after: unique s.newest_after, refs: made_refs(s.live))
+        ),
+        true
+      )
     },
     None() => (take kept, newest_kept),
   }
@@ -1889,15 +2002,20 @@ fn by_age(take kept: List[Kept], take k: Kept) -> List[Kept] uses {} {
 }
 
 // One holder of a reader pin, as `relied` orders them.
-type PinRow { version: u64, token: Bytes, principal: String, at: Bytes }
+type PinRow {
+  version: u64,
+  token: Bytes,
+  principal: String,
+  at: Bytes,
+}
 
 // A Reading's locator as a retention commit writes it: the record holding
 // the commit, `no_locator()`, while it is pending.
-fn written_at(at: Bytes) -> Bytes uses {} {
-  if at == b"" {
+fn written_at(loc: Bytes) -> Bytes uses {} {
+  if loc == b"" {
     history.no_locator()
   } else {
-    copy at
+    unique loc
   }
 }
 
@@ -1985,7 +2103,9 @@ pub fn at_pin(a: Authority, p: HeldPin) -> Result[Snapshot of a, StoreError] {
         let mut base: Option[Base] = None()
         for r in h.roots {
           if r.desc.version <= h.version {
-            base = Some(Base(desc: unique r.desc, after: history.locator_position(r.after)))
+            base = Some(
+              Base(desc: unique r.desc, after: history.locator_position(r.after))
+            )
           }
         }
         replay(a, h.limits, base, h.version, Some(copy h.at))
@@ -1993,7 +2113,7 @@ pub fn at_pin(a: Authority, p: HeldPin) -> Result[Snapshot of a, StoreError] {
       Ok(_) => return Error(PinReleased()),
       Error(e) => Error(take e),
     }
-    match read {
+    match take read {
       Ok(snap) => return Ok(take snap),
       Error(Missing()) if missed == 1 => return Error(Corrupt("hirsel.checkpoint")),
       Error(Missing()) => {
@@ -2075,8 +2195,8 @@ fn pinned(a: Authority, top: Level of a, token: Bytes) -> Result[Option[Pinned],
         let (cs, here) = later[i]
         for c in cs {
           match c {
-            Hold(token: t, version: v, at: at, ..) if t == token => {
-              held = Some((v, resolved(at, here)))
+            Hold(token: t, version: v, at: loc, ..) if t == token => {
+              held = Some((v, resolved(loc, here)))
             },
             Free(token: t) if t == token => {
               held = None()
@@ -2087,7 +2207,14 @@ fn pinned(a: Authority, top: Level of a, token: Bytes) -> Result[Option[Pinned],
       }
       return Ok(
         match take held {
-          Some((v, at)) => Some(Pinned(version: v, at: take at, roots: take roots, limits: store_limits(limits))),
+          Some((v, loc)) => Some(
+            Pinned(
+              version: v,
+              at: take loc,
+              roots: take roots,
+              limits: store_limits(limits)
+            )
+          ),
           None() => None(),
         }
       )
@@ -2107,7 +2234,10 @@ fn pinned(a: Authority, top: Level of a, token: Bytes) -> Result[Option[Pinned],
 
 // The group `l` locates, durable at `top`; `Moved()` when its record is not
 // there.
-fn located_group(a: Authority, top: Level of a, l: Bytes) -> Result[history.Group, Unread] {
+fn located_group(a: Authority, top: Level of a, l: Bytes) -> Result[
+  history.Group,
+  Unread
+] {
   let pos = history.locator_position(l)
   let records = match authority.at(a, l, pos - 1, top, 1) {
     Ok(x) => x,
@@ -2389,7 +2519,9 @@ fn read_tree(a: Authority, desc: history.Descriptor) -> Result[
         expects = take more
       },
       Ok(Leaves(entries)) => {
-        let mut state: ordered_map.OrderedMap[Bytes, Bytes] = ordered_map.empty(compare_keys)
+        let mut state: ordered_map.OrderedMap[Bytes, Bytes] = ordered_map.empty(
+          compare_keys
+        )
         for (k, v) in entries {
           ordered_map.insert(mut state, unique k, unique v)
         }
@@ -2425,7 +2557,10 @@ fn batch_refs(max_entry: u64) -> u64 uses {} {
 }
 
 // Puts a checkpoint node under the store's claim.
-fn put_node(a: Authority, mut s: Store, r: ObjectRef, take data: Bytes) -> Result[(), StoreError] {
+fn put_node(a: Authority, mut s: Store, r: ObjectRef, take data: Bytes) -> Result[
+  (),
+  StoreError
+] {
   let Some(held) = replace(mut s.claim, None()) else {
     return Error(stop(mut s, Closed()))
   }
@@ -2533,7 +2668,10 @@ fn called[F](
   take args: Bytes,
   take outcome: Bytes
 ) -> (history.Body, history.Def) uses {} {
-  (call_body(info, take arrival, take args, take outcome), entry_def(core@1/runner.entry_id(f)))
+  (
+    call_body(info, take arrival, take args, take outcome),
+    entry_def(core@1/runner.entry_id(f))
+  )
 }
 
 // An entry's identity as a group definition.
@@ -2573,10 +2711,10 @@ const LIBRARY_STEP: Bytes = b"std@1/table"
 // generic over its caller's types, as each of `table.migrate`'s steps is,
 // cannot be an entry. Its commit is a Library commit. Outcomes are
 // `transact`'s, but a failure in `body` propagates.
-fn transact_body[R: inert, E: inert](mut s: Store, body: fn(mut tx: Tx) -> Result[R, E] uses {}) -> Result[
-  R,
-  TxFailure[E]
-] {
+fn transact_body[R: inert, E: inert](
+  mut s: Store,
+  body: fn(mut tx: Tx) -> Result[R, E] uses {}
+) -> Result[R, TxFailure[E]] {
   if s.closed {
     return Error(Storage(Closed()))
   }
@@ -2920,7 +3058,13 @@ fn decide(mut s: Store, t: Run, key: Bytes, req: CallRequest, caller: String) ->
     return Ok(Reject())
   }
   let row = match ordered_map.get(t.state, key) {
-    None() => StreamRow(owner: unique caller, epoch: 0, applied: 0, acknowledged: 0, retained: []),
+    None() => StreamRow(
+      owner: unique caller,
+      epoch: 0,
+      applied: 0,
+      acknowledged: 0,
+      retained: []
+    ),
     Some(data) => {
       let decoded: Result[StreamRow, DecodeError] = codec.decode(data)
       match take decoded {
@@ -3055,7 +3199,11 @@ type ServedBody = Transacting(
 // One evaluation of a served entry: an argument that does not decode, a
 // failure in the run, or the body's outcome as the stream records it (a
 // `Result[R, TxFailure[E]]`) and as the call ends.
-type Evaluated = Undecoded | Faulting(Failure) | Ended(ok: bool, recorded: Bytes, end: CallEnd)
+type Evaluated = Undecoded | Faulting(Failure) | Ended(
+  ok: bool,
+  recorded: Bytes,
+  end: CallEnd
+)
 
 /// Serves the transaction entry `f`.
 pub fn served_transact[A: serializable, R: serializable, E: serializable](
@@ -3063,26 +3211,28 @@ pub fn served_transact[A: serializable, R: serializable, E: serializable](
 ) -> Served uses {} {
   Served(
     entry: runner.entry_id(f),
-    body: Transacting(fn(mut tx: Tx, info: CallInfo, argument: Bytes) -> Evaluated {
-      let decoded: Result[A, DecodeError] = codec.decode(argument)
-      let Ok(a) = take decoded else {
-        return Undecoded()
+    body: Transacting(
+      fn(mut tx: Tx, info: CallInfo, argument: Bytes) -> Evaluated {
+        let decoded: Result[A, DecodeError] = codec.decode(argument)
+        let Ok(a) = take decoded else {
+          return Undecoded()
+        }
+        match runner.apply_mut(f, mut tx, info, take a) {
+          Ok(Ok(v)) => {
+            let end: CallEnd = Returned(codec.encode(v))
+            let outcome: Result[R, TxFailure[E]] = Ok(take v)
+            Ended(ok: true, recorded: codec.encode(outcome), end: take end)
+          },
+          Ok(Error(e)) => {
+            let failure: TxFailure[E] = Aborted(take e)
+            let end: CallEnd = Failed(codec.encode(failure))
+            let outcome: Result[R, TxFailure[E]] = Error(take failure)
+            Ended(ok: false, recorded: codec.encode(outcome), end: take end)
+          },
+          Error(failure) => Faulting(take failure),
+        }
       }
-      match runner.apply_mut(f, mut tx, info, take a) {
-        Ok(Ok(v)) => {
-          let end: CallEnd = Returned(codec.encode(v))
-          let outcome: Result[R, TxFailure[E]] = Ok(take v)
-          Ended(ok: true, recorded: codec.encode(outcome), end: take end)
-        },
-        Ok(Error(e)) => {
-          let failure: TxFailure[E] = Aborted(take e)
-          let end: CallEnd = Failed(codec.encode(failure))
-          let outcome: Result[R, TxFailure[E]] = Error(take failure)
-          Ended(ok: false, recorded: codec.encode(outcome), end: take end)
-        },
-        Error(failure) => Faulting(take failure),
-      }
-    }),
+    ),
     limited: fn(l: TxLimit) -> (Bytes, Bytes) {
       let failure: TxFailure[E] = Limit(l)
       let end = codec.encode(failure)
@@ -3102,20 +3252,22 @@ pub fn served_query[A: serializable, R: serializable, E: serializable](
 ) -> Served uses {} {
   Served(
     entry: runner.entry_id(f),
-    body: Querying(fn(tx: Tx, info: CallInfo, argument: Bytes) -> Evaluated {
-      let decoded: Result[A, DecodeError] = codec.decode(argument)
-      let Ok(a) = take decoded else {
-        return Undecoded()
+    body: Querying(
+      fn(tx: Tx, info: CallInfo, argument: Bytes) -> Evaluated {
+        let decoded: Result[A, DecodeError] = codec.decode(argument)
+        let Ok(a) = take decoded else {
+          return Undecoded()
+        }
+        match runner.apply(f, tx, info, take a) {
+          Ok(Ok(v)) => Ended(ok: true, recorded: b"", end: Returned(codec.encode(v))),
+          Ok(Error(e)) => {
+            let failure: TxFailure[E] = Aborted(take e)
+            Ended(ok: false, recorded: b"", end: Failed(codec.encode(failure)))
+          },
+          Error(failure) => Faulting(take failure),
+        }
       }
-      match runner.apply(f, tx, info, take a) {
-        Ok(Ok(v)) => Ended(ok: true, recorded: b"", end: Returned(codec.encode(v))),
-        Ok(Error(e)) => {
-          let failure: TxFailure[E] = Aborted(take e)
-          Ended(ok: false, recorded: b"", end: Failed(codec.encode(failure)))
-        },
-        Error(failure) => Faulting(take failure),
-      }
-    }),
+    ),
     limited: fn(l: TxLimit) -> (Bytes, Bytes) {
       let failure: TxFailure[E] = Limit(l)
       let end = codec.encode(failure)
@@ -3238,10 +3390,12 @@ const WINDOW: u64 = 8
 // floor, after one wait for all of them. An arrival whose version did not
 // become durable ends `InDoubt(Abandoned())`, and the store's closing is the
 // error.
-fn end_held(mut s: Store, take ran: List[Arrival], take ends: List[CallEnd], needs: List[u64]) -> Result[
-  (),
-  StoreError
-] {
+fn end_held(
+  mut s: Store,
+  take ran: List[Arrival],
+  take ends: List[CallEnd],
+  needs: List[u64]
+) -> Result[(), StoreError] {
   let mut top: u64 = 0
   for n in needs {
     if n > top {
@@ -3275,7 +3429,15 @@ fn serve_one(mut s: Store, entries: List[Served], take request: Arrived) -> Call
     return NotRun(Denied())
   }
   if !querying {
-    return serve_transact(mut s, entries, request.entry, request.level, request.request, request.caller, request.argument)
+    return serve_transact(
+      mut s,
+      entries,
+      request.entry,
+      request.level,
+      request.request,
+      request.caller,
+      request.argument
+    )
   }
   let here = match resolve(entries, request.entry, true, request.level) {
     Ok(here) => here,
@@ -3300,14 +3462,25 @@ fn serve_one(mut s: Store, entries: List[Served], take request: Arrived) -> Call
     return InDoubt(Abandoned())
   }
   let tx = Tx(
-    txn: reading(take Snapshot(version: floor_version, index: take index, limits: s.limits, energy: s.config.energy)),
+    txn: reading(
+      take Snapshot(
+        version: floor_version,
+        index: take index,
+        limits: s.limits,
+        energy: s.config.energy
+      )
+    ),
     limits: s.limits,
     scope: all(Read()),
     points: recorder.new(),
     spans: recorder.new()
   )
   let saved = energy.enter(s.config.energy)
-  let evaluated = body(tx, CallInfo(caller: copy request.caller, at: 0, seed: 0, id: b""), request.argument)
+  let evaluated = body(
+    tx,
+    CallInfo(caller: copy request.caller, at: 0, seed: 0, id: b""),
+    request.argument
+  )
   let spent = energy.leave(take saved).exhausted
   let Tx(txn: _, limits: _, scope: _, points: read_points, spans: read_spans) = take tx
   let _: List[Bytes] = recorder.finish(take read_points)
@@ -3527,7 +3700,10 @@ pub fn tx_get(tx: Tx, key: Bytes) -> Result[Option[Bytes] in tx, TxError]
 /// `tx_get` with `within` checked in place of the transaction's scope:
 /// `OutOfScope()` without reading unless the transaction's scope holds every
 /// key `within` holds, at any access, and `within` holds `key`.
-pub fn tx_get_in(tx: Tx, within: KeyScope, key: Bytes) -> Result[Option[Bytes] in tx, TxError]
+pub fn tx_get_in(tx: Tx, within: KeyScope, key: Bytes) -> Result[
+  Option[Bytes] in tx,
+  TxError
+]
   requires !reserved(key) {
   read_within(tx, within)?
   table_read(tx, within, copy_to(heap, key))
@@ -3684,7 +3860,10 @@ fn scan[A](
     high,
     direction,
     take start,
-    fn(take walk: (A, u64, Option[Bytes]), k: Bytes, v: Bytes) -> ((A, u64, Option[Bytes]), bool) {
+    fn(take walk: (A, u64, Option[Bytes]), k: Bytes, v: Bytes) -> (
+      (A, u64, Option[Bytes]),
+      bool
+    ) {
       let (acc, left, _) = take walk
       let (next, more) = step(take acc, k, v)
       if more && left > 1 {
@@ -3842,7 +4021,10 @@ fn spans_hold(spans: List[ScopeSpan], lo: Bytes, hi: Option[Bytes], write: bool)
 // a library's rows.
 // The value of `key` in this transaction, after checking read access and
 // the key limit. The read enters the run's access set.
-fn table_read(tx: Tx, scope: KeyScope, take key: Bytes) -> Result[Option[Bytes] in tx, TxError] {
+fn table_read(tx: Tx, scope: KeyScope, take key: Bytes) -> Result[
+  Option[Bytes] in tx,
+  TxError
+] {
   admit(scope, key, false)?
   if bytes.len(key) > tx.limits.key_bytes {
     return Error(Limit(KeyBytes()))
@@ -3896,7 +4078,14 @@ fn table_range[A](
     Ascending() => true,
     Descending() => false,
   }
-  let (folded, _) = scan(tx, Some((take lo, take hi)), ascending, limit, take initial, step)
+  let (folded, _) = scan(
+    tx,
+    Some((take lo, take hi)),
+    ascending,
+    limit,
+    take initial,
+    step
+  )
   Ok(take folded)
 }
 
@@ -4072,7 +4261,9 @@ fn union(a: List[ScopeSpan], b: List[ScopeSpan]) -> KeyScope uses {} {
     if held > 0 {
       let write = held == 2
       let last = list.len(spans)
-      if last > 0 && spans[last - 1].write == write && spans[last - 1].hi == Some(copy here) {
+      if last > 0 && spans[last - 1].write == write && spans[last - 1].hi == Some(
+        copy here
+      ) {
         spans[last - 1].hi = unique end
       } else {
         list.push(mut spans, ScopeSpan(lo: unique here, hi: unique end, write: write))
@@ -4141,12 +4332,18 @@ fn put_row(
   take end: CallEnd
 ) -> () uses {} {
   let mut recorded = take row
-  list.push(mut recorded.retained, Retained(position: req.position, digest: unique req.digest, end: take end))
+  list.push(
+    mut recorded.retained,
+    Retained(position: req.position, digest: unique req.digest, end: take end)
+  )
   run_put(mut set, take key, codec.encode(recorded))
 }
 
 // Releases a refusal once every commit the request could see is durable.
-fn refuse[R, E](mut s: Store, base: u64, take f: CallFailure[E]) -> Result[R, CallFailure[E]] {
+fn refuse[R, E](mut s: Store, base: u64, take f: CallFailure[E]) -> Result[
+  R,
+  CallFailure[E]
+] {
   gate(mut s, base) ? released_call
   Error(f)
 }
@@ -4244,10 +4441,12 @@ fn release(mut s: Store, upto: u64) -> Result[(), Unreleased] {
 // Commits `t` with `body`, the call it records, and releases it at the floor.
 // A Library step that writes nothing has nothing to record: it only waits for
 // the commit it began at.
-fn settle(mut s: Store, take t: Run, take body: history.Body, take def: Option[history.Def]) -> Result[
-  (),
-  Unreleased
-] {
+fn settle(
+  mut s: Store,
+  take t: Run,
+  take body: history.Body,
+  take def: Option[history.Def]
+) -> Result[(), Unreleased] {
   let base = t.base
   let recorded = match body {
     Transaction(_) => true,
@@ -4282,10 +4481,12 @@ fn settle(mut s: Store, take t: Run, take body: history.Body, take def: Option[h
 // encoded commit over the limits change nothing and are `Limit(..)`. A
 // group that would outgrow the authority's largest entry or `group_bytes`
 // advances first; one that reaches a bound advances after.
-fn commit(mut s: Store, take t: Run, take body: history.Body, take def: Option[history.Def]) -> Result[
-  u64,
-  Unreleased
-] {
+fn commit(
+  mut s: Store,
+  take t: Run,
+  take body: history.Body,
+  take def: Option[history.Def]
+) -> Result[u64, Unreleased] {
   if s.closed {
     discard(mut s, take t)
     return Error(Storage(Closed()))
@@ -4347,9 +4548,9 @@ fn commit(mut s: Store, take t: Run, take body: history.Body, take def: Option[h
     Some(d) => def_size(d),
     None() => 0,
   }
-  if group_size(s) + def_bytes > s.max_entry || (
-    group_size(s) + def_bytes > s.config.group_bytes && pending_count(s) > 1 + pair
-  ) {
+  if group_size(s) + def_bytes > s.max_entry || group_size(s) + def_bytes > s.config.group_bytes && pending_count(
+    s
+  ) > 1 + pair {
     // The group without this commit advances, and it starts the next.
     if pair > 0 {
       unadd(mut s, retain_size)
@@ -4467,14 +4668,19 @@ fn pending_count(s: Store) -> u64 uses {} {
 
 // A definition's encoded size in a group's table.
 fn def_size(d: history.Def) -> u64 uses {} {
-  12 + bytes.len(d.path) + bytes.len(d.fingerprint) + bytes.len(d.code) + bytes.len(d.revision)
+  12 + bytes.len(d.path) + bytes.len(d.fingerprint) + bytes.len(d.code) + bytes.len(
+    d.revision
+  )
 }
 
 // Extends the history with the pending group, durable at `here`, the level at
 // index `i`: every commit up to V is then durable at `here` and each weaker
 // level. A refusal or a later claim leaves the group out of the history, and
 // an undecided append leaves it unknown; each closes the store.
-fn advance(a: Authority, mut s: Store, here: Level of a, i: u64) -> Result[(), Unreleased] {
+fn advance(a: Authority, mut s: Store, here: Level of a, i: u64) -> Result[
+  (),
+  Unreleased
+] {
   if pending_groups(s) == 0 {
     return answer(a, mut s)
   }
@@ -4503,7 +4709,10 @@ fn narrow_claim(a: Authority, mut s: Store) -> Result[Claim of a, Unreleased] {
 // next entry. The head moves past it and its state is held; nothing is
 // durable until it is answered. A dead claim or a refused group closes the
 // store with nothing appended.
-fn submit(a: Authority, mut s: Store, here: Level of a, i: u64) -> Result[(), Unreleased] {
+fn submit(a: Authority, mut s: Store, here: Level of a, i: u64) -> Result[
+  (),
+  Unreleased
+] {
   if pending_groups(s) == 0 {
     return Ok(())
   }
@@ -4516,10 +4725,13 @@ fn submit(a: Authority, mut s: Store, here: Level of a, i: u64) -> Result[(), Un
 }
 
 // `submit` under `c`, the store's claim narrowed and taken from it.
-fn submit_claimed(a: Authority, mut s: Store, mut c: Claim of a, here: Level of a, i: u64) -> Result[
-  (),
-  Unreleased
-] {
+fn submit_claimed(
+  a: Authority,
+  mut s: Store,
+  mut c: Claim of a,
+  here: Level of a,
+  i: u64
+) -> Result[(), Unreleased] {
   let Some(w) = replace(mut s.pending, None()) else {
     return Ok(())
   }
@@ -4562,7 +4774,10 @@ fn submit_claimed(a: Authority, mut s: Store, mut c: Claim of a, here: Level of 
   }
   let state = current(mut s)
   list.push(mut s.held, Held(position: position, version: s.visible, state: take state))
-  list.push(mut s.submitted, Submitted(position: position, version: s.visible, level: i))
+  list.push(
+    mut s.submitted,
+    Submitted(position: position, version: s.visible, level: i)
+  )
   Ok(())
 }
 
@@ -4584,7 +4799,10 @@ fn answer(a: Authority, mut s: Store) -> Result[(), Unreleased] {
 }
 
 // `answer` under `c`, the store's claim narrowed and taken from it.
-fn answer_claimed(a: Authority, mut s: Store, mut c: Claim of a) -> Result[(), Unreleased] {
+fn answer_claimed(a: Authority, mut s: Store, mut c: Claim of a) -> Result[
+  (),
+  Unreleased
+] {
   let groups = replace(mut s.submitted, [])
   for g in groups {
     let outcome = authority.wait(a, mut c, g.position)
@@ -4715,7 +4933,9 @@ fn released_call[E](take u: Unreleased) -> CallFailure[E] uses {} {
 }
 
 // A commit's write set, in key order.
-fn write_set(writes: ordered_map.OrderedMap[Bytes, Option[Bytes]]) -> List[history.Write] uses {} {
+fn write_set(writes: ordered_map.OrderedMap[Bytes, Option[Bytes]]) -> List[
+  history.Write
+] uses {} {
   let first: List[history.Write] = []
   ordered_map.fold_range(
     writes,
@@ -4723,7 +4943,10 @@ fn write_set(writes: ordered_map.OrderedMap[Bytes, Option[Bytes]]) -> List[histo
     Unbounded(),
     Ascending(),
     take first,
-    fn(take acc: List[history.Write], k: Bytes, v: Option[Bytes]) -> (List[history.Write], bool) {
+    fn(take acc: List[history.Write], k: Bytes, v: Option[Bytes]) -> (
+      List[history.Write],
+      bool
+    ) {
       let mut out = take acc
       match v {
         Some(value) => list.push(mut out, Put(key: unique k, value: unique value)),
@@ -4784,7 +5007,6 @@ fn apply(mut index: ordered_map.OrderedMap[Bytes, Bytes], set: List[history.Writ
   }
 }
 
-
 // Typed operations preflight the complete prospective write set before mutating
 // the live Tx, so a limit refusal changes nothing and the body can continue.
 fn check_put(tx: Tx, key: Bytes, value: Bytes) -> Option[TxLimit] uses {} {
@@ -4824,7 +5046,14 @@ fn table_all[A](
   if !scope.whole {
     check(spans_hold(scope.spans, lo, hi, write), write)?
   }
-  let (folded, _) = scan(tx, Some((take lo, take hi)), true, 18446744073709551615, take initial, step)
+  let (folded, _) = scan(
+    tx,
+    Some((take lo, take hi)),
+    true,
+    18446744073709551615,
+    take initial,
+    step
+  )
   Ok(take folded)
 }
 

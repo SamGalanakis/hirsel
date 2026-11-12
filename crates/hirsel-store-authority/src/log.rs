@@ -661,7 +661,7 @@ impl Authority for Log {
         if failed.is_some() || barrier.is_some() {
             c.dead = true;
         }
-        batch
+        let out: Vec<Advanced> = batch
             .iter()
             .enumerate()
             .map(|(i, q)| match (&barrier, i.cmp(&written)) {
@@ -672,7 +672,17 @@ impl Authority for Log {
                 (_, std::cmp::Ordering::Equal) => failed.clone().unwrap_or(Advanced::Fenced),
                 _ => Advanced::Fenced,
             })
-            .collect()
+            .collect();
+        // The handle follows every frame it wrote, even one a failed barrier
+        // leaves undecided, so `locate` names it with no read; a read that
+        // caught up followed it already.
+        for q in &batch[..written] {
+            if self.chain.end() + 1 == q.position {
+                let followed = self.chain.follow(&q.record);
+                debug_assert!(followed.is_ok(), "an append follows its tip");
+            }
+        }
+        out
     }
 
     fn durable(&mut self, c: &mut Claim, at: Level) -> Result<u64, Error> {
@@ -724,8 +734,8 @@ impl Authority for Log {
                 continue;
             };
             let p = first + fr.entries.len() as u64 - 1;
-            let entry = read_entry(&f, offset, len)?
-                .ok_or_else(|| Error::Corrupt(segment_name(first)))?;
+            let entry =
+                read_entry(&f, offset, len)?.ok_or_else(|| Error::Corrupt(segment_name(first)))?;
             self.frames.insert(first, fr);
             if at >= HOST {
                 disk::sync_data(&f).map_err(|e| Error::Storage(io(e)))?;
@@ -747,7 +757,9 @@ impl Authority for Log {
     /// `host` it syncs `l`'s segment once: a segment is synced whole before
     /// the next starts.
     fn at(&mut self, l: &Locator, from: u64, at: Level, max: u64) -> Result<Vec<Record>, Error> {
-        if self.chain.locator(l.position) == Some(*l) && (l.position as usize) <= self.index.spots.len() {
+        if self.chain.locator(l.position) == Some(*l)
+            && (l.position as usize) <= self.index.spots.len()
+        {
             let stop = l.position.min(from.saturating_add(max));
             return self.read(from.min(stop), at, stop - from.min(stop));
         }

@@ -890,7 +890,10 @@ fn a_claim_after_a_lost_reply_names_the_append_its_replace_selected() {
         let bucket = Arc::new(Bucket::new(1, BTreeMap::new()));
         let s = Scripted::new(bucket.clone());
         let (mut h, mut c, p) = writer_a(&s);
-        assert_eq!(append(&mut h, &mut c, p.clone(), Level(0)), Advanced::Advanced(2));
+        assert_eq!(
+            append(&mut h, &mut c, p.clone(), Level(0)),
+            Advanced::Advanced(2)
+        );
         let x = entry(99, 1);
         let (s2, b2) = (s.clone(), bucket.clone());
         let answer = if landed_first {
@@ -901,7 +904,10 @@ fn a_claim_after_a_lost_reply_names_the_append_its_replace_selected() {
             s.arm(vec![Act::Hold, Act::Before(lands)], vec![]);
             append(&mut h, &mut c, x.clone(), Level(0))
         } else {
-            s.arm(vec![Act::Hold], vec![Act::Before(Box::new(move || b_claims(&b2)))]);
+            s.arm(
+                vec![Act::Hold],
+                vec![Act::Before(Box::new(move || b_claims(&b2)))],
+            );
             let a = append(&mut h, &mut c, x.clone(), Level(0));
             s.land();
             a
@@ -909,24 +915,47 @@ fn a_claim_after_a_lost_reply_names_the_append_its_replace_selected() {
         let mut fresh = Objects::new(bucket.clone(), "zone".into(), Level(0));
         let history = read_all(&mut fresh).unwrap();
         let newest = if landed_first { 3 } else { 2 };
-        assert_eq!(answer, if landed_first { Advanced::Advanced(3) } else { Advanced::Fenced });
-        assert_eq!(history[newest as usize - 1], appended(if landed_first { &x } else { &p }));
-        assert!(matches!(history.last(), Some(Record::Claimed { .. })), "B's claim is last");
+        assert_eq!(
+            answer,
+            if landed_first {
+                Advanced::Advanced(3)
+            } else {
+                Advanced::Fenced
+            }
+        );
+        assert_eq!(
+            history[newest as usize - 1],
+            appended(if landed_first { &x } else { &p })
+        );
+        assert!(
+            matches!(history.last(), Some(Record::Claimed { .. })),
+            "B's claim is last"
+        );
         assert_eq!(history.len() as u64, newest + 1);
         // A cold reader: `last` is the append B's claim names.
         let mut cold = Objects::new(bucket.clone(), "zone".into(), Level(0));
         let l = cold.last(Level(0)).unwrap().expect("an append");
-        assert_eq!(l, fresh.followed_locator(newest).unwrap(), "landed first {landed_first}");
+        assert_eq!(
+            l,
+            fresh.followed_locator(newest).unwrap(),
+            "landed first {landed_first}"
+        );
         let p_at = fresh.followed_locator(2).unwrap();
         let mut cold = Objects::new(bucket.clone(), "zone".into(), Level(0));
-        assert_eq!(cold.at(&p_at, 0, Level(0), 8).unwrap(), history[..2].to_vec());
+        assert_eq!(
+            cold.at(&p_at, 0, Level(0), 8).unwrap(),
+            history[..2].to_vec()
+        );
         let mut cold = Objects::new(bucket.clone(), "zone".into(), Level(0));
         assert_eq!(cold.at(&p_at, 1, Level(0), 8).unwrap(), vec![appended(&p)]);
         // A locator nothing authenticates, another digest at P or a position
         // past the history, is a restart, not corruption.
         let mut other = p_at;
         other.digest[0] ^= 1;
-        let past = crate::Locator { position: 9, ..p_at };
+        let past = crate::Locator {
+            position: 9,
+            ..p_at
+        };
         for l in [other, past] {
             let mut cold = Objects::new(bucket.clone(), "zone".into(), Level(0));
             assert_eq!(cold.at(&l, 0, Level(0), 8).unwrap(), vec![]);

@@ -543,11 +543,21 @@ mod tests {
             (tip2.clone(), claimed(&tip2, [3; 16], [4; 32], None)),
             (
                 tip2.clone(),
-                claimed(&tip2, [3; 16], [4; 32], doctored(&|t| t.appended.as_mut().unwrap().digest = [9; 32]).appended),
+                claimed(
+                    &tip2,
+                    [3; 16],
+                    [4; 32],
+                    doctored(&|t| t.appended.as_mut().unwrap().digest = [9; 32]).appended,
+                ),
             ),
             (
                 tip2.clone(),
-                claimed(&tip2, [3; 16], [4; 32], doctored(&|t| t.appended.as_mut().unwrap().position = 1).appended),
+                claimed(
+                    &tip2,
+                    [3; 16],
+                    [4; 32],
+                    doctored(&|t| t.appended.as_mut().unwrap().position = 1).appended,
+                ),
             ),
             // An append in another epoch.
             (

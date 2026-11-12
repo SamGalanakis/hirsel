@@ -284,7 +284,7 @@ fn batched(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
 fn group(body: history.Engine) -> Bytes {
   let (data, _) = history.encode_group(
     history.Group(
-      retain: 0,
+      retain: history.no_locator(),
       commits: [history.Commit(body: Engine(copy body), writes: [])],
       defs: []
     )

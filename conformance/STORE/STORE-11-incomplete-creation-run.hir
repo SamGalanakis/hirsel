@@ -334,7 +334,7 @@ fn refolded(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
   let mut c = take made
   let mut other = default_creation()
   other.bounds.node_max = 8388608
-  let fold = Retain(
+  let fold: history.Engine = Retain(
     floor: 0,
     creation: take other,
     pins: [],
@@ -370,14 +370,12 @@ fn pinned_limits(rt: Io, a: Authority, mut s: store.Store) -> Result[bool, Faile
   let Ok(p) = store.new_reader_pin(r) else {
     return Error(Failed("reader pin"))
   }
-  let request = CallRequest(
-    stream: sha256_name(b"reader"),
-    epoch: 1,
-    position: 1,
-    digest: sha256_name(b"acquire"),
-    acknowledged: 0
+  let got: Result[store.HeldPin, store.TxFailure[store.PinError]] = store.transact(
+    mut s,
+    store.acquire_reader_pin,
+    p
   )
-  let Ok(held) = store.call(mut s, request, store.acquire_reader_pin, p) else {
+  let Ok(held) = got else {
     return Error(Failed("acquire"))
   }
   let Ok(snap) = store.at_pin(a, held) else {

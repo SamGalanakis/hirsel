@@ -4,8 +4,8 @@
 use crate::envelope::{self, Chain};
 use crate::reclaim::{self, Found, Page, Space, Sweep};
 use crate::{
-    Advanced, Authority, Claim, Claimed, Error, Level, Locator, ObjectRef, Queued, Reclaimed, Record,
-    live, owner_id,
+    Advanced, Authority, Claim, Claimed, Error, Level, Locator, ObjectRef, Queued, Reclaimed,
+    Record, live, owner_id,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};

@@ -1,0 +1,274 @@
+// rule: STORE-8
+// expect: run
+// authorities: {"objects":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":3}}}
+// stdout: objects: agrees
+// steps: 20000000
+// The readers table a store keeps on its history as Retain folds and
+// ReaderDelta commits is the table a model keeps of the same changes. A seeded
+// sequence of acquires (fresh tokens and tokens dropped before), drops by the
+// holder and releases by the operator runs past `HIGH` holders and more than
+// `HIGH` changes past them, so the ReaderDelta runs between folds reach their
+// bound, min(holders, FOLD_DELTAS), with compactions between, on an object store. Each
+// acquire pins a state whose `x` no other acquire pinned, at a version the
+// model notes. After each change, the pin it touched and another the model
+// picks read through store.at_pin (newest first, from authority.last) as the
+// model says: the state its acquire pinned while the model holds it,
+// PinReleased() once it does not, a dropped pin's token acquired again
+// included. After a reopen, which recovers the table forward from the history,
+// store.reader_pins lists exactly the model's holders at the versions it
+// noted, and every pin ever acquired reads as the model says. Past
+// FOLD_DELTAS holders, where the bound is FOLD_DELTAS, a cold pin read is
+// checked by crates/hirsel-cli/tests/cli/cold_pin.rs.
+pub type Failed = Check(String) | Store(store.StoreError)
+
+fn check(ok: bool, take what: String) -> Result[(), Failed] {
+  if ok {
+    Ok(())
+  } else {
+    Error(Check(what))
+  }
+}
+
+fn put_x(mut tx: store.Tx, info: store.CallInfo, n: u8) -> Result[(), store.TxError] {
+  store.tx_put(mut tx, b"x", bytes.from_list([n]))
+}
+
+// One acquire: the index of the token it used, the pin it returned, the `x` of
+// the state it pinned and whether the model still holds it.
+type Issued {
+  token: u64,
+  held: store.HeldPin,
+  x: u8,
+  live: bool,
+}
+
+// Whether `h` reads as the model says: the state whose `x` is `x` while the
+// model holds it, and PinReleased() otherwise.
+fn agrees(a: Authority, i: Issued) -> bool {
+  match store.at_pin(a, i.held) {
+    Ok(snap) => i.live && store.get(snap, b"x") == Some(bytes.from_list([i.x])),
+    Error(PinReleased()) => !i.live,
+    Error(_) => false,
+  }
+}
+
+// Whether the store's holders are exactly the model's live ones: as many, and
+// each pinning the version the model noted for a live issued pin (an acquire is
+// a commit, so no two acquires pin one version).
+fn listed(
+  a: Authority,
+  mut s: store.Store,
+  issued: List[Issued],
+  versions: List[store.Version of a]
+) -> Result[bool, Failed] {
+  let holders = store.reader_pins(a, mut s) ? Store
+  let mut want: List[store.Version of a] = []
+  for k in 0u64..list.len(issued) {
+    if issued[k].live {
+      list.push(mut want, versions[k])
+    }
+  }
+  if list.len(holders) != list.len(want) {
+    return Ok(false)
+  }
+  for h in holders {
+    let mut found = false
+    for v in want {
+      found = found || v == store.pin_version(a, h)
+    }
+    if !found {
+      return Ok(false)
+    }
+  }
+  Ok(true)
+}
+
+fn draw(mut g: prng.Generator, n: u64) -> u64 {
+  match prng.below(mut g, n) {
+    Ok(x) => x,
+    Error(_) => 0,
+  }
+}
+
+// The index of a random issued pin the model holds (`live`) or not.
+fn pick(mut g: prng.Generator, issued: List[Issued], live: bool) -> Option[u64] {
+  let mut at: List[u64] = []
+  for k in 0u64..list.len(issued) {
+    if issued[k].live == live {
+      list.push(mut at, k)
+    }
+  }
+  if list.len(at) == 0 {
+    return None()
+  }
+  Some(at[draw(mut g, list.len(at))])
+}
+
+// Whether the store holds the token of the dropped pin `k` under a later pin.
+fn token_held(issued: List[Issued], k: u64) -> bool {
+  let mut held = false
+  for i in issued {
+    held = held || i.live && i.token == issued[k].token
+  }
+  held
+}
+
+// Steps the sequence runs, and the first steps, in which 7 changes in 8 are
+// acquires (4 in 8 after) while fewer than `MOST` are held, so the table passes
+// `HIGH` holders early and then changes past `HIGH` holders more than `HIGH`
+// times. A compaction every `COMPACT` steps leaves room for a full run of
+// deltas between the folds it causes.
+const STEPS: u64 = 32
+
+const FILL: u64 = 14
+
+const MOST: u64 = 10
+
+const HIGH: u64 = 6
+
+const COMPACT: u64 = 12
+
+fn run(rt: Io, name: String) -> Result[(), Failed] {
+  let Ok(a) = io.authority(rt, name) else {
+    return Error(Check(f"{name} not granted"))
+  }
+  let Ok(r) = io.random(rt) else {
+    return Error(Check("random"))
+  }
+  let mut g = prng.seed(681)
+  let mut s = store.open(a, store.default_config()) ? Store
+  let mut issued: List[Issued] = []
+  // The version each issued pin pins, by the store's snapshot before its
+  // acquire.
+  let mut versions: List[store.Version of a] = []
+  let mut tokens: List[store.ReaderPin] = []
+  let mut live: u64 = 0
+  let mut most: u64 = 0
+  let mut past: u64 = 0
+  for step in 1u64..STEPS + 1 {
+    let n: u8 = int.truncate(step)
+    let wrote: Result[(), store.TxFailure[store.TxError]] = store.transact(
+      mut s,
+      put_x,
+      n
+    )
+    check(wrote == Ok(()), f"{name}: write {step}")?
+    let roll = draw(mut g, 8)
+    let mut touched: Option[u64] = None()
+    let acquires: u64 = if step <= FILL {
+      7
+    } else {
+      4
+    }
+    if live < MOST && roll < acquires || live == 0 {
+      // An acquire, of a dropped pin's token when one is free.
+      let mut token: Option[u64] = None()
+      if roll == 0 {
+        if let Some(k) = pick(mut g, issued, false) {
+          if !token_held(issued, k) {
+            token = Some(issued[k].token)
+          }
+        }
+      }
+      let t = match token {
+        Some(t) => t,
+        None() => {
+          let Ok(fresh) = store.new_reader_pin(r) else {
+            return Error(Check("token"))
+          }
+          list.push(mut tokens, fresh)
+          list.len(tokens) - 1
+        },
+      }
+      let p = tokens[t]
+      let now = store.snapshot(a, mut s, authority.floor(a)) ? Store
+      let version = store.version(a, now)
+      let got: Result[store.HeldPin, store.TxFailure[store.PinError]] = store.transact(
+        mut s,
+        store.acquire_reader_pin,
+        p
+      )
+      let Ok(held) = got else {
+        return Error(Check(f"{name}: acquire {step}"))
+      }
+      list.push(mut issued, Issued(token: t, held: held, x: n, live: true))
+      list.push(mut versions, version)
+      live += 1
+      touched = Some(list.len(issued) - 1)
+    } else if let Some(k) = pick(mut g, issued, true) {
+      if roll < 7 {
+        // The holder drops it.
+        let gone: Result[(), store.TxFailure[()]] = store.transact(
+          mut s,
+          store.drop_reader_pin,
+          issued[k].held
+        )
+        check(gone == Ok(()), f"{name}: drop {step}")?
+      } else {
+        // The operator releases its holder.
+        let holders = store.reader_pins(a, mut s) ? Store
+        let mut released = false
+        let pinned = versions[k]
+        for h in holders {
+          if !released && pinned == store.pin_version(a, h) {
+            released = store.release_reader_pin(mut s, h) == Ok(true)
+          }
+        }
+        check(released, f"{name}: release {step}")?
+      }
+      issued[k].live = false
+      live -= 1
+      touched = Some(k)
+    }
+    if let Some(k) = touched {
+      if live > HIGH || !issued[k].live && live == HIGH {
+        past += 1
+      }
+      check(agrees(a, issued[k]), f"{name}: step {step} pin {k}")?
+    }
+    let other = draw(mut g, list.len(issued))
+    check(agrees(a, issued[other]), f"{name}: step {step} pin {other}")?
+    if step % COMPACT == 0 {
+      store.compact(mut s) ? Store
+    }
+    if live > most {
+      most = live
+    }
+    if step == FILL {
+      store.close(take s) ? Store
+      s = store.open(a, store.default_config()) ? Store
+      check(
+        listed(a, mut s, issued, versions)?,
+        f"{name}: holders after the reopen at {step}"
+      )?
+    }
+  }
+  check(
+    most > HIGH && past > HIGH,
+    f"{name}: {most} holders at most, {past} changes past {HIGH} holders"
+  )?
+  store.close(take s) ? Store
+  let mut again = store.open(a, store.default_config()) ? Store
+  check(
+    listed(a, mut again, issued, versions)?,
+    f"{name}: holders after the last reopen"
+  )?
+  for k in 0u64..list.len(issued) {
+    check(agrees(a, issued[k]), f"{name}: pin {k} at the end")?
+  }
+  store.close(take again) ? Store
+  Ok(())
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
+  let Ok(stdout) = io.stdout(rt) else {
+    return Error(Check("stdout"))
+  }
+  let line = match run(rt, "objects") {
+    Ok(()) => "objects: agrees",
+    Error(Check(what)) => what,
+    Error(Store(_)) => "objects: store error",
+  }
+  let _ = out.print(stdout, f"{line}\n")
+  Ok(())
+}

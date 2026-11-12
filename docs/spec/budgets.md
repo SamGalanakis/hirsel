@@ -81,11 +81,15 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 | counted node | payload size + 8 |
 | region allocation | its byte count, rounded up to 8 |
 | task | 256 + the size of its result + 32 for its primary cause |
-| resource value | 32 for one cause, besides its storage |
+| resource value | 32 for one cause, plus its grant (MEM-29), besides its storage |
 | channel | capacity × item size + 64 |
 
-Scalar sizes are their widths; `bool` and `char` are 1 and 4; an own reference to a block
-counts 8; `List`, `String`, `Bytes` and `Map` headers count 24. Growth that doubles capacity
+Sizes are logical, never an engine's: scalars are their widths, `bool` and `char` 1 and 4,
+`()` 0; a record or tuple is the sum of its fields; a variant type is 8 plus its largest
+payload; `Box`, `Rc`, `Arc`, a task handle and a capability count 8; a `View`, `Text`, a
+span and a reference to a stable value count 16; `List`, `String`, `Bytes` and `Map`
+headers, `Sender` and `Receiver` count 24; a closure counts 8 plus its captures; a compact
+value counts its blob. Growth that doubles capacity
 does so from 4 elements. No allocator constant, alignment or chunk size of an engine enters
 a charge. A later policy has a new name; a package states the policy it was written for
 ([PROG-1](programs.md#prog-1-packages)).
@@ -124,11 +128,16 @@ to a parent (MEM-22), and growth is charged there.
 
 ### MEM-29: Finalizer grants
 
-A finalizer cannot allocate from a limit. A resource type whose finalizer needs storage
-declares `grant bytes n`; creating a value of the type admits `n` with the value, the
-finalizer may allocate up to `n` from that grant only, and the grant is refunded after the
-finalizer returns. An allocation beyond the grant is a finalizer failure with cause
-`Capacity` ([FAIL-12](failure.md#fail-12-finalizer-failure)).
+A finalizer never admits from a limit. Everything it may need is admitted with the
+resource: a resource type whose finalizer allocates, or creates resources, declares
+`grant bytes n`, and creating a value of the type admits `n` with the value as part of its
+charge (MEM-26). The finalizer only subdivides that grant: its own allocations, and the
+storage, cause cell and grant of every resource it creates, are taken from it. Exhausting
+the grant is a finalizer failure with cause `Capacity`
+([FAIL-12](failure.md#fail-12-finalizer-failure)), recorded in the resource's own cause
+cell ([FAIL-10](failure.md#fail-10-cause-chain)). The grant is refunded after the
+finalizer and the resources it created are cleaned. So cleanup, failure cleanup included,
+never admits.
 
 ```hirsel
 resource type Log grant bytes 256 { sink: Sink }

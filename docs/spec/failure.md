@@ -118,7 +118,8 @@ the next value. The chain is delivered whole to the joiner (FAIL-14). Cleaning n
 replaces the primary cause, and no cause is dropped. A **cause cell** holds one
 cause. Cells are admitted before any cause can need them: one with each task, for its
 primary cause, and one with each resource value, for the failure its cleanup may add
-([MEM-26](budgets.md#mem-26-logical-charges)). These are the only places a cause arises,
+([MEM-26](budgets.md#mem-26-logical-charges)); a resource created by a finalizer takes
+its cell from the finalizer's grant ([MEM-29](budgets.md#mem-29-finalizer-grants)). These are the only places a cause arises,
 so recording a cause, linking the chain and delivering it never admit, and the chain has
 no depth limit and is never truncated. A `Fail` cause takes ownership of its message.
 

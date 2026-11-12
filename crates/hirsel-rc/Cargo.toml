@@ -24,5 +24,6 @@ hirsel-types = { path = "../hirsel-types" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+hirsel-lir = { path = "../hirsel-lir", features = ["testing"] }
 hirsel-guard = { path = "../hirsel-guard" }
 hirsel-heapcheck = { path = "../hirsel-heapcheck" }

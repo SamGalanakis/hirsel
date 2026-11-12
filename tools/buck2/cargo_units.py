@@ -13,6 +13,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import tempfile
 
 import rust_environment
 
@@ -70,6 +71,13 @@ class Resolution:
         self.preferred = {}
         self.runtime = {}
         self.test_binaries = {}
+        fingerprint = hashlib.sha256(json.dumps([meta['packages'], meta['workspace_members'], (root / 'Cargo.toml').read_text(), (root / 'rust-toolchain.toml').read_text()], sort_keys=True).encode()).hexdigest()
+        self.cache_path = root / '.buck2/cargo-units.json'
+        try:
+            cached = json.loads(self.cache_path.read_text())
+        except (OSError, ValueError):
+            cached = {}
+        self.graphs = cached.get('graphs', {}) if cached.get('fingerprint') == fingerprint else {}
         env = rust_environment.environment(root)
         # --unit-graph is unstable in the pinned Cargo; it executes no compiler.
         env['RUSTC_BOOTSTRAP'] = '1'
@@ -81,7 +89,7 @@ class Resolution:
                            '--unit-graph', '-Z', 'unstable-options']
                 if testing:
                     command.append('--no-run')
-                graph = json.loads(subprocess.check_output(command, cwd=root, env=env))
+                graph = self.graph(command, env)
                 if graph['version'] != 1:
                     raise ValueError('unsupported Cargo unit graph version')
                 keys = self.add(graph)
@@ -107,17 +115,32 @@ class Resolution:
                                                                                     if graph['units'][i]['target']['kind'] != ['custom-build'])
         # Runtime archives are cross compiled; Cargo must resolve their target
         # dependency edges separately from the build-script host dependencies.
-        graph = json.loads(subprocess.check_output([env['CARGO'], 'build', '-p', 'hirsel-rt', '--locked',
+        graph = self.graph([env['CARGO'], 'build', '-p', 'hirsel-rt', '--locked',
                             '--manifest-path', str(root / 'Cargo.toml'), '--target', 'aarch64-unknown-linux-gnu',
-                            '--unit-graph', '-Z', 'unstable-options'], cwd=root, env=env))
+                            '--unit-graph', '-Z', 'unstable-options'], env)
         keys = self.add(graph)
         self.runtime['aarch64-unknown-linux-gnu'] = next(keys[i] for i in graph['roots'])
         for key, unit in self.units.items():
             base = self.base(unit)
             if base:
                 self.names[key] = base if self.preferred.get(base) == key else base + '-features-' + key[:12]
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        # Cache only Cargo's answer. A manifest or target-layout change changes
+        # the metadata fingerprint, and bypasses this cache completely.
+        with tempfile.NamedTemporaryFile(mode='w', dir=self.cache_path.parent, delete=False) as pending:
+            json.dump(dict(fingerprint=fingerprint, graphs=self.graphs), pending, separators=(',', ':'))
+        Path(pending.name).replace(self.cache_path)
         if len(set(self.names.values())) != len(self.names):
             raise ValueError('Cargo unit label collision')
+
+    def graph(self, command, env):
+        key = json.dumps(command)
+        if key not in self.graphs:
+            graph = json.loads(subprocess.check_output(command, cwd=self.root, env=env))
+            self.graphs[key] = dict(version=graph['version'], roots=graph['roots'], units=[
+                {field: unit[field] for field in ('pkg_id', 'target', 'mode', 'features', 'dependencies')}
+                for unit in graph['units']])
+        return self.graphs[key]
 
     def add(self, graph):
         keys = {}

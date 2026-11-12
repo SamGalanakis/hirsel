@@ -32,3 +32,6 @@ hirsel-syntax = { path = "../hirsel-syntax" }
 libc = { version = "0.2", default-features = false }
 object = { version = "=0.40.0", default-features = false, features = ["archive", "elf", "read_core", "std", "write"] }
 sha2 = "0.10"
+
+[dev-dependencies]
+hirsel-lir = { path = "../hirsel-lir", features = ["testing"] }

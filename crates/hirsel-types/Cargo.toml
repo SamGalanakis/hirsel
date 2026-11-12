@@ -18,6 +18,7 @@ serde = { version = "1", features = ["derive", "rc"] }
 sha2 = "0.10"
 
 [dev-dependencies]
+hirsel-intern = { path = "../hirsel-intern", features = ["id-salt"] }
 hirsel-type-analysis = { path = "../hirsel-type-analysis" }
 hirsel-guard = { path = "../hirsel-guard" }
 hirsel-run-schema = { path = "../hirsel-run-schema" }

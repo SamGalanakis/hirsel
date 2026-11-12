@@ -1486,7 +1486,7 @@ def root_buck(meta: dict, resolution: Resolution) -> str:
     if declared != classified:
         raise SystemExit("production feature inventory changed; audit and classify: "
                          + ", ".join(sorted(declared ^ classified)))
-    check_production_features(buck, policy)
+    check_production_features(buck, policy, strict=True)
     return buck
 
 

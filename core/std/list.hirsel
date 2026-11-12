@@ -57,3 +57,9 @@ pub fn reverse[T](mut xs: List[T])
 /// Alloc: nothing. Cost: O(len log len) worst case.
 /// Ex: `list.sort(mut xs, fn(a: u64, b: u64) -> Order { order.compare(a, b) })`
 pub fn sort[T](mut xs: List[T], before: scoped fn(T, T) -> Order)
+
+/// Sum of the bytes of b in u64: the corpus checksum. `list.sum` sums in u8 and would fail
+/// with Overflow; there is no generic widening sum (no numeric bound, OWN-4). Cannot
+/// overflow below 2^56 bytes. Alloc: nothing. Cost: O(len).
+/// Ex: `let s = list.sum_bytes(string.as_bytes(out))`
+pub fn sum_bytes(b: Bytes) -> u64

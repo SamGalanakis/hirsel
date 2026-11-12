@@ -243,7 +243,7 @@ fn instance_identity_separates_types_and_dictionaries() {
 /// the normal-dependency closure of every `hirsel-core-*` crate stays inside the
 /// neutral crates below both pipelines.
 #[test]
-fn core_crates_depend_only_on_neutral_crates() {
+fn coreir_data_crates_depend_only_on_neutral_crates() {
     const NEUTRAL: &[&str] = &[
         "hirsel-core-ids",
         "hirsel-core-layout",
@@ -267,14 +267,11 @@ fn core_crates_depend_only_on_neutral_crates() {
         }
         out
     };
-    let roots: Vec<String> = std::fs::read_dir(crates)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        // `hirsel-core-contract` is the old pipeline's contract crate, not a core crate.
-        .filter(|n| n.starts_with("hirsel-core-") && n != "hirsel-core-contract")
-        .filter(|n| crates.join(n).join("Cargo.toml").exists())
-        .collect();
-    assert!(roots.iter().any(|r| r == "hirsel-core-ir"));
+    // The CoreIR data crates (decision 14); front-end crates such as
+    // `hirsel-core-syntax` may depend on them, never the other way round.
+    let roots: Vec<String> = ["hirsel-core-ids", "hirsel-core-layout", "hirsel-core-ir"]
+        .map(String::from)
+        .to_vec();
     let mut stack = roots.clone();
     let mut seen = std::collections::BTreeSet::new();
     while let Some(c) = stack.pop() {

@@ -499,3 +499,271 @@ fn check_live_lower_observations(live_only: bool) {
         }
     });
 }
+
+/// What one scheduled Lower request answered for each definition: how many
+/// times it lowered the body, and its canonical TIR bytes, V's verdict and
+/// any diagnostic.
+type Answers = std::collections::BTreeMap<String, (u64, Result<(Vec<u8>, bool), String>)>;
+
+/// Lower every named definition of `source` against `store`.
+fn lower_all(
+    directory: &std::path::Path,
+    source: &str,
+    names: &[&str],
+    store: Arc<dyn store::ResultStore>,
+) -> Answers {
+    lower_package(directory, &[("main.hir", source)], "[]", names, store)
+}
+
+/// Lower every named root definition of a package whose files are `files`
+/// (paths relative to `directory`, `main.hir` its one module) and whose
+/// dependencies are the manifest JSON `dependencies`.
+fn lower_package(
+    directory: &std::path::Path,
+    files: &[(&str, &str)],
+    dependencies: &str,
+    names: &[&str],
+    store: Arc<dyn store::ResultStore>,
+) -> Answers {
+    let manifest = directory.join("hirsel.json");
+    // `main.hir` is the root module; any other `<m>.hir` is module `m`.
+    let sources: Vec<String> = files
+        .iter()
+        .map(|(path, _)| match path.strip_suffix(".hir") {
+            Some("main") | None => format!(r#"{{"path":"{path}","module":[]}}"#),
+            Some(module) => format!(r#"{{"path":"{path}","module":["{module}"]}}"#),
+        })
+        .collect();
+    let sources = sources.join(",");
+    std::fs::write(&manifest, format!(r#"{{"schema":1,"package":{{"name":"universe_split","version":"1"}},"sources":[{sources}],"dependencies":{dependencies},"entry":{{"module":[],"name":"main"}}}}"#)).unwrap();
+    for (path, text) in files {
+        let path = directory.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let mut program = COMPILER
+        .with_config(CompileConfig {
+            store: store.clone(),
+            verify: Verify::On,
+            jobs: hirsel_intern::jobs::Jobs::ONE,
+            ..Default::default()
+        })
+        .with_owned_engines()
+        .load_program(&manifest)
+        .unwrap();
+    let definitions: Vec<_> = names
+        .iter()
+        .map(|name| {
+            let mut path = program.entry.clone();
+            path.0.name = (*name).into();
+            path
+        })
+        .collect();
+    let errors = crate::scheduled_front::errors();
+    let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
+    let mut runtime = AdmittedRuntime::new(
+        hirsel_intern::jobs::Jobs::ONE,
+        budget.reserve(512 << 20).unwrap(),
+        errors,
+    )
+    .unwrap();
+    let weight = MemoryWeight {
+        retained: 2 << 20,
+        scratch: 8 << 20,
+        stack: 0,
+    };
+    let front = program
+        .engine
+        .front_body_queries(&definitions, weight, &budget, errors)
+        .unwrap();
+    let lower = program
+        .engine
+        .front_lower_queries(&definitions, front.clone(), weight, 64, &budget, errors)
+        .unwrap();
+    runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
+    runtime
+        .register_local(FRONT_LOWER_KIND, lower.factory())
+        .unwrap();
+    runtime
+        .register_local(FRONT_EVALUATE_KIND, lower.factory())
+        .unwrap();
+    let records = NativeRecords::new(program.engine.types().clone(), store.clone());
+    let mut answers = Answers::new();
+    for (name, path) in names.iter().zip(&definitions) {
+        let request = runtime.request(&[lower.query(path).unwrap()]);
+        let answer = match runtime.wait(request) {
+            Ok(products) => {
+                let actual = lower.outcome(products[0].clone()).unwrap();
+                Ok((
+                    records
+                        .encode(&program.engine, &actual.output.value)
+                        .unwrap(),
+                    actual.verified.is_some(),
+                ))
+            }
+            // Anchors are process-local; the one source file's offsets place
+            // each diagnostic.
+            Err(error) => Err(format!("{:?}", lower.failure(error))
+                .split("Anchor(")
+                .enumerate()
+                .map(|(i, part)| {
+                    if i == 0 {
+                        part
+                    } else {
+                        part.split_once(')').map_or(part, |(_, rest)| rest)
+                    }
+                })
+                .collect()),
+        };
+        answers.insert(name.to_string(), (0, answer));
+    }
+    for (name, path) in names.iter().zip(&definitions) {
+        answers.get_mut(*name).unwrap().0 = lower.work(path).lowerings;
+    }
+    runtime.shutdown();
+    answers
+}
+
+/// The universe split's cutoff law: after an edit, a warm store reruns only
+/// the bodies whose own reads (V's views among them) changed, and every
+/// answer equals a fresh lowering and V run of every body with no stored
+/// product and no receipt reuse.
+#[test]
+fn warm_lower_reruns_only_bodies_whose_validation_reads_changed() {
+    with_compiler_stack(|| {
+        let base = [
+            "pub fn a()->u8{1u8}",
+            "pub fn b()->u8{a()}",
+            "pub fn c()->u8{2u8}",
+            "pub fn d()->u8{c()}",
+            "fn helper()->u8{b()}",
+            "pub fn main()->u8{comptime helper()}",
+        ];
+        let names = ["a", "b", "c", "d", "helper", "main"];
+        let text = |lines: &[&str]| lines.join("\n") + "\n";
+        let reversed: Vec<_> = base.iter().rev().copied().collect();
+        let with = |replace: &str, by: &str| {
+            text(
+                &base
+                    .iter()
+                    .map(|l| if *l == replace { by } else { l })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        // (source, the bodies a correct cutoff reruns, hand-derived)
+        let edits: Vec<(String, Vec<&str>)> = vec![
+            // c's header changes, so c and d, which reads c's signature and
+            // V's view of it, rerun; nothing else does.
+            (
+                with("pub fn c()->u8{2u8}", "fn c()->u8{2u8}"),
+                vec!["c", "d"],
+            ),
+            // c is public again, which d's newest variant did not observe, so
+            // d reruns; the new name zz, which no body looked up, reruns
+            // nothing.
+            (text(&base) + "pub fn zz()->u8{3u8}\n", vec!["d"]),
+            // An invalid signature front refuses never enters V's universe,
+            // so it reaches no other body: nothing reruns.
+            (text(&base) + "pub fn bad()->Nope{3u8}\n", vec![]),
+            // An invalid signature d reads fails c and d before either is
+            // lowered; nothing else reruns.
+            (with("pub fn c()->u8{2u8}", "pub fn c()->Nope{2u8}"), vec![]),
+            // Fixing it recovers both from their stored variants: failures
+            // are never stored, so d's newest variant observed the valid c.
+            (text(&base), vec![]),
+            // a's body alone changes: b keeps its view of a, and only main,
+            // whose comptime evaluation executed a, reruns beside a.
+            (
+                with("pub fn a()->u8{1u8}", "pub fn a()->u8{5u8}"),
+                vec!["a", "main"],
+            ),
+        ];
+        // The reversed history moves every definition, so only the oracle
+        // decides it; the base history also checks the rerun sets.
+        for (history, check_reruns) in [(text(&base), true), (text(&reversed), false)] {
+            let warm_dir = tempfile::tempdir().unwrap();
+            let warm: Arc<dyn store::ResultStore> = Arc::new(MemStore::default());
+            let cold = lower_all(warm_dir.path(), &history, &names, warm.clone());
+            assert!(
+                cold.values()
+                    .all(|(n, answer)| *n == 1 && matches!(answer, Ok((_, true))))
+            );
+            for (source, expected) in &edits {
+                let fresh_dir = tempfile::tempdir().unwrap();
+                let oracle = lower_all(
+                    fresh_dir.path(),
+                    source,
+                    &names,
+                    Arc::new(MemStore::default()),
+                );
+                let actual = lower_all(warm_dir.path(), source, &names, warm.clone());
+                for name in names {
+                    assert_eq!(
+                        actual[name].1, oracle[name].1,
+                        "{name} after edit:\n{source}"
+                    );
+                }
+                let reran: Vec<_> = names.iter().copied().filter(|n| actual[*n].0 > 0).collect();
+                if check_reruns {
+                    assert_eq!(&reran, expected, "rerun set after edit:\n{source}");
+                }
+            }
+        }
+    });
+}
+
+/// The checker's own view reads carry the cutoff where front reads nothing:
+/// `operations` reaches the opaque `ptr.Pointer` only through
+/// `List[Operation]` → `Path`, so front never reads Pointer's signature or
+/// representation, yet V checked the body against Pointer's view. When
+/// Pointer's representation changes, a correct cutoff reruns `operations`
+/// (V's view of it changed) and nothing else, and every answer equals a
+/// fresh lowering and V run. Shape of std `json_patch.operations`.
+#[test]
+fn warm_lower_reruns_a_body_that_reaches_an_opaque_type_only_through_the_checker() {
+    with_compiler_stack(|| {
+        let main = "pub opaque type Path: copyable + inert + noalloc_drop uses {} {\n  pointer: ptr.Pointer,\n}\npub type Operation = Add(Path) | Clear\npub opaque type Patch: copyable + inert + noalloc_drop uses {} {\n  operations: List[Operation],\n}\npub fn operations(patch: Patch) -> List[Operation] in patch uses {} {\n  patch.operations\n}\npub fn main()->u8{3u8}\n";
+        let base = "pub opaque type Pointer: copyable + inert + noalloc_drop uses {} {\n  tokens: List[String],\n}\n";
+        let grown = base.replace(
+            "tokens: List[String],",
+            "tokens: List[String],\n  depth: u8,",
+        );
+        let names = ["operations", "main"];
+        let warm_dir = tempfile::tempdir().unwrap();
+        let warm: Arc<dyn store::ResultStore> = Arc::new(MemStore::default());
+        let cold = lower_package(
+            warm_dir.path(),
+            &[("main.hir", main), ("ptr.hir", base)],
+            "[]",
+            &names,
+            warm.clone(),
+        );
+        assert!(
+            cold.values()
+                .all(|(n, answer)| *n == 1 && matches!(answer, Ok((_, true))))
+        );
+        // (ptr module source, the bodies a correct cutoff reruns, hand-derived)
+        // Back at the base, operations reruns again: restore resolves the
+        // newest variant, which observed the grown view.
+        for (ptr, expected) in [
+            (grown.as_str(), vec!["operations"]),
+            (base, vec!["operations"]),
+        ] {
+            let files = [("main.hir", main), ("ptr.hir", ptr)];
+            let fresh_dir = tempfile::tempdir().unwrap();
+            let oracle = lower_package(
+                fresh_dir.path(),
+                &files,
+                "[]",
+                &names,
+                Arc::new(MemStore::default()),
+            );
+            let actual = lower_package(warm_dir.path(), &files, "[]", &names, warm.clone());
+            for name in names {
+                assert_eq!(actual[name].1, oracle[name].1, "{name} with ptr:\n{ptr}");
+            }
+            let reran: Vec<_> = names.iter().copied().filter(|n| actual[*n].0 > 0).collect();
+            assert_eq!(reran, expected, "rerun set with ptr:\n{ptr}");
+        }
+    });
+}

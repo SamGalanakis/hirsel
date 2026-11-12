@@ -1764,6 +1764,14 @@ impl FrontLowerQueries {
             .as_ref()
             .ok()
             .and_then(|_| source.evidence.borrow().finish(&observed));
+        // An unexecuted body V accepted depends on what V read, not on every
+        // view of its package's universe.
+        let observed = match &verification {
+            Some((_, verified)) if result.is_ok() && !executed => {
+                evidence::narrowed_reads(&observed, &path, verified.reads()).unwrap_or(observed)
+            }
+            _ => observed,
+        };
         if result.is_ok() {
             let selections = std::mem::take(&mut *source.selections.borrow_mut());
             let action = self.output_action(id, &key);

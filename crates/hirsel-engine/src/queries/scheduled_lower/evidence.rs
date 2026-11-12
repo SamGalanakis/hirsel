@@ -2,6 +2,7 @@
 //! composition. Missing evidence disables reuse; it never disables actual V.
 use crate::Verify;
 use hirsel_query_products::reads::{ReadKey, Reads};
+use hirsel_syntax::ContentHash;
 use hirsel_validate::{AcceptedArtifact, ExecutionReceipt};
 
 /// Unexecuted Lower products retain their validation guards. Only an opaque
@@ -14,6 +15,85 @@ pub(in crate::queries) fn persisted_reads(
         Some(receipt) => super::persistent::persisted_execution_reads(reads, Some(receipt)),
         None => Some(reads.clone()),
     }
+}
+
+/// An unexecuted body's validation observations: exactly what V read for its
+/// own artifact (`reads` of its `VerifiedDefinition`), in place of the owner's
+/// package-wide universe digest.
+///
+/// V validated the body against the owner package's base universe, which is
+/// also the universe the engine's contextual `ValidationView`, `HeapRole` and
+/// `UniverseErrors` observations read, so each `VRead` is the same observation
+/// as the engine read it becomes: a view digest, the heap-role fingerprint and
+/// the universe-errors digest. Executed bodies keep their universe contexts,
+/// which V's receipt replay re-observes through each artifact's own (possibly
+/// private-overlay) universe. Producer reads (front, layouts, registrations,
+/// selections, executed bodies) are untouched.
+///
+/// `None` keeps the package-wide guard: a body whose reads would conflict, that
+/// read another package's universe, or for which V read an absent view. An
+/// accepted unexecuted body never has one: the universe holds a view of every
+/// definition whose signature succeeded (snapshot `build_validation`), and
+/// front refuses a body naming a definition whose signature failed.
+pub(in crate::queries) fn narrowed_reads(
+    reads: &Reads,
+    owner: &hirsel_syntax::DefPath,
+    validation: &[hirsel_validate::VRead],
+) -> Option<Reads> {
+    let guard = ReadKey::ValidationUniverse(hirsel_query_products::reads::PackageKey::of(
+        &owner.0.package,
+    ));
+    let mut narrowed = hirsel_query_products::reads::ReadsBuilder::new();
+    for (key, value) in reads.iter() {
+        match key {
+            key if *key == guard => {}
+            ReadKey::ValidationUniverse(_) => return None,
+            _ => narrowed.record(*key, *value),
+        }
+    }
+    for read in validation {
+        let (key, value) = match read {
+            hirsel_validate::VRead::View(d, digest) => (ReadKey::ValidationView(*d), digest.0),
+            hirsel_validate::VRead::Missing(_) => return None,
+            hirsel_validate::VRead::HeapRole(observation) => {
+                (ReadKey::HeapRole, observation.fingerprint())
+            }
+            hirsel_validate::VRead::UniverseErrors(digest) => (ReadKey::UniverseErrors, *digest),
+        };
+        narrowed.record(key, value);
+    }
+    narrowed.finish().ok()
+}
+
+/// V's context for an unexecuted body's completion: the owner package and a
+/// digest of every validation observation in the body's reads, in canonical
+/// order. Those observations are exactly what V read (or the package-wide
+/// guard, for a body that was not narrowed), so the completion reopens
+/// whenever they all still hold and never at a bare package name.
+pub(in crate::queries) fn completion_context(
+    owner: &hirsel_syntax::PackageId,
+    reads: &Reads,
+) -> (hirsel_syntax::PackageId, ContentHash) {
+    let mut bytes = Vec::new();
+    for (key, value) in reads.iter() {
+        if matches!(
+            key,
+            ReadKey::ValidationView(_)
+                | ReadKey::HeapRole
+                | ReadKey::UniverseErrors
+                | ReadKey::ValidationUniverse(_)
+        ) {
+            key.encode(&mut bytes);
+            bytes.extend(value.0);
+        }
+    }
+    (
+        owner.clone(),
+        ContentHash::of_parts(
+            "hirsel.front.lower.completion-context.v1",
+            [bytes.as_slice()],
+        ),
+    )
 }
 
 /// Only V's current opaque receipt restores archived validation observations.
@@ -134,5 +214,37 @@ impl Evidence {
             .collect();
         contexts.sort_unstable();
         ExecutionReceipt::compose(&contexts, proofs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No accepted unexecuted body is known to read an absent view, so none
+    /// is translated: such a body keeps the package-wide guard instead of a
+    /// read set that reuse could not re-observe as absent.
+    #[test]
+    fn an_absent_view_read_keeps_the_package_guard() {
+        let owner = hirsel_syntax::DefPath(hirsel_syntax::ItemPath {
+            package: hirsel_syntax::PackageId {
+                name: "p".into(),
+                version: "1".into(),
+            },
+            modules: vec![],
+            name: "body".into(),
+        });
+        let guard = ReadKey::ValidationUniverse(hirsel_query_products::reads::PackageKey::of(
+            &owner.0.package,
+        ));
+        let mut reads = hirsel_query_products::reads::ReadsBuilder::new();
+        reads.record(guard, ContentHash([7; 32]));
+        let reads = reads.finish().unwrap();
+        let mut absent = owner.clone();
+        absent.0.name = "absent".into();
+        let absent = hirsel_syntax::DefId::intern(&absent);
+        assert!(
+            narrowed_reads(&reads, &owner, &[hirsel_validate::VRead::Missing(absent)]).is_none()
+        );
     }
 }

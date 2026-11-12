@@ -13,7 +13,7 @@ type HeaderProjection = (
 #[derive(Default)]
 pub(crate) struct OperationOwner {
     pub(crate) structural: parallel::structural::Checks,
-    pub(crate) fact_graph: Arc<hirsel_validate::FactGraph>,
+    pub(crate) fact_graph: Arc<hirsel_types::FactGraph>,
     pub(crate) header_scope: Mutex<Option<Arc<header_products::HeaderScope>>>,
     pub(crate) captures: Mutex<Vec<Weak<NamespaceCapture>>>,
     pub(crate) inputs: Mutex<Option<Weak<header_products::SourceInputs>>>,

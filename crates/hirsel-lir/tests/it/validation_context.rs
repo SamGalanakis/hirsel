@@ -32,7 +32,7 @@ fn stage<S: Stage>() {
     for _ in 0..2 {
         let shared = context.validate(unit.clone(), &inputs).unwrap();
         assert_eq!(shared.unit(), ordinary.unit());
-        assert_eq!(shared.receipt(), ordinary.receipt());
+        assert_eq!(shared.digest(), ordinary.digest());
     }
     // A previous verdict for this same unit cannot hide a later mutation.
     let mut mutant = unit.clone();
@@ -81,7 +81,7 @@ fn stage<S: Stage>() {
     };
     let shared = context.validate(unit.clone(), &changed_inputs).unwrap();
     let ordinary = validate::validate(unit, &changed_inputs).unwrap();
-    assert_eq!(shared.receipt(), ordinary.receipt());
+    assert_eq!(shared.digest(), ordinary.digest());
 }
 
 #[test]

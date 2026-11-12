@@ -2,7 +2,7 @@
 //! select an analysis, never permission to save a native caller.
 use super::*;
 use crate::continuation::{CalleeClass, PlanInputs, callee_symbol};
-use crate::stage::ValidatedUnit;
+use crate::stage::StageOutput;
 use hirsel_syntax::{ContentHash, DefPath};
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -50,7 +50,7 @@ pub(crate) fn intrinsic(definition: &DefPath) -> Option<CalleeClass> {
 }
 
 pub(crate) fn evidence(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &PlanInputs<'_>,
     instance: ContentHash,
 ) -> Result<IsolateEvidence, String> {
@@ -133,11 +133,7 @@ impl IsolateEvidence {
     /// Recheck all actual incoming SSA values, every cleanup operand and the
     /// complete wrapper CFG. Neither candidate classification nor a frame hash
     /// substitutes for this independent source authority.
-    pub fn check(
-        &self,
-        units: &[&ValidatedUnit<Ready>],
-        table: &LayoutTable,
-    ) -> Result<(), String> {
+    pub fn check(&self, units: &[&StageOutput<Ready>], table: &LayoutTable) -> Result<(), String> {
         let wrapper = self.protocol.checked_sources(units, table)?;
         for &point in &self.cleanup.finalizers {
             explicit_finalizer(wrapper.unit(), units, table, point)?;
@@ -297,7 +293,7 @@ impl IsolateEvidence {
 /// Producer walk; the import checker above instead validates supplied rows
 /// while traversing the actual graph and instructions independently.
 fn callback_graph(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     table: &LayoutTable,
     root: ContentHash,
 ) -> Result<Vec<CallbackBody>, String> {

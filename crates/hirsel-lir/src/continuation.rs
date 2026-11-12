@@ -29,7 +29,7 @@ use hirsel_syntax::{ContentHash, DefPath};
 use crate::abi_types::ParameterPassing;
 use crate::ir::*;
 use crate::layout_types::{LayoutId, LayoutKind, LayoutTable, ScalarKind, SizeSpec, TargetSpec};
-use crate::stage::{Ready, ValidatedUnit};
+use crate::stage::{Ready, StageOutput};
 
 pub mod isolate;
 mod ordered;
@@ -294,14 +294,14 @@ pub struct PlanInputs<'a> {
 /// Unit digests are the ones each unit's validator sealed with it: the planned
 /// index holds exactly these accepted units, so nothing is encoded again.
 struct PlanDigests<'a> {
-    units: &'a BTreeMap<ContentHash, &'a ValidatedUnit<Ready>>,
+    units: &'a BTreeMap<ContentHash, &'a StageOutput<Ready>>,
     table: ContentHash,
     target: ContentHash,
 }
 
 impl<'a> PlanDigests<'a> {
     fn new(
-        units: &'a BTreeMap<ContentHash, &'a ValidatedUnit<Ready>>,
+        units: &'a BTreeMap<ContentHash, &'a StageOutput<Ready>>,
         inputs: &PlanInputs<'_>,
     ) -> Self {
         Self {
@@ -1583,7 +1583,7 @@ fn plan_unit<'a>(
     digests: &PlanDigests<'a>,
     done: &BTreeMap<ContentHash, ContinuationPlan>,
     admission: Result<Option<isolate::IsolateEvidence>, String>,
-    checked: &[&ValidatedUnit<Ready>],
+    checked: &[&StageOutput<Ready>],
 ) -> ContinuationPlan {
     let effects: Vec<_> = u
         .tables
@@ -1774,7 +1774,7 @@ fn plan_in_order<'a>(
     digests: &PlanDigests<'a>,
     active: &mut BTreeSet<ContentHash>,
     done: &mut BTreeMap<ContentHash, ContinuationPlan>,
-    checked: &[&ValidatedUnit<Ready>],
+    checked: &[&StageOutput<Ready>],
 ) {
     if done.contains_key(&id) || !active.insert(id) {
         return;
@@ -1839,7 +1839,7 @@ fn plan_in_order<'a>(
 impl ContinuationPlans {
     /// Plan every body that can reach a boundary. Partitioning cannot change
     /// a plan: it reads only the complete Ready bodies given here.
-    pub fn build(units: &[&ValidatedUnit<Ready>], inputs: &PlanInputs<'_>) -> Self {
+    pub fn build(units: &[&StageOutput<Ready>], inputs: &PlanInputs<'_>) -> Self {
         let accepted: BTreeMap<_, _> = units
             .iter()
             .map(|u| (u.unit().header.instance, *u))

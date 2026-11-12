@@ -7,7 +7,7 @@
 use crate::abi_types::FnAbiId;
 use crate::ir::LirUnit;
 use crate::layout_types::{LayoutId, LayoutTable, TargetSpec};
-use crate::stage::{Stage, ValidatedUnit};
+use crate::stage::{Stage, StageOutput};
 use crate::{LayoutIndex, LayoutKeys, SealedLayoutTable};
 use hirsel_codec::{snapshot_enum, snapshot_struct};
 use hirsel_syntax::ContentHash;
@@ -110,17 +110,12 @@ impl LayoutClosure {
     /// Capture independently checked local input rows and common rows a later
     /// stage may introduce. Additional finalizer ABIs must be explicit reads.
     pub fn capture<S: Stage>(
-        unit: &ValidatedUnit<S>,
+        unit: &StageOutput<S>,
         inputs: &crate::validate::Inputs<'_>,
         additional_abis: &[FnAbiId],
     ) -> Result<(Self, UnitBody), String> {
         let table = inputs.layouts;
         let index = LayoutIndex::new(table);
-        if crate::validate::UnitInputs::from(inputs).digest_with_index(unit.unit(), &index)?
-            != unit.receipt().checked_inputs()
-        {
-            return Err("native product inputs differ from checked unit".into());
-        }
         let (erased, direct_layouts, direct_abis) = crate::objects::erased(unit.unit());
         let keys = LayoutKeys::new(table);
         let mut abi_ids = direct_abis.clone();

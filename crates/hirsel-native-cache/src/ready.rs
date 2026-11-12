@@ -3,7 +3,7 @@
 use super::*;
 use hirsel_engine_store::ResultStore;
 use hirsel_engine_store::{Action, Address, Association, Contents, Domain, Reference};
-use hirsel_lir::stage::{Ready, StageKind, ValidatedUnit, Value};
+use hirsel_lir::stage::{Ready, StageKind, StageOutput, Value};
 use hirsel_lir::validate::{Inputs, NativeCache, NativeEnvironment, ValidationContext};
 use hirsel_native::stages::lower_local_raw;
 
@@ -126,7 +126,7 @@ pub struct ReadyMiss<'a> {
 /// Explicit diagnostic output. Only `unit` carries ordinary C acceptance;
 /// plans and recipes are observations and are rechecked before native emission.
 pub struct ObservedReady {
-    pub unit: ValidatedUnit<Ready>,
+    pub unit: StageOutput<Ready>,
     pub layouts: hirsel_lir::LayoutTable,
     pub initial: hirsel_lir::ownership_trace::Plan,
     pub plan: hirsel_lir::ownership_trace::Plan,
@@ -457,7 +457,7 @@ impl ReadyQueries {
         key: &InstanceAddress,
         action: Action,
         miss: ReadyMiss<'_>,
-    ) -> Result<(ValidatedUnit<Ready>, Arc<ReadyProduct>), String> {
+    ) -> Result<(StageOutput<Ready>, Arc<ReadyProduct>), String> {
         self.check_miss(key, &miss)?;
         let inputs = miss.inputs;
         let environment = NativeEnvironment {

@@ -6,7 +6,7 @@ use hirsel_lir::layout_types::LayoutId;
 use hirsel_lir::ownership_trace::native::NativeProjection;
 use hirsel_lir::ownership_trace::native::resource_cleanup_program;
 use hirsel_lir::stage::Ready;
-use hirsel_lir::stage::ValidatedUnit;
+use hirsel_lir::stage::StageOutput;
 use hirsel_run_schema::Site;
 use hirsel_run_schema::ownership_trace::Projection;
 use hirsel_run_schema::ownership_trace::native::CleanupBinding;
@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub fn derive(
     program: &ReadyProgram,
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     payloads: &BTreeMap<u32, BTreeSet<LayoutId>>,
     sites: &Sites<'_>,
 ) -> Result<CleanupLayouts, NativeError> {

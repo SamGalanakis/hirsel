@@ -193,7 +193,7 @@ impl ComponentKey {
 /// The key is metadata, never permission to infer a Value or its equations.
 pub fn extract_local_arena(
     key: &InstanceAddress,
-    value: &hirsel_lir::stage::ValidatedUnit<hirsel_lir::stage::Value>,
+    value: &hirsel_lir::stage::StageOutput<hirsel_lir::stage::Value>,
     layouts: &hirsel_lir::layout_types::LayoutTable,
 ) -> Result<LocalArenaEquations, String> {
     let header = &value.unit().header;
@@ -386,7 +386,7 @@ pub trait NativeProducts {
         &mut self,
         products: &[Arc<ReadyProduct>],
         use_units: impl FnOnce(
-            &[&hirsel_lir::stage::ValidatedUnit<hirsel_lir::stage::Ready>],
+            &[&hirsel_lir::stage::StageOutput<hirsel_lir::stage::Ready>],
             &hirsel_lir::emission::EmitInputs<'_>,
         ) -> Result<R, String>,
     ) -> Result<R, String>;

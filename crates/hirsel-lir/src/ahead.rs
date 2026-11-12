@@ -9,7 +9,7 @@ use hirsel_syntax::ContentHash;
 
 use crate::ir::*;
 use crate::layout_types::{LayoutId, LayoutKind, LayoutTable, ScalarKind, SizeSpec, TargetSpec};
-use crate::stage::{Ready, ValidatedUnit};
+use crate::stage::{Ready, StageOutput};
 
 mod cpu_mapper;
 mod cpu_roots;
@@ -224,7 +224,7 @@ pub fn scalar_image(table: &LayoutTable, id: LayoutId) -> bool {
 /// `helper_identity` binds the exact runtime assembly/record contract; callers
 /// must also bind emission options and final object/frame evidence later.
 pub fn scalar_graph(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     table: &crate::SealedLayoutTable,
     target: &TargetSpec,
     root: ContentHash,

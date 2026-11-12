@@ -1010,7 +1010,7 @@ mod tests {
 /// Prove resource-free callable environments from checked capture equations.
 /// Physical callable layout equality never identifies the captured code.
 pub(super) fn empty_callables(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     layouts: &LayoutTable,
     selection: Selection,
     codes: &[Vec<calls::Code>],
@@ -1025,7 +1025,7 @@ pub(super) fn empty_callables(
         .collect::<BTreeMap<_, _>>();
     fn empty(
         target: &calls::Target,
-        units: &[&ValidatedUnit<Ready>],
+        units: &[&StageOutput<Ready>],
         layouts: &LayoutTable,
         selection: Selection,
         codes: &[Vec<calls::Code>],

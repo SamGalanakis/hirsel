@@ -18,8 +18,7 @@ use crate::layout_types::{
 };
 use crate::object::ObjectFile;
 use crate::stage::{
-    InputIdentity, ObjectArtifact, ObjectSymbol, ObjectSymbolKind, Ready, Relocation,
-    Reproducibility, StageKind, ValidatedUnit,
+    InputIdentity, ObjectArtifact, ObjectSymbol, ObjectSymbolKind, Relocation, Reproducibility,
 };
 
 /// How much a backend optimizes. LLVM runs `default<O0>`, `<O2>` and `<O3>`;
@@ -357,54 +356,6 @@ pub fn scalar_shape(kind: &LayoutKind) -> Option<ScalarKind> {
 /// a private and an indirect call agree; runtime primitives keep their result pointer.
 pub fn register_result(_layouts: &LayoutTable, abi: &FnAbi) -> Option<ScalarKind> {
     abi.result.as_ref()?.register
-}
-
-/// Independently bind the receipt to the unit and its actual reached input rows.
-/// Unrelated layouts, ABIs, manifest rows and program input digests do not affect
-/// a unit. Neither a producer-stamped UnitKey nor cached LayoutKeys is a proof.
-/// The receipt's unit digest needs no comparison here: `ValidatedUnit` is sealed
-/// only by its validator, from the digest of the very unit it holds immutably.
-pub fn check_receipt(unit: &ValidatedUnit<Ready>, inputs: &EmitInputs<'_>) -> Result<(), String> {
-    let raw = unit.receipt().raw();
-    let header = &unit.unit().header;
-    let reject = |problem: &str| Err(problem.to_owned());
-    if raw.stage != StageKind::Ready || header.stage != StageKind::Ready {
-        return reject("the receipt is not for the Ready stage");
-    }
-    if raw.lir_version != crate::LIR_VERSION || header.lir_version != crate::LIR_VERSION {
-        return reject("the unit is of another LIR version");
-    }
-    if raw.validator_version != crate::VALIDATOR_VERSION {
-        return reject("the receipt is from another validator version");
-    }
-    let target = inputs.target.digest();
-    if header.target != target || inputs.layouts.target != target {
-        return reject("the receipt names another target");
-    }
-    if raw.key != header.key {
-        return reject("the receipt names another unit key");
-    }
-    let owned;
-    let index = match inputs.index.filter(|index| index.matches(inputs.layouts)) {
-        Some(index) => index,
-        None => {
-            owned = crate::LayoutIndex::new(inputs.layouts);
-            &owned
-        }
-    };
-    let evidence = crate::validate::UnitInputs {
-        target: inputs.target,
-        layouts: inputs.layouts,
-        manifest: inputs.manifest,
-    }
-    .digest_with_index(unit.unit(), index)?;
-    if unit.receipt().checked_inputs() != evidence {
-        return reject("the receipt names other checked inputs");
-    }
-    if inputs.input.interface_version != crate::INTERFACE_VERSION {
-        return reject("the input is of another interface version");
-    }
-    Ok(())
 }
 
 /// The symbols an emitter declared: what the object must export and may import.

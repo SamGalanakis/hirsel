@@ -3,7 +3,7 @@
 use super::{FinalizerFrame, FinalizerSource};
 use crate::continuation::{ContinuationPlans, PlanInputs};
 use crate::layout_types::{LayoutId, LayoutKind, LayoutRecord, LayoutTable};
-use crate::stage::{Ready, ValidatedUnit};
+use crate::stage::{Ready, StageOutput};
 use hirsel_syntax::ContentHash;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -21,7 +21,7 @@ impl FinalizerCoverage {
     pub fn propose(
         root: LayoutId,
         sources: &BTreeMap<LayoutId, ContentHash>,
-        units: &[&ValidatedUnit<Ready>],
+        units: &[&StageOutput<Ready>],
         inputs: &PlanInputs<'_>,
         plans: &ContinuationPlans,
         after: u64,
@@ -33,7 +33,7 @@ impl FinalizerCoverage {
     pub(crate) fn propose_extents(
         root: LayoutId,
         sources: &BTreeMap<LayoutId, ContentHash>,
-        units: &[&ValidatedUnit<Ready>],
+        units: &[&StageOutput<Ready>],
         inputs: &PlanInputs<'_>,
         plans: &ContinuationPlans,
         after: u64,
@@ -83,7 +83,7 @@ impl FinalizerCoverage {
     /// with a retained frame whenever that finalizer can suspend.
     pub fn check(
         &self,
-        units: &[&ValidatedUnit<Ready>],
+        units: &[&StageOutput<Ready>],
         inputs: &PlanInputs<'_>,
         plans: &ContinuationPlans,
         after: u64,
@@ -94,7 +94,7 @@ impl FinalizerCoverage {
 
     pub(crate) fn check_extents(
         &self,
-        units: &[&ValidatedUnit<Ready>],
+        units: &[&StageOutput<Ready>],
         table: &LayoutTable,
         plans: &ContinuationPlans,
         after: u64,

@@ -9,7 +9,7 @@ use hirsel_intern::timings::{self, Count, Interval, Phase};
 use hirsel_lir::discharge::Discharge;
 use hirsel_lir::ir::LirUnit;
 use hirsel_lir::layout_types::{LayoutId, TargetSpec};
-use hirsel_lir::stage::{InputIdentity, Ready, Stage, ValidatedUnit};
+use hirsel_lir::stage::{InputIdentity, Ready, Stage, StageOutput};
 use hirsel_lir::validate::{Inputs, Rejected};
 use hirsel_rc::cleanup::Finalizers;
 use hirsel_rc::insert::Proofs;
@@ -175,7 +175,7 @@ pub struct ReadyProgram {
     pub table: hirsel_lir::SealedLayoutTable,
     pub manifest: Manifest,
     /// Every independently validated Ready unit selected for inspection.
-    pub units: Vec<ValidatedUnit<Ready>>,
+    pub units: Vec<StageOutput<Ready>>,
     pub ahead_environments: BTreeMap<ContentHash, Option<LayoutId>>,
     /// What program assembly reads from each unit (`hirsel_lir::fragment`), in unit order.
     pub summaries: Vec<hirsel_lir::fragment::UnitSummary>,
@@ -408,7 +408,7 @@ impl ReadyProgram {
     }
 
     /// Put `unit` at `index` in place of the unit there, with its summary.
-    pub fn replace_unit(&mut self, index: usize, unit: ValidatedUnit<Ready>) -> Result<(), String> {
+    pub fn replace_unit(&mut self, index: usize, unit: StageOutput<Ready>) -> Result<(), String> {
         self.summaries[index] = hirsel_lir::fragment::UnitSummary::of(
             unit.unit(),
             &self.table,
@@ -448,8 +448,8 @@ pub fn timed<T>(phase: Phase, work: impl FnOnce() -> T) -> T {
 /// every violation it reported.
 pub fn seal<S: Stage>(
     stage: StageName,
-    validate: impl FnOnce() -> Result<ValidatedUnit<S>, Box<Rejected<S>>>,
-) -> Result<ValidatedUnit<S>, NativeError> {
+    validate: impl FnOnce() -> Result<StageOutput<S>, Box<Rejected<S>>>,
+) -> Result<StageOutput<S>, NativeError> {
     timed(Phase::LirValidate, validate).map_err(|rejected| {
         let mut kinds: Vec<String> = rejected
             .violations
@@ -506,7 +506,7 @@ pub fn checkpoint<S: Stage>(
     match validation {
         Validation::Ready => Ok(unit),
         Validation::EveryStage => {
-            seal(stage, || context.validate(unit, inputs)).map(ValidatedUnit::into_raw)
+            seal(stage, || context.validate(unit, inputs)).map(StageOutput::into_raw)
         }
     }
 }
@@ -522,7 +522,7 @@ pub fn lower_unit(
     finalizers: &Finalizers,
     inputs: &Inputs<'_>,
     validation: &hirsel_lir::validate::ValidationContext<'_>,
-) -> Result<ValidatedUnit<Ready>, NativeError> {
+) -> Result<StageOutput<Ready>, NativeError> {
     let facts = LocalRcFacts {
         placement: hirsel_rc::placement::Options::for_instance(options.regions, instances, id),
         proofs: Proofs::for_instance(instances, id),
@@ -566,7 +566,7 @@ pub fn lower_local_unit(
     finalizers: &Finalizers,
     inputs: &Inputs<'_>,
     validation: &hirsel_lir::validate::ValidationContext<'_>,
-) -> Result<ValidatedUnit<Ready>, NativeError> {
+) -> Result<StageOutput<Ready>, NativeError> {
     let raw = lower_local_raw(unit, options, facts, finalizers, inputs, validation)?;
     let ready = seal(StageName::Ready, || validation.validate(raw, inputs))?;
     super::emit::check_unit_runtime_calls(ready.unit(), inputs.layouts, inputs.manifest)?;
@@ -1007,12 +1007,7 @@ fn main() -> u64 {
                                     &inputs,
                                     &context,
                                 )
-                                .map(|unit| {
-                                    (
-                                        hirsel_codec::to_text(unit.unit()),
-                                        unit.receipt().raw().clone(),
-                                    )
-                                })
+                                .map(|unit| (hirsel_codec::to_text(unit.unit()), unit.digest()))
                             },
                         )
                         .into_iter()

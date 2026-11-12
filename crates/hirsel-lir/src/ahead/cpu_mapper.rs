@@ -48,7 +48,7 @@ pub struct CpuRegional {
 /// Produce the bounded, nonrecursive Ready graph. The separate checker below
 /// validates proposals against actual bodies without invoking this producer.
 pub fn cpu_mapper_graph(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     table: &crate::SealedLayoutTable,
     target: &TargetSpec,
     root: ContentHash,
@@ -177,7 +177,7 @@ pub fn cpu_mapper_graph(
 }
 
 pub fn validate_cpu_mapper_graph(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     table: &crate::SealedLayoutTable,
     target: &TargetSpec,
     proposal: &CpuMapperGraph,

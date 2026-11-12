@@ -279,7 +279,7 @@ impl OwnershipTasks {
         &self,
         root: ProductRef,
         use_units: impl FnOnce(
-            &[&hirsel_lir::stage::ValidatedUnit<Ready>],
+            &[&hirsel_lir::stage::StageOutput<Ready>],
             &hirsel_lir::emission::EmitInputs<'_>,
             &BTreeMap<ContentHash, Plan>,
         ) -> Result<R, String>,
@@ -294,7 +294,7 @@ impl OwnershipTasks {
         &self,
         root: ProductRef,
         use_units: impl FnOnce(
-            &[&hirsel_lir::stage::ValidatedUnit<Ready>],
+            &[&hirsel_lir::stage::StageOutput<Ready>],
             &hirsel_lir::emission::EmitInputs<'_>,
             &BTreeMap<ContentHash, Plan>,
         ) -> Result<R, String>,
@@ -467,7 +467,7 @@ impl OwnershipTasks {
         source: &hirsel_native::root_source::NativeLinkSource,
         use_context: impl FnOnce(
             &hirsel_native::ReadyProgram,
-            &[&hirsel_lir::stage::ValidatedUnit<Ready>],
+            &[&hirsel_lir::stage::StageOutput<Ready>],
             &hirsel_lir::emission::EmitInputs<'_>,
             &BTreeMap<ContentHash, Plan>,
         ) -> Result<R, String>,
@@ -484,7 +484,7 @@ impl OwnershipTasks {
         source: &hirsel_native::root_source::NativeLinkSource,
         use_context: impl FnOnce(
             &hirsel_native::ReadyProgram,
-            &[&hirsel_lir::stage::ValidatedUnit<Ready>],
+            &[&hirsel_lir::stage::StageOutput<Ready>],
             &hirsel_lir::emission::EmitInputs<'_>,
             &BTreeMap<ContentHash, Plan>,
         ) -> Result<R, String>,
@@ -620,7 +620,7 @@ impl OwnershipTasks {
         entry: &hirsel_syntax::DefPath,
         use_context: impl FnOnce(
             &hirsel_native::ReadyProgram,
-            &[&hirsel_lir::stage::ValidatedUnit<Ready>],
+            &[&hirsel_lir::stage::StageOutput<Ready>],
             &hirsel_lir::emission::EmitInputs<'_>,
             &BTreeMap<ContentHash, Plan>,
         ) -> Result<R, String>,

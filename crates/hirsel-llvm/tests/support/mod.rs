@@ -22,7 +22,7 @@ use hirsel_lir::ir::*;
 
 use hirsel_lir::emission::{FailureCode, FailureCodes};
 use hirsel_lir::layout_types::{LayoutId, LayoutKind, LayoutTable, ScalarKind, TargetSpec};
-use hirsel_lir::stage::{InputIdentity, Ready, StageKind, ValidatedUnit};
+use hirsel_lir::stage::{InputIdentity, Ready, StageKind, StageOutput};
 use hirsel_lir::validate::{self, Inputs};
 use hirsel_syntax::{ContentHash, DefPath, ItemPath, PackageId, PassingMode};
 use hirsel_tir::RepresentationRecord;
@@ -999,7 +999,7 @@ impl<'t> Unit<'t> {
 }
 
 /// Seals a unit with the Ready validator; a rejection fails the test with its violations.
-pub fn seal(table: &Table, manifest: &Manifest, unit: LirUnit<Ready>) -> ValidatedUnit<Ready> {
+pub fn seal(table: &Table, manifest: &Manifest, unit: LirUnit<Ready>) -> StageOutput<Ready> {
     let name = unit.header.definition.0.name.clone();
     validate::validate(
         unit,

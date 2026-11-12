@@ -1334,21 +1334,10 @@ fn raw_artifacts_round_trip_deterministically_on_both_targets() {
 }
 
 #[test]
-fn receipts_artifacts_and_manifests_round_trip_and_bind_the_unit_key() {
-    let raw = RawReceipt {
-        key: hirsel_lir::objects::UnitKey(hash("unit key")),
-        stage: StageKind::Ready,
-        lir_version: hirsel_lir::LIR_VERSION,
-        unit: hash("unit"),
-        validator_version: hirsel_lir::VALIDATOR_VERSION,
-    };
-    assert_round_trip(&raw);
+fn artifacts_and_manifests_round_trip() {
     for stage in StageKind::ALL {
         assert_round_trip(&stage);
     }
-    let mut stale = raw.clone();
-    stale.key = hirsel_lir::objects::UnitKey(hash("other key"));
-    assert_ne!(raw.digest(), stale.digest());
 
     let artifact = ObjectArtifact {
         ahead: None,

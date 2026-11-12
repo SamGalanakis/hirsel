@@ -9,6 +9,7 @@ rust-version.workspace = true
 testing = []
 
 [dependencies]
+bincode = "1.3.3"
 hirsel-codec = { path = "../hirsel-codec" }
 hirsel-span = { path = "../hirsel-span" }
 hirsel-syntax = { path = "../hirsel-syntax" }

@@ -46,7 +46,7 @@ mod tsan;
 use std::fmt;
 
 use hirsel_lir::emission::{EmitInputs, GlueInputs};
-use hirsel_lir::stage::{ObjectArtifact, Ready, ValidatedUnit};
+use hirsel_lir::stage::{ObjectArtifact, Ready, StageOutput};
 use hirsel_syntax::DefPath;
 
 /// The pinned Cranelift release (`=0.136.3` in this crate's manifest).
@@ -143,7 +143,7 @@ pub fn emit_glue(inputs: &GlueInputs<'_>) -> Result<ObjectArtifact, CodegenError
 
 /// Emits validated Ready units as one relocatable object for `inputs.target`.
 pub fn emit_object(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
 ) -> Result<ObjectArtifact, CodegenError> {
     caught(|| module::emit(units, inputs, false, Default::default(), None))
@@ -154,7 +154,7 @@ pub fn emit_object(
 /// each function's debug intervals (`ObjectArtifact::debug`), for the link's
 /// `debug_object`. Cranelift embeds no measurement instrumentation.
 pub fn emit_object_profile(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
     profile: hirsel_lir::debug::Profile<'_>,
 ) -> Result<ObjectArtifact, CodegenError> {
@@ -164,7 +164,7 @@ pub fn emit_object_profile(
 /// The Cranelift IR of every function `emit_object` defines, before compilation, as text:
 /// what a parity failure is debugged from.
 pub fn emit_clif(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
 ) -> Result<String, CodegenError> {
     caught(|| module::emit(units, inputs, true, Default::default(), None))
@@ -174,7 +174,7 @@ pub fn emit_clif(
 /// Emit diagnostic shadow hooks for the supported leaf ownership subset.
 /// Unsupported transfers are refused before any object is published.
 pub fn emit_object_ownership(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
 ) -> Result<ObjectArtifact, CodegenError> {
     caught(|| {
@@ -191,7 +191,7 @@ pub fn emit_object_ownership(
 
 /// Cranelift IR with explicit diagnostic ownership calls.
 pub fn emit_clif_ownership(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
 ) -> Result<String, CodegenError> {
     caught(|| {
@@ -208,7 +208,7 @@ pub fn emit_clif_ownership(
 
 /// Emit exactly the plans preserved by earlier compiler passes.
 pub fn emit_object_relocated_ownership(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
     plans: &std::collections::BTreeMap<
         hirsel_syntax::ContentHash,
@@ -231,7 +231,7 @@ pub fn emit_object_relocated_ownership(
 
 /// Emit the explicit resource selection of a source diagnostic request.
 pub fn emit_object_resources_ownership(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
     plans: &std::collections::BTreeMap<
         hirsel_syntax::ContentHash,
@@ -253,7 +253,7 @@ pub fn emit_object_resources_ownership(
 }
 
 pub fn emit_clif_relocated_ownership(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
     plans: &std::collections::BTreeMap<
         hirsel_syntax::ContentHash,
@@ -306,7 +306,7 @@ pub fn test_dispatcher_object(
 
 /// Emits real alternate definitions and reads their final x86 SysV frame metadata.
 pub fn emit_ahead_object(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
 ) -> Result<(ObjectArtifact, std::collections::BTreeMap<String, u64>), CodegenError> {
     if inputs.ahead.is_some_and(|plan| {
@@ -327,7 +327,7 @@ pub fn emit_ahead_object(
 
 /// Emits the continuation alternates and dispatchers of every resumable plan.
 pub fn emit_resume_object(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
     plans: &hirsel_lir::continuation::ContinuationPlans,
 ) -> Result<ObjectArtifact, CodegenError> {

@@ -73,9 +73,7 @@ pub fn classify(definition: &DefPath) -> Option<CalleeClass> {
     })
 }
 
-fn units(
-    program: &ReadyProgram,
-) -> Vec<&hirsel_lir::stage::ValidatedUnit<hirsel_lir::stage::Ready>> {
+fn units(program: &ReadyProgram) -> Vec<&hirsel_lir::stage::StageOutput<hirsel_lir::stage::Ready>> {
     program.units.iter().collect()
 }
 

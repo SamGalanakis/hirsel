@@ -174,7 +174,7 @@ impl std::error::Error for CodegenError {}
 
 /// Emits real alternate definitions and reads final caller-SP frame extents.
 pub fn emit_ahead_object(
-    units: &[&hirsel_lir::stage::ValidatedUnit<hirsel_lir::stage::Ready>],
+    units: &[&hirsel_lir::stage::StageOutput<hirsel_lir::stage::Ready>],
     inputs: &hirsel_lir::emission::EmitInputs<'_>,
 ) -> Result<
     (

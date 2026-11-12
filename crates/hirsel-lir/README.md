@@ -14,7 +14,7 @@ exactly the planned sites. `hirsel-graph` supplies pure traversal, dominance and
 the validators derive their own normal and failure graph from the IR.
 `emission.rs` is the backend-neutral emission interface both native backends
 implement: `EmitInputs`, failure codes, link names, site codes, descriptor names,
-the immortal prefix, the register-result rule, the receipt check and the object
+the immortal prefix, the register-result rule and the object
 manifest; `object.rs` reads an emitted ELF object's symbol interface.
 `checkpoints.rs` names function entries and feedback-edge targets used by
 private native execution to yield its physical frame for scheduling.
@@ -37,11 +37,9 @@ Invariants:
   `QueryEnvironment.interface_version` (a test checks it); a unit naming another
   version is stale. Receipt and object-artifact digests include the input
   identity, so an interface change invalidates them.
-- Raw versus validated. `LirUnit<S>`, `LayoutTable`, `RawReceipt` and
-  `ObjectArtifact` are plain public data that tests may forge. `ValidatedUnit<S>`
-  and `NativeReceipt` have crate-private constructors for the stage validators;
-  no other crate can build one, and no snapshot decodes into one. A pass that
-  rewrites a validated unit gives up its proof (`into_raw`).
+- Stage outputs. `LirUnit<S>`, `LayoutTable` and `ObjectArtifact` are ordinary
+  compiler data. `StageOutput<S>` retains an immutable unit and caches its content
+  digest. Its public constructor runs no checker and grants no acceptance authority.
 - Stages. `Value | Placed | Rc | Reuse | Ready` are sealed marker types; the
   header stage must equal `S::KIND`, and a snapshot decodes only as its own
   stage. `StageKind::admits` is each stage's opcode vocabulary; validators

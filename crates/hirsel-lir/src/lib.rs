@@ -59,8 +59,7 @@ pub use layout_index::LayoutIndex;
 pub use layout_keys::{LayoutKeys, SealedLayoutTable};
 pub use layout_types::{LayoutId, LayoutKey, LayoutRecord, LayoutTable, TargetSpec};
 pub use stage::{
-    InputIdentity, NativeReceipt, ObjectArtifact, Placed, RawReceipt, Rc, Ready, Reuse, Stage,
-    StageKind, ValidatedUnit, Value,
+    InputIdentity, ObjectArtifact, Placed, Rc, Ready, Reuse, Stage, StageKind, StageOutput, Value,
 };
 
 /// The front-end interface version these schemas consume

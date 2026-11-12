@@ -469,7 +469,7 @@ fn check_state(
     exclusive: Option<&ExclusiveParameter>,
     frame: &[LiveStorage],
     base: u64,
-    isolate: Option<(&isolate::IsolateProtocol, &ValidatedUnit<Ready>)>,
+    isolate: Option<(&isolate::IsolateProtocol, &StageOutput<Ready>)>,
 ) -> Result<(), ContinuationError> {
     let id = u.header.instance;
     let n = ordinal + 1;
@@ -960,7 +960,7 @@ fn check_fixed(
 
 /// Recompute and check every plan against the complete Ready bodies.
 pub fn validate(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &PlanInputs<'_>,
     plans: &ContinuationPlans,
 ) -> Result<(), ContinuationError> {
@@ -968,7 +968,7 @@ pub fn validate(
 }
 
 fn validate_plans(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &PlanInputs<'_>,
     plans: &ContinuationPlans,
     certificates: bool,
@@ -1532,7 +1532,7 @@ fn native_class(definition: &DefPath) -> Option<CalleeClass> {
 /// Callers supply complete Ready content, including bodies that stay stackful,
 /// because incoming callable provenance cannot be inferred from a plan hash.
 pub fn validate_runtime_operations(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     table: &crate::SealedLayoutTable,
     target: &TargetSpec,
     plans: &ContinuationPlans,
@@ -1944,7 +1944,7 @@ fn check_cleanup_instruction(
     instruction: usize,
     number: u32,
     base: u64,
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     all_plans: &ContinuationPlans,
 ) -> Result<(), ContinuationError> {
     let id = u.header.instance;
@@ -2239,7 +2239,7 @@ mod region_width_tests {
 /// Physical checker for an inactive isolate proposal. Ordinary plans continue
 /// to refuse the exception until source/emitter admission is qualified.
 pub(super) fn isolate_frame(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &PlanInputs<'_>,
     ordinary: &ContinuationPlans,
     protocol: &isolate::IsolateProtocol,
@@ -2470,12 +2470,12 @@ fn instruction_reaches_finalizer(table: &LayoutTable, root: LayoutId) -> bool {
 /// continuation row. Recursion, indirect code, leaving operations and entered
 /// cleanup all refuse this proof.
 pub(super) fn synchronous_source(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     table: &LayoutTable,
     body: ContentHash,
 ) -> bool {
     fn walk(
-        units: &[&ValidatedUnit<Ready>],
+        units: &[&StageOutput<Ready>],
         table: &LayoutTable,
         body: ContentHash,
         active: &mut BTreeSet<ContentHash>,

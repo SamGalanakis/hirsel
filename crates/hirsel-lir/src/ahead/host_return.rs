@@ -94,7 +94,7 @@ fn byte_buffer(table: &LayoutTable, layout: LayoutId) -> Option<LayoutId> {
 }
 
 pub(super) fn propose(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     table: &crate::SealedLayoutTable,
     target: &TargetSpec,
     source: ContentHash,

@@ -173,7 +173,7 @@ pub fn prospective<S>(units: &[LirUnit<S>]) -> BTreeSet<usize> {
 
 impl AheadPlan {
     pub fn build(
-        units: &[&ValidatedUnit<Ready>],
+        units: &[&StageOutput<Ready>],
         table: &crate::SealedLayoutTable,
         target: &TargetSpec,
         envs: &BTreeMap<ContentHash, Option<LayoutId>>,

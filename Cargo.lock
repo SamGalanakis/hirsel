@@ -1815,6 +1815,7 @@ dependencies = [
 name = "hirsel-types"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "hirsel-codec",
  "hirsel-diag",
  "hirsel-guard",

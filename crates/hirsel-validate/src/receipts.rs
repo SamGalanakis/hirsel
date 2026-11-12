@@ -1233,7 +1233,7 @@ impl VerifierCache {
                         package.clone(),
                         environment
                             .base_digest(package)
-                            .map_err(FactError::View)?
+                            .map_err(|error| FactError::Query(error.into()))?
                             .ok_or(FactError::Refused)?,
                     ))
                 })
@@ -1241,7 +1241,10 @@ impl VerifierCache {
             let changed = contexts != record.contexts;
             let mut checked = Vec::new();
             for (package, digest) in &contexts {
-                if let Some(input) = environment.checked(package).map_err(FactError::View)? {
+                if let Some(input) = environment
+                    .checked(package)
+                    .map_err(|error| FactError::Query(error.into()))?
+                {
                     if !Arc::ptr_eq(&input.stamp().types, &types) || input.input_digest() != *digest
                     {
                         return Err(FactError::Refused);
@@ -1295,7 +1298,7 @@ impl VerifierCache {
                         (Some(base), Some(overlay)) => {
                             let views = environment
                                 .checked_overlay(&package, overlay.clone())
-                                .map_err(FactError::View)?
+                                .map_err(|error| FactError::Query(error.into()))?
                                 .ok_or(FactError::Refused)?;
                             if views.origin_input() != base.input_digest()
                                 || !Arc::ptr_eq(
@@ -1380,7 +1383,7 @@ impl VerifierCache {
                         _ => {
                             raw = environment
                                 .views(&package, replay.overlay.clone())
-                                .map_err(FactError::View)?
+                                .map_err(|error| FactError::Query(error.into()))?
                                 .ok_or(FactError::Refused)?;
                             crate::SignatureInputs::Raw(&*raw)
                         }
@@ -1424,7 +1427,7 @@ impl VerifierCache {
                             Some(self),
                             &mut vec![],
                         )
-                        .map_err(FactError::View)?;
+                        .map_err(|error| FactError::Query(error.into()))?;
                         if !report.violations.is_empty()
                             || !refreshed.as_ref().is_some_and(|current| {
                                 current.artifact == accepted.artifact
@@ -1469,7 +1472,11 @@ impl VerifierCache {
                     return Err(FactError::Refused);
                 }
                 for (package, digest) in &contexts {
-                    if environment.base_digest(package).map_err(FactError::View)? != Some(*digest) {
+                    if environment
+                        .base_digest(package)
+                        .map_err(|error| FactError::Query(error.into()))?
+                        != Some(*digest)
+                    {
                         return Err(FactError::Refused);
                     }
                 }

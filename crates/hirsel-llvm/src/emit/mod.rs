@@ -39,7 +39,7 @@ use hirsel_lir::runtime_abi::{
 };
 use hirsel_lir::stage::{
     InputIdentity, ObjectArtifact, ObjectSymbol, ObjectSymbolKind, Ready, Relocation,
-    Reproducibility, StageKind, ValidatedUnit,
+    Reproducibility, StageKind, StageOutput,
 };
 use hirsel_syntax::{ContentHash, DefPath};
 
@@ -307,7 +307,7 @@ fn optimize(
 
 /// Emits validated Ready units as one relocatable object for `inputs.target`.
 pub fn emit_object(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
 ) -> Result<ObjectArtifact, CodegenError> {
     emit_object_profile(units, inputs, Profile::default())
@@ -318,7 +318,7 @@ pub fn emit_object(
 /// itself keeps no DWARF) and, under measurement with resolved sources, source-site call
 /// scopes.
 pub fn emit_object_profile(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
     profile: Profile<'_>,
 ) -> Result<ObjectArtifact, CodegenError> {
@@ -328,7 +328,7 @@ pub fn emit_object_profile(
 /// Emit diagnostic shadow hooks for the supported leaf ownership subset.
 /// Unsupported transfers are refused before any object is published.
 pub fn emit_object_ownership(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
 ) -> Result<ObjectArtifact, CodegenError> {
     emit_object_inner(
@@ -340,7 +340,7 @@ pub fn emit_object_ownership(
 }
 
 fn emit_object_inner(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
     profile: Profile<'_>,
     ownership: Option<hirsel_lir::ownership_trace::native::Request<'_>>,
@@ -427,7 +427,7 @@ fn emit_object_inner(
 
 /// Every resumable plan's state alternates and dispatcher (`resume`), as one object.
 pub fn emit_resume_object(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
     plans: &hirsel_lir::continuation::ContinuationPlans,
 ) -> Result<ObjectArtifact, CodegenError> {
@@ -466,7 +466,7 @@ pub fn emit_resume_object(
 /// The verified, optimized LLVM IR `emit_object` would emit as an object: the text
 /// codegen controls inspect.
 pub fn emit_optimized_ir(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
 ) -> Result<String, CodegenError> {
     lower(
@@ -485,7 +485,7 @@ pub fn emit_optimized_ir(
 
 /// The verified module text before optimization, for IR-level controls.
 pub fn emit_ir(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
 ) -> Result<String, CodegenError> {
     lower(
@@ -501,7 +501,7 @@ pub fn emit_ir(
 
 /// The verified preoptimization module with explicit ownership shadow hooks.
 pub fn emit_ir_ownership(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
 ) -> Result<String, CodegenError> {
     lower(
@@ -518,7 +518,7 @@ pub fn emit_ir_ownership(
 /// Emit exactly the plans preserved by earlier compiler passes. No leaf plan
 /// fallback can supply a missing or stale unit in this diagnostic request.
 pub fn emit_object_relocated_ownership(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
     plans: &BTreeMap<ContentHash, hirsel_lir::ownership_trace::Plan>,
 ) -> Result<ObjectArtifact, CodegenError> {
@@ -534,7 +534,7 @@ pub fn emit_object_relocated_ownership(
 
 /// Emit the explicit resource selection of a source diagnostic request.
 pub fn emit_object_resources_ownership(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
     plans: &BTreeMap<ContentHash, hirsel_lir::ownership_trace::Plan>,
 ) -> Result<ObjectArtifact, CodegenError> {
@@ -549,7 +549,7 @@ pub fn emit_object_resources_ownership(
 }
 
 pub fn emit_ir_relocated_ownership(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
     plans: &BTreeMap<ContentHash, hirsel_lir::ownership_trace::Plan>,
 ) -> Result<String, CodegenError> {
@@ -568,7 +568,7 @@ pub fn emit_ir_relocated_ownership(
 
 /// Lowers `units` into one module for the target and hands it to `finish`.
 fn lower<T>(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
     profile: Profile<'_>,
     ownership: Option<hirsel_lir::ownership_trace::native::Request<'_>>,
@@ -616,14 +616,6 @@ fn lower<T>(
         index: Some(index),
         ..inputs.clone()
     };
-    for unit in units {
-        hirsel_lir::emission::check_receipt(unit, inputs).map_err(|problem| {
-            CodegenError::Receipt {
-                definition: unit.unit().header.definition.clone(),
-                problem,
-            }
-        })?;
-    }
     let mut manifested = Manifested::default();
     // Copied entries: optimizer-only bodies whose residual references import the owner's.
     let mut optimizer_only = BTreeMap::new();

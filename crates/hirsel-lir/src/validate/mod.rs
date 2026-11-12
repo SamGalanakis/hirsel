@@ -1,8 +1,7 @@
 //! Independent stage validators.
 //!
 //! `validate` checks one raw `LirUnit<S>` against the layout table and the
-//! operation manifest and, only if every check passes, seals it into a
-//! `ValidatedUnit<S>` with a receipt. Nothing here reads a pass's liveness,
+//! operation manifest and returns an ordinary `StageOutput<S>` on success. Nothing here reads a pass's liveness,
 //! availability, shape or uniqueness answer, or `OwnershipFacts`: every fact is
 //! re-derived from the unit's operations and the layout records, as the TIR
 //! validator re-derives its facts from TIR. Destruction comes from layout drop
@@ -81,7 +80,7 @@ use crate::layout_types::{
     CopyRecipe, DropStep, LayoutId, LayoutKind, LayoutRecord, LayoutTable, ScalarKind, SizeSpec,
     TargetSpec,
 };
-use crate::stage::{NativeReceipt, RawReceipt, Stage, StageKind, ValidatedUnit};
+use crate::stage::{Stage, StageKind, StageOutput};
 use hirsel_core_contract::Manifest;
 
 /// The independently supplied declarations a unit is checked against. The
@@ -309,7 +308,7 @@ impl<'a> ValidationContext<'a> {
         &self,
         unit: LirUnit<S>,
         inputs: &Inputs<'_>,
-    ) -> Result<ValidatedUnit<S>, Box<Rejected<S>>> {
+    ) -> Result<StageOutput<S>, Box<Rejected<S>>> {
         if !self.matches(inputs) {
             return validate(unit, inputs);
         }
@@ -317,20 +316,7 @@ impl<'a> ValidationContext<'a> {
         if !violations.is_empty() {
             return Err(Box::new(Rejected { unit, violations }));
         }
-        let raw = RawReceipt {
-            key: unit.header.key,
-            stage: S::KIND,
-            lir_version: unit.header.lir_version,
-            unit: unit.digest(),
-            validator_version: crate::VALIDATOR_VERSION,
-        };
-        let evidence = UnitInputs::from(inputs)
-            .digest_with_index(&unit, &self.index)
-            .expect("the independent validator checked every input reference");
-        Ok(ValidatedUnit::seal(
-            unit,
-            NativeReceipt::issue(raw, evidence),
-        ))
+        Ok(StageOutput::new(unit))
     }
 
     /// Every violation, with exactly the same ordering as `check`.
@@ -569,7 +555,7 @@ pub enum ViolationKind {
 pub fn validate<S: Stage>(
     unit: LirUnit<S>,
     inputs: &Inputs<'_>,
-) -> Result<ValidatedUnit<S>, Box<Rejected<S>>> {
+) -> Result<StageOutput<S>, Box<Rejected<S>>> {
     ValidationContext::new(inputs).validate(unit, inputs)
 }
 
@@ -578,31 +564,31 @@ pub fn validate<S: Stage>(
 pub fn validate_value(
     unit: LirUnit<crate::stage::Value>,
     inputs: &Inputs<'_>,
-) -> Result<ValidatedUnit<crate::stage::Value>, Box<Rejected<crate::stage::Value>>> {
+) -> Result<StageOutput<crate::stage::Value>, Box<Rejected<crate::stage::Value>>> {
     validate(unit, inputs)
 }
 pub fn validate_placed(
     unit: LirUnit<crate::stage::Placed>,
     inputs: &Inputs<'_>,
-) -> Result<ValidatedUnit<crate::stage::Placed>, Box<Rejected<crate::stage::Placed>>> {
+) -> Result<StageOutput<crate::stage::Placed>, Box<Rejected<crate::stage::Placed>>> {
     validate(unit, inputs)
 }
 pub fn validate_rc(
     unit: LirUnit<crate::stage::Rc>,
     inputs: &Inputs<'_>,
-) -> Result<ValidatedUnit<crate::stage::Rc>, Box<Rejected<crate::stage::Rc>>> {
+) -> Result<StageOutput<crate::stage::Rc>, Box<Rejected<crate::stage::Rc>>> {
     validate(unit, inputs)
 }
 pub fn validate_reuse(
     unit: LirUnit<crate::stage::Reuse>,
     inputs: &Inputs<'_>,
-) -> Result<ValidatedUnit<crate::stage::Reuse>, Box<Rejected<crate::stage::Reuse>>> {
+) -> Result<StageOutput<crate::stage::Reuse>, Box<Rejected<crate::stage::Reuse>>> {
     validate(unit, inputs)
 }
 pub fn validate_ready(
     unit: LirUnit<crate::stage::Ready>,
     inputs: &Inputs<'_>,
-) -> Result<ValidatedUnit<crate::stage::Ready>, Box<Rejected<crate::stage::Ready>>> {
+) -> Result<StageOutput<crate::stage::Ready>, Box<Rejected<crate::stage::Ready>>> {
     validate(unit, inputs)
 }
 

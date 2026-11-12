@@ -563,7 +563,7 @@ impl NativeCache {
         inputs: &Inputs<'_>,
         additional_abis: &[FnAbiId],
         metadata: &[u8],
-    ) -> Result<(ValidatedUnit<S>, Option<NativeOutput>), Box<Rejected<S>>> {
+    ) -> Result<(StageOutput<S>, Option<NativeOutput>), Box<Rejected<S>>> {
         let (checked, output) =
             self.validate_output(subject, policy, unit, inputs, additional_abis)?;
         let output = output.and_then(|output| self.publish_output(&output, metadata));
@@ -581,7 +581,7 @@ impl NativeCache {
         unit: LirUnit<S>,
         inputs: &Inputs<'_>,
         additional_abis: &[FnAbiId],
-    ) -> Result<(ValidatedUnit<S>, Option<NativeOutput>), Box<Rejected<S>>> {
+    ) -> Result<(StageOutput<S>, Option<NativeOutput>), Box<Rejected<S>>> {
         let observed = super::declaration_reads::Observed::new(inputs.operations);
         let checked_inputs = Inputs {
             target: inputs.target,
@@ -745,7 +745,7 @@ impl NativeCache {
         &self,
         output: &NativeOutput,
         inputs: &Inputs<'_>,
-    ) -> Result<ValidatedUnit<S>, String> {
+    ) -> Result<StageOutput<S>, String> {
         if output.stage() != S::KIND {
             return Err("native output stage differs".into());
         }

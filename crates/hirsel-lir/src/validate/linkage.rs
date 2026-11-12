@@ -4,7 +4,7 @@ use crate::{
     abi_types::{FnAbi, ParameterPath, ScopedEntry},
     ir::{Callee, Symbol},
     layout_types::LayoutTable,
-    stage::{Stage, ValidatedUnit},
+    stage::{Stage, StageOutput},
 };
 use hirsel_codec::snapshot_struct;
 use hirsel_syntax::{ContentHash, DefPath};
@@ -91,7 +91,7 @@ fn scoped(abi: &FnAbi) -> ContentHash {
     )
 }
 impl LinkageRecord {
-    pub(super) fn capture<S: Stage>(unit: &ValidatedUnit<S>, table: &LayoutTable) -> Option<Self> {
+    pub(super) fn capture<S: Stage>(unit: &StageOutput<S>, table: &LayoutTable) -> Option<Self> {
         Self::observe(unit.unit(), table)
     }
     fn observe<S: Stage>(unit: &crate::ir::LirUnit<S>, table: &LayoutTable) -> Option<Self> {
@@ -433,7 +433,7 @@ mod tests {
         (vec![caller, callee], table)
     }
     // Raw vectors compare precisely the two existing linkage algorithms. They
-    // are not C-acceptance tests: production capture requires ValidatedUnit,
+    // are not C-acceptance tests: production capture requires StageOutput,
     // and the separate compiler control exercises actual C and relocation.
     fn agrees(label: &str, units: &[LirUnit<Value>], table: &LayoutTable, expected: bool) {
         let old = super::super::check_result_arena_calls(units, table)

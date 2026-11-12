@@ -39,7 +39,7 @@ fn inputs<'a>(program: &'a Program, input: &'a InputIdentity, opt: OptLevel) -> 
 
 /// Both backends' `emit_object_profile`, by name.
 type Emit = fn(
-    &[&hirsel_lir::stage::ValidatedUnit<hirsel_lir::stage::Ready>],
+    &[&hirsel_lir::stage::StageOutput<hirsel_lir::stage::Ready>],
     &EmitInputs<'_>,
     hirsel_lir::debug::Profile<'_>,
 ) -> Result<hirsel_lir::stage::ObjectArtifact, String>;
@@ -232,10 +232,10 @@ fn a_fragment_binds_into_a_program_that_numbers_its_layouts_apart() {
                     target.triple
                 );
                 // Every other unit of the program stands in for the templates it copies.
-                let fragment = |unit: &hirsel_lir::stage::ValidatedUnit<_>,
+                let fragment = |unit: &hirsel_lir::stage::StageOutput<_>,
                                 program: &Program,
                                 i: &EmitInputs<'_>| {
-                    let summary = |u: &hirsel_lir::stage::ValidatedUnit<_>| {
+                    let summary = |u: &hirsel_lir::stage::StageOutput<_>| {
                         UnitSummary::of(u.unit(), i.layouts, i.layouts.keys(), i.manifest).unwrap()
                     };
                     UnitFragment {

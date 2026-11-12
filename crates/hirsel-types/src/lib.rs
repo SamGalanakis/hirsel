@@ -1434,3 +1434,8 @@ pub fn constant_identity(
         }
     }
 }
+
+mod facts;
+pub use facts::{FactError, FactGraph, FactTable};
+mod signature_identity;
+pub use signature_identity::signature_identity;

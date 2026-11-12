@@ -25,7 +25,7 @@ use hirsel_lir::continuation::{
 use hirsel_lir::emission::{EmitInputs, artifact};
 use hirsel_lir::ir::*;
 use hirsel_lir::runtime_abi::{RuntimeEntry, STATUS_SUSPENDED};
-use hirsel_lir::stage::{ObjectArtifact, ObjectSymbol, ObjectSymbolKind, Ready, ValidatedUnit};
+use hirsel_lir::stage::{ObjectArtifact, ObjectSymbol, ObjectSymbolKind, Ready, StageOutput};
 
 pub(crate) struct Resume<'a> {
     pub(crate) plan: &'a ContinuationPlan,
@@ -697,7 +697,7 @@ impl FnEmitter<'_, '_, '_> {
 
 /// Every resumable plan's alternates and dispatcher, in one object.
 pub(crate) fn emit(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
     plans: &ContinuationPlans,
 ) -> Emitted<ObjectArtifact> {

@@ -1870,7 +1870,7 @@ fn native_semantic_plan(unit: &LirUnit<Rc>) -> Plan {
 fn checked_native_fixture<S: hirsel_lir::stage::Stage>(
     unit: LirUnit<S>,
     table: &hirsel_lir::layout_types::LayoutTable,
-) -> hirsel_lir::stage::ValidatedUnit<S> {
+) -> hirsel_lir::stage::StageOutput<S> {
     let target = hirsel_lir::layout_types::TargetSpec::x86_64_unknown_linux_gnu();
     let operations = support::registry();
     let manifest = support::manifest(hirsel_core_contract::Disposition::RuntimePrimitive(
@@ -2488,7 +2488,7 @@ fn ownership_trace_edge_observation_cannot_use_an_unreferenced_pool_row() {
 }
 
 fn once_capture_value_fixture() -> (
-    hirsel_lir::stage::ValidatedUnit<hirsel_lir::stage::Value>,
+    hirsel_lir::stage::StageOutput<hirsel_lir::stage::Value>,
     hirsel_lir::layout_types::LayoutTable,
     ValueId,
     ValueId,
@@ -2762,7 +2762,7 @@ fn ownership_trace_once_invocation_borrows_environment_and_retains_both_caller_c
 }
 
 fn alias_fixture() -> (
-    hirsel_lir::stage::ValidatedUnit<hirsel_lir::stage::Value>,
+    hirsel_lir::stage::StageOutput<hirsel_lir::stage::Value>,
     hirsel_lir::layout_types::LayoutTable,
     Plan,
     ValueId,
@@ -3189,7 +3189,7 @@ fn ownership_trace_nested_source_construction_transfers_fields_without_a_shell_t
 fn compound_drop_fixture(
     alternatives: bool,
 ) -> (
-    hirsel_lir::stage::ValidatedUnit<hirsel_lir::stage::Ready>,
+    hirsel_lir::stage::StageOutput<hirsel_lir::stage::Ready>,
     Plan,
     Plan,
     CleanupAnchorId,
@@ -3202,7 +3202,7 @@ fn compound_drop_fixture_with_parent(
     alternatives: bool,
     parent: bool,
 ) -> (
-    hirsel_lir::stage::ValidatedUnit<hirsel_lir::stage::Ready>,
+    hirsel_lir::stage::StageOutput<hirsel_lir::stage::Ready>,
     Plan,
     Plan,
     CleanupAnchorId,
@@ -3216,7 +3216,7 @@ fn compound_drop_fixture_with_children(
     parent: bool,
     child: hirsel_lir::LayoutId,
 ) -> (
-    hirsel_lir::stage::ValidatedUnit<hirsel_lir::stage::Ready>,
+    hirsel_lir::stage::StageOutput<hirsel_lir::stage::Ready>,
     Plan,
     Plan,
     CleanupAnchorId,
@@ -3231,7 +3231,7 @@ fn compound_drop_fixture_with_layout(
     child: hirsel_lir::LayoutId,
     container: hirsel_lir::LayoutId,
 ) -> (
-    hirsel_lir::stage::ValidatedUnit<hirsel_lir::stage::Ready>,
+    hirsel_lir::stage::StageOutput<hirsel_lir::stage::Ready>,
     Plan,
     Plan,
     CleanupAnchorId,
@@ -3947,7 +3947,7 @@ fn ownership_trace_nested_arena_entries_keep_original_lifetimes_through_ready() 
 fn checked_nested_arena_fixture<S: hirsel_lir::stage::Stage>(
     unit: LirUnit<S>,
     table: &hirsel_lir::layout_types::LayoutTable,
-) -> hirsel_lir::stage::ValidatedUnit<S> {
+) -> hirsel_lir::stage::StageOutput<S> {
     // The independently declared finalizer is body 1 of Res, as in the
     // fixture layout; a Library caller must carry that invocation reference.
     let mut operations = support::registry();

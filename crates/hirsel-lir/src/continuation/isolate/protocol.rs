@@ -2,7 +2,7 @@
 //! compact admission: entered runtime state, frame custody and the complete
 //! reachable cleanup graph still require their physical continuation proofs.
 use super::*;
-use crate::stage::ValidatedUnit;
+use crate::stage::StageOutput;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct CallPoint {
@@ -116,10 +116,10 @@ impl IsolateProtocol {
     /// Derive anchors only from independently C-validated Ready units. Neither
     /// optimizer discovery nor a name/digest can substitute for those units.
     pub fn derive(
-        caller: &ValidatedUnit<Ready>,
+        caller: &StageOutput<Ready>,
         invocation: CallId,
-        wrapper: &ValidatedUnit<Ready>,
-        callback: &ValidatedUnit<Ready>,
+        wrapper: &StageOutput<Ready>,
+        callback: &StageOutput<Ready>,
         environment: Option<LayoutId>,
         layouts: &LayoutTable,
     ) -> Option<Self> {
@@ -240,9 +240,9 @@ impl IsolateProtocol {
     /// compact frame offsets/entered and cleanup state remain separate proofs.
     pub fn validate(
         &self,
-        caller: &ValidatedUnit<Ready>,
-        wrapper: &ValidatedUnit<Ready>,
-        callback: &ValidatedUnit<Ready>,
+        caller: &StageOutput<Ready>,
+        wrapper: &StageOutput<Ready>,
+        callback: &StageOutput<Ready>,
         layouts: &LayoutTable,
     ) -> Result<(), &'static str> {
         let unit = wrapper.unit();

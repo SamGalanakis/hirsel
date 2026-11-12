@@ -1,7 +1,7 @@
 //! Exact Ready cleanup operands. Source coverage and retained cursor/frame
 //! custody are separate proofs; enumerating a destructor grants no admission.
 use super::*;
-use crate::stage::ValidatedUnit;
+use crate::stage::StageOutput;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum CleanupOwner {
@@ -54,7 +54,7 @@ impl IsolateProtocol {
     /// identity and an environment whose entire destruction is mechanical.
     pub fn synchronous_cleanup(
         &self,
-        wrapper: &ValidatedUnit<Ready>,
+        wrapper: &StageOutput<Ready>,
         layouts: &LayoutTable,
     ) -> Option<SourceCleanupPlan> {
         let plan = self.source_cleanup(wrapper, layouts)?;
@@ -68,7 +68,7 @@ impl IsolateProtocol {
 
     pub(crate) fn source_cleanup(
         &self,
-        wrapper: &ValidatedUnit<Ready>,
+        wrapper: &StageOutput<Ready>,
         layouts: &LayoutTable,
     ) -> Option<SourceCleanupPlan> {
         let u = wrapper.unit();
@@ -163,9 +163,9 @@ impl IsolateProtocol {
     /// owner substitutes for the actual Ready operand and callback identity.
     pub fn check_synchronous_cleanup(
         &self,
-        caller: &ValidatedUnit<Ready>,
-        wrapper: &ValidatedUnit<Ready>,
-        callback: &ValidatedUnit<Ready>,
+        caller: &StageOutput<Ready>,
+        wrapper: &StageOutput<Ready>,
+        callback: &StageOutput<Ready>,
         layouts: &LayoutTable,
         plan: &SourceCleanupPlan,
     ) -> bool {
@@ -179,9 +179,9 @@ impl IsolateProtocol {
 
     pub(crate) fn check_source_cleanup(
         &self,
-        caller: &ValidatedUnit<Ready>,
-        wrapper: &ValidatedUnit<Ready>,
-        callback: &ValidatedUnit<Ready>,
+        caller: &StageOutput<Ready>,
+        wrapper: &StageOutput<Ready>,
+        callback: &StageOutput<Ready>,
         layouts: &LayoutTable,
         plan: &SourceCleanupPlan,
     ) -> bool {
@@ -332,7 +332,7 @@ impl IsolateProtocol {
 /// is the descriptor's source body, borrowing exactly the started owner.
 pub(crate) fn explicit_finalizer(
     unit: &LirUnit<Ready>,
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     table: &LayoutTable,
     point: InstructionPoint,
 ) -> Result<hirsel_syntax::ContentHash, String> {

@@ -1515,12 +1515,7 @@ fn accepted_units_are_sealed_and_rejected_units_returned() {
         manifest: &manifest,
     };
     let sealed = validate::validate(unit, &inputs).expect("accepted");
-    assert_eq!(sealed.receipt().raw().unit, digest);
-    assert_eq!(sealed.receipt().raw().key, sealed.unit().header.key);
-    assert_eq!(
-        sealed.receipt().raw().validator_version,
-        hirsel_lir::VALIDATOR_VERSION
-    );
+    assert_eq!(sealed.digest(), digest);
     let (unit, table, manifest) = build(false);
     let target = hirsel_lir::layout_types::TargetSpec::x86_64_unknown_linux_gnu();
     let inputs = Inputs {

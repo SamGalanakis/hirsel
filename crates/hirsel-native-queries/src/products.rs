@@ -11,7 +11,7 @@ use hirsel_engine_store::ResultStore;
 use hirsel_lir::{
     emission::{EmitInputs, OptLevel},
     products::Binding,
-    stage::{InputIdentity, Ready, ValidatedUnit},
+    stage::{InputIdentity, Ready, StageOutput},
     validate::{Inputs, NativeEnvironment},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -506,7 +506,7 @@ impl NativeProducts for SettledProducts {
     fn with_ready<R>(
         &mut self,
         products: &[Arc<ReadyProduct>],
-        use_units: impl FnOnce(&[&ValidatedUnit<Ready>], &EmitInputs<'_>) -> Result<R, String>,
+        use_units: impl FnOnce(&[&StageOutput<Ready>], &EmitInputs<'_>) -> Result<R, String>,
     ) -> Result<R, String> {
         self.inner.with_ready(products, use_units)
     }
@@ -594,7 +594,7 @@ impl NativeProducts for DemandProducts {
     fn with_ready<R>(
         &mut self,
         products: &[Arc<ReadyProduct>],
-        use_units: impl FnOnce(&[&ValidatedUnit<Ready>], &EmitInputs<'_>) -> Result<R, String>,
+        use_units: impl FnOnce(&[&StageOutput<Ready>], &EmitInputs<'_>) -> Result<R, String>,
     ) -> Result<R, String> {
         let snapshot = self.snapshot.clone();
         let environment = snapshot.environment();
@@ -778,7 +778,7 @@ pub(crate) type ValidatedReady = ValidatedUnits<
     hirsel_lir::LayoutTable,
     hirsel_lir::pretransfer::AdapterReference,
     (ProductRef, Reference),
-    ValidatedUnit<Ready>,
+    StageOutput<Ready>,
 >;
 
 /// Units validated under one scope (a table `T` and an adapter set `A`), by

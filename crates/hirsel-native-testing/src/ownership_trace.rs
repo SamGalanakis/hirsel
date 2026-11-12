@@ -107,7 +107,7 @@ pub fn emit_leaf(
 pub fn emit_relocated(
     program: &ReadyProgram,
     entry: &DefPath,
-    selected: &[&hirsel_lir::stage::ValidatedUnit<hirsel_lir::stage::Ready>],
+    selected: &[&hirsel_lir::stage::StageOutput<hirsel_lir::stage::Ready>],
     inputs: &EmitInputs<'_>,
     request: hirsel_lir::ownership_trace::native::Request<'_>,
     sites: &Sites<'_>,

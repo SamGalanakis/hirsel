@@ -20,7 +20,7 @@ use hirsel_lir::ir::UnitOrigin;
 use hirsel_lir::layout_types::{LayoutId, LayoutTable, ScalarKind, TargetSpec};
 use hirsel_lir::object::ObjectFile;
 use hirsel_lir::runtime_abi::{CName, CType, RuntimeEntry};
-use hirsel_lir::stage::{ObjectArtifact, ObjectSymbol, ObjectSymbolKind, Ready, ValidatedUnit};
+use hirsel_lir::stage::{ObjectArtifact, ObjectSymbol, ObjectSymbolKind, Ready, StageOutput};
 use hirsel_syntax::DefPath;
 
 use crate::CodegenError;
@@ -320,7 +320,7 @@ fn isa_with_verifier(target: &TargetSpec, opt: OptLevel, verify: bool) -> Emitte
 /// Emits `units` as one object (`crate::emit_object`); with `clif`, also the text of
 /// every function's Cranelift IR.
 pub(crate) fn emit(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     inputs: &EmitInputs<'_>,
     clif: bool,
     profile: hirsel_lir::debug::Profile<'_>,
@@ -373,17 +373,9 @@ pub(crate) fn emit(
         index: Some(index),
         ..inputs.clone()
     };
-    for unit in units {
-        hirsel_lir::emission::check_receipt(unit, inputs).map_err(|problem| {
-            CodegenError::Receipt {
-                definition: unit.unit().header.definition.clone(),
-                problem,
-            }
-        })?;
-    }
     let mut emitter = Emitter::new(Inputs::units(inputs), clif)?;
     emitter.debug = profile.debug;
-    let emitted: Vec<&ValidatedUnit<Ready>> = units
+    let emitted: Vec<&StageOutput<Ready>> = units
         .iter()
         .copied()
         .filter(|u| {

@@ -206,7 +206,7 @@ fn discover_seeded<S>(u: &LirUnit<S>, seeds: &[Code], finite: bool) -> Vec<Code>
 /// or becomes Dynamic. Source spelling, callable layout equality and runtime
 /// rows cannot select a code identity.
 /// A genuinely unbound input remains Dynamic and poisons every dependent use.
-pub(super) fn closed_runtime(units: &[&ValidatedUnit<Ready>]) -> Result<Vec<Vec<Code>>, String> {
+pub(super) fn closed_runtime(units: &[&StageOutput<Ready>]) -> Result<Vec<Vec<Code>>, String> {
     solve_mode(
         &units.iter().map(|unit| unit.unit()).collect::<Vec<_>>(),
         true,

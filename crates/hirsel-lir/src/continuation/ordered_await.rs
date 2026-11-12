@@ -184,7 +184,7 @@ fn suffix(u: &LirUnit<Ready>, start: BlockId, slot: SlotId, loan: LoanId) -> Opt
 
 impl OrderedAwaitProtocol {
     pub fn derive(
-        unit: &ValidatedUnit<Ready>,
+        unit: &StageOutput<Ready>,
         table: &LayoutTable,
         block: BlockId,
         frame: &[LiveStorage],
@@ -262,7 +262,7 @@ impl OrderedAwaitProtocol {
     /// An imported digest, suffix list or cleanup cursor is never authority.
     pub fn validate(
         &self,
-        unit: &ValidatedUnit<Ready>,
+        unit: &StageOutput<Ready>,
         table: &LayoutTable,
         frame: &[LiveStorage],
     ) -> bool {

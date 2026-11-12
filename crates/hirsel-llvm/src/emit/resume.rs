@@ -897,7 +897,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
 pub(super) fn declare<'m, 'a>(
     module: &'m Module<'m>,
     inputs: &'a EmitInputs<'a>,
-    units: &[&'a ValidatedUnit<Ready>],
+    units: &[&'a StageOutput<Ready>],
     plans: &'a ContinuationPlans,
     manifested: &mut Manifested,
 ) -> Result<Vec<(&'a LirUnit<Ready>, &'a ContinuationPlan, u32, Function<'m>)>, CodegenError> {

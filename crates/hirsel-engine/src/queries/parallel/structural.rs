@@ -62,14 +62,14 @@ impl Hash for Key {
         self.input.signature.definition.hash(state);
     }
 }
-type Table = hirsel_validate::FactTable<Arc<Key>, QueryOutput<TypedBody>, QueryError>;
+type Table = hirsel_types::FactTable<Arc<Key>, QueryOutput<TypedBody>, QueryError>;
 #[derive(Default)]
 pub(in crate::queries) struct Checks {
     facts: OnceLock<Table>,
     recipes: Mutex<BTreeMap<DefId, Vec<Weak<Key>>>>,
 }
 impl Checks {
-    fn facts(&self, graph: Arc<hirsel_validate::FactGraph>) -> &Table {
+    fn facts(&self, graph: Arc<hirsel_types::FactGraph>) -> &Table {
         self.facts.get_or_init(|| Table::new(graph))
     }
     pub(in crate::queries) fn evict(&self) -> bool {

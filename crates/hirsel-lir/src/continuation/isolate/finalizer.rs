@@ -3,7 +3,7 @@
 //! cleanup coverage or permission to return Pending.
 use super::*;
 use crate::abi_types::{FnAbiId, ParameterPassing};
-use crate::stage::ValidatedUnit;
+use crate::stage::StageOutput;
 use hirsel_core_contract::Passing;
 use hirsel_syntax::ContentHash;
 
@@ -20,7 +20,7 @@ impl FinalizerSource {
     /// Resolve the supplied program association against the actual resource
     /// descriptor and validated Ready body. A matching name alone is insufficient.
     pub fn derive(
-        units: &[&ValidatedUnit<Ready>],
+        units: &[&StageOutput<Ready>],
         table: &LayoutTable,
         layout: LayoutId,
         body: ContentHash,
@@ -48,7 +48,7 @@ impl FinalizerSource {
     /// Ready bytes, independently of any runtime resolver or continuation hash.
     pub fn check(
         &self,
-        units: &[&ValidatedUnit<Ready>],
+        units: &[&StageOutput<Ready>],
         table: &LayoutTable,
     ) -> Result<(), &'static str> {
         let record = table
@@ -112,7 +112,7 @@ impl FinalizerSource {
 /// run the charged one, any other unit's frames the uncharged one, as the drop
 /// wrapper picks them by the running context.
 pub(crate) fn sources(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     table: &LayoutTable,
     unit: ContentHash,
 ) -> std::collections::BTreeMap<LayoutId, ContentHash> {

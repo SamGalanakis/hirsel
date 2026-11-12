@@ -5,7 +5,7 @@
 //! Component identities follow Unison's recursive component boundary; the two
 //! deletion strata are Hirsel's existing assume-then-verify semantics.
 use super::*;
-use hirsel_lir::stage::ValidatedUnit;
+use hirsel_lir::stage::StageOutput;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 #[cfg(test)]
@@ -93,7 +93,7 @@ impl LocalArenaEquations {
 
 /// Value acceptance remains the independent native validator's responsibility.
 pub fn extract_local_arena(
-    value: &ValidatedUnit<Value>,
+    value: &StageOutput<Value>,
     layouts: &LayoutTable,
 ) -> LocalArenaEquations {
     extract(value.unit(), layouts)

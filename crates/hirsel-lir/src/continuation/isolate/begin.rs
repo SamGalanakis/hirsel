@@ -7,7 +7,7 @@ use crate::continuation::{
     RuntimeResultSource,
 };
 use crate::layout_types::{ScalarKind, SizeSpec};
-use crate::stage::ValidatedUnit;
+use crate::stage::StageOutput;
 
 impl IsolateProtocol {
     /// Typed handoff to the entered begin runtime. The full protocol, cleanup
@@ -15,7 +15,7 @@ impl IsolateProtocol {
     /// constructing this record does not make an isolate call resumable.
     pub fn begin_operation(
         &self,
-        wrapper: &ValidatedUnit<Ready>,
+        wrapper: &StageOutput<Ready>,
         layouts: &LayoutTable,
         after: u64,
     ) -> Option<RuntimeOpPlan> {
@@ -40,7 +40,7 @@ impl IsolateProtocol {
     /// This neither calls begin_operation nor trusts a runtime/helper digest.
     pub fn check_begin_operation(
         &self,
-        wrapper: &ValidatedUnit<Ready>,
+        wrapper: &StageOutput<Ready>,
         layouts: &LayoutTable,
         after: u64,
         claimed: &RuntimeOpPlan,
@@ -59,7 +59,7 @@ impl IsolateProtocol {
     /// an entered Pending rebinds it rather than materializing a fresh mark.
     pub fn begin_result(
         &self,
-        wrapper: &ValidatedUnit<Ready>,
+        wrapper: &StageOutput<Ready>,
         layouts: &LayoutTable,
         after: u64,
     ) -> Option<RuntimeResultSlot> {
@@ -123,7 +123,7 @@ impl IsolateProtocol {
     /// the producer or infer ownership from this numeric offset.
     pub fn check_begin_result(
         &self,
-        wrapper: &ValidatedUnit<Ready>,
+        wrapper: &StageOutput<Ready>,
         layouts: &LayoutTable,
         after: u64,
         claimed: &RuntimeResultSlot,

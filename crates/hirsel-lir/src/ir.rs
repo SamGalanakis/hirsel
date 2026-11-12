@@ -1937,7 +1937,7 @@ pub struct UnitHeader {
 }
 
 /// One function body at stage `S`. Fields are public so tests and adversarial
-/// inputs can forge raw units; only validators produce `ValidatedUnit<S>`.
+/// inputs can forge raw units; only validators produce `StageOutput<S>`.
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub struct LirUnit<S> {
     pub header: UnitHeader,

@@ -4,7 +4,7 @@
 //! relocations and runtime finalizers are dependencies too.
 use hirsel_lir::{
     ir::Inst,
-    stage::{Ready, ValidatedUnit},
+    stage::{Ready, StageOutput},
 };
 use hirsel_native::ReadyProgram;
 use hirsel_syntax::{ContentHash, DefPath};
@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub fn select(
     program: &ReadyProgram,
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     entry: &DefPath,
 ) -> Result<BTreeSet<ContentHash>, String> {
     let bodies = units

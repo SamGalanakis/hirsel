@@ -2,7 +2,7 @@
 //! This is separate from ordinary plans: no caller or emitter selects it yet.
 use super::*;
 use crate::continuation::*;
-use crate::stage::ValidatedUnit;
+use crate::stage::StageOutput;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IsolatePlan {
@@ -17,7 +17,7 @@ impl IsolateProtocol {
     /// environment. Unknown cleanup still refuses the complete wrapper.
     pub fn frame(
         &self,
-        units: &[&ValidatedUnit<Ready>],
+        units: &[&StageOutput<Ready>],
         inputs: &PlanInputs<'_>,
         ordinary: &ContinuationPlans,
     ) -> Result<IsolatePlan, String> {
@@ -123,9 +123,9 @@ impl IsolateProtocol {
 
     pub(super) fn checked_callers<'a>(
         &self,
-        units: &[&'a ValidatedUnit<Ready>],
+        units: &[&'a StageOutput<Ready>],
         inputs: &PlanInputs<'_>,
-    ) -> Result<&'a ValidatedUnit<Ready>, String> {
+    ) -> Result<&'a StageOutput<Ready>, String> {
         let callback_id = self
             .identity
             .target
@@ -139,9 +139,9 @@ impl IsolateProtocol {
 
     pub(super) fn checked_sources<'a>(
         &self,
-        units: &[&'a ValidatedUnit<Ready>],
+        units: &[&'a StageOutput<Ready>],
         table: &LayoutTable,
-    ) -> Result<&'a ValidatedUnit<Ready>, String> {
+    ) -> Result<&'a StageOutput<Ready>, String> {
         let wrapper = units
             .iter()
             .copied()
@@ -222,7 +222,7 @@ impl IsolatePlan {
     /// of the producer. A valid digest never grants wrapper admission.
     pub fn check(
         &self,
-        units: &[&ValidatedUnit<Ready>],
+        units: &[&StageOutput<Ready>],
         inputs: &PlanInputs<'_>,
         ordinary: &ContinuationPlans,
     ) -> Result<(), String> {

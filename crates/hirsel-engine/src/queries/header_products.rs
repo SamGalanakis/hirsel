@@ -313,7 +313,7 @@ impl HeaderProducts {
         std::ptr::eq(checker, &**owned).then(|| (&self.operation.structural, owned.clone()))
     }
 
-    pub(crate) fn fact_graph(&self) -> Arc<hirsel_validate::FactGraph> {
+    pub(crate) fn fact_graph(&self) -> Arc<hirsel_types::FactGraph> {
         self.store
             .as_ref()
             .and_then(|store| store.verifier())

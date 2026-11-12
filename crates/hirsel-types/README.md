@@ -553,3 +553,7 @@ Declaration normalization resolves nominal cleanup from the selected signature
 view, including callable parameters and results. Public opaque declarations keep
 their exported cleanup promises; owner views use their defining representation.
 Resources retain the finalizer allocation promise in either view.
+
+`FactGraph` and `FactTable` provide operation-local single flight with cycle detection,
+admission and reader-owned leases. `signature_identity` encodes complete signature
+data and reachable types independently of session numbering.

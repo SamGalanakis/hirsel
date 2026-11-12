@@ -387,7 +387,7 @@ fn codegen(
 /// only, exactly the subset its key recorded (`execution_plan::object_identity`).
 /// A body or row the key did not cover fails here rather than reusing an object.
 pub(crate) fn object_continuation(
-    units: &[&hirsel_lir::stage::ValidatedUnit<hirsel_lir::stage::Ready>],
+    units: &[&hirsel_lir::stage::StageOutput<hirsel_lir::stage::Ready>],
     inputs: &hirsel_lir::emission::EmitInputs<'_>,
     bodies: &std::collections::BTreeSet<hirsel_syntax::ContentHash>,
     keyed: Option<(hirsel_syntax::ContentHash, hirsel_syntax::ContentHash)>,

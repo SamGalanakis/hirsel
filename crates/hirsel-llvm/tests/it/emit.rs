@@ -338,27 +338,14 @@ fn slice_storage_is_bound_even_when_only_the_slice_type_names_it() {
         .position(|row| matches!(row.kind, LayoutKind::Sequence { .. }))
         .unwrap();
     changed.layouts[storage].key.owner_revision = Some(hash("changed storage"));
-    // The receipt sees the changed raw storage row although neither an
-    // operand nor the ABI directly names it.
+    // Storage content contributes to the object key even without a direct operand.
     let changed = SealedLayoutTable::seal(changed);
     let rebound = EmitInputs {
         layouts: &changed,
         ..valid.clone()
     };
-    assert!(hirsel_lir::emission::check_receipt(units[0], &rebound).is_err());
     assert_ne!(
         before,
         hirsel_lir::objects::ready_digest(units[0].unit(), &rebound, "llvm", false, &[]).unwrap()
-    );
-    let wrong = hirsel_lir::LayoutIndex::new(&program.table.table);
-    assert!(
-        hirsel_lir::emission::check_receipt(
-            units[0],
-            &EmitInputs {
-                index: Some(&wrong),
-                ..rebound
-            }
-        )
-        .is_err()
     );
 }

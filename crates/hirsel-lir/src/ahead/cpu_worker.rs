@@ -217,7 +217,7 @@ impl AheadPlan {
 /// Check publication recipes for the units in an ordinary object partition.
 /// Private execution additionally requires the complete worker graph check.
 pub fn validate_cpu_summaries(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     table: &LayoutTable,
     plan: &AheadPlan,
 ) -> bool {
@@ -257,7 +257,7 @@ pub fn validate_cpu_summaries(
 /// runtime supplies the actual callback identity; these checks supply its
 /// complete effect-free Ready graph and the worker's retained ownership.
 pub fn validate_cpu_workers(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     table: &crate::SealedLayoutTable,
     target: &TargetSpec,
     plan: &AheadPlan,
@@ -524,10 +524,10 @@ fn spine(u: &LirUnit<Ready>, protocol: &CpuWorkerProtocol) -> Spine {
 }
 
 pub(super) fn propose(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     table: &crate::SealedLayoutTable,
     target: &TargetSpec,
-    worker: &ValidatedUnit<Ready>,
+    worker: &StageOutput<Ready>,
     environments: &BTreeMap<ContentHash, Option<LayoutId>>,
 
     helpers: ContentHash,
@@ -743,11 +743,11 @@ pub struct CpuMapperBinding {
 
 impl CpuMapperBinding {
     pub fn derive(
-        caller: &ValidatedUnit<Ready>,
+        caller: &StageOutput<Ready>,
         invocation: CallId,
-        map: &ValidatedUnit<Ready>,
-        worker: &ValidatedUnit<Ready>,
-        callback: &ValidatedUnit<Ready>,
+        map: &StageOutput<Ready>,
+        worker: &StageOutput<Ready>,
+        callback: &StageOutput<Ready>,
         table: &LayoutTable,
         environments: &BTreeMap<ContentHash, Option<LayoutId>>,
     ) -> Option<Self> {
@@ -922,7 +922,7 @@ fn integer(unit: &LirUnit<Ready>, value: ValueId) -> Option<u128> {
 impl CpuWorkerProtocol {
     /// Reconstruct only from strict-C validated Ready content. The worker name
     /// chooses the protocol to inspect; it never supplies missing evidence.
-    pub fn derive(validated: &ValidatedUnit<Ready>, table: &LayoutTable) -> Option<Self> {
+    pub fn derive(validated: &StageOutput<Ready>, table: &LayoutTable) -> Option<Self> {
         let unit = validated.unit();
         if unit.header.origin != UnitOrigin::Library
             || !unit.header.definition.is_core("$native.cpu_worker")
@@ -1239,7 +1239,7 @@ impl CpuWorkerProtocol {
         })
     }
 
-    pub fn check(&self, unit: &ValidatedUnit<Ready>, table: &LayoutTable) -> bool {
+    pub fn check(&self, unit: &StageOutput<Ready>, table: &LayoutTable) -> bool {
         Self::derive(unit, table).as_ref() == Some(self)
     }
 }

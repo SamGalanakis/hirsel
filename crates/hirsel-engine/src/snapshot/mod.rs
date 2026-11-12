@@ -269,8 +269,8 @@ pub(crate) struct ValidationState {
     /// Full installed tables for materialized owners. The snapshot fixes the
     /// source, registration and verifier inputs; each overlay still gets its
     /// own replacement verdicts and every execution receipt is replayed.
-    overlay_bases: hirsel_validate::FactTable<PackageId, RetainedView<ViewTable>, QueryError>,
-    overlays: hirsel_validate::FactTable<
+    overlay_bases: hirsel_types::FactTable<PackageId, RetainedView<ViewTable>, QueryError>,
+    overlays: hirsel_types::FactTable<
         (PackageId, ValidationDigest),
         RetainedView<PackageViews>,
         QueryError,
@@ -449,7 +449,7 @@ impl ValidationState {
         weight.add(
             size_of::<Self>()
                 + 2 * size_of::<usize>()
-                + size_of::<hirsel_validate::FactGraph>()
+                + size_of::<hirsel_types::FactGraph>()
                 + 2 * size_of::<usize>()
                 + 4 * size_of::<std::sync::Weak<SignatureSnapshot>>()
                 + 128,
@@ -1079,8 +1079,8 @@ impl SignatureSnapshot {
                 views,
                 bases: hirsel_validate::ValidationRows::new(bases)?,
                 packages: hirsel_validate::ValidationRows::new(packages)?,
-                overlay_bases: hirsel_validate::FactTable::new(graph.clone()),
-                overlays: hirsel_validate::FactTable::new(graph),
+                overlay_bases: hirsel_types::FactTable::new(graph.clone()),
+                overlays: hirsel_types::FactTable::new(graph),
                 installed: hirsel_validate::ValidationRows::new(installed_universes)?,
                 validated,
             });
@@ -1559,7 +1559,7 @@ impl SignatureSnapshot {
     /// caller-owned value without publishing it to the table.
     fn validation_fact<K: Clone + Eq + std::hash::Hash + std::fmt::Debug, T>(
         &self,
-        table: &hirsel_validate::FactTable<K, RetainedView<T>, QueryError>,
+        table: &hirsel_types::FactTable<K, RetainedView<T>, QueryError>,
         key: K,
         mut compute: impl FnMut() -> Result<Arc<RetainedView<T>>, QueryError>,
     ) -> Result<Arc<RetainedView<T>>, QueryError> {

@@ -6,7 +6,7 @@ use hirsel_lir::stage::{Stage, Value};
 use hirsel_lir::validate::{Inputs, UnitInputs};
 
 fn roundtrip<S: Stage>(
-    units: Vec<hirsel_lir::stage::ValidatedUnit<S>>,
+    units: Vec<hirsel_lir::stage::StageOutput<S>>,
     inputs: &Inputs<'_>,
 ) -> Vec<String> {
     let products: Vec<_> = units

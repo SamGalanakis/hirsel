@@ -3,7 +3,7 @@
 use hirsel_core_contract::Manifest;
 use hirsel_lir::ir::*;
 use hirsel_lir::layout_types::{ScalarKind, TargetSpec};
-use hirsel_lir::stage::{Ready, ValidatedUnit};
+use hirsel_lir::stage::{Ready, StageOutput};
 use hirsel_syntax::PassingMode;
 use hirsel_types::Primitive;
 
@@ -19,14 +19,14 @@ use super::*;
 pub struct Program {
     pub table: Table,
     pub manifest: Manifest,
-    pub units: Vec<ValidatedUnit<Ready>>,
+    pub units: Vec<StageOutput<Ready>>,
     pub statics: Vec<StaticData>,
     /// Per layout with a finalizer, its drop body's instance digest.
     pub finalizers: BTreeMap<LayoutId, ContentHash>,
 }
 
 impl Program {
-    pub fn units(&self) -> Vec<&ValidatedUnit<Ready>> {
+    pub fn units(&self) -> Vec<&StageOutput<Ready>> {
         self.units.iter().collect()
     }
 

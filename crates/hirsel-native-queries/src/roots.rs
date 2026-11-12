@@ -637,7 +637,7 @@ impl NativeProducts for RootProducts {
         &mut self,
         products: &[Arc<ReadyProduct>],
         use_units: impl FnOnce(
-            &[&hirsel_lir::stage::ValidatedUnit<hirsel_lir::stage::Ready>],
+            &[&hirsel_lir::stage::StageOutput<hirsel_lir::stage::Ready>],
             &hirsel_lir::emission::EmitInputs<'_>,
         ) -> Result<R, String>,
     ) -> Result<R, String> {

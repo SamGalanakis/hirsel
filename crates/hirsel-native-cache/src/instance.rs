@@ -5,7 +5,7 @@ use super::arena::EQUATIONS_DOMAIN;
 use super::*;
 use hirsel_engine_store::ResultStore;
 use hirsel_engine_store::{Action, Domain, Reference};
-use hirsel_lir::stage::{StageKind, ValidatedUnit, Value};
+use hirsel_lir::stage::{StageKind, StageOutput, Value};
 use hirsel_lir::validate::{Inputs, NativeCache, NativeEnvironment};
 
 pub const INSTANCE_RECORD_DOMAIN: Domain = Domain {
@@ -279,7 +279,7 @@ impl InstanceQueries {
         additional_abis: &[hirsel_lir::FnAbiId],
         discovery: Reference,
         statics_finalizers: Reference,
-    ) -> Result<(ValidatedUnit<Value>, Arc<InstanceProduct>), String> {
+    ) -> Result<(StageOutput<Value>, Arc<InstanceProduct>), String> {
         if unit.header.definition != *key.instance.definition()
             || unit.header.instance != key.instance.digest()
             || unit.header.target != key.target_abi

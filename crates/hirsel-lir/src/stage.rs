@@ -1,12 +1,4 @@
-//! Stages, receipts and owned object artifacts.
-//!
-//! A stage is an invariant on one LIR family, checked by its validator; it is
-//! not a set of optional flags. Raw artifacts (`LirUnit<S>`, `RawReceipt`,
-//! `ObjectArtifact`) are plain data that tests can forge. The validated
-//! wrappers `ValidatedUnit<S>` and `NativeReceipt` have constructors private to
-//! this crate, called only by the stage validators (`validate/`) after
-//! every check passed; no other crate can manufacture them, and no snapshot
-//! decodes into them.
+//! Ordinary stage results and owned object artifacts.
 use crate::effect::Opcode;
 use crate::ir::LirUnit;
 use crate::layout_types::ObjectFormat;
@@ -172,91 +164,24 @@ macro_rules! stages { ($($name:ident),*) => {$(
 )*}; }
 stages!(Value, Placed, Rc, Reuse, Ready);
 
-/// The digests a stage receipt binds. Plain data; decodable; never a proof.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct RawReceipt {
-    pub key: crate::objects::UnitKey,
-    pub stage: StageKind,
-    pub lir_version: u32,
-    pub unit: ContentHash,
-    pub validator_version: u32,
-}
-
-impl RawReceipt {
-    /// Content digest, including the unit content key.
-    pub fn digest(&self) -> ContentHash {
-        crate::snapshot::digest("receipt", self)
-    }
-}
-
-/// Proof that a stage validator accepted exactly these digests in this
-/// process. Constructed only by `issue`, which only validators call; a
-/// deserialized `RawReceipt` never substitutes for revalidation.
-///
-/// ```compile_fail
-/// use hirsel_lir::{NativeReceipt, RawReceipt};
-/// fn forge(raw: RawReceipt) -> NativeReceipt {
-///     NativeReceipt { raw }
-/// }
-/// ```
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct NativeReceipt {
-    raw: RawReceipt,
-    checked_inputs: ContentHash,
-}
-
-impl NativeReceipt {
-    /// For the stage validators only, after every check passed.
-    pub(crate) fn issue(raw: RawReceipt, checked_inputs: ContentHash) -> Self {
-        Self {
-            raw,
-            checked_inputs,
-        }
-    }
-    pub(crate) fn checked_inputs(&self) -> ContentHash {
-        self.checked_inputs
-    }
-    pub fn raw(&self) -> &RawReceipt {
-        &self.raw
-    }
-    pub fn digest(&self) -> ContentHash {
-        self.raw.digest()
-    }
-}
-
-/// A unit accepted by its stage validator, with the receipt binding it.
-///
-/// ```compile_fail
-/// use hirsel_lir::{LirUnit, NativeReceipt, Ready, ValidatedUnit};
-/// fn forge(unit: LirUnit<Ready>, receipt: NativeReceipt) -> ValidatedUnit<Ready> {
-///     ValidatedUnit { unit, receipt }
-/// }
-/// ```
+/// An immutable stage result with its cached content identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ValidatedUnit<S> {
+pub struct StageOutput<S> {
     unit: LirUnit<S>,
-    receipt: NativeReceipt,
+    digest: ContentHash,
 }
 
-impl<S: Stage> ValidatedUnit<S> {
-    /// For the stage validators only, after every check passed.
-    pub(crate) fn seal(unit: LirUnit<S>, receipt: NativeReceipt) -> Self {
-        Self { unit, receipt }
+impl<S: Stage> StageOutput<S> {
+    pub fn new(unit: LirUnit<S>) -> Self {
+        let digest = unit.digest();
+        Self { unit, digest }
     }
     pub fn unit(&self) -> &LirUnit<S> {
         &self.unit
     }
-    pub fn receipt(&self) -> &NativeReceipt {
-        &self.receipt
-    }
-    /// The unit's full content digest, computed once by the validator that
-    /// sealed it. The unit is immutable behind this proof, so it is exactly
-    /// `self.unit().digest()` without encoding the unit again. This holds only
-    /// while the proof offers no mutable access to its unit.
     pub fn digest(&self) -> ContentHash {
-        self.receipt.raw.unit
+        self.digest
     }
-    /// Give up the proof to transform the unit; the result must be revalidated.
     pub fn into_raw(self) -> LirUnit<S> {
         self.unit
     }
@@ -340,13 +265,6 @@ snapshot_enum!(StageKind {
     Rc,
     Reuse,
     Ready
-});
-snapshot_struct!(RawReceipt {
-    key,
-    stage,
-    lir_version,
-    unit,
-    validator_version
 });
 snapshot_enum!(ObjectSymbolKind {
     Function,

@@ -449,7 +449,7 @@ impl NativeTasks {
                 .ok_or("receipt read has no native owner")?;
             let ready = products.ready(owner)?;
             products.with_ready(&[ready], |units, _| {
-                writeln!(text, "{:?}", units[0].receipt().raw()).unwrap();
+                writeln!(text, "{:?}", units[0].digest()).unwrap();
                 Ok(())
             })?;
         }

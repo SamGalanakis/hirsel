@@ -7,7 +7,7 @@ use crate::continuation::{
 };
 use crate::ir::SlotId;
 use crate::layout_types::LayoutTable;
-use crate::stage::{Ready, ValidatedUnit};
+use crate::stage::{Ready, StageOutput};
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct FinalizerFrame {
@@ -22,7 +22,7 @@ pub struct FinalizerFrame {
 impl FinalizerFrame {
     pub fn propose(
         source: &FinalizerSource,
-        units: &[&ValidatedUnit<Ready>],
+        units: &[&StageOutput<Ready>],
         inputs: &PlanInputs<'_>,
         plans: &ContinuationPlans,
         after: u64,
@@ -33,7 +33,7 @@ impl FinalizerFrame {
 
     pub(crate) fn propose_extent(
         source: &FinalizerSource,
-        units: &[&ValidatedUnit<Ready>],
+        units: &[&StageOutput<Ready>],
         inputs: &PlanInputs<'_>,
         plans: &ContinuationPlans,
         after: u64,
@@ -71,7 +71,7 @@ impl FinalizerFrame {
     /// This still grants no runtime admission or permission to return Pending.
     pub fn check(
         &self,
-        units: &[&ValidatedUnit<Ready>],
+        units: &[&StageOutput<Ready>],
         inputs: &PlanInputs<'_>,
         plans: &ContinuationPlans,
         after: u64,
@@ -82,7 +82,7 @@ impl FinalizerFrame {
 
     pub(crate) fn check_extent(
         &self,
-        units: &[&ValidatedUnit<Ready>],
+        units: &[&StageOutput<Ready>],
         table: &LayoutTable,
         plans: &ContinuationPlans,
         after: u64,

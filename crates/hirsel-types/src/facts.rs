@@ -1,7 +1,7 @@
 //! Typed operation-local single flight. The wait graph follows salsa's
 //! src/runtime/dependency_graph.rs:49-110 add_edge-before-block protocol. Unlike S1
 //! evaluation, an illegal fact cycle returns its key and never duplicates work.
-use crate::ViewRefusal;
+use crate::QueryError;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -13,15 +13,15 @@ pub enum FactError {
     Refused,
     Admission,
     Unavailable,
-    View(ViewRefusal),
+    Query(QueryError),
     Cycle(String),
     Aborted,
 }
-impl From<FactError> for hirsel_types::QueryError {
+impl From<FactError> for QueryError {
     fn from(error: FactError) -> Self {
         match error {
-            FactError::View(error) => error.into(),
-            error => Self::Operational(hirsel_types::OperationalFailure {
+            FactError::Query(error) => error,
+            error => Self::Operational(crate::OperationalFailure {
                 operation: "typed fact".into(),
                 message: format!("{error:?}"),
             }),

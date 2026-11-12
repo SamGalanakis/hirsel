@@ -17,7 +17,7 @@ use hirsel_interp::{Integer, Value};
 use hirsel_lir::emission::{EmitInputs, OptLevel, site_code};
 use hirsel_lir::ir::*;
 use hirsel_lir::layout_types::{ScalarKind, TargetSpec};
-use hirsel_lir::stage::{Ready, ValidatedUnit};
+use hirsel_lir::stage::{Ready, StageOutput};
 use hirsel_llvm::emit_object;
 use hirsel_syntax::PassingMode;
 
@@ -995,7 +995,7 @@ fn first_difference(actual: &str, expected: &str) -> String {
 }
 
 /// The heap checker's lines for one case: its unit run at every operand tuple.
-fn heap_lines(program: &Program, case: &Case, unit: &ValidatedUnit<Ready>) -> String {
+fn heap_lines(program: &Program, case: &Case, unit: &StageOutput<Ready>) -> String {
     let mut actual = String::new();
     // One unit per program: a run validates the whole program it is given.
     let heap = hirsel_heapcheck::Program::<Ready> {
@@ -1054,7 +1054,7 @@ fn the_heap_checker_agrees_with_the_interpreter_on_every_scalar_library_operatio
     let target = TargetSpec::x86_64_unknown_linux_gnu();
     let program = program(&target);
     let cases = cases();
-    let work: Vec<(&Case, &ValidatedUnit<Ready>)> = cases.iter().zip(&program.units).collect();
+    let work: Vec<(&Case, &StageOutput<Ready>)> = cases.iter().zip(&program.units).collect();
     let threads = hirsel_guard::jobs();
     let chunk = work.len().div_ceil(threads);
     let program = &program;

@@ -27,7 +27,7 @@ pub struct CpuSaveRoots {
 }
 
 pub(super) fn propose(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     table: &LayoutTable,
     graph: &ScalarGraph,
     protocol: &CpuWorkerProtocol,
@@ -245,7 +245,7 @@ fn storage(u: &LirUnit<Ready>) -> BTreeMap<CpuSavePoint, Storage> {
 }
 
 pub(super) fn check(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
     table: &LayoutTable,
     graph: &ScalarGraph,
     protocol: &CpuWorkerProtocol,

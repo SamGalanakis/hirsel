@@ -5,7 +5,7 @@
 //! checked independently against the transported original Value plan.
 use super::*;
 use crate::layout_types::{LayoutId, LayoutKind, LayoutTable};
-use crate::stage::{Ready, ValidatedUnit};
+use crate::stage::{Ready, StageOutput};
 use std::collections::BTreeSet;
 
 mod calls;
@@ -69,7 +69,7 @@ pub struct LeafPlan {
     empty_codes: Vec<bool>,
 }
 impl LeafPlan {
-    pub fn prepare(unit: &ValidatedUnit<Ready>, layouts: &LayoutTable) -> Result<Self, String> {
+    pub fn prepare(unit: &StageOutput<Ready>, layouts: &LayoutTable) -> Result<Self, String> {
         Self::from_unit(unit.unit(), layouts, false, true, Selection::Owned)
     }
 
@@ -79,7 +79,7 @@ impl LeafPlan {
     /// Owned direct-call operands use existing semantic commit points here;
     /// Ready enumeration cannot replace their original marker identities.
     pub fn prepare_value(
-        unit: &ValidatedUnit<crate::stage::Value>,
+        unit: &StageOutput<crate::stage::Value>,
         layouts: &LayoutTable,
     ) -> Result<Plan, String> {
         Self::from_unit(unit.unit(), layouts, true, false, Selection::Owned).map(|plan| plan.plan)
@@ -89,7 +89,7 @@ impl LeafPlan {
     /// This is observation data, not code authority: Request::prepare must
     /// bind the complete checked call graph before any object can be emitted.
     pub fn prepare_value_for_program(
-        unit: &ValidatedUnit<crate::stage::Value>,
+        unit: &StageOutput<crate::stage::Value>,
         layouts: &LayoutTable,
     ) -> Result<Plan, String> {
         Self::from_unit(unit.unit(), layouts, true, true, Selection::Owned).map(|plan| plan.plan)
@@ -99,7 +99,7 @@ impl LeafPlan {
     /// ordinary reference-counted data. Generic native Owned clients retain
     /// their original selection and must request it independently at emission.
     pub fn prepare_resources_value_for_program(
-        unit: &ValidatedUnit<crate::stage::Value>,
+        unit: &StageOutput<crate::stage::Value>,
         layouts: &LayoutTable,
     ) -> Result<Plan, String> {
         Self::from_unit(unit.unit(), layouts, true, true, Selection::Resources)
@@ -883,7 +883,7 @@ impl LeafPlan {
     /// coverage checks every physical transition, but its newly enumerated ids
     /// never replace the source plan's identities, sites or semantic drops.
     pub fn from_relocated(
-        unit: &ValidatedUnit<Ready>,
+        unit: &StageOutput<Ready>,
         layouts: &LayoutTable,
         plan: &Plan,
     ) -> Result<Self, String> {
@@ -1248,7 +1248,7 @@ impl LeafPlan {
     /// coverage, then restore each original logical marker and source. Temporary
     /// ids are private preparation keys and never become trace token identities.
     fn with_cleanup_transports(
-        unit: &ValidatedUnit<Ready>,
+        unit: &StageOutput<Ready>,
         layouts: &LayoutTable,
         plan: &Plan,
     ) -> Result<Self, String> {
@@ -1471,7 +1471,7 @@ impl LeafPlan {
 /// a FinalizeBegin elsewhere in the block. All targets remain required by the
 /// complete physical local_call_sites inventory before this projection.
 pub fn local_calls(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
 ) -> Result<BTreeMap<[u8; 32], std::collections::BTreeSet<[u8; 32]>>, String> {
     let mut calls = call_targets(units)?;
     for unit in units {
@@ -1493,7 +1493,7 @@ pub fn local_calls(
 
 /// Complete physical callees, including implicit finalizers and runtime callbacks.
 pub fn physical_calls(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
 ) -> Result<BTreeMap<[u8; 32], BTreeSet<[u8; 32]>>, String> {
     Ok(call_targets(units)?
         .into_iter()
@@ -1504,7 +1504,7 @@ pub fn physical_calls(
 /// Exact checked target of each original caller block. An Alias names one
 /// call site, never the union of all functions that caller might invoke.
 pub fn local_call_sites(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
 ) -> Result<BTreeMap<[u8; 32], BTreeMap<BlockId, [u8; 32]>>, String> {
     Ok(call_targets(units)?
         .into_iter()
@@ -1525,7 +1525,7 @@ pub fn local_call_sites(
         .collect())
 }
 fn call_targets(
-    units: &[&ValidatedUnit<Ready>],
+    units: &[&StageOutput<Ready>],
 ) -> Result<BTreeMap<[u8; 32], BTreeMap<BlockId, Vec<[u8; 32]>>>, String> {
     let mut symbols = BTreeMap::new();
     for unit in units {
@@ -1791,7 +1791,7 @@ impl Request<'_> {
     /// subset must refuse rather than silently synthesizing the missing plans.
     pub fn prepare(
         self,
-        units: &[&ValidatedUnit<Ready>],
+        units: &[&StageOutput<Ready>],
         layouts: &LayoutTable,
     ) -> Result<BTreeMap<ContentHash, LeafPlan>, String> {
         local_calls(units)?;
@@ -1908,9 +1908,9 @@ impl Request<'_> {
 /// complete canonical body/layout/ABI content and every marker must agree.
 /// This grants no source or ordinary C authority and never enumerates new ids.
 pub fn rebind_plan(
-    before: &ValidatedUnit<Ready>,
+    before: &StageOutput<Ready>,
     before_inputs: &crate::validate::Inputs<'_>,
-    after: &ValidatedUnit<Ready>,
+    after: &StageOutput<Ready>,
     after_inputs: &crate::validate::Inputs<'_>,
     plan: &Plan,
 ) -> Result<Plan, String> {

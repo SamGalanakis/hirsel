@@ -28,7 +28,7 @@ impl NativeProducts for NoNative {
         &mut self,
         _: &[Arc<ReadyProduct>],
         _: impl FnOnce(
-            &[&hirsel_lir::stage::ValidatedUnit<hirsel_lir::stage::Ready>],
+            &[&hirsel_lir::stage::StageOutput<hirsel_lir::stage::Ready>],
             &hirsel_lir::emission::EmitInputs<'_>,
         ) -> Result<R, String>,
     ) -> Result<R, String> {

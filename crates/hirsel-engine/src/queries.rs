@@ -2061,7 +2061,7 @@ impl QueryEngine {
         };
         view.map_or_else(
             |_| ContentHash::default(),
-            |view| hirsel_validate::digest(self.types(), &view).0,
+            |view| hirsel_types::signature_identity(self.types(), &view),
         )
     }
     /// Runtime types over `views` (each with the digest a reflection of it

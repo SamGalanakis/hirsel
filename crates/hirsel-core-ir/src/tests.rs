@@ -1,0 +1,244 @@
+//! Tests over the FORM v0 samples. Every expected value is the hand-derived `run:`
+//! line in the sample file, not output of this crate.
+
+use crate::text::{parse, print};
+use crate::*;
+
+mod eval;
+
+const SAMPLES: &[(&str, &str)] = &[
+    ("arith", include_str!("../samples/arith.core")),
+    (
+        "compare-convert",
+        include_str!("../samples/compare-convert.core"),
+    ),
+    ("control", include_str!("../samples/control.core")),
+    ("slots", include_str!("../samples/slots.core")),
+    ("calls", include_str!("../samples/calls.core")),
+];
+
+fn load(name: &str, text: &str) -> Module {
+    parse(text).unwrap_or_else(|e| panic!("{name}: line {}: {}", e.line, e.message))
+}
+
+/// Bug: the printer drops or renames something the parser reads (a failure target,
+/// an anchor, a flag result, an instance type), or the parser reads a field into
+/// the wrong table. Law: print is the inverse of parse on canonical text, and
+/// parse(print(m)) == m.
+#[test]
+fn text_round_trips_every_sample() {
+    for (name, text) in SAMPLES {
+        let m = load(name, text);
+        let printed = print(&m);
+        let canonical: String = text
+            .lines()
+            .map(|l| l.split(';').next().unwrap().trim_end())
+            .filter(|l| !l.is_empty())
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert_eq!(
+            printed, canonical,
+            "{name}: print(parse(text)) differs from the text"
+        );
+        assert_eq!(load(name, &printed), m, "{name}: parse(print(m)) != m");
+    }
+}
+
+/// Bug: a sample (the producers' reference) is malformed: a wrong arity, a value
+/// defined twice, a missing failure block.
+#[test]
+fn every_sample_is_well_formed() {
+    for (name, text) in SAMPLES {
+        wf::module(&load(name, text)).unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+}
+
+/// Bug: well-formedness accepts a producer mistake an emitter would miscompile.
+/// Each case is a one-line edit of a correct body and the rule it breaks.
+#[test]
+fn well_formedness_rejects_producer_mistakes() {
+    let head = "core v0\nsig g0 = (i32, i32) -> (i32)\ninst n0 = p@0/m/f [] []\nfn f0 = n0 g0 {\n";
+    let ok =
+        "b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1 fail b1\n  return v2\nb1:\n  return v0\n}\n";
+    wf::module(&parse(&format!("{head}{ok}")).unwrap()).expect("the base case is well formed");
+    let cases = [
+        // integer add can overflow: it must name a failure block
+        (
+            "b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1\n  return v2\n}\n",
+            "missing",
+        ),
+        // a failure block receives no parameters in v0
+        (
+            "b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1 fail b1\n  return v2\nb1(v3: i32):\n  return v3\n}\n",
+            "parameters",
+        ),
+        // an edge passes the wrong number of arguments
+        (
+            "b0(v0: i32, v1: i32):\n  jump b1(v0, v1)\nb1(v2: i32):\n  return v2\n}\n",
+            "arity",
+        ),
+        // branching on an integer instead of a bool
+        (
+            "b0(v0: i32, v1: i32):\n  branch v0, b1, b1\nb1:\n  return v0\n}\n",
+            "non-bool",
+        ),
+        // returning a different type than the signature
+        (
+            "b0(v0: i32, v1: i32):\n  v2: bool = lt v0, v1\n  return v2\n}\n",
+            "return",
+        ),
+        // entry parameters must be the signature's
+        ("b0(v0: i32):\n  return v0\n}\n", "entry"),
+        // mixed widths (SEM-1) never reach CoreIR
+        (
+            "b0(v0: i32, v1: i32):\n  v2: i64 = widen v0\n  v3: i64 = add v2, v1 fail b1\n  return v0\nb1:\n  return v0\n}\n",
+            "binary operand types",
+        ),
+    ];
+    for (body, why) in cases {
+        let m = parse(&format!("{head}{body}")).unwrap();
+        let err = wf::module(&m).expect_err(why);
+        assert!(err.contains(why), "expected `{why}`, got `{err}`");
+    }
+    let twice =
+        "b0(v0: i32, v1: i32):\n  v1: i32 = add v0, v0 fail b1\n  return v1\nb1:\n  return v0\n}\n";
+    assert!(
+        parse(&format!("{head}{twice}"))
+            .unwrap_err()
+            .message
+            .contains("defined twice")
+    );
+}
+
+/// Bug: a constant silently truncated to its type (300 read as 44 in a u8).
+#[test]
+fn constants_out_of_range_are_refused() {
+    let m = |c: &str| {
+        let t = format!(
+            "core v0\nsig g0 = () -> (u8)\ninst n0 = p@0/m/f [] []\nfn f0 = n0 g0 {{\nb0:\n  v0: u8 = const {c}\n  return v0\n}}\n"
+        );
+        parse(&t)
+    };
+    assert!(m("255").is_ok());
+    assert!(m("256").is_err());
+    assert!(m("-1").is_err());
+}
+
+/// Bug: a sample's lowering, or this crate's statement of an op's meaning, differs
+/// from the hand-derived behaviour written beside the source.
+#[test]
+fn samples_behave_as_derived_by_hand() {
+    for (name, text) in SAMPLES {
+        let mut runs = 0;
+        let m = load(name, text);
+        for line in text.lines() {
+            let Some(run) = line.strip_prefix("; run:") else {
+                continue;
+            };
+            let run = run.split(';').next().unwrap().trim();
+            let (call, expected) = run.split_once("->").unwrap();
+            let (f, args) = call.trim().trim_end_matches(')').split_once('(').unwrap();
+            let f = FuncId(f.trim_start_matches('f').parse().unwrap());
+            let sig = &m.signatures[m.functions[f.index()].signature.index()];
+            let args: Vec<u64> = args
+                .split(',')
+                .filter(|a| !a.trim().is_empty())
+                .zip(&sig.params)
+                .map(|(a, p)| match p {
+                    Param::Value(t) => eval::scalar(*t, a.trim()),
+                    Param::Address(_) => panic!("by-address arguments are FORM v1"),
+                })
+                .collect();
+            let got = eval::run(&m, f, &args);
+            let want = match expected.trim() {
+                "fail" => eval::Outcome::Failed,
+                e => eval::Outcome::Returned(
+                    e.split(',')
+                        .zip(&sig.results)
+                        .map(|(v, t)| eval::scalar(*t, v.trim()))
+                        .collect(),
+                ),
+            };
+            assert_eq!(got, want, "{name}: {run}");
+            runs += 1;
+        }
+        assert!(runs > 0, "{name} has no run lines");
+    }
+}
+
+/// Bug: two instances of one generic share a link name (types or dictionaries left
+/// out of the digest, or the boundary between them not encoded).
+#[test]
+fn instance_identity_separates_types_and_dictionaries() {
+    let path = hirsel_core_ids::DefPath::from_full("p@0/m/f").unwrap();
+    let key = |types: &[&str], dicts: &[&str]| InstanceKey {
+        definition: path.clone(),
+        types: types.iter().map(|s| s.to_string()).collect(),
+        dictionaries: dicts.iter().map(|s| s.to_string()).collect(),
+    };
+    let keys = [
+        key(&["u32"], &[]),
+        key(&["u64"], &[]),
+        key(&["u32", "eq"], &[]),
+        key(&["u32"], &["eq"]),
+        key(&[], &["u32", "eq"]),
+    ];
+    for (i, a) in keys.iter().enumerate() {
+        for b in &keys[i + 1..] {
+            assert_ne!(a.digest(), b.digest(), "{a:?} and {b:?} collide");
+        }
+    }
+}
+
+/// Bug: a core crate links old semantic code (LIR, TIR, the old request sum,
+/// TypeInterner), so the old and new pipelines stop being separable at M3. Law:
+/// the normal-dependency closure of every `hirsel-core-*` crate stays inside the
+/// neutral crates below both pipelines.
+#[test]
+fn core_crates_depend_only_on_neutral_crates() {
+    const NEUTRAL: &[&str] = &[
+        "hirsel-core-ids",
+        "hirsel-core-layout",
+        "hirsel-core-ir",
+        "hirsel-intern",
+        "hirsel-guard",
+    ];
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let deps = |name: &str| -> Vec<String> {
+        let manifest = std::fs::read_to_string(crates.join(name).join("Cargo.toml")).unwrap();
+        let mut in_deps = false;
+        let mut out = Vec::new();
+        for line in manifest.lines() {
+            if line.starts_with('[') {
+                in_deps = line.trim() == "[dependencies]";
+            } else if in_deps && line.starts_with("hirsel-") {
+                out.push(line.split([' ', '=']).next().unwrap().to_owned());
+            }
+        }
+        out
+    };
+    let roots: Vec<String> = std::fs::read_dir(crates)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        // `hirsel-core-contract` is the old pipeline's contract crate, not a core crate.
+        .filter(|n| n.starts_with("hirsel-core-") && n != "hirsel-core-contract")
+        .filter(|n| crates.join(n).join("Cargo.toml").exists())
+        .collect();
+    assert!(roots.iter().any(|r| r == "hirsel-core-ir"));
+    let mut stack = roots.clone();
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(c) = stack.pop() {
+        if !seen.insert(c.clone()) {
+            continue;
+        }
+        for d in deps(&c) {
+            assert!(
+                NEUTRAL.contains(&d.as_str()),
+                "{c} depends on {d}, outside the neutral crates"
+            );
+            stack.push(d);
+        }
+    }
+}

@@ -1,0 +1,197 @@
+//! Declared shapes: what a type declaration says about its representation. The
+//! checker publishes one `Shape` per declared type; `compute` turns the table into
+//! recipes once. Shapes name other types by `TypeRef`, an index into the same table.
+
+/// Index of a declared type in its module's type table.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct TypeRef(pub u32);
+impl TypeRef {
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Index of a function in the module's function table (finalizers, glue).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct FuncRef(pub u32);
+
+/// A scalar as the language sees it (SEM-1, SEM-2): its logical width is its
+/// written width; `bool` is 1 byte and `char` 4 (MEM-26).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Scalar {
+    Bool,
+    Char,
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
+    F32,
+    F64,
+}
+impl Scalar {
+    pub const ALL: [Scalar; 12] = [
+        Scalar::Bool,
+        Scalar::Char,
+        Scalar::I8,
+        Scalar::I16,
+        Scalar::I32,
+        Scalar::I64,
+        Scalar::U8,
+        Scalar::U16,
+        Scalar::U32,
+        Scalar::U64,
+        Scalar::F32,
+        Scalar::F64,
+    ];
+    pub const fn size(self) -> u64 {
+        match self {
+            Scalar::Bool | Scalar::I8 | Scalar::U8 => 1,
+            Scalar::I16 | Scalar::U16 => 2,
+            Scalar::Char | Scalar::I32 | Scalar::U32 | Scalar::F32 => 4,
+            Scalar::I64 | Scalar::U64 | Scalar::F64 => 8,
+        }
+    }
+    pub const fn name(self) -> &'static str {
+        match self {
+            Scalar::Bool => "bool",
+            Scalar::Char => "char",
+            Scalar::I8 => "i8",
+            Scalar::I16 => "i16",
+            Scalar::I32 => "i32",
+            Scalar::I64 => "i64",
+            Scalar::U8 => "u8",
+            Scalar::U16 => "u16",
+            Scalar::U32 => "u32",
+            Scalar::U64 => "u64",
+            Scalar::F32 => "f32",
+            Scalar::F64 => "f64",
+        }
+    }
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.name() == name)
+    }
+}
+
+/// The width `W` of a compact declaration (MEM-9): the blob cap is `2^W - 1`
+/// bytes and every stored length, extent, offset and link uses `W` bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Width {
+    U16,
+    U32,
+    U64,
+}
+impl Width {
+    pub const fn bytes(self) -> u64 {
+        match self {
+            Width::U16 => 2,
+            Width::U32 => 4,
+            Width::U64 => 8,
+        }
+    }
+    /// The largest blob a compact declaration of this width admits.
+    pub const fn max_blob(self) -> u64 {
+        match self {
+            Width::U16 => u16::MAX as u64,
+            Width::U32 => u32::MAX as u64,
+            Width::U64 => u64::MAX,
+        }
+    }
+}
+
+/// A runtime-owned handle kind: an opaque pointer whose cleanup is a run-time call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Handle {
+    Task,
+    Sender,
+    Receiver,
+    /// An OS resource the run time closes (file, socket, lock); the capability
+    /// layer names which.
+    Os,
+}
+
+/// What a declaration says about representation (ruling 1; OWN-19, MEM-9).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Repr {
+    /// `type`: one owner, mutated in place, capacity-based (MEM-13).
+    Own,
+    /// `resource type`: own, cleaned exactly once, finalizer optional (FAIL-11).
+    Resource,
+    /// `stable type`: published in a region, immutable, natively laid out like own.
+    Stable,
+    /// `@compact(W) stable type`: one byte-aligned blob (MEM-9..12).
+    Compact(Width),
+    /// A scoped record (OWN-19): lives in a frame, never stored or returned.
+    Scoped,
+}
+
+/// The type of one field.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum FieldTy {
+    Scalar(Scalar),
+    /// The declared type stored by value (own/stable/scoped) or inline (compact).
+    Inline(TypeRef),
+    /// `Box[T]`: one own block.
+    Box(TypeRef),
+    /// `List[T]`, `String` (`Seq(u8)` of UTF-8), `Bytes` (`Seq(u8)`): ptr/len/cap.
+    Seq(Box<FieldTy>),
+    Rc(TypeRef),
+    Arc(TypeRef),
+    /// A locator of a published stable value of this type.
+    Stable(TypeRef),
+    Region,
+    /// A callable value: code pointer plus environment block (LANG-13).
+    Closure,
+    Handle(Handle),
+    // Compact-only field types (MEM-9..12).
+    Text,
+    FixedSpan(Box<FieldTy>),
+    SeqSpan(Box<FieldTy>),
+    IndexedSpan(Box<FieldTy>),
+    Link(TypeRef),
+    OptLink(TypeRef),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Field {
+    pub name: String,
+    pub ty: FieldTy,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Case {
+    pub name: String,
+    pub fields: Vec<Field>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum Body {
+    Record(Vec<Field>),
+    /// Cases in declaration order; the tag of case `i` is `i`.
+    Variant(Vec<Case>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Shape {
+    pub name: String,
+    pub repr: Repr,
+    pub body: Body,
+    /// A resource's finalizer (FAIL-11), called with the value's address.
+    pub finalizer: Option<FuncRef>,
+    /// `grant bytes n` (MEM-29).
+    pub grant: u64,
+}
+
+impl Shape {
+    /// The fields of case `case`, or of the record when `case` is `None`.
+    pub fn fields(&self, case: Option<u32>) -> Option<&[Field]> {
+        match (&self.body, case) {
+            (Body::Record(fields), None) => Some(fields),
+            (Body::Variant(cases), Some(c)) => cases.get(c as usize).map(|c| &c.fields[..]),
+            _ => None,
+        }
+    }
+}

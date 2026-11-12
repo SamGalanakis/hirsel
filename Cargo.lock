@@ -643,8 +643,8 @@ dependencies = [
 name = "hirsel-codec"
 version = "0.1.0"
 dependencies = [
+ "hirsel-core-ids",
  "hirsel-guard",
- "hirsel-syntax",
 ]
 
 [[package]]
@@ -692,6 +692,32 @@ dependencies = [
  "hirsel-codec",
  "hirsel-guard",
  "hirsel-syntax",
+]
+
+[[package]]
+name = "hirsel-core-ids"
+version = "0.1.0"
+dependencies = [
+ "hirsel-guard",
+ "hirsel-intern",
+ "serde",
+ "sha2",
+]
+
+[[package]]
+name = "hirsel-core-ir"
+version = "0.1.0"
+dependencies = [
+ "hirsel-core-ids",
+ "hirsel-core-layout",
+ "hirsel-guard",
+]
+
+[[package]]
+name = "hirsel-core-layout"
+version = "0.1.0"
+dependencies = [
+ "hirsel-guard",
 ]
 
 [[package]]
@@ -1780,12 +1806,12 @@ dependencies = [
 name = "hirsel-syntax"
 version = "0.1.0"
 dependencies = [
+ "hirsel-core-ids",
  "hirsel-guard",
  "hirsel-intern",
  "hirsel-span",
  "hirsel-syntax",
  "serde",
- "sha2",
 ]
 
 [[package]]

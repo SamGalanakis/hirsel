@@ -1,0 +1,14 @@
+[package]
+name = "hirsel-core-ids"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+hirsel-intern = { path = "../hirsel-intern" }
+sha2 = "0.10"
+
+[dev-dependencies]
+hirsel-guard = { path = "../hirsel-guard" }

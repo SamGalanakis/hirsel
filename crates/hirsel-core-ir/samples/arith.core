@@ -1,0 +1,98 @@
+; FORM v0 sample, family: scalar arithmetic (Const, Unary, Binary, IntArith, MulAdd, ScalarUnary).
+;
+; Source (package samples@0, module arith), one item per line:
+;   i0  fn hyp(a: f64, b: f64) -> f64 { float.sqrt(float.mul_add(a, a, b * b)) }
+;   i1  fn add(x: i32, y: i32) -> i32 { x + y }
+;   i2  fn wrap(x: u8) -> u8 { int.wrapping_add(x, 100) }
+;   i3  fn sat(x: u8) -> u8 { int.saturating_add(x, 100) }
+;   i4  fn overflows(x: u8) -> bool { option.is_none(int.checked_add(x, 100)) }
+;   i5  fn lz(x: u32) -> u32 { int.leading_zeros(x) }
+;   i6  fn neg(x: i8) -> i8 { -x }
+;
+; Behaviour, derived by hand from SEM-1/SEM-2 (`fail` = the operation failed: control
+; entered its failure block; what that block does is FORM v1, so here it returns 0):
+; run: f0(3, 4) -> 5                 ; 3*3 + 4*4 = 25, rounded once; sqrt 25 = 5
+; run: f0(1e308, 1e308) -> inf       ; b*b overflows to inf; sqrt inf = inf
+; run: f1(2, 3) -> 5
+; run: f1(-5, 5) -> 0
+; run: f1(2147483647, 1) -> fail     ; i32 overflow (SEM-1)
+; run: f1(-2147483648, -1) -> fail
+; run: f2(200) -> 44                 ; 300 mod 256
+; run: f2(1) -> 101
+; run: f3(200) -> 255                ; saturates at u8 MAX
+; run: f3(154) -> 254
+; run: f4(155) -> false              ; 255 fits
+; run: f4(156) -> true               ; 256 does not
+; run: f5(0) -> 32                   ; the width for zero
+; run: f5(1) -> 31
+; run: f5(4294967295) -> 0
+; run: f6(5) -> -5
+; run: f6(-127) -> 127
+; run: f6(-128) -> fail              ; -(-128) does not fit i8
+core v0
+item i0 = samples@0/arith/hyp
+item i1 = samples@0/arith/add
+item i2 = samples@0/arith/wrap
+item i3 = samples@0/arith/sat
+item i4 = samples@0/arith/overflows
+item i5 = samples@0/arith/lz
+item i6 = samples@0/arith/neg
+sig g0 = (f64, f64) -> (f64)
+sig g1 = (i32, i32) -> (i32)
+sig g2 = (u8) -> (u8)
+sig g3 = (u8) -> (bool)
+sig g4 = (u32) -> (u32)
+sig g5 = (i8) -> (i8)
+inst n0 = samples@0/arith/hyp [] []
+inst n1 = samples@0/arith/add [] []
+inst n2 = samples@0/arith/wrap [] []
+inst n3 = samples@0/arith/sat [] []
+inst n4 = samples@0/arith/overflows [] []
+inst n5 = samples@0/arith/lz [] []
+inst n6 = samples@0/arith/neg [] []
+fn f0 = n0 g0 {
+b0(v0: f64, v1: f64):
+  v2: f64 = mul v1, v1                 ; float ops cannot fail: no failure block
+  v3: f64 = mul_add v0, v0, v2
+  v4: f64 = sqrt v3
+  return v4
+}
+fn f1 = n1 g1 {
+b0(v0: i32, v1: i32):
+  v2: i32 = add v0, v1 fail b1 at i1 32..37    ; `x + y`, offsets relative to the item
+  return v2 at i1 0..39
+b1:                                    ; failure block: no parameters in v0
+  v3: i32 = const 0
+  return v3
+}
+fn f2 = n2 g2 {
+b0(v0: u8):
+  v1: u8 = const 100
+  v2: u8 = wrapping_add v0, v1
+  return v2
+}
+fn f3 = n3 g2 {
+b0(v0: u8):
+  v1: u8 = const 100
+  v2: u8 = saturating_add v0, v1
+  return v2
+}
+fn f4 = n4 g3 {
+b0(v0: u8):
+  v1: u8 = const 100
+  v2: u8, v3: bool = checked_add v0, v1  ; the flag is the whole Option test
+  return v3
+}
+fn f5 = n5 g4 {
+b0(v0: u32):
+  v1: u32 = leading_zeros v0
+  return v1
+}
+fn f6 = n6 g5 {
+b0(v0: i8):
+  v1: i8 = neg v0 fail b1 at i6 22..24
+  return v1
+b1:
+  v2: i8 = const 0
+  return v2
+}

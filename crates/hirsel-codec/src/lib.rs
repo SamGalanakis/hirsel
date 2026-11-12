@@ -17,7 +17,7 @@
 #[cfg(test)]
 hirsel_guard::install!();
 
-use hirsel_syntax::{ContentHash, DefPath, ItemPath, PackageId};
+use hirsel_core_ids::{ContentHash, DefPath, ItemPath, PackageId};
 use std::fmt::Write as _;
 use std::marker::PhantomData;
 

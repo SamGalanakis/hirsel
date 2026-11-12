@@ -5,6 +5,7 @@
     "hirsel-artifact-store/test-support": "test-only",
     "hirsel-authority/testing": "test-only",
     "hirsel-cli/native-tsan": "test-only",
+    "hirsel-core-ir/wf": "test-only",
     "hirsel-cranelift/native-tsan": "test-only",
     "hirsel-driver/native-tsan": "test-only",
     "hirsel-engine-admission/test-alloc": "test-only",

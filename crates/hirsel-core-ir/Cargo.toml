@@ -1,0 +1,17 @@
+[package]
+name = "hirsel-core-ir"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+# The structural well-formedness function, for tests of this crate and of its producers.
+wf = []
+
+[dependencies]
+hirsel-core-ids = { path = "../hirsel-core-ids" }
+hirsel-core-layout = { path = "../hirsel-core-layout" }
+
+[dev-dependencies]
+hirsel-guard = { path = "../hirsel-guard" }

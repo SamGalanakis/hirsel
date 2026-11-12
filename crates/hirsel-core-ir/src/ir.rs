@@ -1,0 +1,561 @@
+//! The CoreIR data types. Extracted from `hirsel-lir/src/ir.rs` (u32 ID arenas,
+//! typed pools, immutable values plus mutable slots, block parameters, edges with
+//! arguments, source anchors); WHY-NEW-FORM.md lists, per LIR opcode, what was kept,
+//! rewritten or deleted.
+//!
+//! Values are defined exactly once and hold a scalar or a pointer; aggregates live in
+//! slots or behind pointers and are reached through addresses. Slots are ordinary
+//! memory: a read names no "reaching version", so a producer need not build SSA for
+//! slots or prove liveness before emitting.
+
+use hirsel_core_ids::{ContentHash, DefPath};
+pub use hirsel_core_layout::Scalar;
+use std::marker::PhantomData;
+
+macro_rules! ids { ($($(#[$doc:meta])* $name:ident),* $(,)?) => {$(
+    $(#[$doc])*
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+    pub struct $name(pub u32);
+    impl $name {
+        pub const fn index(self) -> usize {
+            self.0 as usize
+        }
+    }
+)*}; }
+ids!(
+    /// An immutable value of one body.
+    ValueId,
+    /// A mutable storage slot of one body (a local, a temporary, a destination).
+    SlotId,
+    /// A computed address: base plus projection steps.
+    AddressId,
+    BlockId,
+    /// A control edge with its block arguments, in `Body::edges`.
+    EdgeId,
+    /// A call site in `Body::calls`.
+    CallId,
+    /// A function (defined or external) in `Module::functions`.
+    FuncId,
+    /// Read-only static data in `Module::statics`.
+    StaticId,
+    /// A signature row in `Module::signatures`.
+    SigId,
+    /// An instance row in `Module::instances`.
+    InstanceId,
+    /// A source item in `Module::items` (debug identity).
+    ItemId,
+    /// A declared type in `Module::types`; its layout recipe is FORM v1.
+    TypeId,
+);
+
+/// A typed range in one of a body's pools (LIR `PoolRange`, unchanged).
+pub struct PoolRange<T> {
+    pub start: u32,
+    pub len: u32,
+    _element: PhantomData<fn() -> T>,
+}
+impl<T> PoolRange<T> {
+    pub const EMPTY: Self = Self::new(0, 0);
+    pub const fn new(start: u32, len: u32) -> Self {
+        Self {
+            start,
+            len,
+            _element: PhantomData,
+        }
+    }
+    /// The range's elements, or None if it reaches outside `pool`.
+    pub fn get<'a>(&self, pool: &'a [T]) -> Option<&'a [T]> {
+        let start = self.start as usize;
+        pool.get(start..start.checked_add(self.len as usize)?)
+    }
+    /// Append `items` to `pool` and return their range.
+    pub fn push(pool: &mut Vec<T>, items: impl IntoIterator<Item = T>) -> Self {
+        let start = pool.len() as u32;
+        pool.extend(items);
+        Self::new(start, pool.len() as u32 - start)
+    }
+}
+impl<T> Clone for PoolRange<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for PoolRange<T> {}
+impl<T> PartialEq for PoolRange<T> {
+    fn eq(&self, other: &Self) -> bool {
+        (self.start, self.len) == (other.start, other.len)
+    }
+}
+impl<T> Eq for PoolRange<T> {}
+impl<T> std::hash::Hash for PoolRange<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (self.start, self.len).hash(state);
+    }
+}
+impl<T> std::fmt::Debug for PoolRange<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}..+{}", self.start, self.len)
+    }
+}
+
+/// The type of a value: a scalar or an opaque target pointer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Ty {
+    Scalar(Scalar),
+    Ptr,
+}
+impl Ty {
+    pub fn int(self) -> Option<(bool, u32)> {
+        match self {
+            Ty::Scalar(s) => match s {
+                Scalar::I8 | Scalar::I16 | Scalar::I32 | Scalar::I64 => {
+                    Some((true, s.size() as u32 * 8))
+                }
+                Scalar::U8 | Scalar::U16 | Scalar::U32 | Scalar::U64 => {
+                    Some((false, s.size() as u32 * 8))
+                }
+                _ => None,
+            },
+            Ty::Ptr => None,
+        }
+    }
+    pub fn is_float(self) -> bool {
+        matches!(self, Ty::Scalar(Scalar::F32 | Scalar::F64))
+    }
+}
+
+/// The type of a slot or of the place an address names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum PlaceTy {
+    Value(Ty),
+    /// A declared type laid out by its recipe (FORM v1).
+    Declared(TypeId),
+}
+
+/// One projection step; indices are already-evaluated values (LIR `ProjectionStep`
+/// without `Slot` and `FlatAt`, which were library-unit and old-flat steps).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Step {
+    /// Follow the pointer stored at this place.
+    Deref,
+    Field(u32),
+    /// A field of one case of a variant; the tag test precedes it (FORM v1).
+    CaseField {
+        case: u32,
+        field: u32,
+    },
+    Index(ValueId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum AddressBase {
+    Slot(SlotId),
+    /// The place a pointer value points at.
+    Value(ValueId),
+    Address(AddressId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct AddressInfo {
+    pub base: AddressBase,
+    pub steps: PoolRange<Step>,
+    pub ty: PlaceTy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum UnaryOp {
+    /// Integer negation fails on signed MIN and is refused on unsigned kinds;
+    /// float negation flips the sign bit.
+    Neg,
+    /// Boolean not.
+    Not,
+    BitNot,
+}
+
+/// Scalar binary operations (LIR `BinaryOp` without the comparisons, which are
+/// `CompareOp`). Integer `Add`..`Shr`, `DivFloor`, `Mod` and `DivExact` fail on an
+/// out-of-range result, a zero divisor, signed MIN / -1, a shift count outside
+/// `0..width` and (DivExact) a nonzero remainder (SEM-1); float forms are exact IEEE.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum BinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Shl,
+    Shr,
+    BitAnd,
+    BitOr,
+    BitXor,
+    DivFloor,
+    Mod,
+    DivExact,
+    /// IEEE 754-2019 minimum/maximum/minimumNumber/maximumNumber on floats;
+    /// the ordinary minimum/maximum on integers.
+    Min,
+    Max,
+    MinNumber,
+    MaxNumber,
+}
+impl BinaryOp {
+    /// Whether the op on operands of `ty` can fail and so names a failure block.
+    pub fn can_fail(self, ty: Ty) -> bool {
+        ty.int().is_some()
+            && matches!(
+                self,
+                Self::Add
+                    | Self::Sub
+                    | Self::Mul
+                    | Self::Div
+                    | Self::Rem
+                    | Self::Shl
+                    | Self::Shr
+                    | Self::DivFloor
+                    | Self::Mod
+                    | Self::DivExact
+            )
+    }
+}
+
+/// Comparison of two scalars of one kind, or two pointers (Eq/Ne only). Floats
+/// compare by IEEE: an unordered pair makes every op but `Ne` false.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum CompareOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+/// LIR `ConvertMode`, unchanged; see its documentation for each mode's exact result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum ConvertMode {
+    Widen,
+    Truncate,
+    /// `flag` (bool) is true exactly when the operand is representable.
+    TryNarrow,
+    /// `flag` (i32): 0 fits, 1 NaN or infinity, 2 out of range; result saturated.
+    FloatToI32,
+    IntToFloat,
+    Reinterpret,
+    FloatResize,
+}
+
+/// Overflow behaviour of `IntArith` (LIR `ArithMode`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum ArithMode {
+    Wrapping,
+    Saturating,
+    /// The wrapped result and a bool flag, true exactly on overflow.
+    Checked,
+}
+
+/// The ops `IntArith` admits (LIR used `BinaryOp` and a validator rule).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+}
+
+/// LIR `ScalarUnaryOp`, unchanged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum ScalarUnaryOp {
+    Sqrt,
+    Floor,
+    Ceil,
+    Trunc,
+    Round,
+    Abs,
+    LeadingZeros,
+    TrailingZeros,
+    CountOnes,
+    SwapBytes,
+    ReverseBits,
+}
+impl ScalarUnaryOp {
+    pub const fn is_float(self) -> bool {
+        matches!(
+            self,
+            Self::Sqrt | Self::Floor | Self::Ceil | Self::Trunc | Self::Round | Self::Abs
+        )
+    }
+}
+
+/// How a read uses its place.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum ReadMode {
+    /// Plain bits; the place is unchanged.
+    Bits,
+    /// Move out: the place is uninitialized afterwards (its owner moved).
+    Take,
+}
+
+/// An instruction. A `fail` block is the failure successor of an operation that
+/// can fail; the block takes no parameters in FORM v0 and what it does (cause
+/// storage, cleanup, propagation) is FORM v1.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum Inst {
+    /// The bits of a scalar of the result's type (floats by their IEEE bits,
+    /// signed integers two's complement in the low bits, bool 0 or 1, char its
+    /// scalar value).
+    Const {
+        result: ValueId,
+        bits: u64,
+    },
+    /// A pointer to read-only static data.
+    ReadStatic {
+        result: ValueId,
+        data: StaticId,
+    },
+    /// A function's code pointer.
+    FunctionRef {
+        result: ValueId,
+        function: FuncId,
+    },
+    Unary {
+        result: ValueId,
+        op: UnaryOp,
+        operand: ValueId,
+        fail: Option<BlockId>,
+    },
+    Binary {
+        result: ValueId,
+        op: BinaryOp,
+        left: ValueId,
+        right: ValueId,
+        fail: Option<BlockId>,
+    },
+    Compare {
+        result: ValueId,
+        op: CompareOp,
+        left: ValueId,
+        right: ValueId,
+    },
+    Convert {
+        result: ValueId,
+        flag: Option<ValueId>,
+        operand: ValueId,
+        mode: ConvertMode,
+    },
+    IntArith {
+        result: ValueId,
+        flag: Option<ValueId>,
+        op: ArithOp,
+        mode: ArithMode,
+        left: ValueId,
+        right: ValueId,
+    },
+    /// `left * right + addend`, rounded once.
+    MulAdd {
+        result: ValueId,
+        left: ValueId,
+        right: ValueId,
+        addend: ValueId,
+    },
+    ScalarUnary {
+        result: ValueId,
+        op: ScalarUnaryOp,
+        operand: ValueId,
+    },
+    /// Evaluate an address: index bounds checks run here (failing to `fail`).
+    Address {
+        address: AddressId,
+        fail: Option<BlockId>,
+    },
+    Read {
+        result: ValueId,
+        address: AddressId,
+        mode: ReadMode,
+    },
+    Store {
+        address: AddressId,
+        value: ValueId,
+    },
+    /// The slot's storage begins; its content is uninitialized.
+    StorageLive {
+        slot: SlotId,
+    },
+    StorageDead {
+        slot: SlotId,
+    },
+    /// Set or clear bit `field` of an initialization mask (an integer value).
+    UpdateMask {
+        result: ValueId,
+        mask: ValueId,
+        field: u32,
+        initialized: bool,
+    },
+    Call {
+        call: CallId,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Callee {
+    Direct(FuncId),
+    /// A code pointer value, called with the call site's signature.
+    Indirect(ValueId),
+}
+
+/// A call argument: a value, or the address of a place passed by address.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Arg {
+    Value(ValueId),
+    Address(AddressId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct CallSite {
+    pub callee: Callee,
+    pub signature: SigId,
+    pub args: PoolRange<Arg>,
+    pub results: PoolRange<ValueId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Edge {
+    pub target: BlockId,
+    pub args: PoolRange<ValueId>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct SwitchArm {
+    pub value: u64,
+    pub edge: EdgeId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum Terminator {
+    Jump(EdgeId),
+    Branch {
+        condition: ValueId,
+        yes: EdgeId,
+        no: EdgeId,
+    },
+    /// Arms in order, values distinct; `otherwise` takes every other value.
+    Switch {
+        value: ValueId,
+        arms: PoolRange<SwitchArm>,
+        otherwise: EdgeId,
+    },
+    /// The signature's results, in order.
+    Return(PoolRange<ValueId>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Block {
+    pub params: PoolRange<ValueId>,
+    pub insts: PoolRange<Inst>,
+    /// The terminator's source, None for generated code.
+    pub anchor: Option<Anchor>,
+}
+
+/// Where code came from: a byte range relative to the start of an item, so an
+/// item moved in its file keeps its body; the driver rebinds items to files at
+/// link time (as `hirsel-lir/src/debug.rs` already persists).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct Anchor {
+    pub item: ItemId,
+    pub start: u32,
+    pub end: u32,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub struct Pools {
+    pub values: Vec<ValueId>,
+    pub steps: Vec<Step>,
+    pub args: Vec<Arg>,
+    pub arms: Vec<SwitchArm>,
+}
+
+/// One function body. Block 0 is the entry; its parameters are the signature's
+/// parameters (a by-address parameter arrives as a pointer value).
+#[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub struct Body {
+    pub values: Vec<Ty>,
+    pub slots: Vec<PlaceTy>,
+    pub addresses: Vec<AddressInfo>,
+    pub blocks: Vec<Block>,
+    /// Parallel to `blocks`.
+    pub terminators: Vec<Terminator>,
+    pub insts: Vec<Inst>,
+    /// Parallel to `insts`; None for generated code (no source line).
+    pub inst_anchors: Vec<Option<Anchor>>,
+    pub calls: Vec<CallSite>,
+    pub edges: Vec<Edge>,
+    pub pools: Pools,
+}
+
+/// How a parameter is passed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Param {
+    Value(Ty),
+    /// A pointer to a place of the declared type, owned by the caller.
+    Address(TypeId),
+}
+
+/// An instantiated signature. `dest` is the declared type of a result returned
+/// through a caller-provided destination, passed as a leading pointer parameter.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Signature {
+    pub params: Vec<Param>,
+    pub results: Vec<Ty>,
+    pub dest: Option<TypeId>,
+}
+
+/// The identity of one instantiation (see the crate docs, "Instances").
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct InstanceKey {
+    pub definition: DefPath,
+    /// Canonical text of each closed type argument, in parameter order.
+    pub types: Vec<String>,
+    /// Canonical text of the implementation chosen for each constraint, in order.
+    pub dictionaries: Vec<String>,
+}
+impl InstanceKey {
+    /// The content identity the link name and caches use.
+    pub fn digest(&self) -> ContentHash {
+        let definition = self.definition.to_string();
+        let counts =
+            [self.types.len() as u64, self.dictionaries.len() as u64].map(u64::to_le_bytes);
+        let parts = [definition.as_bytes(), &counts[0], &counts[1]]
+            .into_iter()
+            .chain(
+                self.types
+                    .iter()
+                    .chain(&self.dictionaries)
+                    .map(String::as_bytes),
+            );
+        ContentHash::of_parts("hirsel.core-instance.v0", parts)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Function {
+    pub instance: InstanceId,
+    pub signature: SigId,
+    /// None for a function defined in another module (linked by name).
+    pub body: Option<Body>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Static {
+    pub align: u32,
+    pub bytes: Vec<u8>,
+}
+
+/// One unit of emission.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub struct Module {
+    pub items: Vec<DefPath>,
+    /// Canonical text of each declared type; recipes join on this table (v1).
+    pub types: Vec<String>,
+    pub statics: Vec<Static>,
+    pub signatures: Vec<Signature>,
+    pub instances: Vec<InstanceKey>,
+    pub functions: Vec<Function>,
+}

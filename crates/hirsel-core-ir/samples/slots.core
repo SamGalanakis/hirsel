@@ -1,0 +1,82 @@
+; FORM v0 sample, family: storage (StorageLive, StorageDead, Address, Read, Store, UpdateMask).
+;
+; Source (package samples@0, module slots):
+;   i0  fn collatz(n: u64) -> u32 {
+;         let mut x = n; let mut steps: u32 = 0;
+;         while x != 1 { if x % 2 == 0 { x = x / 2 } else { x = 3 * x + 1 }; steps += 1 };
+;         steps
+;       }
+; f1 has no source: it is the kind of initialization-mask update cleanup code uses
+; (bit k = field k initialized).
+;
+; A producer that does not build SSA keeps `x` and `steps` in slots; addresses are
+; evaluated once and used from any block. Reads name no reaching version.
+;
+; Behaviour, derived by hand:
+; run: f0(1) -> 0
+; run: f0(6) -> 8                    ; 6 3 10 5 16 8 4 2 1
+; run: f0(27) -> 111                 ; the well-known 111-step orbit of 27
+; run: f1(1) -> 4                    ; 0b001: set bit 2 -> 0b101, clear bit 0 -> 0b100
+; run: f1(7) -> 6                    ; 0b111 -> 0b111 -> 0b110
+core v0
+item i0 = samples@0/slots/collatz
+sig g0 = (u64) -> (u32)
+sig g1 = (u8) -> (u8)
+inst n0 = samples@0/slots/collatz [] []
+inst n1 = samples@0/slots/init_mask [] []
+fn f0 = n0 g0 {
+  slot s0 = u64                        ; x
+  slot s1 = u32                        ; steps
+  addr a0 = s0 : u64
+  addr a1 = s1 : u32
+b0(v0: u64):
+  live s0
+  live s1
+  address a0
+  address a1
+  store a0, v0
+  v1: u32 = const 0
+  store a1, v1
+  v2: u64 = const 1
+  v3: u64 = const 2
+  v4: u64 = const 3
+  v5: u64 = const 0
+  v6: u32 = const 1
+  jump b1
+b1:
+  v7: u64 = read a0
+  v8: bool = ne v7, v2
+  branch v8, b2, b5
+b2:
+  v9: u64 = rem v7, v3 fail b6
+  v10: bool = eq v9, v5
+  branch v10, b3, b4
+b3:
+  v11: u64 = div v7, v3 fail b6
+  store a0, v11
+  jump b7
+b4:
+  v12: u64 = mul v4, v7 fail b6
+  v13: u64 = add v12, v2 fail b6
+  store a0, v13
+  jump b7
+b5:
+  v14: u32 = read a1
+  dead s1
+  dead s0
+  return v14
+b6:
+  v15: u32 = const 0
+  return v15
+b7:
+  v16: u32 = read a1
+  v17: u32 = add v16, v6 fail b6
+  store a1, v17
+  jump b1
+}
+fn f1 = n1 g1 {
+b0(v0: u8):
+  v1: u8 = set_mask v0, 2
+  v2: u8 = clear_mask v1, 0
+  return v2
+}

@@ -1,0 +1,195 @@
+type Slot {
+    key: Inline[u8, 32],
+    key_len: u32,
+    payload: Inline[u8, 128],
+    len: u32,
+    prev: u32,
+    next: u32,
+    generation: u64
+}
+
+type Cache {
+    slots: List[Slot],
+    index: Map[String, u32],
+    head: u32,
+    tail: u32,
+    first: Option[(u32, u64)]
+}
+
+const NONE: u32 = 4294967295
+
+fn empty() -> Slot {
+    Slot(key:[0; 32], key_len: 0, payload:[0; 128], len: 0, prev: NONE, next: NONE, generation: 0)
+}
+
+fn key(c: Cache, h: u32) -> Result[String, m1.support.Error] {
+    let i: u64 = int.widen(h)
+    let mut payload_bytes: Bytes = m1.support.mem(list.with_capacity(int.widen(c.slots[i].key_len)))?
+    let mut j: u64 = 0
+    while j < int.widen(c.slots[i].key_len) {
+        m1.support.push(mut payload_bytes, c.slots[i].key[j])?;
+        j += 1
+    }
+    Ok(result.unwrap(string.from_utf8(take payload_bytes)))
+}
+
+fn touch(mut c: Cache, h: u32) {
+    if c.head == h {
+        return
+    }
+    let i: u64 = int.widen(h)
+    let p = c.slots[i].prev
+    let n = c.slots[i].next
+    if p != NONE {
+        c.slots[int.widen(p)].next = n
+    }
+    if n != NONE {
+        c.slots[int.widen(n)].prev = p
+    }
+    if c.tail == h {
+        c.tail = p
+    }
+    c.slots[i].prev = NONE
+    c.slots[i].next = c.head
+    if c.head != NONE {
+        c.slots[int.widen(c.head)].prev = h
+    }
+    c.head = h
+    if c.tail == NONE {
+        c.tail = h
+    }
+}
+
+fn put(mut c: Cache, name: String, value: String) -> Result[bool, m1.support.Error] {
+    if string.byte_len(name) > 32 || string.byte_len(value) > 128 {
+        return Error(m1.support.error("Parse@cache-op"))
+    }
+    let mut staged = empty()
+    let mut j: u64 = 0
+    for b in string.as_bytes(name) {
+        staged.key[j] = b;
+        j += 1
+    }
+    staged.key_len = int.narrow(j)
+    j = 0
+    for b in string.as_bytes(value) {
+        staged.payload[j] = b;
+        j += 1
+    }
+    staged.len = int.narrow(j)
+    let existing: Option[u32] = match map.get(c.index, name) {
+        Some(h) => Some(h),
+        None => None
+    }
+    if let Some(h) = existing {
+        let i: u64 = int.widen(h)
+        c.slots[i].payload = staged.payload
+        c.slots[i].len = staged.len
+        touch(mut c, h)
+        return Ok(false)
+    }
+    let owned = m1.support.mem(string.from(name))?
+    let evicted = list.len(c.slots) == 64
+    let h: u32 = if evicted {
+        let h = c.tail
+        let old_key = key(c, h)?
+        let _ = map.remove(mut c.index, old_key)
+        let i: u64 = int.widen(h)
+        staged.prev = c.slots[i].prev
+        staged.next = c.slots[i].next
+        staged.generation = c.slots[i].generation + 1
+        let _ = list.set(mut c.slots, i, staged)
+        h
+    } else {
+        let h: u32 = int.narrow(list.len(c.slots))
+        m1.support.push(mut c.slots, staged)?
+        h
+    }
+    m1.support.insert(mut c.index, take owned, h)?
+    touch(mut c, h)
+    if let None = c.first {
+        c.first = Some((h, c.slots[int.widen(h)].generation))
+    }
+    Ok(evicted)
+}
+
+fn operations(mut c: Cache, input: String, variant: String, mut hits: u64, mut checksum: u64, mut evictions: u64) -> Result[(), m1.support.Error] {
+    let mut at: u64 = 0
+    let mut puts: u64 = 0
+    while at < string.byte_len(input) {
+        let row = m1.support.line(input, mut at)
+        if let Some(rest) = string.strip_prefix(row, "P ") {
+            let Some((name, value)) = string.split_once(rest, " ") else {
+                return Error(m1.support.error("Parse@cache-op"))
+            }
+            puts += 1
+            m1.support.admission(variant, m1.support.name("put", puts, ".payload")?, 0)?
+            if put(mut c, name, value)? {
+                evictions += 1
+            }
+        } else if let Some(name) = string.strip_prefix(row, "G ") {
+            let handle: Option[u32] = match map.get(c.index, name) {
+                Some(h) => Some(h),
+                None => None
+            }
+            if let Some(h) = handle {
+                let i: u64 = int.widen(h)
+                let mut value: Bytes = m1.support.mem(list.with_capacity(int.widen(c.slots[i].len)))?
+                let mut j: u64 = 0
+                while j < int.widen(c.slots[i].len) {
+                    m1.support.push(mut value, c.slots[i].payload[j])?;
+                    j += 1
+                }
+                touch(mut c, h)
+                hits += 1
+                checksum += list.sum_bytes(value)
+            }
+        } else if row == "S" {
+            if let Some((h, generation)) = c.first {
+                if c.slots[int.widen(h)].generation != generation {
+                    return Error(m1.support.error("StaleHandle@first-entry"))
+                }
+            }
+        } else {
+            return Error(m1.support.error("Parse@cache-op"))
+        }
+    }
+    Ok(())
+}
+
+fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> Result[(), m1.support.Error] waits {
+    let owner = m1.support.marker(tx, "cache")?
+    let mut c = Cache(slots: m1.support.mem(list.with_capacity(64))?, index: map.new(), head: NONE, tail: NONE, first: None)
+    let mut hits: u64 = 0
+    let mut checksum: u64 = 0
+    let mut evictions: u64 = 0
+    let outcome = operations(mut c, input, variant, mut hits, mut checksum, mut evictions)
+    let mut rendered = string.new()
+    m1.support.add(mut rendered, "hits=")?
+    m1.support.num(mut rendered, hits)?
+    m1.support.add(mut rendered, " sum=")?
+    m1.support.num(mut rendered, checksum)?
+    m1.support.add(mut rendered, " evictions=")?
+    m1.support.num(mut rendered, evictions)?
+    m1.support.add(mut rendered, "\norder=")?
+    let mut p = c.head
+    let mut first = true
+    while p != NONE {
+        if !first {
+            m1.support.add(mut rendered, ",")?
+        }
+        first = false
+        m1.support.add(mut rendered, key(c, p)?)?
+        p = c.slots[int.widen(p)].next
+    }
+    m1.support.add(mut rendered, "\n")?
+    m1.support.put(out, rendered)?
+    outcome
+}
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
+    let input = m1.support.input(d, argv)?
+    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(2))?
+    let outcome = run(out, input, m1.support.case_variant(argv), take tx)
+    m1.support.finish(out, take rx, take outcome)
+}

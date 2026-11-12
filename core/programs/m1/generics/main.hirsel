@@ -1,0 +1,78 @@
+fn mapped[T, U](xs: List[T], f: scoped fn(T) -> Result[U, m1.support.Error]) -> Result[List[U], m1.support.Error] {
+    let mut ys: List[U] = m1.support.mem(list.with_capacity(list.len(xs)))?
+    for x in xs {
+        m1.support.push(mut ys, f(x)?)?
+    }
+    Ok(take ys)
+}
+
+fn count_if[T](xs: List[T], f: scoped fn(T) -> bool) -> u64 {
+    let mut n: u64 = 0
+    for x in xs {
+        if f(x) {
+            n += 1
+        }
+    }
+    n
+}
+
+fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> Result[(), m1.support.Error] waits {
+    let xs_owner = m1.support.marker(tx, "list")?
+    let mut xs: List[String] = list.new()
+    let mut at: u64 = 0
+    while at < string.byte_len(input) {
+        let w = m1.support.mem(string.from(m1.support.line(input, mut at)))?
+        m1.support.push(mut xs, take w)?
+    }
+    let mapped_owner = m1.support.marker(tx, "mapped")?
+    let mut position: u64 = 0
+    let ys = mapped(xs, fn(s: String) -> Result[String, m1.support.Error] {
+        position += 1
+        let site = m1.support.name("callback", position, ".string")?
+        m1.support.admission(variant, site, string.byte_len(s) + 1)?
+        if s == "!error" {
+            return Error(m1.support.error(m1.support.name("Callback@", position, "")?))
+        }
+        let mut t = m1.support.mem(string.from(s))?
+        m1.support.add(mut t, "!")?
+        Ok(take t)
+    })?
+    let map_owner = m1.support.marker(tx, "map")?
+    let mut counts: Map[String, u64] = map.new()
+    let mut i: u64 = 0
+    let mut total: u64 = 0
+    for w in ys {
+        i += 1
+        total += string.byte_len(w)
+        let site = m1.support.name("tally", i, ".key")?
+        m1.support.admission(variant, site, string.byte_len(w))?
+        let n = map.get_or(counts, w, 0)
+        if n == 0 {
+            m1.support.insert(mut counts, m1.support.mem(string.from(w))?, 1)?
+        } else {
+            let _ = map.set(mut counts, w, n + 1)
+        }
+    }
+    let mut rendered = string.new()
+    m1.support.add(mut rendered, "long=")?
+    m1.support.num(mut rendered, count_if(ys, fn(s: String) -> bool {
+        string.byte_len(s) >= 6
+    }))?
+    m1.support.add(mut rendered, " bytes=")?
+    m1.support.num(mut rendered, total)?
+    m1.support.add(mut rendered, "\n")?
+    for (k, n) in counts {
+        m1.support.add(mut rendered, k)?
+        m1.support.add(mut rendered, "=")?
+        m1.support.num(mut rendered, n)?
+        m1.support.add(mut rendered, "\n")?
+    }
+    m1.support.put(out, rendered)
+}
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
+    let input = m1.support.input(d, argv)?
+    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(6))?
+    let outcome = run(out, input, m1.support.case_variant(argv), take tx)
+    m1.support.finish(out, take rx, take outcome)
+}

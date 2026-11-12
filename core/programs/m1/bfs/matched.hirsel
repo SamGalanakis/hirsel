@@ -1,0 +1,128 @@
+fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> Result[(), m1.support.Error] waits {
+    let mut at: u64 = 0
+    let header = m1.support.line(input, mut at)
+    let Some((ns, rest)) = string.split_once(header, " ") else {
+        return Error(m1.support.error("Parse@graph"))
+    }
+    let Some((fs, ts)) = string.split_once(rest, " ") else {
+        return Error(m1.support.error("Parse@graph"))
+    }
+    let n = m1.support.number(ns)?
+    let from = m1.support.number(fs)?
+    let to = m1.support.number(ts)?
+    let graph_owner = m1.support.marker(tx, "graph")?
+    if from >= n || to >= n {
+        return Error(m1.support.error("InvalidVertex"))
+    }
+    // Validate the entire edge input before allocating search state.
+    let edge_start = at
+    while at < string.byte_len(input) {
+        let row = m1.support.line(input, mut at)
+        let Some((a, b)) = string.split_once(row, " ") else {
+            return Error(m1.support.error("Parse@edge"))
+        }
+        if m1.support.number(a)? >= n || m1.support.number(b)? >= n {
+            return Error(m1.support.error("InvalidVertex"))
+        }
+    }
+    let mut offsets: List[u32] = m1.support.mem(list.with_capacity(n + 1))?
+    m1.support.mem(list.fill(mut offsets, n + 1, 0))?
+    let mut edge_count: u64 = 0
+    at = edge_start
+    while at < string.byte_len(input) {
+        let row = m1.support.line(input, mut at)
+        let Some((a, b)) = string.split_once(row, " ") else {
+            return Error(m1.support.error("Parse@edge"))
+        }
+        let u = m1.support.number(a)? + 1
+        let _ = list.set(mut offsets, u, offsets[u] + 1)
+        edge_count += 1
+    }
+    let mut i: u64 = 1
+    while i <= n {
+        let _ = list.set(mut offsets, i, offsets[i] + offsets[i - 1]);
+        i += 1
+    }
+    let mut positions: List[u32] = m1.support.mem(list.with_capacity(n))?
+    i = 0
+    while i < n {
+        m1.support.push(mut positions, offsets[i])?;
+        i += 1
+    }
+    let mut neighbors: List[u32] = m1.support.mem(list.with_capacity(edge_count))?
+    m1.support.mem(list.fill(mut neighbors, edge_count, 0))?
+    at = edge_start
+    while at < string.byte_len(input) {
+        let row = m1.support.line(input, mut at)
+        let Some((a, b)) = string.split_once(row, " ") else {
+            return Error(m1.support.error("Parse@edge"))
+        }
+        let u = m1.support.number(a)?
+        let pos: u64 = int.widen(positions[u])
+        let _ = list.set(mut neighbors, pos, int.narrow(m1.support.number(b)?))
+        let _ = list.set(mut positions, u, positions[u] + 1)
+    }
+    m1.support.admission(variant, "search.parent", 8 * n)?
+    let parent_owner = m1.support.marker(tx, "parent")?
+    let mut parent: List[u64] = m1.support.mem(list.with_capacity(n))?
+    m1.support.mem(list.fill(mut parent, n, n))?
+    m1.support.admission(variant, "search.queue", 8 * n)?
+    let queue_owner = m1.support.marker(tx, "queue")?
+    let mut queue: List[u64] = m1.support.mem(list.with_capacity(n))?
+    m1.support.push(mut queue, from)?
+    let _ = list.set(mut parent, from, from)
+    let mut head: u64 = 0
+    while head < list.len(queue) {
+        let here = queue[head]
+        head += 1
+        let mut lo: u64 = int.widen(offsets[here])
+        let hi: u64 = int.widen(offsets[here + 1])
+        while lo < hi {
+            let next: u64 = int.widen(neighbors[lo])
+            if parent[next] == n {
+                let _ = list.set(mut parent, next, here)
+                m1.support.push(mut queue, next)?
+            }
+            lo += 1
+        }
+    }
+    if parent[to] == n {
+        return Error(m1.support.error("NoPath"))
+    }
+    let mut path_len: u64 = 1
+    let mut cursor = to
+    while cursor != from {
+        cursor = parent[cursor];
+        path_len += 1
+    }
+    m1.support.admission(variant, "result.path", path_len * 8)?
+    let mut path: List[u64] = m1.support.mem(list.with_capacity(path_len))?
+    cursor = to
+    m1.support.push(mut path, cursor)?
+    while cursor != from {
+        cursor = parent[cursor];
+        m1.support.push(mut path, cursor)?
+    }
+    list.reverse(mut path)
+    let mut rendered = string.new()
+    m1.support.add(mut rendered, "path=")?
+    let mut first = true
+    for node in path {
+        if !first {
+            m1.support.add(mut rendered, ",")?
+        }
+        first = false
+        m1.support.num(mut rendered, node)?
+    }
+    m1.support.add(mut rendered, "\nvisited=")?
+    m1.support.num(mut rendered, list.len(queue))?
+    m1.support.add(mut rendered, "\n")?
+    m1.support.put(out, rendered)
+}
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
+    let input = m1.support.input(d, argv)?
+    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(6))?
+    let outcome = run(out, input, m1.support.case_variant(argv), take tx)
+    m1.support.finish(out, take rx, take outcome)
+}

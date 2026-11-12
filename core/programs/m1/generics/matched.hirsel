@@ -1,0 +1,133 @@
+type Count {
+    lo: u32,
+    hi: u32,
+    count: u64
+}
+
+type Counts {
+    storage: String,
+    entries: List[Count],
+    buckets: List[u64]
+}
+
+fn hash(s: String) -> u64 {
+    let mut h: u64 = 0
+    for b in string.as_bytes(s) {
+        h = int.wrapping_add(int.wrapping_mul(h, 31), int.widen(b))
+    }
+    h
+}
+
+fn tally(mut c: Counts, s: String) -> Result[(), m1.support.Error] {
+    if (list.len(c.entries) + 1) * 2 >= list.len(c.buckets) {
+        let next = if list.len(c.buckets) < 8 {
+            16
+        } else {
+            list.len(c.buckets) * 2
+        }
+        let mut buckets: List[u64] = m1.support.mem(list.with_capacity(next))?
+        m1.support.mem(list.fill(mut buckets, next, 0))?
+        let mut i: u64 = 0
+        for e in c.entries {
+            let mut slot = hash(string.slice(c.storage, int.widen(e.lo), int.widen(e.hi))) % next
+            while buckets[slot] != 0 {
+                slot = (slot + 1) % next
+            }
+            let _ = list.set(mut buckets, slot, i + 1)
+            i += 1
+        }
+        let _ = replace(mut c.buckets, take buckets)
+    }
+    let mut slot = hash(s) % list.len(c.buckets)
+    while c.buckets[slot] != 0 {
+        let i = c.buckets[slot] - 1
+        let e = c.entries[i]
+        if string.slice(c.storage, int.widen(e.lo), int.widen(e.hi)) == s {
+            c.entries[i].count += 1
+            return Ok(())
+        }
+        slot = (slot + 1) % list.len(c.buckets)
+    }
+    let lo: u32 = int.narrow(string.byte_len(c.storage))
+    m1.support.add(mut c.storage, s)?
+    let hi: u32 = int.narrow(string.byte_len(c.storage))
+    m1.support.push(mut c.entries, Count(lo: lo, hi: hi, count: 1))?
+    let _ = list.set(mut c.buckets, slot, list.len(c.entries))
+    Ok(())
+}
+
+fn mapped[T, U](xs: List[T], f: scoped fn(T) -> Result[U, m1.support.Error]) -> Result[List[U], m1.support.Error] {
+    let mut ys: List[U] = m1.support.mem(list.with_capacity(list.len(xs)))?
+    for x in xs {
+        m1.support.push(mut ys, f(x)?)?
+    }
+    Ok(take ys)
+}
+
+fn count_if[T](xs: List[T], f: scoped fn(T) -> bool) -> u64 {
+    let mut n: u64 = 0
+    for x in xs {
+        if f(x) {
+            n += 1
+        }
+    }
+    n
+}
+
+fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> Result[(), m1.support.Error] waits {
+    let xs_owner = m1.support.marker(tx, "list")?
+    let mut xs: List[String] = list.new()
+    let mut at: u64 = 0
+    while at < string.byte_len(input) {
+        let w = m1.support.mem(string.from(m1.support.line(input, mut at)))?
+        m1.support.push(mut xs, take w)?
+    }
+    let mapped_owner = m1.support.marker(tx, "mapped")?
+    let mut position: u64 = 0
+    let ys = mapped(xs, fn(s: String) -> Result[String, m1.support.Error] {
+        position += 1
+        let site = m1.support.name("callback", position, ".string")?
+        m1.support.admission(variant, site, string.byte_len(s) + 1)?
+        if s == "!error" {
+            return Error(m1.support.error(m1.support.name("Callback@", position, "")?))
+        }
+        let mut t = m1.support.mem(string.from(s))?
+        m1.support.add(mut t, "!")?
+        Ok(take t)
+    })?
+    let map_owner = m1.support.marker(tx, "map")?
+    let mut counts = Counts(storage: string.new(), entries: list.new(), buckets: list.new())
+    let mut i: u64 = 0
+    let mut total: u64 = 0
+    for w in ys {
+        i += 1
+        total += string.byte_len(w)
+        let site = m1.support.name("tally", i, ".key")?
+        m1.support.admission(variant, site, string.byte_len(w))?
+        tally(mut counts, w)?
+    }
+    let mut rendered = string.new()
+    m1.support.add(mut rendered, "long=")?
+    m1.support.num(mut rendered, count_if(ys, fn(s: String) -> bool {
+        string.byte_len(s) >= 6
+    }))?
+    m1.support.add(mut rendered, " bytes=")?
+    m1.support.num(mut rendered, total)?
+    m1.support.add(mut rendered, "\n")?
+    for entry in counts.entries {
+        let k = string.slice(counts.storage, int.widen(entry.lo), int.widen(entry.hi))
+        let n = entry.count
+        m1.support.add(mut rendered, k)?
+        m1.support.add(mut rendered, "=")?
+        m1.support.num(mut rendered, n)?
+        m1.support.add(mut rendered, "\n")?
+    }
+    m1.support.put(out, rendered)
+}
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
+    let input = m1.support.input(d, argv)?
+    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(6))?
+    let outcome = run(out, input, m1.support.case_variant(argv), take tx)
+    m1.support.finish(out, take rx, take outcome)
+}

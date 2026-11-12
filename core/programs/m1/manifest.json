@@ -1,0 +1,402 @@
+{
+  "core": {
+    "name": "core",
+    "version": "1"
+  },
+  "packages": [
+    {
+      "package": {
+        "name": "core",
+        "version": "1"
+      },
+      "sources": [
+        {
+          "file": "core/core/arc.hirsel",
+          "modules": [
+            "arc"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/args.hirsel",
+          "modules": [
+            "args"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/box.hirsel",
+          "modules": [
+            "box"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/channel.hirsel",
+          "modules": [
+            "channel"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/char.hirsel",
+          "modules": [
+            "char"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/core.hirsel",
+          "modules": [
+            "core"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/dest.hirsel",
+          "modules": [
+            "dest"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/float.hirsel",
+          "modules": [
+            "float"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/host.hirsel",
+          "modules": [
+            "host"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/int.hirsel",
+          "modules": [
+            "int"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/list.hirsel",
+          "modules": [
+            "list"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/map.hirsel",
+          "modules": [
+            "map"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/option.hirsel",
+          "modules": [
+            "option"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/rc.hirsel",
+          "modules": [
+            "rc"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/result.hirsel",
+          "modules": [
+            "result"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/span.hirsel",
+          "modules": [
+            "span"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/stderr.hirsel",
+          "modules": [
+            "stderr"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/stdout.hirsel",
+          "modules": [
+            "stdout"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/string.hirsel",
+          "modules": [
+            "string"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/task.hirsel",
+          "modules": [
+            "task"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/text.hirsel",
+          "modules": [
+            "text"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/unique.hirsel",
+          "modules": [
+            "unique"
+          ],
+          "signatures": true
+        }
+      ],
+      "dependencies": []
+    },
+    {
+      "package": {
+        "name": "std",
+        "version": "1"
+      },
+      "sources": [
+        {
+          "file": "core/std/char.hirsel",
+          "modules": [
+            "char"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/std/dir.hirsel",
+          "modules": [
+            "dir"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/std/file.hirsel",
+          "modules": [
+            "file"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/std/float.hirsel",
+          "modules": [
+            "float"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/std/int.hirsel",
+          "modules": [
+            "int"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/std/list.hirsel",
+          "modules": [
+            "list"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/std/map.hirsel",
+          "modules": [
+            "map"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/std/order.hirsel",
+          "modules": [
+            "order"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/std/pool.hirsel",
+          "modules": [
+            "pool"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/std/result.hirsel",
+          "modules": [
+            "result"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/std/set.hirsel",
+          "modules": [
+            "set"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/std/string.hirsel",
+          "modules": [
+            "string"
+          ],
+          "signatures": true
+        }
+      ],
+      "dependencies": [
+        {
+          "name": "core",
+          "version": "1"
+        }
+      ]
+    },
+    {
+      "package": {
+        "name": "m1",
+        "version": "1"
+      },
+      "sources": [
+        {
+          "file": "core/programs/m1/support.hirsel",
+          "modules": [
+            "support"
+          ],
+          "signatures": false
+        }
+      ],
+      "dependencies": [
+        {
+          "name": "core",
+          "version": "1"
+        },
+        {
+          "name": "std",
+          "version": "1"
+        }
+      ]
+    },
+    {
+      "package": {
+        "name": "bfs",
+        "version": "1"
+      },
+      "sources": [
+        {
+          "file": "core/programs/m1/bfs/main.hirsel",
+          "modules": [
+            "main"
+          ],
+          "signatures": false
+        },
+        {
+          "file": "core/programs/m1/bfs/matched.hirsel",
+          "modules": [
+            "matched"
+          ],
+          "signatures": false
+        }
+      ],
+      "dependencies": [
+        {
+          "name": "core",
+          "version": "1"
+        },
+        {
+          "name": "std",
+          "version": "1"
+        },
+        {
+          "name": "m1",
+          "version": "1"
+        }
+      ]
+    },
+    {
+      "package": {
+        "name": "generics",
+        "version": "1"
+      },
+      "sources": [
+        {
+          "file": "core/programs/m1/generics/main.hirsel",
+          "modules": [
+            "main"
+          ],
+          "signatures": false
+        },
+        {
+          "file": "core/programs/m1/generics/matched.hirsel",
+          "modules": [
+            "matched"
+          ],
+          "signatures": false
+        }
+      ],
+      "dependencies": [
+        {
+          "name": "core",
+          "version": "1"
+        },
+        {
+          "name": "std",
+          "version": "1"
+        },
+        {
+          "name": "m1",
+          "version": "1"
+        }
+      ]
+    },
+    {
+      "package": {
+        "name": "lru",
+        "version": "1"
+      },
+      "sources": [
+        {
+          "file": "core/programs/m1/lru/main.hirsel",
+          "modules": [
+            "main"
+          ],
+          "signatures": false
+        },
+        {
+          "file": "core/programs/m1/lru/matched.hirsel",
+          "modules": [
+            "matched"
+          ],
+          "signatures": false
+        }
+      ],
+      "dependencies": [
+        {
+          "name": "core",
+          "version": "1"
+        },
+        {
+          "name": "std",
+          "version": "1"
+        },
+        {
+          "name": "m1",
+          "version": "1"
+        }
+      ]
+    }
+  ]
+}

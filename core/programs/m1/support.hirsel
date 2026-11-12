@@ -1,0 +1,143 @@
+pub type Error: send {
+    code: u64,
+    label: String,
+    capacity: Option[Capacity]
+}
+
+pub fn error(take label: String) -> Error {
+    Error(code: 2, label: take label, capacity: None)
+}
+
+pub fn mem[T](take r: Result[T, Capacity]) -> Result[T, Error] {
+    match take r {
+        Ok(take x) => Ok(take x),
+        Error(c) => Error(Error(code: 3, label: "Capacity@ambient", capacity: Some(c))),
+    }
+}
+
+pub fn push[T](mut xs: List[T], take x: T) -> Result[(), Error] {
+    mem(result.capacity_only(list.push(mut xs, take x)))
+}
+
+pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), Error] {
+    match map.insert(mut m, take k, take v) {
+        Ok(()) => Ok(()),
+        Error((c, _, _)) => mem(Error(c))
+    }
+}
+
+pub fn put(out: Stdout, s: String) -> Result[(), Error] waits {
+    match stdout.write(out, s) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(error("Io@stdout"))
+    }
+}
+
+pub fn add(mut s: String, t: String) -> Result[(), Error] {
+    mem(string.push(mut s, t))
+}
+
+pub fn num(mut s: String, n: u64) -> Result[(), Error] {
+    mem(string.push_u64(mut s, n))
+}
+
+pub fn number(s: String) -> Result[u64, Error] {
+    match int.parse(s) {
+        Ok(n) => Ok(n),
+        Error(_) => Error(error("Parse@number"))
+    }
+}
+
+pub fn line(s: String, mut at: u64) -> View[String] in s {
+    let lo = at
+    let hi = match string.find(s, at, "\n") {
+        Some(n) => n,
+        None => string.byte_len(s)
+    }
+    at = if hi < string.byte_len(s) {
+        hi + 1
+    } else {
+        hi
+    }
+    let end = if hi > lo && string.as_bytes(s)[hi - 1] == 13 {
+        hi - 1
+    } else {
+        hi
+    }
+    string.slice(s, lo, end)
+}
+
+pub fn name(prefix: String, n: u64, suffix: String) -> Result[String, Error] {
+    let mut s = mem(string.from(prefix))?
+    num(mut s, n)?
+    add(mut s, suffix)?
+    Ok(take s)
+}
+
+pub fn admission(variant: String, site: String, requested: u64) -> Result[(), Error] {
+    if let Some(s) = string.strip_prefix(variant, "capacity:") {
+        if s == site {
+            let mut label = mem(string.from("Capacity@"))?
+            add(mut label, site)?
+            return Error(Error(code: 3, label: take label, capacity: Some(Capacity(requested: requested, available: 0))))
+        }
+    }
+    Ok(())
+}
+
+pub resource type Marker grant bytes 256 {
+    release: String,
+    events: Sender[String]
+} drop(m) {
+    match string.from(m.release) {
+        Ok(take s) => {
+            let _ = channel.try_send(m.events, take s)
+        },
+        Error(_) => fail("trace finalizer grant"),
+    }
+}
+
+pub fn marker(tx: Sender[String], label: String) -> Result[Marker, Error] {
+    let mut a = mem(string.from("acquire="))?
+    add(mut a, label)?
+    match channel.try_send(tx, take a) {
+        Ok(()) => {},
+        Error(_) => fail("trace capacity")
+    }
+    let mut r = mem(string.from("release="))?
+    add(mut r, label)?
+    mem(Marker(release: take r, events: channel.sender(tx)))
+}
+
+pub fn finish(out: Stdout, take rx: Receiver[String], take outcome: Result[(), Error]) -> Result[(), Error] waits {
+    while let Ok(take event) = channel.receive(rx) {
+        put(out, event)?
+        put(out, "\n")?
+    }
+    match take outcome {
+        Ok(()) => Ok(()),
+        Error(take e) => {
+            put(out, "failure=")?;
+            put(out, e.label)?;
+            put(out, "\n")?;
+            Error(take e)
+        },
+    }
+}
+
+pub fn input(d: Dir, argv: Args) -> Result[String, Error] waits {
+    let Some(path) = args.get(argv, 0) else {
+        return Error(error("Parse@arguments"))
+    }
+    match std.file.read_string(d, path) {
+        Ok(take s) => Ok(take s),
+        Error(_) => Error(error("Io@input"))
+    }
+}
+
+pub fn case_variant(argv: Args) -> View[String] in argv {
+    match args.get(argv, 1) {
+        Some(s) => s,
+        None => "normal"
+    }
+}

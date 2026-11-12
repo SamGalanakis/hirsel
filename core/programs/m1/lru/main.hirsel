@@ -1,0 +1,174 @@
+type Entry {
+    key: String,
+    payload: String,
+    prev: Option[std.pool.Id[Entry]],
+    next: Option[std.pool.Id[Entry]]
+}
+
+type Cache {
+    slots: std.pool.Pool[Entry],
+    index: Map[String, std.pool.Id[Entry]],
+    head: Option[std.pool.Id[Entry]],
+    tail: Option[std.pool.Id[Entry]],
+    first: Option[std.pool.Id[Entry]]
+}
+
+fn unlink(mut c: Cache, h: std.pool.Id[Entry]) {
+    let (prev, next) = {
+        let e = result.unwrap(std.pool.get(c.slots, h));
+        (e.prev, e.next)
+    }
+    if let Some(p) = prev {
+        let _ = std.pool.update(mut c.slots, p, fn(mut e: Entry) {
+            e.next = next
+        })
+    } else {
+        c.head = next
+    }
+    if let Some(n) = next {
+        let _ = std.pool.update(mut c.slots, n, fn(mut e: Entry) {
+            e.prev = prev
+        })
+    } else {
+        c.tail = prev
+    }
+}
+
+fn front(mut c: Cache, h: std.pool.Id[Entry]) {
+    let old = c.head
+    let _ = std.pool.update(mut c.slots, h, fn(mut e: Entry) {
+        e.prev = None;
+        e.next = old
+    })
+    if let Some(p) = old {
+        let _ = std.pool.update(mut c.slots, p, fn(mut e: Entry) {
+            e.prev = Some(h)
+        })
+    }
+    c.head = Some(h)
+    if let None = c.tail {
+        c.tail = Some(h)
+    }
+}
+
+fn touch(mut c: Cache, h: std.pool.Id[Entry]) {
+    if c.head != Some(h) {
+        unlink(mut c, h);
+        front(mut c, h)
+    }
+}
+
+fn put(mut c: Cache, key: String, value: String) -> Result[bool, m1.support.Error] {
+    let mut staged = m1.support.mem(string.from(value))?
+    let existing: Option[std.pool.Id[Entry]] = match map.get(c.index, key) {
+        Some(h) => Some(h),
+        None => None
+    }
+    if let Some(h) = existing {
+        let _ = std.pool.update(mut c.slots, h, fn(mut e: Entry) {
+            let _ = replace(mut e.payload, replace(mut staged, string.new()))
+        })
+        touch(mut c, h)
+        return Ok(false)
+    }
+    // All payload copies precede eviction; the named refusal cannot alter the cache.
+    let owned_key = m1.support.mem(string.from(key))?
+    let index_key = m1.support.mem(string.from(key))?
+    let evicted = std.pool.len(c.slots) == 64
+    if evicted {
+        let h = option.unwrap(c.tail)
+        let removed = {
+            let e = result.unwrap(std.pool.get(c.slots, h));
+            map.remove(mut c.index, e.key)
+        }
+        unlink(mut c, h)
+        let _ = std.pool.remove(mut c.slots, h)
+    }
+    let e = Entry(key: take owned_key, payload: take staged, prev: None, next: None)
+    let h = m1.support.mem(result.capacity_only(std.pool.insert(mut c.slots, take e)))?
+    m1.support.insert(mut c.index, take index_key, h)?
+    front(mut c, h)
+    if let None = c.first {
+        c.first = Some(h)
+    }
+    Ok(evicted)
+}
+
+fn operations(mut c: Cache, input: String, variant: String, mut hits: u64, mut checksum: u64, mut evictions: u64) -> Result[(), m1.support.Error] {
+    let mut at: u64 = 0
+    let mut puts: u64 = 0
+    while at < string.byte_len(input) {
+        let row = m1.support.line(input, mut at)
+        if let Some(rest) = string.strip_prefix(row, "P ") {
+            let Some((key, value)) = string.split_once(rest, " ") else {
+                return Error(m1.support.error("Parse@cache-op"))
+            }
+            puts += 1
+            m1.support.admission(variant, m1.support.name("put", puts, ".payload")?, string.byte_len(value))?
+            if put(mut c, key, value)? {
+                evictions += 1
+            }
+        } else if let Some(key) = string.strip_prefix(row, "G ") {
+            let handle: Option[std.pool.Id[Entry]] = match map.get(c.index, key) {
+                Some(h) => Some(h),
+                None => None
+            }
+            if let Some(h) = handle {
+                let value = {
+                    let e = result.unwrap(std.pool.get(c.slots, h));
+                    m1.support.mem(string.from(e.payload))?
+                }
+                touch(mut c, h)
+                hits += 1
+                checksum += list.sum_bytes(string.as_bytes(value))
+            }
+        } else if row == "S" {
+            if let Some(h) = c.first {
+                if let Error(_) = std.pool.get(c.slots, h) {
+                    return Error(m1.support.error("StaleHandle@first-entry"))
+                }
+            }
+        } else {
+            return Error(m1.support.error("Parse@cache-op"))
+        }
+    }
+    Ok(())
+}
+
+fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> Result[(), m1.support.Error] waits {
+    let owner = m1.support.marker(tx, "cache")?
+    let mut c = Cache(slots: m1.support.mem(std.pool.with_capacity(64))?, index: map.new(), head: None, tail: None, first: None)
+    let mut hits: u64 = 0
+    let mut checksum: u64 = 0
+    let mut evictions: u64 = 0
+    let outcome = operations(mut c, input, variant, mut hits, mut checksum, mut evictions)
+    let mut rendered = string.new()
+    m1.support.add(mut rendered, "hits=")?
+    m1.support.num(mut rendered, hits)?
+    m1.support.add(mut rendered, " sum=")?
+    m1.support.num(mut rendered, checksum)?
+    m1.support.add(mut rendered, " evictions=")?
+    m1.support.num(mut rendered, evictions)?
+    m1.support.add(mut rendered, "\norder=")?
+    let mut p = c.head
+    let mut first = true
+    while let Some(h) = p {
+        let e = result.unwrap(std.pool.get(c.slots, h))
+        if !first {
+            m1.support.add(mut rendered, ",")?
+        }
+        first = false
+        m1.support.add(mut rendered, e.key)?
+        p = e.next
+    }
+    m1.support.add(mut rendered, "\n")?
+    m1.support.put(out, rendered)?
+    outcome
+}
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
+    let input = m1.support.input(d, argv)?
+    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(2))?
+    let outcome = run(out, input, m1.support.case_variant(argv), take tx)
+    m1.support.finish(out, take rx, take outcome)
+}

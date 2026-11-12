@@ -1,0 +1,105 @@
+type Graph {
+    neighbors: List[List[u64]]
+}
+
+fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> Result[(), m1.support.Error] waits {
+    let mut at: u64 = 0
+    let header = m1.support.line(input, mut at)
+    let Some((ns, rest)) = string.split_once(header, " ") else {
+        return Error(m1.support.error("Parse@graph"))
+    }
+    let Some((fs, ts)) = string.split_once(rest, " ") else {
+        return Error(m1.support.error("Parse@graph"))
+    }
+    let n = m1.support.number(ns)?
+    let from = m1.support.number(fs)?
+    let to = m1.support.number(ts)?
+    let graph_owner = m1.support.marker(tx, "graph")?
+    if from >= n || to >= n {
+        return Error(m1.support.error("InvalidVertex"))
+    }
+    // Validate the entire edge input before allocating search state.
+    let edge_start = at
+    while at < string.byte_len(input) {
+        let row = m1.support.line(input, mut at)
+        let Some((a, b)) = string.split_once(row, " ") else {
+            return Error(m1.support.error("Parse@edge"))
+        }
+        if m1.support.number(a)? >= n || m1.support.number(b)? >= n {
+            return Error(m1.support.error("InvalidVertex"))
+        }
+    }
+    let mut graph = Graph(neighbors: m1.support.mem(list.with_capacity(n))?)
+    let mut v: u64 = 0
+    while v < n {
+        m1.support.push(mut graph.neighbors, list.new())?;
+        v += 1
+    }
+    at = edge_start
+    while at < string.byte_len(input) {
+        let row = m1.support.line(input, mut at)
+        let Some((a, b)) = string.split_once(row, " ") else {
+            return Error(m1.support.error("Parse@edge"))
+        }
+        m1.support.push(mut graph.neighbors[m1.support.number(a)?], m1.support.number(b)?)?
+    }
+    m1.support.admission(variant, "search.parent", 8 * n)?
+    let parent_owner = m1.support.marker(tx, "parent")?
+    let mut parent: List[u64] = m1.support.mem(list.with_capacity(n))?
+    m1.support.mem(list.fill(mut parent, n, n))?
+    m1.support.admission(variant, "search.queue", 8 * n)?
+    let queue_owner = m1.support.marker(tx, "queue")?
+    let mut queue: List[u64] = m1.support.mem(list.with_capacity(n))?
+    m1.support.push(mut queue, from)?
+    let _ = list.set(mut parent, from, from)
+    let mut head: u64 = 0
+    while head < list.len(queue) {
+        let here = queue[head]
+        head += 1
+        for next in graph.neighbors[here] {
+            if parent[next] == n {
+                let _ = list.set(mut parent, next, here)
+                m1.support.push(mut queue, next)?
+            }
+        }
+    }
+    if parent[to] == n {
+        return Error(m1.support.error("NoPath"))
+    }
+    let mut path_len: u64 = 1
+    let mut cursor = to
+    while cursor != from {
+        cursor = parent[cursor];
+        path_len += 1
+    }
+    m1.support.admission(variant, "result.path", path_len * 8)?
+    let mut path: List[u64] = m1.support.mem(list.with_capacity(path_len))?
+    cursor = to
+    m1.support.push(mut path, cursor)?
+    while cursor != from {
+        cursor = parent[cursor];
+        m1.support.push(mut path, cursor)?
+    }
+    list.reverse(mut path)
+    let mut rendered = string.new()
+    m1.support.add(mut rendered, "path=")?
+    let mut first = true
+    for node in path {
+        if !first {
+            m1.support.add(mut rendered, ",")?
+        }
+        first = false
+        m1.support.num(mut rendered, node)?
+    }
+    m1.support.add(mut rendered, "\nvisited=")?
+    m1.support.num(mut rendered, list.len(queue))?
+    m1.support.add(mut rendered, "\n")?
+    m1.support.put(out, rendered)
+}
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
+    let input = m1.support.input(d, argv)?
+    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(6))?
+    let outcome = run(out, input, m1.support.case_variant(argv), take tx)
+    m1.support.finish(out, take rx, take outcome)
+}

@@ -1,7 +1,14 @@
 # Core milestone corpus
 
 These nine programs define the M1 runtime workloads before the new compiler exists.
-The corpus does not contain Hirsel source. The spec lane owns that source.
+Hirsel packages live under `programs/m1/<workload>/`. Each `main.hirsel` is the
+idiomatic entry; `matched.hirsel`, where present, is the matched entry. Sources use
+the canonical declarations in `core/` and the seed API in `std/`; shared fixture
+I/O, explicit Capacity conversion and resource traces live in `programs/m1/support.hirsel`.
+`programs/m1/manifest.json` maps packages, modules and exact dependencies for the
+real parser/resolver. Each package uses `charge-v1`. Per-workload `DERIVATION.md`
+contains the hand-check output and named-site charge calculation. These programs
+cannot execute until the new compiler's memory, task and native slices land.
 
 Each `corpus/m1/<workload>/SPEC.md` defines its algorithm, inputs, sizes, failure sites,
 observable output and small hand check. `inputs/` and `EXPECTED/` are committed fixtures;

@@ -743,6 +743,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "hirsel-core-rt"
+version = "0.1.0"
+dependencies = [
+ "hirsel-core-layout",
+ "hirsel-guard",
+]
+
+[[package]]
 name = "hirsel-core-syntax"
 version = "0.1.0"
 dependencies = [

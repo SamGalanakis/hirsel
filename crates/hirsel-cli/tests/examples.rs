@@ -237,14 +237,14 @@ impl Fixture {
             use hirsel_native::TargetSpec;
             use hirsel_native::Toolchain;
             use hirsel_native::link;
-            use hirsel_native_batch::build;
             let mut loaded =
                 hirsel_front_phases::load_program(&self.0.join("hirsel.json")).unwrap();
             loaded.check_for_execution().unwrap();
             let input = loaded.engine.export_native_input().unwrap();
             let validated = loaded.engine.import_native_input(input).unwrap();
             let target = TargetSpec::x86_64_unknown_linux_gnu();
-            let program = build(&validated, &Options::new(target.clone())).unwrap();
+            let program = hirsel_requests::ready_supplier(&self.0.join("hirsel.json"), None, &loaded.entry, &hirsel_native_testing::ready_toolchain(&(&Options::new(target.clone())).target)).unwrap()(&Options::new(target.clone())).unwrap();
+            let program = &program.program;
             let work = self.0.join("native");
             std::fs::create_dir_all(work.join("root")).unwrap();
             let toolchain = Toolchain::in_tree(&self.0.join("runtime"), &[&target]).unwrap();

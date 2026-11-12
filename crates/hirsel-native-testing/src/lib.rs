@@ -4,6 +4,7 @@ pub mod differential;
 pub mod heap;
 pub mod pairwise;
 pub use coverage::backend_features;
+pub use differential::ready_toolchain;
 pub use differential::toolchain_for_matrix;
 pub use differential::{
     Builds, Built, Configuration, Emission, Engine, MATRIX_VERSION, Objects, Outcome,

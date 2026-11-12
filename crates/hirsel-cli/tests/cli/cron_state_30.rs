@@ -389,7 +389,6 @@ fn cron_state_30_ordered_cranelift() {
 fn full_gate_cron_state_30_public_fixture_witness() {
     use hirsel_driver::native::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     hirsel_intern::jobs::with_compiler_stack(|| {
         let temp = scratch();
@@ -474,7 +473,6 @@ fn full_gate_cron_state_30_public_fixture_witness() {
 fn cron_state_30_crash_boundaries() {
     use hirsel_driver::native::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     hirsel_intern::jobs::with_compiler_stack(|| {
         let temp = scratch();

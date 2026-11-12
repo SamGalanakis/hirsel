@@ -2,7 +2,6 @@
 use hirsel_driver::native::*;
 use hirsel_engine::{RunConfiguration, SimulationConfig};
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileFault, FileFaultError, FileOperation, FileReadScript};
 use serde_json::{Value, json};
@@ -717,7 +716,8 @@ fn native_workflows(native_only: bool) {
             root.to_string_lossy().into_owned(),
         ];
         tools.launch_timeout = std::time::Duration::from_secs(65);
-        let ready = build(&input, &options).unwrap();
+        let ready = hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options).unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let objects = [Backend::Llvm, Backend::Cranelift].map(|backend| {
             (
@@ -1664,7 +1664,8 @@ fn capped_fixture_capacity(
         root.to_string_lossy().into_owned(),
     ];
     tools.launch_timeout = std::time::Duration::from_secs(60);
-    let ready = build(&input, &options).unwrap();
+    let ready = hirsel_requests::ready_supplier(manifest, None, &loaded.entry, &tools).unwrap()(&options).unwrap();
+    let ready = &ready.program;
     let sites = Sites::new(input.snapshot());
     let objects = emit_backend_objects(
         &ready,
@@ -1813,7 +1814,8 @@ fn merge_audit_37_native_report_boundaries() {
             root.to_string_lossy().into_owned(),
         ];
         tools.launch_timeout = std::time::Duration::from_secs(65);
-        let ready = build(&input, &options).unwrap();
+        let ready = hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options).unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let objects = [Backend::Llvm, Backend::Cranelift].map(|b| {
             (

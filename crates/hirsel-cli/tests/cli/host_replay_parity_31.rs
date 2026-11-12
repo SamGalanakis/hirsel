@@ -211,7 +211,6 @@ fn snapshot_file_waits_live_and_native_replay() {
         RunConfiguration, run_observed_checked_bounded, run_observed_snapshot_bounded,
     };
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     use hirsel_run_schema::{Access, FileReadScript};
     hirsel_intern::jobs::with_compiler_stack(|| {
@@ -229,11 +228,9 @@ fn snapshot_file_waits_live_and_native_replay() {
         };
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = build(
-            &validated,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = hirsel_requests::ready_supplier(&source, None, &loaded.entry, &hirsel_native_testing::ready_toolchain(&(&Options::new(TargetSpec::x86_64_unknown_linux_gnu())).target)).unwrap()(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
         .unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(validated.snapshot());
         let tools = Toolchain::in_tree(&root.path().join("runtime"), &[&ready.target]).unwrap();
         let objects: Vec<_> = [Backend::Llvm, Backend::Cranelift]
@@ -446,7 +443,6 @@ fn retained_production_tapes() {
 fn record_chunk_blocked_on_current_runtime() {
     use hirsel_driver::native::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     hirsel_intern::jobs::with_compiler_stack(|| {
         let root =
@@ -475,11 +471,9 @@ fn record_chunk_blocked_on_current_runtime() {
             .unwrap_or_else(|error| panic!("{error}"));
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = build(
-            &validated,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = hirsel_requests::ready_supplier(&source, None, &loaded.entry, &hirsel_native_testing::ready_toolchain(&(&Options::new(TargetSpec::x86_64_unknown_linux_gnu())).target)).unwrap()(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
         .unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(validated.snapshot());
         let mut tools = Toolchain::in_tree(&root.join("runtime"), &[&ready.target]).unwrap();
         tools.execution = Execution::Executable;

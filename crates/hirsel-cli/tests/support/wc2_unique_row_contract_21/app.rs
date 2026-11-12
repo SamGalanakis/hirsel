@@ -5,7 +5,6 @@ use hirsel_native::OptLevel;
 use hirsel_native::Options;
 use hirsel_native::Partition;
 use hirsel_native::TargetSpec;
-use hirsel_native::Toolchain;
 use hirsel_native_testing::Configuration;
 use hirsel_native_testing::Engine;
 use hirsel_native_testing::Runtime;
@@ -128,8 +127,6 @@ fn wc2_contract_original_and_strong_all_engines() {
             } else {
                 original = Some(reference.clone());
             }
-            let input = program.engine.export_native_input().unwrap();
-            let validated = program.engine.import_native_input(input).unwrap();
             let directory = scratch.path().join(name);
             std::fs::create_dir_all(&directory).unwrap();
             let results = hirsel_native_testing::differential_ready(
@@ -269,8 +266,6 @@ pub fn main(rt: Io) -> Result[(), AppError] {{
                 } else {
                     original = Some(reference.clone());
                 }
-                let input = program.engine.export_native_input().unwrap();
-                let validated = program.engine.import_native_input(input).unwrap();
                 let directory = scratch.path().join(format!("{case}-{name}"));
                 std::fs::create_dir_all(&directory).unwrap();
                 let results = hirsel_native_testing::differential_ready(

@@ -41,7 +41,8 @@ fn cpu_owned_allocation_audit(width: usize, source: &str, provider: &str, label:
         let validated = loaded.engine.import_native_input(input).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
         let program =
-            hirsel_native_batch::build(&validated, &Options::new(target.clone())).unwrap();
+            hirsel_requests::ready_supplier(&manifest, None, &loaded.entry, &hirsel_native_testing::ready_toolchain(&(&Options::new(target.clone())).target)).unwrap()(&Options::new(target.clone())).unwrap();
+        let program = &program.program;
         let toolchain = Toolchain::in_tree_diagnostic(&root.join("runtime"), &[&target]).unwrap();
         for backend in [Backend::Llvm, Backend::Cranelift] {
             let objects = hirsel_native::emit_backend_objects(

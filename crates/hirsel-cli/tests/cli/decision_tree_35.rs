@@ -2,7 +2,6 @@
 use hirsel_driver::native::*;
 use hirsel_engine::{RunConfiguration, SimulationConfig};
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileFault, FileFaultError, FileOperation, FileReadScript};
 use serde_json::{Value, json};
@@ -418,7 +417,8 @@ fn native(
             }
         }
     }
-    let ready = build(&input, &options).unwrap();
+    let ready = crate::native_ready::supplier(manifest, &loaded.entry, &tools)(&options).unwrap();
+    let ready = &ready.program;
     let sites = Sites::new(input.snapshot());
     let mut runnables = Vec::new();
     for backend in [Backend::Llvm, Backend::Cranelift] {

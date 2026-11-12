@@ -381,7 +381,6 @@ fn chunk_backup_31_scripted_native_record_replay() {
     }
     use hirsel_driver::native::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     if std::env::var_os("CHUNK_BACKUP_31_PRODUCTION_TAPES").is_some() {
         production_tapes_host_replay();
@@ -433,7 +432,8 @@ fn chunk_backup_31_scripted_native_record_replay() {
                 .to_string_lossy()
                 .into(),
         ];
-        let ready = build(&input, &options).unwrap();
+        let ready = hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options).unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let mut objects = vec![];
         for backend in [Backend::Llvm, Backend::Cranelift] {

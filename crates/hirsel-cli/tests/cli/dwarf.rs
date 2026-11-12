@@ -367,8 +367,16 @@ fn cranelift_debug_lines_match_llvm_per_function_on_both_targets() {
                 } else {
                     TargetSpec::x86_64_unknown_linux_gnu()
                 };
-                let ready =
-                    hirsel_native_batch::build(&validated, &Options::new(target_spec)).unwrap();
+                let options = Options::new(target_spec);
+                let ready = hirsel_requests::ready_supplier(
+                    &source,
+                    None,
+                    &loaded.entry,
+                    &hirsel_native_testing::ready_toolchain(&options.target),
+                )
+                .unwrap()(&options)
+                .unwrap();
+                let ready = &ready.program;
                 let mut expected = None;
                 for backend in ["llvm", "cranelift"] {
                     let objects = hirsel_native::emit_backend_objects(
@@ -615,11 +623,16 @@ pub fn value() -> u64 { failure.check(false, Arithmetic()); 0u64 }
                 let input = loaded.engine.export_native_input().unwrap();
                 let sources = hirsel_native::profile_sources(&input);
                 let validated = loaded.engine.import_native_input(input).unwrap();
-                let ready = hirsel_native_batch::build(
-                    &validated,
-                    &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
+                let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+                let ready = hirsel_requests::ready_supplier(
+                    &tree.join("app/hirsel.json"),
+                    None,
+                    &loaded.entry,
+                    &hirsel_native_testing::ready_toolchain(&options.target),
                 )
+                .unwrap()(&options)
                 .unwrap();
+                let ready = &ready.program;
                 let objects = hirsel_native::emit_backend_objects(
                     &ready,
                     backend,

@@ -1,7 +1,6 @@
 //! Snapshot and host Unix listeners replay from the tape's authority, without providers.
 use hirsel_driver::native::*;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use hirsel_rt::io::{Completion, Request};
 use serde_json::json;
@@ -86,7 +85,8 @@ fn replay_case(case: &str) {
         let snapshot = loaded.engine.export_native_input().unwrap();
         let input = loaded.engine.import_native_input(snapshot).unwrap();
         let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
-        let ready = build(&input, &options).unwrap();
+        let ready = hirsel_requests::ready_supplier(&manifest, None, &loaded.entry, &hirsel_native_testing::ready_toolchain(&(&options).target)).unwrap()(&options).unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let matrix = [Configuration {
             options,

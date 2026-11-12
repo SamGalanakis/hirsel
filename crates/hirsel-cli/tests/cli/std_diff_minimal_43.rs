@@ -2,7 +2,6 @@
 use hirsel_driver::native::*;
 use hirsel_engine::{RunConfiguration, SimulationConfig};
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use std::path::PathBuf;
 

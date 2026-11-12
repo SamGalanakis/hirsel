@@ -545,7 +545,6 @@ fn existing_replay(evidence: &Path) {
 fn schema_etl_30_native_scripted_entry_boundary_witness() {
     use hirsel_driver::native::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();

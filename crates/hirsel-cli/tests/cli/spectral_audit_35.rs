@@ -2,7 +2,6 @@
 use hirsel_driver::native::*;
 use hirsel_engine::{RunConfiguration, SimulationConfig};
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileReadScript};
 use serde_json::{Value, json};
@@ -425,7 +424,8 @@ fn native_workflows(part: usize) {
             root.to_string_lossy().into_owned(),
         ];
         tools.launch_timeout = std::time::Duration::from_secs(65);
-        let ready = build(&input, &options).unwrap();
+        let ready = hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options).unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let objects = [Backend::Llvm, Backend::Cranelift].map(|b| {
             (
@@ -1018,7 +1018,8 @@ fn spectral_audit_35_scripted_ordered_streams() {
             root.to_string_lossy().into_owned(),
         ];
         tools.launch_timeout = std::time::Duration::from_secs(65);
-        let ready = build(&input, &options).unwrap();
+        let ready = hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options).unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let recovery = recovery();
         let mut baseline: BTreeMap<String, hirsel_rt::launch::Recording> = BTreeMap::new();

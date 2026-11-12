@@ -4,7 +4,6 @@ use hirsel_driver::replay_observations;
 use hirsel_driver::replay_observations_checked;
 use hirsel_engine::{RunConfiguration, SimulationConfig};
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileReadScript};
 use serde_json::{Value, json};
@@ -291,7 +290,8 @@ fn discrete_simulation_33_native_full_entry_replay() {
             "/usr/bin/python3".into(),
             root.join("capped").to_string_lossy().into_owned(),
         ];
-        let ready = build(&input, &options).unwrap();
+        let ready = hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options).unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let objects: Vec<_> = [Backend::Llvm, Backend::Cranelift]
             .into_iter()
@@ -691,7 +691,8 @@ fn ordered(backend: Backend) {
             hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         tools.execution = Execution::Executable;
         tools.launch_timeout = std::time::Duration::from_secs(60);
-        let ready = build(&input, &options).unwrap();
+        let ready = hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options).unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let objects = emit_backend_objects(
             &ready,

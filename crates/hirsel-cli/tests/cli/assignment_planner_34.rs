@@ -2,7 +2,6 @@
 use hirsel_driver::native::*;
 use hirsel_engine::{RunConfiguration, SimulationConfig};
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileReadScript};
 use serde_json::{Value, json};
@@ -489,7 +488,8 @@ fn native_four_engine_replay(partition: usize) {
             root.to_string_lossy().into_owned(),
         ];
         tools.launch_timeout = std::time::Duration::from_secs(65);
-        let ready = build(&input, &options).unwrap();
+        let ready = hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options).unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let mut objects = vec![];
         for backend in [Backend::Llvm, Backend::Cranelift] {

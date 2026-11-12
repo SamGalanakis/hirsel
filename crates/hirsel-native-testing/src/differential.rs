@@ -451,6 +451,12 @@ pub fn toolchain_for_matrix(
     }
     Toolchain::in_tree_with_runtimes(build_dir, &targets, &runtime_builds(matrix))
 }
+/// The in-tree toolchain a request needs to build a Ready view of `target`,
+/// which links nothing; one build directory per process.
+pub fn ready_toolchain(target: &TargetSpec) -> Toolchain {
+    let dir = std::env::temp_dir().join(format!("hirsel-ready-toolchain-{}", std::process::id()));
+    Toolchain::in_tree(&dir, &[target]).unwrap_or_else(|error| panic!("{error}"))
+}
 /// The topology matrix (PROG-5): one object, one object per unit and
 /// `seeds` seeded random partitions of the default pipeline on x86-64 at O3.
 pub fn topology_matrix(seeds: u64) -> Vec<Configuration> {

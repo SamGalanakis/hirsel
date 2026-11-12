@@ -103,17 +103,14 @@ fn jsonpatchctl_23_pure_model_checked_heap() {
     hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_driver::native::*;
         use hirsel_native::*;
-        use hirsel_native_batch::*;
         use hirsel_native_testing::*;
         let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = build(
-            &validated,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = hirsel_requests::ready_supplier(&selection, None, &loaded.entry, &hirsel_native_testing::ready_toolchain(&(&Options::new(TargetSpec::x86_64_unknown_linux_gnu())).target)).unwrap()(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
         .unwrap();
+        let ready = &ready.program;
         let heap = run_heap(&ready, &loaded.entry, &Sites::new(validated.snapshot())).unwrap();
         assert_eq!(
             heap.observation.exit_code,

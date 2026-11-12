@@ -600,7 +600,6 @@ dependencies = [
  "hirsel-intern",
  "hirsel-interp",
  "hirsel-native",
- "hirsel-native-batch",
  "hirsel-native-queries",
  "hirsel-native-testing",
  "hirsel-observation-view",

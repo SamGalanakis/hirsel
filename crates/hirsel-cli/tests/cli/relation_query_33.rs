@@ -2,7 +2,6 @@
 use hirsel_driver::native::*;
 use hirsel_engine::{RunConfiguration, SimulationConfig};
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileReadScript};
 use serde_json::{Value, json};
@@ -366,7 +365,9 @@ fn relation_query_33_full_entry_native_replay() {
             retain(Path::new(&products), &root.join("std-products"));
         }
 
-        let ready = build(&input, &options).unwrap();
+        let ready = hirsel_requests::ready_supplier(&manifest, None, &loaded.entry, &tools).unwrap()(&options)
+            .unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let backend_objects = [Backend::Llvm, Backend::Cranelift]
             .into_iter()

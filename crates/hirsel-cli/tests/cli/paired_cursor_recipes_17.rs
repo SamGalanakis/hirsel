@@ -177,7 +177,6 @@ fn paired_cursor_recipes_17_bounded_matrix_engines() {
     hirsel_intern::jobs::with_compiler_stack(|| {
         use hirsel_driver::native::*;
         use hirsel_native::*;
-        use hirsel_native_batch::*;
         use hirsel_native_testing::*;
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
@@ -192,11 +191,9 @@ fn paired_cursor_recipes_17_bounded_matrix_engines() {
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let ready = build(
-            &validated,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = hirsel_requests::source_ready_supplier(&SOURCE, "paired-recipes.hir", &hirsel_engine::entry_path(&context), &hirsel_native_testing::ready_toolchain(&(&Options::new(TargetSpec::x86_64_unknown_linux_gnu())).target)).unwrap()(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
         .unwrap();
+        let ready = &ready.program;
         let heap = run_heap(
             &ready,
             &hirsel_engine::entry_path(&context),

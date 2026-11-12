@@ -4,7 +4,6 @@ use hirsel_engine::{
     RunConfiguration, run_observed_checked_bounded, run_observed_snapshot_bounded,
 };
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileReadScript};
 use serde_json::{Value, json};
@@ -394,7 +393,10 @@ fn scripted_native(group: u8) {
         let tools =
             hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
                 .unwrap();
-        let ready = build(&input, &options).unwrap();
+        let ready = hirsel_requests::ready_supplier_with_compiler(&path, None, &loaded.entry, &tools, compiler.clone())
+            .unwrap()(&options)
+        .unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let objects: Vec<_> = [Backend::Llvm, Backend::Cranelift]
             .into_iter()

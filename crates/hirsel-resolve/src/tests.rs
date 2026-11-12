@@ -1626,6 +1626,107 @@ fn signature_context_keeps_nominal_fields_through_deep_boxes() {
     );
 }
 
+/// A bare variant is in view once a declared type edge reaches its type:
+/// here `Payload`, reached only through `external`'s signature, read after
+/// the body's first bare variant. A sibling's variant is in view from the
+/// start. A variant that is in view defers without an expected type, and a
+/// callee names its only declaring type (LANG-4).
+#[test]
+fn variants_come_into_view_as_their_types_are_reached() {
+    let mut t = Tree::new("A()\nexternal\nB\nB()\nfn main() {}\ntype Local = A\n");
+    let mut statements = vec![];
+    for e in [
+        t.call("A", vec![], 1),
+        t.value("external", 2),
+        t.value("B", 3),
+        t.call("B", vec![], 4),
+    ] {
+        statements.push(t.stmt(StmtKind::Expr(e), 1));
+    }
+    let body = t.block(statements, None, 5);
+    let main = t.function(
+        "main",
+        FunctionSyntax::default(),
+        body,
+        Visibility::Private,
+        5,
+    );
+    let a = t.name("A");
+    t.type_item(
+        "Local",
+        TypeBody::Variants(vec![VariantSyntax {
+            name: a,
+            fields: vec![],
+        }]),
+        Visibility::Private,
+        6,
+    );
+    let entries = vec![entry(own("external"), Namespace::Value, Visibility::Public)];
+    let (index, ds) = ManifestIndex::new(fixture(entries));
+    assert!(ds.is_empty());
+    let mut fake = Fake::new(&index);
+    let store = session();
+    let variants = store.intern(ty::Type::with_kind(ty::TypeKind::Variant(
+        vec![ty::Variant {
+            name: Symbol::intern("B"),
+            fields: vec![].into(),
+        }]
+        .into(),
+    )));
+    let mut payload = constant(own("Payload"), ty::TypeKind::Tuple(vec![].into()));
+    payload.kind = ty::SignatureKind::Type(Box::new(ty::TypeDefinition {
+        representation: Some(variants),
+        loop_source: None,
+        format: None,
+        generics: vec![],
+        bounds: vec![],
+        authority: ty::AuthoritySummary::inert(),
+        capability: None,
+        implementation_authority: None,
+        serializable: false,
+        serializable_check: None,
+        layout: ty::Layout::default(),
+        distinct: false,
+        resource: false,
+        drop: None,
+        fact: None,
+        captures: None,
+        destructor_allocation: ty::Allocation::NoAlloc,
+    }));
+    fake.signatures.insert(own("Payload"), payload);
+    fake.signatures.insert(
+        own("external"),
+        constant(
+            own("external"),
+            ty::TypeKind::Named {
+                definition: DefId::intern(&own("Payload")),
+                arguments: vec![].into(),
+            },
+        ),
+    );
+    let output = resolve_item(&t.file, &t.file.items[main], &index, store, &mut fake);
+    clean(&output);
+    assert_eq!(
+        output
+            .deferred
+            .iter()
+            .map(|d| (d.name.as_str(), d.span))
+            .collect::<Vec<_>>(),
+        vec![("A", t.origin(1).span), ("B", t.origin(3).span)]
+    );
+    assert_eq!(
+        output
+            .contextual
+            .iter()
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>(),
+        vec![&ContextualName::Variant {
+            owner: own("Payload"),
+            variant: ty::VariantId(0)
+        }]
+    );
+}
+
 /// The path rules, written over plain paths: a qualified path names exactly
 /// that package's module path; otherwise the own package's file-relative path,
 /// then its root path, then a head's targets, ambiguous unless they are the

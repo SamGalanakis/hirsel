@@ -130,6 +130,40 @@ struct Shape {
     variants: Vec<(String, Vec<(Option<String>, ExpectedType)>)>,
 }
 
+/// The variant names in view, kept as signatures arrive. Signatures are read
+/// once and never change, so each one is indexed once and each declared type
+/// edge is followed once; the reads recorded are those a full rescan records.
+#[derive(Default)]
+struct VariantIndex {
+    /// Variant names the sibling variant types declare, once their
+    /// signatures have been read.
+    headers: Option<std::collections::HashSet<Symbol>>,
+    /// The `signature_order` prefix whose declared type edges were followed.
+    expanded: usize,
+    /// Definitions those edges reached; each one's signature has been asked for.
+    reached: std::collections::HashSet<DefPath>,
+    /// The `signature_order` prefix whose variant names are in `declared`.
+    indexed: usize,
+    /// For each variant name a read type signature declares: whether a core
+    /// type declares it, and whether any other type does.
+    declared: std::collections::HashMap<Symbol, (bool, bool)>,
+    owners: Option<VariantOwners>,
+}
+
+/// The declarations a bare constructor may name in one file context.
+struct VariantOwners {
+    context: FileContext,
+    /// The unqualified types and every type signature read, in path order.
+    declarations: BTreeSet<DefPath>,
+    /// The `signature_order` prefix whose type signatures are in `declarations`.
+    seen: usize,
+    /// Declarations whose answer read signatures settle, so asking again
+    /// reads nothing: the eligible ones, by the variant names they declare.
+    settled: std::collections::HashMap<Symbol, BTreeSet<DefPath>>,
+    /// Declarations still asked in full, in path order.
+    unsettled: BTreeSet<DefPath>,
+}
+
 /// Resolves one definition, so local numbering cannot depend on declaration order.
 /// The other items of `file` supply header fixtures, but resolution never walks
 /// their bodies.
@@ -218,6 +252,8 @@ pub fn resolve_view(
         },
         scopes: vec![Scope::default()],
         signatures: DefMap::default(),
+        signature_order: Vec::new(),
+        variants: VariantIndex::default(),
         next_local: 0,
         alternative_locals: Vec::new(),
         generator_parameters: Vec::new(),
@@ -270,6 +306,9 @@ struct Resolver<'a, P: ?Sized> {
     output: ResolveOutput,
     scopes: Vec<Scope>,
     signatures: DefMap<Result<ty::SignatureRef, ty::QueryError>>,
+    /// The definitions in `signatures`, in the order they were read.
+    signature_order: Vec<DefId>,
+    variants: VariantIndex,
     next_local: u32,
     callees: BTreeSet<ExprId>,
     local_function_depth: usize,
@@ -688,6 +727,7 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
             .push(definition.clone());
         let value = signature.as_ref().ok().cloned();
         self.signatures.insert(id, signature);
+        self.signature_order.push(id);
         value
     }
     fn failed_signature(&self, definition: &DefPath) -> bool {
@@ -2458,130 +2498,208 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
             && self.declared_variant(path.segments[0], false)
     }
     fn declared_variant(&mut self, name: Symbol, core: bool) -> bool {
-        let headers = self
-            .siblings
-            .iter()
-            .map(|syntax| &syntax.item)
-            .filter_map(|item| {
-                if let ItemKind::Type {
-                    body: TypeBody::Variants(variants),
-                    ..
-                } = &item.kind
-                {
-                    Some((
-                        item.definition.clone(),
-                        variants.iter().any(|v| v.name == name),
-                    ))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        let mut found = core
-            && self
-                .expected
-                .available_variants
-                .contains(&self.spelling(name));
-        for (owner, contains) in headers {
-            self.signature(&owner);
-            found |= contains;
+        if self.variants.headers.is_none() {
+            let mut names = std::collections::HashSet::new();
+            let owners = self
+                .siblings
+                .iter()
+                .filter_map(|syntax| match &syntax.item.kind {
+                    ItemKind::Type {
+                        body: TypeBody::Variants(variants),
+                        ..
+                    } => {
+                        names.extend(variants.iter().map(|v| v.name));
+                        Some(syntax.item.definition.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for owner in owners {
+                self.signature(&owner);
+            }
+            self.variants.headers = Some(names);
         }
         // The driver isolates sibling syntax. Follow only declared type edges:
         // a function result can introduce Option without a written annotation.
-        let mut visited = BTreeSet::new();
-        loop {
-            let pending: BTreeSet<_> = self
-                .signatures
-                .values()
-                .filter_map(|s| s.as_ref().ok())
-                .flat_map(|s| {
-                    ty::closure(self.types, signature_roots(s))
-                        .iter()
-                        .filter_map(|t| match &self.types.row(*t).kind {
-                            ty::TypeKind::Named { definition, .. } => {
-                                Some(definition.path().clone())
-                            }
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .filter(|d| !visited.contains(d))
-                .collect();
-            if pending.is_empty() {
-                break;
+        while self.variants.expanded < self.signature_order.len() {
+            let fresh = &self.signature_order[self.variants.expanded..];
+            self.variants.expanded = self.signature_order.len();
+            let mut pending = BTreeSet::new();
+            for signature in fresh
+                .iter()
+                .filter_map(|id| self.signatures.get(id)?.as_ref().ok())
+            {
+                for &t in ty::closure(self.types, signature_roots(signature)).iter() {
+                    if let ty::TypeKind::Named { definition, .. } = &self.types.row(t).kind
+                        && !self.variants.reached.contains(definition.path())
+                    {
+                        pending.insert(definition.path().clone());
+                    }
+                }
             }
             for definition in pending {
-                visited.insert(definition.clone());
                 self.signature(&definition);
+                self.variants.reached.insert(definition);
             }
         }
-        found |= self
-            .signatures
-            .values()
-            .filter_map(|s| s.as_ref().ok())
-            .any(|signature| {
-                if !core && signature.definition.path().package_is("core", "1") {
-                    false
-                } else if let ty::SignatureKind::Type(definition) = &signature.kind {
-                    definition.representation.is_some_and(|id| {
-                        shape_from_type(self.types, id, &[])
-                            .variants
-                            .iter()
-                            .any(|(variant, _)| variant == &self.spelling(name))
-                    })
-                } else {
-                    false
+        for id in &self.signature_order[self.variants.indexed..] {
+            if let Some(Ok(signature)) = self.signatures.get(id)
+                && let ty::SignatureKind::Type(definition) = &signature.kind
+                && let Some(ty::TypeKind::Variant(variants)) = definition
+                    .representation
+                    .and_then(|id| self.types.get(id))
+                    .map(|t| &t.kind)
+            {
+                let in_core = signature.definition.path().package_is("core", "1");
+                for variant in variants.iter() {
+                    let (by_core, by_other) =
+                        self.variants.declared.entry(variant.name).or_default();
+                    *by_core |= in_core;
+                    *by_other |= !in_core;
                 }
-            });
-        found
+            }
+        }
+        self.variants.indexed = self.signature_order.len();
+        (core
+            && self
+                .expected
+                .available_variants
+                .contains(&self.spelling(name)))
+            || self
+                .variants
+                .headers
+                .as_ref()
+                .is_some_and(|names| names.contains(&name))
+            || self
+                .variants
+                .declared
+                .get(&name)
+                .is_some_and(|&(by_core, by_other)| by_other || (core && by_core))
     }
     /// Choose a declaration, never a type argument. H infers arguments from
     /// the call's payloads in source order, using ordinary constructor inference.
     fn inferred_variant_owner(&mut self, name: Symbol) -> Option<DefPath> {
-        let mut declarations: BTreeSet<_> = self
-            .index
-            .unqualified_types(&self.context)
-            .into_iter()
-            .collect();
+        let mut owners = match self.variants.owners.take() {
+            Some(owners) if owners.context == self.context => owners,
+            _ => {
+                let declarations: BTreeSet<_> = self
+                    .index
+                    .unqualified_types(&self.context)
+                    .into_iter()
+                    .collect();
+                VariantOwners {
+                    context: self.context.clone(),
+                    unsettled: declarations.clone(),
+                    declarations,
+                    seen: 0,
+                    settled: Default::default(),
+                }
+            }
+        };
         // Types reached through declared signatures are also in view, as for
         // contextual variant deferral. No implementation body is consulted.
-        declarations.extend(
-            self.signatures
-                .values()
-                .filter_map(|s| s.as_ref().ok())
-                .filter_map(|s| {
-                    matches!(s.kind, ty::SignatureKind::Type(_))
-                        .then(|| s.definition.path().clone())
-                }),
-        );
-        let spelling = self.spelling(name);
-        let mut candidates = BTreeSet::new();
-        for owner in declarations {
-            let Some(signature) = self.signature(&owner) else {
-                continue;
-            };
-            if signature.metadata.alias
-                || self.index.access(&self.context, &owner).is_err()
-                || (signature.metadata.visibility == Visibility::PublicOpaque
-                    && owner.0.package != self.context.package)
+        for id in &self.signature_order[owners.seen..] {
+            if let Some(Ok(signature)) = self.signatures.get(id)
+                && matches!(signature.kind, ty::SignatureKind::Type(_))
+                && owners
+                    .declarations
+                    .insert(signature.definition.path().clone())
             {
-                continue;
+                owners.unsettled.insert(signature.definition.path().clone());
             }
-            if self
-                .shape(&owner, &[])
-                .variants
-                .iter()
-                .any(|(n, _)| n == &spelling)
-            {
+        }
+        owners.seen = self.signature_order.len();
+        // While a shape is being built its owners shape as empty, so no
+        // answer settles and every declaration is asked in full.
+        let settle = self.shaping.is_empty();
+        let (mut candidates, asked) = if settle {
+            (
+                owners.settled.get(&name).cloned().unwrap_or_default(),
+                owners.unsettled.iter().cloned().collect::<Vec<_>>(),
+            )
+        } else {
+            (
+                BTreeSet::new(),
+                owners.declarations.iter().cloned().collect(),
+            )
+        };
+        for owner in asked {
+            let eligible = self.signature(&owner).is_some_and(|signature| {
+                !(signature.metadata.alias
+                    || self.index.access(&self.context, &owner).is_err()
+                    || (signature.metadata.visibility == Visibility::PublicOpaque
+                        && owner.0.package != self.context.package))
+            });
+            let declares = if !eligible {
+                if settle {
+                    owners.unsettled.remove(&owner);
+                }
+                false
+            } else if let Some(variants) = self.read_variants(&owner) {
+                if settle {
+                    owners.unsettled.remove(&owner);
+                    for variant in &variants {
+                        owners
+                            .settled
+                            .entry(*variant)
+                            .or_default()
+                            .insert(owner.clone());
+                    }
+                }
+                variants.contains(&name)
+            } else {
+                self.shape(&owner, &[])
+                    .variants
+                    .iter()
+                    .any(|(n, _)| n == name.as_str())
+            };
+            if declares {
                 candidates.insert(owner);
             }
         }
+        self.variants.owners = Some(owners);
         // A user declaration shadows a core default; two user owners remain
         // ambiguous. Payload types never select between overloaded declarations.
         if candidates.iter().any(|p| !p.package_is("core", "1")) {
             candidates.retain(|p| !p.package_is("core", "1"));
         }
         (candidates.len() == 1).then(|| candidates.into_iter().next().unwrap())
+    }
+    /// The variant names `shape(owner, &[])` lists when read signatures alone
+    /// answer it, so asking reads nothing; `None` when shaping would read.
+    fn read_variants(&self, owner: &DefPath) -> Option<Vec<Symbol>> {
+        // A header view withholds its own recursive group's signatures.
+        if matches!(self.view, ResolveView::Header) {
+            return None;
+        }
+        let mut seen = BTreeSet::new();
+        let (mut current, mut arguments) = (owner.clone(), vec![]);
+        loop {
+            if self.shaping.contains(&current) || !seen.insert(current.clone()) {
+                return Some(vec![]);
+            }
+            let signature = self.signatures.get(&DefId::get(&current)?)?.as_ref().ok()?;
+            let ty::SignatureKind::Type(definition) = &signature.kind else {
+                return None;
+            };
+            let representation = definition.representation?;
+            match self.types.get(representation).map(|t| &t.kind) {
+                Some(ty::TypeKind::Named { .. }) => {
+                    let ExpectedType::Named {
+                        definition,
+                        arguments: next,
+                    } = semantic_expected(self.types, representation, &arguments, 0)
+                    else {
+                        return Some(vec![]);
+                    };
+                    (current, arguments) = (definition, next);
+                }
+                Some(ty::TypeKind::Variant(variants)) => {
+                    return Some(variants.iter().map(|v| v.name).collect());
+                }
+                _ => return Some(vec![]),
+            }
+        }
     }
     fn variant(
         &mut self,

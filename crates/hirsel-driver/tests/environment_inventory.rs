@@ -15,29 +15,61 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// The inventory's source, `program_record.rs`.
+fn inventory_source() -> String {
+    std::fs::read_to_string(root().join("crates/hirsel-driver/src/program_record.rs"))
+        .expect("the inventory's source is test data")
+}
+
+/// The 1-based line span of the table that starts at `start`, through its `];`.
+fn table_span(source: &str, start: &str) -> (usize, usize, String) {
+    let first = source.find(start).expect(start);
+    let last = first + source[first..].find("];").expect("table end");
+    let line = |at: usize| source[..at].matches('\n').count() + 1;
+    (line(first), line(last), source[first..last].to_owned())
+}
+
 /// (name, class, host-only reader) rows and the prefix rows of the inventory.
-/// A host-only row's reader is documentation: a stale one changes nothing the
-/// compiler produces, so no test holds it.
+/// A row is a whole tuple, whatever its line breaks. A host-only row's reader
+/// is documentation: a stale one changes nothing the compiler produces, so
+/// no test holds it.
 fn inventory() -> (BTreeMap<String, (String, Option<String>)>, Vec<String>) {
-    let source = std::fs::read_to_string(root().join("crates/hirsel-driver/src/program_record.rs"))
-        .expect("the inventory's source is test data");
-    let row = |line: &str| -> Option<(String, String, Option<String>)> {
-        let line = line.trim().strip_prefix("(\"")?;
-        let (name, rest) = line.split_once("\", Class::")?;
-        let rest = rest.strip_suffix("),")?;
-        Some(match rest.split_once("(\"") {
-            Some((class, reader)) => (
-                name.into(),
-                class.into(),
-                Some(reader.strip_suffix("\")")?.into()),
-            ),
-            None => (name.into(), rest.into(), None),
-        })
-    };
+    let source = inventory_source();
     let table = |start: &str| {
-        let body = &source[source.find(start).expect(start)..];
-        let body = &body[..body.find("];").expect("table end")];
-        body.lines().filter_map(row).collect::<Vec<_>>()
+        let (_, _, body) = table_span(&source, start);
+        // Comments dropped and whitespace removed: names, classes and readers
+        // hold none, so each row reads `("NAME",Class::X)` or
+        // `("NAME",Class::HostOnly("reader"))`, with optional trailing commas.
+        let body: String = body
+            .lines()
+            .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+            .collect::<String>()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let mut rows = vec![];
+        let mut rest = body.as_str();
+        while let Some(at) = rest.find("(\"") {
+            rest = &rest[at + 2..];
+            let Some((name, tail)) = rest.split_once('"') else {
+                break;
+            };
+            let Some(tail) = tail.strip_prefix(",Class::") else {
+                continue;
+            };
+            let class: String = tail
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            let tail = &tail[class.len()..];
+            let reader = tail
+                .strip_prefix("(\"")
+                .and_then(|reader| reader.split_once('"'))
+                .map(|(reader, _)| reader.to_owned());
+            rows.push((name.to_owned(), class, reader));
+            rest = tail;
+        }
+        rows
     };
     let mut names = BTreeMap::new();
     for (name, class, reader) in table("const VARIABLES") {
@@ -54,6 +86,11 @@ fn inventory() -> (BTreeMap<String, (String, Option<String>)>, Vec<String>) {
         names.len() > 50,
         "the inventory parse found {} rows",
         names.len()
+    );
+    // rustfmt breaks a long row over several lines; the parse must see it.
+    assert!(
+        matches!(names.get("HIRSEL_BUCK2_CONFIG"), Some((class, Some(_))) if class == "HostOnly"),
+        "the multi-line HIRSEL_BUCK2_CONFIG row was not parsed"
     );
     (names, prefixes)
 }
@@ -359,21 +396,34 @@ fn compiler_reads() -> BTreeMap<String, String> {
     }
     all.sort();
     let test = test_files(&all);
+    // The inventory's own rows name variables; they do not read them.
+    let inventory = root().join("crates/hirsel-driver/src/program_record.rs");
+    let source = inventory_source();
+    let rows = [
+        table_span(&source, "const VARIABLES"),
+        table_span(&source, "const PREFIXES"),
+    ];
     let mut reads = BTreeMap::new();
     for file in all.iter().filter(|file| !test.contains(*file)) {
         let text = std::fs::read_to_string(file).unwrap();
+        let same = |a: &Path, b: &Path| a.canonicalize().ok() == b.canonicalize().ok();
+        let in_inventory = same(file, &inventory);
         for (line, content) in production(file, &text) {
+            if in_inventory
+                && rows
+                    .iter()
+                    .any(|(first, last, _)| (*first..=*last).contains(&line))
+            {
+                continue;
+            }
             let mut rest = content.as_str();
             while let Some(at) = rest.find("\"HIRSEL_") {
                 let tail = &rest[at + 1..];
                 let end = tail.find('"').unwrap_or(tail.len());
                 let name = &tail[..end];
-                // The inventory's own rows name variables; they do not read them.
-                let row = tail[end..].starts_with("\", Class::");
-                if !row
-                    && name
-                        .chars()
-                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                if name
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
                 {
                     let site = format!(
                         "{}:{line}",

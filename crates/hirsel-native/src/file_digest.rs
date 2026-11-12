@@ -24,10 +24,10 @@ pub struct Digests {
 }
 
 // dev, inode, mode, size, mtime seconds/nanos, ctime seconds/nanos.
-pub(crate) type Stamp = [u64; 8];
+pub type Stamp = [u64; 8];
 type Receipt = (u32, Vec<u8>, Stamp, [u8; 32], [u8; 32]);
 
-pub(crate) fn stamp(meta: &std::fs::Metadata) -> Stamp {
+pub fn stamp(meta: &std::fs::Metadata) -> Stamp {
     [
         meta.dev(),
         meta.ino(),
@@ -40,7 +40,9 @@ pub(crate) fn stamp(meta: &std::fs::Metadata) -> Stamp {
     ]
 }
 
-pub(crate) fn stable(state: &Stamp, now: SystemTime) -> bool {
+/// Whether a stamp may be reused from a cache: both its times are at least
+/// two seconds before `now`.
+pub fn stable(state: &Stamp, now: SystemTime) -> bool {
     // Two seconds covers coarse timestamp clocks, as in a racy Git index.
     // Future timestamps (including a clock rollback) never become cache hits.
     let cutoff = now
@@ -157,7 +159,9 @@ fn cached(path: &Path, cache: &Path, started: SystemTime) -> std::io::Result<Dig
     Ok(value)
 }
 
-fn verified_digests(
+/// A full read of `source`, the file opened at `path`, whose opened and named
+/// stamps equal the stamp taken before the read (retried on churn).
+pub fn verified_digests(
     path: &Path,
     source: &mut File,
     mut after_read: impl FnMut(),

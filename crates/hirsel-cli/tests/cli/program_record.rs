@@ -286,6 +286,16 @@ fn a_check_record_answers_only_unchanged_inputs_and_replays_cold() {
     // differs from the physical path a diagnostic cites.
     edit(&root.join("dep/dep.hir"), "  1u64", "  1u64 + true");
     flips_then_hits(&home, root, &check, &[], "dependency diagnostic");
+    // Two errors in two packages replay in cold's order at either width.
+    for jobs in ["1", "2"] {
+        let env = [("HIRSEL_JOBS", jobs)];
+        let (answer, counts) = home.warm(root, &check, &env);
+        assert_eq!(
+            (answer, counts),
+            (home.cold(root, &check, &env), HIT),
+            "two errors, jobs {jobs}"
+        );
+    }
     // Display is not an input: every renderer of `check` (plain, `--json`;
     // `--safe` runs its own analysis outside the record, `--verbose` prints
     // nothing for check) is answered by the same record, as cold renders it.
@@ -481,10 +491,11 @@ fn a_build_record_restores_its_executable_and_replays_failures() {
         damage();
         let (answer, counts) = home.warm(root, &build, &[]);
         assert_eq!(counts, HIT, "{what}");
-        assert_eq!(answer, home.cold(root, &build, &[]), "{what}");
+        // The hit's own bytes, before the cold oracle rewrites the output.
         assert_eq!(std::fs::read(&exe).unwrap(), cold_bytes, "{what}");
         let ran = Command::new(&exe).output().unwrap();
         assert_eq!(ran.status.code(), Some(0), "{what}: {ran:?}");
+        assert_eq!(answer, home.cold(root, &build, &[]), "{what}");
     }
     let (_, counts) = home.warm(
         root,
@@ -495,6 +506,30 @@ fn a_build_record_restores_its_executable_and_replays_failures() {
     assert_eq!(
         std::fs::read(root.join("elsewhere.exe")).unwrap(),
         cold_bytes
+    );
+    // Stage validation revalidates every build: under either spelling a
+    // build neither reads nor publishes a record.
+    let validated = [
+        "build",
+        "--validate-stages",
+        "app/hirsel.json",
+        "-o",
+        "app.exe",
+    ];
+    let (_, counts) = home.warm(root, &validated, &[]);
+    assert_eq!(counts, bypassed("validate stages"), "--validate-stages");
+    let (_, counts) = home.warm(root, &validated, &[]);
+    assert_eq!(
+        counts,
+        bypassed("validate stages"),
+        "--validate-stages again"
+    );
+    // The CLI turns the environment spelling into the same validation.
+    let (_, counts) = home.warm(root, &build, &[("HIRSEL_VALIDATE_STAGES", "1")]);
+    assert_eq!(
+        counts,
+        bypassed("validate stages"),
+        "HIRSEL_VALIDATE_STAGES=1"
     );
     // Cross tools and memcheck tools are not inputs of an x86_64 build or of
     // a check: setting them keeps both hits.

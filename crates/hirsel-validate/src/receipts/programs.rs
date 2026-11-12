@@ -243,8 +243,15 @@ impl ProgramAuthority {
     /// Open (creating) this domain's record store.
     pub fn records(&self) -> io::Result<ProgramRecords> {
         let root = self.primary.directory.join("programs");
+        // A directory this call creates is synced into its parent, so a
+        // commit's names survive a power loss with the directories that hold them.
         for directory in ["", "blobs", "pins", "addresses", "retiring"] {
-            private_directory(&root.join(directory))?;
+            let path = root.join(directory);
+            let created = fs::symlink_metadata(&path).is_err();
+            private_directory(&path)?;
+            if created {
+                sync_directory(path.parent().expect("a records directory has a parent"))?;
+            }
         }
         Ok(ProgramRecords {
             root,
@@ -649,10 +656,14 @@ impl ProgramRecords {
     }
     fn write_blob(&self, digest: ContentHash, bytes: &[u8]) -> io::Result<()> {
         let path = self.blob(digest);
+        // Equal bytes are reused, but only once durable: the writer that
+        // renamed them may not have synced them or `blobs/` yet.
         if let Ok(existing) = private_read(&path, bytes.len())
             && existing == bytes
         {
-            return Ok(());
+            fs::File::open(&path)?.sync_all()?;
+            synced(&path);
+            return sync_directory(&self.root.join("blobs"));
         }
         let temporary = path.with_extension(format!("{}.tmp", hex(&random()?)));
         write_durable(&temporary, bytes)?;
@@ -803,10 +814,23 @@ impl ProgramHit {
     }
 }
 fn write_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    super::installation::private_write(path, bytes)
+    super::installation::private_write(path, bytes)?;
+    synced(path);
+    Ok(())
 }
 fn sync_directory(path: &Path) -> io::Result<()> {
-    fs::File::open(path)?.sync_all()
+    fs::File::open(path)?.sync_all()?;
+    synced(path);
+    Ok(())
+}
+#[cfg(test)]
+thread_local! {
+    /// Every path this thread synced, in order.
+    pub(super) static SYNCS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(vec![]) };
+}
+fn synced(_path: &Path) {
+    #[cfg(test)]
+    SYNCS.with(|syncs| syncs.borrow_mut().push(_path.to_owned()));
 }
 
 #[cfg(test)]

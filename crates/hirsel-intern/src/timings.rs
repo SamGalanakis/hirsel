@@ -376,11 +376,13 @@ pub enum Count {
     ProgramRecordPublications,
     /// Requests that did not use program records; the reason is in the report.
     ProgramRecordBypasses,
+    /// Compiler files rehashed because their stat differed from the cached one.
+    ProgramCompilerRehashes,
 }
 
 impl Count {
     /// Every count, in declaration order.
-    pub const ALL: [Count; 110] = [
+    pub const ALL: [Count; 111] = [
         Count::Definitions,
         Count::Units,
         Count::VRuns,
@@ -491,6 +493,7 @@ impl Count {
         Count::ProgramRecordMisses,
         Count::ProgramRecordPublications,
         Count::ProgramRecordBypasses,
+        Count::ProgramCompilerRehashes,
     ];
     /// The stable name `--timings` prints.
     pub fn name(self) -> &'static str {
@@ -513,6 +516,7 @@ impl Count {
             Count::ProgramRecordMisses => "program record misses",
             Count::ProgramRecordPublications => "program record publications",
             Count::ProgramRecordBypasses => "program record bypasses",
+            Count::ProgramCompilerRehashes => "program compiler rehashes",
             Count::ValidationRetentionRefusals => "validation retention refusals",
             Count::VerifierFactEvictions => "verifier fact evictions",
             Count::ExecutionValidationRequests => "execution validation requests",

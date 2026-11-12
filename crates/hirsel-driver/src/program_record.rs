@@ -57,13 +57,13 @@ const VARIABLES: &[(&str, Class)] = &[
     ("HIRSEL_GLIBC_FLOOR", Class::Key),
     ("HIRSEL_GUARD_ORACLE", Class::Key),
     ("HIRSEL_LINK_KIT", Class::Key),
-    ("HIRSEL_QEMU_AARCH64", Class::CrossTool),
     ("HIRSEL_RUNTIME_ARCHIVES", Class::Key),
+    // The emulator runs a built aarch64 program; no build reads it.
+    ("HIRSEL_QEMU_AARCH64", Class::Launch),
     // Memcheck runtimes are built and launched only by `test --native`,
     // which does not use B.
     ("HIRSEL_VALGRIND", Class::Launch),
     ("HIRSEL_VALGRIND_RUNTIME", Class::Launch),
-    ("HIRSEL_VALIDATE_STAGES", Class::Key),
     ("LLVM_SYS_231_PREFIX", Class::Key),
     ("VALGRIND_LIB", Class::Launch),
     ("PATH", Class::Key),
@@ -80,6 +80,7 @@ const VARIABLES: &[(&str, Class)] = &[
     ("XDG_STATE_HOME", Class::Owner),
     ("XDG_DATA_HOME", Class::Owner),
     ("HIRSEL_VERIFY_CACHE", Class::Bypass),
+    ("HIRSEL_VALIDATE_STAGES", Class::Bypass),
     ("HIRSEL_CARRIED_ROW_RECHECK", Class::Bypass),
     ("HIRSEL_INSTANCE_RECOMPUTATION_DIR", Class::Bypass),
     ("HIRSEL_NATIVE_RETENTION", Class::Bypass),
@@ -468,6 +469,8 @@ fn environment() -> Result<Vec<(String, Vec<u8>)>, String> {
         match class {
             // `HIRSEL_VERIFY_CACHE=0` asks for no recheck; every other value rechecks.
             Class::Bypass if name == "HIRSEL_VERIFY_CACHE" && value == "0" => {}
+            // The CLI validates stages only for `HIRSEL_VALIDATE_STAGES=1`.
+            Class::Bypass if name == "HIRSEL_VALIDATE_STAGES" && value != "1" => {}
             Class::Bypass => return Err(format!("variable {name} is a bypass mode")),
             Class::Key => rows.push((name, value.as_bytes().to_vec())),
             Class::Owner => {
@@ -509,40 +512,154 @@ fn bypassed(reason: String) {
     timings::program_bypass(reason);
 }
 
-/// The running compiler's own bytes, by stat: this executable and every
-/// libLLVM it mapped. A rebuilt or replaced compiler is another key even when
-/// its source identity is equal.
-fn compiler_guard() -> Option<Vec<u8>> {
+/// The running compiler's own bytes: this executable and every libLLVM it
+/// mapped, each by the content digest of the very inode it mapped. A rebuilt
+/// or replaced compiler is another key even when its source identity is
+/// equal; a file whose stat changed but whose bytes did not (a hard link
+/// added elsewhere moves a shared inode's ctime) keeps its key at the cost of
+/// one rehash. A file replaced or deleted after this process loaded it, or
+/// unreadable, bypasses B: the bytes on disk are then not the running code.
+fn compiler_guard() -> Result<Vec<u8>, String> {
+    use std::os::unix::ffi::OsStrExt;
+    let cache = hirsel_validate::Installation::default_state()
+        .map(|state| state.join("compiler-digests"))
+        .filter(|dir| {
+            use std::os::unix::fs::DirBuilderExt;
+            let _ = std::fs::DirBuilder::new().mode(0o700).create(dir);
+            std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir())
+        });
+    let started = std::time::SystemTime::now();
+    let mut guard = Vec::new();
+    for loaded in loaded_compiler()? {
+        let (digest, _) = compiler_file_digest(cache.as_deref(), &loaded, started)?;
+        guard.extend_from_slice(loaded.path.as_os_str().as_bytes());
+        guard.extend_from_slice(&digest.0);
+    }
+    Ok(guard)
+}
+
+/// One compiler file this process runs: the path it was loaded from and the
+/// (device, inode) it mapped.
+struct Loaded {
+    path: PathBuf,
+    mapped: (u64, u64),
+}
+
+/// The running executable, through `/proc/self/exe`, and each libLLVM bound
+/// to the device and inode `/proc/self/maps` names for it.
+fn loaded_compiler() -> Result<Vec<Loaded>, String> {
+    use std::os::unix::fs::MetadataExt;
+    let running =
+        std::fs::metadata("/proc/self/exe").map_err(|_| "compiler executable unreadable")?;
+    let path =
+        std::fs::read_link("/proc/self/exe").map_err(|_| "compiler executable unreadable")?;
+    if path.to_string_lossy().ends_with(" (deleted)") {
+        return Err("compiler executable deleted after load".into());
+    }
+    let mut loaded = vec![Loaded {
+        path,
+        mapped: (running.dev(), running.ino()),
+    }];
+    let maps =
+        std::fs::read_to_string("/proc/self/maps").map_err(|_| "compiler mappings unreadable")?;
+    for line in maps.lines() {
+        // address, permissions, offset, device (major:minor, hex), inode, path.
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 6 {
+            continue;
+        }
+        let path = fields[5..].join(" ");
+        if !path.contains("libLLVM") {
+            continue;
+        }
+        if path.ends_with(" (deleted)") {
+            return Err(format!("compiler library {path} deleted after load"));
+        }
+        let unreadable = || format!("compiler mapping of {path} unreadable");
+        let (major, minor) = fields[3].split_once(':').ok_or_else(unreadable)?;
+        let major = u32::from_str_radix(major, 16).map_err(|_| unreadable())?;
+        let minor = u32::from_str_radix(minor, 16).map_err(|_| unreadable())?;
+        let inode: u64 = fields[4].parse().map_err(|_| unreadable())?;
+        let mapped = (libc::makedev(major, minor), inode);
+        let path = PathBuf::from(path);
+        match loaded.iter().find(|known| known.path == path) {
+            Some(known) if known.mapped != mapped => {
+                return Err(format!("compiler library {} mapped twice", path.display()));
+            }
+            Some(_) => {}
+            None => loaded.push(Loaded { path, mapped }),
+        }
+    }
+    Ok(loaded)
+}
+
+/// One loaded compiler file's content digest, and whether it was rehashed.
+/// The file opened at its path must be the inode the process mapped. The
+/// digest is cached under the file's full stamp (ctime included) and reused
+/// only for an equal stamp old enough to be stable (hirsel-native
+/// `file_digest::stable`: same-tick writes and clock rollback never reuse);
+/// any other stamp rehashes the bytes, verified unchanged across the read,
+/// so changed bytes are a new digest (a miss) and equal bytes the same one.
+fn compiler_file_digest(
+    cache: Option<&Path>,
+    loaded: &Loaded,
+    started: std::time::SystemTime,
+) -> Result<(ContentHash, bool), String> {
+    use hirsel_native::file_digest::{stable, stamp, verified_digests};
+    use std::io::Write;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
-    let mut paths = vec![std::env::current_exe().ok()?];
-    if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
-        for line in maps.lines() {
-            if let Some(path) = line.split_whitespace().nth(5)
-                && path.contains("libLLVM")
-                && !paths.iter().any(|known| known.as_os_str() == path)
-            {
-                paths.push(PathBuf::from(path));
-            }
-        }
+    let path = &loaded.path;
+    let unreadable = || format!("compiler file {} unreadable", path.display());
+    let mut file = std::fs::File::open(path).map_err(|_| unreadable())?;
+    let meta = file.metadata().map_err(|_| unreadable())?;
+    if (meta.dev(), meta.ino()) != loaded.mapped {
+        return Err(format!(
+            "compiler file {} replaced after load",
+            path.display()
+        ));
     }
-    let mut guard = Vec::new();
-    for path in paths {
-        let stat = std::fs::metadata(&path).ok()?;
-        guard.extend_from_slice(path.as_os_str().as_bytes());
-        for value in [
-            stat.dev(),
-            stat.ino(),
-            stat.size(),
-            stat.mtime() as u64,
-            stat.mtime_nsec() as u64,
-            stat.ctime() as u64,
-            stat.ctime_nsec() as u64,
-        ] {
-            guard.extend_from_slice(&value.to_le_bytes());
-        }
+    let state = stamp(&meta);
+    let encode = |state: &hirsel_native::file_digest::Stamp| -> Vec<u8> {
+        state.iter().flat_map(|word| word.to_le_bytes()).collect()
+    };
+    let entry = cache.map(|dir| {
+        let name = ContentHash::of_parts(
+            "hirsel.program.compiler-file.v1",
+            [path.as_os_str().as_bytes()],
+        );
+        dir.join(
+            name.0
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
+        )
+    });
+    let known = encode(&state);
+    if stable(&state, started)
+        && let Some(cached) = entry.as_ref().and_then(|entry| std::fs::read(entry).ok())
+        && cached.len() == known.len() + 32
+        && cached[..known.len()] == known[..]
+    {
+        let digest: [u8; 32] = cached[known.len()..].try_into().expect("length checked");
+        return Ok((ContentHash(digest), false));
     }
-    Some(guard)
+    let (state, digests) = verified_digests(path, &mut file, || {})
+        .map_err(|_| format!("compiler file {} changed while hashed", path.display()))?;
+    timings::count(Count::ProgramCompilerRehashes);
+    // Only a verified, stable (stamp, digest) pair is cached.
+    if stable(&state, started)
+        && let Some(entry) = entry
+        && let Ok(mut temporary) =
+            tempfile::NamedTempFile::new_in(entry.parent().expect("cache entry"))
+    {
+        let _ = temporary
+            .write_all(&encode(&state))
+            .and_then(|()| temporary.write_all(&digests.content.0))
+            .map_err(drop)
+            .and_then(|()| temporary.persist(&entry).map(drop).map_err(drop));
+    }
+    Ok((digests.content, true))
 }
 
 /// One request's selected record domain and keys.
@@ -575,7 +692,7 @@ fn keyed(session: &Session, entry: &Path, policy: Policy) -> Result<Keyed, Strin
     }
     let inputs = session.current_inputs().ok_or("no observed inputs")?;
     let environment = environment()?;
-    let guard = compiler_guard().ok_or("compiler guard unreadable")?;
+    let guard = compiler_guard()?;
     let directory = std::env::current_dir().map_err(|_| "no current directory")?;
     let compiler = session.compiler();
     let installation = compiler.installation_key(inputs);
@@ -829,7 +946,11 @@ pub(crate) fn build(
         // Without prebuilt runtime archives the link builds them with the
         // Cargo found on PATH (hirsel-native runtime_cache.rs), whose inputs
         // P does not hold.
-        let keyed = if std::env::var_os("HIRSEL_RUNTIME_ARCHIVES").is_none() {
+        // Stage validation must revalidate every build: it neither reads nor
+        // publishes a record.
+        let keyed = if build.validation == hirsel_native::Validation::EveryStage {
+            Err("validate stages".to_owned())
+        } else if std::env::var_os("HIRSEL_RUNTIME_ARCHIVES").is_none() {
             Err("runtime archives from the Cargo fallback".to_owned())
         } else {
             keyed(session, entry, policy)
@@ -1063,5 +1184,89 @@ fn replay_build(hit: &ProgramHit, platform: Option<ContentHash>, output: &Path) 
             hit.materialize(output).ok()?;
             Some(Ok(Ok(report)))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Loaded, compiler_file_digest};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::time::{Duration, SystemTime};
+
+    /// As the loader saw `path` now.
+    fn mapped(path: &std::path::Path) -> Loaded {
+        let meta = std::fs::metadata(path).unwrap();
+        Loaded {
+            path: path.to_owned(),
+            mapped: (meta.dev(), meta.ino()),
+        }
+    }
+
+    /// Bug caught: a guard keyed by inode metadata instead of the mapped
+    /// compiler's bytes. A ctime-only change must keep the key after one
+    /// rehash (not miss forever on a shared inode); a same-size rewrite with
+    /// its mtime restored must be a new key; a file replaced on disk after
+    /// the process mapped it must not be keyed at all.
+    #[test]
+    fn a_compiler_file_is_keyed_by_the_bytes_of_the_inode_it_mapped() {
+        let home = tempfile::tempdir().unwrap();
+        let cache = home.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        let path = home.path().join("libLLVM.so");
+        std::fs::write(&path, b"compiler bytes one").unwrap();
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let loaded = mapped(&path);
+        // Stamps written now are stable only seconds later.
+        let later = || SystemTime::now() + Duration::from_secs(10);
+        let digest = |started| compiler_file_digest(Some(&cache), &loaded, started).unwrap();
+        // File times are taken from a coarse clock: a change in the same tick
+        // as the cached stamp would leave it equal. Only stamps two seconds
+        // old are cached in use, so each change here first lets a tick pass.
+        let tick = || std::thread::sleep(Duration::from_millis(20));
+
+        let (first, rehashed) = digest(later());
+        assert!(rehashed, "a first sight hashes");
+        assert_eq!(digest(later()), (first, false), "an equal stamp reuses");
+        // Within the same tick a stamp never reuses: the write may be racing.
+        assert_eq!(digest(SystemTime::now()), (first, true), "unstable stamp");
+
+        // ctime moves (as when another hard link to the inode is made), bytes do not.
+        tick();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            digest(later()),
+            (first, true),
+            "equal bytes after a stat change: the same compiler, one rehash"
+        );
+        assert_eq!(digest(later()), (first, false));
+
+        // Equal size, other bytes, mtime restored: only ctime shows the rewrite.
+        tick();
+        std::fs::write(&path, b"compiler bytes two").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        let (second, rehashed) = digest(later());
+        assert!(rehashed);
+        assert_ne!(second, first, "rewritten compiler bytes must miss");
+        assert_eq!(
+            compiler_file_digest(None, &loaded, later()).unwrap(),
+            (second, true)
+        );
+
+        // Replaced after the mapping (an atomic upgrade renames a new inode in).
+        let next = home.path().join("libLLVM.so.new");
+        std::fs::write(&next, b"compiler bytes two").unwrap();
+        std::fs::rename(&next, &path).unwrap();
+        let replaced = compiler_file_digest(Some(&cache), &loaded, later()).unwrap_err();
+        assert!(replaced.contains("replaced after load"), "{replaced}");
+        // The new inode, once loaded, is keyed by its own bytes.
+        assert_eq!(
+            compiler_file_digest(Some(&cache), &mapped(&path), later()).unwrap(),
+            (second, true)
+        );
     }
 }

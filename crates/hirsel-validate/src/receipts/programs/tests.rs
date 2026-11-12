@@ -349,3 +349,58 @@ fn materialization_restores_the_recorded_executable() {
     assert!(found.materialize(&out).is_err());
     assert!(!out.exists());
 }
+
+/// Bug caught: a commit that names content not yet durable. A publication
+/// that reuses an equal blob (another writer renamed it, maybe without its
+/// syncs) must sync that blob and `blobs/` before the journal commit, and a
+/// records directory created now must be synced into its parent. This counts
+/// the syncs in order at the seam; power loss itself is not tested.
+#[test]
+fn a_commit_follows_the_sync_of_every_blob_it_names_reused_ones_included() {
+    let domain = Domain_::new();
+    SYNCS.with(|syncs| syncs.borrow_mut().clear());
+    let records = domain.records();
+    let created = SYNCS.with(|syncs| syncs.take());
+    let programs = records.root.clone();
+    // Four subdirectories created in programs/, then programs/ in its parent.
+    assert_eq!(
+        created.iter().filter(|path| **path == programs).count(),
+        4,
+        "each new programs/ entry synced: {created:?}"
+    );
+    assert!(
+        created.contains(&programs.parent().unwrap().to_owned()),
+        "programs/ itself synced into its parent: {created:?}"
+    );
+    records.publish(&record(b"E", b"d"), 0).unwrap();
+    // The second publication of the same record reuses both blobs.
+    SYNCS.with(|syncs| syncs.borrow_mut().clear());
+    records
+        .publish(&record(b"E", b"d"), generation(&records))
+        .unwrap();
+    let log = SYNCS.with(|syncs| syncs.take());
+    let commit = log
+        .iter()
+        .position(|path| *path == programs.join("addresses"))
+        .expect("the commit syncs addresses/");
+    let blobs: Vec<PathBuf> = fs::read_dir(programs.join("blobs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(blobs.len(), 2, "record and executable");
+    for blob in &blobs {
+        let file = log
+            .iter()
+            .position(|path| path == blob)
+            .unwrap_or_else(|| panic!("reused {} was not synced: {log:?}", blob.display()));
+        let directory = log[file..]
+            .iter()
+            .position(|path| *path == programs.join("blobs"))
+            .map(|at| at + file)
+            .expect("blobs/ synced after the reused blob");
+        assert!(
+            directory < commit,
+            "blob durable before the commit: {log:?}"
+        );
+    }
+}

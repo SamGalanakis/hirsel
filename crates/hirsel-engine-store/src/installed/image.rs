@@ -42,9 +42,13 @@ const TEXT: Domain = Domain {
     kind: 0x4601_0014,
     schema: 1,
 };
-// The sections later lands fill, each separately versioned and absent until
-// then: the name index, signature and representation edges, conventions,
-// and signature rows.
+// The sections later lands fill, each separately versioned: the name index,
+// signature and representation edges, conventions, and signature rows. `None`
+// means the producer did not build the section, so a reader must treat what
+// it would answer as unavailable, never as empty; `Some` of an empty section
+// means built and empty. Today's reader decodes these slots, ignores a
+// populated one, and refuses the whole image if one names a domain or schema
+// it does not know (`Sections::domains`), so a later schema is never misread.
 const NAMES: Domain = Domain {
     kind: 0x4601_0015,
     schema: 1,
@@ -222,36 +226,51 @@ pub(super) fn build(
     for reference in installed.contents.iter() {
         put_reference(&mut contents, reference);
     }
-    // One chunk per source file; the index lists definitions in path order.
-    let mut files = BTreeMap::<&Path, Vec<u8>>::new();
+    // Each source file's descriptors, in path order, fill chunks of at most
+    // one store record; the index lists definitions in path order.
+    let mut files = BTreeMap::<&Path, Vec<Vec<u8>>>::new();
     let mut entries = Vec::with_capacity(definitions.len());
     for (path, definition) in definitions {
         let bytes = options()
             .serialize(definition)
             .map_err(std::io::Error::other)?;
-        let chunk = files
+        if bytes.len() > hirsel_artifact_store::MAX_RECORD {
+            return Err(std::io::Error::other(
+                "installed definition descriptor exceeds one store record",
+            ));
+        }
+        let chunks = files
             .entry(&definition.ownership.source_logical)
             .or_default();
+        if chunks
+            .last()
+            .is_none_or(|chunk| chunk.len() + bytes.len() > hirsel_artifact_store::MAX_RECORD)
+        {
+            chunks.push(Vec::new());
+        }
+        let part = chunks.len() - 1;
+        let chunk = &mut chunks[part];
         let offset = u32::try_from(chunk.len()).map_err(std::io::Error::other)?;
         let len = u32::try_from(bytes.len()).map_err(std::io::Error::other)?;
         chunk.extend_from_slice(&bytes);
         entries.push((
             path.fingerprint().0,
-            &definition.ownership.source_logical,
+            (&definition.ownership.source_logical, part),
             offset,
             len,
         ));
     }
     let numbers = files
-        .keys()
+        .iter()
+        .flat_map(|(file, chunks)| (0..chunks.len()).map(move |part| (*file, part)))
         .enumerate()
-        .map(|(number, file)| (*file, number as u32))
+        .map(|(number, key)| (key, number as u32))
         .collect::<BTreeMap<_, _>>();
     let mut index = Vec::with_capacity(8 + entries.len() * (ENTRY + 4));
     index.extend_from_slice(&(entries.len() as u64).to_le_bytes());
-    for (fingerprint, file, offset, len) in &entries {
+    for (fingerprint, (file, part), offset, len) in &entries {
         index.extend_from_slice(fingerprint);
-        index.extend_from_slice(&numbers[file.as_path()].to_le_bytes());
+        index.extend_from_slice(&numbers[&(file.as_path(), *part)].to_le_bytes());
         index.extend_from_slice(&offset.to_le_bytes());
         index.extend_from_slice(&len.to_le_bytes());
     }
@@ -266,6 +285,7 @@ pub(super) fn build(
         index: store.put(INDEX, &index)?,
         chunks: files
             .values()
+            .flatten()
             .map(|chunk| store.put(CHUNK, chunk))
             .collect::<std::io::Result<_>>()?,
         texts: installed
@@ -304,16 +324,117 @@ pub(super) fn build(
 /// Open the header `bytes` of an installation: read its row, content and
 /// index sections and source texts, each checked against its reference.
 /// Definition chunks are left to first demand.
+/// Decoding a header or descriptor allocates at most this many heap bytes per
+/// encoded byte: every container in `Header` and `InstalledDefinition` holds
+/// elements at most four times their shortest fixint encoding (a 24-byte
+/// String, Vec or PathBuf against its 8-byte length; a 32-byte `(u8, PathBuf)`
+/// against 9 bytes). A field whose elements expand more must raise it.
+const EXPANSION: u64 = 4;
+
+fn bytes_of(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+/// The request charge for reading and decoding a header of `encoded` bytes,
+/// admitted before the header is read.
+pub(super) fn header_bytes(encoded: u64) -> u64 {
+    bytes_of(std::mem::size_of::<Header>()).saturating_add(encoded.saturating_mul(1 + EXPANSION))
+}
+
+/// Everything else opening the image allocates or its package retains, from
+/// the decoded header alone and admitted before any section is read: each raw
+/// section, the decoded tables, the order and tiling checks, both copies of
+/// every source text, the slot tables, every descriptor a request may come to
+/// demand (its chunk bytes and their decoded expansion), and the two row
+/// trees the operation's records keep. Section lengths come from the header;
+/// a section whose bytes disagree is refused on read. Saturating throughout.
+fn section_bytes(sections: &Sections, root: &Path) -> u64 {
+    let len = |reference: &Reference| reference.len;
+    let rows = len(&sections.rows) / ROW as u64;
+    let contents = len(&sections.contents) / REFERENCE as u64;
+    let count = len(&sections.index) / (ENTRY + 4) as u64;
+    let chunks = bytes_of(sections.chunks.len());
+    let each = |n: u64, size: usize| n.saturating_mul(bytes_of(size));
+    let texts = sections
+        .texts
+        .iter()
+        .map(len)
+        .fold(0u64, u64::saturating_add);
+    let descriptors = sections
+        .chunks
+        .iter()
+        .map(len)
+        .fold(0u64, u64::saturating_add);
+    let mut trees = hirsel_query_products::retained::MetadataWeight::default();
+    let tree_rows = usize::try_from(rows).unwrap_or(usize::MAX);
+    trees.tree::<ContentHash, Reference>(tree_rows);
+    trees.add(
+        std::mem::size_of::<InstalledRecords>()
+            + std::mem::size_of::<InstalledSourceRecords>()
+            + 3 * root.as_os_str().len(),
+    );
+    [
+        len(&sections.rows),
+        each(rows, std::mem::size_of::<(ContentHash, Association)>()),
+        len(&sections.contents),
+        each(contents, std::mem::size_of::<Reference>()),
+        len(&sections.index),
+        each(
+            count,
+            std::mem::size_of::<&[u8]>() + std::mem::size_of::<(u32, u64, u64)>(),
+        ),
+        each(
+            chunks,
+            std::mem::size_of::<u64>() + std::mem::size_of::<Reference>(),
+        ),
+        texts.saturating_mul(2),
+        each(
+            chunks,
+            std::mem::size_of::<OnceLock<Result<Bytes, String>>>(),
+        ),
+        each(
+            count,
+            std::mem::size_of::<OnceLock<Result<InstalledDefinition, String>>>(),
+        ),
+        descriptors.saturating_mul(1 + EXPANSION),
+        trees.bytes(),
+    ]
+    .into_iter()
+    .fold(0, u64::saturating_add)
+}
+
+/// Decode a header alone: the only work `read` does before its plan.
+#[cfg(test)]
+pub(super) fn decode_header(bytes: &[u8]) -> bool {
+    options().deserialize::<Header>(bytes).is_ok()
+}
+
+/// Decode the header in `bytes` and, if it is `expected`'s, admit and read
+/// its sections. `admit` refuses before anything past the header allocates.
 pub(super) fn read(
     store: &hirsel_artifact_store::Store,
     bytes: &[u8],
+    expected: Option<(&PackageId, ContentHash)>,
+    admit: &mut dyn FnMut(u64) -> bool,
 ) -> Result<InstalledPackage, String> {
     let header: Header = options()
         .deserialize(bytes)
         .map_err(|error| format!("corrupt installed package: {error}"))?;
+    if let Some((package, compiler)) = expected {
+        if header.compiler != compiler {
+            return Err("stale installed package: compiler identity mismatch".into());
+        }
+        if header.package != *package {
+            return Err("installed package identity mismatch".into());
+        }
+    }
     let sections = header.sections;
     if !sections.domains() || sections.texts.len() != header.sources.len() {
         return Err("invalid installed package sections".into());
+    }
+    let charge = section_bytes(&sections, store.root());
+    if !admit(charge) {
+        return Err("installed package exceeds request admission".into());
     }
     let section = |reference: Reference| {
         store
@@ -438,6 +559,7 @@ pub(super) fn read(
         definitions: Some(Arc::new(definitions)),
         records: Default::default(),
         sources_owner: None,
+        charge: header_bytes(bytes_of(bytes.len())).saturating_add(charge),
     })
 }
 

@@ -372,6 +372,7 @@ impl ResultStore for RequestStore {
         &self,
         package: &hirsel_syntax::PackageId,
         compiler: ContentHash,
+        admit: &mut dyn FnMut(u64) -> bool,
     ) -> Result<Arc<InstalledPackage>, String> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(installed) = &state.installed
@@ -380,13 +381,16 @@ impl ResultStore for RequestStore {
         {
             return Ok(installed.clone());
         }
-        let installed = self.backend.installed_package(package, compiler)?;
         if state.installed.is_some() {
             return Err("operation already owns another installed package".into());
         }
-        if !self.charge(&mut state, installed.operation_metadata_bytes()) {
-            return Err("installed integrity metadata exceeds request transport admission".into());
-        }
+        // The backend charges this request before it allocates; whatever an
+        // attempt charged stays charged, refused or not.
+        let installed = self
+            .backend
+            .installed_package(package, compiler, &mut |bytes| {
+                admit(bytes) && self.charge(&mut state, bytes)
+            })?;
         state.installed = Some(installed.clone());
         Ok(installed)
     }

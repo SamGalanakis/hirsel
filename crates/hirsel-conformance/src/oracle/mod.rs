@@ -127,8 +127,9 @@ impl ResultStore for ColdStore {
         &self,
         package: &hirsel_syntax::PackageId,
         compiler: hirsel_syntax::ContentHash,
+        admit: &mut dyn FnMut(u64) -> bool,
     ) -> Result<Arc<hirsel_engine_store::InstalledPackage>, String> {
-        self.0.installed_package(package, compiler)
+        self.0.installed_package(package, compiler, admit)
     }
 
     fn get(&self, _: &hirsel_engine_store::EntryKey) -> Option<hirsel_engine_store::Bytes> {

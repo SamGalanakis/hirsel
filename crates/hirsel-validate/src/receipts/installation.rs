@@ -35,7 +35,17 @@ type Header = (
 /// one generation's.
 pub struct Registered {
     pub verifier: Arc<VerifierCache>,
-    pub header: Header,
+    pub header: AuthenticatedHeader,
+}
+/// The header association a registration authenticated. Only `registered`
+/// constructs one, so a reader that trusts an image lazily on its strength
+/// cannot be handed an arbitrary header instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuthenticatedHeader(Header);
+impl AuthenticatedHeader {
+    pub fn header(self) -> Header {
+        self.0
+    }
 }
 /// Issuance is private to VerifierCache::publish_bytes. Imported associations
 /// are never enumerated. A Precompute adopts only V's own rows from the root's
@@ -293,7 +303,7 @@ impl Installation {
                 crate::FactTable::default(),
                 Mutex::default(),
             )),
-            header,
+            header: AuthenticatedHeader(header),
         })
     }
     /// The authenticated, read-only rows of the root's current registration,

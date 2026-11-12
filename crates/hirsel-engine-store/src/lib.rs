@@ -200,11 +200,16 @@ pub trait ResultStore: Send + Sync {
     /// Observe encoding at the producer, including request-local content.
     fn archive_encoded(&self, _boundary: ArchiveBoundary) {}
 
-    /// Attach an explicitly selected installed package, independently of cache hits.
+    /// Attach an explicitly selected installed package, independently of cache
+    /// hits. `admit` is charged what the package costs its holder before that
+    /// is allocated: an open charges its header before reading it and the
+    /// rest before reading any section; a package already held charges its
+    /// recorded total. A refusal fails the attach and leaves nothing held.
     fn installed_package(
         &self,
         package: &hirsel_syntax::PackageId,
         _compiler: ContentHash,
+        _admit: &mut dyn FnMut(u64) -> bool,
     ) -> Result<Arc<InstalledPackage>, String> {
         Err(format!(
             "installed products for {}@{} are not configured",
@@ -1125,13 +1130,14 @@ impl ResultStore for MemStore {
         &self,
         package: &hirsel_syntax::PackageId,
         compiler: ContentHash,
+        admit: &mut dyn FnMut(u64) -> bool,
     ) -> Result<Arc<InstalledPackage>, String> {
         self.installed
             .as_ref()
             .ok_or_else(|| {
                 "installed products: no installed package root attached to mem@1".to_string()
             })?
-            .installed_package(package, compiler)
+            .installed_package(package, compiler, admit)
     }
     fn for_operation(&self) -> Option<Arc<dyn ResultStore>> {
         let installed = self.installed.as_ref()?.clone();

@@ -145,8 +145,9 @@ fn session_representation_edit_matches_cold(opaque: bool, reads_field: bool) {
             &self,
             package: &hirsel_syntax::PackageId,
             compiler: hirsel_syntax::ContentHash,
+            admit: &mut dyn FnMut(u64) -> bool,
         ) -> Result<Arc<store::InstalledPackage>, String> {
-            self.0.installed_package(package, compiler)
+            self.0.installed_package(package, compiler, admit)
         }
         fn get(&self, _: &store::EntryKey) -> Option<store::Bytes> {
             None

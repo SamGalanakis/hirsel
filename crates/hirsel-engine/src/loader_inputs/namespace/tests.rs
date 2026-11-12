@@ -745,6 +745,7 @@ fn explicit_toolchain_context_loads_sidecar_graph_without_host_discovery() {
             &self,
             package: &hirsel_syntax::PackageId,
             compiler: ContentHash,
+            _admit: &mut dyn FnMut(u64) -> bool,
         ) -> Result<Arc<hirsel_engine_store::InstalledPackage>, String> {
             assert_eq!(package, &self.0.package);
             assert_eq!(compiler, self.0.compiler);

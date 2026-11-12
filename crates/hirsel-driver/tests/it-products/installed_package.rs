@@ -149,7 +149,7 @@ fn installed_std_compiles_without_its_source_files_and_never_checks_unused_items
             version: "1".into(),
         };
         let installed = provider()
-            .installed_package(&package, COMPILER.identity())
+            .installed_package(&package, COMPILER.identity(), &mut |_| true)
             .unwrap();
         let physical = hirsel_artifact_store::Store::new(products.clone());
         let corrupt = |reference: Reference| {
@@ -241,7 +241,7 @@ fn foreign_demanded_body_is_rejected_on_its_first_use() {
             std::fs::remove_dir_all(&source_root).unwrap();
             let body = DirStore::new(directory.path().join(format!("{name}-index")))
                 .with_read_only_root(products.clone())
-                .installed_package(&package, COMPILER.identity())
+                .installed_package(&package, COMPILER.identity(), &mut |_| true)
                 .unwrap()
                 .definition(&hirsel_syntax::DefPath(hirsel_syntax::ItemPath {
                     package: package.clone(),
@@ -325,7 +325,7 @@ fn a_refused_installed_specialization_registration_is_the_request_error() {
         });
         let installed = DirStore::new(directory.path().join("index"))
             .with_read_only_root(products.clone())
-            .installed_package(&package, COMPILER.identity())
+            .installed_package(&package, COMPILER.identity(), &mut |_| true)
             .unwrap();
         let semantic = installed.definition(&outer).unwrap().unwrap().record;
         drop(installed);
@@ -362,5 +362,126 @@ fn a_refused_installed_specialization_registration_is_the_request_error() {
         assert!(error.contains("installed semantic input"), "{error}");
         std::fs::write(&path, original).unwrap();
         compile("restored").unwrap();
+    });
+}
+
+/// Flip the first payload byte of every installed definition chunk under
+/// `root` whose payload names `marker`, wherever it is packed: each definition
+/// in those chunks is refused on load.
+fn damage_definition_chunks(root: &std::path::Path, marker: &[u8]) -> usize {
+    // A stored container: magic, then the domain kind (LE u32) and payload
+    // length (LE u64 at +16); chunks are domain 0x4601_0013 and their payload
+    // follows the 64-byte header.
+    const MAGIC: &[u8; 8] = b"HIRART02";
+    let mut damaged = 0;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let mut bytes = std::fs::read(&path).unwrap();
+            let starts = bytes
+                .windows(12)
+                .enumerate()
+                .filter(|(_, window)| {
+                    window[..8] == MAGIC[..] && window[8..12] == 0x4601_0013u32.to_le_bytes()
+                })
+                .map(|(start, _)| start)
+                .filter(|&start| {
+                    let len = u64::from_le_bytes(bytes[start + 16..start + 24].try_into().unwrap());
+                    bytes[start + 64..start + 64 + len as usize]
+                        .windows(marker.len())
+                        .any(|window| window == marker)
+                })
+                .collect::<Vec<_>>();
+            for start in &starts {
+                bytes[start + 64] ^= 1;
+            }
+            if !starts.is_empty() {
+                damaged += starts.len();
+                std::fs::write(&path, bytes).unwrap();
+            }
+        }
+    }
+    damaged
+}
+
+/// A registered request reads an installed callee's signature from the
+/// image's source text, which the registered header authenticates, and admits
+/// its descriptor only when it uses the body. Bugs: a registered open audits
+/// (or reads) descriptors no request demands, or lowering a body skips the
+/// descriptor's admission. Oracle: with only an unused module's chunk refused
+/// the check answers; with the callee's own chunk refused, `check` still
+/// answers from authenticated text (it never lowers an installed body), while
+/// TIR, which demands the callee's body, is refused.
+#[test]
+fn a_signature_only_use_skips_a_refused_descriptor_and_a_body_use_is_refused() {
+    hirsel_intern::jobs::with_compiler_stack(|| {
+        let directory = tempfile::tempdir().unwrap();
+        let precompute = |name: &str| {
+            let source_root = directory.path().join(format!("{name}-std"));
+            std::fs::create_dir(&source_root).unwrap();
+            let manifest = source_root.join("hirsel.json");
+            std::fs::write(
+                source_root.join("math.hir"),
+                "pub fn twice(x:u8)->u8{x+x}\n",
+            )
+            .unwrap();
+            std::fs::write(
+                source_root.join("other.hir"),
+                "pub fn unrelated_marker()->u8{7u8}\n",
+            )
+            .unwrap();
+            std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"std","version":"1"},"sources":[{"path":"math.hir","module":["math"]},{"path":"other.hir","module":["other"]}],"dependencies":[]}"#).unwrap();
+            let products = directory.path().join(name);
+            COMPILER.precompute_package(&manifest, &products).unwrap();
+            std::fs::remove_dir_all(&source_root).unwrap();
+            products
+        };
+        let compile = |products: &std::path::Path, name: &str, operation| {
+            // Registered as `Compiler::configuration` selects it for the CLI.
+            let store: Arc<dyn ResultStore> = Arc::new(
+                DirStore::new(directory.path().join(name))
+                    .with_read_only_root(products.to_path_buf()),
+            );
+            let config = CompileConfig {
+                store: store.for_compiler(COMPILER.identity()).unwrap(),
+                ..Default::default()
+            };
+            CompilerRequests::for_host(COMPILER, config)
+                .execute_request(&CompileRequest::source(
+                    "pub fn main()->u8{std@1/math.twice(1u8)}\n",
+                    &hirsel_engine::default_context(),
+                    operation,
+                ))
+                .map_err(|error| error.to_string())
+        };
+        let answers = |result: Result<Arc<CompileOutput>, String>| {
+            let output = result.unwrap();
+            let CompileResult::Check(checked) = &output.result else {
+                panic!("check answers a check");
+            };
+            assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        };
+        let unused = precompute("unused");
+        assert_eq!(damage_definition_chunks(&unused, b"unrelated_marker"), 1);
+        let check = || CompileOperation::Check {
+            lowering: LoweringPolicy::Reachable,
+        };
+        answers(compile(&unused, "unused-check", check()));
+        let used = precompute("used");
+        assert_eq!(damage_definition_chunks(&used, b"twice"), 1);
+        answers(compile(&used, "used-check", check()));
+        let tir = CompileOperation::Tir { definition: None };
+        let Err(error) = compile(&used, "used-tir", tir) else {
+            panic!("lowering a refused descriptor's body answered");
+        };
+        assert!(
+            error.contains("corrupt installed definition chunk"),
+            "{error}"
+        );
     });
 }

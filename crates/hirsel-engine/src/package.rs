@@ -1203,7 +1203,7 @@ impl<'a> Graph<'a> {
                 return Ok(expected.clone());
             }
             let products = store
-                .installed_package(expected, compiler)
+                .installed_package(expected, compiler, &mut |_| true)
                 .map_err(ToolError::Runtime)?;
             let sources = products
                 .sources

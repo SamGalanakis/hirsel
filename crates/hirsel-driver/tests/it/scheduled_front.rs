@@ -755,8 +755,9 @@ fn admitted_front_zero_hold_retains_only_archives_after_settlement() {
                 &self,
                 package: &hirsel_syntax::PackageId,
                 compiler: hirsel_syntax::ContentHash,
+                admit: &mut dyn FnMut(u64) -> bool,
             ) -> Result<Arc<hirsel_engine_store::InstalledPackage>, String> {
-                self.0.installed_package(package, compiler)
+                self.0.installed_package(package, compiler, admit)
             }
 
             fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
@@ -1055,8 +1056,9 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 &self,
                 package: &hirsel_syntax::PackageId,
                 compiler: hirsel_syntax::ContentHash,
+                admit: &mut dyn FnMut(u64) -> bool,
             ) -> Result<Arc<hirsel_engine_store::InstalledPackage>, String> {
-                self.0.installed_package(package, compiler)
+                self.0.installed_package(package, compiler, admit)
             }
             fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
                 self.1.then(|| self.0.verifier()).flatten()

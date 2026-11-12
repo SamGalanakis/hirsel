@@ -746,7 +746,7 @@ impl QueryEngine {
                 .result_store
                 .as_ref()
                 .ok_or_else(missing)?
-                .installed_package(&context.package, self.store_identity)
+                .installed_package(&context.package, self.store_identity, &mut |_| true)
                 .map_err(|_| missing())?
                 .source_records()
                 .ok_or_else(missing)?;

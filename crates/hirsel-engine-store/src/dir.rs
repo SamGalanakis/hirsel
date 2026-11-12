@@ -50,8 +50,7 @@ struct Registration {
 #[derive(Debug)]
 struct Selected {
     verifier: std::sync::Arc<hirsel_validate::VerifierCache>,
-    headers:
-        std::collections::BTreeMap<PathBuf, (super::Address, hirsel_artifact_store::Association)>,
+    headers: std::collections::BTreeMap<PathBuf, hirsel_validate::AuthenticatedHeader>,
     /// An operation's read-only roots' index generations, pinned before their
     /// registrations are read and held while it opens their headers.
     _leases: Vec<hirsel_artifact_store::Batch>,
@@ -267,7 +266,7 @@ impl DirStore {
     fn header_of(
         &self,
         store: &hirsel_artifact_store::Store,
-    ) -> Option<(super::Address, hirsel_artifact_store::Association)> {
+    ) -> Option<hirsel_validate::AuthenticatedHeader> {
         self.selection()?.headers.get(store.root()).copied()
     }
     /// Publish the installation and return the header association it
@@ -550,6 +549,7 @@ impl ResultStore for DirStore {
         &self,
         package: &hirsel_syntax::PackageId,
         compiler: hirsel_syntax::ContentHash,
+        admit: &mut dyn FnMut(u64) -> bool,
     ) -> Result<std::sync::Arc<super::InstalledPackage>, String> {
         let mut captured = self
             .installed_capture
@@ -559,8 +559,13 @@ impl ResultStore for DirStore {
             && installed.package.package == *package
             && installed.package.compiler == compiler
         {
+            if !admit(installed.package.operation_metadata_bytes()) {
+                return Err("installed package exceeds request admission".into());
+            }
             return Ok(installed.package.clone());
         }
+        // Each root's attempt is charged as it opens; a refused admission
+        // fails before that root allocates and captures nothing.
         let mut failures = Vec::new();
         for root in &self.read_only {
             match super::InstalledPackage::open_header(
@@ -568,6 +573,7 @@ impl ResultStore for DirStore {
                 self.header_of(root),
                 package,
                 compiler,
+                admit,
             ) {
                 Ok(package) => {
                     if let Some(captured) = &mut captured {
@@ -956,7 +962,9 @@ mod tests {
         let before = statistics.snapshot();
         let operation = provider.for_operation().unwrap();
         let _scope = operation.read_scope();
-        let package_owner = operation.installed_package(&package, compiler).unwrap();
+        let package_owner = operation
+            .installed_package(&package, compiler, &mut |_| true)
+            .unwrap();
         assert_eq!(
             statistics.snapshot().counters["ContentChecks"],
             before.counters["ContentChecks"] + interface,
@@ -994,7 +1002,8 @@ mod tests {
         // An independent operation verifies its interface before demand too.
         let consumed = statistics.snapshot();
         let next = provider.for_operation().unwrap();
-        next.installed_package(&package, compiler).unwrap();
+        next.installed_package(&package, compiler, &mut |_| true)
+            .unwrap();
         assert_eq!(
             statistics.snapshot().counters["ContentChecks"],
             consumed.counters["ContentChecks"] + interface
@@ -1010,11 +1019,15 @@ mod tests {
             1 << 30,
         )
         .unwrap();
-        let installed = request.installed_package(&package, compiler).unwrap();
+        let installed = request
+            .installed_package(&package, compiler, &mut |_| true)
+            .unwrap();
         let charged = request.retained_bytes();
         assert!(charged >= installed.operation_metadata_bytes());
         assert!(charged > 0);
-        request.installed_package(&package, compiler).unwrap();
+        request
+            .installed_package(&package, compiler, &mut |_| true)
+            .unwrap();
         assert_eq!(request.retained_bytes(), charged);
         let sources = installed.source_records().unwrap();
         drop(request);
@@ -1029,7 +1042,11 @@ mod tests {
         }
         let refused =
             super::super::RequestStore::in_memory(Arc::new(provider), budget.reserve(0).unwrap());
-        assert!(refused.installed_package(&package, compiler).is_err());
+        assert!(
+            refused
+                .installed_package(&package, compiler, &mut |_| true)
+                .is_err()
+        );
         assert!(refused.exhausted());
     }
 
@@ -1153,7 +1170,9 @@ mod tests {
         let reader =
             DirStore::new(directory.path().join("local")).with_read_only_root(root.clone());
         let operation = reader.for_operation().unwrap();
-        operation.installed_package(&package, identity).unwrap();
+        operation
+            .installed_package(&package, identity, &mut |_| true)
+            .unwrap();
         for reader in [&reader as &dyn ResultStore, &*operation] {
             assert_eq!(&*reader.get(&first).unwrap(), b"first record");
             assert_eq!(

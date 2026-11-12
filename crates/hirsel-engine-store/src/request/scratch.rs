@@ -252,8 +252,9 @@ impl ResultStore for ScratchStore {
         &self,
         package: &hirsel_syntax::PackageId,
         compiler: ContentHash,
+        admit: &mut dyn FnMut(u64) -> bool,
     ) -> Result<Arc<InstalledPackage>, String> {
-        self.selected.installed_package(package, compiler)
+        self.selected.installed_package(package, compiler, admit)
     }
     fn cache_product(&self, address: Address, action: Action, domain: Domain, bytes: &[u8]) {
         self.selected.cache_product(address, action, domain, bytes);
@@ -634,6 +635,24 @@ fn read_at(file: &fs::File, bytes: &mut [u8], offset: u64) -> std::io::Result<()
 mod tests {
     use super::*;
 
+    /// The one request's spool directory under `parent`. The sweep's
+    /// `<prefix>swept` marker shares the prefix but is a file, not a spool.
+    fn spool_directory(parent: &Path) -> PathBuf {
+        let mut spools = fs::read_dir(parent)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.is_dir()
+                    && path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".hirsel-request-")
+            });
+        let spool = spools.next().unwrap();
+        assert!(spools.next().is_none());
+        spool
+    }
     #[test]
     fn scratch_creation_sweeps_dead_owner() {
         let parent = tempfile::tempdir().unwrap();
@@ -795,12 +814,7 @@ mod tests {
         ));
         // Corrupt a byte outside the window. Its complete content identity
         // must still fail, while the independently owned old window survives.
-        let directory = fs::read_dir(parent.path())
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+        let directory = spool_directory(parent.path());
         let spool = directory.join("contents");
         let file = fs::OpenOptions::new().write(true).open(&spool).unwrap();
         write_at(&file, &[255], 1).unwrap();
@@ -885,12 +899,7 @@ mod tests {
             2 << 20,
         )
         .unwrap();
-        let directory = fs::read_dir(parent.path())
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+        let directory = spool_directory(parent.path());
         let mut references = Vec::new();
         for n in 0..20u8 {
             references.push(request.put_content(domain(), &vec![n; 32 << 10]).unwrap());
@@ -958,12 +967,7 @@ mod tests {
         .unwrap();
         let first = request.put_content(domain(), &vec![1; 32 << 10]).unwrap();
         let second = request.put_content(domain(), &vec![2; 32 << 10]).unwrap();
-        let directory = fs::read_dir(parent.path())
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+        let directory = spool_directory(parent.path());
         let disk: u64 = fs::read_dir(&directory)
             .unwrap()
             .map(|entry| entry.unwrap().metadata().unwrap().len())
@@ -1096,16 +1100,7 @@ mod tests {
             let operation = request.operation_scope();
             let payload = vec![42; 32 << 10];
             let reference = request.put_content(domain(), &payload).unwrap();
-            let directory = fs::read_dir(parent.path())
-                .unwrap()
-                .map(|e| e.unwrap().path())
-                .find(|p| {
-                    p.file_name()
-                        .unwrap()
-                        .to_string_lossy()
-                        .starts_with(".hirsel-request-")
-                })
-                .unwrap();
+            let directory = spool_directory(parent.path());
             assert_eq!(
                 fs::metadata(directory.join("contents")).unwrap().len(),
                 0,

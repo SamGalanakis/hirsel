@@ -116,6 +116,48 @@ mod tests {
         let served = InstalledPackage::open(&fresh, &package, compiler).unwrap();
         assert_eq!(served.package.identity, old);
     }
+    /// The other guard's schedule: every write is admitted, but a content the
+    /// records list was collected from storage before publication. Only the
+    /// read-back through published storage sees it; publication must fail and
+    /// the root keep serving the installation it had.
+    #[test]
+    fn a_listed_content_missing_from_storage_fails_publication_and_keeps_the_old_header() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, compiler, package, _) = fixture(directory.path());
+        let old = InstalledPackage::open(&store, &package, compiler)
+            .unwrap()
+            .package
+            .identity;
+        let next = (*InstalledPackage::open(&store, &package, compiler)
+            .unwrap()
+            .package)
+            .clone();
+        // Larger than a packed content, so it is one loose file to collect.
+        let product = store
+            .put(
+                Domain {
+                    kind: 77,
+                    schema: 1,
+                },
+                &[7; 8192],
+            )
+            .unwrap();
+        std::fs::remove_file(store.output_path(product)).unwrap();
+        let mut records = records_of(&next);
+        records.rows.insert(
+            ContentHash::of_bytes(b"next row"),
+            (Action(ContentHash::of_bytes(b"next action")), product),
+        );
+        records.contents.insert(product.output.0, product);
+        let refused = next.publish(&store, &records).unwrap_err().to_string();
+        assert!(
+            refused.contains("incomplete package publication"),
+            "{refused}"
+        );
+        let fresh = hirsel_artifact_store::Store::new(directory.path().to_owned());
+        let served = InstalledPackage::open(&fresh, &package, compiler).unwrap();
+        assert_eq!(served.package.identity, old);
+    }
     /// The rows and contents an opened package lists, to republish it.
     fn records_of(installed: &InstalledPackage) -> InstallationRecords {
         InstallationRecords {
@@ -499,7 +541,7 @@ mod tests {
                 .with_registration(compiler, state.clone())
                 .for_operation()
                 .unwrap()
-                .installed_package(&package, compiler)
+                .installed_package(&package, compiler, &mut |_| true)
         }
     }
     /// Every file of the verifier registrations under `directory`'s state.
@@ -636,8 +678,9 @@ mod tests {
     /// relabels one entry with a path it does not hold, re-sorted so order and
     /// tiling still pass, would report that definition absent. No registration
     /// authenticates such an image, so an unregistered open must decode every
-    /// entry first and refuse it; under the header taken as authenticated,
-    /// the lazy open accepts it and answers absent, which is the attack.
+    /// entry first and refuse it. Registered, the lazy open accepts it and
+    /// answers absent: a registration vouches for the whole image, and only
+    /// the registration check issues the header a lazy open accepts.
     #[test]
     fn a_relabeled_and_resorted_index_is_refused_at_an_unregistered_open() {
         let directory = tempfile::tempdir().unwrap();
@@ -669,7 +712,16 @@ mod tests {
                 }
             },
         );
-        let lazy = InstalledPackage::open_header(&store, Some(header), &package, compiler).unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let header = authenticated(
+            directory.path(),
+            &state.path().join("state"),
+            compiler,
+            header,
+        );
+        let lazy =
+            InstalledPackage::open_header(&store, Some(header), &package, compiler, &mut |_| true)
+                .unwrap();
         assert!(lazy.package.definition(&one).unwrap().is_none());
         let refused = InstalledPackage::open(&store, &package, compiler).unwrap_err();
         assert!(
@@ -694,6 +746,22 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(read(Counter::InstalledDefinitionDecodes), before + 1);
+    }
+    /// `header` registered for `root` in `state`, as the registration check
+    /// hands it to a reader: the only way to obtain an authenticated header.
+    fn authenticated(
+        root: &Path,
+        state: &Path,
+        compiler: ContentHash,
+        header: (Address, Association),
+    ) -> hirsel_validate::AuthenticatedHeader {
+        hirsel_validate::Installation::begin(root, state, compiler)
+            .unwrap()
+            .finish(header)
+            .unwrap();
+        hirsel_validate::Installation::registered(root, state, compiler, Arc::default())
+            .unwrap()
+            .header
     }
     /// The image of `header` with one section rewritten by `edit`, under a new
     /// header that the root now associates.
@@ -727,7 +795,16 @@ mod tests {
     fn a_misordered_or_misdirected_section_is_refused_never_reported_absent() {
         let directory = tempfile::tempdir().unwrap();
         let (store, compiler, package, header, _) = imaged(directory.path(), false);
-        let open = |header| InstalledPackage::open_header(&store, Some(header), &package, compiler);
+        let state = tempfile::tempdir().unwrap();
+        let open = |header| {
+            let header = authenticated(
+                directory.path(),
+                &state.path().join("state"),
+                compiler,
+                header,
+            );
+            InstalledPackage::open_header(&store, Some(header), &package, compiler, &mut |_| true)
+        };
         let swap = |width: usize, at: usize| {
             move |bytes: &mut [u8]| {
                 let (first, second) = bytes[at..at + 2 * width].split_at_mut(width);
@@ -919,13 +996,71 @@ mod tests {
         assert_eq!(decoded, expected);
         assert!(allocations.peak <= large.bytes() as isize);
     }
+    /// Bug: an open allocates sections, texts or slots before it charges
+    /// them, or decoded headers and descriptors outgrow their charge (a
+    /// short string costs a 24-byte container against an 8-byte encoded
+    /// length). Oracle: the allocator. An unregistered open decodes every
+    /// descriptor, yet never peaks above what it admitted; refused at the
+    /// section plan, the read fails within the header's own charge.
+    #[test]
+    fn an_open_charges_before_it_allocates_and_never_outgrows_its_charge() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, compiler, package, _) = fixture(directory.path());
+        // The store's read batch keeps a snapshot of the root's index, sized
+        // by the root rather than the image; it is held across both reads.
+        let _batch = store.batch();
+        drop(InstalledPackage::open(&store, &package, compiler).unwrap());
+        let mut charges = Vec::new();
+        let (opened, allocations) = test_alloc::measured(|| {
+            InstalledPackage::open_header(&store, None, &package, compiler, &mut |bytes| {
+                charges.push(bytes);
+                true
+            })
+        });
+        let charged = charges.iter().sum::<u64>();
+        assert_eq!(charged, opened.unwrap().package.operation_metadata_bytes());
+        assert!(
+            allocations.peak <= charged as isize,
+            "{} > {charged}",
+            allocations.peak
+        );
+        let mut calls = 0;
+        let (refused, allocations) = test_alloc::measured(|| {
+            InstalledPackage::read_header(&store, None, None, &mut |_| {
+                calls += 1;
+                calls == 1
+            })
+        });
+        assert!(refused.is_err());
+        assert_eq!(calls, 2);
+        assert!(
+            allocations.peak <= charges[0] as isize,
+            "{} > {}",
+            allocations.peak,
+            charges[0]
+        );
+        // Only the steps before the plan may have allocated: the header's
+        // lookup, its read and its decode, each measured alone.
+        let row = store.lookup_owned(address()).unwrap();
+        let (_, lookup) = test_alloc::measured(|| store.lookup_owned(address()));
+        let (bytes, read) = test_alloc::measured(|| store.get_owned(row.reference).unwrap());
+        let (_, decode) = test_alloc::measured(|| image::decode_header(&bytes));
+        let before = lookup.peak + read.peak + decode.peak;
+        assert!(
+            allocations.peak <= before,
+            "{} > {before}",
+            allocations.peak
+        );
+    }
     #[test]
     fn operation_pins_the_manifest_and_rows_across_atomic_publication() {
         let directory = tempfile::tempdir().unwrap();
         let (writer, compiler, package, first) = fixture(directory.path());
         let reader = DirStore::new(directory.path().join("cache"))
             .with_read_only_root(directory.path().to_owned());
-        let package_owner = reader.installed_package(&package, compiler).unwrap();
+        let package_owner = reader
+            .installed_package(&package, compiler, &mut |_| true)
+            .unwrap();
         let previous = OpenedInstallation {
             records: package_owner
                 .records
@@ -1070,12 +1205,16 @@ mod tests {
         let provider = DirStore::new(directory.path().join("cache"))
             .with_read_only_root(directory.path().to_owned());
         let operation = provider.for_operation().unwrap();
-        let first = operation.installed_package(&package, compiler).unwrap();
-        let second = operation.installed_package(&package, compiler).unwrap();
+        let first = operation
+            .installed_package(&package, compiler, &mut |_| true)
+            .unwrap();
+        let second = operation
+            .installed_package(&package, compiler, &mut |_| true)
+            .unwrap();
         assert!(Arc::ptr_eq(&first, &second));
         assert!(
             operation
-                .installed_package(&package, ContentHash::default())
+                .installed_package(&package, ContentHash::default(), &mut |_| true)
                 .unwrap_err()
                 .contains("compiler identity mismatch")
         );
@@ -1090,7 +1229,8 @@ mod tests {
         assert_eq!(&*held, b"product");
         assert!(operation.get_content(reference).is_none());
         let next = provider.for_operation().unwrap();
-        next.installed_package(&package, compiler).unwrap();
+        next.installed_package(&package, compiler, &mut |_| true)
+            .unwrap();
         assert!(next.get_content(reference).is_none());
         assert!(
             InstalledPackage::verify_store(directory.path())
@@ -1106,7 +1246,8 @@ mod tests {
         )
         .unwrap();
         let next = provider.for_operation().unwrap();
-        next.installed_package(&package, compiler).unwrap();
+        next.installed_package(&package, compiler, &mut |_| true)
+            .unwrap();
         assert!(next.get_content(reference).is_some());
         // Restored content revalidates; the index row is not part of it.
         InstalledPackage::verify_store(directory.path()).unwrap();
@@ -1157,17 +1298,6 @@ impl InstalledRecords {
     pub(crate) fn content(&self, reference: Reference) -> Option<Bytes> {
         self.contents.binary_search(&reference).ok()?;
         self.store.get_owned(reference).ok()
-    }
-    pub fn metadata_bytes(&self) -> usize {
-        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
-        weight.add(
-            std::mem::size_of::<Self>()
-                + 2 * std::mem::size_of::<usize>()
-                + self.root.as_os_str().len()
-                + 2 * self.store.root().as_os_str().len(),
-        );
-        // The rows and contents are the package's, charged with it.
-        weight.bytes().try_into().unwrap_or(usize::MAX)
     }
 }
 /// Immutable parse references survive their operation without retaining its
@@ -1223,6 +1353,10 @@ pub struct InstalledPackage {
     definitions: Option<Arc<image::Definitions>>,
     records: std::sync::Weak<InstalledRecords>,
     sources_owner: Option<Arc<InstalledSourceRecords>>,
+    /// What opening the image charged before it allocated: its header and
+    /// the plan its sections imply (`image::section_bytes`). A package built
+    /// in memory was never opened and charges nothing.
+    charge: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1241,39 +1375,10 @@ impl InstalledPackage {
     pub fn source_records(&self) -> Option<Arc<InstalledSourceRecords>> {
         self.sources_owner.clone()
     }
+    /// The request charge for holding this package: everything opening it
+    /// allocated or retains, admitted before it allocated.
     pub fn operation_metadata_bytes(&self) -> u64 {
-        let mut weight = hirsel_query_products::retained::MetadataWeight::default();
-        weight.add(std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>());
-        weight.add(self.package.name.capacity() + self.package.version.capacity());
-        weight.add(self.manifest.capacity());
-        weight.add(std::mem::size_of_val(&*self.rows));
-        weight.add(std::mem::size_of_val(&*self.contents));
-        if let Some(sections) = &self.sections {
-            weight.add(sections.references().count() * std::mem::size_of::<Reference>());
-        }
-        // Reserved up front for every chunk the request may come to demand.
-        if let Some(definitions) = &self.definitions {
-            weight.add(definitions.bytes());
-        }
-        weight.add(self.sources.capacity() * std::mem::size_of::<InstalledSource>());
-        for source in &self.sources {
-            weight.add(source.path.as_os_str().len() + source.logical.as_os_str().len());
-            weight.add(source.text.capacity());
-            weight.add(
-                source.context.package.name.capacity() + source.context.package.version.capacity(),
-            );
-            weight.add(source.context.modules.capacity() * std::mem::size_of::<String>());
-            for module in &source.context.modules {
-                weight.add(module.capacity());
-            }
-        }
-        if let Some(records) = self.records.upgrade() {
-            weight.add(records.metadata_bytes());
-        }
-        if let Some(sources) = &self.sources_owner {
-            weight.add(sources.metadata_bytes());
-        }
-        weight.bytes()
+        self.charge
     }
     pub fn new(
         compiler: ContentHash,
@@ -1297,6 +1402,7 @@ impl InstalledPackage {
             definitions: None,
             records: Default::default(),
             sources_owner: None,
+            charge: 0,
         }
     }
     pub(crate) fn publish(
@@ -1421,16 +1527,21 @@ impl InstalledPackage {
         Self::read(store)?.check_records(store)
     }
     fn read(store: &hirsel_artifact_store::Store) -> Result<Self, String> {
-        Self::read_header(store, None)?.admit(false)
+        Self::read_header(store, None, None, &mut |_| true)?.admit(false)
     }
     /// Read the installation `header` names, or without one the root's
-    /// current header. A header a registration authenticated is opened as
-    /// is, never reselected from the root.
+    /// current header, if it is `expected`'s. A header a registration
+    /// authenticated is opened as is, never reselected from the root.
+    /// `admit` is charged the header before it is read and the rest of the
+    /// open before any section is (`image::read`).
     fn read_header(
         store: &hirsel_artifact_store::Store,
-        header: Option<(Address, hirsel_artifact_store::Association)>,
+        header: Option<hirsel_validate::AuthenticatedHeader>,
+        expected: Option<(&PackageId, ContentHash)>,
+        admit: &mut dyn FnMut(u64) -> bool,
     ) -> Result<Self, String> {
         let (at, row) = header
+            .map(hirsel_validate::AuthenticatedHeader::header)
             .or_else(|| Some((address(), store.lookup_owned(address())?)))
             .ok_or("missing installed package product")?;
         if at != address() {
@@ -1439,11 +1550,14 @@ impl InstalledPackage {
         if row.reference.domain != PACKAGE || row.action != Action(row.reference.output.0) {
             return Err("invalid installed package domain or action".into());
         }
+        if !admit(image::header_bytes(row.reference.len)) {
+            return Err("installed package exceeds request admission".into());
+        }
         let bytes = store
             .get_owned(row.reference)
             .ok()
             .ok_or("corrupt installed package product")?;
-        let mut installed = image::read(store, &bytes)?;
+        let mut installed = image::read(store, &bytes, expected, admit)?;
         installed.identity = row.reference.output.0;
         if installed.sources.is_empty()
             || installed.rows.is_empty()
@@ -1482,25 +1596,21 @@ impl InstalledPackage {
         package: &PackageId,
         compiler: ContentHash,
     ) -> Result<OpenedInstallation, String> {
-        Self::open_header(store, None, package, compiler)
+        Self::open_header(store, None, package, compiler, &mut |_| true)
     }
-    /// Open the installation `header` names; see `read_header`.
+    /// Open the installation `header` names, charging `admit` before each
+    /// allocation; see `read_header`.
     pub(crate) fn open_header(
         store: &hirsel_artifact_store::Store,
-        header: Option<(Address, hirsel_artifact_store::Association)>,
+        header: Option<hirsel_validate::AuthenticatedHeader>,
         package: &PackageId,
         compiler: ContentHash,
+        admit: &mut dyn FnMut(u64) -> bool,
     ) -> Result<OpenedInstallation, String> {
         hirsel_intern::timings::count(hirsel_intern::timings::Count::InstalledPackageOpens);
-        let read = || -> Result<OpenedInstallation, String> {
+        let mut read = || -> Result<OpenedInstallation, String> {
             let scope = store.batch();
-            let installed = Self::read_header(store, header)?;
-            if installed.compiler != compiler {
-                return Err("stale installed package: compiler identity mismatch".into());
-            }
-            if installed.package != *package {
-                return Err("installed package identity mismatch".into());
-            }
+            let installed = Self::read_header(store, header, Some((package, compiler)), admit)?;
             Self::attach(store, scope, installed.admit(header.is_some())?)
         };
         read().map_err(|error| format!("installed products {}: {error}", store.root().display()))
@@ -1510,10 +1620,12 @@ impl InstalledPackage {
     /// resolve only through this header, never through the root's index.
     pub(crate) fn open_records(
         store: &hirsel_artifact_store::Store,
-        header: Option<(Address, hirsel_artifact_store::Association)>,
+        header: Option<hirsel_validate::AuthenticatedHeader>,
     ) -> Result<Arc<InstalledRecords>, String> {
         let scope = store.batch();
-        let installed = Self::read_header(store, header)?.admit(header.is_some())?;
+        // An ordinary reader's records are not a request's to charge.
+        let installed =
+            Self::read_header(store, header, None, &mut |_| true)?.admit(header.is_some())?;
         Ok(Self::attach(store, scope, installed)?.records)
     }
     fn attach(

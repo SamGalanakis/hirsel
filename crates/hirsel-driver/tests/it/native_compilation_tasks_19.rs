@@ -48,8 +48,9 @@ impl ResultStore for DiagnosedStore {
         &self,
         package: &hirsel_syntax::PackageId,
         compiler: hirsel_syntax::ContentHash,
+        admit: &mut dyn FnMut(u64) -> bool,
     ) -> Result<Arc<store::InstalledPackage>, String> {
-        self.0.installed_package(package, compiler)
+        self.0.installed_package(package, compiler, admit)
     }
 
     fn for_operation(&self) -> Option<Arc<dyn ResultStore>> {

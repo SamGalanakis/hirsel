@@ -32,8 +32,9 @@ impl ResultStore for InstalledRemote {
         &self,
         package: &PackageId,
         compiler: ContentHash,
+        admit: &mut dyn FnMut(u64) -> bool,
     ) -> Result<Arc<InstalledPackage>, String> {
-        self.installed.installed_package(package, compiler)
+        self.installed.installed_package(package, compiler, admit)
     }
     fn read_scope(&self) -> Option<Box<dyn Send + Sync>> {
         self.installed.read_scope()

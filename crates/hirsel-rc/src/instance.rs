@@ -1401,12 +1401,31 @@ pub fn discover_library_instance(
     Ok(discovery.out)
 }
 
-/// Register source, nominal-finalizer and registry-constant roots using only
+/// Every non-generic source function: the entries of a build with no bound run
+/// (the middle-end oracle `import::lower` and the batch harness build), whose
+/// callers name any function directly, to read its unit or call it.
+pub fn source_functions(program: &Program) -> BTreeSet<DefPath> {
+    program
+        .signatures
+        .iter()
+        .filter(|(path, signature)| {
+            program.definitions.contains_key(*path)
+                && matches!(&signature.kind, SignatureKind::Function(f) if f.generics.is_empty())
+        })
+        .map(|(path, _)| path.clone())
+        .collect()
+}
+
+/// Register the entry, nominal-finalizer and registry-constant roots using only
 /// compact contracts. Every returned source instance starts without a body.
+/// `entries` are the functions the build can launch (run entry, selected tests,
+/// exported roots, call entries, place heads); everything else a program runs is
+/// discovered from their bodies, so unreachable source functions get no instance.
 pub fn seed_instances(
     program: &Program,
     context: &DiscoveryContext,
     layouts: &mut LayoutBuilder<'_>,
+    entries: &BTreeSet<DefPath>,
 ) -> Result<(Instances, Vec<InstanceId>), InstanceError> {
     // Explicit scoped capture specialization erases only dead callable carriers
     // to Unit; reserve its ordinary layout before the table is sealed.
@@ -1420,15 +1439,22 @@ pub fn seed_instances(
         context,
         nominals: Default::default(),
     };
-    for (path, signature) in &program.signatures {
-        if !context.sources.contains_key(path) {
-            continue;
-        }
-        match &signature.kind {
-            SignatureKind::Function(f) if f.generics.is_empty() => {
+    for path in entries {
+        match program
+            .signatures
+            .get(path)
+            .map(|signature| &signature.kind)
+        {
+            Some(SignatureKind::Function(f))
+                if f.generics.is_empty() && context.sources.contains_key(path) =>
+            {
                 e.function(path, Actuals::none())?;
             }
-            _ => {}
+            _ => {
+                return Err(InstanceError::Malformed(format!(
+                    "native entry {path} is not a non-generic source function"
+                )));
+            }
         }
     }
     // Every non-generic nominal: its finalizer, and what its representation requires.
@@ -1505,9 +1531,10 @@ pub fn register_static_callables<'a>(
 pub fn expand(
     program: &Program,
     layouts: &mut LayoutBuilder<'_>,
+    entries: &BTreeSet<DefPath>,
 ) -> Result<Instances, InstanceError> {
     let context = DiscoveryContext::of(program)?;
-    let (mut instances, roots) = seed_instances(program, &context, layouts)?;
+    let (mut instances, roots) = seed_instances(program, &context, layouts, entries)?;
     let mut pending: VecDeque<_> = roots.into();
     while let Some(id) = pending.pop_front() {
         if instances.roles[id.index()].is_library() {

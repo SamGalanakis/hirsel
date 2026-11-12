@@ -37,6 +37,7 @@ impl NativeDeclarations {
             source_anchors,
             discoveries,
             constant_definitions,
+            entries,
         } = self;
         let shared = match roots {
             RootInputs::Front(front) => front
@@ -111,6 +112,8 @@ impl NativeDeclarations {
         });
         w.flat_vec(discoveries);
         w.vec(constant_definitions, Weight::path);
+        w.tree::<hirsel_syntax::DefPath, ()>(entries.len());
+        entries.iter().for_each(|path| w.path(path));
         Ok(w.bytes())
     }
 }

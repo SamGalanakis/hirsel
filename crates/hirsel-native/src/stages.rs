@@ -648,11 +648,14 @@ pub fn lower_local_raw(
     Ok(ready)
 }
 
-/// Lower a validated snapshot to a Ready program for `options.target`.
+/// Lower a validated snapshot to a Ready program for `options.target`, rooted at
+/// `launch_entries` and the library `roots`; everything else it runs is
+/// discovered from their bodies.
 pub fn build_program_with_sources(
     program: &Program,
     manifest: Manifest,
     options: &Options,
+    launch_entries: &std::collections::BTreeSet<DefPath>,
     roots: &[hirsel_rc::library::Request],
     capture: &mut dyn FnMut(
         &mut hirsel_rc::instance::Instances,
@@ -670,6 +673,7 @@ pub fn build_program_with_sources(
         },
         &options.discharge,
         options.scoped_specialization,
+        launch_entries,
         roots,
         &mut |instances, layouts| capture(instances, layouts),
     )
@@ -1109,6 +1113,7 @@ pub(crate) fn fixture_ready(
         &program,
         manifest,
         options,
+        &hirsel_rc::instance::source_functions(&program),
         &[],
         &mut |instances, layouts| {
             hirsel_native_queries::batch_sources::capture(

@@ -64,6 +64,7 @@ fn build_program_source(
         program,
         manifest,
         options,
+        &hirsel_rc::instance::source_functions(program),
         roots,
         &mut |instances, layouts| {
             hirsel_native_queries::batch_sources::capture(reader, program, instances, layouts)

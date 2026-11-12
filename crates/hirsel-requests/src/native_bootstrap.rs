@@ -342,7 +342,7 @@ impl NativeBootstrap {
             );
             plan.options.discharge = proofs.discharge.clone();
         }
-        let declarations = NativeDeclarations::from_front(facts.clone())
+        let mut declarations = NativeDeclarations::from_front(facts.clone())
             .map_err(|e| format!("native declarations: {e:?}"))?;
         let reader = facts
             .original_context
@@ -439,6 +439,16 @@ impl NativeBootstrap {
             source
                 .bind_tests(&plan.test_entries)
                 .map_err(|error| error.to_string())?;
+        }
+        // A built program roots native code at what it can launch: its entry
+        // (or call), the selected tests and the place heads. Object output has
+        // no bound run and exports every function of its package.
+        if plan.output != CompilationOutput::Objects {
+            declarations.select_entries(
+                std::iter::once(facts.run.entry.clone())
+                    .chain(plan.test_entries.iter().map(|(path, _)| path.clone()))
+                    .chain(plan.options.places.iter().cloned()),
+            )?;
         }
         let emission = EmissionOptions::request(
             source.input().clone(),

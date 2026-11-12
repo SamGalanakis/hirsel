@@ -185,8 +185,9 @@ pub fn lower_discharging(
 }
 
 /// Batch reference import with explicit specialization policy and library roots.
-/// Demand queries import individual instances through `import_instance`. The
-/// diagnostic batch pipeline also supplies an independent middle-end test oracle.
+/// Demand queries import individual instances through `import_instance`. This
+/// middle-end oracle enters at every source function so a test can read any
+/// unit; native builds pass their launch entries to `lower_with_sources`.
 pub fn lower_with_roots(
     program: &Program,
     target: &TargetSpec,
@@ -201,6 +202,7 @@ pub fn lower_with_roots(
         flat_walk,
         discharge,
         scoped_specialization,
+        &crate::instance::source_functions(program),
         roots,
         &mut |_, _| Ok(Default::default()),
     )
@@ -219,6 +221,7 @@ pub fn lower_with_sources(
     flat_walk: &crate::flat_walk::Options,
     discharge: &Discharge,
     scoped_specialization: bool,
+    entries: &std::collections::BTreeSet<DefPath>,
     roots: &[crate::library::Request],
     source: &mut impl FnMut(&mut Instances, &mut LayoutBuilder<'_>) -> Result<SourceData, String>,
 ) -> Result<Lowered, LowerError> {
@@ -233,7 +236,7 @@ pub fn lower_with_sources(
     let mut layouts = LayoutBuilder::new(target, &owners);
     layouts.prepare_native_controls();
     let mut instances =
-        crate::instance::expand(program, &mut layouts).map_err(LowerError::Instance)?;
+        crate::instance::expand(program, &mut layouts, entries).map_err(LowerError::Instance)?;
     for root in roots {
         crate::library::instantiate(&mut layouts, &mut instances, root.clone())
             .map_err(LowerError::Instance)?;

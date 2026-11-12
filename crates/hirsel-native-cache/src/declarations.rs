@@ -47,8 +47,35 @@ pub struct NativeDeclarations {
     pub source_anchors: BTreeMap<DefPath, Vec<hirsel_span::Anchor>>,
     pub discoveries: Vec<ProductRef>,
     pub constant_definitions: Vec<DefPath>,
+    /// The functions that root native discovery. A build with a bound run
+    /// selects what it can launch (`select_entries`); without one (object
+    /// artifacts, harnesses) every non-generic source function is an entry,
+    /// since its caller can name any of them.
+    pub entries: BTreeSet<DefPath>,
 }
 impl NativeDeclarations {
+    /// Root native discovery at exactly `entries`: the run entry, selected
+    /// tests, exported roots, call entries and place heads of a bound build.
+    pub fn select_entries(
+        &mut self,
+        entries: impl IntoIterator<Item = DefPath>,
+    ) -> Result<(), String> {
+        let entries: BTreeSet<_> = entries.into_iter().collect();
+        if let Some(path) = entries.iter().find(|path| {
+            !self.context.sources.contains_key(*path)
+                || !matches!(
+                    self.program.signatures.get(*path).map(|signature| &signature.kind),
+                    Some(hirsel_types::SignatureKind::Function(f)) if f.generics.is_empty()
+                )
+        }) {
+            return Err(format!(
+                "native entry {path} is not a non-generic source function"
+            ));
+        }
+        self.entries = entries;
+        Ok(())
+    }
+
     /// Reviewed runtime dispositions and ownership from this exact source
     /// inventory. Instance C admission and Ready must use the same manifest.
     pub fn manifest(&self) -> Result<hirsel_core_contract::Manifest, String> {
@@ -380,6 +407,17 @@ impl NativeDeclarations {
         if !violations.is_empty() {
             return Err(invalid(format!("invalid instance bodies: {violations:?}")));
         }
+        let entries = context
+            .sources
+            .keys()
+            .filter(|path| {
+                program.signatures.get(*path).is_some_and(|signature| {
+                    matches!(&signature.kind,
+                        hirsel_types::SignatureKind::Function(f) if f.generics.is_empty())
+                })
+            })
+            .cloned()
+            .collect();
         Ok(Self {
             roots,
             program,
@@ -388,6 +426,7 @@ impl NativeDeclarations {
             source_anchors,
             discoveries,
             constant_definitions: statics.definitions,
+            entries,
         })
     }
 }

@@ -1006,6 +1006,7 @@ impl DemandInstances {
             &declarations.program,
             &declarations.context,
             &mut layouts,
+            &declarations.entries,
         )
         .map_err(|e| format!("native root registration: {e:?}"))?;
         for request in library {

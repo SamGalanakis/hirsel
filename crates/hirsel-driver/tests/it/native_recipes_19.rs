@@ -42,6 +42,7 @@ fn source_recipes_restore_generic_closures_and_finalizers_without_ancestor_value
             &declarations.program,
             &declarations.context,
             &mut layouts,
+            &declarations.entries,
         )
         .unwrap();
         let main_id = instances
@@ -224,6 +225,7 @@ fn library_recipe_rebinds_its_environment_without_reconstructing_the_requiring_v
             &declarations.program,
             &declarations.context,
             &mut layouts,
+            &declarations.entries,
         )
         .unwrap();
         let main = entry_path(&default_context());

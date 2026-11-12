@@ -260,6 +260,7 @@ RUNTIME_ARCHIVE_VIEWS = {
     "hirsel-cli-test-la_sieve_10": ["x86_64-default", "x86_64-measurement", "x86_64-ownership-trace"],
     "hirsel-cli-test-la_spectral_split_14": ["x86_64-default"],
     "hirsel-cli-test-object_edit_737": ["x86_64-default"],
+    "hirsel-cli-test-reachable_roots_801": ["x86_64-default"],
     "hirsel-cli-test-rule_explain_5": ["x86_64-default"],
     "hirsel-cli-test-stream_replay": ["x86_64-default"],
     "hirsel-cli-test-tabfold_10": ["x86_64-default"],

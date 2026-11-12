@@ -50,6 +50,7 @@ fn native_instance_product_hits_require_current_c_without_value_materialization(
             &declarations.program,
             &declarations.context,
             &mut layouts,
+            &declarations.entries,
         )
         .unwrap();
         let main = entry_path(&default_context());

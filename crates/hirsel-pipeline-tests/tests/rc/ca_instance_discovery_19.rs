@@ -13,7 +13,8 @@ fn explicit_source_discovery_matches_batch_keys_without_a_program_body_collectio
     let owners =
         hirsel_rc::library::owners(&program.types, &program.signatures).over(&program.owners);
     let mut batch_layouts = LayoutBuilder::new(&target, &owners);
-    let batch = hirsel_rc::instance::expand(&program, &mut batch_layouts).unwrap();
+    let entries = hirsel_rc::instance::source_functions(&program);
+    let batch = hirsel_rc::instance::expand(&program, &mut batch_layouts, &entries).unwrap();
     let expected = batch
         .ids()
         .map(|id| batch.view(id).key.encoding().to_vec())
@@ -23,7 +24,8 @@ fn explicit_source_discovery_matches_batch_keys_without_a_program_body_collectio
     let owners =
         hirsel_rc::library::owners(&program.types, &program.signatures).over(&program.owners);
     let mut layouts = LayoutBuilder::new(&target, &owners);
-    let (mut instances, mut pending) = seed_instances(&program, &context, &mut layouts).unwrap();
+    let (mut instances, mut pending) =
+        seed_instances(&program, &context, &mut layouts, &entries).unwrap();
     assert!(
         instances
             .ids()

@@ -200,7 +200,12 @@ pub(super) fn original_with_ready_observer(
         hirsel_rc::library::owners(&program.types, &program.signatures).over(&program.owners);
     let mut layouts = LayoutBuilder::new(&target, &owners);
     layouts.prepare_native_controls();
-    let mut instances = hirsel_rc::instance::expand(&program, &mut layouts).unwrap();
+    let mut instances = hirsel_rc::instance::expand(
+        &program,
+        &mut layouts,
+        &hirsel_rc::instance::source_functions(&program),
+    )
+    .unwrap();
     // The two selected bodies are linked explicitly by this component test;
     // the production BODIES table is unchanged. Selection precedes candidates.
     let mut selected = Vec::new();

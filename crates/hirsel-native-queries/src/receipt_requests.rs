@@ -59,6 +59,7 @@ fn roots(
         &declarations.program,
         &declarations.context,
         &mut layouts,
+        &declarations.entries,
     )
     .map_err(|e| format!("receipt original root registration: {e:?}"))?;
     Ok(roots

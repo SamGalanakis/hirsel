@@ -87,7 +87,12 @@ mod tests {
                 .over(&program.owners);
             let mut layouts = LayoutBuilder::new(&target, &owners);
             layouts.prepare_native_controls();
-            let mut instances = hirsel_rc::instance::expand(&program, &mut layouts).unwrap();
+            let mut instances = hirsel_rc::instance::expand(
+                &program,
+                &mut layouts,
+                &hirsel_rc::instance::source_functions(&program),
+            )
+            .unwrap();
             let sources = capture(
                 validated.original_reader(),
                 &program,

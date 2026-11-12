@@ -17,12 +17,14 @@ fn explicit_instance_import_keeps_source_invocations_without_program_bodies() {
     let manifest = support::manifest(&program);
     let mut operations = program.operation_registry();
     let context = DiscoveryContext::of(&program).unwrap();
+    let entries = hirsel_rc::instance::source_functions(&program);
     let bodies = std::mem::take(&mut program.definitions);
     let owners =
         hirsel_rc::library::owners(&program.types, &program.signatures).over(&program.owners);
     let mut layouts = LayoutBuilder::new(&target, &owners);
     layouts.prepare_native_controls();
-    let (mut instances, mut pending) = seed_instances(&program, &context, &mut layouts).unwrap();
+    let (mut instances, mut pending) =
+        seed_instances(&program, &context, &mut layouts, &entries).unwrap();
     let mut seen = BTreeSet::new();
     while let Some(id) = pending.pop() {
         if !seen.insert(instances.view(id).key.encoding().to_vec())

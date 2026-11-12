@@ -62,6 +62,11 @@ pub(crate) struct RuntimeSearch {
     opened: Vec<PathBuf>,
     /// DT_RPATH or DT_RUNPATH added search directories.
     owner_paths: bool,
+    /// Every path the loader tried for a library, in order (the audit
+    /// interface's search candidates); the opened ones are in `opened`.
+    pub(crate) candidates: Vec<PathBuf>,
+    /// What the probe link's linker searched.
+    pub(crate) linker: Option<super::capture::Traced>,
 }
 struct SelectedInput {
     name: String,
@@ -220,9 +225,10 @@ impl CapturedPlatform {
             arguments.push(format!("--symbol-ordering-file={}", order.display()));
             arguments.push("--no-warn-symbol-ordering".into());
         }
-        let probe = inputs
-            .linker
-            .capture(store, scratch.path(), &arguments, inputs.limits)?;
+        let (probe, probe_search) =
+            inputs
+                .linker
+                .capture_traced(store, scratch.path(), &arguments, inputs.limits)?;
         for (path, selected) in std::iter::once(&runtime_path)
             .chain(&foreign_paths)
             .zip(std::iter::once(&runtime_archive).chain(&foreign))
@@ -267,6 +273,8 @@ impl CapturedPlatform {
                 .map(|input| input.path.clone())
                 .collect(),
             owner_paths: discovered.owner_paths,
+            candidates: discovered.candidates,
+            linker: Some(probe_search),
         };
         reads.extend(discovered.inputs.into_iter().map(|input| PlatformRead {
             path: input.path,

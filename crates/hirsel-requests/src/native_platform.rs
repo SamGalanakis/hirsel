@@ -196,7 +196,7 @@ impl NativePlatformSelection {
             runtime_limits,
         )?;
         let emulator = spec.emulator.clone();
-        let mode = options.capture_mode().map_err(failed)?;
+        let mode = CaptureMode::from_environment().map_err(failed)?;
         let selected = spec
             .select_handed(request.platform.as_deref(), store.as_ref(), mode)
             .map_err(failed)?;
@@ -329,9 +329,10 @@ fn executable_spec(
 }
 
 /// The platform a host executable build of `options` with no foreign link
-/// inputs selects now, under the capture mode that build selects (release and
-/// `HIRSEL_PLATFORM_CAPTURE=cold` capture cold), captured into `store`, the
-/// operation store the build's request store reads through. A program record
+/// inputs selects now, under the capture mode that build selects
+/// (`HIRSEL_PLATFORM_CAPTURE=cold` captures cold), selected through the
+/// native product store over `store` that the build's request store reads
+/// through, which also keeps the platform records. A program record
 /// keys a linked executable by its identity, selected exactly as the build
 /// selects it and before any record is read; a miss hands it to the build,
 /// and a run hit launches the recorded executable on it.
@@ -355,14 +356,16 @@ pub fn host_executable_platform(
         name_bytes: 64 << 10,
     };
     let spec = executable_spec(&tools, &policy, options, &[], limits, runtime_limits)?;
-    let mode = options.capture_mode().map_err(failed)?;
+    let mode = CaptureMode::from_environment().map_err(failed)?;
+    let store =
+        super::native_store::products(store.clone(), options).map_err(|e| failed(e.to_string()))?;
     let handed = spec.hand_off(store.as_ref(), mode).map_err(failed)?;
     Ok(HostPlatform {
         handed,
         spec,
         mode,
         tools: Arc::new(tools),
-        store: store.clone(),
+        store,
     })
 }
 

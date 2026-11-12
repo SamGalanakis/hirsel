@@ -883,13 +883,83 @@ pub(crate) fn retain_link_input(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(super::runtime_cache::default_directory)
         .join("inputs-v1");
-    retain_link_input_in(&cache, store, reference, executable)
+    // A forced cold capture verifies every byte again; every other selection
+    // trusts a copy's receipt.
+    let receipts = matches!(
+        platform::record::CaptureMode::from_environment(),
+        Ok(platform::record::CaptureMode::Record)
+    );
+    retain_link_input_in(
+        &cache,
+        store,
+        reference,
+        executable,
+        receipts.then(std::time::SystemTime::now),
+    )
 }
+
+#[cfg(test)]
+thread_local! {
+    /// Retained copies whose bytes this thread checked in full.
+    pub(crate) static COPY_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A private copy's receipt: the content it was checked against, its mode,
+/// and the full stamp of the checked inode.
+fn copy_receipt(
+    reference: Reference,
+    executable: bool,
+    state: &crate::file_digest::Stamp,
+) -> Vec<u8> {
+    let mut receipt = b"hirsel.retained-copy.v1\0".to_vec();
+    receipt.extend_from_slice(&reference.output.0.0);
+    receipt.extend_from_slice(&reference.domain.kind.to_le_bytes());
+    receipt.extend_from_slice(&reference.domain.schema.to_le_bytes());
+    receipt.extend_from_slice(&reference.len.to_le_bytes());
+    receipt.push(u8::from(executable));
+    for word in state {
+        receipt.extend_from_slice(&word.to_le_bytes());
+    }
+    receipt
+}
+
+/// `destination` opened, when its receipt shows it is the very inode last
+/// checked against `reference`, unchanged since (full stamp, ctime included)
+/// and older than the racy margin (`file_digest::stable`): a same-tick
+/// rewrite or a clock rollback is checked in full.
+fn receipted_copy(
+    destination: &Path,
+    receipt: &Path,
+    reference: Reference,
+    executable: bool,
+    now: std::time::SystemTime,
+) -> Option<std::fs::File> {
+    use std::io::Read;
+    let file = std::fs::File::open(destination).ok()?;
+    let meta = file.metadata().ok()?;
+    let state = crate::file_digest::stamp(&meta);
+    if !meta.is_file() || !crate::file_digest::stable(&state, now) {
+        return None;
+    }
+    let expected = copy_receipt(reference, executable, &state);
+    let mut recorded = Vec::new();
+    super::runtime_cache::private_file(receipt)
+        .ok()?
+        .take(expected.len() as u64 + 1)
+        .read_to_end(&mut recorded)
+        .ok()?;
+    (recorded == expected).then_some(file)
+}
+
+/// Materialize and check a platform input; with `receipts` (the time the
+/// selection started), a copy whose receipt still holds is not reread, and a
+/// copy checked in full and stable is receipted for the next process.
 fn retain_link_input_in(
     cache: &Path,
     store: &dyn ResultStore,
     reference: Reference,
     executable: bool,
+    receipts: Option<std::time::SystemTime>,
 ) -> Result<Arc<RetainedInput>, String> {
     let mut retained = RETAINED.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(input) = retained.get(&(reference, executable)) {
@@ -913,20 +983,72 @@ fn retain_link_input_in(
             .collect::<String>(),
         if executable { ".x" } else { "" }
     );
-    let destination = std::path::PathBuf::from(format!(
+    let private = std::path::PathBuf::from(format!(
         "/proc/{}/fd/{}",
         std::process::id(),
         directory.as_raw_fd()
-    ))
-    .join(name);
-    let input = Arc::new(RetainedInput(materialize_blob(
-        store,
-        reference,
-        &destination,
-        executable,
-    )?));
+    ));
+    let destination = private.join(&name);
+    let receipt = private.join(format!("{name}.receipt"));
+    // The receipt is the store's own check made earlier: the blob must still
+    // be named by this store, as for a copy retained in this process.
+    let receipted = match receipts {
+        Some(now) => match receipted_copy(&destination, &receipt, reference, executable, now) {
+            Some(file) => {
+                blob_record(store, reference)?;
+                Some(file)
+            }
+            None => None,
+        },
+        None => None,
+    };
+    let file = match receipted {
+        Some(file) => file,
+        None => {
+            #[cfg(test)]
+            COPY_CHECKS.with(|count| count.set(count.get() + 1));
+            let file = materialize_blob(store, reference, &destination, executable)?;
+            if let Some(now) = receipts
+                && let Ok(meta) = file.metadata()
+                && crate::file_digest::stable(&crate::file_digest::stamp(&meta), now)
+            {
+                // A receipt is only an optimisation: failing to write one
+                // costs the next process a full check.
+                let _ = write_receipt(
+                    &private,
+                    &receipt,
+                    &copy_receipt(reference, executable, &crate::file_digest::stamp(&meta)),
+                );
+            }
+            file
+        }
+    };
+    let input = Arc::new(RetainedInput(file));
     retained.insert((reference, executable), input.clone());
     Ok(input)
+}
+
+/// Replace `receipt` atomically within the private directory.
+fn write_receipt(private: &Path, receipt: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let temporary = private.join(format!(
+        ".receipt-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .and_then(|mut file| file.write_all(bytes))
+        .and_then(|()| std::fs::rename(&temporary, receipt));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written
 }
 
 /// Forget every checked copy, as a new process starts.
@@ -1281,8 +1403,8 @@ mod transport_tests {
         let second = [b"second platform input ".as_slice(), unique].concat();
         let first_ref = store_link_input(&store, &first).unwrap();
         let second_ref = store_link_input(&store, &second).unwrap();
-        let retained = retain_link_input_in(&cache, &store, first_ref, false).unwrap();
-        let other = retain_link_input_in(&cache, &store, second_ref, false).unwrap();
+        let retained = retain_link_input_in(&cache, &store, first_ref, false, None).unwrap();
+        let other = retain_link_input_in(&cache, &store, second_ref, false, None).unwrap();
         assert_eq!(std::fs::read(retained.path()).unwrap(), first);
         assert_eq!(std::fs::read(other.path()).unwrap(), second);
         let name = cache.join(
@@ -1297,9 +1419,60 @@ mod transport_tests {
         let swapped = directory.path().join("swapped");
         std::fs::write(&swapped, &second).unwrap();
         std::fs::rename(&swapped, &name).unwrap();
-        let again = retain_link_input_in(&cache, &store, first_ref, false).unwrap();
+        let again = retain_link_input_in(&cache, &store, first_ref, false, None).unwrap();
         assert_eq!(std::fs::read(again.path()).unwrap(), first);
         assert_eq!(std::fs::read(&name).unwrap(), second);
+    }
+
+    /// Bug caught (platform-copies-stamp): a retained copy trusted on a
+    /// receipt that does not bind the copy's full stamp, so a private copy
+    /// modified after its check feeds the link. Oracle: the stored blob's
+    /// bytes. And the receipt's purpose: an unchanged copy is not reread.
+    #[test]
+    fn a_modified_private_copy_is_checked_again_not_trusted_by_its_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DirStore::new(directory.path().join("products"));
+        let cache = directory.path().join("inputs-v1");
+        let unique = directory.path().to_str().unwrap().as_bytes();
+        let bytes = [b"receipted platform input ".as_slice(), unique].concat();
+        let reference = store_link_input(&store, &bytes).unwrap();
+        // Stamps written now are stable only seconds later.
+        let later = || Some(std::time::SystemTime::now() + std::time::Duration::from_secs(10));
+        let checks = || COPY_CHECKS.with(|count| count.get());
+        // Each retain is a new process for this one input.
+        let retain = |now| {
+            RETAINED
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&(reference, false));
+            retain_link_input_in(&cache, &store, reference, false, now).unwrap()
+        };
+        let before = checks();
+        retain(later());
+        assert_eq!(checks(), before + 1, "a first copy is checked");
+        let unchanged = retain(later());
+        assert_eq!(checks(), before + 1, "an unchanged copy is not reread");
+        assert_eq!(std::fs::read(unchanged.path()).unwrap(), bytes);
+        drop(unchanged);
+        let name = cache.join(
+            reference
+                .output
+                .0
+                .0
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+        );
+        // A receipt is issued only for a stamp two seconds old, so a later
+        // write always moves it; this test's clock is advanced instead, so a
+        // timestamp tick must pass for the write to show.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut other = bytes.clone();
+        other[0] ^= 1;
+        std::fs::write(&name, &other).unwrap();
+        let checked = retain(later());
+        assert_eq!(checks(), before + 2, "a modified copy is checked again");
+        assert_eq!(std::fs::read(checked.path()).unwrap(), bytes);
     }
 }
 

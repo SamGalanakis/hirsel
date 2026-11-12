@@ -11,10 +11,26 @@ pub(super) fn capture(
     scratch: &Path,
     disk: u64,
 ) -> Result<Arc<dyn ResultStore>, ToolError> {
+    let backend = products(source, &request.options)?;
+    let store =
+        RequestStore::with_scratch_and_verifier_transport(backend, allowance, scratch, disk)
+            .map_err(ToolError::Io)?;
+    Ok(Arc::new(store))
+}
+
+/// The store a host native build of `options` keeps its products and
+/// platform in: the host-selected object cache, reading through `source`.
+/// A selection made before the build's request (a program record's lookup)
+/// goes through this same store, so what it captures is what the build and
+/// the next process find.
+pub(super) fn products(
+    source: Arc<dyn ResultStore>,
+    options: &hirsel_native::BuildOptions,
+) -> Result<Arc<dyn ResultStore>, ToolError> {
     let partition = hirsel_lir::objects::partition(
-        &request.options.passes.target.triple,
-        request.options.backend.name(),
-        &format!("{:?}", request.options.opt).to_lowercase(),
+        &options.passes.target.triple,
+        options.backend.name(),
+        &format!("{:?}", options.opt).to_lowercase(),
     );
     let directory = hirsel_lir::objects::DirObjects::default_location(&partition)
         .map(|store| store.root().to_owned());
@@ -45,11 +61,7 @@ pub(super) fn capture(
             )));
         }
     };
-    let backend = Arc::new(NativeStore { source, cache });
-    let store =
-        RequestStore::with_scratch_and_verifier_transport(backend, allowance, scratch, disk)
-            .map_err(ToolError::Io)?;
-    Ok(Arc::new(store))
+    Ok(Arc::new(NativeStore { source, cache }))
 }
 struct NativeStore {
     source: Arc<dyn ResultStore>,
@@ -73,6 +85,11 @@ impl ResultStore for NativeStore {
 
     fn local_product_store(&self) -> Option<hirsel_artifact_store::Store> {
         self.cache.local_product_store()
+    }
+    /// The object cache has no registration of its own; the operation's is
+    /// the source's.
+    fn program_authority(&self) -> Option<hirsel_validate::programs::ProgramAuthority> {
+        self.source.program_authority()
     }
     fn read_scope(&self) -> Option<Box<dyn Send + Sync>> {
         self.cache.read_scope()

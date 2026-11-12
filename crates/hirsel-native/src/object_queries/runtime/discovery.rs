@@ -33,6 +33,8 @@ pub struct DiscoveredRuntime {
     /// Whether the image or an opened object carries DT_RPATH or DT_RUNPATH,
     /// which adds search directories outside the selected library path.
     pub owner_paths: bool,
+    /// Every path the loader tried for a library, in order, opened or not.
+    pub candidates: Vec<PathBuf>,
 }
 
 /// Discover against the actual linked image's location, preserving its ORIGIN.
@@ -96,6 +98,7 @@ pub fn discover(
     }
     let mut opened = BTreeSet::new();
     let mut requests = BTreeSet::new();
+    let mut candidates = Vec::new();
     for event in event_bytes.split_inclusive(|byte| *byte == 0) {
         if event.last() != Some(&0) || event.len() < 2 {
             return Err("malformed runtime discovery event".into());
@@ -104,6 +107,12 @@ pub fn discover(
         match event[0] {
             b'S' => {
                 requests.insert(text.to_string());
+            }
+            b'C' => candidates.push(PathBuf::from(text)),
+            // A candidate ld.so.cache named: the cache chose it.
+            b'G' => {
+                candidates.push(PathBuf::from("/etc/ld.so.cache"));
+                candidates.push(PathBuf::from(text));
             }
             b'O' if text.is_empty() || text == "linux-vdso.so.1" || text == "linux-gate.so.1" => {}
             b'O' if Path::new(text) == image || Path::new(text) == loader_path => {}
@@ -216,6 +225,7 @@ pub fn discover(
         runtime,
         inputs,
         owner_paths,
+        candidates,
     })
 }
 

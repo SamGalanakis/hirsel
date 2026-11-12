@@ -7,7 +7,8 @@
  * HIRSEL_RUNTIME_MAP_LENGTH. Format: R (closed replay) or C (discovery), then
  * byte-sorted request\0absolute-snapshot-path\0 pairs. Discovery additionally
  * supplies a new HIRSEL_RUNTIME_EVENTS path and HIRSEL_RUNTIME_EVENTS_LIMIT.
- * Events are S request\0 or O opened-path\0. All bounds come from the caller.
+ * Events are S request\0, C candidate-path\0 (each path the loader tries
+ * for a request, in order; G when ld.so.cache named it) or O opened-path\0. All bounds come from the caller.
  * Runtime input derivation and ordinary-store admission belong to the host.
  */
 typedef unsigned long word;
@@ -136,7 +137,8 @@ unsigned int la_version(unsigned int version) {
 }
 char *la_objsearch(const char *name, word *cookie, unsigned int flag) {
     (void)cookie;
-    if (flag == 1) event('S', name);
+    /* LA_SER_ORIG 0x01, LA_SER_CONFIG 0x08 (glibc link.h:112-115). */
+    event(flag == 0x01 ? 'S' : flag == 0x08 ? 'G' : 'C', name);
     for (const char *p = pairs; p < end;) {
         const char *request = p;
         const char *snapshot = next(p);

@@ -308,20 +308,27 @@ lists the path of every other variable inside its toolchain directory
 Before its first link, a native build captures the selected platform: it
 identifies the linker, link kit, runtime archive, foreign libraries, loader and
 auditor byte for byte, and runs the linker and loader to resolve them. It keeps
-a platform record of that capture in the native cache (`platform-v1`). A later
-build with the same selection reuses the record while the stamps (device,
-inode, size, mtime and ctime) of every file the capture read, and of every
-directory the loader searches, are unchanged, and no record is older than a
-day. The record is a local cache that detects accidents, such as a toolchain
-upgraded in place, a file added to a library directory or a cache copied from
-another machine. It is not a security boundary: it trusts the files of your own
-account (the toolchain packages and this private cache). If a link that a
-record fed fails, the build deletes the record, captures again, and keeps no
-output from a platform the new capture disagrees with. `--timings` lists each
-hit, miss and its reason under `runner`. `HIRSEL_PLATFORM_CAPTURE=cold` reads
-no record and verifies the platform fully; `tools/land` and every Buck2 gate
-set it. Release builds always verify the platform fully, regardless of the
-environment.
+a platform record of that capture beside the captured content, in the native
+object cache of the home that built it (`platform-v1`). Every build profile
+follows one rule: a later build with the same selection reuses the record only
+while everything the capture selected is witnessed unchanged. That means the
+stamps (device, inode, size, mtime and ctime) of every file it read, of every
+directory a linker or loader search looked in, and the absence of every
+candidate those searches did not find, all on admitted local filesystems
+(ext2/3/4, xfs, btrfs, tmpfs, f2fs, zfs, bcachefs) under the same mounts, in the
+same boot and registration, for at most a day from the capture (no hit extends
+it). Records are authenticated with the home's registration; a home without a
+registration keeps none. Any other capture is full verification. The record is
+a local cache that detects accidents, such as a toolchain upgraded in place, a
+file added to a library directory, a remount or a cache copied from another
+machine. It is not a security boundary: it trusts the files of your own account
+(the toolchain packages and this cache), and it does not promise to notice
+raw-disk corruption, a rollback that restores metadata, or deliberate tampering
+by your own account. If a link that a record fed fails, the build deletes the
+record, captures again, and keeps no output from a platform the new capture
+disagrees with. `--timings` lists each hit, miss and its reason under `runner`.
+`HIRSEL_PLATFORM_CAPTURE=cold` reads no record and verifies the platform fully;
+`tools/land` and every Buck2 gate set it.
 
 `build`, `run` and `test` validate every lowered body with V, the second checker,
 as checks do. `--no-verify` skips V: the program, its output and every

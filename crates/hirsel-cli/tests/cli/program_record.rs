@@ -251,12 +251,17 @@ impl Home {
         (answer, counts)
     }
     /// The forced cold oracle: a state home with no registration.
+    /// The forced cold oracle also keeps its own cache home: it issues
+    /// platform records into its store, and a record of its capture must not
+    /// answer a later warm build.
     fn cold(&self, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Answer {
         self.cold_in(cwd, args, env, b"")
     }
     fn cold_in(&self, cwd: &Path, args: &[&str], env: &[(&str, &str)], input: &[u8]) -> Answer {
         let state = tempfile::tempdir().unwrap();
-        let (answer, counts, _) = self.report_in(state.path(), cwd, args, env, input);
+        let cache = tempfile::tempdir().unwrap();
+        let env = [env, &[("XDG_CACHE_HOME", cache.path().to_str().unwrap())]].concat();
+        let (answer, counts, _) = self.report_in(state.path(), cwd, args, &env, input);
         assert_eq!(
             counts,
             bypassed("no registration"),
@@ -693,19 +698,32 @@ fn a_build_record_restores_its_executable_and_replays_failures() {
     assert_eq!(counts, HIT, "check keeps its own record");
     let (_, counts) = home.warm(root, &["check", "app/hirsel.json"], &tools);
     assert_eq!(counts, HIT, "check with cross and memcheck tools");
+    // A build's first selection in an interval captures once, and an
+    // unchanged rerun hits the program record with no capture at all. (Bug,
+    // native-record-819: the lookup selected through the front results store
+    // while the build captured into the native product store, so the second
+    // build's platform record named content the lookup could not read and it
+    // captured cold again.)
+    let debug = ["build", "--debug", "app/hirsel.json", "-o", "app.exe"];
+    let (_, counts, captures) = home.report(&home.state(), root, &debug, &[]);
+    assert_eq!((counts, captures), (MISS, 1), "debug first build");
+    let (_, counts, captures) = home.report(&home.state(), root, &debug, &[]);
+    assert_eq!((counts, captures), (HIT, 0), "debug hit: no cold capture");
     let release = ["build", "--release", "app/hirsel.json", "-o", "app.exe"];
     flips_then_hits(&home, root, &release, &[], "profile");
-    // A release build captures its platform cold before the lookup; a miss
-    // builds with that capture and runs no second one.
+    // Release follows the same rule as every profile: its selection (LLVM,
+    // default optimization, no debug tables) is the default builds' above,
+    // whose record answers it, so neither its miss nor its hit captures.
+    // (Bug: release, LTO and profiling captured cold on every build.)
     edit(
         &app.join("main.hir"),
         "  Ok(())\n}\npub fn other",
         "  Ok(())\n}\n\npub fn other",
     );
     let (_, counts, captures) = home.report(&home.state(), root, &release, &[]);
-    assert_eq!((counts, captures), (MISS, 1), "release miss");
+    assert_eq!((counts, captures), (MISS, 0), "release miss");
     let (_, counts, captures) = home.report(&home.state(), root, &release, &[]);
-    assert_eq!((counts, captures), (HIT, 1), "release hit");
+    assert_eq!((counts, captures), (HIT, 0), "release hit");
     edit(
         &app.join("main.hir"),
         "  Ok(())\n}\n\npub fn other",
@@ -1298,4 +1316,556 @@ fn a_run_record_launches_its_executable_with_this_runs_inputs() {
         (cold, HIT),
         "granted directory retargeted, replaced"
     );
+}
+
+/// `HIRSEL_LINK_KIT` copied under `root`, its x86_64 link given `-L <a> -L
+/// <b>` and a closing script `INPUT(-l:sub/x.a)`, with `<a>/sub` and
+/// `<b>/sub` present but only `<b>/sub/x.a` (a script defining
+/// `hirsel_search_marker = 1`). Returns the kit and `<a>/sub`: a file added
+/// there changes no searched directory's stamp, only an absent candidate.
+fn searching_kit(root: &Path) -> (PathBuf, PathBuf) {
+    use sha2::Digest;
+    let kit = root.join("kit");
+    let copied = Command::new("cp")
+        .arg("-a")
+        .arg(std::env::var_os("HIRSEL_LINK_KIT").unwrap())
+        .arg(&kit)
+        .status()
+        .unwrap();
+    assert!(copied.success());
+    assert!(
+        Command::new("chmod")
+            .arg("-R")
+            .arg("u+w")
+            .arg(&kit)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (a, b) = (root.join("search-a"), root.join("search-b"));
+    std::fs::create_dir_all(a.join("sub")).unwrap();
+    std::fs::create_dir_all(b.join("sub")).unwrap();
+    std::fs::write(b.join("sub/x.a"), "hirsel_search_marker = 1;\n").unwrap();
+    let triple = "x86_64-unknown-linux-gnu";
+    std::fs::write(kit.join(triple).join("search.ld"), "INPUT(-l:sub/x.a)\n").unwrap();
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(kit.join("manifest.json")).unwrap()).unwrap();
+    let target = &mut manifest["targets"][triple];
+    let options = target["options"].as_array_mut().unwrap();
+    options.push(format!("-L{}", a.display()).into());
+    options.push(format!("-L{}", b.display()).into());
+    target["end"]
+        .as_array_mut()
+        .unwrap()
+        .push("search.ld".into());
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    std::fs::write(kit.join("manifest.json"), &bytes).unwrap();
+    let digest: String = sha2::Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    std::fs::write(kit.join("digest"), digest).unwrap();
+    (kit, a.join("sub"))
+}
+
+/// Bug caught (819 item 2, with R4's scope): platform records kept in one
+/// per-user directory beside no store. A second home's build replaces the
+/// first home's record with one scoped to the second home's registration, so
+/// the first home's next unchanged build refuses it and captures again; with
+/// a store that lacks the content a record names, the record answers
+/// nothing either. Oracle: an unchanged build in a home whose own capture is
+/// recorded captures nothing (design-809 §15), whatever another home did.
+#[test]
+fn a_second_home_leaves_the_first_homes_platform_record_answering() {
+    let first = Home::new();
+    let second = Home::new();
+    second.register("pub fn unused()->u8{8u8}\n");
+    let root = first.path();
+    app(root);
+    let build = ["build", "--debug", "app/hirsel.json", "-o", "app.exe"];
+    age_past_racy_margin();
+    let (_, counts, captures) = first.report(&first.state(), root, &build, &[]);
+    assert_eq!((counts, captures), (MISS, 1), "first home, first build");
+    let (_, counts, captures) = first.report(&first.state(), root, &build, &[]);
+    assert_eq!((counts, captures), (HIT, 0), "first home, unchanged");
+    let (_, counts, captures) = second.report(&second.state(), root, &build, &[]);
+    assert_eq!((counts, captures), (MISS, 1), "second home, first build");
+    let (_, counts, captures) = first.report(&first.state(), root, &build, &[]);
+    assert_eq!(
+        (counts, captures),
+        (HIT, 0),
+        "first home after the second built"
+    );
+}
+
+/// Bug caught (design-809 §15 R3; 819 keyed the executable and libLLVM
+/// only): a compiler guard that leaves a loaded library out of the set, so a
+/// library replaced under the compiler's search path answers from a record
+/// of the old one. Oracle: the library's bytes. Equal bytes in another inode
+/// are the same compiler (a hit after one rehash); other bytes are another
+/// compiler, which misses, and every answer equals cold's.
+#[test]
+fn a_compiler_library_replaced_on_its_search_path_misses_the_program_record() {
+    let home = Home::new();
+    let root = home.path();
+    app(root);
+    let library = library_outside_the_compiler_rpath();
+    let directory = root.join("libraries");
+    std::fs::create_dir(&directory).unwrap();
+    let name = library.file_name().unwrap();
+    // A new inode at the same path, as a package upgrade renames one in.
+    let place = |bytes: &[u8]| {
+        let next = directory.join("next");
+        std::fs::write(&next, bytes).unwrap();
+        std::fs::rename(&next, directory.join(name)).unwrap();
+    };
+    let original = std::fs::read(&library).unwrap();
+    place(&original);
+    let env = [("LD_LIBRARY_PATH", directory.to_str().unwrap())];
+    let check = ["check", "app/hirsel.json"];
+    flips_then_hits(&home, root, &check, &env, "first check");
+    place(&original);
+    let (answer, counts) = home.warm(root, &check, &env);
+    assert_eq!(
+        (answer, counts),
+        (home.cold(root, &check, &env), HIT),
+        "equal bytes in another inode"
+    );
+    // A trailing byte the loader ignores: the process runs as before, but
+    // its loaded bytes differ.
+    let mut other = original;
+    other.push(0);
+    place(&other);
+    flips_then_hits(&home, root, &check, &env, "other library bytes");
+}
+
+/// A library the compiler loads from the system search path rather than
+/// its own RPATH directory, so `LD_LIBRARY_PATH` selects it; as the loader
+/// itself lists them (`LD_TRACE_LOADED_OBJECTS`, what `ldd` runs).
+fn library_outside_the_compiler_rpath() -> PathBuf {
+    let compiler = std::path::absolute(env!("CARGO_BIN_EXE_hirsel")).unwrap();
+    let output = Command::new(&compiler)
+        .env("LD_TRACE_LOADED_OBJECTS", "1")
+        .output()
+        .unwrap();
+    let listed = String::from_utf8(output.stdout).unwrap();
+    // libc, libm, libgcc_s, libstdc++ and the loader are the toolchain's own
+    // runtime; any other system library serves.
+    let runtime = [
+        "libc.so",
+        "libm.so",
+        "libgcc_s.so",
+        "libstdc++.so",
+        "ld-linux",
+    ];
+    listed
+        .lines()
+        .filter_map(|line| {
+            let (name, rest) = line.trim().split_once(" => ")?;
+            let path = rest.split_whitespace().next()?;
+            (path.starts_with('/')
+                && !path.contains("llvm-files")
+                && !runtime.iter().any(|runtime| name.starts_with(runtime)))
+            .then(|| PathBuf::from(path))
+        })
+        .next()
+        .unwrap_or_else(|| panic!("no system library outside the RPATH in {listed}"))
+}
+
+/// Older than the platform record's racy-timestamp margin (two whole
+/// seconds), so a capture of files written just now can be recorded.
+fn age_past_racy_margin() {
+    std::thread::sleep(std::time::Duration::from_millis(3500));
+}
+
+/// Bug caught (design-809 §15 R1, red on main at 284b521e): a platform
+/// record that guards only the files a linker search opened, not the
+/// candidates it found absent, answers after a file appears earlier on the
+/// search path: kit `-L A -L B` with `INPUT(-l:sub/x.a)` finds `B/sub/x.a`;
+/// adding `A/sub/x.a` selects it, yet the record hit keeps the old selection and the
+/// build hit replays the old executable. Oracle: a forced cold build
+/// (`HIRSEL_PLATFORM_CAPTURE=cold`, no registration, its own platform cache)
+/// of the same sources.
+#[test]
+fn a_file_added_earlier_on_a_linker_search_path_misses_the_platform_record() {
+    let home = Home::new();
+    let root = home.path();
+    let app = app(root);
+    let (kit, a) = searching_kit(root);
+    // R7 symlink retarget: the kit is selected through a link, later pointed
+    // at an equal kit whose linker script selects another archive.
+    let other_kit = root.join("kit-other");
+    assert!(
+        Command::new("cp")
+            .arg("-a")
+            .arg(&kit)
+            .arg(&other_kit)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let triple = "x86_64-unknown-linux-gnu";
+    std::fs::write(
+        other_kit.join(triple).join("search.ld"),
+        "INPUT(-l:sub/y.a)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        a.parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("search-b/sub/y.a"),
+        "hirsel_search_marker = 3;\n",
+    )
+    .unwrap();
+    let linked = root.join("kit-link");
+    std::os::unix::fs::symlink(&kit, &linked).unwrap();
+    let kit = linked.to_str().unwrap().to_owned();
+    let warm_cache = root.join("native-warm").to_str().unwrap().to_owned();
+    let warm = [
+        ("HIRSEL_LINK_KIT", kit.as_str()),
+        ("HIRSEL_NATIVE_CACHE", warm_cache.as_str()),
+    ];
+    let build = ["build", "--debug", "app/hirsel.json", "-o", "app.exe"];
+    let exe = root.join("app.exe");
+    let cold = |what: &str| {
+        let cache = tempfile::tempdir().unwrap();
+        let answer = home.cold(
+            root,
+            &build,
+            &[
+                ("HIRSEL_LINK_KIT", kit.as_str()),
+                ("HIRSEL_NATIVE_CACHE", cache.path().to_str().unwrap()),
+                ("HIRSEL_PLATFORM_CAPTURE", "cold"),
+            ],
+        );
+        assert_eq!(answer.status, Some(0), "{what}: cold {answer:?}");
+        (answer, std::fs::read(&exe).unwrap())
+    };
+    age_past_racy_margin();
+    let (_, counts, captures) = home.report(&home.state(), root, &build, &warm);
+    assert_eq!((counts, captures), (MISS, 1), "first build");
+    // Precondition: the capture was recorded, so an unchanged build answers
+    // its platform from the record (no capture) and its program from B.
+    let (_, counts, captures) = home.report(&home.state(), root, &build, &warm);
+    assert_eq!((counts, captures), (HIT, 0), "unchanged rerun, recorded");
+    // Each stage: (program record, platform captures), and the answer and
+    // executable equal cold's.
+    let stage = |what: &str, expected: (Counts, u64)| {
+        let (answer, counts, captures) = home.report(&home.state(), root, &build, &warm);
+        let built = std::fs::read(&exe).unwrap();
+        let (cold_answer, cold_bytes) = cold(what);
+        assert_eq!((counts, captures), expected, "{what}");
+        assert_eq!(answer, cold_answer, "{what}");
+        assert!(built == cold_bytes, "{what}: executable differs from cold");
+    };
+    // R7, bug: a guard so broad that a linker nothing selects (an unrelated
+    // `/usr/bin` linker upgraded) fails the record.
+    // Outside the home: its root may be an absent search directory's
+    // nearest guarded ancestor.
+    let unrelated = tempfile::tempdir().unwrap();
+    std::fs::write(unrelated.path().join("ld.lld"), "#!/bin/sh\n").unwrap();
+    stage("an unrelated linker added", (HIT, 0));
+    // R7 hard-link churn, bug: a platform capture whose identity follows
+    // inode metadata, so the program record misses too. A new link moves
+    // the archive's ctime: the platform is verified again (a safe loss) and
+    // finds the same platform, which the program record still answers.
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::fs::hard_link(
+        a.parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("search-b/sub/x.a"),
+        elsewhere.path().join("x.a"),
+    )
+    .unwrap();
+    age_past_racy_margin();
+    stage("a hard link to the selected archive", (HIT, 1));
+    stage("after the hard link, recorded again", (HIT, 0));
+    // R7 symlink retarget, bug: a record keyed by the spelled kit path
+    // answers for the kit the link now names.
+    std::fs::remove_file(&linked).unwrap();
+    std::os::unix::fs::symlink(&other_kit, &linked).unwrap();
+    stage("the kit link retargeted", (MISS, 1));
+    // Restored: the original selection is verified again (whether the
+    // program record still holds its earlier answer is B's business).
+    std::fs::remove_file(&linked).unwrap();
+    std::os::unix::fs::symlink(root.join("kit"), &linked).unwrap();
+    age_past_racy_margin();
+    let (answer, _, captures) = home.report(&home.state(), root, &build, &warm);
+    let built = std::fs::read(&exe).unwrap();
+    let (cold_answer, cold_bytes) = cold("the kit link restored");
+    assert_eq!(captures, 1, "the kit link restored");
+    assert_eq!(answer, cold_answer, "the kit link restored");
+    assert!(
+        built == cold_bytes,
+        "the kit link restored: executable differs from cold"
+    );
+    std::fs::write(a.join("x.a"), "hirsel_search_marker = 2;\n").unwrap();
+    let (answer, counts, _) = home.report(&home.state(), root, &build, &warm);
+    let built = std::fs::read(&exe).unwrap();
+    let (cold_answer, cold_bytes) = cold("A/sub/x.a added");
+    assert_eq!(counts, MISS, "A/sub/x.a added: the record must not answer");
+    assert_eq!(answer, cold_answer, "A/sub/x.a added");
+    assert!(
+        built == cold_bytes,
+        "A/sub/x.a added: executable differs from cold"
+    );
+}
+
+/// Bug caught (design-809 §15 R2, red on main at 284b521e): the AArch64
+/// emulator a platform capture runs discovery through is keyed by its
+/// pathname alone, so a wrapper replaced at the same path by one whose
+/// `QEMU_LD_PREFIX` makes the loader find another `libc.so.6` (here an empty
+/// one, which the loader refuses) is still answered by the record of the
+/// old wrapper's capture. Oracle: a forced cold build through the new
+/// wrapper. Needs the cross toolchain (`HIRSEL_QEMU_AARCH64`); without it the
+/// test says NOT RUN on stderr and passes nothing else.
+#[test]
+fn an_emulator_replaced_at_its_path_misses_the_platform_record() {
+    let Some(qemu) = std::env::var_os("HIRSEL_QEMU_AARCH64")
+        .map(PathBuf::from)
+        .filter(|qemu| qemu.is_file())
+    else {
+        eprintln!(
+            "NOT RUN: an_emulator_replaced_at_its_path_misses_the_platform_record needs HIRSEL_QEMU_AARCH64"
+        );
+        return;
+    };
+    let qemu = std::path::absolute(qemu).unwrap();
+    let floor = std::fs::canonicalize(std::env::var_os("HIRSEL_GLIBC_FLOOR").unwrap()).unwrap();
+    let home = Home::new();
+    let root = home.path();
+    app(root);
+    let wrapper = root.join("qemu-wrapper");
+    let write_wrapper = |prefix: Option<&Path>| {
+        let assignment = prefix
+            .map(|prefix| format!("QEMU_LD_PREFIX='{}' ", prefix.display()))
+            .unwrap_or_default();
+        let temporary = root.join("qemu-wrapper.new");
+        std::fs::write(
+            &temporary,
+            format!("#!/bin/sh\n{assignment}exec '{}' \"$@\"\n", qemu.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&temporary, &wrapper).unwrap();
+    };
+    write_wrapper(None);
+    let prefix = root.join("prefix");
+    let shadow = prefix
+        .join(floor.strip_prefix("/").unwrap())
+        .join("aarch64-unknown-linux-gnu");
+    std::fs::create_dir_all(&shadow).unwrap();
+    std::fs::write(shadow.join("libc.so.6"), b"").unwrap();
+    let (wrapper_text, floor_text) = (
+        wrapper.to_str().unwrap().to_owned(),
+        floor.to_str().unwrap().to_owned(),
+    );
+    // The cross tools as absolute paths: the builds run from `root`.
+    let cross = ["HIRSEL_AARCH64_CC", "HIRSEL_AARCH64_SYSROOT"].map(|name| {
+        let path = std::path::absolute(std::env::var_os(name).unwrap()).unwrap();
+        (name, path.to_str().unwrap().to_owned())
+    });
+    let warm_cache = root.join("native-warm").to_str().unwrap().to_owned();
+    let with_cross = |env: &[(&'static str, &str)]| -> Vec<(&'static str, String)> {
+        cross
+            .iter()
+            .cloned()
+            .chain(env.iter().map(|(name, value)| (*name, (*value).to_owned())))
+            .collect()
+    };
+    let owned = with_cross(&[
+        ("HIRSEL_QEMU_AARCH64", wrapper_text.as_str()),
+        ("HIRSEL_GLIBC_FLOOR", floor_text.as_str()),
+        ("HIRSEL_NATIVE_CACHE", warm_cache.as_str()),
+    ]);
+    let warm: Vec<(&str, &str)> = owned.iter().map(|(n, v)| (*n, v.as_str())).collect();
+    let build = [
+        "build",
+        "--target",
+        "aarch64-linux",
+        "app/hirsel.json",
+        "-o",
+        "app.exe",
+    ];
+    age_past_racy_margin();
+    let (first, counts) = home.warm(root, &build, &warm);
+    assert_eq!(
+        (first.status, counts),
+        (Some(0), MISS),
+        "first build: {first:?}"
+    );
+    write_wrapper(Some(&prefix));
+    let (answer, counts) = home.warm(root, &build, &warm);
+    let cache = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let owned = with_cross(&[
+        ("HIRSEL_QEMU_AARCH64", wrapper_text.as_str()),
+        ("HIRSEL_GLIBC_FLOOR", floor_text.as_str()),
+        ("HIRSEL_NATIVE_CACHE", cache.path().to_str().unwrap()),
+        ("XDG_CACHE_HOME", cache.path().to_str().unwrap()),
+        ("HIRSEL_PLATFORM_CAPTURE", "cold"),
+    ]);
+    let cold_env: Vec<(&str, &str)> = owned.iter().map(|(n, v)| (*n, v.as_str())).collect();
+    let (cold, cold_counts) = home.run(state.path(), root, &build, &cold_env);
+    assert_eq!(cold_counts, bypassed("no registration"), "cold oracle");
+    assert_eq!(
+        counts.hits, 0,
+        "replaced emulator: the record answered: {answer:?}"
+    );
+    assert_eq!(
+        answer.status, cold.status,
+        "replaced emulator: {answer:?} / cold {cold:?}"
+    );
+    // A static emulator is admitted by its stamp: record a static copy, then
+    // replace it at its path by a static program that exits 1, which the
+    // loader discovery cannot run through.
+    let bytes = std::fs::read(&qemu).unwrap();
+    if !is_static_elf(&bytes) {
+        eprintln!("NOT RUN: static emulator stage needs a static HIRSEL_QEMU_AARCH64");
+        return;
+    }
+    let emulator = root.join("qemu-static");
+    let install = |bytes: &[u8]| {
+        let temporary = root.join("qemu-static.new");
+        std::fs::write(&temporary, bytes).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&temporary, &emulator).unwrap();
+    };
+    install(&bytes);
+    let emulator_text = emulator.to_str().unwrap().to_owned();
+    let static_cache = root.join("native-static").to_str().unwrap().to_owned();
+    let owned = with_cross(&[
+        ("HIRSEL_QEMU_AARCH64", emulator_text.as_str()),
+        ("HIRSEL_GLIBC_FLOOR", floor_text.as_str()),
+        ("HIRSEL_NATIVE_CACHE", static_cache.as_str()),
+    ]);
+    let warm: Vec<(&str, &str)> = owned.iter().map(|(n, v)| (*n, v.as_str())).collect();
+    age_past_racy_margin();
+    let (first, counts, captures) = home.report(&home.state(), root, &build, &warm);
+    assert_eq!(
+        (first.status, counts, captures),
+        (Some(0), MISS, 1),
+        "static: first build"
+    );
+    let (_, counts, captures) = home.report(&home.state(), root, &build, &warm);
+    assert_eq!(
+        (counts, captures),
+        (HIT, 0),
+        "static: unchanged rerun, recorded"
+    );
+    // `QEMU_*` in the building process: discovery runs the emulator with a
+    // cleared environment, so neither the capture nor the record may see
+    // them. If discovery ever inherits one, this stage forces the key
+    // (cold through the empty libc fails while the record answers).
+    let prefix_text = prefix.to_str().unwrap().to_owned();
+    let mut qemu_env = warm.clone();
+    qemu_env.extend([
+        ("QEMU_LD_PREFIX", prefix_text.as_str()),
+        ("QEMU_STRACE", "1"),
+    ]);
+    let (answer, _, captures) = home.report(&home.state(), root, &build, &qemu_env);
+    let built = std::fs::read(root.join("app.exe")).unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let owned = with_cross(&[
+        ("HIRSEL_QEMU_AARCH64", emulator_text.as_str()),
+        ("HIRSEL_GLIBC_FLOOR", floor_text.as_str()),
+        ("HIRSEL_NATIVE_CACHE", cache.path().to_str().unwrap()),
+        ("XDG_CACHE_HOME", cache.path().to_str().unwrap()),
+        ("HIRSEL_PLATFORM_CAPTURE", "cold"),
+        ("QEMU_LD_PREFIX", prefix_text.as_str()),
+        ("QEMU_STRACE", "1"),
+    ]);
+    let cold_env: Vec<(&str, &str)> = owned.iter().map(|(n, v)| (*n, v.as_str())).collect();
+    let (cold, _) = home.run(state.path(), root, &build, &cold_env);
+    assert_eq!(
+        captures, 0,
+        "QEMU_* set: the record must still answer: {answer:?}"
+    );
+    assert_eq!(answer, cold, "QEMU_* set");
+    assert!(
+        built == std::fs::read(root.join("app.exe")).unwrap(),
+        "QEMU_* set: executable differs from cold"
+    );
+    install(&exit_one_elf());
+    let (answer, counts, _) = home.report(&home.state(), root, &build, &warm);
+    let cache = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let owned = with_cross(&[
+        ("HIRSEL_QEMU_AARCH64", emulator_text.as_str()),
+        ("HIRSEL_GLIBC_FLOOR", floor_text.as_str()),
+        ("HIRSEL_NATIVE_CACHE", cache.path().to_str().unwrap()),
+        ("XDG_CACHE_HOME", cache.path().to_str().unwrap()),
+        ("HIRSEL_PLATFORM_CAPTURE", "cold"),
+    ]);
+    let cold_env: Vec<(&str, &str)> = owned.iter().map(|(n, v)| (*n, v.as_str())).collect();
+    let (cold, _) = home.run(state.path(), root, &build, &cold_env);
+    assert_ne!(
+        cold.status,
+        Some(0),
+        "static: the exit-1 emulator must fail cold"
+    );
+    assert_eq!(
+        counts.hits, 0,
+        "static emulator replaced: the record answered: {answer:?}"
+    );
+    assert_eq!(
+        answer.status, cold.status,
+        "static emulator replaced: {answer:?} / cold {cold:?}"
+    );
+}
+
+/// A 64-bit little-endian ELF with no PT_INTERP (static or static-pie).
+fn is_static_elf(bytes: &[u8]) -> bool {
+    let word = |at: usize, n: usize| {
+        bytes.get(at..at + n).map(|b| {
+            b.iter()
+                .rev()
+                .fold(0u64, |acc, byte| acc << 8 | u64::from(*byte))
+        })
+    };
+    if bytes.get(..6) != Some(&[0x7f, b'E', b'L', b'F', 2, 1][..]) {
+        return false;
+    }
+    let (Some(phoff), Some(phentsize), Some(phnum)) = (word(32, 8), word(54, 2), word(56, 2))
+    else {
+        return false;
+    };
+    (0..phnum)
+        .all(|index| word((phoff + index * phentsize) as usize, 4).is_some_and(|kind| kind != 3))
+}
+
+/// A hand-assembled static x86-64 program: `exit(1)`.
+fn exit_one_elf() -> Vec<u8> {
+    let code: &[u8] = &[
+        0xbf, 1, 0, 0, 0, // mov edi, 1
+        0xb8, 60, 0, 0, 0, // mov eax, 60 (exit)
+        0x0f, 0x05, // syscall
+    ];
+    let size = (64 + 56 + code.len()) as u64;
+    let base = 0x40_0000u64;
+    let mut elf = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    elf.extend_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+    elf.extend_from_slice(&0x3eu16.to_le_bytes()); // x86-64
+    elf.extend_from_slice(&1u32.to_le_bytes());
+    elf.extend_from_slice(&(base + 64 + 56).to_le_bytes()); // entry
+    elf.extend_from_slice(&64u64.to_le_bytes()); // phoff
+    elf.extend_from_slice(&0u64.to_le_bytes()); // shoff
+    elf.extend_from_slice(&0u32.to_le_bytes());
+    for half in [64u16, 56, 1, 0, 0, 0] {
+        elf.extend_from_slice(&half.to_le_bytes());
+    }
+    elf.extend_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+    elf.extend_from_slice(&5u32.to_le_bytes()); // R+X
+    for word in [0, base, base, size, size, 0x1000u64] {
+        elf.extend_from_slice(&word.to_le_bytes());
+    }
+    elf.extend_from_slice(code);
+    elf
 }

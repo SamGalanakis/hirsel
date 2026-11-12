@@ -1,15 +1,27 @@
 //! The platform record: a later process reuses one full platform capture
-//! while nothing that capture read or searched has changed.
+//! while nothing that capture read or searched has changed (native rerun
+//! design §15). One rule for every build profile: a record answers only when
+//! the capture witnessed its complete selection; any other capture is cold.
 //!
 //! The record is a LOCAL cache that detects accidents; it is not a security
 //! boundary. Files of the user's own account (the packaged toolchain, this
 //! private cache) are trusted to that account. Full verification is the cold
 //! capture: it runs the capture children and identifies every tool, kit and
 //! input byte. It runs on every miss, under `HIRSEL_PLATFORM_CAPTURE=cold`
-//! (which reads no record), on every release build and when a record is older than a day.
+//! (which reads no record) and when a record has expired.
 //!
-//! A hit compares the stamps of exactly these paths, taken by the capture
-//! that issued the record:
+//! A record lives beside the content it names, in the local product store
+//! the selection reads (`platform-v1` under that store's root): two homes
+//! never answer from each other's records, and a record cannot outlive or
+//! precede its content's store. A capture made outside any request (a
+//! program record's lookup) publishes its content before its record. A store
+//! without a registration keeps no records.
+//!
+//! Complete selection (R1, R2). The linker reports its own search
+//! (`--search-trace`: every query through its input filesystem, found or
+//! absent, and the final `-L` list) and the loader probe reports its search
+//! the same way. A hit compares the stamps of exactly these paths, taken by
+//! the capture that issued the record:
 //! - every directory and file in each guarded tree, recursively: the linker
 //!   package, the kit and each runtime library-path directory. A directory's
 //!   stamp changes when an immediate entry is added, removed or renamed, so a
@@ -18,16 +30,42 @@
 //!   existed, and that directory is in the record;
 //! - each other file the capture read by name (the runtime archive, its
 //!   startup order, foreign inputs, loader, auditor, files a linker script
-//!   names). Nothing found these by a search;
-//! - the nearest existing ancestor of an absent library-path directory.
+//!   names, a static emulator). Nothing found these by a search;
+//! - each directory a search looked in, and each candidate it found absent
+//!   (by the nearest existing ancestor of an absent directory).
 //!
 //! It also re-resolves every selected spelling, so a symlink hop that now
 //! leads elsewhere is a miss. Foreign-input selection searches system
 //! directories, but it runs in every process and its result is in the key,
-//! so system directories need no guard. A capture is not recorded when the
-//! loader found an object outside the guarded trees, when an object carries
-//! DT_RPATH or DT_RUNPATH, when the guarded trees are too large, or when a
-//! guarded file is on a filesystem outside a local allowlist.
+//! so system directories need no guard. A capture is not recorded when a
+//! search could not be traced, when the loader found an object outside the
+//! guarded trees, when an object carries DT_RPATH or DT_RUNPATH, when the
+//! guard exceeds `GUARD_ENTRIES`, when the emulator is dynamic, when a
+//! guarded stamp changed between the stamps bracketing the capture or lies
+//! within the two-second racy margin, or when a guarded file is on a
+//! filesystem outside the admitted list.
+//!
+//! Scope (R4). Admitted filesystems: ext2/3/4, xfs, btrfs, tmpfs, f2fs, zfs
+//! and bcachefs (not overlayfs, ramfs, NFS, FUSE or any other). A record
+//! answers only under the registration epoch that issued it, on the same
+//! machine id and `boot_id`, with every guarded device and the record
+//! directory still showing the same (device, statx mount id, `f_fsid`) and
+//! the record directory the same inode: a remount or a restored snapshot
+//! misses, and an identity that cannot be read refuses or misses.
+//!
+//! Authentication (R5). The file is the hex MAC, under the registration's
+//! key and bound to its epoch, of every byte that follows: format, key,
+//! scope, spellings, guard (searched directories and absent candidates
+//! included), both issue clocks, platform reference and identity. Any other
+//! format has no such line and misses.
+//!
+//! Expiry (R6). A fixed day from the capture's start that no hit renews,
+//! measured on realtime and CLOCK_BOOTTIME, which must agree within two
+//! seconds; a clock earlier than the issue misses.
+//!
+//! Not promised: raw-disk corruption, a metadata-preserving rollback (bytes
+//! restored with their full stamps, ctime included), and privileged or
+//! deliberate same-user tampering with the guarded files or this cache.
 use super::*;
 use crate::file_digest::{Stamp, stable, stamp};
 use std::collections::{BTreeMap, BTreeSet};
@@ -41,27 +79,29 @@ const PLATFORM: Domain = Domain {
     kind: 0x4f000010,
     schema: 1,
 };
-const FORMAT: u64 = 1;
+const FORMAT: u64 = 3;
 #[cfg(test)]
 thread_local! {
     static RECORD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
-/// A record older than this gets a full verification.
+/// A record older than this gets a full verification; no hit renews it.
 const PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
+/// The most a record's realtime and boottime ages may disagree.
+const CLOCK_SKEW: Duration = Duration::from_secs(2);
 /// Directory and file stamps in one record, across every guarded tree.
 const GUARD_ENTRIES: usize = 4096;
-/// statfs `f_type`s of local filesystems that advance ctime on every change:
-/// ext2/3/4, xfs, btrfs, tmpfs, overlayfs, f2fs, zfs, bcachefs and ramfs.
-const LOCAL_FILESYSTEMS: [i64; 9] = [
+/// statfs `f_type`s of local filesystems that advance ctime on every change
+/// and report a stable identity: ext2/3/4, xfs, btrfs, tmpfs, f2fs, zfs and
+/// bcachefs. overlayfs (whose lower layers change under it) and ramfs are
+/// not admitted; neither are NFS, FUSE or any other.
+const LOCAL_FILESYSTEMS: [i64; 7] = [
     0xef53,
     0x5846_5342,
     0x9123_683e,
     0x0102_1994,
-    0x794c_7630,
     0xf2f5_2010,
     0x2fc1_2fc1,
     0xca45_1a4e,
-    0x8584_58f6,
 ];
 
 /// Everything one platform capture is selected by, as selected. The key
@@ -92,8 +132,9 @@ pub enum CaptureMode {
     Cold,
 }
 impl CaptureMode {
-    /// `HIRSEL_PLATFORM_CAPTURE=cold` selects full verification. tools/land
-    /// and conformance gates set it; release build options require Cold directly.
+    /// The one platform policy of every build profile: Record, unless
+    /// `HIRSEL_PLATFORM_CAPTURE=cold` selects full verification (tools/land
+    /// and conformance gates set it).
     pub fn from_environment() -> Result<Self, String> {
         match std::env::var_os("HIRSEL_PLATFORM_CAPTURE") {
             None => Ok(Self::Record),
@@ -134,7 +175,7 @@ impl HandedPlatform {
 
 impl PlatformSpec {
     pub fn select(&self, store: &dyn ResultStore, mode: CaptureMode) -> Result<Selected, String> {
-        self.select_in(store, &cache_directory(), mode, SystemTime::now())
+        self.select_in(store, &records(store), mode)
     }
     /// Select now, for a later request to take with `select_handed`.
     pub fn hand_off(
@@ -179,7 +220,7 @@ impl PlatformSpec {
         store: &dyn ResultStore,
         reason: &str,
     ) -> Result<CapturedPlatform, String> {
-        self.recapture_in(store, &cache_directory(), reason, SystemTime::now())
+        self.recapture_in(store, &records(store), reason)
     }
     /// Rule 5 for a failure (`failure`) that a record's platform, with
     /// identity `recorded`, fed: delete the record and verify fully. The
@@ -193,24 +234,17 @@ impl PlatformSpec {
         recorded: ContentHash,
         failure: &str,
     ) -> Result<CapturedPlatform, String> {
-        self.recover_in(
-            store,
-            &cache_directory(),
-            recorded,
-            failure,
-            SystemTime::now(),
-        )
+        self.recover_in(store, &records(store), recorded, failure)
     }
 
     fn recover_in(
         &self,
         store: &dyn ResultStore,
-        cache: &Path,
+        records: &Records,
         recorded: ContentHash,
         failure: &str,
-        now: SystemTime,
     ) -> Result<CapturedPlatform, String> {
-        let fresh = self.recapture_in(store, cache, failure, now)?;
+        let fresh = self.recapture_in(store, records, failure)?;
         if fresh.identity != recorded {
             return Err(format!(
                 "platform cache mismatch ({failure}): record deleted and recaptured; rerun"
@@ -222,30 +256,32 @@ impl PlatformSpec {
     fn recapture_in(
         &self,
         store: &dyn ResultStore,
-        cache: &Path,
+        records: &Records,
         reason: &str,
-        now: SystemTime,
     ) -> Result<CapturedPlatform, String> {
         crate::runner::count_platform_record(&format!(
             "mismatch: {reason}; record deleted and recaptured"
         ));
-        let _ = std::fs::remove_file(cache.join(name(&self.key()?)));
-        Ok(self
-            .select_in(store, cache, CaptureMode::Cold, now)?
-            .platform)
+        if let Ok(place) = records {
+            let _ = std::fs::remove_file(place.directory.join(name(&self.key()?)));
+        }
+        Ok(self.select_in(store, records, CaptureMode::Cold)?.platform)
     }
 
     fn select_in(
         &self,
         store: &dyn ResultStore,
-        cache: &Path,
+        records: &Records,
         mode: CaptureMode,
-        now: SystemTime,
     ) -> Result<Selected, String> {
         let name = name(&self.key()?);
         let (reason, recorded) = match mode {
             CaptureMode::Cold => ("full verification required".to_string(), None),
-            CaptureMode::Record => match self.lookup(store, cache, &name, now) {
+            CaptureMode::Record => match records
+                .as_ref()
+                .map_err(|reason| Miss::from(reason.clone()))
+                .and_then(|place| self.lookup(store, place, &name))
+            {
                 Ok(platform) => {
                     crate::runner::count_platform_record("hit");
                     return Ok(Selected {
@@ -257,7 +293,7 @@ impl PlatformSpec {
             },
         };
         crate::runner::count_platform_record(&format!("miss: {reason}"));
-        let (platform, issued) = self.capture(store, cache, &name, now)?;
+        let (platform, issued) = self.capture(store, records, &name)?;
         if let Err(reason) = issued {
             crate::runner::count_platform_record(&format!("not recorded: {reason}"));
         }
@@ -327,15 +363,14 @@ impl PlatformSpec {
     fn lookup(
         &self,
         store: &dyn ResultStore,
-        cache: &Path,
+        place: &RecordPlace,
         name: &str,
-        now: SystemTime,
     ) -> Result<CapturedPlatform, Miss> {
-        let directory = crate::runtime_cache::private_directory(cache)
+        let directory = crate::runtime_cache::private_directory(&place.directory)
             .map_err(|error| Miss::from(format!("private cache: {error}")))?;
         #[cfg(test)]
         RECORD_READS.update(|count| count + 1);
-        let file = match crate::runtime_cache::private_file(&cache.join(name)) {
+        let file = match crate::runtime_cache::private_file(&place.directory.join(name)) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Err("no record".to_string().into());
@@ -346,27 +381,68 @@ impl PlatformSpec {
         file.take(16 << 20)
             .read_to_string(&mut text)
             .map_err(|error| Miss::from(format!("record unreadable: {error}")))?;
-        let record: LocalRecord = hirsel_codec::from_text(&text)
+        // Rule R5: the MAC under the registration's key covers every byte
+        // after its line; any other format has no such line and misses here.
+        let (mac, body) = text
+            .split_once('\n')
+            .ok_or_else(|| Miss::from("record malformed: no MAC".to_string()))?;
+        if mac != hex(&place.authority.platform_record_mac(body.as_bytes())) {
+            return Err("record MAC differs".to_string().into());
+        }
+        let record: LocalRecord = hirsel_codec::from_text(body)
             .map_err(|error| Miss::from(format!("record malformed: {}", error.message)))?;
         if record.format != FORMAT || record.key != name {
             return Err("record format or key differs".to_string().into());
         }
-        if record.scope != scope(&directory).map_err(Miss::from)? {
-            return Err("record from another machine or cache".to_string().into());
+        if record.epoch != place.authority.epoch() {
+            return Err("record from another registration".to_string().into());
         }
-        let issued = UNIX_EPOCH + Duration::from_secs(record.issued);
-        if !now.duration_since(issued).is_ok_and(|age| age < PERIOD) {
+        if record.machine != machine().map_err(Miss::from)? {
+            return Err("record from another machine".to_string().into());
+        }
+        // Rule R6: a record lives within one boot, for a fixed day from its
+        // issue that no hit renews, measured on both clocks.
+        if record.boot != place.clock.boot {
+            return Err("record from another boot".to_string().into());
+        }
+        let real = place
+            .clock
+            .realtime
+            .duration_since(UNIX_EPOCH + Duration::from_nanos(record.issued_realtime))
+            .map_err(|_| Miss::from("realtime is before the record's issue".to_string()))?;
+        let boot = place
+            .clock
+            .boottime
+            .checked_sub(Duration::from_nanos(record.issued_boottime))
+            .ok_or_else(|| Miss::from("boottime is before the record's issue".to_string()))?;
+        if real.abs_diff(boot) > CLOCK_SKEW {
+            return Err("realtime and boottime ages disagree".to_string().into());
+        }
+        if real.max(boot) >= PERIOD {
             return Err(Miss {
                 reason: "record older than a day".into(),
                 recorded: Some(record.identity),
             });
+        }
+        // Rule R4: the same mounts of the same filesystems, and this cache
+        // directory itself, not a copy or a restored snapshot of it.
+        let guarded = record
+            .guard
+            .iter()
+            .map(|(path, stamp)| Ok((*stamp.first().ok_or("empty stamp")?, PathBuf::from(path))))
+            .collect::<Result<Vec<_>, &str>>()
+            .map_err(|error| Miss::from(error.to_string()))?;
+        if record.devices != devices(&guarded, &directory).map_err(Miss::from)? {
+            return Err("record from another mount, filesystem or cache"
+                .to_string()
+                .into());
         }
         for (spelled, canonical) in &record.spellings {
             if std::fs::canonicalize(spelled).ok().as_deref() != Some(Path::new(canonical)) {
                 return Err(format!("{spelled} now resolves elsewhere").into());
             }
         }
-        if let Some(path) = changed(&record.guard) {
+        if let Some(path) = changed(&record.guard, &record.absent) {
             return Err(format!("{path} changed").into());
         }
         let platform = CapturedPlatform::stored(store, &self.target, record.platform.into())
@@ -378,21 +454,52 @@ impl PlatformSpec {
     }
 
     /// The cold capture, then the record of it unless something it read
-    /// cannot be witnessed. The capture's own failure is the build's.
+    /// cannot be witnessed or its content is not durable. The capture's own
+    /// failure is the build's.
+    ///
+    /// The capture's records are published before the record that names
+    /// them: a capture made outside any request (a program record's lookup)
+    /// would otherwise leave them pending in a handle no request finishes,
+    /// and the next process would find the record but not its content.
     fn capture(
         &self,
         store: &dyn ResultStore,
-        cache: &Path,
+        records: &Records,
         name: &str,
-        started: SystemTime,
     ) -> Result<(CapturedPlatform, Result<(), String>), String> {
+        let publication = store.local_product_store().map(|store| store.request());
+        let captured = self.capture_unpublished(store, records, name);
+        // A nested request publishes with its outer one; a record issued
+        // under it whose content is then lost is a checked miss
+        // ("store lacks the recorded platform"), never a wrong answer.
+        let published = publication.map_or(Ok(()), |publication| {
+            publication
+                .finish()
+                .map_err(|error| format!("platform content not published: {error}"))
+        });
+        let (platform, record) = captured?;
+        let issued = record.and_then(|record| {
+            published?;
+            let place = records.as_ref().map_err(Clone::clone)?;
+            publish(&place.directory, name, &record)
+        });
+        Ok((platform, issued))
+    }
+
+    fn capture_unpublished(
+        &self,
+        store: &dyn ResultStore,
+        records: &Records,
+        name: &str,
+    ) -> Result<(CapturedPlatform, Result<String, String>), String> {
         let selection = Selection::resolve(self);
         let before = selection
             .as_ref()
             .map_err(Clone::clone)
-            .and_then(|selection| selection.guard(&[]));
+            .and_then(|selection| selection.guard(&[], &[]));
         let linker = FrozenLinker::snapshot(store, &self.linker)?;
-        let kit = FrozenLinkKit::snapshot(store, &self.kit, &self.target, linker, self.limits)?;
+        let (kit, kit_searches) =
+            FrozenLinkKit::snapshot_traced(store, &self.kit, &self.target, linker, self.limits)?;
         let mut platform = CapturedPlatform::capture(
             store,
             &self.target,
@@ -413,14 +520,14 @@ impl PlatformSpec {
                 limits: self.limits,
             },
         )?;
-        let issued = selection.and_then(|selection| {
-            let record = selection.issue(store, kit, &platform, &before?, cache, name, started)?;
-            publish(cache, name, &record)
+        let record = selection.and_then(|selection| {
+            let place = records.as_ref().map_err(Clone::clone)?;
+            selection.issue(store, kit, &kit_searches, &platform, &before?, place, name)
         });
         // Only issuance reads what the loader searched; the build keeps the
         // platform without it.
         platform.search = RuntimeSearch::default();
-        Ok((platform, issued))
+        Ok((platform, record))
     }
 }
 
@@ -438,12 +545,27 @@ impl From<String> for Miss {
     }
 }
 
-/// The first guarded path whose current stamp is not the recorded one.
-fn changed(guard: &[(String, Vec<u64>)]) -> Option<&str> {
-    guard.iter().find_map(|(path, recorded)| {
-        let current = std::fs::metadata(path).map(|meta| stamp(&meta));
-        (!current.is_ok_and(|current| same(&current, recorded))).then_some(path.as_str())
-    })
+/// The first guarded path whose current stamp is not the recorded one, or
+/// recorded absent path that is no longer absent.
+fn changed<'a>(guard: &'a [(String, Vec<u64>)], absent: &'a [String]) -> Option<&'a str> {
+    guard
+        .iter()
+        .find_map(|(path, recorded)| {
+            let current = std::fs::metadata(path).map(|meta| stamp(&meta));
+            (!current.is_ok_and(|current| same(&current, recorded))).then_some(path.as_str())
+        })
+        .or_else(|| {
+            absent
+                .iter()
+                .find(|path| !is_absent(Path::new(path.as_str())))
+                .map(String::as_str)
+        })
+}
+
+/// Absent as the linker and loader see it: following symlinks, not found.
+/// Any other answer (found, or a permission error) is not absent.
+fn is_absent(path: &Path) -> bool {
+    std::fs::metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Stamps are equal in every field, ctime included: an in-place write that
@@ -464,12 +586,16 @@ fn same(left: &Stamp, right: &[u64]) -> bool {
 /// linker script names) has no earlier stamp; its old ctime alone shows it
 /// was not changed while the child read it.
 fn witnessed(before: &Guard, after: &Guard, started: SystemTime) -> Result<(), String> {
-    for (path, earlier) in &before.0 {
-        if !after.0.get(path).is_some_and(|later| same(later, earlier)) {
+    for (path, earlier) in &before.stamps {
+        if !after
+            .stamps
+            .get(path)
+            .is_some_and(|later| same(later, earlier))
+        {
             return Err(format!("{} changed during the capture", path.display()));
         }
     }
-    for (path, stamp) in &after.0 {
+    for (path, stamp) in &after.stamps {
         if !stable(stamp, started) {
             return Err(format!("{} changed too recently", path.display()));
         }
@@ -477,8 +603,12 @@ fn witnessed(before: &Guard, after: &Guard, started: SystemTime) -> Result<(), S
     Ok(())
 }
 
-/// Path stamps; dirs and files alike.
-struct Guard(BTreeMap<PathBuf, Stamp>);
+/// Path stamps, dirs and files alike, and the candidates a search found
+/// absent.
+struct Guard {
+    stamps: BTreeMap<PathBuf, Stamp>,
+    absent: BTreeSet<PathBuf>,
+}
 
 /// The guarded paths a selection resolves to.
 #[derive(Default)]
@@ -532,14 +662,31 @@ impl Selection {
         for path in &spec.foreign {
             files.push(canonical(path)?);
         }
+        // Discovery runs through the emulator with a cleared environment
+        // (runtime/discovery.rs), so a static one is witnessed whole by its
+        // stamp. A script or dynamic emulator reads files nothing here
+        // names: its capture is cold.
+        if let Some(emulator) = &spec.emulator {
+            let emulator = canonical(emulator)?;
+            if crate::object_queries::runtime::is_static_executable(&emulator) != Ok(true) {
+                return Err(format!(
+                    "emulator {} is not a static executable",
+                    emulator.display()
+                ));
+            }
+            files.push(emulator);
+        }
         selection.trees = trees;
         selection.ancestors = ancestors;
         selection.files = files;
         Ok(selection)
     }
 
-    /// Stamps of every guarded path, plus `extra` files read by name.
-    fn guard(&self, extra: &[PathBuf]) -> Result<Guard, String> {
+    /// Stamps of every guarded path, plus `extra` files read by name, and
+    /// what `searches` looked for: each candidate it found (stamped), each it
+    /// found absent (which must stay absent), and each searched directory
+    /// (stamped, or the nearest existing ancestor of an absent one).
+    fn guard(&self, extra: &[PathBuf], searches: &[&SearchTrace]) -> Result<Guard, String> {
         let mut guard = BTreeMap::new();
         let mut visited = BTreeSet::new();
         let add = |path: &Path, guard: &mut BTreeMap<PathBuf, Stamp>| {
@@ -567,7 +714,38 @@ impl Selection {
         for path in self.files.iter().chain(&self.ancestors).chain(extra) {
             add(path, &mut guard)?;
         }
-        Ok(Guard(guard))
+        let mut absent = BTreeSet::new();
+        for search in searches {
+            for (path, found) in &search.queries {
+                if *found {
+                    add(path, &mut guard)?;
+                } else if is_absent(path) {
+                    absent.insert(path.clone());
+                } else {
+                    return Err(format!("{} appeared during the capture", path.display()));
+                }
+            }
+            for directory in &search.searched {
+                if is_absent(directory) {
+                    let existing = directory
+                        .ancestors()
+                        .skip(1)
+                        .find(|ancestor| ancestor.exists())
+                        .ok_or("a searched directory has no existing ancestor")?;
+                    add(existing, &mut guard)?;
+                    absent.insert(directory.clone());
+                } else {
+                    add(directory, &mut guard)?;
+                }
+            }
+        }
+        if guard.len() + absent.len() > GUARD_ENTRIES {
+            return Err(format!("guarded paths exceed {GUARD_ENTRIES}"));
+        }
+        Ok(Guard {
+            stamps: guard,
+            absent,
+        })
     }
 
     /// The record of a cold capture whose every read is witnessed.
@@ -576,12 +754,13 @@ impl Selection {
         &self,
         store: &dyn ResultStore,
         kit: FrozenLinkKit,
+        kit_searches: &[Traced],
         platform: &CapturedPlatform,
         before: &Guard,
-        cache: &Path,
+        place: &RecordPlace,
         name: &str,
-        started: SystemTime,
     ) -> Result<String, String> {
+        let started = place.clock.realtime;
         if platform.search.owner_paths {
             return Err("a runtime object carries DT_RPATH or DT_RUNPATH".into());
         }
@@ -602,14 +781,38 @@ impl Selection {
             .map(|read| read.path.clone())
             .chain(kit_files.iter().map(|(path, _)| path.clone()))
             .collect::<Vec<_>>();
-        let after = self.guard(&read)?;
+        // Every linker search (the kit's links and the runtime probe) must
+        // have been traced; the loader's search is its candidate list.
+        let mut searches = Vec::new();
+        for traced in kit_searches.iter().chain(platform.search.linker.as_ref()) {
+            searches.push(
+                traced
+                    .as_ref()
+                    .map_err(|error| format!("untraceable linker search: {error}"))?,
+            );
+        }
+        if platform.search.linker.is_none() {
+            return Err("untraceable linker search: the runtime probe kept none".into());
+        }
+        let opened = platform.search.opened.iter().collect::<BTreeSet<_>>();
+        let loader = SearchTrace {
+            queries: platform
+                .search
+                .candidates
+                .iter()
+                .map(|path| (path.clone(), opened.contains(path) || !is_absent(path)))
+                .collect(),
+            searched: Vec::new(),
+        };
+        searches.push(&loader);
+        let after = self.guard(&read, &searches)?;
         witnessed(before, &after, started)?;
         // The kit capture holds the bytes its linker read; they must be the
         // bytes behind the witnessed name.
         for (path, content) in &kit_files {
             let mut file = std::fs::File::open(path)
                 .map_err(|error| format!("{}: {error}", path.display()))?;
-            let witnessed = after.0.get(path).ok_or("unwitnessed kit input")?;
+            let witnessed = after.stamps.get(path).ok_or("unwitnessed kit input")?;
             if stamp(&file.metadata().map_err(error)?) != *witnessed
                 || !file_matches_blob(&blob_record(store, *content)?, &mut file)?
             {
@@ -619,9 +822,14 @@ impl Selection {
                 ));
             }
         }
-        let directory =
-            crate::runtime_cache::private_directory(cache).map_err(|error| error.to_string())?;
-        local_filesystems(&after, &directory)?;
+        let directory = crate::runtime_cache::private_directory(&place.directory)
+            .map_err(|error| error.to_string())?;
+        let guarded = after
+            .stamps
+            .iter()
+            .map(|(path, stamp)| (stamp[0], path.clone()))
+            .collect::<Vec<_>>();
+        let devices = devices(&guarded, &directory)?;
         let text = |path: &Path| {
             path.to_str()
                 .map(str::to_owned)
@@ -630,60 +838,79 @@ impl Selection {
         let record = LocalRecord {
             format: FORMAT,
             key: name.to_owned(),
-            scope: scope(&directory)?,
-            issued: started
-                .duration_since(UNIX_EPOCH)
-                .map_err(|error| error.to_string())?
-                .as_secs(),
+            epoch: place.authority.epoch(),
+            machine: machine()?,
+            boot: place.clock.boot.clone(),
+            devices,
+            issued_realtime: nanos(
+                started
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|e| e.to_string())?,
+            )?,
+            issued_boottime: nanos(place.clock.boottime)?,
             spellings: self
                 .spellings
                 .iter()
                 .map(|(spelled, canonical)| Ok((text(spelled)?, text(canonical)?)))
                 .collect::<Result<_, String>>()?,
             guard: after
-                .0
+                .stamps
                 .iter()
                 .map(|(path, stamp)| Ok((text(path)?, stamp.to_vec())))
+                .collect::<Result<_, String>>()?,
+            absent: after
+                .absent
+                .iter()
+                .map(|path| text(path))
                 .collect::<Result<_, String>>()?,
             identity: platform.identity,
             platform: platform.store(store)?.into(),
         };
-        Ok(hirsel_codec::to_text(&record))
+        let body = hirsel_codec::to_text(&record);
+        let mac = hex(&place.authority.platform_record_mac(body.as_bytes()));
+        Ok(format!("{mac}\n{body}"))
     }
 }
 
-/// The machine and this cache directory's inode: a cache copied or
-/// restored elsewhere names other records. A host without a machine ID
-/// (a build sandbox) is scoped by the cache directory and the guard's own
-/// device and inode numbers.
-fn scope(directory: &std::fs::File) -> Result<(String, Vec<u64>), String> {
-    let machine = match std::fs::read_to_string("/etc/machine-id") {
-        Ok(machine) => machine,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(format!("/etc/machine-id: {error}")),
-    };
+/// This machine's ID; empty on a host without one (a build sandbox), which
+/// the boot ID and the per-device identities still scope.
+fn machine() -> Result<String, String> {
+    match std::fs::read_to_string("/etc/machine-id") {
+        Ok(machine) => Ok(machine.trim().to_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(format!("/etc/machine-id: {error}")),
+    }
+}
+
+/// Rule R4's per-device scope, in device order: for each device a guarded
+/// path is on, and for the record directory, (device, statx mount ID,
+/// `f_fsid`), followed by the directory's own inode. A device on a
+/// filesystem outside the local allowlist, or whose mount ID the kernel does
+/// not report, has no identity a record could be scoped by: Err.
+fn devices(guarded: &[(u64, PathBuf)], directory: &std::fs::File) -> Result<Vec<u64>, String> {
     let meta = directory.metadata().map_err(error)?;
-    Ok((machine.trim().to_owned(), vec![meta.dev(), meta.ino()]))
-}
-
-fn local_filesystems(guard: &Guard, cache: &std::fs::File) -> Result<(), String> {
-    let mut devices = BTreeMap::new();
-    for (path, stamp) in &guard.0 {
-        devices.entry(stamp[0]).or_insert_with(|| path.clone());
+    let fd = format!(
+        "/proc/self/fd/{}",
+        std::os::fd::AsRawFd::as_raw_fd(directory)
+    );
+    let mut paths = BTreeMap::new();
+    for (device, path) in guarded {
+        paths.entry(*device).or_insert_with(|| path.clone());
     }
-    let cache = format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(cache));
-    for path in devices
-        .values()
-        .map(PathBuf::as_path)
-        .chain([Path::new(&cache)])
-    {
-        let name = std::ffi::CString::new(path.as_os_str().as_bytes())
-            .map_err(|error| error.to_string())?;
+    paths.insert(meta.dev(), PathBuf::from(fd));
+    let mut words = Vec::with_capacity(paths.len() * 3 + 1);
+    for (device, path) in paths {
+        let name =
+            std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
         // SAFETY: `name` is a NUL-terminated path and `status` is a valid,
         // writable statfs buffer for the duration of the call.
         let mut status: libc::statfs = unsafe { std::mem::zeroed() };
         if unsafe { libc::statfs(name.as_ptr(), &mut status) } != 0 {
-            return Err(std::io::Error::last_os_error().to_string());
+            return Err(format!(
+                "{}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
         }
         #[allow(clippy::unnecessary_cast)]
         let kind = status.f_type as i64;
@@ -693,8 +920,53 @@ fn local_filesystems(guard: &Guard, cache: &std::fs::File) -> Result<(), String>
                 path.display()
             ));
         }
+        // SAFETY: as above, with a statvfs buffer.
+        let mut volume: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(name.as_ptr(), &mut volume) } != 0 {
+            return Err(format!(
+                "{}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: as above, with a statx buffer; the path is absolute.
+        let mut extended: libc::statx = unsafe { std::mem::zeroed() };
+        if unsafe {
+            libc::statx(
+                libc::AT_FDCWD,
+                name.as_ptr(),
+                0,
+                libc::STATX_MNT_ID,
+                &mut extended,
+            )
+        } != 0
+        {
+            return Err(format!(
+                "{}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        if extended.stx_mask & libc::STATX_MNT_ID == 0 {
+            return Err(format!(
+                "{}: the kernel reports no mount ID",
+                path.display()
+            ));
+        }
+        #[allow(clippy::unnecessary_cast)]
+        words.extend([device, extended.stx_mnt_id, volume.f_fsid as u64]);
     }
-    Ok(())
+    words.push(meta.ino());
+    Ok(words)
+}
+
+/// The record's MAC, as lowercase hex.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn nanos(duration: Duration) -> Result<u64, String> {
+    u64::try_from(duration.as_nanos()).map_err(|e| e.to_string())
 }
 
 /// Write the record beside its name and rename it into place, so a reader
@@ -721,11 +993,76 @@ fn publish(cache: &Path, name: &str, text: &str) -> Result<(), String> {
     result.map_err(error)
 }
 
-fn cache_directory() -> PathBuf {
-    std::env::var_os("HIRSEL_NATIVE_CACHE")
-        .map(PathBuf::from)
-        .unwrap_or_else(crate::runtime_cache::default_directory)
-        .join("platform-v1")
+/// Where and under what a selection keeps platform records, or why it
+/// keeps none (and every selection through it captures cold).
+type Records = Result<RecordPlace, String>;
+
+/// A store's platform records: `platform-v1` under its local product store's
+/// root, beside the content they name, so a record never outlives, precedes
+/// or crosses into a home other than its content's; MAC'd under the store's
+/// registration authority (design §3's key); checked against this boot's
+/// clocks.
+#[derive(Clone)]
+struct RecordPlace {
+    directory: PathBuf,
+    authority: hirsel_validate::programs::ProgramAuthority,
+    clock: Clock,
+}
+
+/// The clocks a record is issued and checked against.
+#[derive(Clone)]
+struct Clock {
+    realtime: SystemTime,
+    boottime: Duration,
+    /// `/proc/sys/kernel/random/boot_id`: boottime counts within this boot.
+    boot: String,
+}
+impl Clock {
+    fn now() -> Result<Self, String> {
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `time` is a valid, writable timespec for the call.
+        if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut time) } != 0 {
+            return Err(format!("boottime: {}", std::io::Error::last_os_error()));
+        }
+        let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .map_err(|error| format!("boot ID: {error}"))?;
+        Ok(Self {
+            realtime: SystemTime::now(),
+            boottime: Duration::new(time.tv_sec as u64, time.tv_nsec as u32),
+            boot: boot.trim().to_owned(),
+        })
+    }
+}
+
+#[cfg(test)]
+impl Clock {
+    /// This clock `elapsed` later in the same boot.
+    fn after(&self, elapsed: Duration) -> Self {
+        Self {
+            realtime: self.realtime + elapsed,
+            boottime: self.boottime + elapsed,
+            boot: self.boot.clone(),
+        }
+    }
+}
+
+fn records(store: &dyn ResultStore) -> Records {
+    let directory = store
+        .local_product_store()
+        .ok_or("the store keeps no local records")?
+        .root()
+        .join("platform-v1");
+    let authority = store
+        .program_authority()
+        .ok_or("the store has no registration to key records")?;
+    Ok(RecordPlace {
+        directory,
+        authority,
+        clock: Clock::now()?,
+    })
 }
 
 fn name(key: &[u8]) -> String {
@@ -745,20 +1082,34 @@ fn words(values: &[u64]) -> Vec<u8> {
 struct LocalRecord {
     format: u64,
     key: String,
-    scope: (String, Vec<u64>),
-    issued: u64,
+    /// Rule R4's scope: the registration's authority epoch, the machine,
+    /// the boot, and `devices`' per-device identities.
+    epoch: ContentHash,
+    machine: String,
+    boot: String,
+    devices: Vec<u64>,
+    /// Rule R6: when the capture that issued it started, on both clocks.
+    issued_realtime: u64,
+    issued_boottime: u64,
     spellings: Vec<(String, String)>,
     guard: Vec<(String, Vec<u64>)>,
+    /// Candidates a search found absent; each must still be absent.
+    absent: Vec<String>,
     identity: ContentHash,
     platform: WireRef,
 }
 snapshot_struct!(LocalRecord {
     format,
     key,
-    scope,
-    issued,
+    epoch,
+    machine,
+    boot,
+    devices,
+    issued_realtime,
+    issued_boottime,
     spellings,
     guard,
+    absent,
     identity,
     platform
 });

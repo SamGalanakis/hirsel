@@ -41,6 +41,44 @@ pub struct FrozenLinker(Reference);
 #[derive(Clone, Copy)]
 pub struct CapturedLink(Reference);
 
+/// What one capture's linker searched (lld `--search-trace`): every path it
+/// asked its input filesystem about, in order, with whether it was found, and
+/// its final search path (`-L` options, the kit's options and every
+/// `SEARCH_DIR`). Paths are absolute: a relative name is the link working
+/// directory's. Only a platform record reads it; a build keeps none.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SearchTrace {
+    pub(crate) queries: Vec<(PathBuf, bool)>,
+    pub(crate) searched: Vec<PathBuf>,
+}
+/// A search trace, or why the linker's search could not be traced; a
+/// platform record is refused for an untraceable search.
+pub(crate) type Traced = Result<SearchTrace, String>;
+
+fn read_trace(path: &Path, directory: &Path, scratch: &Path) -> Traced {
+    let text =
+        std::fs::read_to_string(path).map_err(|error| format!("linker search trace: {error}"))?;
+    let mut trace = SearchTrace::default();
+    for line in text.lines() {
+        let (kind, name) = line
+            .split_once(' ')
+            .ok_or("malformed linker search trace")?;
+        let name = directory.join(name);
+        // The capture's own scratch (overlay, reproducer, output) is not
+        // an input the platform selects.
+        if name.starts_with(scratch) {
+            continue;
+        }
+        match kind {
+            "found" => trace.queries.push((name, true)),
+            "absent" => trace.queries.push((name, false)),
+            "searched" => trace.searched.push(name),
+            _ => return Err("malformed linker search trace".into()),
+        }
+    }
+    Ok(trace)
+}
+
 #[derive(Clone, Debug)]
 struct FileRecord {
     name: String,
@@ -125,6 +163,18 @@ impl FrozenLinker {
         arguments: &[String],
         limits: CaptureLimits,
     ) -> Result<CapturedLink, String> {
+        self.capture_traced(store, directory, arguments, limits)
+            .map(|(captured, _)| captured)
+    }
+
+    /// [`Self::capture`] and what its linker searched.
+    pub(crate) fn capture_traced(
+        self,
+        store: &dyn ResultStore,
+        directory: &Path,
+        arguments: &[String],
+        limits: CaptureLimits,
+    ) -> Result<(CapturedLink, Traced), String> {
         self.capture_fixed(store, directory, arguments, limits, &[])
     }
 
@@ -135,7 +185,7 @@ impl FrozenLinker {
         arguments: &[String],
         limits: CaptureLimits,
         fixed: &[FileRecord],
-    ) -> Result<CapturedLink, String> {
+    ) -> Result<(CapturedLink, Traced), String> {
         check_arguments(arguments)?;
         let directory = std::fs::canonicalize(directory).map_err(error)?;
         let directory = directory
@@ -145,6 +195,7 @@ impl FrozenLinker {
         let scratch = tempfile::tempdir().map_err(error)?;
         let tool = self.retain(store)?;
         let archive = scratch.path().join("inputs.tar");
+        let trace = scratch.path().join("search.trace");
         let mut command = tool.command(scratch.path())?;
         command
             .current_dir(&directory)
@@ -154,6 +205,7 @@ impl FrozenLinker {
             .args(arguments.iter().filter(|arg| *arg != "--no-whole-archive"))
             .arg("--capture-inputs-only")
             .arg(format!("--reproduce={}", archive.display()))
+            .arg(format!("--search-trace={}", trace.display()))
             .arg("-o")
             .arg(scratch.path().join("unused-output"));
         if !fixed.is_empty() {
@@ -183,7 +235,8 @@ impl FrozenLinker {
             return Err("link input archive exceeds admitted bytes".into());
         }
         let files = read_archive(store, file.take(limits.archive_bytes), limits)?;
-        Ok(CapturedLink(put_record(
+        let traced = read_trace(&trace, Path::new(&directory), scratch.path());
+        let captured = CapturedLink(put_record(
             store,
             CAPTURE,
             &CaptureRecord {
@@ -192,7 +245,8 @@ impl FrozenLinker {
                 arguments: arguments.to_vec(),
                 files,
             },
-        )?))
+        )?);
+        Ok((captured, traced))
     }
 
     /// Every tool file is checked once per process and then executed through
@@ -390,6 +444,17 @@ impl FrozenLinkKit {
         linker: FrozenLinker,
         limits: CaptureLimits,
     ) -> Result<Self, String> {
+        Self::snapshot_traced(store, root, target, linker, limits).map(|(kit, _)| kit)
+    }
+
+    /// [`Self::snapshot`] and what each of its kit links searched.
+    pub(crate) fn snapshot_traced(
+        store: &dyn ResultStore,
+        root: &Path,
+        target: &super::super::TargetSpec,
+        linker: FrozenLinker,
+        limits: CaptureLimits,
+    ) -> Result<(Self, Vec<Traced>), String> {
         use std::os::unix::ffi::OsStrExt as _;
         let root = std::fs::canonicalize(root).map_err(error)?;
         let mut manifest = Vec::new();
@@ -432,7 +497,8 @@ impl FrozenLinkKit {
                     .map_err(|e| e.to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let mut capture = linker.capture(store, &root, &arguments, limits)?;
+        let (mut capture, traced) = linker.capture_traced(store, &root, &arguments, limits)?;
+        let mut traces = vec![traced];
         if parsed
             .has_static(&target.triple)
             .map_err(|e| e.to_string())?
@@ -450,7 +516,8 @@ impl FrozenLinkKit {
                         .ok_or("non-UTF8 static link argument")
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let archives = linker.capture(store, &root, &arguments, limits)?;
+            let (archives, traced) = linker.capture_traced(store, &root, &arguments, limits)?;
+            traces.push(traced);
             let mut combined = capture.record(store)?;
             let mut files = BTreeMap::new();
             for file in combined
@@ -491,7 +558,7 @@ impl FrozenLinkKit {
         };
         let result = Self(put_record(store, KIT, &record)?);
         result.validate(store, target)?;
-        Ok(result)
+        Ok((result, traces))
     }
     pub fn reference(self) -> Reference {
         self.0
@@ -630,7 +697,8 @@ impl FrozenLinkKit {
                     .ok_or_else(|| "non-UTF8 link argument".to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let captured = linker.capture_fixed(store, &plan.directory, &arguments, limits, &files)?;
+        let (captured, _) =
+            linker.capture_fixed(store, &plan.directory, &arguments, limits, &files)?;
         for file in captured.record(store)?.files {
             match fixed.get(&file.name) {
                 Some(expected) if *expected == Reference::from(file.bytes) => {}
@@ -659,7 +727,8 @@ impl FrozenLinkKit {
         if Reference::from(base.tool) != linker.reference() {
             return Err("frozen kit selected another linker".into());
         }
-        let captured = linker.capture_fixed(store, directory, arguments, limits, &base.files)?;
+        let (captured, _) =
+            linker.capture_fixed(store, directory, arguments, limits, &base.files)?;
         let actual = captured.record(store)?;
         for file in &actual.files {
             if let Some(expected) = base
@@ -760,6 +829,7 @@ fn check_arguments(arguments: &[String]) -> Result<(), String> {
                 "--input-overlay",
                 "--input-working-directory",
                 "--capture-inputs-only",
+                "--search-trace",
                 "--dependency-file",
                 "--chroot",
                 "--remap-inputs",

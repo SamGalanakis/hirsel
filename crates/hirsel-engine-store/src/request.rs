@@ -453,6 +453,11 @@ impl ResultStore for RequestStore {
     fn local_product_store(&self) -> Option<hirsel_artifact_store::Store> {
         self.backend.local_product_store()
     }
+    /// The operation's own registrations: a platform record selected inside
+    /// the request is keyed by them as one selected before it.
+    fn program_authority(&self) -> Option<hirsel_validate::programs::ProgramAuthority> {
+        self.backend.program_authority()
+    }
     fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
         self.verifier.clone()
     }

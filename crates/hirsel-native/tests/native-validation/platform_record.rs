@@ -113,7 +113,7 @@ fn tick() {
 
 fn recorded(guard: &Guard) -> Vec<(String, Vec<u64>)> {
     guard
-        .0
+        .stamps
         .iter()
         .map(|(path, stamp)| (path.to_str().unwrap().to_owned(), stamp.to_vec()))
         .collect()
@@ -132,8 +132,8 @@ fn a_rewrite_restoring_size_and_mtime_is_a_miss() {
         files: vec![file.clone()],
         ..Selection::default()
     };
-    let guard = recorded(&selection.guard(&[]).unwrap());
-    assert_eq!(changed(&guard), None);
+    let guard = recorded(&selection.guard(&[], &[]).unwrap());
+    assert_eq!(changed(&guard, &[]), None);
     tick();
     std::fs::write(&file, "two").unwrap();
     std::fs::File::options()
@@ -142,7 +142,7 @@ fn a_rewrite_restoring_size_and_mtime_is_a_miss() {
         .unwrap()
         .set_modified(modified)
         .unwrap();
-    assert_eq!(changed(&guard), Some(file.to_str().unwrap()));
+    assert_eq!(changed(&guard, &[]), Some(file.to_str().unwrap()));
 }
 
 /// Bug: the loader would now find a library in a library-path directory
@@ -158,20 +158,20 @@ fn a_new_entry_on_a_search_path_is_a_miss() {
     std::fs::create_dir_all(tree.join("glibc-hwcaps/x86-64-v3")).unwrap();
     std::fs::write(tree.join("libc.so.6"), "libc").unwrap();
     let selection = Selection::resolve(&selected).unwrap();
-    let guard = recorded(&selection.guard(&[]).unwrap());
-    assert_eq!(changed(&guard), None);
+    let guard = recorded(&selection.guard(&[], &[]).unwrap());
+    assert_eq!(changed(&guard, &[]), None);
     tick();
     std::fs::write(tree.join("glibc-hwcaps/x86-64-v3/libc.so.6"), "v3").unwrap();
     assert_eq!(
-        changed(&guard),
+        changed(&guard, &[]),
         Some(tree.join("glibc-hwcaps/x86-64-v3").to_str().unwrap())
     );
     // The absent library-path directory `absent/lib` is guarded by its
     // nearest existing ancestor.
-    let guard = recorded(&selection.guard(&[]).unwrap());
+    let guard = recorded(&selection.guard(&[], &[]).unwrap());
     tick();
     std::fs::create_dir(root.join("absent")).unwrap();
-    assert_eq!(changed(&guard), Some(root.to_str().unwrap()));
+    assert_eq!(changed(&guard, &[]), Some(root.to_str().unwrap()));
 }
 
 /// Bug: a file rewritten while a capture child read it by path, then the
@@ -188,11 +188,11 @@ fn a_change_between_the_bracketing_stamps_records_nothing() {
     };
     // A clock past the racy margin stands for stamps that have aged.
     let started = SystemTime::now() + Duration::from_secs(10);
-    let before = selection.guard(&[]).unwrap();
+    let before = selection.guard(&[], &[]).unwrap();
     assert_eq!(witnessed(&before, &before, started), Ok(()));
     tick();
     std::fs::write(&file, "two").unwrap();
-    let after = selection.guard(&[]).unwrap();
+    let after = selection.guard(&[], &[]).unwrap();
     assert!(witnessed(&before, &after, started).is_err());
     assert!(
         witnessed(&after, &after, SystemTime::now()).is_err(),
@@ -263,8 +263,16 @@ fn a_platform_record_is_reused_until_switched_off_aged_or_shown_wrong() {
         std::env::set_var("HIRSEL_NATIVE_CACHE", &native);
         std::env::remove_var("HIRSEL_PLATFORM_CAPTURE");
     };
-    let cache = cache_directory();
     let store = DirStore::new(directory.path().join("products"));
+    let cache = directory.path().join("products/platform-v1");
+    let authority = registered(directory.path());
+    let at = |cache: &Path, clock: &Clock| -> Records {
+        Ok(RecordPlace {
+            directory: cache.to_owned(),
+            authority: authority.clone(),
+            clock: clock.clone(),
+        })
+    };
     let llvm = input("LLVM_SYS_231_PREFIX");
     let target = super::super::super::super::TargetSpec::x86_64_unknown_linux_gnu();
     let floor = input("HIRSEL_GLIBC_FLOOR").join(&target.triple);
@@ -348,15 +356,16 @@ fn a_platform_record_is_reused_until_switched_off_aged_or_shown_wrong() {
     };
     // The files above were just written; a clock past the racy margin lets
     // their capture be recorded.
-    let now = SystemTime::now() + Duration::from_secs(10);
-    let select =
-        |store: &dyn ResultStore, mode, now| spec.select_in(store, &cache, mode, now).unwrap();
+    let now = Clock::now().unwrap().after(Duration::from_secs(10));
+    let select = |store: &dyn ResultStore, mode, now: &Clock| {
+        spec.select_in(store, &at(&cache, now), mode).unwrap()
+    };
 
-    let cold = select(&store, CaptureMode::Record, now);
+    let cold = select(&store, CaptureMode::Record, &now);
     assert!(!cold.hit);
     let program = link(&cold.platform, &store, "cold").unwrap();
     crate::object_queries::forget_retained();
-    let hit = select(&store, CaptureMode::Record, now);
+    let hit = select(&store, CaptureMode::Record, &now);
     assert!(
         hit.hit,
         "an unchanged selection reuses its record: {:?}",
@@ -365,9 +374,11 @@ fn a_platform_record_is_reused_until_switched_off_aged_or_shown_wrong() {
     assert_eq!(hit.platform.identity, cold.platform.identity);
     assert_eq!(link(&hit.platform, &store, "hit").unwrap(), program);
 
-    // Build presets change verification, not the identity of these link inputs.
-    // A fresh cache is the byte oracle; observing lookup and actual linker
+    // Every build preset follows one rule: a valid record answers it. A
+    // fresh cache is the byte oracle; observing lookup and actual linker
     // capture children distinguishes full verification from a record hit.
+    // Bug: a preset (release, LTO, profiling) that verifies fully on every
+    // build despite a record that witnessed its complete selection.
     let children = || crate::object_queries::capture::CAPTURE_CHILDREN.get();
     let options = |profile: crate::BuildProfile| {
         profile
@@ -381,13 +392,16 @@ fn a_platform_record_is_reused_until_switched_off_aged_or_shown_wrong() {
     let fresh = directory.path().join("fresh-platform");
     let fresh_store = DirStore::new(directory.path().join("fresh-products"));
     let reference = spec
-        .select_in(&fresh_store, &fresh, CaptureMode::Record, now)
+        .select_in(&fresh_store, &at(&fresh, &now), CaptureMode::Record)
         .unwrap();
     let reference_program = link(&reference.platform, &fresh_store, "fresh").unwrap();
     assert_eq!(program, reference_program);
     for (index, build) in [
         options(crate::BuildProfile::Debug),
         options(crate::BuildProfile::Default),
+        options(crate::BuildProfile::Release),
+        options(crate::BuildProfile::ReleaseLto),
+        options(crate::BuildProfile::Profiling),
         crate::BuildProfile::run_options(
             crate::Backend::Llvm,
             target.clone(),
@@ -403,33 +417,16 @@ fn a_platform_record_is_reused_until_switched_off_aged_or_shown_wrong() {
     .enumerate()
     {
         let before = (RECORD_READS.get(), children());
-        let debug = select(&store, build.capture_mode().unwrap(), now);
-        assert!(debug.hit, "debug and run builds reuse the record");
+        let reused = select(&store, CaptureMode::from_environment().unwrap(), &now);
+        assert!(
+            reused.hit,
+            "{:?} {:?} reuses the record",
+            build.opt, build.backend
+        );
         assert_eq!(RECORD_READS.get(), before.0 + 1);
         assert_eq!(children(), before.1, "a hit runs no capture children");
         assert_eq!(
-            link(&debug.platform, &store, &format!("debug-{index}")).unwrap(),
-            reference_program
-        );
-    }
-    for (index, profile) in [
-        crate::BuildProfile::Release,
-        crate::BuildProfile::ReleaseLto,
-        crate::BuildProfile::Profiling,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let before = (RECORD_READS.get(), children());
-        let release = select(&store, options(profile).capture_mode().unwrap(), now);
-        assert!(
-            !release.hit,
-            "{profile:?} must verify fully even with a valid record"
-        );
-        assert_eq!(RECORD_READS.get(), before.0, "release reads no record");
-        assert!(children() > before.1, "release runs capture children");
-        assert_eq!(
-            link(&release.platform, &store, &format!("release-{index}")).unwrap(),
+            link(&reused.platform, &store, &format!("preset-{index}")).unwrap(),
             reference_program
         );
     }
@@ -460,12 +457,13 @@ fn a_platform_record_is_reused_until_switched_off_aged_or_shown_wrong() {
         .unwrap();
     assert!(children() > before, "foreign inputs capture for themselves");
     assert_eq!(other.platform.identity, own);
-    let before = RECORD_READS.get();
+    // (This store has no registration, so it keeps no records: a Record
+    // selection of its own captures.)
+    let before = children();
     spec.select_handed(Some(&handed), &store, CaptureMode::Record)
         .unwrap();
-    assert_eq!(
-        RECORD_READS.get(),
-        before + 1,
+    assert!(
+        children() > before,
         "another capture mode selects for itself"
     );
     let before = children();
@@ -486,11 +484,7 @@ fn a_platform_record_is_reused_until_switched_off_aged_or_shown_wrong() {
     // SAFETY: this proof runs alone, as at its initial environment setup.
     unsafe { std::env::set_var("HIRSEL_PLATFORM_CAPTURE", "cold") };
     let before = (RECORD_READS.get(), children());
-    let override_cold = select(
-        &store,
-        options(crate::BuildProfile::Debug).capture_mode().unwrap(),
-        now,
-    );
+    let override_cold = select(&store, CaptureMode::from_environment().unwrap(), &now);
     assert!(!override_cold.hit);
     assert_eq!(RECORD_READS.get(), before.0);
     assert!(children() > before.1);
@@ -499,7 +493,11 @@ fn a_platform_record_is_reused_until_switched_off_aged_or_shown_wrong() {
 
     let record = cache.join(name(&spec.key().unwrap()));
     let issued = std::fs::read(&record).unwrap();
-    let forced = select(&store, CaptureMode::Cold, now + Duration::from_secs(1));
+    let forced = select(
+        &store,
+        CaptureMode::Cold,
+        &now.after(Duration::from_secs(1)),
+    );
     assert!(!forced.hit, "the forced-cold switch reads no record");
     assert_eq!(forced.platform.identity, cold.platform.identity);
     assert_ne!(
@@ -508,11 +506,11 @@ fn a_platform_record_is_reused_until_switched_off_aged_or_shown_wrong() {
         "and records afresh"
     );
 
-    let later = now + PERIOD + Duration::from_secs(2);
-    let aged = select(&store, CaptureMode::Record, later);
+    let later = now.after(PERIOD + Duration::from_secs(2));
+    let aged = select(&store, CaptureMode::Record, &later);
     assert!(!aged.hit, "a record older than a day is verified fully");
     assert_eq!(aged.platform.identity, cold.platform.identity);
-    assert!(select(&store, CaptureMode::Record, later).hit);
+    assert!(select(&store, CaptureMode::Record, &later).hit);
 
     // The store loses the runtime archive's chunks and the process its
     // checked copy: the record still names a structurally complete platform.
@@ -530,11 +528,16 @@ fn a_platform_record_is_reused_until_switched_off_aged_or_shown_wrong() {
     };
     crate::object_queries::forget_retained();
     std::fs::remove_dir_all(native.join("inputs-v1")).unwrap();
-    let wrong = select(&lost, CaptureMode::Record, later);
+    let wrong = select(&lost, CaptureMode::Record, &later);
     assert!(wrong.hit);
     let failure = link(&wrong.platform, &lost, "wrong").unwrap_err();
     let fresh = spec
-        .recover_in(&lost, &cache, wrong.platform.identity, &failure, later)
+        .recover_in(
+            &lost,
+            &at(&cache, &later),
+            wrong.platform.identity,
+            &failure,
+        )
         .unwrap();
     assert_eq!(link(&fresh, &lost, "recovered").unwrap(), program);
 
@@ -543,12 +546,107 @@ fn a_platform_record_is_reused_until_switched_off_aged_or_shown_wrong() {
     let debug = archives.join("default/debug/libhirsel_rt.a");
     std::fs::remove_file(runtime.join("libhirsel_rt.a")).unwrap();
     std::fs::copy(&debug, runtime.join("libhirsel_rt.a")).unwrap();
-    let Err(error) = spec.recover_in(&store, &cache, cold.platform.identity, "Link failed", later)
-    else {
+    let Err(error) = spec.recover_in(
+        &store,
+        &at(&cache, &later),
+        cold.platform.identity,
+        "Link failed",
+    ) else {
         panic!("recovery kept a platform other than the recorded one");
     };
     assert!(error.starts_with("platform cache mismatch"), "{error}");
-    let replaced = select(&store, CaptureMode::Record, later);
+    let replaced = select(&store, CaptureMode::Record, &later);
     assert!(replaced.hit, "recovery recorded the full verification");
     assert_ne!(replaced.platform.identity, cold.platform.identity);
+
+    // Rule R6. Bug: a hit that renews its record's day, so a record in daily
+    // use is never verified again. Oracle: the fixed day from issue.
+    assert!(select(&store, CaptureMode::Record, &later.after(PERIOD / 2)).hit);
+    let day = later.after(PERIOD + Duration::from_secs(1));
+    assert!(
+        !select(&store, CaptureMode::Record, &day).hit,
+        "a hit within the day must not renew it"
+    );
+    // Bug: a record that outlives a reboot (boottime restarts; the guarded
+    // stamps may come from a restored disk).
+    let rebooted = Clock {
+        boot: "another boot".into(),
+        ..day.after(Duration::from_secs(1))
+    };
+    assert!(
+        !select(&store, CaptureMode::Record, &rebooted).hit,
+        "reboot"
+    );
+    assert!(
+        !select(
+            &store,
+            CaptureMode::Record,
+            &day.after(Duration::from_secs(2))
+        )
+        .hit
+    );
+    let hour = day.after(Duration::from_secs(3600));
+    assert!(select(&store, CaptureMode::Record, &hour).hit);
+    // Bug: a realtime jump (or rollback) within one boot passing as the
+    // record's age. Oracle: boottime, which no clock change moves.
+    let jumped = Clock {
+        realtime: hour.realtime + Duration::from_secs(10),
+        ..hour.after(Duration::from_secs(1))
+    };
+    assert!(
+        !select(&store, CaptureMode::Record, &jumped).hit,
+        "clock jump"
+    );
+
+    // Rule R5. Bug: a record whose searched-path guard was edited (here an
+    // absent candidate the loader searched, renamed) still answers. Oracle:
+    // the MAC under the registration covers every byte of the record.
+    let settled = jumped.after(Duration::from_secs(60));
+    assert!(select(&store, CaptureMode::Record, &settled).hit);
+    let text = std::fs::read_to_string(&record).unwrap();
+    let (_, body) = text.split_once('\n').unwrap();
+    let recorded: LocalRecord = hirsel_codec::from_text(body).unwrap();
+    let candidate = recorded
+        .absent
+        .first()
+        .expect("the loader searched an absent path");
+    std::fs::write(
+        &record,
+        text.replacen(candidate.as_str(), &format!("{candidate}-renamed"), 1),
+    )
+    .unwrap();
+    assert!(
+        !select(&store, CaptureMode::Record, &settled).hit,
+        "an edited guard must not answer"
+    );
+}
+
+/// A registration whose authority keys this proof's platform records.
+fn registered(directory: &Path) -> hirsel_validate::programs::ProgramAuthority {
+    use hirsel_artifact_store::{Action, Address, Association, Domain, Store};
+    let root = directory.join("registered");
+    let state = directory.join("registration-state");
+    std::fs::create_dir_all(&root).unwrap();
+    let verifier = ContentHash::of_bytes(b"platform record proof verifier");
+    let store = Store::new(root.clone());
+    let reference = store
+        .put(
+            Domain {
+                kind: 31,
+                schema: 1,
+            },
+            b"platform record proof header",
+        )
+        .unwrap();
+    let address = Address(ContentHash::of_bytes(b"ordinary"));
+    let action = Action(ContentHash::default());
+    let install = hirsel_validate::Installation::begin(&root, &state, verifier).unwrap();
+    store.associate(address, action, reference).unwrap();
+    install
+        .finish((address, Association { action, reference }))
+        .unwrap();
+    let registered =
+        hirsel_validate::Installation::registered(&root, &state, verifier, Default::default())
+            .unwrap();
+    hirsel_validate::programs::ProgramAuthority::new(vec![registered.authority]).unwrap()
 }

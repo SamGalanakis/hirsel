@@ -262,6 +262,26 @@ impl ProgramAuthority {
     pub fn epoch(&self) -> ContentHash {
         self.epoch
     }
+    /// The MAC of a local platform record (native rerun design §15 R5): the
+    /// primary registration's key, bound to its root, filesystem and
+    /// generation, and to this domain's epoch. Replacing or revoking a
+    /// registration fails every record made under the old one.
+    pub fn platform_record_mac(&self, payload: &[u8]) -> [u8; 32] {
+        self.bound_mac(b"hirsel.platform-record.v3\0", payload)
+    }
+    /// The MAC of a cached compiler file digest (native rerun design §15 R3,
+    /// safe issuance): a (stamp, digest) pair is reused only under the
+    /// registration that issued it.
+    pub fn compiler_digest_mac(&self, payload: &[u8]) -> [u8; 32] {
+        self.bound_mac(b"hirsel.compiler-digest.v1\0", payload)
+    }
+    fn bound_mac(&self, label: &[u8], payload: &[u8]) -> [u8; 32] {
+        let mut bound = Vec::with_capacity(label.len() + 32 + payload.len());
+        bound.extend_from_slice(label);
+        bound.extend_from_slice(&self.epoch.0);
+        bound.extend_from_slice(payload);
+        self.primary.mac(&bound)
+    }
     /// Open (creating) this domain's record store.
     pub fn records(&self) -> io::Result<ProgramRecords> {
         let root = self.primary.directory.join("programs");

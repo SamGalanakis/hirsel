@@ -326,7 +326,8 @@ fn probe(target: &TargetSpec, once: bool, usage: CaptureUse, malformed: u8) -> (
         &unit.tables.symbols[0].definition,
         unit.tables.symbols[0].instance.as_ref(),
     );
-    let keys = hirsel_lir::LayoutKeys::new(&table);
+    let table = hirsel_lir::SealedLayoutTable::seal(table);
+    let keys = table.keys();
     let manifest = Manifest::skeleton([]);
     let input = InputIdentity {
         interface_version: hirsel_lir::INTERFACE_VERSION,
@@ -342,7 +343,6 @@ fn probe(target: &TargetSpec, once: bool, usage: CaptureUse, malformed: u8) -> (
         input: &input,
         target,
         layouts: &table,
-        keys: &keys,
         manifest: &manifest,
         statics: &[],
         inline_instances: &empty,
@@ -360,7 +360,6 @@ fn probe(target: &TargetSpec, once: bool, usage: CaptureUse, malformed: u8) -> (
     let glue_inputs = hirsel_lir::emission::GlueInputs {
         target,
         layouts: &table,
-        keys: &keys,
         registry: registry.clone(),
         finalizers: &finalizers,
         charged_finalizers: &Default::default(),

@@ -258,7 +258,7 @@ pub fn validate_cpu_summaries(
 /// complete effect-free Ready graph and the worker's retained ownership.
 pub fn validate_cpu_workers(
     units: &[&ValidatedUnit<Ready>],
-    table: &LayoutTable,
+    table: &crate::SealedLayoutTable,
     target: &TargetSpec,
     plan: &AheadPlan,
 ) -> bool {
@@ -525,7 +525,7 @@ fn spine(u: &LirUnit<Ready>, protocol: &CpuWorkerProtocol) -> Spine {
 
 pub(super) fn propose(
     units: &[&ValidatedUnit<Ready>],
-    table: &LayoutTable,
+    table: &crate::SealedLayoutTable,
     target: &TargetSpec,
     worker: &ValidatedUnit<Ready>,
     environments: &BTreeMap<ContentHash, Option<LayoutId>>,

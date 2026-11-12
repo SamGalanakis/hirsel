@@ -225,7 +225,7 @@ pub fn scalar_image(table: &LayoutTable, id: LayoutId) -> bool {
 /// must also bind emission options and final object/frame evidence later.
 pub fn scalar_graph(
     units: &[&ValidatedUnit<Ready>],
-    table: &LayoutTable,
+    table: &crate::SealedLayoutTable,
     target: &TargetSpec,
     root: ContentHash,
     helper_identity: ContentHash,

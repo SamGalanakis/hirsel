@@ -54,7 +54,6 @@ fn execute(source: &str, root: TypeKind, native: NativeType) {
     let glue_inputs = GlueInputs {
         target: &h.target,
         layouts: &h.layouts,
-        keys: &keys,
         registry,
         finalizers: &finalizers,
         charged_finalizers: &Default::default(),
@@ -79,7 +78,6 @@ fn execute(source: &str, root: TypeKind, native: NativeType) {
         input: &input,
         target: &h.target,
         layouts: &h.layouts,
-        keys: &keys,
         manifest: &manifest,
         statics: &h.statics,
         inline_instances: &empty,

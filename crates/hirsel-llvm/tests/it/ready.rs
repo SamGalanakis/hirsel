@@ -31,7 +31,7 @@ fn heap_program(program: &Program) -> hirsel_heapcheck::Program<Ready> {
         invocations: Default::default(),
         pretransfer_adapters: Vec::new(),
         target: program.table.target.clone(),
-        layouts: program.table.table.clone(),
+        layouts: program.table.table.table().clone(),
         units: program.units.iter().map(|u| u.unit().clone()).collect(),
         statics: program.statics.clone(),
     }
@@ -253,7 +253,6 @@ fn emit(program: &Program, opt: OptLevel) -> Vec<u8> {
         input: &input,
         target: &program.table.target,
         layouts: &program.table.table,
-        keys: &program.table.keys,
         manifest: &program.manifest,
         statics: &program.statics,
         inline_instances: &std::collections::BTreeSet::new(),

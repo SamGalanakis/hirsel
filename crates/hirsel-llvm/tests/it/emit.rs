@@ -4,6 +4,7 @@
 use crate::support;
 
 use hirsel_core_contract::Manifest;
+use hirsel_lir::SealedLayoutTable;
 use hirsel_lir::emission::{EmitInputs, FailureCodes, OptLevel, function_thunk_name, symbol_name};
 use hirsel_lir::layout_types::TargetSpec;
 use hirsel_lir::stage::{InputIdentity, ObjectArtifact, ObjectSymbolKind};
@@ -27,7 +28,6 @@ fn inputs<'a>(program: &'a Program, input: &'a InputIdentity, opt: OptLevel) -> 
         input,
         target: &program.table.target,
         layouts: &program.table.table,
-        keys: &program.table.keys,
         manifest: &program.manifest,
         statics: &program.statics,
         inline_instances: &EMPTY_INLINE,
@@ -127,13 +127,12 @@ fn a_receipt_for_other_inputs_is_rejected() {
     };
 
     // Unrelated rows and front-end snapshots do not change this unit's proof.
-    // Keep the original LayoutKeys deliberately: the receipt reads actual rows.
-    let mut table = program.table.table.clone();
+    let mut table = program.table.table.table().clone();
     table.layouts.push(table.layouts[0].clone());
     emit_object(
         &units,
         &EmitInputs {
-            layouts: &table,
+            layouts: &SealedLayoutTable::seal(table.clone()),
             ..valid.clone()
         },
     )
@@ -151,16 +150,16 @@ fn a_receipt_for_other_inputs_is_rejected() {
     table.layouts[reached.0 as usize].align += 1;
     assert_eq!(
         problem(&EmitInputs {
-            layouts: &table,
+            layouts: &SealedLayoutTable::seal(table),
             ..valid.clone()
         }),
         "the receipt names other checked inputs"
     );
-    let mut table = program.table.table.clone();
+    let mut table = program.table.table.table().clone();
     table.fn_abis[units[0].unit().header.abi.0 as usize].caller_site = true;
     assert_eq!(
         problem(&EmitInputs {
-            layouts: &table,
+            layouts: &SealedLayoutTable::seal(table),
             ..valid.clone()
         }),
         "the receipt names other checked inputs"
@@ -241,13 +240,12 @@ fn two_units_with_one_link_name_are_rejected() {
 fn a_forged_or_foreign_program_descriptor_assignment_is_rejected() {
     let program = heap_program(&x86());
     let codes = failure_codes();
-    let keys = &program.table.keys;
+    let keys = &program.table.table.keys();
     let units = program.unit_abis();
     let glue = hirsel_lir::glue::UnitGlue::default();
     let valid = hirsel_lir::emission::GlueInputs {
         target: &program.table.target,
         layouts: &program.table.table,
-        keys,
         registry: hirsel_lir::descriptor_registry::DescriptorRegistry::new(
             &program.table.table,
             &program.finalizers,
@@ -279,52 +277,6 @@ fn a_forged_or_foreign_program_descriptor_assignment_is_rejected() {
         );
     }
     hirsel_llvm::emit_glue(&valid).unwrap();
-}
-
-/// Stale or forged keys must not let physically different descriptors share a cell.
-#[test]
-fn different_registry_layouts_cannot_share_an_index_cell() {
-    use hirsel_lir::{LayoutId, LayoutKeys, descriptor_registry::DescriptorRegistry};
-    let mut program = scalar_program(&x86());
-    let units = program.unit_abis();
-    let table = &mut program.table.table;
-    let original = LayoutId(0);
-    let duplicate = LayoutId(table.layouts.len() as u32);
-    table
-        .layouts
-        .push(table.layouts[original.0 as usize].clone());
-    let keys = LayoutKeys::new(table);
-    assert_eq!(keys.key(original), keys.key(duplicate));
-    // Keep the old key while replacing the row with another valid physical layout.
-    let different = table
-        .layouts
-        .iter()
-        .find(|r| r.size != table.layouts[0].size)
-        .unwrap()
-        .clone();
-    table.layouts[duplicate.0 as usize] = different;
-    table.layouts[duplicate.0 as usize].key.instance = Some(hash("forged distinct layout"));
-    let codes = failure_codes();
-    let glue = hirsel_lir::glue::UnitGlue::default();
-    let inputs = hirsel_lir::emission::GlueInputs {
-        target: &program.table.target,
-        layouts: table,
-        keys: &keys,
-        registry: DescriptorRegistry::new(table, &program.finalizers),
-        finalizers: &program.finalizers,
-        charged_finalizers: &Default::default(),
-        units: &units,
-        glue: &glue,
-        failures: &codes,
-        statics: &program.statics,
-        callbacks: &[],
-        foreign: &hirsel_lir::emission::NO_FOREIGN,
-        aliasing_unstated: false,
-    };
-    assert!(matches!(
-        hirsel_llvm::emit_glue(&inputs),
-        Err(CodegenError::Glue { what }) if what.contains("two registry layouts share the cell")
-    ));
 }
 
 /// A uniqueness query must stay a count read, including at O0: it must never
@@ -380,25 +332,21 @@ fn slice_storage_is_bound_even_when_only_the_slice_type_names_it() {
     emit_object(&units, &valid).unwrap();
     let before =
         hirsel_lir::objects::ready_digest(units[0].unit(), &valid, "llvm", false, &[]).unwrap();
-    let mut changed = program.table.table.clone();
+    let mut changed = program.table.table.table().clone();
     let storage = changed
         .layouts
         .iter()
         .position(|row| matches!(row.kind, LayoutKind::Sequence { .. }))
         .unwrap();
     changed.layouts[storage].key.owner_revision = Some(hash("changed storage"));
-    // Keep producer LayoutKeys stale. The receipt still sees the changed raw
-    // storage row although neither an operand nor the ABI directly names it.
-    let stale = EmitInputs {
+    // The receipt sees the changed raw storage row although neither an
+    // operand nor the ABI directly names it.
+    let changed = SealedLayoutTable::seal(changed);
+    let rebound = EmitInputs {
         layouts: &changed,
         ..valid.clone()
     };
-    assert!(hirsel_lir::emission::check_receipt(units[0], &stale).is_err());
-    let new_keys = hirsel_lir::LayoutKeys::new(&changed);
-    let rebound = EmitInputs {
-        keys: &new_keys,
-        ..stale
-    };
+    assert!(hirsel_lir::emission::check_receipt(units[0], &rebound).is_err());
     assert_ne!(
         before,
         hirsel_lir::objects::ready_digest(units[0].unit(), &rebound, "llvm", false, &[]).unwrap()

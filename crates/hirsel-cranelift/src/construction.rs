@@ -33,7 +33,8 @@ impl<'a> FnEmitter<'_, 'a, '_> {
     /// cell (`hirsel_lir::glue`): units carry no number the program assigns.
     pub(crate) fn descriptor_value(&mut self, layout: LayoutId) -> Emitted<Value> {
         self.layout(layout)?;
-        let name = hirsel_lir::glue::descriptor_index_symbol(&self.em.inputs.keys.key(layout));
+        let name =
+            hirsel_lir::glue::descriptor_index_symbol(&self.em.inputs.layouts.keys().key(layout));
         let cell = self.em.glue_data(&name)?;
         let address = self.data_addr(cell, 0);
         Ok(self.load_ty(types::I32, address, 0))
@@ -298,7 +299,7 @@ impl<'a> FnEmitter<'_, 'a, '_> {
             plan,
             unit,
             self.em.inputs.layouts,
-            self.em.inputs.keys,
+            self.em.inputs.layouts.keys(),
         ) {
             Ok(codec) => codec.key,
             Err(error) => return self.invalid(format!("a codec plan off its layouts: {error}")),

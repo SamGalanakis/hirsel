@@ -231,13 +231,12 @@ fn object(target: &TargetSpec) -> (Vec<u8>, String) {
     let finalizers = BTreeMap::from([(LayoutId(2), instance)]);
     let units = BTreeMap::from([(instance, FnAbiId(0))]);
     let empty = BTreeSet::new();
+    let table = hirsel_lir::SealedLayoutTable::seal(table);
     let registry = DescriptorRegistry::new(&table, &finalizers);
-    let keys = hirsel_lir::LayoutKeys::new(&table);
     let glue = hirsel_lir::glue::UnitGlue::default();
     let glue_inputs = hirsel_lir::emission::GlueInputs {
         target,
         layouts: &table,
-        keys: &keys,
         registry: registry.clone(),
         finalizers: &finalizers,
         charged_finalizers: &Default::default(),
@@ -258,7 +257,6 @@ fn object(target: &TargetSpec) -> (Vec<u8>, String) {
         input: &input,
         target,
         layouts: &table,
-        keys: &keys,
         manifest: &manifest,
         statics: &[],
         inline_instances: &empty,

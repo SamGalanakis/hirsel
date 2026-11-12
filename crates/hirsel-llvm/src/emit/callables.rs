@@ -56,7 +56,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         kind: EntryKind,
         abi: Option<&FnAbi>,
     ) {
-        let entry = entry_of(self.inputs.keys, kind, abi);
+        let entry = entry_of(self.inputs.layouts.keys(), kind, abi);
         self.manifested.import_entry(name, definition, entry);
     }
 

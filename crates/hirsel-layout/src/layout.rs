@@ -397,7 +397,7 @@ impl<'o> LayoutBuilder<'o> {
             hirsel_lir::products::Binding::new(target, products).map_err(LayoutError::Invalid)?;
         let mut builder = Self::new(target, owners);
         builder.done.resize(binding.table.layouts.len(), true);
-        let keys = hirsel_lir::LayoutKeys::new(&binding.table);
+        let keys = binding.table.keys();
         for (index, record) in binding.table.layouts.iter().enumerate() {
             let Some(request) = record.key.instance else {
                 continue;
@@ -411,7 +411,7 @@ impl<'o> LayoutBuilder<'o> {
                 ));
             }
         }
-        builder.table = binding.table;
+        builder.table = binding.table.into_table();
         Ok(builder)
     }
 

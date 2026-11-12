@@ -792,8 +792,7 @@ pub struct LinkAssembly {
     pub summaries: Vec<hirsel_lir::fragment::UnitSummary>,
     pub functions: BTreeMap<hirsel_syntax::DefPath, hirsel_syntax::ContentHash>,
     pub finalizers: BTreeMap<hirsel_lir::LayoutId, hirsel_syntax::ContentHash>,
-    pub table: hirsel_lir::LayoutTable,
-    pub keys: hirsel_lir::LayoutKeys,
+    pub table: hirsel_lir::SealedLayoutTable,
     pub statics: Vec<hirsel_lir::statics::StaticData>,
 }
 pub fn with_link_assembly<R>(
@@ -809,7 +808,6 @@ pub fn with_link_assembly<R>(
         functions,
         finalizers,
         table,
-        keys,
         statics,
     } = assembly;
     let callbacks = summaries
@@ -836,7 +834,6 @@ pub fn with_link_assembly<R>(
         input: input.input.clone(),
         target: input.options.target.clone(),
         table,
-        keys,
         manifest: input.manifest.clone(),
         units: vec![],
         ahead_environments: BTreeMap::new(),

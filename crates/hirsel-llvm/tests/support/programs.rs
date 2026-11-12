@@ -46,7 +46,7 @@ impl Program {
             let needs = hirsel_lir::glue::UnitGlue::of(
                 unit.unit(),
                 &self.table.table,
-                &self.table.keys,
+                &self.table.table.keys(),
                 &self.manifest,
             )
             .unwrap();
@@ -76,7 +76,6 @@ impl Program {
         let inputs = hirsel_lir::emission::GlueInputs {
             target: &self.table.target,
             layouts: &self.table.table,
-            keys: &self.table.keys,
             registry: hirsel_lir::descriptor_registry::DescriptorRegistry::new(
                 &self.table.table,
                 &self.finalizers,

@@ -89,9 +89,10 @@ fn fixture(target: &TargetSpec) -> (Table, LirUnit<hirsel_lir::stage::Ready>, So
         scalars: vec![(0, ScalarKind::Pointer)],
         unaligned: false,
     };
-    let meta_id = LayoutId(table.table.layouts.len() as u32);
-    table.table.layouts.push(metadata);
-    table.keys = hirsel_lir::LayoutKeys::new(&table.table);
+    let meta_id = table.edit(|table| {
+        table.layouts.push(metadata);
+        LayoutId(table.layouts.len() as u32 - 1)
+    });
     let payload = SourcePayload {
         root_type,
         recipe: PayloadRecipe {

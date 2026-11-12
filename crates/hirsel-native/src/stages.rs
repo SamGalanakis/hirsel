@@ -170,10 +170,9 @@ pub struct ReadyProgram {
     pub launch: hirsel_run_schema::Inputs,
     pub input: InputIdentity,
     pub target: TargetSpec,
-    pub table: LayoutTable,
-    /// The content key of each layout of `table` (`hirsel_lir::layout_keys`), which names
-    /// the glue symbols units import.
-    pub keys: hirsel_lir::LayoutKeys,
+    /// The program's layouts, sealed with their digest and the content key of each
+    /// layout (`hirsel_lir::layout_keys`), which names the glue symbols units import.
+    pub table: hirsel_lir::SealedLayoutTable,
     pub manifest: Manifest,
     /// Every independently validated Ready unit selected for inspection.
     pub units: Vec<ValidatedUnit<Ready>>,
@@ -244,7 +243,7 @@ impl ReadyProgram {
             pretransfer_adapters: self.operations.pretransfer_adapters.clone(),
             invocations,
             target: self.target.clone(),
-            layouts: self.table.clone(),
+            layouts: self.table.table().clone(),
             units: self.raw_units(),
             statics: self.statics.clone(),
         }
@@ -413,7 +412,7 @@ impl ReadyProgram {
         self.summaries[index] = hirsel_lir::fragment::UnitSummary::of(
             unit.unit(),
             &self.table,
-            &self.keys,
+            self.table.keys(),
             &self.manifest,
         )?;
         self.summaries[index].add_static_references(&self.statics);
@@ -782,11 +781,11 @@ pub fn build_program_with_sources(
         .flat_map(|unit| callbacks(unit.unit()))
         .collect();
     let entries = units.iter().flat_map(|unit| entries(unit.unit())).collect();
-    let keys = hirsel_lir::LayoutKeys::new(&lowered.table);
+    let table = hirsel_lir::SealedLayoutTable::seal(lowered.table);
     let summaries = units
         .iter()
         .map(|u| {
-            hirsel_lir::fragment::UnitSummary::of(u.unit(), &lowered.table, &keys, &manifest)
+            hirsel_lir::fragment::UnitSummary::of(u.unit(), &table, table.keys(), &manifest)
                 .map(|mut summary| {
                     summary.add_static_references(&statics);
                     summary
@@ -820,8 +819,7 @@ pub fn build_program_with_sources(
             .map(|(layout, f)| (*layout, f.instance))
             .collect(),
         functions,
-        keys,
-        table: lowered.table,
+        table,
         manifest,
         units,
         ahead_environments,

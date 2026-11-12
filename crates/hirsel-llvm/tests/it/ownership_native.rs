@@ -217,7 +217,6 @@ fn inputs(program: &support::programs::Program) -> EmitInputs<'_> {
         input: INPUT.get_or_init(input),
         target: &program.table.target,
         layouts: &program.table.table,
-        keys: &program.table.keys,
         manifest: &program.manifest,
         statics: &[],
         inline_instances: &EMPTY,

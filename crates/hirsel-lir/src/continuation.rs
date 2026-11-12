@@ -278,7 +278,7 @@ pub enum CalleeClass {
 
 #[derive(Clone, Copy)]
 pub struct PlanInputs<'a> {
-    pub table: &'a LayoutTable,
+    pub table: &'a crate::SealedLayoutTable,
     pub target: &'a TargetSpec,
     /// Environment layout of each known code (`ahead::environments`).
     pub environments: &'a BTreeMap<ContentHash, Option<LayoutId>>,

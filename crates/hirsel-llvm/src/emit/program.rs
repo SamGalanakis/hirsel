@@ -281,7 +281,7 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
     fn index_cells(&mut self) -> Glued {
         let i32_ty = self.module.int_type(32);
         for id in self.inputs.registry.layouts.clone() {
-            let name = descriptor_index_symbol(&self.inputs.keys.key(id));
+            let name = descriptor_index_symbol(&self.inputs.layouts.keys().key(id));
             if self.module.named_global(&name).is_some() {
                 return invalid(format!("two registry layouts share the cell `{name}`"));
             }
@@ -317,7 +317,7 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
     /// descriptor its steps name, as `hirsel_lir::rt_program` lowers them. A layout with a
     /// user finalizer names its drop wrapper.
     fn descriptor_pointer(&mut self, layout: LayoutId) -> Glued<Value<'m>> {
-        let keys = self.inputs.keys;
+        let keys = self.inputs.layouts.keys();
         self.layout(layout)?;
         if let Some(global) = self
             .module
@@ -508,7 +508,10 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
         let ty = self
             .module
             .function_type(i8_ty, &[ptr, ptr, i64_ty, i64_ty]);
-        let name = format!("hirsel.drop.{}", self.inputs.keys.key(layout).hex());
+        let name = format!(
+            "hirsel.drop.{}",
+            self.inputs.layouts.keys().key(layout).hex()
+        );
         let wrapper = match self.module.function(&name, ty) {
             Ok(wrapper) => wrapper,
             Err(what) => return invalid(what),
@@ -567,7 +570,7 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
         };
         let abi = fn_abi(self.inputs.layouts, abi, definition)?;
         let kind = plain_entry(self.inputs.layouts, abi);
-        let entry = entry_of(self.inputs.keys, kind, Some(abi));
+        let entry = entry_of(self.inputs.layouts.keys(), kind, Some(abi));
         self.manifested.import_entry(name, definition, entry);
         Ok(())
     }
@@ -584,7 +587,7 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
         let abi = fn_abi(self.inputs.layouts, check.abi, &definition)?;
         let name = symbol_name(&definition, check.instance.as_ref());
         let entry = entry_of(
-            self.inputs.keys,
+            self.inputs.layouts.keys(),
             plain_entry(self.inputs.layouts, abi),
             Some(abi),
         );
@@ -741,7 +744,7 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
 
     /// `layout`'s `descriptor_word_symbol`, which units' views of glue blocks of it name.
     fn descriptor_word(&mut self, layout: LayoutId) -> Glued {
-        let name = descriptor_word_symbol(&self.inputs.keys.key(layout));
+        let name = descriptor_word_symbol(&self.inputs.layouts.keys().key(layout));
         if !self.manifested.exports.contains_key(&name) {
             let index = self.index(layout)?;
             self.module.absolute_symbol(&name, u64::from(index));
@@ -779,7 +782,7 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
                 let symbol = &function.symbol;
                 let abi = fn_abi(self.inputs.layouts, function.abi, &symbol.definition)?;
                 let thunk = function_thunk_name(&symbol.definition, symbol.instance.as_ref());
-                let entry = entry_of(self.inputs.keys, EntryKind::FunctionRef, Some(abi));
+                let entry = entry_of(self.inputs.layouts.keys(), EntryKind::FunctionRef, Some(abi));
                 self.manifested
                     .import_entry(&thunk, &symbol.definition, entry);
                 let code = self.module.function_address(&thunk);
@@ -834,7 +837,7 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
         self.descriptor_word(payload)?;
         let descriptor = self.const_u32(self.index(payload)?);
         let align = self.layout(payload)?.align;
-        let name = literal_symbol(&self.inputs.keys.key(payload), data);
+        let name = literal_symbol(&self.inputs.layouts.keys().key(payload), data);
         static_block(
             self.module,
             self.inputs.target,
@@ -865,7 +868,7 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
             Aliasing::of(self.inputs.aliasing_unstated),
         )?;
         let digest = entry_of(
-            self.inputs.keys,
+            self.inputs.layouts.keys(),
             plain_entry(self.inputs.layouts, abi),
             Some(abi),
         );
@@ -881,7 +884,7 @@ impl<'m, 'a> ProgramEmitter<'m, 'a> {
             &external,
             definition,
         )?;
-        let entry = entry_of(self.inputs.keys, EntryKind::Callback, Some(abi));
+        let entry = entry_of(self.inputs.layouts.keys(), EntryKind::Callback, Some(abi));
         self.manifested.export_entry(&thunk, definition, entry);
         Ok(())
     }

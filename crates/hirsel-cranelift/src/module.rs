@@ -216,8 +216,7 @@ pub(crate) struct CheckThunk {
 #[derive(Clone, Copy)]
 pub(crate) struct Inputs<'a> {
     pub(crate) target: &'a TargetSpec,
-    pub(crate) layouts: &'a LayoutTable,
-    pub(crate) keys: &'a hirsel_lir::LayoutKeys,
+    pub(crate) layouts: &'a hirsel_lir::SealedLayoutTable,
     pub(crate) opt: OptLevel,
     pub(crate) unit: Option<&'a EmitInputs<'a>>,
     pub(crate) glue: Option<&'a GlueInputs<'a>>,
@@ -229,7 +228,6 @@ impl<'a> Inputs<'a> {
         Self {
             target: inputs.target,
             layouts: inputs.layouts,
-            keys: inputs.keys,
             opt: inputs.opt,
             unit: Some(inputs),
             glue: None,
@@ -240,7 +238,6 @@ impl<'a> Inputs<'a> {
         Self {
             target: glue.target,
             layouts: glue.layouts,
-            keys: glue.keys,
             opt: OptLevel::None,
             unit: None,
             glue: Some(glue),
@@ -438,14 +435,15 @@ pub(crate) fn emit(
         } else {
             EntryKind::Value
         };
-        let entry = emitter.inputs.keys.entry(kind, false, Some(abi));
+        let entry = emitter.inputs.layouts.keys().entry(kind, false, Some(abi));
         emitter
             .manifested
             .export_entry(&name, &header.definition, entry);
         if let Some(thunk) = &thunk {
             let entry = emitter
                 .inputs
-                .keys
+                .layouts
+                .keys()
                 .entry(EntryKind::FunctionRef, false, Some(abi));
             emitter
                 .manifested
@@ -483,7 +481,8 @@ pub(crate) fn emit(
             let id = emitter.declare_function(&name, Linkage::Export, &sig.ir)?;
             let entry = emitter
                 .inputs
-                .keys
+                .layouts
+                .keys()
                 .entry(EntryKind::Resume, false, Some(abi));
             emitter
                 .manifested
@@ -1002,7 +1001,7 @@ impl<'a> Emitter<'a> {
         kind: EntryKind,
         abi: Option<&FnAbi>,
     ) {
-        let entry = self.inputs.keys.entry(kind, false, abi);
+        let entry = self.inputs.layouts.keys().entry(kind, false, abi);
         self.manifested.import_entry(name, definition, entry);
     }
 }

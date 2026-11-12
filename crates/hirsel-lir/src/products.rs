@@ -8,7 +8,7 @@ use crate::abi_types::FnAbiId;
 use crate::ir::LirUnit;
 use crate::layout_types::{LayoutId, LayoutTable, TargetSpec};
 use crate::stage::{Stage, ValidatedUnit};
-use crate::{LayoutIndex, LayoutKeys};
+use crate::{LayoutIndex, LayoutKeys, SealedLayoutTable};
 use hirsel_codec::{snapshot_enum, snapshot_struct};
 use hirsel_syntax::ContentHash;
 use std::{collections::BTreeMap, sync::Arc};
@@ -277,10 +277,11 @@ impl LayoutClosure {
     /// Check actual rows and complete recursive keys. Descriptor fields and
     /// content integrity never substitute for independent layout validation.
     pub fn check(&self, target: &TargetSpec) -> Result<(), String> {
-        self.checked_keys(target).map(|_| ())
+        self.check_rows(target)?;
+        self.check_keys(&LayoutKeys::new(&self.table))
     }
 
-    fn checked_keys(&self, target: &TargetSpec) -> Result<LayoutKeys, String> {
+    fn check_rows(&self, target: &TargetSpec) -> Result<(), String> {
         if self.layouts.len() != self.table.layouts.len()
             || self.abis.len() != self.table.fn_abis.len()
             || self.abis.windows(2).any(|w| w[0] >= w[1])
@@ -288,8 +289,11 @@ impl LayoutClosure {
             return Err("noncanonical reached native layout graph".into());
         }
         crate::layout_validate::validate_table(&self.table, target)
-            .map_err(|e| format!("native layout product: {e:?}"))?;
-        let keys = LayoutKeys::new(&self.table);
+            .map_err(|e| format!("native layout product: {e:?}"))
+    }
+
+    /// `keys` must be the keys of this closure's own table.
+    fn check_keys(&self, keys: &LayoutKeys) -> Result<(), String> {
         if keys
             .all()
             .iter()
@@ -304,7 +308,7 @@ impl LayoutClosure {
         {
             return Err("native layout product content identity differs".into());
         }
-        Ok(keys)
+        Ok(())
     }
 }
 
@@ -313,12 +317,13 @@ impl LayoutClosure {
 pub struct CheckedLayouts {
     closure: LayoutClosure,
     binding: Binding,
-    keys: LayoutKeys,
     pub(crate) admission: Option<Arc<dyn Send + Sync>>,
 }
 impl CheckedLayouts {
     pub fn new(closure: LayoutClosure, target: &TargetSpec) -> Result<Self, String> {
-        let keys = closure.checked_keys(target)?;
+        closure.check_rows(target)?;
+        let table = SealedLayoutTable::seal(closure.table.clone());
+        closure.check_keys(table.keys())?;
         // A checked closure already has complete, independently validated local
         // rows. Bind their content names directly, without decoding/reconstructing
         // a second copy and deriving every key again. Aliases select first use.
@@ -327,19 +332,20 @@ impl CheckedLayouts {
             layouts.entry(*key).or_insert(LayoutId(index as u32));
         }
         let binding = Binding {
-            table: closure.table.clone(),
-            layouts,
-            abis: closure
-                .abis
-                .iter()
-                .enumerate()
-                .map(|(index, key)| (*key, FnAbiId(index as u32)))
-                .collect(),
+            table,
+            ids: BindingIds {
+                layouts,
+                abis: closure
+                    .abis
+                    .iter()
+                    .enumerate()
+                    .map(|(index, key)| (*key, FnAbiId(index as u32)))
+                    .collect(),
+            },
         };
         Ok(Self {
             closure,
             binding,
-            keys,
             admission: None,
         })
     }
@@ -347,7 +353,7 @@ impl CheckedLayouts {
         &self.binding
     }
     pub fn keys(&self) -> &LayoutKeys {
-        &self.keys
+        self.binding.table.keys()
     }
 }
 impl std::ops::Deref for CheckedLayouts {
@@ -359,9 +365,25 @@ impl std::ops::Deref for CheckedLayouts {
 
 /// One temporary table for selected products, owned by a with_ready callback.
 /// The maps have this binding's lifetime, never a second publication owner.
+/// The table is sealed once its content identities are checked; a caller that
+/// extends it takes it back with `open`.
 #[derive(Clone)]
 pub struct Binding {
-    pub table: LayoutTable,
+    pub table: SealedLayoutTable,
+    ids: BindingIds,
+}
+
+/// A binding's content identities, resolved to ids of its table. They stay
+/// valid in a table that `Binding::open` hands back and the caller appends to.
+#[derive(Clone)]
+pub struct BindingIds {
+    layouts: BTreeMap<ContentHash, LayoutId>,
+    abis: BTreeMap<ContentHash, FnAbiId>,
+}
+
+/// A binding while closures are merged into it, before it is sealed.
+struct Merging {
+    table: LayoutTable,
     layouts: BTreeMap<ContentHash, LayoutId>,
     abis: BTreeMap<ContentHash, FnAbiId>,
 }
@@ -370,7 +392,7 @@ impl Binding {
         for closure in closures {
             closure.check(target)?;
         }
-        Self::merge(target, closures).map(|(binding, _)| binding)
+        Self::merge(target, closures)
     }
 
     /// Merge checked closures as they arrive. A reader's original transport
@@ -379,7 +401,7 @@ impl Binding {
         target: &TargetSpec,
         closures: impl IntoIterator<Item = Result<C, String>>,
     ) -> Result<Self, String> {
-        let mut binding = Self::empty(target);
+        let mut binding = Merging::empty(target);
         for closure in closures {
             let closure = closure?;
             if closure.table.target != target.digest() {
@@ -387,26 +409,25 @@ impl Binding {
             }
             binding.include(&closure.closure)?;
         }
-        binding.finish(target).map(|(binding, _)| binding)
+        binding.finish(target)
     }
 
+    fn merge(target: &TargetSpec, closures: &[&LayoutClosure]) -> Result<Self, String> {
+        let mut binding = Merging::empty(target);
+        for closure in closures {
+            binding.include(closure)?;
+        }
+        binding.finish(target)
+    }
+}
+
+impl Merging {
     fn empty(target: &TargetSpec) -> Self {
         Self {
             table: LayoutTable::new(target),
             layouts: BTreeMap::new(),
             abis: BTreeMap::new(),
         }
-    }
-
-    fn merge(
-        target: &TargetSpec,
-        closures: &[&LayoutClosure],
-    ) -> Result<(Self, LayoutKeys), String> {
-        let mut binding = Self::empty(target);
-        for closure in closures {
-            binding.include(closure)?;
-        }
-        binding.finish(target)
     }
 
     fn include(&mut self, c: &LayoutClosure) -> Result<(), String> {
@@ -471,21 +492,51 @@ impl Binding {
         Ok(())
     }
 
-    fn finish(self, target: &TargetSpec) -> Result<(Self, LayoutKeys), String> {
+    /// Validate the merged table, seal it, and check every recorded content
+    /// identity against the sealed table's own keys.
+    fn finish(self, target: &TargetSpec) -> Result<Binding, String> {
         crate::layout_validate::validate_table(&self.table, target)
             .map_err(|e| format!("bound native layouts: {e:?}"))?;
-        let keys = LayoutKeys::new(&self.table);
+        let table = SealedLayoutTable::seal(self.table);
+        let keys = table.keys();
         if self.layouts.iter().any(|(key, id)| keys.key(*id).0 != *key)
             || self
                 .abis
                 .iter()
-                .any(|(key, id)| keys.fn_abi(&self.table.fn_abis[id.0 as usize]) != *key)
+                .any(|(key, id)| keys.fn_abi(&table.fn_abis[id.0 as usize]) != *key)
         {
             return Err("bound native product content identities differ".into());
         }
-        Ok((self, keys))
+        Ok(Binding {
+            table,
+            ids: BindingIds {
+                layouts: self.layouts,
+                abis: self.abis,
+            },
+        })
     }
+}
 
+impl Binding {
+    pub fn ids(&self) -> &BindingIds {
+        &self.ids
+    }
+    /// The unsealed table and its ids, for a caller that appends to the table.
+    pub fn open(self) -> (LayoutTable, BindingIds) {
+        (self.table.into_table(), self.ids)
+    }
+    pub fn layout(&self, key: ContentHash) -> Option<LayoutId> {
+        self.ids.layout(key)
+    }
+    pub fn abi(&self, key: ContentHash) -> Option<FnAbiId> {
+        self.ids.abi(key)
+    }
+    pub fn materialize<S: Stage>(&self, body: &UnitBody) -> Result<LirUnit<S>, String> {
+        self.ids.materialize(body)
+    }
+}
+
+impl BindingIds {
     /// Resolve content identities within this binding's temporary table. These
     /// maps are owned here; no second publication/global layout map is needed.
     pub fn layout(&self, key: ContentHash) -> Option<LayoutId> {

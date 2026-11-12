@@ -753,7 +753,7 @@ impl NativeCache {
             .read(output, inputs.target)
             .map_err(|e| e.to_string())?;
         let binding = closure.binding();
-        if &binding.table != inputs.layouts {
+        if binding.table.table() != inputs.layouts {
             return Err("native materialization needs its bound local table".into());
         }
         let unit = binding.materialize::<S>(&body)?;

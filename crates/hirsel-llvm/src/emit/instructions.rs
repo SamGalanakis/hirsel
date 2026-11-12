@@ -1030,7 +1030,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                         match compare::comparator(
                             self.module,
                             self.inputs.layouts,
-                            self.inputs.keys,
+                            self.inputs.layouts.keys(),
                             self.inputs.index,
                             layout,
                             matches!(op, CompareOp::Eq | CompareOp::Ne),
@@ -1670,7 +1670,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 let hasher = match compare::hasher(
                     self.module,
                     self.inputs.layouts,
-                    self.inputs.keys,
+                    self.inputs.layouts.keys(),
                     self.inputs.index,
                     layout,
                     update,

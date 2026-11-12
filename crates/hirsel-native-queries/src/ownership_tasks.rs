@@ -434,7 +434,6 @@ impl OwnershipTasks {
             units.push(unit);
         }
         let statics = statics.into_values().collect::<Vec<_>>();
-        let keys = hirsel_lir::LayoutKeys::new(&binding.table);
         let index = hirsel_lir::LayoutIndex::new(&binding.table);
         let emit = hirsel_lir::emission::EmitInputs {
             ahead: None,
@@ -444,7 +443,6 @@ impl OwnershipTasks {
             input: &snapshot.emission.input,
             target: environment.target,
             layouts: &binding.table,
-            keys: &keys,
             manifest: environment.manifest,
             statics: &statics,
             inline_instances: &snapshot.emission.inline_instances,
@@ -509,8 +507,12 @@ impl OwnershipTasks {
             let mut semantic_owners = BTreeMap::new();
             let mut functions = BTreeMap::new();
             for unit in units {
-                let mut summary =
-                    UnitSummary::of(unit.unit(), emit.layouts, emit.keys, emit.manifest)?;
+                let mut summary = UnitSummary::of(
+                    unit.unit(),
+                    emit.layouts,
+                    emit.layouts.keys(),
+                    emit.manifest,
+                )?;
                 summary.add_static_references(emit.statics);
                 let owner = match summary.origin {
                     UnitOrigin::Source => Some(summary.definition.clone()),
@@ -565,13 +567,14 @@ impl OwnershipTasks {
                             summary.definition == definition && summary.instance == instance
                         })
                         .ok_or("ownership finalizer has no C-admitted body")?;
-                    if emit.keys.fn_abi_of(emit.layouts, summary.abi) != Some(abi)
+                    if emit.layouts.keys().fn_abi_of(emit.layouts, summary.abi) != Some(abi)
                         || (summary.origin == UnitOrigin::Library) != library
                     {
                         return Err("ownership finalizer ABI or origin differs".into());
                     }
                     let layout = emit
-                        .keys
+                        .layouts
+                        .keys()
                         .all()
                         .iter()
                         .position(|key| key.0 == layout)
@@ -586,7 +589,6 @@ impl OwnershipTasks {
                 }
             }
             let table = emit.layouts.clone();
-            let keys = hirsel_lir::LayoutKeys::new(&table);
             hirsel_native::root_source::with_link_assembly(
                 hirsel_native::root_source::LinkContextInput {
                     options: &snapshot.options,
@@ -601,7 +603,6 @@ impl OwnershipTasks {
                     functions,
                     finalizers,
                     table,
-                    keys,
                     statics: emit.statics.to_vec(),
                 },
                 |program| use_context(program, units, emit, plans),

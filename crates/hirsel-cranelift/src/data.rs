@@ -164,7 +164,7 @@ impl Emitter<'_> {
         if self.inputs.layouts.layout(layout).is_none() {
             return Self::invalid_at(definition, format!("no layout {}", layout.0));
         }
-        let name = descriptor_name(&self.inputs.keys.key(layout));
+        let name = descriptor_name(&self.inputs.layouts.keys().key(layout));
         if let Some(&id) = self.data.get(&name) {
             return Ok(id);
         }
@@ -187,7 +187,7 @@ impl Emitter<'_> {
             if self.inputs.layouts.layout(d.layout).is_none() {
                 return Self::invalid_at(definition, format!("no layout {}", d.layout.0));
             }
-            let name = descriptor_name(&self.inputs.keys.key(d.layout));
+            let name = descriptor_name(&self.inputs.layouts.keys().key(d.layout));
             let (id, fresh) = self.declare_data(&name, Linkage::Preemptible)?;
             if fresh {
                 self.manifested.descriptors.insert(name.clone());
@@ -218,7 +218,7 @@ impl Emitter<'_> {
                         }
                         match self
                             .data
-                            .get(&descriptor_name(&self.inputs.keys.key(target)))
+                            .get(&descriptor_name(&self.inputs.layouts.keys().key(target)))
                         {
                             Some(&target) => targets.push((at + 48, target)),
                             None => {
@@ -391,7 +391,10 @@ impl Emitter<'_> {
             AbiParam::new(types::I64),
         ]);
         sig.returns.push(AbiParam::new(types::I8).uext());
-        let name = format!("hirsel.drop.{}", self.inputs.keys.key(layout).hex());
+        let name = format!(
+            "hirsel.drop.{}",
+            self.inputs.layouts.keys().key(layout).hex()
+        );
         self.helper(&name, &sig, |_| Helper::Drop {
             body,
             charged,
@@ -568,7 +571,8 @@ impl Emitter<'_> {
         let Some(record) = self.inputs.layouts.layout(payload) else {
             return Self::invalid_at(definition, "no literal payload layout");
         };
-        let name = hirsel_lir::glue::literal_symbol(&self.inputs.keys.key(payload), &data);
+        let name =
+            hirsel_lir::glue::literal_symbol(&self.inputs.layouts.keys().key(payload), &data);
         self.glue_block(&name, record.align, definition)
     }
 

@@ -795,7 +795,7 @@ impl NativeRoots for RootProducts {
         });
         let binding = Binding::from_checked(environment.target, closures)?;
         hirsel_lir::validate::check_arena_scoped_links(&linkage)?;
-        let keys = hirsel_lir::LayoutKeys::new(&binding.table);
+        let keys = binding.table.keys();
         let mut summaries = Vec::new();
         let mut semantic_owners = BTreeMap::new();
         let mut functions = BTreeMap::new();
@@ -952,7 +952,6 @@ impl NativeRoots for RootProducts {
                 functions,
                 finalizers,
                 table: binding.table,
-                keys,
                 statics: statics.into_values().collect(),
             },
             use_context,

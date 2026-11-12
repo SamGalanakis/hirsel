@@ -350,3 +350,65 @@ impl LayoutKeys {
         table.fn_abis.get(id.0 as usize).map(|abi| self.fn_abi(abi))
     }
 }
+
+/// A layout table that no longer changes, holding the digest and the per-layout
+/// content keys its consumers read. Nothing hands out `&mut` access, so the held
+/// values cannot go stale: a changed table is a new seal (`into_table`, edit,
+/// `seal`), which computes both again. The keys are computed at the seal; the
+/// digest at its first read, since most seals (one per checked closure and
+/// binding) are never asked for one. This is the only place a table's digest is
+/// computed.
+///
+/// A sealed table cannot be edited in place, which would leave its keys and
+/// digest stale:
+///
+/// ```compile_fail
+/// use hirsel_lir::{SealedLayoutTable, layout_types::{LayoutTable, TargetSpec}};
+/// let mut sealed = SealedLayoutTable::seal(LayoutTable::new(&TargetSpec::x86_64_unknown_linux_gnu()));
+/// sealed.fn_abis.clear();
+/// ```
+#[derive(Clone, Debug)]
+pub struct SealedLayoutTable {
+    table: LayoutTable,
+    digest: std::sync::OnceLock<ContentHash>,
+    keys: LayoutKeys,
+}
+impl SealedLayoutTable {
+    pub fn seal(table: LayoutTable) -> Self {
+        Self {
+            digest: std::sync::OnceLock::new(),
+            keys: LayoutKeys::new(&table),
+            table,
+        }
+    }
+    /// The digest of the sealed table.
+    pub fn digest(&self) -> ContentHash {
+        *self
+            .digest
+            .get_or_init(|| crate::snapshot::digest("layout-table", &self.table))
+    }
+    /// The content key of every layout of the sealed table.
+    pub fn keys(&self) -> &LayoutKeys {
+        &self.keys
+    }
+    pub fn table(&self) -> &LayoutTable {
+        &self.table
+    }
+    /// Give the table back for editing; seal the result again to read its digest.
+    pub fn into_table(self) -> LayoutTable {
+        self.table
+    }
+}
+impl std::ops::Deref for SealedLayoutTable {
+    type Target = LayoutTable;
+    fn deref(&self) -> &LayoutTable {
+        &self.table
+    }
+}
+/// The digest and keys are functions of the table, so the table decides equality.
+impl PartialEq for SealedLayoutTable {
+    fn eq(&self, other: &Self) -> bool {
+        self.table == other.table
+    }
+}
+impl Eq for SealedLayoutTable {}

@@ -168,7 +168,6 @@ fn object(program: &Program, opt: OptLevel) -> Vec<u8> {
         input: &input,
         target: &program.table.target,
         layouts: &program.table.table,
-        keys: &program.table.keys,
         manifest: &program.manifest,
         statics: &program.statics,
         inline_instances: &std::collections::BTreeSet::new(),

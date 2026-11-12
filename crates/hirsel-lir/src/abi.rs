@@ -449,5 +449,38 @@ pub(crate) fn scoped_entry_identity_with_keys(
     ContentHash::of_parts("hirsel.scoped-entry.v1", parts)
 }
 
+/// The scoped-entries part of an FnAbi key:
+/// `snapshot::digest("scoped-entries-v1", entries)`. Most callables have no
+/// scoped entries, so the empty list's digest is held rather than encoded again
+/// for every key.
+pub fn scoped_entries_digest(entries: &[ScopedEntry]) -> ContentHash {
+    if entries.is_empty() {
+        return NO_SCOPED_ENTRIES;
+    }
+    snapshot::digest("scoped-entries-v1", &entries.to_vec())
+}
+
+/// `snapshot::digest("scoped-entries-v1", &Vec::<ScopedEntry>::new())`.
+const NO_SCOPED_ENTRIES: ContentHash = ContentHash([
+    20, 199, 239, 64, 217, 14, 182, 147, 42, 232, 192, 32, 18, 120, 106, 30, 203, 114, 13, 187, 87,
+    85, 167, 44, 156, 134, 138, 217, 121, 200, 52, 167,
+]);
+
 #[cfg(test)]
 mod receipt_slots_tests;
+
+#[cfg(test)]
+mod tests {
+    /// The held empty-list digest is the one the format computes; a change to
+    /// the snapshot format or the domain leaves it stale.
+    #[test]
+    fn the_held_empty_scoped_entries_digest_is_the_encoded_one() {
+        assert_eq!(
+            super::NO_SCOPED_ENTRIES,
+            crate::snapshot::digest(
+                "scoped-entries-v1",
+                &Vec::<crate::abi_types::ScopedEntry>::new()
+            )
+        );
+    }
+}

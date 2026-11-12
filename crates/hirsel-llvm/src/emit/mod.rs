@@ -751,7 +751,7 @@ fn lower<T>(
                     module.make_available_externally(entry);
                     let definition = &unit.header.definition;
                     for (name, kind) in [(&name, name_kind), (&body_name, body_kind)] {
-                        let entry = entry_of(inputs.keys, kind, Some(abi));
+                        let entry = entry_of(inputs.layouts.keys(), kind, Some(abi));
                         optimizer_only
                             .insert(name.clone(), ObjectSymbol::entry(name, definition, entry));
                     }
@@ -832,7 +832,7 @@ fn lower<T>(
             if template {
                 if copy {
                     module.make_available_externally(function);
-                    let entry = entry_of(inputs.keys, body_kind, Some(abi));
+                    let entry = entry_of(inputs.layouts.keys(), body_kind, Some(abi));
                     optimizer_only.insert(
                         body_name.clone(),
                         ObjectSymbol::entry(&body_name, &unit.header.definition, entry),
@@ -892,7 +892,7 @@ fn lower<T>(
                     let thunk = define_function_thunk(&module, &name, entry, &external);
                     if copy {
                         module.make_available_externally(thunk);
-                        let entry = entry_of(inputs.keys, EntryKind::FunctionRef, Some(abi));
+                        let entry = entry_of(inputs.layouts.keys(), EntryKind::FunctionRef, Some(abi));
                         optimizer_only.insert(
                             name.clone(),
                             ObjectSymbol::entry(&name, &unit.header.definition, entry),
@@ -908,12 +908,12 @@ fn lower<T>(
             manifested.export_entry(
                 &name,
                 definition,
-                entry_of(inputs.keys, name_kind, Some(abi)),
+                entry_of(inputs.layouts.keys(), name_kind, Some(abi)),
             );
             if !inputs.alternate && abi.shape == CallableShape::Definition {
                 let thunk = function_thunk_name(definition, Some(&unit.header.instance));
                 define_function_thunk(&module, &thunk, entry, &external);
-                let entry = entry_of(inputs.keys, EntryKind::FunctionRef, Some(abi));
+                let entry = entry_of(inputs.layouts.keys(), EntryKind::FunctionRef, Some(abi));
                 manifested.export_entry(&thunk, definition, entry);
             }
             functions.push((unit, function, signature));
@@ -1115,7 +1115,7 @@ fn lower<T>(
                 ),
             ] {
                 if manifested.library.remove(&name) {
-                    let entry = entry_of(inputs.keys, kind, Some(abi));
+                    let entry = entry_of(inputs.layouts.keys(), kind, Some(abi));
                     manifested.export_entry(&name, &header.definition, entry);
                 }
                 // The owner's one definition of each Hirsel entry kind is hidden; a C

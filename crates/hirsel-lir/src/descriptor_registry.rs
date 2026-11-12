@@ -1,6 +1,6 @@
 //! The linker's immutable descriptor-index assignment. A single instance is passed to
 //! every emission partition; it binds the complete layout table, never the selected units.
-use crate::{LayoutId, LayoutTable};
+use crate::{LayoutId, SealedLayoutTable};
 use hirsel_syntax::ContentHash;
 use std::collections::BTreeMap;
 
@@ -20,7 +20,7 @@ pub struct DescriptorRegistry {
 impl DescriptorRegistry {
     /// Called by the driver before partitioning. Canonical descriptor digests order
     /// the complete linked table; layouts without a selected finalizer are not executable.
-    pub fn new(table: &LayoutTable, finalizers: &BTreeMap<LayoutId, ContentHash>) -> Self {
+    pub fn new(table: &SealedLayoutTable, finalizers: &BTreeMap<LayoutId, ContentHash>) -> Self {
         let mut rows: Vec<_> = table
             .layouts
             .iter()
@@ -66,7 +66,7 @@ impl DescriptorRegistry {
     }
     pub fn validates(
         &self,
-        table: &LayoutTable,
+        table: &SealedLayoutTable,
         finalizers: &BTreeMap<LayoutId, ContentHash>,
     ) -> bool {
         self.layouts.len() <= (1 << 29) - 3 && *self == Self::new(table, finalizers)
@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn equal_layouts_share_an_index_and_aliases_are_validated() {
-        let table = duplicated_table();
+        let table = crate::SealedLayoutTable::seal(duplicated_table());
         let finalizers = BTreeMap::new();
         let registry = DescriptorRegistry::new(&table, &finalizers);
         assert_eq!(registry.layouts, [LayoutId(0)]);
@@ -162,6 +162,7 @@ mod tests {
     fn different_full_records_keep_distinct_indices() {
         let mut table = duplicated_table();
         table.layouts[1].copy = CopyRecipe::NotCopyable;
+        let table = crate::SealedLayoutTable::seal(table);
         let registry = DescriptorRegistry::new(&table, &BTreeMap::new());
         assert_eq!(registry.layouts.len(), 2);
         assert_ne!(registry.index(LayoutId(0)), registry.index(LayoutId(1)));
@@ -177,6 +178,7 @@ mod tests {
                 unsafe_ffi_package: false,
             });
         }
+        let table = crate::SealedLayoutTable::seal(table);
         let finalizers = BTreeMap::from([
             (LayoutId(0), ContentHash::of_bytes(b"first")),
             (LayoutId(1), ContentHash::of_bytes(b"second")),

@@ -101,12 +101,11 @@ pub struct Inputs<'a> {
 }
 
 /// The facts of an [`Inputs`] that do not depend on the unit checked: the layout
-/// table's check against the target and the digests a receipt binds. Each is
+/// table's check against the target and the manifest digest a receipt binds. Each is
 /// computed on first use.
 #[derive(Default)]
 pub struct Memo {
     table: std::sync::OnceLock<Result<(), Vec<crate::layout_validate::Violation>>>,
-    layouts: std::sync::OnceLock<hirsel_syntax::ContentHash>,
     manifest: std::sync::OnceLock<hirsel_syntax::ContentHash>,
 }
 
@@ -116,10 +115,6 @@ impl Inputs<'_> {
         self.memo
             .table
             .get_or_init(|| crate::layout_validate::validate_table(self.layouts, self.target))
-    }
-    /// The layout table's digest.
-    pub fn layouts_digest(&self) -> hirsel_syntax::ContentHash {
-        *self.memo.layouts.get_or_init(|| self.layouts.digest())
     }
     /// The operation manifest's digest.
     pub fn manifest_digest(&self) -> hirsel_syntax::ContentHash {

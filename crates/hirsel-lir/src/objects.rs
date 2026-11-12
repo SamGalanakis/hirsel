@@ -654,11 +654,12 @@ fn unit_digest<S: crate::stage::Stage + Clone>(
         if inputs.layouts.layout(*id).is_none() {
             return Err(format!("the unit names layout {}, outside the table", id.0));
         }
-        parts.push(inputs.keys.key(*id).0.0.to_vec());
+        parts.push(inputs.layouts.keys().key(*id).0.0.to_vec());
     }
     for id in &abis {
         let key = inputs
-            .keys
+            .layouts
+            .keys()
             .fn_abi_of(inputs.layouts, *id)
             .ok_or_else(|| format!("the unit names FnAbi {}, outside the table", id.0))?;
         parts.push(key.0.to_vec());
@@ -685,7 +686,7 @@ fn unit_digest<S: crate::stage::Stage + Clone>(
                 .introduced()
                 .filter(|_| domain == "hirsel.object-key.v1"),
         )
-        .map(|id| inputs.keys.key(id))
+        .map(|id| inputs.layouts.keys().key(id))
         .collect();
     dependencies.sort_unstable();
     dependencies.dedup();
@@ -707,7 +708,7 @@ fn unit_digest<S: crate::stage::Stage + Clone>(
             crate::statics::resolve(&inputs.statics, symbol).ok_or("a static without its data")?;
         let mut data = data.clone();
         for block in &mut data.blocks {
-            parts.push(inputs.keys.key(block.layout).0.0.to_vec());
+            parts.push(inputs.layouts.keys().key(block.layout).0.0.to_vec());
             block.layout = LayoutId(0);
             for function in &mut block.functions {
                 parts.push(

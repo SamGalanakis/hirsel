@@ -67,7 +67,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
     /// carry no number the program assigns.
     pub(super) fn descriptor(&mut self, layout: LayoutId) -> Emitted<Value<'m>> {
         self.layout(layout)?;
-        let name = descriptor_index_symbol(&self.inputs.keys.key(layout));
+        let name = descriptor_index_symbol(&self.inputs.layouts.keys().key(layout));
         let i32_ty = self.module.int_type(32);
         let cell = self.glue_cell(&name, i32_ty);
         Ok(self.builder.load(i32_ty, cell, 4))
@@ -89,7 +89,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
             plan,
             self.unit,
             self.inputs.layouts,
-            self.inputs.keys,
+            self.inputs.layouts.keys(),
         ) {
             Ok(codec) => codec.key,
             Err(error) => return self.invalid(format!("a codec plan off its layouts: {error}")),
@@ -210,7 +210,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
             Ok(data) => data,
             Err(what) => return self.invalid(what),
         };
-        let name = literal_symbol(&self.inputs.keys.key(payload), &data);
+        let name = literal_symbol(&self.inputs.layouts.keys().key(payload), &data);
         self.glue_block(&name, payload, &data, &[])
     }
 
@@ -233,7 +233,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         let global = match self.module.named_global(name) {
             Some(global) => global,
             None => {
-                let word = descriptor_word_symbol(&self.inputs.keys.key(layout));
+                let word = descriptor_word_symbol(&self.inputs.layouts.keys().key(layout));
                 let i8_ty = self.module.int_type(8);
                 let symbol = self.glue_cell(&word, i8_ty);
                 let descriptor = self

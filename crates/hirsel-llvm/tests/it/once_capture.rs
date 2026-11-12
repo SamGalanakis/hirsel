@@ -84,15 +84,18 @@ fn closure(
 
 fn program(target: &TargetSpec, called: bool, weakened: bool) -> Program {
     let mut table = schema().build(target);
-    for name in ["leaf", "outer"] {
-        let abi = table.abi(name);
-        table.table.fn_abis[abi.0 as usize].multiplicity = CallMultiplicity::Once;
-    }
+    let once = ["leaf", "outer"].map(|name| table.abi(name));
     let many = table.abi("many_leaf");
-    let mut abi = table.table.fn_abis[many.0 as usize].clone();
-    abi.multiplicity = CallMultiplicity::Many;
-    let id = hirsel_lir::abi_types::FnAbiId(table.table.fn_abis.len() as u32);
-    table.table.fn_abis.push(abi);
+    let id = table.edit(|table| {
+        for abi in once {
+            table.fn_abis[abi.0 as usize].multiplicity = CallMultiplicity::Once;
+        }
+        let mut abi = table.fn_abis[many.0 as usize].clone();
+        abi.multiplicity = CallMultiplicity::Many;
+        let id = hirsel_lir::abi_types::FnAbiId(table.fn_abis.len() as u32);
+        table.fn_abis.push(abi);
+        id
+    });
     table.abis.insert("many_leaf", id);
     let m = manifest();
     let mut leaf = Unit::new(&table, "leaf", "leaf");
@@ -235,7 +238,7 @@ fn heap_program(p: &Program) -> hirsel_heapcheck::Program<Ready> {
         invocations: Default::default(),
         pretransfer_adapters: Vec::new(),
         target: p.table.target.clone(),
-        layouts: p.table.table.clone(),
+        layouts: p.table.table.table().clone(),
         units: p.units.iter().map(|u| u.unit().clone()).collect(),
         statics: vec![],
     }
@@ -313,7 +316,6 @@ fn capture_masks_agree_on_both_native_targets() {
                     input: &id,
                     target: &target,
                     layouts: &p.table.table,
-                    keys: &p.table.keys,
                     manifest: &p.manifest,
                     statics: &[],
                     inline_instances: &std::collections::BTreeSet::new(),
@@ -415,7 +417,7 @@ fn environment_layouts_require_their_exact_live_word_and_guards() {
         assert!(
             hirsel_lir::layout_validate::validate_table(&p.table.table, &p.table.target).is_ok()
         );
-        let mut table = p.table.table.clone();
+        let mut table = p.table.table.table().clone();
         let record = &mut table.layouts[id.0 as usize];
         match mutation {
             0 => {
@@ -530,7 +532,6 @@ fn initialization_masks_share_the_named_live_word_limit() {
             input: &id,
             target: &table.target,
             layouts: &table.table,
-            keys: &table.keys,
             manifest: &m,
             statics: &[],
             inline_instances: &std::collections::BTreeSet::new(),

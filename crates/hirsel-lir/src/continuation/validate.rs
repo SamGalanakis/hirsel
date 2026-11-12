@@ -1533,7 +1533,7 @@ fn native_class(definition: &DefPath) -> Option<CalleeClass> {
 /// because incoming callable provenance cannot be inferred from a plan hash.
 pub fn validate_runtime_operations(
     units: &[&ValidatedUnit<Ready>],
-    table: &LayoutTable,
+    table: &crate::SealedLayoutTable,
     target: &TargetSpec,
     plans: &ContinuationPlans,
 ) -> Result<(), ContinuationError> {

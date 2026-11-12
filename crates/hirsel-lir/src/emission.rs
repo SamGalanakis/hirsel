@@ -82,10 +82,9 @@ pub struct EmitInputs<'a> {
     /// The frozen front-end input every unit was built from.
     pub input: &'a InputIdentity,
     pub target: &'a TargetSpec,
-    /// The table every unit's receipt names.
-    pub layouts: &'a LayoutTable,
-    /// The content key of every layout of `layouts`.
-    pub keys: &'a crate::layout_keys::LayoutKeys,
+    /// The table every unit's receipt names, sealed with its digest and the
+    /// content key of every layout.
+    pub layouts: &'a crate::SealedLayoutTable,
     /// The operation manifest every unit's receipt names.
     pub manifest: &'a Manifest,
     /// The bytes of each static a `ReadStatic` names: a constant slot copies pointer-free
@@ -127,8 +126,8 @@ pub struct GlueCallback {
 #[derive(Clone, Debug)]
 pub struct GlueInputs<'a> {
     pub target: &'a TargetSpec,
-    pub layouts: &'a LayoutTable,
-    pub keys: &'a crate::layout_keys::LayoutKeys,
+    /// Sealed with its digest and the content key of every layout.
+    pub layouts: &'a crate::SealedLayoutTable,
     pub registry: crate::descriptor_registry::DescriptorRegistry,
     /// Per layout with a user finalizer, the instance digest of its drop body's unit.
     pub finalizers: &'a BTreeMap<LayoutId, ContentHash>,
@@ -752,7 +751,7 @@ mod tests {
             interface_version: crate::INTERFACE_VERSION,
             digest: ContentHash::of_bytes(b"input"),
         };
-        let keys = crate::layout_keys::LayoutKeys::new(&layouts);
+        let layouts = crate::SealedLayoutTable::seal(layouts);
         let inputs = EmitInputs {
             ahead,
             continuation: None,
@@ -762,7 +761,6 @@ mod tests {
             input: &input,
             target: &target,
             layouts: &layouts,
-            keys: &keys,
             manifest: &manifest,
             statics: &[],
             inline_instances: &BTreeSet::new(),

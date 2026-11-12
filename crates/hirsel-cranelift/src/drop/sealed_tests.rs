@@ -97,7 +97,7 @@ uint8_t hirsel_rt_v2_finalize(void *ctx, uint32_t descriptor, void *value, const
 "#;
 fn probe(target: &TargetSpec) -> (Vec<u8>, String) {
     let (table, unit, abi) = fixture(target);
-    let keys = hirsel_lir::LayoutKeys::new(&table);
+    let table = hirsel_lir::SealedLayoutTable::seal(table);
     let manifest = hirsel_core_contract::Manifest::skeleton([]);
     let input = InputIdentity {
         interface_version: hirsel_lir::INTERFACE_VERSION,
@@ -113,7 +113,6 @@ fn probe(target: &TargetSpec) -> (Vec<u8>, String) {
         input: &input,
         target,
         layouts: &table,
-        keys: &keys,
         manifest: &manifest,
         statics: &[],
         inline_instances: &empty,
@@ -132,7 +131,6 @@ fn probe(target: &TargetSpec) -> (Vec<u8>, String) {
     let glue_inputs = hirsel_lir::emission::GlueInputs {
         target,
         layouts: &table,
-        keys: &keys,
         registry: registry.clone(),
         finalizers: &finalizers,
         charged_finalizers: &Default::default(),

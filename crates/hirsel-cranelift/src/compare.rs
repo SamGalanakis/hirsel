@@ -79,7 +79,7 @@ impl Emitter<'_> {
     fn declare_comparator(&mut self, layout: LayoutId, equality: bool) -> Emitted<FuncId> {
         let name = format!(
             "hirsel.compare.{}{}",
-            self.inputs.keys.key(layout).hex(),
+            self.inputs.layouts.keys().key(layout).hex(),
             if equality { ".eq" } else { "" }
         );
         let sig = self.comparator_signature();
@@ -87,7 +87,10 @@ impl Emitter<'_> {
     }
 
     fn declare_hasher(&mut self, layout: LayoutId) -> Emitted<FuncId> {
-        let name = format!("hirsel.hash.{}", self.inputs.keys.key(layout).hex());
+        let name = format!(
+            "hirsel.hash.{}",
+            self.inputs.layouts.keys().key(layout).hex()
+        );
         let sig = self.hasher_signature();
         self.helper(&name, &sig, |_| Helper::Hash { layout })
     }

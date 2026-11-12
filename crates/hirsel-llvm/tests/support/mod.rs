@@ -119,9 +119,8 @@ pub fn wire_owner(owners: &mut Owners) -> DefPath {
 /// The layout table of one program and the ids its units name.
 pub struct Table {
     pub target: TargetSpec,
-    pub table: LayoutTable,
-    /// `table`'s content keys, which name the glue symbols units import.
-    pub keys: hirsel_lir::LayoutKeys,
+    /// Sealed with its content keys, which name the glue symbols units import.
+    pub table: hirsel_lir::SealedLayoutTable,
     pub layouts: BTreeMap<&'static str, LayoutId>,
     pub abis: BTreeMap<&'static str, FnAbiId>,
     /// The block header layout: a reuse token's.
@@ -131,6 +130,14 @@ pub struct Table {
 }
 
 impl Table {
+    /// Edit the table and seal the result again.
+    pub fn edit<R>(&mut self, edit: impl FnOnce(&mut LayoutTable) -> R) -> R {
+        let empty = hirsel_lir::SealedLayoutTable::seal(LayoutTable::new(&self.target));
+        let mut table = std::mem::replace(&mut self.table, empty).into_table();
+        let result = edit(&mut table);
+        self.table = hirsel_lir::SealedLayoutTable::seal(table);
+        result
+    }
     pub fn layout(&self, name: &str) -> LayoutId {
         self.layouts[name]
     }
@@ -289,8 +296,7 @@ impl Schema {
         }
         Table {
             target: target.clone(),
-            keys: hirsel_lir::LayoutKeys::new(&table),
-            table,
+            table: hirsel_lir::SealedLayoutTable::seal(table),
             layouts,
             abis,
             header,

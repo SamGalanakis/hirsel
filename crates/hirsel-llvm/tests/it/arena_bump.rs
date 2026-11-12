@@ -92,7 +92,6 @@ fn inputs<'a>(
         input,
         target: &p.table.target,
         layouts: &p.table.table,
-        keys: &p.table.keys,
         manifest: &p.manifest,
         statics: &p.statics,
         inline_instances: &INLINE,

@@ -1312,7 +1312,10 @@ fn raw_artifacts_round_trip_deterministically_on_both_targets() {
         unit_round_trip::<Rc>(&table);
         unit_round_trip::<Reuse>(&table);
         unit_round_trip::<Ready>(&table);
-        digests.push((target.digest(), table.digest()));
+        digests.push((
+            target.digest(),
+            hirsel_lir::SealedLayoutTable::seal(table).digest(),
+        ));
     }
     assert_ne!(digests[0].0, digests[1].0, "targets share a digest");
     assert_ne!(digests[0].1, digests[1].1, "layout tables share a digest");

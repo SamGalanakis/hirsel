@@ -657,17 +657,16 @@ impl NativeProducts for DemandProducts {
             Ok(closure)
         });
         let local_binding;
-        let local_keys;
-        let (binding, keys) = if let Some(execution) = snapshot.execution.get() {
+        let binding = if let Some(execution) = snapshot.execution.get() {
             for closure in closures {
                 drop(closure?);
             }
-            (execution.plan.binding(), execution.plan.keys())
+            execution.plan.binding()
         } else {
             local_binding = Binding::from_checked(environment.target, closures)?;
-            local_keys = hirsel_lir::LayoutKeys::new(&local_binding.table);
-            (&local_binding, &local_keys)
+            &local_binding
         };
+        let keys = binding.table.keys();
         let selected_operations = super::instance_operations::InstanceOperations {
             inventory: None,
             receipts: None,
@@ -756,7 +755,6 @@ impl NativeProducts for DemandProducts {
             input: &snapshot.emission.input,
             target: environment.target,
             layouts: &binding.table,
-            keys,
             manifest: environment.manifest,
             statics: &statics,
             inline_instances: &snapshot.emission.inline_instances,

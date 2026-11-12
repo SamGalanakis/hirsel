@@ -197,7 +197,7 @@ impl<'o> LayoutBuilder<'o> {
         let scoped_contract = hirsel_lir::abi::scoped_contract_digest(&nonretaining, &[]);
         atom(
             &mut key,
-            &hirsel_lir::snapshot::digest("scoped-entries-v1", &scoped_entries).0,
+            &hirsel_lir::abi::scoped_entries_digest(&scoped_entries).0,
         );
         atom(&mut key, &scoped_contract.0);
         let callable_key = ContentHash::of_parts("hirsel.fn-abi-key.v1", [key.as_slice()]);
@@ -371,7 +371,7 @@ impl<'o> LayoutBuilder<'o> {
             "hirsel.scoped-entry-abi.v1",
             [
                 abi.key.callable.0.as_slice(),
-                hirsel_lir::snapshot::digest("scoped-entries-v1", &abi.scoped_entries)
+                hirsel_lir::abi::scoped_entries_digest(&abi.scoped_entries)
                     .0
                     .as_slice(),
             ],

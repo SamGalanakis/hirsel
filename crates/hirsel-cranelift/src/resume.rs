@@ -645,7 +645,7 @@ impl FnEmitter<'_, '_, '_> {
                     }
                 })?;
             let key = hirsel_lir::glue::descriptor_index_symbol(
-                &self.em.inputs.keys.key(frame.source.layout),
+                &self.em.inputs.layouts.keys().key(frame.source.layout),
             );
             let (cell, _) = self.em.declare_data(&key, Linkage::Import)?;
             self.em.manifest_import(&key, ObjectSymbolKind::Data, None);
@@ -739,7 +739,8 @@ pub(crate) fn emit(
             let id = emitter.declare_function(&name, Linkage::Export, &sig.ir)?;
             let entry = emitter
                 .inputs
-                .keys
+                .layouts
+                .keys()
                 .entry(EntryKind::Resume, false, Some(abi));
             emitter
                 .manifested

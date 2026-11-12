@@ -30,7 +30,6 @@ fn ir(program: &Program, opt: OptLevel, callbacks: &BTreeSet<DefPath>) -> String
         input: &input,
         target: &program.table.target,
         layouts: &program.table.table,
-        keys: &program.table.keys,
         manifest: &program.manifest,
         statics: &program.statics,
         inline_instances: &none,

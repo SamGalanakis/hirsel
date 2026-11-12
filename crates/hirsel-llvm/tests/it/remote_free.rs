@@ -80,7 +80,6 @@ fn inputs<'a>(
         layouts: &p.table.table,
         manifest: &p.manifest,
         index: None,
-        keys: &p.table.keys,
         tracking: false,
         statics: &p.statics,
         inline_instances: &INLINE,

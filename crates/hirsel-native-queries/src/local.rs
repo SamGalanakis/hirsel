@@ -40,7 +40,7 @@ fn function(key: &InstanceAddress) -> Function {
 
 fn bind_statics(
     statics: StaticRows,
-    binding: &Binding,
+    binding: &hirsel_lir::products::BindingIds,
 ) -> Result<Vec<hirsel_lir::statics::StaticData>, String> {
     statics
         .into_iter()
@@ -90,7 +90,7 @@ pub fn read_statics(
         .ok_or("missing local statics")?;
     let (statics, _): (StaticRows, FinalizerRows) =
         serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    bind_statics(statics, binding)
+    bind_statics(statics, binding.ids())
 }
 
 /// One selected request's local Ready provider. Completed base instances and
@@ -397,27 +397,24 @@ impl LocalReadyQueries {
                     .map(|(_, instance, _, _, _)| instance.product.layout_closure),
             )
             .map(|reference| instances.layout_metadata(reference, environment.target));
-        let mut binding = Binding::from_checked(environment.target, closures)?;
+        let binding = Binding::from_checked(environment.target, closures)?;
         let body: UnitBody = self.decode(owner.product.value)?;
         let mut value = binding.materialize::<Value>(&body)?;
+        // Callee ABIs are appended below; the table leaves its seal here.
+        let (mut table, binding) = binding.open();
         let mut callee_bindings = Vec::new();
         for (function, _, abi, claim, _) in &callees {
             let base = binding.abi(*abi).ok_or("missing callee ABI content")?;
-            let mut abi = binding.table.fn_abis[base.0 as usize].clone();
+            let mut abi = table.fn_abis[base.0 as usize].clone();
             if abi.result_arena.is_some() {
                 return Err("callee is not a base Value ABI".into());
             }
             abi.result_arena = *claim;
-            let id = hirsel_lir::FnAbiId(binding.table.fn_abis.len() as u32);
-            binding.table.fn_abis.push(abi);
+            let id = hirsel_lir::FnAbiId(table.fn_abis.len() as u32);
+            table.fn_abis.push(abi);
             callee_bindings.push((function.clone(), id));
         }
-        hirsel_rc::arena_credit::bind_local(
-            &mut value,
-            &mut binding.table,
-            own.1,
-            &callee_bindings,
-        )?;
+        hirsel_rc::arena_credit::bind_local(&mut value, &mut table, own.1, &callee_bindings)?;
         if owner.product.statics_finalizers.domain != STATICS_FINALIZERS_DOMAIN {
             return Err("wrong local static/finalizer domain".into());
         }
@@ -460,7 +457,7 @@ impl LocalReadyQueries {
         let statics = bind_statics(statics, &binding)?;
         let adapters = super::instance_operations::bind_pretransfer(
             environment.operations,
-            &binding.table,
+            &table,
             environment.target,
         )?;
         let additional_abis = adapters.iter().map(|r| r.abi).collect::<Vec<_>>();
@@ -476,7 +473,7 @@ impl LocalReadyQueries {
         let inputs = Inputs {
             memo: Default::default(),
             target: environment.target,
-            layouts: &binding.table,
+            layouts: &table,
             operations: &operations,
             manifest: environment.manifest,
             discharge: environment.discharge,

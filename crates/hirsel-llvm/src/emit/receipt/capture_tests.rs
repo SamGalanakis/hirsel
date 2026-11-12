@@ -321,7 +321,8 @@ fn probe(target: &TargetSpec, once: bool, usage: CaptureUse, malformed: u8) -> (
     let module = Module::new(&context, "receipt-capture-probes");
     let machine = machine(target, false).unwrap();
     module.set_target(&machine);
-    let keys = hirsel_lir::LayoutKeys::new(&table);
+    let table = hirsel_lir::SealedLayoutTable::seal(table);
+    let keys = table.keys();
     let manifest = Manifest::skeleton([]);
     let input = InputIdentity {
         interface_version: hirsel_lir::INTERFACE_VERSION,
@@ -337,7 +338,6 @@ fn probe(target: &TargetSpec, once: bool, usage: CaptureUse, malformed: u8) -> (
         input: &input,
         target,
         layouts: &table,
-        keys: &keys,
         manifest: &manifest,
         statics: &[],
         inline_instances: &empty,

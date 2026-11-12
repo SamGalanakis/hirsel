@@ -25,7 +25,6 @@ fn inputs<'a>(program: &'a Program, input: &'a InputIdentity, opt: OptLevel) -> 
         input,
         target: &program.table.target,
         layouts: &program.table.table,
-        keys: &program.table.keys,
         manifest: &program.manifest,
         statics: &program.statics,
         inline_instances: &NONE,
@@ -207,7 +206,8 @@ fn a_fragment_binds_into_a_program_that_numbers_its_layouts_apart() {
                 inputs(b, &input, OptLevel::None),
             );
             let layouts: HashMap<_, _> = ib
-                .keys
+                .layouts
+                .keys()
                 .all()
                 .iter()
                 .enumerate()
@@ -220,7 +220,7 @@ fn a_fragment_binds_into_a_program_that_numbers_its_layouts_apart() {
                 .enumerate()
                 .map(|(i, abi)| {
                     (
-                        ib.keys.fn_abi(abi),
+                        ib.layouts.keys().fn_abi(abi),
                         hirsel_lir::abi_types::FnAbiId(i as u32),
                     )
                 })
@@ -236,7 +236,7 @@ fn a_fragment_binds_into_a_program_that_numbers_its_layouts_apart() {
                                 program: &Program,
                                 i: &EmitInputs<'_>| {
                     let summary = |u: &hirsel_lir::stage::ValidatedUnit<_>| {
-                        UnitSummary::of(u.unit(), i.layouts, i.keys, i.manifest).unwrap()
+                        UnitSummary::of(u.unit(), i.layouts, i.layouts.keys(), i.manifest).unwrap()
                     };
                     UnitFragment {
                         summary: summary(unit),
@@ -250,10 +250,10 @@ fn a_fragment_binds_into_a_program_that_numbers_its_layouts_apart() {
                     }
                 };
                 let (fa, fb) = (fragment(ua, a, &ia), fragment(ub, b, &ib));
-                let summary = fa.summary.encode(ia.layouts, ia.keys).unwrap();
+                let summary = fa.summary.encode(ia.layouts, ia.layouts.keys()).unwrap();
                 assert_eq!(
                     summary,
-                    fb.summary.encode(ib.layouts, ib.keys).unwrap(),
+                    fb.summary.encode(ib.layouts, ib.layouts.keys()).unwrap(),
                     "{what}"
                 );
                 let restored = UnitSummary::decode(&summary, &|k| layouts.get(k).copied(), &|k| {
@@ -270,8 +270,12 @@ fn a_fragment_binds_into_a_program_that_numbers_its_layouts_apart() {
                     )
                     .is_err()
                 );
-                let bytes = fa.encode(ia.layouts, ia.keys).unwrap();
-                assert_eq!(bytes, fb.encode(ib.layouts, ib.keys).unwrap(), "{what}");
+                let bytes = fa.encode(ia.layouts, ia.layouts.keys()).unwrap();
+                assert_eq!(
+                    bytes,
+                    fb.encode(ib.layouts, ib.layouts.keys()).unwrap(),
+                    "{what}"
+                );
                 let decoded = UnitFragment::decode(&bytes, &|k| layouts.get(k).copied(), &|k| {
                     abis.get(k).copied()
                 })

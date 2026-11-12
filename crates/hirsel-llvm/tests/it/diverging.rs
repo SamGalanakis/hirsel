@@ -53,7 +53,6 @@ fn a_diverging_call_branches_on_status_without_noreturn() {
         input: &input,
         target: &program.table.target,
         layouts: &program.table.table,
-        keys: &program.table.keys,
         manifest: &program.manifest,
         statics: &program.statics,
         inline_instances: &std::collections::BTreeSet::new(),

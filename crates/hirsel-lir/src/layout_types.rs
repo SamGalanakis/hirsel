@@ -739,9 +739,6 @@ impl LayoutTable {
         let (child, within) = inside?;
         self.field_at(child, within)
     }
-    pub fn digest(&self) -> ContentHash {
-        snapshot::digest("layout-table", self)
-    }
 }
 
 snapshot_enum!(Endian { Little, Big });

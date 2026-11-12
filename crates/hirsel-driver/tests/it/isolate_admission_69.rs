@@ -220,7 +220,6 @@ fn isolate_cleanup_source_and_cursor_forgeries_refuse_both_emitters() {
                 input: &program.input,
                 target: &program.target,
                 layouts: &program.table,
-                keys: &program.keys,
                 manifest: &program.manifest,
                 statics: &program.statics,
                 inline_instances: &program.inline_instances,

@@ -1225,7 +1225,6 @@ fn every_target_agrees_with_the_interpreter_on_every_scalar_library_operation() 
                     input: &input,
                     target: &program.table.target,
                     layouts: &program.table.table,
-                    keys: &program.table.keys,
                     manifest: &program.manifest,
                     statics: &program.statics,
                     inline_instances: &std::collections::BTreeSet::new(),

@@ -435,7 +435,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                     definition: definition.clone(),
                     what,
                 })?;
-            let entry = entry_of(self.inputs.keys, EntryKind::Resume, Some(abi));
+            let entry = entry_of(self.inputs.layouts.keys(), EntryKind::Resume, Some(abi));
             self.manifested
                 .import_entry(&target_name, definition, entry);
             let name = format!("{target_name}_drop_adapter");
@@ -471,7 +471,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 b.ret(status);
             }
             let cell_name = hirsel_lir::glue::descriptor_index_symbol(
-                &self.inputs.keys.key(frame.source.layout),
+                &self.inputs.layouts.keys().key(frame.source.layout),
             );
             let descriptor = self.glue_cell(&cell_name, i32_ty);
             rows.push(self.module.const_struct(&[
@@ -506,7 +506,11 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         } else {
             resume_name(&symbol.definition, callee.body, None)
         };
-        let entry = entry_of(self.inputs.keys, EntryKind::Resume, Some(signature.abi));
+        let entry = entry_of(
+            self.inputs.layouts.keys(),
+            EntryKind::Resume,
+            Some(signature.abi),
+        );
         self.manifested
             .import_entry(&name, &symbol.definition, entry);
         self.module
@@ -854,7 +858,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         let header = &self.unit.header;
         let name = resume_name(&header.definition, header.instance, None);
         let entry = entry_of(
-            self.inputs.keys,
+            self.inputs.layouts.keys(),
             EntryKind::Resume,
             Some(self.signature.abi),
         );
@@ -932,7 +936,7 @@ pub(super) fn declare<'m, 'a>(
             manifested.export_entry(
                 &name,
                 &header.definition,
-                entry_of(inputs.keys, EntryKind::Resume, Some(abi)),
+                entry_of(inputs.layouts.keys(), EntryKind::Resume, Some(abi)),
             );
             states.push((unit, plan, 0, function));
             continue;
@@ -955,7 +959,7 @@ pub(super) fn declare<'m, 'a>(
             manifested.export_entry(
                 &name,
                 &header.definition,
-                entry_of(inputs.keys, EntryKind::Resume, Some(abi)),
+                entry_of(inputs.layouts.keys(), EntryKind::Resume, Some(abi)),
             );
             declared.push(function);
         }

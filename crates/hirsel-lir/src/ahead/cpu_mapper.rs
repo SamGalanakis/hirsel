@@ -49,7 +49,7 @@ pub struct CpuRegional {
 /// validates proposals against actual bodies without invoking this producer.
 pub fn cpu_mapper_graph(
     units: &[&ValidatedUnit<Ready>],
-    table: &LayoutTable,
+    table: &crate::SealedLayoutTable,
     target: &TargetSpec,
     root: ContentHash,
 
@@ -178,7 +178,7 @@ pub fn cpu_mapper_graph(
 
 pub fn validate_cpu_mapper_graph(
     units: &[&ValidatedUnit<Ready>],
-    table: &LayoutTable,
+    table: &crate::SealedLayoutTable,
     target: &TargetSpec,
     proposal: &CpuMapperGraph,
 
@@ -308,7 +308,11 @@ fn supported(target: &TargetSpec) -> bool {
         && target.features.is_empty()
 }
 
-fn identity(proposal: &CpuMapperGraph, table: &LayoutTable, target: &TargetSpec) -> ContentHash {
+fn identity(
+    proposal: &CpuMapperGraph,
+    table: &crate::SealedLayoutTable,
+    target: &TargetSpec,
+) -> ContentHash {
     ContentHash::of_parts(
         "hirsel.ahead.cpu-mapper.v1",
         [

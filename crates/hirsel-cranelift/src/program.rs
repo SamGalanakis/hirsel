@@ -64,7 +64,10 @@ impl Emitter<'_> {
         let definition = glue_definition();
         for id in glue.registry.layouts.clone() {
             let index = self.descriptor_index(id, &definition)?;
-            self.cell(&descriptor_index_symbol(&self.inputs.keys.key(id)), index)?;
+            self.cell(
+                &descriptor_index_symbol(&self.inputs.layouts.keys().key(id)),
+                index,
+            )?;
         }
         for definition in &glue.glue.foreign {
             let name = hirsel_lir::glue::foreign_dispatch_symbol(definition);
@@ -281,7 +284,7 @@ impl Emitter<'_> {
                 what: "no literal payload layout".into(),
             });
         };
-        let name = literal_symbol(&self.inputs.keys.key(payload), data);
+        let name = literal_symbol(&self.inputs.layouts.keys().key(payload), data);
         self.static_block(
             &name,
             descriptor,
@@ -307,7 +310,8 @@ impl Emitter<'_> {
             hirsel_lir::emission::callback_thunk_name(definition, callback.instance.as_ref());
         let entry = self
             .inputs
-            .keys
+            .layouts
+            .keys()
             .entry(EntryKind::Callback, false, Some(abi));
         self.manifested.export_entry(&thunk, definition, entry);
         self.define_callback(&thunk, target, &sig, Linkage::Export, definition)

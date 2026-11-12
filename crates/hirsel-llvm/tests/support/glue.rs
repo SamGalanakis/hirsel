@@ -604,7 +604,8 @@ pub fn cases_header(corpus: &Corpus, scenarios: &[Scenario]) -> String {
     let descriptors = rt_program::descriptors(table, &used).expect("every layout lowers");
     let mut c = String::new();
     for d in &descriptors {
-        let name = hirsel_lir::glue::descriptor_name(&corpus.program.table.keys.key(d.layout));
+        let name =
+            hirsel_lir::glue::descriptor_name(&corpus.program.table.table.keys().key(d.layout));
         let _ = writeln!(
             c,
             "extern const hirsel_rt_v2_layout L{} __asm__(\"{name}\");",

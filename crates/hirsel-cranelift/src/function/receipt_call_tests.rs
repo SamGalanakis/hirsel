@@ -162,7 +162,7 @@ int main(void) {
 
 fn call_probe(target: &TargetSpec, malformed: u8) -> (Vec<u8>, String) {
     let (table, unit, abi, callee) = call_fixture(target, malformed);
-    let keys = hirsel_lir::LayoutKeys::new(&table);
+    let table = hirsel_lir::SealedLayoutTable::seal(table);
     let manifest = Manifest::skeleton([]);
     let input = InputIdentity {
         interface_version: hirsel_lir::INTERFACE_VERSION,
@@ -178,7 +178,6 @@ fn call_probe(target: &TargetSpec, malformed: u8) -> (Vec<u8>, String) {
         input: &input,
         target,
         layouts: &table,
-        keys: &keys,
         manifest: &manifest,
         statics: &[],
         inline_instances: &empty,

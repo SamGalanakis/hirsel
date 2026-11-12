@@ -71,7 +71,12 @@ const PHASES: [&str; 22] = [
 ];
 
 fn build(source: &std::path::Path, timings: &str) -> std::process::Output {
+    let homes = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_hirsel"))
+        .env("XDG_CACHE_HOME", homes.path().join("cache"))
+        .env("XDG_DATA_HOME", homes.path().join("data"))
+        .env("XDG_STATE_HOME", homes.path().join("state"))
+        .env("HIRSEL_RESULTS_DIR", homes.path().join("results"))
         .arg(timings)
         .args(["build", "--backend", "cranelift"])
         .arg(source)
@@ -284,10 +289,8 @@ fn mem_usage_reports_peak_rss_and_the_tables_held() {
             .and_then(|row| row["bytes"].as_i64())
             .unwrap_or_else(|| panic!("no {name:?} in {memory}"))
     };
-    assert!(
-        held("engine: snapshot row provenance") > 0 && held("engine: signature snapshot") > 0,
-        "{memory}"
-    );
+    assert_eq!(held("engine: snapshot row provenance"), 0, "{memory}");
+    assert!(held("engine: signature snapshot") > 0, "{memory}");
     assert!(held("engine: signatures") > 0, "{memory}");
 }
 

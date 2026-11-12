@@ -20,7 +20,7 @@ is `send`. An own or resource type is `send` when it declares the bound
 ([OWN-4](ownership.md#own-4-bounds)) and each field type is `send`; a capability type is
 `send` when its declaration says so ([CAP-2](capabilities.md#cap-2-capabilities-are-opaque)).
 A closure is `send` when every capture is. Never `send`: `Rc`, stable values, regions,
-scoped values, builders, task handles, receivers, and branded values whose brand owner is
+scoped values, builders, task handles, and branded values whose brand owner is
 not moved with them in one value. The check reads declarations and capture lists only.
 
 ```hirsel
@@ -57,7 +57,7 @@ fn count(tasks: Tasks, take words: List[Rc[Node]]) -> Result[Task[u64], (Capacit
 `channel.new[T: send](cap: u64) -> Result[(Sender[T], Receiver[T]), Capacity]` admits the
 channel's whole charge, including `cap` items, at creation; sending never allocates.
 `Sender[T]` is a `send` resource; `channel.sender(tx)` adds a sender and cannot fail.
-`Receiver[T]` is a resource that is not `send`. When the last sender is cleaned, the
+`Receiver[T]` is a `send` resource with no way to add a second receiver. When the last sender is cleaned, the
 channel is closed for receiving after its queued items; when the receiver is cleaned, the
 channel is closed for sending and its queued items are dropped (CONC-9).
 

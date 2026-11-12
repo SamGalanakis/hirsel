@@ -67,6 +67,7 @@ fn list.push[T](mut xs: List[T], take x: T) -> Result[(), (Capacity, T)]
 fn list.pop[T](mut xs: List[T]) -> Option[T]
 fn list.set[T](mut xs: List[T], i: u64, take x: T) -> T         // returns the old element; Bounds
 fn list.clear[T](mut xs: List[T])
+fn list.fill[T: plain](mut xs: List[T], n: u64, x: T) -> Result[(), Capacity]   // grows xs to length n
 fn list.sum[T](xs: List[T]) -> T                               // integers; Overflow
 fn string.new() -> String
 fn string.from(s: String) -> Result[String, Capacity]          // copies a literal or a view

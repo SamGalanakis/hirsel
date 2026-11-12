@@ -18,7 +18,6 @@ impl Root {
         parent: &Path,
     ) -> std::io::Result<Arc<Self>> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        crate::scratch::sweep(parent, ".hirsel-request-");
         let path = crate::scratch::path(
             parent,
             ".hirsel-request-",
@@ -31,6 +30,7 @@ impl Root {
         let owner = memory
             .split(bytes)
             .ok_or_else(|| std::io::Error::other("scratch directory exceeds admitted transport"))?;
+        crate::scratch::sweep(parent, ".hirsel-request-");
         let mut builder = fs::DirBuilder::new();
         #[cfg(unix)]
         {
@@ -647,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn scratch_sweep_keeps_live_owner_and_removes_reused_pid() {
+    fn scratch_sweep_keeps_live_owner_and_removes_reused_pid_once_the_last_sweep_is_stale() {
         let parent = tempfile::tempdir().unwrap();
         let budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
         let mut memory = budget.reserve(64 << 10).unwrap();
@@ -657,6 +657,18 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir(&stale).unwrap();
+        let _fresh = super::Root::new(&mut memory, parent.path()).unwrap();
+        assert!(stale.exists(), "a fresh sweep answers for the parent");
+        std::fs::File::options()
+            .write(true)
+            .open(parent.path().join(".hirsel-request-swept"))
+            .unwrap()
+            .set_modified(
+                std::time::SystemTime::now()
+                    - crate::scratch::SWEPT_FOR
+                    - std::time::Duration::from_secs(1),
+            )
+            .unwrap();
         let _root = super::Root::new(&mut memory, parent.path()).unwrap();
         assert!(live.path.is_dir(), "this process still owns its directory");
         assert!(!stale.exists(), "a reused PID is not the recorded owner");

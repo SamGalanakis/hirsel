@@ -2,6 +2,7 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    time::{Duration, SystemTime},
 };
 
 fn start_time(pid: u32) -> io::Result<u64> {
@@ -19,12 +20,36 @@ pub fn path(parent: &Path, prefix: &str, sequence: u64) -> io::Result<PathBuf> {
     Ok(parent.join(format!("{prefix}{pid}-{}-{sequence}", start_time(pid)?)))
 }
 
+/// How long a sweep of one parent and prefix answers for. Recovery of a dead
+/// owner's scratch is eventual: it happens within this interval of its death,
+/// at the next creation under that parent.
+pub(crate) const SWEPT_FOR: Duration = Duration::from_secs(600);
+
 /// Best-effort recovery of this user's dead owners. Unknown identities are kept.
 /// A `.hirsel-keep` file exempts explicitly retained debugging artifacts.
+///
+/// A creation pays one `stat` while `<prefix>swept` is younger than
+/// [`SWEPT_FOR`]; otherwise it renews the marker and walks the parent.
 pub fn sweep(parent: &Path, prefix: &str) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        let marker = parent.join(format!("{prefix}swept"));
+        let now = SystemTime::now();
+        let fresh = fs::metadata(&marker)
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|swept| now.duration_since(swept).is_ok_and(|age| age < SWEPT_FOR));
+        if fresh {
+            return;
+        }
+        // Renewed before the walk, so concurrent creations skip it. A marker
+        // that cannot be written leaves every creation sweeping, as before.
+        let _ = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&marker)
+            .and_then(|file| file.set_modified(now));
         let Ok(user) = fs::metadata("/proc/self") else {
             return;
         };

@@ -1,0 +1,57 @@
+{
+  "scope": "First-party Cargo features in generated Buck production roots. Shared literal attributes cover checked, release and dist, both runtime architectures, the std producer and installed bundle. Explicit runtime diagnostic/sanitizer variants are intentional; audit their common dependency closure here. Third-party resolution still needs the production/test graph split.",
+  "baseline": "318e92d66c3f8a1345469b60f034eca9feecf1d6; test-features-prod-816 audit-only slice. Each listed leak remains a defect, not a production feature contract. Remove exceptions when splitting the graph; strict mode admits none.",
+  "features": {
+    "hirsel-artifact-store/test-support": "test-only",
+    "hirsel-authority/testing": "test-only",
+    "hirsel-cli/native-tsan": "test-only",
+    "hirsel-cranelift/native-tsan": "test-only",
+    "hirsel-driver/native-tsan": "test-only",
+    "hirsel-engine-admission/test-alloc": "test-only",
+    "hirsel-engine-runtime/test-support": "test-only",
+    "hirsel-free-loom/weak": "test-only",
+    "hirsel-free/tsan": "test-only",
+    "hirsel-heaps-loom/blind-trim": "test-only",
+    "hirsel-heaps-loom/direct-dequeue": "test-only",
+    "hirsel-intern/id-salt": "test-only",
+    "hirsel-lir/testing": "test-only",
+    "hirsel-llvm/native-tsan": "test-only",
+    "hirsel-native/native-tsan": "test-only",
+    "hirsel-object-storage/testing": "test-only",
+    "hirsel-query-products/test-support": "test-only",
+    "hirsel-rc/testing": "test-only",
+    "hirsel-requests/native-tsan": "test-only",
+    "hirsel-rt/default": "runtime-option",
+    "hirsel-rt/diagnostic": "test-only",
+    "hirsel-rt/measurement": "test-only",
+    "hirsel-rt/memcheck": "test-only",
+    "hirsel-rt/operation-latency": "test-only",
+    "hirsel-rt/ownership-trace": "runtime-option",
+    "hirsel-rt/system-allocator": "runtime-option",
+    "hirsel-rt/tsan": "test-only",
+    "hirsel-syntax/id-salt": "test-only",
+    "hirsel-types/testing": "test-only"
+  },
+  "roots": {
+    "hirsel-cli-bin-hirsel": [
+      "hirsel-artifact-store/test-support",
+      "hirsel-authority/testing",
+      "hirsel-engine-admission/test-alloc",
+      "hirsel-engine-runtime/test-support",
+      "hirsel-intern/id-salt",
+      "hirsel-lir/testing",
+      "hirsel-object-storage/testing",
+      "hirsel-query-products/test-support",
+      "hirsel-rc/testing",
+      "hirsel-rt/diagnostic",
+      "hirsel-syntax/id-salt",
+      "hirsel-types/testing"
+    ],
+    "hirsel-rt-archives": [
+      "hirsel-intern/id-salt",
+      "hirsel-object-storage/testing",
+      "hirsel-syntax/id-salt",
+      "hirsel-types/testing"
+    ]
+  }
+}

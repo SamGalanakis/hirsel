@@ -19,6 +19,61 @@ sync = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(sync)
 
 
+class ProductionFeatures(unittest.TestCase):
+    def graph(self, *, leaked=True, build=False):
+        return (sync.call('hirsel_binary', name='compiler', package_name='compiler', features=[],
+                          deps=['//:middle'])
+                + sync.call('hirsel_library', name='middle', package_name='middle', features=[],
+                            deps=[] if build else ['//:fixture'],
+                            build_script=':fixture' if build else None)
+                + sync.call('hirsel_build_script' if build else 'hirsel_library',
+                            name='fixture', package_name='fixture',
+                            features=['testing'] if leaked else [], deps=[]))
+
+    def policy(self, exceptions=()):
+        return {'features': {'fixture/testing': 'test-only'}, 'roots': {'compiler': list(exceptions)}}
+
+    def test_strict_finds_a_transitive_feature_even_with_a_baseline_exception(self):
+        with self.assertRaisesRegex(SystemExit, 'compiler: unapproved test feature fixture/testing'):
+            sync.check_production_features(self.graph(), self.policy(['fixture/testing']), strict=True)
+
+    def test_production_graph_without_test_features_passes_strict(self):
+        self.assertEqual(sync.check_production_features(self.graph(leaked=False), self.policy(), strict=True), [])
+
+    def test_exact_exceptions_pass_but_new_leaks_and_stale_exceptions_fail(self):
+        self.assertEqual(sync.check_production_features(self.graph(), self.policy(['fixture/testing'])),
+                         ['compiler: fixture/testing'])
+        with self.assertRaisesRegex(SystemExit, 'unapproved test feature'):
+            sync.check_production_features(self.graph(), self.policy())
+        with self.assertRaisesRegex(SystemExit, 'remove resolved feature exception'):
+            sync.check_production_features(self.graph(leaked=False), self.policy(['fixture/testing']))
+
+    def test_build_script_features_are_audited(self):
+        with self.assertRaisesRegex(SystemExit, 'fixture/testing'):
+            sync.check_production_features(self.graph(build=True), self.policy(), strict=True)
+
+    def test_unclassified_features_and_missing_roots_are_refused(self):
+        policy = self.policy()
+        policy['features'] = {}
+        with self.assertRaisesRegex(SystemExit, 'no classification'):
+            sync.check_production_features(self.graph(), policy)
+        with self.assertRaisesRegex(SystemExit, 'no first-party target'):
+            sync.check_production_features('', self.policy())
+
+    def test_runtime_variants_override_only_their_own_features(self):
+        graph = (sync.call('hirsel_library', name='runtime', package_name='runtime',
+                           features=['diagnostic'], deps=['//:fixture'])
+                 + sync.call('hirsel_runtime_archives', name='archives', package_name='runtime',
+                             features=['default'], deps=['//:fixture'])
+                 + sync.call('hirsel_library', name='fixture', package_name='fixture', features=[], deps=[]))
+        policy = {'features': {'runtime/diagnostic': 'test-only', 'runtime/default': 'runtime-option',
+                               'fixture/testing': 'test-only'}, 'roots': {'archives': []}}
+        self.assertEqual(sync.check_production_features(graph, policy, strict=True), [])
+        graph = graph.replace('features = [],', 'features = ["testing"],')
+        with self.assertRaisesRegex(SystemExit, 'archives: unapproved test feature fixture/testing'):
+            sync.check_production_features(graph, policy, strict=True)
+
+
 class AtomicScratch(unittest.TestCase):
     def concurrent_writes(self, writer, output):
         barrier = threading.Barrier(2)

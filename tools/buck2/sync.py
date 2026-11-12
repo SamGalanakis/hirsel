@@ -40,6 +40,7 @@ listing, which runs Buck2).
 from __future__ import annotations
 
 import argparse
+import ast
 import collections
 import functools
 import json
@@ -1070,7 +1071,7 @@ def first_party(meta: dict) -> str:
                                  "//tools/buck2:llvm-cxx-headers-lock.json", "//tools/buck2:llvm-runtime-lock.json",
                                  "//tools/buck2:pins.json", "tools/native-toolchain/llvm-23.lock"]))
     out.append("\n" + call("hirsel_script_test", name="test-native-scratch-tools", script="tools/tests/buck2_sync.py", full=False,
-                           args=["AtomicScratch"],
+                           args=["AtomicScratch", "ProductionFeatures"],
                            data=["//tools/buck2:sync.py", "//tools/buck2:generated.py",
                                  "//tools/buck2:action_sizes_from_log.py", "//tools/buck2:test_sizes_from_usage.py"]))
     out.append("\n" + call("hirsel_script_test", name="test-consumers", script="tools/tests/consumers.py", full=False,
@@ -1464,7 +1465,66 @@ def root_buck(meta: dict) -> str:
     buck = first_party(meta)
     check_classes(buck)
     check_test_data(buck)
+    policy = json.loads(READS.text(HERE / "production-features.json"))
+    declared = {f"{p['name']}/{feature}" for p in meta["packages"]
+                if p["id"] in meta["workspace_members"] for feature in p["features"]}
+    classified = set(policy["features"])
+    if declared != classified:
+        raise SystemExit("production feature inventory changed; audit and classify: "
+                         + ", ".join(sorted(declared ^ classified)))
+    check_production_features(buck, policy)
     return buck
+
+
+def check_production_features(buck: str, policy: dict, strict: bool = False) -> list[str]:
+    """Audit generated first-party features along normal and build-script edges.
+
+    Checked, release and dist share these literal attributes. Runtime archives
+    replace their own workspace features with explicit variant selections;
+    their dependencies still use the ordinary library graph. Third-party
+    features are outside this first-party inventory.
+    """
+    if set(policy["features"].values()) - {"test-only", "runtime-option"}:
+        raise SystemExit("unknown production feature classification")
+    rules = {}
+    for statement in ast.parse(buck).body:
+        if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
+            continue
+        call = statement.value
+        if not isinstance(call.func, ast.Name) or call.func.id not in {
+                "hirsel_library", "hirsel_binary", "hirsel_build_script", "hirsel_runtime_archives"}:
+            continue
+        attrs = {k.arg: ast.literal_eval(k.value) for k in call.keywords
+                 if k.arg in {"name", "package_name", "features", "deps", "build_script"}}
+        rules[attrs["name"]] = attrs
+    findings, errors = [], []
+    for root, exceptions in policy["roots"].items():
+        pending, seen, leaks = [root], set(), set()
+        while pending:
+            name = pending.pop()
+            if name in seen:
+                continue
+            seen.add(name)
+            if name not in rules:
+                raise SystemExit(f"production feature audit has no first-party target: {name}")
+            attrs = rules[name]
+            for feature in attrs["features"]:
+                key = f"{attrs['package_name']}/{feature}"
+                if key not in policy["features"]:
+                    raise SystemExit(f"production feature audit has no classification: {key}")
+                if policy["features"][key] == "test-only":
+                    leaks.add(f"{name}/{feature}")
+            for dep in attrs.get("deps", []) + ([attrs["build_script"]] if attrs.get("build_script") else []):
+                if dep.startswith("//:") or dep.startswith(":"):
+                    pending.append(dep.split(":", 1)[1])
+        findings += [f"{root}: {leak}" for leak in sorted(leaks)]
+        allowed = set() if strict else set(exceptions)
+        errors += [f"{root}: unapproved test feature {leak}" for leak in sorted(leaks - allowed)]
+        if not strict:
+            errors += [f"{root}: remove resolved feature exception {leak}" for leak in sorted(allowed - leaks)]
+    if errors:
+        raise SystemExit("production feature audit failed:\n" + "\n".join(errors))
+    return findings
 
 
 def native_toolchain_pins() -> str:
@@ -1495,6 +1555,8 @@ def main() -> int:
     parser.add_argument("--check", action="store_true",
                         help="regenerate when stale, then check the sharded test binaries' test-cost coverage on the pool")
     parser.add_argument("--files-only", action="store_true", help="with --check, skip the pool's test-cost inventory")
+    parser.add_argument("--strict-production-features", action="store_true",
+                        help="fail on every production test feature, including the explicitly recorded baseline leaks")
     args = parser.parse_args()
     if not REINDEER.is_file():
         raise SystemExit("run tools/buck2/bootstrap.py first (Reindeer is missing)")
@@ -1502,6 +1564,9 @@ def main() -> int:
     if parts:
         for part, reads in generate(ROOT, parts).items():
             generated.record(ROOT, part, reads)
+    if args.strict_production_features:
+        check_production_features((ROOT / "BUCK").read_text(),
+                                  json.loads((HERE / "production-features.json").read_text()), strict=True)
     if args.check and not args.files_only and (errors := check_cost_coverage()):
         print("\n".join(errors), file=sys.stderr)
         return 1

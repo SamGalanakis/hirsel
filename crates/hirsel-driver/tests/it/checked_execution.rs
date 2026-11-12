@@ -287,7 +287,7 @@ fn a_result_declared_global_cannot_carry_a_borrowed_parameter() {
 
 /// Review 3 finding 1 (`k1`), rejected at source today (PROV-4): the returned
 /// closure captures `(x, 1u8)` with `x` in the arena, and runs after it closed.
-const ARENA_CLOSURE: &str = "fn mk(a: Arena) -> fn() -> u64 { let x: String = \"xy\"; let p = (x, 1u8); fn() { let (s, n) = p; string.byte_len(s) } }\npub fn main(rt: Io, args: Args) -> Result[(), GrantError] {\n  let grant_stdout = io.stdout(rt)?\n\n  let f = arena.with(fn(a: Arena) -> fn() -> u64 { mk(a) })\n  if f() == 2u64 { let _ = out.print(grant_stdout, \"two\\n\") }\n  Ok(())\n}";
+const ARENA_CLOSURE: &str = "fn mk(a: Arena) -> fn() -> u64 { let x: String = \"xy\"; let p = (copy x, 1u8); fn() { let (s, n) = copy p; string.byte_len(s) } }\npub fn main(rt: Io, args: Args) -> Result[(), GrantError] {\n  let grant_stdout = io.stdout(rt)?\n\n  let f = arena.with(fn(a: Arena) -> fn() -> u64 { mk(a) })\n  if f() == 2u64 { let _ = out.print(grant_stdout, \"two\\n\") }\n  Ok(())\n}";
 
 #[test]
 fn a_returned_closure_over_arena_content_traps_after_the_arena_ends() {

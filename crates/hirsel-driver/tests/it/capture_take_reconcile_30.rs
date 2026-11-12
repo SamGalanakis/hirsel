@@ -12,12 +12,12 @@ fn v_rejects_taking_a_copied_capture_from_a_many_invocation() {
     with_compiler_stack(|| {
         for source in [
             r#"fn make()->fn()->u64 {
-                let text:String in heap="x"; let pair=(text,1u8);
-                fn(){let(s,n)=pair;string.byte_len(s)}
+                let text:String in heap="x"; let pair=(copy text,1u8);
+                fn(){let (s, n) = copy pair;string.byte_len(s)}
             }
             fn main(){}"#,
             r#"fn make()->fn()->fn()->u64 {
-                let cb:fn()->u64=fn(){7u64}; fn(){cb}
+                let cb:fn()->u64=fn(){7u64}; fn(){copy cb}
             }
             fn main(){}"#,
         ] {

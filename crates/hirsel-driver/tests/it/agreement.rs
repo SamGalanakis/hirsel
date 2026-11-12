@@ -693,7 +693,7 @@ fn a_global_environment_cannot_own_a_part_placed_in_scoped_storage() {
         // The source phases reject the arena form of this program (PROV-4 at
         // the closure literal); the heap form lowers, and placing the tuple's
         // string part in a region forges the rejected environment.
-        let source = "fn probe()->fn()->u64 {let x:String in heap=\"x\";let pair=(x,1u8);fn(){let (s,n)=pair;string.byte_len(s)}}\nfn main(){}";
+        let source = "fn probe()->fn()->u64 {let x:String in heap=\"x\";let pair = (copy x,1u8);fn(){let (s, n) = copy pair;string.byte_len(s)}}\nfn main(){}";
         let (probe, signatures) = lowered(source, "probe");
         assert_eq!(kinds(&probe, &signatures), []);
         let mut forged = probe.clone();
@@ -826,11 +826,11 @@ fn a_captured_callable_keeps_the_authority_creation_fixed_and_no_more() {
     with_compiler_stack(|| {
         for (source, storage) in [
             (
-                "fn probe() -> fn() -> u64 {\n let x: String in heap = \"x\"\n let pair = (x, 1u8)\n let inner: fn() -> u64 = fn() { let (s, n) = pair; string.byte_len(s) }\n fn() { (fn() { inner() })() }\n}\nfn main() {}",
+                "fn probe() -> fn() -> u64 {\n let x: String in heap = \"x\"\n let pair = (copy x, 1u8)\n let inner: fn() -> u64 = fn() { let (s, n) = copy pair; string.byte_len(s) }\n fn() { (fn() { inner() })() }\n}\nfn main() {}",
                 hirsel_tir::Storage::Capture,
             ),
             (
-                "fn probe() -> fn() -> u64 {\n let x: String in heap = \"x\"\n let pair = (x, 1u8)\n let inner: fn() -> u64 = fn() { let (s, n) = pair; string.byte_len(s) }\n fn() { (fn() { (fn() { inner })()() })() }\n}\nfn main() {}",
+                "fn probe() -> fn() -> u64 {\n let x: String in heap = \"x\"\n let pair = (copy x, 1u8)\n let inner: fn() -> u64 = fn() { let (s, n) = copy pair; string.byte_len(s) }\n fn() { (fn() { (fn() { copy inner })()() })() }\n}\nfn main() {}",
                 hirsel_tir::Storage::Temporary,
             ),
         ] {
@@ -1457,7 +1457,7 @@ fn error_kind(e: Err) -> u64 {
   match e { Archive(Truncated) => 1, Archive(Header(_)) => 2, _ => 3 }
 }
 fn scan(data: String) {
-  let mut s = State(text: data)
+  let mut s = State(text: copy data)
   while true {
     match next(mut s) {
       Ok(None) => return,

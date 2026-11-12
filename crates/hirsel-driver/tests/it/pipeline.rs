@@ -2479,7 +2479,7 @@ fn physical_projection_contracts_are_independently_checked() {
         use hirsel_types::SignatureProvider;
         for (source, names, local) in [
             (
-                "type R{xs:unique List[Bytes]}\nfn probe(take r:R){let built=box r.xs}",
+                "type R{xs:unique List[Bytes]}\nfn probe(take r:R){let built=box copy r.xs}",
                 vec!["R", "probe"],
                 false,
             ),
@@ -2492,7 +2492,7 @@ fn physical_projection_contracts_are_independently_checked() {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             edit(&mut engine, source);
             let output = engine.lower_to_tir(&path("probe")).unwrap();
-            let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
+            let mut signatures = independent_signatures(&mut engine);
             for name in names {
                 signatures.insert(
                     path(name),
@@ -2559,13 +2559,13 @@ fn physical_projection_contracts_are_independently_checked() {
 #[test]
 fn computed_part_shares_cannot_forge_unique_aggregate_receipts() {
     hirsel_intern::jobs::with_compiler_stack(|| {
-        for value in ["box ({r}).xs", "(({r}).xs,1u8)"] {
+        for value in ["box copy ({r}).xs", "(copy ({r}).xs,1u8)"] {
             let source =
                 format!("type R{{xs:unique List[Bytes]}}\nfn probe(take r:R){{let built={value}}}");
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             edit(&mut engine, &source);
             let output = engine.lower_to_tir(&path("probe")).unwrap();
-            let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
+            let mut signatures = independent_signatures(&mut engine);
             for name in ["R", "probe"] {
                 signatures.insert(
                     path(name),

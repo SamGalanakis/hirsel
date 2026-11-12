@@ -342,9 +342,9 @@ fn local_function_receivers_cannot_invent_sendable_content() {
 fn projected_box_payloads_keep_their_instantiated_generic_contract() {
     with_compiler_stack(|| {
         for source in [
-            "type R { xs: unique List[Bytes] }\nfn probe(r: R) { let built = box unique r.xs; let frozen = shared.freeze(take built) }",
-            "type R { xs: unique List[Bytes] }\nfn probe(take r: R in r) { let built = box unique ({r}).xs; let frozen = shared.freeze(take built) }",
-            "type R { part: Shared[Bytes] }\nfn probe(take r: R in r) { let built = box ({r}).part; let frozen = shared.freeze(take built) }",
+            "type R { xs: unique List[Bytes] }\nfn probe(r: R) { let built = box unique copy r.xs; let frozen = shared.freeze(take built) }",
+            "type R { xs: unique List[Bytes] }\nfn probe(take r: R in r) { let built = box unique copy ({r}).xs; let frozen = shared.freeze(take built) }",
+            "type R { part: Shared[Bytes] }\nfn probe(take r: R in r) { let built = box copy ({r}).part; let frozen = shared.freeze(take built) }",
         ] {
             check(source);
         }
@@ -354,8 +354,8 @@ fn projected_box_payloads_keep_their_instantiated_generic_contract() {
 #[test]
 fn freezing_a_projected_box_requires_global_contents_before_uniqueness() {
     with_compiler_stack(|| {
-        let source = "type R { xs: unique List[Bytes] }\nfn probe(take r: R in r) { let built = box ({r}).xs; let frozen = shared.freeze(take built) }";
-        check(&source.replace("box ({r}).xs", "box unique ({r}).xs"));
+        let source = "type R { xs: unique List[Bytes] }\nfn probe(take r: R in r) { let built = box copy ({r}).xs; let frozen = shared.freeze(take built) }";
+        check(&source.replace("box copy ({r}).xs", "box unique copy ({r}).xs"));
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("freeze.hir", source.into()).unwrap();
         let checked = source_check_request(&mut engine, file, &default_context()).unwrap();

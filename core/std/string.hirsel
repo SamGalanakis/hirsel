@@ -89,11 +89,11 @@ pub fn make_ascii_upper(mut s: String)
 /// Empties s; keeps storage. Alloc: nothing. Cost: O(1). Ex: `string.clear(mut line)`
 pub fn clear(mut s: String)
 
-/// The first byte position at or after `from` where pat occurs, or None. An empty pat is
-/// found at `from`. Fails: Bounds (failure) when from > byte_len. Alloc: nothing.
+/// The first byte position at or after `start` where pat occurs, or None. An empty pat is
+/// found at `start`. Fails: Bounds (failure) when start > byte_len. Alloc: nothing.
 /// Cost: O(len x len(pat)) worst case (naive search, as Go for short patterns).
 /// Ex: `let Some(colon) = string.find(line, 0, ":") else { return Error(Malformed) }`
-pub fn find(s: String, from: u64, pat: String) -> Option[u64]
+pub fn find(s: String, start: u64, pat: String) -> Option[u64]
 
 /// Whether s begins with p. Cost: O(len(p)). Ex: `string.starts_with(line, "GET ")`
 pub fn starts_with(s: String, p: String) -> bool

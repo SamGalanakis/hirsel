@@ -128,10 +128,10 @@ There are at most 64 entries in a recency chain linked by handles.
   (eviction). Relinking sets prev and next inside `update`. Replacing a payload lends the staged
   payload to the callback (OWN-21) and swaps it in with
   `replace(mut e.payload, replace(mut staged, string.new()))`.
-- The index is `Map[String, Id[Entry] of .pool]` and head and tail are `Option[Id[Entry] of .pool]`
-  (MEM-18). Entries link with `Handle[Entry]` (MEM-19): `pool.handle` to store, `pool.id` to get the
-  Id back before `update` or `remove`.
-- The saved first handle is a `Handle`; `pool.resolve` returns None after reuse.
+- The index is a `Map[String, pool.Id[Entry]]`; head, tail and each entry's prev and next are
+  `Option[pool.Id[Entry]]`. Ids are plain and checked at run time, so they are stored directly.
+- The saved first Id is probed with `pool.get`, which returns `Error(Removed)` after reuse; the
+  output's StaleHandle comes from that.
 - `map.get`, `map.insert`, `map.remove` (CORE)
 - `string.copy` (CORE) for the key, the payload and the copied hit
 
@@ -207,7 +207,7 @@ bodies for M2.
   `string.compare`, `string.clear`
 - `text.len`, `text.copy_in` (CORE): none of the nine keeps text in a region
 - `map.contains`, `map.set` (P5); `set.contains`, `set.remove`
-- `pool.new`, `pool.get_or`, `pool.contains`, `pool.insert_owned`, `pool.owned_id`
+- `pool.new`, `pool.get_or`, `pool.contains`
 - `file.remove`; `dir.create_dir`, `dir.remove_all` (its use in files is blocked by N3)
 - `args.len`
 - `span.fixed_builder`, `span.indexed_builder`
@@ -222,7 +222,7 @@ Each item is a later addition that changes no seed signature.
 - Sorted maps (`ordered` keys), `map.update` with a callback (needs P5 and a placeholder),
   `map.with_capacity` and `map.clear` (no core primitive, and `replace` of a whole Map through
   `mut` depends on N1), `map.shrink`
-- `pool.clear`, pool iteration
+- `pool.clear`, pool iteration, branded Ids and `SlotOwner` (not in the first version)
 - `string.split_once`, `string.strip_prefix` and `text.as_string` (N2); `string.trim`,
   `string.split` iteration, `string.replace`, case mapping beyond ASCII, float formatting,
   normalisation; `string.scalars` and `positions` cursors (`for` takes only built-in sources)

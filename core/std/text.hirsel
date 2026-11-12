@@ -1,10 +1,14 @@
 // Module `text`: Text, the stable twin of String (SEM-3): valid UTF-8 published in a
-// region, a SeqSpan[u8] (MEM-12). Field legend: API.md, "Reading a contract".
+// region, a SeqSpan[u8] (MEM-12). Field legend: API.md, "Reading a contract". Both
+// operations are core.md's, restated.
 //
 // Representation: a reference to a Text counts 16 bytes (MEM-26); its bytes live in a
 // region block (count, extent, bytes) charged to the limit current where it was placed
 // and freed when the region closes. Text is never frozen and never written (OWN-10,
 // MEM-5); `let` copies the reference. Equality and order are `==` and `<` (bytewise).
+// Left out: a String view of a Text (`as_string`) and `from_utf8_in`. No core operation
+// gives a String view of a Text or of a Bytes view, and a library function cannot make
+// one (OWN-20), so both would copy through a temporary String (N2 in SPEC-GAPS).
 
 /// CORE. Length in bytes. Cost: O(1). Ex: `text.len(t)`
 pub fn len(t: Text) -> u64
@@ -13,19 +17,4 @@ pub fn len(t: Text) -> u64
 /// Fails: Error(c) when the block is refused; nothing published.
 /// Alloc: one region block of the SeqSpan header plus byte_len(s), rounded to 8, at the
 /// current limit; freed when r closes. Cost: O(len). Ex: `let t = text.copy_in(r, s)?`
-/// PROVISIONAL (F07): as span.copy_in.
 pub fn copy_in(r: Region, s: String) -> Result[Text in r, Capacity]
-
-/// Validates b and publishes a copy of it in r.
-/// Fails: Error(Invalid(e)) when b is not UTF-8, nothing allocated; Error(Full(c)) when the
-/// block is refused. Alloc: as copy_in. Cost: O(len).
-/// Ex: `let t = text.from_utf8_in(r, raw)?`
-/// PROVISIONAL (F07): as span.copy_in.
-pub fn from_utf8_in(r: Region, b: Bytes) -> Result[Text in r, TextError]
-
-pub type TextError = Invalid(string.Utf8Error) | Full(Capacity)
-
-/// A String view of t's bytes, so every `string` reading operation accepts a Text.
-/// Needs VIEWRANGE (G1). View: anchored to t's region; Text is never frozen.
-/// Cost: O(1). Ex: `string.starts_with(text.as_string(t), "GET ")`
-pub fn as_string(t: Text) -> View[String] in t

@@ -1,7 +1,7 @@
 // Module `pool`: a generation-checked slot pool, built only from what MEM-19 allows:
 // opaque types, brands (MEM-18), checked 64-bit arithmetic, checked indexing of its own
 // list and its own resource cleanup (MEM-20). Field legend: API.md, "Reading a contract";
-// design: API.md, "Pool".
+// design: API.md, "Pool". Everything here is library code.
 //
 // Representation: `slots` is a List[Slot[T]] (24-byte header; storage capacity x
 // size(Slot[T]) with size(Slot[T]) = 8 + max(8 + size(T), 16)), charged like any list to
@@ -9,30 +9,39 @@
 // so removing never allocates. Each slot's generation starts at 0 and rises by one on
 // every removal; a slot whose generation reaches 2^64 - 1 is retired: never reused,
 // its storage kept until the pool is cleaned. Cleaning the pool cleans each live value
-// in slot order from the highest index down; a pool never runs a value's finalizer
-// early, and `remove` hands the value (a resource included) to the caller.
+// in slot order from the highest index down; `remove` hands the value (a resource
+// included) to the caller.
+//
+// Brands: `Id[T] of p` is checked at compile time against the pool place and at run time
+// by generation. A record stores it as `Id[T] of .pool`, also inside a sibling field's
+// type arguments (`Map[String, Id[Entry] of .pool]`, MEM-18). Links inside the pool's own
+// values are unbranded `Handle`s (MEM-19), turned back into views or Ids by `resolve` and
+// `id`. Outside this module a `mut Pool` cannot be assigned or replaced (MEM-18), so a
+// callee cannot swap the pool under its caller's Ids.
 
 pub opaque type Pool[T] { slots: List[Slot[T]], free: u64, live: u64 }
 type Slot[T] = Occupied(u64, T) | Vacant(u64, u64)        // (generation, value | next free)
 
-/// A branded handle: valid only with the pool it was issued by (MEM-18). Plain, 16 bytes.
-/// Moving, assigning or ending the pool's place ends it. Stored in a sibling field as
-/// `Id[T] of .pool`.
+/// A branded handle: valid only with the pool place it was issued by (MEM-18). Plain,
+/// 16 bytes. Assigning, replacing, moving or ending the pool's place ends it.
 pub opaque type Id[T]: plain + key { index: u64, generation: u64 }
 
-/// An unbranded handle for storage inside the pool's own values (G7): same bits as Id,
-/// usable only after `resolve` checks its generation. Plain + key, 16 bytes.
+/// An unbranded handle, for links inside the pool's own values and for anything kept
+/// beyond the pool place's epoch (MEM-19): same bits as Id, checked by index and
+/// generation at each `resolve` or `id`. Plain + key, 16 bytes.
 pub opaque type Handle[T]: plain + key { index: u64, generation: u64 }
 
-/// The slot the handle names was removed (or retired) since the handle was issued.
-pub type Stale {}
+/// A live slot that its owner removes when cleaned (MEM-20). Its finalizer is
+/// `drop(s, mut p)`: it removes the slot and cleans the value; p must be neither frozen,
+/// lent nor moved wherever a SlotOwner may be cleaned.
+pub resource type SlotOwner[T] of p { id: Id[T] of p }
 
-/// An empty pool with no storage. Ex: `let mut p: Pool[Entry] = pool.new()`
+/// An empty pool with no storage. Ex: `let mut p: pool.Pool[Entry] = pool.new()`
 pub fn new[T]() -> Pool[T]
 
-/// An empty pool with storage for n slots.
+/// An empty pool with storage for n slots: `list.with_capacity` of slots.
 /// Fails: Error(c). Alloc: n x size(Slot[T]) rounded to 8, current limit.
-/// Ex: `let mut p: Pool[Entry] = pool.with_capacity(64)?`
+/// Ex: `let mut p: pool.Pool[Entry] = pool.with_capacity(64)?`
 pub fn with_capacity[T](n: u64) -> Result[Pool[T], Capacity]
 
 /// Number of live values. Cost: O(1). Ex: `pool.len(p)`
@@ -44,10 +53,16 @@ pub fn len[T](p: Pool[T]) -> u64
 /// Ex: `let id = pool.insert(mut l.pool, take entry)?`
 pub fn insert[T](mut p: Pool[T], take x: T) -> Result[Id[T] of p, (Capacity, T)]
 
-/// A view of id's value, or Stale. The result is scoped: it carries the view or Stale.
-/// View: anchored to p; FREEZE p for the result's extent. Cost: O(1).
-/// Ex: `match pool.get(l.pool, id) { Ok(e) => string.byte_len(e.value), Error(_) => 0 }`
-pub fn get[T](p: Pool[T], id: Id[T] of p) -> Result[View[T], Stale] in p
+/// As insert, but the slot is owned: the returned SlotOwner removes it when cleaned.
+/// Fails: as insert. Ex: `let so = pool.insert_owned(mut p, string.from("a")?)?`
+pub fn insert_owned[T](mut p: Pool[T], take x: T) -> Result[SlotOwner[T] of p, (Capacity, T)]
+
+/// The Id a SlotOwner holds. Cost: O(1). Ex: `let id = pool.owned_id(so)`
+pub fn owned_id[T](s: SlotOwner[T] of p) -> Id[T] of p
+
+/// A view of id's value, or None when it is stale. View: anchored to p; FREEZE p.
+/// Cost: O(1). Ex: `match pool.get(l.pool, id) { Some(e) => string.byte_len(e.value), None => 0 }`
+pub fn get[T](p: Pool[T], id: Id[T] of p) -> Option[View[T]] in p
 
 /// id's value copied out, or x when stale. Cost: O(1). Ex: `pool.get_or(b, i, 0)`
 pub fn get_or[T: plain](p: Pool[T], id: Id[T] of p, x: T) -> T
@@ -55,25 +70,31 @@ pub fn get_or[T: plain](p: Pool[T], id: Id[T] of p, x: T) -> T
 /// Whether id is live. Cost: O(1). Ex: `pool.contains(p, id)`
 pub fn contains[T](p: Pool[T], id: Id[T] of p) -> bool
 
-/// Calls f with id's value in place and returns its result, or Error(Stale) without
-/// calling f. f must not reach p (it is lent for the call). A failure in f propagates;
-/// the value keeps whatever f installed. Alloc: nothing. Cost: O(1) plus f.
-/// Ex: `pool.update(mut l.pool, id, fn(mut e: Entry) { e.prev = None })?`
-/// PROVISIONAL (F15): as map.update.
-pub fn update[T, R](mut p: Pool[T], id: Id[T] of p, f: scoped fn(mut T) -> R) -> Result[R, Stale]
+/// Calls f with id's value as an owned local and puts the value back; returns Some of
+/// f's result, or None without calling f when id is stale. Library code: the value is
+/// taken out with `list.set` of a Vacant placeholder and installed again after f, so no
+/// mutable view is needed. f must not reach p (it is lent for the call). If f fails,
+/// the failure propagates and the value is cleaned with the local; the slot is left
+/// vacant and every handle to it is stale. Alloc: nothing. Cost: O(1) plus f.
+/// Ex: `pool.update(mut l.pool, id, fn(mut e: Entry) { e.prev = None })`
+pub fn update[T, R](mut p: Pool[T], id: Id[T] of p, f: scoped fn(mut T) -> R) -> Option[R]
 
 /// Removes id's value and returns it; the slot's generation rises by one, so every
 /// handle to it is stale from now on; at 2^64 - 1 the slot retires instead of joining the
-/// free list. Fails: Error(Stale), p unchanged. Alloc: nothing. Cost: O(1).
-/// Ex: `let old = pool.remove(mut l.pool, tail)?`
-pub fn remove[T](mut p: Pool[T], id: Id[T] of p) -> Result[T, Stale]
+/// free list. None when stale, p unchanged. Alloc: nothing. Cost: O(1).
+/// Ex: `let old = pool.remove(mut l.pool, tail)`
+pub fn remove[T](mut p: Pool[T], id: Id[T] of p) -> Option[T]
 
 /// The unbranded form of id, for storing inside the pool's values. Cost: O(1).
 /// Ex: `let h = pool.handle(l.pool, head)`
 pub fn handle[T](p: Pool[T], id: Id[T] of p) -> Handle[T]
 
-/// Checks h's generation against p and returns the branded Id, or Error(Stale).
-/// A Handle from another pool is caught only when its generation differs; brands are
-/// what keep pools apart, so store Handles only inside the pool that issued them.
-/// Cost: O(1). Ex: `let next = pool.resolve(l.pool, h)?`
-pub fn resolve[T](p: Pool[T], h: Handle[T]) -> Result[Id[T] of p, Stale]
+/// A view of h's value, or None when h is stale (MEM-19's form). A Handle from another
+/// pool is caught only when its index or generation differs; brands keep pools apart,
+/// so store Handles only inside the pool that issued them. View: anchored to p; FREEZE p.
+/// Cost: O(1). Ex: `match e.next { Some(h) => pool.resolve(p, h), None => None }`
+pub fn resolve[T](p: Pool[T], h: Handle[T]) -> Option[View[T]] in p
+
+/// The branded Id for h, or None when h is stale; the form to use before `update` or
+/// `remove`. Cost: O(1). Ex: `let Some(next) = pool.id(l.pool, h) else { return Error(Broken) }`
+pub fn id[T](p: Pool[T], h: Handle[T]) -> Option[Id[T] of p]

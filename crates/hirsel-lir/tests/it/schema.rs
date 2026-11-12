@@ -1734,6 +1734,22 @@ fn every_opcode_is_covered_and_admitted_by_a_stage() {
     // descriptors. Inventory and receipt transport remain unavailable there.
     // Every standalone row still has complete snapshot and opcode coverage.
     for instruction in [
+        Inst::Charge {
+            energy: Energy::Iteration,
+            failure: FailureId(0),
+        },
+        Inst::Charge {
+            energy: Energy::Entry,
+            failure: FailureId(0),
+        },
+        Inst::Charge {
+            energy: Energy::Span {
+                from: ValueId(0),
+                to: ValueId(1),
+                inclusive: true,
+            },
+            failure: FailureId(0),
+        },
         Inst::SealArena {
             result: ValueId(0),
             grant: ValueId(1),
@@ -1771,7 +1787,8 @@ fn every_opcode_is_covered_and_admitted_by_a_stage() {
             StageKind::Ready.admits(opcode),
             matches!(
                 opcode,
-                Opcode::SealArena
+                Opcode::Charge
+                    | Opcode::SealArena
                     | Opcode::BorrowSealedRoot
                     | Opcode::PayloadReceipt
                     | Opcode::ArenaInventory

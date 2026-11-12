@@ -63,6 +63,7 @@ pub(super) struct Builder<'a, 'b> {
     pub state: State,
     pub bindings: super::bindings::Bindings,
     pub owned: Vec<bool>,
+    entry_owned: BTreeSet<u32>,
     plain_locals: Vec<bool>,
     /// Scope nesting depth of each local; cleanup releases nest by it (DROP-2).
     local_depth: Vec<u32>,
@@ -161,6 +162,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             state: State::default(),
             bindings: Default::default(),
             owned: vec![],
+            entry_owned: BTreeSet::new(),
             plain_locals: vec![],
             local_depth: vec![],
             cleanup_epoch: 0,
@@ -312,11 +314,14 @@ impl<'a, 'b> Builder<'a, 'b> {
         });
         let entry = self.body.entry.0 as usize;
         if calls && entry < self.body.blocks.len() {
+            // The first instruction may already have consumed an entry owner.
+            let entry_owned = std::mem::take(&mut self.entry_owned);
+            let on_failure = self.cleanup_for(&entry_owned, &[]);
             let block = &mut self.body.blocks[entry];
-            let (span, on_failure) = block
+            let span = block
                 .instructions
                 .first()
-                .map_or((Span::default(), CleanupId(0)), |i| (i.span, i.on_failure));
+                .map_or(Span::default(), |i| i.span);
             block.instructions.insert(
                 0,
                 Instruction {
@@ -517,6 +522,9 @@ impl<'a, 'b> Builder<'a, 'b> {
     }
     pub fn slot(&mut self, ty: TypeId, storage: Storage, span: Span, owned: bool) -> PlaceId {
         let root = LocalId(self.body.locals.len() as u32);
+        if owned && matches!(storage, Storage::Parameter | Storage::Capture) {
+            self.entry_owned.insert(root.0);
+        }
         self.body.locals.push(Local {
             ty,
             storage,

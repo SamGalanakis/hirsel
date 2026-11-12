@@ -99,7 +99,7 @@ impl<'a> FrozenProvider<'a> {
             .view(d)?
             .map(|input| input.digest());
         self.reads.record(
-            ReadKey::ValidationView(d),
+            ReadKey::ValidationView(PackageKey::of(&self.owner), d),
             digest.map_or_else(ContentHash::default, |digest| digest.0),
         );
         Ok(digest)
@@ -118,13 +118,17 @@ impl<'a> FrozenProvider<'a> {
     /// The owner universe's V errors, recording `UniverseErrors`.
     pub fn universe_errors(&mut self) -> Result<ContentHash, QueryError> {
         let (digest, _) = self.snapshot.validation(&self.owner)?.universe_errors();
-        self.reads.record(ReadKey::UniverseErrors, digest);
+        self.reads
+            .record(ReadKey::UniverseErrors(PackageKey::of(&self.owner)), digest);
         Ok(digest)
     }
     /// The owner's selected heap and checked declaration evidence.
     pub fn heap_role(&mut self) -> Result<hirsel_validate::HeapObservation, QueryError> {
         let heap = self.snapshot.validation(&self.owner)?.heap_observation()?;
-        self.reads.record(ReadKey::HeapRole, heap.fingerprint());
+        self.reads.record(
+            ReadKey::HeapRole(PackageKey::of(&self.owner)),
+            heap.fingerprint(),
+        );
         Ok(heap)
     }
     /// `DeclarationCandidates(d)`, recorded.

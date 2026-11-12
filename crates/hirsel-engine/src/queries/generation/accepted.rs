@@ -391,24 +391,20 @@ impl AcceptedFrontRegistration {
                 ReadKey::ValidationUniverse(package) => {
                     snapshot.validation_input_digest(&package.id()).ok()
                 }
-                ReadKey::ValidationView(id) => Some(
+                ReadKey::ValidationView(package, id) => Some(
                     snapshot
-                        .validation(&definition.0.package)
+                        .validation(&package.id())
                         .ok()?
                         .view(*id)
                         .ok()?
                         .map_or_else(ContentHash::default, |view| view.digest().0),
                 ),
-                ReadKey::UniverseErrors => Some(
+                ReadKey::UniverseErrors(package) => {
+                    Some(snapshot.validation(&package.id()).ok()?.universe_errors().0)
+                }
+                ReadKey::HeapRole(package) => Some(
                     snapshot
-                        .validation(&definition.0.package)
-                        .ok()?
-                        .universe_errors()
-                        .0,
-                ),
-                ReadKey::HeapRole => Some(
-                    snapshot
-                        .validation(&definition.0.package)
+                        .validation(&package.id())
                         .ok()?
                         .heap_observation()
                         .ok()?

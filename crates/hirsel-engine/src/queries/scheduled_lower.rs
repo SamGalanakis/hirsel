@@ -3017,6 +3017,16 @@ impl Source<'_> {
             .borrow_mut()
             .dependency(outcome.executed, outcome.execution.as_ref());
         if let Ok(Value::Lower(lower)) = &outcome.result {
+            // A callee's stored reads may be narrowed to the views V read for
+            // it, but an execution receipt holding its proof binds its
+            // package's whole base universe (`Evidence::finish`), so the
+            // consumer reads that guard.
+            if lower.acceptance.is_some() {
+                let guard = owner
+                    .validation_reads(&path.0.package, &self.reads)
+                    .map_err(|reference| self.refused(reference))?;
+                self.merge(&guard.finish().map_err(|_| QueryError::NotImplemented)?);
+            }
             self.evidence
                 .borrow_mut()
                 .accepted(lower.acceptance.clone());

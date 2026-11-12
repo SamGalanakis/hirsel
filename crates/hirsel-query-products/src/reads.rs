@@ -148,12 +148,14 @@ pub enum ReadKey {
     /// H(count, then (file path, header hash) per candidate in source order);
     /// read by every query keyed on the definition.
     DeclarationCandidates(DefId),
-    /// V's digest of a view.
-    ValidationView(DefId),
-    /// The aggregate digest of the signature universe's V errors.
-    UniverseErrors,
-    /// The selected selected heap role.
-    HeapRole,
+    /// V's digest of a definition's view in the named package's base V
+    /// universe. The universe's package is explicit, as for
+    /// `ValidationUniverse`, because execution-read unions cross packages.
+    ValidationView(PackageKey, DefId),
+    /// The aggregate digest of the named package's V universe errors.
+    UniverseErrors(PackageKey),
+    /// The heap role selected in the named package's V universe.
+    HeapRole(PackageKey),
     /// The query environment's hash.
     Environment,
     /// All V input views in the originating package's private universe.
@@ -240,9 +242,9 @@ impl ReadKey {
             ReadKey::ExecutedSignature(_) => ReadKind::ExecutedSignature,
             ReadKey::CitedText(_) => ReadKind::CitedText,
             ReadKey::DeclarationCandidates(_) => ReadKind::DeclarationCandidates,
-            ReadKey::ValidationView(_) => ReadKind::ValidationView,
-            ReadKey::UniverseErrors => ReadKind::UniverseErrors,
-            ReadKey::HeapRole => ReadKind::HeapRole,
+            ReadKey::ValidationView(..) => ReadKind::ValidationView,
+            ReadKey::UniverseErrors(_) => ReadKind::UniverseErrors,
+            ReadKey::HeapRole(_) => ReadKind::HeapRole,
             ReadKey::Environment => ReadKind::Environment,
             ReadKey::ValidationUniverse(_) => ReadKind::ValidationUniverse,
         }
@@ -259,7 +261,7 @@ impl ReadKey {
             | ReadKey::ExecutedSignature(d)
             | ReadKey::CitedText(d)
             | ReadKey::DeclarationCandidates(d)
-            | ReadKey::ValidationView(d) => Some(d),
+            | ReadKey::ValidationView(_, d) => Some(d),
             _ => None,
         }
     }
@@ -286,8 +288,10 @@ impl ReadKey {
             | Self::LayoutBody(d)
             | Self::ExecutedSignature(d)
             | Self::CitedText(d)
-            | Self::DeclarationCandidates(d)
-            | Self::ValidationView(d) => encoded_def_path_bytes(d.path())?,
+            | Self::DeclarationCandidates(d) => encoded_def_path_bytes(d.path())?,
+            Self::ValidationView(p, d) => {
+                text(p.0.as_str())?.checked_add(encoded_def_path_bytes(d.path())?)?
+            }
             Self::Lookup(l) => {
                 let mut bytes = 2usize
                     .checked_add(text(l.package.0.as_str())?)?
@@ -299,8 +303,10 @@ impl ReadKey {
                 bytes
             }
             Self::NameSet(p, m) => text(p.0.as_str())?.checked_add(text(m.0.as_str())?)?,
-            Self::ValidationUniverse(p) => text(p.0.as_str())?,
-            Self::UniverseErrors | Self::HeapRole | Self::Environment => 0,
+            Self::ValidationUniverse(p) | Self::UniverseErrors(p) | Self::HeapRole(p) => {
+                text(p.0.as_str())?
+            }
+            Self::Environment => 0,
         };
         payload.checked_add(1)
     }
@@ -323,8 +329,11 @@ impl ReadKey {
             | ReadKey::LayoutBody(d)
             | ReadKey::ExecutedSignature(d)
             | ReadKey::CitedText(d)
-            | ReadKey::DeclarationCandidates(d)
-            | ReadKey::ValidationView(d) => path(out, d),
+            | ReadKey::DeclarationCandidates(d) => path(out, d),
+            ReadKey::ValidationView(package, d) => {
+                text(out, package.0.as_str());
+                path(out, d);
+            }
             ReadKey::Lookup(l) => {
                 out.push(l.source as u8);
                 text(out, l.package.0.as_str());
@@ -342,8 +351,10 @@ impl ReadKey {
                 text(out, p.0.as_str());
                 text(out, m.0.as_str());
             }
-            ReadKey::ValidationUniverse(package) => text(out, package.0.as_str()),
-            ReadKey::UniverseErrors | ReadKey::HeapRole | ReadKey::Environment => {}
+            ReadKey::ValidationUniverse(package)
+            | ReadKey::UniverseErrors(package)
+            | ReadKey::HeapRole(package) => text(out, package.0.as_str()),
+            ReadKey::Environment => {}
         }
     }
 }
@@ -526,9 +537,9 @@ impl Reads {
     }
     /// The canonical persisted encoding.
     pub fn encode(&self, out: &mut Vec<u8>) {
-        // HRD4 is canonical rows only; earlier framings carried an
-        // observation permutation and are rejected.
-        out.extend(b"HRD4");
+        // HRD5 is canonical rows only, with V's universe reads naming their
+        // package; earlier framings are rejected.
+        out.extend(b"HRD5");
         out.extend((self.len() as u32).to_le_bytes());
         for (key, value) in self.iter() {
             key.encode(out);
@@ -549,13 +560,13 @@ impl Reads {
             .checked_mul(4)?
             .checked_add(size_of::<Vec<u8>>() as u64)
     }
-    /// Visit HRD4's canonical rows with the same framing and row-order
+    /// Visit HRD5's canonical rows with the same framing and row-order
     /// checks as decode.
     pub fn visit_encoded(
         mut input: &[u8],
         mut visit: impl FnMut(usize, (ReadKey, ContentHash)) -> Option<()>,
     ) -> Option<usize> {
-        if take(&mut input, 4)? != b"HRD4" {
+        if take(&mut input, 4)? != b"HRD5" {
             return None;
         }
         let count = take_u32(&mut input)? as usize;
@@ -575,7 +586,7 @@ impl Reads {
         input.is_empty().then_some(count)
     }
     pub fn decode(input: &mut &[u8]) -> Option<Reads> {
-        if take(input, 4)? != b"HRD4" {
+        if take(input, 4)? != b"HRD5" {
             return None;
         }
         let count = take_u32(input)? as usize;
@@ -602,7 +613,7 @@ impl Reads {
             key.encode(&mut bytes);
             bytes.extend(value.0);
         }
-        ContentHash::of_parts("hirsel.reads.v2", [bytes.as_slice()])
+        ContentHash::of_parts("hirsel.reads.v3", [bytes.as_slice()])
     }
 }
 
@@ -793,7 +804,10 @@ fn decode_key(input: &mut &[u8]) -> Option<ReadKey> {
         ReadKind::ExecutedSignature => ReadKey::ExecutedSignature(take_def(input)?),
         ReadKind::CitedText => ReadKey::CitedText(take_def(input)?),
         ReadKind::DeclarationCandidates => ReadKey::DeclarationCandidates(take_def(input)?),
-        ReadKind::ValidationView => ReadKey::ValidationView(take_def(input)?),
+        ReadKind::ValidationView => {
+            let package = PackageKey(Symbol::intern(take_text(input)?));
+            ReadKey::ValidationView(package, take_def(input)?)
+        }
         ReadKind::Lookup => {
             let source = match *take(input, 1)?.first()? {
                 0 => LookupSource::Provider,
@@ -822,8 +836,10 @@ fn decode_key(input: &mut &[u8]) -> Option<ReadKey> {
             PackageKey(Symbol::intern(take_text(input)?)),
             ModuleKey(Symbol::intern(take_text(input)?)),
         ),
-        ReadKind::UniverseErrors => ReadKey::UniverseErrors,
-        ReadKind::HeapRole => ReadKey::HeapRole,
+        ReadKind::UniverseErrors => {
+            ReadKey::UniverseErrors(PackageKey(Symbol::intern(take_text(input)?)))
+        }
+        ReadKind::HeapRole => ReadKey::HeapRole(PackageKey(Symbol::intern(take_text(input)?))),
         ReadKind::Environment => ReadKey::Environment,
         ReadKind::ValidationUniverse => {
             ReadKey::ValidationUniverse(PackageKey(Symbol::intern(take_text(input)?)))
@@ -882,7 +898,7 @@ mod tests {
         }
         assert_eq!(
             one.digest(),
-            ContentHash::of_parts("hirsel.reads.v2", [canonical_encoding.as_slice()])
+            ContentHash::of_parts("hirsel.reads.v3", [canonical_encoding.as_slice()])
         );
         let mut visited = Vec::new();
         assert_eq!(
@@ -976,9 +992,9 @@ mod tests {
             ReadKey::ExecutedSignature(a),
             ReadKey::CitedText(b),
             ReadKey::DeclarationCandidates(b),
-            ReadKey::ValidationView(a),
-            ReadKey::UniverseErrors,
-            ReadKey::HeapRole,
+            ReadKey::ValidationView(package, a),
+            ReadKey::UniverseErrors(package),
+            ReadKey::HeapRole(package),
             ReadKey::Environment,
             ReadKey::ValidationUniverse(package),
         ];
@@ -1172,7 +1188,10 @@ mod tests {
                 h("4"),
             ),
             (ReadKey::Environment, h("5")),
-            (ReadKey::UniverseErrors, h("6")),
+            (
+                ReadKey::UniverseErrors(PackageKey::of(&context.package)),
+                h("6"),
+            ),
             (
                 ReadKey::ValidationUniverse(PackageKey::of(&context.package)),
                 h("7"),
@@ -1222,9 +1241,9 @@ mod tests {
         assert_eq!(reads.len(), 2);
         let mut bytes = vec![];
         reads.encode(&mut bytes);
-        assert_eq!(&bytes[..4], b"HRD4");
+        assert_eq!(&bytes[..4], b"HRD5");
         assert_eq!(Reads::decode(&mut bytes.as_slice()), Some(reads.clone()));
-        for old_magic in [b"HRD2", b"HRD3"] {
+        for old_magic in [b"HRD2", b"HRD3", b"HRD4"] {
             let mut old = bytes.clone();
             old[..4].copy_from_slice(old_magic);
             assert!(Reads::decode(&mut old.as_slice()).is_none());
@@ -1232,11 +1251,14 @@ mod tests {
         let mut truncated = bytes.clone();
         truncated.pop();
         assert!(Reads::decode(&mut truncated.as_slice()).is_none());
-        let mut noncanonical = b"HRD4".to_vec();
+        let mut noncanonical = b"HRD5".to_vec();
         noncanonical.extend(2u32.to_le_bytes());
         for (key, value) in [
             (ReadKey::Environment, h("environment")),
-            (ReadKey::UniverseErrors, h("errors")),
+            (
+                ReadKey::UniverseErrors(PackageKey::of(&context.package)),
+                h("errors"),
+            ),
         ] {
             key.encode(&mut noncanonical);
             noncanonical.extend(value.0);
@@ -1305,11 +1327,11 @@ mod admission_tests {
             ReadKey::ExecutedSignature(id),
             ReadKey::CitedText(id),
             ReadKey::DeclarationCandidates(id),
-            ReadKey::ValidationView(id),
+            ReadKey::ValidationView(package, id),
             ReadKey::NameSet(package, ModuleKey::of(&ctx.modules)),
             ReadKey::ValidationUniverse(package),
-            ReadKey::UniverseErrors,
-            ReadKey::HeapRole,
+            ReadKey::UniverseErrors(package),
+            ReadKey::HeapRole(package),
             ReadKey::Environment,
         ];
         for source in [
@@ -1362,7 +1384,7 @@ impl hirsel_product_codec::decode_schema::Walk for Reads {
         scan.add(n.checked_mul(2)?)?;
         let bytes = scan.take(n)?;
         let mut rows = Scan::raw_reads(bytes);
-        if rows.take(4)? != b"HRD4" {
+        if rows.take(4)? != b"HRD5" {
             return None;
         }
         let count = rows.word()? as usize;
@@ -1390,8 +1412,14 @@ impl hirsel_product_codec::decode_schema::Walk for Reads {
                     text(&mut rows)?;
                     text(&mut rows)?;
                 }
-                ReadKind::ValidationUniverse => text(&mut rows)?,
-                ReadKind::UniverseErrors | ReadKind::HeapRole | ReadKind::Environment => (),
+                ReadKind::ValidationUniverse | ReadKind::UniverseErrors | ReadKind::HeapRole => {
+                    text(&mut rows)?
+                }
+                ReadKind::ValidationView => {
+                    text(&mut rows)?;
+                    path(&mut rows)?;
+                }
+                ReadKind::Environment => (),
                 ReadKind::Signature
                 | ReadKind::FailedSignature
                 | ReadKind::Representation
@@ -1399,7 +1427,6 @@ impl hirsel_product_codec::decode_schema::Walk for Reads {
                 | ReadKind::ExecutedSignature
                 | ReadKind::CitedText
                 | ReadKind::DeclarationCandidates
-                | ReadKind::ValidationView
                 | ReadKind::LayoutBody
                 | ReadKind::DeclaredSignature => path(&mut rows)?,
             }

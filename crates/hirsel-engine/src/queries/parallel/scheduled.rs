@@ -1273,10 +1273,10 @@ impl FrontBodyQueries {
                 .unwrap_or_else(memos::no_candidates),
             ReadKey::Environment => self.environment,
             // A refused V universe observes nothing: the read does not hold.
-            ReadKey::ValidationView(id) => self
+            ReadKey::ValidationView(package, id) => self
                 .namespace
                 .snapshot
-                .validation(package)
+                .validation(&package.id())
                 .ok()?
                 .view(id)
                 .ok()?
@@ -1286,18 +1286,18 @@ impl FrontBodyQueries {
                 .snapshot
                 .validation_input_digest(&package.id())
                 .ok()?,
-            ReadKey::UniverseErrors => {
+            ReadKey::UniverseErrors(package) => {
                 self.namespace
                     .snapshot
-                    .validation(package)
+                    .validation(&package.id())
                     .ok()?
                     .universe_errors()
                     .0
             }
-            ReadKey::HeapRole => self
+            ReadKey::HeapRole(package) => self
                 .namespace
                 .snapshot
-                .validation(package)
+                .validation(&package.id())
                 .ok()?
                 .heap_observation()
                 .ok()?

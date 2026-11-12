@@ -371,10 +371,10 @@ impl Worker<'_> {
                     for &(key, value) in task.registration.iter().flat_map(|r| r.reads.iter()) {
                         if !matches!(
                             key,
-                            ReadKey::ValidationView(_)
+                            ReadKey::ValidationView(..)
                                 | ReadKey::ValidationUniverse(_)
-                                | ReadKey::UniverseErrors
-                                | ReadKey::HeapRole
+                                | ReadKey::UniverseErrors(_)
+                                | ReadKey::HeapRole(_)
                         ) {
                             observed.merged.record(key, value);
                         }

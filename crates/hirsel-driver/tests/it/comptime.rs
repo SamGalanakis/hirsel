@@ -1691,9 +1691,9 @@ fn frozen_lowering_frontier_keeps_lower_warnings_and_current_hit_metadata() {
                     for (key, value) in scalar_reads.iter() {
                         if matches!(
                             key,
-                            hirsel_query_products::reads::ReadKey::ValidationView(_)
-                                | hirsel_query_products::reads::ReadKey::UniverseErrors
-                                | hirsel_query_products::reads::ReadKey::HeapRole
+                            hirsel_query_products::reads::ReadKey::ValidationView(..)
+                                | hirsel_query_products::reads::ReadKey::UniverseErrors(_)
+                                | hirsel_query_products::reads::ReadKey::HeapRole(_)
                         ) {
                             continue;
                         }

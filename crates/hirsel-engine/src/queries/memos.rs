@@ -572,9 +572,9 @@ impl QueryEngine {
             ReadKey::DeclarationCandidates(d) => self.candidates_value(d.path()),
             ReadKey::Environment => self.environment_value(),
             // A refused V universe observes nothing: the read does not hold.
-            ReadKey::ValidationView(d) => self
+            ReadKey::ValidationView(package, d) => self
                 .signature_snapshot()
-                .validation(&owner.0.package)
+                .validation(&package.id())
                 .ok()?
                 .view(d)
                 .ok()?
@@ -583,16 +583,16 @@ impl QueryEngine {
                 .signature_snapshot()
                 .validation_input_digest(&package.id())
                 .ok()?,
-            ReadKey::UniverseErrors => {
+            ReadKey::UniverseErrors(package) => {
                 self.signature_snapshot()
-                    .validation(&owner.0.package)
+                    .validation(&package.id())
                     .ok()?
                     .universe_errors()
                     .0
             }
-            ReadKey::HeapRole => self
+            ReadKey::HeapRole(package) => self
                 .signature_snapshot()
-                .validation(&owner.0.package)
+                .validation(&package.id())
                 .ok()?
                 .heap_observation()
                 .ok()?

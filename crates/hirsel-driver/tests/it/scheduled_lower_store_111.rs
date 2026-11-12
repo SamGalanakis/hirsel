@@ -767,3 +767,149 @@ fn warm_lower_reruns_a_body_that_reaches_an_opaque_type_only_through_the_checker
         }
     });
 }
+
+/// What one lowering of the `client` entry `main`, which executes the
+/// `library` dependency's `lib.width` at compile time, did: its encoded
+/// answer and verdict, and how often `main` and `lib.width` were lowered
+/// (zero for a body restored from the store).
+#[derive(Debug, PartialEq)]
+struct Lowered {
+    answer: (Vec<u8>, bool),
+    main_lowerings: u64,
+    width_lowerings: u64,
+}
+
+/// Lowers `client`'s entry `main` = `comptime lib.width()` on a fresh
+/// compiler over `store`. `lib.width` names the `library` package's
+/// unexposed `internal.Plan`, whose source is `internal`.
+fn lower_client(directory: &std::path::Path, internal: &str, store: &Arc<MemStore>) -> Lowered {
+    std::fs::write(directory.join("library.json"), r#"{"schema":1,"package":{"name":"library","version":"1"},"sources":[{"path":"api.hir","module":["lib"]},{"path":"internal.hir","module":["internal"]}],"dependencies":[]}"#).unwrap();
+    std::fs::write(
+        directory.join("api.hir"),
+        "pub fn width() -> u32 uses {} {\n  let plans: List[internal.Plan] = []\n  7u32\n}\n",
+    )
+    .unwrap();
+    std::fs::write(directory.join("internal.hir"), internal).unwrap();
+    let manifest = directory.join("client.json");
+    std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"client","version":"1"},"sources":[{"path":"client.hir","module":[]}],"dependencies":[{"manifest":"library.json","package":{"name":"library","version":"1"},"expose":[{"head":"lib","module":["lib"]}]}],"entry":{"module":[],"name":"main"}}"#).unwrap();
+    std::fs::write(
+        directory.join("client.hir"),
+        "pub fn main()->u32{comptime lib.width()}\n",
+    )
+    .unwrap();
+    let mut program = COMPILER
+        .with_config(CompileConfig {
+            store: store.clone(),
+            verify: Verify::On,
+            jobs: hirsel_intern::jobs::Jobs::ONE,
+            ..Default::default()
+        })
+        .with_owned_engines()
+        .load_program(&manifest)
+        .unwrap();
+    let main = program.entry.clone();
+    let width = program
+        .engine
+        .front_source_roots()
+        .into_iter()
+        .find(|path| path.0.name == "width")
+        .unwrap();
+    let definitions = [main.clone(), width.clone()];
+    let errors = crate::scheduled_front::errors();
+    let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
+    let mut runtime = AdmittedRuntime::new(
+        hirsel_intern::jobs::Jobs::ONE,
+        budget.reserve(512 << 20).unwrap(),
+        errors,
+    )
+    .unwrap();
+    let weight = MemoryWeight {
+        retained: 2 << 20,
+        scratch: 8 << 20,
+        stack: 0,
+    };
+    let front = program
+        .engine
+        .front_body_queries(&definitions, weight, &budget, errors)
+        .unwrap();
+    let lower = program
+        .engine
+        .front_lower_queries(&definitions, front.clone(), weight, 64, &budget, errors)
+        .unwrap();
+    runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
+    runtime
+        .register_local(FRONT_LOWER_KIND, lower.factory())
+        .unwrap();
+    runtime
+        .register_local(FRONT_EVALUATE_KIND, lower.factory())
+        .unwrap();
+    let records = NativeRecords::new(program.engine.types().clone(), store.clone());
+    let request = runtime.request(&[lower.query(&main).unwrap()]);
+    let products = runtime
+        .wait(request)
+        .unwrap_or_else(|error| panic!("main refused: {:?}", lower.failure(error)));
+    let actual = lower.outcome(products[0].clone()).unwrap();
+    drop(products);
+    let lowered = Lowered {
+        answer: (
+            records
+                .encode(&program.engine, &actual.output.value)
+                .unwrap(),
+            actual.verified.is_some(),
+        ),
+        main_lowerings: lower.work(&main).lowerings,
+        width_lowerings: lower.work(&width).lowerings,
+    };
+    runtime.shutdown();
+    lowered
+}
+
+const PLAN: &str =
+    "pub opaque type Plan: copyable + inert + noalloc_drop uses {} {\n  tokens: List[String],\n}\n";
+
+/// A dependency body's narrowed V reads keep their package when a consumer
+/// that executes it merges them (argvplan's `plan_json` executing std bodies
+/// that view the unexposed `std/internal/substring.Plan`, the manifest gate's
+/// refusal): they are observed in the dependency's universe, which admits
+/// `internal.Plan`, not in the client's, which does not. So a second lowering
+/// on unchanged sources restores the first: nothing is lowered again.
+#[test]
+fn a_comptime_call_into_a_dependency_reruns_nothing_on_unchanged_sources() {
+    with_compiler_stack(|| {
+        let scratch = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemStore::default());
+        let cold = lower_client(scratch.path(), PLAN, &store);
+        assert!(cold.answer.1, "main is verified");
+        assert_eq!((cold.main_lowerings, cold.width_lowerings), (1, 1));
+        let warm = lower_client(scratch.path(), PLAN, &store);
+        assert_eq!(
+            warm,
+            Lowered {
+                main_lowerings: 0,
+                width_lowerings: 0,
+                ..cold
+            }
+        );
+    });
+}
+
+/// A private edit to `internal.Plan` moves the library's V view of it, which
+/// `lib.width` read and `main` merged by executing it, though the client's
+/// universe has no such view. So both are lowered again and `main` answers as
+/// a fresh store does.
+#[test]
+fn a_private_dependency_edit_reruns_the_comptime_call_that_merged_its_reads() {
+    with_compiler_stack(|| {
+        let scratch = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemStore::default());
+        lower_client(scratch.path(), PLAN, &store);
+        let grown = PLAN.replace(
+            "tokens: List[String],",
+            "tokens: List[String],\n  depth: u8,",
+        );
+        let fresh = tempfile::tempdir().unwrap();
+        let oracle = lower_client(fresh.path(), &grown, &Arc::new(MemStore::default()));
+        assert_eq!((oracle.main_lowerings, oracle.width_lowerings), (1, 1));
+        assert_eq!(lower_client(scratch.path(), &grown, &store), oracle);
+    });
+}

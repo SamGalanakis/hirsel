@@ -220,7 +220,11 @@ mod tests {
             let errors = hirsel_syntax::ContentHash([2; 32]);
             if reverse {
                 reads.record(
-                    hirsel_query_products::reads::ReadKey::UniverseErrors,
+                    hirsel_query_products::reads::ReadKey::UniverseErrors(
+                        hirsel_query_products::reads::PackageKey(hirsel_intern::Symbol::intern(
+                            "p@1",
+                        )),
+                    ),
                     errors,
                 );
                 reads.record(
@@ -233,7 +237,11 @@ mod tests {
                     environment,
                 );
                 reads.record(
-                    hirsel_query_products::reads::ReadKey::UniverseErrors,
+                    hirsel_query_products::reads::ReadKey::UniverseErrors(
+                        hirsel_query_products::reads::PackageKey(hirsel_intern::Symbol::intern(
+                            "p@1",
+                        )),
+                    ),
                     errors,
                 );
             }

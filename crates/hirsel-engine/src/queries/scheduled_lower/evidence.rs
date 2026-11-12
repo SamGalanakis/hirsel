@@ -21,11 +21,12 @@ pub(in crate::queries) fn persisted_reads(
 /// own artifact (`reads` of its `VerifiedDefinition`), in place of the owner's
 /// package-wide universe digest.
 ///
-/// V validated the body against the owner package's base universe, which is
-/// also the universe the engine's contextual `ValidationView`, `HeapRole` and
-/// `UniverseErrors` observations read, so each `VRead` is the same observation
-/// as the engine read it becomes: a view digest, the heap-role fingerprint and
-/// the universe-errors digest. Executed bodies keep their universe contexts,
+/// V validated the body against the owner package's base universe, and each
+/// `VRead` becomes the engine read of that same universe, naming the owner
+/// package: a view digest, the heap-role fingerprint and the universe-errors
+/// digest. The package is explicit, so the reads keep their meaning when a
+/// consumer in another package merges them (execution-read unions, generator
+/// acceptance). Executed bodies keep their universe contexts,
 /// which V's receipt replay re-observes through each artifact's own (possibly
 /// private-overlay) universe. Producer reads (front, layouts, registrations,
 /// selections, executed bodies) are untouched.
@@ -40,9 +41,8 @@ pub(in crate::queries) fn narrowed_reads(
     owner: &hirsel_syntax::DefPath,
     validation: &[hirsel_validate::VRead],
 ) -> Option<Reads> {
-    let guard = ReadKey::ValidationUniverse(hirsel_query_products::reads::PackageKey::of(
-        &owner.0.package,
-    ));
+    let package = hirsel_query_products::reads::PackageKey::of(&owner.0.package);
+    let guard = ReadKey::ValidationUniverse(package);
     let mut narrowed = hirsel_query_products::reads::ReadsBuilder::new();
     for (key, value) in reads.iter() {
         match key {
@@ -53,12 +53,16 @@ pub(in crate::queries) fn narrowed_reads(
     }
     for read in validation {
         let (key, value) = match read {
-            hirsel_validate::VRead::View(d, digest) => (ReadKey::ValidationView(*d), digest.0),
+            hirsel_validate::VRead::View(d, digest) => {
+                (ReadKey::ValidationView(package, *d), digest.0)
+            }
             hirsel_validate::VRead::Missing(_) => return None,
             hirsel_validate::VRead::HeapRole(observation) => {
-                (ReadKey::HeapRole, observation.fingerprint())
+                (ReadKey::HeapRole(package), observation.fingerprint())
             }
-            hirsel_validate::VRead::UniverseErrors(digest) => (ReadKey::UniverseErrors, *digest),
+            hirsel_validate::VRead::UniverseErrors(digest) => {
+                (ReadKey::UniverseErrors(package), *digest)
+            }
         };
         narrowed.record(key, value);
     }
@@ -78,9 +82,9 @@ pub(in crate::queries) fn completion_context(
     for (key, value) in reads.iter() {
         if matches!(
             key,
-            ReadKey::ValidationView(_)
-                | ReadKey::HeapRole
-                | ReadKey::UniverseErrors
+            ReadKey::ValidationView(..)
+                | ReadKey::HeapRole(_)
+                | ReadKey::UniverseErrors(_)
                 | ReadKey::ValidationUniverse(_)
         ) {
             key.encode(&mut bytes);

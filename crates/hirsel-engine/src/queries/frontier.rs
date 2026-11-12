@@ -152,12 +152,14 @@ impl QueryEngine {
         let mut changes = changes.clone();
         // Body-only changes deliberately do not touch broad V inputs.
         // Header/candidate/signature changes can affect every overlay's
-        // verdict, even when the base universe remains error-free.
-        for read in changes.reads.clone() {
-            if let ReadKey::Signature(definition) | ReadKey::FailedSignature(definition) = read {
-                changes.read(ReadKey::ValidationView(definition));
-                changes.validation_contexts = true;
-            }
+        // verdict, even when the base universe remains error-free. A changed
+        // signature's views are stale in every universe (`Changes::stales`).
+        if changes
+            .reads
+            .iter()
+            .any(|read| matches!(read, ReadKey::Signature(_) | ReadKey::FailedSignature(_)))
+        {
+            changes.validation_contexts = true;
         }
         self.revision = self.revision.next();
         let stale = self.stale_memos(&changes);

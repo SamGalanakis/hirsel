@@ -112,7 +112,9 @@ impl Changes {
     pub fn text(&mut self, def: DefId) {
         self.texts.insert(def);
     }
-    /// Whether the memo `key` with `reads` observed a change.
+    /// Whether the memo `key` with `reads` observed a change. A changed or
+    /// failed signature stales V's view of that definition in every package's
+    /// universe.
     pub fn stales(&self, key: &MemoKey, reads: &Reads) -> bool {
         self.texts.contains(&key.def)
             || reads.iter().any(|(read, value)| {
@@ -122,9 +124,12 @@ impl Changes {
                         && matches!(
                             read,
                             ReadKey::ValidationUniverse(_)
-                                | ReadKey::UniverseErrors
-                                | ReadKey::HeapRole
+                                | ReadKey::UniverseErrors(_)
+                                | ReadKey::HeapRole(_)
                         ))
+                    || matches!(read, ReadKey::ValidationView(_, d)
+                        if self.reads.contains(&ReadKey::Signature(*d))
+                            || self.reads.contains(&ReadKey::FailedSignature(*d)))
             })
     }
 }

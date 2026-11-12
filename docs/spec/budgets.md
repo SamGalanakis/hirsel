@@ -68,7 +68,7 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 
 | allocation | charge |
 |---|---|
-| own record or variant block | the sum of its field sizes, variants at their largest payload, rounded up to 8 |
+| `Box[T]` node | the payload's size, rounded up to 8 |
 | `List[T]`, `Bytes`, `String` storage | capacity × element size, rounded up to 8 |
 | `Map[K, V]` storage | capacity × (key size + value size + 16), rounded up to 8 |
 | counted node | payload size + 8 |

@@ -51,7 +51,7 @@ Every type has exactly one kind:
 | kind | members | `let` | cleanup |
 |---|---|---|---|
 | plain | OWN-2 | copies | none |
-| own | `type` with a non-plain field; `List`, `String`, `Map`, `Bytes` | moves | drops fields in reverse declaration order |
+| own | `type` with a non-plain field; `Box`, `List`, `String`, `Map`, `Bytes` | moves | drops fields in reverse declaration order |
 | stable | `stable type`; `Text`, the spans | copies | freed with its region |
 | resource | `resource type`; capabilities that hold state; task handles | moves | finalizer, then fields |
 | counted | `Rc[T]`, `Arc[T]` | moves | release ([MEM-16](memory.md#mem-16-counting)) |
@@ -452,8 +452,8 @@ column names the one owner of every surviving value after a failure
 
 | row | operation | success | failure | owner after failure |
 |---|---|---|---|---|
-| T1.1 | `T(a: take a, b: e)` own | fields evaluated left to right into temporaries; admission (commit); value L | `e` fails | temporaries dropped in reverse by statement cleanup; prop |
-| T1.2 | same | | admission: `Capacity` | as T1.1; the error is bare `Capacity` |
+| T1.1 | `T(a: take a, b: e)` | fields evaluated left to right into temporaries; value L, stored inline | `e` fails | temporaries dropped in reverse by statement cleanup; prop |
+| T1.2 | `T(..) in r`, `box.new(take x)` | as T1.1, then admission (commit) | admission: `Capacity` | as T1.1, and the error is bare `Capacity`; `box.new`: the error owns `x` |
 | T1.3 | `rc.new(take x)` | node L, count 1; `chg(node)`; `ref` of `x`'s top block | `Capacity` | the error owns `x` |
 | T1.4 | `arc.new(take x)` | as T1.3; a recorded event ([CONC-10](tasks.md#conc-10-event-order)) | `Capacity`, recorded | the error owns `x` |
 | T1.5 | `clone(x)`, `clone_in(r, x)` | copy L; `chg` per own node; `share` per counted edge | `Capacity` at node k | copied nodes dropped and shares released in reverse, each refunded; `x` untouched |

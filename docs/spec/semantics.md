@@ -13,9 +13,9 @@ dividend's sign; division or remainder by zero fails with `Division`, and `MIN /
 with `Overflow`. A shift count has the left operand's type; a count that is negative or at
 least the width fails with `Overflow`; `<<` discards high bits, `>>` sign-extends signed
 and zero-extends unsigned values. Operands of a binary operator have one type; there are no
-mixed-width operators. Conversions are named: `as_u64` and its siblings widen without loss
-and exist only where every value fits; `int.narrow` fails with `Overflow`; `int.try_narrow`
-returns an `Option`; `int.truncate` keeps the low bits.
+mixed-width operators. Conversions are named and take their target from the expected type: `int.widen` exists
+only where every value fits; `int.narrow` fails with `Overflow`; `int.try_narrow` returns an
+`Option`; `int.truncate` keeps the low bits.
 
 ```hirsel
 fn add(x: u8) -> u8 { int.wrapping_add(x, 100) }

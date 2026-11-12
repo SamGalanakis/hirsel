@@ -30,7 +30,7 @@ raised it:
 `Capacity` outside a finalizer is an error, never a failure.
 
 ```hirsel
-fn mean(xs: List[i64]) -> i64 { list.sum(xs) / list.len(xs) as_i64 }   // Division when xs is empty
+fn mean(xs: List[i64]) -> i64 { list.sum(xs) / int.narrow(list.len(xs)) }   // Division when xs is empty
 ```
 
 ### FAIL-3: Commit points
@@ -50,14 +50,15 @@ fn put(mut q: List[File], take f: File) -> Result[(), (Capacity, File)] {
 ### FAIL-4: Constructor temporaries
 
 A record or variant construction evaluates its field expressions left to right into
-statement temporaries, then admits its block. If a field expression or the admission fails,
+statement temporaries; a placed literal `T(..) in r` and `box.new` then admit their block.
+If a field expression or the admission fails,
 the temporaries are dropped by the statement's cleanup in reverse evaluation order, their
 finalizers included; on admission failure the error is bare `Capacity`
 ([T1.1, T1.2](ownership.md#own-26-the-transition-table)).
 
 ```hirsel
-fn pair(d: Dir) -> Result[Pair, Capacity] {
-  Ok(Pair(a: open_temp(d), b: open_temp(d)))   // on Capacity, a's temporary is dropped once
+fn pair(d: Dir) -> Result[Pair, IoError] {
+  Ok(Pair(a: open_temp(d)?, b: open_temp(d)?))   // if b fails, a's temporary is dropped once
 }
 ```
 

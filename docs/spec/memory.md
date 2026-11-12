@@ -29,13 +29,14 @@ fn leak(src: String) -> Region { region r { r } }          // refused: MEM-7
 
 A stable value has a type written `T in r`, where `r` is a `Region` value in scope or a
 region parameter (MEM-6). It is created only by a builder (MEM-3, MEM-4), a literal placed
-with `in r`, or a function that takes `r` and returns `T in r`. A literal `T(..) in r` of a
-stable type that is not compact evaluates its fields left to right, admits one block in
-`r`, and publishes the value ([T1.1](ownership.md#own-26-the-transition-table)).
+with `in r`, or a function that takes `r` and returns `T in r`. A placed literal `T(..) in r`
+of a stable type that is not compact evaluates its fields left to right, admits one block in
+`r` and publishes the value; its type is `Result[T in r, Capacity]`
+([T1.2](ownership.md#own-26-the-transition-table)).
 
 ```hirsel
 stable type Span2 { start: u64, end: u64 }
-fn mk(r: Region) -> Result[Span2 in r, Capacity] { Ok(Span2(start: 0, end: 1) in r) }
+fn mk(r: Region) -> Result[Span2 in r, Capacity] { Span2(start: 0, end: 1) in r }
 ```
 ```hirsel
 fn mk() -> Span2 { Span2(start: 0, end: 1) }                 // refused: MEM-2, no region
@@ -56,7 +57,7 @@ builder publishes nothing.
 fn digits(n: u64, r: Region) -> Result[SeqSpan[u8] in r, Capacity] {
   let mut b = span.builder(r)
   let mut k = n
-  loop { span.push(mut b, (k % 10) as_u8)?; k = k / 10; if k == 0 { break } }
+  loop { span.push(mut b, int.narrow(k % 10))?; k = k / 10; if k == 0 { break } }
   Ok(span.finish(take b))
 }
 ```
@@ -105,12 +106,12 @@ lexical nesting and the signature only.
 ```hirsel
 stable type Token[in src] { text: Text in src, line: u32 }
 fn tok(s: Region, t: Text in s) -> Result[u64, Capacity] {
-  region r { let k = Token(text: t, line: 1) in r; Ok(text.len(k.text)) }
+  region r { let k = (Token(text: t, line: 1) in r)?; Ok(text.len(k.text)) }
 }
 ```
 ```hirsel
 fn tok(t: Text) -> Result[(), Capacity] {
-  region r { let x = text.copy_in(r, t)?; region s { let k = Token(text: x, line: 1) in s }; Ok(()) }
+  region r { let x = text.copy_in(r, t)?; region s { let k = (Token(text: x, line: 1) in s)? }; Ok(()) }
 }                                         // accepted: r outlives s; the reverse is refused: MEM-6
 ```
 
@@ -196,11 +197,20 @@ fn second(xs: SeqSpan[Text]) -> Text { xs[1] }               // refused: MEM-12
 ### MEM-13: Own layout
 
 Own types are capacity-based: a record holds its fields inline, a variant reserves its
-largest payload, and `List`, `String`, `Bytes` and `Map` hold a block with a length and a
+largest payload, `Box[T]` holds one block made by `box.new(take x) -> Result[Box[T], (Capacity,
+T)]`, and `List`, `String`, `Bytes` and `Map` hold a block with a length and a
 capacity. Growing a collection may move its block, which is safe because a view freezes
 it ([OWN-10](ownership.md#own-10-freezes)). Field order, padding, alignment and the native
 calling convention are private to the implementation and may differ between engines;
-nothing in a program can observe them.
+nothing in a program can observe them. A type that contains itself other than through
+`Box`, `List`, `Map`, `Rc`, `Arc` or a pool is refused.
+
+```hirsel
+type Tree { label: String, kids: List[Tree] }
+```
+```hirsel
+type Chain = End | Link(u64, Chain)                       // refused: MEM-13, use Box[Chain]
+```
 
 ### MEM-14: Rc
 

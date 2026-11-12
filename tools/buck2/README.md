@@ -302,13 +302,13 @@ executor's absolute checkout path; no Buck patch or per-target override is used.
 
 Arguments after `--` go to Buck2's test runner: `--test-arg=<a>` passes one
 libtest argument. Test commands use the shared outer bound without overrides. A case filter intersects each shard's cost-table assignment and CPU-width group.
-Select the owning shards from `tools/consumers`, or every shard of the binary. Check the output
-for a nonzero case count. Every test runs on the pool by default, including
+Select the owning shards from `tools/consumers`. A filtered run on a shard that owns
+none of the selected cases fails and names the owning shard or CPU-width group. Every test runs on the pool by default, including
 native and full-gate cases. `-c hirsel.tests=host` explicitly opts into host
 execution; it still uses the pinned tool inputs. There are no implicit host
 partitions. Target names come from Cargo; `-unittest` and `-test-it` run unit
-and integration tests, and the library target runs declared doctests. For a
-sharded binary, select every `-shard-<i>` target.
+and integration tests, and the library target runs declared doctests. For an
+unfiltered sharded binary, select every `-shard-<i>` target.
 
 `tools/consumers <path>...` prints affected test targets, one per line, using
 Buck reverse dependencies, real harness case listings, source helpers and loaded
@@ -320,11 +320,12 @@ the changed owners (fewest reverse-dependency steps, the changed crate's own tes
 first; `--limit N` changes the cap, `--limit 0` keeps all) and prints `consumers:
 CAPPED` on stderr with each cut target or `cut <n> of <family>`; a capped list is
 partial consumer coverage. Discovery
-runs no bodies. A libtest selector that matches no bodies fails before dispatch.
+runs no bodies. A libtest selector that matches no bodies fails before dispatch,
+including names that exist only on other shards.
 A Rust target that completes no test bodies fails at result classification and
 names the target, including empty binaries and ignored-only runs. Intentional
-empty shard partitions use `--exact ""` and keep their success; discovery keeps
-its status.
+empty shard partitions in unfiltered runs use `--exact ""` and keep their
+success; discovery keeps its status.
 
 `test_report.py` streams libtest JSON start/result events without an inner
 deadline. Ordinary result lines, summaries and per-case timings remain available

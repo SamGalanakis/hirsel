@@ -397,7 +397,7 @@ selection_exists() (
   [ -n "$(list_cases "$@")" ]
 )
 # Discover positive selectors before deciding which shard owns them. A stale
-# selector must fail on shard 1, rather than becoming an empty exact filter.
+# selector fails on every shard, rather than becoming an empty exact filter.
 filtered=false
 restricted=false
 skip=false
@@ -468,7 +468,12 @@ fi
 # A binary with per-case widths has one shard set per width group, and the
 # measured shards (empty group) for its undeclared cases. Every shard deals
 # only its own group's cases, including when filters are present.
+owners="$action_cache/owners"
+: > "$owners"
 if [ -n "$case_cpus" ] && [ -n "$shard" ]; then
+  printf '%s\n' "$cases" | awk -v declared="$case_cpus" -v group="$cpu_group" -v binary="$test_binary" '
+    BEGIN { n = split(declared, rows, " "); for (i = 1; i <= n; i++) { split(rows[i], f, "="); width[f[1]] = f[2] } }
+    NF && ($0 in width) && width[$0] != group { printf "  %s -> %s-cpus-%s shards\n", $0, binary, width[$0] }' >> "$owners"
   cases="$(printf '%s\n' "$cases" | awk -v declared="$case_cpus" -v group="$cpu_group" '
     BEGIN { n = split(declared, rows, " "); for (i = 1; i <= n; i++) { split(rows[i], f, "="); width[f[1]] = f[2] } }
     NF && (($0 in width) ? width[$0] : "") == group')"
@@ -499,27 +504,34 @@ if [ -n "$shard" ]; then
   # case to its shard without building the harness. A binary without a
   # table deals the live cases at equal cost in name order.
   if [ -n "$costs" ]; then
-    owned="$(awk -F '\t' -v declared="$case_cpus" -v group="$cpu_group" '
+    awk -F '\t' -v declared="$case_cpus" -v group="$cpu_group" '
       BEGIN { n = split(declared, rows, " "); for (i = 1; i <= n; i++) { split(rows[i], f, "="); width[f[1]] = f[2] } }
       NF && (($1 in width) ? width[$1] : "") == group { printf "%.3f\t%s\n", $2 + 0, $1 }' "$costs" |
       LC_ALL=C sort -t "$(printf '\t')" -k1,1nr -k2,2 |
       awk -F '\t' -v index_="$index" -v count="$count" '{
         best = 1; for (s = 2; s <= count; s++) if (load[s] < load[best]) best = s
-        load[best] += $1; if (best == index_) print $2 }')"
-    cases="$(printf '%s\n' "$cases" | awk -F '\t' -v costs="$costs" -v owned="$owned" -v index_="$index" -v count="$count" '
+        load[best] += $1; print $2 "\t" best }' > "$action_cache/assigned"
+    cases="$(printf '%s\n' "$cases" | awk -F '\t' -v costs="$costs" -v assigned="$action_cache/assigned" -v index_="$index" -v count="$count" -v owners="$owners" '
       BEGIN {
         for (i = 1; i < 256; i++) code[sprintf("%c", i)] = i
         while ((getline row < costs) > 0) { split(row, f, "\t"); measured[f[1]] = 1 }
-        n = split(owned, rows, "\n"); for (i = 1; i <= n; i++) mine[rows[i]] = 1
+        while ((getline row < assigned) > 0) { split(row, f, "\t"); owner[f[1]] = f[2] }
       }
       NF {
-        if ($0 in measured) { if ($0 in mine) print; next }
-        h = 0; for (i = 1; i <= length($0); i++) h = (h * 31 + code[substr($0, i, 1)]) % 2147483647
-        if (h % count + 1 == index_) print
+        if ($0 in measured) { home = owner[$0] }
+        else {
+          h = 0; for (i = 1; i <= length($0); i++) h = (h * 31 + code[substr($0, i, 1)]) % 2147483647
+          home = h % count + 1
+        }
+        printf "  %s -> shard %s/%s\n", $0, home, count >> owners
+        if (home == index_) print
       }' | LC_ALL=C sort)"
   else
     cases="$(printf '%s\n' "$cases" | awk 'NF' | LC_ALL=C sort |
-      awk -v index_="$index" -v count="$count" '{ if ((NR - 1) % count + 1 == index_) print }')"
+      awk -v index_="$index" -v count="$count" -v owners="$owners" '{
+        home = (NR - 1) % count + 1
+        printf "  %s -> shard %s/%s\n", $0, home, count >> owners
+        if (home == index_) print }')"
   fi
 fi
 # Deal every original case before removing isolated bodies, so unrelated
@@ -530,6 +542,11 @@ if [ -n "${HIRSEL_TEST_ISOLATED_CASES:-}" ] && [ -n "$shard" ] && ! "$filtered";
     !($0 in excluded)')"
 fi
 unset HIRSEL_TEST_ISOLATED_CASES
+if [ -z "$cases" ] && "$filtered" && ! "$discovery"; then
+  printf 'test_launcher.sh: selector [%s] matched no test bodies on %s shard %s\n' "$*" "$test_binary" "${shard:-dedicated}" >&2
+  cat "$owners" >&2
+  exit 2
+fi
 "$discovery" || check_case_cpus "$cases"
 # The caller's positive filters already shaped the listing. Replace them with
 # the exact selected names, preserving flags and paired values. In particular,

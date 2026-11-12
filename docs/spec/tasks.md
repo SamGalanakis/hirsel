@@ -85,7 +85,8 @@ fn pump(tx: Sender[Job], take jobs: List[Job]) -> Result[(), Closed[Job]] {
 `task.join(take h: Task[R]) -> Result[R, JoinError]` waits for the child to end. The child
 cleans its own state before it ends. `Ok(r)` moves the result to the joiner; `Failed(causes)`
 delivers the child's cause chain ([FAIL-10](failure.md#fail-10-cause-chain)) as a value the
-joiner owns; `Cancelled` reports a child that ended by observing cancellation. `join` is a
+joiner owns, made of the child's cells, so the joiner's own primary cell is untouched and
+`join` reserves nothing; `Cancelled` reports a child that ended by observing cancellation. `join` is a
 cancellation point: if the joiner observes cancellation while waiting, `h` is dropped by
 the joiner's cleanup (CONC-8).
 

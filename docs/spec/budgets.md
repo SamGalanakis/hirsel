@@ -23,7 +23,13 @@ exits or its task finishes), the blocks still charged to it are handed to the li
 parent in one step: the parent already holds those bytes as part of the reservation it
 gave, so the hand-over cannot fail, admits nothing and visits no value. From then on the
 blocks belong to the parent, for refunds and for growth (MEM-28); if the parent ends in
-turn, they pass on again, up to the root. So no value outlives the limit that funds it. Transferring
+turn, they pass on again, up to the root. This includes the cause cells of
+a failure raised under the limit ([FAIL-10](failure.md#fail-10-cause-chain)) and values in
+a queue or a task's result slot. So a limit's lexical end and the death of what it funded
+are separate: at the end, the unused part of its reservation returns to the parent at once;
+each surviving block's bytes return to whichever limit then holds them when that block is
+refunded. Neither step walks a value or admits, and no value outlives the limit that
+funds it. Transferring
 or refunding across tasks is an event in the run's event order
 ([CONC-10](tasks.md#conc-10-event-order)). A sent value's blocks keep their limit through the
 sender, the queue, the receiver, an abandoned handle and `join`; because a limit's charges

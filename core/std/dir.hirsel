@@ -23,10 +23,13 @@ pub fn create_dir(d: Dir, p: String) -> Result[(), IoError] waits
 /// Ex: `dir.remove_all(d, "tmp")?`
 pub fn remove_all(d: Dir, p: String) -> Result[(), IoError] waits
 
-/// Creates a new empty directory with a fresh name directly below d and returns a Dir for
-/// it and its name in d (Go os.MkdirTemp). `host.mkdtemp`. It is not removed
-/// automatically: `dir.remove_all(d, name)` removes it and everything below it.
-/// Fails: Error(Denied | Other(_)). Prefix: on failure nothing was created; a cancellation
-/// observed at delivery leaves the directory created and its name lost.
-/// Ex: `let (tmp, name) = dir.create_temp(d)?; ..; dir.remove_all(d, name)?`
-pub fn create_temp(d: Dir) -> Result[(Dir, String), IoError] waits
+/// Creates a new empty directory with a fresh name directly below d, appends that name (at
+/// most 32 ASCII bytes) to `name` and returns a Dir for it (Go os.MkdirTemp).
+/// `host.mkdtemp`: the name lands in capacity the caller already holds, so `name` needs 32
+/// bytes of spare capacity. It is not removed automatically: `dir.remove_all(d, name)`
+/// removes it and everything below it.
+/// Fails: Bounds (failure), checked before issue, when name has less than 32 bytes spare;
+/// Error(Denied | Other(_)), name unchanged. Prefix: on failure nothing was created; a
+/// cancellation observed at delivery leaves the directory created and name unchanged.
+/// Ex: `let mut name = string.with_capacity(32)?; let tmp = dir.create_temp(d, mut name)?; ..; dir.remove_all(d, name)?`
+pub fn create_temp(d: Dir, mut name: String) -> Result[Dir, IoError] waits

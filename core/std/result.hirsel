@@ -1,6 +1,8 @@
-// Module `result`: explicit error conversion for `?` (LANG-18). `e?` propagates an error
-// only when the function's error type is exactly e's; anything else is converted first.
-// These two cover the conversions the nine workloads repeat; a one-off is a `match`.
+// Module `result`, extended (LANG-7): library members of the core module `result`, over
+// its core member unwrap (core/core/result.hirsel). Explicit error conversion for `?`
+// (LANG-18): `e?` propagates an error only when the function's error type is exactly e's;
+// anything else is converted first. These two cover the conversions the nine workloads
+// repeat; a one-off is a `match`.
 
 /// r with its error mapped by f; Ok is passed through untouched (Rust map_err). f is a
 /// `scoped fn` (OWN-21): it may view the caller's locals, does not wait and does not

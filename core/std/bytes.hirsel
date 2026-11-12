@@ -1,9 +1,0 @@
-// Module `bytes`: helpers for `Bytes`, which is `List[u8]` (SEM-3). Every list operation
-// applies to Bytes (`list.with_capacity`, `list.push`, `list.append`, `list.slice`,
-// `list.clear`, ...); this module holds only what a byte sequence needs beyond them.
-// A `b".."` literal is static and never charged. Field legend: API.md.
-
-/// Sum of the bytes in u64: the corpus checksum. `list.sum` sums in u8 and would fail
-/// with Overflow. Cannot overflow below 2^56 bytes. Alloc: nothing. Cost: O(len).
-/// Ex: `let s = bytes.sum(string.as_bytes(out))`
-pub fn sum(b: Bytes) -> u64

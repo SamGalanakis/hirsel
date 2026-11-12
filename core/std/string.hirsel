@@ -36,9 +36,11 @@ pub fn push_uint(mut s: String, n: u64, base: u32, width: u64, pad: char) -> Res
 
 /// Upper-cases ASCII a-z in place; other bytes are unchanged, so the result is valid UTF-8
 /// of the same length (Rust make_ascii_uppercase). Library code over into_bytes and
-/// from_utf8, which revalidates. Alloc: nothing. Cost: O(len).
-/// Ex: `let mut up = string.from(row)?; string.make_ascii_upper(mut up)`
-pub fn make_ascii_upper(mut s: String)
+/// from_utf8, which revalidates. Fails: Error(c) only when s is static (a literal) and
+/// into_bytes cannot admit its copy (core.md, "Strings"); s unchanged.
+/// Alloc: nothing for an owned s; byte_len rounded to 8 for a static one. Cost: O(len).
+/// Ex: `let mut up = string.from(row)?; string.make_ascii_upper(mut up)?`
+pub fn make_ascii_upper(mut s: String) -> Result[(), Capacity]
 
 /// Empties s; keeps storage. Alloc: nothing. Cost: O(1). Ex: `string.clear(mut line)`
 pub fn clear(mut s: String)

@@ -11,36 +11,28 @@
 //  1. Exact fast path (Clinger): mantissa below 2^53 (f32: 2^24) and |exponent| <= 22
 //     (f32: 10): `float.from_int` of the mantissa, multiplied or divided by an exact power
 //     of ten, which IEEE rounds once.
-//  2. Eisel-Lemire: a 128-bit product of the mantissa and a truncated power of five,
-//     assembled into the result's bits and made with `float.from_bits64` (`from_bits32`).
-//     v1 has no u128 and no high-half multiply (Go bits.Mul64), so each 64 x 64 product is
-//     four 32 x 32 partial products and their carries: about 4x the multiplies.
-//     The 651 powers of five, two u64 words each, are a private function over one `match`
-//     on the exponent: a `const` holds one plain value and there is no fixed-size array,
-//     so the table cannot be a constant.
+//  2. Eisel-Lemire: a 128-bit product of the mantissa and a truncated power of five
+//     (`int.mul_wide`), assembled into the result's bits and made with
+//     `float.from_bits64` (`from_bits32`). The 651 powers of five, two u64 words each, are
+//     one private `const POW5: Inline[(u64, u64), 651]` (SEM-9).
 //  3. Slow path, when step 2 cannot decide the rounding (more than 19 significant digits
 //     near a halfway point): a big decimal of at most 768 significant digits, shifted by
-//     powers of two. Its digit buffer is a Bytes of capacity 768, admitted once from the
-//     current limit; Rust keeps it in a fixed-size array on the stack, which v1 cannot
-//     declare. Only this step allocates, so only it can return Capacity.
-
-/// Why a float did not parse: the lexeme's error, or the slow path's buffer refused.
-pub type Error = Parse(ParseError) | Capacity(Capacity)
+//     powers of two, held in a local `Inline[u8, 768]` as Rust holds it on the stack.
+//     No step allocates, so parsing returns only ParseError.
 
 /// Parses the whole of s as a decimal f64: an optional '-', digits with an optional
 /// fraction, an optional exponent (the JSON number grammar plus a leading '+' in the
 /// exponent; "inf", "nan", '+' before the number and hex are refused). Correctly rounded,
 /// ties to even.
-/// Fails: Error(Parse(Empty | Invalid(i))), i the byte position; Error(Parse(OutOfRange))
+/// Fails: Error(Empty | Invalid(i)), i the byte position; Error(OutOfRange)
 /// when the value rounds to an infinity (Go returns ErrRange there; Rust returns inf).
-/// A value too small rounds to a signed zero and is Ok. Error(Capacity(c)) only from
-/// step 3. Alloc: nothing, or 768 bytes in step 3, refunded before return.
+/// A value too small rounds to a signed zero and is Ok. Alloc: nothing.
 /// Cost: O(len); step 3 is O(digits x shifts), at most about 768 x 30 digit steps.
 /// Ex: `let x = float.parse64(token)?`
-pub fn parse64(s: String) -> Result[f64, Error]
+pub fn parse64(s: String) -> Result[f64, ParseError]
 
 /// As parse64, rounded once to f32. Ex: `let y = float.parse32(token)?`
-pub fn parse32(s: String) -> Result[f32, Error]
+pub fn parse32(s: String) -> Result[f32, ParseError]
 
 /// Whether x is neither infinite nor NaN: its exponent bits (`float.to_bits64`) are not
 /// all ones. For an f32 use `float.is_finite(float.widen(x))`, which is exact.

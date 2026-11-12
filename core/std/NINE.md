@@ -2,7 +2,7 @@
 
 The source is the corpus definitions, `core/corpus/m1/<workload>/SPEC.md`, with their
 `cases.json`, inputs and EXPECTED files, and `core/SPEC-COMPARISON.md`. For each workload, the
-list names the operations a Hirsel version calls under spec revision 3 (7f47d961), and what it
+list names the operations a Hirsel version calls under spec round 4 (0d649bad), and what it
 uses in place of anything revision 3 deleted. Language forms are not listed: `for`, `while let`,
 `xs[i]`, `region`, `bound`, `?`, `==`, `<`, records, `match`, `replace` and resource `drop`.
 Core operations are named as core declares them (`core/core/`); the rest are the seed's.
@@ -13,13 +13,16 @@ and `versions` count live chunks and nodes themselves: v1 has no cells (CONC-12)
 the distinct ids reachable from its live roots into a `set.Set[u64]`, which is also how the
 SPEC's oracle is defined.
 
-**Verdict under revision 3.** All nine can be written, and none needs anything revision 3
+**Verdict under round 4.** All nine can be written, and none needs anything revision 3
 deleted. Of the deleted spans (`SeqSpan`, `IndexedSpan`, the fixed and indexed builders) the
 seed's nine used none: request-scratch's span was always a `FixedSpan` of a plain record, and
 json's tree and rope's document are own data (`List`, `Map`, `Rc`). The "matched" json
 variant waits for compact sequences of variable-size elements (see json). Revision 3 removed three
 awkward points (the leaked temp directory, the assumed open modes, the side list in generics)
-and line cutting is now `split_once`. What remains awkward, most useful first:
+and line cutting is now `split_once`. Round 4 removed two more: float parsing no longer
+allocates (`Inline` arrays, `int.mul_wide`), so json converts no third error type, and
+request-scratch's builder is sized with `span.with_capacity`, so it abandons no blocks. What
+remains awkward, most useful first:
 
 1. **Error conversion (all nine).** `?` propagates only an identical error type (LANG-18), and
    every allocating core call returns `Capacity` or `(Capacity, X)`. Each workload has its own
@@ -31,18 +34,10 @@ and line cutting is now `split_once`. What remains awkward, most useful first:
    A function that returns plain `Result[_, Capacity]` keeps bare `?` with
    `result.capacity_only`, so the useful shape is small helpers returning `Capacity` and one
    conversion at their caller.
-2. **json number parsing.** `float.parse64` allocates in its slow path (no fixed-size array,
-   R3) and so returns `float.Error`, a third error type to convert. The json fixture only needs
-   finiteness, and its numbers are integers and -2.5 (json SPEC), so the exact fast path
-   takes every one and nothing allocates; the cost is the error type.
-3. **generics tally.** `map.get_or` then `map.set` costs two hash probes per repeated word,
+2. **generics tally.** `map.get_or` then `map.set` costs two hash probes per repeated word,
    where the side list it replaces cost one probe and an O(1) `list.set`. Either allocates
    nothing on a repeat. The tally uses `map.set`, as asked; the side list stays the faster
    shape if the measurement cares.
-4. **request-scratch.** `span.builder` has no capacity hint (R6), so a request with h headers
-   abandons its builder's earlier blocks to the region: 8 + 32 x 4, then 8 + 32 x 8, ... for
-   h > 4, at most about the final span's size again. The region closes per request, so the waste
-   is bounded and freed.
 
 ## Shared by all nine (the driver protocol)
 
@@ -58,7 +53,7 @@ driver passes the input path relative to that Dir.
   program builds `Capacity(requested: r, available: a)` itself; Capacity is a plain record. The
   site is logical, as in the corpus; no admission is forced.
 - Output: `string.new`, `string.push`, `string.push_u64`, then `stdout.write`.
-- Checksum: `bytes.sum(string.as_bytes(out))`.
+- Checksum: `list.sum_bytes(string.as_bytes(out))`.
 - The acquire/release trace. The release lines are printed after the result lines, in the
   order the owners are actually cleaned. With no cells, a resource's `drop` cannot append to a
   list it does not own, so each traced resource holds a `Sender[String]` to one trace channel,
@@ -92,8 +87,9 @@ unreachable target.
    error is primary and the later ones are suppressed, in order.
 5. Probe the lock with a freshly opened file, then report the destination's size and sum.
 
-- `dir.create_temp` returns `(tmp, name)`; the run ends with `dir.remove_all(d, name)`, so
-  nothing leaks (revision 3, `host.mkdtemp`).
+- `let mut name = string.with_capacity(32)?` then `let tmp = dir.create_temp(d, mut name)?`:
+  `host.mkdtemp` writes the directory's name into capacity the caller already holds. The run
+  ends with `dir.remove_all(d, name)`, so nothing leaks.
 - `file.write(tmp, "source.txt", data)` for the source.
 - `file.open` with `Read` for the source, `CreateNew` for the destination (error-second hits an
   existing destination: `Exists`), and `Write` for the lock file, which core.md now defines to
@@ -101,7 +97,7 @@ unreachable target.
 - `file.try_lock` (error-lock meets a real held lock), `file.unlock`, `file.close`
 - `list.with_capacity(4096)`, `list.clear`, `file.read_into`, `file.write_all`, and
   `list.slice(buf, 0, 17)` for the 17-byte prefix before the failing write
-- `file.read`, `list.len` and `bytes.sum` for `destination-bytes` and `sum`
+- `file.read`, `list.len` and `list.sum_bytes` for `destination-bytes` and `sum`
 - `list.push` to collect the suppressed causes
 - Opening admits nothing now (HostFile is mechanical); only `try_lock` admits (the Lock's cause
   cell), and the case's Capacity site is logical.
@@ -134,9 +130,9 @@ It used no span in revision 2 and uses none now.
 
 - The parser reads bytes: `string.as_bytes` and `xs[i]`, `list.len`. Unescaped runs and number
   lexemes are cut with `string.slice` and kept with `string.from`.
-- Numbers: `float.parse64` for the range check only (`Error(Parse(OutOfRange))` is the
-  invalid-number case); the lexeme is kept as text, so no float is formatted. Its
-  `float.Error` is converted to the program's `JsonError`.
+- Numbers: `float.parse64` for the range check only (`Error(OutOfRange)` is the
+  invalid-number case); the lexeme is kept as text, so no float is formatted. It allocates
+  nothing and returns core's `ParseError`, converted to the program's `JsonError`.
 - `\uXXXX`: `int.parse_uint(hex4, 16)`, then the surrogate pair is combined in user code, then
   `char.from_u32` and `string.push_char`.
 - Tree: `list.push` and `map.insert`; the first-position/last-value duplicate rule is exactly
@@ -199,6 +195,7 @@ Batches are owned and moved from task to task. Transform allocates the uppercase
   no resource, LANG-14) and its endpoints as `x`; `task.join`, `task.cancel`,
   `task.check_cancel`
 - `string.from` for the new uppercase row (site `batch2.output`), then `string.make_ascii_upper`
+  (its `Capacity` cannot occur on the owned copy, but is converted like any other)
 - `list.with_capacity`, `list.push` for rows; `list.sort` with `order.compare` for the
   release ids
 - Unchanged by revision 3 otherwise: the stages already took their endpoints as the spawn
@@ -218,10 +215,10 @@ writer.
 - `arc.new`, `arc.share`; `map.new`, `map.insert`, `map.get` on the config
 - `string.strip_prefix(line, "GET ")` for the route and `string.split_once(line, ": ")` per
   header; positions come from `string.find`, and `string.slice` reads a header back
-- `span.builder`, `span.push`, `span.finish`, `span.len`, `span.get` in the request's `region`,
-  holding a plain `Header { name: (u64, u64), value: (u64, u64) }`: revision 3's
-  `SpanBuilder[Header, in r]` building a `FixedSpan[Header] in r`. This is the span set
-  revision 3 kept, so the shape is unchanged; cost in item 4 above.
+- `span.with_capacity` (the header count is known from the request's lines), `span.push`,
+  `span.finish`, `span.len`, `span.get` in the request's `region`, holding a plain
+  `Header { name: (u64, u64), value: (u64, u64) }`: a `SpanBuilder[Header, in r]` building a
+  `FixedSpan[Header] in r`, one admission per request and nothing abandoned.
 - `string.with_capacity` (site `reply`), `string.push`, then `stdout.write`
 
 ## rope
@@ -234,9 +231,9 @@ latest snapshot. The program reports live chunk counts after the history is rele
 after the current text is released.
 
 - `rc.new`, `rc.share` for chunks; `Chunk { id: u64, text: String }`, the document a
-  `List[Piece]` of `(Rc[Chunk], from, to)`: own data, no span
+  `List[Piece]` of `(Rc[Chunk], lo, hi)`: own data, no span
 - `string.is_boundary`, `string.byte_len`, `string.from`
-- `bytes.sum(list.slice(string.as_bytes(c.text), from, to))` to sum a piece's byte range;
+- `list.sum_bytes(list.slice(string.as_bytes(c.text), lo, hi))` to sum a piece's byte range;
   `string.slice` to render it
 - `list.with_capacity`, `list.push`, `list.pop`, `list.len`; `list.remove` at index 0 to evict
   the oldest of 64 (O(64))

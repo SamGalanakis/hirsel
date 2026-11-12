@@ -211,3 +211,18 @@ fn revision_three_deletions_and_sized_parameters() {
         2
     );
 }
+
+#[test]
+fn malformed_numeric_point_primary_site_excludes_trailing_comment() {
+    let source = "const BAD: u64 = 1. // comment\n";
+    let start = source.find("1.").unwrap() as u32;
+    let p = parse(source, ParseMode::Source);
+    assert_eq!(
+        p.diagnostics[0].primary,
+        Span {
+            start,
+            end: start + 2
+        }
+    );
+    assert_eq!(p.diagnostics[0].rule, "LANG-3");
+}

@@ -415,3 +415,53 @@ fn record_and_variant_constructor_collision_waits_for_expected_type() {
     assert_eq!(r.diagnostics, vec![]);
     assert!(r.names.iter().any(|u|matches!(&u.target,Target::ContextualConstructor {candidates,..} if candidates.contains(&m.definition("Capacity"))&&candidates.contains(&m.definition("Failure")))));
 }
+
+#[test]
+fn clean_measurement_keeps_valid_members_of_a_partly_refused_module() {
+    let core = PackageId {
+        name: "core".into(),
+        version: "1".into(),
+    };
+    let app = PackageId {
+        name: "app".into(),
+        version: "1".into(),
+    };
+    let manifest = CorpusManifest {
+        core: core.clone(),
+        packages: vec![PackageManifest {
+            package: app.clone(),
+            sources: vec![],
+            dependencies: vec![core.clone()],
+        }],
+    };
+    let c = Corpus {
+        manifest,
+        sources: vec![
+            CorpusSource {
+                module: ModuleId {
+                    package: core,
+                    modules: vec!["string".into()],
+                },
+                file: "string.hirsel".into(),
+                mode: ParseMode::Source,
+                text: "pub fn good() -> u64 { 1 }\npub fn bad(x: Missing) {}".into(),
+            },
+            CorpusSource {
+                module: ModuleId {
+                    package: app,
+                    modules: vec!["main".into()],
+                },
+                file: "main.hirsel".into(),
+                mode: ParseMode::Source,
+                text: "fn f() -> u64 { string.good() }".into(),
+            },
+        ],
+    };
+    let clean = c.cleaned();
+    let p = clean.parse();
+    let i = clean.index(&p);
+    let r = clean.analyze(&p, &i);
+    assert_eq!(r.files.len(), 2);
+    assert!(r.files.iter().all(|f| f.resolved));
+    assert_eq!(r.files.iter().map(|f| f.items).sum::<usize>(), 2);
+}

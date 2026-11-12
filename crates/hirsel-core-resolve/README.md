@@ -24,7 +24,7 @@ dependencies. It discovers no installed old library and guesses no core declarat
 
 Each report refusal includes file, line, column, excerpt and the machine-readable rule
 and item-relative site. `--strip-comments` compacts trivia while preserving statement
-newlines and literal spellings. `--clean` selects files with no syntax/index/resolve
-refusal. `--phase parse|resolve --iterations N` repeats the selected stage. Parsing
+newlines and literal spellings. `--clean` selects definitions with no syntax/index/resolve
+refusal and removes newly refused dependents, while retaining valid module members. `--phase parse|resolve --iterations N` repeats the selected stage. Parsing
 includes one corpus header-index build per iteration; resolution reuses one index and
 never rebuilds it per definition. Whole-process startup and reporting remain amortized.

@@ -12,10 +12,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         corpus = corpus.without_comments();
     }
     if args.iter().any(|a| a == "--clean") {
-        let p = corpus.parse();
-        let i = corpus.index(&p);
-        let report = corpus.analyze(&p, &i);
-        corpus = corpus.clean_subset(&report);
+        corpus = corpus.cleaned();
     }
     let parsed = corpus.parse();
     let index = corpus.index(&parsed);

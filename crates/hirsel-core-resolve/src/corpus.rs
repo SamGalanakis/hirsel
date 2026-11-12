@@ -200,10 +200,58 @@ impl Corpus {
         }
         self
     }
-    pub fn clean_subset(mut self, report: &CorpusReport) -> Self {
-        self.sources
-            .retain(|s| report.files.iter().any(|f| f.file == s.file && f.resolved));
-        self
+    /// Select accepted definitions, retaining other declarations from a module that has
+    /// one refusal. Repeat after removals until no dependent definition is refused.
+    /// This is only corpus preparation for the requested clean measurement scenario.
+    pub fn cleaned(mut self) -> Self {
+        loop {
+            let parsed = self.parse();
+            let index = self.index(&parsed);
+            let report = self.analyze(&parsed, &index);
+            if report.files.iter().all(|f| f.resolved) {
+                return self;
+            }
+            let mut removed = 0;
+            let mut next = vec![];
+            for ((source, p), result) in self.sources.into_iter().zip(parsed).zip(report.files) {
+                let mut bad = std::collections::BTreeSet::new();
+                for d in result.diagnostics {
+                    let site = d.refusal.primary;
+                    if site.item != u32::MAX {
+                        bad.insert(site.item as usize);
+                    } else {
+                        for (i, item) in p.syntax.items.iter().enumerate() {
+                            let end = item.file_offset + item.text.len() as u32;
+                            if site.span.start >= item.file_offset
+                                && (site.span.start < end || i + 1 == p.syntax.items.len())
+                            {
+                                bad.insert(i);
+                                break;
+                            }
+                        }
+                    }
+                }
+                let mut text = String::new();
+                for (i, item) in p.syntax.items.into_iter().enumerate() {
+                    if bad.contains(&i)
+                        || item.tree.node(item.root).kind == hirsel_core_syntax::NodeKind::Error
+                        || result.resource_refusal
+                    {
+                        removed += 1;
+                    } else {
+                        text.push_str(&item.text);
+                        text.push('\n');
+                    }
+                }
+                if !text.trim().is_empty() {
+                    next.push(CorpusSource { text, ..source });
+                }
+            }
+            self.sources = next;
+            if removed == 0 {
+                return self;
+            }
+        }
     }
 }
 pub fn code_lines(text: &str) -> usize {

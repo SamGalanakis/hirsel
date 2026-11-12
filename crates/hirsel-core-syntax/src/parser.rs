@@ -807,7 +807,14 @@ impl Parser<'_> {
                 }
                 if self.eat(".") {
                     if self.tree.node(left).kind == NodeKind::Literal && self.eof() {
-                        return self.fail("LANG-3", "fractional point requires a following digit");
+                        let start = self.base + self.tree.node(left).origin.span.start;
+                        let end = self.tokens[self.significant[self.pos - 1]].span.end;
+                        self.diagnostics.push(Diagnostic::error(
+                            "LANG-3",
+                            Span { start, end },
+                            "fractional point requires a following digit",
+                        ));
+                        return Err(());
                     }
                     let n = if self.token(0).kind == TokenKind::Integer {
                         let raw = self.word(0);

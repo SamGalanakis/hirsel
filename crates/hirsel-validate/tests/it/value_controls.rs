@@ -1865,3 +1865,169 @@ fn outer_unique_payload_rejects_every_second_holder() {
         }
     }
 }
+
+/// `fn main(take s: String)`: `let mut p: unique (String,) = ("",)`, then
+/// `p.0 = copy s` (a counted share; a fresh string with `fresh`), then
+/// `need(mut p)` with `need(mut x: unique (String,))`, or with `construct`
+/// `let q: unique (unique (String,),) = (take p,)`.
+fn declared_unique_root_after_part_write(fresh: bool, construct: bool) -> Fixture {
+    let mut f = Fixture::unit();
+    let string = TypeKind::Primitive(Primitive::String);
+    let s = param(&mut f, string.clone());
+    let aliased = f.body().places[s as usize].ty;
+    let mut row = ty(TypeKind::Tuple(vec![aliased].into()));
+    row.modes.uniqueness = Uniqueness::Unique;
+    let unique_tuple = f.definition.types.push(row);
+    let typed = |f: &mut Fixture, storage| {
+        let p = f.slot(TypeKind::Tuple(vec![].into()), storage);
+        let root = f.body().places[p as usize].root;
+        f.body().locals[root.0 as usize].ty = unique_tuple;
+        f.body().places[p as usize].ty = unique_tuple;
+        p
+    };
+    let e = f.slot(string.clone(), Storage::Temporary);
+    let c = f.cleanup(vec![drop(s)]);
+    f.assign(e, Rvalue::Constant(Constant::String("".into())), c);
+    let p = typed(&mut f, Storage::Local);
+    let c = f.cleanup(vec![drop(e), drop(s)]);
+    f.assign(
+        p,
+        Rvalue::Construct {
+            constructor: Constructor::Tuple,
+            fields: vec![ConstructField {
+                field: 0,
+                value: take(e),
+            }],
+            destination: Destination::Inferred,
+        },
+        c,
+    );
+    let root = f.body().places[p as usize].root;
+    let p0 = f.body().places.len() as u32;
+    f.body().places.push(Place {
+        root,
+        projection: vec![Projection::Field(0)].into(),
+        ty: aliased,
+        loan: None,
+        binding: None,
+    });
+    let c = f.cleanup(vec![drop(p), drop(s)]);
+    let (value, live) = if fresh {
+        let n = f.slot(string.clone(), Storage::Temporary);
+        f.assign(n, Rvalue::Constant(Constant::String("n".into())), c);
+        (take(n), f.cleanup(vec![drop(n), drop(p), drop(s)]))
+    } else {
+        (copy(s), c)
+    };
+    f.body().blocks[0].instructions.push(inst(
+        InstructionKind::Drop {
+            place: PlaceId(p0),
+            if_live: false,
+        },
+        live,
+    ));
+    f.assign(p0, Rvalue::Use(value), live);
+    if construct {
+        let mut row = ty(TypeKind::Tuple(vec![unique_tuple].into()));
+        row.modes.uniqueness = Uniqueness::Unique;
+        let outer = f.definition.types.push(row);
+        let q = typed(&mut f, Storage::Local);
+        let q_root = f.body().places[q as usize].root;
+        f.body().locals[q_root.0 as usize].ty = outer;
+        f.body().places[q as usize].ty = outer;
+        f.assign(
+            q,
+            Rvalue::Construct {
+                constructor: Constructor::Tuple,
+                fields: vec![ConstructField {
+                    field: 0,
+                    value: take(p),
+                }],
+                destination: Destination::Inferred,
+            },
+            c,
+        );
+        let done = f.cleanup(vec![drop(q), drop(s)]);
+        f.body().blocks[0].terminator = ret(0, done);
+        owner_sig(&mut f, &[PassingMode::Take]);
+        return f;
+    }
+    let unit = f.slot(TypeKind::Tuple(vec![].into()), Storage::Temporary);
+    f.body().blocks[0].instructions.push(inst(
+        InstructionKind::BeginLoan {
+            id: LoanId(0),
+            place: PlaceId(p),
+            mutable: true,
+            if_inactive: false,
+        },
+        c,
+    ));
+    let via = f.through_loan(p, 0);
+    let lent = f.cleanup(vec![
+        CleanupAction::EndLoan {
+            loan: LoanId(0),
+            if_active: false,
+        },
+        drop(p),
+        drop(s),
+    ]);
+    f.body().blocks[0].terminator = Terminator::Call {
+        callee: Callee::Definition {
+            path: path("need"),
+            arguments: vec![],
+        },
+        arguments: vec![CallArgument {
+            parameter: ParamId(0),
+            value: operand(via, UseKind::Mut),
+        }],
+        returns: Some(CallReturn {
+            destination: PlaceId(unit),
+            next: BlockId(1),
+        }),
+        on_failure: CleanupId(lent),
+    };
+    let exit = f.cleanup(vec![drop(unit), drop(p), drop(s)]);
+    let ending = inst(
+        InstructionKind::EndLoan {
+            loan: LoanId(0),
+            if_active: false,
+        },
+        exit,
+    );
+    f.body().blocks.push(block(vec![ending], ret(0, exit)));
+    owner_sig(&mut f, &[PassingMode::Take]);
+    let mut need = function_signature(
+        "need",
+        vec![(PassingMode::Mut, TypeKind::Tuple(vec![aliased].into()))],
+        TypeKind::Tuple(vec![].into()),
+    );
+    let SignatureKind::Function(fun) = &mut need.kind else {
+        panic!()
+    };
+    let mut row = interner().get(fun.parameters[0].ty).unwrap().clone();
+    row.modes.uniqueness = Uniqueness::Unique;
+    fun.parameters[0].ty = interner().intern(row);
+    f.signatures.insert(id("need"), need);
+    f
+}
+
+#[test]
+fn a_declared_unique_root_loses_its_proof_to_a_shared_part_write() {
+    // MODE-2: `s` still holds the string `p.0` now reaches, so `p` is not
+    // unique however it was declared (attack candidate 6).
+    let refused = |entity| ViolationKind::TypeMismatch { entity };
+    for (construct, expected) in [
+        (false, vec![refused("call argument")]),
+        (
+            true,
+            vec![refused("constructor field"), refused("unique construction")],
+        ),
+    ] {
+        declared_unique_root_after_part_write(true, construct).valid();
+        assert_eq!(
+            declared_unique_root_after_part_write(false, construct).kinds(),
+            expected,
+            "construct {construct}"
+        );
+    }
+}

@@ -2012,6 +2012,16 @@ impl<'a, 'input> Checker<'a, 'input> {
             && target.get(actual).unwrap().modes.uniqueness != Uniqueness::Unique
         {
             self.unique_type(target, actual)
+        } else if value.usage != UseKind::Copy
+            && !origins.current_unique.contains(&place.0)
+            && target.get(actual).unwrap().modes.uniqueness == Uniqueness::Unique
+            && super::flow::needs_release(self, self.place_type(place), self.t)
+        {
+            // MODE-2: a declared unique row proves nothing once a part write
+            // stored a counted share in it; only the current fact does.
+            let mut row = target.get(actual).unwrap().clone();
+            row.modes.uniqueness = Uniqueness::Aliased;
+            target.intern(row)
         } else {
             actual
         };
@@ -4569,6 +4579,14 @@ impl<'a, 'input> Checker<'a, 'input> {
             let actual = store.intern(row);
             let actual = if origins.current_unique.contains(&field.value.place.0) {
                 self.unique_type(store, actual)
+            } else if field.value.usage != UseKind::Copy
+                && store.get(actual).unwrap().modes.uniqueness == Uniqueness::Unique
+                && super::flow::needs_release(self, self.place_type(field.value.place), self.t)
+            {
+                // MODE-2: as for a call argument, only the current fact proves it.
+                let mut row = store.get(actual).unwrap().clone();
+                row.modes.uniqueness = Uniqueness::Aliased;
+                store.intern(row)
             } else if origins.weakened.contains(&field.value.place.0) {
                 self.weakened_type(store, actual, &self.generic_declarations())
             } else {

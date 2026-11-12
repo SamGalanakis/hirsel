@@ -315,7 +315,9 @@ impl Checker<'_, '_> {
                 let mut row = store.get(ty).unwrap().clone();
                 row.modes.sendability = Sendability::Sendable;
                 update_type(store, ty, row)
-            } else if projected && !self.operand_unique(state, value) {
+            } else if !self.operand_unique(state, value) {
+                // MODE-2: a declared unique row is a requirement, not evidence;
+                // without the current fact the value is aliased, root or part.
                 let mut row = store.get(ty).unwrap().clone();
                 row.modes.uniqueness = Uniqueness::Aliased;
                 update_type(store, ty, row)
@@ -1297,15 +1299,7 @@ impl Checker<'_, '_> {
                     }
                 );
         }
-        !state.shared[root]
-            && (state.current_unique[root]
-                || self
-                    .t
-                    .get(self.place_type(value.place))
-                    .unwrap()
-                    .modes
-                    .uniqueness
-                    == Uniqueness::Unique)
+        !state.shared[root] && state.current_unique[root]
     }
     pub(super) fn rvalue_unique(&self, state: &State, value: &Rvalue) -> bool {
         match value {
@@ -1337,7 +1331,12 @@ impl Checker<'_, '_> {
     pub(super) fn set_current_unique(&self, state: &mut State, destination: PlaceId, unique: bool) {
         let place = &self.body.places[destination.0 as usize];
         if place.projection.is_empty() {
-            state.current_unique.set(place.root.0 as usize, unique);
+            // A whole write was checked against the declared row, so a declared
+            // unique root starts unique; only a later part write takes it away.
+            let declared = self.t.get(place.ty).unwrap().modes.uniqueness == Uniqueness::Unique;
+            state
+                .current_unique
+                .set(place.root.0 as usize, unique || declared);
         } else if needs_release(self, place.ty, self.t)
             && !matches!(
                 self.t.get(place.ty).unwrap().kind,

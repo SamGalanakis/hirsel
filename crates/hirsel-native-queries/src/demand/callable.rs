@@ -947,7 +947,7 @@ impl DemandInstances {
             }
             // Ordinary staging holds the transformed body until the dependency
             // identities close. Only publication below grants C acceptance.
-            let value = self.snapshot(&(binding.table, unit))?;
+            let value = self.snapshot(&(binding.table.into_table(), unit))?;
             rewritten.push(self.json(&Rewritten {
                 selection: selection_record,
                 value,

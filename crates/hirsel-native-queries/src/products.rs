@@ -666,7 +666,6 @@ impl NativeProducts for DemandProducts {
             local_binding = Binding::from_checked(environment.target, closures)?;
             &local_binding
         };
-        let keys = binding.table.keys();
         let selected_operations = super::instance_operations::InstanceOperations {
             inventory: None,
             receipts: None,

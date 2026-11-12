@@ -236,7 +236,11 @@ fn native_cached_hashes_exact_across_widths_and_seeds() {
                 1 | (256u128 << 64),
             ],
         ));
-        source.push_str(&history_source());
+        let calls: String = cases
+            .iter()
+            .map(|(name, _, _)| format!("let _ = {name}()\n"))
+            .collect();
+        source.push_str(&history_source_calling(&calls));
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine
             .sources
@@ -419,8 +423,13 @@ fn native_cached_hashes_exact_across_widths_and_seeds() {
 }
 
 fn history_source() -> String {
+    history_source_calling("")
+}
+
+/// The history program, whose main first runs `calls`.
+fn history_source_calling(extra: &str) -> String {
     let mut source = String::new();
-    let mut calls = String::new();
+    let mut calls = extra.to_string();
     for width in [1, 2, 4, 8, 16] {
         for signed in [false, true] {
             let ty = format!("{}{}", if signed { 'i' } else { 'u' }, width * 8);

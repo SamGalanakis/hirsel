@@ -17,6 +17,7 @@ hirsel-registry = { path = "../hirsel-registry" }
 hirsel-compiler-identity = { path = "../hirsel-compiler-identity" }
 base64 = "=0.22.1"
 hirsel-artifact-store = { path = "../hirsel-artifact-store" }
+hirsel-check-protocol = { path = "../hirsel-check-protocol" }
 hirsel-codec = { path = "../hirsel-codec" }
 hirsel-core-contract = { path = "../hirsel-core-contract" }
 hirsel-cranelift = { path = "../hirsel-cranelift" }

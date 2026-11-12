@@ -31,7 +31,7 @@ fn flat_native_copy_oracle_17_both_backends() {
         ] {
             source.push_str(&format!("pub fn {name}() -> Batch {{ {body} }}\n"));
         }
-        source.push_str("pub fn clone_item(x: Item) -> Item in x { copy x }\npub fn clone_batch(x: Batch) -> Batch in x { copy x }\npub fn write_item(mut x: Item, n: u64) { x.n = n }\npub fn fail_item(x: Item, z: u64) -> u64 { let a = copy x\n let b = copy x\n a.n / z + b.n }\npub fn local_region() -> u64 { let x = Item(text: \"é🐑\", n: 7)\n let mut y = copy x\n let mut z = copy x\n y.n = 11\n z.n = 19\n x.n + y.n + z.n }\npub fn main() -> Result[(), ()] { Ok(()) }\n");
+        source.push_str("pub fn clone_item(x: Item) -> Item in x { copy x }\npub fn clone_batch(x: Batch) -> Batch in x { copy x }\npub fn write_item(mut x: Item, n: u64) { x.n = n }\npub fn fail_item(x: Item, z: u64) -> u64 { let a = copy x\n let b = copy x\n a.n / z + b.n }\npub fn local_region() -> u64 { let x = Item(text: \"é🐑\", n: 7)\n let mut y = copy x\n let mut z = copy x\n y.n = 11\n z.n = 19\n x.n + y.n + z.n }\npub fn main() -> Result[(), ()] { let _ = ascii()\n let _ = zero()\n let _ = one()\n let _ = growth()\n let a = empty()\n let _ = clone_item(a)\n let _ = clone_batch(zero())\n let mut b = utf8()\n write_item(mut b, 1u64)\n let _ = fail_item(b, 1u64)\n let _ = local_region()\n Ok(()) }\n");
         let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
             .join("flat-native-copy-oracle-17");
         std::fs::create_dir_all(&root).unwrap();

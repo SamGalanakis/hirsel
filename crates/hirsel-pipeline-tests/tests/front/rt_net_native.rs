@@ -486,7 +486,10 @@ fn read_into_body_calls_its_fixed_entry_and_validation_refuses_forged_calls() {
         let source = "pub fn fill(n: Net, mut s: Stream of n) -> Result[u64, NetError] {\n  \
             let mut buffer: Inline[u8, 6] = [0u8, 0u8, 0u8, 0u8, 0u8, 0u8]\n  \
             net.read_into(n, mut s, mut buffer)\n}\n\
-            pub fn main(rt: Io, args: Args) -> Result[(), ()] {\n  Ok(())\n}\n";
+            pub fn main(rt: Io, args: Args) -> Result[(), ()] {\n  \
+            let n = match io.net(rt) {\n    Ok(n) => n,\n    Error(_) => return Ok(()),\n  }\n  \
+            let mut s = match net.connect(n, \"localhost\", 443u16, Unbounded()) {\n    Ok(s) => s,\n    Error(_) => return Ok(()),\n  }\n  \
+            let _ = fill(n, mut s)\n  Ok(())\n}\n";
         let mut engine = source_std::engine();
         let context = default_context();
         let file = engine.sources.add("read-into.hir", source.into()).unwrap();

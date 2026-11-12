@@ -155,6 +155,10 @@ impl NativeLinkSource {
                     "missing or duplicate source anchor for {path}"
                 )));
             }
+            // A fact helper's code is its owner's `where` predicate, so the
+            // anchors it cites belong to the owner's declaration.
+            let declaration =
+                hirsel_check_protocol::fact::fact_owner(path).unwrap_or_else(|| path.clone());
             for anchor in anchors {
                 let owner = context.record_owner(*anchor);
                 let canonical = owner.as_ref().and_then(|(owner, occurrence)| {
@@ -163,10 +167,10 @@ impl NativeLinkSource {
                 // Raw source-map aliases can share the same content-owned
                 // identity and placed origin. Require the full codec identity
                 // to round-trip through its selected canonical alias.
-                if context.source_definition(*anchor) != Some(path)
+                if context.source_definition(*anchor) != Some(&declaration)
                     || canonical.is_none_or(|canonical| {
                         context.record_owner(canonical) != owner
-                            || context.source_definition(canonical) != Some(path)
+                            || context.source_definition(canonical) != Some(&declaration)
                             || facts.roots.sources.anchor(canonical)
                                 != facts.roots.sources.anchor(*anchor)
                     })

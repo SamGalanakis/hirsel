@@ -758,12 +758,9 @@ fn native_four_engine_replay(partition: usize) {
                     // Replay state is fresh for every tape and engine. Reuse
                     // the checked source graph already used for the reference.
                     for checked in [false, true] {
-                        let replayed = hirsel_driver::replay_loaded_observations(
-                            &mut loaded,
-                            &tape,
-                            Some(1_000_000),
-                            checked,
-                        );
+                        // The tape binds the request-built program, so it
+                        // replays through the request pipeline, as `hirsel replay` does.
+                        let replayed = if checked { hirsel_driver::replay_observations_checked(&path, &tape, Some(1_000_000)) } else { hirsel_driver::replay_observations(&path, &tape, Some(1_000_000)) };
                         if known_steps(id) {
                             let error = replayed.unwrap_err().to_string();
                             assert!(
@@ -831,12 +828,7 @@ fn native_four_engine_replay(partition: usize) {
                                 )
                                 .unwrap();
                                 for checked in [false, true] {
-                                    let error = hirsel_driver::replay_loaded_observations(
-                                        &mut loaded,
-                                        &bad,
-                                        Some(1_000_000),
-                                        checked,
-                                    )
+                                    let error = (if checked { hirsel_driver::replay_observations_checked(&path, &bad, Some(1_000_000)) } else { hirsel_driver::replay_observations(&path, &bad, Some(1_000_000)) })
                                     .unwrap_err()
                                     .to_string();
                                     assert!(error.contains(expected), "{kind}: {error}");

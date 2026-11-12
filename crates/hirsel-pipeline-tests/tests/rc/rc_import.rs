@@ -12,7 +12,10 @@ fn equal(nodes: List[box Word], index: u64, token: Bytes) -> bool {
   nodes[index].key == token
 }
 fn next(nodes: List[box Word], index: u64) -> u64 { nodes[index].next }
-fn main() -> bool { equal([box Word(key: b"key", count: 1, next: 0)], 0, b"key") }
+fn main() -> bool {
+  let nodes = [box Word(key: b"key", count: 1, next: 0)]
+  equal(nodes, 0, b"key") && next(nodes, 0) == 0
+}
 "#;
     let (program, lowered) = lower_valid(source);
     for name in ["equal", "next"] {

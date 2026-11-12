@@ -100,6 +100,9 @@ pub struct NativeProbe<'a> {
     /// and bodies are numbered differently than in a fresh engine.
     pub warm: Option<&'a str>,
     pub source_path: Option<std::path::PathBuf>,
+    /// The recorded case ID; a swept case's `case@K` names the cut whose Args
+    /// the run takes.
+    pub case: &'a str,
 }
 
 impl Probe for NativeProbe<'_> {
@@ -108,10 +111,11 @@ impl Probe for NativeProbe<'_> {
             input: validated,
             entry,
             reference,
+            args,
             ..
         } = super::checked_with_config(
             self.warm,
-            "<artifact>",
+            self.case,
             source,
             self.source_path.as_deref(),
             self.configuration.options.launch.clone(),
@@ -125,7 +129,10 @@ impl Probe for NativeProbe<'_> {
             std::slice::from_ref(&self.configuration),
             self.toolchain,
             self.dir,
-            &hirsel_native::Fixture::default(),
+            &hirsel_native::Fixture {
+                args,
+                ..Default::default()
+            },
         );
         match outcomes.into_iter().next()?.1 {
             Outcome::Agree => Some((reference.clone(), reference)),
@@ -196,6 +203,8 @@ pub fn write(
 
 /// A stored artifact.
 pub struct Artifact {
+    /// The case ID the artifact was written for.
+    pub case: String,
     pub source: String,
     pub configuration: String,
     pub expected: String,
@@ -232,6 +241,7 @@ pub fn read(dir: &Path) -> Result<Artifact, String> {
         .split_once("--- actual\n")
         .ok_or("case.txt has no actual observation")?;
     Ok(Artifact {
+        case: field("case ")?,
         source: read("source.hir")?,
         configuration: field("configuration ")?,
         expected: expected.to_string(),

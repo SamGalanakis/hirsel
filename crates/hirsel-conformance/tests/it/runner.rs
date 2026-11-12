@@ -1,6 +1,6 @@
 use hirsel_cli_args::Shard;
 use hirsel_conformance::{
-    Actual, Compiler, Driver, End, Expect, Observation, Status, TestResult, extract_rules,
+    Actual, Compiler, Driver, End, Expect, Observation, Status, TestResult, Verdict, extract_rules,
     parse_header, run_suite, run_suite_shard,
 };
 use hirsel_diag::RuleId;
@@ -37,13 +37,25 @@ fn corpus_cases_cannot_select_a_compiled_only_native_oracle() {
 /// Every file passes except those whose path ends with a listed name.
 struct Statuses(Vec<(&'static str, Status)>);
 impl Driver for Statuses {
-    fn evaluate(&self, path: &Path, _: &Expect) -> (Status, Observation) {
-        let status = self
-            .0
-            .iter()
-            .find(|(name, _)| path.ends_with(name))
-            .map_or(Status::Pass, |(_, status)| status.clone());
-        (status, Observation::default())
+    fn runs(&self, path: &Path, _: &Expect) -> Vec<Verdict> {
+        let source = fs::read_to_string(path).unwrap();
+        hirsel_conformance::runs(&source, &[])
+            .unwrap()
+            .into_iter()
+            .map(|run| {
+                let id = run.id(&path.to_string_lossy());
+                let status = self
+                    .0
+                    .iter()
+                    .find(|(name, _)| id.ends_with(name))
+                    .map_or(Status::Pass, |(_, status)| status.clone());
+                Verdict {
+                    cut: run.cut,
+                    status,
+                    observation: Observation::default(),
+                }
+            })
+            .collect()
     }
 }
 fn passing() -> Statuses {
@@ -342,6 +354,59 @@ fn errors_with(report: &hirsel_conformance::Report, text: &str) -> Vec<String> {
         .filter(|e| e.contains(text))
         .cloned()
         .collect()
+}
+#[test]
+fn a_swept_case_fails_unless_its_driver_runs_every_declared_cut_once() {
+    // The header is the oracle: `cuts: 1..=3` declares exactly cuts 1, 2, 3.
+    let root = Fixture::new();
+    let path = "conformance/OWN/OWN-6-sweep-run.hir";
+    fs::write(
+        root.0.join(path),
+        "// rule: OWN-6\n// expect: run\n// cuts: 1..=3\nfn main() {}\n",
+    )
+    .unwrap();
+    /// Runs the sweep's cuts as listed; every other case as `passing` does.
+    struct Ran(Vec<u64>);
+    impl Driver for Ran {
+        fn runs(&self, file: &Path, expect: &Expect) -> Vec<Verdict> {
+            if !file.ends_with("OWN-6-sweep-run.hir") {
+                return passing().runs(file, expect);
+            }
+            let pass = |k| Verdict {
+                cut: Some(k),
+                status: Status::Pass,
+                observation: Observation::default(),
+            };
+            self.0.iter().copied().map(pass).collect()
+        }
+    }
+    let errors = |ran: Vec<u64>| -> Vec<String> {
+        let report = run_suite(&root.0, &Ran(ran)).unwrap();
+        report
+            .errors
+            .into_iter()
+            .filter(|e| e.starts_with(path))
+            .collect()
+    };
+    let report = run_suite(&root.0, &Ran(vec![1, 2, 3])).unwrap();
+    assert!(report.success(), "{:?}", report.errors);
+    let ids: Vec<_> = report
+        .tests
+        .iter()
+        .map(|t| t.path.as_str())
+        .filter(|id| id.starts_with(path))
+        .collect();
+    assert_eq!(ids, [1, 2, 3].map(|k| format!("{path}@{k}")));
+    let skipped = errors(vec![1, 3]);
+    assert!(
+        skipped.len() == 1 && skipped[0].contains(r#"missing ["cut 2"]"#),
+        "{skipped:?}"
+    );
+    let repeated = errors(vec![1, 2, 2, 3]);
+    assert!(
+        repeated.len() == 1 && repeated[0].contains(r#"repeated ["cut 2"]"#),
+        "{repeated:?}"
+    );
 }
 #[test]
 fn an_unlisted_failing_file_fails_its_shard() {
@@ -758,7 +823,7 @@ fn path_selection_runs_only_matches_and_gates_them() {
     // when even one request is absent (including several typos together).
     struct MustNotRun;
     impl Driver for MustNotRun {
-        fn evaluate(&self, _: &Path, _: &Expect) -> (Status, Observation) {
+        fn runs(&self, _: &Path, _: &Expect) -> Vec<Verdict> {
             panic!("invalid selection or empty partition invoked the compiler");
         }
     }

@@ -32,6 +32,21 @@ COUNTS = re.compile(r'^(whole corpus|in-gate corpus): (\d+) validated / (\d+) pa
 EXEMPT = re.compile(r'^corpus formatting: (\d+) intentional syntax rejections exempt$')
 
 
+def run_ids(case, source):
+    """The IDs a corpus file runs as, as hirsel-conformance's `runs` gives them:
+    `case@K` for each cut K of a `// cuts: A..=B` header, else the case alone."""
+    for line in source.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if not line.startswith('//'):
+            break
+        name, colon, value = line[2:].lstrip().partition(':')
+        if colon and name == 'cuts' and (match := re.fullmatch(r'(\d+)\.\.=(\d+)', value.strip())):
+            return [f'{case}@{k}' for k in range(int(match[1]), int(match[2]) + 1)]
+    return [case]
+
+
 def summarize(outputs, shards):
     """The summed count lines of the shards' outputs, or an error naming what they lack."""
     if len(outputs) != shards:

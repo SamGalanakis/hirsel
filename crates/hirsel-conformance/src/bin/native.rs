@@ -56,7 +56,8 @@ fn main() -> ExitCode {
 }
 
 /// The cases `--filter` and `--shard` select: every case whose ID contains
-/// any given text (all of them without one) and that the shard holds.
+/// any given text (all of them without one), or is the one cut a `case@K`
+/// text names, and that the shard holds.
 #[derive(Default)]
 struct Filter(Vec<String>, Option<Shard>, Vec<String>);
 
@@ -70,9 +71,13 @@ impl Filter {
         if let Some(selected) = isolate::selected() {
             return id == selected;
         }
-        self.is_empty()
-            || self.0.iter().any(|text| id.contains(text.as_str()))
-            || self.2.iter().any(|case| id == case)
+        // A text naming one cut of a swept case (`case@K`) selects the ID
+        // ending in it, not `case@K0`..`case@K9`.
+        let selects = |text: &String| match hirsel_conformance::run_case(text).1 {
+            Some(_) => id.ends_with(text.as_str()),
+            None => id.contains(text.as_str()),
+        };
+        self.is_empty() || self.0.iter().any(selects) || self.2.iter().any(|case| id == case)
     }
 
     /// A run that selected no case fails unless it is a shard and the text
@@ -115,13 +120,17 @@ fn listed(root: &Path, list: &str) -> Result<Vec<Case>, String> {
     text.lines()
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .map(|id| {
-            Ok(Case {
+            // A listed `case@K` names one cut of a swept case.
+            let file = root.join(hirsel_conformance::run_case(id).0);
+            Case {
                 id: id.to_string(),
-                path: Some(root.join(id)),
-                source: std::fs::read_to_string(root.join(id)).map_err(|e| format!("{id}: {e}"))?,
-            })
+                source: std::fs::read_to_string(&file).map_err(|e| format!("{id}: {e}"))?,
+                path: Some(file),
+            }
+            .per_cut()
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()
+        .map(|cases| cases.into_iter().flatten().collect())
 }
 
 /// Exact generated IDs stay replayable after the rotating window moves.
@@ -932,6 +941,7 @@ fn run() -> Result<bool, String> {
                     dir: &scratch,
                     warm: None,
                     source_path: Some(dir.join("source.hir")),
+                    case: &stored.case,
                 };
                 artifact::replay(&stored, &probe)?;
                 if reduce {
@@ -1420,6 +1430,7 @@ fn full(
                                 dir: &scratch,
                                 source_path: Some(item.dir.join("source.hir")),
                                 warm: Some("fn warm(x: u64) -> u64 { x }\ntype Warm { a: u64 }\n"),
+                                case: &artifact.case,
                             };
                             artifact::replay(&artifact, &probe)?;
                             if item.first {
@@ -1791,6 +1802,12 @@ mod tests {
         assert!(filter.keeps("conformance/MEM/MEM-4-b.hir"));
         assert!(!filter.keeps("conformance/OWN/OWN-7-c.hir"));
         assert!(Filter::default().keeps("conformance/OWN/OWN-7-c.hir"));
+        // A cut's ID selects that cut alone; a case's selects every cut.
+        let cut = Filter(vec!["STORE-11-x-run.hir@1".into()], None, Vec::new());
+        assert!(cut.keeps("conformance/STORE/STORE-11-x-run.hir@1"));
+        assert!(!cut.keeps("conformance/STORE/STORE-11-x-run.hir@10"));
+        let case = Filter(vec!["STORE-11-x-run.hir".into()], None, Vec::new());
+        assert!(case.keeps("conformance/STORE/STORE-11-x-run.hir@10"));
     }
 
     #[test]

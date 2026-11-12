@@ -551,11 +551,14 @@ NATIVE_COVER_PARTS = 16
 NATIVE_COVER_PART_SECONDS = 231
 NATIVE_HEAP_PART_SECONDS = 450
 # A heap+inject campaign injects a fault at every failure-capable site of its
-# clean run, about 6 ms each (STORE-11-checkpoint-run: 148,802 sites, 916 s of
-# a 991 s smoke action on 2026-11-11). A whole campaign runs inside its case's
-# action up to this many sites; a larger one is left to ceil(sites / this)
-# heap parts, so one action holds about 240 s of faults.
-NATIVE_HEAP_PART_SITES = 40_000
+# clean run. A site's cost is the injected run, which goes on to the program's
+# end: about 7 ms in STORE-11-checkpoint-run, but 0.35-1.8 s in the unsplit
+# cut sweeps (counting run, store-crash-710, 2026-11-12). tools/corpus plans
+# campaigns from each case's measured seconds a site (NATIVE_HEAP_COSTS), so
+# that no action holds more than NATIVE_HEAP_FAULT_SECONDS of expected faults
+# and nothing planned reaches the pool's 15-minute limit.
+NATIVE_HEAP_FAULT_SECONDS = 480
+NATIVE_HEAP_COSTS = "native-tests/regressions/heap-costs.tsv"
 # The full native matrix (tools/main-runs) runs as shards of the baseline by
 # path hash, each case under its rotating pairwise cover, so each shard stays well
 # under its Buck2 timeout; gate-native-full stays whole for --bless and for a

@@ -35,6 +35,18 @@ Compiled native executables count no steps. The runner rejects a larger or
 smaller value, a duplicate, a missing reason and the header on a case that is
 not executed.
 
+A case that cuts one fixed history at each of its requests declares the cuts
+with a `// cuts: A..=B` header line (an executed case, at most 1,000 cuts).
+Every engine runs its one program once per cut K with the launch arguments K
+and B, and reports the run as `case.hir@K`, so results, filters and
+known-failure rows name a cut. The driver checks that each declared cut ran
+exactly once; a missing or repeated cut fails the case. B is the first cut past
+the history's end: a run with K below B checks that cut K stopped the history,
+and the run with K = B that the history finished, so a wrong range fails at the
+cut where it is wrong (see [this case](STORE/STORE-11-fence-cuts-fail-run.hir)).
+`tools/corpus --selection store-land` and `--selection store-milestone` name
+the swept STORE cases each STORE land and each milestone runs.
+
 For multiple packages, put an exact `case.hir.json` sidecar beside the case.
 It is an ordinary schema-1 launch manifest: `package` fixes the importing
 package identity, `sources` assigns files to explicit modules, `dependencies`

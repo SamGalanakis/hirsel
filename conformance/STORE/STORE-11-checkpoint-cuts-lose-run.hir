@@ -1,6 +1,7 @@
 // rule: STORE-11
 // expect: run
-// authorities: {"l1":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":1,"crash_at":1}},"l10":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":10,"crash_at":10}},"l11":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":11,"crash_at":11}},"l12":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":12,"crash_at":12}},"l13":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":13,"crash_at":13}},"l14":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":14,"crash_at":14}},"l15":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":15,"crash_at":15}},"l16":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":16,"crash_at":16}},"l2":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":2,"crash_at":2}},"l3":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":3,"crash_at":3}},"l4":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":4,"crash_at":4}},"l5":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":5,"crash_at":5}},"l6":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":6,"crash_at":6}},"l7":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":7,"crash_at":7}},"l8":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":8,"crash_at":8}},"l9":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":9,"crash_at":9}}}
+// authorities: {"l1":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":1,"crash_at":1}},"l10":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":10,"crash_at":10}},"l11":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":11,"crash_at":11}},"l12":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":12,"crash_at":12}},"l13":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":13,"crash_at":13}},"l14":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":14,"crash_at":14}},"l2":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":2,"crash_at":2}},"l3":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":3,"crash_at":3}},"l4":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":4,"crash_at":4}},"l5":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":5,"crash_at":5}},"l6":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":6,"crash_at":6}},"l7":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":7,"crash_at":7}},"l8":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":8,"crash_at":8}},"l9":{"provider":"authority.sim@1","floor":"disk","seed":1,"represent":"log","levels":["disk"],"faults":{"lose_response_at":9,"crash_at":9}}}
+// cuts: 1..=14
 // steps: 20000000
 // Each cut hashes every commit and checkpoint with the interpreted SHA-256.
 // Checkpoints over a simulated log whose history is cut at each authority
@@ -17,17 +18,13 @@
 // compactions putting nodes the cut one may already have put, and a reopen
 // holds the model's end state.
 // Every `lN` up to the history's last request stops the history there, and
-// the first one past it lets the history finish, which ends the sweep.
-// This case makes the cuts at requests 1 to the history's end.
+// the one past it, the last declared cut, lets the history finish.
+// Each run makes one cut, K, of the declared cuts; the last lets the
+// history finish.
 // stdout: checkpoints: 0
 
 // The cut this case makes at each request.
 const KIND: String = "l"
-
-// The first request this case cuts, and the last (0: to the history's end).
-const FIRST: u64 = 1
-
-const LAST: u64 = 0
 
 // A value of `len` bytes, each `fill`, built by doubling.
 fn value(fill: u8, len: u64) -> Bytes {
@@ -269,34 +266,48 @@ fn recover(a: Authority, name: String, k: Known) -> Result[(), Failed] {
   Ok(())
 }
 
-pub fn main(rt: Io) -> Result[(), Failed] {
+// Argument i of the run: the corpus driver runs the case once per declared cut
+// K, with the arguments K and the last declared cut.
+fn cut_arg(args: Args, i: u64) -> Result[u64, Failed] {
+  match arg.text(args, i) {
+    Ok(text) => match u64.parse(text) {
+      Ok(k) => Ok(k),
+      Error(_) => Error(Check(f"argument {i} is not a cut")),
+    },
+    Error(_) => Error(
+      Check(f"argument {i} is missing: the corpus driver runs each cut")
+    ),
+  }
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
   let Ok(stdout) = io.stdout(rt) else {
     return Error(Check("stdout"))
   }
-  let r = sweep(rt, stdout)
+  let r = run(rt, stdout, args)
   if let Error(Check(what)) = r {
     let _ = out.print(stdout, f"{what}\n")
   }
   r
 }
 
-fn sweep(rt: Io, stdout: Stdout) -> Result[(), Failed] {
+fn run(rt: Io, stdout: Stdout, args: Args) -> Result[(), Failed] {
+  let n = cut_arg(args, 0)?
+  let end = cut_arg(args, 1)?
+  let name = f"{KIND}{n}"
+  let Ok(a) = io.authority(rt, name) else {
+    return Error(Check(f"{name} not granted"))
+  }
+  let mut cut = Known(low: 0, high: 0, finished: false)
+  history(a, mut cut)
   let mut failures: u64 = 0
-  let mut n: u64 = FIRST
-  let mut last = false
-  while !last && (LAST == 0 || n <= LAST) {
-    let name = f"{KIND}{n}"
-    let Ok(a) = io.authority(rt, name) else {
-      return Error(Check(f"{name} not granted: the history is longer than the grants"))
-    }
-    let mut cut = Known(low: 0, high: 0, finished: false)
-    history(a, mut cut)
-    if cut.finished {
-      // Every cut stops the history at its request, so a history that
-      // finished had none: request n is past its end.
-      last = true
-      check(n > FIRST, f"request {FIRST} was not cut")?
-    } else if let Error(e) = recover(a, name, cut) {
+  if n == end {
+    // Every cut stops the history at its request, so the one past its end
+    // lets it finish.
+    check(cut.finished, f"{name} stopped the history: it is longer than its cuts")?
+  } else {
+    check(!cut.finished, f"{name} let the history finish: it is shorter than its cuts")?
+    if let Error(e) = recover(a, name, cut) {
       failures += 1
       let line = match e {
         Check(what) => what,
@@ -304,7 +315,6 @@ fn sweep(rt: Io, stdout: Stdout) -> Result[(), Failed] {
       }
       let _ = out.print(stdout, f"{line}\n")
     }
-    n += 1
   }
   let _ = out.print(stdout, f"checkpoints: {failures}\n")
   Ok(())

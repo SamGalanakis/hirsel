@@ -558,14 +558,18 @@ pub fn replay_history(
         .filter(|p| filters.is_empty() || filters.iter().any(|f| p.contains(f)))
         .filter(|p| shard.is_none_or(|s| s.holds(p)))
         .map(|id| {
-            Ok(native::Case {
+            native::Case {
                 source: std::fs::read_to_string(root.join(&id))
                     .map_err(|e| format!("{id}: {e}"))?,
                 path: Some(root.join(&id)),
                 id,
-            })
+            }
+            .per_cut()
         })
-        .collect::<Result<_, String>>()?;
+        .collect::<Result<Vec<_>, String>>()?
+        .into_iter()
+        .flatten()
+        .collect();
     if cases.is_empty() {
         return Err("history replay selected no programs".into());
     }

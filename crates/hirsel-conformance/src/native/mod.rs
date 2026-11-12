@@ -49,6 +49,22 @@ pub struct Case {
 }
 
 impl Case {
+    /// A swept case (`// cuts: A..=B`) as one case per cut, `id@K`, each the
+    /// same program run with its cut's Args; any other case, or one already
+    /// naming its cut, as itself.
+    pub fn per_cut(self) -> Result<Vec<Case>, String> {
+        if crate::run_case(&self.id).1.is_some() {
+            return Ok(vec![self]);
+        }
+        let runs = crate::runs(&self.source, &[]).map_err(|e| format!("{}: {e}", self.id))?;
+        Ok(runs
+            .iter()
+            .map(|run| Case {
+                id: run.id(&self.id),
+                ..self.clone()
+            })
+            .collect())
+    }
     /// An explicit compiled-only library oracle, or the ordinary interpreter default.
     pub fn expected_stdout(&self) -> Result<Option<Observation>, String> {
         oracle::expected_stdout(&self.id, &self.source, self.path.as_deref())
@@ -169,11 +185,14 @@ pub fn baseline(root: &Path) -> Result<Vec<Case>, String> {
                 | crate::Expect::Signaled { .. }
         ) && crate::gate_exclusions(&pending, &id, &source).is_empty()
         {
-            cases.push(Case {
-                id,
-                path: Some(file),
-                source,
-            });
+            cases.extend(
+                Case {
+                    id,
+                    path: Some(file),
+                    source,
+                }
+                .per_cut()?,
+            );
         }
     }
     Ok(cases)
@@ -435,6 +454,8 @@ struct Prepared {
     compiled_only: bool,
     /// A run with runners: what the launcher found about each callee entry.
     callees: std::collections::BTreeMap<String, hirsel_run_schema::CalleeFacts>,
+    /// The program's Args: its cut's `[K, B]` for a swept case, else none.
+    args: Vec<String>,
 }
 
 impl Prepared {
@@ -442,6 +463,7 @@ impl Prepared {
     fn fixture(&self, source: &str) -> hirsel_native::Fixture {
         hirsel_native::Fixture {
             callees: self.callees.clone(),
+            args: self.args.clone(),
             ..crate::fixture(source).unwrap()
         }
     }
@@ -493,6 +515,7 @@ fn checked_with_config(
     launch: hirsel_native::LaunchInputs,
     trace_roots: bool,
 ) -> Result<Prepared, String> {
+    let args = run_args(id, source)?;
     let expected = oracle::expected_stdout(id, source, path)?;
     let compiled_only = expected.is_some();
     let input = source_request::Source::new(path, source).map_err(|error| error.to_string())?;
@@ -530,6 +553,7 @@ fn checked_with_config(
                 random_seed: launch.random_seed,
                 test_seed: launch.test_seed,
                 trace_roots,
+                args: args.clone(),
                 ..crate::simulation(source)?
             },
             crate::interpreter(source)?.limits,
@@ -548,7 +572,21 @@ fn checked_with_config(
         reference,
         compiled_only,
         callees,
+        args,
     })
+}
+
+/// The Args of the one run `id` names: a swept case's id must name its cut
+/// (`case@K`, see `Case::per_cut`), and any other case's must not.
+fn run_args(id: &str, source: &str) -> Result<Vec<String>, String> {
+    let (_, cut) = crate::run_case(id);
+    let mut runs = crate::runs(source, cut.as_slice()).map_err(|e| format!("{id}: {e}"))?;
+    match runs.len() {
+        1 => Ok(runs.pop().unwrap().args),
+        n => Err(format!(
+            "{id}: a swept case runs once per cut ({n} cuts); name one as {id}@K"
+        )),
+    }
 }
 
 /// Run one source under `matrix`. Must be called on a compiler stack.

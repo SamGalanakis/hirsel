@@ -218,7 +218,7 @@ pub struct Header {
 }
 
 /// Header directive names; other colon-bearing comments are prose.
-const DIRECTIVES: [&str; 19] = [
+const DIRECTIVES: [&str; 20] = [
     "rule",
     "expect",
     "stdout",
@@ -238,6 +238,7 @@ const DIRECTIVES: [&str; 19] = [
     "authorities",
     "tasks",
     "twin",
+    "cuts",
 ];
 
 /// The most ordinary-interpretation steps a `// steps:` header may grant.
@@ -402,6 +403,147 @@ pub fn fixture(source: &str) -> Result<hirsel_native::Fixture, String> {
     Ok(fixture)
 }
 
+/// A swept case's cuts, `// cuts: A..=B`: the driver runs the case's one
+/// compiled program once for each cut K from A to B, on every engine, with
+/// Args `[K, B]`, and keys each run's result `<case>@K` (`Run::id`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Cuts {
+    pub first: u64,
+    pub last: u64,
+}
+
+/// The most cuts one case may declare.
+pub const MAX_CUTS: u64 = 1000;
+
+/// The case's `// cuts:` directive, if it has one.
+pub fn cuts(source: &str) -> Result<Option<Cuts>, String> {
+    let mut found = None;
+    for line in source.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some(comment) = line.strip_prefix("//") else {
+            break;
+        };
+        let Some(("cuts", value)) = comment.trim_start().split_once(':') else {
+            continue;
+        };
+        if found.is_some() {
+            return Err("duplicate cuts directive".into());
+        }
+        let whole = |text: &str| {
+            (!text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| text.parse::<u64>().ok())
+                .flatten()
+        };
+        let cuts = value
+            .trim()
+            .split_once("..=")
+            .and_then(|(first, last)| {
+                Some(Cuts {
+                    first: whole(first)?,
+                    last: whole(last)?,
+                })
+            })
+            .filter(|c| 1 <= c.first && c.first <= c.last && c.last - c.first < MAX_CUTS)
+            .ok_or(format!(
+                "cuts must be A..=B with 1 <= A <= B and at most {MAX_CUTS} cuts"
+            ))?;
+        found = Some(cuts);
+    }
+    Ok(found)
+}
+
+/// One launch of a corpus case: the whole case, or one cut of a swept case.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Run {
+    pub cut: Option<u64>,
+    /// The program's Args: none, or `[K, B]` for cut K of `A..=B`.
+    pub args: Vec<String>,
+}
+
+impl Run {
+    /// The key a run's results go by: the case, or `<case>@K`.
+    pub fn id(&self, case: &str) -> String {
+        match self.cut {
+            Some(k) => format!("{case}@{k}"),
+            None => case.to_string(),
+        }
+    }
+}
+
+/// A run key's case and cut: `conformance/X.hir@3` is cut 3 of `conformance/X.hir`.
+pub fn run_case(id: &str) -> (&str, Option<u64>) {
+    match id.rsplit_once('@') {
+        Some((case, k)) if case.ends_with(".hir") => match k.parse::<u64>() {
+            // Only the canonical spelling: digits, no leading zero.
+            Ok(cut) if cut.to_string() == k => (case, Some(cut)),
+            _ => (id, None),
+        },
+        _ => (id, None),
+    }
+}
+
+/// The launches the driver makes of a case: its one run, or one per cut,
+/// restricted to `only` when it names any.
+pub fn runs(source: &str, only: &[u64]) -> Result<Vec<Run>, String> {
+    match cuts(source)? {
+        None if only.is_empty() => Ok(vec![Run {
+            cut: None,
+            args: vec![],
+        }]),
+        None => Err(format!(
+            "selects cuts {only:?} of a case without a cuts directive"
+        )),
+        Some(c) => {
+            if let Some(k) = only.iter().find(|k| !(c.first..=c.last).contains(k)) {
+                return Err(format!("selects cut {k}, outside {}..={}", c.first, c.last));
+            }
+            Ok((c.first..=c.last)
+                .filter(|k| only.is_empty() || only.contains(k))
+                .map(|k| Run {
+                    cut: Some(k),
+                    args: vec![k.to_string(), c.last.to_string()],
+                })
+                .collect())
+        }
+    }
+}
+
+/// The driver's coverage check of what an engine ran of a case: each declared
+/// cut (each of `only`, when it names any) exactly once and in order, or the
+/// one run of a case without cuts. A missing or repeated cut fails the case.
+pub fn covered(source: &str, only: &[u64], ran: &[Option<u64>]) -> Result<(), String> {
+    let declared: Vec<Option<u64>> = match cuts(source)? {
+        None => vec![None],
+        Some(c) => (c.first..=c.last)
+            .filter(|k| only.is_empty() || only.contains(k))
+            .map(Some)
+            .collect(),
+    };
+    if ran == declared {
+        return Ok(());
+    }
+    let cut = |k: &Option<u64>| k.map_or("the case".to_string(), |k| format!("cut {k}"));
+    let missing: Vec<_> = declared
+        .iter()
+        .filter(|k| !ran.contains(k))
+        .map(cut)
+        .collect();
+    let mut seen = BTreeSet::new();
+    let repeated: Vec<_> = ran.iter().filter(|k| !seen.insert(**k)).map(cut).collect();
+    let extra: Vec<_> = ran
+        .iter()
+        .filter(|k| !declared.contains(k))
+        .map(cut)
+        .collect();
+    Err(format!(
+        "the runs do not cover the declared cuts once each in order: missing {missing:?}, \
+         repeated {repeated:?}, undeclared {extra:?}"
+    ))
+}
+
 pub(crate) fn simulation(source: &str) -> Result<hirsel_engine::SimulationConfig, String> {
     let fixture = fixture(source)?;
     let mut simulation = hirsel_engine::SimulationConfig {
@@ -430,6 +572,7 @@ pub(crate) fn simulation(source: &str) -> Result<hirsel_engine::SimulationConfig
 pub fn parse_header(path: &Path, source: &str, rules: &Rules) -> Result<Header, String> {
     let parse = || -> Result<Header, String> {
         let fixture = fixture(source)?;
+        let cuts = cuts(source)?;
         let mut rule = None;
         let mut expect = None;
         let mut stdout = String::new();
@@ -575,7 +718,7 @@ pub fn parse_header(path: &Path, source: &str, rules: &Rules) -> Result<Header, 
                     );
                 }
                 "grant" | "env" | "net" | "process" | "runners" | "fault_seed" | "signals"
-                | "authorities" | "tasks" => {}
+                | "authorities" | "tasks" | "cuts" => {}
                 "twin" => {
                     if twin.is_some() {
                         return Err("duplicate twin directive".into());
@@ -647,6 +790,9 @@ pub fn parse_header(path: &Path, source: &str, rules: &Rules) -> Result<Header, 
         ) && fixture.steps.is_some()
         {
             return Err("steps requires expect: run, fail, blocked or test".into());
+        }
+        if cuts.is_some() && !matches!(expect, Expect::Run { .. }) {
+            return Err("cuts requires expect: run".into());
         }
         if twin.is_some() && !matches!(expect, Expect::Reject { .. } | Expect::RefuseEntry) {
             return Err("twin is only valid for expect: reject or refuse entry".into());
@@ -771,20 +917,37 @@ pub(crate) fn selected_entry(
 }
 
 /// The runner's seam: a corpus file's verdict and what was observed.
+/// One run's verdict (`Run`): `cut` is none for a case's one run, and for a
+/// swept case that failed before any of its cuts ran.
+#[derive(Clone, Debug)]
+pub struct Verdict {
+    pub cut: Option<u64>,
+    pub status: Status,
+    pub observation: Observation,
+}
+
 pub trait Driver {
-    fn evaluate(&self, path: &Path, expect: &Expect) -> (Status, Observation);
+    /// The verdict of each run the engine made of the case at `path`, in order.
+    fn runs(&self, path: &Path, expect: &Expect) -> Vec<Verdict>;
+    /// The verdict of a case with one run.
+    fn evaluate(&self, path: &Path, expect: &Expect) -> (Status, Observation) {
+        let mut verdicts = self.runs(path, expect);
+        assert_eq!(verdicts.len(), 1, "{} has cuts", path.display());
+        let verdict = verdicts.pop().unwrap();
+        (verdict.status, verdict.observation)
+    }
 }
 /// A corpus driver varying only placement; capability inputs keep their seeds.
 pub struct SeededCompiler(pub u64);
 impl Driver for SeededCompiler {
-    fn evaluate(&self, path: &Path, expect: &Expect) -> (Status, Observation) {
+    fn runs(&self, path: &Path, expect: &Expect) -> Vec<Verdict> {
         compiler::evaluate_with_hash_seed(path, expect, self.0)
     }
 }
 pub struct Compiler;
 impl Driver for Compiler {
-    fn evaluate(&self, path: &Path, expect: &Expect) -> (Status, Observation) {
-        compiler::evaluate(path, expect)
+    fn runs(&self, path: &Path, expect: &Expect) -> Vec<Verdict> {
+        compiler::evaluate_with_hash_seed(path, expect, 0)
     }
 }
 
@@ -1079,6 +1242,10 @@ pub fn run_suite_selected_with_format(
         let source = fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
         match parse_header(path, &source, &rules) {
             Ok(header) => {
+                // A swept case is selected once per cut: each is a run with a result.
+                if let Ok(Some(c)) = cuts(&source) {
+                    report.selection.selected += (c.last - c.first) as usize;
+                }
                 let path = path.to_string_lossy().replace('\\', "/");
                 let errors = corpus_errors(root, &path, &header, &rules);
                 if errors.is_empty() {
@@ -1092,33 +1259,45 @@ pub fn run_suite_selected_with_format(
     }
     for (file, path, header) in headers {
         let _progress = hirsel_intern::test_progress::enter("corpus-case", || path.clone());
-        let (status, observation) = driver.evaluate(&file, &header.expect);
-        if let Some(divergence) = &observation.checked {
-            report.errors.push(format!("{path}: {divergence}"));
+        let source = fs::read_to_string(&file).map_err(|e| e.to_string())?;
+        let verdicts = driver.runs(&file, &header.expect);
+        let ran: Vec<_> = verdicts.iter().map(|v| v.cut).collect();
+        // A swept case that failed before any cut ran is one failing result.
+        let before =
+            matches!(verdicts.as_slice(), [v] if v.cut.is_none() && v.status != Status::Pass);
+        if !before && let Err(error) = covered(&source, &[], &ran) {
+            report.errors.push(format!("{path}: {error}"));
         }
-        report.observations.insert(path.clone(), observation);
-        let exclusions = gate_exclusions(
-            &pending,
-            &path,
-            &fs::read_to_string(&file).map_err(|e| e.to_string())?,
-        );
-        if exclusions.is_empty() {
-            report.in_gate.add(&status);
-        } else {
-            report.exclusions.insert(path.clone(), exclusions);
+        let exclusions = gate_exclusions(&pending, &path, &source);
+        for verdict in verdicts {
+            let Verdict {
+                cut,
+                status,
+                observation,
+            } = verdict;
+            let id = Run { cut, args: vec![] }.id(&path);
+            if let Some(divergence) = &observation.checked {
+                report.errors.push(format!("{id}: {divergence}"));
+            }
+            report.observations.insert(id.clone(), observation);
+            if exclusions.is_empty() {
+                report.in_gate.add(&status);
+            } else {
+                report.exclusions.insert(id.clone(), exclusions.clone());
+            }
+            let prefix = header.rule.prefix().to_owned();
+            report.counts.add(&status);
+            report
+                .prefixes
+                .entry(prefix.clone())
+                .or_default()
+                .add(&status);
+            report.tests.push(TestResult {
+                path: id,
+                prefix,
+                status,
+            });
         }
-        let prefix = header.rule.prefix().to_owned();
-        report.counts.add(&status);
-        report
-            .prefixes
-            .entry(prefix.clone())
-            .or_default()
-            .add(&status);
-        report.tests.push(TestResult {
-            path,
-            prefix,
-            status,
-        });
     }
     if !selection.paths.is_empty()
         && report

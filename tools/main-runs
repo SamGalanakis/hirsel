@@ -56,6 +56,7 @@ TREE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TREE / 'tools/buck2'))
 sys.dont_write_bytecode = True
 import event_logs  # noqa: E402
+from conformance import run_ids  # noqa: E402
 from run_failures import first_error_line, infra_reason  # noqa: E402
 
 PY = sys.executable
@@ -139,7 +140,9 @@ def selection_plan(tier, selections=()):
             raise SelectionError('no corpus cases match: ' + ', '.join(missing))
         name = 'interpreter selection: ' + ', '.join(paths)
         command = ['tools/corpus', '--slices', '32', '--report-json', '{report}', *paths]
-        inventory = sorted(case for case in all_cases if any(case.startswith(value) for value in prefixes))
+        # A swept case's runs are `case@K`, one a cut (tools/corpus selected_cases).
+        inventory = sorted(run for case in all_cases if any(case.startswith(value) for value in prefixes)
+                           for run in run_ids(case, (TREE / case).read_text()))
         plan = {preparation: [PY, 'tools/buck2/prepare.py'], name: command}
         return plan, 'conformance', (name, command, inventory)
     catalog = stage_plan(tier)
@@ -230,7 +233,8 @@ def manual_stages(stage, tier, config):
             prefix = f'conformance/{directory}'
             stage(f'interpreter conformance: {prefix}',
                   ['tools/corpus', '--slices', '32', '--report-json', '{report}', prefix], corpus=True,
-                  corpus_inventory=sorted(path for path in corpus_paths if path.split('/')[1] == directory))
+                  corpus_inventory=sorted(run for path in corpus_paths if path.split('/')[1] == directory
+                                          for run in run_ids(path, (TREE / path).read_text())))
     if tier in ('native-smoke', 'full'):
         smoke_file = TREE / 'native-tests/regressions/smoke.txt'
         smoke = [line.strip() for line in (smoke_file.read_text().splitlines() if smoke_file.exists() else [])
@@ -332,8 +336,8 @@ def failing_ids(target, details):
     cases += re.findall(r'^---- (.+?) stdout ----$', details, re.M)
     started = set(re.findall(r'^HIRSEL_TEST_STARTED (.+)$', details, re.M))
     cases = [case for case in cases if not started or case in started]
-    ids = [f'{binary}::{case}' for case in cases] + re.findall(r'^(conformance/\S+\.hir): ', details, re.M)
-    return list(dict.fromkeys(ids + re.findall(r'"path"\s*:\s*"(conformance/[^"]+\.hir)"', details)))
+    ids = [f'{binary}::{case}' for case in cases] + re.findall(r'^(conformance/\S+\.hir(?:@\d+)?): ', details, re.M)
+    return list(dict.fromkeys(ids + re.findall(r'"path"\s*:\s*"(conformance/[^"]+\.hir(?:@\d+)?)"', details)))
 
 
 def first_error(details, identity=None):
@@ -382,7 +386,7 @@ def corpus_observations(stage, artifact, targets=None):
                               status=source.get('status', event_logs.FAIL if error else event_logs.PASS), provenance=provenance))
         observed = {o['identity']: o for o in found}
         for error in report.get('errors', []):
-            if match := re.match(r'(conformance/\S+\.hir): (.*)', error):
+            if match := re.match(r'(conformance/\S+\.hir(?:@\d+)?): (.*)', error):
                 if match[1] in observed:
                     if not match[2].startswith('an in-gate file must pass, got '):
                         observed[match[1]].update(state='failure', first_error=first_error_line(match[2]))
@@ -755,7 +759,7 @@ def run_stages(directory, log, tier, running=None, selectors=()):
                         reds[f'{name}: {case["identity"]}'] = dict(stage=name, target=None,
                             ids=[case['identity']], kind='code', reason=case['first_error'])
                 errors = [error.splitlines()[0] for report in artifact['reports'] for error in report.get('errors', [])
-                          if not re.match(r'conformance/\S+\.hir: ', error)
+                          if not re.match(r'conformance/\S+\.hir(?:@\d+)?: ', error)
                           and not error.startswith('--path requires every selected test')]
                 if errors:
                     stage_verdict.update(state='failure', first_error=errors[0], independent_failure=True)

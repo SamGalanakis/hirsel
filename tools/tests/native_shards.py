@@ -21,6 +21,7 @@ class NativeShards(unittest.TestCase):
     def test_corpus_requires_every_fault_partition_and_its_metadata(self):
         corpus = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'corpus'))
         args = SimpleNamespace(slices=2, parts=1, config=['x86_64/heap+inject'], heap_parts=3, report_json=None)
+        runs = ['conformance/STORE/STORE-1-a-run.hir', 'conformance/STORE/STORE-1-b-run.hir']
         outputs = {f'gate-native-selected-shard-{i}': json.dumps(dict(
             configuration_attempts=1, baseline_executable=1,
             baseline_minus_native_unlisted=[], stale_exclusions=[],
@@ -28,49 +29,75 @@ class NativeShards(unittest.TestCase):
         with patch.object(corpus['event_logs'], 'recorded', return_value=contextlib.nullcontext(Path('/tmp/event'))), \
              patch.object(corpus['subprocess'], 'run'), patch.object(corpus['subprocess'], 'call', return_value=0), \
              patch.object(corpus['conformance'], 'shard_outputs', return_value=outputs), \
+             patch.dict(corpus['native'].__globals__, heap_costs=lambda: {'conformance/': (1, 0.006, '')}), \
              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(corpus['native'](['conformance/STORE'], 2, args), 0)
+            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args), 0)
             last = outputs.pop('gate-native-selected-shard-6')
-            self.assertEqual(corpus['native'](['conformance/STORE'], 2, args), 1)
+            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args), 1)
             report = json.loads(last)
             report['heap_partition']['index'] = 2
             outputs['gate-native-selected-shard-6'] = json.dumps(report, indent=2)
-            self.assertEqual(corpus['native'](['conformance/STORE'], 2, args), 1)
+            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args), 1)
             del report['heap_partition']
             outputs['gate-native-selected-shard-6'] = json.dumps(report, indent=2)
-            self.assertEqual(corpus['native'](['conformance/STORE'], 2, args), 1)
+            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args), 1)
 
-    def test_a_parted_campaign_passes_only_when_every_heap_part_reports(self):
-        # 148,802 sites over a 40,000-site bound: four parts of the one case.
+    def test_heap_parts_are_sized_by_measured_cost_and_unplanned_campaigns_run_clean(self):
+        # Costs a site: checkpoint 7 ms (measured), objects-world 165 ms (the
+        # worst of rule STORE-11), SEM-1 9 s (worse, another rule); nodes `-`.
+        # Round one bounds whole campaigns at 480 s of the worst planned cost:
+        # int(480 / 0.165) = 2909 sites. STORE-11-new-run has no row, so it is
+        # planned at its rule's worst, 3000 x 0.165 / 480 -> 2 parts (at 6 ms
+        # or the 9 s overall worst it would be 1 or 57); checkpoint 148,802 x
+        # 0.007 / 480 -> 3 parts. The left-out nodes cut gets a clean heap run
+        # (one site) and no parts.
         corpus = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'corpus'))
         args = SimpleNamespace(slices=None, parts=None, config=['smoke'], heap_parts=1, report_json=None)
-        case, name = 'conformance/STORE/STORE-11-checkpoint-run.hir', 'x86_64/regions/elide/reuse/flat-walk/heap+inject'
+        store = 'conformance/STORE/'
+        checkpoint, new = store + 'STORE-11-checkpoint-run.hir', store + 'STORE-11-new-run.hir'
+        nodes = store + 'STORE-11-checkpoint-nodes-crash-run.hir@3'
+        costs = {checkpoint: (148_802, 0.007, ''), store + 'STORE-11-objects-world-run.hir': (511_376, 0.165, ''),
+                 'conformance/SEM/SEM-1-': (1, 9.0, ''),
+                 store + 'STORE-11-checkpoint-nodes-': (0, None, 'queue:heap-campaign-checkpoint-nodes')}
+        name = 'x86_64/regions/elide/reuse/flat-walk/heap+inject'
         report = dict(configuration_attempts=3, baseline_executable=1, baseline_minus_native_unlisted=[],
                       stale_exclusions=[])
-        first = {'gate-native-selected-shard-1': json.dumps(dict(
-            report, heap_sites_max=40_000, heap_parted=[dict(case=case, configuration=name, sites=148_802)]), indent=2)}
-        parts = {f'gate-native-selected-shard-{i}': json.dumps(dict(
-            report, configuration_attempts=1, heap_partition=dict(index=i, count=4)), indent=2) for i in range(1, 5)}
-        calls = []
+        def shard(i, **fields):
+            return {f'gate-native-selected-shard-{i}': json.dumps(dict(report, **fields), indent=2)}
+        planned = {**shard(1, heap_sites_max=2909, heap_parted=[dict(case=checkpoint, configuration=name, sites=148_802)]),
+                   **shard(2, heap_sites_max=2909, heap_parted=[dict(case=new, configuration=name, sites=3000)])}
+        clean = shard(1, heap_sites_max=1, heap_parted=[])
+        def parts(count):
+            return {k: v for i in range(1, count + 1) for k, v in shard(
+                i, configuration_attempts=1, heap_partition=dict(index=i, count=count)).items()}
         for missing, expected in [(None, 0), ('gate-native-selected-shard-3', 1)]:
-            second = {k: v for k, v in parts.items() if k != missing}
-            with patch.object(corpus['event_logs'], 'recorded', return_value=contextlib.nullcontext(Path('/tmp/event'))), \
+            calls = []
+            three = {k: v for k, v in parts(3).items() if k != missing}
+            with patch.dict(corpus['native'].__globals__, heap_costs=lambda: costs, compress=list), \
+                 patch.object(corpus['event_logs'], 'recorded', return_value=contextlib.nullcontext(Path('/tmp/event'))), \
                  patch.object(corpus['subprocess'], 'run'), \
                  patch.object(corpus['subprocess'], 'call', side_effect=lambda command, **_: calls.append(command) or 0), \
-                 patch.object(corpus['conformance'], 'shard_outputs', side_effect=[first, second]), \
+                 patch.object(corpus['conformance'], 'shard_outputs', side_effect=[planned, clean, parts(2), three]), \
                  contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(corpus['native'](['conformance/STORE/STORE-11-checkpoint-run'], 1, args), expected)
-        self.assertIn('hirsel.native_paths_heap_parts=4', calls[1])
-        self.assertIn(f'hirsel.native_paths={case}', calls[1])
+                self.assertEqual(corpus['native']([checkpoint, new, nodes], [checkpoint, new, nodes], args), expected)
+            self.assertIn('hirsel.native_paths_heap_sites_max=2909', calls[0])
+            self.assertIn(f'hirsel.native_paths={nodes}', calls[1])
+            self.assertIn('hirsel.native_paths_heap_sites_max=1', calls[1])
+            self.assertIn('hirsel.native_paths_heap_parts=2', calls[2])
+            self.assertIn(f'hirsel.native_paths={new}', calls[2])
+            self.assertIn('hirsel.native_paths_heap_parts=3', calls[3])
+            self.assertIn(f'hirsel.native_paths={checkpoint}', calls[3])
 
     def test_corpus_refuses_a_selection_whose_slices_outrun_the_budget(self):
         # 100 cases under their full-matrix covers fit 512 slices only as five
         # parts per case: four cover sixteenths (about 924 s) per slice.
         corpus = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'corpus'))
         args = SimpleNamespace(slices=None, parts=None, config=[], heap_parts=1)
-        with patch.object(corpus['subprocess'], 'run') as run, patch.object(corpus['subprocess'], 'call') as call, \
+        runs = [f'conformance/OWN/OWN-1-{i}-run.hir' for i in range(100)]
+        with patch.dict(corpus['native'].__globals__, heap_costs=lambda: {'conformance/': (1, 0.006, '')}), \
+             patch.object(corpus['subprocess'], 'run') as run, patch.object(corpus['subprocess'], 'call') as call, \
              contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(corpus['native'](['conformance/OWN'], 100, args), 2)
+            self.assertEqual(corpus['native'](['conformance/OWN'], runs, args), 2)
         run.assert_not_called()
         call.assert_not_called()
 

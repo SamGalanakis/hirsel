@@ -17,14 +17,24 @@ defs.bzl selected_paths), with about CONFORMANCE_SLICE_PROGRAMS cases per slice.
 Prints the summed counts and every failing case; exits non-zero when any slice
 fails or none executed a case.
 
+A case with a `// cuts: A..=B` header runs once per cut K, as `case@K`: a
+prefix selects all its cuts, `case@K` (native only; the interpreter runs every
+cut of the file) that one. `--selection store-land` and `--selection
+store-milestone` name the cut-sweep selections STORE lands and milestones run
+(named_selection).
+
 `--heap-parts N` distributes the entire fault domain of explicitly selected
 heap+inject configurations. Every part checks the clean run; aggregation requires
-all parts, including matching partition metadata. Without it, a case's action
-runs its heap+inject campaign whole up to sync.py's NATIVE_HEAP_PART_SITES
-fault sites; over that it checks the clean run and reports the campaign
-parted, and a second round runs each parted (case, configuration) as
-ceil(sites / NATIVE_HEAP_PART_SITES) heap parts of their own, every part
-required, so every site is injected and judged.
+all parts, including matching partition metadata. Without it, campaigns are
+planned from sync.py's NATIVE_HEAP_COSTS, each case's measured seconds a fault
+site (a case with no row: the worst figure of its rule, never a guess): a run's
+action runs its heap+inject campaign whole when its sites fit
+NATIVE_HEAP_FAULT_SECONDS at the worst selected cost; over that it checks the
+clean run and reports the campaign parted, and later rounds run each parted
+(case, configuration) as ceil(sites x cost / NATIVE_HEAP_FAULT_SECONDS) heap
+parts of their own, every part required, so every site is injected and judged.
+A row costed `-` leaves its cases' campaigns out of every plan (clean heap run
+only); its note names the gap row's owner.
 
 `--native` runs the same selection through gate-native-full (`--full --filter`,
 the full gate's seed and request) as `//:gate-native-selected-shard-<i>`: one
@@ -58,8 +68,100 @@ import conformance  # noqa: E402
 import event_logs  # noqa: E402
 from run_failures import first_error_line  # noqa: E402
 from sync import (CONFORMANCE_SLICE_PROGRAMS, NATIVE_CONFIG_SECONDS, NATIVE_COVER_PART_SECONDS,  # noqa: E402
-                  NATIVE_COVER_PARTS, NATIVE_HEAP_PART_SECONDS, NATIVE_HEAP_PART_SITES, NATIVE_SELECTED_SLICES,
-                  NATIVE_SLICE_SECONDS, SELECTED_SLICES)
+                  NATIVE_COVER_PARTS, NATIVE_HEAP_COSTS, NATIVE_HEAP_FAULT_SECONDS, NATIVE_HEAP_PART_SECONDS,
+                  NATIVE_SELECTED_SLICES, NATIVE_SLICE_SECONDS, SELECTED_SLICES)
+
+CUT = re.compile(r'^(.+\.hir)@(\d+)$')
+STORE = 'conformance/STORE/'
+# The cut-sweep cases every STORE land runs (orchestrator, 2026-11-12), and the
+# objects-cuts kinds one of whose cases each land also runs a third of.
+LAND_CASES = ['STORE-11-fence-cuts-fail-run.hir', 'STORE-11-crash-cuts-crash-run.hir']
+OBJECTS_CUTS = 'STORE-11-objects-cuts-'
+
+
+def runs_of(corpus, prefixes):
+    """The run IDs a selection names, in corpus order: every run of a file a
+    prefix starts, and the one run a `case@K` prefix names."""
+    selected = []
+    for case in corpus:
+        if not any(case.startswith(CUT.sub(r'\1', p)) for p in prefixes):
+            continue
+        for run in conformance.run_ids(case, (ROOT / case).read_text()):
+            if any(run == p if CUT.match(p) else case.startswith(p) for p in prefixes):
+                selected.append(run)
+    return selected
+
+
+def named_selection(name, corpus, parent):
+    """A named selection's prefixes. `store-land`: what every STORE land runs,
+    LAND_CASES whole and a third of the cuts of one objects-cuts case, the
+    kind and the third derived from the land's parent commit. `store-milestone`:
+    every other cut-sweep case of conformance/STORE (each of place-store's trim
+    lands, and any change to the heap model or the objects provider)."""
+    swept = sorted(c for c in corpus if c.startswith(STORE)
+                   and conformance.run_ids(c, (ROOT / c).read_text()) != [c])
+    if name == 'store-milestone':
+        return [c for c in swept if Path(c).name not in LAND_CASES]
+    if name != 'store-land':
+        raise ValueError(f'unknown selection {name}; known: store-land, store-milestone')
+    digest = int(subprocess.check_output(['git', 'rev-parse', parent], cwd=ROOT, text=True).strip()[:12], 16)
+    kinds = [c for c in swept if Path(c).name.startswith(OBJECTS_CUTS)]
+    case = kinds[digest % len(kinds)]
+    third = digest // len(kinds) % 3
+    cuts = conformance.run_ids(case, (ROOT / case).read_text())
+    chosen = [run for i, run in enumerate(cuts) if i % 3 == third]
+    print(f'corpus: store-land at parent {parent}: {Path(case).name}, third {third + 1}/3 of its cuts '
+          f'({", ".join(run.rsplit("@", 1)[1] for run in chosen)})', file=sys.stderr, flush=True)
+    return [STORE + land for land in LAND_CASES] + chosen
+
+
+def compress(runs):
+    """`runs` as native filters: a file when every one of its runs is listed,
+    else its listed `case@K` runs."""
+    files = {}
+    for run in runs:
+        files.setdefault(CUT.sub(r'\1', run), []).append(run)
+    filters = []
+    for file, listed in sorted(files.items()):
+        whole = len(listed) == len(conformance.run_ids(file, (ROOT / file).read_text()))
+        filters += [file] if whole else listed
+    return filters
+
+
+def heap_costs():
+    """NATIVE_HEAP_COSTS rows: case or prefix -> (sites, seconds a site or None,
+    note). A row whose cost is `-` names cases left out of campaign plans; its
+    note is the gap row's owner."""
+    rows = {}
+    for line in (ROOT / NATIVE_HEAP_COSTS).read_text().splitlines():
+        if line and not line.startswith('#'):
+            key, sites, cost, note = line.split('\t')
+            rows[key] = (int(sites), None if cost == '-' else float(cost), note)
+    return rows
+
+
+def heap_cost(run, costs):
+    """Planned seconds a fault site of `run`, or None when its campaign is left out
+    of plans: the longest matching row, else the worst measured figure of its
+    rule (its family), else the worst measured at all."""
+    keys = [key for key in costs if run == key or run.startswith(key)]
+    if keys:
+        return costs[max(keys, key=len)][1]
+    rule = re.match(r'(.*/[A-Z]+-\d+)-', run)
+    measured = [cost for _, cost, _ in costs.values() if cost is not None]
+    family = [cost for key, (_, cost, _) in costs.items()
+              if cost is not None and rule and key.startswith(rule[1] + '-')]
+    return max(family or measured)
+
+
+def unplanned(runs, costs):
+    """The runs whose campaigns are left out of plans, with each gap row's owner."""
+    found = {}
+    for run in runs:
+        if heap_cost(run, costs) is None:
+            key = max((k for k in costs if run.startswith(k)), key=len)
+            found[run] = costs[key][2]
+    return found
 
 
 def cases(root):
@@ -112,8 +214,13 @@ def main():
     parser.add_argument('--full-matrix', action='store_true',
                         help="--native: every configuration of each case's full-gate cover")
     parser.add_argument('--report-json', type=Path, help='write per-slice compiler reports for main-runs')
-    parser.add_argument('prefixes', nargs='+', metavar='PREFIX')
+    parser.add_argument('--selection', choices=['store-land', 'store-milestone'],
+                        help='a named selection instead of prefixes (see named_selection)')
+    parser.add_argument('--parent', default='HEAD^', help="--selection store-land: the land's parent commit")
+    parser.add_argument('prefixes', nargs='*', metavar='PREFIX')
     args = parser.parse_args()
+    if bool(args.selection) == bool(args.prefixes):
+        parser.error('name either prefixes or one --selection')
     if (args.parts or args.config or args.full_matrix or args.heap_parts != 1) and not args.native:
         parser.error('--parts, --config and --full-matrix need --native')
     if args.config and args.full_matrix:
@@ -124,21 +231,30 @@ def main():
         parser.error(f'--heap-parts must be 1..{NATIVE_SELECTED_SLICES}')
     if args.heap_parts > 1 and (args.full_matrix or not args.config or any(not c.endswith('/heap+inject') for c in args.config)):
         parser.error('--heap-parts requires explicit heap+inject configurations only')
-    prefixes = [p.rstrip('/') + '/' if (ROOT / p).is_dir() else p for p in args.prefixes]
     corpus = cases(ROOT)
-    unmatched = [p for p in prefixes if not any(c.startswith(p) for c in corpus)]
+    if args.selection:
+        args.prefixes = named_selection(args.selection, corpus, args.parent)
+    prefixes = [p.rstrip('/') + '/' if (ROOT / p).is_dir() else p for p in args.prefixes]
+    unmatched = [p for p in prefixes if not runs_of(corpus, [p])]
     if unmatched or any('|' in p or ';' in p for p in prefixes):
         print(f'corpus: no corpus case matches {unmatched or prefixes}', file=sys.stderr)
         return 2
     if any('|' in c or ';' in c for c in args.config):
         print(f'corpus: bad configuration name in {args.config}', file=sys.stderr)
         return 2
-    selected = sum(any(c.startswith(p) for p in prefixes) for c in corpus)
+    # A swept case counts once per cut: each is a run with its own verdict.
+    runs = runs_of(corpus, prefixes)
+    selected = len(runs)
     if args.native:
-        return native(prefixes, selected, args)
+        return native(prefixes, runs, args)
+    # The interpreter runs a swept case's every cut; a `case@K` prefix selects its file.
+    prefixes = sorted({CUT.sub(r'\1', p) for p in prefixes})
+    runs = runs_of(corpus, prefixes)
+    selected = len(runs)
     slices = args.slices or math.ceil(selected / CONFORMANCE_SLICE_PROGRAMS)
-    slices = max(1, min(slices, SELECTED_SLICES, selected))
-    print(f'corpus: {selected} cases in {slices} slices', file=sys.stderr, flush=True)
+    files = len({CUT.sub(r'\1', run) for run in runs})
+    slices = max(1, min(slices, SELECTED_SLICES, files))
+    print(f'corpus: {selected} runs in {slices} slices', file=sys.stderr, flush=True)
     subprocess.run([sys.executable, str(ROOT / 'tools/buck2/sync.py'), '--if-stale'], cwd=ROOT, check=True)
     targets = [f'//:gate-conformance-selected-shard-{i}' for i in range(1, slices + 1)]
     config = ['-c', 'hirsel.conformance_paths=' + '|'.join(prefixes),
@@ -171,7 +287,7 @@ def main():
             records.append(record)
         with args.report_json.open('w') as out:
             json.dump(dict(version=1, expected_slices=slices, reports=records, problems=problems,
-                           selected_cases=sorted(c for c in corpus if any(c.startswith(p) for p in prefixes))), out)
+                           selected_cases=sorted(runs)), out)
         # Keep the usual CLI summaries and failure lines as well as the JSON artifact.
         outputs = {name: '\n'.join([
             f'{label}: ' + ' / '.join(f'{report[key][field]} {word}' for field, word in
@@ -199,51 +315,64 @@ def main():
     return status
 
 
-def native(prefixes, selected, args):
-    """The selection through gate-native-full's matrix: one action per case (or
-    path shards times configuration parts), then the parted heap campaigns."""
-    shards = max(1, min(args.slices or selected, NATIVE_SELECTED_SLICES // args.heap_parts, selected))
-    # A named set gives each case at most that many configurations (smoke:
-    # three), all in one action unless --parts splits them; a full-matrix
-    # cover is cut into at most NATIVE_COVER_PARTS parts.
-    named = sum(3 if name == 'smoke' else 1 for name in args.config) or NATIVE_COVER_PARTS
-    parts = max(1, min(args.parts or (1 if args.config else named), named,
-                       NATIVE_SELECTED_SLICES // (shards * args.heap_parts)))
-    # Whole campaigns are bounded unless the caller chose the heap parts.
-    sites_max = NATIVE_HEAP_PART_SITES if args.heap_parts == 1 else None
-    heap = sites_max and any(name == 'smoke' or name.endswith('/heap+inject') for name in args.config)
-    # Estimated warm seconds of the heaviest slice (sync.py NATIVE_SLICE_SECONDS):
-    # a bounded heap campaign costs about one heap part.
-    if args.heap_parts > 1:
-        per_case = math.ceil(named / parts) * NATIVE_HEAP_PART_SECONDS
-    elif args.config:
-        per_case = math.ceil(named / parts) * NATIVE_CONFIG_SECONDS + (NATIVE_HEAP_PART_SECONDS if heap else 0)
-    else:
-        per_case = math.ceil(named / parts) * NATIVE_COVER_PART_SECONDS
-    estimate = math.ceil(selected / shards) * per_case
-    if estimate > NATIVE_SLICE_SECONDS:
-        print(f'corpus: {selected} cases in {shards * parts * args.heap_parts} slices would run about {estimate} s '
-              f'per slice, over {NATIVE_SLICE_SECONDS} s; narrow the selection or name fewer configurations',
-              file=sys.stderr)
-        return 2
-    print(f'corpus: {selected} files in {shards} case parts x {parts} configuration parts x {args.heap_parts} heap fault parts', file=sys.stderr,
-          flush=True)
-    subprocess.run([sys.executable, str(ROOT / 'tools/buck2/sync.py'), '--if-stale'], cwd=ROOT, check=True)
-    status, problems, reports, attempts, cases, parted, expected = native_round(
-        prefixes, shards, parts, args.config, args.heap_parts, sites_max, 'corpus-native')
-    if parted:
-        # Each parted (case, configuration) as its own heap parts: every part
-        # checks the clean run and injects a disjoint share of the sites.
-        ids = sorted({row['case'] for row in parted})
-        configs = sorted({row['configuration'] for row in parted})
-        heap_parts = max(math.ceil(row['sites'] / NATIVE_HEAP_PART_SITES) for row in parted)
-        print(f'corpus: {len(parted)} heap campaigns over {NATIVE_HEAP_PART_SITES} sites, '
-              f'{len(ids)} cases x {heap_parts} heap fault parts', file=sys.stderr, flush=True)
-        if len(ids) * len(configs) * heap_parts > NATIVE_SELECTED_SLICES:
-            problems.append(f'parted campaigns need {len(ids) * len(configs) * heap_parts} slices, '
-                            f'over {NATIVE_SELECTED_SLICES}; narrow the selection')
+def native(prefixes, runs, args):
+    """The selection through gate-native-full's matrix: one action per run (or
+    run shards times configuration parts), then the parted heap campaigns,
+    each in parts sized by its measured cost (heap_cost)."""
+    costs = heap_costs()
+    left_out = unplanned(runs, costs)
+    planned = [run for run in runs if run not in left_out]
+    if args.heap_parts > 1 and left_out:
+        # Explicit heap parts are a campaign plan: these runs have none.
+        print(f'corpus: --heap-parts: {len(left_out)} runs have no campaign plan ('
+              + ', '.join(sorted(set(left_out.values()))) + '); not run', file=sys.stderr)
+        left_out = {}
+    status, problems, reports, attempts, cases, expected, parted = 0, [], [], 0, 0, 0, []
+    # A whole campaign of up to sites_max sites holds at most
+    # NATIVE_HEAP_FAULT_SECONDS of faults at the worst planned cost; runs whose
+    # campaigns are left out of plans get their clean heap run alone (one site).
+    rounds = []
+    if planned:
+        worst = max(heap_cost(run, costs) for run in planned)
+        rounds.append((planned, max(1, int(NATIVE_HEAP_FAULT_SECONDS / worst)) if args.heap_parts == 1 else None))
+    if left_out:
+        rounds.append((sorted(left_out), 1))
+    for selection, sites_max in rounds:
+        chosen = prefixes if len(selection) == len(runs) else compress(selection)
+        result = native_selection(chosen, len(selection), args, sites_max)
+        if isinstance(result, int):
+            return result
+        status = status or result[0]
+        problems += result[1]
+        reports += result[2]
+        attempts += result[3]
+        cases += result[4]
+        expected += result[6]
+        if selection == planned:
+            parted += result[5]
         else:
-            more = native_round(ids, len(ids), len(configs), configs, heap_parts, None, 'corpus-native-heap')
+            problems += [f'{row["case"]}: a campaign left out of plans was not parted' for row in result[5]]
+    for run, owner in sorted(left_out.items()):
+        print(f'corpus: {run}: heap campaign left out of plans ({owner}); clean heap run only', file=sys.stderr)
+    # Each parted (case, configuration) as its own heap parts, every part
+    # checking the clean run and injecting a disjoint share of the sites, the
+    # share sized so its expected faults stay under NATIVE_HEAP_FAULT_SECONDS.
+    groups = {}
+    for row in parted:
+        parts = math.ceil(row['sites'] * heap_cost(row['case'], costs) / NATIVE_HEAP_FAULT_SECONDS)
+        groups.setdefault(parts, []).append(row)
+    for heap_parts, rows in sorted(groups.items()):
+        configs = sorted({row['configuration'] for row in rows})
+        ids = sorted({row['case'] for row in rows})
+        per_round = NATIVE_SELECTED_SLICES // (len(configs) * heap_parts)
+        if per_round == 0:
+            problems.append(f'{", ".join(ids)}: {heap_parts} heap fault parts per configuration, '
+                            f'over {NATIVE_SELECTED_SLICES} slices; not run')
+            continue
+        for at in range(0, len(ids), per_round):
+            chunk = ids[at:at + per_round]
+            print(f'corpus: {len(chunk)} parted heap campaigns x {heap_parts} heap fault parts', file=sys.stderr, flush=True)
+            more = native_round(chunk, len(chunk), len(configs), configs, heap_parts, None, 'corpus-native-heap')
             status = status or more[0]
             problems += more[1]
             reports += more[2]
@@ -259,6 +388,37 @@ def native(prefixes, selected, args):
         print('corpus: no executable case ran', file=sys.stderr)
         return status or 1
     return status or (1 if problems else 0)
+
+
+def native_selection(prefixes, selected, args, sites_max):
+    """Round one over `selected` runs: its native_round result, or an exit code
+    when the selection cannot fit the slice budget."""
+    shards = max(1, min(args.slices or selected, NATIVE_SELECTED_SLICES // args.heap_parts, selected))
+    # A named set gives each case at most that many configurations (smoke:
+    # three), all in one action unless --parts splits them; a full-matrix
+    # cover is cut into at most NATIVE_COVER_PARTS parts.
+    named = sum(3 if name == 'smoke' else 1 for name in args.config) or NATIVE_COVER_PARTS
+    parts = max(1, min(args.parts or (1 if args.config else named), named,
+                       NATIVE_SELECTED_SLICES // (shards * args.heap_parts)))
+    heap = sites_max and any(name == 'smoke' or name.endswith('/heap+inject') for name in args.config)
+    # Estimated warm seconds of the heaviest slice (sync.py NATIVE_SLICE_SECONDS):
+    # a bounded heap campaign costs about one heap part.
+    if args.heap_parts > 1:
+        per_case = math.ceil(named / parts) * NATIVE_HEAP_PART_SECONDS
+    elif args.config:
+        per_case = math.ceil(named / parts) * NATIVE_CONFIG_SECONDS + (NATIVE_HEAP_PART_SECONDS if heap else 0)
+    else:
+        per_case = math.ceil(named / parts) * NATIVE_COVER_PART_SECONDS
+    estimate = math.ceil(selected / shards) * per_case
+    if estimate > NATIVE_SLICE_SECONDS:
+        print(f'corpus: {selected} runs in {shards * parts * args.heap_parts} slices would run about {estimate} s '
+              f'per slice, over {NATIVE_SLICE_SECONDS} s; narrow the selection or name fewer configurations',
+              file=sys.stderr)
+        return 2
+    print(f'corpus: {selected} runs in {shards} case parts x {parts} configuration parts x {args.heap_parts} heap fault parts'
+          + (f', whole campaigns up to {sites_max} sites' if heap else ''), file=sys.stderr, flush=True)
+    subprocess.run([sys.executable, str(ROOT / 'tools/buck2/sync.py'), '--if-stale'], cwd=ROOT, check=True)
+    return native_round(prefixes, shards, parts, args.config, args.heap_parts, sites_max if heap else None, 'corpus-native')
 
 
 def native_round(prefixes, shards, parts, configs, heap_parts, sites_max, log):

@@ -41,17 +41,21 @@ pub fn cases(root: &Path) -> Result<Vec<Case>, String> {
                             | crate::Expect::Test
                     ) =>
                 {
-                    Some(Ok(Case {
-                        id,
-                        source,
-                        path: Some(path),
-                    }))
+                    Some(
+                        Case {
+                            id,
+                            source,
+                            path: Some(path),
+                        }
+                        .per_cut(),
+                    )
                 }
                 Ok(_) => None,
                 Err(e) => Some(Err(e)),
             }
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()
+        .map(|cases| cases.into_iter().flatten().collect())
 }
 
 pub fn omissions(text: &str, cases: &[Case]) -> Result<BTreeMap<String, String>, String> {

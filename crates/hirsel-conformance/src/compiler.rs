@@ -69,17 +69,18 @@ pub struct Observation {
     /// Its coordinates belong to a dependency, so formatting this case cannot move them.
     pub primary_external: bool,
 }
-pub fn evaluate(path: &Path, expect: &Expect) -> (Status, Observation) {
-    evaluate_with_hash_seed(path, expect, 0)
-}
-pub fn evaluate_with_hash_seed(
-    path: &Path,
-    expect: &Expect,
-    hash_seed: u64,
-) -> (Status, Observation) {
+pub fn evaluate_with_hash_seed(path: &Path, expect: &Expect, hash_seed: u64) -> Vec<Verdict> {
     hirsel_intern::jobs::with_compiler_stack(|| {
         evaluate_on_compiler_thread(path, expect, hash_seed)
     })
+}
+/// The one verdict of a case that ended before any run, or that has one run.
+fn whole(status: Status, observation: Observation) -> Vec<Verdict> {
+    vec![Verdict {
+        cut: None,
+        status,
+        observation,
+    }]
 }
 /// A diagnostic raised while indexing package sources, before any Check output.
 fn source_rejection(
@@ -102,11 +103,7 @@ fn source_rejection(
     };
     (verdict(expect, &actual, &observation.actual), observation)
 }
-fn evaluate_on_compiler_thread(
-    path: &Path,
-    expect: &Expect,
-    hash_seed: u64,
-) -> (Status, Observation) {
+fn evaluate_on_compiler_thread(path: &Path, expect: &Expect, hash_seed: u64) -> Vec<Verdict> {
     let compiler = verifying_compiler();
     let requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
     let input_compiler = requests.compiler().clone();
@@ -117,7 +114,7 @@ fn evaluate_on_compiler_thread(
     ) {
         Ok(observed) => observed,
         Err(_) => {
-            return (
+            return whole(
                 Status::Fail("corpus inputs changed during capture".into()),
                 Observation::default(),
             );
@@ -135,10 +132,11 @@ fn evaluate_on_compiler_thread(
             sources,
             ..
         }) if !diagnostics.is_empty() => {
-            return source_rejection(expect, &diagnostics[0], &sources);
+            let (status, observation) = source_rejection(expect, &diagnostics[0], &sources);
+            return whole(status, observation);
         }
         Err(error) => {
-            return (
+            return whole(
                 Status::Fail(format!("tool error: {error}")),
                 Observation::default(),
             );
@@ -156,7 +154,7 @@ fn evaluate_on_compiler_thread(
             program.engine.adapters.interpreter = Some(interpreter);
             limits
         }
-        Err(error) => return (Status::Fail(error), Observation::default()),
+        Err(error) => return whole(Status::Fail(error), Observation::default()),
     };
     // Interpretation refuses a definition outside the entry's semantic closure
     // in every build, so every executed corpus file checks the closure.
@@ -191,12 +189,12 @@ fn evaluate_on_compiler_thread(
         let (tests, batch) = match discovered {
             Ok((tests, batch)) if !tests.is_empty() => (tests, batch),
             Ok(_) => {
-                return (
+                return whole(
                     Status::Fail("expect: test selected no @test functions".into()),
                     observation,
                 );
             }
-            Err(error) => return (Status::Fail(format!("test check: {error}")), observation),
+            Err(error) => return whole(Status::Fail(format!("test check: {error}")), observation),
         };
         for test in &tests {
             let mut execute = |checked| {
@@ -215,7 +213,7 @@ fn evaluate_on_compiler_thread(
                         ))
                     ) || observation.checked.is_some()
                     {
-                        return (
+                        return whole(
                             Status::Fail(format!(
                                 "{}: {:?}; checked: {:?}",
                                 test.definition, ordinary.outcome, observation.checked
@@ -225,7 +223,7 @@ fn evaluate_on_compiler_thread(
                     }
                 }
                 (ordinary, checked) => {
-                    return (
+                    return whole(
                         Status::Fail(format!(
                             "{}: ordinary {ordinary:?}; checked {checked:?}",
                             test.definition
@@ -236,7 +234,7 @@ fn evaluate_on_compiler_thread(
             }
         }
         observation.actual = format!("{} tests", tests.len());
-        return (Status::Pass, observation);
+        return whole(Status::Pass, observation);
     }
     let context = program
         .files
@@ -290,7 +288,8 @@ fn evaluate_on_compiler_thread(
         }
     })();
     if let Some(rejected) = rejected {
-        return rejected;
+        let (status, observation) = rejected;
+        return whole(status, observation);
     }
     let primary_path = program
         .engine
@@ -319,12 +318,12 @@ fn evaluate_on_compiler_thread(
                 reachable.diagnostics,
                 reachable.completion
             );
-            return (Status::Fail(observation.actual.clone()), observation);
+            return whole(Status::Fail(observation.actual.clone()), observation);
         }
         Ok((comptime, _)) => comptime,
         Err(error) => {
             observation.actual = format!("tool error: {error}");
-            return (Status::Fail(observation.actual.clone()), observation);
+            return whole(Status::Fail(observation.actual.clone()), observation);
         }
     };
     engine.sources = output.sources.clone();
@@ -353,12 +352,12 @@ fn evaluate_on_compiler_thread(
             rule: d.rule.clone(),
             line: line as usize,
         };
-        return (verdict(expect, &actual, &observation.actual), observation);
+        return whole(verdict(expect, &actual, &observation.actual), observation);
     }
     if let hirsel_engine::CheckCompletion::Incomplete { phase } = output.completion {
         observation.actual = "not implemented".into();
         observation.phase = phase.phase_name().into();
-        return (Status::NotImplemented, observation);
+        return whole(Status::NotImplemented, observation);
     }
     if matches!(expect, Expect::RefuseEntry) {
         use hirsel_engine::DefinitionQueries;
@@ -373,7 +372,7 @@ fn evaluate_on_compiler_thread(
             "accepted entry"
         }
         .into();
-        return (
+        return whole(
             verdict(
                 expect,
                 &if refused {
@@ -391,7 +390,7 @@ fn evaluate_on_compiler_thread(
         expect,
         Expect::Run { .. } | Expect::Fail { .. } | Expect::Blocked { .. } | Expect::Signaled { .. }
     ) {
-        return (
+        return whole(
             verdict(expect, &Actual::Accepted, &observation.actual),
             observation,
         );
@@ -401,9 +400,9 @@ fn evaluate_on_compiler_thread(
         hash_seed,
         inputs: vec![],
     };
-    let simulation = match crate::simulation(&text) {
-        Ok(simulation) => simulation,
-        Err(error) => return (Status::Fail(error), observation),
+    let (simulation, runs) = match (crate::simulation(&text), crate::runs(&text, &[])) {
+        (Ok(simulation), Ok(runs)) => (simulation, runs),
+        (Err(error), _) | (_, Err(error)) => return whole(Status::Fail(error), observation),
     };
     // The accepted TIR supplies the execution's source view. Release the
     // completed Check view before admitting that independent operation.
@@ -422,7 +421,7 @@ fn evaluate_on_compiler_thread(
                 }
                 _ => {
                     observation.actual = "corpus TIR returned another operation".into();
-                    return (Status::Fail(observation.actual.clone()), observation);
+                    return whole(Status::Fail(observation.actual.clone()), observation);
                 }
             },
             Err(ToolError::Query {
@@ -431,119 +430,144 @@ fn evaluate_on_compiler_thread(
                 ..
             }) => {
                 observation.actual = format!("TIR request unavailable at {phase:?}");
+                return whole(Status::NotImplemented, observation);
+            }
+            Err(error) => {
+                observation.actual = format!("tool error: {error}");
+                return whole(Status::Fail(observation.actual.clone()), observation);
+            }
+        }
+    };
+    // The one prepared program runs once, or once per cut with its Args.
+    observation.phase = "interpretation".into();
+    let mut interpret = |simulation: hirsel_engine::SimulationConfig,
+                         mut observation: Observation|
+     -> (Status, Observation) {
+        let mut execute = |checked| {
+            hirsel_driver::testing::observe_tir(
+                &prepared,
+                &config,
+                simulation.clone(),
+                limits,
+                checked,
+            )
+        };
+        let execution = match execute(false) {
+            Ok(outcome) => outcome,
+            Err(ToolError::Query {
+                error: QueryError::NotImplemented,
+                ..
+            }) => {
+                observation.actual = "not implemented".into();
                 return (Status::NotImplemented, observation);
             }
             Err(error) => {
                 observation.actual = format!("tool error: {error}");
                 return (Status::Fail(observation.actual.clone()), observation);
             }
-        }
-    };
-    observation.phase = "interpretation".into();
-    let mut execute = |checked| {
-        hirsel_driver::testing::observe_tir(&prepared, &config, simulation.clone(), limits, checked)
-    };
-    let execution = match execute(false) {
-        Ok(outcome) => outcome,
-        Err(ToolError::Query {
-            error: QueryError::NotImplemented,
-            ..
-        }) => {
-            observation.actual = "not implemented".into();
-            return (Status::NotImplemented, observation);
-        }
-        Err(error) => {
-            observation.actual = format!("tool error: {error}");
-            return (Status::Fail(observation.actual.clone()), observation);
-        }
-    };
-    // Third witness: the same IR under checked execution must observe the same.
-    observation.checked = match execute(true) {
-        Ok(checked) => checked_divergence(&execution, &checked),
-        Err(error) => Some(format!("checked execution: tool error: {error}")),
-    };
-    let stdout = execution
-        .observation
-        .as_ref()
-        .map(|o| o.output.as_slice())
-        .unwrap_or(&execution.tooling_output);
-    if let Some(failure) = execution
-        .observation
-        .as_ref()
-        .and_then(|o| o.failures.first())
-    {
-        let file = engine.sources.anchors().find_map(|(_, file, _)| {
-            (engine.sources.file(file)?.path.to_string_lossy() == failure.stable_site.file)
-                .then_some(file)
-        });
-        if let Some(file) = file {
-            observation.primary_external =
-                engine.sources.file(file).map(|file| &file.path) != primary_path.as_ref();
-            observation.primary = crate::corpus_format::primary_at_site(
-                &mut engine,
-                file,
-                failure.rule.as_str(),
-                failure.stable_site.line as usize,
-                failure.stable_site.column as usize,
-            );
-        }
-    }
-    let outcome = match execution.outcome {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            let missing = matches!(
-                &error,
-                hirsel_engine::RuntimeError::Query(QueryError::NotImplemented)
-            );
-            let text = match error {
-                hirsel_engine::RuntimeError::Query(error) => ToolError::Query {
-                    error,
-                    phase: Some(hirsel_query_products::QueryKind::Interpret),
-                    sources: prepared.sources.clone(),
-                }
-                .to_string(),
-                hirsel_engine::RuntimeError::Io(error) => error.to_string(),
-                hirsel_engine::RuntimeError::Tool(message) => message,
-            };
-            observation.actual = format!(
-                "tool error: {text}; stdout {:?}",
-                String::from_utf8_lossy(stdout)
-            );
-            return (
-                if missing {
-                    Status::NotImplemented
-                } else {
-                    Status::Fail(observation.actual.clone())
-                },
-                observation,
-            );
-        }
-    };
-    observation.actual = format!("{outcome:?}; stdout {:?}", String::from_utf8_lossy(stdout));
-    let end = match execution.observation.as_ref() {
-        Some(actual) => match (actual.failures.first(), actual.exit_code) {
-            (Some(failure), _) => End::Failure {
-                rule: failure.rule.clone(),
-                line: failure.stable_site.line as usize,
-            },
-            (None, Some(code)) => End::Exit(code),
-            (None, None)
-                if actual.blocked.is_some() && matches!(outcome, RunOutcome::Blocked(_)) =>
-            {
-                End::Blocked
+        };
+        // Third witness: the same IR under checked execution must observe the same.
+        observation.checked = match execute(true) {
+            Ok(checked) => checked_divergence(&execution, &checked),
+            Err(error) => Some(format!("checked execution: tool error: {error}")),
+        };
+        let stdout = execution
+            .observation
+            .as_ref()
+            .map(|o| o.output.as_slice())
+            .unwrap_or(&execution.tooling_output);
+        if let Some(failure) = execution
+            .observation
+            .as_ref()
+            .and_then(|o| o.failures.first())
+        {
+            let file = engine.sources.anchors().find_map(|(_, file, _)| {
+                (engine.sources.file(file)?.path.to_string_lossy() == failure.stable_site.file)
+                    .then_some(file)
+            });
+            if let Some(file) = file {
+                observation.primary_external =
+                    engine.sources.file(file).map(|file| &file.path) != primary_path.as_ref();
+                observation.primary = crate::corpus_format::primary_at_site(
+                    &mut engine,
+                    file,
+                    failure.rule.as_str(),
+                    failure.stable_site.line as usize,
+                    failure.stable_site.column as usize,
+                );
             }
-            (None, None) => match (actual.signaled, &outcome) {
-                (Some(kind), RunOutcome::Signaled(k)) if kind == *k => End::Signaled(kind),
-                _ => End::Other,
+        }
+        let outcome = match execution.outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let missing = matches!(
+                    &error,
+                    hirsel_engine::RuntimeError::Query(QueryError::NotImplemented)
+                );
+                let text = match error {
+                    hirsel_engine::RuntimeError::Query(error) => ToolError::Query {
+                        error,
+                        phase: Some(hirsel_query_products::QueryKind::Interpret),
+                        sources: prepared.sources.clone(),
+                    }
+                    .to_string(),
+                    hirsel_engine::RuntimeError::Io(error) => error.to_string(),
+                    hirsel_engine::RuntimeError::Tool(message) => message,
+                };
+                observation.actual = format!(
+                    "tool error: {text}; stdout {:?}",
+                    String::from_utf8_lossy(stdout)
+                );
+                return (
+                    if missing {
+                        Status::NotImplemented
+                    } else {
+                        Status::Fail(observation.actual.clone())
+                    },
+                    observation,
+                );
+            }
+        };
+        observation.actual = format!("{outcome:?}; stdout {:?}", String::from_utf8_lossy(stdout));
+        let end = match execution.observation.as_ref() {
+            Some(actual) => match (actual.failures.first(), actual.exit_code) {
+                (Some(failure), _) => End::Failure {
+                    rule: failure.rule.clone(),
+                    line: failure.stable_site.line as usize,
+                },
+                (None, Some(code)) => End::Exit(code),
+                (None, None)
+                    if actual.blocked.is_some() && matches!(outcome, RunOutcome::Blocked(_)) =>
+                {
+                    End::Blocked
+                }
+                (None, None) => match (actual.signaled, &outcome) {
+                    (Some(kind), RunOutcome::Signaled(k)) if kind == *k => End::Signaled(kind),
+                    _ => End::Other,
+                },
             },
-        },
-        None => End::Other,
+            None => End::Other,
+        };
+        let actual = Actual::Ran {
+            end,
+            stdout: stdout.to_vec(),
+        };
+        (verdict(expect, &actual, &observation.actual), observation)
     };
-    let actual = Actual::Ran {
-        end,
-        stdout: stdout.to_vec(),
-    };
-    (verdict(expect, &actual, &observation.actual), observation)
+    let mut verdicts = Vec::new();
+    for run in runs {
+        let simulation = hirsel_engine::SimulationConfig {
+            args: run.args,
+            ..simulation.clone()
+        };
+        let (status, observation) = interpret(simulation, observation.clone());
+        verdicts.push(Verdict {
+            cut: run.cut,
+            status,
+            observation,
+        });
+    }
+    verdicts
 }
 /// The status for what was observed, decided by the header's own matcher.
 fn verdict(expect: &Expect, actual: &Actual, observed: &str) -> Status {
@@ -644,7 +668,7 @@ mod tests {
                 std::process::id()
             ));
             fs::write(&path, "fn charge[T: copyable](x: T) -> u8 { match arena.bounded(64, fn(a: Arena) -> u8 { let c = copy_to(a, x); 0u8 }) { Ok(n) => n, Error(e) => 1u8 } }\npub fn main(rt: Io, args: Args) -> Result[(), GrantError] { let _ = out.print(io.stdout(rt)?, \"before unavailable\\n\"); let n = charge(7u8); Ok(()) }").unwrap();
-            let (status, observation) = evaluate(
+            let (status, observation) = crate::Compiler.evaluate(
                 &path,
                 &Expect::Run {
                     stdout: "before unavailable\n".into(),

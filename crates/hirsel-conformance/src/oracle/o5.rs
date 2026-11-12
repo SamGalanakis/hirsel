@@ -190,21 +190,26 @@ fn observe(path: &Path, expect: &Expect, native: bool) -> Result<Artifacts, supe
             }
         }
     }
-    let (status, observation) = crate::compiler::evaluate(path, expect);
-    let primary = observation
-        .primary
-        .map(|p| format!("{} {} {}:{}", p.rule, p.spelling, p.line, p.column));
     if native {
         artifacts.insert("native".into(), native_runs(path).into_bytes());
     }
-    artifacts.insert(
-        "evaluation".into(),
-        format!(
+    // A swept case (`// cuts:`) gives one verdict per cut, each prefixed by
+    // its cut; any other case gives its one verdict unprefixed.
+    let mut evaluation = String::new();
+    for verdict in crate::Driver::runs(&crate::Compiler, path, expect) {
+        let (status, observation) = (verdict.status, verdict.observation);
+        let primary = observation
+            .primary
+            .map(|p| format!("{} {} {}:{}", p.rule, p.spelling, p.line, p.column));
+        if let Some(cut) = verdict.cut {
+            evaluation.push_str(&format!("cut {cut}\n"));
+        }
+        evaluation.push_str(&format!(
             "{status:?}\n{}\n{}\n{:?}\n{primary:?}\n",
             observation.phase, observation.actual, observation.checked
-        )
-        .into_bytes(),
-    );
+        ));
+    }
+    artifacts.insert("evaluation".into(), evaluation.into_bytes());
     Ok(artifacts)
 }
 

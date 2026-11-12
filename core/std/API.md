@@ -286,9 +286,9 @@ makes awkward for the library, most useful first (R-numbers in `SPEC-GAPS.md`):
 - **R5** No wide multiply (`u128` or a high half), so Eisel-Lemire costs about 4x the multiplies.
 - **R6** `span.builder` has no capacity hint, so a builder whose count is known still abandons
   its growth blocks to the region (request-scratch: a few hundred bytes per request).
-- **R7** Compact values have no sequence of links (reserved R6), so a document blob holds
-  arrays and objects as backward-linked cells. The seed's json uses own `List` and `Map` and is
-  unaffected (NINE.md).
+- **R7** Compact sequences of variable-size elements are not in revision 3. They will return
+  in the first version (goose-parts-897); json's matched variant, one blob per document, waits
+  for them. The seed's json uses own `List` and `Map` and is unaffected (NINE.md).
 
 ## Operation index
 

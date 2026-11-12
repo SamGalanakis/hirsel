@@ -16,8 +16,8 @@ SPEC's oracle is defined.
 **Verdict under revision 3.** All nine can be written, and none needs anything revision 3
 deleted. Of the deleted spans (`SeqSpan`, `IndexedSpan`, the fixed and indexed builders) the
 seed's nine used none: request-scratch's span was always a `FixedSpan` of a plain record, and
-json's tree and rope's document are own data (`List`, `Map`, `Rc`). The cost moved to the
-"matched" json variant, which the seed does not write (see json). Revision 3 removed three
+json's tree and rope's document are own data (`List`, `Map`, `Rc`). The "matched" json
+variant waits for compact sequences of variable-size elements (see json). Revision 3 removed three
 awkward points (the leaked temp directory, the assumed open modes, the side list in generics)
 and line cutting is now `split_once`. What remains awkward, most useful first:
 
@@ -147,29 +147,20 @@ It used no span in revision 2 and uses none now.
 - Document release: each document's tree is a local of the per-line loop and is cleaned at the
   end of its iteration; the "document region releases once" trace line is that owner's release.
 
-**What the matched variant would cost.** The corpus's matched Rust keeps each document as one
-immutable blob with u32 child offsets, built once and freed at document close. In Hirsel that
-is a compact value in a per-document region, built with `build_in` (MEM-4). Revision 2's
-indexed span would have held an array's or object's children as one offset table. Revision 3
-keeps only `FixedSpan` of plain elements, and a `Link` is not a value (MEM-10), so a compact
-`Json` holds an array as cells: `Arr(Option[Link[Cell]])` with
-`Cell { v: Link[Json], prev: Option[Link[Cell]] }`, and an object likewise with a `Text` key.
-That costs:
-- 2 x W bytes of links per element (8 at `@compact(u32)`), where an offset table costs W;
-- links point only backward (a child is complete before its parent), so the cells come out in
-  reverse; printing in order recurses once per element (a stack depth of the array length, and
-  the corpus sets no nesting limit) or first copies the cells' order into an own list;
-- an index query `a/3` walks the cells, O(n) instead of O(1);
-- the duplicate-key rule must be settled before the object is written, because a published blob
-  is immutable (MEM-5), so the parser stages each object in an own `Map` first: the matched
-  variant still builds the idiomatic tree as its staging, then copies it;
-- `build_in` admits its size once, before writing: the parser either sizes the blob in a first
-  pass over the staged tree, or guesses and retries on `Overflow`, leaving each failed
-  destination's bytes charged until the region closes.
+**The matched variant: waits for compact sequences.** The corpus's matched Rust keeps each
+document as one immutable blob with u32 child offsets, built once and freed at document close.
+In Hirsel that is one compact value per document in a per-document region. It needs compact
+sequences of variable-size elements (a sequential walk, an optional index, and nested
+documents built in one blob with no staging tree). Revision 3 does not have them: it keeps only
+`FixedSpan` of plain elements, and a `Link` is not a value (MEM-10). They will return in the
+first version, from the goose-parts-897 design lane (GOOSE-PARTS.md) and a later spec round.
+The seed writes this variant as one blob per document when those rules land, and not before.
 
-Nothing is impossible; the matched variant becomes "idiomatic tree, then a compact copy", which
-measures the copy rather than the blob. Sequences of variable-size or stable elements are
-reserved (reserved.md R6).
+Measured reason, for the record: without compact sequences an array or object would be
+backward-linked cells, costing 2 x W bytes of links per element instead of W, reverse order
+(printing recurses once per element), O(n) index queries, and an own staging tree before every
+blob, because the duplicate-key rule must be settled before an immutable blob is written. That
+would measure "idiomatic tree, then a compact copy", not the blob.
 
 ## lru
 

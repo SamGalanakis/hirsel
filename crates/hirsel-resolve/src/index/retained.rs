@@ -35,6 +35,18 @@ impl Bytes {
         });
         self.add((n / 5 + 1).saturating_mul(node));
     }
+    /// A hashbrown table: two entries per usable slot plus controls covers its
+    /// <=7/8 load, as for `entries`.
+    fn map<K, V>(&mut self, capacity: usize) {
+        if capacity != 0 {
+            self.add(
+                capacity
+                    .saturating_mul(2)
+                    .saturating_mul(size_of::<(K, V)>() + 1)
+                    .saturating_add(16),
+            );
+        }
+    }
     fn package(&mut self, value: &PackageId) {
         self.add(value.name.capacity());
         self.add(value.version.capacity());
@@ -83,14 +95,24 @@ impl ManifestIndex {
                 bytes.strings(modules);
             }
         }
-        bytes.arc(&*self.module_heads);
-        bytes.tree::<(PackageId, Vec<String>), BTreeSet<String>>(self.module_heads.len());
-        for ((package, modules), values) in &*self.module_heads {
+        bytes.arc(&*self.tables);
+        bytes.map::<PackageId, ModuleId>(self.tables.roots.capacity());
+        for package in self.tables.roots.keys() {
             bytes.package(package);
-            bytes.strings(modules);
-            bytes.tree::<String, ()>(values.len());
-            for value in values {
-                bytes.add(value.capacity());
+        }
+        bytes.map::<(ModuleId, Symbol), ModuleId>(self.tables.children.capacity());
+        bytes.map::<(ModuleId, Symbol), DefId>(self.tables.names.capacity());
+        bytes.arc(&*self.head_targets);
+        bytes.map::<Symbol, HeadTargets>(self.head_targets.capacity());
+        for targets in self.head_targets.values() {
+            bytes.add(targets.targets.capacity().saturating_mul(size_of::<(
+                PackageId,
+                Vec<String>,
+                Option<ModuleId>,
+            )>()));
+            for (package, modules, _) in &targets.targets {
+                bytes.package(package);
+                bytes.strings(modules);
             }
         }
         bytes.0

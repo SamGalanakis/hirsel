@@ -75,6 +75,19 @@ impl Symbol {
         symbol
     }
 
+    /// The symbol for `text` if this process has interned it, never assigning
+    /// one: a spelling nothing interned cannot name anything a table holds.
+    pub fn existing(text: &str) -> Option<Symbol> {
+        let mut hasher = IdHash::default();
+        hasher.write(text.as_bytes());
+        let shard = &SYMBOLS.shards[(hasher.finish() >> 60) as usize % SHARDS];
+        shard
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(text)
+            .copied()
+    }
+
     pub fn retained_owners_match() -> bool {
         let owner = retention::symbols();
         (0..SYMBOLS.assigned.load(Atomic::Relaxed)).all(|at| {

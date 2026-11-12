@@ -1,8 +1,9 @@
 use hirsel_diag::{Diagnostic, Label, RuleId};
+use hirsel_intern::{IdHasher, Symbol};
 use hirsel_span::Span;
 use hirsel_syntax::*;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
 };
 mod retained;
@@ -47,7 +48,120 @@ pub struct ManifestIndex {
     pub revision: ContentHash,
     entries: Arc<DefMap<DefinitionEntry>>,
     heads: Arc<BTreeMap<String, BTreeSet<(PackageId, Vec<String>)>>>,
-    module_heads: Arc<BTreeMap<(PackageId, Vec<String>), BTreeSet<String>>>,
+    tables: Arc<Tables>,
+    /// Each exposed head's targets, in `heads` order: a candidate set, never
+    /// one answer, so ambiguity and the core/std merge stay decidable.
+    head_targets: Arc<HashMap<Symbol, HeadTargets, IdHasher>>,
+}
+
+/// One node per (package, module path) some definition lives under.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+struct ModuleId(u32);
+
+/// Scope tables: module nodes keyed by (parent, symbol) and definitions keyed
+/// by (module, symbol). A lookup walks symbols; it never spells or interns a
+/// candidate path to ask whether it exists.
+#[derive(Debug, Default)]
+struct Tables {
+    roots: HashMap<PackageId, ModuleId>,
+    children: HashMap<(ModuleId, Symbol), ModuleId, IdHasher>,
+    names: HashMap<(ModuleId, Symbol), DefId, IdHasher>,
+}
+
+#[derive(Debug)]
+struct HeadTargets {
+    targets: Vec<(PackageId, Vec<String>, Option<ModuleId>)>,
+    /// Only identical core/std module paths share a namespace. Two std majors
+    /// remain ambiguous even if only one declares the member.
+    merged: bool,
+}
+
+/// Where one file's unqualified paths start: its package root and its module.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ModuleScope {
+    root: Option<ModuleId>,
+    module: Option<ModuleId>,
+}
+
+impl Tables {
+    fn new<'a>(paths: impl IntoIterator<Item = (DefId, &'a DefPath)>) -> Self {
+        let mut tables = Self::default();
+        let mut next = 0;
+        let node = |next: &mut u32| {
+            *next += 1;
+            ModuleId(*next - 1)
+        };
+        for (id, path) in paths {
+            let mut module = *tables
+                .roots
+                .entry(path.0.package.clone())
+                .or_insert_with(|| node(&mut next));
+            for name in &path.0.modules {
+                module = *tables
+                    .children
+                    .entry((module, Symbol::intern(name)))
+                    .or_insert_with(|| node(&mut next));
+            }
+            tables
+                .names
+                .insert((module, Symbol::intern(&path.0.name)), id);
+        }
+        tables
+    }
+    fn walk(
+        &self,
+        from: Option<ModuleId>,
+        names: impl IntoIterator<Item = Option<Symbol>>,
+    ) -> Option<ModuleId> {
+        names.into_iter().try_fold(from?, |module, name| {
+            self.children.get(&(module, name?)).copied()
+        })
+    }
+    fn module(&self, package: &PackageId, modules: &[String]) -> Option<ModuleId> {
+        self.walk(
+            self.roots.get(package).copied(),
+            modules.iter().map(|m| Symbol::existing(m)),
+        )
+    }
+    fn member(
+        &self,
+        from: Option<ModuleId>,
+        modules: &[Option<Symbol>],
+        name: Option<Symbol>,
+    ) -> Option<DefId> {
+        let module = self.walk(from, modules.iter().copied())?;
+        self.names.get(&(module, name?)).copied()
+    }
+    fn heads(
+        &self,
+        heads: &BTreeMap<String, BTreeSet<(PackageId, Vec<String>)>>,
+    ) -> HashMap<Symbol, HeadTargets, IdHasher> {
+        heads
+            .iter()
+            .map(|(head, exposed)| {
+                let merged = exposed.len() == 2
+                    && exposed.iter().any(|(p, _)| p.package_is("core", "1"))
+                    && exposed.iter().any(|(p, _)| p.name_is("std"))
+                    && exposed
+                        .iter()
+                        .map(|(_, m)| m)
+                        .collect::<BTreeSet<_>>()
+                        .len()
+                        == 1;
+                let targets = exposed
+                    .iter()
+                    .map(|(package, prefix)| {
+                        (
+                            package.clone(),
+                            prefix.clone(),
+                            self.module(package, prefix),
+                        )
+                    })
+                    .collect();
+                (Symbol::intern(head), HeadTargets { targets, merged })
+            })
+            .collect()
+    }
 }
 
 pub use hirsel_types::LookupError;
@@ -224,18 +338,6 @@ impl ManifestIndex {
                 entries.insert(DefId::intern(&entry.definition), entry);
             }
         }
-        let mut module_heads: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
-        for definition in entries.keys().map(|id| id.path()) {
-            for (i, head) in definition.0.modules.iter().enumerate() {
-                module_heads
-                    .entry((
-                        definition.0.package.clone(),
-                        definition.0.modules[..i].to_vec(),
-                    ))
-                    .or_default()
-                    .insert(head.clone());
-            }
-        }
         let mut heads: BTreeMap<String, BTreeSet<(PackageId, Vec<String>)>> = BTreeMap::new();
         for exposure in fixture.exposures {
             heads
@@ -243,13 +345,16 @@ impl ManifestIndex {
                 .or_default()
                 .insert((exposure.package, exposure.modules));
         }
+        let tables = Tables::new(entries.keys().map(|&id| (id, id.path())));
+        let head_targets = tables.heads(&heads);
         (
             Self {
                 package: fixture.package,
                 revision: fixture.revision,
                 entries: Arc::new(entries),
                 heads: Arc::new(heads),
-                module_heads: Arc::new(module_heads),
+                tables: Arc::new(tables),
+                head_targets: Arc::new(head_targets),
             },
             diagnostics,
         )
@@ -273,6 +378,7 @@ impl ManifestIndex {
                 .insert((exposure.package.clone(), exposure.modules.clone()));
         }
         Self {
+            head_targets: Arc::new(self.tables.heads(&heads)),
             heads: Arc::new(heads),
             ..self.clone()
         }
@@ -296,16 +402,31 @@ impl ManifestIndex {
     }
 
     pub fn entry(&self, definition: &DefPath) -> Option<&DefinitionEntry> {
-        self.entries.get(&DefId::intern(definition))
+        self.entries.get(&DefId::get(definition)?)
+    }
+
+    /// Where `context`'s unqualified paths start; computed once per file context.
+    pub fn scope(&self, context: &FileContext) -> ModuleScope {
+        let root = self.tables.roots.get(&context.package).copied();
+        ModuleScope {
+            root,
+            module: self
+                .tables
+                .walk(root, context.modules.iter().map(|m| Symbol::existing(m))),
+        }
     }
 
     pub fn has_head(&self, context: &FileContext, head: &str) -> bool {
-        self.heads.contains_key(head)
-            || [vec![], context.modules.clone()].iter().any(|modules| {
-                self.module_heads
-                    .get(&(context.package.clone(), modules.clone()))
-                    .is_some_and(|heads| heads.contains(head))
-            })
+        Symbol::existing(head).is_some_and(|head| self.has_head_in(self.scope(context), head))
+    }
+
+    /// An exposed dependency head, or a module under the package root or the file's module.
+    pub fn has_head_in(&self, scope: ModuleScope, head: Symbol) -> bool {
+        self.head_targets.contains_key(&head)
+            || [scope.root, scope.module]
+                .into_iter()
+                .flatten()
+                .any(|module| self.tables.children.contains_key(&(module, head)))
     }
 
     /// Accessible replacements for one path segment. Reuse real lookup so
@@ -390,12 +511,20 @@ impl ManifestIndex {
     }
 
     pub fn lookup(&self, context: &FileContext, path: &Path) -> Result<DefPath, LookupError> {
-        let segments: Vec<_> = path
-            .segments
-            .iter()
-            .map(|s| s.as_str().to_owned())
-            .collect();
-        self.lookup_spelling(context, path.package.as_ref(), &segments)
+        self.lookup_in(context, self.scope(context), path)
+    }
+
+    /// `lookup` from a file context's precomputed scope.
+    pub fn lookup_in(
+        &self,
+        context: &FileContext,
+        scope: ModuleScope,
+        path: &Path,
+    ) -> Result<DefPath, LookupError> {
+        let segments: Vec<_> = path.segments.iter().map(|&s| Some(s)).collect();
+        self.resolve(context, scope, path.package.as_ref(), &segments, &|i| {
+            path.segments[i].as_str().to_owned()
+        })
     }
 
     pub fn lookup_spelling(
@@ -404,70 +533,72 @@ impl ManifestIndex {
         package: Option<&PackageId>,
         segments: &[String],
     ) -> Result<DefPath, LookupError> {
-        let (name, modules) = segments.split_last().ok_or(LookupError::Missing)?;
-        let make = |package: PackageId, modules: Vec<String>| {
-            DefPath(ItemPath {
-                package,
-                modules,
-                name: name.clone(),
-            })
-        };
-        let candidates = if let Some(package) = package {
-            vec![make(package.clone(), modules.to_vec())]
-        } else {
-            // Own package wins over dependency exposure, even when it is private.
-            let mut relative = context.modules.clone();
-            relative.extend_from_slice(modules);
-            let own = [
-                make(context.package.clone(), relative),
-                make(context.package.clone(), modules.to_vec()),
-            ];
-            if let Some(found) = own
-                .iter()
-                .find(|d| self.entries.contains_key(&DefId::intern(d)))
-            {
-                return self.access(context, found);
-            }
-            if segments.len() < 2 {
-                return Err(LookupError::Missing);
-            }
-            let Some(exposed) = self.heads.get(&segments[0]) else {
-                return Err(LookupError::Missing);
+        let symbols: Vec<_> = segments.iter().map(|s| Symbol::existing(s)).collect();
+        self.resolve(context, self.scope(context), package, &symbols, &|i| {
+            segments[i].clone()
+        })
+    }
+
+    /// A qualified path names its package's module path. Otherwise the own
+    /// package wins (the file's module, then the root), even when private,
+    /// before a dependency head; a head with several targets is ambiguous
+    /// unless it is the core/std merge. Absent symbols name nothing.
+    fn resolve(
+        &self,
+        context: &FileContext,
+        scope: ModuleScope,
+        package: Option<&PackageId>,
+        segments: &[Option<Symbol>],
+        spell: &dyn Fn(usize) -> String,
+    ) -> Result<DefPath, LookupError> {
+        let (&name, modules) = segments.split_last().ok_or(LookupError::Missing)?;
+        let tables = &*self.tables;
+        if let Some(package) = package {
+            return match tables.member(tables.roots.get(package).copied(), modules, name) {
+                Some(id) => self.access_id(context, id),
+                None => Err(LookupError::Missing),
             };
-            let candidates: Vec<_> = exposed
-                .iter()
-                .map(|(package, prefix)| {
-                    let mut module = prefix.clone();
-                    module.extend_from_slice(&segments[1..segments.len() - 1]);
-                    make(package.clone(), module)
-                })
-                .collect();
-            // Only identical core/std module paths share a namespace. Two std
-            // majors remain ambiguous even if only one declares this member.
-            let merged = exposed.len() == 2
-                && exposed.iter().any(|(p, _)| p.package_is("core", "1"))
-                && exposed.iter().any(|(p, _)| p.name_is("std"))
-                && exposed
-                    .iter()
-                    .map(|(_, m)| m)
-                    .collect::<BTreeSet<_>>()
-                    .len()
-                    == 1;
-            if exposed.len() > 1 && !merged {
-                return Err(LookupError::Ambiguous(candidates));
-            }
-            candidates
+        }
+        if let Some(id) = tables
+            .member(scope.module, modules, name)
+            .or_else(|| tables.member(scope.root, modules, name))
+        {
+            return self.access_id(context, id);
+        }
+        if segments.len() < 2 {
+            return Err(LookupError::Missing);
+        }
+        let Some(head) = segments[0].and_then(|head| self.head_targets.get(&head)) else {
+            return Err(LookupError::Missing);
         };
-        for candidate in &candidates {
-            if self.entries.contains_key(&DefId::intern(candidate)) {
-                return self.access(context, candidate);
+        let members = &modules[1..];
+        let candidates = || {
+            head.targets
+                .iter()
+                .map(|(package, prefix, _)| {
+                    let mut modules = prefix.clone();
+                    modules.extend((1..segments.len() - 1).map(spell));
+                    DefPath(ItemPath {
+                        package: package.clone(),
+                        modules,
+                        name: spell(segments.len() - 1),
+                    })
+                })
+                .collect()
+        };
+        if head.targets.len() > 1 && !head.merged {
+            return Err(LookupError::Ambiguous(candidates()));
+        }
+        for &(_, _, module) in &head.targets {
+            if let Some(id) = tables.member(module, members, name) {
+                return self.access_id(context, id);
             }
         }
-        if package.is_none() {
-            Err(LookupError::MissingMember(candidates))
-        } else {
-            Err(LookupError::Missing)
-        }
+        Err(LookupError::MissingMember(candidates()))
+    }
+
+    fn access_id(&self, context: &FileContext, id: DefId) -> Result<DefPath, LookupError> {
+        self.access_entry(context, id.path(), self.entries.get(&id))
     }
 
     pub fn access(
@@ -475,7 +606,20 @@ impl ManifestIndex {
         context: &FileContext,
         definition: &DefPath,
     ) -> Result<DefPath, LookupError> {
-        if let Some(entry) = self.entries.get(&DefId::intern(definition))
+        self.access_entry(
+            context,
+            definition,
+            DefId::get(definition).and_then(|id| self.entries.get(&id)),
+        )
+    }
+
+    fn access_entry(
+        &self,
+        context: &FileContext,
+        definition: &DefPath,
+        entry: Option<&DefinitionEntry>,
+    ) -> Result<DefPath, LookupError> {
+        if let Some(entry) = entry
             && entry.visibility == Visibility::Private
             && context.package != definition.0.package
         {

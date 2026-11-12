@@ -3,7 +3,7 @@ use hirsel_intern::Symbol;
 use hirsel_span::{SourceMap, Span};
 use hirsel_syntax::*;
 use hirsel_types::{self as ty, QueryError, ResolvedName, SignatureProvider};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The session interner these tests' signatures and resolutions share.
 fn session() -> &'static ty::TypeInterner {
@@ -1624,4 +1624,213 @@ fn signature_context_keeps_nominal_fields_through_deep_boxes() {
             field: ty::FieldId(0)
         })
     );
+}
+
+/// The path rules, written over plain paths: a qualified path names exactly
+/// that package's module path; otherwise the own package's file-relative path,
+/// then its root path, then a head's targets, ambiguous unless they are the
+/// identical-module core/std merge; then privacy and `internal` (LANG-4, PROG-2).
+#[test]
+fn scope_tables_answer_as_the_written_path_rules() {
+    let own_package = package("test", "1");
+    let library = package("library", "1");
+    let (core, std1, std2) = (
+        package("core", "1"),
+        package("std", "1"),
+        package("std", "2"),
+    );
+    let mut declared: BTreeMap<DefPath, Visibility> = BTreeMap::new();
+    for (pkg, modules, name, visibility) in [
+        (&own_package, &[][..], "length", Visibility::Private),
+        (&own_package, &["nested"], "length", Visibility::Public),
+        (
+            &own_package,
+            &["nested", "deep"],
+            "value",
+            Visibility::Public,
+        ),
+        (&own_package, &["nested"], "helper", Visibility::Private),
+        (&own_package, &["internal"], "tool", Visibility::Public),
+        (
+            &own_package,
+            &["nested", "internal"],
+            "tool",
+            Visibility::Public,
+        ),
+        (&own_package, &["text"], "len", Visibility::Public),
+        (&library, &["text"], "len", Visibility::Public),
+        (&library, &["text"], "secret", Visibility::Private),
+        (&library, &["internal"], "tool", Visibility::Public),
+        (&library, &[], "value", Visibility::Public),
+        (&core, &["text"], "len", Visibility::Public),
+        (&std1, &["text"], "find", Visibility::Public),
+        (&std2, &["text"], "find", Visibility::Public),
+    ] {
+        declared.insert(definition(pkg.clone(), modules, name), visibility);
+    }
+    let mut f = fixture(vec![]);
+    for (path, visibility) in &declared {
+        f.definitions
+            .push(entry(path.clone(), Namespace::Value, *visibility));
+    }
+    let (index, errors) = ManifestIndex::new(f);
+    assert!(errors.is_empty());
+    let expose = |head: &str, package: &PackageId, modules: &[&str]| DependencyExposure {
+        head: head.into(),
+        package: package.clone(),
+        modules: modules.iter().map(|m| (*m).into()).collect(),
+    };
+    let exposure_sets = [
+        vec![
+            expose("words", &library, &["text"]),
+            expose("hidden", &library, &["internal"]),
+            expose("lib", &library, &[]),
+            expose("text", &core, &["text"]),
+            expose("text", &std1, &["text"]),
+        ],
+        vec![
+            expose("words", &library, &["text"]),
+            expose("words", &own_package, &[]),
+            expose("text", &core, &["text"]),
+            expose("text", &std1, &["text"]),
+            expose("text", &std2, &["text"]),
+        ],
+        vec![
+            expose("text", &core, &["text"]),
+            expose("text", &std1, &[]),
+            expose("lib", &library, &["nowhere"]),
+        ],
+    ];
+    let oracle = |exposures: &[DependencyExposure],
+                  context: &FileContext,
+                  qualifier: Option<&PackageId>,
+                  segments: &[String]|
+     -> Result<DefPath, LookupError> {
+        let access = |path: &DefPath| {
+            let p = &path.0;
+            let private = declared[path] == Visibility::Private && p.package != context.package;
+            let internal = p.modules.iter().enumerate().any(|(i, m)| {
+                m == "internal"
+                    && (p.package != context.package
+                        || !context.modules.starts_with(&p.modules[..i]))
+            });
+            if private || internal {
+                Err(LookupError::Invisible(path.clone()))
+            } else {
+                Ok(path.clone())
+            }
+        };
+        let (name, modules) = segments.split_last().unwrap();
+        let at = |package: &PackageId, modules: Vec<String>| {
+            DefPath(ItemPath {
+                package: package.clone(),
+                modules,
+                name: name.clone(),
+            })
+        };
+        if let Some(package) = qualifier {
+            let path = at(package, modules.to_vec());
+            return if declared.contains_key(&path) {
+                access(&path)
+            } else {
+                Err(LookupError::Missing)
+            };
+        }
+        let relative = at(&context.package, [&context.modules[..], modules].concat());
+        let absolute = at(&context.package, modules.to_vec());
+        for path in [relative, absolute] {
+            if declared.contains_key(&path) {
+                return access(&path);
+            }
+        }
+        let targets: BTreeSet<(PackageId, Vec<String>)> = exposures
+            .iter()
+            .filter(|e| segments.len() > 1 && e.head == segments[0])
+            .map(|e| (e.package.clone(), e.modules.clone()))
+            .collect();
+        if targets.is_empty() {
+            return Err(LookupError::Missing);
+        }
+        let candidates: Vec<_> = targets
+            .iter()
+            .map(|(package, prefix)| at(package, [&prefix[..], &modules[1..]].concat()))
+            .collect();
+        let merged = targets.len() == 2
+            && targets.iter().any(|(p, _)| *p == core)
+            && targets.iter().any(|(p, _)| p.name == "std")
+            && targets
+                .iter()
+                .all(|(_, m)| *m == targets.first().unwrap().1);
+        if targets.len() > 1 && !merged {
+            return Err(LookupError::Ambiguous(candidates));
+        }
+        match candidates.iter().find(|path| declared.contains_key(path)) {
+            Some(path) => access(path),
+            None => Err(LookupError::MissingMember(candidates)),
+        }
+    };
+    let words = [
+        "length",
+        "nested",
+        "deep",
+        "value",
+        "helper",
+        "internal",
+        "tool",
+        "text",
+        "len",
+        "secret",
+        "find",
+        "words",
+        "hidden",
+        "lib",
+        "never-a-name",
+    ];
+    let mut paths: Vec<Vec<String>> = vec![];
+    for a in words {
+        paths.push(vec![a.into()]);
+        for b in words {
+            paths.push(vec![a.into(), b.into()]);
+            for c in words {
+                paths.push(vec![a.into(), b.into(), c.into()]);
+            }
+        }
+    }
+    let contexts = [
+        (&own_package, &[][..]),
+        (&own_package, &["nested"]),
+        (&own_package, &["nested", "deep"]),
+        (&own_package, &["internal"]),
+        (&library, &["text"]),
+    ]
+    .map(|(package, modules)| FileContext {
+        package: package.clone(),
+        modules: modules.iter().map(|m| (*m).into()).collect(),
+    });
+    for exposures in &exposure_sets {
+        let selected = index.with_exposures(exposures);
+        for context in &contexts {
+            for word in words {
+                let head = exposures.iter().any(|e| e.head == word)
+                    || declared.keys().any(|path| {
+                        path.0.package == context.package
+                            && [&[][..], &context.modules[..]].iter().any(|prefix| {
+                                path.0.modules.starts_with(prefix)
+                                    && path.0.modules.get(prefix.len()).map(String::as_str)
+                                        == Some(word)
+                            })
+                    });
+                assert_eq!(selected.has_head(context, word), head, "{context:?} {word}");
+            }
+            for qualifier in [None, Some(&own_package), Some(&library), Some(&core)] {
+                for segments in &paths {
+                    assert_eq!(
+                        selected.lookup_spelling(context, qualifier, segments),
+                        oracle(exposures, context, qualifier, segments),
+                        "{exposures:?} {context:?} {qualifier:?} {segments:?}"
+                    );
+                }
+            }
+        }
+    }
 }

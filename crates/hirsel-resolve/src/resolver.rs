@@ -1,4 +1,4 @@
-use crate::{LookupError, ManifestIndex, Namespace};
+use crate::{LookupError, ManifestIndex, Namespace, index::ModuleScope};
 use hirsel_diag::{Diagnostic, Label, RuleId};
 use hirsel_intern::Symbol;
 use hirsel_span::Span;
@@ -192,6 +192,10 @@ pub fn resolve_view(
     expected: &ExpectedTypes,
 ) -> ResolveOutput {
     let definition = &syntax.item.definition;
+    let context = FileContext {
+        package: definition.0.package.clone(),
+        modules: definition.0.modules.clone(),
+    };
     let mut resolver = Resolver {
         syntax,
         siblings,
@@ -201,10 +205,9 @@ pub fn resolve_view(
         types,
         provider,
         expected,
-        context: FileContext {
-            package: definition.0.package.clone(),
-            modules: definition.0.modules.clone(),
-        },
+        scope: index.scope(&context),
+        read_context: context.clone().into(),
+        context,
         output: ResolveOutput {
             operational_failure: None,
             query: ty::QueryOutput {
@@ -261,6 +264,9 @@ struct Resolver<'a, P: ?Sized> {
     provider: &'a mut P,
     expected: &'a ExpectedTypes,
     context: FileContext,
+    /// `context`'s scope in the index and its recorded form, made once per context.
+    scope: ModuleScope,
+    read_context: ty::ReadContext,
     output: ResolveOutput,
     scopes: Vec<Scope>,
     signatures: DefMap<Result<ty::SignatureRef, ty::QueryError>>,
@@ -305,12 +311,13 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
     }
     fn lookup_using(&mut self, path: &Path) -> Result<DefPath, LookupError> {
         hirsel_intern::timings::count(hirsel_intern::timings::Count::ResolveLookups);
-        let segments = path
+        let segments: ty::ReadSegments = path
             .segments
             .iter()
             .map(|s| s.as_str().to_owned())
-            .collect::<Vec<_>>();
-        let mut result = self.index.lookup(&self.context, path);
+            .collect::<Vec<_>>()
+            .into();
+        let mut result = self.index.lookup_in(&self.context, self.scope, path);
         // The provider can supply builtin/driver-owned names absent from this
         // manifest snapshot. It is never allowed to override ambiguity/privacy.
         if matches!(
@@ -320,14 +327,9 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
             let lookup = self.provider.lookup(&self.context, path);
             std::sync::Arc::make_mut(&mut self.output.reads).push(
                 DependencyRead::ProviderLookup {
-                    context: (self.context.clone()).into(),
+                    context: self.read_context.clone(),
                     package: path.package.clone(),
-                    segments: (path
-                        .segments
-                        .iter()
-                        .map(|s| s.as_str().to_owned())
-                        .collect::<Vec<_>>())
-                    .into(),
+                    segments: segments.clone(),
                     output: (lookup.clone()).into(),
                 }
                 .shared(),
@@ -352,9 +354,9 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
         }
         std::sync::Arc::make_mut(&mut self.output.reads).push(
             DependencyRead::Lookup {
-                context: (self.context.clone()).into(),
+                context: self.read_context.clone(),
                 package: path.package.clone(),
-                segments: (segments).into(),
+                segments,
                 manifest: self.index.revision,
                 result: (result.clone()).map(Into::into),
             }
@@ -2274,13 +2276,13 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
         };
         // Read from the declaring item's own arenas.
         let old_syntax = std::mem::replace(&mut self.syntax, fixture);
-        let old_context = std::mem::replace(
-            &mut self.context,
-            FileContext {
-                package: owner.0.package.clone(),
-                modules: owner.0.modules.clone(),
-            },
-        );
+        let context = FileContext {
+            package: owner.0.package.clone(),
+            modules: owner.0.modules.clone(),
+        };
+        let old_scope = std::mem::replace(&mut self.scope, self.index.scope(&context));
+        let old_read_context = std::mem::replace(&mut self.read_context, context.clone().into());
+        let old_context = std::mem::replace(&mut self.context, context);
         let old_arguments = std::mem::replace(
             &mut self.type_arguments,
             generics
@@ -2292,6 +2294,8 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
         let result = f(self, body);
         self.syntax = old_syntax;
         self.context = old_context;
+        self.scope = old_scope;
+        self.read_context = old_read_context;
         self.type_arguments = old_arguments;
         Some(result)
     }
@@ -3314,13 +3318,14 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
         if path.package.is_some() {
             return true;
         }
-        let Some(head) = path.segments.first().map(|s| self.spelling(*s)) else {
+        let Some(&head) = path.segments.first() else {
             return false;
         };
-        let exposed = self.index.has_head(&self.context, &head);
+        let exposed = self.index.has_head_in(self.scope, head);
+        let head = self.spelling(head);
         std::sync::Arc::make_mut(&mut self.output.reads).push(
             DependencyRead::ModuleHead {
-                context: (self.context.clone()).into(),
+                context: self.read_context.clone(),
                 head,
                 manifest: self.index.revision,
                 exposed,

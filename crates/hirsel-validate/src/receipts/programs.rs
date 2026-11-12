@@ -285,12 +285,6 @@ pub enum Published {
     Committed { generation: u64 },
     Lost,
 }
-/// What a collection removed.
-#[derive(Debug, Default, Eq, PartialEq)]
-pub struct Collected {
-    pub pins: u64,
-    pub blobs: u64,
-}
 
 /// A point to stop publication at, as a crash there would (tests).
 #[cfg(test)]
@@ -634,6 +628,11 @@ impl ProgramRecords {
             sync_directory(&self.root.join("retiring"))?;
         }
         drop(pin);
+        drop(gc);
+        // (5) Collection, unless another process is publishing or selecting:
+        // the replaced generation, once no reader holds it, and whatever an
+        // abandoned publication left. A failed sweep keeps the commit.
+        let _ = self.collect();
         Ok(Published::Committed {
             generation: association.generation,
         })
@@ -671,11 +670,16 @@ impl ProgramRecords {
         sync_directory(&self.root.join("blobs"))
     }
     /// Free every pin set no committed association names and no publisher or
-    /// reader holds, then every blob no remaining pin set names.
-    pub fn collect(&self) -> io::Result<Collected> {
+    /// reader holds, then every blob no remaining pin set names. Each
+    /// committed publication runs it; it frees nothing while any publication
+    /// or selection holds `gc.lock`.
+    fn collect(&self) -> io::Result<()> {
         let gc = self.gc_lock()?;
-        gc.lock()?;
-        let mut collected = Collected::default();
+        match gc.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => return Ok(()),
+            Err(fs::TryLockError::Error(error)) => return Err(error),
+        }
         let mut named = std::collections::BTreeSet::new();
         for entry in fs::read_dir(self.root.join("addresses"))? {
             let entry = entry?;
@@ -716,7 +720,6 @@ impl ProgramRecords {
             if free {
                 fs::remove_file(entry.path())?;
                 let _ = fs::remove_file(self.root.join("retiring").join(&name));
-                collected.pins += 1;
                 continue;
             }
             let mut bytes = vec![];
@@ -736,12 +739,10 @@ impl ProgramRecords {
             let name = entry.file_name().to_string_lossy().into_owned();
             if !live.contains(&name) {
                 fs::remove_file(entry.path())?;
-                collected.blobs += 1;
             }
         }
         sync_directory(&self.root.join("pins"))?;
-        sync_directory(&self.root.join("blobs"))?;
-        Ok(collected)
+        sync_directory(&self.root.join("blobs"))
     }
 }
 impl ProgramHit {

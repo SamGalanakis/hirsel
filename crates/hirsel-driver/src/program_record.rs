@@ -7,10 +7,11 @@
 //! a copied store or a replaced one, every lookup misses.
 //!
 //! P is an explicit inventory. Every `HIRSEL_*` and tool variable is in one
-//! class: key (its value is in P), owner (its canonical identity is in P),
-//! bypass (B is not used), acquisition (how work is scheduled or admitted,
-//! never what it produces), telemetry, or launch-only. An unclassified
-//! `HIRSEL_*` that is set bypasses B.
+//! class: key (its value is in P), native (its value is in a build's P, never
+//! a check's), owner (its canonical identity is in P), bypass (B is not used),
+//! acquisition (how work is scheduled or admitted, never what it produces),
+//! telemetry, or launch-only. An unclassified `HIRSEL_*` that is set bypasses
+//! B.
 use crate::session::{Policy, Session};
 use hirsel_engine::{CheckCompletion, CheckOutput, QueryError, ToolError};
 use hirsel_intern::timings::{self, Count, Phase};
@@ -27,6 +28,10 @@ use std::path::{Path, PathBuf};
 enum Class {
     /// Its value selects what is produced: the value is in P.
     Key,
+    /// A native tool or archive a build links with and a check never reads:
+    /// its value is in a build's success key, not in the source key a check
+    /// and a failing build share.
+    Native,
     /// It selects an owner (a store, cache or home): its canonical path is in P.
     Owner,
     /// Verification, tracing or injection that must run fresh: B is not used.
@@ -52,19 +57,19 @@ enum Class {
 const VARIABLES: &[(&str, Class)] = &[
     ("HIRSEL_AARCH64_CC", Class::CrossTool),
     ("HIRSEL_AARCH64_SYSROOT", Class::CrossTool),
-    ("HIRSEL_AUDITOR_PACKAGE", Class::Key),
-    ("HIRSEL_CAPTURE_LINKER", Class::Key),
-    ("HIRSEL_GLIBC_FLOOR", Class::Key),
+    ("HIRSEL_AUDITOR_PACKAGE", Class::Native),
+    ("HIRSEL_CAPTURE_LINKER", Class::Native),
+    ("HIRSEL_GLIBC_FLOOR", Class::Native),
     ("HIRSEL_GUARD_ORACLE", Class::Key),
-    ("HIRSEL_LINK_KIT", Class::Key),
-    ("HIRSEL_RUNTIME_ARCHIVES", Class::Key),
+    ("HIRSEL_LINK_KIT", Class::Native),
+    ("HIRSEL_RUNTIME_ARCHIVES", Class::Native),
     // The emulator runs a built aarch64 program; no build reads it.
     ("HIRSEL_QEMU_AARCH64", Class::Launch),
     // Memcheck runtimes are built and launched only by `test --native`,
     // which does not use B.
     ("HIRSEL_VALGRIND", Class::Launch),
     ("HIRSEL_VALGRIND_RUNTIME", Class::Launch),
-    ("LLVM_SYS_231_PREFIX", Class::Key),
+    ("LLVM_SYS_231_PREFIX", Class::Native),
     ("VALGRIND_LIB", Class::Launch),
     ("PATH", Class::Key),
     ("LD_LIBRARY_PATH", Class::Key),
@@ -447,11 +452,13 @@ fn class(name: &str) -> Option<Class> {
         .map(|(_, class)| *class)
 }
 
-/// The key and owner rows of this process's environment, sorted by name; the
-/// bypass reason when a variable bypasses B.
-fn environment() -> Result<Vec<(String, Vec<u8>)>, String> {
+/// The rows of this process's environment, sorted by name: the key and owner
+/// rows, then the native rows; the bypass reason when a variable bypasses B.
+type Rows = Vec<(String, Vec<u8>)>;
+fn environment() -> Result<(Rows, Rows), String> {
     use std::os::unix::ffi::OsStrExt;
     let mut rows = Vec::new();
+    let mut native = Vec::new();
     for (name, value) in std::env::vars_os() {
         let Some(name) = name.to_str().map(str::to_owned) else {
             return Err(format!(
@@ -473,6 +480,7 @@ fn environment() -> Result<Vec<(String, Vec<u8>)>, String> {
             Class::Bypass if name == "HIRSEL_VALIDATE_STAGES" && value != "1" => {}
             Class::Bypass => return Err(format!("variable {name} is a bypass mode")),
             Class::Key => rows.push((name, value.as_bytes().to_vec())),
+            Class::Native => native.push((name, value.as_bytes().to_vec())),
             Class::Owner => {
                 let path = std::fs::canonicalize(&value).unwrap_or_else(|_| PathBuf::from(&value));
                 rows.push((name, path.as_os_str().as_bytes().to_vec()));
@@ -485,7 +493,8 @@ fn environment() -> Result<Vec<(String, Vec<u8>)>, String> {
         }
     }
     rows.sort();
-    Ok(rows)
+    native.sort();
+    Ok((rows, native))
 }
 
 /// The cross-tool rows of this process's environment, sorted by name: a
@@ -512,14 +521,16 @@ fn bypassed(reason: String) {
     timings::program_bypass(reason);
 }
 
-/// The running compiler's own bytes: this executable and every libLLVM it
-/// mapped, each by the content digest of the very inode it mapped. A rebuilt
+/// The running compiler's own bytes: this executable, then every libLLVM it
+/// mapped, each by the content digest of the very inode it mapped. Only code
+/// generation runs libLLVM, so a check keys the executable alone and a build
+/// both. A rebuilt
 /// or replaced compiler is another key even when its source identity is
 /// equal; a file whose stat changed but whose bytes did not (a hard link
 /// added elsewhere moves a shared inode's ctime) keeps its key at the cost of
 /// one rehash. A file replaced or deleted after this process loaded it, or
 /// unreadable, bypasses B: the bytes on disk are then not the running code.
-fn compiler_guard() -> Result<Vec<u8>, String> {
+fn compiler_guard() -> Result<(Vec<u8>, Vec<u8>), String> {
     use std::os::unix::ffi::OsStrExt;
     let cache = hirsel_validate::Installation::default_state()
         .map(|state| state.join("compiler-digests"))
@@ -529,13 +540,18 @@ fn compiler_guard() -> Result<Vec<u8>, String> {
             std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir())
         });
     let started = std::time::SystemTime::now();
-    let mut guard = Vec::new();
-    for loaded in loaded_compiler()? {
+    let (mut executable, mut libraries) = (Vec::new(), Vec::new());
+    for (index, loaded) in loaded_compiler()?.into_iter().enumerate() {
         let (digest, _) = compiler_file_digest(cache.as_deref(), &loaded, started)?;
+        let guard = if index == 0 {
+            &mut executable
+        } else {
+            &mut libraries
+        };
         guard.extend_from_slice(loaded.path.as_os_str().as_bytes());
         guard.extend_from_slice(&digest.0);
     }
-    Ok(guard)
+    Ok((executable, libraries))
 }
 
 /// One compiler file this process runs: the path it was loaded from and the
@@ -668,6 +684,9 @@ struct Keyed {
     package: String,
     /// The source key: equal for a check and a build of the same inputs.
     source: ContentHash,
+    /// What only code generation reads, which a build's success key adds:
+    /// the native rows and the loaded libLLVM files.
+    native: Vec<u8>,
 }
 
 /// The source key P of the session's current observation, under its
@@ -691,8 +710,8 @@ fn keyed(session: &Session, entry: &Path, policy: Policy) -> Result<Keyed, Strin
         return Err("foreign links".into());
     }
     let inputs = session.current_inputs().ok_or("no observed inputs")?;
-    let environment = environment()?;
-    let guard = compiler_guard()?;
+    let (environment, native_rows) = environment()?;
+    let (guard, libraries) = compiler_guard()?;
     let directory = std::env::current_dir().map_err(|_| "no current directory")?;
     let compiler = session.compiler();
     let installation = compiler.installation_key(inputs);
@@ -720,6 +739,13 @@ fn keyed(session: &Session, entry: &Path, policy: Policy) -> Result<Keyed, Strin
         parts.push(value);
     }
     let source = ContentHash::of_parts("hirsel.program.key.v1", parts.iter().map(Vec::as_slice));
+    let mut native = libraries;
+    for (name, value) in native_rows {
+        native.extend_from_slice(name.as_bytes());
+        native.push(0);
+        native.extend_from_slice(&value);
+        native.push(0);
+    }
     let records = authority
         .records()
         .map_err(|error| format!("record domain: {error}"))?;
@@ -727,6 +753,7 @@ fn keyed(session: &Session, entry: &Path, policy: Policy) -> Result<Keyed, Strin
         records,
         package: format!("{:?}", facts.entry.0.package),
         source,
+        native,
     })
 }
 
@@ -993,6 +1020,7 @@ pub(crate) fn build(
                 "hirsel.program.build-key.v1",
                 [
                     &keyed.source.0[..],
+                    keyed.native.as_slice(),
                     options.as_slice(),
                     &evidence.0,
                     &platform.0,

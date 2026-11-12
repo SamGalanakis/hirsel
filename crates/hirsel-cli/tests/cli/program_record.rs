@@ -17,6 +17,7 @@ const PASSED: &[&str] = &[
 
 struct Home {
     root: tempfile::TempDir,
+    compiler: PathBuf,
 }
 
 #[derive(Debug, PartialEq)]
@@ -49,8 +50,13 @@ impl Home {
     /// A private home whose state holds the registration `precompute` writes
     /// for its products.
     fn new() -> Self {
+        // Absolute: Buck2 names the binary relative to the test's own directory.
+        Self::with_compiler(std::path::absolute(env!("CARGO_BIN_EXE_hirsel")).unwrap())
+    }
+    fn with_compiler(compiler: PathBuf) -> Self {
         let home = Self {
             root: tempfile::tempdir().unwrap(),
+            compiler,
         };
         home.register("pub fn unused()->u8{7u8}\n");
         home
@@ -79,8 +85,7 @@ impl Home {
         assert!(output.status.success(), "{output:?}");
     }
     fn command(&self, state: &Path) -> Command {
-        // Absolute: Buck2 names the binary relative to the test's own directory.
-        let mut command = Command::new(std::path::absolute(env!("CARGO_BIN_EXE_hirsel")).unwrap());
+        let mut command = Command::new(&self.compiler);
         for (name, _) in std::env::vars_os() {
             let name = name.to_string_lossy();
             if name.starts_with("HIRSEL_") && !PASSED.contains(&name.as_ref()) {
@@ -115,15 +120,7 @@ impl Home {
         args: &[&str],
         env: &[(&str, &str)],
     ) -> (Answer, Counts, u64) {
-        let mut command = self.command(state);
-        command.current_dir(cwd).arg("--timings=json").args(args);
-        for (name, value) in env {
-            match *value {
-                UNSET => command.env_remove(name),
-                value => command.env(name, value),
-            };
-        }
-        let output: Output = command.output().unwrap();
+        let output: Output = self.request(state, cwd, args, env).output().unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();
         let trimmed = stderr.trim_end_matches('\n');
         let (rest, report) = trimmed.rsplit_once('\n').unwrap_or(("", trimmed));
@@ -167,6 +164,58 @@ impl Home {
             },
             captures,
         )
+    }
+    /// The command of one request, with its timings report.
+    fn request(&self, state: &Path, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Command {
+        let mut command = self.command(state);
+        command.current_dir(cwd).arg("--timings=json").args(args);
+        for (name, value) in env {
+            match *value {
+                UNSET => command.env_remove(name),
+                value => command.env(name, value),
+            };
+        }
+        command
+    }
+    /// One run whose stdout and stderr write one file, as a terminal shows
+    /// both: the bytes in the order written, without the timings report
+    /// (the last line), and the record counts.
+    fn merged(&self, state: &Path, cwd: &Path, args: &[&str]) -> (Vec<u8>, Counts) {
+        let file = tempfile::tempfile().unwrap();
+        let status = self
+            .request(state, cwd, args, &[])
+            .stdout(file.try_clone().unwrap())
+            .stderr(file.try_clone().unwrap())
+            .status()
+            .unwrap();
+        let mut bytes = vec![];
+        use std::io::{Read, Seek};
+        let mut file = file;
+        file.rewind().unwrap();
+        file.read_to_end(&mut bytes).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let (rest, report) = text
+            .trim_end_matches('\n')
+            .rsplit_once('\n')
+            .unwrap_or(("", &text));
+        let report: serde_json::Value = serde_json::from_str(report).unwrap();
+        let count = |name: &str| report["counts"][name].as_u64().unwrap();
+        (
+            format!("{status}\n{rest}").into_bytes(),
+            Counts {
+                hits: count("program record hits"),
+                misses: count("program record misses"),
+                publications: count("program record publications"),
+                bypass: report["program_record_bypass"].as_str().map(str::to_owned),
+            },
+        )
+    }
+    /// `merged` under the forced cold oracle.
+    fn merged_cold(&self, cwd: &Path, args: &[&str]) -> Vec<u8> {
+        let state = tempfile::tempdir().unwrap();
+        let (bytes, counts) = self.merged(state.path(), cwd, args);
+        assert_eq!(counts, bypassed("no registration"), "the cold oracle");
+        bytes
     }
     fn warm(&self, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> (Answer, Counts) {
         self.run(&self.state(), cwd, args, env)
@@ -310,6 +359,14 @@ fn a_check_record_answers_only_unchanged_inputs_and_replays_cold() {
         );
         let (answer, counts) = home.warm(root, display, &[]);
         assert_eq!((answer, counts), (cold, HIT), "{display:?}");
+        // `--json` writes diagnostics to stdout and its summary to stderr:
+        // a replay must interleave the two streams as cold does.
+        let cold = home.merged_cold(root, display);
+        assert_eq!(
+            home.merged(&home.state(), root, display),
+            (cold, HIT),
+            "{display:?}, both streams in one"
+        );
     }
     let plain = home.cold(root, &check, &[]);
     assert!(
@@ -319,6 +376,29 @@ fn a_check_record_answers_only_unchanged_inputs_and_replays_cold() {
     edit(&root.join("dep/dep.hir"), "  1u64 + true", "  1u64");
     edit(&app.join("util.hir"), "x + true", "x + x");
     flips_then_hits(&home, root, &check, &[], "body byte (accepted)");
+    // A check that succeeds with a warning (LANG-8: a private error type's
+    // arm nothing constructs) replays the warning in every renderer.
+    let warning = "\ntype UtilError = Used | Unused\nfn guarded(x: u64) -> Result[u64, UtilError] {\n  if x == 0u64 {\n    return Error(Used())\n  }\n  Ok(x)\n}\n";
+    edit(
+        &app.join("util.hir"),
+        "  x + x\n}\n",
+        &format!("  x + x\n}}\n{warning}"),
+    );
+    flips_then_hits(&home, root, &check, &[], "warning");
+    for display in [&check[..], &json[..]] {
+        let cold = home.merged_cold(root, display);
+        let text = String::from_utf8_lossy(&cold);
+        assert!(
+            text.starts_with("exit status: 0") && text.contains("LANG-8"),
+            "{display:?}: {text}"
+        );
+        assert_eq!(
+            home.merged(&home.state(), root, display),
+            (cold, HIT),
+            "{display:?}, warning"
+        );
+    }
+    edit(&app.join("util.hir"), warning, "");
     write_manifest(&app, "other", &["util"], "1");
     flips_then_hits(&home, root, &check, &[], "manifest entry");
     write_manifest(&app, "other", &["helpers"], "1");
@@ -708,4 +788,90 @@ fn a_build_record_keys_its_proof_evidence_and_replays_the_proof_report() {
         );
         assert_ne!(answer.status, Some(0), "{answer:?}");
     }
+}
+
+/// The built compiler copied beside its own copy of libLLVM, which it finds
+/// through its DT_RPATH (`$ORIGIN/../../../../../../tools/buck2/toolchains/
+/// llvm-files/lib`, every other library a link to the checkout's), with the
+/// standard library it finds upward from itself: a test can change the
+/// libLLVM bytes this compiler maps.
+struct Relocated {
+    _root: tempfile::TempDir,
+    compiler: PathBuf,
+    llvm: PathBuf,
+}
+impl Relocated {
+    fn new() -> Self {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let built = std::fs::canonicalize(env!("CARGO_BIN_EXE_hirsel")).unwrap();
+        let checkout = built.parent().unwrap().join("../../../../../..");
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("b/1/2/3/4/5");
+        std::fs::create_dir_all(&bin).unwrap();
+        let compiler = bin.join("hirsel");
+        std::fs::copy(&built, &compiler).unwrap();
+        let source = checkout.join("tools/buck2/toolchains/llvm-files/lib");
+        let lib = root.path().join("tools/buck2/toolchains/llvm-files/lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        for entry in std::fs::read_dir(&source).unwrap() {
+            let entry = entry.unwrap();
+            symlink(entry.path(), lib.join(entry.file_name())).unwrap();
+        }
+        let llvm = lib.join("libLLVM.so.23.1");
+        std::fs::remove_file(&llvm).unwrap();
+        std::fs::copy(source.join("libLLVM.so.23.1"), &llvm).unwrap();
+        std::fs::set_permissions(&llvm, std::fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(checkout.join("stdlib"), root.path().join("stdlib")).unwrap();
+        Self {
+            _root: root,
+            compiler,
+            llvm,
+        }
+    }
+    /// Other libLLVM bytes at the same path and inode: one byte appended
+    /// past everything the loader maps.
+    fn change_llvm(&self) {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&self.llvm)
+            .unwrap()
+            .write_all(b"\0")
+            .unwrap();
+    }
+}
+
+/// Bug caught: a check keyed by what only code generation reads (the libLLVM
+/// the compiler maps, a native tool variable), so it misses after either
+/// changes; or a build success key without them, so a build by other LLVM
+/// code, or with another link kit, is answered by the old record.
+#[test]
+fn only_a_build_keys_the_mapped_libllvm_and_native_tools() {
+    let relocated = Relocated::new();
+    let home = Home::with_compiler(relocated.compiler.clone());
+    let root = home.path();
+    app(root);
+    let check = ["check", "app/hirsel.json"];
+    let build = ["build", "app/hirsel.json", "-o", "app.exe"];
+    flips_then_hits(&home, root, &check, &[], "check");
+    flips_then_hits(&home, root, &build, &[], "build");
+    relocated.change_llvm();
+    let (answer, counts) = home.warm(root, &check, &[]);
+    assert_eq!(
+        (answer, counts),
+        (home.cold(root, &check, &[]), HIT),
+        "check, other libLLVM bytes"
+    );
+    flips_then_hits(&home, root, &build, &[], "build, other libLLVM bytes");
+    let kit = std::env::var_os("HIRSEL_LINK_KIT").expect("the build tests' link kit");
+    let link = root.join("kit");
+    std::os::unix::fs::symlink(&kit, &link).unwrap();
+    let env = [("HIRSEL_LINK_KIT", link.to_str().unwrap())];
+    let (answer, counts) = home.warm(root, &check, &env);
+    assert_eq!(
+        (answer, counts),
+        (home.cold(root, &check, &env), HIT),
+        "check, another link kit path"
+    );
+    flips_then_hits(&home, root, &build, &env, "build, another link kit path");
 }

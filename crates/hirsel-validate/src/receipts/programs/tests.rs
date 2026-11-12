@@ -239,26 +239,42 @@ fn concurrent_publishers_commit_once_and_the_loser_drops_only_its_pin() {
     assert_eq!(fs::read_dir(records.root.join("blobs")).unwrap().count(), 2);
 }
 
-/// Bug: collection freeing a generation a reader selected before a replace.
+/// Bug: collection that never runs outside tests, so replaced generations and
+/// the leftovers of abandoned publications accumulate; or one that frees a
+/// generation a reader selected before it was replaced. Law: each committed
+/// publication frees every closure nothing names or holds, and only those.
 #[test]
-fn a_reader_keeps_its_generation_across_replace_and_collection() {
+fn each_publication_sweeps_replaced_and_abandoned_generations_but_not_a_held_one() {
     let domain = Domain_::new();
     let records = domain.records();
+    let present = |executable: &[u8]| records.blob(ContentHash::of_bytes(executable)).exists();
     records.publish(&record(b"old", b"d"), 0).unwrap();
     let reader = hit(&records).unwrap();
+    // A publisher that died with its content written and nothing committed.
+    CRASH.with(|c| c.set(Some(Boundary::AfterContent)));
+    assert!(records.publish(&record(b"abandoned", b"d"), 1).is_err());
+    CRASH.with(|c| c.set(None));
+    assert!(present(b"abandoned"));
     assert_eq!(
         records.publish(&record(b"new", b"d"), 1).unwrap(),
         Published::Committed { generation: 2 }
     );
-    records.collect().unwrap();
+    assert!(!present(b"abandoned"), "abandoned publication kept");
+    assert!(present(b"old"), "a held generation was freed");
     let directory = tempfile::tempdir().unwrap();
     assert_eq!(executable_bytes(&reader, directory.path()), b"old");
     drop(reader);
-    let collected = records.collect().unwrap();
-    assert_eq!(collected, Collected { pins: 1, blobs: 2 });
+    assert_eq!(
+        records.publish(&record(b"newer", b"d"), 2).unwrap(),
+        Published::Committed { generation: 3 }
+    );
+    assert!(
+        !present(b"old") && !present(b"new"),
+        "replaced generations kept"
+    );
     assert_eq!(
         executable_bytes(&hit(&records).unwrap(), directory.path()),
-        b"new"
+        b"newer"
     );
 }
 

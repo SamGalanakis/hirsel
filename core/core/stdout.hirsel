@@ -1,0 +1,3 @@
+// Module `stdout`: a provider operation (CAP-5).
+
+pub fn write(out: Stdout, s: String) -> Result[(), WriteError] waits

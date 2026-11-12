@@ -1,0 +1,19 @@
+// Module `int`. T and U range over the integer types (SEM-1).
+
+pub fn wrapping_add[T](a: T, b: T) -> T
+pub fn wrapping_sub[T](a: T, b: T) -> T
+pub fn wrapping_mul[T](a: T, b: T) -> T
+pub fn wrapping_neg[T](a: T) -> T
+pub fn wrapping_shl[T](a: T, n: u32) -> T
+pub fn checked_add[T](a: T, b: T) -> Option[T]
+pub fn checked_sub[T](a: T, b: T) -> Option[T]
+pub fn checked_mul[T](a: T, b: T) -> Option[T]
+pub fn checked_div[T](a: T, b: T) -> Option[T]
+pub fn saturating_add[T](a: T, b: T) -> T
+pub fn saturating_sub[T](a: T, b: T) -> T
+pub fn saturating_mul[T](a: T, b: T) -> T
+pub fn widen[T, U](x: T) -> U
+pub fn narrow[T, U](x: T) -> U
+pub fn try_narrow[T, U](x: T) -> Option[U]
+pub fn truncate[T, U](x: T) -> U
+pub fn parse[T](s: String) -> Result[T, ParseError]

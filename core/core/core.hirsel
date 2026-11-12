@@ -1,0 +1,67 @@
+// Module `core`: the prelude. Every `pub` declaration here is named unqualified
+// (LANG-7). A type declared with no body is built in: its kind, bounds, size and layout are
+// the ones the specification gives it. Contracts: docs/spec/core.md.
+
+pub type Option[T] = None | Some(T)
+pub type Result[T, E] = Ok(T) | Error(E)
+pub type Order = Less | Equal | Greater
+pub opaque type Never
+
+pub opaque type String
+pub opaque type List[T]
+pub type Bytes = List[u8]
+pub opaque type Map[K: key, V]
+pub opaque type Box[T]
+pub opaque type Rc[T: shareable]
+pub opaque type Arc[T: shareable + send]
+pub opaque type View[T]
+pub opaque type Unique: key
+
+pub opaque type Region
+pub opaque stable type Text
+pub opaque stable type FixedSpan[T: plain]
+pub opaque type Link[T]
+pub opaque type Dest[T]
+pub opaque type Child[T]
+pub opaque type SpanBuilder[T: plain, in r]
+pub opaque type Builder[T, in r]
+
+pub opaque type Task[R: send]
+pub opaque type Sender[T: send]
+pub opaque type Receiver[T: send]
+
+pub opaque type Args
+pub opaque type Dir
+pub opaque type Net
+pub opaque type Clock
+pub opaque type Random
+pub opaque type Stdout
+pub opaque type Stderr
+pub opaque type Stdin
+pub opaque type Env
+pub opaque type Process
+pub opaque type Tasks
+pub opaque resource type HostFile
+pub type OpenMode = Read | Write | Append | CreateNew
+
+pub type Capacity { requested: u64, available: u64 }
+pub type Closed[T] = Closed(T)
+pub type SendError[T] = Full(T) | Closed(T)
+pub type JoinError = Failed(Causes) | Cancelled(Causes)
+pub opaque type Site
+pub opaque type Causes
+pub type Cause { kind: CauseKind, site: Site }
+pub type CauseKind = Overflow | Bounds | Division | Unwrap | Fail(String) | Cancelled | Capacity
+pub type BuildError = Capacity(Capacity) | Overflow
+pub type IoError = NotFound | Denied | Exists | Closed | Other(u32)
+pub type WriteError { written: u64, error: IoError }
+pub type ParseError = Empty | Invalid(u64) | OutOfRange
+pub type FloatError = NaN | OutOfRange
+
+pub fn fail(take msg: String) -> Never
+pub fn replace[T](mut q: T, take v: T) -> T
+pub fn clone[T, U](x: T) -> Result[U, Capacity]
+pub fn clone_in[T, U](r: Region, x: T) -> Result[U in r, Capacity]
+pub fn build_in[T](r: Region, bytes n: u64, w: scoped fn(mut Dest[T]) -> Result[Child[T], BuildError]) -> Result[Builder[T, in r], BuildError]
+pub fn prepare_in[T](r: Region, staging: T) -> Result[Builder[T, in r], BuildError]
+pub fn finish[T, in r](take b: Builder[T, in r]) -> T in r

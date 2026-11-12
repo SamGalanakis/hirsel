@@ -1,0 +1,12 @@
+// Module `float`. F ranges over f32 and f64, I over the integer types (SEM-2).
+
+pub fn mul_add[F](a: F, b: F, c: F) -> F
+pub fn total_order[F](a: F, b: F) -> Order
+pub fn to_int[F, I](x: F) -> Result[I, FloatError]
+pub fn from_int[I, F](x: I) -> F
+pub fn widen(x: f32) -> f64
+pub fn narrow(x: f64) -> f32
+pub fn to_bits32(x: f32) -> u32
+pub fn to_bits64(x: f64) -> u64
+pub fn from_bits32(b: u32) -> f32
+pub fn from_bits64(b: u64) -> f64

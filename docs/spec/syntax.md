@@ -31,11 +31,12 @@ The reserved keywords are exactly:
 ```text
 fn let mut match if else loop while for in break continue return
 take copy view type stable resource scoped region bound
-pub opaque const uses of where true false
+pub opaque const where true false
 ```
 
-A keyword cannot be declared as a name. These names are contextual and ordinary
-elsewhere: `bytes` after `bound`, `grant` and in a sized-destination argument; `drop` after
+A keyword cannot be declared or used as a name anywhere, after a `.` included. These names
+are contextual and ordinary elsewhere: `bytes` after `bound` and `grant`, and before a sized
+parameter or argument; `drop` after
 a resource declaration; `plain`, `shareable`, `send`, `key` and `ordered` in a bound
 list; `own` before `fn` in a type; `waits` after a function or callable header. Library types and functions, including `Region`,
 `View`, `Rc`, `Arc` and `Capacity`, are ordinary names. `_` is the discard pattern.
@@ -107,12 +108,11 @@ No semicolons are inserted. These rules use syntax only:
    or `?` on the next line never continues it. A bare `return`, `break` or `continue` is
    complete at a newline.
 4. These continue across newlines and comments: `else` after an `if` block; `drop` after a
-   resource declaration; `->`, `uses`, `waits`, `where`, `in` and a body `{` after a
+   resource declaration; `->`, `waits`, `where`, `in` and a body `{` after a
    function header that has no body yet.
 5. `;` ends a statement explicitly. `}` and the end of file end a pending complete
-   statement, so no END is needed before them. A completed `if`, `match`, block, `loop`,
-   `while`, `for`, `region` or `bound` may be followed by another statement on the same
-   line.
+   statement, so no END is needed before them. Two statements on one line are always
+   separated by `;`.
 6. A block's last expression is its value; a trailing `;` discards it. A final `let` or
    assignment gives unit.
 7. In list braces a newline can replace a comma after a complete entry.
@@ -145,16 +145,15 @@ attribute   = "@", ( "test" | "compact", "(", ( "u16" | "u32" | "u64" ), ")"
 const-def   = "const", name, ":", type, "=", expression ;
 function    = "fn", name, fn-header, block ;
 fn-header   = [ generics ], "(", list(parameter), ")", [ "->", type ],
-              [ uses ], [ "waits" ], [ outlives ] ;
-parameter   = [ "take" | "mut" ], name, ":", type ;
+              [ "waits" ], [ outlives ] ;
+parameter   = [ "take" | "mut" | "bytes" ], name, ":", type ;
 generics    = "[", nonempty(generic), "]" ;
 generic     = name, [ ":", bounds ] | "in", name ;
 bounds      = bound-name, { "+", bound-name } ;
 bound-name  = "plain" | "shareable" | "send" | "key" | "ordered" ;
-uses        = "uses", type-path, { "+", type-path } ;
 outlives    = "where", name, ":", name, { ",", name, ":", name } ;
 type-def    = [ "stable" | "resource" | "scoped" ], "type", name, [ generics ],
-              [ ":", bounds ], [ uses ], [ "of", brand ], [ "grant", "bytes", integer ],
+              [ ":", bounds ], [ "grant", "bytes", integer ],
               ( fields | "=", type-rhs | empty ), [ drop ] ;
 fields      = "{", [ field, { entry-sep, field }, [ entry-sep ] ], "}" ;
 field       = name, ":", type ;
@@ -163,17 +162,16 @@ type-rhs    = variant, "|", variant, { "|", variant }
             | type ;
 variant     = name, [ "(", list(payload), ")" ] ;
 payload     = [ name, ":" ], type ;
-drop        = "drop", "(", name, [ ",", "mut", name ], ")", block ;
+drop        = "drop", "(", name, ")", block ;
 
 (* types *)
-type        = type-atom, [ "of", brand ], [ anchor ] ;
+type        = type-atom, [ anchor ] ;
 anchor      = "in", place ;
-brand       = place | ".", name ;
 place       = name, { ".", name } ;
 type-atom   = type-path, [ "[", nonempty(type-arg), "]" ]
             | "(", ")" | "(", type, ")" | "(", type, ",", list(type), ")"
             | [ "scoped" | "own", [ "[", bounds, "]" ] ], "fn", "(", list(fn-param), ")",
-              [ "->", type ], [ uses ], [ "waits" ] ;
+              [ "->", type ], [ "waits" ] ;
 type-arg    = type | "in", place ;
 fn-param    = [ "take" | "mut" ], [ name, ":" ], type ;
 type-path   = name, { ".", name } ;
@@ -213,8 +211,8 @@ loop-expr   = "loop", block | "while", cond, block
 if-expr     = "if", cond, block, [ "else", ( block | if-expr ) ] ;
 match-expr  = "match", expression, "{", [ arm, { entry-sep, arm }, [ entry-sep ] ], "}" ;
 arm         = pattern, [ "if", expression ], "=>", expression ;
-closure     = [ "scoped" ], "fn", "(", list(fn-param), ")", [ "->", type ], [ uses ],
-              [ "waits" ], block ;
+closure     = [ "scoped" ], "fn", "(", list(fn-param), ")", [ "->", type ], [ "waits" ],
+              block ;
 
 (* patterns *)
 pattern     = "_" | [ "take" ], name | scalar, [ "..=", scalar ]
@@ -258,8 +256,12 @@ or `match` subject cannot end in an unparenthesized block. `for` patterns, `let`
 without `else`, and `let`-condition patterns are checked for refutability after parsing
 ([LANG-17](language.md#lang-17-match)). An attribute applies only to its own target:
 `@test` to a function, `@compact` to a `stable type`, `@twin` to a type; a repeated
-attribute, an attribute on another item, a representation keyword or `uses` on an alias,
-and `drop` on a declaration that is not `resource` are refused. Malformed syntax with no
+attribute, an attribute on another item, a representation keyword on an alias,
+and `drop` on a declaration that is not `resource` are refused. A parameter marked `bytes`
+is a byte count of type `u64`, and its argument is written `bytes e`; the mark is part of the
+signature, as `take` is. In a core declaration file ([core](core.md)) a function may end at
+its header, with no body, and a type with no body is built in; everywhere else a function
+needs a body. Malformed syntax with no
 more specific rule is LANG-5.
 
 ```hirsel

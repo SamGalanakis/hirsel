@@ -5,14 +5,13 @@
 Files, directories, network, processes, clocks, randomness, standard streams, environment
 variables and tasks are reached only through operations that take a capability argument.
 These capability values are the only way a program affects or observes the world outside
-its values. A function holds authority only through its parameters and, for closures, its
-captures (CAP-3). Top-level `const` values cannot hold capabilities.
+its values. A function holds authority only through its parameters (CAP-3). Top-level `const` values cannot hold capabilities.
 
 ```hirsel
-fn stamp(c: Clock) -> u64 { clock.now_ms(c) }
+fn stamp(c: Clock) -> u64 { host.mono_ns(c) }
 ```
 ```hirsel
-fn stamp() -> u64 { clock.now_ms() }                     // refused: CAP-1, no Clock argument
+fn stamp() -> u64 { host.mono_ns() }                     // refused: CAP-1, no Clock argument
 ```
 
 ### CAP-2: Capabilities are opaque
@@ -28,26 +27,25 @@ declares whether it is `send` ([CONC-2](tasks.md#conc-2-the-send-bound)).
 fn forge() -> Dir { Dir(fd: 3) }                         // refused: PROG-2, Dir is opaque
 ```
 
-### CAP-3: Callable authority
+### CAP-3: Authority is received
 
-A type that holds a capability declares it with `uses`: `type Logger uses Stdout { out:
-Stdout }`. The declaration is checked once against its fields' declared `uses`, which
-indirections and generic arguments pass through, and is read, never re-derived, by every
-other check. A callable type lists the capability types its closures may capture:
-`own fn(path.Path) -> Result[Bytes, IoError] uses Dir`. A closure's `uses` must include
-the `uses` of every capture's type, and a callable type without `uses` admits only
-closures that capture no authority. A `uses` list is compared by inclusion, so a closure
-with less authority fits a type with more. In v1 a type's or callable type's `uses` is one
-declared list; there is no separate private ceiling.
+A function's authority is exactly the capability values it receives as arguments, directly
+or inside argument values (fields, collections, counted payloads). There are no authority
+summaries in v1: no declaration lists the capabilities a type or a function may hold, and a
+generic `T` may carry any. An owning closure captures no capability
+([LANG-14](language.md#lang-14-captures)), so a callable value holds no authority of its own
+and reaches the world only through the arguments of each call; a scoped callback uses the
+receiving call's capabilities for that call. A later authority facade is reserved
+([reserved](reserved.md), R19).
 
 ```hirsel
-fn reader(d: Dir) -> Result[own fn(path.Path) -> Result[Bytes, IoError] uses Dir, Capacity] {
-  fn(p: path.Path) -> Result[Bytes, IoError] uses Dir { file.read(d, p) }
+fn load(d: Dir, p: String, f: fn(Dir, String) -> Result[u64, IoError] waits) -> Result[u64, IoError] waits {
+  f(d, p)
 }
 ```
 ```hirsel
-fn reader(d: Dir) -> Result[own fn(path.Path) -> Result[Bytes, IoError], Capacity] {
-  fn(p: path.Path) -> Result[Bytes, IoError] { file.read(d, p) }  // refused: CAP-3, captures Dir
+fn opener(d: Dir) -> Result[own fn(String) -> Result[HostFile, IoError] waits, Capacity] {
+  fn(p: String) -> Result[HostFile, IoError] waits { host.open(d, p, Read) }   // refused: LANG-14, captures Dir
 }
 ```
 
@@ -68,7 +66,7 @@ simulation). Programs cannot tell providers apart except by the values the opera
 return. A provider operation that may wait is declared `waits` and is a cancellation point
 at its issue ([CONC-7](tasks.md#conc-7-cancellation-points)). Provider operations state
 their allocation in their result types as every operation does
-([MEM-23](budgets.md#mem-23-admission)); host memory behind them is not charged. Core task,
+([MEM-21](budgets.md#mem-21-admission)); host memory behind them is not charged. Core task,
 channel and `Arc` operations are not provider operations; their choices are events
 ([CONC-10](tasks.md#conc-10-event-order)).
 
@@ -76,9 +74,10 @@ channel and `Arc` operations are not provider operations; their choices are even
 
 No operation without a capability argument observes anything outside its arguments: there
 is no ambient clock, randomness, environment, input, thread identity or address, and no
-observable hash seed. No value depends on where a block is placed in memory. A `Map`'s hash
-may be keyed by a per-run engine seed; iteration is in insertion order and no operation
-reveals a hash, so the seed is unobservable and is not an input of the run.
+observable hash seed. No value depends on where a block is placed in memory, and no
+operation reveals the order in which `Unique` values were made
+([MEM-18](memory.md#mem-18-pools-are-library-code)). The `Map` hash seed enters at the
+replay point and no value depends on it ([SEM-5](semantics.md#sem-5-maps)).
 
 ### CAP-7: Attenuation
 
@@ -86,10 +85,6 @@ A capability can be narrowed by its module's functions: a `Dir` to a subdirector
 read-only access, a `Net` to a subset of its rules, a `Tasks` to a child limit. A narrowed
 capability never permits more than its source. No operation widens a capability or
 combines two into more than either.
-
-```hirsel
-fn logs(d: Dir) -> Result[Dir, IoError] { dir.narrow(d, path.of("logs")) }
-```
 
 ### CAP-8: The replay point
 

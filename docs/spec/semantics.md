@@ -28,9 +28,9 @@ fn add(x: u8, y: u16) -> u16 { x + y }                    // refused: SEM-1, mix
 state. Expressions are evaluated as written: no contraction, reassociation or wider
 intermediates; `float.mul_add` fuses explicitly. Subnormals are kept and zero is signed, as
 IEEE 754 says. Every NaN an operation produces has one bit pattern: `0x7fc00000` for `f32`,
-`0x7ff8000000000000` for `f64`. `float.to_i64` and its siblings truncate toward zero and
-return `Result[i64, FloatError]`, with `FloatError` `NaN` or `OutOfRange`. Conversions from
-integers to floats and from `f64` to `f32` round to nearest even. `%` is integer-only.
+`0x7ff8000000000000` for `f64`. `float.to_int` truncates toward zero and returns `NaN` or
+`OutOfRange` as its error; conversions from integers to floats and from `f64` to `f32`
+round to nearest even. [core](core.md) lists every numeric conversion. `%` is integer-only.
 Floats are neither `key` nor `ordered`; `float.total_order` orders them by IEEE 754
 totalOrder.
 
@@ -53,7 +53,7 @@ strings.
 [MEM-13](memory.md#mem-13-own-layout). `xs[i]` and `list.get(xs, i)` read through a view and
 fail with `Bounds`, or return `None`, when `i` is out of range. `list.push` and the other
 growing operations return `Result[_, (Capacity, T)]` or `Result[_, Capacity]` and grow as
-[MEM-26](budgets.md#mem-26-logical-charges) says; `list.capacity` reads the capacity and
+[MEM-24](budgets.md#mem-24-logical-charges) says; `list.capacity` reads the capacity and
 `list.reserve(mut xs, n)` grows it to at least `len + n`. Removing elements never
 allocates or shrinks. A view
 returned by `list.get` or indexing is anchored to the list
@@ -68,10 +68,13 @@ amortised expected constant time; removal keeps the order of the remaining entri
 Inserting an existing key installs the new value in place, keeps the stored key, cleans
 the old value and then drops the incoming key; it admits nothing, so it never returns
 `Capacity`. `map.get(m, k)` returns `Option[View[V]] in m`
-([OWN-20](ownership.md#own-20-scoped-results-name-their-anchor)). Each `key` type has exactly
-one equality, the structural one of SEM-7, and one hash, which is private and cannot be
-observed ([CAP-6](capabilities.md#cap-6-no-ambient-input)); both are fixed by the type, so every map with the same key type uses the
-same ones, and no program supplies or replaces them in v1 ([reserved](reserved.md), R11).
+([OWN-20](ownership.md#own-20-scoped-results-name-their-anchor)). `map.set` replaces the value of a present key and never inserts ([core](core.md)). Each `key`
+type has exactly one equality, the structural one of SEM-7, and one hash, fixed by the type;
+no program supplies or replaces them in v1 ([reserved](reserved.md), R11). The hash is keyed
+by a per-run seed that enters at the replay point
+([CAP-8](capabilities.md#cap-8-the-replay-point)); no operation reveals a hash and iteration
+is in insertion order, so no value depends on the seed
+([CAP-6](capabilities.md#cap-6-no-ambient-input)).
 Views from `map.get` are anchored to the map and freeze it as list views do.
 
 ```hirsel
@@ -80,7 +83,7 @@ fn count(m: Map[String, u64], k: String) -> u64 { match map.get(m, k) { Some(v) 
 
 ### SEM-6: Iteration
 
-`for x in e` iterates a range, or a view of a `List`, a span or a `Causes`
+`for x in e` iterates a range, or a view of a `List`, a `FixedSpan` or a `Causes`
 ([core](core.md)), binding a view of each element from the lowest index. Over a view of a
 `Map` it binds `(View[K], View[V])` for each entry in insertion order. `for take x in e` consumes an own `List`, moving each
 element out from the lowest index and cleaning the rest if the loop exits early. Nothing
@@ -102,8 +105,9 @@ fn grow(mut xs: List[u64]) -> Result[(), Capacity] {
 
 `==` and `!=` need `key` operands; `<`, `<=`, `>` and `>=` need `ordered` operands
 ([OWN-4](ownership.md#own-4-bounds)). Integers, `bool`, `char`, unit, `String` and `Text`
-are both. Tuples, `Option`, `Result`, `List` and spans have a bound when their
-components do. A nominal type has a bound when it declares it and its fields have it.
+are both. Tuples, `Option`, `Result`, `List` and `FixedSpan` have a bound when
+their components do. `Unique` is `key` and not `ordered`
+([MEM-18](memory.md#mem-18-pools-are-library-code)). A nominal type has a bound when it declares it and its fields have it.
 Equality is structural. Order is numeric for integers and `char`, `false` before `true`,
 bytewise for text, lexicographic for tuples, sequences and records (fields in declaration
 order, a proper prefix first), and by declaration ordinal then payload for variants. A

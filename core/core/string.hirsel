@@ -1,0 +1,13 @@
+// Module `string` (SEM-3).
+
+pub fn new() -> String
+pub fn from(s: String) -> Result[String, Capacity]
+pub fn from_utf8(take b: Bytes) -> Result[String, Bytes]
+pub fn into_bytes(take s: String) -> Bytes
+pub fn as_bytes(s: String) -> View[Bytes] in s
+pub fn slice(s: String, from: u64, to: u64) -> View[String] in s
+pub fn next_scalar(s: String, at: u64) -> Option[(char, u64)]
+pub fn byte_len(s: String) -> u64
+pub fn push(mut s: String, t: String) -> Result[(), Capacity]
+pub fn push_char(mut s: String, c: char) -> Result[(), Capacity]
+pub fn push_u64(mut s: String, n: u64) -> Result[(), Capacity]

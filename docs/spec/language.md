@@ -11,25 +11,41 @@ caller-owned temporary until the callee is entered
 ([FAIL-3](failure.md#fail-3-commit-points)).
 
 ```hirsel
-fn f(d: Dir) -> Result[(Bytes, Bytes), IoError] waits {
-  Ok((file.read(d, path.of("a"))?, file.read(d, path.of("b"))?))   // a is read first
+fn f(d: Dir) -> Result[(HostFile, HostFile), IoError] waits {
+  Ok((host.open(d, "a", Read)?, host.open(d, "b", Read)?))   // a is opened first
 }
 ```
 
 ### LANG-7: Names
 
-There are no imports. A name resolves, in order, to a local, a definition of the current
-module, a module of the current package, a dependency package, or a declaration of the
-core library ([core](core.md)); locals, definitions, modules and packages share this one
-namespace, and a local may not have the name of anything else visible there. A dotted
-path `a.b.c` resolves its first name this way and then selects a field, if `a` is a local,
-or a member, if `a` is a module or package: a library type of another module is written
-`path.Path`. Two definitions with one name in one module are refused. Variants are written
-bare (`Ok(x)`, `None`) and resolved through the expected type. Core roles (`Result`,
-`Capacity`, the capability types) are fixed by definition path, never by spelling.
+There are no imports. Types and values have separate namespaces, and the grammar decides
+which one a name is read in: a name in a type position (LANG-5) is a type, and any other
+name is a value. A type name resolves, in order, to a type of the current module or a type
+of the **prelude**; a value name resolves to a local, a function or constant of the current
+module, a function of the prelude, a module of the current package, a dependency package or
+a core module. The prelude is the `core` module of the core library: every `pub`
+declaration in `core/core/core.hirsel` ([core](core.md)), and nothing else. A dotted path
+`a.b` reads its first name as a value; if `a` is a local, `.b` selects a field, and if `a` is
+a module or package, `.b` selects a member; in a type position the last name is a type
+(`path.Path`). So `fn f(c: char)` names the builtin type and `char.digit(c)` a module
+member.
+
+A package module may have the name of a core module; it then **extends** it. In a module of
+package P, the name of a core module `m` reads one merged set: the core members of `m`, and
+the `pub` members of every module named `m` in P and in P's dependencies (with the private
+members of the module itself, when it is one of them). A member that has the name of a core
+member is refused, so an extension never redeclares or shadows one; two extensions that
+declare one name are refused where that name is read through `m`. Each member keeps its
+definition identity (package, module path, name): `list.push` is the core library's and
+`list.sort` the standard library's, and visibility and type identity read that identity.
+An extension sees no private member of the core module. A local may not have the name of a visible local, a definition of its module, a module or a
+prelude function. Two definitions with one name in one module are refused. Variants are
+written bare (`Ok(x)`, `None`) and selected by the expected type; a dotted path never names
+a variant. Core roles (`Result`, `Capacity`, the capability types) are fixed by definition
+path, never by spelling.
 
 ```hirsel
-fn parse(s: String) -> Result[u64, ParseError] { int.parse(s) }
+fn digits(s: String) -> Result[u64, ParseError] { int.parse(s) }
 ```
 ```hirsel
 fn f(x: u64) -> u64 { let x = x + 1; x }                  // refused: LANG-7, shadows x
@@ -39,12 +55,20 @@ fn f(x: u64) -> u64 { let x = x + 1; x }                  // refused: LANG-7, sh
 
 Every top-level function writes a complete signature: parameter names, modes and types,
 the result type and its anchors ([OWN-20](ownership.md#own-20-scoped-results-name-their-anchor)),
-`uses`, `waits` ([CAP-5](capabilities.md#cap-5-provider-operations)) and region outlives clauses
-([MEM-6](memory.md#mem-6-roots)). Checking a body reads that body, the signatures and type
+`waits` and region outlives clauses ([MEM-6](memory.md#mem-6-roots)). Checking a body reads that body, the signatures and type
 summaries ([OWN-2](ownership.md#own-2-type-summaries)) it names, and nothing else: no fact is
 inferred from another body, and no check revisits a definition after its callers are seen.
 A closure writes its parameter types; its result type may be omitted when the expected
 type gives it.
+
+`waits` says that a call may wait and may observe cancellation
+([CONC-7](tasks.md#conc-7-cancellation-points)). A function or closure is declared `waits`
+exactly when its body calls a function, or invokes a callable, whose type is `waits`; one
+declared `waits` without such a call is refused too. Cleanup never counts: finalizers and the
+cleanup of task handles run shielded and observe no cancellation
+([FAIL-11](failure.md#fail-11-resources), [CONC-8](tasks.md#conc-8-abandoned-handles)), so a
+finalizer may call `waits` operations without being marked, and no implicit cleanup makes a
+function `waits`. `main` is `waits` ([PROG-3](programs.md#prog-3-entry)).
 
 ```hirsel
 fn twice(x: u64) -> u64 { x * 2 }
@@ -75,14 +99,12 @@ type Bad = A(x: u64, u64)                                 // refused: LANG-9, mi
 
 ### LANG-10: Built-in types
 
-The built-in types are `bool`, `char`, `i8` to `i64`, `u8` to `u64`, `f32`, `f64`, unit
-`()`, tuples `(A, B, ..)`, `Never` (the type of `return`, `break`, `continue`, `fail` and a
-loop with no `break`, which converts to every type), `Option[T] = Some(T) | None` and
-`Result[T, E] = Ok(T) | Error(E)`. The core library declares the others ([core](core.md)):
-`String`, `Text`, `Box`, `List`, `Map`, `FixedSpan`, `SeqSpan`, `IndexedSpan`, `Link`,
-`View`, `Rc`, `Arc`, `Region`, `Builder`, `Dest`, `Child`, `Capacity`, `Task`, `Sender`,
-`Receiver`, the capability types, and the alias `Bytes = List[u8]`. Their kinds are in
-[OWN-3](ownership.md#own-3-kinds).
+The builtin type names are `bool`, `char`, `i8` to `i64`, `u8` to `u64`, `f32` and `f64`;
+unit `()` and tuples `(A, B, ..)` are written by syntax. Every other type a program names
+without declaring it is declared in the prelude ([core](core.md)), `Option`, `Result`,
+`String`, `List` and the capability types included. `Never` is the type of `return`,
+`break`, `continue`, `fail` and a loop with no `break`, and converts to every type. Kinds
+are in [OWN-3](ownership.md#own-3-kinds).
 
 ### LANG-11: Typing is local
 
@@ -132,14 +154,12 @@ A callable type has one of three kinds, written in the type:
 | `own fn(..) -> R`, `own[send] fn(..) -> R` | the above, and **owning closures** (LANG-14); `own[send]` only those whose captures are all `send` | own; `send` only with `[send]` | 16 |
 | `scoped fn(..) -> R` | any closure, and the above | scoped ([OWN-21](ownership.md#own-21-scoped-callbacks)) | 16 |
 
-Each callable type also carries `uses`, the authority its values may hold
-([CAP-3](capabilities.md#cap-3-callable-authority)), and `waits`, whether calling it may
-wait ([CAP-5](capabilities.md#cap-5-provider-operations)). These are its declared summaries. A
-callable fits a callable type when its parameter modes and types and its result are
-identical, its kind is admitted, its `uses` are included in the type's, and it is `waits`
-only if the type is. Calling a callable never consumes it and follows the modes of a direct
-call. Any call through a callable may allocate; cleaning an owning closure admits nothing
-([FAIL-13](failure.md#fail-13-mechanical-release)).
+A callable type also says whether it is `waits` (LANG-8). A callable fits a callable type
+when its parameter modes and types and its result are identical, its kind is admitted, and
+it is `waits` only if the type is. Calling a callable never consumes it and follows the
+modes of a direct call. Any call through a callable may allocate. Cleaning an owning closure
+cleans its captures, which hold no resource (LANG-14), so it runs no finalizer and admits
+nothing ([FAIL-13](failure.md#fail-13-mechanical-release)).
 
 ```hirsel
 fn apply(f: fn(u64) -> u64, x: u64) -> u64 { f(x) }
@@ -158,13 +178,19 @@ is scoped: it captures as the arguments of the call that receives it, a capture 
 reads as a view of the place it reads and a capture it assigns or lends `mut` as a `mut`
 loan of that place, both for that whole call, and it never moves a capture. Any other
 closure with captures is an **owning closure**: creating it admits one environment block
-([MEM-26](budgets.md#mem-26-logical-charges)) and then copies its plain captures into it and
+([MEM-24](budgets.md#mem-24-logical-charges)) and then copies its plain captures into it and
 moves the others, whose slots become moved ([OWN-5](ownership.md#own-5-availability)); its
 literal has type `Result[own fn(..) -> R, Capacity]`, `own[send]` when every capture is
 `send`, and on `Capacity` its captures are dropped as a failed literal's fields are
 ([T1.2](ownership.md#own-26-the-transition-table)). Its body reads captures as views and
-cannot move, assign or lend them `mut`. A view, a scoped value or a stable value cannot be
-captured by an owning closure.
+cannot move, assign or lend them `mut`. An owning closure may capture only a value whose
+type holds no resource, no capability, no view, no scoped value and no stable reference at
+any depth, as its type
+summary records ([OWN-2](ownership.md#own-2-type-summaries)): plain values other than
+capabilities, own values, counted holders of such values, and nothing whose type is a type
+parameter. Resources and capabilities reach a closure as call arguments. The environment
+holds the captures in the order the body first names them, and cleaning it cleans them in
+reverse.
 
 ```hirsel
 fn counter(take base: List[u64]) -> Result[own fn(u64) -> u64, Capacity] {
@@ -196,7 +222,7 @@ fn find(xs: List[u64], k: u64) -> Option[u64] {
 ### LANG-16: Loops
 
 `loop` repeats until a `break`. `while c` and `while let p = e` test before each iteration.
-`for x in e` iterates a range, or a view of a `List`, a `Map` or a span, and `for take x in
+`for x in e` iterates a range, or a view of a `List`, a `Map`, a `FixedSpan` or a `Causes`, and `for take x in
 e` consumes an own `List` ([SEM-6](semantics.md#sem-6-iteration)); nothing else is a loop
 source in v1. A `for` pattern is irrefutable. Bindings made by one iteration end with it
 ([OWN-17](ownership.md#own-17-loops)).
@@ -231,24 +257,20 @@ fn area(s: Shape) -> f64 { match s { Circle(r) => 3.14 * r * r } }   // refused:
 ### LANG-18: Errors
 
 Expected failures are `Result[T, E]` values. `e?` on `Result[T, E]` consumes `e` and
-evaluates to the `Ok` payload or exits the function with the `Error` payload: unchanged
-when the function's error type is `E`, or injected when the function's error type is a
-variant type with exactly one arm whose single payload is `E`; any other case is refused.
-`e?` on `Option[T]` in a function returning `Option` exits with `None`. Inside a bound
-scope of the same function, `?` on an error of type exactly `Capacity` exits the scope
-instead ([MEM-27](budgets.md#mem-27-the-bound-scope)). An expression statement whose value
-is a `Result` is refused; `let _ = e` discards it explicitly.
+evaluates to the `Ok` payload, or exits the function with `Error` of the same payload; the
+function's error type must be exactly `E`. A different error type is converted explicitly,
+with `match`. `e?` on `Option[T]` in a function returning `Option` exits with `None`. Inside
+a bound scope of the same function, `?` on an error of type exactly `Capacity` exits the
+scope instead ([MEM-25](budgets.md#mem-25-the-bound-scope)). An expression statement whose
+value is a `Result` is refused; `let _ = e` discards it explicitly.
 
 ```hirsel
-type LoadError = Io(IoError) | Parse(ParseError)
-fn load(d: Dir, p: path.Path) -> Result[u64, LoadError] waits {
-  let s = file.read_string(d, p)?
-  Ok(int.parse(s)?)
-}
+fn half(n: u64) -> Result[u64, ParseError] { if n % 2 == 0 { Ok(n / 2) } else { Error(OutOfRange) } }
+fn quarter(n: u64) -> Result[u64, ParseError] { let h = half(n)?; half(h) }
 ```
 ```hirsel
-fn save(d: Dir, p: path.Path) -> Result[(), WriteError] waits { file.write(d, p, b"x"); Ok(()) }
-                                                          // refused: LANG-18, unused Result
+fn half(n: u64) -> Result[u64, ParseError] { Ok(n / 2) }
+fn quarter(n: u64) -> Result[u64, ParseError] { half(n); Ok(0) }   // refused: LANG-18, unused Result
 ```
 
 ### LANG-19: Recursion

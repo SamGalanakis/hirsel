@@ -1,0 +1,15 @@
+// Module `host`: the provider operations (CAP-5), with `stdout.write` and
+// `stderr.write`, exactly these.
+
+pub fn open(d: Dir, p: String, mode: OpenMode) -> Result[HostFile, IoError] waits
+pub fn read(mut f: HostFile, mut buf: Bytes) -> Result[u64, IoError] waits
+pub fn write(mut f: HostFile, b: Bytes) -> Result[(), WriteError] waits
+pub fn close(take f: HostFile) -> Result[(), IoError] waits
+pub fn try_lock(mut f: HostFile) -> Result[bool, IoError] waits
+pub fn unlock(mut f: HostFile) -> Result[(), IoError] waits
+pub fn mkdir(d: Dir, p: String) -> Result[(), IoError] waits
+pub fn mkdtemp(d: Dir) -> Result[(Dir, String), IoError] waits
+pub fn remove(d: Dir, p: String) -> Result[(), IoError] waits
+pub fn remove_tree(d: Dir, p: String) -> Result[(), IoError] waits
+pub fn wall_ms(c: Clock) -> u64
+pub fn mono_ns(c: Clock) -> u64

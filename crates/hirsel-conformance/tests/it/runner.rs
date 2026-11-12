@@ -591,9 +591,11 @@ fn suite_discovers_nested_files_and_fails_every_unpassed_in_gate_file() {
     let root = Fixture::new();
     let report = run_suite(&root.0, &Compiler).unwrap();
     assert_eq!(report.counts.validated, 4);
-    assert_eq!(report.counts.not_implemented, 1);
+    // These complete programs now get concrete refusal/mismatch verdicts.
+    // The synthetic-driver shard controls below still cover NotImplemented.
+    assert_eq!(report.counts.not_implemented, 0);
     assert_eq!(report.counts.passing, 1);
-    assert_eq!(report.counts.failing, 2);
+    assert_eq!(report.counts.failing, 3);
     // Unlisted files gate too: each in-gate file that did not pass is an error.
     let mut unpassed: Vec<_> = report
         .errors
@@ -700,7 +702,9 @@ fn binary_json_and_exit_status_follow_validation_and_the_gate() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["summary"]["validated"], 4);
-    assert_eq!(json["summary"]["not_implemented"], 1);
+    assert_eq!(json["summary"]["not_implemented"], 0);
+    assert_eq!(json["summary"]["passing"], 1);
+    assert_eq!(json["summary"]["failing"], 3);
     assert_eq!(json["in_gate"]["validated"], 1);
     assert_eq!(json["unchecked"], 0);
     assert!(

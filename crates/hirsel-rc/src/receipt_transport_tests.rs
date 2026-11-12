@@ -19,7 +19,6 @@ fn unit() -> LirUnit<Value> {
         instance: ContentHash([2; 32]),
         target: ContentHash([3; 32]),
         abi: FnAbiId(0),
-        charged: false,
     });
     let arguments = PoolRange::push(
         &mut unit.pools.call_arguments,

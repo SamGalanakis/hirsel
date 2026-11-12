@@ -272,8 +272,6 @@ pub(crate) enum Access {
     Value,
     /// The task's LANG-10 counters (runtime ABI 65); only runtime calls write them.
     Depth,
-    /// The task's energy allowance (runtime ABI 111); charges write it.
-    Energy,
 }
 
 impl Access {
@@ -285,7 +283,6 @@ impl Access {
             Self::Used => "builder used bytes",
             Self::Value => "scalar value",
             Self::Depth => "invocation depth",
-            Self::Energy => "energy allowance",
         }
     }
 }

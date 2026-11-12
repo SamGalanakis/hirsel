@@ -51,7 +51,6 @@ impl<'p, S: Stage> Machine<'p, S> {
             open_elements: self.open_elements.clone(),
             tasks: self.tasks.clone(),
             recorders: self.recorders.clone(),
-            energy: self.energy.clone(),
             full_recount_due: self.full_recount_due,
         }
     }

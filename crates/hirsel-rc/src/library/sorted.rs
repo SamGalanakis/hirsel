@@ -82,7 +82,6 @@ fn empty(cx: &mut ImportCx<'_>, call: &CallShape<'_>) -> R<bool> {
         kind: SymbolKind::Type,
         definition: hirsel_syntax::DefPath::core("SortedMap"),
         instance: None,
-        charged: false,
     });
     let result = cx.construct(layout, payload, ConstructorKind::Record(symbol), &[entries])?;
     cx.finish(call, result)?;
@@ -165,7 +164,6 @@ fn record_symbol(b: &mut Body<'_, '_>, name: &str) -> SymbolId {
         kind: SymbolKind::Type,
         definition: hirsel_syntax::DefPath::core(name),
         instance: None,
-        charged: false,
     })
 }
 fn order(cx: &mut Cx<'_>) -> Result<LirUnit<Value>, PassError> {

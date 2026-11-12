@@ -61,51 +61,8 @@ impl<S: Stage> Program<S> {
                 self.function(&function.symbol)?;
             }
         }
-        // STORE-11 energy: a charged instance selects its base's body, unless
-        // the selections already name it; it is audited with its charges
-        // stripped, and only it may carry charges.
-        let selected: std::collections::BTreeSet<_> = self
-            .invocation_bodies
-            .iter()
-            .map(|r| (&r.definition, r.instance))
-            .collect();
-        let charged: std::collections::BTreeSet<_> = self
-            .units
-            .iter()
-            .filter(|u| u.header.charged)
-            .map(|u| (&u.header.definition, u.header.instance))
-            .filter(|key| !selected.contains(key))
-            .collect();
-        let twins: Vec<_> = self
-            .invocation_bodies
-            .iter()
-            .filter_map(|r| {
-                let instance = hirsel_lir::energy::charged_digest(r.instance);
-                charged.contains(&(&r.definition, instance)).then(|| {
-                    hirsel_lir::invocations::ReferenceBody {
-                        instance,
-                        ..r.clone()
-                    }
-                })
-            })
-            .collect();
-        let invocation_bodies = [self.invocation_bodies.as_slice(), &twins].concat();
+        let invocation_bodies = &self.invocation_bodies;
         for unit in &self.units {
-            let stripped = if unit.header.charged {
-                hirsel_lir::energy::check(unit).map_err(|e| err(V::Malformed, e))?;
-                Some(hirsel_lir::energy::strip(unit).map_err(|e| err(V::Malformed, e))?)
-            } else if unit
-                .instructions
-                .iter()
-                .any(|i| matches!(i, hirsel_lir::ir::Inst::Charge { .. }))
-            {
-                return fail(
-                    V::Malformed,
-                    "an uncharged unit carries a charge (STORE-11 energy)",
-                );
-            } else {
-                None
-            };
             let abi = self
                 .layouts
                 .fn_abis
@@ -153,15 +110,15 @@ impl<S: Stage> Program<S> {
                     return fail(V::FrameImbalance, "duplicate independent body selection");
                 }
                 crate::invocations::audit(
-                    stripped.as_ref().unwrap_or(unit),
+                    unit,
                     reference,
                     selected.body,
-                    &invocation_bodies,
+                    invocation_bodies,
                     &self.layouts,
                 )?;
             }
             if unit.header.origin == hirsel_lir::ir::UnitOrigin::Library {
-                crate::invocations::audit_library(unit, &invocation_bodies, &self.layouts)?;
+                crate::invocations::audit_library(unit, invocation_bodies, &self.layouts)?;
             }
             for plan in &unit.tables.structural {
                 plan.check(&self.layouts)
@@ -185,7 +142,6 @@ impl<S: Stage> Program<S> {
         let mut found = self.units.iter().enumerate().filter(|(_, u)| {
             u.header.definition == symbol.definition
                 && symbol.instance.is_none_or(|i| i == u.header.instance)
-                && symbol.charged == u.header.charged
         });
         match (found.next(), found.next()) {
             (Some((index, _)), None) => Ok(index),
@@ -198,28 +154,16 @@ impl<S: Stage> Program<S> {
     }
 
     /// The unit implementing a resource layout's finalizer.
-    /// The drop body of `definition` that drop glue runs: its charged twin
-    /// when `budgeted` and the program has one, else its uncharged unit
-    /// (STORE-11 energy: a finalizer follows the running context).
-    pub(crate) fn finalizer(&self, definition: &DefPath, budgeted: bool) -> Checked<usize> {
-        let base = self
-            .units
+    pub(crate) fn finalizer(&self, definition: &DefPath) -> Checked<usize> {
+        self.units
             .iter()
-            .position(|u| &u.header.definition == definition && !u.header.charged);
-        let twin = base.filter(|_| budgeted).and_then(|base| {
-            let instance = hirsel_lir::energy::charged_digest(self.units[base].header.instance);
-            self.units.iter().position(|u| {
-                &u.header.definition == definition
-                    && u.header.charged
-                    && u.header.instance == instance
+            .position(|u| &u.header.definition == definition)
+            .ok_or_else(|| {
+                err(
+                    V::Malformed,
+                    format!("no finalizer unit for {definition:?}"),
+                )
             })
-        });
-        twin.or(base).ok_or_else(|| {
-            err(
-                V::Malformed,
-                format!("no finalizer unit for {definition:?}"),
-            )
-        })
     }
 
     /// The unit to start from.

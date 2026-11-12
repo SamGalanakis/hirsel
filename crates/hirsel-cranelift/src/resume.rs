@@ -741,7 +741,7 @@ pub(crate) fn emit(
                 .inputs
                 .layouts
                 .keys()
-                .entry(EntryKind::Resume, false, Some(abi));
+                .entry(EntryKind::Resume, Some(abi));
             emitter
                 .manifested
                 .export_entry(&name, &header.definition, entry);

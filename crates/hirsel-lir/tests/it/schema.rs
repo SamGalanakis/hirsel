@@ -363,7 +363,6 @@ fn fixture_unit<S: Stage>(table: &LayoutTable) -> LirUnit<S> {
         instance: hash("f instance"),
         target: table.target,
         abi: FnAbiId(0),
-        charged: false,
     });
     let reprs = [
         (ValueRepr::Unit, 0),
@@ -558,7 +557,6 @@ fn fixture_unit<S: Stage>(table: &LayoutTable) -> LirUnit<S> {
         kind,
         definition: path(&format!("s{i}")),
         instance: (i % 2 == 0).then(|| hash("instance")),
-        charged: false,
     })
     .collect();
     t.constants = [
@@ -740,10 +738,6 @@ fn fixture_unit<S: Stage>(table: &LayoutTable) -> LirUnit<S> {
         },
         Inst::Check {
             condition: v(10),
-            failure: f,
-        },
-        Inst::Charge {
-            energy: Energy::Iteration,
             failure: f,
         },
         Inst::StorageLive { slot: SlotId(1) },
@@ -1727,22 +1721,6 @@ fn every_opcode_is_covered_and_admitted_by_a_stage() {
     // descriptors. Inventory and receipt transport remain unavailable there.
     // Every standalone row still has complete snapshot and opcode coverage.
     for instruction in [
-        Inst::Charge {
-            energy: Energy::Iteration,
-            failure: FailureId(0),
-        },
-        Inst::Charge {
-            energy: Energy::Entry,
-            failure: FailureId(0),
-        },
-        Inst::Charge {
-            energy: Energy::Span {
-                from: ValueId(0),
-                to: ValueId(1),
-                inclusive: true,
-            },
-            failure: FailureId(0),
-        },
         Inst::SealArena {
             result: ValueId(0),
             grant: ValueId(1),
@@ -1780,8 +1758,7 @@ fn every_opcode_is_covered_and_admitted_by_a_stage() {
             StageKind::Ready.admits(opcode),
             matches!(
                 opcode,
-                Opcode::Charge
-                    | Opcode::SealArena
+                Opcode::SealArena
                     | Opcode::BorrowSealedRoot
                     | Opcode::PayloadReceipt
                     | Opcode::ArenaInventory
@@ -2329,7 +2306,6 @@ fn runtime_declarations_match_the_landed_c_header() {
             "CTX_CLEANUP_MODE_OFFSET",
             runtime_abi::CTX_CLEANUP_MODE_OFFSET,
         ),
-        ("CTX_ENERGY_OFFSET", runtime_abi::CTX_ENERGY_OFFSET),
         ("PAGE_OWNER_OFFSET", runtime_abi::PAGE_OWNER_OFFSET),
         (
             "PAGE_XTHREAD_FREE_OFFSET",

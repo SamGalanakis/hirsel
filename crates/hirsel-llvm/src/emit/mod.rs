@@ -935,31 +935,6 @@ fn lower<T>(
         );
         let counter_units =
             hirsel_lir::invocations::room::counter_units(units.iter().map(|u| u.unit()));
-        // STORE-11 "Energy": a body keeps its entry charge when it is in a call
-        // cycle, calls a target outside this module or indirectly, or has a
-        // control-flow cycle that no other emitted charge pays for (a self-tail
-        // loop, whose call became a jump back to the entry). Any other body's
-        // work is bounded by its loops' charges and its callees'.
-        let entry_charged: BTreeSet<ContentHash> = {
-            let all: Vec<_> = units.iter().map(|u| u.unit()).collect();
-            let known: BTreeSet<_> = all.iter().map(|u| u.header.instance).collect();
-            let mut set = foreground::recursive(all.iter().copied());
-            for unit in &all {
-                let open = unit.tables.calls.iter().any(|call| match call.callee {
-                    Callee::Direct(symbol) | Callee::Bound { code: symbol, .. } => {
-                        let s = &unit.tables.symbols[symbol.index()];
-                        hirsel_core_contract::depth::adds_activation(&s.definition)
-                            && s.instance.is_none_or(|i| !known.contains(&i))
-                    }
-                    Callee::Indirect(_) => true,
-                    Callee::Operation(_) => false,
-                });
-                if open || hirsel_lir::energy::cycles_paid(*unit, false).is_err() {
-                    set.insert(unit.header.instance);
-                }
-            }
-            set
-        };
         let mut foreground_functions = BTreeMap::new();
         let mut specialized = Vec::new();
         if !inputs.alternate && !profile.debug && !inputs.measurement && ownership_plans.is_none() {
@@ -1032,7 +1007,6 @@ fn lower<T>(
                 emitter.foreground_entry = foreground_functions.get(&name).copied();
             }
             emitter.room = hirsel_lir::invocations::room::RoomChecks::of(unit, &depth_leaf);
-            emitter.entry_charged = entry_charged.contains(&unit.header.instance);
             // A continuation re-enters with its callee's cleanup mode still
             // live. Its saved admission needs the runtime's retained token.
             if !inputs.alternate {
@@ -1276,7 +1250,7 @@ fn fn_abi<'a>(
 /// The entry digest of a `kind` entry at `abi`. No entry is a charged wrapper:
 /// a charged twin is an instance of its own, under its own names.
 pub(super) fn entry_of(keys: &LayoutKeys, kind: EntryKind, abi: Option<&FnAbi>) -> ContentHash {
-    keys.entry(kind, false, abi)
+    keys.entry(kind, abi)
 }
 
 /// The kind of a body's entry `X` at `abi`: the value entry, or the slot form
@@ -1524,8 +1498,6 @@ struct FnEmitter<'m, 'a> {
     resume: Option<resume::Resume<'a, 'm>>,
     /// Admissions of depth-leaf callees, lowered to room checks with no retirement.
     room: hirsel_lir::invocations::room::RoomChecks,
-    /// Whether this body keeps its `Energy::Entry` charge (STORE-11 "Energy").
-    entry_charged: bool,
     /// The prologue's room test, built at the first room check (`no_room`).
     no_room: Option<Value<'m>>,
     counters: hirsel_lir::invocations::room::RoomChecks,

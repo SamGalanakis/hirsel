@@ -291,7 +291,6 @@ pub fn inspect(root: List[u64]) -> u64 { forward(root)+forward_again(root) }
             kind: hirsel_lir::ir::SymbolKind::Function,
             definition: read.clone(),
             instance: Some(address.instance.digest()),
-            charged: false,
         };
         let (evidence, _) = source
             .source_invocations(

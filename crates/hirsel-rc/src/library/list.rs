@@ -395,7 +395,6 @@ fn record_symbol(b: &mut Body<'_, '_>, path: hirsel_syntax::DefPath) -> SymbolId
         kind: SymbolKind::Type,
         definition: path,
         instance: None,
-        charged: false,
     })
 }
 

@@ -131,10 +131,6 @@ pub struct TaskCtx {
     /// `CTX_FOREGROUND_COUNT_OFFSET`): a depth-leaf callee's room check reads them.
     pub(crate) activations: hirsel_core_contract::depth::Activations,
     pub(crate) cleanup_depth: u32,
-    /// The task's energy allowance (STORE-11 "Energy"), at `CTX_ENERGY_OFFSET`:
-    /// native charges subtract from it and fail OutOfEnergy on a borrow. Outside
-    /// any budget it is `u64::MAX`, a finite allowance no run spends.
-    pub(crate) energy: u64,
     worker: *mut Worker,
     run: *mut RunShared,
     /// Stable scheduler identity and save slot. The task table may grow while
@@ -231,8 +227,6 @@ pub struct TaskCtx {
     pub(crate) compact: Option<Box<crate::continuation::Compact>>,
     /// LIFO catches owned by their invocation, including stackful wrappers.
     pub(crate) isolations: crate::isolate::Invocations,
-    /// The task's open energy scopes (STORE-11 "Energy", `crate::energy`).
-    pub(crate) energy_scopes: hirsel_core_contract::energy::Scopes,
     #[cfg(feature = "ownership-trace")]
     pub(crate) ownership_cleanup: *mut crate::ownership_trace::CleanupScope,
     pub(crate) resume_bindings: crate::continuation::binding::Bindings,
@@ -296,11 +290,9 @@ impl<T> Spare<T> {
 pub const CTX_FOREGROUND_COUNT_OFFSET: usize = std::mem::offset_of!(TaskCtx, activations);
 pub const CTX_CLEANUP_COUNT_OFFSET: usize = CTX_FOREGROUND_COUNT_OFFSET + 2;
 pub const CTX_CLEANUP_MODE_OFFSET: usize = std::mem::offset_of!(TaskCtx, cleanup_depth);
-pub const CTX_ENERGY_OFFSET: usize = std::mem::offset_of!(TaskCtx, energy);
 const _: () = assert!(
     CTX_FOREGROUND_COUNT_OFFSET == crate::CTX_HEAP_ID_OFFSET + 24
         && CTX_CLEANUP_MODE_OFFSET == CTX_FOREGROUND_COUNT_OFFSET + 4
-        && CTX_ENERGY_OFFSET == CTX_FOREGROUND_COUNT_OFFSET + 8
 );
 
 /// One OS thread that runs Hirsel code, and what is its own: its heap (with its region pool),
@@ -616,8 +608,6 @@ impl TaskCtx {
             activations: Default::default(),
             active_invocations,
             cleanup_depth: 0,
-            energy: u64::MAX,
-            energy_scopes: Default::default(),
             cleanup_invocations,
             cleanup_rejections: 0,
             free_ops: Default::default(),

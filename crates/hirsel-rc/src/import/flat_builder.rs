@@ -552,7 +552,7 @@ impl Importer<'_> {
         let (values, loans, taken) = self.construct_fields(&encoded, &given)?;
         let constructor = match constructor {
             tir::Constructor::Record(path) => {
-                ConstructorKind::Record(self.symbol(SymbolKind::Type, path, None, false))
+                ConstructorKind::Record(self.symbol(SymbolKind::Type, path, None))
             }
             tir::Constructor::Tuple => ConstructorKind::Tuple,
             other => return malformed(format!("a builder element {other:?} construction")),

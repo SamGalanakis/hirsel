@@ -233,7 +233,6 @@ fn input_program(src: &str, enabled: bool, n: u64) -> hirsel_heapcheck::Program<
         kind: SymbolKind::Constant,
         definition: path("input"),
         instance: None,
-        charged: false,
     };
     sum.tables.symbols.push(sym.clone());
     let address = AddressId(sum.addresses.len() as u32);

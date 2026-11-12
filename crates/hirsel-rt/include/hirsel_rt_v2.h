@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define HIRSEL_RT_V2_ABI_VERSION 113
+#define HIRSEL_RT_V2_ABI_VERSION 114
 /* TaskSpawn trailing flags: compiler proofs, ignored in ordered execution and replay. */
 #define HIRSEL_RT_V2_SPAWN_IMMEDIATE_AWAIT 1
 #define HIRSEL_RT_V2_SPAWN_OP_FREE 2
@@ -136,9 +136,6 @@ extern "C" {
 #define HIRSEL_RT_V2_CTX_FOREGROUND_COUNT_OFFSET 552
 #define HIRSEL_RT_V2_CTX_CLEANUP_COUNT_OFFSET 554
 #define HIRSEL_RT_V2_CTX_CLEANUP_MODE_OFFSET 556
-/* Runtime ABI 111: the task's u64 energy allowance (STORE-11 "Energy"). Compiled code
- * subtracts each charge, stores the result, and fails OutOfEnergy on a borrow. */
-#define HIRSEL_RT_V2_CTX_ENERGY_OFFSET 560
 #define HIRSEL_RT_V2_PAGE_FREE_OFFSET 16
 #define HIRSEL_RT_V2_PAGE_LIVE_OFFSET 24
 #define HIRSEL_RT_V2_PAGE_LOCAL_FREE_OFFSET 72

@@ -137,7 +137,7 @@ impl Importer<'_> {
 
     /// Lay the builder blocks out into the unit's arenas.
     pub(super) fn finish(mut self) -> R<LirUnit<Value>> {
-        let view = self.instances.view(self.charged.unwrap_or(self.id));
+        let view = self.instances.view(self.id);
         let revision = self
             .program
             .revisions
@@ -157,7 +157,6 @@ impl Importer<'_> {
             instance: view.key.digest(),
             target: table.target,
             abi: self.instances.abis[self.id.index()],
-            charged: self.charged.is_some(),
         });
         // A proven match may remove the only path into a TIR block. Only
         // those reserved, never-emitted blocks may lack a terminator; other

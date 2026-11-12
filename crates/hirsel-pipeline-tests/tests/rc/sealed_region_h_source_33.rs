@@ -265,7 +265,6 @@ pub(super) fn original_with_ready_observer(
                 kind: SymbolKind::Function,
                 definition: definition.clone(),
                 instance: Some(instances.view(*callee).key.digest()),
-                charged: false,
             });
             call.callee = Callee::Direct(symbol);
             call.operation_arguments.clear();

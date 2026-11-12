@@ -42,7 +42,6 @@ pub struct Library {
     pub(super) next_shared: u64,
     /// A scripted client's unmet Expect at the last handle drop (LANG-9).
     pub(super) drop_failure: Option<(String, String)>,
-    pub(super) energy: super::energy::Meters,
     pub(super) runners: super::runners::Runners,
     pub(super) places: super::places::Places,
     /// Free mode (`tasks.free@1`): the run's session and pending states.
@@ -133,7 +132,6 @@ impl Library {
             cpu_supplied: None,
             next_shared: 0,
             drop_failure: None,
-            energy: Default::default(),
             runners: Default::default(),
             places: Default::default(),
             free: None,
@@ -1553,14 +1551,6 @@ impl Operations for Library {
         self.drop_failure.take()
     }
 
-    fn energy_charge(&mut self) -> bool {
-        Library::energy_charge(self)
-    }
-
-    fn energy_metered(&self) -> bool {
-        self.energy.metered(self.tasks.current)
-    }
-
     fn ownership_channel(&self, endpoint: u64) -> Option<u64> {
         self.channels.endpoint_channel(endpoint)
     }
@@ -2272,8 +2262,6 @@ primary_operations! { library, call, context, name, a, value;
     Unavailable: "$intrinsic.NetReadInto" | "$intrinsic.ReadHalfReadInto" => { return Err(Error::Unavailable(format!("{name} is the native entry of a read_into's compiled body; the reference executes the read_into"))); },
     Primitive: "path.of" => path(text(arg(a, 0)?)?),
     Primitive: "runner.entry_id" => library.entry_id(arg(a, 0)?)?,
-    Primitive: "energy.enter" => library.energy_enter(a)?,
-    Primitive: "energy.leave" => library.energy_leave(a)?,
     Primitive: "runner.apply" | "runner.apply_mut" => { return library.runner_apply(name, a).map(Some); },
     Capability: "io.runner" | "runner.grants" | "runner.narrow" | "runner.only" | "runner.compute" | "runner.call" | "runner.spawn" | "test.runner" => {
         return library.runner_call(name, &call, context).map(Some);

@@ -81,7 +81,6 @@ fn native_instance_product_hits_require_current_c_without_value_materialization(
             kind: hirsel_lir::ir::SymbolKind::Function,
             definition: main.clone(),
             instance: Some(view.key.digest()),
-            charged: false,
         };
         let mut operations = declarations
             .source_operations(&main, &selected, view.body)

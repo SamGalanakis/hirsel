@@ -852,9 +852,6 @@ pub const ENTRIES: &[Entry] = &[
     ops("hirsel_rt_v2_runner_argument", HOST),
     ops("hirsel_rt_v2_runner_io", HOST),
     ops("hirsel_rt_v2_runner_reply", HOST),
-    // energy.rs: a store's energy scopes on the task's meter (STORE-11 Energy).
-    entry("hirsel_rt_v2_energy_enter", Local),
-    entry("hirsel_rt_v2_energy_leave", Local),
     // authority.rs: the store authority seam, served by the run's providers.
     ops("hirsel_rt_v2_io_authority", HOST),
     ops("hirsel_rt_v2_authority_levels", HOST),
@@ -1118,11 +1115,6 @@ pub const INLINE: &[Inline] = &[
         word: "CTX_HEAP_ID_OFFSET",
         locality: Local,
         effect: "inline free's owner check: a block of another worker's heap goes to the runtime",
-    },
-    Inline {
-        word: "CTX_ENERGY_OFFSET",
-        locality: Local,
-        effect: "a charged unit's subtract and store on the task's own energy allowance",
     },
     Inline {
         word: "CTX_FOREGROUND_COUNT_OFFSET",

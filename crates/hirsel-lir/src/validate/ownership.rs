@@ -2752,12 +2752,6 @@ impl<S: Stage> Walker<'_, '_, S> {
                 self.create(site, st, cr, result);
             }
             Inst::Check { condition, .. } => self.borrow(site, st, cr, condition),
-            Inst::Charge { energy, .. } => {
-                if let crate::ir::Energy::Span { from, to, .. } = energy {
-                    self.borrow(site, st, cr, from);
-                    self.borrow(site, st, cr, to);
-                }
-            }
             Inst::UpdateMask { result, mask, .. } => {
                 self.borrow(site, st, cr, mask);
                 self.create(site, st, cr, result);

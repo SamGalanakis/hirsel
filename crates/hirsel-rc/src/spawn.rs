@@ -176,7 +176,6 @@ pub(crate) fn op_free(units: &[LirUnit<Value>], table: &LayoutTable) -> HashMap<
             kind: SymbolKind::Function,
             definition: u.header.definition.clone(),
             instance: Some(u.header.instance),
-            charged: u.header.charged,
         })
         .collect();
     let indices: HashMap<_, _> = symbols

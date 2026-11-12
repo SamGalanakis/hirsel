@@ -239,7 +239,6 @@ fn object(target: &TargetSpec) -> (Vec<u8>, String) {
         layouts: &table,
         registry: registry.clone(),
         finalizers: &finalizers,
-        charged_finalizers: &Default::default(),
         units: &units,
         glue: &glue,
         failures: &failures,
@@ -288,7 +287,6 @@ fn object(target: &TargetSpec) -> (Vec<u8>, String) {
         instance,
         target: table.target,
         abi: FnAbiId(0),
-        charged: false,
     });
     unit.tables.cleanup_anchors.push(CleanupAnchor {
         body: 0,

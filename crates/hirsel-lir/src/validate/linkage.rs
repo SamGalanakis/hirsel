@@ -23,10 +23,6 @@ pub(super) struct LinkageRecord {
     scoped: ContentHash,
     entries: Vec<Entry>,
     data: bool,
-    /// Whether the unit is a charged instance (STORE-11 energy).
-    charged: bool,
-    /// Every function the unit names, with whether it names it charged.
-    functions: Vec<(Target, bool)>,
 }
 snapshot_struct!(LinkageRecord {
     definition,
@@ -36,9 +32,7 @@ snapshot_struct!(LinkageRecord {
     abi,
     scoped,
     entries,
-    data,
-    charged,
-    functions
+    data
 });
 #[derive(Clone, Debug)]
 struct Target {
@@ -177,14 +171,6 @@ impl LinkageRecord {
             scoped: scoped(own),
             entries,
             data: super::scoped_transport::has_data_paths(own, table) || data_capture,
-            charged: unit.header.charged,
-            functions: unit
-                .tables
-                .symbols
-                .iter()
-                .filter(|s| s.kind == crate::ir::SymbolKind::Function)
-                .map(|s| (target(s), s.charged))
-                .collect(),
         })
     }
     pub(super) fn checked(&self) -> CheckedLinkage {
@@ -259,34 +245,7 @@ pub fn check_arena_scoped_links(units: &[CheckedLinkage]) -> Result<(), String> 
         }
     }
     let records = units.iter().map(|u| &*u.record).collect::<Vec<_>>();
-    check_charged(&records)?;
     check_data(&records)
-}
-
-/// A symbol's charged flag (STORE-11 energy) is part of the identity it
-/// names: a function symbol names a linked unit only with that unit's own
-/// flag, so charged code cannot reach an uncharged body under a charged name,
-/// and `energy::check` can decide by the flag alone.
-fn check_charged(units: &[&LinkageRecord]) -> Result<(), String> {
-    let charged: BTreeMap<_, _> = units
-        .iter()
-        .map(|u| ((&u.definition, u.instance), u.charged))
-        .collect();
-    for unit in units {
-        for (symbol, flag) in &unit.functions {
-            if let Some(&target) = symbol
-                .instance
-                .and_then(|instance| charged.get(&(&symbol.definition, instance)))
-                && target != *flag
-            {
-                return Err(format!(
-                    "{} names {} with the wrong charged flag (STORE-11 energy)",
-                    unit.definition.0.name, symbol.definition.0.name
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Opaque C products retain the same dependency equations as full-body linking.
@@ -350,7 +309,6 @@ pub(super) fn check_data_calls<S: Stage>(
         .map(|u| LinkageRecord::observe(u, table).ok_or("nonretaining linkage unavailable"))
         .collect::<Result<Vec<_>, _>>()?;
     let records = records.iter().collect::<Vec<_>>();
-    check_charged(&records)?;
     check_data(&records)
 }
 
@@ -403,7 +361,6 @@ mod tests {
             instance: hash(name),
             target: table.target,
             abi: FnAbiId(0),
-            charged: false,
         })
     }
     fn pair(arena: Option<u32>) -> (Vec<LirUnit<Value>>, LayoutTable) {
@@ -415,7 +372,6 @@ mod tests {
             kind: SymbolKind::Function,
             definition: callee.header.definition.clone(),
             instance: Some(callee.header.instance),
-            charged: callee.header.charged,
         });
         caller.tables.calls.push(CallSite {
             forward_caller: false,

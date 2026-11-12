@@ -215,21 +215,18 @@ impl EntryKind {
 /// passes its arguments bumps it.
 pub const ENTRY_CONVENTION_VERSION: u32 = 2;
 
-/// The physical entry digest: the entry's kind, whether it is a charged
-/// wrapper, the convention version and its signature, the FnAbi content key
-/// with layout content keys (`LayoutKeys::fn_abi`) where the kind's
+/// The physical entry digest: the entry's kind, the convention version and
+/// its signature, the FnAbi content key with layout content keys (`LayoutKeys::fn_abi`) where the kind's
 /// convention reads one. An import and the export it binds to carry equal
 /// digests, or Link refuses them. It names no contract, sequence or effect
 /// fact.
-pub fn entry_digest(kind: EntryKind, charged: bool, signature: Option<ContentHash>) -> ContentHash {
+pub fn entry_digest(kind: EntryKind, signature: Option<ContentHash>) -> ContentHash {
     let version = ENTRY_CONVENTION_VERSION.to_le_bytes();
-    let charged = [u8::from(charged)];
     let signature = signature.map(|s| s.0);
     ContentHash::of_parts(
         "hirsel.entry.v1",
         [
             kind.tag().as_bytes(),
-            &charged[..],
             &version[..],
             signature.as_ref().map_or(&[][..], |s| &s[..]),
         ],

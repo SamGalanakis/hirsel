@@ -45,7 +45,6 @@ fn call_fixture(
         kind: SymbolKind::Function,
         definition: callee,
         instance: None,
-        charged: false,
     });
     let arguments = PoolRange::push(
         &mut unit.pools.call_arguments,

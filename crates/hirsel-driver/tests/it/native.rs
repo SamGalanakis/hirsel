@@ -945,7 +945,7 @@ fn link_refuses_an_entry_import_with_a_missing_or_other_digest() {
         forged.layouts[rows.0 as usize].key.instance = Some(hirsel_syntax::ContentHash::of_bytes(
             b"other layout content",
         ));
-        let other = hirsel_lir::LayoutKeys::new(&forged).entry(EntryKind::Value, false, Some(abi));
+        let other = hirsel_lir::LayoutKeys::new(&forged).entry(EntryKind::Value, Some(abi));
         assert_ne!(Some(other), objects[caller].imports[import].entry);
         let cached = |object: &ObjectArtifact| {
             hirsel_codec::from_text::<ObjectArtifact>(&hirsel_codec::to_text(object)).unwrap()
@@ -1073,7 +1073,6 @@ pub fn main() -> Result[(), ()] {
             kind: hirsel_lir::ir::SymbolKind::Constant,
             definition,
             instance: None,
-            charged: false,
         };
         let data = hirsel_lir::statics::StaticData {
             symbol: symbol.clone(),
@@ -1139,7 +1138,6 @@ pub fn main() -> Result[(), ()] {
         // Check the emitted import expectation as well as Link's comparison.
         let integer_digest = ready.table.keys().entry(
             EntryKind::FunctionRef,
-            false,
             Some(&ready.table.fn_abis[integer.abi.0 as usize]),
         );
         let imports: Vec<_> = objects
@@ -1160,7 +1158,7 @@ pub fn main() -> Result[(), ()] {
                 abi
             }),
         ] {
-            let other = ready.table.keys().entry(kind, false, Some(&abi));
+            let other = ready.table.keys().entry(kind, Some(&abi));
             let mut mutated = objects.clone();
             let export = mutated
                 .iter_mut()
@@ -1185,11 +1183,12 @@ pub fn main() -> Result[(), ()] {
             .flat_map(|o| &mut o.exports)
             .find(|e| e.name == integer_name)
             .unwrap();
-        export.entry = Some(ready.table.keys().entry(
-            EntryKind::FunctionRef,
-            false,
-            Some(float_abi),
-        ));
+        export.entry = Some(
+            ready
+                .table
+                .keys()
+                .entry(EntryKind::FunctionRef, Some(float_abi)),
+        );
         let error = hirsel_native::link_objects(&ready, &program.entry, &root_only, &tools, &dir)
             .unwrap_err();
         assert_eq!(error.stage, StageName::Link);

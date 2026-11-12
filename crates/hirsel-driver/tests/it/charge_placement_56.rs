@@ -43,7 +43,7 @@ fn loop_entry_charges_precede_rebinding_and_loan_ends_on_four_engines() {
                 for block in &body.blocks {
                     for (index, instruction) in block.instructions.iter().enumerate() {
                         if matches!(instruction.kind, InstructionKind::Charge(event)
-                            if matches!(event.kind, SourceEventKind::Iteration | SourceEventKind::CountedIteration))
+                            if event.kind == SourceEventKind::Iteration)
                         {
                             assert_eq!(index, 0, "{}", definition.path);
                             loops += 1;

@@ -84,7 +84,6 @@ pub fn forward(root:List[u64])->u64 {
             kind: hirsel_lir::ir::SymbolKind::Function,
             definition: address.instance.definition().clone(),
             instance: Some(address.instance.digest()),
-            charged: false,
         };
         let (evidence, _) = source
             .source_invocations(

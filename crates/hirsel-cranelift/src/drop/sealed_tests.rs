@@ -133,7 +133,6 @@ fn probe(target: &TargetSpec) -> (Vec<u8>, String) {
         layouts: &table,
         registry: registry.clone(),
         finalizers: &finalizers,
-        charged_finalizers: &Default::default(),
         units: &Default::default(),
         glue: &glue,
         failures: &failures,

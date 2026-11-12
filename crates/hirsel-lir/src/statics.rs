@@ -25,20 +25,9 @@ use crate::layout_types::LayoutId;
 use hirsel_codec::{DecodeError, Reader, Snapshot, Writer};
 use hirsel_syntax::ContentHash;
 
-/// The data a `ReadStatic` of `symbol` reads. The charged copy of a constant
-/// (STORE-11 energy) is its own data only when it holds a callable, which
-/// names charged code; otherwise it is an alias of the constant's data.
+/// The data a `ReadStatic` of `symbol` reads.
 pub fn resolve<'a>(statics: &'a [StaticData], symbol: &Symbol) -> Option<&'a StaticData> {
-    statics.iter().find(|d| d.symbol == *symbol).or_else(|| {
-        let base = Symbol {
-            charged: false,
-            ..symbol.clone()
-        };
-        statics
-            .iter()
-            .find(|d| d.symbol == base)
-            .filter(|d| symbol.charged && d.blocks.iter().all(|b| b.functions.is_empty()))
-    })
+    statics.iter().find(|d| d.symbol == *symbol)
 }
 
 /// One constant's static blocks; block 0 is the constant's own.

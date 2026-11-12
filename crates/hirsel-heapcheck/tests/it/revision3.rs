@@ -354,7 +354,6 @@ fn a_flat_field_lies_at_its_cursor() {
             kind: SymbolKind::Constant,
             definition: path("ITEM"),
             instance: None,
-            charged: false,
         },
         item,
         bytes,

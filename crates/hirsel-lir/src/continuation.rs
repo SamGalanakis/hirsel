@@ -1661,7 +1661,7 @@ fn plan_unit<'a>(
                 }
             }
         }
-        let sources = isolate::finalizer_sources(checked, inputs.table, u.header.instance);
+        let sources = isolate::finalizer_sources(checked, inputs.table);
         let partial = ContinuationPlans {
             plans: done.clone(),
             ..Default::default()
@@ -1780,7 +1780,7 @@ fn plan_in_order<'a>(
         return;
     }
     let u = units[&id];
-    let sources = isolate::finalizer_sources(checked, inputs.table, u.header.instance);
+    let sources = isolate::finalizer_sources(checked, inputs.table);
     for (block, instruction) in
         cleanup::sites(u, inputs.table, isolate_environment(u, inputs.environments))
     {

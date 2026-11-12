@@ -148,10 +148,6 @@ pub unsafe extern "C" fn hirsel_rt_v2_failure_begin(
     site: u64,
     operation_site: u64,
 ) -> u8 {
-    if crate::isolate::is_energy_rule(ctx, rule) {
-        // SAFETY: `ctx` is live.
-        crate::energy::exhausted(unsafe { &mut *ctx });
-    }
     unsafe {
         (*ctx).failure.record(FailureRecord {
             kind,

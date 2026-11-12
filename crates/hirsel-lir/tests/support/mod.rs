@@ -590,7 +590,6 @@ impl<S: Stage> Lir<S> {
             instance: hash("f instance"),
             target: table.target,
             abi: FnAbiId(0),
-            charged: false,
         });
         unit.tables.task_domains = 1;
         unit.scopes.push(ScopeInfo { parent: None });
@@ -1314,7 +1313,6 @@ impl<S: Stage> Lir<S> {
             kind,
             definition: path(&format!("s{}", self.builder.unit.tables.symbols.len())),
             instance: None,
-            charged: false,
         });
         SymbolId(self.builder.unit.tables.symbols.len() as u32 - 1)
     }

@@ -125,7 +125,6 @@ fn fixture(choice: u32, looped: bool, fail_arm: bool, fail_finalizer: bool) -> F
             definition: finalizer_path,
             instance: finalizer.header.instance,
             abi: FnAbiId(1),
-            charged: false,
         },
     )]));
 

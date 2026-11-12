@@ -162,7 +162,6 @@ pub(crate) fn option(
         kind: SymbolKind::Type,
         definition: hirsel_syntax::DefPath::core("Option"),
         instance: None,
-        charged: false,
     });
     let fields = PoolRange::push(
         &mut b.ed.unit.pools.fields,

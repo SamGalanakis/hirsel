@@ -449,38 +449,6 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                     .or_else(|what| self.invalid(what))?;
                 self.define(result, value)
             }
-            Inst::Charge {
-                energy: Energy::Entry,
-                ..
-            } if !self.entry_charged => Ok(()),
-            Inst::Charge { energy, failure } => {
-                let units = match energy {
-                    Energy::Iteration | Energy::Entry => self.const_u64(1),
-                    Energy::Span {
-                        from,
-                        to,
-                        inclusive,
-                    } => self.span_units(from, to, inclusive)?,
-                };
-                let at = self.builder.offset(
-                    self.context,
-                    self.const_u64(hirsel_lir::runtime_abi::CTX_ENERGY_OFFSET),
-                );
-                let i64_ty = self.module.int_type(64);
-                let remaining =
-                    self.builder
-                        .load_access(i64_ty, at, 8, crate::context::Access::Energy);
-                // Store first, then branch on the borrow: the store runs on
-                // every path, so LICM keeps the allowance in a register across
-                // a loop and folds the test into the loop's own exit compare.
-                // The failure path never reads the wrapped value as an
-                // allowance: the runtime resets it when it records the failure.
-                let left = self.builder.binary(BinOp::Sub, remaining, units);
-                self.builder
-                    .store_access(left, at, 8, crate::context::Access::Energy);
-                let short = self.builder.icmp(IntPredicate::Ult, remaining, units);
-                self.guard(short, failure)
-            }
             Inst::Check { condition, failure } => {
                 let condition = self.get(condition)?;
                 let one = self.module.const_int(self.module.int_type(1), 1);
@@ -2139,66 +2107,5 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 self.invalid("an operation outside the Ready vocabulary")
             }
         }
-    }
-}
-
-impl<'m> FnEmitter<'m, '_> {
-    /// The trip count of a counted loop from `from` to `to` (STORE-11
-    /// "Energy"), as an `i64` saturated at `u64::MAX`: zero for an empty range.
-    fn span_units(&mut self, from: ValueId, to: ValueId, inclusive: bool) -> Emitted<Value<'m>> {
-        let kind = self.scalar_kind(from)?;
-        let (bits, signed) = match kind {
-            ScalarKind::U8 => (8, false),
-            ScalarKind::U16 => (16, false),
-            ScalarKind::U32 => (32, false),
-            ScalarKind::U64 => (64, false),
-            ScalarKind::U128 => (128, false),
-            ScalarKind::I8 => (8, true),
-            ScalarKind::I16 => (16, true),
-            ScalarKind::I32 => (32, true),
-            ScalarKind::I64 => (64, true),
-            ScalarKind::I128 => (128, true),
-            _ => return self.invalid("a charge span over a non-integer"),
-        };
-        let (l, r) = (self.get(from)?, self.get(to)?);
-        let nonempty = self.builder.icmp(
-            match (signed, inclusive) {
-                (true, true) => IntPredicate::Sle,
-                (true, false) => IntPredicate::Slt,
-                (false, true) => IntPredicate::Ule,
-                (false, false) => IntPredicate::Ult,
-            },
-            l,
-            r,
-        );
-        // Where the range is nonempty, `to - from` modulo 2^bits is its exact
-        // unsigned distance.
-        let distance = self.builder.binary(BinOp::Sub, r, l);
-        let i64_ty = self.module.int_type(64);
-        let most = self.const_u64(u64::MAX);
-        let one = self.const_u64(u64::from(inclusive));
-        let count = if bits == 128 {
-            let wide = self.module.int_type(128);
-            let limit = self.module.const_int(wide, u128::from(u64::MAX));
-            let big = self.builder.icmp(IntPredicate::Uge, distance, limit);
-            let narrow = self.builder.cast(Cast::Trunc, distance, i64_ty);
-            let counted = self.builder.binary(BinOp::Add, narrow, one);
-            self.builder.select(big, most, counted)
-        } else {
-            let wide = if bits == 64 {
-                distance
-            } else {
-                self.builder.cast(Cast::ZExt, distance, i64_ty)
-            };
-            let counted = self.builder.binary(BinOp::Add, wide, one);
-            if bits == 64 && inclusive {
-                let full = self.builder.icmp(IntPredicate::Eq, wide, most);
-                self.builder.select(full, most, counted)
-            } else {
-                counted
-            }
-        };
-        let zero = self.const_u64(0);
-        Ok(self.builder.select(nonempty, count, zero))
     }
 }

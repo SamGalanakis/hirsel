@@ -35,9 +35,7 @@
 mod payload_receipts;
 
 use crate::PassError;
-use crate::instance::{
-    Actuals, InstanceError, InstanceId, InstanceRole, Instances, Program, substitute,
-};
+use crate::instance::{Actuals, InstanceError, InstanceId, Instances, Program, substitute};
 use crate::library::builder::Layouts as _;
 use crate::normalize::{Declined, Facts, Home, LoopPlan, LoopSite, NormalizeError};
 use hirsel_core_contract::{OperationId, Passing};
@@ -258,42 +256,13 @@ pub fn lower_with_sources(
     let mut next = 0;
     loop {
         if next == instances.len() {
-            // Every drop calls a source finalizer's charged instance
-            // (STORE-11 energy): a library unit that drops a value may run
-            // inside an energy scope, and what it calls cannot depend on
-            // whether this program has charged code.
-            let finalizers: Vec<_> = instances
-                .ids()
-                .filter(|&id| {
-                    instances.roles[id.index()] == InstanceRole::Finalizer
-                        && !instances.is_charged(id)
-                        && instances.charged_of(id).is_none()
-                })
-                .collect();
-            if finalizers.is_empty() {
-                break;
-            }
-            for id in finalizers {
-                instances.charge(id).map_err(LowerError::Instance)?;
-            }
+            break;
         }
         let id = InstanceId(next as u32);
         next += 1;
         let definition = instances.view(id).key.definition().clone();
         let sites = discharge.sites(&definition);
         let key = (definition.clone(), instances.view(id).key.digest());
-        let base = (
-            definition.clone(),
-            instances.view(instances.uncharged(id)).key.digest(),
-        );
-        if instances.is_charged(id) && source.expectations.contains_key(&base) {
-            return Err(LowerError::Import(
-                id,
-                PassError::Unsupported(
-                    "a charged instance of a sealed-source body (STORE-11 energy)".into(),
-                ),
-            ));
-        }
         if let Some(expected) = source.expectations.get(&key) {
             instances.bind_payload_sources(id, expected.payloads().to_vec());
         }
@@ -323,9 +292,6 @@ pub fn lower_with_sources(
         for request in imported.required {
             crate::library::instantiate(&mut layouts, &mut instances, request)
                 .map_err(LowerError::Instance)?;
-        }
-        for callee in imported.charged {
-            instances.charge(callee).map_err(LowerError::Instance)?;
         }
         units.push(imported.unit);
     }
@@ -417,9 +383,6 @@ pub struct InstanceImport {
     pub declined: Vec<Declined>,
     pub required: Vec<crate::library::Request>,
     pub discharged: Option<DischargedUnit>,
-    /// Uncharged instances whose charged instance the unit names; the
-    /// caller registers each with `Instances::charge` (STORE-11 energy).
-    pub charged: Vec<InstanceId>,
 }
 
 pub fn import_instance(
@@ -439,23 +402,20 @@ pub fn import_instance(
             declined: Vec::new(),
             required: Vec::new(),
             discharged: None,
-            charged: Vec::new(),
         });
     }
-    let (plan, declined) = plan_instance(program, instances, instances.uncharged(id), layouts)
-        .map_err(|e| LowerError::Normalize(id, e))?;
-    let mut charged = Vec::new();
+    let (plan, declined) =
+        plan_instance(program, instances, id, layouts).map_err(|e| LowerError::Normalize(id, e))?;
     let none = BTreeSet::new();
     let reference = if sites.is_some() {
         Some(
-            import_body(
+            import(
                 program,
                 instances,
                 id,
                 plan.as_ref(),
                 &none,
                 layouts,
-                &mut Vec::new(),
                 &mut Vec::new(),
             )
             .map_err(|e| LowerError::Import(id, e))?,
@@ -464,7 +424,7 @@ pub fn import_instance(
         None
     };
     let mut required = Vec::new();
-    let mut unit = import_body(
+    let mut unit = import(
         program,
         instances,
         id,
@@ -472,7 +432,6 @@ pub fn import_instance(
         sites.unwrap_or(&none),
         layouts,
         &mut required,
-        &mut charged,
     )
     .map_err(|e| LowerError::Import(id, e))?;
     let discharged = reference.map(|reference| DischargedUnit {
@@ -492,7 +451,6 @@ pub fn import_instance(
         declined,
         required,
         discharged,
-        charged,
     })
 }
 
@@ -583,7 +541,6 @@ pub(crate) fn invocation_registry(
                 kind: SymbolKind::Function,
                 definition: unit.header.definition.clone(),
                 instance: Some(unit.header.instance),
-                charged: unit.header.charged,
             },
             view.body,
         )
@@ -757,10 +714,7 @@ fn statics(
                     };
                     nullary.insert(symbol.instance, (symbol.clone(), payload));
                 } else if symbol.kind == SymbolKind::Constant {
-                    read.insert(
-                        (symbol.definition.clone(), symbol.instance, symbol.charged),
-                        symbol.clone(),
-                    );
+                    read.insert((symbol.definition.clone(), symbol.instance), symbol.clone());
                 }
             }
         }
@@ -793,18 +747,13 @@ fn statics(
     let mut constants = BTreeMap::new();
     for symbol in read.into_values() {
         let definition = symbol.definition.clone();
-        let charged = symbol.charged;
         let static_error = |e| LowerError::Static(definition.clone(), e);
         let Some(value) = program.constants.get(&symbol.definition) else {
             return Err(static_error(crate::statics::StaticError(
                 "a constant without a materialized value".into(),
             )));
         };
-        let base = Symbol {
-            charged: false,
-            ..symbol.clone()
-        };
-        let mut data = crate::statics::encode_functions(
+        let data = crate::statics::encode_functions(
             layouts,
             &program.types,
             symbol,
@@ -812,34 +761,14 @@ fn statics(
             &mut |path, arguments| {
                 let (callable_path, id) = static_callable(program, instances, path, arguments)?;
                 let digest = instances.view(id).key.digest();
-                if charged && !instances.roles[id.index()].is_library() {
-                    if instances.charged_of(id).is_none() {
-                        return Err(crate::statics::StaticError(
-                            "a charged constant's callable has no charged instance (STORE-11 energy)"
-                                .into(),
-                        ));
-                    }
-                    return Ok(Symbol {
-                        kind: SymbolKind::Function,
-                        definition: callable_path,
-                        instance: Some(hirsel_lir::energy::charged_digest(digest)),
-                        charged: true,
-                    });
-                }
                 Ok(Symbol {
                     kind: SymbolKind::Function,
                     definition: callable_path,
                     instance: Some(digest),
-                    charged: false,
                 })
             },
         )
         .map_err(static_error)?;
-        // The charged copy of a constant holding no callable is an alias of
-        // the constant's own data (`statics::resolve`).
-        if charged && data.blocks.iter().all(|b| b.functions.is_empty()) {
-            data.symbol = base;
-        }
         constants.entry(data.symbol.clone()).or_insert(data);
     }
     Ok(empty
@@ -1395,33 +1324,9 @@ pub fn import(
     id: InstanceId,
     plan: Option<&LoopPlan>,
     discharge: &BTreeSet<Discharged>,
-    layouts: &mut LayoutBuilder<'_>,
-    required: &mut Vec<crate::library::Request>,
-) -> R<LirUnit<Value>> {
-    import_body(
-        program,
-        instances,
-        id,
-        plan,
-        discharge,
-        layouts,
-        required,
-        &mut Vec::new(),
-    )
-}
-
-fn import_body(
-    program: &Program,
-    instances: &Instances,
-    id: InstanceId,
-    plan: Option<&LoopPlan>,
-    discharge: &BTreeSet<Discharged>,
     layouts: &mut dyn crate::library::builder::Layouts,
     required: &mut Vec<crate::library::Request>,
-    charged_callees: &mut Vec<InstanceId>,
 ) -> R<LirUnit<Value>> {
-    let charged = instances.is_charged(id).then_some(id);
-    let id = instances.uncharged(id);
     let view = instances.view(id);
     let def: &tir::Definition = view.definition().map_err(InstanceError::from)?;
     let body = &def.bodies[view.body.0 as usize];
@@ -1434,9 +1339,6 @@ fn import_body(
         instances,
         layouts,
         id,
-        charged,
-        forming_entry: false,
-        charged_callees: Vec::new(),
         plan,
         discharge,
         source_anchors: tir::source_anchors(def),
@@ -1568,12 +1470,7 @@ fn import_body(
     for _ in 0..1000 {
         let used = im.pass(&entry)?;
         if converged(&used, &entry) {
-            let mut callees = std::mem::take(&mut im.charged_callees);
-            let unit = im.finish()?;
-            callees.sort();
-            callees.dedup();
-            charged_callees.extend(callees);
-            return Ok(unit);
+            return im.finish();
         }
         entry = used;
     }
@@ -1609,15 +1506,8 @@ struct Importer<'a> {
     program: &'a Program,
     instances: &'a Instances,
     layouts: &'a mut dyn crate::library::builder::Layouts,
-    /// The uncharged instance whose body this imports; every instance table
-    /// is read through it.
+    /// The instance whose body this imports.
     id: InstanceId,
-    /// The charged instance this unit is, if it is one (STORE-11 energy).
-    charged: Option<InstanceId>,
-    /// Whether the function reference being imported forms a store entry.
-    forming_entry: bool,
-    /// Uncharged instances whose charged instance this unit names.
-    charged_callees: Vec<InstanceId>,
     plan: Option<&'a LoopPlan>,
     /// PS-13 sites of this definition that import without their check.
     discharge: &'a BTreeSet<Discharged>,

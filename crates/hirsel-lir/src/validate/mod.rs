@@ -754,35 +754,6 @@ fn check_with_context<S: Stage>(
                 report.add(Site::UNIT, ViolationKind::Schema(error));
             }
         }
-        // STORE-11 energy: only a charged instance carries charges. It is
-        // checked with them stripped, exactly as its uncharged base would be,
-        // and its charges must sit where the charging rule puts them.
-        let stripped = if unit.header.charged {
-            if let Err(error) = crate::energy::check(unit) {
-                report.add(Site::UNIT, ViolationKind::Schema(error));
-            }
-            match crate::energy::strip(unit) {
-                Ok(stripped) => Some(stripped),
-                Err(error) => {
-                    report.add(Site::UNIT, ViolationKind::Schema(error));
-                    None
-                }
-            }
-        } else {
-            if unit
-                .instructions
-                .iter()
-                .any(|i| matches!(i, crate::ir::Inst::Charge { .. }))
-            {
-                report.add(
-                    Site::UNIT,
-                    ViolationKind::Schema(
-                        "an uncharged unit carries a charge (STORE-11 energy)".into(),
-                    ),
-                );
-            }
-            None
-        };
         if let Some(reference) = inputs.operations.invocations(&unit.header.definition) {
             let selected = inputs
                 .operations
@@ -790,7 +761,7 @@ fn check_with_context<S: Stage>(
                 .ok_or_else(|| "independent source body selection is missing".to_owned());
             if let Err(error) = selected.and_then(|body| {
                 crate::invocations::check_with_layouts(
-                    stripped.as_ref().unwrap_or(unit),
+                    unit,
                     reference,
                     body,
                     inputs.operations,

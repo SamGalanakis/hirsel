@@ -68,7 +68,6 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
             ownership_cleanup: None,
             resume: None,
             room: Default::default(),
-            entry_charged: true,
             no_room: None,
             counters: Default::default(),
             counter_cell: None,

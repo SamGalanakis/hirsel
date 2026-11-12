@@ -46,7 +46,6 @@ mod fork;
 pub(crate) use fork::campaign as fork_campaign;
 mod channels;
 mod clock;
-mod energy;
 mod holders;
 mod isolate;
 mod recorders;
@@ -369,8 +368,6 @@ pub(crate) struct Machine<'p, S> {
     tasks: Option<Box<tasks::Tasks>>,
     /// The task-local recorders (MODE-6).
     recorders: recorders::Recorders,
-    /// Each task's energy meter and scopes (STORE-11 "Energy").
-    energy: energy::Meters,
 }
 
 /// What a resolved address names.
@@ -501,7 +498,6 @@ impl<'p, S: Stage> Machine<'p, S> {
             open_elements: BTreeMap::new(),
             tasks: None,
             recorders: Default::default(),
-            energy: Default::default(),
             choices: 0,
             signaled: None,
             full_recount_due: false,
@@ -2146,7 +2142,6 @@ impl<'p, S: Stage> Machine<'p, S> {
                     kind: SymbolKind::Function,
                     definition: self.unit(*code).header.definition.clone(),
                     instance: Some(self.unit(*code).header.instance),
-                    charged: self.unit(*code).header.charged,
                 })
             }
             LayoutKind::Inline { element, count } => {
@@ -4273,11 +4268,6 @@ impl<'p, S: Stage> Machine<'p, S> {
                     return fail(V::TypeConfusion, "weakening a non-callable");
                 }
                 self.bind(f, result, m)?;
-            }
-            Inst::Charge { energy, failure } => {
-                if !self.energy_charge(f, energy)? {
-                    return self.fail_at(f, failure, false);
-                }
             }
             Inst::Check { condition, failure } => {
                 let Val::Bits {
@@ -8783,7 +8773,6 @@ impl<'p, S: Stage> Machine<'p, S> {
                     kind: SymbolKind::Function,
                     definition: self.unit(code).header.definition.clone(),
                     instance: Some(self.unit(code).header.instance),
-                    charged: self.unit(code).header.charged,
                 }),
                 image @ Val::Image(_)
                     if matches!(self.record(layout)?.kind, LayoutKind::Slice { .. }) =>
@@ -8834,10 +8823,7 @@ impl<'p, S: Stage> Machine<'p, S> {
                     .and_then(|cause| self.ops.canceled(&id, &args, cause, &mut self.output))
                 {
                     Some(outcome) => outcome,
-                    None => match energy::operation(&id) {
-                        Some(name) => self.energy_operation(name, &args)?,
-                        None => self.ops.call(&id, &args, &mut self.output),
-                    },
+                    None => self.ops.call(&id, &args, &mut self.output),
                 };
                 let outcome = match outcome {
                     OpOutcome::Wait { clock, until } => {
@@ -10543,8 +10529,7 @@ impl<'p, S: Stage> Machine<'p, S> {
                             });
                             return Ok(None);
                         }
-                        let budgeted = self.energy_budgeted();
-                        let unit = self.program.finalizer(&finalizer.definition, budgeted)?;
+                        let unit = self.program.finalizer(&finalizer.definition)?;
                         let finalizer_unit = self.unit(unit);
                         let abi =
                             &self.program.layouts.fn_abis[finalizer_unit.header.abi.0 as usize];

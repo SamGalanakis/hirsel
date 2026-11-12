@@ -328,7 +328,7 @@ impl LayoutKeys {
     /// The entry digest of a typed entry. Placement proofs do not change the
     /// convention. Function-reference and C callback thunks retain the typed
     /// declaration ABI from which their physical signatures are emitted.
-    pub fn entry(&self, kind: EntryKind, charged: bool, abi: Option<&FnAbi>) -> ContentHash {
+    pub fn entry(&self, kind: EntryKind, abi: Option<&FnAbi>) -> ContentHash {
         let signature = abi.map(|abi| {
             let mut physical = abi.clone();
             physical.result_arena = None;
@@ -342,7 +342,7 @@ impl LayoutKeys {
             }
             self.fn_abi(&physical)
         });
-        entry_digest(kind, charged, signature)
+        entry_digest(kind, signature)
     }
 
     /// `fn_abi` of the table's FnAbi `id`.

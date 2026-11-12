@@ -2451,7 +2451,6 @@ impl<S: Stage> Flow<'_, S> {
                 }
             }
             Inst::Check { .. }
-            | Inst::Charge { .. }
             | Inst::EndScope { .. }
             | Inst::BindOrigin { .. }
             | Inst::BindFields { .. }
@@ -4478,12 +4477,6 @@ pub(crate) fn remap_values<S>(unit: &mut LirUnit<S>, map: &impl Fn(ValueId) -> V
             }
             Inst::FlatNext { result, .. } => *result = map(*result),
             Inst::Check { condition, .. } => *condition = map(*condition),
-            Inst::Charge { energy, .. } => {
-                if let hirsel_lir::ir::Energy::Span { from, to, .. } = energy {
-                    *from = map(*from);
-                    *to = map(*to);
-                }
-            }
             Inst::Read {
                 result, reaching, ..
             }

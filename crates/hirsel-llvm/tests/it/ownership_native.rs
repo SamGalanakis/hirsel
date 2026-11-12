@@ -641,7 +641,6 @@ fn owned_static_fixture() -> support::programs::Program {
                 kind: SymbolKind::Constant,
                 definition: path("OWNED_STATIC"),
                 instance: Some(instance("OWNED_STATIC")),
-                charged: false,
             },
             payload,
             7i64.to_le_bytes().to_vec(),

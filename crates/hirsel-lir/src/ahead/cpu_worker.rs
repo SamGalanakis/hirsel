@@ -873,7 +873,6 @@ impl CpuMapperBinding {
                 kind: SymbolKind::Function,
                 definition: callback.header.definition.clone(),
                 instance: Some(callback.header.instance),
-                charged: callback.header.charged,
             },
             callback_digest: callback.digest(),
             environment,

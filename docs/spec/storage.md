@@ -1251,45 +1251,9 @@ open creates the store on it, writing the Genesis after its own claim with the l
 is passed. Only a history whose every record is an intact claim record is read so; damage
 to any record, the Genesis of an established store's included, is corruption.
 
-**Energy.** Each transaction and query body runs under a budget of **energy**, the
-engine setting `StoreConfig.energy` (10^9 units by default), which nothing records. The
-store opens one energy scope around each body it applies, local or served, with the core
-operations `energy.enter` and `energy.leave`; those two are std@1's store machinery
-alone, and a program that names them is refused (STORE-11). A body is charged as it runs:
-one unit for each trip around a loop and one on entry to a body that calls another; an
-engine may leave out the entry charge of a body that can neither recur nor reach code it
-does not know. A counted loop whose exit test compares its
-counter, stepped by one, with its bound may be charged its whole trip count once on entry.
-How much a unit buys, and so where a body runs out, depends on the engine; that some
-engine accepts a body far under its budget and refuses one far over it does not. Charges
-for core operations by the size of their operands are **Reserved**: until they exist, one
-host operation costs what its call costs, whatever its size. A compiled body is admitted
-only when its charges pay for every trip: no cycle of its control flow avoids every
-charge, and when it calls any other body, its one entry charge precedes the first call on
-every path. Control flow here includes failure: an operation's failure enters cleanup, and
-a catch can resume ordinary code from it. A charge pays only for what leaves after it, so
-a failure out of a charge, or out of anything before it, has paid nothing; with every such
-paid transfer cut the flow is acyclic, a counted loop's edge back excepted, which its entry
-charge pays.
-
-Scopes nest: a scope opened inside another is granted at most what the enclosing scope
-has left, and what any scope spends, every scope around it has spent. Code outside any
-scope, a compute entry's or a run's own, runs unbounded. A finalizer is charged to the
-scope of the code that drops its value. A charge the meter cannot pay fails with
-`FailureKind.OutOfEnergy`, and the scope has **run out**, and with it every scope around
-it: the open scopes are granted once a cleanup **reserve** of 10^6 units, so the failure
-unwinds and its finalizers run ([FAIL-3](failure.md#fail-3-what-runs)). A scope opened
-after that holds at most what is left of the reserve. The reserve is never renewed, by
-the scope that ran out or any scope opened inside it: when it too runs out, the meter
-stays at 0, every later charge in those scopes fails at once, so each later finalizer
-fails as FAIL-3 orders, and the fields of every value are still released. Each scope that
-was open when the scope inside it ran out reports that it ran out too. A body
-that ran out ends `Limit(Energy())` whatever it returned, even when it caught the failure
-and returned `Ok`: a transaction commits none of its writes, and what it returned is
-dropped within a reserve of its own. A served call's stream records that end. Without
-energy, a body is bounded only by its run's memory budget, which is not equal across
-engines and so decides no outcome: exceeding it stops the run that holds the store, and
-every call that run had not released ends `InDoubt(Abandoned())`.
+A body is bounded only by its run, like any other code: by its run's memory budget, which is
+not equal across engines and so decides no outcome. Exceeding it stops the run that holds the
+store, and every call that run had not released ends `InDoubt(Abandoned())`.
 
 The engine provider is `db.local@1`: one head on one machine, every key and value in
 memory, bodies run one at a time. Those are its costs, and so are the promises that a
@@ -1817,11 +1781,7 @@ the entry with `runner.apply_mut` to a `Tx` of its transaction, or with `runner.
 `Tx` of a query ([RUN-3](runners.md#run-3-entries)), so a body's failure is an outcome of
 the evaluation and never escapes it. Whether a body exceeds a byte or row limit is part of its outcome
 and the same in every engine; where an engine stops it is not, since its writes are
-discarded ([STORE-11](#store-11-engine-and-storage-seam)). Whether a body runs out of
-energy, and how much it uses, depend on the engine that ran it: the recorded outcome is
-the truth, and re-execution does not decide it again. A re-execution runs a body outside
-any energy scope, and takes a call recorded as `Limit(Energy())` from its record without
-running it. A place that evaluates a call
+discarded ([STORE-11](#store-11-engine-and-storage-seam)). A place that evaluates a call
 record it did not serve loads the code it names by its hash
 ([RUN-13](runners.md#run-13-provider-seams)). A body can perform no effect
 ([STORE-3](#store-3-transaction-scope)), so an evaluation needs no confinement and leaves

@@ -136,10 +136,7 @@ fn finalizers_are_instances_of_their_resource() {
     let finalizers: Vec<_> = lowered
         .instances
         .ids()
-        .filter(|&id| {
-            lowered.instances.roles[id.index()] == InstanceRole::Finalizer
-                && !lowered.instances.is_charged(id)
-        })
+        .filter(|&id| lowered.instances.roles[id.index()] == InstanceRole::Finalizer)
         .collect();
     assert_eq!(finalizers.len(), 1);
     let abi = &lowered.table.fn_abis[lowered.instances.abis[finalizers[0].index()].0 as usize];

@@ -328,18 +328,12 @@ impl OperationDeclarations for OperationRegistry {
         definition: &hirsel_syntax::DefPath,
         instance: hirsel_syntax::ContentHash,
     ) -> Option<u32> {
-        // A charged instance (STORE-11 energy) without a selection of its
-        // own selects its base's body.
-        let unique = |same: &dyn Fn(hirsel_syntax::ContentHash) -> bool| {
-            let mut selected = self
-                .invocation_bodies
-                .iter()
-                .filter(|r| &r.definition == definition && same(r.instance));
-            let body = selected.next()?.body;
-            selected.next().is_none().then_some(body)
-        };
-        unique(&|i| i == instance)
-            .or_else(|| unique(&|i| hirsel_lir::energy::charged_digest(i) == instance))
+        let mut selected = self
+            .invocation_bodies
+            .iter()
+            .filter(|r| &r.definition == definition && r.instance == instance);
+        let body = selected.next()?.body;
+        selected.next().is_none().then_some(body)
     }
     fn requires_structural_reference(&self) -> bool {
         !self.invocations.is_empty()

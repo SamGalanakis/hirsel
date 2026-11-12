@@ -188,24 +188,6 @@ impl FnEmitter<'_, '_, '_> {
                 let value = self.scalar_unary(op, kind, operand)?;
                 self.define1(result, value)
             }
-            // STORE-11 "Energy": every charge is emitted, body entries
-            // included; subtract, store, then branch on the borrow, as LLVM.
-            Inst::Charge { energy, failure } => {
-                let units = match energy {
-                    Energy::Iteration | Energy::Entry => self.b.ins().iconst(types::I64, 1),
-                    Energy::Span {
-                        from,
-                        to,
-                        inclusive,
-                    } => self.span_units(from, to, inclusive)?,
-                };
-                use hirsel_lir::runtime_abi::CTX_ENERGY_OFFSET;
-                let remaining = self.load_ty(types::I64, self.context, CTX_ENERGY_OFFSET);
-                let left = self.b.ins().isub(remaining, units);
-                self.store_at(left, self.context, CTX_ENERGY_OFFSET);
-                let short = self.b.ins().icmp(IntCC::UnsignedLessThan, remaining, units);
-                self.guard(short, failure)
-            }
             Inst::Check { condition, failure } => {
                 let condition = self.get1(condition)?;
                 let failed = self.b.ins().bxor_imm_s(condition, 1);
@@ -1358,62 +1340,5 @@ impl FnEmitter<'_, '_, '_> {
             V::One(v) => v,
             _ => unreachable!("a pointer loads as one value"),
         }
-    }
-}
-
-impl FnEmitter<'_, '_, '_> {
-    /// A counted loop's trip count (STORE-11 "Energy") as an `i64` saturated
-    /// at `u64::MAX`, zero for an empty range; LLVM's `span_units`.
-    fn span_units(&mut self, from: ValueId, to: ValueId, inclusive: bool) -> Emitted<Value> {
-        let kind = self.scalar_kind(from)?;
-        let (bits, signed) = match kind {
-            ScalarKind::U8 => (8, false),
-            ScalarKind::U16 => (16, false),
-            ScalarKind::U32 => (32, false),
-            ScalarKind::U64 => (64, false),
-            ScalarKind::U128 => (128, false),
-            ScalarKind::I8 => (8, true),
-            ScalarKind::I16 => (16, true),
-            ScalarKind::I32 => (32, true),
-            ScalarKind::I64 => (64, true),
-            ScalarKind::I128 => (128, true),
-            _ => return self.invalid("a charge span over a non-integer"),
-        };
-        let (l, r) = (self.get1(from)?, self.get1(to)?);
-        let order = match (signed, inclusive) {
-            (true, true) => IntCC::SignedLessThanOrEqual,
-            (true, false) => IntCC::SignedLessThan,
-            (false, true) => IntCC::UnsignedLessThanOrEqual,
-            (false, false) => IntCC::UnsignedLessThan,
-        };
-        let nonempty = self.b.ins().icmp(order, l, r);
-        let distance = self.b.ins().isub(r, l);
-        let most = self.b.ins().iconst(types::I64, -1);
-        let increment = i64::from(inclusive);
-        let count = if bits == 128 {
-            let limit = self.b.ins().uextend(types::I128, most);
-            let big = self
-                .b
-                .ins()
-                .icmp(IntCC::UnsignedGreaterThanOrEqual, distance, limit);
-            let narrow = self.b.ins().ireduce(types::I64, distance);
-            let counted = self.b.ins().iadd_imm(narrow, increment);
-            self.b.ins().select(big, most, counted)
-        } else {
-            let wide = if bits == 64 {
-                distance
-            } else {
-                self.b.ins().uextend(types::I64, distance)
-            };
-            let counted = self.b.ins().iadd_imm(wide, increment);
-            if bits == 64 && inclusive {
-                let full = self.b.ins().icmp(IntCC::Equal, wide, most);
-                self.b.ins().select(full, most, counted)
-            } else {
-                counted
-            }
-        };
-        let zero = self.b.ins().iconst(types::I64, 0);
-        Ok(self.b.ins().select(nonempty, count, zero))
     }
 }

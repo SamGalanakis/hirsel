@@ -184,7 +184,6 @@ pub fn main()->u64 {
                     kind: hirsel_lir::ir::SymbolKind::Function,
                     definition: ignored.clone(),
                     instance: Some(target),
-                    charged: false,
                 };
                 match route {
                     0 => summary.calls.push(symbol),

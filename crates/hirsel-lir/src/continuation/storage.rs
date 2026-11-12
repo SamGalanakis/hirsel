@@ -129,7 +129,6 @@ mod tests {
             instance: hash,
             target: hash,
             abi: FnAbiId(0),
-            charged: false,
         }));
         for kind in [
             SlotKind::Parameter(0),

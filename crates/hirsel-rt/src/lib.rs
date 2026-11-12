@@ -20,7 +20,6 @@ mod base64;
 mod continuation;
 mod deadlines;
 mod depth;
-mod energy;
 pub mod handles;
 mod host_child;
 pub mod host_launch;
@@ -141,8 +140,8 @@ pub use alloc::{
 #[cfg(any(feature = "diagnostic", feature = "measurement"))]
 pub use context::Stats;
 pub use context::{
-    Audit, CTX_CLEANUP_COUNT_OFFSET, CTX_CLEANUP_MODE_OFFSET, CTX_ENERGY_OFFSET,
-    CTX_FOREGROUND_COUNT_OFFSET, Config, TaskCtx,
+    Audit, CTX_CLEANUP_COUNT_OFFSET, CTX_CLEANUP_MODE_OFFSET, CTX_FOREGROUND_COUNT_OFFSET, Config,
+    TaskCtx,
 };
 pub use count::{COUNT_ARENA_SHARED, COUNT_ARENA_UNIQUE, COUNT_IMMORTAL, finite_count_max};
 pub use failure::FailureRecord;

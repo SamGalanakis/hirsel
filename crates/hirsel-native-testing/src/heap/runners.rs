@@ -369,7 +369,6 @@ mod tests {
                 kind: SymbolKind::Function,
                 definition: DefPath::from_full("app@1/entry").unwrap(),
                 instance: None,
-                charged: false,
             }),
             OpValue::Bytes(b"request".to_vec()),
         ];

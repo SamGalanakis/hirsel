@@ -226,7 +226,6 @@ impl Importer<'_> {
             direct.symbol.kind,
             &direct.symbol.definition,
             direct.symbol.instance,
-            direct.symbol.charged,
         );
         let version = self.value(list.ty, Holding::Plain);
         self.versions[list.slot.index()] = Some(version);

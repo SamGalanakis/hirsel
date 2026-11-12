@@ -811,7 +811,6 @@ pub fn commit(
             kind: SymbolKind::Function,
             definition: spare.clone(),
             instance: Some(request.key(types, layouts)?.digest()),
-            charged: false,
         };
         let id = match u.tables.symbols.iter().position(|s| *s == target) {
             Some(i) => SymbolId(i as u32),

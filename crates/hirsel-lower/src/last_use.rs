@@ -727,15 +727,11 @@ impl Builder<'_, '_> {
             InstructionKind::StorageLive(local) => {
                 step.defines.push(self.roots[local.0 as usize]);
             }
-            InstructionKind::Charge(event) => {
-                for place in event.kind.reads() {
-                    self.read(place, &mut step);
-                }
-            }
             InstructionKind::EndOrigin(_)
             | InstructionKind::StorageDead { .. }
             | InstructionKind::EndScope(_)
-            | InstructionKind::EndLoan { .. } => {}
+            | InstructionKind::EndLoan { .. }
+            | InstructionKind::Charge(_) => {}
         }
         step
     }

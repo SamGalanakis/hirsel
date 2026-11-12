@@ -12,12 +12,12 @@ include!(concat!(env!("OUT_DIR"), "/reviewed.rs"));
 /// (`hirsel_rt::ABI_VERSION`) and the compiler (`hirsel_lir::RUNTIME_ABI_VERSION`)
 /// both read. `hirsel_rt_v2.h` restates it for C; hirsel-lir's schema test
 /// requires the header to match.
-pub const RUNTIME_ABI_VERSION: u32 = 113;
+pub const RUNTIME_ABI_VERSION: u32 = 114;
 /// The ownership-trace extension's version, which emitted traced code passes to
 /// `hirsel_rt_v2_ownership_enter` and the runtime requires. One definition for the
 /// runtime and both native emitters; `hirsel_rt_ownership_trace.h` restates it
 /// for C, checked by hirsel-llvm's ownership_native test.
-pub const OWNERSHIP_TRACE_ABI_VERSION: u32 = 114;
+pub const OWNERSHIP_TRACE_ABI_VERSION: u32 = 115;
 const _: () = assert!(OWNERSHIP_TRACE_ABI_VERSION > RUNTIME_ABI_VERSION);
 
 /// Classify exactly the reserved inventory. The declaration producer supplies digest/ownership.
@@ -390,8 +390,6 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
         "io.inbox" | "inbox.take" | "arrival.request" | "arrival.end" => {
             Some(format!("hirsel_rt_v2_{}", name.replace('.', "_")))
         }
-        // A store's energy scopes (STORE-11 Energy, `energy.rs`).
-        "energy.enter" | "energy.leave" => Some(format!("hirsel_rt_v2_{}", name.replace('.', "_"))),
         "runner.send" => Some("hirsel_rt_v2_place_send".into()),
         "$intrinsic.RunnerSend" => Some("hirsel_rt_v2_runner_send".into()),
         "$intrinsic.RunnerWait" => Some("hirsel_rt_v2_runner_wait".into()),
@@ -2526,20 +2524,6 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
     },
     AbiExport {
         caller_site: false,
-        symbol: "hirsel_rt_v2_energy_enter",
-        destination: true,
-        result: Some((8, 8)),
-        parameters: &[Physical::I64],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_energy_leave",
-        destination: true,
-        result: Some((16, 8)),
-        parameters: &[Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
         symbol: "hirsel_rt_v2_claim_end",
         destination: false,
         result: Some((8, 8)),
@@ -3318,9 +3302,6 @@ pub const NATIVE_PATHS: &[&str] = &[
     "authority.reclaim",
     "authority.select",
     "authority.base",
-    // A store's energy scopes (STORE-11 Energy, `hirsel-rt/src/energy.rs`).
-    "energy.enter",
-    "energy.leave",
 ];
 
 /// Stable declaration ownership transport, used by the independently retained inventory.

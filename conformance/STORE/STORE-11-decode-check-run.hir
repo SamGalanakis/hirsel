@@ -5,25 +5,16 @@
 // A serializable check that fails inside a transaction body fails the body's decode,
 // which unwinds like any failure (FAIL-3): the reconstructed list, every String in it
 // included, is released once, and the transaction ends Faulted with nothing committed.
-// A check that runs out of energy ends the transaction Limit(Energy()). Both checks run
-// on the third of five elements, and the store stays usable after each.
+// The check runs on the third of five elements, and the store stays usable after it.
 @serializable(check = valid)
 pub opaque type Month: plain + key + sendable + inert + noalloc_drop uses {} {
   number: u8,
 }
 
-// Admits 1 and 2; fails on 3 and above (u8 overflow); spins far past the budget on 0.
+// Admits 1 and 2; fails on 3 and above (u8 overflow).
 @noalloc
 fn valid(value: Month) -> bool uses {} {
-  if value.number == 0 {
-    let mut sum: u64 = 0
-    for i in 0u64..1000000000000u64 {
-      sum = int.wrapping_add(sum, i)
-    }
-    sum > 0
-  } else {
-    value.number * 100 > 0
-  }
+  value.number * 100 > 0
 }
 
 @serializable
@@ -79,17 +70,12 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
     return Error(Check())
   }
   let at = authority.floor(a)
-  let mut config = store.default_config()
-  config.energy = 100000
-  let mut s = store.open(a, config) ? Store
+  let mut s = store.open(a, store.default_config()) ? Store
   let first = store.snapshot(a, mut s, at) ? Store
   let failing = codec.encode(entries([1, 2, 3, 1, 2]))
   let failed: Result[u64, store.TxFailure[Read]] = store.transact(mut s, load, failing)
   check(faulted(failed))?
-  let spinning = codec.encode(entries([1, 2, 0, 1, 2]))
-  let spun: Result[u64, store.TxFailure[Read]] = store.transact(mut s, load, spinning)
-  check(spun == Error(Limit(Energy())))?
-  // Neither committed.
+  // Nothing committed.
   let after = store.snapshot(a, mut s, at) ? Store
   check(store.version(a, after) == store.version(a, first))?
   check(store.get(take after, b"seen") == None())?

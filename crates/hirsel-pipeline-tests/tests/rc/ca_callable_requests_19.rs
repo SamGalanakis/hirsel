@@ -35,7 +35,6 @@ fn callable_requests_preserve_refusal_names_and_rebind_canonical_abis() {
                     kind: SymbolKind::Function,
                     definition: unit.header.definition.clone(),
                     instance: Some(unit.header.instance),
-                    charged: unit.header.charged,
                 },
                 CallableEntry {
                     key: lowered.instances.view(id).key.clone(),
@@ -43,7 +42,6 @@ fn callable_requests_preserve_refusal_names_and_rebind_canonical_abis() {
                     origin: unit.header.origin,
                     op_free: false,
                     fields: Default::default(),
-                    charged: false,
                 },
             )
         })
@@ -244,7 +242,6 @@ fn task_capture_requests_preserve_existing_adapter_identity_and_owned_finish() {
         kind: SymbolKind::Function,
         definition: target_body.header.definition.clone(),
         instance: Some(target_body.header.instance),
-        charged: target_body.header.charged,
     };
     let request = TaskCaptureRequest::new(
         source,
@@ -318,7 +315,6 @@ fn task_capture_requests_preserve_existing_adapter_identity_and_owned_finish() {
             origin: target_body.header.origin,
             op_free: false,
             fields: Default::default(),
-            charged: false,
         },
     )]);
     rewrite_task_capture(&mut unit, &binding.table, &entries, &rebound, |_, _| false).unwrap();

@@ -826,18 +826,15 @@ impl NativeRoots for RootProducts {
             {
                 return Err("mixed native semantic owner origins".into());
             }
-            // A charged twin (STORE-11 energy) shares its base's definition
-            // and is never the definition's own native entry.
-            if key.instance.uncharged().is_none()
-                && key.instance
-                    == *snapshot
-                        .instances
-                        .admitted(key, &environment)?
-                        .0
-                        .facts
-                        .source
-                        .ready_source
-                        .origin()
+            if key.instance
+                == *snapshot
+                    .instances
+                    .admitted(key, &environment)?
+                    .0
+                    .facts
+                    .source
+                    .ready_source
+                    .origin()
                 && self.source.functions().get(key.instance.definition())
                     == Some(&key.instance.body())
                 && functions
@@ -892,16 +889,6 @@ impl NativeRoots for RootProducts {
                 let layout = binding
                     .layout(layout)
                     .ok_or("missing linked finalizer layout")?;
-                // A charged unit's row names its finalizer's charged twin
-                // (STORE-11 energy). Glue keys each layout by its base drop
-                // body and picks the twin at each drop.
-                let instance = summaries
-                    .iter()
-                    .find(|s| {
-                        s.definition == definition
-                            && hirsel_lir::energy::charged_digest(s.instance) == instance
-                    })
-                    .map_or(instance, |base| base.instance);
                 if let Some(previous) = finalizers.insert(layout, instance)
                     && previous != instance
                 {

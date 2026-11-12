@@ -57,7 +57,6 @@ fn fixture(target: &TargetSpec) -> (LayoutTable, LirUnit<Ready>, FnAbi) {
         instance: digest,
         target: table.target,
         abi: FnAbiId(0),
-        charged: false,
     });
     unit.types.push(LirType {
         repr: ValueRepr::PayloadReceipt,

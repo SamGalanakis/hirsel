@@ -186,11 +186,9 @@ pub(crate) enum Helper {
     Hash {
         layout: LayoutId,
     },
-    /// `hirsel.drop.<layout>`, calling the drop body `body`, or its charged
-    /// instance `charged` inside a budget (STORE-11 energy).
+    /// `hirsel.drop.<layout>`, calling the drop body `body`.
     Drop {
         body: FuncId,
-        charged: Option<FuncId>,
         caller_site: bool,
     },
     DropResume {
@@ -427,17 +425,16 @@ pub(crate) fn emit(
         } else {
             EntryKind::Value
         };
-        let entry = emitter.inputs.layouts.keys().entry(kind, false, Some(abi));
+        let entry = emitter.inputs.layouts.keys().entry(kind, Some(abi));
         emitter
             .manifested
             .export_entry(&name, &header.definition, entry);
         if let Some(thunk) = &thunk {
-            let entry =
-                emitter
-                    .inputs
-                    .layouts
-                    .keys()
-                    .entry(EntryKind::FunctionRef, false, Some(abi));
+            let entry = emitter
+                .inputs
+                .layouts
+                .keys()
+                .entry(EntryKind::FunctionRef, Some(abi));
             emitter
                 .manifested
                 .export_entry(thunk, &header.definition, entry);
@@ -476,7 +473,7 @@ pub(crate) fn emit(
                 .inputs
                 .layouts
                 .keys()
-                .entry(EntryKind::Resume, false, Some(abi));
+                .entry(EntryKind::Resume, Some(abi));
             emitter
                 .manifested
                 .export_entry(&name, &header.definition, entry);
@@ -903,11 +900,9 @@ impl<'a> Emitter<'a> {
                 Helper::Hash { layout } => {
                     crate::compare::define_hasher(self, b, layout, definition)?
                 }
-                Helper::Drop {
-                    body,
-                    charged,
-                    caller_site,
-                } => self.define_drop_wrapper(b, body, charged, caller_site),
+                Helper::Drop { body, caller_site } => {
+                    self.define_drop_wrapper(b, body, caller_site)
+                }
                 Helper::DropResume { body, caller_site } => {
                     self.define_drop_resume_wrapper(b, body, caller_site)
                 }
@@ -985,8 +980,7 @@ impl<'a> Emitter<'a> {
     }
 
     /// Records the import of the `kind` entry `name` of a body of `definition`
-    /// at `abi` for the manifest. No entry is a charged wrapper: a charged
-    /// twin is an instance of its own.
+    /// at `abi` for the manifest.
     pub(crate) fn import_entry(
         &mut self,
         name: &str,
@@ -994,7 +988,7 @@ impl<'a> Emitter<'a> {
         kind: EntryKind,
         abi: Option<&FnAbi>,
     ) {
-        let entry = self.inputs.layouts.keys().entry(kind, false, abi);
+        let entry = self.inputs.layouts.keys().entry(kind, abi);
         self.manifested.import_entry(name, definition, entry);
     }
 }

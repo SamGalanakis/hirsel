@@ -18,7 +18,6 @@ fn unit(name: &str) -> UnitBuilder<Ready> {
         instance: hash,
         target: ContentHash::default(),
         abi: FnAbiId(0),
-        charged: false,
     }));
     unit.block(BlockKind::Body, &[]);
     unit
@@ -262,7 +261,6 @@ fn finite_callable_equations_converge_when_a_cycle_reverses_predecessor_order() 
             kind: SymbolKind::Function,
             definition: hirsel_syntax::DefPath::core("a"),
             instance: Some(ContentHash::of_bytes(b"a")),
-            charged: false,
         },
         abi: None,
         environment: None,

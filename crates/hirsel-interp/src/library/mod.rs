@@ -9,7 +9,6 @@ mod authority;
 mod codec;
 mod dictionaries;
 mod dispatch;
-mod energy;
 mod file;
 mod filesystem;
 mod net;

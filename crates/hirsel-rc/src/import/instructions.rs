@@ -327,13 +327,7 @@ impl Importer<'_> {
             K::Assign { destination, value } => {
                 let rvalue = &self.body.rvalues[value.0 as usize];
                 let p = self.place(*destination)?;
-                // A store entry names its definition's charged instance,
-                // wherever it is formed (STORE-11 energy).
-                self.forming_entry = matches!(rvalue, tir::Rvalue::FunctionReference { definition, .. }
-                    if self.store_entry(self.body.places[destination.0 as usize].ty, definition));
-                let v = self.rvalue(rvalue, p.ty);
-                self.forming_entry = false;
-                let v = v?;
+                let v = self.rvalue(rvalue, p.ty)?;
                 let v = self.weaken(v, p.ty);
                 let address = self.address(&p)?;
                 self.store(&p, address, v)?;
@@ -465,54 +459,7 @@ impl Importer<'_> {
                 let place = self.origin_address(&p)?;
                 self.push(Inst::EndOrigin { place });
             }
-            // Native energy points (STORE-11 "Energy"). Calls charge at their
-            // callee's entry, never at the call: a failure edge there would
-            // hold the evaluated arguments.
-            // Only a charged instance carries charges; an uncharged one
-            // imports as if the body had no energy points.
-            K::Charge(_) if self.charged.is_none() => {}
-            K::Charge(event) => {
-                use hirsel_lir::ir::Energy;
-                use hirsel_tir::SourceEventKind as E;
-                // A counted loop charges its trip count once, at entry; C
-                // checks the loop's shape against that amount.
-                let energy = match event.kind {
-                    E::Call | E::CountedIteration => None,
-                    E::CountedEntry {
-                        from,
-                        to,
-                        inclusive,
-                    } => {
-                        let mut read = |place| {
-                            self.operand(&tir::Operand {
-                                place,
-                                usage: UseKind::Copy,
-                            })
-                        };
-                        Some(Energy::Span {
-                            from: read(from)?,
-                            to: read(to)?,
-                            inclusive,
-                        })
-                    }
-                    E::Iteration => Some(Energy::Iteration),
-                    // Only a body that can add an activation can recurse.
-                    E::Entry => self
-                        .body
-                        .blocks
-                        .iter()
-                        .any(|b| {
-                            matches!(&b.terminator, tir::Terminator::Call { callee, .. }
-                                if !matches!(callee, tir::Callee::Definition { path, .. }
-                                    if !hirsel_core_contract::depth::adds_activation(path)))
-                        })
-                        .then_some(Energy::Entry),
-                };
-                if let Some(energy) = energy {
-                    let failure = self.fail(Some(hirsel_core_contract::ENERGY_RULE.to_string()))?;
-                    self.push(Inst::Charge { energy, failure });
-                }
-            }
+            K::Charge(_) => {}
         }
         Ok(())
     }
@@ -656,8 +603,7 @@ impl Importer<'_> {
                 };
                 let instance = hirsel_tir::constant_instance_path(definition, &values);
                 let definition = &instance;
-                let charged = self.charged_constant(definition)?;
-                let symbol = self.symbol(SymbolKind::Constant, definition, None, charged);
+                let symbol = self.symbol(SymbolKind::Constant, definition, None);
                 let result = self.fresh(ty);
                 self.push(Inst::ReadStatic { result, symbol });
                 result
@@ -684,7 +630,6 @@ impl Importer<'_> {
                             SymbolKind::Function,
                             &direct.symbol.definition,
                             direct.symbol.instance,
-                            direct.symbol.charged,
                         ),
                         direct.abi,
                     )
@@ -868,12 +813,9 @@ impl Importer<'_> {
                 let (values, loans, taken) = self.construct_fields(&encoded, fields)?;
                 if !encoded.is_empty() {
                     let constructor = match constructor {
-                        tir::Constructor::Record(path) => ConstructorKind::Record(self.symbol(
-                            SymbolKind::Type,
-                            path,
-                            None,
-                            false,
-                        )),
+                        tir::Constructor::Record(path) => {
+                            ConstructorKind::Record(self.symbol(SymbolKind::Type, path, None))
+                        }
                         tir::Constructor::Tuple => ConstructorKind::Tuple,
                         other => return malformed(format!("a flat {other:?} construction")),
                     };
@@ -906,7 +848,7 @@ impl Importer<'_> {
                 {
                     let inner_layout = field.layout;
                     let inner_ty = self.intern(inner_layout);
-                    let symbol = self.symbol(SymbolKind::Type, &inner, None, false);
+                    let symbol = self.symbol(SymbolKind::Type, &inner, None);
                     let v = self.construct(
                         ConstructorKind::Record(symbol),
                         inner_layout,
@@ -917,7 +859,7 @@ impl Importer<'_> {
                     if self.holds(v) {
                         self.failure.pending.push(v);
                     }
-                    let symbol = self.symbol(SymbolKind::Type, path, None, false);
+                    let symbol = self.symbol(SymbolKind::Type, path, None);
                     return self.construct(
                         ConstructorKind::Record(symbol),
                         layout,
@@ -929,13 +871,13 @@ impl Importer<'_> {
                 let constructor = match constructor {
                     tir::Constructor::Tuple => ConstructorKind::Tuple,
                     tir::Constructor::Record(path) => {
-                        ConstructorKind::Record(self.symbol(SymbolKind::Type, path, None, false))
+                        ConstructorKind::Record(self.symbol(SymbolKind::Type, path, None))
                     }
                     tir::Constructor::Variant {
                         definition,
                         variant,
                     } => ConstructorKind::Variant {
-                        definition: self.symbol(SymbolKind::Type, definition, None, false),
+                        definition: self.symbol(SymbolKind::Type, definition, None),
                         variant: *variant,
                     },
                     tir::Constructor::Sequence => ConstructorKind::Sequence,
@@ -1019,12 +961,11 @@ impl Importer<'_> {
                     .closure(self.id, *body)
                     .ok_or_else(|| InstanceError::MissingInstance(self.def.path.path().clone()))?;
                 let (code, environment) = {
-                    let (digest, charged) = self.callee_digest(instance);
+                    let digest = self.callee_digest(instance);
                     let symbol = self.symbol(
                         SymbolKind::Function,
                         &self.def.path.path().clone(),
                         Some(digest),
-                        charged,
                     );
                     let code = ClosureCode {
                         symbol,
@@ -1256,12 +1197,7 @@ impl Importer<'_> {
             return Ok(None);
         };
         self.drop_place(field.value.place)?;
-        let symbol = self.symbol(
-            SymbolKind::Constant,
-            &nullary_variant(),
-            Some(instance),
-            false,
-        );
+        let symbol = self.symbol(SymbolKind::Constant, &nullary_variant(), Some(instance));
         let result = self.fresh(ty);
         self.push(Inst::ReadStatic { result, symbol });
         Ok(Some(result))
@@ -1304,12 +1240,7 @@ impl Importer<'_> {
             && !self.needs_construction_receipt()
         {
             let instance = self.static_layout_key(layout).0;
-            let symbol = self.symbol(
-                SymbolKind::Constant,
-                &empty_sequence(),
-                Some(instance),
-                false,
-            );
+            let symbol = self.symbol(SymbolKind::Constant, &empty_sequence(), Some(instance));
             let result = self.fresh(ty);
             self.push(Inst::ReadStatic { result, symbol });
             return Ok(result);
@@ -1411,7 +1342,6 @@ impl Importer<'_> {
                 _ => return malformed("keyed constructor kind"),
             }),
             None,
-            false,
         );
         let site = self.out.tables.constructs.len();
         let empty = self.construct(
@@ -1471,7 +1401,6 @@ impl Importer<'_> {
             direct.symbol.kind,
             &direct.symbol.definition,
             direct.symbol.instance,
-            direct.symbol.charged,
         );
         for field in fields {
             let value = self.operand(&field.value)?;
@@ -1566,93 +1495,9 @@ impl Importer<'_> {
         }
     }
 
-    /// Whether a function reference to `definition` at type `ty` forms a
-    /// store entry: an `Entry[F]` (RUN-3) of a definition whose first
-    /// parameter is a store transaction. Its body runs under a budget.
-    fn store_entry(&self, ty: hirsel_types::TypeId, definition: &DefPath) -> bool {
-        let named = |ty: hirsel_types::TypeId| match self.types.get(ty).map(|t| &t.kind) {
-            Some(hirsel_types::TypeKind::Named { definition, .. }) => {
-                Some(definition.path().clone())
-            }
-            _ => None,
-        };
-        let tx = |path: &DefPath| {
-            path.package_is("std", "1") && path.0.modules == ["store"] && path.0.name == "Tx"
-        };
-        named(ty).is_some_and(|path| path == DefPath::core("Entry"))
-            && self
-                .program
-                .signatures
-                .get(definition)
-                .is_some_and(|signature| match &signature.kind {
-                    // A transaction, query, call or served entry takes the
-                    // `Tx` first; a `table.migrate` row function, run inside
-                    // each migration batch's commit, is `fn(c: (), key, old)`.
-                    // A `runner.compute` entry, `fn(a: A)`, runs outside any
-                    // store body and stays uncharged.
-                    SignatureKind::Function(f) => {
-                        f.parameters
-                            .first()
-                            .and_then(|p| named(p.ty))
-                            .is_some_and(|path| tx(&path))
-                            || (f.parameters.len() == 3
-                                && matches!(
-                                    self.types.get(f.parameters[0].ty).map(|t| &t.kind),
-                                    Some(hirsel_types::TypeKind::Tuple(items)) if items.is_empty()
-                                ))
-                    }
-                    _ => false,
-                })
-    }
-
-    /// Whether a read of constant `definition` names its charged copy: from
-    /// charged code it does (STORE-11 energy), and this import then demands
-    /// charged every callee the constant holds. The copy is an alias of the
-    /// constant's data unless it holds a callable.
-    fn charged_constant(&mut self, definition: &DefPath) -> R<bool> {
-        if self.charged.is_none() || definition.package_is("core", "1") {
-            return Ok(false);
-        }
-        let Some(value) = self.program.constants.get(definition) else {
-            return malformed(format!("constant {definition:?} has no value"));
-        };
-        let mut pending = vec![&value.root];
-        while let Some(node) = pending.pop() {
-            match &node.kind {
-                tir::ValueKind::FunctionReference {
-                    definition: path,
-                    arguments,
-                } => {
-                    let id = super::static_callable(self.program, self.instances, path, arguments)
-                        .map_err(|e| {
-                            PassError::Malformed(format!("constant {definition:?}: {e:?}"))
-                        })?
-                        .1;
-                    if !self.instances.roles[id.index()].is_library() {
-                        self.charged_callees.push(id);
-                    }
-                }
-                tir::ValueKind::Construct { fields, .. } => pending.extend(fields),
-                tir::ValueKind::Constant(_) => {}
-            }
-        }
-        Ok(true)
-    }
-
-    /// The symbol digest of callee instance `id` from this unit, and whether
-    /// it names the charged instance: from charged code and from a store
-    /// entry formation it does, and this import then demands that instance;
-    /// otherwise it names the instance itself.
-    pub(super) fn callee_digest(&mut self, id: InstanceId) -> (hirsel_syntax::ContentHash, bool) {
-        let digest = self.instances.view(id).key.digest();
-        if (self.charged.is_some() || self.forming_entry)
-            && !self.instances.roles[id.index()].is_library()
-        {
-            self.charged_callees.push(id);
-            (hirsel_lir::energy::charged_digest(digest), true)
-        } else {
-            (digest, false)
-        }
+    /// The symbol digest of callee instance `id`.
+    pub(super) fn callee_digest(&self, id: InstanceId) -> hirsel_syntax::ContentHash {
+        self.instances.view(id).key.digest()
     }
 
     /// The symbol and ABI of a direct callee instance.
@@ -1693,12 +1538,7 @@ impl Importer<'_> {
             let request = self.library_request(body, path, arguments)?;
             let direct = self.require(request)?;
             return Ok((
-                self.symbol(
-                    SymbolKind::Function,
-                    path,
-                    direct.symbol.instance,
-                    direct.symbol.charged,
-                ),
+                self.symbol(SymbolKind::Function, path, direct.symbol.instance),
                 direct.abi,
             ));
         }
@@ -1723,12 +1563,7 @@ impl Importer<'_> {
                 crate::library::Request::operation_value(self.program, path, callee.arguments)?;
             let direct = self.require(request)?;
             return Ok((
-                self.symbol(
-                    SymbolKind::Function,
-                    path,
-                    direct.symbol.instance,
-                    direct.symbol.charged,
-                ),
+                self.symbol(SymbolKind::Function, path, direct.symbol.instance),
                 direct.abi,
             ));
         }
@@ -1742,9 +1577,9 @@ impl Importer<'_> {
             path,
         )?;
         let id = self.instances.find(self.program, path, &callee)?;
-        let (digest, charged) = self.callee_digest(id);
+        let digest = self.callee_digest(id);
         Ok((
-            self.symbol(SymbolKind::Function, path, Some(digest), charged),
+            self.symbol(SymbolKind::Function, path, Some(digest)),
             self.instances.abis[id.index()],
         ))
     }

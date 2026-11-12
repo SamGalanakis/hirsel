@@ -312,7 +312,7 @@ impl Emitter<'_> {
             .inputs
             .layouts
             .keys()
-            .entry(EntryKind::Callback, false, Some(abi));
+            .entry(EntryKind::Callback, Some(abi));
         self.manifested.export_entry(&thunk, definition, entry);
         self.define_callback(&thunk, target, &sig, Linkage::Export, definition)
     }
@@ -340,7 +340,6 @@ pub(crate) fn emit_glue(inputs: &GlueInputs<'_>) -> Emitted<ObjectArtifact> {
                 what: "a static without its data".into(),
             });
         };
-        // A charged constant without a callable aliases its base's data.
         if !defined.insert(static_symbol(&data.symbol)) {
             continue;
         }

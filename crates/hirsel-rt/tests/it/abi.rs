@@ -120,7 +120,6 @@ fn header_constants_match_the_runtime() {
             "CTX_CLEANUP_MODE_OFFSET",
             hirsel_rt::CTX_CLEANUP_MODE_OFFSET as u64,
         ),
-        ("CTX_ENERGY_OFFSET", hirsel_rt::CTX_ENERGY_OFFSET as u64),
         ("PAGE_OWNER_OFFSET", hirsel_rt::PAGE_OWNER_OFFSET as u64),
         (
             "PAGE_XTHREAD_FREE_OFFSET",

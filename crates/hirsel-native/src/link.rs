@@ -1789,26 +1789,7 @@ done:
     let callee_identity = program.callee_facts.as_ref().map_or([0; 32], |facts| {
         hirsel_rt::program::callee_metadata_identity(&revision.digest(), facts)
     });
-    // A definition formed as an Entry in both uncharged and charged code has a
-    // thunk for each under one path (STORE-11 energy). Launches by path take
-    // the first row, so the uncharged ones come first; a program without
-    // charged twins keeps its table as it was.
-    let charged: std::collections::BTreeSet<String> = program
-        .summaries
-        .iter()
-        .flat_map(|unit| &unit.references)
-        .filter(|symbol| symbol.charged)
-        .map(|symbol| {
-            hirsel_lir::emission::function_thunk_name(&symbol.definition, symbol.instance.as_ref())
-        })
-        .collect();
-    let (uncharged, twins): (Vec<_>, Vec<_>) = program
-        .entries
-        .iter()
-        .partition(|(thunk, _)| !charged.contains(thunk));
-    let entries: Vec<&(String, String)> = uncharged.into_iter().chain(twins).collect();
-    // One callee row per checked path: its first, uncharged where one exists.
-    let mut callee_paths = std::collections::BTreeSet::new();
+    let entries: Vec<&(String, String)> = program.entries.iter().collect();
     let callee_rows: Vec<(usize, &(String, String))> = entries
         .iter()
         .copied()
@@ -1818,7 +1799,6 @@ done:
                 .callee_facts
                 .as_ref()
                 .is_some_and(|facts| facts.facts.contains_key(path))
-                && callee_paths.insert(path)
         })
         .collect();
     let callee_codes: Vec<_> = callee_rows
@@ -2318,7 +2298,7 @@ fn check_link_manifest(
             }))
         };
         if expected.contains(&plain) {
-            signatures.insert(plain, program.table.keys().entry(kind, false, Some(abi)));
+            signatures.insert(plain, program.table.keys().entry(kind, Some(abi)));
         }
         let thunk =
             hirsel_lir::emission::function_thunk_name(&unit.definition, Some(&unit.instance));
@@ -2328,7 +2308,7 @@ fn check_link_manifest(
                 program
                     .table
                     .keys()
-                    .entry(EntryKind::FunctionRef, false, Some(abi)),
+                    .entry(EntryKind::FunctionRef, Some(abi)),
             );
         }
     }

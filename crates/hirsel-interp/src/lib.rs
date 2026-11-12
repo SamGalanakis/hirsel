@@ -447,9 +447,6 @@ operation_boundary! {
     /// the recording describes the uninterrupted run. Stop at the guard instead.
     /// Other providers retain their ordinary tooling cleanup.
     fn stop_at_tooling_limit(&self) -> bool { false }
-    /// The running task is inside an energy scope (storage.md STORE-11 "Energy"), so
-    /// every counted charge goes through [`energy_charge`](Operations::energy_charge).
-    fn energy_metered(&self) -> bool { false }
     }
     mutable {
     /// Execute an id returned by this provider's `resolve`. The default retains
@@ -504,11 +501,6 @@ operation_boundary! {
     /// The rule and kind of a language failure the last handle drop raised.
     fn take_drop_failure(&mut self) -> Option<(String, String)> {
         None
-    }
-    /// One counted charge on the running task's energy meter (storage.md STORE-11
-    /// "Energy"). False: the scope has run out, and the charge fails with OutOfEnergy.
-    fn energy_charge(&mut self) -> bool {
-        true
     }
     /// Independent scalar TIR graph evidence for the immediately following CPU call.
     fn cpu_mapper_certified(&mut self, _certified: bool) {}

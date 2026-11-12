@@ -2568,9 +2568,8 @@ impl<'o> LayoutBuilder<'o> {
                             }
                         }
                         // SEM-5: an `ordered of` token's word is its ticks or
-                        // ordinal, the only handle a comparison may read. An
-                        // Energy scope's word is its serial (STORE-11 Energy).
-                        "Instant" | "Level" | "Energy" => {
+                        // ordinal, the only handle a comparison may read.
+                        "Instant" | "Level" => {
                             handle.scan = vec![ScanStep::Handle {
                                 offset: 0,
                                 kind: HandleKind::Word,

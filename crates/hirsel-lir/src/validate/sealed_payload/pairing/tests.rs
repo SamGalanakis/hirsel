@@ -19,7 +19,6 @@ fn unit() -> LirUnit<Value> {
         instance: ContentHash([2; 32]),
         target: ContentHash([3; 32]),
         abi: FnAbiId(0),
-        charged: false,
     });
     unit.types.push(LirType {
         repr: ValueRepr::Scalar(ScalarKind::U64),

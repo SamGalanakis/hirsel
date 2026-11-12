@@ -93,7 +93,6 @@ mod tests {
             instance: hash,
             target: ContentHash::default(),
             abi: FnAbiId(0),
-            charged: false,
         }));
         let entry = b.block(BlockKind::Body, &[]);
         let selected = b.block(BlockKind::Cleanup, &[]);

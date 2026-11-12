@@ -63,8 +63,6 @@ pub struct Finalizer {
     pub definition: DefPath,
     pub instance: ContentHash,
     pub abi: FnAbiId,
-    /// Whether this is the finalizer's charged instance (STORE-11 energy).
-    pub charged: bool,
 }
 
 /// Every resource layout's drop body, keyed by the resource's layout.
@@ -75,22 +73,18 @@ impl Finalizers {
     /// The finalizer instances of a program, from its plan alone (design §1e): each takes
     /// its resource borrowed as its first parameter, whose `FnAbi` layout names the
     /// resource. No unit is read, so a unit's cleanup needs no other unit's RC output.
-    /// Each is the finalizer's charged instance where it has one (STORE-11 energy): every
-    /// unit, charged or not, drops through it, since an uncharged library unit can run
-    /// inside an energy scope and a charged instance outside one costs only its checks.
     pub fn planned(instances: &Instances, table: &LayoutTable) -> Self {
         let mut out = BTreeMap::new();
         for id in instances.ids() {
             let role = &instances.roles[id.index()];
-            if !role.is_finalizer() || instances.is_charged(id) {
+            if !role.is_finalizer() {
                 continue;
             }
             let abi = instances.abis[id.index()];
             let Some(parameter) = table.fn_abis[abi.0 as usize].parameters.first() else {
                 continue;
             };
-            let called = instances.charged_of(id).unwrap_or(id);
-            let view = instances.view(called);
+            let view = instances.view(id);
             out.insert(
                 parameter.layout,
                 Finalizer {
@@ -102,7 +96,6 @@ impl Finalizers {
                     definition: view.key.definition().clone(),
                     instance: view.key.digest(),
                     abi,
-                    charged: called != id,
                 },
             );
         }
@@ -161,10 +154,10 @@ impl Finalizers {
     pub fn new<S: Stage>(instances: &Instances, units: &[LirUnit<S>]) -> Self {
         let mut out = BTreeMap::new();
         for id in instances.ids() {
-            if !instances.roles[id.index()].is_finalizer() || instances.is_charged(id) {
+            if !instances.roles[id.index()].is_finalizer() {
                 continue;
             }
-            let unit = &units[instances.charged_of(id).unwrap_or(id).index()];
+            let unit = &units[id.index()];
             let Some(&self_value) = unit.parameters.first() else {
                 continue;
             };
@@ -176,7 +169,6 @@ impl Finalizers {
                     definition: unit.header.definition.clone(),
                     instance: unit.header.instance,
                     abi: instances.abis[id.index()],
-                    charged: unit.header.charged,
                 },
             );
         }
@@ -2728,7 +2720,6 @@ impl<R: Reporter> Lowering<'_, '_, R> {
                     kind: SymbolKind::Function,
                     definition: finalizer.definition.clone(),
                     instance: Some(finalizer.instance),
-                    charged: finalizer.charged,
                 };
                 let symbols = &mut self.ed.unit.tables.symbols;
                 let s = match symbols.iter().position(|s| *s == wanted) {

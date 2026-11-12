@@ -441,7 +441,7 @@ fn defining_and_public_views_agree_and_private_changes_move_the_entry_digest() {
         let table = checked(b);
         let abi = table.fn_abis[id.0 as usize].clone();
         let key = table.layout(abi.parameters[0].layout).unwrap().key.clone();
-        let entry = hirsel_lir::LayoutKeys::new(&table).entry(EntryKind::Value, false, Some(&abi));
+        let entry = hirsel_lir::LayoutKeys::new(&table).entry(EntryKind::Value, Some(&abi));
         (entry, key)
     };
     let narrow = owners_with_id(&[Primitive::U32]);
@@ -491,9 +491,7 @@ fn thunk_digests_bind_typed_parameters_and_results() {
     for kind in [EntryKind::FunctionRef, EntryKind::Callback] {
         let digests: Vec<_> = ids
             .iter()
-            .map(|(definition, _)| {
-                keys.entry(kind, false, Some(&table.fn_abis[definition.0 as usize]))
-            })
+            .map(|(definition, _)| keys.entry(kind, Some(&table.fn_abis[definition.0 as usize])))
             .collect();
         assert_ne!(digests[0], digests[1], "{kind:?}: u64 and f64 parameters");
         assert_ne!(digests[0], digests[2], "{kind:?}: u64 and f64 returns");
@@ -502,12 +500,10 @@ fn thunk_digests_bind_typed_parameters_and_results() {
         assert_eq!(
             keys.entry(
                 EntryKind::FunctionRef,
-                false,
                 Some(&table.fn_abis[definition.0 as usize])
             ),
             keys.entry(
                 EntryKind::FunctionRef,
-                false,
                 Some(&table.fn_abis[callable.0 as usize])
             ),
             "the declaration and callable type describe the same thunk"

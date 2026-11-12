@@ -2372,7 +2372,6 @@ pub(crate) fn execute_frames<O: crate::ownership_trace::Observer>(
                 codes.get(code),
                 depth,
                 limits,
-                operations.energy_metered(),
                 runtime.trace_mode,
                 execution,
             )
@@ -2421,24 +2420,6 @@ pub(crate) fn execute_frames<O: crate::ownership_trace::Observer>(
                 execution.charged += 1;
             }
             frame.instruction += 1;
-            if event.kind.counted() && !operations.energy_charge() {
-                record_failure(
-                    runtime.trace_mode,
-                    execution,
-                    failure(
-                        sources,
-                        *span,
-                        hirsel_core_contract::ENERGY_RULE,
-                        "OutOfEnergy",
-                    )?,
-                    anchor(frame, *span),
-                    frame.caller.as_ref(),
-                );
-                frame.ending = Some(crate::resources::Ending::Failed);
-                if let Some(id) = cleanup {
-                    enqueue_cleanup(frame, id, *span)?;
-                }
-            }
             continue;
         }
         // Issue #34: failure occurs at the next scheduled site after entry.
@@ -3261,7 +3242,6 @@ fn dispatch(
     code: &crate::code::Code,
     depth: usize,
     limits: Limits,
-    metered: bool,
     trace_mode: TraceMode,
     execution: &mut Execution,
 ) -> bool {
@@ -3301,9 +3281,8 @@ fn dispatch(
         match &op.kind {
             OpKind::General => return true,
             OpKind::Charge => {
-                // The general step denies the charge past the budget, and
-                // charges the task's energy meter.
-                if metered || limits.source == Some(execution.charged) {
+                // The general step denies the charge past the budget.
+                if limits.source == Some(execution.charged) {
                     return true;
                 }
                 if limits.source.is_some() {

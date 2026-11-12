@@ -250,7 +250,6 @@ fn a_forged_or_foreign_program_descriptor_assignment_is_rejected() {
             &program.finalizers,
         ),
         finalizers: &program.finalizers,
-        charged_finalizers: &Default::default(),
         units: &units,
         glue: &glue,
         failures: &codes,

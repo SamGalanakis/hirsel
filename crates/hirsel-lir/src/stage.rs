@@ -86,7 +86,6 @@ impl StageKind {
             | Opcode::MulAdd
             | Opcode::ScalarUnary
             | Opcode::Check
-            | Opcode::Charge
             | Opcode::StorageLive
             | Opcode::StorageDead
             | Opcode::EndScope

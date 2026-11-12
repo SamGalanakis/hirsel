@@ -19,7 +19,6 @@ pub mod descriptor_registry;
 pub mod discharge;
 pub mod effect;
 pub mod emission;
-pub mod energy;
 pub mod fragment;
 pub mod glue;
 pub mod handle_scan;
@@ -65,7 +64,7 @@ pub use stage::{
 /// The front-end interface version these schemas consume
 /// (`QueryEnvironment.interface_version`). A change invalidates every artifact.
 pub const INTERFACE_VERSION: u32 = 11;
-pub const LIR_VERSION: u32 = 70;
+pub const LIR_VERSION: u32 = 71;
 pub const LAYOUT_VERSION: u32 = 10;
 /// Hirsel cross-unit ABI v5: adds independently checked nested scoped entry identity.
 pub const ABI_VERSION: u32 = 5;

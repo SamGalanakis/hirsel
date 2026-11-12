@@ -461,7 +461,6 @@ impl<'t> Unit<'t> {
             instance: instance(name),
             target: table.table.target,
             abi: table.abi(abi),
-            charged: false,
         });
         lir.tables.task_domains = 1;
         lir.scopes.push(ScopeInfo { parent: None });
@@ -898,7 +897,6 @@ impl<'t> Unit<'t> {
             kind,
             definition: path(name),
             instance: Some(instance(name)),
-            charged: false,
         };
         if let Some(i) = self
             .builder

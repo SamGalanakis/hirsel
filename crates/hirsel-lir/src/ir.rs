@@ -449,25 +449,6 @@ pub enum ArithMode {
     Checked,
 }
 
-/// What one `Inst::Charge` takes from the task's allowance (STORE-11 "Energy").
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub enum Energy {
-    /// One unit: a loop iteration.
-    Iteration,
-    /// One unit at a body's entry. Emission may leave it out for a body in no
-    /// call cycle that calls no unknown or indirect target: such a body's work
-    /// is bounded by its loops' charges and its callees'.
-    Entry,
-    /// A counted loop's trip count, charged once at its entry: the integers
-    /// from `from` to `to` (both included when `inclusive`), zero when that
-    /// range is empty, at most `u64::MAX`. Both are scalars of one integer kind.
-    Span {
-        from: ValueId,
-        to: ValueId,
-        inclusive: bool,
-    },
-}
-
 /// What `Inst::ScalarUnary` computes (LIR schema revision 41,
 /// docs/spec/core-library.md "Numeric and string details"). Every op is
 /// exactly defined, so each engine gives the same bits.
@@ -657,13 +638,6 @@ pub enum Inst {
     /// A source check; the failure edge carries its rule.
     Check {
         condition: ValueId,
-        failure: FailureId,
-    },
-    /// Takes `energy` from the task's allowance (STORE-11 "Energy"): the
-    /// failure edge, OutOfEnergy, is taken when fewer units remain. Where a
-    /// body runs out, and how much it uses, are the engine's.
-    Charge {
-        energy: Energy,
         failure: FailureId,
     },
     // Storage and addresses.
@@ -1625,11 +1599,6 @@ pub struct Symbol {
     pub kind: SymbolKind,
     pub definition: DefPath,
     pub instance: Option<ContentHash>,
-    /// The charged instance of a function, or the charged copy of a constant
-    /// (STORE-11 energy, LIR schema revision 68): what code that runs under a
-    /// budget names. Charged code names no uncharged source-defined function
-    /// or constant; C refuses it by this flag alone (`energy::check`).
-    pub charged: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -1928,10 +1897,6 @@ pub struct UnitHeader {
     pub implementation_revision: ContentHash,
     /// Digest of the unit's `InstanceKey`.
     pub instance: ContentHash,
-    /// Whether this is the charged instance of its definition (STORE-11
-    /// energy): `Symbol::charged` of the unit's own symbol. C checks it
-    /// against the unit's selected source body.
-    pub charged: bool,
     pub target: ContentHash,
     pub abi: FnAbiId,
 }
@@ -2201,7 +2166,6 @@ impl Inst {
                 ..
             } => vec![version, displaced_version],
             Inst::Check { .. }
-            | Inst::Charge { .. }
             | Inst::StorageLive { .. }
             | Inst::StorageDead { .. }
             | Inst::EndScope { .. }
@@ -2240,7 +2204,6 @@ impl Inst {
             | Inst::Hash { failure, .. }
             | Inst::Decode { failure, .. }
             | Inst::Check { failure, .. }
-            | Inst::Charge { failure, .. }
             | Inst::Address { failure, .. }
             | Inst::Copy { failure, .. }
             | Inst::FlatCopy { failure, .. }
@@ -2327,7 +2290,6 @@ impl Inst {
             | Inst::Hash { failure, .. }
             | Inst::Decode { failure, .. }
             | Inst::Check { failure, .. }
-            | Inst::Charge { failure, .. }
             | Inst::Address { failure, .. }
             | Inst::Copy { failure, .. }
             | Inst::FlatCopy { failure, .. }
@@ -2523,13 +2485,6 @@ impl Inst {
             }
             Self::Check { condition, failure } => {
                 f(R::Value(condition));
-                f(R::Failure(failure));
-            }
-            Self::Charge { energy, failure } => {
-                if let Energy::Span { from, to, .. } = energy {
-                    f(R::Value(from));
-                    f(R::Value(to));
-                }
                 f(R::Failure(failure));
             }
             Self::StorageLive { slot } | Self::StorageDead { slot, if_live: _ } => f(R::Slot(slot)),
@@ -3548,11 +3503,6 @@ snapshot_enum!(ConvertMode {
     Reinterpret,
     FloatResize
 });
-snapshot_enum!(Energy {
-    Iteration,
-    Entry,
-    Span { from, to, inclusive }
-});
 snapshot_enum!(ArithMode {
     Wrapping,
     Saturating,
@@ -3615,7 +3565,6 @@ snapshot_enum!(Inst {
     MulAdd { result, left, right, addend },
     ScalarUnary { result, op, operand },
     Check { condition, failure },
-    Charge { energy, failure },
     StorageLive { slot },
     StorageDead { slot, if_live },
     EndScope { scope },
@@ -3830,8 +3779,7 @@ snapshot_enum!(SymbolKind {
 snapshot_struct!(Symbol {
     kind,
     definition,
-    instance,
-    charged
+    instance
 });
 snapshot_struct!(LoanInfo { address, mutable });
 snapshot_struct!(SiteRange { source, start, end });
@@ -3923,7 +3871,6 @@ snapshot_struct!(UnitHeader {
     definition,
     implementation_revision,
     instance,
-    charged,
     target,
     abi
 });

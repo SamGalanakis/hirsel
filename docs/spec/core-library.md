@@ -421,17 +421,7 @@ fn inbox.take(mut i: Inbox, wait: bool) -> Option[List[Arrival]]
 fn arrival.request(a: Arrival) -> Arrived
 fn arrival.end(take a: Arrival, end: CallEnd) -> ()
 fn test.runner(t: Test) -> Runner
-// STORE-11 Energy: a store's energy scopes, named only by std@1's store machinery
-N fn energy.enter(budget: u64) -> Energy
-N fn energy.leave(take saved: Energy) -> EnergyUsed
 ```
-
-`energy.enter(budget)` opens an energy scope of `budget` units inside the current one and
-returns its `Energy`, an opaque linear token; `energy.leave` closes the innermost open
-scope, which must be the one its token names, and returns its `EnergyUsed`,
-`{ units: u64, exhausted: bool }`: the units the scope spent, its cleanup reserve
-included, and whether it ran out. Only std@1's store names them, one scope around each
-body it applies ([STORE-11](storage.md#store-11-engine-and-storage-seam) "Energy").
 
 A core operation that only advances an erased state it takes `mut` (`iter.next`) is
 declared at the argument's own captures, so `iter.next(mut it)` and `for x in mut it` over
@@ -996,7 +986,7 @@ waits due at it resume.
 `{ kind: FailureKind, rule: String, site: SourceSite, spawn: List[u64], cause: Option[box Failure] }`,
 where `SourceSite` is `{ definition: String, line: u64, column: u64 }`, using a fully
 qualified definition path and one-based source coordinates, and `FailureKind` is
-`Check | Contract | Depth | OutOfSpace | DeadMutex | OutOfEnergy`; all three are `serializable`. The site follows the failing
+`Check | Contract | Depth | OutOfSpace | DeadMutex`; all three are `serializable`. The site follows the failing
 operation and [`@track_caller`](failure.md#fail-1-kinds), rather than the isolation
 boundary. Tooling additionally retains the original operation and the complete file
 identity for human and JSON reports.

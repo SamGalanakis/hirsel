@@ -217,12 +217,7 @@ impl Inline for Importer<'_> {
         Ok(())
     }
     fn intern_symbol(&mut self, symbol: &Symbol) -> SymbolId {
-        self.symbol(
-            symbol.kind,
-            &symbol.definition,
-            symbol.instance,
-            symbol.charged,
-        )
+        self.symbol(symbol.kind, &symbol.definition, symbol.instance)
     }
     fn iterator_closure(
         &mut self,
@@ -278,12 +273,7 @@ impl Inline for Importer<'_> {
         );
         let environment = request.environment.unwrap();
         let direct = self.require(request)?;
-        let code = self.symbol(
-            SymbolKind::Function,
-            helper,
-            direct.symbol.instance,
-            direct.symbol.charged,
-        );
+        let code = self.symbol(SymbolKind::Function, helper, direct.symbol.instance);
         let anchor = self.anchor_here();
         let captures = PoolRange::push(&mut self.out.pools.captures, values.iter().copied());
         let closure = hirsel_lir::ir::ClosureId(self.out.tables.closures.len() as u32);

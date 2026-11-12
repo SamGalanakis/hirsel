@@ -198,7 +198,6 @@ fn fixture(
         kind: SymbolKind::Function,
         definition: hirsel_syntax::DefPath::core("receipt_capture_entered"),
         instance: Some(hash),
-        charged: false,
     });
     let capture_values = (0..3)
         .map(|ordinal| CaptureValue {
@@ -362,7 +361,6 @@ fn probe(target: &TargetSpec, once: bool, usage: CaptureUse, malformed: u8) -> (
         layouts: &table,
         registry: registry.clone(),
         finalizers: &finalizers,
-        charged_finalizers: &Default::default(),
         units: &Default::default(),
         glue: &glue,
         failures: &failures,

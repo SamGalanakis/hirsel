@@ -189,7 +189,6 @@ pub(super) fn variant(
         kind: SymbolKind::Type,
         definition: hirsel_syntax::DefPath::core(name),
         instance: None,
-        charged: false,
     });
     let fields = PoolRange::push(
         &mut b.ed.unit.pools.fields,

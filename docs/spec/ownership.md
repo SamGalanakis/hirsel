@@ -123,7 +123,7 @@ whatever the mode, except `mut`.
 fn len(xs: List[u64]) -> u64 { list.len(xs) }
 fn add(mut xs: List[u64], x: u64) -> Result[(), Capacity] { list.push(mut xs, x) }
 fn eat(take xs: List[u64]) {}
-fn use_all(take xs: List[u64]) { let n = len(xs); add(mut xs, n); eat(take xs) }
+fn use_all(take xs: List[u64]) { let n = len(xs); let _ = add(mut xs, n); eat(take xs) }
 ```
 ```hirsel
 fn f(take xs: List[u64]) { eat(xs) }                      // refused: OWN-7, needs take xs
@@ -139,7 +139,8 @@ for a lexical **extent**:
 - otherwise a temporary: to the end of its statement;
 - a parameter view: for the call.
 
-There is no last-use end and no mutable view. A stable value used where a view is expected
+There is no last-use end and no mutable view. Where a plain `T` is expected, a `View[T]`
+of a plain `T` reads as the value. A stable value used where a view is expected
 is that view ([OWN-25](#own-25-stable-values-are-read-as-views)).
 
 ```hirsel

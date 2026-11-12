@@ -75,6 +75,46 @@ mod tests {
         installed.publish(&store, &records).unwrap();
         (store, compiler, package, reference)
     }
+    /// The attack's schedule: the index skips one section write of a new
+    /// publication and admits everything after it, header and association
+    /// included. Publication must fail and the root keep serving the
+    /// installation it had, rather than associate a header whose rows section
+    /// never reached storage.
+    #[test]
+    fn a_skipped_section_write_fails_publication_and_keeps_the_old_header() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, compiler, package, _) = fixture(directory.path());
+        let old = InstalledPackage::open(&store, &package, compiler)
+            .unwrap()
+            .package
+            .identity;
+        let next = (*InstalledPackage::open(&store, &package, compiler)
+            .unwrap()
+            .package)
+            .clone();
+        // A new product, so the next image's rows section is new content.
+        let product = store
+            .put(
+                Domain {
+                    kind: 77,
+                    schema: 1,
+                },
+                b"next product",
+            )
+            .unwrap();
+        let mut records = records_of(&next);
+        records.rows.insert(
+            ContentHash::of_bytes(b"next row"),
+            (Action(ContentHash::of_bytes(b"next action")), product),
+        );
+        records.contents.insert(product.output.0, product);
+        // The rows section is the image's first write.
+        store.skip_index_publications_for_test(1);
+        next.publish(&store, &records).unwrap_err();
+        let fresh = hirsel_artifact_store::Store::new(directory.path().to_owned());
+        let served = InstalledPackage::open(&fresh, &package, compiler).unwrap();
+        assert_eq!(served.package.identity, old);
+    }
     /// The rows and contents an opened package lists, to republish it.
     fn records_of(installed: &InstalledPackage) -> InstallationRecords {
         InstallationRecords {
@@ -599,12 +639,11 @@ mod tests {
             .unwrap();
         let mut records = records_of(&installed.package);
         records.contents.insert(reference.output.0, reference);
-        installed
-            .package
-            .as_ref()
-            .clone()
-            .publish(&store, &records)
-            .unwrap();
+        let package_image = installed.package.as_ref().clone();
+        // The open operation's batch holds this store's writes pending; end
+        // it so the content and the new image reach published storage.
+        drop(installed);
+        package_image.publish(&store, &records).unwrap();
         let installed = InstalledPackage::open(&store, &package, compiler).unwrap();
         let budget = hirsel_engine_admission::ProcessBudget::new(2 << 20);
         let _transport = budget.reserve(encoded.len() as u64).unwrap();
@@ -1021,6 +1060,10 @@ impl InstalledPackage {
         store: &hirsel_artifact_store::Store,
         records: &InstallationRecords,
     ) -> std::io::Result<(Address, hirsel_artifact_store::Association)> {
+        // Without a retention scope the store reports a skipped index
+        // publication as success; with one, any write this publication makes
+        // that the index does not admit fails it.
+        let _retention = store.retention_scope()?;
         let mut records = records.clone();
         let definitions = self.index_definitions(store, &mut records)?;
         self.rows = records
@@ -1061,12 +1104,24 @@ impl InstalledPackage {
         )
         .map_err(std::io::Error::other)?;
         let reference = image::build(store, &mut self, &definitions)?;
-        // Associate last, after fresh reads prove the complete installation
-        // exists. The header's one association is the commit: until it
-        // lands, the previous header and every content and section it lists
-        // stay intact, since content is immutable and no row of it lives in
-        // the index.
-        self.check_records(store).map_err(std::io::Error::other)?;
+        // Associate last, after reading back the header and everything it
+        // lists through published storage: a fresh store holds none of this
+        // one's pending bytes. The header's one association is the commit:
+        // until it lands, the previous header and every content and section
+        // it lists stay intact, since content is immutable.
+        hirsel_artifact_store::Store::new(store.root().to_owned())
+            .verify_records(
+                std::iter::empty(),
+                self.contents
+                    .iter()
+                    .copied()
+                    .chain(self.rows.iter().map(|(_, row)| row.reference))
+                    .chain(self.sections.iter().flat_map(image::Sections::references))
+                    .chain([reference]),
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!("incomplete package publication: {error}"))
+            })?;
         let action = Action(reference.output.0);
         store.associate(address(), action, reference)?;
         Ok((

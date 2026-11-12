@@ -46,6 +46,9 @@ pub(super) struct State {
     epoch_limits: Option<(usize, usize)>,
     #[cfg(test)]
     crash_after_segment: bool,
+    /// Index publications still to report skipped, as if contended.
+    #[cfg(feature = "test-support")]
+    skip_publications: usize,
 }
 #[derive(Clone)]
 struct Index {
@@ -163,6 +166,13 @@ impl Store {
     }
     fn state(&self) -> MutexGuard<'_, State> {
         self.packed.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// Report the next `count` index publications of this store skipped, as a
+    /// contended root would: the fault a publication must not mistake for
+    /// success.
+    #[cfg(feature = "test-support")]
+    pub fn skip_index_publications_for_test(&self, count: usize) {
+        self.state().skip_publications = count;
     }
     /// Publish small records together, bounded to 1024 records or 1 MiB of
     /// scratch. Nested scopes share the same transaction; readers of another
@@ -422,7 +432,16 @@ impl Store {
         let mut conflict_retry = true;
         loop {
             self.count(Counter::IndexPublicationAttempts, 1);
-            match index::publish_delta(&self.root, &delta, epoch)? {
+            #[cfg(feature = "test-support")]
+            let outcome = if state.skip_publications != 0 {
+                state.skip_publications -= 1;
+                index::PublishOutcome::Skipped(index::SkipReason::Contended)
+            } else {
+                index::publish_delta(&self.root, &delta, epoch)?
+            };
+            #[cfg(not(feature = "test-support"))]
+            let outcome = index::publish_delta(&self.root, &delta, epoch)?;
+            match outcome {
                 index::PublishOutcome::Published {
                     maintenance_due, ..
                 } => {

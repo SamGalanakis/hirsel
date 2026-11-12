@@ -50,7 +50,11 @@ are dealt to the windows in turn, and run K makes those dealt to window K, so
 the windows together make every check (see
 [this case](STORE/STORE-8-reader-table-law-log-run.hir)).
 `tools/corpus --selection store-land` and `--selection store-milestone` name
-the swept STORE cases each STORE land and each milestone runs.
+the swept STORE cases each STORE land and each milestone runs: a land runs the
+share of each family that [store-land.tsv](../native-tests/regressions/store-land.tsv)
+names, rotating land by land, and a milestone every family whole.
+`tools/corpus --native --selection store-land --plan` prints a land's planned
+pool CPU-h from [heap-costs.tsv](../native-tests/regressions/heap-costs.tsv).
 
 For multiple packages, put an exact `case.hir.json` sidecar beside the case.
 It is an ordinary schema-1 launch manifest: `package` fixes the importing

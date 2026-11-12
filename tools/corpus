@@ -21,7 +21,8 @@ A case with a `// cuts: A..=B` header runs once per cut K, as `case@K`: a
 prefix selects all its cuts, `case@K` (native only; the interpreter runs every
 cut of the file) that one. `--selection store-land` and `--selection
 store-milestone` name the cut-sweep selections STORE lands and milestones run
-(named_selection).
+(named_selection; sync.py NATIVE_STORE_LAND holds the shares a land runs), and
+`--native --plan` prints a selection's planned pool CPU-h without running it.
 
 `--heap-parts N` distributes the entire fault domain of explicitly selected
 heap+inject configurations. Every part checks the clean run; aggregation requires
@@ -75,15 +76,11 @@ import event_logs  # noqa: E402
 from run_failures import first_error_line  # noqa: E402
 from sync import (CONFORMANCE_SLICE_PROGRAMS, NATIVE_CONFIG_SECONDS, NATIVE_COVER_PART_SECONDS,  # noqa: E402
                   NATIVE_COVER_PARTS, NATIVE_HEAP_COSTS, NATIVE_HEAP_FAULT_SECONDS, NATIVE_HEAP_PART_SECONDS,
-                  NATIVE_HEAP_ROTATIONS,
+                  NATIVE_HEAP_ROTATIONS, NATIVE_STORE_LAND,
                   NATIVE_SELECTED_SLICES, NATIVE_SLICE_SECONDS, SELECTED_SLICES)
 
 CUT = re.compile(r'^(.+\.hir)@(\d+)$')
 STORE = 'conformance/STORE/'
-# The cut-sweep cases every STORE land runs (orchestrator, 2026-11-12), and the
-# objects-cuts kinds one of whose cases each land also runs a third of.
-LAND_CASES = ['STORE-11-fence-cuts-fail-run.hir', 'STORE-11-crash-cuts-crash-run.hir']
-OBJECTS_CUTS = 'STORE-11-objects-cuts-'
 
 
 def runs_of(corpus, prefixes):
@@ -99,27 +96,43 @@ def runs_of(corpus, prefixes):
     return selected
 
 
+def land_rows():
+    """NATIVE_STORE_LAND rows: (key, N), in file order."""
+    rows = []
+    for line in (ROOT / NATIVE_STORE_LAND).read_text().splitlines():
+        if line and not line.startswith('#'):
+            key, shares, _ = line.split('\t')
+            rows.append((key, int(shares)))
+    return rows
+
+
 def named_selection(name, corpus, parent):
-    """A named selection's prefixes. `store-land`: what every STORE land runs,
-    LAND_CASES whole and a third of the cuts of one objects-cuts case, the
-    kind and the third derived from the land's parent commit. `store-milestone`:
-    every other cut-sweep case of conformance/STORE (each of place-store's trim
-    lands, and any change to the heap model or the objects provider)."""
+    """A named selection's prefixes. `store-land`: per NATIVE_STORE_LAND row,
+    one case of its key and one share of that case's cuts, both from the count
+    of commits up to the land's parent, printed. `store-milestone`: every
+    cut-sweep case of conformance/STORE but those every land runs whole."""
     swept = sorted(c for c in corpus if c.startswith(STORE)
                    and conformance.run_ids(c, (ROOT / c).read_text()) != [c])
+    rows = land_rows()
     if name == 'store-milestone':
-        return [c for c in swept if Path(c).name not in LAND_CASES]
+        whole = {c for key, shares in rows if shares == 1 for c in swept if c.startswith(key)
+                 and len([d for d in swept if d.startswith(key)]) == 1}
+        return [c for c in swept if c not in whole]
     if name != 'store-land':
         raise ValueError(f'unknown selection {name}; known: store-land, store-milestone')
-    digest = int(subprocess.check_output(['git', 'rev-parse', parent], cwd=ROOT, text=True).strip()[:12], 16)
-    kinds = [c for c in swept if Path(c).name.startswith(OBJECTS_CUTS)]
-    case = kinds[digest % len(kinds)]
-    third = digest // len(kinds) % 3
-    cuts = conformance.run_ids(case, (ROOT / case).read_text())
-    chosen = [run for i, run in enumerate(cuts) if i % 3 == third]
-    print(f'corpus: store-land at parent {parent}: {Path(case).name}, third {third + 1}/3 of its cuts '
-          f'({", ".join(run.rsplit("@", 1)[1] for run in chosen)})', file=sys.stderr, flush=True)
-    return [STORE + land for land in LAND_CASES] + chosen
+    count = int(subprocess.check_output(['git', 'rev-list', '--count', parent], cwd=ROOT, text=True))
+    chosen = []
+    for key, shares in rows:
+        cases = [c for c in swept if c.startswith(key)]
+        if not cases:
+            raise ValueError(f'{NATIVE_STORE_LAND}: {key} names no cut-sweep case')
+        case = cases[count // shares % len(cases)]
+        share = count % shares
+        cuts = [run for i, run in enumerate(conformance.run_ids(case, (ROOT / case).read_text())) if i % shares == share]
+        print(f'corpus: store-land at parent {parent} (commit {count}): {Path(case).name}, share {share + 1}/{shares} '
+              f'of its cuts ({", ".join(run.rsplit("@", 1)[1] for run in cuts)})', file=sys.stderr, flush=True)
+        chosen += cuts
+    return chosen
 
 
 def heap_costs():
@@ -141,6 +154,33 @@ def heap_cost(run, costs):
     rule = re.match(r'(.*/[A-Z]+-\d+)-', run)
     family = [cost for key, (_, cost, _) in costs.items() if rule and key.startswith(rule[1] + '-')]
     return max(family or [cost for _, cost, _ in costs.values()])
+
+
+def plan(runs, costs):
+    """Print the selection's planned pool CPU-h a native smoke run costs, per
+    case and in total: each run's clean configurations (NATIVE_CONFIG_SECONDS
+    each) and, from its NATIVE_HEAP_COSTS row, its heap+inject campaign of the
+    row's sites at the row's seconds a site, one clean run checked a heap part.
+    Returns 2 when a run has no measured row."""
+    unmeasured = sorted({CUT.sub(r'\1', run) for run in runs
+                         if not any(run == key or run.startswith(key) for key in costs)})
+    if unmeasured:
+        print(f'corpus: no {NATIVE_HEAP_COSTS} row for {", ".join(unmeasured)}; measure it first', file=sys.stderr)
+        return 2
+    total, by_case = 0.0, {}
+    for run in runs:
+        sites, cost, _ = costs[max((key for key in costs if run == key or run.startswith(key)), key=len)]
+        heap = sites * cost
+        parts = math.ceil(heap / NATIVE_HEAP_FAULT_SECONDS)
+        seconds = heap + (3 + parts) * NATIVE_CONFIG_SECONDS
+        case = CUT.sub(r'\1', run)
+        count, sum_ = by_case.get(case, (0, 0.0))
+        by_case[case] = (count + 1, sum_ + seconds)
+        total += seconds
+    for case, (count, seconds) in by_case.items():
+        print(f'plan: {Path(case).name}: {count} runs, {seconds / 3600:.2f} CPU-h')
+    print(f'plan: {len(runs)} runs, {total / 3600:.2f} CPU-h')
+    return 0
 
 
 def heap_rotations():
@@ -248,12 +288,15 @@ def main():
     parser.add_argument('--selection', choices=['store-land', 'store-milestone'],
                         help='a named selection instead of prefixes (see named_selection)')
     parser.add_argument('--parent', default='HEAD^', help="--selection store-land: the land's parent commit")
+    parser.add_argument('--plan', action='store_true', help="--native: print the selection's planned CPU-h and run nothing")
     parser.add_argument('prefixes', nargs='*', metavar='PREFIX')
     args = parser.parse_args()
     if bool(args.selection) == bool(args.prefixes):
         parser.error('name either prefixes or one --selection')
     if (args.parts or args.config or args.full_matrix or args.heap_parts != 1) and not args.native:
         parser.error('--parts, --config and --full-matrix need --native')
+    if args.plan and not (args.native and args.config in ([], ['smoke']) and args.heap_parts == 1):
+        parser.error('--plan plans a native smoke run: --native, no --config, --full-matrix or --heap-parts')
     if args.config and args.full_matrix:
         parser.error('--config and --full-matrix exclude each other')
     if args.native and not (args.config or args.full_matrix):
@@ -276,6 +319,8 @@ def main():
     # A swept case counts once per cut: each is a run with its own verdict.
     runs = runs_of(corpus, prefixes)
     selected = len(runs)
+    if args.plan:
+        return plan(runs, heap_costs())
     if args.native:
         return native(prefixes, runs, args)
     # The interpreter runs a swept case's every cut; a `case@K` prefix selects its file.

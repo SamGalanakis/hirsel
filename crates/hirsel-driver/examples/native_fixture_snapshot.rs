@@ -15,7 +15,7 @@ fn main() {
     with_compiler_stack(move || {
         let source = std::fs::read_to_string(&arguments[0]).unwrap();
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
-        let file = engine.sources.add("fixture.hir", source).unwrap();
+        let file = engine.sources.add("fixture.hir", source.clone()).unwrap();
         let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let raw = engine.export_native_input().unwrap();

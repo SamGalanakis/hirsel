@@ -17,15 +17,11 @@ this state; every rule of this specification that refuses a body is decided from
   ([OWN-11](#own-11-call-arguments), [OWN-12](#own-12-assignment));
 - the **anchor sets**: for each scoped value, the places and regions it reads
   ([OWN-19](#own-19-scoped-values));
-- the **brand epochs**: for each slot, a number advanced by every assignment, replacement,
-  move or scope end of it; a branded value records the epoch of its brand owner when it
-  is made ([MEM-18](memory.md#mem-18-brands));
 - the published **type summaries** ([OWN-2](#own-2-type-summaries)), which are read and
   never recomputed.
 
 At a join ([OWN-16](#own-16-joins)), availability joins by its table, freeze records,
-reservations and anchor sets join by union, and a slot whose incoming brand epochs differ
-gets a fresh epoch. How an implementation represents this state, and how it emits drop
+reservations and anchor sets join by union. How an implementation represents this state, and how it emits drop
 flags, is its choice; neither changes what is accepted.
 
 ### OWN-1: Representation is declared once
@@ -49,22 +45,32 @@ fn bad(x: own Inbox) {}                        // refused: LANG-5, no representa
 
 ### OWN-2: Type summaries
 
-Each type declaration publishes one **summary**: its kind (OWN-3), its declared bounds
-(OWN-4) and `uses` ([CAP-3](capabilities.md#cap-3-callable-authority)), its region
-parameters ([MEM-6](memory.md#mem-6-roots)), its logical size
-([MEM-26](budgets.md#mem-26-logical-charges)) and its layout obligations
-([MEM-9](memory.md#mem-9-compact-types)). The summary is computed once, from the
-declaration's own fields and the published summaries of the types they hold inline; the
-indirections `Box`, `List`, `Map`, `Rc`, `Arc`, `Task`, `Sender`, `Receiver`, callables and
-stable references have a fixed summary that does not read their payload's. Summaries are
-computed in this dependency order and never iterated. A declaration whose computation
-re-enters a type still being computed contains itself inline and is refused; the refusal
-is reported at the field, continuing the cycle, of the cycle member whose definition
-identity (package, module path, byte offset) is least. A generic declaration's summary is
-stated in terms of its parameters and instantiated from the arguments' summaries at each
-use. A `type` whose fields are all plain is **plain**: it is copied by `let`, by passing and
-by capture, and has no cleanup. Scalars, `bool`, `char`, unit, plain callables, and tuples,
-`Option` and `Result` of plain types are plain.
+Each type declaration publishes one **summary**. This is its whole content:
+
+- its kind (OWN-3) and declared bounds (OWN-4);
+- its region parameters and anchors ([MEM-6](memory.md#mem-6-roots), OWN-22);
+- its logical size ([MEM-24](budgets.md#mem-24-logical-charges)), its layout obligations
+  ([MEM-9](memory.md#mem-9-compact-types)) and its declared twin
+  ([MEM-17](memory.md#mem-17-clone));
+- its **holds** set: which of resource, capability, scoped value and stable reference it
+  contains at any depth.
+
+Kind, size and layout read only the fields held inline. The indirections `Box`, `List`,
+`Map`, `Rc`, `Arc`, `Task`, `Sender`, `Receiver`, callables and stable references have a
+fixed size and layout that does not read their payload's. These parts are computed in
+dependency order and never iterated. A declaration whose computation re-enters a type
+still being computed contains itself inline and is refused; the refusal is reported at the
+field, continuing the cycle, of the cycle member whose definition identity (package, module
+path, byte offset) is least. The holds set reads every field, through indirections too:
+types that name each other through fields, at any depth, form a group, and every member of
+a group holds the union of what the group's fields hold directly and what the other types
+they name hold. Where a rule needs a type to hold nothing, a type parameter counts as
+holding everything unless its bound is `plain`. A generic declaration's summary is stated
+in terms of its parameters and instantiated from the arguments' summaries at each use. A
+`type` whose fields are all plain is **plain**: it is copied by `let`, by passing and by
+capture, and has no cleanup. Scalars, `bool`, `char`, unit, plain callables, and tuples,
+`Option` and `Result` of plain types are plain. The checker reads summaries and never
+recomputes them.
 
 ```hirsel
 type Point { x: i64, y: i64 }
@@ -83,8 +89,8 @@ Every type has exactly one kind. A value is **copyable** when `let` copies it.
 | kind | members | `let` | cleanup |
 |---|---|---|---|
 | plain | OWN-2 | copies | none |
-| own | `type` with a non-plain field; `Box`, `List`, `String`, `Map`, `own fn` | moves | fields in reverse declaration order, then its blocks |
-| stable | `stable type`; `Text`, the spans | copies | freed with its region |
+| own | `type` with a non-plain field; `Box`, `List`, `String`, `Map`, the builders, `own fn` | moves | fields in reverse declaration order, then its blocks |
+| stable | `stable type`; `Text`, `FixedSpan` | copies | freed with its region |
 | resource | `resource type`; `Sender`, `Receiver`, `Task`; capabilities that hold state | moves | finalizer, then fields |
 | counted | `Rc[T]`, `Arc[T]` | moves | release ([MEM-16](memory.md#mem-16-counting)) |
 | scoped | `View[T]`, `Region`, `Dest`, `scoped fn`, `scoped type` | copies when every component is copyable, otherwise moves | cleans each owned component |
@@ -178,6 +184,7 @@ fn eat(take xs: List[u64]) {}
 fn use_all(take xs: List[u64]) { let n = len(xs); let _ = add(mut xs, n); eat(take xs) }
 ```
 ```hirsel
+fn eat(take xs: List[u64]) {}
 fn f(take xs: List[u64]) { eat(xs) }                      // refused: OWN-7, needs take xs
 ```
 
@@ -234,14 +241,14 @@ fn f(mut xs: List[List[u8]], i: u64, j: u64) {
 
 ### OWN-10: Freezes
 
-A live view of an owning place (own, resource or counted) **freezes** it for the view's
-extent: moving, lending `mut`, assigning, replacing, destructuring or dropping an
+A live view **freezes** every place in its anchor set, whatever the place's kind, for the
+view's extent: moving, lending `mut`, assigning, replacing, destructuring or dropping an
 overlapping place is refused. Several views of overlapping places may coexist. Copying a
 view into another slot or aggregate extends its anchors' freezes to that slot's extent,
 which must end before every anchor's scope does. A freeze ends on every exit edge of its
 extent, before the owners of the exited blocks are cleaned
-([FAIL-8](failure.md#fail-8-exit-edge-cleanup)). Stable values are never frozen; they are
-never written.
+([FAIL-8](failure.md#fail-8-exit-edge-cleanup)). A view of a stable value is anchored to its
+region, not to a place, and freezes nothing: stable storage is never written.
 
 ```hirsel
 fn f(mut m: Inbox) -> u64 {
@@ -282,7 +289,7 @@ Compound assignment (`+=`) is plain-only: it resolves `q` once, reads its old va
 evaluates the right side, computes, and installs.
 
 ```hirsel
-fn f(mut s: String) -> Result[(), Capacity] { s = string.copy("new")?; Ok(()) }  // old s dropped at install
+fn f(mut s: String) -> Result[(), Capacity] { s = string.from("new")?; Ok(()) }  // old s dropped at install
 ```
 ```hirsel
 fn f(mut xs: List[u64]) { xs[0] = { xs = list.new(); 7 } }  // refused: OWN-12, xs is reserved
@@ -351,29 +358,33 @@ A maybe slot cannot be read, viewed, lent or moved; to consume conditionally, us
 `Option`. It can be assigned (OWN-12) and is cleaned by its flag (OWN-18).
 
 ```hirsel
-fn f(take s: String, c: bool) { if c { consume(take s) } }     // s is maybe; cleaned by flag
+fn f(take s: String, c: bool) { if c { let _ = string.into_bytes(take s) } }   // s is maybe
 ```
 ```hirsel
-fn f(take s: String, c: bool) -> String { if c { consume(take s) }; s }  // refused: OWN-16
+fn f(take s: String, c: bool) -> String { if c { let _ = string.into_bytes(take s) }; s }
+                                                          // refused: OWN-16, s is maybe
 ```
 
 ### OWN-17: Loops
 
 The state of every slot at a loop head is its state on entry; a `for take` source is moved
 before the head. Every `continue` and the end of the loop body must leave every slot
-declared outside the loop in its entry state, and may not end a view, anchor or branded
-value that was live at the head: a slot moved in the body must be reassigned before the
+declared outside the loop in its entry state, and may not end a view or anchor that was live
+at the head: a slot moved in the body must be reassigned before the
 back edge. A `while` condition's false edge and each `break` merge into the loop's exit
 state by OWN-16. Nothing is iterated to a fixpoint.
 
 ```hirsel
 fn drain(mut q: List[String]) {
   let mut cur = string.new()
-  while list.len(q) > 0 { consume(take cur); cur = list.pop_or_empty(mut q) }
+  while list.len(q) > 0 {
+    let _ = string.into_bytes(take cur)
+    cur = match list.pop(mut q) { Some(take x) => x, None => string.new() }
+  }
 }
 ```
 ```hirsel
-fn f(take s: String) { loop { consume(take s) } }           // refused: OWN-17
+fn f(take s: String) { loop { let _ = string.into_bytes(take s) } }   // refused: OWN-17
 ```
 
 ### OWN-18: Drop flags
@@ -398,7 +409,7 @@ anchors are live and frozen. It may not be:
 ```hirsel
 fn longest(a: String, b: String) -> u64 {
   let pair = (view a, view b)
-  max(string.byte_len(pair.0), string.byte_len(pair.1))
+  if string.byte_len(pair.0) > string.byte_len(pair.1) { string.byte_len(pair.0) } else { string.byte_len(pair.1) }
 }
 ```
 ```hirsel
@@ -410,13 +421,14 @@ fn keep(xs: List[String]) -> List[View[String]] { list.new() }  // refused: OWN-
 A function that returns a scoped value writes its anchors in the result type: `View[T] in
 p` for one, `R[in a, in b]` for a scoped type with several. Each names a view parameter.
 The caller's argument for each stays frozen for the result's extent. The result may denote
-the anchored argument, a part of it, or (for a core operation) a sub-view (OWN-8); it is a
-scoped value and copies as OWN-3 says. No anchor is inferred from a body.
+the anchored argument, a part of it, or a sub-view that a call gave for that argument (OWN-8),
+including a core operation's; such a result has the argument's anchor and keeps the same
+freeze. It is a scoped value and copies as OWN-3 says. No anchor is inferred from a body.
 
 ```hirsel
 fn first(xs: List[String]) -> Option[View[String]] in xs { list.get(xs, 0) }
 fn show(mut xs: List[String]) {
-  if let Some(s) = first(xs) { print_len(s) }
+  if let Some(s) = first(xs) { let _ = string.byte_len(s) }
   list.clear(mut xs)
 }
 ```
@@ -429,8 +441,7 @@ fn first(xs: List[String]) -> Option[View[String]] { list.get(xs, 0) }  // refus
 A callable type written `scoped fn(..) -> U` is a **scoped callback**: it may capture views
 and lend `mut` (LANG-14), and it is itself scoped (OWN-19). It may be bound by `let` and
 passed on as an argument. Its view parameters last for one invocation, so neither `U` nor
-any capture may be anchored to a parameter; the destination writer of
-[MEM-4](memory.md#mem-4-sized-destinations) is the one built-in exception. Its captures are
+any capture may be anchored to a parameter. Its captures are
 checked as arguments of the call that receives the callback, and their loans last that
 whole call.
 
@@ -441,6 +452,7 @@ fn long_ones(xs: List[String], min: u64) -> u64 {
 }
 ```
 ```hirsel
+fn each(xs: List[String], f: scoped fn(String)) {}
 fn grab(xs: List[String]) -> u64 {
   let mut last: Option[View[String]] = None
   each(xs, fn(s: String) { last = Some(view s) })     // refused: OWN-21, escapes the call
@@ -512,7 +524,7 @@ fn f(r: Region, s: Text in r) -> u64 { let u = s; width(u) + width(s) }
 This table is the single authority for what each operation does to its inputs, its slots
 and its limits, on success and on failure; other rules cite its rows. Notation: `L` live,
 `M` moved, `?` maybe; `chg(n)` and `ref(n)` are admission and refund
-([MEM-23](budgets.md#mem-23-admission), MEM-25); `F(x)` runs `x`'s finalizer and `Rel(x)`
+([MEM-21](budgets.md#mem-21-admission), MEM-23); `F(x)` runs `x`'s finalizer and `Rel(x)`
 releases its fields; `cause+=e` appends a cause ([FAIL-10](failure.md#fail-10-cause-chain));
 "prop" is failure propagation. The last column names the one owner of every surviving value
 after a failure ([FAIL-7](failure.md#fail-7-one-owner-per-survivor)).
@@ -526,7 +538,7 @@ after a failure ([FAIL-7](failure.md#fail-7-one-owner-per-survivor)).
 | T1.3 | `box.new(take x)`, `rc.new(take x)` | as T1.2, then `x` moved into the new node, count 1 for `rc`; no block `x` owns is freed | `Capacity` | the error owns `x` |
 | T1.4 | `arc.new(take x)` | as T1.3; a recorded event ([CONC-10](tasks.md#conc-10-event-order)) | `Capacity`, recorded | the error owns `x` |
 | T1.5 | `clone(x)`, `clone_in(r, x)` | copy L; `chg` per new block; `share` per counted edge | `Capacity` at block k | own blocks copied so far dropped and shares released in reverse, each `ref`; region bytes stay charged until close; `x` untouched |
-| T1.6 | builder append | value moved into the builder | `Capacity` | the error owns the value; the builder unchanged; region bytes stay charged |
+| T1.6 | `span.push(mut b, x)` | value moved into the builder | `Capacity` | the error owns the value; the builder unchanged; region bytes stay charged |
 | T1.7 | `finish(take b)` | stable value L | cannot fail | |
 
 **T2 Bindings and views**
@@ -569,7 +581,7 @@ after a failure ([FAIL-7](failure.md#fail-7-one-owner-per-survivor)).
 | T5.2 | region allocation of n bytes | `chg(n)` | `Capacity` before any write | nothing allocated; earlier bytes stay charged |
 | T5.3 | region close, any exit edge | views end; owners drop; all bytes `ref` | cannot fail | |
 | T5.4 | `bound bytes n { .. }` enter | `chg(n)` to the current limit; a new limit of n is current | `Capacity`: the body does not run | `Error(c)` |
-| T5.5 | bound exit, any edge | views end; owners drop; the unused part `ref`; surviving blocks handed to the parent ([MEM-22](budgets.md#mem-22-limit-records-and-hand-over)) | cannot fail | |
+| T5.5 | bound exit, any edge | views end; owners drop; the unused part `ref`; surviving blocks handed to the parent ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)) | cannot fail | |
 | T5.6 | admission of n | used + n ≤ size: used += n | `Capacity` | per the operation's row |
 | T5.7 | refund of n | used −= n at the block's limit | cannot fail | |
 

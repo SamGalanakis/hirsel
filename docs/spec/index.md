@@ -30,7 +30,7 @@ These goals decide between designs. A rule that would break one of them is wrong
    values passed as parameters ([capabilities](capabilities.md)).
 5. **Deterministic.** Given the same recorded inputs and limits, every run that no run
    stop ends behaves identically on every engine and build ([SEM-8](semantics.md#sem-8-determinism)),
-   including where it runs out of memory ([MEM-26](budgets.md#mem-26-logical-charges)).
+   including where it runs out of memory ([MEM-24](budgets.md#mem-24-logical-charges)).
 6. **One meaning.** No flag, build mode, optimiser or engine changes what is accepted or
    what a program means ([PROG-6](programs.md#prog-6-one-meaning)).
 7. **One accurate rule and site per refusal.** Each refusal names the one rule the program
@@ -43,15 +43,15 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Syntax](syntax.md) | LANG-1 to LANG-5 |
 | [Language](language.md) | LANG-6 to LANG-20 |
 | [Ownership](ownership.md) | OWN-1 to OWN-26 |
-| [Memory](memory.md) | MEM-1 to MEM-20 |
-| [Budgets](budgets.md) | MEM-21 to MEM-30 |
+| [Memory](memory.md) | MEM-1 to MEM-18 |
+| [Budgets](budgets.md) | MEM-19 to MEM-26 |
 | [Failure](failure.md) | FAIL-1 to FAIL-15 |
 | [Tasks](tasks.md) | CONC-1 to CONC-12 |
 | [Capabilities](capabilities.md) | CAP-1 to CAP-8 |
 | [Semantics](semantics.md) | SEM-1 to SEM-8 |
 | [Programs](programs.md) | PROG-1 to PROG-6 |
 | [Diagnostics](diagnostics.md) | PROG-7 and PROG-8 |
-| [Core library signatures](core.md) | |
+| [Core library](core.md) | |
 | [Reserved](reserved.md) | |
 | [Examples](examples.md) | |
 
@@ -70,17 +70,16 @@ what every operation does to ownership, charges and failures. Examples are infor
 |---|---|
 | anchor | [OWN-19](ownership.md#own-19-scoped-values) |
 | blob | [MEM-9](memory.md#mem-9-compact-types) |
-| brand | [MEM-18](memory.md#mem-18-brands) |
 | cancellation point | [CONC-7](tasks.md#conc-7-cancellation-points) |
 | capability | [CAP-1](capabilities.md#cap-1-authority-is-explicit) |
 | commit point | [FAIL-3](failure.md#fail-3-commit-points) |
 | copyable | [OWN-3](ownership.md#own-3-kinds) |
-| current limit, limit | [MEM-21](budgets.md#mem-21-limits) |
+| current limit, limit | [MEM-19](budgets.md#mem-19-limits) |
 | event | [CONC-10](tasks.md#conc-10-event-order) |
 | extent, view | [OWN-8](ownership.md#own-8-views) |
 | failure, error, run stop | [FAIL-1](failure.md#fail-1-errors-failures-and-run-stops) |
-| grant | [MEM-29](budgets.md#mem-29-finalizer-grants) |
-| hand-over, limit record | [MEM-22](budgets.md#mem-22-limit-records-and-hand-over) |
+| grant | [MEM-27](budgets.md#mem-27-finalizer-grants) |
+| hand-over, limit record | [MEM-20](budgets.md#mem-20-limit-records-and-hand-over) |
 | kind | [OWN-3](ownership.md#own-3-kinds) |
 | outlives | [MEM-6](memory.md#mem-6-roots) |
 | pending result | [FAIL-9](failure.md#fail-9-pending-results) |

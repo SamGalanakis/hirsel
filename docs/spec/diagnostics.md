@@ -11,8 +11,7 @@ source span of the construct that the rule's statement is about (the moved use f
 freeze that a use conflicts with. The rule named is the one whose statement the program
 breaks; when a construct breaks a specific rule and the general rule it restates, the
 specific rule is named: a maybe slot's use names OWN-16, not OWN-5; overlapping
-arguments of one call name OWN-11, not OWN-9; a branded resource's cleanup loan names
-MEM-20, not OWN-10. A refusal never names a rule the program does not break.
+arguments of one call name OWN-11, not OWN-9. A refusal never names a rule the program does not break.
 
 A machine-readable refusal contains the rule ID; the primary site; each **causal site**,
 the earlier construct that makes the primary site wrong (the move, the loan, the

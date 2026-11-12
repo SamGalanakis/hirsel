@@ -18,8 +18,7 @@ is `send`. An own or resource type is `send` when it declares the bound
 `send` when its declaration says so ([CAP-2](capabilities.md#cap-2-capabilities-are-opaque)).
 A plain `fn` is `send`; an owning closure is `own[send] fn` when every capture is `send`
 ([LANG-13](language.md#lang-13-callables)). Never `send`: `Rc`, stable values, regions,
-scoped values, builders, task handles, and branded values whose brand owner is
-not moved with them in one value. The check reads declarations and capture lists only.
+scoped values, builders and task handles. The check reads declarations and capture lists only.
 
 ```hirsel
 type Job: send { id: u64, name: String }
@@ -34,8 +33,8 @@ type Job: send { id: u64, cache: Rc[Node] }            // refused: CONC-2, Rc is
 that runs `f(take x)`, where `x: X`, `X` and `R` are `send`, and `f: fn(take X) -> R waits`
 is a plain callable, which captures nothing ([LANG-13](language.md#lang-13-callables)).
 Everything the child owns arrives as `x`. Spawn admits the task charge
-([MEM-26](budgets.md#mem-26-logical-charges)), which includes `n`, against the spawner's
-current limit, and the child's root limit is `n` ([MEM-21](budgets.md#mem-21-limits)). Admission is the
+([MEM-24](budgets.md#mem-24-logical-charges)), which includes `n`, against the spawner's
+current limit, and the child's root limit is `n` ([MEM-19](budgets.md#mem-19-limits)). Admission is the
 commit point; on `Capacity` the error owns `x`
 ([T7.1](ownership.md#own-26-the-transition-table)).
 
@@ -58,7 +57,7 @@ channel's whole charge, including `cap` items, at creation; sending never alloca
 `channel.sender(tx)` adds a sender, admits nothing and cannot fail; a sender count past
 `2^64 − 1` is a run stop ([FAIL-15](failure.md#fail-15-run-stops)). `Receiver[T]` is a
 `send` resource with no way to add a second receiver. Neither has a cause cell
-([MEM-26](budgets.md#mem-26-logical-charges)). When the last sender is cleaned, the
+([MEM-24](budgets.md#mem-24-logical-charges)). When the last sender is cleaned, the
 channel is closed for receiving after its queued items; when the receiver is cleaned, the
 channel is closed for sending and its queued items are dropped (CONC-9).
 
@@ -74,7 +73,7 @@ failure, and the sender's cleanup drops `x` ([T7.2, T7.3](ownership.md#own-26-th
 point; it returns `Closed` once the channel is closed and empty. The queue is first in,
 first out by publication order; positions are logical, so how an engine stores the queue
 is not observable. The blocks of a sent value stay charged to the limit that admitted them
-([MEM-22](budgets.md#mem-22-limit-records-and-hand-over)).
+([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)).
 
 ```hirsel
 fn pump(tx: Sender[Job], take jobs: List[Job]) -> Result[(), Closed[Job]] waits {
@@ -140,7 +139,7 @@ cleaned ([T7.7](ownership.md#own-26-the-transition-table)).
 A run has one total order of **events**: spawn, task end, cancellation requests and their
 observation, publication by `send`, every `try_send` decision, delivery by `receive`, every
 change of a channel's sender count, `join`, channel close, every charge or refund that
-crosses tasks ([MEM-22](budgets.md#mem-22-limit-records-and-hand-over)), and every `Arc`
+crosses tasks ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)), and every `Arc`
 creation, share, release and `try_unwrap`. Each operation observes the state that the order gives.
 The order is chosen by the scheduler provider at the replay point
 ([CAP-8](capabilities.md#cap-8-the-replay-point)); with the same inputs and the same

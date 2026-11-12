@@ -11,8 +11,8 @@ The region's storage is charged to the current limit as it is allocated
 parameter, never stored or returned. There is no ambient region.
 
 ```hirsel
-fn count_words(src: String) -> Result[u64, Capacity] {
-  region r { let words = split_words(src, r)?; Ok(span.len(words)) }
+fn width(s: String) -> Result[u64, Capacity] {
+  region r { let t = text.copy_in(r, s)?; Ok(text.len(t)) }
 }
 ```
 ```hirsel
@@ -27,8 +27,9 @@ with `in r`, or a function that takes `r` and returns `T in r`. A placed literal
 of a stable type that is not compact evaluates its fields left to right, admits one block in
 `r` and publishes the value; its type is `Result[T in r, Capacity]`
 ([T1.2](ownership.md#own-26-the-transition-table)). A stable type's fields are plain, or
-stable (and `Option` and tuples of these) whose regions outlive the value's (MEM-6). Own,
-counted, resource, scoped and authority-bearing fields are refused.
+stable (and `Option` and tuples of these) whose regions outlive the value's (MEM-6); a field
+whose type is a type parameter needs the bound `plain`. Own, counted, resource, scoped and
+capability fields are refused, at every depth.
 
 ```hirsel
 stable type Span2 { start: u64, end: u64 }
@@ -40,20 +41,31 @@ stable type Bad { name: String }                            // refused: MEM-2, o
 
 ### MEM-3: Builders
 
-A `Builder[T]` builds a stable value of type `T` in one region. It is opaque and affine:
-it exposes no view of its contents and cannot be copied. Each append may allocate in the
-region and may fail with `Capacity`; a failed append returns its argument in the error and
-leaves the builder unchanged ([T1.6](ownership.md#own-26-the-transition-table)). When a
+Two builder types exist, each naming its element or result type and its region.
+`span.builder(r)` makes a `SpanBuilder[T, in r]`, which builds a `FixedSpan[T] in r` (MEM-12)
+of a plain `T`:
+`span.push(mut b, x: T)` appends one element and may fail with `Capacity`, returning its
+argument and leaving the builder unchanged ([T1.6](ownership.md#own-26-the-transition-table));
+`span.finish(take b)` publishes it. A `Builder[T, in r]`, made by `build_in` or `prepare_in`
+(MEM-4), holds one finished compact blob; `finish(take b)` publishes it as a `T in r`. Both
+builders are own, affine and not `send`, expose no view of their contents, and cannot leave
+the block that opened `r` (MEM-7). Neither `finish` can fail or allocate. When a span
 builder outgrows its current allocation it continues in a new, larger one; the bytes it
 abandons stay charged until the region closes ([FAIL-6](failure.md#fail-6-region-prefixes)).
-`finish(take b) -> T in r` publishes and cannot fail or allocate. Dropping an unfinished
-builder publishes nothing.
+Dropping an unfinished builder publishes nothing.
 
 ```hirsel
-fn digits(n: u64, r: Region) -> Result[SeqSpan[u8] in r, (Capacity, u8)] {
+fn digits(n: u64, r: Region) -> Result[FixedSpan[u8] in r, (Capacity, u8)] {
   let mut b = span.builder(r)
   let mut k = n
   loop { span.push(mut b, int.narrow(k % 10))?; k = k / 10; if k == 0 { break } }
+  Ok(span.finish(take b))
+}
+```
+```hirsel
+fn names(r: Region, s: String) -> Result[FixedSpan[String] in r, (Capacity, String)] {
+  let mut b = span.builder(r)                                // refused: MEM-3, String is not plain
+  span.push(mut b, s)?
   Ok(span.finish(take b))
 }
 ```
@@ -62,31 +74,32 @@ fn digits(n: u64, r: Region) -> Result[SeqSpan[u8] in r, (Capacity, u8)] {
 
 ```
 fn build_in[T](r: Region, bytes n: u64,
-               w: scoped fn(mut d: Dest[T]) -> Result[Child[T] of d, BuildError])
-    -> Result[Builder[T in r], BuildError]
+               w: scoped fn(mut Dest[T]) -> Result[Child[T], BuildError])
+    -> Result[Builder[T, in r], BuildError]
 type BuildError = Capacity(Capacity) | Overflow
 ```
 
 `build_in` admits one allocation of `n` bytes in `r`, then calls the writer `w` once with a
-fresh destination `d`; the brand `of d` is fresh for that call and names nothing else.
-`dest.put(mut d, L)`, where `L` is a construction literal of a compact type `U`, is a
-built-in form of type `Result[Child[U] of d, BuildError]`: it writes `L` completely at the
-destination's next byte. In `L`, a `Link[V]` field takes a `Child[V] of d`; an inline `Text`
-or span field takes a view of a `String` or `List`, whose contents are copied; an inline
-compact field takes a nested literal. A put that does not fit in what is left of `n` writes
-nothing and returns `Error(Overflow)`. A `Child` is plain; holding one does not freeze `d`.
-The `Child[T] of d` that `w` returns is the root: the builder holds the destination's whole
-used prefix as the blob, and the reference that `finish` publishes records the root's offset
-in it. `prepare_in(r, staging)` admits an allocation of a staged compact value's blob and
+new destination `d`. Every destination has an identity, a number no other destination of
+the run has. `dest.put(mut d, L)`, where `L` is a construction literal of a compact type
+`U`, is a built-in form of type `Result[Child[U], BuildError]`: it writes `L` completely at
+the destination's next byte. A `Child[U]` is plain data: the destination's identity and the
+offset of a complete `U`. In `L`, a `Link[V]` field takes a `Child[V]`; an inline `Text` or
+span field takes a view of a `String` or `List`, whose contents are copied; an inline compact
+field takes a nested literal. A put whose `Link` child has another destination's identity,
+and a writer that returns such a root, fail with `Bounds`; this check is one comparison
+per link. A put that does not fit in what is left of `n` writes nothing and returns
+`Error(Overflow)`. The `Child[T]` that `w` returns is the root: the builder holds the
+destination's whole used prefix as the blob, and the reference that `finish` publishes
+records the root's offset in it. `prepare_in(r, staging)` admits an allocation of a staged compact value's blob and
 copies it. Bytes of an unused or failed destination stay charged until the region closes.
 `Dest` is scoped and moves (OWN-3), so a destination cannot be stored, returned or passed
-to `finish`; the writer is the one exception to OWN-21 that its result is anchored to its
-parameter.
+to `finish`.
 
 ```hirsel
 @compact(u32) stable type Note { id: u64, body: Text }
 fn note(r: Region, s: String) -> Result[Note in r, BuildError] {
-  let b = build_in(r, bytes 64, fn(mut d: Dest[Note]) -> Result[Child[Note] of d, BuildError] {
+  let b = build_in(r, bytes 64, fn(mut d: Dest[Note]) -> Result[Child[Note], BuildError] {
     dest.put(mut d, Note(id: 1, body: s))
   })?
   Ok(finish(take b))
@@ -114,7 +127,9 @@ declaration names a region parameter: `stable type Token[in src] { text: Text in
 used as `Token[in s] in r`. An own or resource type with a stable field names a region
 parameter for it (`type Holder[in r] { t: Text in r }`). A parameter written with a bare
 stable type (`t: Text`) accepts a value in any region that outlives the call; a result or
-field with a stable type names its region.
+field with a stable type names its region. A function's region parameters are its `Region`
+parameters and its generics written `in a`, which the argument types fix
+(`fn finish[T, in r](take b: Builder[T, in r]) -> T in r`).
 
 A region `a` **outlives** `r` when `a` is `r`, when `a` is opened in a block that encloses
 `r`'s block, when `a` is a parameter and `r` is opened in the body, when the signature
@@ -147,11 +162,11 @@ or a spawn. A function's result may mention only its region parameters. These ar
 on types; nothing is traversed.
 
 ```hirsel
-fn words(src: String) -> Result[u64, Capacity] { region r { let w = split_words(src, r)?; Ok(span.len(w)) } }
+fn width(s: String) -> Result[u64, Capacity] { region r { let t = text.copy_in(r, s)?; Ok(text.len(t)) } }
 ```
 ```hirsel
-fn words(src: String) -> Result[SeqSpan[Text], Capacity] {
-  region r { split_words(src, r) }                        // refused: MEM-7
+fn leak(s: String) -> Result[Text, Capacity] {
+  region r { text.copy_in(r, s) }                           // refused: MEM-7
 }
 ```
 
@@ -170,9 +185,9 @@ reset or reopened; `loop { region r { .. } }` opens a fresh region each iteratio
 A compact value is one contiguous allocation (a **blob**) of at most `2^b − 1` bytes, where
 `b` is `W`'s bit width, laid out with fields in declaration order, each at the next byte
 with no padding. A compact type's fields are scalars, `bool`, `char`, other compact types
-(inline), `Text`, the spans of MEM-12, and `Link[U]` (MEM-10). A compact type held inline or
-as a link target is encoded with its holder's `W`; a `Text` or span that is not inside a
-compact type is encoded with `W = u64`. Every compact type's smallest encoding is at least
+(inline), `Text`, `FixedSpan[T]` (MEM-12), and `Link[U]` (MEM-10). A compact type held inline or
+as a link target is encoded with its holder's `W`; a `Text` or `FixedSpan` that is not inside
+a compact type is encoded with `W = u64`. Every compact type's smallest encoding is at least
 one byte; a type that can encode to zero bytes is refused. Compact values are built only
 through MEM-3 and MEM-4. Compact layout is the only layout a program can declare in v1;
 every other layout is private ([MEM-13](#mem-13-own-layout)).
@@ -181,12 +196,12 @@ The language fixes, and an engine's backend may rely on: scalars little-endian a
 written width; `bool` one byte, 0 or 1; `char` its scalar value as a `u32`; floats their
 IEEE bits, little-endian; a variant tag, numbered from 0 in declaration order, in the
 smallest of `u8`, `u16` and `u32` that holds the variant count; a field's offset is the
-sum of the sizes of the fields before it; the extent words of MEM-12, each `W` wide; the
+sum of the sizes of the fields before it; the count word of MEM-12, `W` wide; the
 link encoding of MEM-10; and the blob cap. Private: where a blob sits in its region and its
 alignment, region chunking, every non-compact layout and the calling convention.
 
 ```hirsel
-@compact(u32) stable type Entry { id: u64, name: Text, tags: SeqSpan[Text] }
+@compact(u32) stable type Entry { id: u64, name: Text, scores: FixedSpan[u32] }
 ```
 ```hirsel
 @compact(u32) stable type Bad { owner: String }             // refused: MEM-9, own field
@@ -195,7 +210,7 @@ alignment, region chunking, every non-compact layout and the calling convention.
 
 ### MEM-10: Inline fields and links
 
-A compact field of compact type, `Text` or span type is stored inline: its bytes are part
+A compact field of compact type, `Text` or `FixedSpan` type is stored inline: its bytes are part
 of the blob. A `Link[U]` field refers to a `U` earlier in the same blob and is stored as
 the `W`-width byte distance back from the field to its target; `Option[Link[U]]` uses zero
 for `None`. Links are formed only from the `Child` values of MEM-4; a child is complete
@@ -222,20 +237,19 @@ variant of a published value is impossible (MEM-5); a new value is built instead
 
 ### MEM-12: Stable sequences
 
-There are three stable sequence types. `FixedSpan[T]` holds elements of one fixed size: a
-count, then the elements. `SeqSpan[T]` stores a count and a byte extent, then the
-elements; it supports iteration and length only, never `s[i]`. `IndexedSpan[T]` adds,
-after the extent, an offset table with one `W`-width entry per element, each the distance
-from the table's start to the element. `span.get(s, i)` on a `FixedSpan` or `IndexedSpan`
-returns `Option[T]` after one bounds test. `Text` is a `SeqSpan[u8]` of valid UTF-8
-([SEM-3](semantics.md#sem-3-text)). Skipping a nested sequence reads its stored extent and
-costs constant work.
+v1 has two stable sequence types. `FixedSpan[T]` holds elements of a plain type `T` whose
+values all have one size: scalars, `bool`, `char`, and tuples and plain records of these. It
+is a `W`-width count, then the elements at a fixed stride. `Text` is a `W`-width byte count,
+then that many bytes of valid UTF-8 ([SEM-3](semantics.md#sem-3-text)). `span.get(s, i)`
+returns `Option[T]` after one bounds test; `s[i]` fails with `Bounds` instead. Sequences of
+variable-size or stable elements are reserved ([reserved](reserved.md)); in v1 they are
+built from compact types and links.
 
 ```hirsel
 fn total(xs: FixedSpan[u64]) -> u64 { let mut t: u64 = 0; for x in xs { t += x }; t }
 ```
 ```hirsel
-fn second(xs: SeqSpan[Text]) -> Text { xs[1] }               // refused: MEM-12
+fn names(xs: FixedSpan[Text]) -> u64 { span.len(xs) }       // refused: MEM-12, Text has no fixed size
 ```
 
 ## Own and counted data
@@ -266,7 +280,7 @@ complete owner `x` into a new counted node with count 1
 ([T1.3](ownership.md#own-26-the-transition-table)). An `Rc[T]` is immutable and task-local:
 it is never `send`. A counted value is read where a view of its payload is expected.
 Because a node is made only from a complete owner, counted values form no cycles; a
-cyclic structure uses a pool (MEM-19). Wrapping a value in `Rc` or `Arc` frees nothing it
+cyclic structure uses a library pool (MEM-18). Wrapping a value in `Rc` or `Arc` frees nothing it
 owned.
 
 ```hirsel
@@ -313,13 +327,14 @@ Capacity]` copies into region `r`; a compact value is copied as its whole blob, 
 root offset. The result type `U` is the expected type: `x`'s type, or its declared **twin**.
 `@twin(P)` on a non-generic declaration names the type `P` it pairs with; the pair is
 symmetric. The two have the same field names in the same order, and each pair of field
-types is identical, a built-in pair (`String` and `Text`; `List[T]` and `FixedSpan[T]` or
-`SeqSpan[T]`; `Box[X]` and a stable reference to `Y` where `X` and `Y` are twins), or a
-declared twin pair. While a declaration's fields are checked, its own pair is assumed, so
-recursive twins check. A stable target cannot hold counted fields. A failure at node k drops
-the copied nodes and releases the shared edges in reverse, each refunded, and leaves `x`
-untouched ([T1.5](ownership.md#own-26-the-transition-table)). Resources are never cloned
-(OWN-4).
+types is identical, a built-in pair (`String` and `Text`; `List[T]` and `FixedSpan[T]`;
+`Box[X]` and a stable reference to `Y` where `X` and `Y` are twins), a declared twin pair, or
+`Option`, `Result` or a tuple of such pairs, component by component. While a declaration's
+fields are checked, its own pair is assumed, so recursive twins check. A stable target
+cannot hold counted fields. Each copied `List`, `String` or `Map` gets capacity equal to its
+length; elements are copied in index order and map entries in insertion order. A value
+whose type summary holds a resource is never cloned (OWN-4). Failure is
+[T1.5](ownership.md#own-26-the-transition-table).
 
 ```hirsel
 type Row { name: String, n: u64 }
@@ -330,73 +345,35 @@ fn freeze(r: Region, x: Row) -> Result[RowS in r, Capacity] { clone_in(r, x) }
 @twin(Row) stable type RowN { label: Text, n: u64 }          // refused: MEM-17, field names
 ```
 
-## Brands and pools
+## Pools
 
-### MEM-18: Brands
+### MEM-18: Pools are library code
 
-A type may carry a **brand**, `T of p`, naming a slot `p` in scope whose type is opaque
-outside the module that brands it ([PROG-2](programs.md#prog-2-visibility)); in a field
-declaration, `of .f` names a sibling field, and it may appear inside the type arguments of
-another field (`Map[String, Id[Entry] of .pool]`). A value of type `T of p` is accepted only
-where `of p` with the same slot and the same brand epoch is expected. Assigning, replacing
-or moving `p` or ending its scope advances its epoch ([checker state](ownership.md#checker-state)),
-which ends every value branded by it: a later use is refused. At a join, a slot whose
-incoming epochs differ gets a fresh one; a loop body may not advance the epoch of a slot
-that brands a value live at the loop head. A field named by a sibling brand cannot be
-assigned, replaced or moved apart from its holder. Outside its module, a whole place of an
-opaque type reached through a `mut` parameter cannot be assigned or replaced, so a callee
-cannot swap a branded owner under its caller. Branded values are created only by functions
-whose signature returns `of` one of their parameters, and by MEM-4. Brands have no run-time
-representation.
+v1 has no brands and no language rule for pools. A pool is an ordinary library type over
+core operations, in the manner of a generational arena: a `pub opaque` type
+([PROG-2](programs.md#prog-2-visibility)) holding a `List` of slots, each with a 64-bit
+generation and an `Option` value, and an identity from `unique.new()`. A handle is plain
+data: the pool's `Unique`, an index and a generation. Every access compares all three and
+reports a stale handle as the library's error; removal is an explicit operation that
+advances the slot's generation; a slot whose generation reaches its maximum is retired,
+never wrapped; dropping the pool cleans what is still in it by ordinary cleanup
+([FAIL-8](failure.md#fail-8-exit-edge-cleanup)). A `Unique` is plain, so cloning a pool
+copies its identity, and a handle of the original also resolves in the copy. The core
+operations a pool needs are `unique.new`, `list.with_capacity`, `list.push`, `list.get`,
+`list.set`, `list.len`, `replace` and checked arithmetic. Against static brands this costs
+one more comparison per access and a handle of 24 bytes instead of 16; brands that elide
+the identity check are reserved ([reserved](reserved.md)).
+
+`Unique` is an opaque plain type with the bound `key` and no other: `unique.new()` returns a
+value unequal to every other `Unique` made in the run, admits nothing and cannot fail.
+Equality is its only observation: it has no order, no conversion to a number or text, and
+no operation reveals its hash. Which values are made first may depend on the event order,
+so this is what keeps that order from reaching output or a recording.
 
 ```hirsel
-type Lru { pool: Pool[Entry], index: Map[String, Id[Entry] of .pool], head: Option[Id[Entry] of .pool] }
-fn top(l: Lru) -> Option[Id[Entry] of l.pool] { l.head }
+type Handle: key { pool: Unique, index: u64, generation: u64 }
+fn same_pool(a: Handle, b: Handle) -> bool { a.pool == b.pool }
 ```
 ```hirsel
-fn mix(a: Pool[u64], b: Pool[u64], i: Id[u64] of a) -> u64 { pool.get_or(b, i, 0) }
-                                                             // refused: MEM-18, i is of a
-fn swap(mut p: Pool[u64]) { p = pool.new() }                 // refused: MEM-18, opaque
-```
-
-### MEM-19: What a pool library may rely on
-
-A library type with private fields (`pub opaque`, [PROG-2](programs.md#prog-2-visibility))
-may rely on: its fields being invisible and unconstructible outside its module; brands
-(MEM-18); checked 64-bit arithmetic; checked indexing of its own collections; and its own
-`resource` cleanup (MEM-20). It may rely on no layout fact. A generation-checked pool is
-library code built from these: a slot array whose slots hold a 64-bit generation, an
-`Id[T] of p` holding an index and a generation, and lookups that compare both. A
-generation at its maximum retires its slot instead of wrapping. There is no brand for "the
-pool that holds me": links between entries of one pool are unbranded handles, checked by
-index and generation at each resolve.
-
-```hirsel
-type Entry { key: String, next: Option[Handle[Entry]] }
-fn next_of(p: Pool[Entry], e: Entry) -> Option[View[Entry]] in p {
-  match e.next { Some(h) => pool.resolve(p, h), None => None }   // checked at run time
-}
-```
-
-### MEM-20: Branded resource cleanup
-
-A resource type may be branded by its owner, `resource type SlotOwner[T] of p`, and declare
-a finalizer `drop(s, mut p)` that receives `mut p`. Its implicit drop is then a `mut` use of
-`p` at its cleanup point: the definition is refused if `p` is frozen, lent, moved or out of
-scope at any point where the resource may be cleaned. Moving or dropping `p` while a
-resource branded by it is live is refused.
-
-```hirsel
-fn use_slot(mut p: Pool[String]) -> Result[(), Capacity] {
-  let so = pool.insert_owned(mut p, string.from("a")?)?  // so: SlotOwner[String] of p
-  Ok(())                                                // so's finalizer removes the entry
-}
-```
-```hirsel
-fn bad(mut p: Pool[String]) -> Result[(), Capacity] {
-  let so = pool.insert_owned(mut p, string.from("a")?)?
-  let v = view p
-  { let inner = so }                // refused: MEM-20, p frozen by v at inner's cleanup
-  Ok(())
-}
+fn older(a: Unique, b: Unique) -> bool { a < b }            // refused: SEM-7, Unique is not ordered
 ```

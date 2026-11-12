@@ -21,7 +21,7 @@ raised it:
 | `Unwrap` | `option.unwrap` of `None`, `result.unwrap` of `Error` |
 | `Fail(text)` | `fail(msg)`, which has type `Never` |
 | `Cancelled` | a cancellation point that observes cancellation ([CONC-7](tasks.md#conc-7-cancellation-points)) |
-| `Capacity` | an allocation beyond a finalizer's grant ([MEM-29](budgets.md#mem-29-finalizer-grants)) |
+| `Capacity` | an allocation beyond a finalizer's grant ([MEM-27](budgets.md#mem-27-finalizer-grants)) |
 
 `Capacity` outside a finalizer is an error, never a failure.
 
@@ -34,7 +34,7 @@ fn mean(xs: List[i64]) -> i64 { list.sum(xs) / int.narrow(list.len(xs)) }   // D
 Every operation that takes custody of an input has a **commit point**: the step at which
 custody passes. It is entry for a call ([T2.3](ownership.md#own-26-the-transition-table)),
 publication for a send ([CONC-4](tasks.md#conc-4-channels)) and admission for an allocating
-constructor or core operation ([MEM-23](budgets.md#mem-23-admission)). Before it, the
+constructor or core operation ([MEM-21](budgets.md#mem-21-admission)). Before it, the
 operation consumes nothing: inputs that its error type lists come back in the error, and
 every other input stays where it was. After it, the operation may still fail (a replaced
 value's finalizer, a callee's own failure), and what it did is not undone: a callee's
@@ -49,29 +49,30 @@ fn put(mut q: List[File], take f: File) -> Result[(), (Capacity, File)] {
 ### FAIL-4: Constructor temporaries
 
 A record or variant construction evaluates its field expressions left to right into
-statement temporaries; a placed literal `T(..) in r`, a resource literal and `box.new` then
-admit their charge.
-If a field expression or the admission fails,
-the temporaries are dropped by the statement's cleanup in reverse evaluation order, their
-finalizers included; on admission failure the error is bare `Capacity`
-([T1.1, T1.2](ownership.md#own-26-the-transition-table)).
+statement temporaries; a placed literal `T(..) in r` and a resource literal then admit their
+charge. If a field expression or the admission fails, the temporaries are dropped by the
+statement's cleanup in reverse evaluation order, their finalizers included, and the error is
+bare `Capacity` ([T1.1, T1.2](ownership.md#own-26-the-transition-table)). A core constructor
+that takes an owner, such as `box.new`, returns it in the error instead (T1.3).
 
 ```hirsel
-fn pair(d: Dir) -> Result[Pair, IoError] {
-  Ok(Pair(a: open_temp(d)?, b: open_temp(d)?))   // if b fails, a's temporary is dropped once
+type Pair { a: HostFile, b: HostFile }
+fn pair(d: Dir) -> Result[Pair, IoError] waits {
+  Ok(Pair(a: host.open(d, "a", Read)?, b: host.open(d, "b", Read)?))   // if b fails, a is dropped once
 }
 ```
 
 ### FAIL-5: Multi-step operations
 
 An operation that allocates in several steps, such as `clone`, `clone_in` and map
-insertion that grows, drops or releases its own partial results in reverse, each refunded,
-before it returns its error. A callback's effects inside such an operation are never undone.
+insertion that grows, undoes its own partial results before it returns its error, as
+[T1.5](ownership.md#own-26-the-transition-table) states. A callback's effects inside such an
+operation are never undone.
 
 ### FAIL-6: Region prefixes
 
-Bytes that a failed builder append, a failed or unused sized destination, or an abandoned
-builder allocation took in a region stay charged to the region until it closes
+Bytes that a failed `span.push`, a failed or unused sized destination, or an abandoned
+span-builder allocation took in a region stay charged to the region until it closes
 ([MEM-8](memory.md#mem-8-close)). Nothing refunds them earlier.
 
 ### FAIL-7: One owner per survivor
@@ -94,10 +95,10 @@ and refunds its block. A region opened by an exited block closes after its block
 are cleaned.
 
 ```hirsel
-fn two(d: Dir) -> Result[(), IoError] {
-  let a = open_temp(d)?
-  let b = open_temp(d)?
-  write(b)?                            // on error: b dropped, then a
+fn two(d: Dir) -> Result[(), IoError] waits {
+  let a = host.open(d, "a", Read)?
+  let mut b = host.open(d, "b", Append)?
+  host.try_lock(mut b)?                // on error: b dropped, then a
   Ok(())
 }
 ```
@@ -121,13 +122,13 @@ replaces the primary cause, and no cause is dropped.
 A cause is stored in a **cause cell**. Propagating a failure moves the existing chain and
 reserves nothing. A cell is reserved only with an obligation that can add a cause: each
 task has one primary cell from its start, and each resource value has one, admitted with
-the resource ([MEM-26](budgets.md#mem-26-logical-charges)); a resource created by a
+the resource ([MEM-24](budgets.md#mem-24-logical-charges)); a resource created by a
 finalizer takes its cell and storage from the finalizer's grant
-([MEM-29](budgets.md#mem-29-finalizer-grants)). A cause raised by a finalizer goes into its
+([MEM-27](budgets.md#mem-27-finalizer-grants)). A cause raised by a finalizer goes into its
 resource's cell, and any other cause into the task's primary cell. If a finalizer cannot
 admit an obligation while a failure is active, its grant being exhausted, that is its own
 failure with cause `Capacity`, recorded in its resource's cell, and cleanup continues. So
-code that makes no resources performs no cause admission, the chain has no depth limit and
+code that makes no resources performs no cause admission beyond task startup, the chain has no depth limit and
 is never truncated, and recording, linking and delivering causes never admit. An unused
 cell is refunded with its obligation; a used cell stays with the chain, through `join`, until
 the `Causes` value that holds it is cleaned, and is then refunded to the limit that admitted
@@ -138,12 +139,12 @@ it. A `Fail` cause takes ownership of its message.
 A `resource type` declares a finalizer after its fields:
 
 ```hirsel
-resource type Temp { dir: Dir, path: Path }
-  drop(t) { let _ = file.remove(t.dir, t.path) }
+resource type Temp { dir: Dir, name: String }
+  drop(t) { let _ = host.remove(t.dir, t.name) }
 ```
 
 A resource literal admits the resource's storage, cause cell and grant
-([MEM-26](budgets.md#mem-26-logical-charges)) and has type `Result[T, Capacity]`. A
+([MEM-24](budgets.md#mem-24-logical-charges)) and has type `Result[T, Capacity]`. A
 resource is cleaned exactly once: by its finalizer on implicit drop, or by an explicit
 consuming function. A consuming function in the defining module ends a resource without
 its finalizer by a whole destructure ([T3.7](ownership.md#own-26-the-transition-table)),
@@ -152,20 +153,21 @@ destructure refunds the resource's unused cause cell and grant after its fields 
 transferred. There is no `forget`. A finalizer has a unit result and no `?` of its own; the
 functions it calls may use `?` inside them. It is shielded: it observes no cancellation
 ([CONC-7](tasks.md#conc-7-cancellation-points)), though it may call `waits` operations, and
-it may spawn from its grant. It uses only the capabilities stored in the resource, its
-brand owner ([MEM-20](memory.md#mem-20-branded-resource-cleanup)) and its grant
-([MEM-29](budgets.md#mem-29-finalizer-grants)); it cannot move, copy or return the
+it may spawn from its grant. It uses only the capabilities stored in the resource and its grant
+([MEM-27](budgets.md#mem-27-finalizer-grants)); it cannot move, copy or return the
 resource.
 
 ```hirsel
-pub fn close(take f: File) -> Result[(), IoError] {
+resource type File { handle: HostFile }
+  drop(f) { let _ = host.unlock(mut f.handle) }
+pub fn close(take f: File) -> Result[(), IoError] waits {
   let File(handle: h) = take f          // f ends without its finalizer
   host.close(take h)
 }
 ```
 ```hirsel
-resource type T { f: File }
-  drop(t) { file.flush(mut t.f)? }      // refused: FAIL-11, ? in a finalizer
+resource type T { f: HostFile }
+  drop(t) { host.unlock(mut t.f)? }     // refused: FAIL-11, ? in a finalizer
 ```
 
 ### FAIL-12: Finalizer failure

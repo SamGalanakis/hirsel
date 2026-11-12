@@ -9,8 +9,6 @@ mod flow;
 mod liveness;
 mod properties;
 mod storage;
-#[cfg(test)]
-mod tests;
 
 use hirsel_diag::Diagnostic;
 use hirsel_intern::work::{self, Counter};

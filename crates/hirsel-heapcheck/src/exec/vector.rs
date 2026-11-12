@@ -1,6 +1,4 @@
-//! `rc-trace v1` protocol vectors (proofs/rc/README.md) executed on this
-//! crate's ledger. The Lean model's `lake exe rc-trace` is one implementation of
-//! the protocol; this is an independent second one: counts, saturation, holder
+//! `rc-trace v1` protocol vectors executed on this crate's ledger. Counts, saturation, holder
 //! cells, dying blocks, raw tokens, region storage and forget records are the
 //! heap executor's own, and after every operation its ideal-holder recount must
 //! agree with every block's count. The printed state follows the vector format,

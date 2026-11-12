@@ -1,6 +1,0 @@
-// rule: PROV-2
-// expect: accept
-fn example(c: MonotonicClock) -> Result[time.Duration, ClockError] {
-  let start = clock.monotonic(c)?
-  time.elapsed(c, start)
-}

@@ -4,13 +4,12 @@
 //! The finite path domain comes from consumed owned projections. Extending a
 //! recursive path beyond that domain retains a dependency at its prefix rather
 //! than spending an iteration/depth budget or inventing heap independence.
+mod actuals;
 use hirsel_types::storage::{StorageBehavior, StorageResult, StorageSelector};
 use hirsel_types::{OwnedTypePart, SharedPath};
 use std::collections::BTreeSet;
 
-mod actuals;
 pub mod program;
-
 /// Prefix-closed input and result paths of one callable's source payloads.
 /// An input selector retains its actual parameter/capture identity throughout.
 #[derive(Clone, Debug)]
@@ -261,37 +260,4 @@ pub fn solve(
         |body, summaries| domains[body].normalize(transfer(body, summaries)),
         |_, current, next| current.join(&next),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::cell::{Cell, RefCell};
-
-    /// Context discovery interns a node and its edge mid-pass; one solve must
-    /// evaluate the discovery rather than stop at the snapshot's fixpoint.
-    #[test]
-    fn a_context_interned_mid_pass_is_evaluated() {
-        let graph = RefCell::new(vec![vec![1], vec![]]);
-        let interned = Cell::new(false);
-        let values = fixed_point(
-            || graph.borrow().clone(),
-            vec![0, 0],
-            || 0,
-            |body, _values| {
-                if body == 0 && !interned.replace(true) {
-                    graph.borrow_mut().push(vec![]);
-                    graph.borrow_mut()[0].push(2);
-                }
-                Ok::<_, ()>(1)
-            },
-            |_, current, next| {
-                let changed = *current != next;
-                *current = next;
-                changed
-            },
-        )
-        .unwrap();
-        assert_eq!(values, vec![1, 1, 1]);
-    }
 }

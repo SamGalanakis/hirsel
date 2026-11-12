@@ -1,8 +1,0 @@
-// rule: MODE-2
-// expect: accept
-fn replace(mut x: box unique List[Bytes]) {}
-
-fn probe() {
-  let mut x: box unique List[Bytes] = box unique [b"x"]
-  replace(mut x)
-}

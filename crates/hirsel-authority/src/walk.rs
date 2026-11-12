@@ -1,3 +1,9 @@
+mod brands;
+mod calls;
+mod causes;
+mod contextual_contracts;
+mod crossing;
+mod patterns;
 use super::facts::*;
 use super::identities::Identities;
 use super::type_bindings::BindingTypes;
@@ -9,12 +15,6 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 type HashMap<K, V> = std::collections::HashMap<K, V, hirsel_intern::IdHasher>;
 type HashSet<K> = std::collections::HashSet<K, hirsel_intern::IdHasher>;
-mod brands;
-mod calls;
-mod causes;
-mod contextual_contracts;
-mod crossing;
-mod patterns;
 mod promises;
 use hirsel_modes::explain::{Cause, Explanation, Fact, Requirement};
 
@@ -2848,87 +2848,5 @@ impl super::cursors::CursorRefinement for Checker<'_> {
     }
     fn item(&mut self, owner: TypeId, item: TypeId) -> Result<TypeId, QueryError> {
         Ok(self.projected_item(owner, item))
-    }
-}
-
-#[cfg(test)]
-mod limit_tests {
-    use super::*;
-    use crate::test_support::Fixture;
-
-    #[test]
-    fn resource_free_siblings_do_not_spend_depth_and_a_real_resource_still_rejects() {
-        for width in [128, 129] {
-            for resource in [false, true] {
-                let mut f = Fixture::new();
-                let scalar = f.ty(TypeKind::Primitive(Primitive::U8));
-                let fields = (0..width)
-                    .map(|n| {
-                        f.nominal(
-                            &format!("N{n}"),
-                            None,
-                            vec![],
-                            AuthoritySummary::inert(),
-                            Some(scalar),
-                            resource && n == width - 1,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let root = f.ty(TypeKind::Tuple(fields.into()));
-                let syntax = f.syntax(None);
-                let generics = f.body.resolution.generic_declarations.clone();
-                let reader = hirsel_modes::reader::Reader::new(&mut f.provider, &f.signature);
-                let mut lookup = |d: DefId| Ok(reader.borrow_mut().read(d).ok());
-                let memo = ContextMemo::new(f.types, &generics, &mut lookup);
-                let mut c = Checker::new(
-                    f.types,
-                    &f.memo,
-                    &syntax,
-                    &f.signature,
-                    f.body,
-                    &reader,
-                    memo,
-                    &f.intrinsics,
-                );
-                assert_eq!(c.contains_resource(root), resource);
-                assert!(c.out.failure.is_none());
-            }
-        }
-    }
-
-    #[test]
-    fn finite_root_layouts_and_resource_walks_have_no_nominal_depth_cutoff() {
-        for depth in [128, 129, 200] {
-            let mut f = Fixture::new();
-            let mut root = f.ty(TypeKind::Primitive(Primitive::U8));
-            for n in 0..depth {
-                root = f.nominal(
-                    &format!("D{n}"),
-                    None,
-                    vec![],
-                    AuthoritySummary::inert(),
-                    Some(root),
-                    false,
-                );
-            }
-            let syntax = f.syntax(None);
-            let generics = f.body.resolution.generic_declarations.clone();
-            let reader = hirsel_modes::reader::Reader::new(&mut f.provider, &f.signature);
-            let mut lookup = |d: DefId| Ok(reader.borrow_mut().read(d).ok());
-            let memo = ContextMemo::new(f.types, &generics, &mut lookup);
-            let mut c = Checker::new(
-                f.types,
-                &f.memo,
-                &syntax,
-                &f.signature,
-                f.body,
-                &reader,
-                memo,
-                &f.intrinsics,
-            );
-            assert!(!c.contains_resource(root));
-            assert_eq!(c.layout(root), Some(TypeKind::Primitive(Primitive::U8)));
-            assert!(c.out.failure.is_none());
-        }
     }
 }

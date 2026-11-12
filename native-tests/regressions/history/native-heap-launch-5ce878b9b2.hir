@@ -1,6 +1,0 @@
-// Historical native finding: native/heap/launch: no typed launch kind
-// Mutation: parameter/passing
-// Original: conformance/DROP/DROP-2-destructure-empty-run.hir
-pub fn main(take t: Test) -> Result[(), ()] {
-  Ok(())
-}

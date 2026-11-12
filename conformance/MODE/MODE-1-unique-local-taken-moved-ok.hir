@@ -1,8 +1,0 @@
-// rule: MODE-1
-// expect: accept
-// The result names x, so `unique v` of the binding x moved into may stay
-// as local as x.
-fn preserve(take x: unique Bytes in x) -> unique Bytes in x {
-  let v = x
-  unique v
-}

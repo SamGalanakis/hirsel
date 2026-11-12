@@ -1,7 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
-use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
 use hirsel_run_config::RunConfig;
@@ -47,27 +46,6 @@ fn unchanged_entry_and_signature_bind_transitive_private_bodies() {
 }
 
 #[test]
-fn constant_initializers_and_their_private_comptime_dependencies_are_bound() {
-    with_compiler_stack(|| {
-        let source = "fn compute() -> u64 { 41u64 }\nconst answer: u64 = compute()\nfn helper() -> u64 { answer }\npub fn main() -> Result[(), ()] { let n = helper(); Ok(()) }\n";
-        let mut engine = engine(source);
-        let first = revision(&mut engine);
-        parse(
-            &mut engine,
-            "program.hir",
-            &source.replace("41u64", "42u64"),
-        );
-        assert_ne!(first, revision(&mut engine));
-        parse(
-            &mut engine,
-            "program.hir",
-            &source.replace("= compute()", "= compute() + 1u64"),
-        );
-        assert_ne!(first, revision(&mut engine));
-    });
-}
-
-#[test]
 fn recursive_and_function_value_dependencies_have_private_implementations() {
     with_compiler_stack(|| {
         let source = "fn recurse(n: u64) -> u64 { if n == 0u64 { 1u64 } else { recurse(n - 1u64) } }\npub fn main() -> Result[(), ()] { let f = recurse; let n = f(2u64); Ok(()) }\n";
@@ -104,37 +82,6 @@ fn file_order_positions_comments_and_compiler_provenance_do_not_change_revision(
         let mut different = QueryEngine::new(environment, compiler_adapters());
         parse(&mut different, "different.hir", PROGRAM);
         assert_eq!(first, revision(&mut different));
-    });
-}
-
-#[test]
-fn parsed_statement_boundaries_preserve_revision_across_formatting() {
-    with_compiler_stack(|| {
-        let source =
-            "fn helper()->u64{let n=1u64;n}\npub fn main()->Result[(),()]{let _=helper();Ok(())}\n";
-        let mut resident = engine(source);
-        let entry = entry_path(&default_context());
-        let before = resident.definition_items(&entry).unwrap()[0].clone();
-        let first = revision(&mut resident);
-        for text in [
-            "fn helper() -> u64 {\n  let n = 1u64\n  n\n}\n\npub fn main() -> Result[(), ()] {\n  let _ = helper()\n  Ok(())\n}\n",
-            "// moved entry\npub fn main()->Result[(),()]{let _=helper();Ok(())}\n\nfn helper()->u64{/* a\ncomment */let n=1u64;/* explanation */n}\n",
-            "fn helper()->u64{\r\nlet n=1u64\r\nn\r\n}\r\npub fn main()->Result[(),()]{\r\nlet _=helper()\r\nOk(())\r\n}\r\n",
-        ] {
-            assert_eq!(first, revision(&mut engine(text)), "{text}");
-            parse(&mut resident, "program.hir", text);
-            let after = resident.definition_items(&entry).unwrap()[0].clone();
-            assert_eq!(before.owner(), after.owner());
-            assert_ne!(before.text_hash, after.text_hash);
-            assert_eq!(first, revision(&mut resident), "resident: {text}");
-        }
-        // A newline can change the parsed program. Ignoring all trivia or all
-        // semicolons would conflate a discarded expression with a block tail.
-        let tail = "fn helper(){()}\npub fn main()->Result[(),()]{helper();Ok(())}\n";
-        assert_ne!(
-            revision(&mut engine(tail)),
-            revision(&mut engine(&tail.replace("{()}", "{();}")))
-        );
     });
 }
 

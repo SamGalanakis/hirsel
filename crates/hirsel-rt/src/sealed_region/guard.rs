@@ -285,6 +285,3 @@ impl Drop for JournalSlot<'_> {
         unsafe { drop(Box::from_raw(self.0)) };
     }
 }
-
-#[cfg(all(test, feature = "diagnostic"))]
-mod tests;

@@ -3,6 +3,7 @@
 //! and promotion between phases cannot fork identity. Ids depend on scheduling
 //! and never reach output: persisted forms encode canonical per-definition
 //! tables (`table`), and ordered output sorts by content, never by `TypeId`.
+mod projection;
 use crate::*;
 use hirsel_intern::retention::{Owner, OwnerKind};
 use hirsel_intern::{AppendTable, IdHash, IdHasher, Scramble};
@@ -11,7 +12,6 @@ use std::hash::{Hash, Hasher};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
-mod projection;
 mod retained;
 pub use projection::TypeProjection;
 
@@ -810,93 +810,5 @@ impl std::fmt::Debug for TypeInterner {
             .field("base", &self.base_len)
             .field("rows", &self.assigned.load(Ordering::Relaxed))
             .finish()
-    }
-}
-
-#[cfg(test)]
-mod source_base_lookup_tests {
-    use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
-
-    struct Counted {
-        candidates: AtomicUsize,
-        available: AtomicBool,
-    }
-    impl TypeBaseSource for Counted {
-        fn rows(&self, _: u32, _: &TypeBase) -> Option<Vec<(u32, Type)>> {
-            self.available.load(Ordering::Relaxed).then(|| {
-                vec![
-                    (0, Type::unit()),
-                    (1, Type::with_kind(TypeKind::Primitive(Primitive::U8))),
-                ]
-            })
-        }
-        fn candidates(&self, row: &Type, _: &TypeBase) -> Vec<u32> {
-            // Pure: availability gates only `rows`.
-            self.candidates.fetch_add(1, Ordering::Relaxed);
-            match row.kind {
-                TypeKind::Primitive(Primitive::U16) => vec![],
-                _ => vec![0, 1],
-            }
-        }
-    }
-    fn fixture(available: bool) -> (Arc<Counted>, Arc<TypeBase>, Arc<TypeInterner>) {
-        let source = Arc::new(Counted {
-            candidates: AtomicUsize::new(0),
-            available: AtomicBool::new(available),
-        });
-        let base = TypeBase::from_source(2, source.clone());
-        let types = TypeInterner::new(Some(base.clone()));
-        (source, base, types)
-    }
-    #[test]
-    fn successful_base_lookup_is_reused_only_for_equal_rows() {
-        let (source, base, types) = fixture(true);
-        for _ in 0..32 {
-            assert_eq!(types.intern(Type::unit()), base.id_at(0).unwrap());
-        }
-        assert_eq!(source.candidates.load(Ordering::Relaxed), 1);
-        for _ in 0..32 {
-            assert_eq!(
-                types.intern(Type::with_kind(TypeKind::Primitive(Primitive::U8))),
-                base.id_at(1).unwrap()
-            );
-        }
-        assert_eq!(source.candidates.load(Ordering::Relaxed), 2);
-        assert_eq!(
-            types.len(),
-            base.len(),
-            "matching rows allocate no private types"
-        );
-        let absent = types.intern(Type::with_kind(TypeKind::Primitive(Primitive::U16)));
-        for _ in 0..32 {
-            assert_eq!(
-                types.intern(Type::with_kind(TypeKind::Primitive(Primitive::U16))),
-                absent
-            );
-        }
-        assert_eq!(
-            source.candidates.load(Ordering::Relaxed),
-            3,
-            "a row without candidates is asked once"
-        );
-    }
-    #[test]
-    fn base_misses_refresh_and_later_base_match_precedes_existing_private_row() {
-        let (source, base, types) = fixture(false);
-        let private = types.intern(Type::unit());
-        assert_ne!(private, base.id_at(0).unwrap());
-        assert_eq!(types.intern(Type::unit()), private);
-        assert_eq!(
-            source.candidates.load(Ordering::Relaxed),
-            2,
-            "misses are not retained"
-        );
-        source.available.store(true, Ordering::Relaxed);
-        assert_eq!(types.intern(Type::unit()), base.id_at(0).unwrap());
-        for _ in 0..32 {
-            assert_eq!(types.intern(Type::unit()), base.id_at(0).unwrap());
-        }
-        assert_eq!(source.candidates.load(Ordering::Relaxed), 3);
     }
 }

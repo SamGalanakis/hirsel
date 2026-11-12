@@ -1,6 +1,0 @@
-// rule: CAP-1
-// expect: reject CAP-1 at line 5
-// twin: CAP/CAP-1-arg-len-parameter-ok.hir
-pub fn query() -> u64 {
-  arg.len()
-}

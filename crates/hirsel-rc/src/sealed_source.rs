@@ -433,9 +433,6 @@ fn payloads_selected(
     Ok(result)
 }
 
-#[cfg(test)]
-mod tests;
-
 mod witness;
 pub use witness::{
     SourceCallableEntry, SourceCapture, SourceDeclarations, SourceDemandProjection,

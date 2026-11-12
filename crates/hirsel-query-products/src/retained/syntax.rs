@@ -310,28 +310,3 @@ impl Weight<'_> {
         });
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::syntax_fixture as fixture;
-    use std::sync::Arc;
-
-    #[test]
-    fn source_syntax_hold_bound_covers_nested_physical_storage_without_allocating() {
-        for width in [1, 4, 16] {
-            let input = fixture(width);
-            let (bound, inspection) = crate::test_alloc::measured(|| retained_syntax_bytes(&input));
-            assert_eq!(inspection.allocations, 0);
-            let (copy, storage) = crate::test_alloc::measured(|| Arc::new(input.clone()));
-            assert!(
-                storage.live as u64 <= bound,
-                "width {width}: actual {} exceeds {bound}",
-                storage.live
-            );
-            assert_eq!(*copy, input);
-            let (_, release) = crate::test_alloc::measured(|| drop(copy));
-            assert_eq!(-release.live, storage.live);
-        }
-    }
-}

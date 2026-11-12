@@ -33,7 +33,7 @@ class PathLists(unittest.TestCase):
         base = 'CAP/a.hir # old reason\n'
         a, b = 'CAP/a.hir # new reason\n', 'CAP/a.hir # other reason\n'
         for left, right in [(a, b), ('', b)]:
-            self.assertIsNone(merging.resolve('crates/hirsel-authority/src/corpus/pending.txt',
+            self.assertIsNone(merging.resolve('conformance/pending.txt',
                                               base, left, right))
 
     def test_duplicate_or_non_path_entries_are_never_hidden(self):

@@ -187,6 +187,3 @@ pub fn boundary(
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

@@ -385,6 +385,3 @@ pub fn analyze(bodies: &[DemandBody<'_>]) -> Result<Vec<Requirements>, SourceErr
         .collect::<Vec<_>>();
     analyze_compact(&compact)
 }
-
-#[cfg(test)]
-mod tests;

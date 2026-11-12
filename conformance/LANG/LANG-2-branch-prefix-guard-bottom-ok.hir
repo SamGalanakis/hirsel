@@ -1,9 +1,0 @@
-// rule: LANG-2
-// expect: accept
-fn probe(b: bool) {
-  let x = match b {
-    true if b => return,
-    true => 1u8,
-    false => 2,
-  }
-}

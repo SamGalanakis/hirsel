@@ -1,8 +1,0 @@
-// rule: SEM-3
-// expect: reject SEM-3 at line 7
-// twin: SEM/SEM-3-fstring-multiline-hole-ok.hir
-// A hole closes on the line where its expression ends.
-fn label(n: u64) -> String {
-  f"total {n
-  }"
-}

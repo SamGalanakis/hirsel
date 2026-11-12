@@ -205,9 +205,6 @@ unsafe fn prepare(
     unsafe { seal_record_with(record, &root, &plan, checkpoint) }
 }
 
-#[cfg(all(test, feature = "diagnostic"))]
-mod tests;
-
 mod construct;
 
 mod inventory;

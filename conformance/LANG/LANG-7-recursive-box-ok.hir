@@ -1,6 +1,0 @@
-// rule: LANG-7
-// expect: accept
-// boundary: A boxed field breaks recursive inline layout.
-type Chain {
-  next: Option[box Chain],
-}

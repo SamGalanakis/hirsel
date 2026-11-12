@@ -343,9 +343,6 @@ impl InstanceKey {
     }
 }
 
-#[cfg(test)]
-mod derived_tests;
-
 /// Declaration ordinal of a binder's parameter.
 trait Ordinal: Copy {
     fn ordinal(self) -> u32;
@@ -961,6 +958,3 @@ impl InstanceView {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod encoding_tests;

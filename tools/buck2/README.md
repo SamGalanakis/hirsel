@@ -249,17 +249,15 @@ commands, profile provenance, interleaved measurements and the declined BOLT tri
 ```sh
 export CARGO_BUILD_JOBS=4 HIRSEL_JOBS=4 RUST_TEST_THREADS=4
 .buck2/bin/buck2 build --target-platforms //tools/buck2:release //:hirsel-toolchain --show-output # CLI and sibling std image
-.buck2/bin/buck2 build //:                        # every first-party target, dev profile, on the pool
 .buck2/bin/buck2 test //...                       # every test
 .buck2/bin/buck2 test //:hirsel-lir-unittest //:hirsel-lir-test-it \
   //:hirsel-lir           # one crate, including doctests
-.buck2/bin/buck2 test -c hirsel.tests=focus //:hirsel-lir-test-it -- --test-arg=layout::recursive_layouts_do_not_depend_on_request_order --test-arg=--exact
-.buck2/bin/buck2 test //:hirsel-pipeline-tests-test-front-shard-2  # one shard of a sharded test binary
-.buck2/bin/buck2 test -c hirsel.tests=host //:hirsel-pipeline-tests-test-front-shard-1   # run tests on this host
-.buck2/bin/buck2 test //:gate-native-smoke          # the native smoke
+.buck2/bin/buck2 test -c hirsel.tests=focus //:hirsel-lir-test-it -- --test-arg=layout::packed_fields_are_unaligned_and_align_raises_alignment --test-arg=--exact
+.buck2/bin/buck2 test //:hirsel-pipeline-tests-test-front-retained-2  # one shard of a sharded test binary
+.buck2/bin/buck2 test -c hirsel.tests=host //:hirsel-pipeline-tests-test-front-retained-1   # run tests on this host
+.buck2/bin/buck2 test //:gate-retained-llvm-shard-1   # one of four native slices
 .buck2/bin/buck2 test //:gate-link-hosts            # native-tests/link built here and on a pool worker, byte-compared
-python3 tools/buck2/conformance.py                # the whole conformance campaign's shards (full suite only)
-python3 tools/buck2/agree.py --native-full        # the native campaign's shards, merged against agree-known.txt (full suite only)
+python3 tools/buck2/conformance.py                # 31 component witnesses in four nonempty slices
 .buck2/bin/buck2 build --target-platforms //tools/buck2:release //:hirsel-conformance-bin-native
 python3 tools/buck2/sync.py --if-stale            # the generated build files, after any edit or rebase
 tools/land                                           # rebase, build, Clippy, fmt, push
@@ -343,7 +341,7 @@ Heavy Buck2 commands run from this host and execute on the pool when one is
 configured. Native changes use a filtered campaign:
 
 ```sh
-.buck2/bin/buck2 test -c hirsel.full=true //:gate-native-full -- --test-arg=--filter --test-arg=SEM-4-view-return-source-run
+.buck2/bin/buck2 test //:gate-retained-llvm-shard-1 -- --test-arg=--filter --test-arg=SEM-1-unsigned-add-ok
 ```
 
 Native tests receive LLVM 23.1.5, the link kit and glibc 2.28 floor runtime
@@ -383,12 +381,14 @@ Target names follow Cargo's targets, all in the root package:
 | a conformance shard (`CONFORMANCE_SHARDS`) | `//:gate-conformance-shard-<i>` |
 | a slice of the corpus cases a lane chose (`-c hirsel.conformance_paths`, up to `SELECTED_SLICES`; with `-c hirsel.conformance_paths_split=N` one slice's path-hash shard `i/N`, as `tools/corpus` runs it) | `//:gate-conformance-selected-shard-<i>` |
 | a slice of chosen corpus cases through the full native matrix (`-c hirsel.native_paths`, up to `NATIVE_SELECTED_SLICES`; `_split=S` gives case part `--case-part i/S`, `_parts=K` configuration part `--config-part j/K` of each case's pairwise cover, `_configs=a\|b` only those configurations of the whole matrix, `smoke` the per-push set, as `tools/corpus --native` runs it) | `//:gate-native-selected-shard-<i>` |
-| a slice of the chosen cases' variants in the seed-1 sample (`-c hirsel.agree_paths`) | `//:gate-agree-selected-shard-<i>` |
-| a budgeted full agreement shard (`AGREE_FULL_SHARDS`, full suite only) | `//:gate-agree-full-shard-<i>` |
-| a budgeted native agreement shard (`AGREE_NATIVE_FULL_SHARDS`, full suite only; `agree.py --native-full` runs and merges them) | `//:gate-agree-native-full-shard-<i>` |
-| a full native matrix shard (`NATIVE_FULL_SHARDS`, full suite only; `gate-native-full` stays whole for `--bless` and filtered runs) | `//:gate-native-full-shard-<i>` |
-| a historical native replay shard (`HISTORY_SHARDS`, on demand) | `//:gate-native-history-shard-<i>` |
-| a root-anchor trace shard (`TRACE_ROOTS_SHARDS`, on demand; `gate-native-trace-roots` stays whole for filtered runs) | `//:gate-native-trace-roots-shard-<i>` |
+
+| a native component witness slice | `//:gate-retained-{heap,llvm,cranelift}-shard-<1..4>` |
+| a named Rust witness slice | `//:<binary>-retained-<1..4>` |
+
+`python3 tools/buck2/full_gate_counts.py --retained` runs the retained matrix and
+requires all 75 named Rust bodies exactly once, all 31 reference programs and all
+36 native files on each engine. The four scalar PORT files are frozen source data.
+Protected V/depth fixtures remain with their deletion owners, outside this matrix.
 
 ## Instruction budgets
 
@@ -793,7 +793,7 @@ A pool test binary reserves what it measured using: `test_sizes.bzl`
 its shards, one CPU while total CPU seconds / total wall seconds is at most
 1.6, otherwise two. A one-CPU action may burst to two (cpu.max = 2 × request).
 A short CPU burst does not establish sustained parallelism. Four-CPU full-run
-shards no longer have an exemption: agreement uses 384 smaller shards instead
+shards no longer have an exemption; the retained matrix uses four nonempty slices per engine
 of 96 long-lived four-CPU reservations. The launcher runs as many test threads
 as the reservation's whole CPUs.
 
@@ -918,49 +918,15 @@ its measured single-CPU platform, declared only under `-c hirsel.clippy=true`, s
 Clippy never reserves a compile's request and `buck2 build //:` never
 compiles the twins.
 
-A lane's agreement run is the seed-1 sample's variants of its chosen cases:
-the global seed-1 catalogue limited to its lowest `AGREE_LIMIT` (5000) ranks
-(`sync.py`), in `gate-agree-selected-shard-<i>`. For the full campaign's
-shards, `agree.py` checks unique shard identities, matching catalogue
-metadata, sample coverage and classification/edit totals, and fails on any
-cluster or absent shard.
-`tools/main-runs` runs `agree.py --full`: a rotating sample of at most 96 variants per program over
-`AGREE_FULL_SHARDS` shards by the same stable rank, each under the shared
-repository test bound. The campaign has grown past what one 4-CPU action can finish
-(286950 variants on 2026-10-16, about 33000 shard-seconds on the pool); each
-shard prints its stage times, slowest variants and costliest programs to stderr,
-and names any variant still running after 30 s.
+The temporary native selection names the same 36 component files on the heap,
+LLVM and Cranelift. Each engine has four nonempty slices, using the existing path
+hash. These use the default x86-64 configuration; dedicated named Rust tests
+retain their own target, link, replay and fault-injection matrices. The retired
+corpus's mutation, history, topology and broad qualification campaigns are gone.
 
-
-Whole-campaign wrappers opt into the shared `//:native-selection` dependency
-with `-c hirsel.native_selection=true`. It exports the frozen program cover
-checked in as `native-tests/regressions/native-selection.json`, an
-inclusion-minimal feature cover after historical pins. Each selected
-baseline/generated program runs a rotating feasible-pair configuration cover;
-topology partitions and named exclusion cells remain present. `--exhaustive`
-on the campaign binary restores the previous exhaustive release check. The
-campaign seed defaults to the full run's `PROPTEST_RNG_SEED`; `--seed N` makes a
-run reproducible. The source/IR full agreement keeps all programs and budgets
-96 mutations each; `--exhaustive` restores its complete catalogue.
-
-The cover is frozen because deriving it observes every corpus program through
-14 native builds (two targets by seven lowering options) with LLVM emission:
-substantial work per program. The former 32 observation shards did not
-finish within their time budget. Each observation now runs in a fresh process;
-only feature strings and errors survive between cases. Compiler panics become
-program errors; a worker crash fails collection. The `inventory` and
-`observations-N` subtargets expose individual derivation stages. Loading the frozen cover adds, from the current tree, every
-historical pin and every program the cover never observed, so new cases run
-until the next derivation. `tools/bless.sh native-selection` derives it again
-on the pool (`-c hirsel.native_selection=derive`: 256 observation shards of
-about 10 programs within 1 CPU and 4 GiB each, then one merge) and writes the
-file for review.
-
-Direct `gate-native-full` and `gate-native-full-shard-N` targets have no
-coverage-artifact dependency unless that setting is enabled, since
-Buck2 fixes its build graph before it receives test-runner arguments. Explicit
-`--filter` values are the program selection; an unfiltered whole-target run
-reads the checked-in cover.
+`native-tests/regressions/native-selection.json` names the retained files.
+On-demand observation collection uses four slices. The ordinary component gate
+reads the named file list directly and does not derive a new cover.
 
 Native program selections use measured per-case costs from
 `tools/buck2/test-costs/gate-native-{changed,cranelift-changed}.tsv`.
@@ -1042,55 +1008,3 @@ mutant. Instrumented pool fixtures use 3,000,000 loop iterations and retain the
 same switch-free overlap assertion and probe cap. The x86 fiber switch annotates both ordinary fibers and naked CPU ahead
 handoffs; only CPU ahead certificates are enabled in this sanitizer mode.
 Each policy/emitter pool cell must independently establish overlap.
-
-### Private CPU overlap audits
-
-`tools/cpu-overlap --prepare /tmp/cpu-overlap-commands` builds the W4/W8/W16
-Ordered audits, P16, and both native TSan gates, and materializes their existing
-launcher commands and environments. It copies each mode's executables and std
-products into that directory because Buck's sanitizer config reuses output
-paths. Remove the prepared directory after the window. Prepare instrumented
-std first with the
-existing `tools/capped python3 tools/buck2/prepare_tsan.py` recipe. Builds happen
-before the fenced window, outside the test scopes.
-
-`tools/cpu-overlap --run /tmp/cpu-overlap-commands --cpus 0-7,16-23` runs those
-commands in private delegated user scopes with exact effective cpusets and the
-existing memory grants. It does not reserve CPUs. Every body checks ownership,
-worker placement, samples and full overlap, then refuses P qualification with
-`host-blocked: not exclusive` when another cgroup can run on those CPUs.
-Failures remain failures. The three ignored Ordered bodies stay ignored because
-libtest cannot report a dynamic host skip without counting the body as passed.
-
-The explicit gate homes are
-`tools/ignored-tests cpu_pool_4::ordered_allocating_mappers_overlap_and_replay`,
-with `cpu_pool_8` and `cpu_pool_16` selecting the other widths. These run
-`tools/cpu-overlap --only ordered-4|ordered-8|ordered-16` against prepared
-commands, require exactly one passing body, and propagate host-blocked failures.
-All three remain ignored in ordinary test runs. After preparation and fencing,
-run each home as root with the original user's UID, for example:
-
-```sh
-sudo -n env HIRSEL_CPU_OVERLAP_COMMANDS=/tmp/cpu-overlap-commands \
-  HIRSEL_CPU_OVERLAP_CPUS=0-7,16-23 HIRSEL_CPU_OVERLAP_SLICE=timing.slice \
-  HIRSEL_CPU_OVERLAP_UID=1000 \
-  tools/ignored-tests cpu_pool_4::ordered_allocating_mappers_overlap_and_replay
-```
-
-After fencing other top-level cgroups, the orchestrator can run
-`sudo -n tools/cpu-overlap --run /tmp/cpu-overlap-commands --cpus 0-7,16-23 --slice timing.slice --uid 1000`.
-Each command gets its own system scope in the named top-level slice and drops
-to that user. No daemon or build shares the scope. The sixteen logical CPUs
-may include SMT siblings; no sibling-idleness or speedup claim is made. The
-runner has a fifteen-minute total deadline and never changes other slices.
-Ownership comes from `cpuset.cpus.effective`; disjoint effective sets outside
-the job's ancestry, plus no resident userspace processes in its ancestors,
-prove exclusivity independently of
-kernel partition-root status. Root kernel threads remain subject to the
-switch-free interval check. Unreadable branches refuse qualification.
-
-The fence must also exclude the owned CPUs from empty top-level cgroups such
-as `dev-hugepages.mount`, whose inherited effective sets otherwise intersect.
-TSan controls remain mandatory. A failed or fifteen-second hung mutant is
-recorded before the production placement audit continues; the body still
-fails. The existing 180-second native TSan gate deadline remains unchanged.

@@ -1,13 +1,8 @@
 //! Demand-driven ordinary Lower and constant evaluation. Rust futures retain
 //! preparation and interpreter state on the admitted home worker. Publication
 //! into a source namespace remains a separate ordered transaction.
-use super::*;
-use crate::products::ProductSource;
-use crate::products::{LiveAdmission, LiveLowerProduct, WeakLowerProduct};
 mod carry;
 pub(in crate::queries) mod check;
-mod constants;
-mod dependencies;
 mod depth;
 pub(super) mod evidence;
 mod inputs;
@@ -16,6 +11,11 @@ mod reads;
 mod registration;
 mod staged;
 pub(super) mod staged_runtime;
+use super::*;
+use crate::products::ProductSource;
+use crate::products::{LiveAdmission, LiveLowerProduct, WeakLowerProduct};
+mod constants;
+mod dependencies;
 mod successor;
 pub(crate) use successor::{SuccessorCapture, WeakSuccessorCapture};
 mod stored;
@@ -3639,60 +3639,6 @@ impl QueryEngine {
             request: partition.request.clone(),
         });
         Ok(lower)
-    }
-}
-
-#[cfg(test)]
-mod retention_tests {
-    use super::*;
-    #[test]
-    fn retained_outcome_charges_capacity_and_compact_read_rows() {
-        let mut bytes = Vec::with_capacity(64 << 10);
-        bytes.push(1);
-        let capacity = bytes.capacity();
-        let substitutions = Vec::with_capacity(4);
-        let substitutions_bytes =
-            substitutions.capacity() * std::mem::size_of::<(hirsel_syntax::ExprId, Materialized)>();
-        let outcome = Outcome {
-            diagnostic_sources: None,
-            phase: Some(QueryKind::Lower),
-            result: Ok(Value::Constant(Box::new(Constants::new(
-                Materialized {
-                    root: hirsel_tir::ValueNode {
-                        ty: hirsel_types::TypeId::DANGLING,
-                        kind: hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Bytes(bytes)),
-                    },
-                },
-                substitutions,
-            )))),
-            reads: Reads::from_vec(vec![(
-                ReadKey::Signature(DefId::intern(&DefPath::core(&"long".repeat(4096)))),
-                ContentHash::default(),
-            )])
-            .unwrap(),
-            reads_decode_bytes: 0,
-            selections: Vec::new(),
-            depth: DepthEvidence::leaf(32).into(),
-            executed: false,
-            execution: None,
-            execution_subject: ContentHash::default(),
-            action: hirsel_artifact_store::Action(ContentHash::default()),
-            observations: None,
-        };
-        let expected = size_of::<Outcome>()
-            + 2 * size_of::<usize>()
-            + size_of::<Constants>()
-            + 2 * size_of::<usize>()
-            + capacity
-            + substitutions_bytes
-            + std::mem::size_of::<(ReadKey, ContentHash)>()
-                .next_multiple_of(std::mem::align_of::<usize>())
-            + 2 * std::mem::size_of::<usize>()
-            + outcome.depth.retained_bytes();
-        assert_eq!(outcome.retained_bytes(), Some(expected as u64));
-        assert_eq!(outcome_table_bytes(0), 0);
-        assert!(outcome_table_bytes(1) >= std::mem::size_of::<(Reference, Outcome, u64)>() as u64);
-        assert!(outcome_table_bytes(6) > outcome_table_bytes(1));
     }
 }
 

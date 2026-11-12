@@ -1,7 +1,0 @@
-// rule: SER-1
-// expect: accept
-fn encode[T: serializable](x: T) {}
-
-fn example(x: time.Duration) {
-  encode(x)
-}

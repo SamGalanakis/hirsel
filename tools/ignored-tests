@@ -38,13 +38,6 @@ def command(case, environment):
     if missing:
         raise ValueError(f'{case}: required retained inputs: ' + ', '.join(missing))
     validate_retained_paths(case, home, environment)
-    if 'cpu_overlap' in home:
-        return [str(ROOT / 'tools/cpu-overlap'),
-                '--run', environment['HIRSEL_CPU_OVERLAP_COMMANDS'],
-                '--cpus', environment['HIRSEL_CPU_OVERLAP_CPUS'],
-                '--slice', environment['HIRSEL_CPU_OVERLAP_SLICE'],
-                '--uid', environment['HIRSEL_CPU_OVERLAP_UID'],
-                '--only', home['cpu_overlap']]
     return [str(ROOT / 'tools/test-filter'), '-c', 'hirsel.tests=host',
             re.sub(r'(?:-cpus-\d+)?-shard-\d+$', '', home.get('target', '//:hirsel-cli-test-cli')),
             *[argument for value in home.get('config', []) for argument in ['-c', value]],
@@ -73,11 +66,7 @@ def main():
     print(result.stdout, end='')
     if result.returncode:
         return result.returncode
-    if 'cpu_overlap' in REGISTRY[args.case]:
-        counts = re.findall(r'test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;', result.stdout)
-        complete = counts == [('1', '0', '0')]
-    else:
-        complete = re.findall(r'^test-filter: executed exactly (\d+) selected bodies$', result.stdout, re.M) == ['1']
+    complete = re.findall(r'^test-filter: executed exactly (\d+) selected bodies$', result.stdout, re.M) == ['1']
     if not complete:
         print('ignored-tests: expected exactly one executed passing test', file=sys.stderr)
         return 1

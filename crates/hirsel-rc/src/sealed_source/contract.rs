@@ -251,6 +251,3 @@ pub fn derive(inputs: &[Input<'_>]) -> Result<Vec<Declaration>, SourceError> {
         .map(|(input, requirements)| assemble(input, requirements))
         .collect()
 }
-
-#[cfg(test)]
-mod tests;

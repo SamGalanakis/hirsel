@@ -57,7 +57,6 @@ URLs under your scratch directory, and serves the independent JSON fixtures.
 Keep this process running until the recording commands finish:
 
 ```sh
-python3 crates/hirsel-cli/tests/support/httpaggregate_9/verify.py \
   --serve examples/httpaggregate/fixtures --output "$aggregate_dir"
 ```
 

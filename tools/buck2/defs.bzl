@@ -13,7 +13,7 @@ CARGO_TARGET_TMPDIR and CARGO_BIN_EXE_<name>.
 """
 
 load(":platforms.bzl", "CLIPPY_REQUEST", "PRECHECK_REQUEST", "PROBE_CPUS", "budget_constraint", "compile_request", "doctest_properties", "dist_compile_request", "pool_budget_name", "test_budget_name", "test_executor", "test_request", "test_memory_limit")
-load(":test_requirements.bzl", "EXACT_CASE_CPUS", "EXACT_TEST_CPUS", "ISOLATED_TEST_CASES", "REPLAY_CELL_CPUS", "REPLAY_TEST_BINARY")
+load(":test_requirements.bzl", "EXACT_CASE_CPUS", "EXACT_TEST_CPUS", "ISOLATED_TEST_CASES")
 load(":exec_sizes.bzl", "COMPILE_CLASSES", "COMPILE_REQUESTS")
 load(":profile.bzl", "OPTIMIZED_RUNTIME_VARIANTS", "TEST_RUNTIME_FLAGS", "runtime_profile_flags", "workspace_profile_flags")
 load("@prelude//linking:link_info.bzl", "ArchiveLinkable", "LinkStrategy", "ObjectsLinkable")
@@ -241,7 +241,7 @@ def _merged_archives(ctx, views):
         for key, artifact in view[RuntimeArchivesInfo].entries.items()
     })
 
-def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], runtime_archives = [], products = None, shards = 1, case_shards = {}, costs = None, seeded = False, skips = [], consumer_cases = {}):
+def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], runtime_archives = [], products = None, shards = 1, case_shards = {}, costs = None, seeded = False, skips = [], consumer_cases = {}, retained_cases = []):
     """A libtest harness (`rustc --test`) and the test that runs it.
 
     `bin_exes` are the package's binaries, as Cargo's CARGO_BIN_EXE_<name>.
@@ -258,8 +258,6 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
     `skips` are exact case names every
     run skips except the full gate's (`-c hirsel.full=true`).
     """
-    if name in ["hirsel-cli-test-cpu_pool_8"] and read_root_config("hirsel", "native_tsan", "false") == "true":
-        runtime_archives = [":hirsel-rt-tsan-archives[x86_64-default]"]
     if package_name == "hirsel-rt" and read_root_config("hirsel", "ownership_trace", "false") == "true":
         features = features + ["ownership-trace"]
     harness = name + "-harness"
@@ -345,6 +343,17 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
             exact_cpus = case_cpus.get(case, 0),
             pool = not TESTS_ON_HOST,
             extra_env = {"HIRSEL_TEST_DEDICATED_CASE": case},
+            **isolated_common
+        )
+    # Fixed nonempty slices of the named old-source component witnesses.
+    for index in range(min(4, len(retained_cases))):
+        _rust_test(
+            name = "{}-retained-{}".format(name, index + 1),
+            args = ["--include-ignored", "--exact"] + retained_cases[index::4],
+            labels = ["gate"],
+            exec_compatible_with = _test_platform(name),
+            request = _request(name),
+            pool = not TESTS_ON_HOST,
             **isolated_common
         )
     # Stable targets for required native launches, including ignored full-gate
@@ -473,12 +482,6 @@ def _rust_test_impl(ctx):
     # test's binaries and products in the same build as the workspace.
     sub_targets = {"inputs": [DefaultInfo(default_output = ctx.attrs.harness[DefaultInfo].default_outputs[0],
                                           other_outputs = inputs)]}
-    if ctx.attrs.test_binary.startswith("hirsel-cli-test-cpu_pool_"):
-        # Materialize the existing launcher and its exact environment before a
-        # fenced CPU window, so no Buck daemon or build shares the test scope.
-        host_command = ctx.actions.declare_output("host-command.json")
-        host_inputs = ctx.actions.write_json(host_command, {"command": command, "env": env}, with_inputs = True)
-        sub_targets["host-command"] = [DefaultInfo(default_output = host_command, other_outputs = [host_inputs])]
     return [
         DefaultInfo(default_output = ctx.attrs.harness[DefaultInfo].default_outputs[0], sub_targets = sub_targets),
         RunInfo(args = command),
@@ -1011,24 +1014,6 @@ def hirsel_tsan_runtime_archives(name):
         visibility = ["PUBLIC"],
     )
 
-def hirsel_native_pool_tsan(name, width, data, products):
-    if read_root_config("hirsel", "native_tsan", "false") != "true":
-        return
-    binary = "hirsel-cli-test-cpu_pool_{}".format(width)
-    _script_binary(name = name + "-script", script = "tools/workers-tsan")
-    _rust_test(
-        name = name, harness = ":" + name + "-script", args = ["--native", str(width)],
-        test_binary = binary, data = data, cwd = ".", products = products,
-        bin_exes = {"hirsel": ":hirsel-cli-bin-hirsel"},
-        bin_exe_dir = BIN_EXE_DIR + "/" + binary + "-harness",
-        files_env = {"HIRSEL_NATIVE_CPU_HARNESS": ":" + binary + "-harness"},
-        llvm = "root//tools/buck2/native-toolchain:llvm",
-        llvm_libraries = "toolchains//:llvm-libraries",
-        native_tools = native_tool_inputs(),
-        runtime_archives = [":hirsel-rt-tsan-archives[x86_64-default]"], labels = ["gate"],
-        exec_compatible_with = _test_platform(binary), pool = not TESTS_ON_HOST,
-        request = _request(binary), visibility = ["PUBLIC"],
-    )
 
 def _runtime_archives_impl(ctx):
     entries = {}
@@ -1170,51 +1155,3 @@ _runtime_archives = rule(
         "_profile_llvm": attrs.dep(default = "toolchains//:llvm"),
     },
 )
-
-
-def hirsel_deadline_replay_matrix(name, data, runtime_archives, products):
-    """One immutable recording per backend, with independently bounded cells.
-
-    Fixture errors are artifacts too: every dependent libtest cell reports the
-    first failed phase. No width regenerates a tape or warms reference startup.
-    """
-    binary = REPLAY_TEST_BINARY
-    common = dict(
-        harness = ":" + binary + "-harness",
-        data = data,
-        bin_exes = {"hirsel": "//:hirsel-cli-bin-hirsel"},
-        bin_exe_dir = BIN_EXE_DIR + "/" + binary + "-harness",
-        runtime_archives = runtime_archives,
-        products = products,
-        llvm = "root//tools/buck2/native-toolchain:llvm",
-        llvm_libraries = "toolchains//:llvm-libraries",
-        native_tools = native_tool_inputs(),
-        cwd = "crates/hirsel-cli",
-        test_binary = binary,
-        pool = not TESTS_ON_HOST,
-        visibility = ["PUBLIC"],
-    )
-    for backend in ["llvm", "cranelift"]:
-        fixture = name + "-" + backend + "-fixture"
-        _rust_test(
-            name = fixture,
-            fixture_output = True,
-            labels = ["fixture"],
-            extra_env = {"HIRSEL_REPLAY_BACKEND": backend},
-            args = ["--ignored", "--exact", "ordered_deadline_liveness_55::fixture", "--nocapture"],
-            request = _request(binary),
-            exec_compatible_with = _test_platform(binary),
-            **common
-        )
-        for cell, exact_cpus in REPLAY_CELL_CPUS.items():
-            _rust_test(
-                name = name + "-" + backend + "-" + cell,
-                files_env = {"HIRSEL_REPLAY_FIXTURE": ":" + fixture},
-                extra_env = {"HIRSEL_REPLAY_BACKEND": backend, "HIRSEL_REPLAY_CELL": cell},
-                args = ["--ignored", "--exact", "ordered_deadline_liveness_55::cell", "--nocapture"],
-                labels = [],
-                request = _request(binary, exact_cpus),
-                exec_compatible_with = _test_platform(binary, exact_cpus),
-                exact_cpus = exact_cpus,
-                **common
-            )

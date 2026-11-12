@@ -1,3 +1,0 @@
-pub fn seal[T: copyable](take a: Arena in a, take root: T) -> Region[T] {
-  arena.seal(take a, take root)
-}

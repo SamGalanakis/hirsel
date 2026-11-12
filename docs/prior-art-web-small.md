@@ -15,7 +15,6 @@ The port retains the upstream test functions and cites every assertion. It
 adds 136 checks: all 52 parser assertions, all 57 IP parse and Display assertions,
 all 26 socket Display assertions, and one additional unscoped maximum-length
 socket check. `SEM-3-net-rust-vectors-run.hir` runs the 90 parse assertions.
-`crates/hirsel-driver/tests/fixtures/net-rust-display.hir` runs 46 Display/scope
 checks through the Rust test `stdlib_net::rust_display_vectors_with_padding`,
 on both snapshot and checked interpreters with a 10M-step bound: running all
 formatting rows exceeds the corpus's 1M-step budget. Existing direct
@@ -86,7 +85,6 @@ contributors). A shared scanner walks the original argv; a private positional-st
 policy preserves `cli.parse`'s Go behavior. Only standalone `--` disables scanning
 in the new entrypoint; value consumption takes precedence over the terminator.
 
-`crates/hirsel-driver/tests/fixtures/cli-interspersed-11/vectors.hir` ports
 `tests/builder/positionals.rs:5-19` (`only_pos_follow`, terminator) and `:43-75`
 (`positional`, before/after option vectors). The pinned `:5-19` range is a
 terminator vector, rather than a before-positional vector. Adaptations omit

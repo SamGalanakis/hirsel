@@ -32,7 +32,7 @@ merge rule above); the batch's own combinations are new digests.
 load(":exec_sizes.bzl", "COMPILE_CLASSES", "COMPILE_REQUESTS", "POOL_BUDGETS", "SPECIAL_REQUESTS")
 load(":priorities.bzl", "LAND_PRIORITY")
 load(":test_sizes.bzl", "TEST_REQUESTS", "TEST_GUARD_LIMITS")
-load(":test_requirements.bzl", "EXACT_CASE_CPUS", "EXACT_TEST_CPUS", "REPLAY_CELL_CPUS", "REPLAY_TEST_BINARY")
+load(":test_requirements.bzl", "EXACT_CASE_CPUS", "EXACT_TEST_CPUS")
 
 PRIORITY = int(read_root_config("hirsel", "priority", "50"))
 if (PRIORITY < 0 or PRIORITY > 99) and PRIORITY != LAND_PRIORITY:
@@ -261,9 +261,6 @@ def declare_platforms(name, constraints):
         for exact_cpus in cases.values():
             test, effective = _binary_test_request(binary, exact_cpus)
             tests[test] = effective
-    for exact_cpus in REPLAY_CELL_CPUS.values():
-        test, effective = _binary_test_request(REPLAY_TEST_BINARY, exact_cpus)
-        tests[test] = effective
     for test, (cpu, memory_kb, cpu_class) in sorted(tests.items()):
         native.constraint_value(name = test, constraint_setting = ":budget", visibility = ["PUBLIC"])
         budgets["{}|{}|{}|{}".format(test, cpu, memory_kb, cpu_class)] = ":" + test

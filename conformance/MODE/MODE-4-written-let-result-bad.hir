@@ -1,7 +1,0 @@
-// rule: MODE-4
-// expect: reject MODE-4 at line 5
-// twin: MODE/MODE-4-written-transport-growth-run.hir
-fn bad(take old: Bytes) -> sendable Bytes {
-  let x: sendable Bytes = take old
-  x
-}

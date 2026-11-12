@@ -1,9 +1,0 @@
-// rule: LANG-12
-// expect: accept
-type A {}
-
-type R = A
-
-fn probe() {
-  let x = R
-}

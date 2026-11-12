@@ -62,7 +62,6 @@ hirsel run recipe/hirsel.json
 ```
 
 Source check, reachable export and execution are separate checks. The
-[recipe tests](../crates/hirsel-driver/tests/it-stdlib/std_api_recipes_24.rs)
 compile these exact Markdown programs with the manifest above and execute each
 under the interpreter and checked heap. `failure.check` makes the handwritten
 expected values executable; applications can match the same Options/Results to
@@ -231,4 +230,3 @@ Rust `library/alloc/src/string.rs:510–559` and
 `Option`/`Result` contextual variants and a raw byte error payload. No validator
 or accessor implementation is ported here. Time's fixed output and failure
 vectors come from the shipped
-[formatter controls](../conformance/SEM/SEM-1-time-strftime-run.hir).

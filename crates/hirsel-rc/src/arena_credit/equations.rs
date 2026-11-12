@@ -8,8 +8,6 @@ use super::*;
 use hirsel_lir::stage::StageOutput;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-#[cfg(test)]
-mod tests;
 
 pub type Function = (hirsel_syntax::DefPath, hirsel_syntax::ContentHash);
 

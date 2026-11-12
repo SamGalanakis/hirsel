@@ -1,8 +1,0 @@
-// rule: GEN-1
-// expect: reject GEN-1 at line 7
-// twin: GEN/GEN-1-opaque-key-data-ok.hir
-pub opaque type KeyOnly: () uses {}
-
-fn equal(x: KeyOnly) -> bool {
-  x == x
-}

@@ -72,7 +72,6 @@ largest unread chunk and is asserted against the capacity in tests.
 This discipline matters: `read_more` itself can append to unread data, so calling
 it repeatedly without consumption would defeat the bound. A `peek` loan used
 after `consume` is rejected, even when the span or consume count is zero. The
-[rejected fixture](../conformance/SEM/SEM-3-binary-pipe-consume-bad.hir)
 and its passing twin demonstrate that boundary.
 
 ## Failures and partial output

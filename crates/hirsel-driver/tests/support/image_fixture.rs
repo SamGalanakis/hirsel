@@ -1,5 +1,4 @@
 //! Temporary packages loaded through the ordinary product provider.
-use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_engine_store as store;
 use hirsel_front_phases::*;

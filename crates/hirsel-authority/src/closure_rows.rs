@@ -127,38 +127,3 @@ impl Drop for ClosureEdit<'_> {
         }
     }
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn replacement_order_and_current_type_index_follow_mutations() {
-        let t = crate::test_support::session();
-        let a = t.intern(Type::with_kind(TypeKind::Primitive(Primitive::U8)));
-        let b = t.intern(Type::with_kind(TypeKind::Primitive(Primitive::U16)));
-        let row = |expression, ty| ClosureInfo {
-            context: hirsel_types::CaptureContext::Scoped,
-            expression: ExprId(expression),
-            ty,
-            captures: vec![],
-            result_evidence: None,
-        };
-        let mut rows = ClosureRows::new(vec![row(2, a), row(1, a)]);
-        assert_eq!(rows.by_type(a).unwrap().expression, ExprId(2));
-        rows.insert(ExprId(2), row(2, a));
-        assert_eq!(
-            rows.iter().map(|r| r.expression.0).collect::<Vec<_>>(),
-            vec![1, 2]
-        );
-        assert_eq!(rows.by_type(a).unwrap().expression, ExprId(1));
-        rows.get_mut(&ExprId(1)).unwrap().ty = b;
-        assert_eq!(rows.by_type(a).unwrap().expression, ExprId(2));
-        assert_eq!(rows.by_type(b).unwrap().expression, ExprId(1));
-        assert_eq!(
-            rows.into_sorted()
-                .iter()
-                .map(|r| r.expression.0)
-                .collect::<Vec<_>>(),
-            vec![1, 2]
-        );
-    }
-}

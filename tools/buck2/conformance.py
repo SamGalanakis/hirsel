@@ -55,8 +55,10 @@ def summarize(outputs, shards):
     exempt = 0
     for shard, output in sorted(outputs.items()):
         seen = set()
+        empty = False
         for line in output.splitlines():
             if match := COUNTS.match(line.strip()):
+                empty |= int(match[2]) == 0
                 seen.add(match[1])
                 totals[match[1]] = [a + int(b) for a, b in zip(totals[match[1]], match.groups()[1:])]
             elif match := EXEMPT.match(line.strip()):
@@ -64,6 +66,8 @@ def summarize(outputs, shards):
                 exempt += int(match[1])
         if missing := {'whole corpus', 'in-gate corpus', 'formatting'} - seen:
             raise ValueError(f'{shard} reported no counts for: ' + ', '.join(sorted(missing)))
+        if empty:
+            raise ValueError(f"{shard} executed no conformance bodies")
     lines = [f'{name}: {v} validated / {p} passing / {f} failing / {n} not implemented'
              for name, (v, p, f, n) in totals.items()]
     return lines + [f'corpus formatting: {exempt} intentional syntax rejections exempt']
@@ -97,8 +101,13 @@ def self_test():
              'whole corpus: 0 validated / 0 passing / 0 failing / 0 not implemented\n'
              'in-gate corpus: 0 validated / 0 passing / 0 failing / 0 not implemented\n'
              'corpus formatting: 0 intentional syntax rejections exempt\n')
-    assert summarize({'a': shard, 'b': empty}, 2) == summarize({'a': shard}, 1)
-    assert summarize({'a': empty}, 1) == empty.splitlines()[1:]
+    for outputs in ({'a': empty}, {'a': shard, 'b': empty}):
+        try:
+            summarize(outputs, len(outputs))
+        except ValueError as error:
+            assert 'executed no conformance bodies' in str(error)
+        else:
+            raise AssertionError('a retained gate slice must execute bodies')
     for missing in ['', empty.split('whole corpus:')[0], empty.replace('corpus formatting:', 'absent:')]:
         try:
             summarize({'a': missing}, 1)

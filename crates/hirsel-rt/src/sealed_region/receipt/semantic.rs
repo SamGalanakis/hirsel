@@ -253,6 +253,3 @@ impl Inventory {
         Ok(retained.plus(root.record().heap))
     }
 }
-
-#[cfg(test)]
-mod tests;

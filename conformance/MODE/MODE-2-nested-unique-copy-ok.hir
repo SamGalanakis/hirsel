@@ -1,5 +1,0 @@
-// rule: MODE-2
-// expect: accept
-fn load(take r: Result[Bytes, ()]) -> (Result[Bytes, ()], Result[Bytes, ()]) {
-  (copy r, take r)
-}

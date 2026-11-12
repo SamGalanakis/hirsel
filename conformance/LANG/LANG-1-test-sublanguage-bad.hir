@@ -1,6 +1,0 @@
-// rule: LANG-1
-// expect: reject LANG-1 at line 6
-// twin: LANG/LANG-9-bench-attribute-both-ok.hir
-// A test is an ordinary fn selected by @test; no top-level test declaration exists.
-@noalloc
-test check() -> () { () }

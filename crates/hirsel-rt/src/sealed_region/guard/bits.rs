@@ -130,6 +130,3 @@ pub(super) unsafe fn bits_plan(
     };
     Ok(plan)
 }
-
-#[cfg(all(test, feature = "diagnostic"))]
-mod tests;

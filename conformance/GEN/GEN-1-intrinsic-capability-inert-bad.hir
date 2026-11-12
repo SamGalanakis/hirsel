@@ -1,5 +1,0 @@
-// rule: GEN-1
-// expect: reject CAP-2 at line 4
-// twin: GEN/GEN-1-intrinsic-capability-inert-ok.hir
-@capability(global)
-pub opaque type Gate: inert uses {}

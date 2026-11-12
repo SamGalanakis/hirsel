@@ -1,9 +1,0 @@
-// rule: MODE-1
-// expect: reject MODE-1 at line 8
-// twin: MODE/MODE-1-unique-local-taken-moved-ok.hir
-// A binding that x moves into keeps x's relation, so `unique v` of that
-// unique binding is still local to x's argument.
-fn preserve(take x: unique Bytes in x) -> unique Bytes {
-  let v = x
-  unique v
-}

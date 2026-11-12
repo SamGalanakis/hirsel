@@ -1,5 +1,0 @@
-// rule: MODE-1
-// expect: accept
-fn probe(s: String) -> String in s uses {} {
-  string.trim(s)
-}

@@ -1,6 +1,5 @@
 # Reference vectors
 
-The shared runner is `crates/hirsel-driver/tests/it-stdlib/reference_vectors.rs`.
 It follows `stdlib_wave2_num.rs:61`'s host-side vector generation and bounded
 batches: ordinary Hirsel source is checked and run through the driver. Interpreter
 steps are unlimited (`Limits { steps: None }`); call depth remains bounded at 256.
@@ -130,5 +129,4 @@ a79de072571b90eb40c3a63ce0c7f75dcb4b62323c8870228e1f61dcc61d63a9  xchacha20_poly
    std importers through `-c hirsel.conformance_paths='path-a|path-b'
    //:gate-conformance-selected-shard-1`.
    Measure new case costs with libtest `--report-time` and update the normal
-   `tools/buck2/test-costs/hirsel-driver-test-it-stdlib.tsv` via
    `tools/buck2/test_costs.py`; this keeps future suites spread over pool shards.

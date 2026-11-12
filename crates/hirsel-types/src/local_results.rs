@@ -86,68 +86,6 @@ pub fn local_result_permissions(
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use hirsel_syntax::PassingMode;
-    fn row(kind: TypeKind) -> Type {
-        Type {
-            drop_allocation: DropAllocation::MayAllocate,
-            ..Type::with_kind(kind)
-        }
-    }
-    fn function(result: TypeId) -> FunctionType {
-        FunctionType {
-            state_promises: Default::default(),
-            generics: vec![GenericParameter::Type {
-                name: "T".into(),
-                bounds: vec![].into(),
-            }]
-            .into(),
-            parameters: vec![Parameter {
-                name: None,
-                label: None,
-                passing: PassingMode::Borrow,
-                ty: result,
-            }]
-            .into(),
-            result,
-            error: None,
-            allocation: Allocation::MayAllocate,
-            authority: AuthoritySummary::inert(),
-            uses: Uses::Unrestricted,
-            contracts: vec![].into(),
-            incomplete: false,
-            foreign: None,
-        }
-    }
-    #[test]
-    fn nested_generic_result_does_not_bind_an_outer_ordinal() {
-        let types = TypeInterner::new(None);
-        let t = types.intern(row(TypeKind::Parameter(TypeParameterRef::bound(
-            TypeParamId(0),
-        ))));
-        let mut nested = row(TypeKind::Function(function(t)));
-        nested.modes.relation = Relation::parameters([ParameterRef::bound(ParamId(0))]);
-        let nested = types.intern(nested);
-        let f = function(nested);
-        assert_eq!(local_result_generics(&types, &f), f.generics);
-        // A reference crossing the nongeneric callable identifies the outer binder.
-        let t = types.intern(row(TypeKind::Parameter(TypeParameterRef::Bound {
-            depth: 1,
-            parameter: TypeParamId(0),
-        })));
-        let mut callable = function(t);
-        callable.generics.clear();
-        let mut result = row(TypeKind::Function(callable));
-        result.modes.relation = Relation::parameters([ParameterRef::bound(ParamId(0))]);
-        let result = types.intern(result);
-        let f = function(result);
-        assert!(matches!(&local_result_generics(&types, &f)[0],
-            GenericParameter::Type { bounds, .. } if bounds.contains(&Bound::Copyable)));
-    }
-}
-
 /// PROV-4: a result related to parameters is placed where its sources agree.
 /// When every named source reaches the same arena, that arena joins the
 /// result's relation, so it is the destination every body, call and

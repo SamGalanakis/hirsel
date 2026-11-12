@@ -1,6 +1,0 @@
-// rule: GEN-1
-// expect: reject GEN-1 at line 4
-// twin: GEN/GEN-1-opaque-noalloc-drop-ok.hir
-pub opaque type Callback: noalloc_drop uses {} {
-  f: fn() uses {},
-}

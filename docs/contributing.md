@@ -70,7 +70,6 @@ Cargo needs no build service. What it builds runs locally, so it runs under
 cargo build --workspace
 tools/capped --long --timeout 1800 cargo test -j 2 -p hirsel-lir
 tools/capped target/debug/hirsel-conformance --verbose --shard 1/1 \
-  --path conformance/SEM/SEM-1-format-into-appends-run.hir
 ```
 
 `hirsel-conformance` reports counts by rule prefix; `--json` gives tool
@@ -210,7 +209,6 @@ canonical formatter check, on the pool:
 ```sh
 .buck2/bin/buck2 test -c hirsel.tests=focus //:gate-conformance-shard-1 -- \
   --test-arg=--shard --test-arg=1/1 \
-  --test-arg=--path --test-arg=conformance/SEM/SEM-1-format-into-appends-run.hir
 ```
 
 `--path` matches repository-relative prefixes, may repeat, and fails if no files

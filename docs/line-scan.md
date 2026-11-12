@@ -89,8 +89,6 @@ Expected stdout is `{"x":1}\n[true,null]\n42\n` and stderr is empty.
 
 The lane owns `conformance/SEM/SEM-3-line-scan-7-{controls,vectors}-run.hir` and their
 manifests, the bounded helper fixture
-`crates/hirsel-driver/tests/fixtures/line-scan-7/exhaustive.hir` and manifest,
-and `crates/hirsel-driver/tests/it-stdlib/line_scan_7.rs`. The corpus stays
 within its 1M-step budget; exhaustive and rising/falling line workloads live
 in a bounded Rust harness. Short cases cover every partition, every pair of
 cuts (including empty chunks), and both CR policies. A whole-input Rust

@@ -392,6 +392,3 @@ unsafe fn block_plan(
     physical.insert(source.addr(), id);
     Ok(id)
 }
-
-#[cfg(all(test, feature = "diagnostic"))]
-pub(in crate::sealed_region) mod tests;

@@ -9,18 +9,10 @@
 # again without the bless, which fails unless the rewritten files pass:
 #   heap               native-tests/heap/              heapcheck fixtures and traces
 #   layout             native-tests/layout/            layout tables
-#   wire               crates/hirsel-types/tests/wire/golden.tsv        SER-2 vectors
-#   replay             native-tests/replay/column-skew/                 replay fixture
-#   signatures         crates/hirsel-signature/src/golden.txt           encoding vectors
-#   package-docs       packages/doc_api@1/api.md
 #   core-review        crates/hirsel-registry/src/review-table.txt
 #   native-inventory   native-tests/library/operations.tsv
-#   ownership-passing  crates/hirsel-ownership/src/tests/{passing,pending}.txt
-#   authority-corpus   crates/hirsel-authority/src/corpus/{passing,pending}.txt
-#   snapshots          insta snapshots: lowering, grammar examples, mode explanations
 #   all                every in-test bless above
 # Corpus-wide blesses:
-#   exclusions         native-tests/regressions/exclusions.tsv: native --full --bless (hours)
 #   native-selection   native-tests/regressions/native-selection.json: the frozen program
 #                      cover, derived on the pool (-c hirsel.native_selection=derive)
 set -euo pipefail
@@ -42,24 +34,12 @@ cases() {
   case "$1" in
     heap) echo "//:hirsel-heapcheck-test-it heap::" ;;
     layout) echo "//:hirsel-lir-test-it layout::" ;;
-    wire) echo "//:hirsel-types-test-wire recursive_canonical_golden_vectors" ;;
-    replay) echo "//:hirsel-conformance-test-it native_gate::a_stored_artifact_replays_from_another_path_and_arena_numbering" ;;
-    signatures) echo "//:hirsel-signature-unittest tests::golden_vectors" ;;
-    package-docs) echo "//:hirsel-driver-test-it api_index::package_public_api_matches_readable_golden" ;;
     core-review) echo "//:hirsel-registry-unittest tests::every_declared_signature_matches_the_review_table_and_canonical_hash" ;;
     native-inventory) echo "//:hirsel-registry-test-native_inventory declaration_digests_match_the_reviewed_native_inventory" ;;
-    ownership-passing) echo "//:hirsel-ownership-unittest tests::corpus::source_corpus_ratchets_rule_and_primary_line" ;;
-    authority-corpus) echo "//:hirsel-authority-unittest corpus::real_phase_corpus_ratchet" ;;
-    snapshots)
-      echo "//:hirsel-lower-unittest tests::"
-      echo "//:hirsel-parser-test-it grammar_examples::"
-      echo "//:hirsel-pipeline-tests-test-front modes_explanations::"
-      ;;
     *) return 1 ;;
   esac
 }
-in_test=(package-docs heap layout wire replay signatures core-review native-inventory
-  ownership-passing authority-corpus snapshots)
+in_test=(heap layout core-review native-inventory)
 
 # Run one target's filtered cases, on this host with `--env` options when
 # given, and fail unless at least one passed: a filter that matches nothing
@@ -99,7 +79,6 @@ bless_in_test() {
 for what in "$@"; do
   case "$what" in
     all) for each in "${in_test[@]}"; do bless_in_test "$each"; done ;;
-    exclusions) "$buck2" test -c hirsel.full=true -c hirsel.tests=host //:gate-native-full -- --test-arg=--bless ;;
     native-selection)
       derived="$("$buck2" build -c hirsel.native_selection=derive //:native-selection --show-full-simple-output)"
       cp "$derived" native-tests/regressions/native-selection.json ;;

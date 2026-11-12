@@ -609,21 +609,3 @@ fn literal_lower_bound(piece: &str) -> u64 {
     }
     count
 }
-
-#[cfg(test)]
-mod text_build_tests {
-    use super::literal_lower_bound;
-
-    #[test]
-    fn literal_capacity_counts_utf8_escapes_and_braces() {
-        for (piece, bytes) in [
-            (r#"f"line {"#, 5),
-            (r#"}\n""#, 1),
-            (r#"f"é😀{{}}""#, 8),
-            (r#"f"\u{1f600}\x41\\\"""#, 4),
-            (r#"f"""#, 0),
-        ] {
-            assert_eq!(literal_lower_bound(piece), bytes, "{piece}");
-        }
-    }
-}

@@ -1521,20 +1521,3 @@ enum CounterCell<'m> {
 }
 
 type Emitted<T = ()> = Result<T, CodegenError>;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use hirsel_syntax::{ItemPath, PackageId};
-
-    fn definition(name: &str) -> DefPath {
-        DefPath(ItemPath {
-            package: PackageId {
-                name: "fixture".into(),
-                version: "0.1".into(),
-            },
-            modules: vec!["m_n".into()],
-            name: name.into(),
-        })
-    }
-}

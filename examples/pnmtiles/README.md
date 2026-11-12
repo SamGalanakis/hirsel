@@ -100,7 +100,6 @@ these bounds have not been increased. Raw tapes, seals and receipts live outside
 the repository in `/workspace/code/hirsel-briefs/pnm-tiles-30/`.
 
 The optional production width driver in
-`crates/hirsel-cli/tests/support/pnm_tiles_30/qualify.py` accepts `--app-root`
 (the retained native test directory containing both binaries, sources, capped
 helper and cases) and a fresh external `--root` for receipts. It runs ordinary
 Ordered success/domain/cancellation cells at widths1/2/4, samples settled control

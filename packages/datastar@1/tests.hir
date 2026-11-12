@@ -1,5 +1,4 @@
 // Tests of the datastar@1 SDK beyond the official golden cases, which run in the
-// corpus (conformance/PROG/PROG-1-datastar-sdk-golden.hir).
 
 @serializable
 type Search {

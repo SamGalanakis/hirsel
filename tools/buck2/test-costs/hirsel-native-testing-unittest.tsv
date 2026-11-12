@@ -1,4 +1,3 @@
-coverage::tests::coverage_retains_scalar_width_operator_and_runtime_calls	1.303424
 differential::tests::ready_program_cache_distinguishes_every_launch_input	0.000037
 heap::file_faults::heap_file_faults_38::complete_script_validated_before_launch_even_unused_tail	0.000205
 heap::file_faults::heap_file_faults_38::denied_and_invalid_paths_retain_queue_head	0.000230
@@ -15,11 +14,5 @@ heap::mount_rights::heap_narrow_inherits_read_rights_and_denies_mutation_before_
 heap::net::tests::grants_timeouts_and_mismatch_use_the_shared_runtime_policy	0.000736
 heap::net::tests::scripted_reads_keep_chunks_and_forks_keep_independent_peer_progress	0.000379
 heap::net::tests::tls_transfers_success_and_consumes_failure_and_close	0.000756
-heap::scoped_document::construction_and_extraction_failures_drain_in_both_audit_modes	203.825512
-heap::scoped_document::dense_nodes_and_detached_text_drain_in_both_audit_modes	207.200644
-heap::scoped_document::private_malformed_spans_links_and_tags_have_checked_twins	113.452692
-heap::scoped_document::scratch_construction_and_extraction_failures_drain_in_both_audit_modes	113.668648
-heap::scoped_document::scratch_full_hash_collisions_preserve_exact_key_comparison	125.539750
-heap::scoped_document::scratch_keys_retire_before_callback_and_detached_text_drains	95.237859
 pairwise::tests::every_feasible_pair_is_covered_for_every_rotating_anchor	0.234730
 pairwise::tests::filtered_and_topology_matrices_cover_only_their_feasible_pairs	0.008039

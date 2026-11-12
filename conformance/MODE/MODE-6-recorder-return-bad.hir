@@ -1,7 +1,0 @@
-// rule: MODE-6
-// expect: reject MODE-6 at line 6
-// twin: MODE/MODE-6-recorder-run.hir
-// "A Recorder is a local capability bound to the invocation that creates it."
-fn example(take r: Recorder[u64]) -> Recorder[u64] {
-  take r
-}

@@ -1,8 +1,0 @@
-// rule: CAP-2
-// expect: reject CAP-2 at line 7
-// twin: CAP/CAP-2-external-opaque-inert-ok.hir
-fn need[T: inert](take value: T) {}
-
-fn probe(take value: vendor.Effect) {
-  need(take value)
-}

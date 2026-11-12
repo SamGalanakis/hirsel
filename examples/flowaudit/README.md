@@ -21,7 +21,6 @@ It accepts alternate optimal flows; changing one flow, value or cut can fail
 with `flowaudit: witness` and exit 2. Verification never changes the report.
 
 The exact CLI and version 1 schema are in
-[SCHEMA.md](../../crates/hirsel-cli/tests/support/flow_audit_36/SCHEMA.md).
 Names use UTF-8 bytes. Bounds are 2–16 vertices, 0–64 arcs, capacity at most
 1,000,000, 1–4 scenarios and jobs, 128 bytes per name, 64 KiB manifest and
 32 KiB report. Duplicate directed arcs, loops and unknown endpoints refuse.

@@ -192,7 +192,7 @@ fn main_on_compiler_thread() -> ExitCode {
             // native-tests/regressions/agree-known.txt: a new kind fails, and
             // so does a listed kind the whole catalogue no longer shows. A
             // shard sees part of the catalogue, so only the merge of every
-            // shard (tools/buck2/agree.py --native-full) judges the latter.
+            // the caller judges the complete collection.
             let mut ok = true;
             if native.is_some() {
                 let listed = match std::fs::read_to_string(root.join(KNOWN)) {

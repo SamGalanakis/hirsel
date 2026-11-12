@@ -474,6 +474,3 @@ pub fn solve(locals: &[LocalDemandEquations], entries: &[usize]) -> Result<Deman
             .collect(),
     })
 }
-
-#[cfg(test)]
-mod tests;

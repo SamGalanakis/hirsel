@@ -236,8 +236,3 @@ snapshot_enum!(SealedState {
     Dropping,
     Dead
 });
-
-#[cfg(test)]
-mod guard_hint_tests {
-    use crate::ir::{RegionInstance, ScopeId, SourceAnchorId};
-}

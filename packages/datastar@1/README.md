@@ -5,7 +5,6 @@ A server SDK for [Datastar](https://data-star.dev): it renders and writes the
 reads the signals a browser sends. It follows the SDK specification in
 starfederation/datastar (`sdk/ADR.md`), with the Go and Python SDKs' surface, and
 passes the official golden SDK tests
-(`conformance/PROG/PROG-1-datastar-sdk-golden.hir`).
 
 The [API reference](api.md) is generated with
 `hirsel doc packages/datastar@1/hirsel.json -o packages/datastar@1/api.md`.

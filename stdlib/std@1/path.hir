@@ -5,7 +5,6 @@
 // parent/filename operate on raw components, ignoring trailing separators;
 // empty and root paths have neither. extension excludes the dot, ignores a
 // leading dot, and returns Some("") for a trailing dot. These differ from Go's
-// Clean/Dir/Base/Ext; see SEM-3-path-go-run and reports/pa-codec-small.md.
 // Slash-only lexical policy. No host authority.
 @serializable
 pub type PathError = Invalid(u64)

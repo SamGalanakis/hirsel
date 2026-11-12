@@ -58,7 +58,6 @@ Invariants:
   unchecked projection ordinals skip only their bounds/tag guards.
   The named divisions guard a divisor made safe, `min`/`max` are `llvm.minimum`/`llvm.maximum`
   (the `_number` forms select a NaN operand's other operand around them). LLVM may lower `llvm.fma` and
-  128-bit integer-to-float casts to target support routines. `crates/hirsel-pipeline-tests/tests/front/llvm_scalar_library.rs` holds each to the
   interpreter's kernels and the heap checker at every width and edge, on both targets.
 - The native library's shapes (LIR schema revision 7): `SeqLen` loads a sequence
   block's count (or a slice's length word), `SeqCapacity` loads the block's capacity word

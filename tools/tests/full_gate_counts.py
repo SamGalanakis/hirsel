@@ -78,6 +78,24 @@ class FullGateCounts(unittest.TestCase):
                                       '-c', script], capture_output=True, text=True)
                 self.assertEqual(run.returncode, expected, run.stderr)
 
+    def test_retained_counts_require_each_exact_body_once(self):
+        target = 'hirsel-fixture-test-it-retained-1'
+        inventory = {target: ['module::a', 'module::b']}
+        output = 'test module::a ... ok\ntest module::b ... ok\n'
+        self.assertEqual(self.module.retained_counts({target: output}, inventory), 2)
+        for changed in ['', output.replace('module::a', 'module::other'), output + output,
+                        output.replace('... ok', '... ignored', 1),
+                        output.replace('... ok', '... FAILED', 1)]:
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                self.module.retained_counts({target: changed}, inventory)
+
+    def test_retained_counts_refuse_missing_or_unexpected_shards(self):
+        target = 'hirsel-fixture-test-it-retained-1'
+        inventory = {target: ['module::a']}
+        for outputs in [{}, {target + '-retained-2': 'test module::a ... ok\n'}]:
+            with self.assertRaises(ValueError):
+                self.module.retained_counts(outputs, inventory)
+
 
 if __name__ == '__main__':
     unittest.main()

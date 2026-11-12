@@ -537,11 +537,6 @@ mod store_load_gate {
 }
 
 #[cfg(test)]
-mod benchmark {
-    use super::*;
-}
-
-#[cfg(test)]
 mod cut_tests {
     use super::*;
     use std::sync::{Arc, Mutex, mpsc};

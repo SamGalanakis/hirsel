@@ -1,8 +1,0 @@
-// rule: GEN-1
-// expect: reject GEN-1 at line 7
-// twin: GEN/GEN-1-noalloc-drop-map-ok.hir
-fn need[T: noalloc_drop](take x: T) -> () {}
-
-fn probe(take x: SortedMap[u8, u8]) {
-  need(take x)
-}

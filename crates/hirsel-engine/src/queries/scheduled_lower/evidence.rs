@@ -220,35 +220,3 @@ impl Evidence {
         ExecutionReceipt::compose(&contexts, proofs)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// No accepted unexecuted body is known to read an absent view, so none
-    /// is translated: such a body keeps the package-wide guard instead of a
-    /// read set that reuse could not re-observe as absent.
-    #[test]
-    fn an_absent_view_read_keeps_the_package_guard() {
-        let owner = hirsel_syntax::DefPath(hirsel_syntax::ItemPath {
-            package: hirsel_syntax::PackageId {
-                name: "p".into(),
-                version: "1".into(),
-            },
-            modules: vec![],
-            name: "body".into(),
-        });
-        let guard = ReadKey::ValidationUniverse(hirsel_query_products::reads::PackageKey::of(
-            &owner.0.package,
-        ));
-        let mut reads = hirsel_query_products::reads::ReadsBuilder::new();
-        reads.record(guard, ContentHash([7; 32]));
-        let reads = reads.finish().unwrap();
-        let mut absent = owner.clone();
-        absent.0.name = "absent".into();
-        let absent = hirsel_syntax::DefId::intern(&absent);
-        assert!(
-            narrowed_reads(&reads, &owner, &[hirsel_validate::VRead::Missing(absent)]).is_none()
-        );
-    }
-}

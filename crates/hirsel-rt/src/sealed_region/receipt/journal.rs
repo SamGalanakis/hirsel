@@ -303,6 +303,3 @@ impl Drop for Journal<'_> {
         unsafe { self.custody.retire(self.ctx.as_mut()) };
     }
 }
-
-#[cfg(all(test, feature = "diagnostic"))]
-mod tests;

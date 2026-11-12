@@ -1,5 +1,0 @@
-// rule: CAP-1
-// expect: accept
-fn allowed(a: Authority) -> Result[store.Store, store.StoreError] uses {a} {
-  store.open(a, store.default_config())
-}

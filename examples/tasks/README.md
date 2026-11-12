@@ -135,7 +135,6 @@ and talks to a running server through std's HTTP client. Its phases are:
 - `second <port>`, after a restart over the same data: the board, ids and
   revisions as the first run left them.
 
-`crates/hirsel-cli/tests/examples.rs` (`tasks_end_to_end_*`) starts the server
 process, runs the three phases, stops it with stdin EOF, restarts it on the same
 port and checks the snapshot files. It does this with the server interpreted and
 built with LLVM; the client runs interpreted. It also runs the unit tests on both native

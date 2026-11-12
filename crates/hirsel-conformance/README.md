@@ -93,7 +93,6 @@ snapshot.
 checker rejects, and for internal errors and panics in any phase.
 
 ```bash
-python3 tools/buck2/agree.py        # the gate's sample, sharded on the pool
 agree="$(.buck2/bin/buck2 build --target-platforms //tools/buck2:release //:hirsel-conformance-bin-agree --show-full-simple-output)"
 tools/capped "$agree" --seed N --limit M --path conformance/SEM/<program>.hir   # one program, locally
 ```
@@ -146,7 +145,6 @@ seed, its file path and its edit, so the same arguments select the same
 variants and adding a corpus file leaves the rest of a sample in place.
 `--shard I/N` partitions that globally selected sample by stable variant rank,
 after applying the limit. Catalogue counts remain those of the unsharded run;
-outcome and edit counts sum across shards. `python3 tools/buck2/agree.py` runs the gate's
 16 shards and rejects missing or inconsistent reports.
 `--path PREFIX` (repeatable) keeps only the corpus files whose root-relative
 path starts with a prefix and samples their catalogue alone, so the limit
@@ -183,7 +181,6 @@ definitions and statements while the classification holds. The exit status is
 1 when any cluster exists.
 
 The crate's tests sample the live corpus with seed 1 and a limit of 64, and
-fail on any cluster. The full gate checks the budgeted campaign in release mode, sharded (`python3 tools/buck2/agree.py --full`).
 
 Each run prints to stderr, per stage (`originals`, the acceptance check of each
 sampled program, then `variants`), its wall time, its five slowest items and
@@ -402,7 +399,6 @@ campaign prints each cluster's first variant to stderr as it finds it
 kinds it saw. `--shard I/N` takes the same stable-rank stripe of the catalogue
 under `--native` as without it; a shard fails on a new kind, and only the merge
 of every shard judges a listed kind that no longer occurs. The full suite
-runs `tools/buck2/agree.py --native-full`: `AGREE_NATIVE_FULL_SHARDS` (16)
 shards, each under `AGREE_NATIVE_FULL_TIMEOUT` (3600 s), merged from their
 reports, or their streamed clusters for a shard that stopped.
 
@@ -477,8 +473,6 @@ every source. Individual C-validator and H-checker check kinds remain
 uninstrumented; successful stages do not claim coverage of their individual
 conditions.
 
-`native-tests/regressions/history.tsv` is derived from all recorded exclusion
-tables by `python3 tools/native-history.py`. Regression sources, smoke and
 memcheck lists, current exclusions, and exact reduced agreement witnesses in
 `native-tests/regressions/history/` are also pinned. Historical mutations are
 replayed as exact programs, independently of the rotating per-program budget.

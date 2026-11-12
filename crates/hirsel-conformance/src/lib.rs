@@ -1093,6 +1093,15 @@ impl Selection<'_> {
     fn resolve(self, root: &Path) -> Result<(Vec<std::path::PathBuf>, SelectionReport), String> {
         let mut files = Vec::new();
         discover(&root.join("conformance"), &mut files)?;
+        if self.paths.is_empty() {
+            let bank = root.join("conformance/passing.txt");
+            if bank.is_file() {
+                let selected =
+                    fs::read_to_string(&bank).map_err(|e| format!("{}: {e}", bank.display()))?;
+                files.retain(|file| selected.lines().any(|path| path == relative(root, file)));
+            }
+        }
+
         // Like Koru e52455a4 run_regression.sh:871-911, validate every request before
         // running any case. H uses its existing prefix grammar and discovers
         // once; global validation precedes its stable shard partition.

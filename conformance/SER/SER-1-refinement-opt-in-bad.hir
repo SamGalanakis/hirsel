@@ -1,5 +1,0 @@
-// rule: SER-1
-// expect: reject SER-1 at line 4
-// twin: SER/SER-1-distinct-opt-in-ok.hir
-@serializable
-distinct type Percent(v: u64) where v <= 100

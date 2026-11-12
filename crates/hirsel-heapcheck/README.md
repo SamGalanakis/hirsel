@@ -31,7 +31,6 @@ campaigns, failure audits, exemptions, closures, tokens, COW, deep release),
 `rc_trace` (`exec/vector.rs`) runs an `rc-trace v1` vector from
 `native-tests/model/` on this crate's ledger and prints the vector output
 format; `tests/it/vectors.rs` requires every vector to print exactly its checked
-`.expected`, which `proofs/rc/check-vectors.sh` requires of `lake exe rc-trace`.
 Counts, saturation (`count_max = max - 1`), holder cells, dying blocks, raw
 tokens, region storage and forget records are the executor's own, and the
 independent holder tally is checked after every operation. A model field `k` is the
@@ -279,9 +278,7 @@ producer that differs changes this crate or the producer):
   it (a write: the block must be unique).
 - LIR schema revision 6: `Convert`, `IntArith`, `MulAdd` and the named
   divisions, minimum, maximum and total order execute in `scalar.rs` from
-  their definitions (SEM-1, SEM-2, conformance/old-spec/core-library.md), independent of the emitter;
-  `hirsel-pipeline-tests/tests/front/llvm_scalar_library.rs` compares them with the interpreter's
-  kernels at every width and edge.
+  their definitions (SEM-1, SEM-2, conformance/old-spec/core-library.md), independent of the emitter.
 - LIR schema revision 7: a `Slot` step addresses an element slot below the
   capacity (`OutOfExtent` past it) whose bytes keep their own initialization;
   `SeqSetLen` writes a unique private heap block (`WriteShared`,

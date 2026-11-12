@@ -1,4 +1,0 @@
-# Executed native corpus obligations, checked against their exact stable reason.
-# A case with a row runs both backends on every run, so no row goes unjudged.
-# case<TAB>configuration<TAB>class<TAB>reason
-# Known main failure (tools/known-failures.tsv), owner native-bugs-6.

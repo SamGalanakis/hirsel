@@ -45,7 +45,6 @@ let separator = std@1/peekable.next(mut tokens)
 ```
 
 The complete executable example is
-[`SEM-5-iter-peekable-7-parser-run.hir`](../conformance/SEM/SEM-5-iter-peekable-7-parser-run.hir).
 The scoped ownership twin uses a list payload so that the returned observation
 retains a real loan; its rejected twins try both `fill` and `next` while that
 loan remains live.
@@ -89,22 +88,10 @@ Implementation and documentation:
 
 - `stdlib/std@1/peekable.hir`
 - `docs/iter-peekable.md`
-- `crates/hirsel-driver/tests/it-stdlib/iter_peekable_7.rs`
 
 Each case below has an adjacent `.hir.json` launch manifest selecting ordinary
 `std@1` sources:
 
-- `conformance/DROP/DROP-2-iter-peekable-7-fill-fail.hir`
-- `conformance/DROP/DROP-2-iter-peekable-7-fill-run.hir`
-- `conformance/DROP/DROP-2-iter-peekable-7-next-fail.hir`
-- `conformance/DROP/DROP-2-iter-peekable-7-next-run.hir`
-- `conformance/DROP/DROP-2-iter-peekable-7-owned-run.hir`
-- `conformance/OWN/OWN-3-iter-peekable-7-fill-borrowed-bad.hir`
-- `conformance/OWN/OWN-3-iter-peekable-7-next-borrowed-bad.hir`
-- `conformance/OWN/OWN-3-iter-peekable-7-scoped-run.hir`
-- `conformance/SEM/SEM-5-iter-peekable-7-counted-run.hir`
-- `conformance/SEM/SEM-5-iter-peekable-7-parser-run.hir`
-- `conformance/SEM/SEM-5-iter-peekable-7-vectors-run.hir`
 
 Registration adds one module declaration to the stdlib harness's `modules.rs`,
 one source to `stdlib/std@1/hirsel.json`, eleven paths to

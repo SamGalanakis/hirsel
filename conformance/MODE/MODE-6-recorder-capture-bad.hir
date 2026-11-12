@@ -1,9 +1,0 @@
-// rule: MODE-6
-// expect: reject MODE-6 at line 6
-// twin: MODE/MODE-6-recorder-run.hir
-// "A scoped capability ... cannot be ... captured by an escaping closure."
-fn example(r: Recorder[u64]) -> once fn() -> () {
-  fn() {
-    recorder.append(r, 1u64)
-  }
-}

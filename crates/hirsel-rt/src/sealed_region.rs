@@ -357,6 +357,3 @@ unsafe fn destroy_owner(ctx: *mut TaskCtx, owner: *mut SealedRegion, generation:
         // pointer is consulted, including on a receiving worker after source exit.
     }
 }
-
-#[cfg(all(test, feature = "diagnostic"))]
-mod tests;

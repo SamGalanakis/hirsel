@@ -180,20 +180,7 @@ the driver must provide J's full selection before publication. Task/scoped
 capability capture restrictions keep their J-owned CLO-3/MODE-6 diagnostic;
 operand availability remains OWN-2.
 
-The ownership source corpus runs lex, parse, resolve, normalize, body check,
-authority capture selection and ownership using **dev-dependencies only**.
-It consumes `hirsel_driver::registry::BuiltinRegistry` signatures, including
-implicit loop declarations, and the intrinsic roles in `hirsel_types::core_roles`. Tests convert the real
-authority output's capture rows to `CaptureMode`; they never reconstruct free
-uses, contexts or library callback types. Authority's enriched body feeds
-ownership, while its independent diagnostics remain outside this I-only oracle.
-Production ownership still has no authority or driver dependency. The independent
-never-shrinking baseline is [passing.txt](../hirsel-ownership/src/tests/passing.txt), and
-[pending.txt](../hirsel-ownership/src/tests/pending.txt) gives every remaining file and its
-reason. `tools/bless.sh ownership-passing` verifies the existing baseline before
-adding new passing files. Each operative ownership reject checks both rule and
-source line. Accepted/run/fail files check for absence of ownership diagnostics;
-this is a static oracle and does not claim runtime behavior. CLO-4's declared
+CLO-4's declared
 capture-authority rejects belong to J; an escaping capture's locality and
 mutability (CLO-4) and a once closure where Many is required (MODE-3) are I's
 alone; Many is required by a binding, an argument, a part, and by the storage a
@@ -203,8 +190,7 @@ read-only resource/capability borrows permit many calls and never finalize the
 capture. Taken or owned noncopyable captures and once function captures require
 once; borrowing a once function does not permit its invocation.
 
-Current ownership baseline: 1126 of 1358 files, with 1215 eligible for this pass.
-The remaining 232 are listed with their phase/rule owners in pending.txt.
+
 
 | Prefix | Verified | Eligible | Outside operative rules |
 | --- | ---: | ---: | ---: |
@@ -912,19 +898,14 @@ relation prefixes. Matching and divergent paths are absorbing states; only stric
 prefixes remain distinct. Projection and union commute with the original prefix
 predicate, so recursive list traversal converges without an iteration limit or a
 weaker result-source rule. No expanded parameter path is retained in flow values.
-The corrected shared-list benchmark is a LANG-2 reject at its untyped indexed
-bytes literal; `hirsel-pipeline-tests/tests/front/modes_flow_solver.rs` checks that exact specimen and its accepted
-explicitly typed twin through the complete source and independent IR pipeline.
+
 
 Forward ownership propagation uses a reverse-postorder priority worklist. A
 solve-local exact ordered slot-join cache preserves the existing slot operator,
 shares repeated inactive subtrees and reports changes during the merge instead
 of comparing whole snapshots again. Access queries select binding holders from
 backward demand in their former binding order. Parameter-prefix construction
-uses the existing scoped binding index. `hirsel-pipeline-tests/tests/front/modes_flow_scaling.rs` checks 32/128
-persistent slots and deep branch-local owners through lowering and independent
-V publication, bounding transfers, value joins and actual copied rows by eight
-times the smaller case plus startup slack; no timing or iteration cap gates it.
+uses the existing scoped binding index.
 
 CAP-5 whole seals always charge their nominal identity. Owner finalizers use the
 private implementation ceiling. Dotted and postfix projections and immutable

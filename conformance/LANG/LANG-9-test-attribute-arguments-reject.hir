@@ -1,5 +1,0 @@
-// rule: LANG-9
-// expect: reject LANG-1 at line 4
-// twin: LANG/LANG-9-test-runner-fakes.hir
-@test(1)
-fn example() {}

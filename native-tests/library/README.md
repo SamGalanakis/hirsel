@@ -14,26 +14,6 @@ control whose independently derived sum is `1000000 * 999999 / 2 = 499999500000`
 `arena.seal` and `region.with` use reviewed library bodies. The capture-free
 heap `List[u64]` root in `conformance/MEM/MEM-4-sealed-heap-run.hir` runs on the
 reference interpreter, checked H, LLVM and Cranelift, including record/replay.
-`MEM-4-sealed-heap-charge-run.hir` also checks bounded evacuation: capacity 15
-refuses two u64 elements, while capacities 16 and 17 preserve both elements.
-`MEM-4-sealed-empty-heap-empty-run.hir` accepts an empty heap list at bound zero.
-`MEM-4-sealed-arena-root-run.hir` also qualifies a capture-free Arena
-`List[List[u64]]` root with a copied heap `List[u64]` child, repeated reads and
-record/replay on all four engines. Its explicit, live construction receipts
-pair both the original Arena destination and every heap child; physical guard
-cleanup retains the child credits until seal or exit.
-`MEM-4-sealed-arena-child-charge-run.hir` checks the same child custody under
-bounded admission: capacities 7, 8 and 15 refuse, while capacity 16 preserves
-the nested element. Rejected construction drops its taken children before
-entering the caller's failure cleanup.
-`MEM-4-sealed-aggregate-inline-run.hir` qualifies a capture-free
-`Region[Wrap[Root]]` whose inline root owns an Arena `List[Item]`, an Arena
-`box Item` and copied heap list children. `Item` has both empty and dataful
-variants. Its callback observes scalar fields and list length inline.
-The unchanged `MEM-4-sealed-aggregate-roots-run.hir` also qualifies
-`Region[Root]`, `Region[(Root, u64)]`, `Region[Wrap[Root]]` and a distinct
-`Region[Whole]` root on all four engines and record/replay. Its callbacks forward
-borrowed root fields through ordinary `score`, `size` and `boxed` helpers.
 Private module query summaries infer borrowed-data nonretention; V and C prove
 those claims from their own body flow. C also discharges the linked callee
 assumptions from the empty proved set, including in cached native queries.

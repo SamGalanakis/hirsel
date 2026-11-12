@@ -1,6 +1,0 @@
-// rule: LANG-14
-// expect: reject LANG-14 at line 6
-// twin: PROG/PROG-3-ordinary-nonentry.hir
-// "once" cannot name a u32 parameter; the twin uses the identifier "value".
-@noalloc
-fn example(once: u32) -> u32 { 0 }

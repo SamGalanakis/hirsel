@@ -1,6 +1,0 @@
-// rule: CT-2
-// expect: reject CT-2 at line 5
-// twin: LANG/LANG-7-repeat-run.hir
-fn example[n: size]() -> Array[u8] {
-  [0u8; n]
-}

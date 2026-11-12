@@ -33,7 +33,6 @@ receive for `Receiver[Status]`. That conflicts with the actual invariant
 today's rules. [Endpoint guidance shipped in b37d5df3](https://github.com/SamGalanakis/hirsel-lang/commit/b37d5df3ec4aeaa0c42b2014345c53e951916f30):
 current MODE-2 names `Receiver[unique Status]` and the context-required
 `Receiver[Status]`, identifies `list.push`'s `value` argument, and suggests binding
-first, then passing `take row`. The [applied-repair regression](../../crates/hirsel-driver/tests/it/receive_endpoint_diagnostic_19.rs)
 checks, independently verifies and executes that repair. The historical mixed
 output predates this diagnostic fix; copying the receiver is not a repair.
 

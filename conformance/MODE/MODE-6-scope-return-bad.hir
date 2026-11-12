@@ -1,7 +1,0 @@
-// rule: MODE-6
-// expect: reject MODE-6 at line 6
-// twin: MODE/MODE-6-scope-return-ok.hir
-// "Scoped ... always local ... cannot be returned."
-fn example(take x: Scope) -> Scope {
-  take x
-}

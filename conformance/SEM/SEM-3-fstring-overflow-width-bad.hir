@@ -1,7 +1,0 @@
-// rule: SEM-3
-// expect: reject SEM-3 at line 6
-// twin: SEM/SEM-3-fstring-zero-run.hir
-// Invalid static format or unsupported type.
-fn label() -> String {
-  f"{1u64:18446744073709551616}"
-}

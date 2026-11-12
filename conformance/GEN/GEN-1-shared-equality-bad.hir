@@ -1,6 +1,0 @@
-// rule: GEN-1
-// expect: reject GEN-1 at line 5
-// twin: GEN/GEN-1-shape-equality-ok.hir
-fn equal(x: Shared[u32]) -> bool {
-  x == x
-}

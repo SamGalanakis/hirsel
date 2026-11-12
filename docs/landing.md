@@ -100,7 +100,6 @@ gate. From an updated checkout, run a chosen profile on current `origin/main`:
 ```sh
 tools/main-runs --now --tier fast
 tools/main-runs --now --tier ownership-trace
-tools/main-runs --now --select conformance/MODE/MODE-1-unique-local-taken-stays-local-bad.hir
 ```
 
 Profiles are `fast`, `full`, `conformance`, `ownership-trace` and `native-smoke`.

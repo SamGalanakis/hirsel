@@ -49,7 +49,6 @@ Focused verification uses `sheet_eval_31` in the CLI harness. The stock full-ent
 matrix, independent edit oracle, native recording/replay, Pending cancellation,
 AfterWrite provider host and Ordered tapes are separate named selections.
 Production width qualification is reproducible with
-`crates/hirsel-cli/tests/support/sheet_eval_31/production.py --app /absolute/sheet-llvm --backend llvm --root /absolute/new-evidence --capped /absolute/repo/tools/capped`.
 The ordinary grant needs only work, std I/O and Tasks; interruptible sessions also
 need `"signals":{"provider":"signals.host@1","kinds":["interrupt"]}` in io.
 

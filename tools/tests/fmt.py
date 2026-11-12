@@ -91,7 +91,7 @@ else:
         self.write('conformance/LANG/untracked.hir', 'fn f(){4u8}')
         (self.root / 'conformance/LANG/deleted.hir').unlink()
         for file in ['conformance/LANG/reports/old.hir', 'stdlib/std@1/store.hir',
-                     'native-tests/library/history-codec.hir']:
+                     'native-tests/library/format-fixture.hir']:
             self.write(file, 'fn old(){1u8}')
         self.assertEqual(fmt.changed_cases(), [
             'conformance/LANG/branch.hir', 'conformance/LANG/case.hir',

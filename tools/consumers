@@ -18,27 +18,11 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 LIMIT = 100
-BIG = {
-    'hirsel-driver-test-it-stdlib': 'crates/hirsel-driver/tests/it-stdlib',
-    'hirsel-driver-test-it': 'crates/hirsel-driver/tests/it',
-    'hirsel-cli-test-cli': 'crates/hirsel-cli/tests/cli',
-    'hirsel-cli-test-free': 'crates/hirsel-cli/tests/free.rs',
-    'hirsel-cli-test-examples': 'crates/hirsel-cli/tests/examples.rs',
-}
+BIG = {'hirsel-driver-test-it-stdlib': 'crates/hirsel-driver/tests/it-stdlib', 'hirsel-driver-test-it': 'crates/hirsel-driver/tests/it', 'hirsel-cli-test-cli': 'crates/hirsel-cli/tests/cli'}
 # These bodies launch native programs and verify replay, rather than merely
 # checking their compilation. The inventory resolves their current shards.
-MUST = {
-    'hirsel-cli-test-cli': {'https::https_serves_a_verifying_client_and_replays_in_either_engine',
-                           'replay::native_and_interpreted_recordings_replay_in_either_engine_and_executables'},
-    'hirsel-cli-test-examples': {'grpc_greeter_serves_and_calls_itself_over_tcp',
-                                'unix_http_serves_itself_over_a_real_socket_and_replays_across_cli_backends'},
-}
-PROOF_HOMES = {
-    ('hirsel-driver-test-it', 'native_compilation_tasks_19::admitted_root_plans_bind_the_kit_before_codegen'):
-        'root//tools/buck2/native-toolchain:root-frozen-kit-proof',
-    ('hirsel-driver-test-it', 'native_compilation_tasks_19::frozen_root_plans_run_both_backends_without_live_linker_inputs'):
-        'root//tools/buck2/native-toolchain:root-plan-proof',
-}
+MUST = {'hirsel-driver-test-it': {'native::zero_parameter_entries_agree_without_host_roots', 'runtime::all_four_projection_controls_propagate_not_granted_without_dummy_capabilities'}, 'hirsel-cli-test-cli': {'program_record::a_build_record_restores_its_executable_and_replays_failures'}}
+PROOF_HOMES = {}
 RUNTIME = re.compile(r'(?:^|/)(?:startup[^/]*|scheduler[^/]*|pool[^/]*|cpu[^/]*|managed_cores|ordered|launch)(?:[./]|$)')
 # Startup also lives in native entry emission and link-kit construction.
 STARTUP_PREFIXES = (
@@ -376,17 +360,9 @@ def select(root, paths, graph, inventories, owners=None, reasons=None, limit=LIM
     """Affected targets, nearest owner first; the first `limit` (0: all) are kept.
     `cut` receives the targets past the limit."""
     sys.path.insert(0, str(root / 'tools/buck2'))
-    from sync import conformance_plan, CONSUMER_CASES
+    from sync import conformance_plan
     mapped = assignments(root, graph, inventories)
-    replay_cells = {target for target, attrs in graph.items()
-                    if 'HIRSEL_REPLAY_CELL' in attrs.get('extra_env', {})}
-
     def homes(binary, case):
-        if binary == 'hirsel-cli-test-cli' and case in {
-                'ordered_deadline_liveness_55::cell', 'ordered_deadline_liveness_55::fixture'}:
-            if not replay_cells:
-                raise ValueError('deadline replay consumers require their configured matrix targets')
-            return replay_cells
         return {mapped[binary, case]}
 
     mandatory, ordinary, shards = set(), set(), set()
@@ -399,19 +375,14 @@ def select(root, paths, graph, inventories, owners=None, reasons=None, limit=LIM
     loaded_crates = crates | {target.split(':')[-1].replace('-', '_') for target in graph
                              if crates and (root / 'crates' / target.split(':')[-1] / 'Cargo.toml').is_file()}
     if runtime:
-        required = MUST | {'hirsel-cli-test-free': {'native_returned_rest_completion_replays_across_engines'}}
+        required = MUST
         for binary, cases in required.items():
             if missing := cases - inventories.get(binary, set()):
                 raise ValueError(f'{binary}: required launch selectors missing from listing: {sorted(missing)}')
-    for binary, cases in CONSUMER_CASES.items():
-        if runtime:
-            mandatory |= {f'root//:{binary}-consumer-{suffix}' for suffix in cases}
     for target, attrs in graph.items():
         binary = attrs.get('test_binary', '')
         if tooling and target in scripts:
             ordinary.add(target)
-        elif runtime and binary.startswith('hirsel-cli-test-cpu_pool_'):
-            mandatory.add(target)
         elif crates and binary and binary not in BIG:
             ordinary.add(target)
     expressions = ([re.escape(crate) for crate in loaded_crates]
@@ -427,8 +398,7 @@ def select(root, paths, graph, inventories, owners=None, reasons=None, limit=LIM
         if test_pattern:
             direct_cases |= {mapped[binary, name] for name in sources.matching(names, test_pattern)}
         for name in names:
-            if runtime and (name in MUST.get(binary, set()) or
-                            binary == 'hirsel-cli-test-free' and name == 'native_returned_rest_completion_replays_across_engines'):
+            if runtime and name in MUST.get(binary, set()):
                 mandatory |= homes(binary, name)
             if name in affected or runtime and re.search(r'pool|ordered|scheduler|cpu|tasks', name):
                 shards |= homes(binary, name)

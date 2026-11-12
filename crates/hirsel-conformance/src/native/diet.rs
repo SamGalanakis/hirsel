@@ -109,8 +109,7 @@ fn universe(root: &Path) -> Result<BTreeSet<String>, String> {
     let mut paths: BTreeSet<String> = native::baseline(root)?.into_iter().map(|c| c.id).collect();
     paths.extend(protected(root)?);
     let rules = spec_rules(root)?;
-    let mut files = Vec::new();
-    discover(&root.join("conformance"), &mut files)?;
+    let files = crate::Selection::default().files(root)?;
     for path in files {
         let relative = path.strip_prefix(root).map_err(|e| e.to_string())?;
         let source = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
@@ -205,17 +204,6 @@ fn cover<T: Ord + Clone>(
 
 fn protected(root: &Path) -> Result<BTreeSet<String>, String> {
     let mut paths = BTreeSet::new();
-    let history = std::fs::read_to_string(root.join("native-tests/regressions/history.tsv"))
-        .map_err(|e| e.to_string())?;
-    for line in history
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-    {
-        let path = line.split('\t').next().unwrap();
-        if root.join(path).is_file() {
-            paths.insert(path.into());
-        }
-    }
     for ((path, _), _) in native::read_exclusions(root)? {
         paths.insert(path);
     }
@@ -545,99 +533,6 @@ fn finish(root: &Path, c: Collected) -> Result<serde_json::Value, String> {
 /// Replay the exact historical sources once under the exhaustive matrix, then
 /// compare the findings retained by every rotating slim plan. The slim view
 /// reuses actual exhaustive outcomes; it never invents a synthetic verdict.
-pub fn replay_history(
-    root: &Path,
-    seed: u64,
-    filters: &[String],
-    shard: Option<crate::Shard>,
-) -> Result<serde_json::Value, String> {
-    let paths = protected(root)?;
-    let historical_programs = paths.len();
-    let cases: Vec<_> = paths
-        .into_iter()
-        .filter(|p| filters.is_empty() || filters.iter().any(|f| p.contains(f)))
-        .filter(|p| shard.is_none_or(|s| s.holds(p)))
-        .map(|id| {
-            native::Case {
-                source: std::fs::read_to_string(root.join(&id))
-                    .map_err(|e| format!("{id}: {e}"))?,
-                path: Some(root.join(&id)),
-                id,
-            }
-            .per_cut()
-        })
-        .collect::<Result<Vec<_>, String>>()?
-        .into_iter()
-        .flatten()
-        .collect();
-    if cases.is_empty() {
-        return Err("history replay selected no programs".into());
-    }
-    let matrix = hirsel_native_testing::full_matrix();
-    let toolchain =
-        hirsel_native_testing::toolchain_for_matrix(&crate::native::runtime_cache()?, &matrix)
-            .map_err(|e| e.to_string())?;
-    // Each case names itself as it finishes, so a shard stopped by its pool
-    // timeout still shows which sources it completed and how long each took.
-    let results = native::run_cases_with(
-        &cases,
-        &native::scratch("history-replay")?,
-        4,
-        |case, dir| {
-            let started = std::time::Instant::now();
-            let result = case.run(&matrix, &toolchain, dir);
-            eprintln!(
-                "native-select: history {} {:.1}s",
-                case.id,
-                started.elapsed().as_secs_f64()
-            );
-            result
-        },
-    );
-    let exclusions = native::read_exclusions(root)?;
-    let findings = |result: &native::CaseResult| -> BTreeSet<_> {
-        [native::Class::Heap, native::Class::Llvm]
-            .into_iter()
-            .flat_map(|class| {
-                result
-                    .exclusions(&[class])
-                    .into_iter()
-                    .map(move |(_, finding)| (class, finding))
-            })
-            .collect()
-    };
-    let mut lost = Vec::new();
-    let mut classifications = Vec::new();
-    let mut unreplayable = Vec::new();
-    for result in &results {
-        if result.snapshot.is_some() {
-            unreplayable.push(json!({"path": result.id, "reason": result.snapshot}));
-            continue;
-        }
-        let full = findings(result);
-        // Every historical source remains pinned. Here we test the only other
-        // reduction, the legal configuration cover, for a complete seed cycle.
-        for offset in 0..matrix.len() as u64 {
-            let rotating_seed = seed.wrapping_add(offset);
-            let names: BTreeSet<_> =
-                configurations(&matrix, &result.id, rotating_seed, false, &exclusions)
-                    .iter()
-                    .map(|c| c.name())
-                    .collect();
-            let mut slim = result.clone();
-            slim.outcomes.retain(|(name, _, _)| names.contains(name));
-            if findings(&slim) != full {
-                lost.push(json!({"path": result.id, "seed": rotating_seed}));
-            }
-        }
-        classifications.push(
-            json!({"path": result.id, "snapshot": result.snapshot, "finding_kinds": full.len()}),
-        );
-    }
-    Ok(
-        json!({"historical_programs": historical_programs, "programs": results.len(), "seeds_per_program": matrix.len(), "configuration_attempts": results.iter().map(|r| r.outcomes.len()).sum::<usize>(), "lost": lost, "unreplayable": unreplayable, "classifications": classifications}),
-    )
-}
 
 #[cfg(test)]
 mod tests {
@@ -731,7 +626,6 @@ mod tests {
         )
         .unwrap();
         for path in [
-            "native-tests/regressions/history.tsv",
             "native-tests/regressions/exclusions.tsv",
             "native-tests/regressions/smoke.txt",
             "native-tests/regressions/memcheck.txt",
@@ -820,8 +714,7 @@ mod tests {
 }
 
 pub fn inventory(root: &Path) -> Result<serde_json::Value, String> {
-    let mut paths = Vec::new();
-    discover(&root.join("conformance"), &mut paths)?;
+    let mut paths = crate::Selection::default().files(root)?;
     paths.sort();
     let rules = spec_rules(root)?;
     let mut programs = Vec::new();

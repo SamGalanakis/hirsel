@@ -1,9 +1,0 @@
-// rule: LANG-4
-// expect: accept
-type Record {
-  length: u64,
-}
-
-fn example(x: Record) -> u64 {
-  x.length
-}

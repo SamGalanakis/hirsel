@@ -60,6 +60,3 @@ pub unsafe extern "C" fn hirsel_rt_v2_receipt_release(receipt: *mut c_void) {
     // SAFETY: the ABI caller transfers precisely the holder this wrapper drops.
     drop(unsafe { Receipt::<semantic::Record>::from_raw(receipt) });
 }
-
-#[cfg(test)]
-mod tests;

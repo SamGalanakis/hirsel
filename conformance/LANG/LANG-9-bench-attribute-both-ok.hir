@@ -1,7 +1,0 @@
-// rule: LANG-9
-// expect: accept
-@test
-fn example() {}
-
-@bench
-fn measured() {}

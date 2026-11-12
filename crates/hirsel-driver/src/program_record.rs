@@ -153,14 +153,6 @@ const VARIABLES: &[(&str, Class)] = &[
         Class::HostOnly("tools/buck2/bootstrap_store.py"),
     ),
     ("HIRSEL_CACHE", Class::HostOnly("tools/compiler-bench/run")),
-    (
-        "HIRSEL_CANCEL_REPLAY_FIXTURES",
-        Class::HostOnly("crates/hirsel-cli/tests/cli/cancel_replay_31.rs"),
-    ),
-    (
-        "HIRSEL_CANCEL_REPLAY_MANIFEST",
-        Class::HostOnly("crates/hirsel-cli/tests/cli/cancel_replay_31.rs"),
-    ),
     ("HIRSEL_CAPPED_SLOTS", Class::HostOnly("tools/capped")),
     (
         "HIRSEL_COST_COMMIT",
@@ -185,10 +177,6 @@ const VARIABLES: &[(&str, Class)] = &[
     (
         "HIRSEL_CPU_OVERLAP_UID",
         Class::HostOnly("tools/ignored-tests"),
-    ),
-    (
-        "HIRSEL_CPU_PRIVATE_SCOPE",
-        Class::HostOnly("tools/cpu-overlap"),
     ),
     (
         "HIRSEL_DISTRIBUTION_NOTICES",

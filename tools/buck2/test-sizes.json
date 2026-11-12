@@ -1,85 +1,4 @@
 {
-  "gate-agree": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 1.49,
-    "mean_wall_seconds": 406.7,
-    "memory_kb": 3014656,
-    "memory_kills": 0,
-    "p95_cores": 2.2,
-    "parallel_fraction": 0.59,
-    "pss_peak_mib": 2452,
-    "pss_runs": 672,
-    "requested": [
-      "2/2359296"
-    ],
-    "runs": 672,
-    "timed_runs": 672,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447421,
-      1792488318
-    ]
-  },
-  "gate-agree-full": {
-    "cpu_class": "",
-    "cpu_count": 2,
-    "mean_cores": 2.68,
-    "mean_wall_seconds": 1595.5,
-    "memory_kb": 4784128,
-    "memory_kills": 0,
-    "p95_cores": 3.15,
-    "parallel_fraction": 0.86,
-    "pss_peak_mib": 3842,
-    "pss_runs": 156,
-    "requested": [
-      "4/2359296"
-    ],
-    "runs": 156,
-    "timed_runs": 156,
-    "two_cpu_slowdown": 1.6,
-    "window": [
-      1792500600,
-      1792532212
-    ]
-  },
-  "gate-agree-native-full": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "fallback_from": "gate-native-full",
-    "memory_kb": 2228224,
-    "memory_kills": 0,
-    "pss_runs": 0,
-    "runs": 0,
-    "window": [
-      1792446898,
-      1792524127
-    ]
-  },
-  "gate-agree-selected": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 1.37,
-    "mean_wall_seconds": 76.7,
-    "memory_kb": 1835008,
-    "memory_kills": 0,
-    "p95_cores": 1.78,
-    "parallel_fraction": 0.46,
-    "pss_peak_mib": 1493,
-    "pss_runs": 14,
-    "requested": [
-      "1/1572864",
-      "2/1572864",
-      "2/2359296"
-    ],
-    "runs": 130,
-    "timed_runs": 127,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792446885,
-      1792526957
-    ]
-  },
   "gate-checker-scaling": {
     "cpu_class": "",
     "cpu_count": 1,
@@ -198,29 +117,6 @@
       1792497150
     ]
   },
-  "gate-native-bugs": {
-    "cpu_class": "",
-    "cpu_count": 2,
-    "mean_cores": 1.71,
-    "mean_wall_seconds": 3.7,
-    "memory_kb": 196608,
-    "memory_kills": 0,
-    "p95_cores": 1.89,
-    "parallel_fraction": 0.33,
-    "pss_peak_mib": 160,
-    "pss_runs": 2,
-    "requested": [
-      "2/2359296",
-      "2/3145728"
-    ],
-    "runs": 2,
-    "timed_runs": 2,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792490036,
-      1792499147
-    ]
-  },
   "gate-native-changed": {
     "cpu_class": "fast",
     "cpu_count": 1,
@@ -248,31 +144,6 @@
       1792532336
     ]
   },
-  "gate-native-corpus": {
-    "cpu_class": "",
-    "cpu_count": 2,
-    "guard_limit_kb": 5767168,
-    "mean_cores": 1.96,
-    "mean_wall_seconds": 717.2,
-    "memory_kb": 6881280,
-    "memory_kills": 0,
-    "p95_cores": 1.97,
-    "parallel_fraction": 0.98,
-    "pss_peak_mib": 5560,
-    "pss_runs": 35,
-    "requested": [
-      "2/2883584",
-      "2/4718592",
-      "2/786432"
-    ],
-    "runs": 35,
-    "timed_runs": 35,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792490717,
-      1792532323
-    ]
-  },
   "gate-native-cranelift": {
     "cpu_class": "",
     "cpu_count": 1,
@@ -295,19 +166,6 @@
     "window": [
       1792446894,
       1792497110
-    ]
-  },
-  "gate-native-cranelift-aarch64": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "fallback_from": "gate-native-full",
-    "memory_kb": 2228224,
-    "memory_kills": 0,
-    "pss_runs": 0,
-    "runs": 0,
-    "window": [
-      1792446898,
-      1792524127
     ]
   },
   "gate-native-cranelift-changed": {
@@ -358,19 +216,6 @@
       1792524127
     ]
   },
-  "gate-native-hash-sweep": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "fallback_from": "gate-native-full",
-    "memory_kb": 2228224,
-    "memory_kills": 0,
-    "pss_runs": 0,
-    "runs": 0,
-    "window": [
-      1792446898,
-      1792524127
-    ]
-  },
   "gate-native-library-c": {
     "cpu_class": "",
     "cpu_count": 1,
@@ -385,19 +230,6 @@
     ]
   },
   "gate-native-runtime-c": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "fallback_from": "gate-native-full",
-    "memory_kb": 2228224,
-    "memory_kills": 0,
-    "pss_runs": 0,
-    "runs": 0,
-    "window": [
-      1792446898,
-      1792524127
-    ]
-  },
-  "gate-native-sanitize": {
     "cpu_class": "",
     "cpu_count": 1,
     "fallback_from": "gate-native-full",
@@ -448,29 +280,6 @@
       1792524127
     ]
   },
-  "gate-native-trace-roots": {
-    "cpu_class": "",
-    "cpu_count": 2,
-    "mean_cores": 1.89,
-    "mean_wall_seconds": 331.5,
-    "memory_kb": 6946816,
-    "memory_kills": 0,
-    "p95_cores": 1.96,
-    "parallel_fraction": 0.95,
-    "pss_peak_mib": 5645,
-    "pss_runs": 184,
-    "requested": [
-      "2/2883584",
-      "2/3604480"
-    ],
-    "runs": 184,
-    "timed_runs": 184,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792466318,
-      1792490220
-    ]
-  },
   "gate-perf-counts": {
     "cpu_class": "",
     "cpu_count": 1,
@@ -491,94 +300,6 @@
     "window": [
       1792454848,
       1792527765
-    ]
-  },
-  "hirsel-analysis-canary-test-canaries": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.1,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 0,
-    "pss_runs": 1,
-    "requested": [
-      "1/2097152"
-    ],
-    "runs": 1,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792462867,
-      1792462867
-    ]
-  },
-  "hirsel-analysis-canary-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.1,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 2,
-    "pss_runs": 3,
-    "requested": [
-      "1/2097152"
-    ],
-    "runs": 3,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792468422,
-      1792519860
-    ]
-  },
-  "hirsel-authority-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.9,
-    "mean_wall_seconds": 8.6,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 1.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 23,
-    "pss_runs": 12,
-    "requested": [
-      "1/2097152"
-    ],
-    "runs": 12,
-    "timed_runs": 11,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792495851,
-      1792531802
-    ]
-  },
-  "hirsel-check-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.99,
-    "mean_wall_seconds": 14.1,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 1.12,
-    "parallel_fraction": null,
-    "pss_peak_mib": 36,
-    "pss_runs": 83,
-    "requested": [
-      "1/524288"
-    ],
-    "runs": 83,
-    "timed_runs": 77,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447234,
-      1792528597
     ]
   },
   "hirsel-cli-args-unittest": {
@@ -646,85 +367,6 @@
       1793623860
     ]
   },
-  "hirsel-cli-test-examples": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 1.05,
-    "mean_wall_seconds": 44.1,
-    "memory_kb": 3407872,
-    "memory_kills": 1,
-    "p95_cores": 1.52,
-    "parallel_fraction": 0.0,
-    "pss_peak_mib": 2773,
-    "pss_runs": 218,
-    "requested": [
-      "1/1048576",
-      "1/2097152",
-      "1/2555904",
-      "2/1048576",
-      "2/1114112",
-      "2/1179648",
-      "2/1245184",
-      "2/1310720",
-      "2/1376256",
-      "2/1441792",
-      "2/1507328",
-      "2/1572864",
-      "2/1769472",
-      "2/2097152"
-    ],
-    "runs": 5873,
-    "timed_runs": 4821,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447458,
-      1792530594
-    ]
-  },
-  "hirsel-cli-test-free": {
-    "cpu_class": "",
-    "cpu_count": 2,
-    "mean_cores": 1.86,
-    "mean_wall_seconds": 350.9,
-    "memory_kb": 2686976,
-    "memory_kills": 0,
-    "p95_cores": 1.91,
-    "parallel_fraction": null,
-    "pss_peak_mib": 2152,
-    "pss_runs": 7,
-    "requested": [
-      "1/2097152"
-    ],
-    "runs": 7,
-    "timed_runs": 7,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792507333,
-      1792528591
-    ]
-  },
-  "hirsel-cli-test-stream_replay": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.93,
-    "mean_wall_seconds": 110.9,
-    "memory_kb": 1114112,
-    "memory_kills": 0,
-    "p95_cores": 0.97,
-    "parallel_fraction": null,
-    "pss_peak_mib": 875,
-    "pss_runs": 4,
-    "requested": [
-      "1/2097152"
-    ],
-    "runs": 4,
-    "timed_runs": 4,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792520676,
-      1792529469
-    ]
-  },
   "hirsel-code-store-test-it": {
     "cpu_class": "",
     "cpu_count": 1,
@@ -745,28 +387,6 @@
     "window": [
       1792447222,
       1792519815
-    ]
-  },
-  "hirsel-code-store-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.1,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 1,
-    "pss_runs": 4,
-    "requested": [
-      "1/2097152"
-    ],
-    "runs": 4,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447222,
-      1792519836
     ]
   },
   "hirsel-codec-unittest": {
@@ -811,51 +431,6 @@
     "window": [
       1792447012,
       1792528288
-    ]
-  },
-  "hirsel-conformance-test-it": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 1.03,
-    "mean_wall_seconds": 388.6,
-    "memory_kb": 3342336,
-    "memory_kills": 2,
-    "p95_cores": 1.07,
-    "parallel_fraction": null,
-    "pss_peak_mib": 2682,
-    "pss_runs": 16,
-    "requested": [
-      "1/1179648",
-      "1/2359296"
-    ],
-    "runs": 14,
-    "timed_runs": 14,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792947376,
-      1793006688
-    ]
-  },
-  "hirsel-conformance-test-spec_links": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.47,
-    "mean_wall_seconds": 0.9,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.75,
-    "parallel_fraction": null,
-    "pss_peak_mib": 6,
-    "pss_runs": 167,
-    "requested": [
-      "1/524288"
-    ],
-    "runs": 167,
-    "timed_runs": 63,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792446889,
-      1792530083
     ]
   },
   "hirsel-conformance-unittest": {
@@ -972,131 +547,6 @@
       1793623733
     ]
   },
-  "hirsel-driver-test-it-image": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "guard_limit_kb": 10092544,
-    "mean_wall_seconds": 376.1,
-    "memory_kb": 5242880,
-    "memory_kills": 1,
-    "p95_cores": 1.04,
-    "parallel_fraction": 0.04,
-    "pss_peak_mib": 4947,
-    "pss_runs": 96,
-    "requested": [
-      "1/5242880",
-      "2/5242880",
-      "2/5570560"
-    ],
-    "runs": 96,
-    "timed_runs": 96,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792410922,
-      1792486499
-    ]
-  },
-  "hirsel-driver-test-it-keyed": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.95,
-    "mean_wall_seconds": 1.6,
-    "memory_kb": 327680,
-    "memory_kills": 0,
-    "p95_cores": 1.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 249,
-    "pss_runs": 115,
-    "requested": [
-      "1/2097152"
-    ],
-    "runs": 115,
-    "timed_runs": 99,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792446595,
-      1792529780
-    ]
-  },
-  "hirsel-driver-test-it-precheck": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "guard_limit_kb": 10092544,
-    "mean_cores": 1.0,
-    "mean_wall_seconds": 383.7,
-    "memory_kb": 6684672,
-    "memory_kills": 0,
-    "p95_cores": 1.03,
-    "parallel_fraction": 0.03,
-    "pss_peak_mib": 5436,
-    "pss_runs": 35,
-    "requested": [
-      "1/5242880",
-      "1/6619136",
-      "2/5242880",
-      "2/5570560"
-    ],
-    "runs": 136,
-    "timed_runs": 134,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447306,
-      1792530340
-    ]
-  },
-  "hirsel-driver-test-it-scaling": {
-    "cpu_class": "",
-    "cpu_count": 2,
-    "mean_cores": 1.85,
-    "mean_wall_seconds": 36.3,
-    "memory_kb": 1048576,
-    "memory_kills": 0,
-    "p95_cores": 3.63,
-    "parallel_fraction": 0.92,
-    "pss_peak_mib": 815,
-    "pss_runs": 136,
-    "requested": [
-      "1/524288",
-      "2/524288",
-      "3/655360",
-      "4/524288",
-      "4/655360"
-    ],
-    "runs": 140,
-    "timed_runs": 139,
-    "two_cpu_slowdown": 1.74,
-    "window": [
-      1792446259,
-      1792529792
-    ]
-  },
-  "hirsel-driver-test-it-stdlib": {
-    "cpu_class": "",
-    "cpu_count": 2,
-    "mean_cores": 1.64,
-    "mean_wall_seconds": 51.0,
-    "memory_kb": 4325376,
-    "memory_kills": 0,
-    "p95_cores": 2.44,
-    "parallel_fraction": 0.91,
-    "pss_peak_mib": 3480,
-    "pss_runs": 2529,
-    "requested": [
-      "1/1835008",
-      "1/2228224",
-      "1/2883584",
-      "2/1835008",
-      "2/2883584",
-      "3/2883584"
-    ],
-    "runs": 2540,
-    "timed_runs": 2161,
-    "two_cpu_slowdown": 1.38,
-    "window": [
-      1792446281,
-      1792530360
-    ]
-  },
   "hirsel-driver-test-stack_depth": {
     "cpu_class": "",
     "cpu_count": 1,
@@ -1117,28 +567,6 @@
     "window": [
       1792447039,
       1792528312
-    ]
-  },
-  "hirsel-driver-test-validate_memory": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.95,
-    "mean_wall_seconds": 12.9,
-    "memory_kb": 851968,
-    "memory_kills": 0,
-    "p95_cores": 0.99,
-    "parallel_fraction": null,
-    "pss_peak_mib": 648,
-    "pss_runs": 25,
-    "requested": [
-      "1/2097152"
-    ],
-    "runs": 25,
-    "timed_runs": 23,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792480163,
-      1792529810
     ]
   },
   "hirsel-driver-unittest": {
@@ -1205,50 +633,6 @@
     "window": [
       1792447222,
       1792529852
-    ]
-  },
-  "hirsel-fmt-test-corpus": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.1,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 5,
-    "pss_runs": 16,
-    "requested": [
-      "1/524288"
-    ],
-    "runs": 16,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447223,
-      1792519813
-    ]
-  },
-  "hirsel-fmt-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.1,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 1,
-    "pss_runs": 15,
-    "requested": [
-      "1/524288"
-    ],
-    "runs": 15,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447222,
-      1792519813
     ]
   },
   "hirsel-free-test-it": {
@@ -1409,29 +793,6 @@
       1792532223
     ]
   },
-  "hirsel-interp-test-it": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.3,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 31,
-    "pss_runs": 7,
-    "requested": [
-      "1/524288",
-      "2/524288"
-    ],
-    "runs": 131,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792446998,
-      1792530193
-    ]
-  },
   "hirsel-interp-unittest": {
     "cpu_class": "",
     "cpu_count": 1,
@@ -1496,72 +857,6 @@
     "window": [
       1792447222,
       1792528283
-    ]
-  },
-  "hirsel-layout-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.1,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 5,
-    "pss_runs": 27,
-    "requested": [
-      "1/2097152"
-    ],
-    "runs": 27,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447222,
-      1792530119
-    ]
-  },
-  "hirsel-lexer-test-conformance": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.53,
-    "mean_wall_seconds": 0.9,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.69,
-    "parallel_fraction": null,
-    "pss_peak_mib": 6,
-    "pss_runs": 62,
-    "requested": [
-      "1/524288"
-    ],
-    "runs": 62,
-    "timed_runs": 22,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447001,
-      1792528286
-    ]
-  },
-  "hirsel-lexer-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.92,
-    "mean_wall_seconds": 0.7,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 1.01,
-    "parallel_fraction": null,
-    "pss_peak_mib": 6,
-    "pss_runs": 62,
-    "requested": [
-      "1/524288"
-    ],
-    "runs": 62,
-    "timed_runs": 9,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447002,
-      1792528286
     ]
   },
   "hirsel-lir-test-it": {
@@ -1654,73 +949,6 @@
       1792529542
     ]
   },
-  "hirsel-lower-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.97,
-    "mean_wall_seconds": 2.7,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 1.02,
-    "parallel_fraction": null,
-    "pss_peak_mib": 30,
-    "pss_runs": 51,
-    "requested": [
-      "1/524288"
-    ],
-    "runs": 51,
-    "timed_runs": 38,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447226,
-      1792528422
-    ]
-  },
-  "hirsel-modes-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 1.34,
-    "mean_wall_seconds": 13.0,
-    "memory_kb": 196608,
-    "memory_kills": 0,
-    "p95_cores": 1.48,
-    "parallel_fraction": 0.51,
-    "pss_peak_mib": 121,
-    "pss_runs": 5,
-    "requested": [
-      "1/524288",
-      "2/524288"
-    ],
-    "runs": 120,
-    "timed_runs": 109,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447019,
-      1792525623
-    ]
-  },
-  "hirsel-native-build-bin-hirsel-native-build-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.1,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 6,
-    "pss_runs": 42,
-    "requested": [
-      "1/524288"
-    ],
-    "runs": 42,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792446999,
-      1792530078
-    ]
-  },
   "hirsel-object-storage-test-it": {
     "cpu_class": "",
     "cpu_count": 1,
@@ -1763,72 +991,6 @@
     "window": [
       1792447222,
       1792519814
-    ]
-  },
-  "hirsel-ownership-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.9,
-    "mean_wall_seconds": 23.0,
-    "memory_kb": 5046272,
-    "memory_kills": 0,
-    "p95_cores": 1.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 4055,
-    "pss_runs": 15,
-    "requested": [
-      "1/2097152"
-    ],
-    "runs": 15,
-    "timed_runs": 14,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792495874,
-      1792531802
-    ]
-  },
-  "hirsel-parser-test-it": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.2,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 10,
-    "pss_runs": 40,
-    "requested": [
-      "2/524288"
-    ],
-    "runs": 40,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447222,
-      1792528580
-    ]
-  },
-  "hirsel-parser-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.1,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 5,
-    "pss_runs": 38,
-    "requested": [
-      "1/524288"
-    ],
-    "runs": 38,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447223,
-      1792528284
     ]
   },
   "hirsel-pipeline-tests-test-front": {
@@ -1900,28 +1062,6 @@
       1792530192
     ]
   },
-  "hirsel-remote-test-it": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.2,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 3,
-    "pss_runs": 4,
-    "requested": [
-      "1/2097152"
-    ],
-    "runs": 4,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792524533,
-      1792531681
-    ]
-  },
   "hirsel-remote-unittest": {
     "cpu_class": "",
     "cpu_count": 1,
@@ -1942,28 +1082,6 @@
     "window": [
       1792524525,
       1792531680
-    ]
-  },
-  "hirsel-resolve-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.1,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 7,
-    "pss_runs": 23,
-    "requested": [
-      "1/524288"
-    ],
-    "runs": 23,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447222,
-      1792528285
     ]
   },
   "hirsel-rt-test-descriptors": {
@@ -2121,28 +1239,6 @@
       1792528010
     ]
   },
-  "hirsel-signature-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.1,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 6,
-    "pss_runs": 52,
-    "requested": [
-      "1/524288"
-    ],
-    "runs": 52,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447222,
-      1792528441
-    ]
-  },
   "hirsel-span-unittest": {
     "cpu_class": "",
     "cpu_count": 1,
@@ -2158,28 +1254,6 @@
       "1/524288"
     ],
     "runs": 8,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447222,
-      1792519814
-    ]
-  },
-  "hirsel-syntax-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.1,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 2,
-    "pss_runs": 17,
-    "requested": [
-      "1/524288"
-    ],
-    "runs": 17,
     "timed_runs": 0,
     "two_cpu_slowdown": null,
     "window": [
@@ -2207,94 +1281,6 @@
     "window": [
       1792447222,
       1792519814
-    ]
-  },
-  "hirsel-tir-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.1,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 5,
-    "pss_runs": 21,
-    "requested": [
-      "1/524288"
-    ],
-    "runs": 21,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447222,
-      1792527044
-    ]
-  },
-  "hirsel-type-analysis-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.1,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 5,
-    "pss_runs": 13,
-    "requested": [
-      "1/2097152"
-    ],
-    "runs": 13,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792498526,
-      1792527865
-    ]
-  },
-  "hirsel-types-test-properties": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.4,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 4,
-    "pss_runs": 11,
-    "requested": [
-      "1/2097152"
-    ],
-    "runs": 11,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792510090,
-      1792527870
-    ]
-  },
-  "hirsel-types-test-wire": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.4,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 15,
-    "pss_runs": 45,
-    "requested": [
-      "1/524288"
-    ],
-    "runs": 45,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792446488,
-      1792528284
     ]
   },
   "hirsel-types-unittest": {
@@ -2365,12 +1351,6 @@
       1792532020
     ]
   },
-  "hirsel-candidate-unittest": {
-    "cpu_count": 1,
-    "memory_kb": 1572864,
-    "cpu_class": "",
-    "inherited_from": "hirsel-driver-unittest"
-  },
   "hirsel-native-unittest": {
     "cpu_count": 1,
     "memory_kb": 1572864,
@@ -2390,18 +1370,6 @@
     "inherited_from": "hirsel-driver-unittest"
   },
   "hirsel-host-io-unittest": {
-    "cpu_count": 1,
-    "memory_kb": 1572864,
-    "cpu_class": "",
-    "inherited_from": "hirsel-driver-unittest"
-  },
-  "hirsel-observation-view-unittest": {
-    "cpu_count": 1,
-    "memory_kb": 1572864,
-    "cpu_class": "",
-    "inherited_from": "hirsel-driver-unittest"
-  },
-  "hirsel-front-phases-unittest": {
     "cpu_count": 1,
     "memory_kb": 1572864,
     "cpu_class": "",

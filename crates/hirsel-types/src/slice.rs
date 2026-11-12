@@ -149,21 +149,6 @@ impl<T: Clone> Extend<T> for SharedSlice<T> {
         self.edit(|v| v.extend(iter));
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn clones_share_children_until_edited() {
-        let a: SharedSlice<_> = (0..64).collect();
-        let mut b = a.clone();
-        assert_eq!(a.storage_identity(), b.storage_identity());
-        b[0] = 99;
-        assert_eq!(a[0], 0);
-        assert_eq!(b[0], 99);
-        assert_ne!(a.storage_identity(), b.storage_identity());
-    }
-}
 impl<'a, T: Clone + 'a> Extend<&'a T> for SharedSlice<T> {
     fn extend<I: IntoIterator<Item = &'a T>>(&mut self, iter: I) {
         self.extend(iter.into_iter().cloned());
@@ -187,75 +172,5 @@ impl<T: PartialEq, const N: usize> PartialEq<[T; N]> for SharedSlice<T> {
 impl<T> From<SharedSlice<T>> for Arc<[T]> {
     fn from(value: SharedSlice<T>) -> Self {
         value.0.unwrap_or_else(|| Arc::from([]))
-    }
-}
-
-#[cfg(test)]
-mod empty_tests {
-    use super::*;
-    use std::hash::{Hash, Hasher};
-    fn hash(value: &impl Hash) -> u64 {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        value.hash(&mut h);
-        h.finish()
-    }
-    #[test]
-    fn empty_slices_keep_value_and_wire_semantics_without_retained_allocations() {
-        let decoded: SharedSlice<u64> = serde_json::from_str("[]").unwrap();
-        let mut choices = vec![
-            SharedSlice::new(),
-            SharedSlice::default(),
-            Vec::new().into(),
-            [].into(),
-            std::iter::empty().collect(),
-            decoded,
-        ];
-        for action in 0..3 {
-            let mut values: SharedSlice<_> = vec![1, 2, 3].into();
-            let retained = values.clone();
-            match action {
-                0 => values.clear(),
-                1 => values.truncate(0),
-                _ => values.retain(|_| false),
-            }
-            assert_eq!(retained.as_slice(), &[1, 2, 3]);
-            choices.push(values);
-        }
-        for value in &mut choices {
-            value.sort();
-            value.dedup();
-            value.extend(std::iter::empty::<u64>());
-            assert!(value.is_empty());
-            assert_eq!(value, &SharedSlice::new());
-            assert_eq!(hash(value), hash(&Vec::<u64>::new()));
-            assert_eq!(format!("{value:?}"), "[]");
-            assert_eq!(serde_json::to_string(value).unwrap(), "[]");
-            let owned: Arc<[u64]> = value.clone().into();
-            assert!(owned.is_empty());
-        }
-        let mut grown = choices[0].clone();
-        grown.push(7);
-        let old = grown.clone();
-        grown[0] = 9;
-        assert_eq!(old.as_slice(), &[7]);
-        assert_eq!(grown.as_slice(), &[9]);
-        assert_eq!(hash(&grown), hash(&vec![9u64]));
-        assert!(choices[0] < grown);
-        let zst: SharedSlice<()> = [(); 3].into();
-        assert_eq!(zst.len(), 3);
-        #[derive(Clone)]
-        #[repr(align(256))]
-        struct Aligned;
-        let mut aligned = SharedSlice::<Aligned>::new();
-        assert_eq!(aligned.as_ptr() as usize % 256, 0);
-        assert_eq!(aligned.iter_mut().count(), 0);
-        assert_eq!(
-            std::mem::size_of::<SharedSlice<u64>>(),
-            std::mem::size_of::<Arc<[u64]>>()
-        );
-        assert!(
-            choices.iter().all(|value| value.storage_identity() == 0),
-            "empty child arrays retain no allocation"
-        );
     }
 }

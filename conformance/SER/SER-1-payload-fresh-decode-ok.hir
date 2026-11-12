@@ -1,8 +1,0 @@
-// rule: SER-1
-// expect: accept
-fn decode[T: serializable](witness: Option[T], data: Bytes) -> unique Result[
-  T,
-  DecodeError
-] {
-  codec.decode_payload(witness, data)
-}

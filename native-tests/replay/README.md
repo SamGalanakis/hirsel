@@ -10,7 +10,6 @@ arenas are numbered differently.
 
 - `column-skew/` is recorded against a synthetic engine (every SEM-1 failure
   one column to the right), so the replay and reduction rules are tested when
-  no real engine disagrees. `crates/hirsel-conformance/tests/it/native_gate.rs`
   copies it elsewhere, replays it in a fresh and in a warmed engine, refuses it
   under another schema version, and reduces it while keeping the same
   discrepancy. Regenerate `case.txt` with `tools/bless.sh replay`.

@@ -125,8 +125,6 @@ budget, including subject decoding and output copying.
   `InvalidCaptures()` for safe expansion of externally constructed captures.
 
 The per-row exclusions and upstream test counts are recorded in
-[regex-captures-vectors.md](../reports/regex-captures-vectors.md). The older
-[regex-vectors.md](../reports/regex-vectors.md) describes the baseline import;
 its captures/flags exclusions are historical and superseded here.
 
 Capture recovery for a confirmed span uses a one-pass plan when the pattern is

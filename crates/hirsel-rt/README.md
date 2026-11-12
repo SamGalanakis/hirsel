@@ -282,7 +282,6 @@ Invariants and boundary:
   as the interpreter's operational limit ends it.
 - No numeric Depth or frame charge exists until spec #16 rules.
 
-Transitions of D's Lean model (`proofs/rc/README.md`) cited in code comments as `T<ID> <name>`;
 `tests/it/model.rs` runs the model's `rc-trace v1` vectors (`native-tests/model/`) on the runtime and
 requires its checked final states:
 
@@ -624,7 +623,7 @@ a fixed peer cannot both accept and reject the same name.
 
 Launch owns a stable `io::Binding`, installs `io::hirsel_rt_v2_io_close` as Config.close_handle, and explicitly binds it with TaskCtx.bind_io_data. The adapter must stay at its bound address and outlive every release on that context. Close-handle runs only while it is bound, with exclusive adapter access; unbind before dropping it. There is no global/thread-local fallback. This private TaskCtx field changes no Config or C ABI.
 
-`Map` and `Set` are native LIR bodies in `hirsel-rc::library::map`. Each container's public length is its live count, while its private optional entries may include tombstones. Removal clears one entry and index bucket; insertion compacts lazily in insertion order, reusing cached hashes. Metadata is neither charged nor tracked. Descriptor version 13 extends the five-word live-count program to private Map and Set entry Lists, so deep copy and detach charge only live key/value pairs and exclude private tags. The compiled seed law in `hirsel-pipeline-tests/tests/rc/rc_maps_native.rs` replaces the Rust Map model. Sequence consumption uses compiled library bodies in `hirsel-rc`; their C and H checks, native target tests and resource failure campaigns replace the Rust Cursor model. The six consuming open/next manifest rows are Body.
+`Map` and `Set` are native LIR bodies in `hirsel-rc::library::map`. Each container's public length is its live count, while its private optional entries may include tombstones. Removal clears one entry and index bucket; insertion compacts lazily in insertion order, reusing cached hashes. Metadata is neither charged nor tracked. Descriptor version 13 extends the five-word live-count program to private Map and Set entry Lists, so deep copy and detach charge only live key/value pairs and exclude private tags. Sequence consumption uses compiled library bodies in `hirsel-rc`; their C and H checks, native target tests and resource failure campaigns replace the Rust Cursor model. The six consuming open/next manifest rows are Body.
 
 ## Tasks
 
@@ -909,9 +908,7 @@ conversion transfers the same slice into either Result arm; slicing shares one
 owner credit and preserves its origin. bytes.replace is ordinary std source.
 StrPos's nominal u64 storage travels by read-only address. SEM-3 exports return
 status 1 with output unwritten; emission records the manifest's rule at the call
-site. `hirsel-pipeline-tests/tests/front/rt_text_native.rs` checks the full native matrix, C callers under
-ASan/UBSan on x86-64 and qemu on AArch64, and generated drop glue with zero
-live blocks after every one of 1000 calls at O0/O2 in both runtime modes.
+site.
 
 `bytes.append` copies a borrowed byte interval with one geometric growth and a
 bulk copy. Native import charges and prepares tracked arena destinations through

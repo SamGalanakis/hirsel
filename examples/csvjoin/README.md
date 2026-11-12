@@ -75,7 +75,6 @@ Hirsel capabilities replace stdin; unique owned index copies allow bucket remova
 implement the join; buffered single-byte delivery supplies exact diagnostics;
 a sole empty output field is quoted to round-trip through the shipped reader.
 No CSV parser is ported. The independent Python `csv` oracle is in
-`crates/hirsel-cli/tests/support/csvjoin_15/oracle.py`.
 
 The rust-csv structure/vectors are used under its MIT option:
 

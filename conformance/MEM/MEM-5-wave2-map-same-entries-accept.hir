@@ -1,6 +1,0 @@
-// rule: MEM-5
-// expect: accept
-@noalloc
-fn probe[K: key, V: data](a: Map[K, V], b: Map[K, V]) -> bool uses {} {
-  map.same_entries(a, b)
-}

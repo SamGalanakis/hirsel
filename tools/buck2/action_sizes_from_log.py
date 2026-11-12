@@ -88,9 +88,7 @@ MAX_CPUS = 2
 CPU_CLASSES = {
     "dev": {
         "hirsel-authority": "fast",
-        "hirsel-authority-unittest-harness": "fast",
         "hirsel-check": "fast",
-        "hirsel-check-unittest-harness": "fast",
         "hirsel-driver": "fast",
         "hirsel-driver-test-it-harness": "fast",
         "hirsel-engine": "fast",
@@ -98,7 +96,6 @@ CPU_CLASSES = {
         "hirsel-lir-test-it-harness": "fast",
         "hirsel-lir-unittest-harness": "fast",
         "hirsel-ownership": "fast",
-        "hirsel-ownership-unittest-harness": "fast",
         "hirsel-pipeline-tests-test-front-harness": "fast",
         "hirsel-rc": "fast",
         "hirsel-rc-unittest-harness": "fast",

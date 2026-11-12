@@ -203,9 +203,6 @@ Invariants:
   none (`Type("flat field of no open element")`, `Type("flat field opened
   twice")`). So a write between the opening and the close that could move
   or overwrite the element's bytes leaves the close without its element.
-  `hirsel-pipeline-tests/tests/rc/rc_flat_field.rs` forges such a write, a
-  close of another field and one of another record, a second opening, a
-  pushed u64 and an unproven spare push.
   Inline of a dynamic Packed stays unavailable; a fixed-size Packed keeps the
   ordinary stride.
 - Validators. `validate::validate::<S>(unit, &Inputs { target, layouts, manifest, operations })`
@@ -367,9 +364,7 @@ FlatNext of the preceding element of the same reaching sequence. Sequence identi
 and reaching versions are substituted on each incoming edge too: a loop header's
 reused SSA name cannot conceal changed content. A forged offset, different
 sequence, wrong predecessor or changed loop-carried sequence is rejected as
-`Type("flat walk offset replay")`. Source-free controls and accepted twins live
-in `hirsel-pipeline-tests/tests/rc/rc_flat_walk.rs` (flat) and
-`rc_packed_walk.rs` (sequential) beside the producer's rewrite tests.
+`Type("flat walk offset replay")`.
 
 Revision-7 amendments: `AbiResult.borrowed_parameters` declares the Borrow parameters a returned borrowed holder may name. C traces holder construction, reads, stores, joins, recasts and calls; an ended loan, a local or undeclared parameter return is rejected. `layout::field_is_borrowed` is the common scan/drop evidence for fields and captures, and a borrowed cursor may be noncopyable without owning a holder. `Terminator::InvariantFault` is a fatal implementation guard with no successors or source cleanup, distinct from a language `Check`. `tests/it/revision7.rs` pins these rules with hand-built controls and twins.
 

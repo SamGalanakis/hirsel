@@ -26,8 +26,7 @@ Invariants:
   `hirsel_lir::persistent::PVec`s, which share structure between program
   points: never clone a dense per-slot vector per instruction, edge or block,
   and never scan every slot at a site (`lacking` lists the slots that hold
-  something). `hirsel-pipeline-tests/tests/rc/rc_scaling.rs` gates the whole pipeline at eight times the
-  statements.
+  something).
 - A slot's moved, taken and pending parts are `paths::Tris` rows: a `yes`
   and a `maybe` bitset over the field paths `Facts` interns once per unit,
   the first 64 inline. Copying or joining a slot state copies and combines
@@ -55,9 +54,7 @@ fuses only when the instructions between call and copy are total and leave
 `D` untouched and the producer's arguments do not name `D`; a builder only
 when nothing can fail after its first append (FAIL-1 cleanup could otherwise
 observe a partial `D`). The output is ordinary TIR: every later pass and C
-see a call and a function. `hirsel-pipeline-tests/tests/rc/rc_append_into.rs`
-validates every rewritten and derived definition with the IR checker, runs C
-at each stage and H against the interpreter, and keeps the declined twins.
+see a call and a function.
 
 Inline format builders consumed by one `text.append` use the same destination.
 Only std primitive formatting and String append steps qualify; custom formatters,
@@ -324,12 +321,7 @@ donates storage. Its ordinary callable drop remains in place.
   the same layout and active variant, through token joins edge by edge, the
   evidence C requires.
 
-`hirsel-pipeline-tests/tests/rc/rc_drop_specialization.rs` builds Rc units the source cannot state
-(children of boxes, variants and records in boxes, irreducible loops);
-`hirsel-pipeline-tests/tests/rc/rc_reuse.rs` runs driver-lowered programs. Both check every unit with C
-before and after, run every mode with every failure-capable site injected on
-the heap executor, compare reuse-on and reuse-off observations, and witness
-reuse, elided dups and kept fields through counters and the units.
+
 
 ## Task K: scalar legalization
 
@@ -355,9 +347,7 @@ reuse, elided dups and kept fields through counters and the units.
 - `hirsel_lir::ir::Inst::defs` lists the result and the flag of `Convert` and
   `IntArith`; renumbering and liveness read definitions only from it.
 
-`hirsel-pipeline-tests/tests/rc/rc_legalize.rs` runs source programs for every operation at every width
-through the pipeline: C accepts each stage, and the heap executor and the
-interpreter agree on results and SEM-1 failures.
+
 
 `arena::COPY_TO` builds a deep `UniqueCopy` with the allocator parameter as its
 construction destination. `arena::HEAP` imports the inert counted-heap token as
@@ -437,21 +427,17 @@ cleanup that drops it). Rules every body keeps:
   Preparing the write after growth lets a static empty list grow directly;
   P4 still detaches a shared list on the spare-capacity path. `forget` imports as
   `Inst::Forget`, consuming its operand without finalizer or field cleanup.
-  `hirsel-pipeline-tests/tests/rc/rc_library_list.rs` executes these operations against the interpreter,
-  audits every injected heap failure, and checks both native targets. Its
-  million-append probe asserts allocation and relocated-byte bounds.
+
 
 Library finalizers receive `mut self`, with their new storage version reaching
 both the normal and failure continuations before field cleanup. Source drop
-bodies retain borrowed self. The hand-built control in `hirsel-pipeline-tests/tests/rc/rc_library_list.rs`
-mutates a field and verifies that its counted sibling is released once.
+bodies retain borrowed self.
 
 `ListConsume`, `ArrayConsume` and `InlineConsume` are library bodies. Inline
 open moves into one allocated Array; the other opens move the existing block
 with its uniqueness flag. The unique cursor finalizer drains the unreached
 suffix last first and empties its source; shared cursor cleanup releases its
-source credit. `hirsel-pipeline-tests/tests/rc/rc_library_list.rs` covers break, body failure and failing
-element finalizers through H's complete fault campaign and both native targets.
+source credit.
 
 Cleanup decomposes record and variant fields by declaration ordinal, in reverse
 order, preserving distinct zero-sized resource obligations even at equal offsets.
@@ -516,8 +502,7 @@ with a compiled `iter_from_step` body; std's adapters (`map` among them) are sou
 over `iter.from`. `iter.next` and iterator loops call the step indirectly through
 the exclusive iterator place. Captured state writes survive callback failure; a
 mapped item finalizes before the remaining iterator state.
-`hirsel-pipeline-tests/tests/rc/rc_library_iter.rs` checks all fourteen iterator conformance programs,
-injected failure cleanup, finalizer order and both native targets.
+
 
 An erased callable or iterator environment may own resources, so Perceus keeps
 its drop at the source cleanup point. A callable with a known environment is
@@ -527,9 +512,7 @@ classified by that payload layout, including environments nested in aggregates.
 inline to Copy at the destination type. Their StringView owner representation is
 an exact layout alias of String, so no retagging instruction is needed. Unicode
 protocols use a private ViewCursor (borrowed Slice plus relative position), while
-collection cursors keep Cursor. hirsel-pipeline-tests/tests/rc/rc_library_views.rs checks heap failure audits,
-compiled early exits and ordinary source grapheme segmentation over all official
-Unicode16 vectors on both native targets. GraphemeView has an ordinary source
+collection cursors keep Cursor. GraphemeView has an ordinary source
 representation and association; it uses no native view registration.
 
 `library/sorted` lowers empty and length inline, shares binary search across
@@ -547,7 +530,6 @@ a FunctionRef and inline Order construction, with no callable static-data format
 operation's own path and actuals, passes each parameter on as declared and calls
 the operation, so a call through the value fails and cleans up as a direct call
 does. The inline lengths have a value (their `SeqLen`), as does
-`string.as_bytes` (a Slice copy); other inline lowerings are unsupported as values. `conformance/LANG/LANG-2-core-operation-values-run.hir`
 runs it in the native smoke.
 
 `flat_walk` strength-reduces zero-based, unit-stride loops over variable-element
@@ -589,8 +571,7 @@ pushes `FlatField Reserve`/`Push` (their calls removed), the freeze a jump,
 and the construction `FlatClose` lacking that field. The list has no slot,
 block, copy or release. `spare_push::prove_fields` marks a push `spare` under
 the same counted-loop proof, the opening standing for the empty list and
-the field reservation for `list.reserve`. `hirsel-pipeline-tests/tests/rc/rc_flat_field.rs`
-holds accepted and declined shapes to the interpreter under H's fault campaign.
+the field reservation for `list.reserve`.
 
 `spare_push` removes capacity tests it proves cannot fail (FACT-3). Right after a
 source unit is imported, before the layout table is sealed, it retargets a
@@ -621,9 +602,7 @@ target vectors per original instance and 256 added units per program; beyond
 either, the original indirect entry remains. `Lowered.unit_origins` names the
 original signature/placement proof owner of every added unit, while
 `inline_instances` identifies bodies available in each calling partition.
-`hirsel-pipeline-tests/tests/rc/rc_flat_walk.rs` includes C forgeries, early exits and injected H failures;
-100,000 variable records require exactly 100,000 H element-prefix reads, while
-the disabled 40/80-element walks require 3,120/12,640 reads.
+
 
 `library::map` owns Map/Set construction and keyed operations. A Map holds
 optional insertion-ordered entries, a u64 index with a 32-bit hash tag and
@@ -644,9 +623,7 @@ next live physical slot while public `map.len` reports live entries.
 Consuming Map cursors save source uniqueness at open, move unique entries and
 copy shared/static entries without allocation; finalizers drain remaining
 entries backwards through temporary holders.
-`hirsel-pipeline-tests/tests/rc/rc_maps.rs` audits clean and injected failures,
-and `rc_maps_native.rs` checks compiled seed placement, internal Set ordering
-and source failure attribution on both targets.
+
 
 Defuse handoff: Flow records per-path `fields_pending` without
 changing versions or field ownership. The planner omits the parent's Finalize

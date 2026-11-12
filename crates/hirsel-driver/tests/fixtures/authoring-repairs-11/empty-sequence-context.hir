@@ -1,4 +1,0 @@
-fn example() {
-  for name in [] { let _ = name }
-}
-pub fn main() -> Result[(), ()] { Ok(()) }

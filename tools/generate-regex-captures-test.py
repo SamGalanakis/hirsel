@@ -174,7 +174,6 @@ def main():
     report += '\n'.join(f'- {group}: {n} rows' for group, n in counts.items())
     report += f'\n- Corpus programs: {len(files)}\n\nEvery excluded row:\n\n| Source | Reason |\n| --- | --- |\n'
     report += ''.join(f'| {file}:{line} | {reason} |\n' for file, line, reason in excluded)
-    (ROOT / 'reports/regex-captures-vectors.md').write_text(report)
     print(dict(counts), len(files), 'programs;', len(excluded), 'excluded rows')
 
 if __name__ == '__main__': main()

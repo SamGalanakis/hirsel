@@ -1,3 +1,0 @@
-pub fn relay[T](take source: unique List[unique T]) -> unique List[unique T] {
-  take source
-}

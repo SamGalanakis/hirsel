@@ -19,8 +19,6 @@ Use `while`, `for x in xs`, half-open ranges `0u64..n`, closed ranges `1u64..=3`
 `break`, `continue` and checked indexing `xs[i]`; assign with `xs[i] = value` on
 a mutable list.
 
-<!-- tour: conformance/LANG/LANG-6-tour-00-statements-run.hir -->
-[Runnable source](../conformance/LANG/LANG-6-tour-00-statements-run.hir)
 
 ```hirsel
 pub fn main() -> Result[(), ()] {
@@ -60,8 +58,6 @@ Use `'outer: for ...` or `'outer: while ...` to name an enclosing loop.
 inner scopes on the way. Labels are lexical within one function, cannot
 shadow an active label, and carry no break value.
 
-<!-- tour: conformance/LANG/LANG-11-tour-loop-labels-run.hir -->
-[Runnable source](../conformance/LANG/LANG-11-tour-loop-labels-run.hir)
 
 ```hirsel
 pub fn main() -> Result[(), String] {
@@ -89,8 +85,6 @@ A labelled block computes a value: `break 'search value` exits the block
 with that value, while its tail supplies the result when no break is taken.
 This lets a nested search return an `Option` directly.
 
-<!-- tour: conformance/LANG/LANG-11-tour-labelled-block-run.hir -->
-[Runnable source](../conformance/LANG/LANG-11-tour-labelled-block-run.hir)
 
 ```hirsel
 pub fn main() -> Result[(), ()] {
@@ -119,8 +113,6 @@ To read one decimal number, pass the line returned by `input.read_line` to
 `u64.parse(string.trim(line))`. Matching the parse result handles invalid input;
 `?` propagates `scalar.ParseError`.
 
-<!-- tour: conformance/LANG/LANG-8-tour-00-number-run.hir -->
-[Runnable source](../conformance/LANG/LANG-8-tour-00-number-run.hir)
 
 ```hirsel
 pub fn main() -> Result[(), scalar.ParseError] {
@@ -198,12 +190,9 @@ choose `int.checked_add` or `int.wrapping_add` explicitly when needed. A public
 signature may mention only public types. `f"{n}\n"` formats a value into a fresh
 string ([f-strings](#building-text-with-f-strings) below).
 
-Run `hirsel run --simulation docs/tour/world.json conformance/LANG/LANG-2-tour-01-values-run.hir`.
 The simulated world grants no host access; `--grants docs/tour/stdout.json` instead
 grants the real standard output alone.
 
-<!-- tour: conformance/LANG/LANG-2-tour-01-values-run.hir -->
-[Runnable source](../conformance/LANG/LANG-2-tour-01-values-run.hir)
 
 ```hirsel
 type Point {
@@ -251,8 +240,6 @@ until last use. Returning it without `in xs` is MODE-1; adding `copy` cannot fix
 that. A plain scalar result, like `first` below, is independent. Use
 `fn keep(take xs: List[u64]) -> List[u64]` when ownership should leave the caller.
 
-<!-- tour: conformance/OWN/OWN-4-tour-02-modes-run.hir -->
-[Runnable source](../conformance/OWN/OWN-4-tour-02-modes-run.hir)
 
 ```hirsel
 pub type AppError = Grant(GrantError) | Output(OutputError)
@@ -314,8 +301,6 @@ resources. An entry returning `Error` exits 1; the launcher prints `error: <e>` 
 after flushing stdout. That launch report needs no stderr grant and is separate
 from explicit program output ([PROG-3](../conformance/old-spec/programs.md#prog-3-entry)).
 
-<!-- tour: conformance/LANG/LANG-8-tour-03-errors-run.hir -->
-[Runnable source](../conformance/LANG/LANG-8-tour-03-errors-run.hir)
 
 ```hirsel
 pub type ParseError = Empty | TooLong(u64)
@@ -363,8 +348,6 @@ reports the `percent` call inside `progress`. A call through a function value st
 at that call. Only ordinary named functions take
 the attribute. Below, `percent(5, 4)` fails at the call in `main`.
 
-<!-- tour: conformance/FAIL/FAIL-1-tour-03-track-caller-fail.hir -->
-[Runnable source](../conformance/FAIL/FAIL-1-tour-03-track-caller-fail.hir)
 
 ```hirsel
 @track_caller
@@ -398,8 +381,6 @@ missing context or an undetermined parameter is LANG-2. A generic function decla
 inside a body, like `tagged`, works the same way and may capture locals; a capturing
 one borrows its scope, so bind it locally or pass it to a callable parameter.
 
-<!-- tour: conformance/LANG/LANG-2-generic-callable-context-run.hir -->
-[Runnable source](../conformance/LANG/LANG-2-generic-callable-context-run.hir)
 
 ```hirsel
 fn identity[T](take value: T) -> T {
@@ -465,8 +446,6 @@ error, and `zip` pairs present values. `results.map_error` transforms an error;
 `results.ok` / `error` keep one branch as an option. Transformations take their
 inputs and callbacks; callbacks may consume their captures once. Hirsel has no panicking `unwrap` or `expect`.
 
-<!-- tour: conformance/LANG/LANG-8-tour-option-result-run.hir -->
-[Runnable source](../conformance/LANG/LANG-8-tour-option-result-run.hir)
 
 ```hirsel
 pub fn main() -> Result[(), ()] {
@@ -506,8 +485,6 @@ A helper can return `Result[T, String]`, and plain `?` propagates its message.
 ([patterns](#patterns-conditional-let-alternatives-and-ranges) below).
 The line below can come from `input.read_line`; the example deliberately rejects it.
 
-<!-- tour: conformance/LANG/LANG-8-tour-12-bad-input-run.hir -->
-[Runnable source](../conformance/LANG/LANG-8-tour-12-bad-input-run.hir)
 
 ```hirsel
 pub fn main() -> Result[(), String] {
@@ -527,8 +504,6 @@ No stdout; exit 1.
 
 The same parser accepts a trimmed decimal:
 
-<!-- tour: conformance/LANG/LANG-8-tour-12-valid-input-run.hir -->
-[Runnable source](../conformance/LANG/LANG-8-tour-12-valid-input-run.hir)
 
 ```hirsel
 pub fn main() -> Result[(), String] {
@@ -560,8 +535,6 @@ byte range with literal bounds, and ranges count toward exhaustiveness, so
 `0..=127` and `128..=255` cover `u8` without a wildcard. There is no
 half-open range pattern (LANG-13).
 
-<!-- tour: conformance/LANG/LANG-13-tour-patterns-run.hir -->
-[Runnable source](../conformance/LANG/LANG-13-tour-patterns-run.hir)
 
 ```hirsel
 fn class(c: char) -> u64 {
@@ -620,8 +593,6 @@ Maps iterate in insertion order; replacement preserves a key's position.
 `map.same_entries` ignores insertion order. Sets ignore order for equality.
 `std@1/list` provides sorting, filtering and folds with explicit callbacks.
 
-<!-- tour: conformance/SEM/SEM-5-tour-04-collections-run.hir -->
-[Runnable source](../conformance/SEM/SEM-5-tour-04-collections-run.hir)
 
 ```hirsel
 pub type AppError = Grant(GrantError) | Output(OutputError)
@@ -676,8 +647,6 @@ When a consuming string operation follows a borrowed view, make ownership explic
 string required by `split`. `copy` would only share the borrowed blocks and keep
 their locality; it would not satisfy the taken global input.
 
-<!-- tour: conformance/SEM/SEM-3-tour-05-text-run.hir -->
-[Runnable source](../conformance/SEM/SEM-3-tour-05-text-run.hir)
 
 ```hirsel
 pub type AppError = Boundary | Grant(GrantError) | Output(OutputError)
@@ -740,8 +709,6 @@ A `char` is not an integer: `char.to_u32` gives its scalar value and
 `char` prints the character. Bytes stay `u8`: a byte literal such as `b','`
 is one ASCII byte and compares with an element of `Bytes`.
 
-<!-- tour: conformance/SEM/SEM-3-tour-05-chars-run.hir -->
-[Runnable source](../conformance/SEM/SEM-3-tour-05-chars-run.hir)
 
 ```hirsel
 pub type AppError = Grant(GrantError) | Output(OutputError)
@@ -800,8 +767,6 @@ other type is a compile error naming it.
 `{mean:.2}` rounds a float to two decimal places, `{name:*^12}` centers text,
 and `{n:#x}` includes the hex prefix.
 
-<!-- tour: conformance/SEM/SEM-3-tour-14-fstrings-run.hir -->
-[Runnable source](../conformance/SEM/SEM-3-tour-14-fstrings-run.hir)
 
 ```hirsel
 pub type AppError = Grant(GrantError) | Output(OutputError)
@@ -864,8 +829,6 @@ Thus `f"|{"界":>4}|"` produces `"|  界|"`, and precision 1 keeps all of
 prefix that fits. A wide fill repeats only while it fits each side's padding,
 then spaces fill the remaining cell: `f"|{"x":界>4}|"` is `"|界 x|"`.
 
-<!-- tour: conformance/SEM/SEM-3-tour-15-format-run.hir -->
-[Runnable source](../conformance/SEM/SEM-3-tour-15-format-run.hir)
 
 ```hirsel
 pub type AppError = Grant(GrantError) | Output(OutputError)
@@ -953,8 +916,6 @@ cookbook](schema-recipes.md): complete decode/encode hooks, owned results and
 missing-hook repairs. These use `schema_decode` / `schema_encode`, separately
 from the direct JSON reader/writer hooks above.
 
-<!-- tour: conformance/LANG/LANG-8-tour-06-json-run.hir -->
-[Runnable source](../conformance/LANG/LANG-8-tour-06-json-run.hir)
 
 ```hirsel
 pub type AppError = Json(json.JsonError) | Grant(GrantError) | Output(OutputError)
@@ -983,8 +944,6 @@ type: signed nanoseconds, used for formatting, parsing, `time.between` and
 `io.wall_clock` and its explicit grant. An `Instant of clock` belongs to that clock; time sampling is
 never an ambient pure operation.
 
-<!-- tour: conformance/LANG/LANG-8-tour-07-path-time-run.hir -->
-[Runnable source](../conformance/LANG/LANG-8-tour-07-path-time-run.hir)
 
 ```hirsel
 pub type AppError = PathError(path.PathError) | Parse(scalar.ParseError) | Time(
@@ -1018,8 +977,6 @@ Each selected size is evaluated while compiling and cached with the implementati
 it executes. Runtime arguments and abstract type parameters cannot be comptime inputs;
 size arithmetic in type arguments remains forbidden.
 
-<!-- tour: conformance/CT/CT-2-closed-frame-size-run.hir -->
-[Runnable source](../conformance/CT/CT-2-closed-frame-size-run.hir)
 
 ```hirsel
 fn square(n: u64) -> u64 {
@@ -1061,8 +1018,6 @@ that accepts one connection, so it needs no live server. Run a Test entry with
 `hirsel run --simulation docs/tour/world.json` just like the other source fixtures:
 the simulator supplies Test.
 
-<!-- tour: conformance/LANG/LANG-9-tour-08-http-run.hir -->
-[Runnable source](../conformance/LANG/LANG-9-tour-08-http-run.hir)
 
 ```hirsel
 pub fn main(t: Test) -> Result[(), http.HttpError] {
@@ -1124,8 +1079,6 @@ Client. All of them also build natively.
 for an absent file; propagate other errors. Atomic replacement writes a temporary
 file, then `file.commit` publishes it. Dropping it before commit aborts the write.
 
-<!-- tour: conformance/LANG/LANG-9-tour-11-file-errors-run.hir -->
-[Runnable source](../conformance/LANG/LANG-9-tour-11-file-errors-run.hir)
 
 ```hirsel
 pub fn main(t: Test) -> Result[(), FileError] {
@@ -1163,8 +1116,6 @@ starts a replacement, `file.write_all` supplies its bytes, and consuming
 `file.commit` publishes it. Dropping an uncommitted atomic file aborts it,
 including on an early `?`.
 
-<!-- tour: conformance/LANG/LANG-9-tour-09-files-bufio-run.hir -->
-[Runnable source](../conformance/LANG/LANG-9-tour-09-files-bufio-run.hir)
 
 ```hirsel
 pub type AppError = Files(FileError) | Read(bufio.ReadError[FileError])
@@ -1205,14 +1156,11 @@ the file adapters. `Ok(None()) | Error(NotGranted())` below handles both kinds o
 absence in one arm.
 
 Run the following in the default simulator (empty Args, Env and stdin), or use
-`hirsel run conformance/CAP/CAP-1-tour-10-inputs-run.hir --grants docs/tour/inputs.json </dev/null`
 for the same output with host streams. The checked-in template grants stdout,
 stdin, empty Args and empty Env; it grants no files or network. To exercise data,
 put strings in its `args` array and exact key/value snapshots in `env`, then pipe
 input to the command. Environment snapshots never fall back to process variables.
 
-<!-- tour: conformance/CAP/CAP-1-tour-10-inputs-run.hir -->
-[Runnable source](../conformance/CAP/CAP-1-tour-10-inputs-run.hir)
 
 ```hirsel
 pub type AppError = Grant(GrantError) | Arguments(ArgError) | Environment(EnvError) | Input(
@@ -1273,8 +1221,6 @@ on cancellation. Receive still returns `Canceled` before delivering a message.
 This example returns one value through a channel and explicitly joins the child; its output is independent of
 which task gets scheduled first.
 
-<!-- tour: conformance/CONC/CONC-2-tour-11-concurrency-run.hir -->
-[Runnable source](../conformance/CONC/CONC-2-tour-11-concurrency-run.hir)
 
 ```hirsel
 pub type AppError = Grant(GrantError) | Output(OutputError) | Channel(ChannelError)
@@ -1345,8 +1291,6 @@ returns the index of the next one and `task.await_at(s, mut set, i)` its result;
 `task.cancel_all` or `task.detach_all` consumes what is left. A task set must be
 consumed like a handle.
 
-<!-- tour: conformance/CONC/CONC-2-tour-11-task-all-run.hir -->
-[Runnable source](../conformance/CONC/CONC-2-tour-11-task-all-run.hir)
 
 ```hirsel
 pub type AppError = Grant(GrantError) | Output(OutputError) | Range(RangeError)
@@ -1417,8 +1361,6 @@ value.
 reading it copies nothing, and the body can neither keep nor change what it reads: a
 part leaves the body only as a plain value or a `unique` copy.
 
-<!-- tour: conformance/MEM/MEM-11-tour-11-shared-config-run.hir -->
-[Runnable source](../conformance/MEM/MEM-11-tour-11-shared-config-run.hir)
 
 ```hirsel
 pub type AppError = Grant(GrantError) | Output(OutputError)
@@ -1511,8 +1453,6 @@ each blocking operation inside is a cancellation point that returns `Canceled`.
 virtual; on the host, run it with
 `--grants '{"io":{"stdout":"stdout.bytes@1","tasks":"tasks.cooperative@1","monotonic_clock":"clock.monotonic.ns@1","dirs":[]}}'`.
 
-<!-- tour: conformance/CONC/CONC-3-tour-11-deadline-run.hir -->
-[Runnable source](../conformance/CONC/CONC-3-tour-11-deadline-run.hir)
 
 ```hirsel
 pub type AppError = Grant(GrantError) | Sleep(time.SleepError) | Output(OutputError)
@@ -1579,8 +1519,6 @@ outcome, and a `ChildScript` plays `Print`, `Expect` and `Exit` steps against wh
 program writes. [testrun](../examples/testrun/main.hir) streams a real child under a
 deadline.
 
-<!-- tour: conformance/CAP/CAP-1-tour-16-processes-run.hir -->
-[Runnable source](../conformance/CAP/CAP-1-tour-16-processes-run.hir)
 
 ```hirsel
 pub fn main(t: Test) -> Result[(), ProcessError] {
@@ -1643,8 +1581,6 @@ Such data cannot leave the arena, even after `copy` or `unique`. Copy it to the
 heap explicitly to keep it. Arenas contain no resources. A unique arena builder
 may update its root; a nested arena mutation detaches to the heap.
 
-<!-- tour: conformance/MEM/MEM-4-tour-12-arenas-run.hir -->
-[Runnable source](../conformance/MEM/MEM-4-tour-12-arenas-run.hir)
 
 ```hirsel
 pub type AppError = Grant(GrantError) | Output(OutputError)
@@ -1672,7 +1608,6 @@ kept
 ## Testing with `test.*`
 
 Tests are ordinary functions marked `@test`, optionally taking an explicit `Test`.
-Run this suite with `hirsel test conformance/LANG/LANG-9-tour-13-testing-run.hir.json`.
 Each selected function runs independently, so a failed check does not skip later tests.
 Core `test.check`, `test.dir` and `test.net` provide assertions and confined
 fakes. `std@1/test` adds structural equality, `assert_eq` (which reports both values,
@@ -1683,8 +1618,6 @@ a failing case shrinks to its simplest counterexample, reported with the seed th
 a committed file under `snapshots/`, and `hirsel test --bless` rewrites it. A false
 check fails LANG-9.
 
-<!-- tour: conformance/LANG/LANG-9-tour-13-testing-run.hir -->
-[Runnable source](../conformance/LANG/LANG-9-tour-13-testing-run.hir)
 
 ```hirsel
 fn small(mut s: test.Source) -> u64 {
@@ -1721,8 +1654,6 @@ bytes, and hex renders the digest. `test.expect_ok` transfers a successful
 Result payload. The [CSV-to-JSON tool](../examples/csvjson/main.hir) combines
 these helpers with flags, buffered input and escaped structured error logging.
 
-<!-- tour: conformance/SEM/SEM-3-tour-14-wire-run.hir -->
-[Runnable source](../conformance/SEM/SEM-3-tour-14-wire-run.hir)
 
 ```hirsel
 pub fn trial(t: Test) -> Result[(), ()] {
@@ -1753,7 +1684,6 @@ No stdout; exit 0 (all checks pass).
 Build the complete values program above into a standalone executable:
 
 ```sh
-hirsel build conformance/LANG/LANG-2-tour-01-values-run.hir -o /tmp/tour-values
 /tmp/tour-values --hirsel-grants docs/tour/stdout.json
 ```
 
@@ -1773,8 +1703,6 @@ that may be NULL as `Option[Ptr[T]]` (or `Option[FnPtr[..]]`), which has the sam
 one-pointer ABI, with `None()` for NULL. A pointer is an opaque address that Hirsel
 code passes back to C; the null check proves nothing else about it.
 
-<!-- tour: conformance/PROG/PROG-4-tour-17-ffi-ok.hir -->
-[Runnable source](../conformance/PROG/PROG-4-tour-17-ffi-ok.hir)
 
 ```hirsel
 pub type AppError = Grant(GrantError) | Output(OutputError)

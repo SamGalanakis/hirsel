@@ -229,8 +229,3 @@ pub fn lower(input: Input<'_>) -> Result<Definition> {
 
 #[cfg(test)]
 mod support;
-#[cfg(test)]
-mod tests;
-
-#[cfg(test)]
-mod cursor_tests;

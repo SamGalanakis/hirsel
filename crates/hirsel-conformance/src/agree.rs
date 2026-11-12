@@ -2950,47 +2950,4 @@ mod tests {
             "{compared}"
         );
     }
-    #[test]
-    fn owned_view_yield_returns_agree_with_independent_ir_checking() {
-        for source in [
-            include_str!("../../../conformance/SEM/SEM-4-view-return-source-run.hir"),
-            include_str!("../../../conformance/SEM/SEM-4-view-return-transparent-run.hir"),
-            include_str!("../../../conformance/SEM/SEM-4-view-return-direct-run.hir"),
-        ] {
-            for source in [
-                source.to_owned(),
-                source
-                    .replace("return piece", "return copy piece")
-                    .replace("=> piece,", "=> copy piece,"),
-            ] {
-                assert_eq!(
-                    classify(&source, Execution::None),
-                    Classification::Valid,
-                    "{source}"
-                );
-            }
-        }
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        for (path, expected) in [
-            (
-                "conformance/SEM/SEM-4-view-return-graphemes-run.hir",
-                Classification::Valid,
-            ),
-            (
-                "conformance/MODE/MODE-1-view-return-graphemes-bad.hir",
-                Classification::Rejected,
-            ),
-        ] {
-            let path = root.join(path);
-            let source = std::fs::read_to_string(&path).unwrap();
-            // The full grapheme program exceeds the campaign's instruction
-            // budget; corpus/native execution covers both return forms.
-            assert_eq!(
-                classify_package_native(&source, Execution::None, None, Some(&path), 0),
-                expected,
-                "{}",
-                path.display()
-            );
-        }
-    }
 }

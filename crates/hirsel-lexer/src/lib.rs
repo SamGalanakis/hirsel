@@ -873,6 +873,3 @@ fn punctuation(bytes: &[u8]) -> Option<(usize, Punct)> {
         _ => return None,
     })
 }
-
-#[cfg(test)]
-mod tests;

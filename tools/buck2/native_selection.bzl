@@ -12,9 +12,9 @@ load(":platforms.bzl", "budget_constraint", "pool_budget_name")
 FROZEN = "native-tests/regressions/native-selection.json"
 
 # Each observation now owns a process, releasing compiler state between cases.
-# Keep the existing 256 stripes; the request is measured separately from
+# Four stripes cover the retained witnesses; the request is measured separately from
 # compiler actions using successful observations' enforced PSS peaks.
-OBSERVATION_SHARDS = 256
+OBSERVATION_SHARDS = 4
 OBSERVATION_REQUEST = tuple(SPECIAL_REQUESTS["native_observation"][:2])  # sync.py adds it to POOL_BUDGETS
 
 

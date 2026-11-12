@@ -1,4 +1,0 @@
-pub const JOBS: u64 = 4
-pub type Spec { input: String }
-pub type Input { spec: Spec, size: u64 }
-pub type Problem = Canceled | Files(String, FileError)

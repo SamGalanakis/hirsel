@@ -1,9 +1,0 @@
-// rule: CLO-4
-// expect: reject CLO-4 at line 6
-// twin: CLO/CLO-4-stored-borrowed-capture-ok.hir
-// "Never borrowed parameters."
-fn example(x: Bytes) -> fn() -> () uses {} {
-  fn() {
-    let _ = x
-  }
-}

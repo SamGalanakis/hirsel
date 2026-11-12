@@ -1,1 +1,0 @@
-pub fn main() -> Result[(), ()] { let data = b"雪"; Ok(()) }

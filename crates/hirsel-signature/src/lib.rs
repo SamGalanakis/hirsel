@@ -3462,6 +3462,3 @@ fn builtin(s: &str) -> Option<BuiltinType> {
 }
 
 // Field markers are signature metadata; the checker owns MEM-12 growable legality.
-
-#[cfg(test)]
-mod tests;

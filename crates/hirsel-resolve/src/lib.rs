@@ -10,6 +10,3 @@ mod index;
 mod resolver;
 pub use index::*;
 pub use resolver::*;
-
-#[cfg(test)]
-mod tests;

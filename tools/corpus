@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Run chosen conformance cases on the checked compiler, spread over the pool.
 
-    tools/corpus conformance/STORE conformance/MODE/MODE-3-   # directories, files or prefixes
-    tools/corpus --slices 12 conformance/SEM
-    tools/corpus --native conformance/STORE/STORE-3-       # the per-push smoke configurations
-    tools/corpus --native --heap-parts 32 --config x86_64/regions/elide/reuse/flat-walk/heap+inject conformance/STORE/STORE-3-
-    tools/corpus --native --full-matrix conformance/OWN/OWN-4-   # every configuration the full gate runs
-    tools/corpus --native --config x86_64/regions/elide/reuse/flat-walk/llvm-O3/whole/default conformance/OWN/OWN-5-
+    tools/corpus conformance/SEM conformance/DROP   # directories, files or prefixes
+    tools/corpus --slices 4 conformance/SEM
+    tools/corpus --native conformance/DROP/DROP-2-       # the per-push smoke configurations
+    tools/corpus --native --heap-parts 32 --config x86_64/regions/elide/reuse/flat-walk/heap+inject conformance/DROP/DROP-2-
+    tools/corpus --native --full-matrix conformance/SEM/SEM-1-   # every configuration the full gate runs
+    tools/corpus --native --config x86_64/regions/elide/reuse/flat-walk/llvm-O3/whole/default conformance/SEM/SEM-2-
 
 Buck2 builds the checked `hirsel-conformance` and the std products it needs
 from this checkout (cached by content on the pool), so a std or compiler edit
@@ -16,18 +16,6 @@ path-hash partition of the same `--path` selection (`hirsel.conformance_paths_sp
 defs.bzl selected_paths), with about CONFORMANCE_SLICE_PROGRAMS cases per slice.
 Prints the summed counts and every failing case; exits non-zero when any slice
 fails or none executed a case.
-
-A case with a `// cuts: A..=B` header runs once per cut K, as `case@K`: a
-prefix selects all its cuts, `case@K` (native only; the interpreter runs every
-cut of the file) that one. `--selection store-land` and `--selection
-store-milestone` name the cut-sweep selections STORE lands and milestones run
-(named_selection; sync.py NATIVE_STORE_LAND holds the shares a land runs,
-NATIVE_STORE_MILESTONE the share of every family a milestone runs, recorded
-with its verdict in the git common directory's hirsel-store-milestones.tsv), and
-`--native --plan` prints a selection's planned pool CPU-h without running it,
-each case's figure measured (a current hirsel-heap-costs.tsv row, with its age)
-or estimated (a NATIVE_HEAP_COSTS row), warning first when estimates plan over
-PLAN_ESTIMATED of it.
 
 `--heap-parts N` distributes the entire fault domain of explicitly selected
 heap+inject configurations. Every part checks the clean run; aggregation requires
@@ -48,7 +36,7 @@ sync.py's NATIVE_HEAP_COSTS rows (a run's longest matching key, else the worst
 figures of its rule) only seed this: --plan's estimates and round one's site
 bound.
 
-`--native` runs the same selection through gate-native-full (`--full --filter`,
+`--native` runs the same selection through the native selection (`--full --filter`,
 the full gate's seed and request) as `//:gate-native-selected-shard-<i>`: one
 action per selected case by default, all its named configurations over one
 prepare and shared builds (`hirsel.native_paths`, `_split`, `_parts`,
@@ -83,7 +71,6 @@ import event_logs  # noqa: E402
 from run_failures import first_error_line  # noqa: E402
 from sync import (CONFORMANCE_SLICE_PROGRAMS, NATIVE_CONFIG_SECONDS, NATIVE_COVER_PART_SECONDS,  # noqa: E402
                   NATIVE_COVER_PARTS, NATIVE_HEAP_COSTS, NATIVE_HEAP_FAULT_SECONDS, NATIVE_HEAP_PART_SECONDS,
-                  NATIVE_STORE_LAND, NATIVE_STORE_MILESTONE,
                   NATIVE_SELECTED_SLICES, NATIVE_SLICE_SECONDS, SELECTED_SLICES)
 
 CUT = re.compile(r'^(.+\.hir)@(\d+)$')
@@ -109,90 +96,6 @@ def runs_of(corpus, prefixes):
             if any(run == p if CUT.match(p) else case.startswith(p) for p in prefixes):
                 selected.append(run)
     return selected
-
-
-def land_rows():
-    """NATIVE_STORE_LAND rows: (key, N), in file order."""
-    rows = []
-    for line in (ROOT / NATIVE_STORE_LAND).read_text().splitlines():
-        if line and not line.startswith('#'):
-            key, shares, _ = line.split('\t')
-            rows.append((key, int(shares)))
-    return rows
-
-
-def named_selection(name, corpus, parent):
-    """A named selection's prefixes and the milestone shares it takes. `store-land`:
-    per NATIVE_STORE_LAND row, one case of its key and one share of that case's
-    cuts, both from the count of commits up to the land's parent, printed.
-    `store-milestone`: per NATIVE_STORE_MILESTONE row, one share of its family's
-    runs (milestone_shares), printed; every swept STORE case falls under one
-    row."""
-    swept = sorted(c for c in corpus if c.startswith(STORE)
-                   and conformance.run_ids(c, (ROOT / c).read_text()) != [c])
-    if name == 'store-milestone':
-        commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
-        shares = milestone_shares(swept, commit, milestone_ledger())
-        for key, (share, count, runs) in shares.items():
-            print(f'corpus: store-milestone at {commit[:12]}: {Path(key).name}*, share {share}/{count} of its '
-                  f'{len(runs_of(swept, [key]))} runs ({", ".join(Path(run).name.removeprefix(Path(key).name) for run in runs)})',
-                  file=sys.stderr, flush=True)
-        return [run for _, _, runs in shares.values() for run in runs], shares
-    if name != 'store-land':
-        raise ValueError(f'unknown selection {name}; known: store-land, store-milestone')
-    rows = land_rows()
-    count = int(subprocess.check_output(['git', 'rev-list', '--count', parent], cwd=ROOT, text=True))
-    chosen = []
-    for key, shares in rows:
-        cases = [c for c in swept if c.startswith(key)]
-        if not cases:
-            raise ValueError(f'{NATIVE_STORE_LAND}: {key} names no cut-sweep case')
-        case = cases[count // shares % len(cases)]
-        share = count % shares
-        cuts = [run for i, run in enumerate(conformance.run_ids(case, (ROOT / case).read_text())) if i % shares == share]
-        print(f'corpus: store-land at parent {parent} (commit {count}): {Path(case).name}, share {share + 1}/{shares} '
-              f'of its cuts ({", ".join(run.rsplit("@", 1)[1] for run in cuts)})', file=sys.stderr, flush=True)
-        chosen += cuts
-    return chosen, {}
-
-
-def milestone_rows():
-    """NATIVE_STORE_MILESTONE rows: (key, N), in file order."""
-    rows = []
-    for line in (ROOT / NATIVE_STORE_MILESTONE).read_text().splitlines():
-        if line and not line.startswith('#'):
-            key, shares, _ = line.split('\t')
-            rows.append((key, int(shares)))
-    return rows
-
-
-def milestone_ledger():
-    """Where milestones record each share they ran and its verdict: shared by
-    every worktree of the repository, outside every commit."""
-    return common_file('hirsel-store-milestones.tsv')
-
-
-def milestone_shares(swept, commit, ledger):
-    """The share of each NATIVE_STORE_MILESTONE row a milestone at `commit`
-    takes: key -> (T, N, runs). A family's runs are its cases' in name order,
-    each case's cuts in order, and share T is those at positions i % N == T - 1
-    (two cases of 40 cuts in 40 shares: cut T of each), T chosen by `commit`
-    among the shares not passed in the family's current cycle, so N passing
-    milestones run every run once. Every swept case must fall under exactly
-    one row."""
-    rows = milestone_rows()
-    for case in swept:
-        keys = [key for key, _ in rows if case.startswith(key)]
-        if len(keys) != 1:
-            raise ValueError(f'{NATIVE_STORE_MILESTONE}: {case} falls under {len(keys)} rows, not one')
-    shares = {}
-    for key, count in rows:
-        family = runs_of(swept, [key])
-        if not family:
-            raise ValueError(f'{NATIVE_STORE_MILESTONE}: {key} names no cut-sweep case')
-        share = rotation_share(key, count, commit, ledger)
-        shares[key] = (share, count, [run for i, run in enumerate(family) if i % count == share - 1])
-    return shares
 
 
 def heap_costs():
@@ -396,30 +299,6 @@ def plan(runs, costs, measured, sites_max, now):
     return 0
 
 
-def rotation_cycle(key, shares, ledger):
-    """The shares of milestone row `key` passed in its current cycle (a cycle
-    ends when every one of the `shares` has passed), and how many cycles have
-    completed."""
-    passed, cycles = set(), 0
-    lines = ledger.read_text().splitlines() if ledger.exists() else []
-    for line in lines:
-        _, _, row_key, share, verdict = line.split('\t')
-        number, of = (int(n) for n in share.split('/'))
-        if row_key == key and of == shares and verdict == 'pass':
-            passed.add(number)
-            if len(passed) == shares:
-                passed, cycles = set(), cycles + 1
-    return passed, cycles
-
-
-def rotation_share(key, shares, commit, ledger):
-    """The share of milestone row `key` a milestone at `commit` takes: chosen
-    by `commit` among those not passed in the current cycle."""
-    passed, _ = rotation_cycle(key, shares, ledger)
-    open_shares = [n for n in range(1, shares + 1) if n not in passed]
-    return open_shares[int(commit[:12], 16) % len(open_shares)]
-
-
 def cases(root):
     """Repository-relative corpus files, as hirsel-conformance discovers them."""
     found = []
@@ -431,6 +310,10 @@ def cases(root):
                     stack.append(entry)
             elif entry.suffix == '.hir':
                 found.append(entry.relative_to(root).as_posix())
+    bank = root / "conformance/passing.txt"
+    if bank.is_file():
+        selected = set(bank.read_text().splitlines())
+        found = [path for path in found if path in selected]
     return found
 
 
@@ -459,24 +342,13 @@ def execute(command, structured=False):
         return child.wait()
 
 
-def plan_selection(runs, shares):
-    """plan() of `runs` as native() would run them at this commit, from each
-    run's current cost-ledger row; for a milestone, each family's share, its
-    cycle in milestones, and how many milestones full coverage takes."""
+def plan_selection(runs):
+    """Plan named runs from their current fault-cost rows."""
     costs, measured = heap_costs(), measured_costs(runs, cost_ledger())
     worst = max(figures(run, costs, measured)[1] for run in runs)
     sites_max = max(1, int(NATIVE_HEAP_FAULT_SECONDS / worst))
     status = plan(runs, costs, measured, sites_max, datetime.datetime.now(datetime.timezone.utc))
-    if status or not shares:
-        return status
-    ledger, left = milestone_ledger(), []
-    for key, (share, count, _) in shares.items():
-        passed, cycles = rotation_cycle(key, count, ledger)
-        left.append(count - len(passed))
-        print(f'plan: {Path(key).name}*: share {share}/{count}, a cycle of {count} milestones; cycle {cycles + 1} '
-              f'has passed {len(passed)}')
-    print(f'plan: full coverage after {max(left)} milestones')
-    return 0
+    return status
 
 
 def main():
@@ -490,14 +362,9 @@ def main():
     parser.add_argument('--full-matrix', action='store_true',
                         help="--native: every configuration of each case's full-gate cover")
     parser.add_argument('--report-json', type=Path, help='write per-slice compiler reports for main-runs')
-    parser.add_argument('--selection', choices=['store-land', 'store-milestone'],
-                        help='a named selection instead of prefixes (see named_selection)')
-    parser.add_argument('--parent', default='HEAD^', help="--selection store-land: the land's parent commit")
     parser.add_argument('--plan', action='store_true', help="--native: print the selection's planned CPU-h and run nothing")
-    parser.add_argument('prefixes', nargs='*', metavar='PREFIX')
+    parser.add_argument('prefixes', nargs='+', metavar='PREFIX')
     args = parser.parse_args()
-    if bool(args.selection) == bool(args.prefixes):
-        parser.error('name either prefixes or one --selection')
     if (args.parts or args.config or args.full_matrix or args.heap_parts != 1) and not args.native:
         parser.error('--parts, --config and --full-matrix need --native')
     if args.plan and not (args.native and args.config in ([], ['smoke']) and args.heap_parts == 1):
@@ -511,9 +378,6 @@ def main():
     if args.heap_parts > 1 and (args.full_matrix or not args.config or any(not c.endswith('/heap+inject') for c in args.config)):
         parser.error('--heap-parts requires explicit heap+inject configurations only')
     corpus = cases(ROOT)
-    shares = {}
-    if args.selection:
-        args.prefixes, shares = named_selection(args.selection, corpus, args.parent)
     prefixes = [p.rstrip('/') + '/' if (ROOT / p).is_dir() else p for p in args.prefixes]
     unmatched = [p for p in prefixes if not runs_of(corpus, [p])]
     if unmatched or any('|' in p or ';' in p for p in prefixes):
@@ -526,9 +390,9 @@ def main():
     runs = runs_of(corpus, prefixes)
     selected = len(runs)
     if args.plan:
-        return plan_selection(runs, shares)
+        return plan_selection(runs)
     if args.native:
-        return native(prefixes, runs, args, shares)
+        return native(prefixes, runs, args)
     # The interpreter runs a swept case's every cut; a `case@K` prefix selects its file.
     prefixes = sorted({CUT.sub(r'\1', p) for p in prefixes})
     runs = runs_of(corpus, prefixes)
@@ -597,14 +461,13 @@ def main():
     return status
 
 
-def native(prefixes, runs, args, shares):
+def native(prefixes, runs, args):
     """The selection through gate-native-full's matrix: one action per run (or
     run shards times configuration parts), then the parted heap campaigns. Each
     parted campaign is sized from its current cost-ledger row; without one, a
     probe part of about PROBE_SITES sites runs first and its measured costs
     size the rest, which skip the probe's sites. Every measured campaign is
-    recorded in the cost ledger, and each milestone share in `shares` in the
-    milestone ledger with the invocation's verdict."""
+    recorded in the cost ledger."""
     costs = heap_costs()
     commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
     costs_ledger = cost_ledger()
@@ -682,13 +545,6 @@ def native(prefixes, runs, args, shares):
                    f'{parts} heap fault parts' + (f' skipping probe {skip[0]}/{skip[1]}' if skip else ''))
     if groups:
         record_costs(campaigns, commit, costs_ledger)
-    # A milestone share passes only when the whole invocation passed.
-    if shares:
-        stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-        verdict = 'pass' if status == 0 and not problems else 'fail'
-        with milestone_ledger().open('a') as out:
-            out.writelines(f'{stamp}\t{commit}\t{key}\t{share}/{count}\t{verdict}\n'
-                           for key, (share, count, _) in shares.items())
     print(f'native: {cases} executable cases, {attempts} configuration attempts, {len(reports)} of {expected} slices')
     for line in problems:
         print(line)

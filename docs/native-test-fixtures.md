@@ -95,7 +95,6 @@ stop has no comparable semantic observation; its error now reports the actual
 Do not classify an arbitrary replay error as a Steps stop.
 
 The executable regression is
-[`native_harness_gaps_30.rs`](../crates/hirsel-pipeline-tests/tests/front/native_harness_gaps_30.rs).
 It checks a Pending sibling cancellation and an AfterWrite release with real
 Args, initial files, a read-only input mount and a writable output mount. Run
 only these cases with:
@@ -254,8 +253,6 @@ Interrupt race and treelearn commit-denial fixtures. Their identities are
 capacity claims or RE600 receipts. From the repository root, with `hirsel` on PATH:
 
 ```sh
-hirsel run --simulation crates/hirsel-cli/tests/support/simulation_world_cli_39/pending-interrupt.json crates/hirsel-cli/tests/support/simulation_world_cli_39/cancel.hir
-hirsel run --simulation crates/hirsel-cli/tests/support/simulation_world_cli_39/commit-denied.json crates/hirsel-cli/tests/support/simulation_world_cli_39/commit.hir
 ```
 
 The complete pending world (unused maps omitted, retaining their defaults):
@@ -313,8 +310,6 @@ For an AfterWrite gate use:
 ```
 
 ```sh
-hirsel run --simulation crates/hirsel-cli/tests/support/simulation_world_cli_39/after-write.json crates/hirsel-cli/tests/support/simulation_world_cli_39/read.hir
-hirsel run --simulation crates/hirsel-cli/tests/support/simulation_world_cli_39/failed-write.json crates/hirsel-cli/tests/support/simulation_world_cli_39/read.hir
 ```
 
 Only a **successful `file.write_bytes`** to `output/release` in the same tree

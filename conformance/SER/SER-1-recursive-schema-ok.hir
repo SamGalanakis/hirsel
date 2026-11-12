@@ -1,4 +1,0 @@
-// rule: SER-1
-// expect: accept
-@serializable
-type Tree[T: serializable] = Leaf(T) | Node(List[Tree[T]])

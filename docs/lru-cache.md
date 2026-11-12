@@ -147,8 +147,6 @@ New fixture paths under `crates/hirsel-driver/tests/fixtures/lru-cache-7/`:
 actual std source in its own module without a second std dependency, since
 a source path has one module context per selected package graph.
 
-New corpus paths: `conformance/SEM/SEM-5-lru-cache-7-run.hir` and
-`conformance/MODE/MODE-1-lru-cache-7-peek-bad.hir`, each with a `.hir.json`
 manifest. Registration uses `conformance/passing.txt`, the std source manifest,
 and the Rust harness's union-merged `modules.rs` only. Reference notices are
 registered in `third-party/NOTICES.md`.

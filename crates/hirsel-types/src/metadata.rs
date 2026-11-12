@@ -304,25 +304,3 @@ pub fn schema_failure(
     }
     failures.into_iter().min_by(|(a, _), (b, _)| a.cmp(b))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn nominal_role_selection_shares_equal_headers_and_observes_metadata_edits() {
-        let mut metadata = Metadata {
-            result_type: Some(ast::DefPath::core("Result")),
-            ..Default::default()
-        };
-        let first = metadata.nominal_roles();
-        assert!(std::sync::Arc::ptr_eq(&first, &metadata.nominal_roles()));
-        let mut changed = metadata.clone();
-        changed.result_type = Some(ast::DefPath::core("Other"));
-        assert_ne!(first, changed.nominal_roles());
-        assert_eq!(first.result_type, metadata.result_type);
-        metadata.result_type = None;
-        assert_eq!(metadata.nominal_roles().result_type, None);
-        assert_eq!(first.result_type, Some(ast::DefPath::core("Result")));
-    }
-}

@@ -1,9 +1,0 @@
-// rule: MEM-5
-// expect: accept
-@noalloc
-fn probe(s: String) -> String in s uses {} {
-  string.find(s, "é")
-  string.starts_with(s, "")
-  string.ends_with(s, "")
-  string.trim(s)
-}

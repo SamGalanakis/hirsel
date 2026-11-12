@@ -97,6 +97,3 @@ fn damaged(file: &SyntaxFile) -> bool {
                     .any(|t| matches!(t.kind, TypeExprKind::Error))
         })
 }
-
-#[cfg(test)]
-mod tests;

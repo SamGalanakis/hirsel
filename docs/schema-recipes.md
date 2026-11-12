@@ -99,7 +99,6 @@ introduce implicit discovery. See [paired structural generation](../conformance/
 
 The generated body constructs the outer record, calling the written nested
 hooks. It does not generate those hook declarations. Here is the rejected
-[decoder](../crates/hirsel-driver/tests/fixtures/schema-recipe-11/missing-decode.hir)
 beside its accepted repair (the complete graph above):
 
 | Rejected | Accepted repair |

@@ -8,9 +8,8 @@
 //! the runtime prints the fault and aborts, and never reports one as a language failure.
 //! Host allocation exhaustion is environmental and also terminates.
 //!
-//! Each primitive cites the transition of D's Lean model (`proofs/rc`) it implements
-//! by its ID and name (`T04 DropLast`); `proofs/rc/README.md` defines the IDs and the README here
-//! lists the entries. `tests/it/model.rs` runs the model's `rc-trace v1` vectors on the runtime.
+//! Primitive comments retain transition IDs and names such as `T04 DropLast`.
+//! `tests/it/model.rs` runs the retained `rc-trace v1` vectors on the runtime.
 
 #[cfg(all(test, not(feature = "tsan")))]
 hirsel_guard::install!(crate::io_real::borrowed_net_tests::Count: crate::io_real::borrowed_net_tests::Count);

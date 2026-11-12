@@ -74,7 +74,7 @@ class Consumers(unittest.TestCase):
 
     def test_many_direct_owners_cannot_evict_mandatory_launches(self):
         inventories = {binary: set(cases) for binary, cases in consumers.MUST.items()}
-        inventories['hirsel-cli-test-free'] = {'native_returned_rest_completion_replays_across_engines'}
+        inventories['hirsel-cli-test-cli'] = {'program_record::a_build_record_restores_its_executable_and_replays_failures'}
         graph = graph_for(inventories)
         owners = set()
         for index in range(consumers.LIMIT + 1):
@@ -102,18 +102,13 @@ class Consumers(unittest.TestCase):
 
     def test_cpu_pool_change_selects_native_launches_and_replay_before_other_shards(self):
         inventories = {binary: set(cases) for binary, cases in consumers.MUST.items()}
-        inventories['hirsel-cli-test-free'] = {
-            'native_returned_rest_completion_replays_across_engines',
+        inventories['hirsel-cli-test-cli'] = {
+            'program_record::a_build_record_restores_its_executable_and_replays_failures',
             'every_f0_trace_replays_to_its_live_projection_at_every_cut_gap_interpreter',
         }
         graph = graph_for(inventories)
-        cpu_targets = {f'root//:hirsel-cli-test-cpu_pool_{width}' for width in (1, 4, 8, 16)}
-        graph |= {target: dict(test_binary=target.split(':')[1]) for target in cpu_targets}
         assignments = consumers.assignments(ROOT, graph, inventories)
-        expected = cpu_targets | {assignments[binary, case] for binary, cases in consumers.MUST.items() for case in cases}
-        expected.add(assignments['hirsel-cli-test-free', 'native_returned_rest_completion_replays_across_engines'])
-        expected |= {'root//:hirsel-cli-test-cli-consumer-native-http',
-                     'root//:hirsel-cli-test-cli-consumer-native-http-concurrent'}
+        expected = {assignments[binary, case] for binary, cases in consumers.MUST.items() for case in cases}
         for path in ('crates/hirsel-rt/src/pool.rs', 'crates/hirsel-rt/src/free_launch.rs',
                      'crates/hirsel-native/src/kit.rs', 'crates/hirsel-llvm/src/c_entry.rs',
                      'crates/hirsel-engine/src/queries/native_records.rs',
@@ -123,13 +118,13 @@ class Consumers(unittest.TestCase):
                 self.assertLessEqual(expected, set(selected[:consumers.LIMIT]))
 
     def test_std_module_selects_the_conformance_shard_that_uses_it(self):
-        path = 'stdlib/std@1/toml.hir'
-        corpus = 'conformance/SEM/SEM-3-toml-edit-cargo-run.hir'
-        inventories = {'hirsel-driver-test-it-stdlib': {'toml_upstream_25::generated_00'}}
+        path = 'stdlib/std@1/input.hir'
+        corpus = 'conformance/CAP/CAP-1-stdin-lines-run.hir'
+        inventories = {'hirsel-driver-test-it': {'host_io::rust_read_until_vectors_preserve_newlines_unterminated_lines_and_eof'}}
         graph = graph_for(inventories)
         selected = consumers.select(ROOT, [path], graph, inventories)
         mapped = consumers.assignments(ROOT, graph, inventories)
-        self.assertIn(mapped['hirsel-driver-test-it-stdlib', 'toml_upstream_25::generated_00'], selected)
+        self.assertIn(mapped['hirsel-driver-test-it', 'host_io::rust_read_until_vectors_preserve_newlines_unterminated_lines_and_eof'], selected)
         from sync import conformance_plan
         index, = [i for i, part in enumerate(conformance_plan(), 1)
                   if consumers.corpus_shard(corpus, part['count']) == part['index']]
@@ -162,7 +157,7 @@ fn regression() { fixture(); }
                              {'regression'})
 
     def test_isolated_body_selects_its_dedicated_target_after_balancing(self):
-        binary = 'hirsel-cli-test-free'
+        binary = 'hirsel-cli-test-cli'
         inventories = {binary: {'isolated', 'ordinary'}}
         graph = graph_for(inventories)
         before = consumers.assignments(ROOT, graph, inventories)
@@ -270,18 +265,18 @@ HIRSEL_TEST_RUNNING laws::receipt elapsed=570.001s
         # testsmash-apply-703: 670 executed cases in 32 tools/corpus slices read
         # as 32 "zero executed bodies".
         counts = 'whole corpus: {} validated / {} passing / {} failing / 0 not implemented\n'
-        failing = ('conformance/LANG/LANG-4-std-duplicate-bad.hir: expected Reject { rule: RuleId("LANG-4"), '
+        failing = ('conformance/TEST/TEST-duplicate-bad.hir: expected Reject { rule: RuleId("LANG-4"), '
                    'line: 1 }; got accept')
         red = failing + '\n--path requires every selected test to pass\n' + counts.format(20, 19, 1)
         self.assertEqual(self.classify(counts.format(21, 21, 0), {}, 1), 'pass')
         self.assertEqual(self.classify(counts.format(0, 0, 0), {}, 1), 'uncertain')
         self.assertEqual(self.classify(red, {}), 'new')
-        self.assertEqual(self.classify(red, {'fixture::conformance/LANG/LANG-4-std-duplicate-bad.hir': failing}),
+        self.assertEqual(self.classify(red, {'fixture::conformance/TEST/TEST-duplicate-bad.hir': failing}),
                          'known')
         self.assertEqual(self.classify(red.replace('got accept', 'got LANG-9'),
-                                       {'fixture::conformance/LANG/LANG-4-std-duplicate-bad.hir': failing}),
+                                       {'fixture::conformance/TEST/TEST-duplicate-bad.hir': failing}),
                          'uncertain')
-        native = ('native: conformance/STORE/STORE-12-serve-run.hir under x86_64/regions/elide/reuse/flat-walk/heap: '
+        native = ('native: conformance/TEST/TEST-provider-run.hir under x86_64/regions/elide/reuse/flat-walk/heap: '
                   'ready: no native layout for Inbox (native-unavailable)\n{\n  "configuration_attempts": 2,\n}\n')
         self.assertEqual(self.classify(native, {}), 'new')
         self.assertEqual(self.classify(native.split('\n', 1)[1], {}, 1), 'pass')
@@ -383,10 +378,10 @@ HIRSEL_TEST_RUNNING laws::receipt elapsed=570.001s
         reasons = {}
         for body in bodies:
             details += (f'HIRSEL_TEST_STARTED {body}\ntest {body} ... FAILED\n'
-                        f"thread '{body}' panicked at crates/hirsel-cli/tests/configctl_8.rs:166:5:\n"
+                        f"thread '{body}' panicked at crates/fixture/tests/control.rs:166:5:\n"
                         f'{diagnostic}\n\n')
             reasons['hirsel-cli-test-configctl_8::' + body] = (
-                f'Failed {body}. crates/hirsel-cli/tests/configctl_8.rs:166:5: {diagnostic}; '
+                f'Failed {body}. crates/fixture/tests/control.rs:166:5: {diagnostic}; '
                 'inner570 RE600. Evidence mutex-borrow-416/REPORT.md and free-heap-report-421/REPORT.md.')
         details += 'test result: FAILED. 0 passed; 3 failed; 0 ignored;\n'
         return details, reasons

@@ -89,7 +89,6 @@ annotations on the constructed Windows roots fix their prefix contract.
 
 The original `step(mut owned.live[i].aggregate,value)?` passes source checking
 but strict V refuses `TypeMismatch(value modes)` (original full app Body0,
-Block13, instruction11). The permanent [original_receipt.hir](../../crates/hirsel-cli/tests/support/event_window_39/original_receipt.hir) reduces it to a
 concrete u64 list, with no generic, loop or Result inside the helper. Its source
 check passes, while reachable TIR export refuses advance Body0/Block1/instruction8.
 This original receipt is INCOMPLETE, owned by the compiler/V maintainer (Sam); it is not

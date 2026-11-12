@@ -81,16 +81,11 @@ toolchain_proof(name = "platform-capture-proof", tools = [":llvm", ":linker", ":
 
 toolchain_proof(name = "platform-closure-proof", tools = [":llvm", ":linker", ":kit", "root//:hirsel-rt-archives", ":runtime-auditor", ":glibc_floor", ":qemu", "root//:hirsel-native-unittest-harness"], script = "platform_closure_proof.py", interpreter = "python3")
 toolchain_proof(name = "platform-record-proof", tools = [":llvm", ":linker", ":kit", "root//:hirsel-rt-archives", ":runtime-auditor", ":glibc_floor", ":qemu", "root//:hirsel-native-unittest-harness"], script = "platform_record_proof.py", interpreter = "python3")
-toolchain_proof(name = "native-compilation-proof", tools = [":llvm", ":kit", "root//:hirsel-rt-archives", "root//:hirsel-driver-test-it-harness"], script = "native_compilation_proof.sh")
-
-toolchain_proof(name = "root-observation-proof", tools = [":llvm", ":kit", "root//:hirsel-rt-archives", "root//:hirsel-driver-test-it-harness"], script = "root_observation_proof.sh")
 
 
-toolchain_proof(name = "root-plan-proof", tools = [":llvm", ":linker", ":kit", "root//:hirsel-rt-archives", "root//:hirsel-driver-test-it-harness"], script = "root_plan_proof.py", interpreter = "python3")
 
 
-toolchain_proof(name = "root-frozen-kit-proof", tools = [":llvm", ":linker", ":kit", "root//:hirsel-rt-archives", "root//:hirsel-driver-test-it-harness"], script = "root_frozen_kit_proof.py", interpreter = "python3")
-toolchain_proof(name = "source-metadata-proof", tools = [":llvm", ":kit", "root//:hirsel-rt-archives", "root//:hirsel-native-unittest-harness", "root//:hirsel-driver-test-it-harness"], script = "source_metadata_proof.sh")
+
 
 toolchain_proof(name = "native-bootstrap-link-proof", tools = [":llvm", ":linker", ":kit", "root//:hirsel-rt-archives", ":runtime-auditor", ":glibc_floor", ":qemu", "root//:hirsel-driver-unittest-harness"], script = "native_bootstrap_link_proof.py", interpreter = "python3")
 

@@ -1,6 +1,5 @@
 # Foreign pointer boundary
 
-`null.c` is linked to `conformance/PROG/PROG-4-ffi-null-api-ok.hir` by the
 hirsel-driver `foreign::native_null_pointer_boundaries_match_on_both_backends` test.
 It checks NULL and stable non-NULL pointers, C-origin function pointers, nullable
 callback arguments/results and writable pointer arguments. Separate process launches

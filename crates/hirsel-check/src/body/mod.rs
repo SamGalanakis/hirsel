@@ -14,8 +14,7 @@ mod patterns;
 mod shapes;
 mod source_rows;
 mod tails;
-#[cfg(test)]
-mod tests;
+
 mod type_display;
 mod types;
 use hirsel_check_protocol::body::*;

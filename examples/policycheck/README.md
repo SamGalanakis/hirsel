@@ -46,7 +46,6 @@ capabilities and offers no network service.
 
 Results contain reload outcomes or batch revisions and decisions, as shown by
 the frozen independent vectors in
-`crates/hirsel-cli/tests/support/policy_evaluator_33/cases.json`. A complete result
 is buffered and checked before stdout publication. Output overflow publishes
 only a fatal diagnostic. This is atomic in-memory policy replacement, not a
 persistent policy database or a stdout transaction across provider failures.

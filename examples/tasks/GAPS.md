@@ -17,7 +17,6 @@ client by choice; that does not establish a compiler failure.
   **1/1 passing**, exit 0, building the unchanged `examples/tasks/e2e/hirsel.json`
   client with LLVM under the original **peak RSS < 1536 MiB** assertion.
   Success does not print the peak, so no exact RSS or speedup is claimed.
-  See the [evidence index](../../conformance/coverage-ledger.md) for the command,
   source/binary identities and retained historical evidence.
 
 - #513132: `d79c14bd` added granted, recorded and replayed signals; `64f6e20c` makes the server race `signal.wait` for SIGINT/SIGTERM with its accept loop. Stdin stop remains because the CLI e2e suite and benchmark helpers close it to test shutdown with open event streams.

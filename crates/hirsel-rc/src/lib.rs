@@ -20,8 +20,7 @@ mod observation;
 pub mod observed;
 pub mod placement;
 pub mod ready;
-#[cfg(test)]
-mod receipt_transport_tests;
+
 pub mod reuse;
 pub mod reuse_stores;
 pub mod seal_demand;

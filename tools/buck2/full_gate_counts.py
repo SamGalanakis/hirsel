@@ -52,7 +52,81 @@ class Counts:
         return len(self.expected)
 
 
+def retained_inventory(root=None):
+    root = root or Path(__file__).resolve().parents[2]
+    groups = {}
+    for line in (root / 'tools/retained-rust.tsv').read_text().splitlines()[1:]:
+        binary, case = line.split('\t')
+        groups.setdefault(binary, []).append(case)
+    if not groups or any(len(set(cases)) != len(cases) for cases in groups.values()):
+        raise ValueError('empty or duplicate retained Rust inventory')
+    return {f'{binary}-retained-{i+1}': cases[i::4]
+            for binary, cases in groups.items() for i in range(min(4, len(cases)))}
+
+
+def retained_counts(outputs, inventory):
+    expected = {(target, case) for target, cases in inventory.items() for case in cases}
+    actual = Counter()
+    errors = []
+    seen = set()
+    for name, output in outputs.items():
+        match = re.search(r'(hirsel-[\w-]+-retained-\d+)', name)
+        if not match:
+            continue
+        target = match[1]
+        seen.add(target)
+        for line in output.splitlines():
+            line = TIMESTAMP.sub('', ANSI.sub('', line)).strip()
+            if result := RESULT.match(line):
+                case, status = result.groups()
+                actual[target, case] += 1
+                if status != 'ok':
+                    errors.append(f'{target} {case}: {status}')
+    if seen != set(inventory):
+        errors.append(f'retained target inventory differs: missing {sorted(set(inventory)-seen)}, extra {sorted(seen-set(inventory))}')
+    for key in sorted(expected | actual.keys()):
+        if key not in expected or actual[key] != 1:
+            errors.append(f'{key}: expected once, observed {actual[key]}')
+    if errors:
+        raise ValueError('; '.join(errors))
+    return len(expected)
+
+
+def run_retained():
+    import event_logs
+    from conformance import BUCK2, CONFIG, ROOT, shard_outputs, summarize
+    inventory = retained_inventory(ROOT)
+    targets = [*inventory, *[f'gate-conformance-shard-{i}' for i in range(1, 5)],
+               *[f'gate-retained-{engine}-shard-{i}' for engine in ('heap', 'llvm', 'cranelift') for i in range(1, 5)]]
+    with event_logs.recorded('retained-matrix') as log:
+        status = subprocess.call([str(BUCK2), 'test', *CONFIG, '--event-log', str(log),
+                                  *['//:' + target for target in targets]], cwd=ROOT)
+        outputs = shard_outputs(log)
+    try:
+        count = retained_counts(outputs, inventory)
+        print(f'retained Rust: {count}/{sum(map(len, inventory.values()))} bodies executed exactly once')
+        corpus = {k: v for k, v in outputs.items() if 'gate-conformance-shard-' in k}
+        print('\n'.join(summarize(corpus, 4)))
+        for engine in ('heap', 'llvm', 'cranelift'):
+            reports = [re.search(r'retained ' + engine + r': (\d+)/(\d+) passed', v)
+                       for k, v in outputs.items() if f'gate-retained-{engine}-shard-' in k]
+            if len(reports) != 4 or any(m is None or int(m[2]) == 0 for m in reports):
+                raise ValueError(f'{engine}: missing or empty retained shard counts')
+            passed = sum(int(m[1]) for m in reports)
+            total = sum(int(m[2]) for m in reports)
+            expected = len((ROOT / 'native-tests/regressions/smoke.txt').read_text().splitlines())
+            print(f'retained {engine}: {passed}/{total} passed')
+            if total != expected or passed != total:
+                raise ValueError(f'{engine}: incomplete retained matrix')
+    except ValueError as error:
+        print(f'retained matrix: {error}', file=sys.stderr)
+        return status or 1
+    return status
+
+
 def main():
+    if sys.argv[1:] == ["--retained"]:
+        return run_retained()
     parser = argparse.ArgumentParser(description=__doc__,
                                      usage='%(prog)s LOG | --run COMMAND ...')
     parser.add_argument('log', type=Path)

@@ -1,3 +1,0 @@
-pub fn demo(c: lru.Cache[payload.Payload]) {
-  let _ = lru.peek(c, "key")
-}

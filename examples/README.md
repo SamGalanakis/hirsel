@@ -96,7 +96,6 @@ selects an explicit bound.
 | [patchctl](patchctl/README.md) | Generate and validate bounded single-file unified patches with read-only grants; reject partial application without publishing text. |
 | [mdsite](mdsite/README.md) | Recursively render Markdown to HTML with an escaped, path-preserving index and safe default rendering. |
 
-The E2E tests are in `crates/hirsel-cli/tests/examples.rs`. They check exact output
 through both CLI backends and additional supplied-file cases, including a
 4,096-line sort input. These examples deliberately use only documented core and
 `std@1` APIs. The HTTP test uses the existing driver simulation and native launch

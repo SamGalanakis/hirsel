@@ -7,11 +7,9 @@ The table preserves the original incidents; the recipes below describe current r
 | Tried | Historical diagnostic | Current disposition / repair | Minutes lost | Class |
 | --- | --- | --- | ---: | --- |
 | Used `distinct` and `result` as ordinary names. | [Exact output](repros/incident-1.txt) | Renamed them `sorted_unique` and `output_lines`; LANG-14. [Minimal program](repros/incident-1.hir). | 1 | language friction |
-| Considered the LANG-14 replacement suggestion. | [Exact output](repros/incident-2.txt) | Historical help suggested reserved `result`. Fixed by [legal, fresh name suggestions](https://github.com/SamGalanakis/hirsel-lang/commit/7874edcd97e00508b3ff84d9abe7d65e7edb9d42); current help uses `value` when available. [Applied-repair controls](../../crates/hirsel-driver/tests/it/error_injection.rs) check the replacement. [Minimal program](repros/incident-2.hir). | 0.5 | bug (fixed) |
 | Inferred a list from its elements or the other `if` arm. | [Exact output](repros/incident-3.txt) | Originally added `List[cli.Flag]` / `List[String]`; LANG-2. The exact String repro now accepts as `List[String]`; only insufficient prefixes still need context (see below). [Minimal program](repros/incident-3.hir). | 0.5 | language friction |
 | Sorted a list after a mutable helper call. | [Exact output](repros/incident-4.txt) | Fixed by private summaries (b552ff23d839 / f71ba1242e00); direct-call proof is inferred. Native qualification still requires the declared remember/collect promises until duplicate list.push request registration is repaired. [Minimal program](repros/incident-4.hir). | 1 | language friction |
 | Returned `out.print(..)?` from a Result function. | [Exact output](repros/incident-5.txt) | Print with `?`, then return `Ok(())`; LANG-7/LANG-8. [Minimal program](repros/incident-5.hir). | 0.5 | language friction |
-| Read buffered lines inside a collection loop. | [Exact output](repros/incident-6.txt) | Fixed by [natural-loop origin expiration](https://github.com/SamGalanakis/hirsel-lang/commit/8d85aeac8cb3c32b8669cc0550906234c18bf0a0); [application file loop restored](https://github.com/SamGalanakis/hirsel-lang/commit/a19ff14b9727354246a86d29663c28c62c80739a). The unchanged [12-line repro](repros/invalid-origin.hir) and restored app pass H, LLVM and Cranelift in the [exact-source regression](../../crates/hirsel-cli/tests/examples.rs); independent V still rejects forged early expiry. Verified 2026-10-22. | 4 | bug (fixed) |
 | Named a local `counts`, also the name of an @test. | [Exact output](repros/incident-7.txt) | Renamed test `count_words`; LANG-4 applies across the entire module. [Minimal program](repros/incident-7.hir). | 0.5 | language friction |
 | Took a record field directly. | [Exact output](repros/incident-8.txt) | Destructured the whole Scan with `let Scan(..) = take scan`; OWN-8. [Minimal program](repros/incident-8.hir). | 0.5 | language friction |
 | Pushed strings from a taken nested sequence into a unique accumulator. | [Exact output](repros/incident-9.txt) | Weak `List[String]` rows need `unique line` for a unique destination. The app now stores strong `List[unique String]` rows and consumes its currently unshared scan list with `take line`; MODE-2. [Minimal program](repros/incident-9.hir). | 0.5 | language friction |
@@ -169,7 +167,6 @@ Every remaining ownership workaround in the application is intentional:
 
 `read_stdin` remains a useful helper. The file loop is inline;
 [its original nested-loop repro](repros/invalid-origin.hir) remains a fixed bug
-regression. The [source regression](../../crates/hirsel-cli/tests/support/wc2_unique_row_contract_21/app.rs)
 compares the weak and strong application bodies through interpreter, H, LLVM
 and Cranelift. Its driver supplies argument lists and creates small files via
 the language's file API because H's existing fixture has empty Args and files;

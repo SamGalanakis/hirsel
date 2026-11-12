@@ -18,7 +18,6 @@ The authority is [MODE-1](../conformance/old-spec/ownership.md#mode-1-locality),
 it is not the third repair. `unique` preserves arena/region placement, so this
 heap-input recipe does not promise to move arena data onto the heap.
 
-The preserved [original F07 reject](../crates/hirsel-driver/tests/fixtures/ownership-repairs-6/original.hir)
 returns an unrelated `NetPeer` containing borrowed bytes and must still fail
 MODE-1. The [existing diagnostic repair table](../crates/hirsel-modes/src/explain.rs)
 already recommends a taken parameter/caller move or a deep unique copy, and warns
@@ -31,7 +30,6 @@ hirsel check examples/ownership-repairs/hirsel.json
 hirsel run examples/ownership-repairs/hirsel.json
 hirsel run --native --backend llvm examples/ownership-repairs/hirsel.json
 hirsel run --native --backend cranelift examples/ownership-repairs/hirsel.json
-hirsel check --json crates/hirsel-driver/tests/fixtures/ownership-repairs-6/original.hir
 ```
 
 The last command intentionally exits nonzero. Each reject has a local manifest;
@@ -67,7 +65,6 @@ source spans without a rendering snapshot:
 ```sh
 python3 tools/buck2/prepare.py
 .buck2/bin/buck2 targets 'root//:'
-.buck2/bin/buck2 test $(tools/consumers crates/hirsel-driver/tests/it/ownership_repairs_6.rs) -- --test-arg=ownership_repairs_6
 ```
 
 The owning shards together run the filtered selection of two Rust tests,
@@ -153,7 +150,6 @@ Run the pure entry without grants:
 
 ```sh
 hirsel run examples/ownership-repairs/authoring.hir.json
-hirsel check --json crates/hirsel-driver/tests/fixtures/authoring-repairs-11/path-copy.hir
 .buck2/bin/buck2 test //:hirsel-driver-test-it-shard-1 -- --test-arg=authoring_repairs_11
 ```
 

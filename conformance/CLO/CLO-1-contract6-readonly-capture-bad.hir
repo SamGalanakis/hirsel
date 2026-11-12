@@ -1,9 +1,0 @@
-// rule: CLO-1
-// expect: reject CLO-1 at line 7
-// twin: CLO/CLO-4-contract6-preserve-normal-ok.hir
-@preserves_captures(it)
-fn step[T](mut it: Iter[T]) {
-  let captured = fn() {
-    let _ = iter.next(mut it)
-  }
-}

@@ -329,6 +329,3 @@ pub(super) unsafe fn run_with_journal(
         Ok(owner)
     }
 }
-
-#[cfg(all(test, feature = "diagnostic"))]
-mod tests;

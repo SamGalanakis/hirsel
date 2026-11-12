@@ -45,14 +45,10 @@ Semantic deviations, with reasons:
 
 ## Lane-private tests
 
-- `conformance/SEM/SEM-3-base64-stream-5-run.hir` and its `.hir.json` manifest:
   lifecycle, empty feeds, split equals, committed output, atomic failing calls,
   sticky errors, invalid UTF-8, retained owned output after failure.
-- `conformance/SEM/SEM-3-base64-stream-5-importers-run.hir` and manifest: RFC6455
   section 1.3 pure acceptance key, with no server paths.
-- `crates/hirsel-driver/tests/it-stdlib/base64_stream_5.rs`: bounded interpreter
   and both native backends with every-stage validation.
-- `crates/hirsel-driver/tests/fixtures/base64-stream-5/partitions.hir` and manifest:
   every partition of the seven RFC4648 section 10 vectors and a binary vector,
   all four policies; all 18 Go pairs (including repeated sure.) at every split;
   all 24 Go corrupt rows and strict whitespace/tail/alphabet/UTF-8 controls at
@@ -60,10 +56,8 @@ Semantic deviations, with reasons:
   Go bigtest at refill widths 1..12. Reference tests: `base64_test.go:25-52`,
   `:102-105`, `:125-158`, `:183-279`. Successful bytes and final error class/offset
   are compared against the unchanged whole-buffer APIs.
-- `crates/hirsel-driver/tests/fixtures/base64-stream-5/bounded.hir` and manifest:
   fixed 6 KiB foo input, single-byte refills, all policies, outputs checked and
   released each call; compile-time copyable/inert/noalloc_drop state controls.
-- `crates/hirsel-driver/tests/fixtures/base64-stream-5/bounded-long.hir` and
   manifest: the original fixed 24 KiB vector unchanged, run only by the bounded
   Rust harness on LLVM and Cranelift after the interpreter exhausted 50M steps.
 - `stdlib_text_wire::base64_stream_5_is_ordinary_source` proves all six new
@@ -139,13 +133,11 @@ fixture builds use every-stage validation. All outputs/statuses are asserted.
 Corpus command:
 
 ```sh
-.buck2/bin/buck2 test -c hirsel.conformance_paths='conformance/SEM/SEM-3-base64-|conformance/SEM/SEM-3-jwt-hs256-run.hir|conformance/SEM/SEM-3-jwt-tampered-run.hir' //:gate-conformance-selected-shard-1
 ```
 
 Native command:
 
 ```sh
-.buck2/bin/buck2 test -c hirsel.native_filters='conformance/SEM/SEM-3-base64-corrupt-run.hir|conformance/SEM/SEM-3-base64-run.hir|conformance/SEM/SEM-3-base64-stream-5-run.hir|conformance/SEM/SEM-3-base64-stream-5-importers-run.hir|conformance/SEM/SEM-3-jwt-hs256-run.hir|conformance/SEM/SEM-3-jwt-tampered-run.hir' //:gate-native-changed
 ```
 
 Those six IDs are the actual selected identities printed by the native runner.

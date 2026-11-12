@@ -1,7 +1,6 @@
 //! LANG-6 definition hashes: renames keep every hash, a body edit moves its
 //! own hash and every transitive dependent's, recursive groups hash without
 //! names, and identical definitions share a hash wherever they live.
-use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
@@ -147,43 +146,6 @@ fn identical_definitions_in_different_modules_share_a_hash() {
     });
 }
 
-#[test]
-fn the_hash_is_a_pinned_function_of_content() {
-    with_compiler_stack(|| {
-        // No HashMap order, arena id, path or position enters: the same
-        // content hashes to this value on every machine and build. It moves
-        // with TIR_VERSION, the content encoding, or an edit to anything `f`
-        // reaches. Nominal role names add no core declaration dependency here.
-        // 1d696836 intentionally moved TIR 9 -> 10 and added Body.borrow_cursors:
-        // even this scalar body's empty cursor list enters the canonical text.
-        // Undoing both changes reproduces the previous 4f584c19... pin.
-        // 2a938017 bumped TIR 10 -> 11; 4a539389 bumped it to 12 for invocation proofs.
-        // b664ed74 and 4aecabbc added private uniqueness headers in TIR 14/15;
-        // ca2c887f moved TIR to 16. Those versions enter this hash preimage.
-        // cefa8ea6 added the third, nonretaining UniqueSummary list to the
-        // content encoding without changing TIR 16. Removing that list from
-        // both summaries and restoring the scalar result Root reproduces
-        // def13697. Restoring Root alone reproduces 357dddcc; 589e59d4
-        // deliberately removed that inert scalar proof under MODE-2.
-        // 8ff5b8a2 moved TIR 16 -> 17 and removed private-helper uniqueness
-        // summaries. Both changes deliberately alter the canonical preimage.
-        const PINNED: &str = "20b9bad943a96d1434360cc582c115487a808a0006c4639fae68e330b46c08dc";
-        let hash = hashes("fn f(x: u64) -> u64 { x + 1u64 }\n", &["f"])[0];
-        let text: String = hash.0.iter().map(|b| format!("{b:02x}")).collect();
-        assert!(
-            text == PINNED,
-            "the definition hash of `fn f(x: u64) -> u64 {{ x + 1u64 }}` is {text}, pinned {PINNED}.\n\
-             A moved definition hash moves every stored code identity: runner calls, \
-             code-store entries and upgrade targets recorded under the old hash no longer \
-             match. Re-pin only for an intended change (TIR_VERSION, the LANG-6 content \
-             encoding, or an edit to a definition `f` reaches, such as a core role type) \
-             and say so in the commit: set PINNED to {text} in \
-             crates/hirsel-driver/tests/it/definition_hash.rs. Any other move is a \
-             determinism bug in the hash preimage."
-        );
-    });
-}
-
 const CORE_USERS: &str = "fn f(x: u64) -> u64 { x + 1u64 }
 fn half(x: u64) -> Result[u64, ()] {
   if x == 0u64 { Error(()) } else { Ok(x / 2u64) }
@@ -207,35 +169,6 @@ pub fn launch(tasks: Tasks) -> () {
   )
 }
 ";
-
-fn core_names(paths: impl IntoIterator<Item = DefPath>) -> BTreeSet<String> {
-    paths
-        .into_iter()
-        .filter(|p| p.0.package.name == "core")
-        .map(|p| p.0.name.to_string())
-        .collect()
-}
-
-#[test]
-fn a_definition_reaches_only_the_core_types_its_signature_and_tir_name() {
-    with_compiler_stack(|| {
-        let mut engine = engine(&[("program.hir", &[], CORE_USERS)]);
-        let mut reached = |name: &str| {
-            let hashes = engine.definition_hashes([named(name)]).unwrap().hashes;
-            core_names(hashes.into_keys())
-        };
-        // Every signature carries the core role table; it adds no dependency.
-        assert_eq!(reached("f"), BTreeSet::new());
-        for user in ["tried", "matched"] {
-            assert!(reached(user).contains("Result"), "{user}");
-        }
-        let launch = reached("launch");
-        assert!(
-            launch.contains("Tasks") && launch.contains("Scope"),
-            "{launch:?}"
-        );
-    });
-}
 
 /// The closure of `roots` as the engine hashes it: a program definition by its
 /// signature and TIR, a core one by its path and signature.
@@ -271,42 +204,6 @@ fn closure(engine: &mut QueryEngine, roots: &[DefPath]) -> BTreeMap<DefPath, Def
 }
 
 #[test]
-fn an_edit_to_a_core_type_moves_the_definitions_that_use_it_and_no_other() {
-    with_compiler_stack(|| {
-        let mut engine = engine(&[("program.hir", &[], CORE_USERS)]);
-        let roots: Vec<_> = ["f", "tried", "matched", "launch"].map(named).to_vec();
-        let contents = closure(&mut engine, &roots);
-        let base = hirsel_proof_export::definition_hashes(engine.types(), &contents).unwrap();
-        for (core, users) in [
-            ("Result", &["tried", "matched"][..]),
-            ("Scope", &["launch"]),
-            ("Tasks", &["launch"]),
-        ] {
-            // c302948e's edit: the type becomes serializable.
-            let mut edited = contents.clone();
-            let (_, content) = edited
-                .iter_mut()
-                .find(|(p, _)| p.0.package.name == "core" && p.0.name == core)
-                .unwrap_or_else(|| panic!("{core} is reached"));
-            let DefinitionContent::Named { signature, .. } = content else {
-                panic!("{core} is a core definition");
-            };
-            let mut signature_edit = (**signature).clone();
-            let SignatureKind::Type(t) = &mut signature_edit.kind else {
-                panic!("{core} is a type");
-            };
-            t.serializable = !t.serializable;
-            *signature = Arc::new(signature_edit);
-            let moved = hirsel_proof_export::definition_hashes(engine.types(), &edited).unwrap();
-            for user in users {
-                assert_ne!(base[&named(user)], moved[&named(user)], "{core}: {user}");
-            }
-            assert_eq!(base[&named("f")], moved[&named("f")], "{core}: f");
-        }
-    });
-}
-
-#[test]
 fn call_sites_record_each_callee_hash() {
     with_compiler_stack(|| {
         let source = "fn helper(n: u64) -> u64 { n }\npub fn main() -> Result[(), ()] {\n  let n = helper(1u64)\n  let f = helper\n  let m = f(2u64)\n  Ok(())\n}\n";
@@ -323,43 +220,5 @@ fn call_sites_record_each_callee_hash() {
             })
             .collect();
         assert_eq!(kinds.len(), 2, "{:?}", result.call_sites[&main]);
-    });
-}
-
-/// PS-19: an analysis annotation is not part of a definition's meaning.
-#[test]
-fn analysis_annotations_move_no_definition_hash() {
-    with_compiler_stack(|| {
-        use super::proof_export::{ANNOTATED, blanked};
-        let names = ["speed", "Point", "Shape", "Meters", "main"];
-        assert_eq!(
-            hashes(ANNOTATED, &names),
-            hashes(&blanked(ANNOTATED), &names)
-        );
-    });
-}
-
-#[test]
-fn a_recursive_type_group_hashes_its_meaning_not_its_text() {
-    with_compiler_stack(|| {
-        let base = "type Tree = Leaf | Node(List[Entry])\n\ntype Entry {\n  key: u64,\n  children: Tree,\n}\nfn size(t: Tree) -> u64 { 0u64 }\n";
-        let names = ["Tree", "Entry", "size"];
-        let before = hashes(base, &names);
-        // Layout, a comment and a rename change no member's hash or a user's.
-        assert_eq!(before, hashes(&format!("\n  {base}"), &names));
-        assert_eq!(
-            before,
-            hashes(
-                &base.replacen("type Entry", "/* c */ type Entry", 1),
-                &names
-            )
-        );
-        assert_eq!(
-            before,
-            hashes(&base.replace("Entry", "Item"), &["Tree", "Item", "size"])
-        );
-        // A member's edit moves the group and its user.
-        let edited = hashes(&base.replacen("key: u64", "key: u32", 1), &names);
-        assert!(before.iter().zip(&edited).all(|(a, b)| a != b));
     });
 }

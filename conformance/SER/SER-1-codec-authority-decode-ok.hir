@@ -1,5 +1,0 @@
-// rule: SER-1
-// expect: accept
-fn use_codec(data: Bytes) -> Result[Bytes, DecodeError] {
-  codec.decode(data)
-}

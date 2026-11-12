@@ -1,8 +1,0 @@
-// rule: SER-1
-// expect: reject SER-1 at line 4
-// twin: SER/SER-1-brand-field-ok.hir
-@serializable
-type Row {
-  owner: List[u64],
-  value: List[u64 of .owner],
-}

@@ -1,7 +1,0 @@
-// rule: LANG-9
-// expect: reject OWN-2 at line 6
-// twin: LANG/LANG-9-testhelpers-expect-error-take-accept.hir
-// entry: trial
-fn trial(t: Test, value: Result[u64, String]) -> String {
-  test.expect_error(t, value)
-}

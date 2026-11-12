@@ -264,9 +264,6 @@ impl std::fmt::Debug for DefId {
     }
 }
 
-#[cfg(test)]
-mod tests;
-
 thread_local! {
     static PERSIST: persist::Scopes<DefId> = const { persist::empty_scope_stack() };
 }

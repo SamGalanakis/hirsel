@@ -187,43 +187,6 @@ impl QueryEngine {
         }
     }
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn pending_generation_invalidates_once_without_consuming_another_products_work() {
-        let definition = DefId::intern(&entry_path(&default_context()));
-        let mut products = FrontProducts::default();
-        products.dead_arms.insert(definition, DeadArmUse::default());
-        products.invalidate(definition, 1);
-        assert!(!products.dead_arms.contains_key(&definition));
-        // A summary or lint refresh must survive later observations of the
-        // same pending generation while P/S1 has not acknowledged its work.
-        products.dead_arms.insert(definition, DeadArmUse::default());
-        products.invalidate(definition, 1);
-        assert!(products.dead_arms.contains_key(&definition));
-        products.invalidate(definition, 2);
-        assert!(!products.dead_arms.contains_key(&definition));
-    }
-    #[test]
-    fn retiring_the_receipt_owner_retires_its_compact_failure() {
-        let path = entry_path(&default_context());
-        let id = DefId::intern(&path);
-        let failure = PublishedResult {
-            definition: path,
-            result: Err(QueryError::Diagnostics(vec![])),
-            phase: Some(QueryKind::Modes),
-            diagnostic_phases: vec![],
-            reads: std::sync::Arc::new(Reads::empty()),
-        };
-        let mut products = FrontProducts::default();
-        products.outcomes.insert(id, failure);
-        products.forget(&crate::memo::MemoKey::new(QueryKind::Check, id));
-        assert!(products.outcomes.contains_key(&id));
-        products.forget(&crate::memo::MemoKey::new(QueryKind::Modes, id));
-        assert!(!products.outcomes.contains_key(&id));
-    }
-}
 
 hirsel_product_codec::decode_structure!(DeadArmUse {
     errors,

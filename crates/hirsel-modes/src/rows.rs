@@ -115,8 +115,3 @@ impl<T> FromIterator<(hirsel_syntax::ExprId, T)> for ExprRows<T> {
         out
     }
 }
-#[cfg(test)]
-mod expression_rows_tests {
-    use super::*;
-    use hirsel_syntax::ExprId;
-}

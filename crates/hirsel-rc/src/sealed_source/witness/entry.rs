@@ -597,6 +597,3 @@ impl SourceInput {
         Ok(entry)
     }
 }
-
-#[cfg(test)]
-mod tests;

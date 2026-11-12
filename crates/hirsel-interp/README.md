@@ -147,12 +147,7 @@ implementation. Signed constants carry width-sized two's-complement bits.
 
 ## Validation
 
-`//:hirsel-interp-unittest` and `//:hirsel-interp-test-it` run scalar boundary tests, ordered
-control-flow/call/cleanup tests, an explicit 2,000-call fixture, budget/depth
-failures, and a resource-cleanup program whose trace and observable projection
-are checked over 100 reruns. `tests/support` is a crate-local hand-built TIR
-builder, with no shared API changes. These fixtures validate the interpreter
-boundary; the full source pipeline remains the driver's integration.
+`//:hirsel-interp-unittest` retains the source-independent checked-shadow controls.
 
 Revision 1 keeps Arc DefinitionRef handles in frames and accepts dyn providers.
 The shared operational-error variant is retained as Error::Query, while InvalidTir
@@ -298,14 +293,7 @@ If cleanup invalidates a returned value, that value is released too; ignored
 continuations' newly owned temporaries are also released. No host destructor runs
 Hirsel finalizers, and no callback or finalizer recurses on the host stack.
 
-The hand-lowered fixture declarations retain owned owner/callee/nominal snapshots
-in `tests/support/signatures.rs`. The main crate tests validate the regular core,
-aggregate, pattern and callback fixtures directly. The intentionally
-reachable tooling-depth sentinel and explicit malformed-TIR rejection cases have
-narrow expected-violation checks; all other retained definitions are asserted
-valid, including callees that never execute. The counted-slot cleanup lists are
-emitted by the fixture builder, with temporary releases before named locals;
-production evaluation never infers cleanup.
+
 
 `OperationResult::Call.updates` publishes saved mutable argument snapshots before
 scheduling the callback. Each `(parameter_ordinal, value)` must target an original

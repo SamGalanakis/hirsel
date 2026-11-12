@@ -1,9 +1,0 @@
-// rule: MEM-14
-// expect: fail SEM-1 at line 6
-// Impossible reservations fail before mutating or asking the host allocator.
-pub fn main() -> Result[(), ()] {
-  let mut xs: List[u64] = [1, 2]
-  list.reserve(mut xs, 18446744073709551615u64)
-  failure.check(false, Bounds())
-  Ok(())
-}

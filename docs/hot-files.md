@@ -78,17 +78,13 @@ is excluded: its edits are not independent registrations.
 | `crates/hirsel-registry/src/review-table.txt` | 35 | Existing semantic sorted-list merge |
 | `BUCK` | 31 | Already removed from Git, generated on demand |
 | `native-tests/library/operations.tsv` | 30 | Existing semantic sorted-list merge |
-| `crates/hirsel-driver/tests/it-stdlib/main.rs` | 18 | Ordinary declarations isolated into independent `modules.rs` |
 | `crates/hirsel-driver/tests/it/main.rs` | 17 | Line-set `modules.rs` |
-| `crates/hirsel-driver/tests/it-scaling/main.rs` | 10 | Line-set `modules.rs` |
 | `crates/hirsel-rt/tests/it/main.rs` | 9 | Line-set `modules.rs` |
 | `crates/hirsel-run-config/tests/it/main.rs` | 8 | Line-set `modules.rs` |
 | `tools/buck2/BUCK` | 7 | Build rules, not an append-only test registry; unchanged |
 | `crates/hirsel-pipeline-tests/tests/front/main.rs` | 6 | Line-set `modules.rs` |
-| `crates/hirsel-authority/src/corpus/passing.txt` | 6 | Path-set merge, accepting unsorted appends |
 | `crates/hirsel-rt/tests/descriptors/main.rs` | 5 | Actual test bodies, not a registry; unchanged |
 | `crates/hirsel-ownership/src/tests/{passing,pending}.txt` | 5 each | Path-set merge, accepting unsorted appends |
-| `crates/hirsel-authority/src/corpus/pending.txt` | 5 | Path-set merge, accepting unsorted appends |
 | `crates/hirsel-llvm/tests/it/main.rs` | 5 | Line-set `modules.rs` |
 | `bench/langarena/RESULTS.md` | 5 | Historical; new reports shard by session |
 | `bench/tasks-perf/RESULTS.md` | 4 | Historical; explicit per-session output |
@@ -104,8 +100,6 @@ is excluded: its edits are not independent registrations.
 | `bench/micro/http/RESULTS.md` | 2 | Historical; runner already requires output |
 | `tools/toolchain-dist/BUCK`, `tools/buck2/native-toolchain/BUCK`, `bench/micro-json-reference/BUCK` | 2 each | Build rules, not test inventories; unchanged |
 | `crates/hirsel-{run-schema,remote,heapcheck,engine}/tests/it/main.rs` | 1 each | Line-set `modules.rs` |
-| `crates/hirsel-driver/tests/it-keyed/main.rs` | 1 | Line-set `modules.rs` |
-| `crates/hirsel-driver/tests/it-image/main.rs` | 1 | Actual test body, not a registry; unchanged |
 | `conformance/pending.txt` | 1 | Path-set merge, accepting unsorted appends |
 | `tools/h2spec/passing.txt` | 1 | Static baseline, not shared lane registration; unchanged |
 | `tools/compiler-bench/RESULTS.md`, `bench/micro/net/RESULTS.md` | 1 each | Historical; new reports shard |

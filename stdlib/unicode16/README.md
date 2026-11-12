@@ -32,12 +32,7 @@ The normalization source files belong to the ordinary `std@1/unicode` module. La
 Unicode algorithms can reuse the private combining-class lookup by joining that
 module; no compiler registry or runtime normalization hook is added.
 
-`hirsel-driver/tests/it-stdlib/stdlib_nfc.rs` executes all 399,300 official
-four-form comparisons and 1,101,784 unlisted assigned-scalar identities through
-the shipped source. Expected results are official columns, not a shared Rust
-normalization kernel. Sixteen-input batches bound retained traces; 64 deterministic catalogue
-partitions and exact counts preserve every comparison within the pool timeout. The exhaustive oracle is release-only;
-directed conformance and regeneration remain in the fast gate.
+
 
 Compatibility decompositions use 3,832 seven-byte index rows (scalar, three-byte
 payload byte offset, one-byte scalar count), with a packed scalar payload.
@@ -133,7 +128,6 @@ edges and Unicode16 additions. No generated property table or host Unicode
 version supplies expected values.
 
 Rust flt2dec's 97 exact rows are pinned in
-`crates/hirsel-driver/tests/fixtures/flt2dec-exact.json`, with source line numbers,
 and carried in ten `SEM-3-fstring-flt2dec-exact-*` kernel corpus cases, with
 62 public fixed-format checks in eleven companion `*-public-*` cases. A Rust test
 also ports `check_exact`'s varying precision and zero-extension loops (1,706

@@ -1084,7 +1084,6 @@ Physical Lower attempt/adapter counters include helpers and discarded work.
 These timing names are additive schema-1 fields; artifact identities are unchanged.
 
 Every interval, phase and count appears, in that order, including those still
-0. `crates/hirsel-cli/tests/cli/timings.rs` checks the schema.
 
 `--mem-usage` prints the process's peak RSS and the heap bytes held at the end
 of the command, largest first: each session query table as it is dropped

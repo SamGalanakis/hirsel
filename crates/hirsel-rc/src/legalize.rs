@@ -38,8 +38,7 @@
 //!
 //! Optional rewrites (end of this file) are separate from legalization and
 //! off unless a caller runs them: discovery is read-only, a plan commits only
-//! where the proof-domain ledger `native-tests/rewrites/ledger.tsv` records
-//! its rule and exact domain as proved, and the Ready validator checks the
+//! for its supported rule and exact domain, and the Ready validator checks the
 //! result again.
 use crate::PassError;
 use crate::import::repr_of;
@@ -1135,9 +1134,8 @@ fn scalar_bits(kind: ScalarKind) -> u32 {
 //
 // An optional rewrite is three steps: `discover` reads a unit and
 // returns plans without changing anything; `prove` keeps only the plans whose
-// rule and proof domain the ledger (`native-tests/rewrites/ledger.tsv`)
-// records as proved; `commit` applies the kept plans. Unknown, timeout and
-// refuted entries, and domains the ledger does not list, stay off. The Ready
+// rule and exact domain are supported; `commit` applies the kept plans.
+// Unsupported rules and domains stay off. The Ready
 // validator checks the committed unit again; it trusts no plan.
 
 /// The scalar domain a rewrite's proof covers. A theorem for one width or

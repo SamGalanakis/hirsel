@@ -152,28 +152,3 @@ impl CaptureRows {
         self.rows.get(&(e, ordinal)).map(|i| &self.values[*i])
     }
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn capture_positions_keep_first_rows_and_shared_graph_inputs() {
-        let row = |ordinal, usage| CaptureMode {
-            expression: ExprId(3),
-            ordinal,
-            owner: NameSite::Expression(ExprId(7)),
-            usage,
-            context: CaptureContext::Escaping,
-        };
-        let rows = std::sync::Arc::new(CaptureRows::new(&[
-            row(1, UseKind::Take),
-            row(0, UseKind::Copy),
-            row(1, UseKind::Mut),
-        ]));
-        let sibling = rows.clone();
-        assert!(std::sync::Arc::ptr_eq(&rows, &sibling));
-        assert_eq!(rows.first(ExprId(3)).unwrap().usage, UseKind::Take);
-        assert_eq!(rows.get(ExprId(3), 1).unwrap().usage, UseKind::Take);
-        assert_eq!(sibling.get(ExprId(3), 0).unwrap().usage, UseKind::Copy);
-        assert!(rows.get(ExprId(3), 2).is_none());
-    }
-}

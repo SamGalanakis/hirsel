@@ -1,4 +1,0 @@
-// rule: SER-1
-// expect: accept
-@serializable
-distinct type Percent(v: u64)

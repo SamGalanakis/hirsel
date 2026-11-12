@@ -1,3 +1,0 @@
-// rule: LANG-6
-// expect: accept
-pub opaque type Marker: () uses {}

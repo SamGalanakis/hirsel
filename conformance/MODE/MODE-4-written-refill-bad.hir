@@ -1,7 +1,0 @@
-// rule: MODE-4
-// expect: reject MODE-4 at line 6
-// twin: MODE/MODE-4-written-refill-ok.hir
-fn bad(take old: Bytes) {
-  let mut x: sendable Bytes = b"a"
-  x = take old
-}

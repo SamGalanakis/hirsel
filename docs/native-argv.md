@@ -156,7 +156,6 @@ outside granted directories; this example grants none.
 
 ## Checked recipe and prior art
 
-`crates/hirsel-cli/tests/support/native_argv_recipe_6.rs` reuses the examples policy
 fixture, copies this app and script into a temporary directory, builds actual
 standalone apps and compares exact stdout, stderr and exit status. Its three
 cases cover interpreted run, native run and built/wrapped LLVM and Cranelift

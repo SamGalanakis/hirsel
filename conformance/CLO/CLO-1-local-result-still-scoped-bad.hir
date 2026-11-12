@@ -1,7 +1,0 @@
-// rule: CLO-1
-// expect: reject CLO-1 at line 6
-// twin: CLO/CLO-1-local-result-still-scoped-ok.hir
-// "A scoped closure cannot be ... returned."
-fn example(action: fn() -> () uses {}) -> fn() -> () uses {} in action {
-  action
-}

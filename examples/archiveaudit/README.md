@@ -91,7 +91,6 @@ mismatch and malformed-input paths in each engine, deletes the source directory
 and grants file, then replays each tape through all three engines:
 
 ```sh
-python3 crates/hirsel-cli/tests/support/archiveaudit_15/verify.py --hirsel /absolute/path/to/hirsel --root examples/archiveaudit --output /tmp/archiveaudit-evidence
 .buck2/bin/buck2 test //:hirsel-cli-test-cli-shard-1 -- --test-arg=archiveaudit_15
 ```
 

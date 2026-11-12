@@ -394,7 +394,6 @@ def main():
                '  epsilon closure, to enforce caller bounds without host stack exhaustion.', '',
                '## Exclusions (every omitted source row)', '', '| Source | Reason |', '|---|---|']
     report += [f'| src/regexp/{table}:{line} | {reason} |' for table, line, reason in skipped]
-    (ROOT / 'reports/regex-vectors.md').write_text('\n'.join(report) + '\n')
     print(json.dumps(dict(counts), indent=2))
     print(f'{len(programs)} programs; {len(skipped)} excluded rows')
 

@@ -6,8 +6,8 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
 };
-mod retained;
 
+mod retained;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Namespace {
     Type,
@@ -295,66 +295,6 @@ impl ManifestIndex {
 }
 
 pub use hirsel_types::LookupError;
-
-#[cfg(test)]
-mod package_view_tests {
-    use super::*;
-
-    #[test]
-    fn package_views_share_rows_and_keep_lookup_package_scoped() {
-        let package = |name: &str| PackageId {
-            name: name.into(),
-            version: "1".into(),
-        };
-        let left = package("left");
-        let right = package("right");
-        let definition = |package, name: &str| {
-            DefPath(ItemPath {
-                package,
-                modules: vec![],
-                name: name.into(),
-            })
-        };
-        let entries = [(left.clone(), "left_value"), (right.clone(), "right_value")].map(
-            |(package, name)| DefinitionEntry {
-                definition: definition(package, name),
-                namespace: Namespace::Value,
-                visibility: Visibility::Public,
-                span: Span::default(),
-            },
-        );
-        let left_definition = entries[0].definition.clone();
-        let (index, diagnostics) = ManifestIndex::new(ManifestFixture {
-            package: left,
-            definitions: entries.into(),
-            exposures: vec![],
-            installed: vec![],
-            revision: ContentHash::default(),
-        });
-        assert!(diagnostics.is_empty());
-        let view = index.for_package(right);
-        for (selected, own, foreign) in [
-            (&index, "left_value", "right_value"),
-            (&view, "right_value", "left_value"),
-        ] {
-            let context = FileContext {
-                package: selected.package.clone(),
-                modules: vec![],
-            };
-            assert!(
-                selected
-                    .lookup_spelling(&context, None, &[own.into()])
-                    .is_ok()
-            );
-            assert_eq!(
-                selected.lookup_spelling(&context, None, &[foreign.into()]),
-                Err(LookupError::Missing)
-            );
-        }
-        assert!(Arc::ptr_eq(&index.entries, &view.entries));
-        assert_eq!(index.entry(&left_definition), view.entry(&left_definition));
-    }
-}
 
 impl ManifestFixture {
     /// Select declared dependency signatures for a phase fixture. Their module

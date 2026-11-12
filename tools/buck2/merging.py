@@ -43,10 +43,6 @@ SORTED_LISTS = (
     'conformance/passing.txt',
     'conformance/pending.txt',
     'crates/hirsel-registry/src/review-table.txt',
-    'crates/hirsel-authority/src/corpus/passing.txt',
-    'crates/hirsel-authority/src/corpus/pending.txt',
-    'crates/hirsel-ownership/src/tests/passing.txt',
-    'crates/hirsel-ownership/src/tests/pending.txt',
     'native-tests/library/operations.tsv',
     'native-tests/regressions/*.txt',
 )

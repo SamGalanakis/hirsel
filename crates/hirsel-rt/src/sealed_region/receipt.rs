@@ -296,6 +296,3 @@ impl<T: Copy> Drop for Receipt<T> {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

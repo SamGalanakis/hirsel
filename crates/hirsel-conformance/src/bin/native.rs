@@ -34,7 +34,7 @@ use hirsel_native_testing::topology_matrix;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: native --corpus [--seed N] [--shard I/N] | --bugs | --smoke [--filter TEXT]... | --sanitize [--filter TEXT]... | --cranelift [--clif] [--aarch64] [--filter TEXT]... [--shard I/N] | --cranelift-times [--filter TEXT]... | --trace-roots [--filter TEXT]... [--shard I/N] | --migrate [--filter TEXT]... [--shard I/N] | --full [--bless] [--filter TEXT]... [--shard I/N] [--engine heap|llvm|diagnostic|default|system] [--seed N] [--exhaustive] [--config NAME|smoke]... [--config-part K/N] [--case-part K/N] [--heap-part K/N [--heap-skip K/N] | --heap-sites-max N] | --hash-sweep [--filter TEXT]... | --replay DIR | --reduce DIR\n\
+const USAGE: &str = "usage: native --retained --engine heap|llvm|cranelift [--shard I/N] | --corpus [--seed N] [--shard I/N] | --bugs | --smoke [--filter TEXT]... | --sanitize [--filter TEXT]... | --cranelift [--clif] [--aarch64] [--filter TEXT]... [--shard I/N] | --cranelift-times [--filter TEXT]... | --trace-roots [--filter TEXT]... [--shard I/N] | --migrate [--filter TEXT]... [--shard I/N] | --full [--bless] [--filter TEXT]... [--shard I/N] [--engine heap|llvm|diagnostic|default|system] [--seed N] [--exhaustive] [--config NAME|smoke]... [--config-part K/N] [--case-part K/N] [--heap-part K/N [--heap-skip K/N] | --heap-sites-max N] | --hash-sweep [--filter TEXT]... | --replay DIR | --reduce DIR\n\
                      options: [--case ID]... [--root PATH] [--jobs N] [--out DIR] [--hash-seed N]";
 
 fn main() -> ExitCode {
@@ -512,7 +512,7 @@ fn run() -> Result<bool, String> {
             }
             match arg {
                 Long(
-                    name @ ("smoke" | "full" | "sanitize" | "hash-sweep" | "cranelift"
+                    name @ ("retained" | "smoke" | "full" | "sanitize" | "hash-sweep" | "cranelift"
                     | "cranelift-times" | "trace-roots" | "migrate" | "corpus" | "bugs"),
                 ) => {
                     mode = Some((format!("--{name}"), PathBuf::new()));
@@ -534,6 +534,7 @@ fn run() -> Result<bool, String> {
                     let (class, runtime) = match args.value()?.string()?.as_str() {
                         "heap" => (Class::Heap, None),
                         "llvm" => (Class::Llvm, None),
+                        "cranelift" => (Class::Cranelift, None),
                         "diagnostic" => (Class::Llvm, Some(Runtime::Diagnostic)),
                         "default" => (Class::Llvm, Some(Runtime::Default)),
                         "system" => (Class::Llvm, Some(Runtime::System)),
@@ -589,8 +590,8 @@ fn run() -> Result<bool, String> {
     let hash_seed_explicit = common.hash_seed.is_some();
     filter.1 = common.shard;
     let (mode, dir) = mode.ok_or(USAGE)?;
-    if engine.is_some() && mode != "--full" {
-        return Err("--engine requires --full".into());
+    if engine.is_some() && !matches!(mode.as_str(), "--full" | "--retained") {
+        return Err("--engine requires --full or --retained".into());
     }
     if !configs.is_all() && mode != "--full" {
         return Err(
@@ -601,11 +602,12 @@ fn run() -> Result<bool, String> {
     if filter.1.is_some()
         && !matches!(
             mode.as_str(),
-            "--full" | "--cranelift" | "--trace-roots" | "--migrate" | "--corpus"
+            "--retained" | "--full" | "--cranelift" | "--trace-roots" | "--migrate" | "--corpus"
         )
     {
         return Err(
-            "--shard requires --full, --cranelift, --trace-roots, --migrate or --corpus".into(),
+            "--shard requires --retained, --full, --cranelift, --trace-roots, --migrate or --corpus"
+                .into(),
         );
     }
     match mode.as_str() {
@@ -872,6 +874,12 @@ fn run() -> Result<bool, String> {
             );
             Ok(ok)
         }
+        "--retained" => retained(
+            &root,
+            jobs,
+            &filter,
+            engine.ok_or("--retained needs --engine")?,
+        ),
         "--full" => full(
             &root,
             jobs,
@@ -1083,6 +1091,55 @@ fn cranelift_times(root: &Path, jobs: usize, filter: &Filter) -> Result<bool, St
         total(2) / total(0).max(1e-9),
     );
     Ok(timed > 0)
+}
+
+/// The temporary component corpus, once on one engine's default configuration.
+fn retained(root: &Path, jobs: usize, filter: &Filter, selected: Selected) -> Result<bool, String> {
+    let mut cases = listed(root, "native-tests/regressions/smoke.txt")?;
+    filter.require_match(cases.iter().map(|case| case.id.as_str()))?;
+    cases.retain(|case| filter.keeps(&case.id));
+    if cases.is_empty() {
+        return Err("retained matrix selected no cases".into());
+    }
+    let engine = match selected.class {
+        Class::Heap => Engine::Heap { campaign: false },
+        Class::Llvm => Engine::Native {
+            opt: OptLevel::Speed,
+            partition: Partition::Whole,
+            runtime: Runtime::Default,
+        },
+        Class::Cranelift => Engine::Cranelift {
+            partition: Partition::Whole,
+            runtime: Runtime::Default,
+        },
+    };
+    let matrix = [Configuration {
+        options: Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
+        engine,
+    }];
+    let tools = toolchain(&matrix)?;
+    let results =
+        native::run_cases_with(&cases, &native::scratch("retained")?, jobs, |case, dir| {
+            case.run(&matrix, &tools, dir)
+        });
+    let ok = all_agree("retained", &results);
+    let passed = results
+        .iter()
+        .filter(|result| {
+            result.snapshot.is_none()
+                && result.outcomes.len() == 1
+                && result
+                    .outcomes
+                    .iter()
+                    .all(|(_, _, outcome)| matches!(outcome, Outcome::Agree))
+        })
+        .count();
+    println!(
+        "retained {}: {passed}/{} passed",
+        selected.class.name(),
+        cases.len()
+    );
+    Ok(ok && passed == cases.len())
 }
 
 /// `--engine`: one engine's configurations, or native code on one runtime

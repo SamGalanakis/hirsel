@@ -92,7 +92,6 @@ payload; send is never assumed cancellable.
 
 ## Verification and precedent
 
-The focused Rust tests in `crates/hirsel-cli/tests/cli/logpipe_27.rs` execute the
 same pipeline with deterministic file/clock providers and an injected sink.
 They compare literal expected bytes and a separate sequential model, and
 validate unsorted reservation/transfer/consume/discard/join traces with an

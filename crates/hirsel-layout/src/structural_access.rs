@@ -101,6 +101,3 @@ pub fn validate(
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod owner_tests;

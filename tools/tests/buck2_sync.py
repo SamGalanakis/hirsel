@@ -369,26 +369,23 @@ class GeneratedParts(unittest.TestCase):
 
 
 class ConformanceShards(unittest.TestCase):
-    def test_timing_weighted_refinement_covers_every_hash_once(self):
-        # One old bucket took 1200 s over twelve runs; another took 120 s.
-        samples = [(1200.0, 12), (120.0, 12)]
+    def test_four_partitions_cover_every_named_case_once(self):
         cases = {f'conformance/CASE-{i}.hir': 1 for i in range(24)}
-        plan = sync.conformance_plan(cases, samples=samples, target_seconds=480)
-        self.assertGreater(len(plan), 2)
-        for name in [*cases, 'conformance/deleted-pending-case.hir']:
-            owners = [part for part in plan if sync.corpus_hash(name) % part['count'] == part['index'] - 1]
-            self.assertEqual(len(owners), 1, name)
-        self.assertLessEqual(max(part['seconds'] for part in plan), 480)
-        self.assertEqual(plan, sync.conformance_plan(dict(reversed(list(cases.items()))), samples=samples, target_seconds=480))
+        plan = sync.conformance_plan(cases)
+        self.assertEqual(len(plan), 4)
+        self.assertTrue(all(part['files'] for part in plan))
+        self.assertEqual(sum(part['files'] for part in plan), len(cases))
+        for name in cases:
+            self.assertEqual(sum(sync.corpus_hash(name) % part['count'] == part['index'] - 1 for part in plan), 1)
 
-    def test_current_corpus_plan_fits_the_eight_minute_prediction(self):
-        plan = sync.conformance_plan()
-        self.assertLessEqual(max(part['seconds'] for part in plan), 480)
+    def test_empty_partitions_are_refused(self):
+        for cases in ({}, {'conformance/one.hir': 1}):
+            with self.assertRaisesRegex(ValueError, 'partition is empty'):
+                sync.conformance_plan(cases)
 
-    def test_indivisible_slow_case_is_reported_without_unbounded_refinement(self):
-        plan = sync.conformance_plan({'conformance/slow.hir': 20}, samples=[(100.0, 1)], target_seconds=480)
-        self.assertEqual(len(plan), 1)
-        self.assertEqual(plan[0]['seconds'], 2000)
+    def test_current_inventory_is_the_named_31_witnesses(self):
+        self.assertEqual(sum(p['files'] for p in sync.conformance_plan()), 31)
+
 
 
 class NativePoolRouting(unittest.TestCase):
@@ -397,12 +394,13 @@ class NativePoolRouting(unittest.TestCase):
         for stage in sync.GATE_TESTS + sync.conformance_tests():
             self.assertFalse(stage.get('host', False), stage['name'])
 
-    def test_filtered_native_entry_has_no_global_cover_dependency(self):
+    def test_retained_engines_have_four_explicit_slices(self):
         stages = {stage['name']: stage for stage in sync.GATE_TESTS}
-        self.assertNotIn('native_selection', stages['gate-native-full'])
-        for index in range(1, sync.NATIVE_FULL_SHARDS + 1):
-            self.assertEqual(stages[f'gate-native-full-shard-{index}']['native_selection'],
-                             '//:native-selection')
+        for engine in ('heap', 'llvm', 'cranelift'):
+            selected = [stages[f'gate-retained-{engine}-shard-{i}'] for i in range(1, 5)]
+            self.assertEqual([s['args'][-1] for s in selected], ['1/4', '2/4', '3/4', '4/4'])
+            self.assertTrue(all('native_selection' not in s for s in selected))
+        self.assertFalse(any('history' in name or 'agree-full' in name for name in stages))
 
     def test_global_cover_is_opt_in_before_test_runner_filters_arrive(self):
         source = (sync.ROOT / 'tools/buck2/defs.bzl').read_text()
@@ -425,7 +423,7 @@ class NativePoolRouting(unittest.TestCase):
     def test_selected_conformance_forwards_every_prefix_in_each_slice(self):
         source = (sync.ROOT / 'tools/buck2/defs.bzl').read_text()
         code = source[source.index('def selected_paths('):source.index('def _script_binary_impl(')]
-        real = 'conformance/OWN/OWN-8-local-aggregate-ok.hir'
+        real = 'conformance/SEM/SEM-1-unsigned-add-ok.hir'
         missing = 'conformance/definitely-not-a-case.hir'
         calls = []
         scope = dict(FULL_GATE=False, TESTS_ON_HOST=False, TEST_SEED='',

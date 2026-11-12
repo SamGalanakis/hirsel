@@ -1,4 +1,0 @@
-// rule: OWN-6
-// expect: reject OWN-6 at line 4
-// twin: OWN/OWN-6-accept.hir
-fn rejected() {}

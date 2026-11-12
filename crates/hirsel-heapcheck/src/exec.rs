@@ -4179,9 +4179,8 @@ impl<'p, S: Stage> Machine<'p, S> {
                     },
                 )?;
             }
-            // The Lean model's uniqueness test (`cnt = .fin 1`, the guard of
-            // T05 write, T06 take and T12 reset in proofs/rc/Rc/Machine.lean): an
-            // immortal count never passes it (Sticky.lean, immortal_never_unique).
+            // Uniqueness requires a finite count of one; an immortal count
+            // never passes it.
             // A `Shared` root passes it as the sole root (`shared.thaw`).
             Inst::IsUnique { result, value } => {
                 let Val::Ptr(p) = self.read_use(f, value)? else {

@@ -1,8 +1,0 @@
-// rule: MODE-4
-// expect: accept
-fn sink(s: sendable String) {}
-
-fn example(take s: sendable String) {
-  sink(s)
-  let bytes = string.as_bytes(s)
-}

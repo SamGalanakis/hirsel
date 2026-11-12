@@ -1,3 +1,0 @@
-type Asset { path: String }
-fn name(asset: Asset) -> String { copy asset.path }
-pub fn main() -> Result[(), ()] { Ok(()) }

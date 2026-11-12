@@ -7,7 +7,6 @@ Both incidents below are historical and fixed; their captured output is unchange
 | Tried | Historical diagnostic | Current disposition / repair | Minutes lost | Class |
 | --- | --- | --- | ---: | --- |
 | Expected raw HTML from the spec overview, unlike the API index. | [Exact output](repros/incident-1.txt) | The API correctly documents seven options and safe rendering. Fixed the stale overview wording and asserted safe default output. No Markdown rules changed. | 1 | doc gap |
-| Compiled `markdown.to_html` natively. | [Exact output](repros/incident-2.txt) | [Minimal program](repros/markdown-native.hir) and adjacent manifest now pass native LLVM. Fixed by [native importer storage/default handling, 0a32703c](https://github.com/SamGalanakis/hirsel-lang/commit/0a32703ca4b6bc31776a024e01d5b2c10d356383); [import regression](../../crates/hirsel-pipeline-tests/tests/rc/rc_import.rs) and [application registration](../../crates/hirsel-cli/tests/examples.rs) retain coverage. | 24 | bug (fixed) |
 
 The native importer incident includes about 2 minutes of direct investigation plus
 22 minutes waiting after the other example work was verified. At that time only

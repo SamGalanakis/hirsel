@@ -180,34 +180,30 @@ RUNTIME_DATA = {
 TEST_DATA = {
     "hirsel-core-front-unittest": ["core/front/**"],
     "hirsel-cli-test-cli": ["tools/capped", "conformance/old-spec/core-library.md", "conformance/old-spec/std-library.md", "docs/dependency-card.schema.json"],
-    # The tasks and ledger-service examples run in place.
-    "hirsel-cli-test-examples": ["examples/tasks/**", "examples/ledger-service/**"],
-    "hirsel-conformance-test-it": ["crates/hirsel-conformance/tests/fixtures/**"],
-    # Every rule ID any crate cites must resolve in conformance/old-spec.
-    # Relative spec links reach top-level docs, research notes, port reports and licenses.
-    "hirsel-conformance-test-spec_links": ["crates/**", "docs/*.md", "docs/research/**", "reports/**"],
-    # memcheck:: compiles a C program against the runtime header.
-    "hirsel-driver-test-it": ["crates/hirsel-driver/tests/fixtures/**", "crates/hirsel-rt/include/**",
-                              "examples/tasks/model.hir", "examples/tasks/store.hir", "tools/portable-manifest"],
-    "hirsel-driver-test-it-stdlib": ["crates/hirsel-driver/tests/fixtures/**"],
+    "hirsel-driver-test-it": ["crates/hirsel-driver/tests/fixtures/**", "crates/hirsel-rt/include/**"],
     "hirsel-llvm-test-it": ["crates/hirsel-llvm/tests/native/**"],
-    "hirsel-ownership-unittest": ["crates/hirsel-ownership/proptest-regressions/**"],
-    "hirsel-pipeline-tests-test-front": ["crates/hirsel-llvm/tests/native/fixture.h", "examples/suite-runner/**"],
+    "hirsel-pipeline-tests-test-front": [],
     "hirsel-rt-test-it": ["crates/hirsel-rt/include/**"],
-    # The operation descriptor checks read the runtime's source.
     "hirsel-rt-test-descriptors": ["crates/hirsel-rt/src/**", "crates/hirsel-lir/src/runtime_abi.rs"],
-    # Every HIRSEL_ variable the compiler's crates read has a program-record class.
     "hirsel-driver-test-environment_inventory": ["crates/*/src/**"],
-    "hirsel-types-test-wire": ["crates/hirsel-types/tests/wire/**"],
 }
 
 # Ownership repair lab runs its clean package in place.
-TEST_DATA["hirsel-driver-test-it"].append("examples/ownership-repairs/**")
 
 # Crates whose tests link native programs: each of their test binaries reads
 # the runtime archives it declares in RUNTIME_ARCHIVE_VIEWS (HIRSEL_RUNTIME_ARCHIVES)
 # instead of building them with Cargo.
-NATIVE_TESTS = {"hirsel-native-queries", "hirsel-cranelift", "hirsel-cli", "hirsel-conformance", "hirsel-driver", "hirsel-native", "hirsel-native-testing", "hirsel-llvm", "hirsel-pipeline-tests", "hirsel-rc", "hirsel-rt"}
+NATIVE_TESTS = {'hirsel-cli',
+ 'hirsel-conformance',
+ 'hirsel-cranelift',
+ 'hirsel-driver',
+ 'hirsel-llvm',
+ 'hirsel-native',
+ 'hirsel-native-queries',
+ 'hirsel-native-testing',
+ 'hirsel-pipeline-tests',
+ 'hirsel-rc',
+ 'hirsel-rt'}
 RUNTIME_ARCHIVES = "//:hirsel-rt-archives"
 # hirsel_runtime_archives' views, `<arch>-<variant>`: every feature subset on both
 # targets, and memcheck and ownership-trace on x86-64 only (defs.bzl).
@@ -233,66 +229,234 @@ def on_both(*variants: str) -> list[str]:
 CRANELIFT_VIEWS = ["x86_64-default", "x86_64-diagnostic"]  # cranelift::matrix(x86-64)
 SMOKE_VIEWS = on_both("default", "diagnostic")  # smoke_matrix plus aarch64, at the glibc floor
 FULL_VIEWS = on_both("default", "diagnostic", "system-allocator")  # full_matrix
-RUNTIME_ARCHIVE_VIEWS = {
-    # CLI programs link the default archive of their `--target`; `--trace-ownership`
-    # the x86-64 ownership-trace archive; harness code may name its own variants.
-    "hirsel-cli-bin-hirsel-unittest": ["x86_64-default", "x86_64-ownership-trace", "aarch64-default"],
-    "hirsel-cli-test-assetcheck": on_both("default"),
-    "hirsel-cli-test-cli": X86_VIEWS + AARCH64_VIEWS,
-    "hirsel-cli-test-configctl_8": ["x86_64-default"],
-    "hirsel-cli-test-cpu_matmul_16": ["x86_64-default"],
-    "hirsel-cli-test-cpu_matmul_4": ["x86_64-default"],
-    "hirsel-cli-test-cpu_matmul_8": ["x86_64-default"],
-    # support/cpu_pool/four_engine.rs: diagnostic, default and system on both targets.
-    "hirsel-cli-test-cpu_pool_1": on_both("default", "diagnostic", "system-allocator"),
-    "hirsel-cli-test-cpu_pool_16": on_both("default", "diagnostic", "system-allocator"),
-    "hirsel-cli-test-cpu_pool_4": on_both("default", "diagnostic", "system-allocator"),
-    "hirsel-cli-test-cpu_pool_8": on_both("default"),
-    "hirsel-cli-test-cpu_pool_semantics": ["x86_64-default"],
-    "hirsel-cli-test-docsession_11": on_both("default"),
-    "hirsel-cli-test-examples": on_both("default"),
-    "hirsel-cli-test-free": on_both("default"),
-    "hirsel-cli-test-httpaggregate_9": ["x86_64-default"],
-    "hirsel-cli-test-la_array_dispatch_14": ["x86_64-default"],
-    "hirsel-cli-test-la_brainfuck_recursion_10": ["x86_64-default"],
-    "hirsel-cli-test-la_bwt_inverse_11": ["x86_64-default"],
-    "hirsel-cli-test-la_calculator_interpreter_10": ["x86_64-default"],
-    "hirsel-cli-test-la_graph_rss_10": ["x86_64-default"],
-    "hirsel-cli-test-la_lzw_10": ["x86_64-default"],
-    "hirsel-cli-test-la_neural_net_10": on_both("default"),
-    "hirsel-cli-test-la_ngram_upsert_14": ["x86_64-default"],
-    "hirsel-cli-test-la_sieve_10": ["x86_64-default", "x86_64-measurement", "x86_64-ownership-trace"],
-    "hirsel-cli-test-la_spectral_split_14": ["x86_64-default"],
-    "hirsel-cli-test-object_edit_737": ["x86_64-default"],
-    "hirsel-cli-test-reachable_roots_801": ["x86_64-default"],
-    "hirsel-cli-test-rule_explain_5": ["x86_64-default"],
-    "hirsel-cli-test-stream_replay": ["x86_64-default"],
-    "hirsel-cli-test-tabfold_10": ["x86_64-default"],
-    "hirsel-conformance-unittest": FULL_VIEWS + ["x86_64-memcheck"],
-    "hirsel-conformance-bin-native-unittest": FULL_VIEWS + ["x86_64-memcheck"],
-    "hirsel-conformance-test-it": FULL_VIEWS,
-    "hirsel-conformance-test-spec_links": ["x86_64-default"],
-    "hirsel-cranelift-unittest": X86_VIEWS + AARCH64_VIEWS,
-    "hirsel-driver-unittest": X86_VIEWS + AARCH64_VIEWS,
-    "hirsel-driver-test-it": X86_VIEWS + AARCH64_VIEWS,
-    "hirsel-driver-test-it-image": ["x86_64-default"],
-    "hirsel-driver-test-it-keyed": ["x86_64-default"],
-    "hirsel-driver-test-it-products": ["x86_64-default", "x86_64-ownership-trace"],
-    "hirsel-driver-test-it-scaling": on_both("default"),
-    "hirsel-driver-test-it-stdlib": X86_VIEWS + AARCH64_VIEWS,
-    "hirsel-driver-test-stack_depth": ["x86_64-default"],
-    "hirsel-driver-test-validate_memory": ["x86_64-default"],
-    "hirsel-driver-test-environment_inventory": ["x86_64-default"],
-    "hirsel-llvm-unittest": X86_VIEWS + AARCH64_VIEWS,
-    "hirsel-llvm-test-it": X86_VIEWS + AARCH64_VIEWS,
-    "hirsel-native-unittest": X86_VIEWS + AARCH64_VIEWS,
-    "hirsel-native-queries-unittest": X86_VIEWS + AARCH64_VIEWS,
-    "hirsel-native-testing-unittest": X86_VIEWS + AARCH64_VIEWS,
-    "hirsel-pipeline-tests-test-front": X86_VIEWS + AARCH64_VIEWS,
-    "hirsel-rc-unittest": X86_VIEWS + AARCH64_VIEWS,
-    "hirsel-rt-test-descriptors": ["x86_64-default"],
-    "hirsel-rt-test-it": X86_VIEWS + AARCH64_VIEWS,
-}
+RUNTIME_ARCHIVE_VIEWS = {'hirsel-cli-bin-hirsel-unittest': ['x86_64-default', 'x86_64-ownership-trace', 'aarch64-default'],
+ 'hirsel-cli-test-cli': ['x86_64-default',
+                         'x86_64-diagnostic',
+                         'x86_64-system-allocator',
+                         'x86_64-diagnostic+system-allocator',
+                         'x86_64-measurement',
+                         'x86_64-diagnostic+measurement',
+                         'x86_64-system-allocator+measurement',
+                         'x86_64-diagnostic+system-allocator+measurement',
+                         'x86_64-memcheck',
+                         'x86_64-ownership-trace',
+                         'aarch64-default',
+                         'aarch64-diagnostic',
+                         'aarch64-system-allocator',
+                         'aarch64-diagnostic+system-allocator',
+                         'aarch64-measurement',
+                         'aarch64-diagnostic+measurement',
+                         'aarch64-system-allocator+measurement',
+                         'aarch64-diagnostic+system-allocator+measurement'],
+ 'hirsel-conformance-unittest': ['x86_64-default',
+                                 'x86_64-diagnostic',
+                                 'x86_64-system-allocator',
+                                 'aarch64-default',
+                                 'aarch64-diagnostic',
+                                 'aarch64-system-allocator',
+                                 'x86_64-memcheck'],
+ 'hirsel-cranelift-unittest': ['x86_64-default',
+                               'x86_64-diagnostic',
+                               'x86_64-system-allocator',
+                               'x86_64-diagnostic+system-allocator',
+                               'x86_64-measurement',
+                               'x86_64-diagnostic+measurement',
+                               'x86_64-system-allocator+measurement',
+                               'x86_64-diagnostic+system-allocator+measurement',
+                               'x86_64-memcheck',
+                               'x86_64-ownership-trace',
+                               'aarch64-default',
+                               'aarch64-diagnostic',
+                               'aarch64-system-allocator',
+                               'aarch64-diagnostic+system-allocator',
+                               'aarch64-measurement',
+                               'aarch64-diagnostic+measurement',
+                               'aarch64-system-allocator+measurement',
+                               'aarch64-diagnostic+system-allocator+measurement'],
+ 'hirsel-driver-unittest': ['x86_64-default',
+                            'x86_64-diagnostic',
+                            'x86_64-system-allocator',
+                            'x86_64-diagnostic+system-allocator',
+                            'x86_64-measurement',
+                            'x86_64-diagnostic+measurement',
+                            'x86_64-system-allocator+measurement',
+                            'x86_64-diagnostic+system-allocator+measurement',
+                            'x86_64-memcheck',
+                            'x86_64-ownership-trace',
+                            'aarch64-default',
+                            'aarch64-diagnostic',
+                            'aarch64-system-allocator',
+                            'aarch64-diagnostic+system-allocator',
+                            'aarch64-measurement',
+                            'aarch64-diagnostic+measurement',
+                            'aarch64-system-allocator+measurement',
+                            'aarch64-diagnostic+system-allocator+measurement'],
+ 'hirsel-driver-test-it': ['x86_64-default',
+                           'x86_64-diagnostic',
+                           'x86_64-system-allocator',
+                           'x86_64-diagnostic+system-allocator',
+                           'x86_64-measurement',
+                           'x86_64-diagnostic+measurement',
+                           'x86_64-system-allocator+measurement',
+                           'x86_64-diagnostic+system-allocator+measurement',
+                           'x86_64-memcheck',
+                           'x86_64-ownership-trace',
+                           'aarch64-default',
+                           'aarch64-diagnostic',
+                           'aarch64-system-allocator',
+                           'aarch64-diagnostic+system-allocator',
+                           'aarch64-measurement',
+                           'aarch64-diagnostic+measurement',
+                           'aarch64-system-allocator+measurement',
+                           'aarch64-diagnostic+system-allocator+measurement'],
+ 'hirsel-driver-test-stack_depth': ['x86_64-default'],
+ 'hirsel-driver-test-environment_inventory': ['x86_64-default'],
+ 'hirsel-llvm-unittest': ['x86_64-default',
+                          'x86_64-diagnostic',
+                          'x86_64-system-allocator',
+                          'x86_64-diagnostic+system-allocator',
+                          'x86_64-measurement',
+                          'x86_64-diagnostic+measurement',
+                          'x86_64-system-allocator+measurement',
+                          'x86_64-diagnostic+system-allocator+measurement',
+                          'x86_64-memcheck',
+                          'x86_64-ownership-trace',
+                          'aarch64-default',
+                          'aarch64-diagnostic',
+                          'aarch64-system-allocator',
+                          'aarch64-diagnostic+system-allocator',
+                          'aarch64-measurement',
+                          'aarch64-diagnostic+measurement',
+                          'aarch64-system-allocator+measurement',
+                          'aarch64-diagnostic+system-allocator+measurement'],
+ 'hirsel-llvm-test-it': ['x86_64-default',
+                         'x86_64-diagnostic',
+                         'x86_64-system-allocator',
+                         'x86_64-diagnostic+system-allocator',
+                         'x86_64-measurement',
+                         'x86_64-diagnostic+measurement',
+                         'x86_64-system-allocator+measurement',
+                         'x86_64-diagnostic+system-allocator+measurement',
+                         'x86_64-memcheck',
+                         'x86_64-ownership-trace',
+                         'aarch64-default',
+                         'aarch64-diagnostic',
+                         'aarch64-system-allocator',
+                         'aarch64-diagnostic+system-allocator',
+                         'aarch64-measurement',
+                         'aarch64-diagnostic+measurement',
+                         'aarch64-system-allocator+measurement',
+                         'aarch64-diagnostic+system-allocator+measurement'],
+ 'hirsel-native-unittest': ['x86_64-default',
+                            'x86_64-diagnostic',
+                            'x86_64-system-allocator',
+                            'x86_64-diagnostic+system-allocator',
+                            'x86_64-measurement',
+                            'x86_64-diagnostic+measurement',
+                            'x86_64-system-allocator+measurement',
+                            'x86_64-diagnostic+system-allocator+measurement',
+                            'x86_64-memcheck',
+                            'x86_64-ownership-trace',
+                            'aarch64-default',
+                            'aarch64-diagnostic',
+                            'aarch64-system-allocator',
+                            'aarch64-diagnostic+system-allocator',
+                            'aarch64-measurement',
+                            'aarch64-diagnostic+measurement',
+                            'aarch64-system-allocator+measurement',
+                            'aarch64-diagnostic+system-allocator+measurement'],
+ 'hirsel-native-queries-unittest': ['x86_64-default',
+                                    'x86_64-diagnostic',
+                                    'x86_64-system-allocator',
+                                    'x86_64-diagnostic+system-allocator',
+                                    'x86_64-measurement',
+                                    'x86_64-diagnostic+measurement',
+                                    'x86_64-system-allocator+measurement',
+                                    'x86_64-diagnostic+system-allocator+measurement',
+                                    'x86_64-memcheck',
+                                    'x86_64-ownership-trace',
+                                    'aarch64-default',
+                                    'aarch64-diagnostic',
+                                    'aarch64-system-allocator',
+                                    'aarch64-diagnostic+system-allocator',
+                                    'aarch64-measurement',
+                                    'aarch64-diagnostic+measurement',
+                                    'aarch64-system-allocator+measurement',
+                                    'aarch64-diagnostic+system-allocator+measurement'],
+ 'hirsel-native-testing-unittest': ['x86_64-default',
+                                    'x86_64-diagnostic',
+                                    'x86_64-system-allocator',
+                                    'x86_64-diagnostic+system-allocator',
+                                    'x86_64-measurement',
+                                    'x86_64-diagnostic+measurement',
+                                    'x86_64-system-allocator+measurement',
+                                    'x86_64-diagnostic+system-allocator+measurement',
+                                    'x86_64-memcheck',
+                                    'x86_64-ownership-trace',
+                                    'aarch64-default',
+                                    'aarch64-diagnostic',
+                                    'aarch64-system-allocator',
+                                    'aarch64-diagnostic+system-allocator',
+                                    'aarch64-measurement',
+                                    'aarch64-diagnostic+measurement',
+                                    'aarch64-system-allocator+measurement',
+                                    'aarch64-diagnostic+system-allocator+measurement'],
+ 'hirsel-pipeline-tests-test-front': ['x86_64-default',
+                                      'x86_64-diagnostic',
+                                      'x86_64-system-allocator',
+                                      'x86_64-diagnostic+system-allocator',
+                                      'x86_64-measurement',
+                                      'x86_64-diagnostic+measurement',
+                                      'x86_64-system-allocator+measurement',
+                                      'x86_64-diagnostic+system-allocator+measurement',
+                                      'x86_64-memcheck',
+                                      'x86_64-ownership-trace',
+                                      'aarch64-default',
+                                      'aarch64-diagnostic',
+                                      'aarch64-system-allocator',
+                                      'aarch64-diagnostic+system-allocator',
+                                      'aarch64-measurement',
+                                      'aarch64-diagnostic+measurement',
+                                      'aarch64-system-allocator+measurement',
+                                      'aarch64-diagnostic+system-allocator+measurement'],
+ 'hirsel-rc-unittest': ['x86_64-default',
+                        'x86_64-diagnostic',
+                        'x86_64-system-allocator',
+                        'x86_64-diagnostic+system-allocator',
+                        'x86_64-measurement',
+                        'x86_64-diagnostic+measurement',
+                        'x86_64-system-allocator+measurement',
+                        'x86_64-diagnostic+system-allocator+measurement',
+                        'x86_64-memcheck',
+                        'x86_64-ownership-trace',
+                        'aarch64-default',
+                        'aarch64-diagnostic',
+                        'aarch64-system-allocator',
+                        'aarch64-diagnostic+system-allocator',
+                        'aarch64-measurement',
+                        'aarch64-diagnostic+measurement',
+                        'aarch64-system-allocator+measurement',
+                        'aarch64-diagnostic+system-allocator+measurement'],
+ 'hirsel-rt-test-descriptors': ['x86_64-default'],
+ 'hirsel-rt-test-it': ['x86_64-default',
+                       'x86_64-diagnostic',
+                       'x86_64-system-allocator',
+                       'x86_64-diagnostic+system-allocator',
+                       'x86_64-measurement',
+                       'x86_64-diagnostic+measurement',
+                       'x86_64-system-allocator+measurement',
+                       'x86_64-diagnostic+system-allocator+measurement',
+                       'x86_64-memcheck',
+                       'x86_64-ownership-trace',
+                       'aarch64-default',
+                       'aarch64-diagnostic',
+                       'aarch64-system-allocator',
+                       'aarch64-diagnostic+system-allocator',
+                       'aarch64-measurement',
+                       'aarch64-diagnostic+measurement',
+                       'aarch64-system-allocator+measurement',
+                       'aarch64-diagnostic+system-allocator+measurement'],
+ 'hirsel-conformance-bin-native-unittest': ['x86_64-default']}
 # The deadline replay cells run `hirsel run --native` on the host.
 REPLAY_VIEWS = ["x86_64-default"]
 
@@ -303,33 +467,53 @@ def archive_views(*names: str) -> list[str]:
 # Ordinary std products: precomputed once by the built CLI,
 # then loaded by the tests and campaigns that run std programs (HIRSEL_PRODUCTS).
 PRODUCTS = "//:hirsel-std-products"
-PRODUCT_TESTS = {"hirsel-native-cache", "hirsel-native", "hirsel-native-queries", "hirsel-native-testing", "hirsel-candidate", "hirsel-observation-view", "hirsel-project-info", "hirsel-front-phases", "hirsel-cli", "hirsel-conformance", "hirsel-driver", "hirsel-ownership", "hirsel-pipeline-tests"}
+PRODUCT_TESTS = {'hirsel-candidate',
+ 'hirsel-cli',
+ 'hirsel-conformance',
+ 'hirsel-driver',
+ 'hirsel-front-phases',
+ 'hirsel-native',
+ 'hirsel-native-cache',
+ 'hirsel-native-queries',
+ 'hirsel-native-testing',
+ 'hirsel-observation-view',
+ 'hirsel-ownership',
+ 'hirsel-pipeline-tests',
+ 'hirsel-project-info'}
 
 # Cases that call full_matrix (44 configurations) for toolchain or configuration
 # discovery: every run outside the full gate skips them by name, and
 # `-c hirsel.full=true` runs them (tools/buck2/defs.bzl).
-FULL_GATE_SKIPS = {
-    "hirsel-driver-test-it": ["native::generated_main_binds_independent_seeds_and_refuses_mismatch_before_entry"],
-    "hirsel-conformance-test-it": ["native_gate::stored_configuration_retains_independent_seeds_and_baseline_names"],
-}
+FULL_GATE_SKIPS = {}
 
 # Their tests live in integration/proof targets, not these empty entry points.
-EMPTY_UNIT_HARNESSES = {
-    "hirsel-analysis-canary-unittest",
-    "hirsel-code-store-unittest",
-    "hirsel-front-phases-unittest",
-    "hirsel-heaps-loom-unittest",
-    "hirsel-native-build-bin-hirsel-native-build-unittest",
-    "hirsel-remote-host-unittest",
-}
+EMPTY_UNIT_HARNESSES = {'hirsel-analysis-canary-unittest',
+ 'hirsel-authority-unittest',
+ 'hirsel-check-protocol-unittest',
+ 'hirsel-check-unittest',
+ 'hirsel-code-store-unittest',
+ 'hirsel-compiler-identity-unittest',
+ 'hirsel-fmt-unittest',
+ 'hirsel-front-phases-unittest',
+ 'hirsel-heaps-loom-unittest',
+ 'hirsel-layout-unittest',
+ 'hirsel-lexer-unittest',
+ 'hirsel-lower-unittest',
+ 'hirsel-modes-unittest',
+ 'hirsel-native-build-bin-hirsel-native-build-unittest',
+ 'hirsel-ownership-unittest',
+ 'hirsel-parser-unittest',
+ 'hirsel-pipeline-tests-unittest',
+ 'hirsel-remote-host-unittest',
+ 'hirsel-resolve-unittest',
+ 'hirsel-rt-operations-unittest',
+ 'hirsel-signature-unittest',
+ 'hirsel-syntax-unittest',
+ 'hirsel-tir-unittest',
+ 'hirsel-type-analysis-unittest'}
 
 # Required startup consumers include these existing full-gate HTTP launches.
-CONSUMER_CASES = {
-    "hirsel-cli-test-cli": {
-        "native-http": "full_gate_hello_web_answers_real_requests_native",
-        "native-http-concurrent": "full_gate_hello_web_concurrent_serves_while_another_request_is_incomplete_native",
-    },
-}
+CONSUMER_CASES = {}
 
 # Tests that draw random cases. Their binaries run under a seed that is part
 # of the test's action key (TEST_SEED in defs.bzl), so a cached pass covers
@@ -357,36 +541,33 @@ def seeded(source_dir: pathlib.Path, crate_root: pathlib.Path) -> bool:
 # 2026-10-16 the stdlib binary in three shards (75 s each by its table) ran
 # 173-188 s per shard on the pool, and in six shards at most 86 s. The gate
 # keeps every test target near two minutes.
-SHARDED = [
-    "hirsel-driver-unittest",
-    "hirsel-host-io-unittest",
-    "hirsel-native-queries-unittest",
-    "hirsel-native-cache-unittest",
-    "hirsel-native-testing-unittest",
-    "hirsel-native-unittest",
-    "hirsel-cli-test-cli",
-    "hirsel-driver-test-it",
-    "hirsel-driver-test-it-stdlib",
-    "hirsel-pipeline-tests-test-front",
-    "hirsel-rt-test-it",
-]
+SHARDED = ['hirsel-driver-unittest',
+ 'hirsel-host-io-unittest',
+ 'hirsel-native-queries-unittest',
+ 'hirsel-native-cache-unittest',
+ 'hirsel-native-testing-unittest',
+ 'hirsel-native-unittest',
+ 'hirsel-driver-test-it',
+ 'hirsel-pipeline-tests-test-front',
+ 'hirsel-rt-test-it']
 # Example and Free matrix cases each build and exercise programs. Keep one
 # compiled test case per shard, using the launcher's existing equal-cost
 # assignment by name.
-CASE_SHARDED = {
-    "hirsel-cli-test-examples": "crates/hirsel-cli/tests/examples.rs",
-    # Each F1 matrix case alone takes most of the pool's 600 s action limit on
-    # its eight exact CPUs; co-scheduled cases also share the one-permit CPU.
-    "hirsel-cli-test-free": "crates/hirsel-cli/tests/free.rs",
-    # Each request-mode column compiles the edit sequence twice from cold std
-    # (about 90 s on one CPU); the lifecycle cases are dealt among them.
-    "hirsel-driver-test-it-resident": "crates/hirsel-driver/tests/it-resident/mode_differential.rs",
-}
+CASE_SHARDED = {}
 SHARD_SECONDS = 40
 COSTS = HERE / "test-costs"
 # The other tables are stale too. Until real gate runs refresh them, the host
 # keeps their coverage advisory rather than starting four measurement campaigns.
 REQUIRED_COSTS = {"hirsel-driver-test-it"}
+
+
+def retained_rust():
+    """Exact selectors of the temporary old-source component corpus."""
+    result = collections.defaultdict(list)
+    for line in READS.text(ROOT / "tools/retained-rust.tsv").splitlines()[1:]:
+        binary, case = line.split("\t")
+        result[binary].append(case)
+    return dict(result)
 
 
 def case_cpus() -> dict[str, dict[str, int]]:
@@ -498,14 +679,21 @@ GATE = dict(cwd="crates/hirsel-conformance")
 # buckets, checked profile, census test-exec-deadline-829 (2026-11-12).
 # Buck reports aggregate corpus timings, not per-case times. Partial runs use
 # their completed corpus-case phase count, so interrupted work is charged too.
-CONFORMANCE_COST_SAMPLES = [
-    (1776.430034, 242), (2544.987386, 408), (2600.338646, 417), (2743.064426, 379),
-    (3373.085511, 374), (3326.110960, 411), (2525.621114, 371), (1521.658543, 559),
-    (2154.984391, 386), (1457.521846, 386), (1080.463428, 209), (2370.187586, 364),
-    (3205.234071, 419), (2989.816911, 410), (1906.374952, 367), (161.364401, 19),
-]
-CONFORMANCE_SHARD_SECONDS = 480
-
+CONFORMANCE_SHARDS = 4
+STD_NATIVE_SHARDS = 4
+NATIVE_CORPUS_SHARDS = 4
+SELECTED_SLICES = 128
+CONFORMANCE_SLICE_PROGRAMS = 6
+NATIVE_SELECTED_SLICES = 512
+NATIVE_SLICE_SECONDS = 600
+NATIVE_CONFIG_SECONDS = 16
+NATIVE_COVER_PARTS = 16
+NATIVE_COVER_PART_SECONDS = 231
+NATIVE_HEAP_PART_SECONDS = 450
+NATIVE_HEAP_FAULT_SECONDS = 480
+NATIVE_HEAP_COSTS = "native-tests/regressions/heap-costs.tsv"
+NATIVE_FULL_SHARDS = 4
+CRANELIFT_SHARDS = 4
 
 def corpus_hash(path: str) -> int:
     """hirsel-cli-args Shard::holds, including its u64 wrap."""
@@ -515,251 +703,53 @@ def corpus_hash(path: str) -> int:
     return value
 
 
-def conformance_plan(cases=None, *, samples=CONFORMANCE_COST_SAMPLES,
-                     target_seconds=CONFORMANCE_SHARD_SECONDS, reads=None):
-    """Refine each measured hash bucket until its largest predicted part fits.
-
-    A bucket r mod B is the disjoint union of r+B*j mod B*K, j in 0..K.
-    Thus the existing runner partitions execution, formatting and pending-path
-    checks identically. Selected-prefix shards retain their independent split.
-    Swept files are weighted by their number of runs, but remain indivisible.
-    """
+def conformance_plan(cases=None, **kwargs):
+    """Four nonempty partitions of the named temporary component corpus."""
+    reads = kwargs.get("reads") or generated.Reads(ROOT)
     if cases is None:
-        reads = reads or generated.Reads(ROOT)
-        cases = {}
-        for file in reads.glob(ROOT / "conformance", "**/*.hir"):
-            if "reports" in file.relative_to(ROOT / "conformance").parts:
-                continue
-            header = reads.text(file).splitlines()
-            runs = 1
-            for line in header:
-                line = line.strip()
-                if not line:
-                    continue
-                if not line.startswith("//"):
-                    break
-                if match := re.fullmatch(r"//\s*cuts:\s*(\d+)\.\.=(\d+)", line):
-                    runs = int(match[2]) - int(match[1]) + 1
-            cases[file.relative_to(ROOT).as_posix()] = runs
-    buckets = [[] for _ in samples]
-    for path, runs in sorted(cases.items()):
-        hashed = corpus_hash(path)
-        bucket = hashed % len(samples)
-        seconds, count = samples[bucket]
-        buckets[bucket].append((hashed, runs * seconds / count))
-    plan = []
-    for bucket, files in enumerate(buckets):
-        indivisible = collections.defaultdict(float)
-        for hashed, seconds in files:
-            indivisible[hashed] += seconds
-        limit = max(target_seconds, max(indivisible.values(), default=0))
-        parts = max(1, math.ceil(sum(indivisible.values()) / limit))
-        while True:
-            loads = [0.0] * parts
-            counts = [0] * parts
-            for hashed, seconds in files:
-                part = hashed // len(samples) % parts
-                loads[part] += seconds
-                counts[part] += 1
-            if max(loads) <= limit:
-                break
-            parts += 1
-        plan.extend(dict(index=bucket + 1 + len(samples) * part,
-                         count=len(samples) * parts, seconds=seconds, files=counts[part])
-                    for part, seconds in enumerate(loads))
+        cases = {path: 1 for path in reads.text(ROOT / "conformance/passing.txt").splitlines()
+                 if path and not path.startswith("#")}
+    plan = [dict(index=i + 1, count=CONFORMANCE_SHARDS, seconds=0,
+                 files=sum(corpus_hash(path) % CONFORMANCE_SHARDS == i for path in cases))
+            for i in range(CONFORMANCE_SHARDS)]
+    if any(not part["files"] for part in plan):
+        raise ValueError("retained conformance partition is empty")
     return plan
 
 
 def conformance_tests(reads=None):
-    return [dict(name=f"gate-conformance-shard-{index}",
+    reads = reads or generated.Reads(ROOT)
+    paths = [p for p in reads.text(ROOT / "conformance/passing.txt").splitlines()
+             if p and not p.startswith("#")]
+    return [dict(name=f"gate-conformance-shard-{i}",
                  binary="//:hirsel-conformance-bin-hirsel-conformance",
-                 args=["--check-format", "--shard", f"{part['index']}/{part['count']}"], **GATE)
-            for index, part in enumerate(conformance_plan(reads=reads), 1)]
+                 args=["--check-format", *[arg for p in paths for arg in ("--path", p)],
+                       "--shard", f"{i}/{CONFORMANCE_SHARDS}"], **GATE)
+            for i in range(1, CONFORMANCE_SHARDS + 1)]
 
 
-# The hourly run's native coverage stages (tools/main-runs). One process over
-# all of std took 931 s and 3.0 GiB, about 160 s of it the first module's source
-# audit, which each std shard pays once. 16 corpus shards took 838-1503 s each.
-NATIVE_CORPUS_SHARDS = 32
-# The seed-1 sample whose variants of chosen corpus cases the agreement
-# slices run.
-AGREE_LIMIT = 5000
-# Chosen corpus cases (`buck2 test -c hirsel.conformance_paths=<a>|<b>
-# //:gate-conformance-selected-shard-1`, and likewise agreement) run in up to SELECTED_SLICES slices
-# (`-c hirsel.conformance_paths` and `hirsel.agree_paths`, defs.bzl
-# selected_paths), each of at least the smallest slice's cases. Conformance
-# spreads them wide: cases differ in cost by more than tenfold (on 2026-10-19
-# 120 toml cases ran 970 s in one slice, where a whole-campaign shard runs 340
-# mixed cases in about 200 s; on 2026-11-10 the 25 STORE cases ran 156 s in one
-# slice). tools/corpus gives each path-hash slice about CONFORMANCE_SLICE_PROGRAMS
-# cases. An agreement slice first ranks the whole corpus's catalogue, so it takes
-# about as many cases as a sample shard.
-SELECTED_SLICES = 128
-CONFORMANCE_SLICE_PROGRAMS = 6
-AGREE_SLICE_PROGRAMS = 260
-# The unrestricted campaign (tools/main-runs) runs as shards of the whole
-# seed-1 catalogue by stable variant rank, with progress attributed to each shard.
-AGREE_FULL_SHARDS = 384
-# The unrestricted native agreement campaign (tools/main-runs) runs as
-# shards of the same catalogue by stable variant rank. On 2026-10-14 the whole
-# campaign took 4909 s for 1987 programs, and on 2026-10-16 2416 programs did
-# not finish in 14400 s on a loaded host; sixteen shards keep each near a
-# twentieth of that, well under an hour. Each streams its clusters as it finds
-# them, and agree.py --native-full runs them together, merges them and judges
-# agree-known.txt.
-AGREE_NATIVE_FULL_SHARDS = 16
-# Chosen corpus cases through the full native matrix (tools/corpus --native):
-# gate-native-full's run of `-c hirsel.native_paths=<a>|<b>`, spread over up
-# to NATIVE_SELECTED_SLICES pool actions as even parts of the cases times parts
-# of each case's own configurations (defs.bzl selected_paths). A case's pairwise
-# cover runs its configurations one after another, each a whole compile and
-# launch, so a slice holds about one case's share of them. tools/corpus sizes
-# the parts so each slice's estimated warm time stays under
-# NATIVE_SLICE_SECONDS (the 15-minute rule applies to slices too) and refuses
-# a selection it cannot fit. Measured on 2026-11-10 (41 lane runs): a smoke or
-# named (case, configuration) costs up to NATIVE_CONFIG_SECONDS in the heaviest
-# slices (STORE+SEM smoke, 47 per slice at 128 slices: 770 s), a sixteenth of
-# a case's full-matrix cover up to NATIVE_COVER_PART_SECONDS (OWN-4, a third of
-# the cover per slice: 1231 s), and one (case, configuration) is about 10 s.
-# A heap fault part runs the case's complete clean run plus its share of the
-# faults: up to NATIVE_HEAP_PART_SECONDS per case (STORE-3, one case and one
-# of 16 heap parts per slice: 447 s; SEM-1, two cases per slice: 652 s).
-NATIVE_SELECTED_SLICES = 512
-NATIVE_SLICE_SECONDS = 600
-NATIVE_CONFIG_SECONDS = 16
-NATIVE_COVER_PARTS = 16
-NATIVE_COVER_PART_SECONDS = 231
-NATIVE_HEAP_PART_SECONDS = 450
-# A heap+inject campaign injects a fault at every failure-capable site of its
-# clean run. A site's cost is the injected run, which goes on to the program's
-# end: about 7 ms in STORE-11-checkpoint-run, but 0.35-1.8 s in the unsplit
-# cut sweeps (counting run, store-crash-710, 2026-11-12). tools/corpus plans
-# campaigns from each run's measured seconds a site (the git common
-# directory's hirsel-heap-costs.tsv, else a probe; NATIVE_HEAP_COSTS rows only
-# seed --plan and round one), so that no action holds more than
-# NATIVE_HEAP_FAULT_SECONDS of faults and clean run together and nothing
-# planned reaches the pool's 15-minute limit.
-NATIVE_HEAP_FAULT_SECONDS = 480
-NATIVE_HEAP_COSTS = "native-tests/regressions/heap-costs.tsv"
-# What each STORE land runs of the cut-sweep families: per row, one case of
-# its key and one share of that case's cuts, rotating land by land
-# (tools/corpus --selection store-land; --plan prints its CPU-h).
-NATIVE_STORE_LAND = "native-tests/regressions/store-land.tsv"
-# What each STORE milestone runs: per family, one of N shares of its runs, each
-# milestone taking a share not yet passed, so N passing milestones cover the
-# family (tools/corpus --selection store-milestone; --plan prints the cycle).
-NATIVE_STORE_MILESTONE = "native-tests/regressions/store-milestone.tsv"
-# The full native matrix (tools/main-runs) runs as shards of the baseline by
-# path hash, each case under its rotating pairwise cover, so each shard stays well
-# under its Buck2 timeout; gate-native-full stays whole for --bless and for a
-# lane's filtered run.
-NATIVE_FULL_SHARDS = 8
-# The Cranelift parity set (about 3600 cases, each an LLVM and a Cranelift build and
-# launch) runs as shards by path hash, each well under the pool's 600 s action limit.
-CRANELIFT_SHARDS = 8
-# The root-anchor trace gate (S-14) builds each executable baseline case (about
-# 2700) as an unoptimized LLVM and a Cranelift executable on the diagnostic archive,
-# as the parity set does, shares its measured request (two jobs), and runs the
-# interpreter. On 2026-10-20 a loaded pool finished about 50 cases in 500 s per
-# shard, the std-heavy markdown, YAML, TOML and HTTP cases taking 40 to 90 s each
-# (one 235 s), so 96 shards of about 28 cases keep each under the pool's 600 s
-# action limit.
-TRACE_ROOTS_SHARDS = 96
-# The migration gate (design §9 W1) builds the same baseline as an optimized LLVM and a
-# Cranelift executable on the default archive and runs the interpreter, as the trace gate
-# does at about its cost, so it takes as many shards.
-MIGRATE_SHARDS = 96
-# The historical replay (gate-native-history-shard-<i>) runs every
-# protected source under the exhaustive matrix at one CPU; single sources take
-# up to 15 minutes, so 32 path-hash shards keep each under the gate's budget.
-# 32 refines 8: an 8-way shard is the union of four 32-way shards.
-HISTORY_SHARDS = 32
 GATE_TESTS = [
-    dict(name="gate-native-bugs", binary="//:hirsel-conformance-bin-native", args=["--bugs"],
-         runtime_archives=archive_views(*CRANELIFT_VIEWS), measured_as="gate-native-smoke", **GATE),
-    # Every runnable corpus case on Cranelift and a rotating LLVM slice against
-    # the interpreter.
-    *(dict(name=f"gate-native-corpus-shard-{index}", binary="//:hirsel-conformance-bin-native",
-           args=["--corpus", "--shard", f"{index}/{NATIVE_CORPUS_SHARDS}"],
-           runtime_archives=archive_views(*CRANELIFT_VIEWS), **GATE)
-      for index in range(1, NATIVE_CORPUS_SHARDS + 1)),
-    *(dict(name=f"gate-conformance-selected-shard-{index}", binary="//:hirsel-conformance-bin-hirsel-conformance",
-           args=["--check-format"], selected=["conformance_paths", "--path", index],
-           measured_as="gate-conformance", **GATE)
-      for index in range(1, SELECTED_SLICES + 1)),
-    *(dict(name=f"gate-agree-selected-shard-{index}", binary="//:hirsel-conformance-bin-agree",
-           args=["--seed", "1", "--limit", str(AGREE_LIMIT)], selected=["agree_paths", "--sample-path", index],
-           measured_as="gate-agree", **GATE)
-      for index in range(1, SELECTED_SLICES + 1)),
-    dict(name="gate-native-smoke", binary="//:hirsel-conformance-bin-native", args=["--smoke"],
-         runtime_archives=archive_views(*SMOKE_VIEWS), **GATE),
-    # Matrix and parity of the programs `-c hirsel.native_filters=<a>|<b>` names.
-    dict(name="gate-native-changed", binary="//:hirsel-conformance-bin-native", args=["--smoke"],
-         runtime_archives=archive_views(*SMOKE_VIEWS), changed_native=True, **GATE),
-    dict(name="gate-native-cranelift-changed", binary="//:hirsel-conformance-bin-native", args=["--cranelift"],
-         runtime_archives=archive_views(*CRANELIFT_VIEWS), changed_native=True, **GATE),
-    # tools/main-runs (`-c hirsel.full=true` declares them). Native stages
-    # carry their cross toolchain, qemu and Valgrind as pool action inputs.
-    *(dict(name=f"gate-agree-full-shard-{index}", full=True, binary="//:hirsel-conformance-bin-agree",
-           args=["--shard", f"{index}/{AGREE_FULL_SHARDS}"], **GATE)
-      for index in range(1, AGREE_FULL_SHARDS + 1)),
-    *(dict(name=f"gate-agree-native-full-shard-{index}", full=True, binary="//:hirsel-conformance-bin-agree",
-           args=["--native", "full", "--shard", f"{index}/{AGREE_NATIVE_FULL_SHARDS}"],
-           runtime_archives=archive_views("x86_64-default", "x86_64-diagnostic"), native_selection="//:native-selection", **GATE)
-      for index in range(1, AGREE_NATIVE_FULL_SHARDS + 1)),
-    # Test-runner filters arrive after the build graph is fixed. Keep the whole
-    # target free of the global cover; an unfiltered CLI run derives it itself.
-    dict(name="gate-native-full", full=True, binary="//:hirsel-conformance-bin-native", args=["--full"],
-         runtime_archives=archive_views(*FULL_VIEWS), **GATE),
-    *(dict(name=f"gate-native-selected-shard-{index}", full=True, binary="//:hirsel-conformance-bin-native",
-           args=["--full"], selected=["native_paths", "--filter", index], runtime_archives=archive_views(*FULL_VIEWS),
+    dict(name="gate-native-changed", binary="//:hirsel-conformance-bin-native",
+         args=["--retained", "--engine", "llvm"], changed_native=True,
+         runtime_archives=archive_views("x86_64-default", "x86_64-diagnostic"), measured_as="gate-native-smoke", **GATE),
+    dict(name="gate-native-cranelift-changed", binary="//:hirsel-conformance-bin-native",
+         args=["--retained", "--engine", "cranelift"], changed_native=True,
+         runtime_archives=archive_views("x86_64-default", "x86_64-diagnostic"), measured_as="gate-native-smoke", **GATE),
+
+    *(dict(name=f"gate-conformance-selected-shard-{i}",
+           binary="//:hirsel-conformance-bin-hirsel-conformance", args=["--check-format"],
+           selected=["conformance_paths", "--path", i], measured_as="gate-conformance", **GATE)
+      for i in range(1, SELECTED_SLICES + 1)),
+    *(dict(name=f"gate-native-selected-shard-{i}", full=True,
+           binary="//:hirsel-conformance-bin-native", args=["--full"],
+           selected=["native_paths", "--filter", i], runtime_archives=archive_views(*FULL_VIEWS),
            measured_as="gate-native-full", **GATE)
-      for index in range(1, NATIVE_SELECTED_SLICES + 1)),
-    *(dict(name=f"gate-native-full-shard-{index}", full=True, binary="//:hirsel-conformance-bin-native",
-           args=["--full", "--shard", f"{index}/{NATIVE_FULL_SHARDS}"],
-           runtime_archives=archive_views(*FULL_VIEWS), native_selection="//:native-selection", **GATE)
-      for index in range(1, NATIVE_FULL_SHARDS + 1)),
-    *(dict(name=f"gate-native-history-shard-{index}", full=True, binary="//:hirsel-conformance-bin-native-select",
-           args=["--replay-history", "--shard", f"{index}/{HISTORY_SHARDS}"],
-           runtime_archives=archive_views(*FULL_VIEWS), **GATE)
-      for index in range(1, HISTORY_SHARDS + 1)),
-    # The Cranelift parity gate: on demand (`-c hirsel.full=true`), with a lane's
-    # `--test-arg=--filter --test-arg=<program>`; the shards together are the whole parity set.
-    dict(name="gate-native-cranelift", full=True, binary="//:hirsel-conformance-bin-native", args=["--cranelift"],
-         runtime_archives=archive_views(*CRANELIFT_VIEWS), **GATE),
-    *(dict(name=f"gate-native-cranelift-shard-{index}", full=True, binary="//:hirsel-conformance-bin-native",
-           args=["--cranelift", "--shard", f"{index}/{CRANELIFT_SHARDS}"],
-           runtime_archives=archive_views(*CRANELIFT_VIEWS), **GATE)
-      for index in range(1, CRANELIFT_SHARDS + 1)),
-    *(dict(name=f"gate-native-cranelift-aarch64-shard-{index}", full=True, binary="//:hirsel-conformance-bin-native",
-           args=["--cranelift", "--aarch64", "--shard", f"{index}/{CRANELIFT_SHARDS}"],
-           runtime_archives=archive_views(*["aarch64-default", "aarch64-diagnostic"]), **GATE)
-      for index in range(1, CRANELIFT_SHARDS + 1)),
-    # The root-anchor trace gate (S-14): every baseline case's `Shared` root trace in the
-    # interpreter, LLVM and Cranelift must be equal. On demand (`-c hirsel.full=true`), with
-    # a lane's `--test-arg=--filter --test-arg=<program>`; the shards are the whole corpus.
-    dict(name="gate-native-trace-roots", full=True, binary="//:hirsel-conformance-bin-native",
-         args=["--trace-roots"], runtime_archives=archive_views(*["x86_64-default", "x86_64-diagnostic"]), measured_as="gate-native-cranelift",
-         **GATE),
-    *(dict(name=f"gate-native-trace-roots-shard-{index}", full=True, binary="//:hirsel-conformance-bin-native",
-           args=["--trace-roots", "--shard", f"{index}/{TRACE_ROOTS_SHARDS}"],
-           runtime_archives=archive_views(*["x86_64-default", "x86_64-diagnostic"]), measured_as="gate-native-cranelift", **GATE)
-      for index in range(1, TRACE_ROOTS_SHARDS + 1)),
-    # The migration gate (design §9 W1): every baseline case's optimized LLVM and Cranelift
-    # executables, on several compute workers that move every task at every suspension, must
-    # observe what the interpreter observes. On demand (`-c hirsel.full=true`); the shards
-    # are the whole corpus.
-    dict(name="gate-native-migrate", full=True, binary="//:hirsel-conformance-bin-native",
-         args=["--migrate"], runtime_archives=archive_views(*["x86_64-default", "x86_64-diagnostic"]), measured_as="gate-native-cranelift",
-         **GATE),
-    *(dict(name=f"gate-native-migrate-shard-{index}", full=True, binary="//:hirsel-conformance-bin-native",
-           args=["--migrate", "--shard", f"{index}/{MIGRATE_SHARDS}"],
-           runtime_archives=archive_views(*["x86_64-default", "x86_64-diagnostic"]), measured_as="gate-native-cranelift", **GATE)
-      for index in range(1, MIGRATE_SHARDS + 1)),
-    dict(name="gate-native-sanitize", full=True, binary="//:hirsel-conformance-bin-native", args=["--sanitize"],
-         runtime_archives=archive_views(*["x86_64-default", "x86_64-diagnostic", "x86_64-system-allocator", "x86_64-memcheck"]), **GATE),
-    dict(name="gate-native-hash-sweep", full=True, binary="//:hirsel-conformance-bin-native", args=["--hash-sweep", "--hash-seed", "1"],
-         runtime_archives=archive_views(*SMOKE_VIEWS), **GATE),
+      for i in range(1, NATIVE_SELECTED_SLICES + 1)),
+    *(dict(name=f"gate-retained-{engine}-shard-{i}",
+           binary="//:hirsel-conformance-bin-native",
+           args=["--retained", "--engine", engine, "--shard", f"{i}/4"],
+           runtime_archives=archive_views("x86_64-default", "x86_64-diagnostic"), measured_as="gate-native-smoke", **GATE)
+      for engine in ("heap", "llvm", "cranelift") for i in range(1, 5)),
 ]
 
 INCLUDE = re.compile(r'\binclude(?:_str|_bytes)?!\(\s*"([^"]+)"\s*\)')
@@ -1136,7 +1126,7 @@ def first_party(meta: dict) -> str:
     archive_consumers = set()
     out = [
         HEADER,
-        'load("//tools/buck2:defs.bzl", "hirsel_binary", "hirsel_build_script", "hirsel_command_test", "hirsel_deadline_replay_matrix", "hirsel_products", "hirsel_library", "hirsel_link_hosts_test", "hirsel_runtime_archives", "hirsel_tsan_runtime_archives", "hirsel_native_pool_tsan", "hirsel_script_test", "hirsel_source_audit", "hirsel_test", "hirsel_toolchain_bundle")\n',
+        'load("//tools/buck2:defs.bzl", "hirsel_binary", "hirsel_build_script", "hirsel_command_test", "hirsel_products", "hirsel_library", "hirsel_link_hosts_test", "hirsel_runtime_archives", "hirsel_tsan_runtime_archives", "hirsel_script_test", "hirsel_source_audit", "hirsel_test", "hirsel_toolchain_bundle")\n',
         'load("//tools/buck2:native_selection.bzl", "hirsel_native_selection")\n',
     ]
 
@@ -1198,7 +1188,7 @@ def first_party(meta: dict) -> str:
                         runtime_archives=runtime_views(binary) if name in NATIVE_TESTS and not requests_only and binary != "hirsel-rt-unittest" else None,
                         products=PRODUCTS if name in PRODUCT_TESTS else None,
                         seeded=seeded(target_dir(package_dir, src), src) or None, skips=FULL_GATE_SKIPS.get(binary),
-                        consumer_cases=CONSUMER_CASES.get(binary))
+                        consumer_cases=CONSUMER_CASES.get(binary), retained_cases=retained_rust().get(binary, []))
 
         lib = next((t for t in package["targets"] if set(t["kind"]) & {"lib", "rlib", "staticlib"}), None)
         build = next((t for t in package["targets"] if t["kind"] == ["custom-build"]), None)
@@ -1299,9 +1289,6 @@ def first_party(meta: dict) -> str:
     ):
         out.append("\n" + call("hirsel_source_audit", name="land-audit-" + name,
                                binary=binary, cwd=cwd, args=args, data=data))
-    out.append("\n" + call("hirsel_deadline_replay_matrix", name="deadline-select-replay",
-                            data=Raw('glob(["stdlib/**", "crates/hirsel-cli/Cargo.toml"])'),
-                            runtime_archives=archive_views(*REPLAY_VIEWS), products=PRODUCTS))
     if archive_consumers != RUNTIME_ARCHIVE_VIEWS.keys():
         raise SystemExit("RUNTIME_ARCHIVE_VIEWS must declare exactly the native test binaries; undeclared: "
                          + (", ".join(sorted(archive_consumers - RUNTIME_ARCHIVE_VIEWS.keys())) or "none")
@@ -1343,11 +1330,6 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_tsan_runtime_archives", name="hirsel-rt-tsan-archives"))
     out.append("\n" + call("hirsel_script_test", name="test-workers-tsan", script="tools/tests/workers_tsan.py", full=False,
                             data=["tools/workers-tsan", "tools/tests/workers_tsan.py"]))
-    out.append("\n" + call("hirsel_script_test", name="test-cpu-overlap", script="tools/tests/cpu_overlap.py", full=False,
-                            data=["tools/cpu-overlap", "tools/tests/cpu_overlap.py"]))
-    for width in [8]:
-        out.append("\n" + call("hirsel_native_pool_tsan", name=f"gate-cpu-pool-native-tsan-{width}", width=width,
-                               products=PRODUCTS, data=Raw('glob(["stdlib/**", "native-tests/library/**", "crates/hirsel-cli/Cargo.toml"])')))
     out.append("\n" + call("hirsel_script_test", name="gate-perf-counts", script="tools/perf-counts",
                             full=False, production=True, bin_exes={"hirsel": "//:hirsel-cli-bin-hirsel"},
                             products=PRODUCTS, runtime_archives=archive_views("x86_64-default"),
@@ -1380,8 +1362,6 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_script_test", name="gate-distribution-notices", script="tools/tests/distribution_notices.py", full=False,
                             data=["tools/tests/distribution_notices.py"],
                             files_env={"HIRSEL_DISTRIBUTION_NOTICES": "//tools/toolchain-dist:notices.py"}))
-    out.append("\n" + call("hirsel_script_test", name="test-pubsub-registration", script="tools/tests/pubsub_registration.py", full=False,
-                            data=Raw('glob(["tools/tests/pubsub_registration.py", "crates/hirsel-cli/tests/support/pubsub_relay_30/*.py", "crates/hirsel-cli/tests/support/pubsub_relay_30/cases.json", "crates/hirsel-cli/tests/cli/pubsub_relay_30*.rs"])')))
     # Four cost-balanced shards of two CPUs on the checked compiler, so a land
     # compiles no release-profile code (docs/landing.md): the slowest manifest
     # (Tasks) bounds each shard, and the rest fit beside it

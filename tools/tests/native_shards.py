@@ -31,18 +31,18 @@ class NativeShards(unittest.TestCase):
              patch.object(corpus['conformance'], 'shard_outputs', return_value=outputs), \
              patch.dict(corpus['native'].__globals__, heap_costs=lambda: {'conformance/': (1, 0.006, 60.0, '')}), \
              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args, {}), 0)
+            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args), 0)
             last = outputs.pop('gate-native-selected-shard-6')
-            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args, {}), 1)
+            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args), 1)
             report = json.loads(last)
             report['heap_partition']['index'] = 2
             outputs['gate-native-selected-shard-6'] = json.dumps(report, indent=2)
-            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args, {}), 1)
+            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args), 1)
             del report['heap_partition']
             outputs['gate-native-selected-shard-6'] = json.dumps(report, indent=2)
-            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args, {}), 1)
+            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args), 1)
 
-    def test_heap_parts_are_sized_by_a_probe_or_a_ledger_row_and_a_milestone_records_its_shares(self):
+    def test_heap_parts_are_sized_by_a_probe_or_a_ledger_row(self):
         # Round one bounds whole campaigns at 480 s of the worst planned cost a
         # site: checkpoint's ledger row says 7 ms, STORE-11-new-run has none
         # and is planned at its rule's worst row, 165 ms: int(480 / 0.165) =
@@ -78,14 +78,13 @@ class NativeShards(unittest.TestCase):
                 index, configuration_attempts=1, heap_partition=dict(index=index, count=count),
                 **(dict(heap_skip=dict(index=skip[0], count=skip[1])) if skip else {})).items()}
         commit = '000000000005' + '0' * 28
-        shares = {store + 'STORE-11-checkpoint-': (2, 3, [checkpoint, new])}
         for missing, expected, verdict in [(None, 0, 'pass'), ('gate-native-selected-shard-2', 1, 'fail')]:
             calls = []
             rest = {k: v for k, v in parts(3, (1, 7)).items() if k != missing}
             with tempfile.TemporaryDirectory() as tmp:
                 ledger = Path(tmp) / 'milestones.tsv'
                 with patch.dict(corpus['native'].__globals__, heap_costs=lambda: costs,
-                                milestone_ledger=lambda: ledger, cost_ledger=lambda: Path(tmp) / 'costs.tsv',
+                                cost_ledger=lambda: Path(tmp) / 'costs.tsv',
                                 measured_costs=lambda runs, _: {r: measured[r] for r in runs if r in measured},
                                 record_costs=lambda *_: None), \
                      patch.object(corpus['event_logs'], 'recorded', return_value=contextlib.nullcontext(Path('/tmp/event'))), \
@@ -95,9 +94,7 @@ class NativeShards(unittest.TestCase):
                      patch.object(corpus['conformance'], 'shard_outputs',
                                   side_effect=[planned, probe, parts(3), rest]), \
                      contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                    self.assertEqual(corpus['native']([checkpoint, new], [checkpoint, new], args, shares), expected)
-                self.assertEqual([line.split('\t')[1:] for line in ledger.read_text().splitlines()],
-                                 [[commit, store + 'STORE-11-checkpoint-', '2/3', verdict]])
+                    self.assertEqual(corpus['native']([checkpoint, new], [checkpoint, new], args), expected)
             def configured(call):
                 return {arg.split('=', 1)[0][len('hirsel.native_paths'):]: arg.split('=', 1)[1]
                         for arg in call if arg.startswith('hirsel.native_paths')}
@@ -167,65 +164,7 @@ class NativeShards(unittest.TestCase):
             'plan: 3 runs, 6.30 CPU-h: 1.20 measured, 5.10 estimated'])
         self.assertEqual(plan([a])[0], 'plan: X-1-a-run.hir: 1 runs, 1.20 CPU-h, measured (ledger, 2.0 h old)')
 
-    def test_a_milestone_takes_an_open_share_of_every_family_and_plans_full_coverage(self):
-        # The reader-table law's two cases sweep cuts 1..=40 in 40 shares;
-        # with shares 1..=30 passed, the open ones are 31..=40 and commit
-        # 0x00000000000c... takes index 12 % 10 = 2: share 33, cut 33 of each
-        # case. Every other family is cut in 20 shares here, none passed, so
-        # full coverage takes the most shares left in any family: 20, not the
-        # law's 10. A swept case under no row is refused.
-        corpus = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'corpus'))
-        family = 'conformance/STORE/STORE-8-reader-table-law-'
-        swept = [c for c in corpus['cases'](corpus['ROOT']) if c.startswith('conformance/STORE/')
-                 and '// cuts:' in (corpus['ROOT'] / c).read_text()]
-        rows = [(key, 40 if key == family else 20) for key, _ in corpus['milestone_rows']()]
-        with tempfile.TemporaryDirectory() as tmp, \
-                patch.dict(corpus['milestone_shares'].__globals__, milestone_rows=lambda: rows):
-            ledger = Path(tmp) / 'milestones.tsv'
-            ledger.write_text(''.join(f'2026-11-12T00:00:00Z\tc\t{family}\t{n}/40\tpass\n' for n in range(1, 31)))
-            shares = corpus['milestone_shares'](sorted(swept), '00000000000c' + '0' * 28, ledger)
-            self.assertEqual(shares[family], (33, 40, [f'{family}log-run.hir@33', f'{family}objects-run.hir@33']))
-            out = io.StringIO()
-            with patch.dict(corpus['plan_selection'].__globals__, milestone_ledger=lambda: ledger,
-                            plan=lambda *_: 0, measured_costs=lambda *_: {}, cost_ledger=lambda: ledger), \
-                    contextlib.redirect_stdout(out):
-                corpus['plan_selection']([run for _, _, runs in shares.values() for run in runs], shares)
-            self.assertEqual(out.getvalue().splitlines()[-1], 'plan: full coverage after 20 milestones')
-            with patch.dict(corpus['milestone_shares'].__globals__, milestone_rows=lambda: rows[1:]):
-                with self.assertRaises(ValueError):
-                    corpus['milestone_shares'](sorted(swept), '0' * 40, ledger)
 
-    def test_store_land_rotation_covers_each_family_cut_once_a_cycle(self):
-        # Rows: crash-cuts-crash in thirds, the five objects-cuts kinds in
-        # sixths, each over the cuts its `// cuts:` header declares. Commit
-        # count n picks third n % 3 and the (n // 6) % 5'th kind's sixth n % 6.
-        # At n = 6463: third 2 is the 2nd, 5th, ... declared cut; 6463 // 6 =
-        # 1077, 1077 % 5 = 2, the third kind in name order (crash, drop, lose,
-        # ...): lose, sixth 2, its 2nd, 8th, ... declared cut. Over 30
-        # consecutive commits each row selects every cut of its family exactly
-        # once, and no two consecutive commits select the same cuts.
-        corpus = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'corpus'))
-        store = 'conformance/STORE/STORE-11-'
-        crash, objects = store + 'crash-cuts-crash-run.hir', store + 'objects-cuts-'
-        corpus['named_selection'].__globals__['land_rows'] = lambda: [(crash, 3), (objects, 6)]
-        cases = corpus['cases'](corpus['ROOT'])
-        kinds = ['crash', 'drop', 'lose', 'refuse', 'vanish']
-
-        def declared(case):
-            return corpus['conformance'].run_ids(case, (corpus['ROOT'] / case).read_text())
-
-        def chosen(count):
-            with patch('subprocess.check_output', return_value=f'{count}\n'), \
-                    contextlib.redirect_stderr(io.StringIO()):
-                return corpus['named_selection']('store-land', cases, 'HEAD^')[0]
-
-        self.assertEqual(chosen(6463), declared(crash)[1::3] + declared(f'{objects}lose-run.hir')[1::6])
-        selections = [chosen(n) for n in range(6463, 6493)]
-        every = sorted(run for runs in selections for run in runs)
-        self.assertEqual([run for run in every if run.startswith(crash)], sorted(declared(crash) * 10))
-        self.assertEqual([run for run in every if run.startswith(objects)],
-                         sorted(run for kind in kinds for run in declared(f'{objects}{kind}-run.hir')))
-        self.assertTrue(all(a != b for a, b in zip(selections, selections[1:])))
 
     def test_corpus_refuses_a_selection_whose_slices_outrun_the_budget(self):
         # 100 cases under their full-matrix covers fit 512 slices only as five
@@ -236,7 +175,7 @@ class NativeShards(unittest.TestCase):
         with patch.dict(corpus['native'].__globals__, heap_costs=lambda: {'conformance/': (1, 0.006, 60.0, '')}), \
              patch.object(corpus['subprocess'], 'run') as run, patch.object(corpus['subprocess'], 'call') as call, \
              contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(corpus['native'](['conformance/OWN'], runs, args, {}), 2)
+            self.assertEqual(corpus['native'](['conformance/OWN'], runs, args), 2)
         self.assertEqual([c.args[0] for c in run.call_args_list if c.args and c.args[0][0] != 'git'], [])
         call.assert_not_called()
 

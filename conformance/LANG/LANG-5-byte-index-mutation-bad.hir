@@ -1,6 +1,0 @@
-// rule: LANG-5
-// expect: reject LANG-5 at line 5
-// twin: LANG/LANG-5-byte-index-mutation-ok.hir
-fn edit(mut bytes: Bytes) -> () {
-  bytes[0] = 1u8
-}

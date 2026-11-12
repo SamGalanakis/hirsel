@@ -17,7 +17,6 @@ rendering. It escapes the leading angle bracket of the nine forbidden tags.
 `tools/generate-markdown-hostile.py` imports the following pinned vectors,
 each as a bounded Hirsel fixture. Programs within one million interpreter
 steps run in the conformance corpus. Sixteen measured larger fixtures run in
-`crates/hirsel-driver/tests/it-stdlib/stdlib_markdown.rs` with a ten-million-step
 budget and the Buck2 runner's timeout. Their sources and expected HTML are
 unchanged. This follows the host rule for fixtures above the corpus budget:
 

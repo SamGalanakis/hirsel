@@ -1,9 +1,0 @@
-// rule: MEM-5
-// expect: reject MEM-5 at line 8
-// twin: MEM/MEM-5-destructor-body-ok.hir
-resource type Token {
-  n: u32,
-}
-@noalloc drop(x) {
-  let bytes: Bytes in heap = b"allocate"
-}

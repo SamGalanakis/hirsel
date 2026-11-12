@@ -59,7 +59,6 @@ The binary body `b"report\x00=\r\n\xff \t"` encodes to
 `report=00=3D=0D=0A=FF =09`. Append that ASCII body after the blank line without
 encoding the headers. Decoding just that body returns the exact original bytes.
 The executable example is
-`crates/hirsel-driver/tests/fixtures/quoted-printable-8-mime.hir`.
 
 ## Prior art and adaptations
 

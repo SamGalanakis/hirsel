@@ -37,7 +37,6 @@ This API does not turn a language failure into `Result` or suppress it.
 ## Duplicate keys with resources
 
 The executable example is
-[`SEM-5-sorted-bounds-7-owned-run.hir`](../conformance/SEM/SEM-5-sorted-bounds-7-owned-run.hir).
 Its resource-bearing `Item` records hold a key, identity and stdout handle; their
 destructors report each identity. The relevant borrowing calls are:
 
@@ -79,24 +78,17 @@ No language rules, TIR/LIR constructs, ABI or existing list implementation chang
 
 The lane owns five corpus programs and their five `.hir.json` manifests:
 
-- `conformance/SEM/SEM-5-sorted-bounds-7-vectors-run.hir`
-- `conformance/SEM/SEM-5-sorted-bounds-7-owned-run.hir`
-- `conformance/MEM/MEM-14-sorted-bounds-7-lower.hir`
-- `conformance/MEM/MEM-14-sorted-bounds-7-upper.hir`
-- `conformance/MEM/MEM-14-sorted-bounds-7-equal.hir`
 
 The three failure cases test the first lower/upper midpoint and the first
 upper-phase midpoint of `equal_range`, respectively. They assert the callback's
 failure site and a complete, nonduplicated destructor identity ledger. Native
 parity runs use the diagnostic runtime's leak audit and compare against H.
 
-`crates/hirsel-driver/tests/it-stdlib/sorted_bounds_7.rs` adds five tests:
 550 generated ascending/descending list queries against an independent linear
 oracle; 168 traced searches of short duplicate runs and all-equal lists that
 count actual comparator entries (including zero calls for empty input); five direct near-maximum midpoint vectors plus five
 bounded synthetic domain searches; resource borrowing; and failure cleanup.
 The private trace fixture and manifest are
-`crates/hirsel-driver/tests/fixtures/sorted_bounds_7/trace.hir{,.json}`.
 Generated tests with a five-million-step limit stay in the Rust harness; corpus
 limits remain unchanged.
 
@@ -104,7 +96,6 @@ limits remain unchanged.
 .buck2/bin/buck2 targets 'root//:'
 .buck2/bin/buck2 test root//:hirsel-driver-test-it-stdlib-shard-1 -- --test-arg=sorted_bounds_7
 .buck2/bin/buck2 test -c hirsel.conformance_paths='conformance/SEM/SEM-5-sorted-bounds-7-|conformance/MEM/MEM-14-sorted-bounds-7-' root//:gate-conformance-selected-shard-1
-.buck2/bin/buck2 test -c hirsel.native_filters='conformance/SEM/SEM-5-sorted-bounds-7-vectors-run.hir|conformance/SEM/SEM-5-sorted-bounds-7-owned-run.hir|conformance/MEM/MEM-14-sorted-bounds-7-lower.hir|conformance/MEM/MEM-14-sorted-bounds-7-upper.hir|conformance/MEM/MEM-14-sorted-bounds-7-equal.hir' root//:gate-native-cranelift-changed
 ```
 
 The final command selects exactly the five corpus IDs and runs each on H, LLVM

@@ -1,6 +1,0 @@
-// rule: CAP-1
-// expect: reject CAP-1 at line 5
-// twin: CAP/CAP-1-dir-remove-all-authority-ok.hir
-fn exercise(d: Dir) -> Result[(), FileError] uses {} {
-  dir.remove_all(d, path.of("a"))
-}

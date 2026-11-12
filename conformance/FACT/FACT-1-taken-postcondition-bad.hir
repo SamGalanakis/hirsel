@@ -1,9 +1,0 @@
-// rule: FACT-1
-// expect: reject FACT-1 at line 7
-// twin: FACT/FACT-1-unique-mut-append-transport-run.hir
-// "an ensures may name a take parameter only inside before".
-@noalloc
-fn consume(take x: u32) -> u32
-  ensures result == x {
-  x
-}

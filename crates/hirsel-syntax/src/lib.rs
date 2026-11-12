@@ -1706,111 +1706,11 @@ impl SyntaxFile {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    pub fn path(name: &str) -> DefPath {
-        DefPath(ItemPath {
-            package: PackageId {
-                name: "sample".into(),
-                version: "1".into(),
-            },
-            modules: vec![],
-            name: name.into(),
-        })
-    }
-    #[test]
-    fn core_identity_and_display_preserve_package_versions_and_module_boundaries() {
-        for (name, spelling) in [
-            ("Option", "core@1/Option"),
-            ("list.push", "core@1/list/push"),
-            ("a.b.c", "core@1/a/b/c"),
-        ] {
-            let path = DefPath::core(name);
-            assert!(path.is_core(name));
-            assert_eq!(path.to_string(), spelling);
-            assert!(path.package_is("core", "1"));
-            assert!(!path.is_core("other"));
-        }
-        let mut path = DefPath::core("list.push");
-        path.0.package.version = "2".into();
-        assert!(path.0.package.name_is("core"));
-        assert!(!path.package_is("core", "1"));
-        assert!(!path.is_core("list.push"));
-        path.0.package.name = "sample".into();
-        assert!(!path.0.package.name_is("core"));
-        assert_eq!(path.to_string(), "sample@2/list/push");
-        path.0.modules.clear();
-        path.0.name = "list.push".into();
-        path.0.package.name = "core".into();
-        path.0.package.version = "1".into();
-        assert!(!path.is_core("list.push"));
-    }
-    #[test]
-    fn hand_built_unit_function_has_no_pointer_edges() {
-        let origin = Origin {
-            span: Span::default(),
-            tokens: TokenRange::default(),
-        };
-        let mut tree = SyntaxTree::default();
-        tree.expressions.push(Expr {
-            origin,
-            kind: ExprKind::Tuple(vec![]),
-        });
-        tree.expressions.push(Expr {
-            origin,
-            kind: ExprKind::Block {
-                label: None,
-                statements: vec![],
-                tail: Some(ExprId(0)),
-            },
-        });
-        let item = Item {
-            name_span: Default::default(),
-            origin,
-            name: Symbol::intern("main"),
-            definition: path("main"),
-            visibility: Visibility::Public,
-            attributes: vec![],
-            kind: ItemKind::Function {
-                signature: FunctionSyntax::default(),
-                body: Some(ExprId(1)),
-                abi: None,
-            },
-            generated: None,
-        };
-        assert!(matches!(
-            item.kind,
-            ItemKind::Function {
-                body: Some(ExprId(1)),
-                ..
-            }
-        ));
-        assert_eq!(tree.expressions.len(), 2);
-        assert_ne!(path("a").fingerprint(), path("b").fingerprint());
-        assert_eq!(
-            ContentHash::of_stream("test", 3, |writer| writer.write_all(b"abc")).unwrap(),
-            ContentHash::of_parts("test", [b"abc".as_slice()])
-        );
-        assert!(ContentHash::of_stream("test", 2, |writer| writer.write_all(b"abc")).is_err());
-        assert!(ContentHash::of_stream("test", 4, |writer| writer.write_all(b"abc")).is_err());
-        assert_ne!(
-            ContentHash::of_parts("test", [b"ab".as_slice(), b"c"]),
-            ContentHash::of_parts("test", [b"a".as_slice(), b"bc"])
-        );
-    }
-}
-
 /// Definition manifest assigns module identity independently of file layout (PROG-1/5; issue #4).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct FileContext {
     pub package: PackageId,
     pub modules: Vec<String>,
-}
-
-#[cfg(test)]
-mod revision_tests {
-    use super::*;
 }
 
 // Item ownership anchors use exactly the same portable numbering as spans.

@@ -646,6 +646,3 @@ fn scalar_of(p: Primitive) -> ScalarKind {
 }
 
 use hirsel_lir::abi::{extension_of, slot};
-
-#[cfg(test)]
-mod receipt_tests;

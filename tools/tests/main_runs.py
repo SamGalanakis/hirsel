@@ -83,7 +83,7 @@ class ExceptionTables(unittest.TestCase):
             with patch.dict(self.tool['exception_tables'].__globals__, TREE=root):
                 with self.assertRaisesRegex(self.tool['TableError'], r'main-runs-skip.tsv:1: unknown skip stage'):
                     self.tool['exception_tables']()
-                skip.write_text('instruction count budgets\twhy\tlane\t2026-10-21\n')
+                skip.write_text('retained component matrix: reference, heap, LLVM, Cranelift and Rust\twhy\tlane\t2026-10-21\n')
                 self.assertIn('full-only::case', self.tool['exception_tables']()[1])
 
     def test_missing_table_fails_before_execution(self):
@@ -315,18 +315,11 @@ class Lifecycle(unittest.TestCase):
 
 
 class NativeCollection(unittest.TestCase):
-    def test_whole_native_stage_explicitly_requests_the_shared_cover(self):
-        stages = runpy.run_path(str(ROOT / 'tools/main-runs'))['stages']
-        commands = {}
-        with patch.dict(os.environ), patch('subprocess.run') as run:
-            run.side_effect = lambda command, **kwargs: subprocess.CompletedProcess(
-                command, 0, json.dumps({'root//:example-unittest': {'test_binary': 'example-unittest'}})
-                if '--output-attribute' in command else 'root//:example-unittest', '')
-            stages(lambda name, command, **kwargs: commands.update({name: command}), 'full')
-        native = commands['native matrix: both targets and named exclusions']
-        at = native.index('hirsel.native_selection=true')
-        self.assertEqual(native[at - 1], '-c')
-        self.assertIn('//:gate-native-full-shard-1', native)
+    def test_full_stage_runs_the_named_matrix(self):
+        plan = runpy.run_path(str(ROOT / 'tools/main-runs'))['stage_plan']('full')
+        command = plan['retained component matrix: reference, heap, LLVM, Cranelift and Rust']
+        self.assertEqual(command, [sys.executable, 'tools/buck2/full_gate_counts.py', '--retained'])
+
 
 
 class Attribution(unittest.TestCase):
@@ -479,7 +472,7 @@ class Tiers(unittest.TestCase):
                                 'free-mode GenMC models',
                                 'fresh std instruction budget'])
         self.assertEqual(named['full'][:len(named['fast'])], named['fast'])
-        self.assertIn('native passing corpus with independent second hash seed', named['full'])
+        self.assertIn('retained component matrix: reference, heap, LLVM, Cranelift and Rust', named['full'])
         # A fast tick is skipped by a full run of main; a full tick is not skipped by a fast run.
         covers = tool['covers']
         self.assertTrue(covers({}, 'fast') and covers({'tier': 'full'}, 'fast') and covers({}, 'full'))
@@ -510,12 +503,12 @@ class ManualRuns(unittest.TestCase):
         with patch.dict(self.tool['main'].__globals__, tick=lambda *args, **kwargs: self.fail('must not launch')), \
                 patch('subprocess.run', side_effect=AssertionError('must not query or build')), \
                 contextlib.redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(self.tool['main'](['--now', '--tier', 'ownership-trace', '--dry-run']), 0)
-        self.assertIn('ownership trace:', output.getvalue())
+            self.assertEqual(self.tool['main'](['--now', '--tier', 'native-smoke', '--dry-run']), 0)
+        self.assertIn('native component witnesses', output.getvalue())
         self.assertNotIn('workspace tests', output.getvalue())
 
     def test_case_selection_is_one_bounded_job_not_the_whole_directory(self):
-        case = 'conformance/MODE/MODE-1-unique-local-taken-stays-local-bad.hir'
+        case = 'conformance/SEM/SEM-1-unsigned-add-ok.hir'
         plan, tier, extra = self.tool['selection_plan']('conformance', [case])
         self.assertEqual(tier, 'conformance')
         self.assertEqual(len(plan), 2)  # Preparation and the chosen case.
@@ -851,23 +844,15 @@ class RegressionReports(unittest.TestCase):
         self.assertLess(report.index('binary::unlisted'), report.index('Known reds by owner: lane: 1'))
         self.assertNotIn('- binary::known', report)
 
-    def test_manual_profiles_select_registered_cases_and_preserve_pool_slices(self):
-        commands = self.tool['stage_plan']('full')
-        registry = json.loads((ROOT / 'tools/ignored-tests.json').read_text())
-        expected = {case for case, home in registry.items() if 'hirsel.ownership_trace=true' in home.get('config', [])}
-        selected = {arg for name, command in commands.items() if name.startswith('ownership trace:')
-                    for arg in command[command.index('--') + 1:] if not arg.startswith('--')}
-        self.assertEqual(selected, expected)
-        interpreter = [name for name in commands if name.startswith('interpreter conformance: ')]
-        corpus = runpy.run_path(str(ROOT / 'tools/corpus'))
-        cases = corpus['cases'](ROOT)
-        selected = [case for name in interpreter for case in cases if case.startswith(commands[name][-1] + '/')]
-        self.assertCountEqual(selected, cases)
-        for name in interpreter:
-            self.assertEqual(commands[name][commands[name].index('--slices') + 1], '32')
-        self.assertEqual(commands['native conformance smoke'][commands['native conformance smoke'].index('--slices') + 1], '48')
+    def test_manual_profiles_select_the_retained_matrix(self):
+        plan = self.tool['stage_plan']('conformance')
+        self.assertEqual(plan['interpreter component witnesses'], [sys.executable, 'tools/buck2/conformance.py'])
+        native = self.tool['stage_plan']('native-smoke')['native component witnesses']
+        targets = [arg for arg in native if arg.startswith('//:gate-retained-')]
+        self.assertCountEqual(targets, [f'//:gate-retained-{engine}-shard-{i}'
+                                       for engine in ('heap', 'llvm', 'cranelift') for i in range(1, 5)])
         fast = self.tool['stage_plan']('fast')
-        self.assertFalse(any(name.startswith(('interpreter conformance:', 'ownership trace:')) or name == 'native conformance smoke' for name in fast))
+        self.assertNotIn('retained component matrix: reference, heap, LLVM, Cranelift and Rust', fast)
 
     def test_corpus_structured_output_keeps_all_verdicts_and_rejects_missing_reports(self):
         corpus = runpy.run_path(str(ROOT / 'tools/corpus'))
@@ -1163,7 +1148,7 @@ class PerfChecks(unittest.TestCase):
                         return 'cafebabe' if pushed else None
                 output = io.StringIO()
                 with patch.dict(tool['run'].__globals__, RUNS=root, ROWS=root / 'runs.jsonl',
-                                run_stages=lambda *args: ({}, ['instruction count budgets'], [], measured, empty_status()),
+                                run_stages=lambda *args: ({}, ['retained component matrix: reference, heap, LLVM, Cranelift and Rust'], [], measured, empty_status()),
                                 attribute=lambda *args: [], rows=lambda: [], push_to_main=push), \
                         contextlib.redirect_stdout(output):
                     tool['run']('0123456789abcdef', 'full')

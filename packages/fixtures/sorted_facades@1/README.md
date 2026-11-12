@@ -18,7 +18,6 @@ The measurements and blockers below are historical, recorded at the baseline
 - Checked execution bounds a resource that a native operation moves out of a `mut`
   argument by the caller's content, not by the wrapper's access to it. The passing
   corpus case
-  [DROP-2-wrapped-sorted-map-remove-resource-run.hir](../../../conformance/DROP/DROP-2-wrapped-sorted-map-remove-resource-run.hir)
   pins it.
 
 The remaining calls have not been migrated again since then.
@@ -63,21 +62,7 @@ literals each count as one token, and compound punctuation uses longest matching
 
 | Fixture | Sites migrated / surveyed | Lines before → after |
 | --- | ---: | ---: |
-| `conformance/CT/CT-2-sortedmap-constant-ok.hir` | 0 / 1 | 7 → 7 |
-| `conformance/DROP/DROP-2-sorted-map-replaced-value.hir` | 3 / 4 | 26 → 26 |
-| `conformance/DROP/DROP-2-std-sorted-map-remove-run.hir` | 4 / 6 | 35 → 35 |
-| `conformance/GEN/GEN-1-sorted-map-copyable-key.hir` | 0 / 1 | 21 → 21 |
 | `conformance/GEN/GEN-1-sortedmap-runtime-equality-bad.hir` | 1 / 2 | 16 → 16 |
-| `conformance/MEM/MEM-6-sorted-map-arena-run.hir` | 19 / 25 | 147 → 147 |
-| `conformance/MEM/MEM-6-std-sorted-map-arena-get-run.hir` | 3 / 4 | 33 → 33 |
-| `conformance/MODE/MODE-2-std-container-empty-run.hir` | 0 / 2 | 25 → 25 |
-| `conformance/OWN/OWN-4-heap-capacity-sorted-closure-run.hir` | 2 / 3 | 17 → 16 |
-| `conformance/SEM/SEM-5-sorted-map-projected-and-consuming-run.hir` | 2 / 3 | 31 → 31 |
-| `conformance/SEM/SEM-5-sorted-map-resource-modes-run.hir` | 1 / 2 | 35 → 35 |
-| `conformance/SEM/SEM-5-std-sorted-map-access-run.hir` | 17 / 18 | 51 → 45 |
-| `conformance/SEM/SEM-5-std-sorted-map-owned-cycle-run.hir` | 2 / 3 | 26 → 26 |
-| `conformance/SEM/SEM-5-std-sorted-map-string-get-run.hir` | 9 / 10 | 18 → 18 |
-| `native-tests/regressions/history/native-heap-heap-d15facecd1.hir` | 2 / 3 | 12 → 12 |
 
 ## API and wrapper cost
 
@@ -122,7 +107,6 @@ and execution limitations prevent claiming all obligations work end to end.
    trapped `region use after scope exit (MODE-1/MEM-10)` at the caller match. The
    checker was sound and the checked interpreter was wrong. The repro now passes
    in every engine; the corpus case
-   [DROP-2-wrapped-sorted-map-remove-resource-run.hir](../../../conformance/DROP/DROP-2-wrapped-sorted-map-remove-resource-run.hir)
    pins it.
 4. **Initial slow check: no persistent stall reproduced.**
    The original small trigger was the `package-result-ok` probe (formerly `-bad`). An initial check took over two minutes, then completed; warm

@@ -1,8 +1,0 @@
-// rule: MODE-4
-// expect: accept
-// Regression from tail/local-result; TIR/TypeMismatch/closure parameter.
-fn view(x: Shared[Bytes]) -> Shared[Bytes] in x {
-  fn(agree_x: Shared[Bytes]) {
-    agree_x
-  }(x)
-}

@@ -16,7 +16,6 @@ Rejects deliberately have no executable entry.
 ## Direct enum descent: borrowed view and owned snapshot
 
 This direct physical pattern is the shipped
-[tree witness](../conformance/LANG/LANG-15-borrow-cursor-tree-ok.hir).
 The borrowed initializer establishes `root` as the fixed cover; each child lies
 inside it. The plain `u64` result needs no counted copy.
 
@@ -82,7 +81,6 @@ fn refill(a: List[u64]) -> u64 {
 ## Array descent and an explicit owned result
 
 The array arm adapts the shipped
-[JSON pointer witness](../conformance/LANG/LANG-15-borrow-cursor-json-pointer-ok.hir).
 The length check precedes indexing. Rebinding borrows an element; `copy node` at
 the result boundary creates the owned return value. The `in root` relation is
 still required: copy retains the input's bounds. It is not a deep independent
@@ -129,7 +127,6 @@ at `target = take next` below (not an invented getter-specific LANG-15 diagnosti
 Keep the current object recursion and hash lookup repair; a linear member scan
 is a conformance witness, not a recommendation to change lookup complexity.
 The full composition is preserved in
-[the owned-getter reject](../conformance/MODE/MODE-1-borrow-cursor-owned-getter-bad.hir).
 
 ```hir
 // expect: reject MODE-1
@@ -372,9 +369,7 @@ fn unrelated(a: List[u64], b: List[u64]) -> u64 {
 ```
 
 Naming `in p.a` instead of `in p` also excludes `p.b`; the shipped
-[field-cover twins](../conformance/MODE/MODE-1-borrow-cursor-field-ok.hir)
 cover that distinction. Tree reset is independently covered by the shipped
-[reset witness](../conformance/LANG/LANG-15-borrow-cursor-reset-ok.hir).
 A whole-name rebind writes only the view holder. It grants no projected write,
 mutable argument, compound assignment or take permission:
 
@@ -456,7 +451,6 @@ The persistent [ordered map](../stdlib/std@1/ordered_map.hir) has only
 `K: copyable, V: copyable` and carries a comparator closure. `copyable` does not
 imply `data`. Its generic trees cannot silently acquire `data` bounds or become
 borrow cursors. The focused
-[generic twins](../conformance/LANG/LANG-15-borrow-cursor-generic-ok.hir)
 keep the owned copy form and reject this borrowed rebind:
 
 ```hir

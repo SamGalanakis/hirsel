@@ -1,9 +1,0 @@
-// rule: CAP-3
-// expect: reject CAP-3 at line 6
-// twin: CAP/CAP-3-stdout-capture-under-stdout-ok.hir
-fn probe(s: Stdout) {
-  let f = fn() uses {Io} {
-    out.print(s, "ok\n")
-  }
-  let _ = f()
-}

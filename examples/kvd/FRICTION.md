@@ -24,7 +24,6 @@ requirement. The application's longer cause runs through `AppError.Store` and
 outstanding requests. The minimal incident still emits two MODE-4 reports of the
 same cause; diagnostic duplication remains, not a second ownership failure.
 
-The [applied-repair tests](../../crates/hirsel-driver/tests/it/error_injection.rs)
 insert `unique ` before `work()` and source-check the result. Merely strengthening
 a callback's return annotation does not make an ordinary counted result unique.
 This complete explicit repair supplies both the contract and the expression:
@@ -65,7 +64,6 @@ copies supply owners for transaction storage and UTF-8 conversion.
 
 ## Current replay and script status
 
-[Formatting replay controls](../../crates/hirsel-cli/tests/cli/replay_format.rs)
 cover the original source across interpretation, LLVM and Cranelift: formatting,
 comments, CRLF and declaration relocation preserve binding; semantic, dependency,
 manifest and run-configuration changes still refuse before entry. No re-record

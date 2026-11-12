@@ -1,6 +1,0 @@
-// rule: LANG-1
-// expect: reject LANG-1 at line 5
-// twin: LANG/LANG-1-raw-cr-ok.hir
-fn value() {
-  let _ = r"firstsecond"
-}

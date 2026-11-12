@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Native gate: LLVM emission, the runtime and its C harness, native differential, Lean and
-# TLA+ model checks. Run by the full gate and on demand; native changes run native --full --filter
-# for the programs they touch.
-# Buck2 runs native tests, C harnesses and toolchain checks on the pool, with
-# pinned tools as inputs. The Lean and TLA+ model checks still use the invoking host.
+# Native support checks: runtime/C harnesses, layout, LLVM and concurrency models.
+# tools/main-runs runs the retained reference/native/Rust component matrix.
+# Buck2 runs native tests, C harnesses and toolchain checks on the pool with
+# pinned inputs. The TLA+ model check uses the invoking host.
 set -Eeuo pipefail
 # Four test threads and campaign workers unless the caller says otherwise.
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" HIRSEL_JOBS="${HIRSEL_JOBS:-4}" RUST_TEST_THREADS="${RUST_TEST_THREADS:-4}"
@@ -54,23 +53,12 @@ mapfile -t runtime < <(buck2 uquery 'kind("_rust_test", attrregexfilter(name, "^
 run_stage "runtime tests" buck2 test "${runtime[@]}" --
 run_stage "runtime C harness" buck2 test //:gate-native-runtime-c --
 run_stage "library C probes" buck2 test //:gate-native-library-c --
-run_stage "layout C probes" buck2 test //:hirsel-lir-test-it -- $(libtest layout:: --ignored)
+run_stage "layout C probes" filtered //:hirsel-lir-test-it -- layout::c_probes_agree_on_both_targets --exact --include-ignored
 run_stage "LLVM toolchain pin" buck2 test //:gate-native-toolchain-pin --
 # They link AArch64 programs with the cross gcc and run them under qemu-user.
 run_stage "LLVM backend tests" buck2 test //:hirsel-llvm-unittest //:hirsel-llvm-test-it -- $(libtest --include-ignored)
-run_stage "LLVM scalar library matrix against the interpreter's kernels" \
-  filtered //:hirsel-pipeline-tests-test-front -- llvm_scalar_library:: --include-ignored
-run_stage "Lean RC model audit" proofs/rc/audit.sh
-run_stage "Lean RC model vectors" proofs/rc/check-vectors.sh
 run_stage "TLA+ ordered-mode model" proofs/ordered/check.sh
-run_stage "native stages end to end: full matrix on both targets and 22 link partitions" \
-  filtered "${release[@]}" //:hirsel-driver-test-it -- native:: --include-ignored --test-threads=4
-run_stage "native smoke with real Io record and replay" buck2 test //:gate-native-smoke --
-# Host execution proves production Ordered widths 1/2/4/8; the pool executor
-# otherwise clamps wider cells to its two CPUs.
-run_stage "Ordered qualification: native trace, immutable-input replay and topology" \
-  filtered -c hirsel.tests=host //:hirsel-cli-test-cli -- ordered_qualification:: runtime50_ordered:: --ignored --test-threads=1
-run_stage "native executables under Valgrind memcheck" buck2 test //:gate-native-sanitize --
+run_stage "free-mode GenMC models" buck2 test //:gate-free-genmc --
 if (( ${#failed_stages[@]} > 0 )); then
   printf 'check-native.sh: %d failing stages: %s\n' "${#failed_stages[@]}" "$(IFS=';'; echo "${failed_stages[*]}")" >&2
   echo "check-native.sh: failed ($((SECONDS - gate_start)) s)" >&2

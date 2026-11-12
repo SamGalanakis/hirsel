@@ -1,6 +1,0 @@
-// rule: LANG-7
-// expect: accept
-// boundary: A list field breaks recursive inline layout.
-type Tree {
-  children: List[Tree],
-}

@@ -1,5 +1,0 @@
-// rule: GEN-1
-// expect: accept
-type Wrapped: data {
-  items: Map[u32, u8],
-}

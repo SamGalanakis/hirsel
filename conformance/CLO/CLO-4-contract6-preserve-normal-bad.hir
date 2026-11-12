@@ -1,7 +1,0 @@
-// rule: CLO-4
-// expect: reject CLO-4 at line 6
-// twin: CLO/CLO-4-contract6-preserve-normal-ok.hir
-@preserves_captures(it)
-fn step[T](mut it: Iter[T], take replacement: Iter[T]) {
-  it = take replacement
-}

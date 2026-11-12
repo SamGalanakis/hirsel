@@ -2,23 +2,30 @@
 // expect: run
 // authorities: {"objects":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":3}}}
 // stdout: objects: agrees
+// cuts: 1..=40
 // steps: 20000000
 // The readers table a store keeps on its history as Retain folds and
 // ReaderDelta commits is the table a model keeps of the same changes. A seeded
 // sequence of acquires (fresh tokens and tokens dropped before), drops by the
-// holder and releases by the operator runs past `HIGH` holders and more than
-// `HIGH` changes past them, so the ReaderDelta runs between folds reach their
-// bound, min(holders, FOLD_DELTAS), with compactions between, on an object store. Each
-// acquire pins a state whose `x` no other acquire pinned, at a version the
-// model notes. After each change, the pin it touched and another the model
+// holder and releases by the operator fills the table to `MOST` holders, with
+// compactions and reopens between, on an object store. Between compactions the
+// ReaderDelta runs reach their bound, min(holders, FOLD_DELTAS), both below
+// FOLD_DELTAS holders, where the bound is the holders, and above it, where it
+// is FOLD_DELTAS; the model counts the runs that must end in a fold at each.
+// Each acquire pins a state whose `x` no other acquire pinned, at a version
+// the model notes. After a change, the pin it touched and another the model
 // picks read through store.at_pin (newest first, from authority.last) as the
 // model says: the state its acquire pinned while the model holds it,
 // PinReleased() once it does not, a dropped pin's token acquired again
-// included. After a reopen, which recovers the table forward from the history,
-// store.reader_pins lists exactly the model's holders at the versions it
-// noted, and every pin ever acquired reads as the model says. Past
-// FOLD_DELTAS holders, where the bound is FOLD_DELTAS, a cold pin read is
-// checked by crates/hirsel-cli/tests/cli/cold_pin.rs.
+// included. After each reopen, which recovers the table forward from the
+// history, store.reader_pins lists exactly the model's holders at the
+// versions it noted, and at the end every pin ever acquired reads as the
+// model says.
+// Every run makes the whole sequence and one window of its checks, so each
+// fits the step cap: the corpus runs the case once per window K of the
+// declared ones (the arguments K and the last), the sequence's checks are
+// dealt to the windows in turn, and run K makes those dealt to window K. The
+// windows together make every check.
 pub type Failed = Check(String) | Store(store.StoreError)
 
 fn check(ok: bool, take what: String) -> Result[(), Failed] {
@@ -114,21 +121,98 @@ fn token_held(issued: List[Issued], k: u64) -> bool {
 }
 
 // Steps the sequence runs, and the first steps, in which 7 changes in 8 are
-// acquires (4 in 8 after) while fewer than `MOST` are held, so the table passes
-// `HIGH` holders early and then changes past `HIGH` holders more than `HIGH`
-// times. A compaction every `COMPACT` steps leaves room for a full run of
-// deltas between the folds it causes.
-const STEPS: u64 = 32
+// acquires (4 in 8 after) while fewer than `MOST` are held. A compaction every
+// `COMPACT` steps leaves room for a run of more than FOLD_DELTAS deltas
+// between the folds it causes, and the store reopens at step `FILL`.
+const STEPS: u64 = 76
 
-const FILL: u64 = 14
+const FILL: u64 = 44
 
-const MOST: u64 = 10
+const MOST: u64 = 40
 
-const HIGH: u64 = 6
+const COMPACT: u64 = 38
 
-const COMPACT: u64 = 12
+// store.hir's bound on a run of ReaderDelta commits between folds.
+const FOLD_DELTAS: u64 = 32
 
-fn run(rt: Io, name: String) -> Result[(), Failed] {
+// The ReaderDelta runs the model has seen reach their bound: `low` counts
+// changes in a row, with no compaction or reopen, each touching fewer than
+// FOLD_DELTAS holders, `most` the largest count among them, and `high` changes
+// in a row each leaving and finding more than FOLD_DELTAS. A row at least as
+// long as its bound holds a fold the bound forced.
+type Runs {
+  low: u64,
+  most: u64,
+  high: u64,
+  low_folds: u64,
+  high_folds: u64,
+}
+
+// Counts a change from `from` holders to `to`.
+fn counted(mut r: Runs, from: u64, to: u64) {
+  let lo = if from < to {
+    from
+  } else {
+    to
+  }
+  let hi = if from < to {
+    to
+  } else {
+    from
+  }
+  if hi < FOLD_DELTAS {
+    r.low += 1
+    if hi > r.most {
+      r.most = hi
+    }
+    if r.most >= 2 && r.low >= r.most {
+      r.low_folds += 1
+      r.low = 0
+      r.most = 0
+    }
+  } else {
+    r.low = 0
+    r.most = 0
+  }
+  if lo > FOLD_DELTAS {
+    r.high += 1
+    if r.high >= FOLD_DELTAS {
+      r.high_folds += 1
+      r.high = 0
+    }
+  } else {
+    r.high = 0
+  }
+}
+
+// Whether the next check, dealt to the windows in turn, is window `win`'s.
+fn dealt(mut slot: u64, win: u64, wins: u64) -> bool {
+  slot += 1
+  (slot - 1) % wins + 1 == win
+}
+
+// A compaction or reopen ends every row.
+fn ended(mut r: Runs) {
+  r.low = 0
+  r.most = 0
+  r.high = 0
+}
+
+// Argument i of the run: the corpus driver runs the case once per declared
+// window K, with the arguments K and the last declared window.
+fn window_arg(args: Args, i: u64) -> Result[u64, Failed] {
+  match arg.text(args, i) {
+    Ok(text) => match u64.parse(text) {
+      Ok(k) => Ok(k),
+      Error(_) => Error(Check(f"argument {i} is not a window")),
+    },
+    Error(_) => Error(
+      Check(f"argument {i} is missing: the corpus driver runs each window")
+    ),
+  }
+}
+
+fn run(rt: Io, name: String, win: u64, wins: u64) -> Result[(), Failed] {
   let Ok(a) = io.authority(rt, name) else {
     return Error(Check(f"{name} not granted"))
   }
@@ -144,7 +228,9 @@ fn run(rt: Io, name: String) -> Result[(), Failed] {
   let mut tokens: List[store.ReaderPin] = []
   let mut live: u64 = 0
   let mut most: u64 = 0
-  let mut past: u64 = 0
+  let mut runs = Runs(low: 0, most: 0, high: 0, low_folds: 0, high_folds: 0)
+  // The checks the sequence has dealt.
+  let mut slot: u64 = 0
   for step in 1u64..STEPS + 1 {
     let n: u8 = int.truncate(step)
     let wrote: Result[(), store.TxFailure[store.TxError]] = store.transact(
@@ -153,6 +239,7 @@ fn run(rt: Io, name: String) -> Result[(), Failed] {
       n
     )
     check(wrote == Ok(()), f"{name}: write {step}")?
+    let holding = live
     let roll = draw(mut g, 8)
     let mut touched: Option[u64] = None()
     let acquires: u64 = if step <= FILL {
@@ -221,15 +308,18 @@ fn run(rt: Io, name: String) -> Result[(), Failed] {
       touched = Some(k)
     }
     if let Some(k) = touched {
-      if live > HIGH || !issued[k].live && live == HIGH {
-        past += 1
+      counted(mut runs, holding, live)
+      if dealt(mut slot, win, wins) {
+        check(agrees(a, issued[k]), f"{name}: step {step} pin {k}")?
       }
-      check(agrees(a, issued[k]), f"{name}: step {step} pin {k}")?
     }
     let other = draw(mut g, list.len(issued))
-    check(agrees(a, issued[other]), f"{name}: step {step} pin {other}")?
+    if dealt(mut slot, win, wins) {
+      check(agrees(a, issued[other]), f"{name}: step {step} pin {other}")?
+    }
     if step % COMPACT == 0 {
       store.compact(mut s) ? Store
+      ended(mut runs)
     }
     if live > most {
       most = live
@@ -237,6 +327,7 @@ fn run(rt: Io, name: String) -> Result[(), Failed] {
     if step == FILL {
       store.close(take s) ? Store
       s = store.open(a, store.default_config()) ? Store
+      ended(mut runs)
       check(
         listed(a, mut s, issued, versions)?,
         f"{name}: holders after the reopen at {step}"
@@ -244,8 +335,8 @@ fn run(rt: Io, name: String) -> Result[(), Failed] {
     }
   }
   check(
-    most > HIGH && past > HIGH,
-    f"{name}: {most} holders at most, {past} changes past {HIGH} holders"
+    most == MOST && runs.low_folds > 0 && runs.high_folds > 0,
+    f"{name}: {most} holders at most, {runs.low_folds} folds below and {runs.high_folds} above FOLD_DELTAS"
   )?
   store.close(take s) ? Store
   let mut again = store.open(a, store.default_config()) ? Store
@@ -254,17 +345,25 @@ fn run(rt: Io, name: String) -> Result[(), Failed] {
     f"{name}: holders after the last reopen"
   )?
   for k in 0u64..list.len(issued) {
-    check(agrees(a, issued[k]), f"{name}: pin {k} at the end")?
+    if dealt(mut slot, win, wins) {
+      check(agrees(a, issued[k]), f"{name}: pin {k} at the end")?
+    }
   }
   store.close(take again) ? Store
   Ok(())
+}
+
+fn windowed(rt: Io, args: Args) -> Result[(), Failed] {
+  let win = window_arg(args, 0)?
+  let wins = window_arg(args, 1)?
+  run(rt, "objects", win, wins)
 }
 
 pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
   let Ok(stdout) = io.stdout(rt) else {
     return Error(Check("stdout"))
   }
-  let line = match run(rt, "objects") {
+  let line = match windowed(rt, args) {
     Ok(()) => "objects: agrees",
     Error(Check(what)) => what,
     Error(Store(_)) => "objects: store error",

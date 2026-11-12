@@ -44,6 +44,11 @@ exactly once; a missing or repeated cut fails the case. B is the first cut past
 the history's end: a run with K below B checks that cut K stopped the history,
 and the run with K = B that the history finished, so a wrong range fails at the
 cut where it is wrong (see [this case](STORE/STORE-11-fence-cuts-fail-run.hir)).
+A case whose checks of one sequence would pass the step cap together uses the
+same header for windows instead: every run makes the whole sequence, the checks
+are dealt to the windows in turn, and run K makes those dealt to window K, so
+the windows together make every check (see
+[this case](STORE/STORE-8-reader-table-law-log-run.hir)).
 `tools/corpus --selection store-land` and `--selection store-milestone` name
 the swept STORE cases each STORE land and each milestone runs.
 

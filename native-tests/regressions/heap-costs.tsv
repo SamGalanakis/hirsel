@@ -10,3 +10,5 @@ conformance/STORE/STORE-11-fence-cuts-	26015	0.018	fence-cuts-fail cut 15, its h
 conformance/STORE/STORE-11-objects-cuts-	33801	0.035	objects-cuts-lose cut 30, main 7da4031a
 conformance/STORE/STORE-11-objects-world-run.hir	511376	0.165	part 1/400, main 7da4031a
 conformance/STORE/STORE-3-narrow-scope-laws-run.hir	405634	0.017	part 1/N, main 7da4031a
+conformance/STORE/STORE-8-reader-table-law-log-run.hir	946604	0.0123	window 1 of 40, part 1/100, main edf86e39
+conformance/STORE/STORE-8-reader-table-law-objects-run.hir	944262	0.0269	window 1 of 40, part 1/100, main edf86e39

@@ -2031,3 +2031,96 @@ fn a_declared_unique_root_loses_its_proof_to_a_shared_part_write() {
         );
     }
 }
+
+/// `both(a, take b: unique)` receiving `Copy(x), Take(x)` of one fresh string
+/// (`attack`), or a borrowed fresh `n` and `Take(x)` (twin).
+fn copy_then_take_into_unique(attack: bool) -> Fixture {
+    let mut f = Fixture::unit();
+    let string = TypeKind::Primitive(Primitive::String);
+    let x = f.slot(string.clone(), Storage::Temporary);
+    f.assign(x, Rvalue::Constant(Constant::String("x".into())), 0);
+    let result = f.slot(TypeKind::Tuple(vec![].into()), Storage::Temporary);
+    let end_loan = CleanupAction::EndLoan {
+        loan: LoanId(0),
+        if_active: false,
+    };
+    let (first, failure, ending, exit) = if attack {
+        (copy(x), 0, vec![], 0)
+    } else {
+        let c = f.cleanup(vec![drop(x)]);
+        let n = f.slot(string.clone(), Storage::Temporary);
+        f.assign(n, Rvalue::Constant(Constant::String("n".into())), c);
+        let c = f.cleanup(vec![drop(n), drop(x)]);
+        f.body().blocks[0].instructions.push(inst(
+            InstructionKind::BeginLoan {
+                id: LoanId(0),
+                place: PlaceId(n),
+                mutable: false,
+                if_inactive: false,
+            },
+            c,
+        ));
+        let via = f.through_loan(n, 0);
+        let lent = f.cleanup(vec![end_loan.clone(), drop(n)]);
+        let ending = inst(
+            InstructionKind::EndLoan {
+                loan: LoanId(0),
+                if_active: false,
+            },
+            lent,
+        );
+        let exit = f.cleanup(vec![drop(n)]);
+        (operand(via, UseKind::Borrow), lent, vec![ending], exit)
+    };
+    f.body().blocks[0].terminator = Terminator::Call {
+        callee: Callee::Definition {
+            path: path("both"),
+            arguments: vec![],
+        },
+        arguments: vec![
+            CallArgument {
+                parameter: ParamId(0),
+                value: first,
+            },
+            CallArgument {
+                parameter: ParamId(1),
+                value: take(x),
+            },
+        ],
+        returns: Some(CallReturn {
+            destination: PlaceId(result),
+            next: BlockId(1),
+        }),
+        on_failure: CleanupId(failure),
+    };
+    f.body().blocks.push(block(ending, ret(result, exit)));
+    let mut both = function_signature(
+        "both",
+        vec![
+            (PassingMode::Borrow, string.clone()),
+            (PassingMode::Take, string),
+        ],
+        TypeKind::Tuple(vec![].into()),
+    );
+    let SignatureKind::Function(fun) = &mut both.kind else {
+        panic!()
+    };
+    let mut row = interner().get(fun.parameters[1].ty).unwrap().clone();
+    row.modes.uniqueness = Uniqueness::Unique;
+    fun.parameters[1].ty = interner().intern(row);
+    f.signatures.insert(id("both"), both);
+    f
+}
+
+#[test]
+fn a_sibling_copy_argument_ends_the_unique_proof_of_a_taken_one() {
+    // MODE-2: `both(copy x, take x)` hands the unique formal a string the
+    // borrowed formal still reaches (oldv-attack-770 candidate 5).
+    copy_then_take_into_unique(false).valid();
+    assert_eq!(
+        copy_then_take_into_unique(true).kinds(),
+        vec![ViolationKind::TypeMismatch {
+            entity: "call argument"
+        }]
+    );
+}

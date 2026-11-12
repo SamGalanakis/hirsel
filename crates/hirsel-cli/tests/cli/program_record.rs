@@ -508,7 +508,7 @@ fn only_the_publishing_registration_answers_a_record() {
     app(root);
     let check = ["check", "app/hirsel.json"];
     flips_then_hits(&home, root, &check, &[], "first check");
-    let verifier = home.state().join("hirsel/verifier");
+    let verifier = home.state().join("hirsel/compiler-records");
     let registration = std::fs::read_dir(&verifier)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -577,7 +577,10 @@ fn copy_tree(from: &Path, to: &Path) {
 /// anything but its sources, or records a failure that was not the source's.
 #[test]
 fn a_build_record_restores_its_executable_and_replays_failures() {
-    let home = Home::new();
+    // A private executable and LLVM keep the corruption vector independent of
+    // the pool staging another action's hard links to the shared build output.
+    let relocated = Relocated::new();
+    let home = Home::with_compiler(relocated.compiler.clone());
     let root = home.path();
     let app = app(root);
     let exe = root.join("app.exe");
@@ -629,7 +632,12 @@ fn a_build_record_restores_its_executable_and_replays_failures() {
     );
     // A damaged recorded executable: the build runs fresh and its
     // publication replaces the record, so the next build hits again.
-    for path in recorded_executables(&home) {
+    let recorded = recorded_executables(&home);
+    assert!(
+        !recorded.is_empty(),
+        "the corruption vector must reach a recorded executable"
+    );
+    for path in recorded {
         let mut bytes = std::fs::read(&path).unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 1;
@@ -1018,7 +1026,7 @@ fn recorded_executables(home: &Home) -> Vec<PathBuf> {
         }
     }
     let mut found = vec![];
-    walk(&home.state().join("hirsel/verifier"), &mut found);
+    walk(&home.state().join("hirsel/compiler-records"), &mut found);
     found
 }
 

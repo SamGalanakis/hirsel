@@ -75,11 +75,14 @@ cleanup of task handles run shielded and observe no cancellation
 finalizer may call `waits` operations without being marked, and no implicit cleanup makes a
 function `waits`.
 
+A body that does not have its declared result type is refused by LANG-11, at the
+expression that has the wrong type.
+
 ```hirsel
 fn twice(x: u64) -> u64 { x * 2 }
 ```
 ```hirsel
-fn twice(x: u64) { x * 2 }                                // refused: LANG-8, result u64 is not unit
+fn twice(x: u64) -> u64 waits { x * 2 }                   // refused: LANG-8, waits with no waiting call
 ```
 
 ### LANG-9: Nominal types
@@ -87,7 +90,9 @@ fn twice(x: u64) { x * 2 }                                // refused: LANG-8, re
 A type definition declares a record (`type P { x: i64, y: i64 }`), a variant type
 (`type Shape = Circle(f64) | Rect(w: f64, h: f64)`, a single variant `Only()`) or a
 transparent alias (`type Ids = List[u64]`), as LANG-5 tells them apart. An alias is its
-right-hand side; a chain of aliases that reaches itself is refused. Payloads are all
+right-hand side; a chain of aliases that reaches itself is refused, at the reference that
+continues the chain in the member whose definition identity is least, as
+[OWN-2](ownership.md#own-2-type-summaries) reports a cycle. Payloads are all
 labelled or all positional. A record is constructed with every field labelled, in
 declaration order, `P(x: 1, y: 2)`; a variant with labels exactly when its payloads are
 labelled; labels appear in no other call. The representation keyword (`stable`, `resource`,
@@ -118,11 +123,17 @@ Types are checked bidirectionally within one body: an expression is checked agai
 expected type where one exists, and its type is synthesised otherwise. The expected type
 reaches a block's last expression, each `if` and `match` arm, each `break` value of a loop
 and a closure's result; an `if` without `else` has type unit, and an arm of type `Never`
-constrains nothing. At a call, the types of all arguments that synthesise one, and the
+constrains nothing. An expression whose type, after the conversions below, is not its
+expected type is refused, at the innermost expression the expected type reached: in `if c
+{ x } else { 0 }` checked against `u16` with `x: u8`, at `x`. This one rule covers a body
+and its result type, an arm, a `let` with a written type, an argument and a `break` value.
+A call has exactly one argument per parameter, in order; a missing argument is refused at
+the call's closing parenthesis, and an extra one at the first extra argument. At a call, the types of all arguments that synthesise one, and the
 expected result type, are collected before an unsuffixed literal argument is checked, so
 `f(1, x)` with `x: u8` types `1` as `u8`; a type parameter or region they leave
 undetermined, or determine twice differently, is refused. An unsuffixed number needs an
-expected type. There are no implicit conversions except these: `Never` to any type; a
+expected type ([LANG-3](syntax.md#lang-3-literals)); operands follow
+[LANG-21](#lang-21-operators). There are no implicit conversions except these: `Never` to any type; a
 `View[T]` of a plain `T` to `T` ([OWN-8](ownership.md#own-8-views)); a stable value to its
 view ([OWN-25](ownership.md#own-25-stable-values-are-read-as-views)); `T in a` to `T in r`
 when `a` outlives `r` ([MEM-6](memory.md#mem-6-roots)); and a callable to a callable type it
@@ -134,13 +145,21 @@ fn f() -> u64 { let x: u64 = 7; x }
 ```hirsel
 fn f() -> u64 { let x = 7; x }                            // refused: LANG-11, 7 has no expected type
 ```
+```hirsel
+fn f(c: bool, x: u8) -> u16 { if c { x } else { 0 } }     // refused: LANG-11, at x: u8 is not u16
+```
+```hirsel
+fn f(x: u8) -> u8 { x }
+fn g() -> u8 { f(1, 2) }                                  // refused: LANG-11, at 2: f takes one argument
+```
 
 ### LANG-12: Generics
 
 A definition may take type parameters with bounds, `[T: key + send]`. A generic body is
 checked once and uses only the bounds it declares
 ([OWN-23](ownership.md#own-23-generic-bodies)). Type arguments are never written at a
-call: they are found from that one call (LANG-11). Each use of a generic type writes its
+call: they are found from that one call (LANG-11). A type argument that lacks a bound its
+parameter declares is refused, at the argument or result that determined it. Each use of a generic type writes its
 arguments.
 
 ```hirsel
@@ -148,6 +167,9 @@ fn same[T: key](a: T, b: T) -> bool { a == b }
 ```
 ```hirsel
 fn same[T](a: T, b: T) -> bool { a == b }                 // refused: LANG-12, T is not key
+```
+```hirsel
+fn f(a: f64, b: f64) -> f64 { int.wrapping_add(a, b) }    // refused: LANG-12, at a: f64 is not integer
 ```
 
 ### LANG-13: Callables
@@ -213,9 +235,13 @@ fn counter(base: List[u64]) -> Result[own fn(u64) -> u64, Capacity] {
 
 A block, `loop`, `while` and `for` are expressions. A block's value is its last
 expression. A `loop` evaluates to the value of the `break` that leaves it; `while` and `for`
-evaluate to unit. Any of them may carry a label, `'l:`. `break v` leaves the innermost loop
-with `v`, `break 'l v` the labelled block or loop; `continue` selects the innermost loop or
-the labelled one. A label cannot shadow an active label, and no exit crosses a closure.
+evaluate to unit. The body of a `loop`, `while` or `for` is checked against unit
+(LANG-11), so a value it should keep is bound or discarded with `;`. Any of them may carry
+a label, `'l:`. `break v` leaves the innermost loop with `v`, `break 'l v` the labelled
+block or loop; `continue` selects the innermost loop or the labelled one. A label cannot
+shadow an active label, and no exit crosses a closure. These are refused at the exit: a
+`break` or `continue` with no loop to leave, a `continue` whose label names a block, and a
+`break` with a value out of `while` or `for`, which have no value to give.
 Every exit cleans up the scopes it leaves ([FAIL-8](failure.md#fail-8-exit-edge-cleanup)).
 
 ```hirsel
@@ -223,6 +249,12 @@ fn find(xs: List[u64], k: u64) -> Option[u64] {
   let mut i: u64 = 0
   loop { if i == list.len(xs) { break None }; if xs[i] == k { break Some(i) }; i += 1 }
 }
+```
+```hirsel
+fn f(c: bool) -> u64 { 'b: { if c { continue 'b }; 1 } }  // refused: LANG-15, 'b labels a block
+```
+```hirsel
+fn f(c: bool) { while c { break 5 } }                     // refused: LANG-15, while has no value
 ```
 
 ### LANG-16: Loops
@@ -301,4 +333,39 @@ const BYTES: u64 = WORDS * 8
 ```
 ```hirsel
 const BIG: u8 = 200 + 100                                 // refused: LANG-20, Overflow
+```
+
+### LANG-21: Operators
+
+An operator applies to the operand types this table lists and to no other; anything else is
+refused at the operator. Both operands of a binary operator have one type, so there are no
+mixed-width or mixed-kind operators. A compound assignment `a op= b` types as `a op b` and
+installs the result ([OWN-12](ownership.md#own-12-assignment)).
+
+| operators | operands | result |
+|---|---|---|
+| `+ - * /` | one integer type, or one float type | the operand type |
+| `%` | one integer type | the operand type |
+| unary `-` | a signed integer type, or a float type | the operand type |
+| `& \| ^`, unary `~` | one integer type | the operand type |
+| `<< >>` | an integer left operand and a count of its type ([SEM-1](semantics.md#sem-1-integers)) | the left type |
+| unary `!`, `&&`, `\|\|` | `bool` | `bool` |
+| `== !=` | one `key` type ([SEM-7](semantics.md#sem-7-equality-and-order)) | `bool` |
+| `< <= > >=` | one `ordered` type (SEM-7) | `bool` |
+
+A **literal operand** is an unsuffixed number, or a unary `-`, a binary operator or
+parentheses applied only to literal operands; it synthesises no type. A binary operator
+checks an operand that is not a literal operand first, and checks a literal operand against
+that operand's type. When both are literal operands they take the expected type, for an
+operator whose result is its operand type, and are refused by LANG-11 otherwise. So `1 + x`
+and `(1 + 2) < x` type their literals from `x`, and `1 < 2` has no type.
+
+```hirsel
+fn f(x: u8) -> bool { (1 + 2) < x && !(x == 7) }
+```
+```hirsel
+fn f(a: bool, b: bool) -> bool { a + b }                  // refused: LANG-21, + on bool
+```
+```hirsel
+fn f(x: u8, y: u16) -> u16 { x + y }                      // refused: LANG-21, mixed widths
 ```

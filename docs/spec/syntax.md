@@ -35,7 +35,7 @@ pub opaque const where true false bytes
 ```
 
 A keyword cannot be declared or used as a name anywhere, after a `.` included. These names
-are contextual and ordinary elsewhere: `drop` after a resource declaration; `plain`, `shareable`, `send`, `key` and `ordered` in a bound
+are contextual and ordinary elsewhere: `drop` after a resource declaration; `plain`, `shareable`, `send`, `key`, `ordered`, `integer` and `float` in a bound
 list; `own` before `fn` in a type; `waits` after a function or callable header. Library types and functions, including `Region`,
 `View`, `Rc`, `Arc` and `Capacity`, are ordinary names. `_` is the discard pattern.
 
@@ -84,13 +84,23 @@ hashes, keeps every source byte including LF, and has no escapes; a CR inside it
 refused. Integer literals have no sign: `-128i8` is negation of a magnitude, and the
 magnitude of `MIN` is accepted there. A malformed number or suffix is one invalid token. A
 fractional point needs a digit on both sides, so `1..2` is a range. An unsuffixed number
-takes its type from the expected type ([LANG-11](language.md#lang-11-typing-is-local)).
+takes its type from the expected type ([LANG-11](language.md#lang-11-typing-is-local)): an
+`integer` token only an integer type and a `float` token only a float type, so `1` is never a
+float (`1.0` and `1f64` are). A literal whose value does not fit its type is refused, at the
+literal: `300` as a `u8`, `300u8`, and a magnitude above `MAX` that is not the operand of a
+negation giving `MIN`.
 
 ```hirsel
 const MASK: u32 = 0xff_ff
 ```
 ```hirsel
 const BAD: u64 = 1.                                       // refused: LANG-3
+```
+```hirsel
+fn f() -> u8 { 300 }                                      // refused: LANG-3, 300 does not fit u8
+```
+```hirsel
+fn f() -> f64 { 1 }                                       // refused: LANG-3, 1 is an integer
 ```
 
 ### LANG-4: Statements and newlines

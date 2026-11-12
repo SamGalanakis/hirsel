@@ -77,7 +77,9 @@ fixed size and layout that does not read their payload's. These parts are comput
 dependency order and never iterated. A declaration whose computation re-enters a type
 still being computed contains itself inline and is refused; the refusal is reported at the
 field, continuing the cycle, of the cycle member whose definition identity (package, module
-path, byte offset) is least. The holds set reads every field, through indirections too:
+path, byte offset) is least. A logical size beyond `2^64 − 1` is refused too, at the field
+or type argument that exceeds it; a smaller size that an engine cannot lay out is a resource
+refusal ([PROG-6](programs.md#prog-6-one-meaning)). The holds set reads every field, through indirections too:
 types that name each other through fields, at any depth, form a group, and every member of
 a group holds the union of what the group's fields hold directly and what the other types
 they name hold. Where a rule needs a type to hold nothing, a type parameter counts as
@@ -139,19 +141,32 @@ The bounds are:
 - `send`: [CONC-2](tasks.md#conc-2-the-send-bound).
 - `key`: equality and hashing ([SEM-7](semantics.md#sem-7-equality-and-order)).
 - `ordered`: total order (SEM-7).
+- `integer`: exactly the integer types; `float`: exactly `f32` and `f64`. They are written
+  only on the type parameters of core declarations ([core](core.md)), which have no body, and
+  are refused anywhere else: numeric generics are not in v1
+  ([reserved](reserved.md#not-in-v1)).
 
 Plain types are `shareable` and `send` without declaring it. Otherwise a nominal type
 declares the bounds it promises after its name (`type Node: shareable + send { .. }`), and
 the declaration is checked once against its fields; a field naming a type, the declared
 type included, reads that type's declared bounds and does not re-derive them, so there is
-no fixpoint. A type without a declaration of `shareable`, `send`, `key` or `ordered` does
+no fixpoint. A generic type's declared bounds are conditional, as a built-in's are: the
+declaration is checked as if each type parameter had those bounds as well, and an
+instance has a declared bound exactly when each of its type arguments has it, so
+`type Pair[T]: shareable { a: T, b: T }` makes `Pair[u64]` shareable and
+`Pair[HostFile]` not. A refusal is reported at the field whose type breaks the bound. A type without a declaration of `shareable`, `send`, `key` or `ordered` does
 not have it, plain types' `shareable` and `send` excepted. `plain` is never declared.
 
 ```hirsel
 type Leaf: shareable + send { n: List[u64] }
+type Pair[T]: shareable { a: T, b: T }
+type Holder { r: Rc[Pair[u64]] }
 ```
 ```hirsel
-type Tree: shareable { kids: List[Rc[Tree]], log: HostFile }  // refused: OWN-4, a resource
+type Tree: shareable { kids: List[Rc[Tree]], log: HostFile }  // refused: OWN-4, at log
+```
+```hirsel
+fn pick[T: integer](a: T) -> T { a }                      // refused: OWN-4, integer outside core
 ```
 
 ### OWN-5: Availability
@@ -303,6 +318,11 @@ fn steal(mut xs: List[u64]) -> List[u64] { take xs }       // refused: OWN-11
 
 ### OWN-12: Assignment
 
+A **writable place** is a slot that is writable ([OWN-5](#own-5-availability)), or a
+field, tuple component, `List` element or `Inline` element of a writable place; nothing
+reached through a view, a counted value or a stable value is one. `q` must be a writable
+place, except that a `let` slot declared without an initializer is assigned while it is
+uninit. Any other assignment is refused here, at `q`.
 `q = e` resolves the writable place `q`, evaluates `e`, installs the value and drops the old
 one, by rows T3.1 to T3.4 of the [transition table](#own-26-the-transition-table). From the
 resolution of `q` until the install, `q` is reserved: `e` may read and view places
@@ -316,6 +336,9 @@ fn f(mut s: String) -> Result[(), Capacity] { s = string.from("new")?; Ok(()) } 
 ```
 ```hirsel
 fn f(mut xs: List[u64]) { xs[0] = { xs = list.new(); 7 } }  // refused: OWN-12, xs is reserved
+```
+```hirsel
+fn f(x: u8) -> u8 { let y = x; y = 3; y }                 // refused: OWN-12, y is not writable
 ```
 
 ### OWN-13: replace
@@ -429,7 +452,8 @@ anchors are live and frozen. It may not be:
 
 - a type argument of a user-declared generic (built-in `Option`, `Result` and tuples
   accept it);
-- a field of an own, stable or resource type, or an element of a collection;
+- a field of an own, stable or resource type, refused at the field, or an element of a
+  collection;
 - captured by an owning closure, sent, or returned past its anchor.
 
 ```hirsel
@@ -450,7 +474,8 @@ The caller's argument for each stays frozen for the result's extent. The result 
 the anchored argument, a part of it (a field, element or payload, at any depth), or a
 sub-view that a call gave for the argument or for such a part (OWN-8), core operations'
 included, or a part or sub-view of such a sub-view, at any depth; such a result has the
-argument's anchor and keeps the same freeze. It is a scoped value and copies as OWN-3 says. No anchor is inferred from a body.
+argument's anchor and keeps the same freeze. It is a scoped value and copies as OWN-3 says. No anchor is inferred from a body. A
+missing or wrong anchor is refused at the written result type.
 
 ```hirsel
 fn first(xs: List[String]) -> Option[View[String]] in xs { list.get(xs, 0) }

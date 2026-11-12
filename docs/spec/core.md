@@ -103,8 +103,10 @@ operations it names; nothing else about them may be inferred from an implementat
   when it is absent; it copies no key and admits nothing. `map.remove` drops the stored key
   and returns the value. A `Map` is cleaned entry by entry in insertion order, each key
   before its value.
-- **Integers.** In `int`, `T` and `U` range over the integer types. `int.widen` is accepted
-  only where every `T` fits in `U`; `int.narrow` fails with `Overflow`; `int.truncate` keeps
+- **Integers.** The `integer` and `float` bounds ([OWN-4](ownership.md#own-4-bounds)) say
+  which numeric types a core parameter ranges over. `int.widen` is accepted only where
+  every `T` fits in `U`, and `int.truncate` only where `U` is no wider than `T`
+  ([SEM-1](semantics.md#sem-1-integers)); `int.narrow` fails with `Overflow`; `int.truncate` keeps
   the low bits. `wrapping_neg` and `wrapping_shl` work modulo 2^width, `wrapping_shl` taking
   its count modulo the width. `checked_div` returns `None` for a zero divisor and for `MIN /
   -1`. `int.mul_wide(a, b)` returns the high and low halves of the exact 128-bit product.
@@ -112,8 +114,7 @@ operations it names; nothing else about them may be inferred from an implementat
   sign, space or underscore; it returns `Empty` for an empty string, `Invalid(i)` at the
   byte position `i` of the first byte that is not allowed, and `OutOfRange` when the value
   does not fit.
-- **Floats.** In `float`, `F` ranges over `f32` and `f64` and `I` over the integer types.
-  `float.from_int` and `float.narrow` round to nearest, ties to even; `float.to_int` rounds
+- **Floats.** `float.from_int` and `float.narrow` round to nearest, ties to even; `float.to_int` rounds
   toward zero and returns `NaN` or `OutOfRange`. `float.from_bits32` and `from_bits64` return
   the canonical NaN of [SEM-2](semantics.md#sem-2-floats) for every NaN pattern and the
   exact value for every other pattern, so a round trip through the bits is exact except that

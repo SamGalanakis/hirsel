@@ -1,4 +1,4 @@
-// Module `list` (SEM-4). Bytes is List[u8]. In `sum`, T ranges over the integer types.
+// Module `list` (SEM-4). Bytes is List[u8].
 
 pub fn new[T]() -> List[T]
 pub fn with_capacity[T](n: u64) -> Result[List[T], Capacity]
@@ -13,4 +13,4 @@ pub fn set[T](mut xs: List[T], i: u64, take x: T) -> T
 pub fn clear[T](mut xs: List[T])
 pub fn fill[T: plain](mut xs: List[T], n: u64, x: T) -> Result[(), Capacity]
 pub fn append[T: plain](mut xs: List[T], ys: List[T]) -> Result[(), Capacity]
-pub fn sum[T](xs: List[T]) -> T
+pub fn sum[T: integer](xs: List[T]) -> T

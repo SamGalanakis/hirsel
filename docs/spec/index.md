@@ -45,7 +45,7 @@ These goals decide between designs. A rule that would break one of them is wrong
 | chapter | rules |
 |---|---|
 | [Syntax](syntax.md) | LANG-1 to LANG-5 |
-| [Language](language.md) | LANG-6 to LANG-20 |
+| [Language](language.md) | LANG-6 to LANG-21 |
 | [Ownership](ownership.md) | OWN-1 to OWN-26 |
 | [Memory](memory.md) | MEM-1 to MEM-18 |
 | [Budgets](budgets.md) | MEM-19 to MEM-28 |

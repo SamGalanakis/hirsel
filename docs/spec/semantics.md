@@ -10,17 +10,19 @@ truncates toward zero and `%` takes the dividend's sign; division or remainder b
 fails with `Division`, `MIN / -1` fails with `Overflow`, and `MIN % -1` is 0. A shift count
 has the left operand's type; a count that is negative or at least the width fails with
 `Overflow`; `<<` discards the bits shifted out and never fails otherwise, and `>>`
-sign-extends signed and zero-extends unsigned values. Operands of a binary operator have one type; there are no
-mixed-width operators. Conversions are named and take their target from the expected type: `int.widen` exists
-only where every value fits; `int.narrow` fails with `Overflow`; `int.try_narrow` returns `Option[U]`;
-`int.truncate` keeps the low bits. `int.mul_wide` gives the full 128-bit product of two `u64`
+sign-extends signed and zero-extends unsigned values. Which operand types each operator
+takes is [LANG-21](language.md#lang-21-operators). Conversions are named and take their
+target from the expected type. `int.widen` is accepted only where every value of `T` fits
+in `U`, and `int.truncate` only where `U` is no wider than `T`; any other instantiation is
+refused at the call. `int.narrow` fails with `Overflow`, `int.try_narrow` returns
+`Option[U]`, and `int.truncate` keeps the low bits. `int.mul_wide` gives the full 128-bit product of two `u64`
 as its high and low halves.
 
 ```hirsel
 fn add(x: u8) -> u8 { int.wrapping_add(x, 100) }
 ```
 ```hirsel
-fn add(x: u8, y: u16) -> u16 { x + y }                    // refused: SEM-1, mixed widths
+fn grow(x: u8) -> u32 { int.truncate(x) }                // refused: SEM-1, u32 is wider than u8
 ```
 
 ### SEM-2: Floats

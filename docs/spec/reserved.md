@@ -175,9 +175,9 @@ failures; deadlines and timeouts; task sets and selection; `@noalloc`; compile-t
 evaluation beyond `const`; unsafe code and foreign functions; layout declarations other
 than `@compact`; methods, traits and implementation contracts; imports; list and map
 literals (an `Inline` array literal is not one); format strings; `forget`; static brands;
-conversion of errors by `?`; code generic over the numeric types, for which v1 has no bound
-(a library writes one function per width; only core operations such as `int.parse` range
-over every integer type); `text.as_string`, because `Text` and `String` have
+conversion of errors by `?`; code generic over the numeric types: the bounds `integer` and
+`float` are written only by core declarations ([OWN-4](ownership.md#own-4-bounds)), and a
+library writes one function per width; `text.as_string`, because `Text` and `String` have
 different representations (an author copies with `string.from` of the `Text` view, or keeps
 a `String`); generics over an `Inline` length; persistent mutable views; derivation and codecs; contracts and
 facts; the store, runners and places; recording formats. A later opt-in execution-budget

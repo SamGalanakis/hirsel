@@ -397,6 +397,9 @@ def _rust_test_impl(ctx):
     if ctx.attrs.test_binary == "hirsel-conformance-unittest":
         # Reuse freed heap across compiler threads inside the existing data guard.
         env["MALLOC_ARENA_MAX"] = "1"
+        # Compiler fixtures share the process query allowance. Parallel cases
+        # compete for it even when each case fits on its own.
+        env["RUST_TEST_THREADS"] = "1"
     exact_cpus = ctx.attrs.exact_cpus or EXACT_TEST_CPUS.get(ctx.attrs.test_binary, 0)
     if exact_cpus:
         env["HIRSEL_TEST_EXACT_CPUS"] = str(exact_cpus)

@@ -19,8 +19,11 @@ budget object in v1; nothing can name a limit.
 An own block, a counted node and a region allocation are charged to the limit current
 where they are made. A block keeps that limit when its owner is moved, sent, returned or
 grown (MEM-28): its refund goes to the same limit. When a limit ends (its bound scope
-exits or its task finishes) while blocks charged to it survive, their charges pass to the
-limit's parent, and their later refunds go there; this repeats up to the root. Transferring
+exits or its task finishes), the blocks still charged to it are handed to the limit's
+parent in one step: the parent already holds those bytes as part of the reservation it
+gave, so the hand-over cannot fail, admits nothing and visits no value. From then on the
+blocks belong to the parent, for refunds and for growth (MEM-28); if the parent ends in
+turn, they pass on again, up to the root. So no value outlives the limit that funds it. Transferring
 or refunding across tasks is an event in the run's event order
 ([CONC-10](tasks.md#conc-10-event-order)). A sent value's blocks keep their limit through the
 sender, the queue, the receiver, an abandoned handle and `join`; because a limit's charges
@@ -104,7 +107,8 @@ the body: own, counted, region and task storage. In the body, `?` applied to an
 `Error(c)` of type `Capacity` exits the bound scope with `Error(c)`; `?` on any other error
 type exits the function as usual. On exit by any edge, the body's
 views end and its owners are cleaned, the unused part of `n` is refunded to the parent, and
-the charges of surviving blocks pass to the parent (MEM-22). `bound` is the only bounding
+the blocks that leave the scope (its result and anything it moved outward) are handed to
+the parent (MEM-22). `bound` is the only bounding
 form; a region is not one.
 
 ```hirsel

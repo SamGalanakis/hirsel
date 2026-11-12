@@ -11,6 +11,8 @@ in `hirsel-candidate`, `hirsel-observation-view` and `hirsel-project-info`.
 Native builds and runs reserve a private scratch directory per build and remove
 it on drop, including errors and unwinding. Set `HIRSEL_KEEP_NATIVE_SCRATCH=1`
 to retain these directories for debugging; the driver prints each retained path.
+A build or run with it set never uses the program record, so every retained
+directory holds work that ran.
 
 Source launch boundaries flush stdout before writing the interpreter's PROG-3 return-payload report. Ready programs retain a checked, layout-derived diagnostic view for the native entry wrapper. Host reports are separate from semantic observations and Io tapes. Native CLI launches inherit the OS output streams, preserving the host report and finalizer order; custom-writer launches retain per-stream forwarding.
 

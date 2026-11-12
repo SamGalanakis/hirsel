@@ -95,6 +95,10 @@ const VARIABLES: &[(&str, Class)] = &[
     ("HIRSEL_OPERATION_OWNER_TRACE", Class::Bypass),
     ("HIRSEL_VALIDATE_PROFILE", Class::Bypass),
     ("HIRSEL_OWNERSHIP_TRACE", Class::Bypass),
+    // Keeping native scratch is for inspecting a build's work, which a hit
+    // does not do; a failed hit's kept scratch would be reported as the
+    // build's.
+    ("HIRSEL_KEEP_NATIVE_SCRATCH", Class::Bypass),
     ("LD_PRELOAD", Class::Bypass),
     ("LD_AUDIT", Class::Bypass),
     ("LD_DEBUG", Class::Bypass),
@@ -105,7 +109,6 @@ const VARIABLES: &[(&str, Class)] = &[
     ("HIRSEL_JOBS", Class::Acquisition),
     ("HIRSEL_MEMORY_LIMIT", Class::Acquisition),
     ("HIRSEL_DAEMON", Class::Acquisition),
-    ("HIRSEL_KEEP_NATIVE_SCRATCH", Class::Acquisition),
     ("HIRSEL_NATIVE_TIMEOUT_DIR", Class::Acquisition),
     ("HIRSEL_PLATFORM_CAPTURE", Class::Acquisition),
     ("HIRSEL_SERVE_IDLE", Class::Acquisition),
@@ -893,13 +896,13 @@ pub(crate) fn check(
                         unsafe_ffi: vec![],
                     });
                 }
-                None
+                hit.generation
             }
-            Lookup::Miss { generation } => Some(generation),
+            Lookup::Miss { generation } => generation,
         };
         timings::count(Count::ProgramRecordMisses);
         let checked = session.check_applied();
-        if let (Ok(output), Some(generation)) = (&checked, generation)
+        if let Ok(output) = &checked
             && output.completion == CheckCompletion::Complete
             && output.unsafe_ffi.is_empty()
             && let Some(diagnostics) = encode(&output.diagnostics, &output.sources, &[])
@@ -1062,16 +1065,13 @@ pub(crate) fn build(
                     timings::count(Count::ProgramRecordHits);
                     return replayed;
                 }
-                None => None,
+                None => hit.generation,
             },
-            Lookup::Miss { generation } => Some(generation),
+            Lookup::Miss { generation } => generation,
         };
         timings::count(Count::ProgramRecordMisses);
         request.platform = captured;
         let selected = run(session, request);
-        let Some(generation) = generation else {
-            return finish(selected, build.output, None);
-        };
         finish(
             selected,
             build.output,
@@ -1349,15 +1349,12 @@ pub(crate) fn run(
                     timings::count(Count::ProgramRecordHits);
                     return ran;
                 }
-                Err(()) => None,
+                Err(()) => hit.generation,
             },
-            Lookup::Miss { generation } => Some(generation),
+            Lookup::Miss { generation } => generation,
         };
         timings::count(Count::ProgramRecordMisses);
         let handed = captured.map(|host| std::sync::Arc::new(host.into_handed()));
-        let Some(generation) = generation else {
-            return fresh(session, &mut run, options, handed, None);
-        };
         let record = |kind: ProgramKind,
                       key: ContentHash,
                       image: Option<ContentHash>,
@@ -1901,7 +1898,58 @@ impl Descriptor<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Loaded, compiler_file_digest};
+    use super::{Descriptor, EXECUTION_VERSION, Loaded, compiler_file_digest};
+
+    /// Bug caught: R decoded under another inner version (a record written by
+    /// an older or newer layout answers this one), trailing bytes accepted,
+    /// or a part that does not survive its own encoding: the emulator's raw
+    /// path bytes, every root, the escape path or the unmodeled symbol.
+    #[test]
+    fn r_decodes_only_its_own_version_and_round_trips() {
+        use std::os::unix::ffi::OsStrExt;
+        let emulator = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/q\xffemu"));
+        let descriptor = Descriptor {
+            platform: hirsel_syntax::ContentHash([1; 32]),
+            run: [2; 32],
+            emulator: Some(emulator.clone()),
+            facts: hirsel_run_config::ProgramFacts {
+                program: [3; 32],
+                entry: "main".into(),
+                launch: hirsel_run_schema::LaunchKind::Call,
+                roots: vec![
+                    hirsel_run_config::Root::Test,
+                    hirsel_run_config::Root::Io,
+                    hirsel_run_config::Root::Unsafe,
+                    hirsel_run_config::Root::Args,
+                    hirsel_run_config::Root::Env,
+                ],
+                code: hirsel_run_schema::CodeReach::Escapes(vec!["a@1".into(), "b@1".into()]),
+            },
+            unmodeled: Some(("user".into(), "extern".into())),
+            observation: std::borrow::Cow::Owned(Default::default()),
+            sources: std::borrow::Cow::Owned(Default::default()),
+        };
+        let bytes = descriptor.encode().unwrap();
+        let decoded = Descriptor::decode(&bytes).expect("its own encoding");
+        assert_eq!(decoded.platform, descriptor.platform);
+        assert_eq!(decoded.run, descriptor.run);
+        assert_eq!(decoded.emulator, Some(emulator));
+        assert_eq!(decoded.facts, descriptor.facts);
+        assert_eq!(decoded.unmodeled, descriptor.unmodeled);
+        assert_eq!(decoded.encode().unwrap(), bytes);
+        for version in [EXECUTION_VERSION - 1, EXECUTION_VERSION + 1] {
+            let mut other = bytes.clone();
+            other[..4].copy_from_slice(&version.to_le_bytes());
+            assert!(Descriptor::decode(&other).is_none(), "version {version}");
+        }
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert!(Descriptor::decode(&longer).is_none(), "trailing byte");
+        assert!(
+            Descriptor::decode(&bytes[..bytes.len() - 1]).is_none(),
+            "truncated"
+        );
+    }
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::time::{Duration, SystemTime};
 

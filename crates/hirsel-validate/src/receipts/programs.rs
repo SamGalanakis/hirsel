@@ -296,6 +296,11 @@ pub enum Lookup {
 }
 /// A selected record, held under a reader lease on its pin set until drop.
 pub struct ProgramHit {
+    /// The journal generation this record committed as: a hit that cannot be
+    /// replayed (a damaged executable, a launcher that no longer validates)
+    /// is answered fresh, and that run's publication replaces this
+    /// generation.
+    pub generation: u64,
     pub header: ProgramHeader,
     pub diagnostics: Vec<u8>,
     /// R, for a run hit.
@@ -458,6 +463,7 @@ impl ProgramRecords {
         drop(gc);
         match self.read(&association) {
             Some((header, diagnostics, execution)) => Lookup::Hit(ProgramHit {
+                generation: association.generation,
                 executable: header.executable.map(|(digest, _)| self.blob(digest)),
                 header,
                 diagnostics,

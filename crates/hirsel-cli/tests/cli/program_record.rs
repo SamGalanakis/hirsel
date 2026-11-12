@@ -566,7 +566,8 @@ fn copy_tree(from: &Path, to: &Path) {
 }
 
 /// Bug caught: a build hit that writes other bytes than the build recorded,
-/// leaves a damaged, deleted or non-executable output in place, answers from
+/// leaves a damaged, deleted or non-executable output in place, keeps a
+/// record whose executable is damaged (every later build misses), answers from
 /// a check record or a check from a build record, keys a failing build by
 /// anything but its sources, or records a failure that was not the source's.
 #[test]
@@ -621,6 +622,23 @@ fn a_build_record_restores_its_executable_and_replays_failures() {
         std::fs::read(root.join("elsewhere.exe")).unwrap(),
         cold_bytes
     );
+    // A damaged recorded executable: the build runs fresh and its
+    // publication replaces the record, so the next build hits again.
+    for path in recorded_executables(&home) {
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+    }
+    let cold = home.cold(root, &build, &[]);
+    // An output that already holds the recorded bytes is kept unread.
+    std::fs::remove_file(&exe).unwrap();
+    let (answer, counts) = home.warm(root, &build, &[]);
+    assert_eq!((answer, counts), (cold.clone(), MISS), "damaged record");
+    assert_eq!(std::fs::read(&exe).unwrap(), cold_bytes, "damaged record");
+    let (answer, counts) = home.warm(root, &build, &[]);
+    assert_eq!((answer, counts), (cold, HIT), "damaged record replaced");
     // Stage validation revalidates every build: under either spelling a
     // build neither reads nor publishes a record.
     let validated = [
@@ -1089,8 +1107,27 @@ fn a_run_record_launches_its_executable_with_this_runs_inputs() {
         (home.cold_in(root, &one, &tools, b"z"), HIT),
         "launch-only variables"
     );
+    // Kept native scratch is for a build's work: such a run never answers
+    // from the record, so no kept directory belongs to a hit.
+    let scratch = tempfile::tempdir().unwrap();
+    let keep = [
+        ("HIRSEL_KEEP_NATIVE_SCRATCH", "1"),
+        ("TMPDIR", scratch.path().to_str().unwrap()),
+    ];
+    let (answer, counts, _) = home.report_in(&home.state(), root, &one, &keep, b"z");
+    assert_eq!(
+        counts,
+        bypassed("variable HIRSEL_KEEP_NATIVE_SCRATCH is a bypass mode"),
+        "kept scratch"
+    );
+    assert_eq!(
+        (answer.status, answer.stdout),
+        (Some(0), b"arg a\nz".to_vec()),
+        "kept scratch"
+    );
     // A damaged recorded executable never launches: the run is answered
-    // fresh, as cold.
+    // fresh, as cold, and its publication replaces the damaged record, so the
+    // next run hits again.
     use std::os::unix::fs::PermissionsExt;
     let recorded = recorded_executables(&home);
     assert!(!recorded.is_empty(), "the run record holds its executable");
@@ -1115,13 +1152,15 @@ fn a_run_record_launches_its_executable_with_this_runs_inputs() {
                 damage(path);
             }
         }
+        let cold = home.cold_in(root, &one, &[], b"w");
         let (answer, counts) = home.warm_in(root, &one, b"w");
-        assert_eq!(answer, home.cold_in(root, &one, &[], b"w"), "{what}");
         if what == "chmod -x" {
             // The record's bytes are copied out and made executable.
-            assert_eq!(counts, HIT, "{what}");
+            assert_eq!((answer, counts), (cold, HIT), "{what}");
         } else {
-            assert_eq!(counts.hits, 0, "{what}: {counts:?}");
+            assert_eq!((answer, counts), (cold.clone(), MISS), "{what}");
+            let (answer, counts) = home.warm_in(root, &one, b"w");
+            assert_eq!((answer, counts), (cold, HIT), "{what}: replaced");
         }
     }
     // Flips with this run's inputs, each answer compared with a cold run.
@@ -1186,4 +1225,77 @@ fn a_run_record_launches_its_executable_with_this_runs_inputs() {
     flips(&env, b"m", "manifest entry edit");
     edit("pipe/grants.json", r#""args":[]"#, r#""args": []"#);
     flips(&env, b"g", "grants file bytes");
+    // A tape and a revocation file are read at launch, not keyed: a hit
+    // records a tape that replays to the cold run's answer.
+    std::fs::write(
+        root.join("pipe/revoked.json"),
+        r#"{"schema":1,"revoked":[]}"#,
+    )
+    .unwrap();
+    let taped = |tape: &'static str| {
+        [
+            &one[..5],
+            &["--record", tape, "--revocations", "pipe/revoked.json"][..],
+            &one[5..],
+        ]
+        .concat()
+    };
+    let cold = home.cold_in(root, &taped("cold.tape"), &env, b"t");
+    let (answer, counts, _) = home.report_in(&home.state(), root, &taped("hit.tape"), &env, b"t");
+    assert_eq!(
+        (answer, counts),
+        (cold.clone(), HIT),
+        "tape and revocations"
+    );
+    let replay = [
+        "run",
+        "--native",
+        "pipe/hirsel.json",
+        "--replay",
+        "hit.tape",
+    ];
+    let (answer, counts, _) = home.report_in(&home.state(), root, &replay, &env, b"");
+    assert_eq!(
+        (answer.status, answer.stdout, counts),
+        (
+            cold.status,
+            cold.stdout,
+            bypassed("replay or callee launch")
+        ),
+        "the hit's tape replayed"
+    );
+    // A granted directory's host path enters the bound run canonicalized, so
+    // retargeting a symlink changes the run the executable embeds while the
+    // grants bytes, and so the key, stay equal: the hit's bound identity
+    // differs from R's, the run is answered fresh and replaces the record.
+    for dir in ["d1", "d2"] {
+        std::fs::create_dir_all(root.join("pipe").join(dir)).unwrap();
+    }
+    std::os::unix::fs::symlink("d1", root.join("pipe/d")).unwrap();
+    std::fs::write(
+        root.join("pipe/dirs.json"),
+        r#"{"io":{"stdin":"stdin.bytes@1","stdout":"stdout.bytes@1","stderr":"stderr.bytes@1","dirs":[{"path":"d","host":"d","access":"read"}]},"args":[]}"#,
+    )
+    .unwrap();
+    let dirs = [&one[..4], &["pipe/dirs.json"][..], &one[5..]].concat();
+    let cold = home.cold_in(root, &dirs, &env, b"d");
+    let (answer, counts, _) = home.report_in(&home.state(), root, &dirs, &env, b"d");
+    assert_eq!((answer, counts), (cold.clone(), MISS), "granted directory");
+    let (answer, counts, _) = home.report_in(&home.state(), root, &dirs, &env, b"d");
+    assert_eq!((answer, counts), (cold, HIT), "granted directory again");
+    std::fs::remove_file(root.join("pipe/d")).unwrap();
+    std::os::unix::fs::symlink("d2", root.join("pipe/d")).unwrap();
+    let cold = home.cold_in(root, &dirs, &env, b"d");
+    let (answer, counts, _) = home.report_in(&home.state(), root, &dirs, &env, b"d");
+    assert_eq!(
+        (answer, counts),
+        (cold.clone(), MISS),
+        "granted directory retargeted"
+    );
+    let (answer, counts, _) = home.report_in(&home.state(), root, &dirs, &env, b"d");
+    assert_eq!(
+        (answer, counts),
+        (cold, HIT),
+        "granted directory retargeted, replaced"
+    );
 }

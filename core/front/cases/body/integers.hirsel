@@ -1,0 +1,40 @@
+// SEM-1 by hand: checked + - * and unary -, truncating / and dividend-signed %, the
+// failures by cause, shift counts of the left operand's type.
+// expect: accept
+// expect: run add(250,5) = 255
+// expect: run add(250,6) = fail Overflow
+// expect: run sub(0,1) = fail Overflow
+// expect: run mul(16,16) = fail Overflow
+// expect: run mul(15,17) = 255
+// expect: run quot(-7,2) = -3
+// expect: run rem(-7,2) = -1
+// expect: run rem(7,-2) = 1
+// expect: run quot(7,0) = fail Division
+// expect: run rem(7,0) = fail Division
+// expect: run quot(-128,-1) = fail Overflow
+// expect: run rem(-128,-1) = 0
+// expect: run neg(-128) = fail Overflow
+// expect: run neg(5) = -5
+// expect: run uneg(0) = 0
+// expect: run uneg(1) = fail Overflow
+// expect: run shl(3,7) = 128
+// expect: run shl(1,8) = fail Overflow
+// expect: run sar(-128,7) = -1
+// expect: run sar(1,-1) = fail Overflow
+// expect: run shr(128,7) = 1
+// expect: run bits(12,10) = 6
+// expect: run flip(0) = 255
+
+fn add(x: u8, y: u8) -> u8 { x + y }
+fn sub(x: u8, y: u8) -> u8 { x - y }
+fn mul(x: u8, y: u8) -> u8 { x * y }
+fn quot(x: i8, y: i8) -> i8 { x / y }
+fn rem(x: i8, y: i8) -> i8 { x % y }
+fn neg(x: i8) -> i8 { -x }
+fn uneg(x: u8) -> u8 { -x }
+fn shl(x: u8, n: u8) -> u8 { x << n }
+fn sar(x: i8, n: i8) -> i8 { x >> n }
+fn shr(x: u8, n: u8) -> u8 { x >> n }
+// (12 & 10) | (12 ^ 10) = 8 | 6 = 14; then & ~8 = 6
+fn bits(x: u8, y: u8) -> u8 { ((x & y) | (x ^ y)) & ~8 }
+fn flip(x: u8) -> u8 { ~x }

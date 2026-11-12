@@ -123,6 +123,10 @@
 #[cfg(test)]
 hirsel_guard::install!();
 
+/// A test evaluator for the FORM v0 subset, for this crate's samples and its producers'
+/// behaviour cases.
+#[cfg(any(test, feature = "eval"))]
+pub mod eval;
 mod ir;
 pub mod text;
 #[cfg(any(test, feature = "wf"))]

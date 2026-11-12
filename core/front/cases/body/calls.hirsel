@@ -1,0 +1,24 @@
+// Direct calls and the core integer operations by hand (SEM-1): a callee's failure
+// leaves the caller with its cause; `int.wrapping_add(x, 100)` is the spec's example.
+// expect: accept
+// expect: run sum_sq(3,4) = 25
+// expect: run outer(1) = fail Overflow
+// expect: run wrap(200) = 44
+// expect: run sat(200) = 255
+// expect: run wsub(0) = 255
+// expect: run wide(200) = 200
+// expect: run swide(-1) = -1
+// expect: run uwide(255) = 255
+// expect: run trunc(258) = 2
+
+fn sq(x: u64) -> u64 { x * x }
+fn sum_sq(a: u64, b: u64) -> u64 { sq(a) + sq(b) }
+fn inner(x: u8) -> u8 { x + 255 }
+fn outer(x: u8) -> u8 { inner(x) }
+fn wrap(x: u8) -> u8 { int.wrapping_add(x, 100) }
+fn sat(x: u8) -> u8 { int.saturating_add(x, 100) }
+fn wsub(x: u8) -> u8 { int.wrapping_sub(x, 1) }
+fn wide(x: u8) -> u32 { int.widen(x) }
+fn swide(x: i8) -> i64 { int.widen(x) }
+fn uwide(x: u8) -> i16 { int.widen(x) }
+fn trunc(x: u32) -> u8 { int.truncate(x) }

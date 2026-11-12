@@ -1,4 +1,4 @@
-// expect: accept
+// Every declaration is accepted; the one body is not built yet (gaps at the end).
 // expect: kind Point plain
 // expect: size Point 16
 // expect: kind Mixed plain
@@ -31,3 +31,5 @@ type Leaf: shareable + send { n: List[u64] }
 type Ids = List[u64]
 type Rec: shareable { kids: List[Rc[Rec]] }
 fn first(xs: List[String]) -> Option[View[String]] in xs { list.get(xs, 0) }
+// expect: gap values of this type are not built
+// expect: gap calls to generic functions are not built

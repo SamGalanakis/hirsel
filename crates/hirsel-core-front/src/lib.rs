@@ -10,15 +10,19 @@
 #[cfg(test)]
 hirsel_guard::install!();
 
+mod body;
 mod decls;
 mod layout;
 mod types;
 
+pub use body::{CoreCheck, Counts, Emitter};
 pub use decls::*;
 pub use types::*;
 
 use hirsel_core_ids::DefPath;
-use hirsel_core_resolve::{ModuleId, NameIndex, Refusal, Resolution, Site, Target, resolve};
+use hirsel_core_resolve::{
+    ModuleId, NameIndex, Refusal, Resolution, ResolvedUse, Site, Target, resolve,
+};
 use hirsel_core_syntax::{Item, NodeId, Span, SyntaxFile};
 use std::collections::HashMap;
 
@@ -141,9 +145,12 @@ impl<'a> Program<'a> {
         }
     }
     pub(crate) fn target(&self, at: ItemRef, n: NodeId) -> Option<&Target> {
+        Some(&self.resolved(at, n)?.target)
+    }
+    pub(crate) fn resolved(&self, at: ItemRef, n: NodeId) -> Option<&ResolvedUse> {
         let info = &self.items[at.module as usize][at.item as usize];
         let k = *info.uses.get(n.0 as usize)?;
-        (k != u32::MAX).then(|| &info.resolution.names[k as usize].target)
+        (k != u32::MAX).then(|| &info.resolution.names[k as usize])
     }
 
     pub fn decl(&self, path: &DefPath) -> Option<&TypeDecl> {

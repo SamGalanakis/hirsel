@@ -13,4 +13,5 @@ hirsel-core-syntax = { path = "../hirsel-core-syntax" }
 hirsel-core-resolve = { path = "../hirsel-core-resolve" }
 
 [dev-dependencies]
+hirsel-core-ir = { path = "../hirsel-core-ir", features = ["eval", "wf"] }
 hirsel-guard = { path = "../hirsel-guard" }

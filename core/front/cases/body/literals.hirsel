@@ -1,0 +1,22 @@
+// LANG-3 by hand: prefixes, separators, suffixes, MIN under negation, and an unsuffixed
+// number taking the expected type (LANG-11), also through an operator.
+// expect: accept
+// expect: run min() = -128
+// expect: run hex() = 255
+// expect: run bin() = 10
+// expect: run big() = 1024
+// expect: run left(2) = 3
+// expect: run shifted(1) = 8
+// expect: run half() = 0.5
+// expect: run byte() = 97
+// expect: run yes() = true
+
+fn min() -> i8 { -128i8 }
+fn hex() -> u8 { 0xff }
+fn bin() -> u32 { 0b1010 }
+fn big() -> u16 { 1_000 + 24 }
+fn left(x: u8) -> u8 { 1 + x }
+fn shifted(x: u64) -> u64 { x << 3 }
+fn half() -> f64 { 1.0 / 2.0 }
+fn byte() -> u8 { b'a' }
+fn yes() -> bool { 2 < 3u8 }

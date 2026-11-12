@@ -1,1 +1,11 @@
+// Module `int`, as core/core/int.hirsel declares the operations built so far.
+// T and U range over the integer types (SEM-1).
+
 pub fn wrapping_add[T](a: T, b: T) -> T
+pub fn wrapping_sub[T](a: T, b: T) -> T
+pub fn wrapping_mul[T](a: T, b: T) -> T
+pub fn saturating_add[T](a: T, b: T) -> T
+pub fn saturating_sub[T](a: T, b: T) -> T
+pub fn saturating_mul[T](a: T, b: T) -> T
+pub fn widen[T, U](x: T) -> U
+pub fn truncate[T, U](x: T) -> U

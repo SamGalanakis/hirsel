@@ -1,0 +1,6 @@
+// LANG-11: an unsuffixed number with no expected type.
+// expect: refuse LANG-11 at 4:11
+fn f() -> u8 {
+  let x = 1
+  x
+}

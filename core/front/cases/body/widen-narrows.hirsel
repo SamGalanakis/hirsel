@@ -1,0 +1,5 @@
+// SEM-1: `int.widen` exists only where every value fits (u32 to u8, i8 to u64).
+// expect: refuse SEM-1 at 4:22
+// expect: refuse SEM-1 at 5:22
+fn a(x: u32) -> u8 { int.widen(x) }
+fn b(x: i8) -> u64 { int.widen(x) }

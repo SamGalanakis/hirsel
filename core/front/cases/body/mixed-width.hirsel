@@ -1,0 +1,3 @@
+// SEM-1: operands have one type; the spec's example, refused at the second operand.
+// expect: refuse SEM-1 at 3:36
+fn add(x: u8, y: u16) -> u16 { x + y }

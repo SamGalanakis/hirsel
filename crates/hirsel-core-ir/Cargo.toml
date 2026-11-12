@@ -8,6 +8,8 @@ rust-version.workspace = true
 [features]
 # The structural well-formedness function, for tests of this crate and of its producers.
 wf = []
+# The FORM v0 test evaluator, for producers' behaviour cases.
+eval = []
 
 [dependencies]
 hirsel-core-ids = { path = "../hirsel-core-ids" }

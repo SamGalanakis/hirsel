@@ -1,0 +1,5 @@
+// LANG-11: with no expected type the first arm fixes the `if`'s type.
+// expect: refuse LANG-11 at 4:29
+fn f(c: bool, x: u8, y: u16) {
+  let z = if c { x } else { y }
+}

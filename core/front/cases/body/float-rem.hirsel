@@ -1,0 +1,3 @@
+// SEM-2: `%` is integer-only.
+// expect: refuse SEM-2 at 3:31
+fn r(x: f64, y: f64) -> f64 { x % y }

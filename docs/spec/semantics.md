@@ -1,21 +1,19 @@
 # Semantics
 
-The meaning of the built-in values and operations. Every operation here means the same
-thing on every engine and build.
-
 ### SEM-1: Integers
 
 The integer types are `i8` to `i64` and `u8` to `u64`. `+`, `-`, `*` and unary `-` fail
 with `Overflow` when the result does not fit ([FAIL-2](failure.md#fail-2-causes)). Other
 arithmetic is named: `int.wrapping_add`, `int.checked_add` (an `Option`),
-`int.saturating_add` and their siblings. `/` truncates toward zero and `%` takes the
-dividend's sign; division or remainder by zero fails with `Division`, and `MIN / -1` fails
-with `Overflow`. A shift count has the left operand's type; a count that is negative or at
-least the width fails with `Overflow`; `<<` discards high bits, `>>` sign-extends signed
-and zero-extends unsigned values. Operands of a binary operator have one type; there are no
+`int.saturating_add` and their siblings; the `checked_` operations return `Option[T]`. `/`
+truncates toward zero and `%` takes the dividend's sign; division or remainder by zero
+fails with `Division`, `MIN / -1` fails with `Overflow`, and `MIN % -1` is 0. A shift count
+has the left operand's type; a count that is negative or at least the width fails with
+`Overflow`; `<<` discards the bits shifted out and never fails otherwise, and `>>`
+sign-extends signed and zero-extends unsigned values. Operands of a binary operator have one type; there are no
 mixed-width operators. Conversions are named and take their target from the expected type: `int.widen` exists
-only where every value fits; `int.narrow` fails with `Overflow`; `int.try_narrow` returns an
-`Option`; `int.truncate` keeps the low bits.
+only where every value fits; `int.narrow` fails with `Overflow`; `int.try_narrow` returns `Option[U]`;
+`int.truncate` keeps the low bits.
 
 ```hirsel
 fn add(x: u8) -> u8 { int.wrapping_add(x, 100) }
@@ -28,17 +26,24 @@ fn add(x: u8, y: u16) -> u16 { x + y }                    // refused: SEM-1, mix
 
 `f32` and `f64` are IEEE 754 binary32 and binary64 with round-to-nearest-even and no mode
 state. Expressions are evaluated as written: no contraction, reassociation or wider
-intermediates; `float.mul_add` fuses explicitly. Every NaN an operation produces has one
-canonical bit pattern per type, so a NaN's bits are the same on every engine.
-`float.to_i64` and its siblings return a `Result`. Floats are neither `key` nor `ordered`;
-`float.total_order` orders them for sorting.
+intermediates; `float.mul_add` fuses explicitly. Subnormals are kept and zero is signed, as
+IEEE 754 says. Every NaN an operation produces has one bit pattern: `0x7fc00000` for `f32`,
+`0x7ff8000000000000` for `f64`. `float.to_i64` and its siblings truncate toward zero and
+return `Result[i64, FloatError]`, with `FloatError` `NaN` or `OutOfRange`. Conversions from
+integers to floats and from `f64` to `f32` round to nearest even. `%` is integer-only.
+Floats are neither `key` nor `ordered`; `float.total_order` orders them by IEEE 754
+totalOrder.
 
 ### SEM-3: Text
 
-`char` is a Unicode scalar value. `String` is own, growable and always valid UTF-8; `Text`
-is its stable twin; `Bytes` is own and arbitrary. Length is `byte_len`; scalars and byte
-positions are iterated through views (`string.scalars(s)`, `string.positions(s)`), and
-slicing at a position never splits a scalar. Equality, order and hashing are bytewise;
+`char` is a Unicode scalar value; `char.to_u32` and `char.from_u32` (an `Option`, `None` for
+surrogates and values above `0x10FFFF`) convert it. `String` is an opaque own type over
+UTF-8 storage that is always valid; `Text` is its stable twin; `Bytes` is `List[u8]`.
+`string.from_utf8` validates a `Bytes` into a `String`, `string.into_bytes` gives its
+storage back, and `string.as_bytes` views it as bytes. Length is `byte_len`; scalars are
+read with `string.next_scalar(s, at) -> Option[(char, u64)]`, which returns the scalar at
+byte position `at` and the next position. `string.slice` fails with `Bounds` at a position
+that would split a scalar. Equality, order and hashing are bytewise;
 normalisation is explicit. String formatting is ordinary calls; there are no format
 strings.
 
@@ -47,8 +52,10 @@ strings.
 `List[T]` is own and growable, with the capacity-based layout of
 [MEM-13](memory.md#mem-13-own-layout). `xs[i]` and `list.get(xs, i)` read through a view and
 fail with `Bounds`, or return `None`, when `i` is out of range. `list.push` and the other
-growing operations return `Result[_, (Capacity, T)]` or `Result[_, Capacity]` and grow by
-doubling ([MEM-26](budgets.md#mem-26-logical-charges)). Removing elements never allocates. A view
+growing operations return `Result[_, (Capacity, T)]` or `Result[_, Capacity]` and grow as
+[MEM-26](budgets.md#mem-26-logical-charges) says; `list.capacity` reads the capacity and
+`list.reserve(mut xs, n)` grows it to at least `len + n`. Removing elements never
+allocates or shrinks. A view
 returned by `list.get` or indexing is anchored to the list
 ([OWN-20](ownership.md#own-20-scoped-results-name-their-anchor)) and freezes it until the
 view's extent ends ([OWN-10](ownership.md#own-10-freezes)); iteration freezes it for the
@@ -57,12 +64,13 @@ loop (SEM-6).
 ### SEM-5: Maps
 
 `Map[K: key, V]` is own and iterates in insertion order. Insertion, lookup and removal take
-amortised constant time; removal keeps the order of the remaining entries. Inserting an
-existing key replaces its value in place, keeps the stored key, cleans the old value and
-then drops the incoming key. `map.get(m, k)` returns `Option[View[V]] in m`
+amortised expected constant time; removal keeps the order of the remaining entries.
+Inserting an existing key installs the new value in place, keeps the stored key, cleans
+the old value and then drops the incoming key; it admits nothing, so it never returns
+`Capacity`. `map.get(m, k)` returns `Option[View[V]] in m`
 ([OWN-20](ownership.md#own-20-scoped-results-name-their-anchor)). Each `key` type has exactly
-one equality, the structural one of SEM-7, and one hash, which is private, has no seed and
-cannot be observed; both are fixed by the type, so every map with the same key type uses the
+one equality, the structural one of SEM-7, and one hash, which is private and cannot be
+observed ([CAP-6](capabilities.md#cap-6-no-ambient-input)); both are fixed by the type, so every map with the same key type uses the
 same ones, and no program supplies or replaces them in v1 ([reserved](reserved.md), R11).
 Views from `map.get` are anchored to the map and freeze it as list views do.
 
@@ -72,10 +80,13 @@ fn count(m: Map[String, u64], k: String) -> u64 { match map.get(m, k) { Some(v) 
 
 ### SEM-6: Iteration
 
-`for x in e` iterates a range or a view of a sequence, map or span; `for take x in e`
-consumes an own sequence, moving each element out from the lowest index and cleaning the
-rest if the loop exits early. A range `a..b` is half-open and `a..=b` closed; both are
-plain and iterate upward. A sequence is frozen for the loop
+`for x in e` iterates a range, or a view of a `List`, a span or a `Causes`
+([core](core.md)), binding a view of each element from the lowest index. Over a view of a
+`Map` it binds `(View[K], View[V])` for each entry in insertion order. `for take x in e` consumes an own `List`, moving each
+element out from the lowest index and cleaning the rest if the loop exits early. Nothing
+else is iterable; scalars are read with `string.next_scalar` (SEM-3). A range `a..b` is
+half-open and `a..=b` closed; both are plain, iterate upward, and stop at the type's
+maximum without overflow. The source is frozen for the loop
 ([OWN-10](ownership.md#own-10-freezes)), so iteration never observes a change.
 
 ```hirsel
@@ -90,13 +101,13 @@ fn grow(mut xs: List[u64]) -> Result[(), Capacity] {
 ### SEM-7: Equality and order
 
 `==` and `!=` need `key` operands; `<`, `<=`, `>` and `>=` need `ordered` operands
-([OWN-4](ownership.md#own-4-bounds)). Integers, `bool`, `char`, unit, `String`, `Text` and
-`Bytes` are both. Tuples, `Option`, `Result`, `List` and spans have a bound when their
+([OWN-4](ownership.md#own-4-bounds)). Integers, `bool`, `char`, unit, `String` and `Text`
+are both. Tuples, `Option`, `Result`, `List` and spans have a bound when their
 components do. A nominal type has a bound when it declares it and its fields have it.
 Equality is structural. Order is numeric for integers and `char`, `false` before `true`,
 bytewise for text, lexicographic for tuples, sequences and records (fields in declaration
 order, a proper prefix first), and by declaration ordinal then payload for variants. A
-counted value compares by payload. Floats, maps, callables, capabilities, resources and
+counted value and a view compare by payload. Floats, maps, callables, capabilities, resources and
 scoped types have neither bound. Comparison never allocates.
 
 ```hirsel
@@ -111,7 +122,8 @@ type Q: key { w: f64 }                                     // refused: OWN-4, f6
 
 Given the same program, the same values at the replay point
 ([CAP-8](capabilities.md#cap-8-the-replay-point)), the same root limit and the same charge
-policy, every run behaves identically on every engine, build and optimisation level: the
-same values, outputs, `Capacity` results, failure causes and sites, cleanup order and run
-outcome. Nothing in the language depends on addresses, timing, the host or unrecorded
-scheduling.
+policy, every run that no run stop ends ([FAIL-15](failure.md#fail-15-run-stops)) behaves
+identically on every engine, build and optimisation level: the same values, outputs,
+`Capacity` results, failure causes and sites, cleanup order and run outcome. Nothing
+observable depends on addresses (of blocks or of functions), on the order of declarations
+in a source, on timing, on the host or on unrecorded scheduling.

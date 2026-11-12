@@ -1,7 +1,5 @@
 # Programs
 
-How source files form a program, what is visible where, and where a run starts.
-
 ### PROG-1: Packages
 
 A **package** has a name and a major version and consists of modules; each source file is
@@ -14,10 +12,14 @@ written for ([MEM-26](budgets.md#mem-26-logical-charges)); in v1 that is `charge
 ### PROG-2: Visibility
 
 A definition is private to its module unless marked `pub`. A `pub` type exposes its
-fields, variants and constructors. A `pub opaque` type exposes its name, kind and declared
+fields, variants and constructors, and may be wholly destructured anywhere it is visible,
+except that a resource is destructured only in its defining module
+([OWN-14](ownership.md#own-14-no-partial-moves)). A `pub opaque` type exposes its name, kind and declared
 bounds only: outside its module its values cannot be constructed, destructured, matched
 on their fields or read field by field. Opaque types are how a library keeps an invariant
-([MEM-19](memory.md#mem-19-what-a-pool-library-may-rely-on)).
+([MEM-19](memory.md#mem-19-what-a-pool-library-may-rely-on)); outside its module, a whole
+place of an opaque type reached through a `mut` parameter cannot be assigned or replaced
+([MEM-18](memory.md#mem-18-brands)).
 
 ```hirsel
 pub opaque type Month { n: u8 }
@@ -30,15 +32,16 @@ fn thirteenth() -> date.Month { date.Month(n: 13) }      // refused: PROG-2, Mon
 ### PROG-3: Entry
 
 A program's entry is a `pub fn main` named by its manifest. Its parameters are capability
-types ([CAP-4](capabilities.md#cap-4-entry-grants)) and `Args`, a plain-readable list of
-the run's argument strings, all unmarked. Its result is `Result[(), E]` for any `E`. The
+types ([CAP-4](capabilities.md#cap-4-entry-grants)) and `Args`, all unmarked. `Args` is an
+opaque own type holding the run's argument strings for the whole run, read with
+`args.len(a)` and `args.get(a, i) -> Option[View[String]] in a`. Its result is `Result[(), E]` for any `E`. The
 run's configuration supplies the root limit ([MEM-21](budgets.md#mem-21-limits)). The run
 ends when `main` returns and its cleanup is done: `Ok(())` is success, `Error(e)` is an
 error outcome carrying `e`, a failure is a failure outcome
 ([FAIL-14](failure.md#fail-14-failure-boundary)).
 
 ```hirsel
-pub fn main(out: Stdout, args: Args) -> Result[(), IoError] { stdout.write(out, "hello\n") }
+pub fn main(out: Stdout, args: Args) -> Result[(), WriteError] waits { stdout.write(out, "hello\n") }
 ```
 ```hirsel
 pub fn main(take xs: List[u64]) -> Result[(), ()] { Ok(()) }   // refused: PROG-3
@@ -48,7 +51,8 @@ pub fn main(take xs: List[u64]) -> Result[(), ()] { Ok(()) }   // refused: PROG-
 
 A function marked `@test` takes no parameters other than capabilities, and returns
 `Result[(), E]`. Each test runs as its own run with its own root limit; `Error` and a
-failure fail the test. Test functions cannot be called from code that is not a test.
+failure fail the test. A test function can be named, called or taken as a value only by
+another test function.
 
 ```hirsel
 @test
@@ -59,13 +63,20 @@ fn adds() -> Result[(), ()] { if 1u64 + 1 == 2 { Ok(()) } else { fail("arithmeti
 
 Each top-level function has a **code identity**: its definition identity (PROG-1) and its
 signature. A call through a function value keeps the callee's identity; a closure has
-none of its own. Programs cannot read code identities in v1; the identity is the stable
-name a later code descriptor will expose ([reserved](reserved.md)). No construct
-dispatches on a function's name or signature at run time.
+none of its own. An instance of a generic function is identified by its definition, its
+closed type arguments and the dictionaries chosen for its bounds; sizes are not part of
+it. Programs cannot read code identities in v1 ([reserved](reserved.md), R13). No
+construct dispatches on a function's name or signature at run time, and nothing
+observable depends on a function's address or on the order of declarations
+([SEM-8](semantics.md#sem-8-determinism)), so two bodies with the same checked meaning
+are interchangeable.
 
 ### PROG-6: One meaning
 
 A program has one meaning. Whether it is accepted, and what each accepted program does,
 does not depend on the engine, the build mode, optimisation, flags, the host, or the order
 in which definitions are checked. There are no conditional compilation forms and no
-language switches.
+language switches. The one exception is an implementation's resource refusal: a program
+whose checking exceeds the implementation's resources (for example unbounded generic
+instantiation, or instantiation past a depth or count) may be refused with a message that
+names no rule; such a refusal is not a meaning of the program.

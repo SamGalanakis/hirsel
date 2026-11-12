@@ -1,7 +1,7 @@
 # Hirsel
 
 Hirsel is a systems-level, general-purpose language whose primary user is a coding agent.
-It is procedural with value semantics: loops and local mutation, no references, no
+It is procedural with value semantics: loops and local mutation, no raw pointers, no
 methods. Every type declares once how its values are represented: own, stable in a
 region, a resource, or plain data. Values are read through lexical views, shared only
 through explicit `Rc` and `Arc`, and allocated against limits that fail with an ordinary
@@ -28,8 +28,8 @@ These goals decide between designs. A rule that would break one of them is wrong
    free and no leaked resources.
 4. **Authority is explicit.** Files, network, clocks, randomness, tasks and output are
    values passed as parameters ([capabilities](capabilities.md)).
-5. **Deterministic.** Given the same recorded inputs and limits, a program behaves
-   identically on every engine and build ([SEM-8](semantics.md#sem-8-determinism)),
+5. **Deterministic.** Given the same recorded inputs and limits, every run that no run
+   stop ends behaves identically on every engine and build ([SEM-8](semantics.md#sem-8-determinism)),
    including where it runs out of memory ([MEM-26](budgets.md#mem-26-logical-charges)).
 6. **One meaning.** No flag, build mode, optimiser or engine changes what is accepted or
    what a program means ([PROG-6](programs.md#prog-6-one-meaning)).
@@ -41,7 +41,7 @@ These goals decide between designs. A rule that would break one of them is wrong
 | chapter | rules |
 |---|---|
 | [Syntax](syntax.md) | LANG-1 to LANG-5 |
-| [Language](language.md) | LANG-6 to LANG-19 |
+| [Language](language.md) | LANG-6 to LANG-20 |
 | [Ownership](ownership.md) | OWN-1 to OWN-26 |
 | [Memory](memory.md) | MEM-1 to MEM-20 |
 | [Budgets](budgets.md) | MEM-21 to MEM-30 |
@@ -74,16 +74,25 @@ what every operation does to ownership, charges and failures. Examples are infor
 | cancellation point | [CONC-7](tasks.md#conc-7-cancellation-points) |
 | capability | [CAP-1](capabilities.md#cap-1-authority-is-explicit) |
 | commit point | [FAIL-3](failure.md#fail-3-commit-points) |
+| copyable | [OWN-3](ownership.md#own-3-kinds) |
 | current limit, limit | [MEM-21](budgets.md#mem-21-limits) |
 | event | [CONC-10](tasks.md#conc-10-event-order) |
 | extent, view | [OWN-8](ownership.md#own-8-views) |
 | failure, error, run stop | [FAIL-1](failure.md#fail-1-errors-failures-and-run-stops) |
+| grant | [MEM-29](budgets.md#mem-29-finalizer-grants) |
+| hand-over, limit record | [MEM-22](budgets.md#mem-22-limit-records-and-hand-over) |
 | kind | [OWN-3](ownership.md#own-3-kinds) |
 | outlives | [MEM-6](memory.md#mem-6-roots) |
 | pending result | [FAIL-9](failure.md#fail-9-pending-results) |
-| provider | [CAP-5](capabilities.md#cap-5-providers) |
+| place, slot | [checker state](ownership.md#checker-state) |
+| provider | [CAP-5](capabilities.md#cap-5-provider-operations) |
 | replay point | [CAP-8](capabilities.md#cap-8-the-replay-point) |
+| reservation | [OWN-11](ownership.md#own-11-call-arguments) |
 | scoped | [OWN-19](ownership.md#own-19-scoped-values) |
+| sub-view | [OWN-8](ownership.md#own-8-views) |
+| twin | [MEM-17](memory.md#mem-17-clone) |
+| type summary | [OWN-2](ownership.md#own-2-type-summaries) |
+| writable | [OWN-5](ownership.md#own-5-availability) |
 
 ## Status
 

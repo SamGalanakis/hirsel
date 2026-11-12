@@ -1,10 +1,5 @@
 # Syntax
 
-Hirsel is procedural with value semantics: functions, records and variants, `match`,
-module-qualified calls, `[T]` generics, `?`, sized numbers and tuples. There are no
-methods, no imports, no conditional operator and no format strings. The grammar is
-context-free: parsing needs no names or types.
-
 ### LANG-1: Source text
 
 Source is UTF-8 with no byte order mark; invalid UTF-8 is refused before any position is
@@ -22,6 +17,9 @@ line-comment  = "//", { non-newline-scalar } ;
 block-comment = "/*", { block-comment | non-delimiter-scalar }, "*/" ;
 ```
 
+A `non-newline-scalar` is any scalar other than LF and CR; a `non-delimiter-scalar` is any
+scalar that does not begin `/*` or `*/`. Tokens are formed by longest match, except that
+no number begins directly after a `.` token, so `p.0.1` is `p`, `.`, `0`, `.`, `1`.
 Comments nest. `///` and `/** */` are documentation comments and otherwise comments. A
 block comment's newlines count as newlines for LANG-4. An unterminated comment is one
 invalid token.
@@ -39,7 +37,7 @@ pub opaque const uses of where true false
 A keyword cannot be declared as a name. These names are contextual and ordinary
 elsewhere: `bytes` after `bound`, `grant` and in a sized-destination argument; `drop` after
 a resource declaration; `plain`, `shareable`, `send`, `key` and `ordered` in a bound
-list; `waits` in a function header. Library types and functions, including `Region`,
+list; `own` before `fn` in a type; `waits` after a function or callable header. Library types and functions, including `Region`,
 `View`, `Rc`, `Arc` and `Capacity`, are ordinary names. `_` is the discard pattern.
 
 ```hirsel
@@ -77,7 +75,9 @@ literal      = integer | float | character | byte | string | bytes
 ```
 
 `string-scalar` excludes `"`, `\`, the controls U+0000–U+001F and U+007F, newlines and
-`Bidi_Control`; the `ascii-` forms also exclude non-ASCII. In strings and characters `\xNN`
+`Bidi_Control`; `character-scalar` is the same with `'` in place of `"`; `raw-body` is any
+scalars other than CR; `byte-escape` is `escape` without its `\u{..}` form; the `ascii-`
+forms also exclude non-ASCII. In strings and characters `\xNN`
 is at most 7F and `\u{..}` has one to six digits denoting a Unicode scalar value; in bytes
 and byte literals `\xNN` is any byte and `\u{..}` is absent. A character literal is exactly
 one scalar. A raw literal closes at the first `"` followed by its opening number of
@@ -110,10 +110,11 @@ No semicolons are inserted. These rules use syntax only:
    resource declaration; `->`, `uses`, `waits`, `where`, `in` and a body `{` after a
    function header that has no body yet.
 5. `;` ends a statement explicitly. `}` and the end of file end a pending complete
-   statement. A completed `if`, `match`, block, `loop`, `while`, `for`, `region` or
-   `bound` may be followed by another statement on the same line.
-6. A block's last expression is its value; a trailing `;` discards it. A final `let`,
-   assignment or loop gives unit.
+   statement, so no END is needed before them. A completed `if`, `match`, block, `loop`,
+   `while`, `for`, `region` or `bound` may be followed by another statement on the same
+   line.
+6. A block's last expression is its value; a trailing `;` discards it. A final `let` or
+   assignment gives unit.
 7. In list braces a newline can replace a comma after a complete entry.
 
 Indentation is never significant.
@@ -137,12 +138,13 @@ fn total(a: u64, b: u64) -> u64 {
 
 ```ebnf
 (* files and items *)
-file        = { NL | item, END }, EOF ;
+file        = { NL | item, ( END | EOF ) }, EOF ;
 item        = { attribute }, [ "pub", [ "opaque" ] ], ( function | type-def | const-def ) ;
-attribute   = "@", ( "test" | "compact", "(", ( "u16" | "u32" | "u64" ), ")" ) ;
+attribute   = "@", ( "test" | "compact", "(", ( "u16" | "u32" | "u64" ), ")"
+                   | "twin", "(", type-path, ")" ) ;
 const-def   = "const", name, ":", type, "=", expression ;
 function    = "fn", name, fn-header, block ;
-fn-header   = [ generics ], "(", list(parameter), ")", [ "->", type, [ anchor ] ],
+fn-header   = [ generics ], "(", list(parameter), ")", [ "->", type ],
               [ uses ], [ "waits" ], [ outlives ] ;
 parameter   = [ "take" | "mut" ], name, ":", type ;
 generics    = "[", nonempty(generic), "]" ;
@@ -152,14 +154,16 @@ bound-name  = "plain" | "shareable" | "send" | "key" | "ordered" ;
 uses        = "uses", type-path, { "+", type-path } ;
 outlives    = "where", name, ":", name, { ",", name, ":", name } ;
 type-def    = [ "stable" | "resource" | "scoped" ], "type", name, [ generics ],
-              [ ":", bounds ], [ "of", brand ], [ "grant", "bytes", integer ],
+              [ ":", bounds ], [ uses ], [ "of", brand ], [ "grant", "bytes", integer ],
               ( fields | "=", type-rhs | empty ), [ drop ] ;
 fields      = "{", [ field, { entry-sep, field }, [ entry-sep ] ], "}" ;
 field       = name, ":", type ;
-type-rhs    = variant, { "|", variant } | type ;
+type-rhs    = variant, "|", variant, { "|", variant }
+            | name, "(", list(payload), ")"
+            | type ;
 variant     = name, [ "(", list(payload), ")" ] ;
 payload     = [ name, ":" ], type ;
-drop        = "drop", "(", name, ")", block ;
+drop        = "drop", "(", name, [ ",", "mut", name ], ")", block ;
 
 (* types *)
 type        = type-atom, [ "of", brand ], [ anchor ] ;
@@ -168,17 +172,16 @@ brand       = place | ".", name ;
 place       = name, { ".", name } ;
 type-atom   = type-path, [ "[", nonempty(type-arg), "]" ]
             | "(", ")" | "(", type, ")" | "(", type, ",", list(type), ")"
-            | [ "scoped" ], "fn", "(", list(fn-param), ")", [ "->", type ], [ uses ] ;
+            | [ "scoped" | "own", [ "[", bounds, "]" ] ], "fn", "(", list(fn-param), ")",
+              [ "->", type ], [ uses ], [ "waits" ] ;
 type-arg    = type | "in", place ;
 fn-param    = [ "take" | "mut" ], [ name, ":" ], type ;
 type-path   = name, { ".", name } ;
 
 (* statements and expressions *)
-block       = "{", { statement, END }, [ expression, [ END ] ], "}" ;
-statement   = "let", [ "mut" ], pattern, [ ":", type ], "=", expression, [ "else", block ]
+block       = "{", { statement, END }, [ statement ], "}" ;
+statement   = "let", [ "mut" ], pattern, [ ":", type ], [ "=", expression, [ "else", block ] ]
             | expression, assign-op, expression
-            | [ label ], ( "loop", block | "while", cond, block
-                         | "for", [ "take" ], pattern, "in", expression, block )
             | expression ;
 assign-op   = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>=" | "&=" | "|=" | "^=" ;
 cond        = expression | "let", pattern, "=", expression ;
@@ -196,22 +199,25 @@ additive    = product, { ( "+" | "-" ), product } ;
 product     = prefix, { ( "*" | "/" | "%" ), prefix } ;
 prefix      = ( "-" | "!" | "~" | "take" | "mut" | "copy" | "view" ), prefix | placed ;
 placed      = postfix, [ "in", place ] ;
-postfix     = primary, { "(", list(argument), ")" | "[", expression, "]" | ".", name | "?" } ;
+postfix     = primary, { "(", list(argument), ")" | "[", expression, "]"
+                       | ".", ( name | digits(digit) ) | "?" } ;
 argument    = [ name, ":" ], expression | "bytes", expression ;
 primary     = literal | type-path | "(", ")" | "(", expression, ")"
             | "(", expression, ",", list(expression), ")"
-            | [ label ], block | if-expr | match-expr | closure
+            | [ label ], ( block | loop-expr ) | if-expr | match-expr | closure
             | "region", name, block | "bound", "bytes", expression, block
-            | "return", [ expression ] | "break", [ "'", name, [ expression ] ]
+            | "return", [ expression ] | "break", [ "'", name ], [ expression ]
             | "continue", [ "'", name ] ;
+loop-expr   = "loop", block | "while", cond, block
+            | "for", [ "take" ], pattern, "in", expression, block ;
 if-expr     = "if", cond, block, [ "else", ( block | if-expr ) ] ;
 match-expr  = "match", expression, "{", [ arm, { entry-sep, arm }, [ entry-sep ] ], "}" ;
 arm         = pattern, [ "if", expression ], "=>", expression ;
-closure     = [ "scoped" ], "fn", "(", list(fn-param), ")", [ "->", type ], [ uses ], block ;
+closure     = [ "scoped" ], "fn", "(", list(fn-param), ")", [ "->", type ], [ uses ],
+              [ "waits" ], block ;
 
 (* patterns *)
-pattern     = alternative, { "|", alternative } ;
-alternative = "_" | [ "take" ], name | scalar, [ "..=", scalar ]
+pattern     = "_" | [ "take" ], name | scalar, [ "..=", scalar ]
             | "(", ")" | "(", pattern, ",", list(pattern), ")"
             | type-path, "(", [ pattern-field, { ",", pattern-field } ], [ ",", ".." ], ")" ;
 pattern-field = [ name, ":" ], pattern ;
@@ -237,18 +243,24 @@ Precedence, strongest first:
 | `== != < <= > >=` | none: comparisons do not chain |
 | `&&`, then `\|\|` | left, short-circuit |
 | `.. ..=` | none |
-| `return e`, `break 'l e` | take a whole expression |
+| `return e`, `break e`, `break 'l e` | take a whole expression |
 | assignment | statement only, no chaining |
 
-Parsing needs no names or types: types appear only after `:` and `->`, inside `[ ]` after
-a type path and on the right of a type definition; expressions never carry type
+The grammar is context-free. Parsing needs no names or types: types appear only after
+`:` and `->`, inside `[ ]` after a type path and on the right of a type definition; expressions never carry type
 arguments, so postfix `[ ]` always indexes; constructors, variants and calls share call
 syntax and are told apart by name resolution; braces after a condition begin a block,
-because records are built with parentheses. A `let else` initializer and an `if`, `while`
+because records are built with parentheses. On the right of a type definition, two or more
+`|`-separated variants or one name followed by `(` declare variants; anything else is an
+alias. A `let` without `=` declares an uninitialized slot and must have a name pattern and
+a type ([OWN-5](ownership.md#own-5-availability)). A `let else` initializer and an `if`, `while`
 or `match` subject cannot end in an unparenthesized block. `for` patterns, `let` patterns
 without `else`, and `let`-condition patterns are checked for refutability after parsing
-([LANG-17](language.md#lang-17-match)). Malformed syntax with no more specific rule is
-LANG-5.
+([LANG-17](language.md#lang-17-match)). An attribute applies only to its own target:
+`@test` to a function, `@compact` to a `stable type`, `@twin` to a type; a repeated
+attribute, an attribute on another item, a representation keyword or `uses` on an alias,
+and `drop` on a declaration that is not `resource` are refused. Malformed syntax with no
+more specific rule is LANG-5.
 
 ```hirsel
 fn f(xs: List[u64]) -> u64 { if list.len(xs) > 0 { xs[0] } else { 0 } }

@@ -33,7 +33,7 @@ pub(super) fn admitted_native_store(
     std::sync::Arc::new(
         hirsel_engine_store::RequestStore::with_scratch(
             backend,
-            budget.reserve(64 << 20).unwrap(),
+            budget.reserve(48 << 20).unwrap(),
             &std::env::temp_dir(),
             1 << 30,
         )

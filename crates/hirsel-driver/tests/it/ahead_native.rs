@@ -136,7 +136,7 @@ fn request_objects(
     let store: Arc<dyn ResultStore> = Arc::new(
         hirsel_engine_store::RequestStore::with_scratch(
             fixture.store.clone(),
-            transport.reserve(24 << 20).unwrap(),
+            transport.reserve(12 << 20).unwrap(),
             &std::env::temp_dir(),
             1 << 30,
         )

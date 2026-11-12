@@ -20,7 +20,7 @@ fn aware_inventory_import_preserves_dead_original_payload_and_rechecks_c_on_repl
         let store: Arc<dyn store::ResultStore> = Arc::new(
             store::RequestStore::with_scratch(
                 Arc::new(store::DirStore::new(directory.path().join("products"))),
-                budget.reserve(64 << 20).unwrap(),
+                budget.reserve(32 << 20).unwrap(),
                 &std::env::temp_dir(),
                 1 << 30,
             )

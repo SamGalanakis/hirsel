@@ -13,7 +13,7 @@ use hirsel_span::Anchor;
 use hirsel_syntax::{ContentHash, DefPath, PackageId};
 use hirsel_tir::Definition;
 use hirsel_types::TypeInterner;
-pub use installation::Installation;
+pub use installation::{Installation, Registered};
 pub use outputs::{
     SourceInvocation, StoredDefinitionOutput, VerifiedDefinitionOutput, VerifiedInvocations,
 };
@@ -3778,7 +3778,9 @@ mod tests {
         let cache = install.verifier();
         assert!(check(f, &cache, build).0.violations.is_empty());
         install.finish(header(root)).unwrap();
-        Installation::registered(root, state, build, Arc::default()).unwrap()
+        Installation::registered(root, state, build, Arc::default())
+            .unwrap()
+            .verifier
     }
     #[test]
     fn registered_installation_refuses_producer_forgery_with_and_without_registration() {
@@ -3924,7 +3926,8 @@ mod tests {
         assert!(install.finish(header(&root.0)).is_err());
         // The renamed registration is visible, so its generation must survive.
         let pinned = Installation::registered(&root.0, &state, build, Arc::default())
-            .expect("the visible registration names a kept generation");
+            .expect("the visible registration names a kept generation")
+            .verifier;
         assert!(!check(&f, &pinned, build).1);
     }
     /// A header changed by a writer outside the precompute protocol between
@@ -3954,7 +3957,8 @@ mod tests {
             .associate(published.0, published.1.action, published.1.reference)
             .unwrap();
         let registered = Installation::registered(&root.0, &state, build, Arc::default())
-            .expect("the published header is registered");
+            .expect("the published header is registered")
+            .verifier;
         assert!(!check(&f, &registered, build).1);
         assert_ne!(other, published);
     }
@@ -4076,7 +4080,9 @@ mod tests {
         for directory in old {
             std::fs::remove_dir_all(directory).unwrap();
         }
-        let reopened = Installation::registered(&root.0, &state, build, Arc::default()).unwrap();
+        let reopened = Installation::registered(&root.0, &state, build, Arc::default())
+            .unwrap()
+            .verifier;
         assert!(!frozen_check(&f, &reopened, build, &frozen(&f)).1);
     }
     /// Adoption runs V's ordinary hit checks first: a changed read, a missing
@@ -4191,7 +4197,9 @@ mod tests {
         for directory in old {
             std::fs::remove_dir_all(directory).unwrap();
         }
-        let reopened = Installation::registered(&root.0, &state, build, Arc::default()).unwrap();
+        let reopened = Installation::registered(&root.0, &state, build, Arc::default())
+            .unwrap()
+            .verifier;
         let output = get(&reopened, &frozen(&f)).expect("the closure stands alone");
         assert!(
             reopened
@@ -4299,7 +4307,9 @@ mod tests {
         for directory in old {
             std::fs::remove_dir_all(directory).unwrap();
         }
-        let reopened = Installation::registered(&root.0, &state, build, Arc::default()).unwrap();
+        let reopened = Installation::registered(&root.0, &state, build, Arc::default())
+            .unwrap()
+            .verifier;
         assert!(revalidated(&reopened).is_some(), "the closure stands alone");
     }
 }

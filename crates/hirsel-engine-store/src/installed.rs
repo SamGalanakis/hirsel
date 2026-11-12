@@ -868,9 +868,21 @@ impl InstalledPackage {
         installed.check_records(store)
     }
     fn read(store: &hirsel_artifact_store::Store) -> Result<Self, String> {
-        let row = store
-            .lookup_owned(address())
+        Self::read_header(store, None)
+    }
+    /// Read the installation `header` names, or without one the root's
+    /// current header. A header a registration authenticated is opened as
+    /// is, never reselected from the root.
+    fn read_header(
+        store: &hirsel_artifact_store::Store,
+        header: Option<(Address, hirsel_artifact_store::Association)>,
+    ) -> Result<Self, String> {
+        let (at, row) = header
+            .or_else(|| Some((address(), store.lookup_owned(address())?)))
             .ok_or("missing installed package product")?;
+        if at != address() {
+            return Err("invalid installed package header address".into());
+        }
         if row.reference.domain != PACKAGE || row.action != Action(row.reference.output.0) {
             return Err("invalid installed package domain or action".into());
         }
@@ -899,15 +911,25 @@ impl InstalledPackage {
         installed.check_definitions()?;
         Ok(installed)
     }
+    #[cfg(test)]
     pub(crate) fn open(
         store: &hirsel_artifact_store::Store,
+        package: &PackageId,
+        compiler: ContentHash,
+    ) -> Result<OpenedInstallation, String> {
+        Self::open_header(store, None, package, compiler)
+    }
+    /// Open the installation `header` names; see `read_header`.
+    pub(crate) fn open_header(
+        store: &hirsel_artifact_store::Store,
+        header: Option<(Address, hirsel_artifact_store::Association)>,
         package: &PackageId,
         compiler: ContentHash,
     ) -> Result<OpenedInstallation, String> {
         hirsel_intern::timings::count(hirsel_intern::timings::Count::InstalledPackageOpens);
         let read = || -> Result<OpenedInstallation, String> {
             let scope = store.batch();
-            let installed = Self::read(store)?;
+            let installed = Self::read_header(store, header)?;
             if installed.compiler != compiler {
                 return Err("stale installed package: compiler identity mismatch".into());
             }
@@ -923,9 +945,10 @@ impl InstalledPackage {
     /// resolve only through this header, never through the root's index.
     pub(crate) fn open_records(
         store: &hirsel_artifact_store::Store,
+        header: Option<(Address, hirsel_artifact_store::Association)>,
     ) -> Result<Arc<InstalledRecords>, String> {
         let scope = store.batch();
-        Ok(Self::attach(store, scope, Self::read(store)?)?.records)
+        Ok(Self::attach(store, scope, Self::read_header(store, header)?)?.records)
     }
     fn attach(
         store: &hirsel_artifact_store::Store,

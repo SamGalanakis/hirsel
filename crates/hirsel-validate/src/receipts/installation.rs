@@ -24,6 +24,19 @@ struct Registration {
     generation: String,
     rows: BTreeMap<ContentHash, Reference>,
 }
+/// An installed-package header association: its address, action and reference.
+type Header = (
+    hirsel_artifact_store::Address,
+    hirsel_artifact_store::Association,
+);
+/// A root's authenticated registration: V's rows from it over `local`, and
+/// the exact header association it binds. An operation opens that header,
+/// never a separately reselected one, so its products and V's authority are
+/// one generation's.
+pub struct Registered {
+    pub verifier: Arc<VerifierCache>,
+    pub header: Header,
+}
 /// Issuance is private to VerifierCache::publish_bytes. Imported associations
 /// are never enumerated. A Precompute adopts only V's own rows from the root's
 /// previous generation, each after V's checks at its hit site (adopt.rs).
@@ -188,7 +201,9 @@ impl Installation {
         // The previous registration, read only under this lock and only while
         // it still authenticates against the root's unchanged header. V may
         // adopt its own rows from it (see adopt.rs); nothing else reads it.
-        let previous = Self::rows(&root, &state, verifier).ok();
+        let previous = Self::rows(&root, &state, verifier)
+            .ok()
+            .map(|(rows, _)| rows);
         let cache = Arc::new(VerifierCache(
             Backend::Hosted(rows.clone(), rows.clone(), previous),
             Mutex::default(),
@@ -268,25 +283,23 @@ impl Installation {
         state: &Path,
         verifier: ContentHash,
         local: Arc<VerifierCache>,
-    ) -> Option<Arc<VerifierCache>> {
-        Self::load(root, state, verifier, local).ok()
+    ) -> Option<Registered> {
+        let (rows, header) = Self::rows(root, state, verifier).ok()?;
+        Some(Registered {
+            verifier: Arc::new(VerifierCache(
+                Backend::Registered(local, rows),
+                Mutex::default(),
+                Arc::new(()),
+                crate::FactTable::default(),
+                Mutex::default(),
+            )),
+            header,
+        })
     }
-    fn load(
-        root: &Path,
-        state: &Path,
-        verifier: ContentHash,
-        local: Arc<VerifierCache>,
-    ) -> io::Result<Arc<VerifierCache>> {
-        Ok(Arc::new(VerifierCache(
-            Backend::Registered(local, Self::rows(root, state, verifier)?),
-            Mutex::default(),
-            Arc::new(()),
-            crate::FactTable::default(),
-            Mutex::default(),
-        )))
-    }
-    /// The authenticated, read-only rows of the root's current registration.
-    fn rows(root: &Path, state: &Path, verifier: ContentHash) -> io::Result<Arc<Rows>> {
+    /// The authenticated, read-only rows of the root's current registration,
+    /// and the header association it authenticated.
+    fn rows(root: &Path, state: &Path, verifier: ContentHash) -> io::Result<(Arc<Rows>, Header)> {
+        hirsel_intern::work::count(hirsel_intern::work::Counter::VerifierRegistrationReads);
         check_private(state)?;
         let root = root.canonicalize()?;
         let state = state.canonicalize()?;
@@ -328,12 +341,22 @@ impl Installation {
         {
             return Err(invalid());
         }
-        Ok(Arc::new(Rows {
-            store: Store::new(directory.join("receipts")),
-            rows: Mutex::new(registration.rows),
-            overflow: false.into(),
-            writable: false,
-        }))
+        let (address, action, reference) = registration.header;
+        Ok((
+            Arc::new(Rows {
+                store: Store::new(directory.join("receipts")),
+                rows: Mutex::new(registration.rows),
+                overflow: false.into(),
+                writable: false,
+            }),
+            (
+                hirsel_artifact_store::Address(address),
+                hirsel_artifact_store::Association {
+                    action: hirsel_artifact_store::Action(action),
+                    reference,
+                },
+            ),
+        ))
     }
 }
 impl Drop for Installation {

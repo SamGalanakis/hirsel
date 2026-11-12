@@ -64,7 +64,7 @@ mod proofs;
 mod receipts;
 pub use receipts::{
     AcceptedArtifact, Artifact, DefinitionInput, ExecutionProductBinding, ExecutionProductInputs,
-    ExecutionReceipt, FactRefusal, Installation, ReplayEnvironment, SourceInvocation,
+    ExecutionReceipt, FactRefusal, Installation, Registered, ReplayEnvironment, SourceInvocation,
     StoredDefinitionOutput, VerifiedDefinition, VerifiedDefinitionOutput, VerifiedInvocations,
     VerifierCache, VerifierRows, validate_cached, validate_definition, validate_with_receipt,
 };

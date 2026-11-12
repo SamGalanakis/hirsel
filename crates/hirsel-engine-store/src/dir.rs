@@ -16,8 +16,10 @@ pub struct DirStore {
     physical: Option<hirsel_artifact_store::Store>,
     read_only: Vec<hirsel_artifact_store::Store>,
     cap: u64,
-    verifier_identity: Option<hirsel_syntax::ContentHash>,
+    /// The local verifier. With a registration, the verifier this store uses
+    /// is the one selected against it.
     verifier: std::sync::Arc<hirsel_validate::VerifierCache>,
+    registration: Option<Arc<Registration>>,
     operation: bool,
     installed_capture: Option<Arc<Mutex<Option<super::installed::OpenedInstallation>>>>,
     /// Each read-only root's installation header, opened once per operation.
@@ -29,6 +31,30 @@ pub struct DirStore {
     /// Set once `root` exists. Clones and operations share the answer, so a
     /// put no longer re-creates an existing directory.
     root_ready: Arc<std::sync::OnceLock<()>>,
+}
+
+/// The compiler identity and private state an installation registration is
+/// selected against, and what was selected. A session selects on first use;
+/// each operation selects once at its entry and never keeps an earlier pin,
+/// so one request authenticates one registration generation, once.
+#[derive(Debug)]
+struct Registration {
+    identity: hirsel_syntax::ContentHash,
+    state: PathBuf,
+    selected: std::sync::OnceLock<Selected>,
+}
+/// The verifier over each root's authenticated registration, and the header
+/// association each registration bound: the store opens that header for its
+/// root, never a reselected one, so V's authority and the products it serves
+/// are one generation's.
+#[derive(Debug)]
+struct Selected {
+    verifier: std::sync::Arc<hirsel_validate::VerifierCache>,
+    headers:
+        std::collections::BTreeMap<PathBuf, (super::Address, hirsel_artifact_store::Association)>,
+    /// An operation's read-only roots' index generations, pinned before their
+    /// registrations are read and held while it opens their headers.
+    _leases: Vec<hirsel_artifact_store::Batch>,
 }
 
 /// What an installation producer adopted or wrote. Publication projects it
@@ -156,7 +182,7 @@ impl DirStore {
             )),
             physical: Some(physical),
             root,
-            verifier_identity: None,
+            registration: None,
             read_only: vec![],
             cap: DEFAULT_CAP,
             operation: false,
@@ -178,6 +204,67 @@ impl DirStore {
     pub fn with_installation(mut self, installation: &hirsel_validate::Installation) -> Self {
         self.verifier = installation.verifier();
         self
+    }
+    /// This store, selecting `identity`'s registration in `state` on first use.
+    fn with_registration(&self, identity: hirsel_syntax::ContentHash, state: PathBuf) -> Self {
+        Self {
+            registration: Some(Arc::new(Registration {
+                identity,
+                state,
+                selected: Default::default(),
+            })),
+            ..self.clone()
+        }
+    }
+    /// What this store selected against its registration, if it has one:
+    /// each root's current registration that authenticates. An installation
+    /// producer's own output root is never its authority.
+    fn selection(&self) -> Option<&Selected> {
+        let registration = self.registration.as_ref()?;
+        Some(registration.selected.get_or_init(|| {
+            let leases = if self.operation {
+                self.read_only.iter().map(|store| store.batch()).collect()
+            } else {
+                vec![]
+            };
+            let mut verifier = self.verifier.clone();
+            let mut headers = std::collections::BTreeMap::new();
+            for root in self
+                .physical
+                .iter()
+                .filter(|_| self.installation.is_none())
+                .chain(&self.read_only)
+            {
+                if let Some(registered) = hirsel_validate::Installation::registered(
+                    root.root(),
+                    &registration.state,
+                    registration.identity,
+                    verifier.clone(),
+                ) {
+                    verifier = registered.verifier;
+                    headers.insert(root.root().to_owned(), registered.header);
+                }
+            }
+            Selected {
+                verifier,
+                headers,
+                _leases: leases,
+            }
+        }))
+    }
+    fn selected_verifier(&self) -> std::sync::Arc<hirsel_validate::VerifierCache> {
+        self.selection().map_or_else(
+            || self.verifier.clone(),
+            |selected| selected.verifier.clone(),
+        )
+    }
+    /// The header its registration authenticated for `store`'s root. A root
+    /// without one supplies no V authority and is read at its current header.
+    fn header_of(
+        &self,
+        store: &hirsel_artifact_store::Store,
+    ) -> Option<(super::Address, hirsel_artifact_store::Association)> {
+        self.selection()?.headers.get(store.root()).copied()
     }
     /// Publish the installation and return the header association it
     /// published, which V's registration binds.
@@ -325,8 +412,8 @@ impl DirStore {
             root,
             physical: None,
             cap: 0,
-            verifier_identity: None,
             verifier,
+            registration: None,
             operation: false,
             installed_capture: Some(Default::default()),
             headers: Arc::default(),
@@ -364,7 +451,9 @@ impl DirStore {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .entry(store.root().to_owned())
-            .or_insert_with(|| super::InstalledPackage::open_records(store).ok())
+            .or_insert_with(|| {
+                super::InstalledPackage::open_records(store, self.header_of(store)).ok()
+            })
             .clone()
     }
     fn installed_records(&self) -> Option<Arc<super::installed::InstalledRecords>> {
@@ -470,7 +559,12 @@ impl ResultStore for DirStore {
         }
         let mut failures = Vec::new();
         for root in &self.read_only {
-            match super::InstalledPackage::open(root, package, compiler) {
+            match super::InstalledPackage::open_header(
+                root,
+                self.header_of(root),
+                package,
+                compiler,
+            ) {
                 Ok(package) => {
                     if let Some(captured) = &mut captured {
                         **captured = Some(package.clone());
@@ -507,43 +601,34 @@ impl ResultStore for DirStore {
             operation: true,
             installed_capture: Some(Default::default()),
             headers: Arc::default(),
-            verifier_identity: None,
+            registration: None,
             installation: self.installation.clone(),
             root_ready: self.root_ready.clone(),
         };
-        match self.verifier_identity {
-            Some(identity) => selected
-                .for_compiler(identity)
-                .or_else(|| Some(std::sync::Arc::new(selected))),
-            None => Some(std::sync::Arc::new(selected)),
-        }
+        let selected = match &self.registration {
+            Some(registration) => {
+                let selected =
+                    selected.with_registration(registration.identity, registration.state.clone());
+                selected.selection();
+                selected
+            }
+            None => selected,
+        };
+        Some(std::sync::Arc::new(selected))
     }
     fn for_compiler(
         &self,
         identity: hirsel_syntax::ContentHash,
     ) -> Option<std::sync::Arc<dyn ResultStore>> {
-        if self.verifier_identity == Some(identity) {
+        if self
+            .registration
+            .as_ref()
+            .is_some_and(|registration| registration.identity == identity)
+        {
             return None;
         }
         let state = hirsel_validate::Installation::default_state()?;
-        let mut selected = self.clone();
-        selected.verifier_identity = Some(identity);
-        for root in self
-            .physical
-            .iter()
-            .filter(|_| self.installation.is_none())
-            .chain(&self.read_only)
-        {
-            if let Some(verifier) = hirsel_validate::Installation::registered(
-                root.root(),
-                &state,
-                identity,
-                selected.verifier.clone(),
-            ) {
-                selected.verifier = verifier;
-            }
-        }
-        Some(std::sync::Arc::new(selected))
+        Some(std::sync::Arc::new(self.with_registration(identity, state)))
     }
     fn read_scope(&self) -> Option<Box<dyn Send + Sync>> {
         if self.read_only.is_empty() {
@@ -605,7 +690,7 @@ impl ResultStore for DirStore {
         self.record_product(address, action, reference);
     }
     fn verifier(&self) -> Option<std::sync::Arc<hirsel_validate::VerifierCache>> {
-        Some(self.verifier.clone())
+        Some(self.selected_verifier())
     }
     fn read_product_content(
         &self,
@@ -1081,6 +1166,67 @@ mod tests {
         assert!(registered().is_none());
     }
 
+    /// A request authenticates the verifier registration once, at its entry,
+    /// against the registration current then, and serves the header that
+    /// registration bound. Bugs: the compiler session and each operation both
+    /// read it (two reads per request); an operation keeps the session's pin
+    /// after a reinstall replaced it; an operation pairs its registration with
+    /// a header reselected after a reinstall. Oracle: the rows each
+    /// generation's header lists, and the reads an entry must make, by hand.
+    #[test]
+    fn each_operation_selects_the_registration_current_at_its_entry_once() {
+        use crate::ResultStore;
+        use hirsel_intern::work::{Counter, read};
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("installed");
+        let seed = DirStore::new(root.clone());
+        let key = |name: &str| {
+            EntryKey::new(
+                Default::default(),
+                &hirsel_syntax::DefPath::core(name),
+                Default::default(),
+                hirsel_query_products::QueryKind::Signature,
+                hirsel_query_products::LoweringPolicy::Reachable,
+            )
+        };
+        let (first, second) = (key("generation-first"), key("generation-second"));
+        seed.put(&first, b"first record");
+        seed.put(&second, b"second record");
+        let state = directory.path().join("state");
+        let identity = hirsel_syntax::ContentHash::of_bytes(b"compiler");
+        let register = |rows: &[hirsel_syntax::ContentHash]| {
+            let header = crate::tests::install(&root, rows, &[]);
+            hirsel_validate::Installation::begin(&root, &state, identity)
+                .unwrap()
+                .finish(header)
+                .unwrap();
+        };
+        let reads = || read(Counter::VerifierRegistrationReads);
+        // One selection reads each root's registration once: the local
+        // results root's and the installed root's.
+        let selection = 2;
+        register(&[first.0]);
+
+        let before = reads();
+        let session = DirStore::new(directory.path().join("local"))
+            .with_read_only_root(root.clone())
+            .with_registration(identity, state.clone());
+        let operation = session.for_operation().unwrap();
+        operation.verifier().unwrap();
+        operation.verifier().unwrap();
+        assert_eq!(reads() - before, selection);
+
+        // A reinstall after the operation's entry: it keeps its generation.
+        register(&[first.0, second.0]);
+        assert_eq!(&*operation.get(&first).unwrap(), b"first record");
+        assert!(operation.get(&second).is_none());
+
+        let before = reads();
+        let operation = session.for_operation().unwrap();
+        assert_eq!(&*operation.get(&second).unwrap(), b"second record");
+        assert_eq!(reads() - before, selection);
+    }
+
     #[test]
     fn installed_only_verifier_is_host_local_and_never_writes_query_results() {
         let directory = tempfile::tempdir().unwrap();
@@ -1095,8 +1241,8 @@ mod tests {
             physical: None,
             read_only: vec![hirsel_artifact_store::Store::new(installed.clone())],
             cap: 0,
-            verifier_identity: None,
             verifier: std::sync::Arc::new(verifier),
+            registration: None,
             operation: false,
             installed_capture: None,
             headers: Arc::default(),

@@ -131,6 +131,8 @@ pub enum Counter {
     ValidationRetentionRefusals,
     /// Owned definition paths copied by source inventory enumeration.
     SourcePathCopies,
+    /// Verifier installation registrations read and authenticated from private state.
+    VerifierRegistrationReads,
     /// Cached dependency-node inspections.
     CacheValidationRows,
 }

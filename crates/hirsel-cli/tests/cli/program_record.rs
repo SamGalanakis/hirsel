@@ -877,10 +877,11 @@ impl Relocated {
 
 /// Bug caught: a check keyed by what only code generation reads (the libLLVM
 /// the compiler maps, a native tool variable), so it misses after either
-/// changes; or a build success key without them, so a build by other LLVM
-/// code, or with another link kit, is answered by the old record.
+/// changes; or a build or run success key without them, so a build or an
+/// LLVM run by other LLVM code, or with another link kit, is answered by the
+/// old record.
 #[test]
-fn only_a_build_keys_the_mapped_libllvm_and_native_tools() {
+fn only_a_build_or_run_keys_the_mapped_libllvm_and_native_tools() {
     let relocated = Relocated::new();
     let home = Home::with_compiler(relocated.compiler.clone());
     let root = home.path();
@@ -889,6 +890,19 @@ fn only_a_build_keys_the_mapped_libllvm_and_native_tools() {
     let build = ["build", "app/hirsel.json", "-o", "app.exe"];
     flips_then_hits(&home, root, &check, &[], "check");
     flips_then_hits(&home, root, &build, &[], "build");
+    pipe(root);
+    let run = [
+        "run",
+        "--native",
+        "--backend",
+        "llvm",
+        "pipe/hirsel.json",
+        "--grants",
+        "pipe/grants.json",
+        "--",
+        "a",
+    ];
+    flips_then_hits(&home, root, &run, &[], "run");
     relocated.change_llvm();
     let (answer, counts) = home.warm(root, &check, &[]);
     assert_eq!(
@@ -897,6 +911,7 @@ fn only_a_build_keys_the_mapped_libllvm_and_native_tools() {
         "check, other libLLVM bytes"
     );
     flips_then_hits(&home, root, &build, &[], "build, other libLLVM bytes");
+    flips_then_hits(&home, root, &run, &[], "run, other libLLVM bytes");
     let kit = std::env::var_os("HIRSEL_LINK_KIT").expect("the build tests' link kit");
     let link = root.join("kit");
     std::os::unix::fs::symlink(&kit, &link).unwrap();
@@ -908,6 +923,7 @@ fn only_a_build_keys_the_mapped_libllvm_and_native_tools() {
         "check, another link kit path"
     );
     flips_then_hits(&home, root, &build, &env, "build, another link kit path");
+    flips_then_hits(&home, root, &run, &env, "run, another link kit path");
 }
 
 /// A program that prints its arguments, then up to 64 bytes of its stdin, then

@@ -220,9 +220,19 @@ fn original_scalar_guard_query_uses_only_metadata_and_rechecks_dependency_output
         .unwrap();
     let first = records[0].clone();
     store.associate_product(first.address, first.action, changed);
+    assert_eq!(query.execute(&store).unwrap().product, selected.product);
+    let missing = MemStore::default();
+    for record in records.iter().skip(1) {
+        let archive = record
+            .archive(hirsel_engine_runtime::ArchiveAdmission::Retained)
+            .unwrap();
+        missing
+            .put_content(archive.reference().domain, archive.bytes())
+            .unwrap();
+    }
     assert!(
         query
-            .execute(&store)
+            .execute(&missing)
             .err()
             .unwrap()
             .contains("dependency changed")

@@ -1,7 +1,7 @@
 //! An installed package binds its discovery inputs and complete product closure.
 //! This is ordinary untrusted content. It never imports verifier authority.
 use super::*;
-mod manifest;
+mod image;
 mod semantic;
 use hirsel_syntax::{FileContext, PackageId};
 pub use semantic::{InstalledDefinition, InstalledDefinitionKey, InstalledDefinitionOwnership};
@@ -15,10 +15,10 @@ use std::path::{Path, PathBuf};
 
 const PACKAGE: Domain = Domain {
     kind: 0x4600_0039,
-    schema: 4,
+    schema: 5,
 };
 fn address() -> Address {
-    Address(ContentHash::of_bytes(b"hirsel.installed-package.v4"))
+    Address(ContentHash::of_bytes(b"hirsel.installed-package.v5"))
 }
 
 #[cfg(test)]
@@ -74,6 +74,21 @@ mod tests {
         );
         installed.publish(&store, &records).unwrap();
         (store, compiler, package, reference)
+    }
+    /// The rows and contents an opened package lists, to republish it.
+    fn records_of(installed: &InstalledPackage) -> InstallationRecords {
+        InstallationRecords {
+            rows: installed
+                .rows
+                .iter()
+                .map(|(address, row)| (*address, (row.action, row.reference)))
+                .collect(),
+            contents: installed
+                .contents
+                .iter()
+                .map(|reference| (reference.output.0, *reference))
+                .collect(),
+        }
     }
     #[cfg(target_os = "linux")]
     #[test]
@@ -152,20 +167,7 @@ mod tests {
                 .contains("missing installed semantic content")
         );
         assert!(InstalledPackage::verify_store(store.root()).is_err());
-        let records = InstallationRecords {
-            rows: reopened
-                .package
-                .rows
-                .iter()
-                .map(|(address, action, reference)| (*address, (Action(*action), *reference)))
-                .collect(),
-            contents: reopened
-                .package
-                .contents
-                .iter()
-                .map(|reference| (reference.output.0, *reference))
-                .collect(),
-        };
+        let records = records_of(&reopened.package);
         assert!(
             reopened
                 .package
@@ -182,37 +184,6 @@ mod tests {
         let installed = InstalledPackage::open(&store, &package, compiler)
             .unwrap()
             .package;
-        // The unchanged serializer and generic decoder independently define
-        // the table layout and accept/reject oracle, including corrupt counts.
-        let encoded = bincode::serialize(&*installed).unwrap();
-        let compare = |bytes: &[u8]| {
-            use bincode::Options;
-            let original = bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .with_limit(MAX_RECORD as u64)
-                .reject_trailing_bytes()
-                .deserialize::<InstalledPackage>(bytes);
-            let decoded = manifest::decode(bytes);
-            assert_eq!(decoded.is_ok(), original.is_ok());
-            if let (Ok(decoded), Ok(original)) = (decoded, original) {
-                assert_eq!(
-                    bincode::serialize(&decoded).unwrap(),
-                    bincode::serialize(&original).unwrap()
-                );
-            }
-        };
-        compare(&encoded);
-        for end in 0..encoded.len() {
-            compare(&encoded[..end]);
-        }
-        let mut trailing = encoded.clone();
-        trailing.push(0);
-        compare(&trailing);
-        for offset in 0..encoded.len() {
-            let mut damaged = encoded.clone();
-            damaged[offset] ^= 0x80;
-            compare(&damaged);
-        }
         drop(installed);
         assert!(
             InstalledPackage::open(&store, &package, ContentHash::default())
@@ -245,37 +216,26 @@ mod tests {
                 .package
                 .as_ref()
                 .clone()
-                .publish(
-                    &store,
-                    &InstallationRecords {
-                        rows: installed
-                            .package
-                            .rows
-                            .iter()
-                            .map(|(address, action, reference)| (
-                                *address,
-                                (Action(*action), *reference)
-                            ))
-                            .collect(),
-                        contents: installed
-                            .package
-                            .contents
-                            .iter()
-                            .map(|r| (r.output.0, *r))
-                            .collect(),
-                    }
-                )
+                .publish(&store, &records_of(&installed.package))
                 .is_err()
         );
         assert_eq!(store.lookup(address()), Some(original_root));
         std::fs::write(&content, kept).unwrap();
         InstalledPackage::verify_store(directory.path()).unwrap();
+        // The header is small enough to share a pack: damage its own payload.
         let path = store.output_path(row.reference);
+        let payload = store.get_owned(row.reference).unwrap();
         let mut damaged = std::fs::read(&path).unwrap();
-        *damaged.last_mut().unwrap() ^= 1;
+        let at = damaged
+            .windows(payload.len())
+            .position(|bytes| bytes == &*payload)
+            .unwrap();
+        damaged[at + payload.len() - 1] ^= 1;
         std::fs::write(path, damaged).unwrap();
+        // A new process, without this one's record of checked ranges.
+        let fresh = hirsel_artifact_store::Store::new(directory.path().to_owned());
         assert!(
-            InstalledPackage::open(&store, &package, compiler)
+            InstalledPackage::open(&fresh, &package, compiler)
                 .unwrap_err()
                 .contains("corrupt")
         );
@@ -295,20 +255,7 @@ mod tests {
         let installed = InstalledPackage::open(&store, &package, compiler).unwrap();
         assert!(installed.records.content(reference).is_none());
         assert!(InstalledPackage::verify_store(directory.path()).is_err());
-        let records = InstallationRecords {
-            rows: installed
-                .package
-                .rows
-                .iter()
-                .map(|(address, action, reference)| (*address, (Action(*action), *reference)))
-                .collect(),
-            contents: installed
-                .package
-                .contents
-                .iter()
-                .map(|r| (r.output.0, *r))
-                .collect(),
-        };
+        let records = records_of(&installed.package);
         let old_root = store.lookup(address()).unwrap();
         assert!(
             installed
@@ -319,6 +266,234 @@ mod tests {
                 .is_err()
         );
         assert_eq!(store.lookup(address()), Some(old_root));
+    }
+    /// An image with definitions `a.one` and `a.two` in `a.hir` and `b.three`
+    /// in `b.hir`, written by a trusted test publisher: its descriptor for
+    /// `a.two` names another compiler when `bad`. Construction would refuse
+    /// that descriptor, so the publisher writes the sections directly.
+    fn imaged(
+        root: &Path,
+        bad: bool,
+    ) -> (
+        hirsel_artifact_store::Store,
+        ContentHash,
+        PackageId,
+        (Address, Association),
+        InstalledPackage,
+    ) {
+        let store = hirsel_artifact_store::Store::new(root.to_owned());
+        let compiler = ContentHash::of_bytes(b"compiler");
+        let package = PackageId {
+            name: "std".into(),
+            version: "1".into(),
+        };
+        let manifest = b"manifest".to_vec();
+        let mut records = InstallationRecords::default();
+        let mut definitions = BTreeMap::new();
+        for (module, name, file) in [
+            ("a", "one", "a.hir"),
+            ("a", "two", "a.hir"),
+            ("b", "three", "b.hir"),
+        ] {
+            let path = DefPath(hirsel_syntax::ItemPath {
+                package: package.clone(),
+                modules: vec![module.into()],
+                name: name.into(),
+            });
+            let text = format!("pub fn {name}()->u8{{1u8}}");
+            let put = |domain, part: &str| {
+                store
+                    .put(domain, format!("{name} {part}").as_bytes())
+                    .unwrap()
+            };
+            let source = store.put(SEMANTIC_SOURCE, text.as_bytes()).unwrap();
+            let ownership = InstalledDefinitionOwnership {
+                header: put(SEMANTIC_HEADER, "header"),
+                body: put(SEMANTIC_BODY, "body"),
+                semantic: put(SEMANTIC_BODY, "semantic"),
+                source,
+                source_logical: format!("std@1/{file}").into(),
+                source_digest: ContentHash::of_bytes(text.as_bytes()),
+                source_bytes: source.len,
+                source_base: 0,
+            };
+            let record = put(SEMANTIC_INPUT, "input");
+            let mut key = InstalledDefinitionKey {
+                compiler,
+                config: ContentHash::default(),
+                manifest: ContentHash::of_bytes(&manifest),
+                definition: path.clone(),
+                specialization: vec![],
+                source: ownership.source_digest,
+                implementation: ContentHash::default(),
+                dependencies: ContentHash::default(),
+            };
+            records
+                .rows
+                .insert(key.address().0, (Action(record.output.0), record));
+            for reference in [
+                record,
+                ownership.header,
+                ownership.body,
+                ownership.semantic,
+                source,
+            ] {
+                records.contents.insert(reference.output.0, reference);
+            }
+            if bad && name == "two" {
+                key.compiler = ContentHash::of_bytes(b"another compiler");
+            }
+            definitions.insert(
+                path,
+                InstalledDefinition {
+                    key,
+                    record,
+                    ownership,
+                },
+            );
+        }
+        let source = |file: &str| InstalledSource {
+            path: format!("/absent/{file}").into(),
+            logical: format!("std@1/{file}").into(),
+            context: FileContext {
+                package: package.clone(),
+                modules: vec![],
+            },
+            text: String::new(),
+        };
+        let mut installed = InstalledPackage::new(
+            compiler,
+            package.clone(),
+            manifest,
+            vec![source("a.hir"), source("b.hir")],
+            vec![],
+            InstalledInputs::default(),
+        );
+        installed.rows = records_of_rows(&records);
+        installed.contents = records.contents.values().copied().collect();
+        let checked = image::check(
+            &image::Context {
+                package: &installed.package,
+                compiler,
+                manifest: ContentHash::of_bytes(&installed.manifest),
+                rows: &installed.rows,
+                contents: &installed.contents,
+            },
+            &definitions,
+        );
+        assert_eq!(checked.is_err(), bad, "{checked:?}");
+        let header = image::build(&store, &mut installed, &definitions).unwrap();
+        let row = Association {
+            action: Action(header.output.0),
+            reference: header,
+        };
+        store.associate(address(), row.action, header).unwrap();
+        (store, compiler, package, (address(), row), installed)
+    }
+    fn records_of_rows(records: &InstallationRecords) -> Arc<[(ContentHash, Association)]> {
+        records
+            .rows
+            .iter()
+            .map(|(address, (action, reference))| {
+                (
+                    *address,
+                    Association {
+                        action: *action,
+                        reference: *reference,
+                    },
+                )
+            })
+            .collect()
+    }
+    /// Flip one byte of `reference`'s stored payload, wherever it is packed.
+    fn damage(store: &hirsel_artifact_store::Store, reference: Reference) {
+        let path = store.output_path(reference);
+        let payload = store.get_owned(reference).unwrap();
+        let mut damaged = std::fs::read(&path).unwrap();
+        let at = damaged
+            .windows(payload.len())
+            .position(|bytes| bytes == &*payload)
+            .unwrap();
+        damaged[at] ^= 1;
+        std::fs::write(path, damaged).unwrap();
+    }
+    fn item(package: &PackageId, module: &str, name: &str) -> DefPath {
+        DefPath(hirsel_syntax::ItemPath {
+            package: package.clone(),
+            modules: vec![module.into()],
+            name: name.into(),
+        })
+    }
+    /// The header authenticates every section by reference. With the header
+    /// association untouched, a changed byte in a definition chunk is refused
+    /// when a definition in that chunk is first demanded, while the other
+    /// chunk loads; a changed byte in a section open reads refuses the open.
+    #[test]
+    fn a_changed_section_byte_is_refused_at_its_first_use() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, compiler, package, header, installed) = imaged(directory.path(), false);
+        let sections = installed.sections.clone().unwrap();
+        damage(&store, sections.chunks[1]);
+        // A new process, without this one's record of checked ranges.
+        let fresh = || hirsel_artifact_store::Store::new(directory.path().to_owned());
+        let opened =
+            InstalledPackage::open_header(&fresh(), Some(header), &package, compiler).unwrap();
+        let one = opened
+            .package
+            .definition(&item(&package, "a", "one"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(one.key.definition, item(&package, "a", "one"));
+        let refused = opened
+            .package
+            .definition(&item(&package, "b", "three"))
+            .unwrap_err();
+        assert!(
+            refused.contains("corrupt installed definition chunk"),
+            "{refused}"
+        );
+        assert!(
+            opened
+                .package
+                .definition(&item(&package, "b", "absent"))
+                .unwrap()
+                .is_none()
+        );
+        damage(&store, sections.index);
+        let refused =
+            InstalledPackage::open_header(&fresh(), Some(header), &package, compiler).unwrap_err();
+        assert!(
+            refused.contains("corrupt installed package section"),
+            "{refused}"
+        );
+    }
+    /// An inconsistent descriptor nobody demands no longer refuses the open;
+    /// the one that is demanded is refused on that first load, and the others,
+    /// in its chunk and outside it, load.
+    #[test]
+    fn one_bad_descriptor_is_refused_at_its_first_load_and_the_others_load() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, compiler, package, header, _) = imaged(directory.path(), true);
+        let opened =
+            InstalledPackage::open_header(&store, Some(header), &package, compiler).unwrap();
+        let refused = opened
+            .package
+            .definition(&item(&package, "a", "two"))
+            .unwrap_err();
+        assert!(
+            refused.contains("invalid installed definition descriptor"),
+            "{refused}"
+        );
+        for (module, name) in [("a", "one"), ("b", "three")] {
+            let definition = opened
+                .package
+                .definition(&item(&package, module, name))
+                .unwrap();
+            assert_eq!(
+                definition.unwrap().key.definition,
+                item(&package, module, name)
+            );
+        }
     }
     #[test]
     fn demanded_expanded_content_refuses_before_allocating_and_remains_usable() {
@@ -339,20 +514,7 @@ mod tests {
                 &encoded,
             )
             .unwrap();
-        let mut records = InstallationRecords {
-            rows: installed
-                .package
-                .rows
-                .iter()
-                .map(|(address, action, reference)| (*address, (Action(*action), *reference)))
-                .collect(),
-            contents: installed
-                .package
-                .contents
-                .iter()
-                .map(|r| (r.output.0, *r))
-                .collect(),
-        };
+        let mut records = records_of(&installed.package);
         records.contents.insert(reference.output.0, reference);
         installed
             .package
@@ -466,17 +628,11 @@ mod tests {
         store
             .associate(Address(key.0), Action(first.output.0), first)
             .unwrap();
-        let mut installed = (*InstalledPackage::open(&store, &package, compiler)
+        let installed = (*InstalledPackage::open(&store, &package, compiler)
             .unwrap()
             .package)
             .clone();
-        let mut records = InstallationRecords::default();
-        for (address, action, reference) in &installed.rows {
-            records.rows.insert(*address, (Action(*action), *reference));
-        }
-        for reference in &installed.contents {
-            records.contents.insert(reference.output.0, *reference);
-        }
+        let mut records = records_of(&installed);
         records.rows.insert(key.0, (Action(first.output.0), first));
         records.contents.insert(first.output.0, first);
         installed.publish(&store, &records).unwrap();
@@ -532,7 +688,7 @@ mod tests {
             },
         ] {
             let mut changed = (*installed).clone();
-            changed.contents.push(invalid);
+            changed.contents = changed.contents.iter().copied().chain([invalid]).collect();
             assert!(
                 changed
                     .check_records(&store)
@@ -621,8 +777,8 @@ pub(crate) struct InstalledRecords {
     store: hirsel_artifact_store::Store,
     // Keep the physical index generation pinned until this operation releases it.
     _scope: hirsel_artifact_store::Batch,
-    rows: Box<[(ContentHash, Association)]>,
-    contents: Box<[Reference]>,
+    rows: Arc<[(ContentHash, Association)]>,
+    contents: Arc<[Reference]>,
 }
 impl InstalledRecords {
     pub(crate) fn lookup(&self, address: Address) -> Option<Association> {
@@ -644,8 +800,7 @@ impl InstalledRecords {
                 + self.root.as_os_str().len()
                 + 2 * self.store.root().as_os_str().len(),
         );
-        weight.add(std::mem::size_of_val(&*self.rows));
-        weight.add(std::mem::size_of_val(&*self.contents));
+        // The rows and contents are the package's, charged with it.
         weight.bytes().try_into().unwrap_or(usize::MAX)
     }
 }
@@ -657,7 +812,7 @@ pub struct InstalledSourceRecords {
     store: hirsel_artifact_store::Store,
     rows: BTreeMap<ContentHash, Reference>,
     operation: std::sync::Weak<InstalledRecords>,
-    definitions: BTreeMap<DefPath, InstalledDefinition>,
+    definitions: Option<Arc<image::Definitions>>,
 }
 impl InstalledSourceRecords {
     pub fn get(&self, key: &EntryKey) -> Option<Bytes> {
@@ -679,37 +834,28 @@ impl InstalledSourceRecords {
                 + self.store.root().as_os_str().len(),
         );
         weight.tree::<ContentHash, Reference>(self.rows.len());
-        weight.tree::<DefPath, InstalledDefinition>(self.definitions.len());
-        for (path, definition) in &self.definitions {
-            weight.path(path);
-            weight.path(&definition.key.definition);
-            weight.vec(&definition.key.specialization, |weight, (name, path)| {
-                weight.add(name.capacity());
-                weight.path(path);
-            });
-            weight.add(definition.ownership.source_logical.as_os_str().len());
-        }
+        // The definitions are the package's, charged with it.
         weight.bytes().try_into().unwrap_or(usize::MAX)
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct InstalledPackage {
     pub compiler: ContentHash,
-    /// Identity of the verified installation manifest, including all actions and references.
-    #[serde(skip)]
+    /// Identity of the verified installation header, including all actions and references.
     pub identity: ContentHash,
     pub package: PackageId,
     pub manifest: Vec<u8>,
     pub sources: Vec<InstalledSource>,
     pub dependencies: Vec<PackageId>,
-    definitions: BTreeMap<DefPath, InstalledDefinition>,
     pub inputs: InstalledInputs,
-    /// Physical action rows and content required by the completed Precompute.
-    rows: Vec<(ContentHash, ContentHash, Reference)>,
-    contents: Vec<Reference>,
-    #[serde(skip)]
+    /// The image's sections, once published or opened.
+    sections: Option<image::Sections>,
+    /// Physical action rows, sorted by address, and every content they and
+    /// the definitions require, sorted.
+    rows: Arc<[(ContentHash, Association)]>,
+    contents: Arc<[Reference]>,
+    definitions: Option<Arc<image::Definitions>>,
     records: std::sync::Weak<InstalledRecords>,
-    #[serde(skip)]
     sources_owner: Option<Arc<InstalledSourceRecords>>,
 }
 
@@ -734,19 +880,14 @@ impl InstalledPackage {
         weight.add(std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>());
         weight.add(self.package.name.capacity() + self.package.version.capacity());
         weight.add(self.manifest.capacity());
-        weight.add(
-            self.rows.capacity() * std::mem::size_of::<(ContentHash, ContentHash, Reference)>(),
-        );
-        weight.add(self.contents.capacity() * std::mem::size_of::<Reference>());
-        weight.tree::<DefPath, InstalledDefinition>(self.definitions.len());
-        for (path, definition) in &self.definitions {
-            weight.path(path);
-            weight.path(&definition.key.definition);
-            weight.vec(&definition.key.specialization, |weight, (name, path)| {
-                weight.add(name.capacity());
-                weight.path(path);
-            });
-            weight.add(definition.ownership.source_logical.as_os_str().len());
+        weight.add(std::mem::size_of_val(&*self.rows));
+        weight.add(std::mem::size_of_val(&*self.contents));
+        if let Some(sections) = &self.sections {
+            weight.add(sections.references().count() * std::mem::size_of::<Reference>());
+        }
+        // Reserved up front for every chunk the request may come to demand.
+        if let Some(definitions) = &self.definitions {
+            weight.add(definitions.bytes());
         }
         weight.add(self.sources.capacity() * std::mem::size_of::<InstalledSource>());
         for source in &self.sources {
@@ -783,10 +924,11 @@ impl InstalledPackage {
             manifest,
             sources,
             dependencies,
-            definitions: BTreeMap::new(),
             inputs,
-            rows: vec![],
-            contents: vec![],
+            sections: None,
+            rows: Arc::new([]),
+            contents: Arc::new([]),
+            definitions: None,
             records: Default::default(),
             sources_owner: None,
         }
@@ -797,26 +939,51 @@ impl InstalledPackage {
         records: &InstallationRecords,
     ) -> std::io::Result<(Address, hirsel_artifact_store::Association)> {
         let mut records = records.clone();
-        self.index_definitions(store, &mut records)?;
+        let definitions = self.index_definitions(store, &mut records)?;
         self.rows = records
             .rows
             .iter()
-            .map(|(address, (action, reference))| (*address, action.0, *reference))
+            .map(|(address, (action, reference))| {
+                (
+                    *address,
+                    Association {
+                        action: *action,
+                        reference: *reference,
+                    },
+                )
+            })
             .collect();
-        self.contents = records.contents.values().copied().collect();
+        self.contents = records
+            .contents
+            .values()
+            .copied()
+            .chain(self.rows.iter().map(|(_, row)| row.reference))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
         if self.rows.is_empty() || self.contents.is_empty() {
             return Err(std::io::Error::other(
                 "package precomputation published no products",
             ));
         }
-        // Publish last, after fresh reads prove the complete installation
+        image::check(
+            &image::Context {
+                package: &self.package,
+                compiler: self.compiler,
+                manifest: ContentHash::of_bytes(&self.manifest),
+                rows: &self.rows,
+                contents: &self.contents,
+            },
+            &definitions,
+        )
+        .map_err(std::io::Error::other)?;
+        let reference = image::build(store, &mut self, &definitions)?;
+        // Associate last, after fresh reads prove the complete installation
         // exists. The header's one association is the commit: until it
-        // lands, the previous header and every content it lists stay intact,
-        // since content is immutable and no row of it lives in the index.
-        self.check_definitions().map_err(std::io::Error::other)?;
+        // lands, the previous header and every content and section it lists
+        // stay intact, since content is immutable and no row of it lives in
+        // the index.
         self.check_records(store).map_err(std::io::Error::other)?;
-        let bytes = bincode::serialize(&self).map_err(std::io::Error::other)?;
-        let reference = store.put(PACKAGE, &bytes)?;
         let action = Action(reference.output.0);
         store.associate(address(), action, reference)?;
         Ok((
@@ -828,14 +995,17 @@ impl InstalledPackage {
         &self,
         store: &hirsel_artifact_store::Store,
     ) -> Result<hirsel_artifact_store::VerifiedRecords, String> {
-        // Rows are the header's; each must reach present, intact content.
+        // Rows, contents and sections are the header's; each must reach
+        // present, intact content. Open already checked the sections it reads,
+        // and publication wrote them itself.
         store
             .verify_records(
                 std::iter::empty(),
                 self.contents
                     .iter()
                     .copied()
-                    .chain(self.rows.iter().map(|&(_, _, reference)| reference)),
+                    .chain(self.rows.iter().map(|(_, row)| row.reference))
+                    .chain(self.sections.iter().flat_map(image::Sections::unread)),
             )
             .map_err(|error| format!("partial or corrupt package product content or row: {error}"))
     }
@@ -890,8 +1060,7 @@ impl InstalledPackage {
             .get_owned(row.reference)
             .ok()
             .ok_or("corrupt installed package product")?;
-        let mut installed = manifest::decode(&bytes)
-            .map_err(|error| format!("corrupt installed package: {error}"))?;
+        let mut installed = image::read(store, &bytes)?;
         installed.identity = row.reference.output.0;
         if installed.sources.is_empty()
             || installed.rows.is_empty()
@@ -908,7 +1077,6 @@ impl InstalledPackage {
         if !installed.dependencies.is_empty() {
             return Err("installed package dependency products are unavailable".into());
         }
-        installed.check_definitions()?;
         Ok(installed)
     }
     #[cfg(test)]
@@ -955,53 +1123,32 @@ impl InstalledPackage {
         scope: hirsel_artifact_store::Batch,
         mut installed: Self,
     ) -> Result<OpenedInstallation, String> {
-        {
-            let mut rows = BTreeMap::new();
-            for &(address, action, reference) in &installed.rows {
-                let row = Association {
-                    action: Action(action),
-                    reference,
-                };
-                if rows
-                    .insert(address, row)
-                    .is_some_and(|previous| previous != row)
-                {
-                    return Err("conflicting installed product rows".into());
-                }
-            }
-            let contents: std::collections::BTreeSet<_> = installed
-                .contents
+        let records = Arc::new(InstalledRecords {
+            root: store.root().to_owned(),
+            store: store.clone(),
+            _scope: scope,
+            rows: installed.rows.clone(),
+            contents: installed.contents.clone(),
+        });
+        installed.sources_owner = Some(Arc::new(InstalledSourceRecords {
+            installation: installed.identity,
+            store: store.clone(),
+            rows: installed
+                .rows
                 .iter()
-                .copied()
-                .chain(rows.values().map(|row| row.reference))
-                .collect();
-            let records = Arc::new(InstalledRecords {
-                root: store.root().to_owned(),
-                store: store.clone(),
-                _scope: scope,
-                rows: rows.into_iter().collect(),
-                contents: contents.into_iter().collect(),
-            });
-            installed.sources_owner = Some(Arc::new(InstalledSourceRecords {
-                installation: installed.identity,
-                store: store.clone(),
-                rows: installed
-                    .rows
-                    .iter()
-                    .filter(|(_, _, reference)| {
-                        reference.domain
-                            == super::entry_domain(hirsel_query_products::QueryKind::Parse)
-                    })
-                    .map(|(address, _, reference)| (*address, *reference))
-                    .collect(),
-                operation: Arc::downgrade(&records),
-                definitions: installed.definitions.clone(),
-            }));
-            installed.records = Arc::downgrade(&records);
-            Ok(OpenedInstallation {
-                package: Arc::new(installed),
-                records,
-            })
-        }
+                .filter(|(_, row)| {
+                    row.reference.domain
+                        == super::entry_domain(hirsel_query_products::QueryKind::Parse)
+                })
+                .map(|(address, row)| (*address, row.reference))
+                .collect(),
+            operation: Arc::downgrade(&records),
+            definitions: installed.definitions.clone(),
+        }));
+        installed.records = Arc::downgrade(&records);
+        Ok(OpenedInstallation {
+            package: Arc::new(installed),
+            records,
+        })
     }
 }

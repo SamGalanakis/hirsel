@@ -923,8 +923,11 @@ mod tests {
         let local_statistics = local.enable_statistics();
         let statistics = provider.read_only[0].enable_statistics();
         let audit = InstalledPackage::audit(&provider.read_only[0]).unwrap();
-        // The whole-store audit retains the existing full-closure work law.
-        let checks = inputs.len() as u64 + 1;
+        // The whole-store audit retains the existing full-closure work law:
+        // each input once, plus what open reads (the header and its row,
+        // content and index sections and the one source text).
+        let interface = 5;
+        let checks = inputs.len() as u64 + interface;
         assert_eq!(statistics.snapshot().counters["ContentChecks"], checks);
         let opened = statistics.snapshot();
         for _ in 0..2 {
@@ -952,7 +955,7 @@ mod tests {
         let package_owner = operation.installed_package(&package, compiler).unwrap();
         assert_eq!(
             statistics.snapshot().counters["ContentChecks"],
-            before.counters["ContentChecks"] + 1,
+            before.counters["ContentChecks"] + interface,
             "opening verifies the interface, not the unused closure"
         );
         let source = package_owner.source_records().unwrap();
@@ -990,7 +993,7 @@ mod tests {
         next.installed_package(&package, compiler).unwrap();
         assert_eq!(
             statistics.snapshot().counters["ContentChecks"],
-            consumed.counters["ContentChecks"] + 1
+            consumed.counters["ContentChecks"] + interface
         );
 
         // Integrity ownership uses the existing transport grant once, and

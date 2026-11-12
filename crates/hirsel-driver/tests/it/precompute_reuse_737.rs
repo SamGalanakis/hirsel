@@ -33,7 +33,7 @@ fn files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 
 fn installation(root: &Path) -> Option<hirsel_artifact_store::Association> {
     hirsel_artifact_store::Store::new(root.to_owned()).lookup_owned(hirsel_artifact_store::Address(
-        hirsel_syntax::ContentHash::of_bytes(b"hirsel.installed-package.v4"),
+        hirsel_syntax::ContentHash::of_bytes(b"hirsel.installed-package.v5"),
     ))
 }
 

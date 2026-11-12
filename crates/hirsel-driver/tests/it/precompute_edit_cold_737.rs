@@ -21,7 +21,7 @@ const MANIFEST: &str = r#"{"schema":1,"package":{"name":"edit_cold_737","version
 fn installation(root: &Path) -> hirsel_artifact_store::Association {
     hirsel_artifact_store::Store::new(root.to_owned())
         .lookup_owned(hirsel_artifact_store::Address(
-            hirsel_syntax::ContentHash::of_bytes(b"hirsel.installed-package.v4"),
+            hirsel_syntax::ContentHash::of_bytes(b"hirsel.installed-package.v5"),
         ))
         .unwrap()
 }

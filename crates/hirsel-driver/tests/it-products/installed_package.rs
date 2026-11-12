@@ -186,6 +186,7 @@ fn installed_std_compiles_without_its_source_files_and_never_checks_unused_items
         let unused = installed
             .definition(&path("spare", "unused"))
             .unwrap()
+            .unwrap()
             .ownership
             .body;
         let (file, original) = corrupt(unused);
@@ -247,6 +248,7 @@ fn foreign_demanded_body_is_rejected_on_its_first_use() {
                     modules: vec!["math".into()],
                     name: "twice".into(),
                 }))
+                .unwrap()
                 .unwrap()
                 .ownership
                 .body;

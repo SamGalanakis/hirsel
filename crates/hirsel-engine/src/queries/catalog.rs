@@ -1873,7 +1873,9 @@ impl QueryEngine {
         self.catalog
             .installed
             .get(&path.0.package)
-            .is_some_and(|owner| owner.definition(path).is_some())
+            // A refused descriptor is installed, not absent: its refusal
+            // surfaces when the definition is read, never as a source fallback.
+            .is_some_and(|owner| !matches!(owner.definition(path), Ok(None)))
     }
     pub(crate) fn installed_semantic_input(
         &self,
@@ -1883,22 +1885,23 @@ impl QueryEngine {
         let Some(owner) = self.catalog.installed.get(&path.0.package) else {
             return Ok(None);
         };
-        let implementation = self
-            .implementation_hash(path)
-            .or_else(|| {
-                owner
-                    .definition(path)
-                    .map(|definition| definition.key.implementation)
+        let refused = |message| {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "installed semantic input".into(),
+                message,
             })
-            .ok_or(QueryError::NotImplemented)?;
+        };
+        let implementation = match self.implementation_hash(path) {
+            Some(implementation) => implementation,
+            None => owner
+                .definition(path)
+                .map_err(refused)?
+                .map(|definition| definition.key.implementation)
+                .ok_or(QueryError::NotImplemented)?,
+        };
         owner
             .semantic(path, self.environment_value(), implementation, limit)
-            .map_err(|message| {
-                QueryError::Operational(hirsel_types::OperationalFailure {
-                    operation: "installed semantic input".into(),
-                    message,
-                })
-            })
+            .map_err(refused)
     }
     pub(crate) fn source_paths(&self) -> Vec<DefPath> {
         self.source_paths_iter()

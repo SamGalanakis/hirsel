@@ -1,5 +1,5 @@
 //! Installed semantic inputs use the ordinary NativeRecords codec and content
-//! references. The manifest indexes descriptors; opening it decodes no headers.
+//! references. The image indexes descriptors; opening it decodes none of them.
 use super::*;
 use bincode::Options;
 use hirsel_syntax::DefPath;
@@ -106,17 +106,21 @@ impl InstalledSemanticInput {
     }
 }
 impl InstalledPackage {
-    pub fn definition(&self, path: &DefPath) -> Option<&InstalledDefinition> {
-        self.definitions.get(path)
+    /// The installed definition at `path`. One whose descriptor or chunk fails
+    /// its checks is refused on this first demand, never reported absent.
+    pub fn definition(&self, path: &DefPath) -> Result<Option<&InstalledDefinition>, String> {
+        match &self.definitions {
+            Some(definitions) => definitions.get(path),
+            None => Ok(None),
+        }
     }
-    pub fn definitions(&self) -> impl Iterator<Item = &InstalledDefinition> {
-        self.definitions.values()
-    }
-    pub fn index_definitions(
-        &mut self,
+    /// Index the semantic inputs among `records`' contents, adding each one's
+    /// row, and refuse two inputs for one path.
+    pub(super) fn index_definitions(
+        &self,
         store: &hirsel_artifact_store::Store,
         records: &mut InstallationRecords,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<BTreeMap<DefPath, InstalledDefinition>> {
         let manifest = ContentHash::of_bytes(&self.manifest);
         let references = records
             .contents
@@ -124,7 +128,7 @@ impl InstalledPackage {
             .filter(|reference| reference.domain == SEMANTIC_INPUT)
             .copied()
             .collect::<Vec<_>>();
-        self.definitions.clear();
+        let mut definitions = BTreeMap::new();
         for reference in references {
             let bytes = store
                 .get_owned(reference)
@@ -166,71 +170,73 @@ impl InstalledPackage {
                 record: reference,
                 ownership: record.ownership,
             };
-            if self
-                .definitions
-                .insert(record.definition, definition)
-                .is_some()
-            {
+            if definitions.insert(record.definition, definition).is_some() {
                 return Err(std::io::Error::other(
                     "conflicting installed semantic inputs",
                 ));
             }
         }
-        Ok(())
-    }
-    pub fn check_definitions(&self) -> Result<(), String> {
-        let manifest = ContentHash::of_bytes(&self.manifest);
-        let rows = self
-            .rows
-            .iter()
-            .map(|(address, action, reference)| (*address, (*action, *reference)))
-            .collect::<BTreeMap<_, _>>();
-        let contents = self
-            .contents
-            .iter()
-            .map(|reference| (reference.output.0, *reference))
-            .collect::<BTreeMap<_, _>>();
-        for (path, definition) in &self.definitions {
-            let key = &definition.key;
-            if path != &key.definition
-                || path.0.package != self.package
-                || key.compiler != self.compiler
-                || key.manifest != manifest
-                || key.source != definition.ownership.source_digest
-                || definition.ownership.source.len != definition.ownership.source_bytes
-                || definition.record.domain != SEMANTIC_INPUT
-                || definition.ownership.header.domain != SEMANTIC_HEADER
-                || definition.ownership.body.domain != SEMANTIC_BODY
-                || definition.ownership.source.domain != SEMANTIC_SOURCE
-                || key.specialization
-                    != hirsel_types::specialization_parts(path)
-                        .map_or_else(Vec::new, |(_, args)| args)
-            {
-                return Err("invalid installed definition descriptor".into());
-            }
-            if rows.get(&key.address().0) != Some(&(definition.record.output.0, definition.record))
-            {
-                return Err("missing installed definition row".into());
-            }
-            for reference in [
-                definition.record,
-                definition.ownership.header,
-                definition.ownership.source,
-                definition.ownership.body,
-                definition.ownership.semantic,
-            ] {
-                if contents.get(&reference.output.0) != Some(&reference) {
-                    return Err("missing installed definition content".into());
-                }
-            }
-        }
-        Ok(())
+        Ok(definitions)
     }
 }
 
+/// One definition's own checks, against its package's identity and its row
+/// and content sections.
+pub(super) fn check_definition(
+    context: &image::Context<'_>,
+    path: &DefPath,
+    definition: &InstalledDefinition,
+) -> Result<(), String> {
+    let key = &definition.key;
+    if path != &key.definition
+        || path.0.package != *context.package
+        || key.compiler != context.compiler
+        || key.manifest != context.manifest
+        || key.source != definition.ownership.source_digest
+        || definition.ownership.source.len != definition.ownership.source_bytes
+        || definition.record.domain != SEMANTIC_INPUT
+        || definition.ownership.header.domain != SEMANTIC_HEADER
+        || definition.ownership.body.domain != SEMANTIC_BODY
+        || definition.ownership.source.domain != SEMANTIC_SOURCE
+        || key.specialization
+            != hirsel_types::specialization_parts(path).map_or_else(Vec::new, |(_, args)| args)
+    {
+        return Err("invalid installed definition descriptor".into());
+    }
+    let row = context
+        .rows
+        .binary_search_by_key(&key.address().0, |(address, _)| *address)
+        .ok()
+        .map(|at| context.rows[at].1);
+    if row
+        != Some(Association {
+            action: Action(definition.record.output.0),
+            reference: definition.record,
+        })
+    {
+        return Err("missing installed definition row".into());
+    }
+    for reference in [
+        definition.record,
+        definition.ownership.header,
+        definition.ownership.source,
+        definition.ownership.body,
+        definition.ownership.semantic,
+    ] {
+        if context.contents.binary_search(&reference).is_err() {
+            return Err("missing installed definition content".into());
+        }
+    }
+    Ok(())
+}
+
 impl InstalledSourceRecords {
-    pub fn definition(&self, path: &DefPath) -> Option<&InstalledDefinition> {
-        self.definitions.get(path)
+    /// See `InstalledPackage::definition`.
+    pub fn definition(&self, path: &DefPath) -> Result<Option<&InstalledDefinition>, String> {
+        match &self.definitions {
+            Some(definitions) => definitions.get(path),
+            None => Ok(None),
+        }
     }
 
     pub fn semantic(
@@ -240,7 +246,7 @@ impl InstalledSourceRecords {
         implementation: ContentHash,
         limit: u64,
     ) -> Result<Option<InstalledSemanticInput>, String> {
-        let Some(descriptor) = self.definitions.get(path) else {
+        let Some(descriptor) = self.definition(path)? else {
             return Ok(None);
         };
         if descriptor.key.config != config || descriptor.key.implementation != implementation {

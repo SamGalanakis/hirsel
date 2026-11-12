@@ -335,7 +335,9 @@ fn nested_task_result_cause_and_repair() {
 #[test]
 fn nested_task_result_repair_already_unique_and_noalloc_controls() {
     let base = include_str!("../../../../examples/kvd/repros/incident-3.hir");
-    let source = base.replace("          work()", "          unique work()");
+    let source = base
+        .replace("type E = Bad(String)", "pub type E = Bad(String)")
+        .replace("          work()", "          unique work()");
     let output = check_text(&source);
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     // Allocation promises on named callbacks are declarations, not an
@@ -425,7 +427,7 @@ fn nested_task_result_names_record_and_variant_parts_without_a_false_repair() {
             .contains("return a `unique Result")
     );
     // Scalar and already-unique parts retain their ordinary acceptance.
-    for replacement in ["type E = Bad(u64)", "type E = Bad(unique String)"] {
+    for replacement in ["pub type E = Bad(u64)", "pub type E = Bad(unique String)"] {
         let source = base.replace("type E = Bad(String)", replacement);
         let fixed = check_text(&source);
         assert!(

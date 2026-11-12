@@ -244,6 +244,7 @@ fn task_result_sendability_folds_both_requirements() {
         assert_eq!(at.start, at.end);
         let mut repaired = TASK_RESULT.to_owned();
         repaired.insert_str(at.start as usize, &fix.replacement);
+        let repaired = repaired.replace("type E = Bad(String)", "pub type E = Bad(String)");
         assert!(repaired.contains("unique work()"));
         let fixed = sendability_check(&repaired);
         assert!(fixed.diagnostics.is_empty(), "{:?}", fixed.diagnostics);
@@ -285,6 +286,7 @@ fn task_result_sendability_folds_isolate_and_named_callbacks() {
                 let at = output.sources.resolve(fix.span);
                 let mut repaired = source;
                 repaired.insert_str(at.start as usize, &fix.replacement);
+                let repaired = repaired.replace("type E = Bad(String)", "pub type E = Bad(String)");
                 let output = sendability_check(&repaired);
                 assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
             }

@@ -1449,8 +1449,8 @@ fn pattern_payload_places_keep_declaration_locality_beside_local_mut_content() {
     with_compiler_stack(|| {
         let source = r#"
 type Item { name: String }
-type Err = Archive(Reason) | Other
-type Reason = Truncated | Header(String)
+pub type Err = Archive(Reason) | Other
+pub type Reason = Truncated | Header(String)
 type State { text: String }
 fn next(mut s: State) -> Result[Option[Item], Err] { Ok(None) }
 fn error_kind(e: Err) -> u64 {

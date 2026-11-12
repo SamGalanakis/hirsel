@@ -170,6 +170,18 @@ fn equal_fresh(engine: &mut QueryEngine, source: &str) {
         }
     }
 }
+fn independent_signatures(engine: &mut QueryEngine) -> hirsel_validate::SignatureMap {
+    let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
+    for name in ["Arena", "$intrinsic.heap"] {
+        let path = hirsel_syntax::DefPath::core(name);
+        let signature =
+            hirsel_types::SignatureProvider::signature(engine, hirsel_syntax::DefId::intern(&path))
+                .unwrap();
+        signatures.insert(path, signature.as_ref().clone());
+    }
+    signatures
+}
+
 #[test]
 fn real_phases_edit_body_signature_failed_read_and_recovery() {
     hirsel_intern::jobs::with_compiler_stack(
@@ -1862,7 +1874,7 @@ fn record_constructors_independently_require_every_declared_field() {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             edit(&mut engine, &source);
             let output = engine.lower_to_tir(&path("probe")).unwrap();
-            let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
+            let mut signatures = independent_signatures(&mut engine);
             for name in ["R", "probe"] {
                 let signature = engine
                     .signature(hirsel_syntax::DefId::intern(&path(name)))
@@ -1919,7 +1931,7 @@ fn call_argument_mapping_independently_rejects_missing_and_duplicate_ordinals() 
             "fn rename(from x:u8,to y:u8){}\nfn probe(){rename(to:2,from:1)}",
         );
         let output = engine.lower_to_tir(&path("probe")).unwrap();
-        let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
+        let mut signatures = independent_signatures(&mut engine);
         for name in ["rename", "probe"] {
             let signature = engine
                 .signature(hirsel_syntax::DefId::intern(&path(name)))
@@ -1984,7 +1996,7 @@ fn branch_results_are_independently_checked_against_the_receiving_type() {
                 &format!("fn probe(b:bool){{ let x={branch} }}"),
             );
             let output = engine.lower_to_tir(&path("probe")).unwrap();
-            let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
+            let mut signatures = independent_signatures(&mut engine);
             signatures.insert(
                 path("probe"),
                 engine
@@ -2035,7 +2047,7 @@ fn match_payload_projections_keep_the_physical_type_and_validate_it_independentl
             "fn make()->Result[unique String,()]{Ok(\"x\")}\nfn probe(){match make(){Ok(text)=>(),Error(e)=>()}}",
         );
         let output = engine.lower_to_tir(&path("probe")).unwrap();
-        let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
+        let mut signatures = independent_signatures(&mut engine);
         for name in ["make", "probe"] {
             signatures.insert(
                 path(name),
@@ -2265,7 +2277,7 @@ fn aggregate_uniqueness_requires_owned_unique_parts_independently() {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             edit(&mut engine, source);
             let output = engine.lower_to_tir(&path("probe")).unwrap();
-            let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
+            let mut signatures = independent_signatures(&mut engine);
             for name in if nominal {
                 vec!["R", "probe"]
             } else {
@@ -2646,7 +2658,7 @@ fn shared_handle_qualifiers_publish_canonical_copy_receipts() {
         let signature = engine
             .signature(hirsel_syntax::DefId::intern(&path("probe")))
             .unwrap();
-        let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
+        let mut signatures = independent_signatures(&mut engine);
         signatures.insert(path("probe"), signature.as_ref().clone());
         let report =
             hirsel_validate::validate(&output.value, engine.types(), &signatures, &mut vec![])
@@ -2712,7 +2724,7 @@ fn nested_view_calls_preserve_mut_handback_and_reject_forged_strengthening() {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             edit(&mut engine, source);
             let output = engine.lower_to_tir(&path("probe")).unwrap();
-            let mut signatures = hirsel_validate::SignatureMap::new(engine.types().clone());
+            let mut signatures = independent_signatures(&mut engine);
             let mut inspect = engine
                 .signature(hirsel_syntax::DefId::intern(&path("inspect")))
                 .unwrap()

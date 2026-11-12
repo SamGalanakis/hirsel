@@ -409,6 +409,9 @@ impl ResultStore for RequestStore {
         }
         admitted
     }
+    fn product_budget(&self) -> Option<Arc<hirsel_engine_admission::ProcessBudget>> {
+        Some(self.memory.memory.budget().clone())
+    }
     fn try_admit_product_memory(&self, bytes: u64) -> Option<Arc<dyn Send + Sync>> {
         let bytes = bytes.checked_add(hirsel_engine_admission::retained_arc_bytes(
             &std::mem::MaybeUninit::<ArchiveLease>::uninit(),

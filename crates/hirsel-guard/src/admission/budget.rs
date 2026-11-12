@@ -25,6 +25,9 @@ pub struct ProcessBudget {
     waiters: AtomicUsize,
     owners: [AtomicU64; OWNERS],
     idle_reclaimer: Mutex<Option<Weak<dyn Fn() + Send + Sync>>>,
+    /// Holders of evictable charges other than the engine's header facts: each
+    /// call drops one charge no reader holds and says whether it dropped one.
+    evictors: Mutex<Vec<Weak<dyn Fn() -> bool + Send + Sync>>>,
     /// The host budget also records which code sites hold its peak.
     sites: bool,
 }
@@ -101,6 +104,7 @@ impl ProcessBudget {
             waiters: AtomicUsize::new(0),
             owners: std::array::from_fn(|_| AtomicU64::new(0)),
             idle_reclaimer: Mutex::new(None),
+            evictors: Mutex::default(),
             sites,
         })
     }
@@ -194,14 +198,40 @@ impl ProcessBudget {
         reclaimer();
         true
     }
+    /// Register a holder of evictable charges for every eviction point and
+    /// every refused reservation, without extending its lifetime. It runs
+    /// outside the budget lock and must not reserve from this budget.
+    pub fn register_evictor(&self, evictor: Weak<dyn Fn() -> bool + Send + Sync>) {
+        let mut evictors = self.evictors.lock().unwrap_or_else(|e| e.into_inner());
+        evictors.retain(|evictor| evictor.strong_count() != 0);
+        evictors.push(evictor);
+    }
+    /// Evict one registered evictable charge; false once none evicts.
+    pub fn evict_one(&self) -> bool {
+        let live = {
+            let mut evictors = self.evictors.lock().unwrap_or_else(|e| e.into_inner());
+            evictors.retain(|evictor| evictor.strong_count() != 0);
+            evictors
+                .iter()
+                .filter_map(Weak::upgrade)
+                .collect::<Vec<_>>()
+        };
+        live.iter().any(|evict| evict())
+    }
     /// Nonblocking: reject a new source snapshot instead of multiplying caps
     /// or waiting while holding another snapshot's allowance.
     #[track_caller]
     pub fn reserve(self: &Arc<Self>, bytes: u64) -> std::io::Result<MemoryReservation> {
-        let error = match self.reserve_once(bytes) {
+        let mut error = match self.reserve_once(bytes) {
             Ok(reservation) => return Ok(reservation),
             Err(error) => error,
         };
+        while bytes <= self.limit && self.evict_one() {
+            match self.reserve_once(bytes) {
+                Ok(reservation) => return Ok(reservation),
+                Err(refused) => error = refused,
+            }
+        }
         if bytes > self.limit || !self.reclaim_idle() {
             return Err(error);
         }
@@ -218,10 +248,16 @@ impl ProcessBudget {
     #[track_caller]
     pub fn reserve_evictable(self: &Arc<Self>, bytes: u64) -> std::io::Result<MemoryReservation> {
         let site = Location::caller();
-        let error = match self.admit(bytes, true, false, site) {
+        let mut error = match self.admit(bytes, true, false, site) {
             Ok(reservation) => return Ok(reservation),
             Err(error) => error,
         };
+        while bytes <= self.limit - self.headroom && self.evict_one() {
+            match self.admit(bytes, true, false, site) {
+                Ok(reservation) => return Ok(reservation),
+                Err(refused) => error = refused,
+            }
+        }
         if bytes > self.limit - self.headroom || !self.reclaim_idle() {
             return Err(error);
         }

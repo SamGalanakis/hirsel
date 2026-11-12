@@ -220,6 +220,11 @@ pub trait ResultStore: Send + Sync {
     /// Retain an immutable live value in this request's existing partition.
     /// Its charge survives the producer and returns after the final reader.
     fn admit_product_memory(&self, bytes: u64) -> Option<Arc<dyn Send + Sync>>;
+    /// The process budget this request's memory comes from, for the evictable
+    /// charges a request keeps (checked layout tables); None outside a request.
+    fn product_budget(&self) -> Option<Arc<hirsel_engine_admission::ProcessBudget>> {
+        None
+    }
     /// Attempt live retention before a required spill without exhausting the request.
     fn try_admit_product_memory(&self, bytes: u64) -> Option<Arc<dyn Send + Sync>> {
         self.admit_product_memory(bytes)

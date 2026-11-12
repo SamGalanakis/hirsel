@@ -1,8 +1,12 @@
 use crate::support::{self, *};
 use hirsel_artifact_store::{Contents, Memory};
+use hirsel_guard::admission::ProcessBudget;
 use hirsel_lir::stage::{Ready, StageKind, Value};
 use hirsel_lir::validate::{Inputs, NativeCache, NativeEnvironment};
 use std::sync::Arc;
+
+/// The charge each kept table takes in these tests' budgets.
+const TABLE: u64 = 1000;
 
 #[test]
 fn native_products_19_only_actual_validation_can_issue_a_local_output() {
@@ -26,11 +30,8 @@ fn native_products_19_only_actual_validation_can_issue_a_local_output() {
         discharge: None,
     };
     let store = Arc::new(Memory::default());
-    let admission = Arc::new(());
-    let cache = NativeCache::new(store.clone(), None).with_layout_admission({
-        let admission = admission.clone();
-        move |_| Some(admission.clone())
-    });
+    let budget = ProcessBudget::new(1 << 30);
+    let cache = NativeCache::new(store.clone(), None).keeping_layouts(budget.clone(), |_| TABLE);
     let subject = hash("native query action");
     let policy = hash("native policy");
     assert!(
@@ -145,26 +146,25 @@ fn native_products_19_only_actual_validation_can_issue_a_local_output() {
         .validate_and_publish(subject, policy, ready, &original, &[], &[])
         .unwrap();
     assert_eq!(ready_output.unwrap().stage(), StageKind::Ready);
-    let expired = Arc::downgrade(&closure);
+    let retained = Arc::downgrade(&closure);
     drop(closure);
-    assert!(
-        expired.upgrade().is_none(),
-        "the validator must release layouts after their last consumer"
-    );
-    assert_eq!(
-        Arc::strong_count(&admission),
-        2,
-        "only the test owner and the admission callback retain the marker"
-    );
     let (closure, _) = cache.read(&output, &target).unwrap();
+    assert!(
+        Arc::ptr_eq(&closure, &retained.upgrade().unwrap()),
+        "the validator keeps its checked table between reads"
+    );
     drop(cache);
     assert_eq!(
-        Arc::strong_count(&admission),
-        2,
-        "a detached layout reader retains the original grant"
+        budget.reserved(),
+        TABLE,
+        "a detached layout reader keeps exactly its own table's charge"
     );
     drop(closure);
-    assert_eq!(Arc::strong_count(&admission), 1);
+    assert!(
+        retained.upgrade().is_none(),
+        "nothing holds a table once its validator and readers end"
+    );
+    assert_eq!(budget.reserved(), 0);
 }
 
 #[test]
@@ -281,7 +281,7 @@ fn native_products_19_directory_reopen_copy_and_corruption() {
     let output = output.unwrap();
     drop(cache);
     let reopened = NativeCache::new(Arc::new(local.clone()), Some(local.clone()))
-        .with_layout_admission(|_| Some(Arc::new(())));
+        .keeping_layouts(ProcessBudget::new(1 << 30), |_| TABLE);
     let current = reopened
         .lookup(subject, policy, StageKind::Value, &environment)
         .unwrap()
@@ -1032,4 +1032,129 @@ fn native_product_binding_consumes_a_shared_typed_body_without_text_decode() {
         ..inputs
     };
     assert!(hirsel_lir::validate::validate_value(materialized, &current).is_ok());
+}
+
+/// Publish units whose layout tables differ (no parameter, a borrowed
+/// sequence block, a borrowed erased value) through `cache`.
+fn publish_distinct_tables(
+    cache: &NativeCache,
+    target: &hirsel_lir::TargetSpec,
+) -> Vec<hirsel_lir::validate::NativeOutput> {
+    use hirsel_core_contract::Passing;
+    use hirsel_lir::ir::SlotKind;
+    let operations = support::registry();
+    let mut empty = Lir::<Value>::new(&[], None);
+    empty.builder.ret(ENTRY, None);
+    let mut fixtures = vec![("empty", empty)];
+    for (name, layout) in [("sequence", l::SEQBLK), ("erased", l::ERASED)] {
+        let mut borrowing = Lir::<Value>::new(&[(Passing::Borrow, layout)], None);
+        let slot = borrowing.slot(layout, SlotKind::Parameter(0), ROOT);
+        let version = borrowing.version_of(slot);
+        borrowing.param(version);
+        borrowing.builder.ret(ENTRY, None);
+        fixtures.push((name, borrowing));
+    }
+    let outputs = fixtures
+        .into_iter()
+        .map(|(name, fixture)| {
+            let (unit, table, manifest) = fixture.finish();
+            let inputs = Inputs {
+                memo: Default::default(),
+                target,
+                layouts: &table,
+                manifest: &manifest,
+                operations: &operations,
+                discharge: None,
+            };
+            let (_, output) = cache
+                .validate_and_publish(hash(name), hash("native policy"), unit, &inputs, &[], b"")
+                .unwrap();
+            output.unwrap()
+        })
+        .collect::<Vec<_>>();
+    let distinct = outputs
+        .iter()
+        .map(|output| output.layouts())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        distinct.len(),
+        outputs.len(),
+        "each fixture has its own table"
+    );
+    outputs
+}
+
+/// A validator keeps each checked layout table it admitted. Units with
+/// different tables must each read back their own table, and a kept table
+/// must still refuse another target, exactly as a reader with nothing kept
+/// refuses it.
+#[test]
+fn native_products_19_retained_layouts_answer_only_their_own_reference_and_target() {
+    let target = hirsel_lir::TargetSpec::x86_64_unknown_linux_gnu();
+    let store = Arc::new(Memory::default());
+    let cache = NativeCache::new(store.clone(), None)
+        .keeping_layouts(ProcessBudget::new(1 << 30), |_| TABLE);
+    let outputs = publish_distinct_tables(&cache, &target);
+    // Oracle: a reader that retains nothing decodes and checks every table.
+    let fresh = NativeCache::new(store.clone(), None);
+    for output in outputs.iter().chain(outputs.iter().rev()) {
+        let (retained, _) = cache.read(output, &target).unwrap();
+        let (decoded, _) = fresh.read(output, &target).unwrap();
+        assert_eq!(retained.binding().table, decoded.binding().table);
+    }
+    let other = hirsel_lir::TargetSpec::aarch64_unknown_linux_gnu();
+    for output in &outputs {
+        assert!(fresh.layouts(output.layouts(), &other).is_err());
+        assert!(
+            cache.layouts(output.layouts(), &other).is_err(),
+            "a retained table is refused for another target"
+        );
+    }
+}
+
+/// Kept tables are evictable charges: at a budget that holds two of three
+/// tables, every read still completes with the table a reader that keeps
+/// nothing decodes; eviction returns an unheld table's charge, and a table a
+/// reader holds is neither evicted nor uncharged.
+#[test]
+fn native_products_19_kept_layouts_yield_to_the_budget_and_never_while_read() {
+    let target = hirsel_lir::TargetSpec::x86_64_unknown_linux_gnu();
+    let store = Arc::new(Memory::default());
+    let budget = ProcessBudget::new(2 * TABLE + TABLE / 2);
+    let cache = NativeCache::new(store.clone(), None).keeping_layouts(budget.clone(), |_| TABLE);
+    let outputs = publish_distinct_tables(&cache, &target);
+    let fresh = NativeCache::new(store.clone(), None);
+    for _ in 0..2 {
+        for output in &outputs {
+            let (kept, _) = cache.read(output, &target).unwrap();
+            let (decoded, _) = fresh.read(output, &target).unwrap();
+            assert_eq!(kept.binding().table, decoded.binding().table);
+            assert!(budget.reserved() <= 2 * TABLE);
+        }
+    }
+    // Hold two tables: the third has no unheld table to evict and is refused,
+    // and the held ones stay the very tables their readers hold.
+    let (first, _) = cache.read(&outputs[0], &target).unwrap();
+    let (second, _) = cache.read(&outputs[1], &target).unwrap();
+    assert_eq!(budget.reserved(), 2 * TABLE);
+    assert!(cache.read(&outputs[2], &target).is_err());
+    assert!(Arc::ptr_eq(
+        &first,
+        &cache.read(&outputs[0], &target).unwrap().0
+    ));
+    assert!(Arc::ptr_eq(
+        &second,
+        &cache.read(&outputs[1], &target).unwrap().0
+    ));
+    assert_eq!(budget.reserved(), 2 * TABLE);
+    // Once a reader drops its table, that table yields to the third.
+    drop(first);
+    let (third, _) = cache.read(&outputs[2], &target).unwrap();
+    assert_eq!(
+        third.binding().table,
+        fresh.read(&outputs[2], &target).unwrap().0.binding().table
+    );
+    assert_eq!(budget.reserved(), 2 * TABLE);
+    drop((second, third, cache));
+    assert_eq!(budget.reserved(), 0);
 }

@@ -14,13 +14,13 @@ hirsel-span = { path = "../hirsel-span" }
 hirsel-graph = { path = "../hirsel-graph" }
 hirsel-codec = { path = "../hirsel-codec" }
 hirsel-core-contract = { path = "../hirsel-core-contract" }
+hirsel-guard = { path = "../hirsel-guard" }
 hirsel-rt-operations = { path = "../hirsel-rt-operations" }
 hirsel-syntax = { path = "../hirsel-syntax" }
 
 [dev-dependencies]
 hirsel-rc = { path = "../hirsel-rc" }
 hirsel-type-analysis = { path = "../hirsel-type-analysis" }
-hirsel-guard = { path = "../hirsel-guard" }
 hirsel-tir = { path = "../hirsel-tir" }
 hirsel-layout = { path = "../hirsel-layout" }
 hirsel-lir = { path = ".", features = ["testing"] }

@@ -933,7 +933,10 @@ impl FrontBodyQueries {
         let request = &self._allowance.request;
         let headers = self.namespace.snapshot.header_products();
         while request.free() < charge {
-            if !cx.evict_body() && !headers.is_some_and(|headers| headers.evict()) {
+            if !cx.evict_body()
+                && !headers.is_some_and(|headers| headers.evict())
+                && !request.evict_one()
+            {
                 return None;
             }
         }

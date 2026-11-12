@@ -1333,15 +1333,16 @@ impl HeaderProducts {
         }
         false
     }
-    /// An eviction point: evict header facts until `budget`'s headroom stays
-    /// free after a further unevictable `charge`, or nothing more evicts.
+    /// An eviction point: evict header facts, then the budget's other
+    /// registered evictable charges, until `budget`'s headroom stays free
+    /// after a further unevictable `charge`, or nothing more evicts.
     /// Unevictable growth is measured from here.
     pub(crate) fn restore_headroom(
         &self,
         budget: &hirsel_engine_admission::ProcessBudget,
         charge: u64,
     ) {
-        while budget.short_of_headroom(charge) && self.evict() {}
+        while budget.short_of_headroom(charge) && (self.evict() || budget.evict_one()) {}
         budget.eviction_point();
     }
     /// Evict one unpinned settled entry.

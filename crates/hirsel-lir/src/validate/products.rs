@@ -250,30 +250,42 @@ impl std::error::Error for NativeReadError {
 /// Uses the selected ordinary content provider. The only extra table is local
 /// native proof authority; it is never a semantic invalidation graph/provider.
 type LayoutAdmission = dyn Fn(&CheckedLayouts) -> Option<Arc<dyn Send + Sync>> + Send + Sync;
-type LayoutRows = BTreeMap<Reference, Weak<CheckedLayouts>>;
-struct LayoutLease {
-    cache: Arc<Mutex<LayoutRows>>,
-    reference: Reference,
-    owner: Weak<CheckedLayouts>,
-    _admission: Arc<dyn Send + Sync>,
-}
-impl Drop for LayoutLease {
-    fn drop(&mut self) {
-        let mut rows = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        if rows
-            .get(&self.reference)
-            .is_some_and(|owner| Weak::ptr_eq(owner, &self.owner))
-        {
-            rows.remove(&self.reference);
-            if rows.is_empty() {
-                *rows = BTreeMap::new();
+/// Checked layout tables a keeping validator has admitted, by content
+/// reference: a request's validator decodes and checks each table once rather
+/// than on every read of it, until an eviction point evicts it.
+type LayoutRows = BTreeMap<Reference, Arc<CheckedLayouts>>;
+type Evictor = dyn Fn() -> bool + Send + Sync;
+/// One kept table's evictable charge. `HIRSEL_NATIVE_RETENTION` prints the
+/// kept tables and bytes at each new peak.
+struct KeptLayouts(hirsel_guard::admission::MemoryReservation);
+static KEPT: Mutex<(u64, u64, u64)> = Mutex::new((0, 0, 0));
+impl KeptLayouts {
+    fn new(grant: hirsel_guard::admission::MemoryReservation) -> Self {
+        let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+        kept.0 += 1;
+        kept.1 += grant.bytes();
+        if kept.1 > kept.2 {
+            kept.2 = kept.1;
+            if std::env::var_os("HIRSEL_NATIVE_RETENTION").is_some() {
+                eprintln!("NATIVE_KEPT_LAYOUTS peak {} tables {}", kept.1, kept.0);
             }
         }
+        Self(grant)
+    }
+}
+impl Drop for KeptLayouts {
+    fn drop(&mut self) {
+        let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+        kept.0 -= 1;
+        kept.1 -= self.0.bytes();
     }
 }
 pub struct NativeCache {
-    layouts: Arc<Mutex<LayoutRows>>,
+    layouts: Mutex<LayoutRows>,
     layout_admission: Option<Arc<LayoutAdmission>>,
+    /// Present only when this validator keeps its tables: the evictor its
+    /// budget holds weakly, owned here so it ends with the validator.
+    evictor: Option<Arc<Evictor>>,
     contents: Arc<dyn Contents>,
     local: Option<Store>,
     accepted: Mutex<BTreeMap<ContentHash, Arc<Record>>>,
@@ -286,9 +298,58 @@ impl NativeCache {
             contents,
             local,
             accepted: Mutex::default(),
-            layouts: Arc::default(),
+            layouts: Mutex::default(),
             layout_admission: None,
+            evictor: None,
         }
+    }
+
+    /// Keep each checked layout table this validator admits, charged to
+    /// `budget` as an evictable charge of `weigh(table)` bytes. The budget's
+    /// eviction points and refused reservations evict kept tables no reader
+    /// holds; a table a reader holds stays charged until that reader drops it.
+    /// A read after an eviction checks and admits the table again, as a first
+    /// read does, taking the headroom only once nothing more evicts.
+    pub fn keeping_layouts(
+        self,
+        budget: Arc<hirsel_guard::admission::ProcessBudget>,
+        weigh: impl Fn(&CheckedLayouts) -> u64 + Send + Sync + 'static,
+    ) -> Arc<Self> {
+        Arc::new_cyclic(|this: &Weak<Self>| {
+            let this = this.clone();
+            let evictor: Arc<Evictor> =
+                Arc::new(move || this.upgrade().is_some_and(|cache| cache.evict_layout()));
+            budget.register_evictor(Arc::downgrade(&evictor));
+            let mut cache = self.with_layout_admission(move |layouts| {
+                let bytes = weigh(layouts);
+                let grant = budget
+                    .reserve_evictable(bytes)
+                    .or_else(|_| budget.reserve_evictable_in_headroom(bytes))
+                    .ok()?;
+                Some(Arc::new(KeptLayouts::new(grant)) as Arc<dyn Send + Sync>)
+            });
+            cache.evictor = Some(evictor);
+            cache
+        })
+    }
+
+    /// Drop one kept table no reader holds; false when there is none, or
+    /// when a read holds the rows (it is about to use them).
+    fn evict_layout(&self) -> bool {
+        let Ok(mut rows) = self.layouts.try_lock() else {
+            return false;
+        };
+        let Some(reference) = rows
+            .iter()
+            .find(|(_, owner)| Arc::strong_count(owner) == 1)
+            .map(|(reference, _)| *reference)
+        else {
+            return false;
+        };
+        let evicted = rows.remove(&reference);
+        drop(rows);
+        drop(evicted);
+        true
     }
 
     /// Retaining checked metadata requires the selected transport's original
@@ -299,17 +360,6 @@ impl NativeCache {
     ) -> Self {
         self.layout_admission = Some(Arc::new(admit));
         self
-    }
-
-    /// Complete shared index allocation, also held by detached layout readers.
-    pub fn layout_cache_bytes() -> usize {
-        size_of::<Mutex<LayoutRows>>() + 2 * size_of::<usize>()
-    }
-
-    /// Lease allocation and shared index backing retained by a layout reader.
-    /// The caller separately admits its tree row and checked layout buffers.
-    pub fn layout_owner_bytes() -> usize {
-        size_of::<LayoutLease>() + 2 * size_of::<usize>() + Self::layout_cache_bytes()
     }
 
     pub fn layouts(
@@ -332,9 +382,11 @@ impl NativeCache {
         // Even a retained typed owner cannot vouch for a changed or missing
         // provider range. Verify the complete reference on every boundary read.
         let bytes = self.get(reference).ok_or("missing native layout product")?;
-        let mut retained = self.layouts.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(owner) = retained.get(&reference).and_then(Weak::upgrade) {
-            drop(retained);
+        let retained = self
+            .evictor
+            .as_ref()
+            .and_then(|_| self.rows().get(&reference).cloned());
+        if let Some(owner) = retained {
             if owner.table.target != target.digest() {
                 return Err("native layout product target differs".into());
             }
@@ -349,27 +401,23 @@ impl NativeCache {
         };
         drop(bytes);
         let mut checked = CheckedLayouts::new(closure, target)?;
-        if let Some(admit) = &self.layout_admission {
-            checked.admission =
-                Some(admit(&checked).ok_or("native layout metadata exceeds admission")?);
-        }
-        let checked = if let Some(admission) = checked.admission.take() {
-            Arc::new_cyclic(|owner| {
-                checked.admission = Some(Arc::new(LayoutLease {
-                    cache: self.layouts.clone(),
-                    reference,
-                    owner: owner.clone(),
-                    _admission: admission,
-                }));
-                checked
-            })
-        } else {
-            Arc::new(checked)
+        let Some(admit) = &self.layout_admission else {
+            return Ok(Arc::new(checked));
         };
-        if checked.admission.is_some() {
-            retained.insert(reference, Arc::downgrade(&checked));
+        checked.admission =
+            Some(admit(&checked).ok_or("native layout metadata exceeds admission")?);
+        if self.evictor.is_none() {
+            return Ok(Arc::new(checked));
         }
-        Ok(checked)
+        Ok(self
+            .rows()
+            .entry(reference)
+            .or_insert_with(|| Arc::new(checked))
+            .clone())
+    }
+
+    fn rows(&self) -> std::sync::MutexGuard<'_, LayoutRows> {
+        self.layouts.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn get(&self, reference: Reference) -> Option<hirsel_artifact_store::Bytes> {

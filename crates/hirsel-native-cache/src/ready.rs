@@ -44,30 +44,16 @@ impl Drop for ValueMemory {
     }
 }
 
-static LAYOUT_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static LAYOUT_PEAK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-struct LayoutMemory {
-    _grant: Arc<dyn Send + Sync>,
-    bytes: u64,
-}
-impl Drop for LayoutMemory {
-    fn drop(&mut self) {
-        LAYOUT_BYTES.fetch_sub(self.bytes, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-pub(crate) fn admit_layouts(
-    store: &dyn ResultStore,
-    layouts: &hirsel_lir::products::CheckedLayouts,
-) -> Option<Arc<dyn Send + Sync>> {
-    use std::sync::atomic::Ordering::Relaxed;
+/// What one checked layout table holds while retained: its maps, binding and
+/// keys, its owner and charge, and its row in a keeping validator's table.
+fn layout_bytes(layouts: &hirsel_lir::products::CheckedLayouts) -> u64 {
     let mut w = hirsel_query_products::retained::MetadataWeight::default();
     w.add(
         size_of::<hirsel_lir::products::CheckedLayouts>()
-            + size_of::<LayoutMemory>()
+            + size_of::<hirsel_engine_admission::MemoryReservation>()
             + 4 * size_of::<usize>(),
     );
-    w.add(NativeCache::layout_owner_bytes());
-    w.tree::<Reference, std::sync::Weak<hirsel_lir::products::CheckedLayouts>>(1);
+    w.tree::<Reference, Arc<hirsel_lir::products::CheckedLayouts>>(1);
     hirsel_native::execution_plan::retained::table(&mut w, &layouts.table);
     w.flat_vec(&layouts.layouts);
     w.flat_vec(&layouts.abis);
@@ -76,18 +62,7 @@ pub(crate) fn admit_layouts(
     for row in layouts.keys().retained_rows() {
         hirsel_native::execution_plan::retained::layout(&mut w, row);
     }
-    let bytes = w.bytes();
-    let grant = store.admit_product_memory(bytes)?;
-    let active = LAYOUT_BYTES.fetch_add(bytes, Relaxed) + bytes;
-    if active > LAYOUT_PEAK.fetch_max(active, Relaxed)
-        && std::env::var_os("HIRSEL_NATIVE_RETENTION").is_some()
-    {
-        eprintln!("NATIVE_LAYOUT_OWNERS peak {active}");
-    }
-    Some(Arc::new(LayoutMemory {
-        _grant: grant,
-        bytes,
-    }))
+    w.bytes() as u64
 }
 
 struct SelectedContents(Arc<dyn ResultStore>);
@@ -177,9 +152,10 @@ impl ReadyQueries {
     }
     pub fn fresh_validator_bytes() -> u64 {
         (size_of::<NativeCache>()
-            + NativeCache::layout_cache_bytes()
             + size_of::<SelectedContents>()
             + size_of::<Arc<dyn ResultStore>>()
+            // A keeping validator's evictor and its slot in the budget.
+            + 5 * size_of::<usize>()
             + 6 * size_of::<usize>()) as u64
     }
     pub fn validator(store: &Arc<dyn ResultStore>) -> Arc<NativeCache> {
@@ -187,17 +163,21 @@ impl ReadyQueries {
             Arc::new(SelectedContents(store.clone())),
             store.local_product_store(),
         );
-        // Standalone stores have no request memory capability; their direct
-        // callers own temporary metadata, as they own the supplied body inputs.
-        let native = if store.try_admit_product_memory(0).is_some() {
-            native.with_layout_admission({
-                let store = store.clone();
-                move |layouts| admit_layouts(store.as_ref(), layouts)
-            })
+        // A request store keeps checked tables as evictable charges of its
+        // process budget. A store with only a live-memory capability charges
+        // each read's table to it and keeps none. Standalone stores have no
+        // request memory capability; their direct callers own temporary
+        // metadata, as they own the supplied body inputs.
+        if let Some(budget) = store.product_budget() {
+            native.keeping_layouts(budget, layout_bytes)
+        } else if store.try_admit_product_memory(0).is_some() {
+            let store = store.clone();
+            Arc::new(native.with_layout_admission(move |layouts| {
+                store.admit_product_memory(layout_bytes(layouts))
+            }))
         } else {
-            native
-        };
-        Arc::new(native)
+            Arc::new(native)
+        }
     }
     pub fn with_validator(store: Arc<dyn ResultStore>, native: Arc<NativeCache>) -> Self {
         Self {

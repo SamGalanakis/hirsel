@@ -328,6 +328,14 @@ fn ownership_spawn_moves_owned_aggregate_captures_into_the_actual_child() {
 resource type Token {}
 drop(x) {}
 @test
+fn captured_children(t: Test) {
+  let tasks = test.tasks(t)
+  task.scope(tasks, fn(s: Scope) {
+    let pair = (Token(), Token())
+    let child = task.async(s, fn() { let carried = take pair })
+    let _ = task.await(s, take child)
+  })
+}
 "#,
         2,
     );
@@ -351,6 +359,21 @@ fn ownership_spawn_cancellation_releases_the_transferred_capture() {
 resource type Token {}
 drop(x) {}
 @test
+fn canceled_capture(t: Test) {
+  let tasks = test.tasks(t)
+  task.scope(tasks, fn(s: Scope) {
+    let token = Token()
+    let (gate_tx, gate_rx): (Sender[u8], Receiver[u8]) = channel.open(tasks)
+    let child = task.async(s, fn() {
+      let held = take token
+      let mut gate = take gate_rx
+      let _ = channel.receive(tasks, mut gate)
+    })
+    task.cancel(s, child)
+    let _ = task.await(s, take child)
+    let _ = gate_tx
+  })
+}
 "#,
         1,
     );
@@ -608,6 +631,14 @@ fn ownership_callbacks_nested_mutex_and_shared_results_keep_the_created_identity
 resource type Token {}
 drop(x) {}
 @test
+fn nested_results(t: Test) {
+  let tasks = test.tasks(t)
+  let board = mutex.create(tasks, unique 0u64)
+  let frozen = shared.freeze(unique 3u64)
+  let received = mutex.with(tasks, board, fn(mut n: unique u64) -> Token uses {} {
+    shared.with(frozen, fn(value: u64) -> Token uses {} { Token() })
+  })
+}
 "#,
         1,
     );
@@ -662,6 +693,12 @@ resource type Token { value: u64 }
 drop(x) {}
 fn identity[T](take value: T in value) -> T in value { take value }
 @test
+fn returned_reader(t: Test) {
+  let token = Token(value: 7u64)
+  let wrapped = (fn() -> u64 uses {} { token.value }, 9u64)
+  let (reader, number) = identity(take wrapped)
+  test.check(t, reader() == 7u64 && number == 9u64)
+}
 "#,
         1,
     );
@@ -675,6 +712,15 @@ resource type Token { value: u64 }
 drop(x) {}
 fn read(token: Token) -> u64 { token.value }
 @test
+fn callback_reader(t: Test) {
+  let tasks = test.tasks(t)
+  let board = mutex.create(tasks, unique 0u64)
+  let token = Token(value: 7u64)
+  let answer = mutex.with(tasks, board, fn(mut n: unique u64) -> u64 uses {} {
+    read(token)
+  })
+  test.check(t, answer == 7u64)
+}
 "#,
         1,
     );
@@ -977,6 +1023,11 @@ fn ownership_callback_captures_scope_moves_its_owned_resource_into_the_result() 
 resource type Token {}
 drop(x) {}
 @test
+fn captured_scope(t: Test) {
+  let tasks = test.tasks(t)
+  let token = Token()
+  let received = task.scope(tasks, fn(s: Scope) { take token })
+}
 "#,
         1,
     );
@@ -991,6 +1042,18 @@ resource type Token {}
 drop(x) {}
 fn inspect(token: Token) -> u64 { 7u64 }
 @test
+fn captured_shared(t: Test) {
+  let tasks = test.tasks(t)
+  let frozen = shared.freeze(unique 3u64)
+  let pair = (Token(), Token())
+  let answer = task.scope(tasks, fn(s: Scope) {
+    let (left, right) = take pair
+    shared.with(frozen, fn(value: u64) -> u64 uses {} {
+      inspect(left) + inspect(right) + value
+    })
+  })
+  test.check(t, answer == 17u64)
+}
 "#,
         2,
     );
@@ -1087,6 +1150,16 @@ resource type Token { value: u64 }
 drop(x) {}
 fn read(token: Token) -> u64 { token.value }
 @test
+fn mixed_captures(t: Test) {
+  let tasks = test.tasks(t)
+  let borrowed = Token(value: 7u64)
+  let owned = Token(value: 7u64)
+  let received = task.scope(tasks, fn(s: Scope) {
+    let n = read(borrowed)
+    take owned
+  })
+  test.check(t, received.value == read(borrowed))
+}
 "#,
         2,
     );
@@ -1118,6 +1191,12 @@ fn ownership_replacement_empty_variants_transfer_only_the_actual_resource() {
 resource type Token {}
 drop(x) {}
 @test
+fn optional_updates(t: Test) {
+  let mut slot: Option[Token] = None()
+  let empty = replace(mut slot, Some(Token()))
+  let full = replace(mut slot, None())
+  test.check(t, match empty { None() => true, Some(value) => false })
+}
 "#,
         1,
     );
@@ -1130,6 +1209,15 @@ fn ownership_mutex_payload_last_root_release_drops_the_stored_resource() {
 resource type Token { value: u64 }
 drop(x) {}
 @test
+fn stored_payload(t: Test) {
+  let tasks = test.tasks(t)
+  let store = mutex.create(tasks, Token(value: 7u64))
+  let other = copy store
+  let answer = mutex.with(tasks, other, fn(mut token: unique Token) -> u64 uses {} {
+    token.value
+  })
+  test.check(t, answer == 7u64)
+}
 "#,
         1,
     );
@@ -1146,6 +1234,14 @@ fn ownership_mutex_payload_replacement_returns_the_original_identity() {
 resource type Token { value: u64 }
 drop(x) {}
 @test
+fn replaced_payload(t: Test) {
+  let tasks = test.tasks(t)
+  let store = mutex.create(tasks, Token(value: 7u64))
+  let old = mutex.with(tasks, store, fn(mut token: unique Token) -> Token uses {} {
+    replace(mut token, Token(value: 7u64))
+  })
+  test.check(t, old.value == 7u64)
+}
 "#,
         2,
     );
@@ -1163,6 +1259,13 @@ fn ownership_mutex_payload_failed_callback_releases_the_stored_resource() {
 resource type Token { value: u64 }
 drop(x) {}
 @test
+fn failed_payload(t: Test) {
+  let tasks = test.tasks(t)
+  let store = mutex.create(tasks, Token(value: 7u64))
+  mutex.with(tasks, store, fn(mut token: unique Token) -> () uses {} {
+    failure.check(token.value != 7u64, Arithmetic())
+  })
+}
 "#,
         1,
     );
@@ -1175,6 +1278,18 @@ fn ownership_mutex_payload_empty_variant_writebacks_preserve_lineage() {
 resource type Token { value: u64 }
 drop(x) {}
 @test
+fn optional_payload(t: Test) {
+  let tasks = test.tasks(t)
+  let initial: unique Option[Token] = None()
+  let store = mutex.create(tasks, take initial)
+  let empty = mutex.with(tasks, store, fn(mut slot: unique Option[Token]) -> Option[Token] uses {} {
+    replace(mut slot, Some(Token(value: 7u64)))
+  })
+  let full = mutex.with(tasks, store, fn(mut slot: unique Option[Token]) -> Option[Token] uses {} {
+    replace(mut slot, None())
+  })
+  test.check(t, match full { None() => false, Some(value) => value.value == 7u64 })
+}
 "#,
         1,
     );

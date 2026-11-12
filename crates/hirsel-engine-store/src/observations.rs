@@ -6,7 +6,7 @@
 //! reaches, whichever reader touched a shared row first.
 use hirsel_intern::attribution::{EdgeSet, FxBuild, Node};
 use hirsel_syntax::ContentHash;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Store-side work id of a use made on a thread no trace reached.
 const UNTRACED: u32 = 0;
@@ -47,6 +47,19 @@ pub struct Used {
 }
 
 impl Used {
+    /// The distinct `found` items, built in key order (a bulk build, not a
+    /// search per insert).
+    fn of(items: &[(bool, ContentHash)], rank: &[u32], found: &mut [u32]) -> Self {
+        found.sort_unstable_by_key(|&item| rank[item as usize]);
+        let (rows, contents): (Vec<_>, Vec<_>) = found
+            .iter()
+            .map(|&item| items[item as usize])
+            .partition(|(row, _)| *row);
+        Self {
+            rows: rows.into_iter().map(|(_, item)| item).collect(),
+            contents: contents.into_iter().map(|(_, item)| item).collect(),
+        }
+    }
     fn add(&mut self, row: bool, item: ContentHash) {
         if row {
             self.rows.insert(item);
@@ -70,18 +83,24 @@ pub struct Observations {
 
 impl Observations {
     pub fn of(edges: &EdgeSet, uses: &Uses) -> Self {
+        // Work and items are interned to dense indices, so each part's walk
+        // stamps flat arrays instead of hashing: every part reaches most of
+        // the shared cache fills, so the walk dominates.
         let mut ids: HashMap<Node, u32, FxBuild> = edges.work.clone();
         let mut intern = |node: Node| {
             let next = u32::try_from(ids.len()).unwrap_or(u32::MAX);
             *ids.entry(node).or_insert(next)
         };
-        let store: HashMap<u32, u32> = uses
+        let store: HashMap<u32, u32, FxBuild> = uses
             .work
             .iter()
             .map(|(node, id)| (*id, intern(*node)))
             .collect();
-        let mut by_work: HashMap<u32, Vec<(bool, ContentHash)>> = HashMap::new();
+        let work_count = ids.len();
         let mut observations = Self::default();
+        let mut items: Vec<(bool, ContentHash)> = Vec::new();
+        let mut item_ids: HashMap<(bool, ContentHash), u32, FxBuild> = HashMap::default();
+        let mut by_work: Vec<Vec<u32>> = vec![Vec::new(); work_count];
         let tagged = uses
             .rows
             .iter()
@@ -92,43 +111,67 @@ impl Observations {
                     .map(|(work, item)| (false, *work, *item)),
             );
         for (row, work, item) in tagged {
-            match store.get(&work) {
-                Some(id) => by_work.entry(*id).or_default().push((row, item)),
-                None => observations.untraced.add(row, item),
-            }
+            let Some(&work) = store.get(&work) else {
+                observations.untraced.add(row, item);
+                continue;
+            };
+            let id = *item_ids.entry((row, item)).or_insert_with(|| {
+                items.push((row, item));
+                u32::try_from(items.len() - 1).unwrap_or(u32::MAX)
+            });
+            by_work[work as usize].push(id);
         }
-        let mut successors: HashMap<u32, Vec<u32>> = HashMap::new();
+        // Each item's position in key order, so a part's items sort by a word.
+        let mut rank = vec![0u32; items.len()];
+        let mut order: Vec<u32> = (0..items.len() as u32).collect();
+        order.sort_unstable_by_key(|&item| items[item as usize]);
+        for (position, &item) in (0u32..).zip(&order) {
+            rank[item as usize] = position;
+        }
+        let mut successors: Vec<Vec<u32>> = vec![Vec::new(); work_count];
         for &(reader, dependency) in &edges.edges {
-            successors.entry(reader).or_default().push(dependency);
+            successors[reader as usize].push(dependency);
         }
-        let mut reached_by_any = HashSet::new();
-        for (node, &part) in ids
+        // Stamps: `seen[w] == stamp` when this part's walk reached `w`.
+        let mut seen = vec![0u32; work_count];
+        let mut held = vec![0u32; items.len()];
+        let mut reached_by_any = vec![false; work_count];
+        let mut parts: Vec<(&Node, u32)> = ids
             .iter()
             .filter(|(node, _)| node.0 == hirsel_intern::attribution::PART)
-        {
-            let mut used = Used::default();
-            let mut seen = HashSet::from([part]);
-            let mut stack = vec![part];
+            .map(|(node, &id)| (node, id))
+            .collect();
+        parts.sort_unstable();
+        let mut stack = Vec::new();
+        let mut found: Vec<u32> = Vec::new();
+        for (stamp, (node, part)) in (1u32..).zip(parts) {
+            seen[part as usize] = stamp;
+            stack.push(part);
+            found.clear();
             while let Some(work) = stack.pop() {
-                for &(row, item) in by_work.get(&work).into_iter().flatten() {
-                    used.add(row, item);
+                reached_by_any[work as usize] = true;
+                for &item in &by_work[work as usize] {
+                    if std::mem::replace(&mut held[item as usize], stamp) != stamp {
+                        found.push(item);
+                    }
                 }
-                for &next in successors.get(&work).into_iter().flatten() {
-                    if seen.insert(next) {
+                for &next in &successors[work as usize] {
+                    if std::mem::replace(&mut seen[next as usize], stamp) != stamp {
                         stack.push(next);
                     }
                 }
             }
-            reached_by_any.extend(seen);
-            observations.parts.insert(node.1, used);
+            observations
+                .parts
+                .insert(node.1, Used::of(&items, &rank, &mut found));
         }
-        for (work, items) in &by_work {
-            if !reached_by_any.contains(work) {
-                for &(row, item) in items {
-                    observations.package.add(row, item);
-                }
-            }
-        }
+        let mut package: Vec<u32> = (0..work_count)
+            .filter(|&work| !reached_by_any[work])
+            .flat_map(|work| by_work[work].iter().copied())
+            .collect();
+        package.sort_unstable();
+        package.dedup();
+        observations.package = Used::of(&items, &rank, &mut package);
         observations
     }
 }

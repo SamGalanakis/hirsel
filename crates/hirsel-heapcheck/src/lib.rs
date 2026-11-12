@@ -51,6 +51,8 @@ pub struct Run {
     pub choices: u64,
     /// Executor steps completed or attempted, for diagnostic-localisation controls.
     pub steps: u64,
+    /// The instruction or finalizer entry whose failure was injected.
+    pub injected_site: Option<violation::Site>,
     pub trace: Trace,
     /// Instrumentation only: no check reads them.
     pub counters: Counters,
@@ -93,6 +95,7 @@ pub fn run<S: Stage>(
         sites: machine.sites,
         choices: machine.choices,
         steps: machine.steps,
+        injected_site: machine.injected_site.clone(),
         trace: machine.ledger.trace.clone(),
         counters: machine.ledger.counters,
         result,
@@ -211,6 +214,12 @@ pub fn fault_campaign<S: Stage>(
             Perturbation::Clean => unreachable!("the clean run is returned separately"),
         },
     );
+    for (site, run) in &mut injected {
+        campaign_failure(&clean, Perturbation::Injected(*site), run);
+    }
+    for (choice, run) in &mut fired {
+        campaign_failure(&clean, Perturbation::Fired(*choice), run);
+    }
     Campaign {
         clean,
         injected,
@@ -279,6 +288,9 @@ pub fn audit_campaign<S: Stage>(
             first_failure = Some((at, run));
         }
     });
+    if let Some((at, run)) = &mut first_failure {
+        campaign_failure(&clean, *at, run);
+    }
     (
         CampaignAudit {
             clean,
@@ -288,6 +300,28 @@ pub fn audit_campaign<S: Stage>(
         },
         timing,
     )
+}
+
+fn campaign_failure(clean: &Run, at: Perturbation, run: &mut Run) {
+    if let Err(v) = &mut run.result
+        && v.kind == ViolationKind::Unsupported
+    {
+        use std::fmt::Write;
+        write!(
+            v.message,
+            "; campaign{at}; clean steps={}, perturbed steps={}",
+            clean.steps, run.steps
+        )
+        .unwrap();
+        if let Some(site) = &run.injected_site {
+            write!(
+                v.message,
+                "; injected site {} block {} statement {}",
+                site.definition, site.block, site.statement
+            )
+            .unwrap();
+        }
+    }
 }
 
 fn visit_campaign<S: Stage>(

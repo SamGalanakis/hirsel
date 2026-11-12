@@ -92,6 +92,7 @@ pub fn run_with_flat_storage_observer<S: Stage>(
         sites: machine.sites,
         choices: machine.choices,
         steps: machine.steps,
+        injected_site: machine.injected_site.clone(),
         trace: machine.ledger.trace.clone(),
         counters: machine.ledger.counters,
     }

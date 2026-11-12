@@ -924,3 +924,19 @@ fn safe_runner_replay_preserves_the_prepared_callee_facts() {
         );
     });
 }
+
+#[test]
+fn heap_campaign_evidence_survives_native_report_formatting() {
+    let message = "Unsupported: step limit reached (a tooling limit); campaign (failure injected at site 834); clean steps=3, perturbed steps=17; injected site standalone@1/main block 0 statement 1";
+    let case = result(
+        "looping-cleanup",
+        Outcome::Unavailable(NativeError::new(StageName::Heap, message)),
+        Outcome::Agree,
+    );
+    let rendered = native::render_exclusions(&[case]);
+    let rows = native::parse_exclusions(&rendered).unwrap();
+    assert_eq!(
+        rows[&("looping-cleanup".into(), "h".into())].reason,
+        format!("heap: {message}")
+    );
+}

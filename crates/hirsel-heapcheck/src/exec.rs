@@ -338,6 +338,7 @@ pub(crate) struct Machine<'p, S> {
     /// Timer choice points executed: the early-firing domain ([`clock`]).
     pub choices: u64,
     pub(crate) steps: u64,
+    pub(crate) injected_site: Option<Site>,
     /// The kind (`SignalKind` ordinal) whose default action ended the run.
     pub signaled: Option<u32>,
     runtime_iterators: Snapshot<std::sync::Arc<[OpValue]>>,
@@ -478,6 +479,7 @@ impl<'p, S: Stage> Machine<'p, S> {
             unanchored_failures: std::collections::BTreeSet::new(),
             sites: 0,
             steps: 0,
+            injected_site: None,
             map_storage: std::sync::Arc::new(hirsel_lir::logical_storage::MapStorage::new(
                 &program.layouts,
             )),
@@ -3161,6 +3163,7 @@ impl<'p, S: Stage> Machine<'p, S> {
             );
         }
         if injected {
+            self.injected_site = Some(self.site(f));
             self.record_failure(f, INJECTED_RULE, edge.anchor);
         } else if let Some(rule) = &edge.rule {
             self.record_failure(f, rule, edge.anchor);
@@ -10520,6 +10523,11 @@ impl<'p, S: Stage> Machine<'p, S> {
                                 err(V::Malformed, "finalize step of a layout without finalizer")
                             })?;
                         if self.injection_site() {
+                            self.injected_site = Some(Site {
+                                definition: finalizer.definition.clone(),
+                                block: 0,
+                                statement: 0,
+                            });
                             d.failed = true;
                             let definition = finalizer.definition.clone();
                             self.failures.push(ObservedFailure {

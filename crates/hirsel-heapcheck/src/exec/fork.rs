@@ -30,6 +30,7 @@ impl<'p, S: Stage> Machine<'p, S> {
             sites: self.sites,
             choices: self.choices,
             steps: self.steps,
+            injected_site: self.injected_site.clone(),
             signaled: self.signaled,
             runtime_iterators: self.runtime_iterators.clone(),
             lazy_iterators: self.lazy_iterators.clone(),
@@ -112,6 +113,7 @@ impl<'p, S: Stage> Machine<'p, S> {
             sites: self.sites,
             choices: self.choices,
             steps: self.steps,
+            injected_site: self.injected_site.clone(),
             trace: self.ledger.trace.clone(),
             counters: self.ledger.counters,
             result: crate::blocked(

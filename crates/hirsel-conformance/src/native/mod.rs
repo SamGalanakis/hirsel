@@ -292,6 +292,14 @@ fn stable(text: &str) -> String {
 /// The stable part of a tool error.
 fn reason(error: &NativeError) -> String {
     let message = &error.message;
+    // Campaign evidence localizes failures and must survive row rendering.
+    if error.stage == StageName::Heap && message.contains("; campaign") {
+        return format!(
+            "{}: {}",
+            error.stage.name(),
+            message.replace(['\t', '\n'], " ")
+        );
+    }
     let quoted = |after: &str| {
         let start = message.find(after)? + after.len();
         let end = message[start..].find('"')? + start;

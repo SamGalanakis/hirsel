@@ -65,6 +65,55 @@ fn a_tooling_budget_still_stops_a_runaway_and_accepts_its_finite_twin() {
     );
 }
 
+#[test]
+fn a_campaign_limit_names_the_injected_instruction_and_both_step_counts() {
+    let (l, c) = layouts();
+    let (target, table) = l.finish();
+    let mut f = F::<Rc>::new("main", c);
+    let looping = f.b.block(BlockKind::FailureCleanup, &[]);
+    let edge = f.b.edge(looping, &[]);
+    f.b.term(looping, Terminator::Jump(edge));
+    let yes = f.b.constant(BOOL, c.bool, ConstantValue::Bool(true));
+    let condition = f.b.plain(BOOL, c.bool);
+    f.inst(Inst::Const {
+        result: condition,
+        constant: yes,
+    });
+    let failure = f.raises("CHECK-1", looping);
+    f.inst(Inst::Check { condition, failure });
+    f.ret(None);
+    let p = program(target, table.clone(), vec![f.finish(&table)]);
+    for reexecute_campaign in [false, true] {
+        let config = Config {
+            step_limit: 16,
+            reexecute_campaign,
+            compare_campaigns: true,
+            ..Config::default()
+        };
+        let (campaign, _) =
+            hirsel_heapcheck::audit_campaign(&p, &path("main"), &[], &mut printer, &config);
+        let collected = fault_campaign(&p, &path("main"), &[], &mut printer, &config);
+        assert_eq!(campaign.first_violation(), collected.first_violation());
+        ok(&campaign.clean);
+        assert_eq!(campaign.clean.sites, 1);
+        assert_eq!(campaign.clean.steps, 3);
+        assert_eq!(campaign.injected, 1);
+        let (at, run) = campaign.first_failure.as_ref().unwrap();
+        assert_eq!(*at, hirsel_heapcheck::Perturbation::Injected(0));
+        assert_eq!(run.steps, 17);
+        let v = run.result.as_ref().unwrap_err();
+        assert_eq!(v.kind, ViolationKind::Unsupported);
+        let text = v.to_string();
+        assert!(text.contains("step limit reached"), "{text}");
+        assert!(text.contains("failure injected at site 0"), "{text}");
+        assert!(text.contains("clean steps=3, perturbed steps=17"), "{text}");
+        assert!(
+            text.contains("injected site fixture@0/heap/main block 0 statement 1"),
+            "{text}"
+        );
+    }
+}
+
 /// Checked arithmetic, a check, a resource whose finalizer has its own sites,
 /// and explicit cleanup on every failure edge. With `leaky`, the cleanup after
 /// the addition forgets to release `x`.

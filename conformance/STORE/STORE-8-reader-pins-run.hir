@@ -13,7 +13,10 @@
 // caller drops, or one the operator releases, is PinReleased(), and its
 // version is no longer retained. A token acquired again after its drop holds
 // a later version, and the earlier acquire's held pin stays PinReleased()
-// rather than reading the later holder's state.
+// rather than reading the later holder's state. Of three holders relying on a
+// checkpoint a later compaction keeps for them alone, with room for deltas,
+// the second's drop is a ReaderDelta and the last one's, which gives the
+// checkpoint up, is a fold.
 // Authority `cN` fails the power right after answering request N, keeping only
 // what is durable at disk. Whatever request it cuts, an acquire that returned
 // Ok has a pin that reads the pinned state after the cut.
@@ -73,6 +76,46 @@ fn reads(a: Authority, v: store.Version of a, n: u8) -> bool {
     Ok(snap) => store.get(snap, b"x") == Some(bytes.from_list([n])),
     Error(_) => false,
   }
+}
+
+// True when `p` reads the state whose `x` is `n`, at whatever version it holds.
+fn pinned_x(a: Authority, p: store.HeldPin, n: u8) -> bool {
+  match store.at_pin(a, p) {
+    Ok(snap) => store.get(snap, b"x") == Some(bytes.from_list([n])),
+    Error(_) => false,
+  }
+}
+
+// What the newest record holds of the retention state: a fold, a ReaderDelta,
+// or neither.
+type Kind = Fold | Delta | Neither
+
+fn newest_kind(a: Authority) -> Result[Kind, Failed] {
+  let Ok(records) = authority.read(a, 0, authority.floor(a), 4096) else {
+    return Error(Check())
+  }
+  let mut kind: Kind = Neither
+  for rec in records {
+    let Appended(entry, _, _) = rec else {
+      continue
+    }
+    let Ok(g) = history.decode_group(entry) else {
+      return Error(Check())
+    }
+    kind = Neither
+    for c in g.commits {
+      match c.body {
+        Engine(Retain(..)) => {
+          kind = Fold
+        },
+        Engine(ReaderDelta(_)) => {
+          kind = Delta
+        },
+        _ => {},
+      }
+    }
+  }
+  Ok(kind)
 }
 
 pub type Failed = Check | Store(store.StoreError)
@@ -198,6 +241,46 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
   check(store.release_reader_pin(mut again, copy others[0]) == Ok(true))?
   check(released(a, later) != released(a, hq))?
   check(store.release_reader_pin(mut again, copy others[0]) == Ok(false))?
+  // Six more holders rely on the checkpoint already kept, so later changes
+  // have room for ReaderDelta commits. Three holders after a compaction rely
+  // on its checkpoint, which a later compaction keeps for them alone. Each
+  // reads its state while held. The second's drop leaves the kept checkpoints
+  // as they are, a ReaderDelta; the last one's gives that checkpoint up, which
+  // only a fold may (storage.md STORE-8, "The readers table on the history").
+  for i in 0u64..6 {
+    let Ok(t) = store.new_reader_pin(r) else {
+      return Error(Check())
+    }
+    let Ok(_) = acquire(mut again, 6 + i, bytes.from_list([int.truncate(102 + i)]), t) else {
+      return Error(Check())
+    }
+  }
+  store.compact(mut again) ? Store
+  write(mut again, 6)?
+  let mut trio: List[store.HeldPin] = []
+  for i in 0u64..3 {
+    let Ok(t) = store.new_reader_pin(r) else {
+      return Error(Check())
+    }
+    let Ok(h) = acquire(mut again, 12 + i, bytes.from_list([int.truncate(108 + i)]), t) else {
+      return Error(Check())
+    }
+    list.push(mut trio, h)
+  }
+  write(mut again, 7)?
+  store.compact(mut again) ? Store
+  let mut kinds: List[Kind] = []
+  for i in 0u64..3 {
+    check(pinned_x(a, trio[i], 6))?
+    let off: Result[(), store.TxFailure[()]] = store.transact(
+      mut again,
+      store.drop_reader_pin,
+      trio[i]
+    )
+    check(off == Ok(()))?
+    list.push(mut kinds, newest_kind(a)?)
+  }
+  check(kinds[1] == Delta && kinds[2] == Fold && released(a, trio[2]))?
   store.close(take again) ? Store
   let mut acquired: u64 = 0
   for k in 1u64..17 {

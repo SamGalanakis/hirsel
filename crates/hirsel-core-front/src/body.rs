@@ -171,6 +171,7 @@ impl Program<'_> {
             params,
             results: value_ty(&self.types, fd.result)?.into_iter().collect(),
             dest: None,
+            never: matches!(self.types.kind(fd.result), TyKind::Never),
         })
     }
 
@@ -1779,8 +1780,8 @@ impl<'c, 'a> Cx<'c, 'a> {
         let call = CallId(self.b.calls.len() as u32 - 1);
         self.inst(Inst::Call { call }, n);
         if result == NEVER {
-            // The callee never returns normally; nothing follows the call.
-            self.end(Terminator::Propagate, Some(n));
+            // The callee never returns normally; nothing follows the call (FORM v1a).
+            self.end(Terminator::Unreachable, Some(n));
         }
         first
     }

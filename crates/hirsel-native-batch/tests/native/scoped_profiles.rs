@@ -1,8 +1,10 @@
 use hirsel_engine::DefinitionQueries;
 use hirsel_native::*;
 use hirsel_native_testing::*;
+/// The batch lowerer runs scoped_consumer_9 under release profiles.
+/// Production query-pipeline coverage lives in production_scoped_profile.
 #[test]
-fn profile_switch_keeps_debug_heap_and_release_zero_environment() {
+fn batch_profile_switch_keeps_debug_heap_and_release_zero_environment() {
     hirsel_intern::jobs::with_compiler_stack(|| {
         let source = "fn invoke(f:fn()->u64 uses {})->u64 uses {f}{f()}\npub fn main()->Result[(),u64]{let n=3u64;Error(invoke(fn()->u64 uses {}{n}))}";
         let mut engine = hirsel_engine::QueryEngine::new(

@@ -1,36 +1,32 @@
-// Module `dir`: Dir, the capability for one directory tree (CAP-1, CAP-2, CAP-7).
-// Dir is plain and `send`, 8 bytes: a designation the provider resolves; copying it
-// copies the designation. A run's Dirs come only from `main`'s granted parameters (CAP-4)
-// and from `narrow`. Every operation is a provider operation (CAP-5, P4 in SPEC-GAPS),
-// passes the replay point at issue and at delivery (CAP-8), and when marked `waits` is a
-// cancellation point (CONC-7). Field legend: API.md; "Prefix:" says what has happened on
-// the host when the operation fails or is cancelled part way.
+// Module `dir`: directories below a Dir, the capability for one directory tree (CAP-1,
+// CAP-2, CAP-7). Dir is a core capability type, plain and `send`; copying it copies the
+// designation. A run's Dirs come from `main`'s granted parameters (CAP-4) and from
+// `create_temp`. Paths are Strings resolved relative to their Dir, which they may not
+// leave (core.md); the seed has no Path type. Every operation is library code over one
+// host primitive, passes the replay point at issue and at delivery (CAP-8) and, being
+// `waits`, is a cancellation point (CONC-7). Field legend: API.md; "Prefix:" says what has
+// happened on the host when the operation fails or is cancelled part way. No operation
+// here admits anything (core.md, "None of them admits").
+//
+// Left out: `narrow` (a Dir for a subdirectory). core.md has no host primitive that
+// returns a Dir for an existing directory, only `host.mkdtemp`.
 
-/// A Dir for the subdirectory p of d; never more authority than d (CAP-7).
-/// Fails: Error(NotFound | InvalidPath | Denied | Os(_)). Alloc: nothing charged; the
-/// provider keeps the designation until the run ends (host memory, stated retention).
-/// Prefix: none; nothing on the host changes. Ex: `let logs = dir.narrow(d, path.of(take "logs"))?`
-pub fn narrow(d: Dir, p: Path) -> Result[Dir, IoError] waits
-
-/// Creates the directory p (its parent must exist).
-/// Fails: Error(Exists | NotFound | InvalidPath | Denied | Os(_)).
+/// Creates the directory p; its parent must exist. `host.mkdir`.
+/// Fails: Error(Exists | NotFound | Denied | Other(_)).
 /// Prefix: on failure nothing was created; a cancellation observed at delivery leaves the
-/// directory created. Alloc: nothing. Ex: `dir.create_dir(d, path.of(take "tmp"))?`
-pub fn create_dir(d: Dir, p: Path) -> Result[(), IoError] waits
+/// directory created. Ex: `dir.create_dir(d, "tmp")?`
+pub fn create_dir(d: Dir, p: String) -> Result[(), IoError] waits
 
-/// Removes p and everything below it, depth first.
-/// Fails: Error(NotFound | InvalidPath | Denied | Os(_)) at the first entry that cannot be
-/// removed. Prefix: entries removed before the failure stay removed; not atomic.
-/// Alloc: nothing charged (the provider walks with host memory). Cost: O(entries).
-/// Ex: `dir.remove_all(d, path.of(take "tmp"))?`
-pub fn remove_all(d: Dir, p: Path) -> Result[(), IoError] waits
+/// Removes p and everything below it, depth first. `host.remove_tree`.
+/// Fails: Error(NotFound | Denied | Other(_)) at the first entry that cannot be removed.
+/// Prefix: entries removed before the failure stay removed; not atomic.
+/// Ex: `dir.remove_all(d, "tmp")?`
+pub fn remove_all(d: Dir, p: String) -> Result[(), IoError] waits
 
-/// Creates a new, private (owner-only) directory named prefix followed by 16 random hex
-/// digits directly below d, and returns its path (Go os.MkdirTemp). The provider draws a
-/// new suffix on Exists, at most 16 times. The directory is not removed automatically.
-/// Fails: Error(Exists) after 16 collisions; Error(Denied | InvalidPath | Os(_));
-/// Error(Capacity(c)) when the Path's String is refused, before any host effect.
-/// Alloc: the Path's String, len(prefix) + 16 bytes, current limit. Prefix: on failure
-/// nothing was created; a cancellation observed at delivery leaves the directory created.
-/// Ex: `let tmp = dir.create_temp(d, take string.from("hirsel-files-")?)?`
-pub fn create_temp(d: Dir, take prefix: String) -> Result[Path, IoError] waits
+/// Creates a new directory with a fresh name directly below d and returns a Dir for it
+/// (Go os.MkdirTemp, but the name is not returned). `host.mkdtemp`. The directory is not
+/// removed automatically, and the seed cannot remove it: `remove_all` needs its name in
+/// d (N3 in SPEC-GAPS). Fails: Error(Denied | Other(_)). Prefix: on failure nothing was
+/// created; a cancellation observed at delivery leaves the directory created.
+/// Ex: `let tmp = dir.create_temp(d)?`
+pub fn create_temp(d: Dir) -> Result[Dir, IoError] waits

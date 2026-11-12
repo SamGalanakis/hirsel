@@ -2,21 +2,21 @@
 // this file restates them with their contracts and adds nothing. Field legend: API.md.
 //
 // Task[R] is a `send` resource. Cleaning an unjoined Task cancels the child, waits for it
-// shielded and cleans its result or causes (CONC-8). JoinError's Cancelled arm may gain
-// the child's causes after spec-attack-887 (SPEC-GAPS G16).
+// shielded and cleans its result or causes (CONC-8). A Task has no cause cell
+// (budgets.md).
 
 /// CORE. Starts a task running f(take x) with a root limit of n bytes.
 /// Fails: Error((c, x)) when 256 + size(R) + 32 + n is refused; no task exists.
 /// Alloc: that sum at the spawner's current limit; n becomes the child's limit (MEM-21).
-/// Ex: `let h = match task.spawn(tasks, bytes 65536, take ends, transform) { Ok(take h) => h, Error((c, _)) => return Error(Mem(c)) }`
-/// PROVISIONAL (F04, F15): f becomes a non-capturing function type with declared summaries; the shape `take x` plus `f(take X)` already matches.
-pub fn spawn[X: send, R: send](tasks: Tasks, bytes n: u64, take x: X, f: fn(take X) -> R) -> Result[Task[R], (Capacity, X)]
+/// f is a plain `fn`: it captures nothing (LANG-13), so everything the child owns
+/// arrives as x. Ex: `let h = match task.spawn(tasks, bytes 65536, take ends, transform) { Ok(h) => h, Error((c, _)) => return Error(Mem(c)) }`
+pub fn spawn[X: send, R: send](tasks: Tasks, bytes n: u64, take x: X, f: fn(take X) -> R waits) -> Result[Task[R], (Capacity, X)]
 
 /// CORE. Waits for the child to end. Ok(r) moves its result; Error(Failed(causes)) hands
-/// over its cause chain; Error(Cancelled) when it ended by observing cancellation.
+/// over its cause chain; Error(Cancelled(causes)) when it ended by observing cancellation,
+/// with the causes its cleanup recorded.
 /// Cancellation while waiting is a failure and h is cleaned (CONC-8). Alloc: nothing.
 /// Ex: `let n = task.join(take h)?`
-/// PROVISIONAL (F11): JoinError becomes `Failed(Causes) | Cancelled(Causes)`.
 pub fn join[R](take h: Task[R]) -> Result[R, JoinError] waits
 
 /// CORE. Requests cancellation and returns at once; the child observes it at its next

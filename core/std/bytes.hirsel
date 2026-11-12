@@ -1,48 +1,9 @@
-// Module `bytes`: Bytes, own growable arbitrary bytes (SEM-3).
-// Field legend and GROWTH, FREEZE, VIEWRANGE: API.md, "Reading a contract".
-//
-// Representation: identical to List[u8]: 24-byte header, storage capacity x 1 rounded up
-// to 8, charged to the limit where it was made (MEM-28); GROWTH doubles from 4. A `b".."`
-// literal is static and never charged. If G2 (SPEC-GAPS: Bytes is List[u8]) is accepted,
-// this module shrinks to `slice` and `extend` and every other operation is list's.
-// Until then every operation here but `sum` is a core primitive over the engine's block (P2).
-// `for b in bytes` reads each byte (SEM-6); `==` and `<` are bytewise.
+// Module `bytes`: helpers for `Bytes`, which is `List[u8]` (SEM-3). Every list operation
+// applies to Bytes (`list.with_capacity`, `list.push`, `list.append`, `list.slice`,
+// `list.clear`, ...); this module holds only what a byte sequence needs beyond them.
+// A `b".."` literal is static and never charged. Field legend: API.md.
 
-/// An empty Bytes with no storage. Ex: `let mut buf = bytes.new()`
-pub fn new() -> Bytes
-
-/// An empty Bytes with storage for n bytes.
-/// Fails: Error(c). Alloc: n rounded to 8, current limit. Cost: O(1).
-/// Ex: `let mut buf = bytes.with_capacity(4096)?`
-pub fn with_capacity(n: u64) -> Result[Bytes, Capacity]
-
-/// Length. Cost: O(1). Ex: `bytes.len(b)`
-pub fn len(b: Bytes) -> u64
-
-/// Storage size in bytes. Cost: O(1). Ex: `bytes.capacity(buf)`
-pub fn capacity(b: Bytes) -> u64
-
-/// Byte i, or None when i >= len. Cost: O(1). Ex: `bytes.get(b, 0)`
-pub fn get(b: Bytes, i: u64) -> Option[u8]
-
-/// Appends x. Fails: Error(c); b unchanged. Alloc: GROWTH. Cost: amortised O(1).
-/// Ex: `bytes.push(mut buf, 10)?`
-pub fn push(mut b: Bytes, x: u8) -> Result[(), Capacity]
-
-/// Appends a copy of src. Fails: Error(c); b unchanged. Alloc: one GROWTH to at least
-/// len + len(src). Cost: O(len(src)) plus growth. Ex: `bytes.extend(mut out, chunk)?`
-pub fn extend(mut b: Bytes, src: Bytes) -> Result[(), Capacity]
-
-/// Sets len to 0; keeps storage. Cost: O(1). Ex: `bytes.clear(mut buf)`
-pub fn clear(mut b: Bytes)
-
-/// Sets len to min(len, n); keeps storage. Cost: O(1). Ex: `bytes.truncate(mut buf, n)`
-pub fn truncate(mut b: Bytes, n: u64)
-
-/// A view of bytes start..end, or None when out of range. Needs VIEWRANGE (G1).
-/// View: anchored to b; FREEZE b. Cost: O(1). Ex: `bytes.slice(buf, 0, n)`
-pub fn slice(b: Bytes, start: u64, end: u64) -> Option[View[Bytes]] in b
-
-/// Sum of the bytes as u64; the corpus checksum. Cost: O(len); cannot overflow below
-/// 2^56 bytes. Ex: `bytes.sum(out)`
+/// Sum of the bytes in u64: the corpus checksum. `list.sum` sums in u8 and would fail
+/// with Overflow. Cannot overflow below 2^56 bytes. Alloc: nothing. Cost: O(len).
+/// Ex: `let s = bytes.sum(string.as_bytes(out))`
 pub fn sum(b: Bytes) -> u64

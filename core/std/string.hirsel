@@ -1,26 +1,22 @@
-// Module `string`: String, own growable valid UTF-8 (SEM-3).
-// Field legend and GROWTH, FREEZE, CORE, VIEWRANGE: API.md, "Reading a contract".
+// Module `string`: String, own valid UTF-8 (SEM-3). Field legend, GROWTH, FREEZE and CORE:
+// API.md, "Reading a contract". CORE operations are core.md's, restated; the others are
+// library code over them.
 //
-// Representation: own; 24-byte header inline in its owner; storage capacity x 1 byte,
-// rounded up to 8, charged to the limit current where the string was made (MEM-28).
-// GROWTH doubles from 4 bytes. A literal is a static String: never charged, and its
-// first growth copies it into a new block. Positions are byte offsets; every operation
-// that takes a position needs it on a scalar boundary. Equality and order are `==` and
-// `<` (bytewise, SEM-7); nothing here normalises.
+// Representation: String is an opaque own type over a Bytes block: a 24-byte header
+// inline, storage capacity x 1 byte rounded up to 8, charged to the limit where it was
+// made (MEM-28); GROWTH as for lists. A literal is static: never charged; its first growth
+// copies it. Positions are byte offsets. Equality, order and hashing are bytewise (`==`,
+// `<`); nothing normalises. Cutting a string is `string.find` plus `string.slice`: a
+// library function cannot return a sub-view it got from a core operation (OWN-20; N2 in
+// SPEC-GAPS), so split_once and strip_prefix are not in the seed. Scalars are read with
+// `next_scalar` in a `while let` loop; `for` iterates only built-in sources (SEM-6).
 
-/// Error of from_utf8: the length of the longest valid prefix.
-pub type Utf8Error { valid_up_to: u64 }
-
-/// Cursor types read by `for` (G12). Scoped: they hold a view of the string.
-pub opaque scoped type Scalars { s: View[String], at: u64 }
-pub opaque scoped type Positions { s: View[String], at: u64 }
-
-/// CORE. An empty string with no storage. Ex: `let mut line = string.new()`
+/// CORE. An empty string with no storage. Alloc: nothing. Ex: `let mut line = string.new()`
 pub fn new() -> String
 
-/// An empty string with storage for n bytes.
-/// Fails: Error(c) when refused. Alloc: n rounded to 8, current limit. Cost: O(1).
-/// Ex: `let mut out = string.with_capacity(4096)?`
+/// An empty string with storage for n bytes: `string.from_utf8` of `list.with_capacity(n)`.
+/// Fails: Error(c). Alloc: n rounded to 8, current limit. Cost: O(1).
+/// Ex: `let mut reply = string.with_capacity(256)?`
 pub fn with_capacity(n: u64) -> Result[String, Capacity]
 
 /// CORE. A new string holding a copy of s (a literal or a view).
@@ -28,20 +24,45 @@ pub fn with_capacity(n: u64) -> Result[String, Capacity]
 /// Ex: `let k = string.from(key)?`
 pub fn from(s: String) -> Result[String, Capacity]
 
-/// CORE. Same as `from`; kept for the spec's examples. Ex: `let k = string.copy(w)?`
+/// CORE. As `from`. Ex: `let w = string.copy(string.slice(line, 0, i))?`
 pub fn copy(s: String) -> Result[String, Capacity]
+
+/// CORE. Takes b's block as a String if it is valid UTF-8; no copy.
+/// Fails: Error(b), b returned unchanged. Alloc: nothing. Cost: O(len) validation.
+/// Ex: `let s = match string.from_utf8(take raw) { Ok(s) => s, Error(raw) => .. }`
+pub fn from_utf8(take b: Bytes) -> Result[String, Bytes]
+
+/// CORE. Gives up the String's block as Bytes; no copy. Alloc: nothing. Cost: O(1).
+/// Ex: `let b = string.into_bytes(take s)`
+pub fn into_bytes(take s: String) -> Bytes
+
+/// CORE. A sub-view of s's bytes (OWN-8). View: anchored to s; FREEZE s. Cost: O(1).
+/// Ex: `for b in string.as_bytes(s) { sum += int.widen(b) }`
+pub fn as_bytes(s: String) -> View[Bytes] in s
+
+/// CORE. A sub-view of bytes from..to (OWN-8). Fails: Bounds (failure) unless
+/// from <= to <= byte_len and both are scalar boundaries; check with `is_boundary` first
+/// when the positions come from input. View: anchored to s; FREEZE s. Cost: O(1).
+/// Ex: `let key = string.slice(line, 0, colon)`
+pub fn slice(s: String, from: u64, to: u64) -> View[String] in s
+
+/// CORE. The scalar at byte position at and the position after it; None at or past the end.
+/// Fails: Bounds (failure) when at is not a boundary. Cost: O(1).
+/// Ex: `let mut at: u64 = 0; while let Some((c, n)) = string.next_scalar(s, at) { ..; at = n }`
+pub fn next_scalar(s: String, at: u64) -> Option[(char, u64)]
 
 /// CORE. Length in bytes. Cost: O(1). Ex: `string.byte_len(s)`
 pub fn byte_len(s: String) -> u64
 
-/// CORE. Appends t. t may be a view of part of s's own storage only if s is not frozen,
-/// which the overlap rule already refuses (OWN-9).
-/// Fails: Error(c) when GROWTH is refused; s unchanged. Alloc: GROWTH.
-/// Cost: O(byte_len(t)) plus amortised growth. Ex: `string.push(mut line, "\n")?`
+/// Whether i is a scalar boundary: i == byte_len, or i < byte_len and byte i is not a
+/// continuation byte. Cost: O(1). Ex: `if !string.is_boundary(text, at) { return Error(BadPosition) }`
+pub fn is_boundary(s: String, i: u64) -> bool
+
+/// CORE. Appends t. Fails: Error(c); s unchanged. Alloc: GROWTH. Cost: O(byte_len(t)).
+/// Ex: `string.push(mut line, "\n")?`
 pub fn push(mut s: String, t: String) -> Result[(), Capacity]
 
-/// Appends one scalar as 1 to 4 UTF-8 bytes. Needs P2, or G2 (SPEC-GAPS).
-/// Fails: Error(c); s unchanged. Alloc: GROWTH. Cost: amortised O(1).
+/// CORE. Appends one scalar as 1 to 4 bytes. Fails: Error(c); s unchanged. Alloc: GROWTH.
 /// Ex: `string.push_char(mut out, c)?`
 pub fn push_char(mut s: String, c: char) -> Result[(), Capacity]
 
@@ -49,84 +70,36 @@ pub fn push_char(mut s: String, c: char) -> Result[(), Capacity]
 /// Ex: `string.push_u64(mut line, n)?`
 pub fn push_u64(mut s: String, n: u64) -> Result[(), Capacity]
 
-/// Appends n in decimal with a leading '-' when negative.
-/// Fails: Error(c); s unchanged. Alloc: GROWTH, at most 20 bytes. Ex: `string.push_i64(mut s, -3)?`
+/// Appends n in decimal, with '-' when negative. Fails: Error(c); s unchanged.
+/// Alloc: one GROWTH, at most 20 bytes. Ex: `string.push_i64(mut s, -3)?`
 pub fn push_i64(mut s: String, n: i64) -> Result[(), Capacity]
 
-/// Appends n in `base` (2 to 36, lower-case digits), left-padded with `pad` to at least
-/// `width` scalars. Fails: Bounds (failure) when base is outside 2..=36; Error(c) when
-/// GROWTH is refused, s unchanged. Alloc: one admission of the whole text.
-/// Cost: O(digits + width). Ex: `string.push_uint(mut out, 31, 16, 4, '0')?` appends "001f"
+/// Appends n in `base` (2 to 36, lower-case), left-padded with `pad` to at least `width`
+/// scalars (Go strconv.AppendUint plus padding). Fails: Bounds (failure) when base is
+/// outside 2..=36; Error(c) when the one admission of the whole text is refused, s
+/// unchanged. Cost: O(digits + width). Ex: `string.push_uint(mut out, 31, 16, 4, '0')?` appends "001f"
 pub fn push_uint(mut s: String, n: u64, base: u32, width: u64, pad: char) -> Result[(), Capacity]
 
-/// Upper-cases the ASCII letters a-z in place; every other byte, and so every non-ASCII
-/// scalar, is unchanged, so the result is valid UTF-8 of the same length (Rust
-/// make_ascii_uppercase). Needs P2 or G2. Alloc: nothing. Cost: O(len).
+/// Upper-cases ASCII a-z in place; other bytes are unchanged, so the result is valid UTF-8
+/// of the same length (Rust make_ascii_uppercase). Library code over into_bytes and
+/// from_utf8, which revalidates. Alloc: nothing. Cost: O(len).
 /// Ex: `let mut up = string.copy(row)?; string.make_ascii_upper(mut up)`
 pub fn make_ascii_upper(mut s: String)
 
-/// Cleans the contents; keeps storage. Alloc: nothing. Cost: O(1). Ex: `string.clear(mut line)`
+/// Empties s; keeps storage. Alloc: nothing. Cost: O(1). Ex: `string.clear(mut line)`
 pub fn clear(mut s: String)
 
-/// Takes ownership of b's block as a String after validating it; no copy.
-/// Needs P2 or G2. Fails: Error((e, b)) with b returned unchanged when b is not
-/// valid UTF-8. Alloc: nothing. Cost: O(len) validation.
-/// Ex: `let s = match string.from_utf8(take raw) { Ok(take s) => s, Error((e, take raw)) => .. }`
-pub fn from_utf8(take b: Bytes) -> Result[String, (Utf8Error, Bytes)]
-
-/// Gives up the String's block as Bytes; no copy. Needs P2 or G2. Alloc: nothing. Cost: O(1).
-/// Ex: `let b = string.into_bytes(take s)`
-pub fn into_bytes(take s: String) -> Bytes
-
-/// A view of s's bytes. Needs VIEWRANGE (G1). View: anchored to s; FREEZE s.
-/// Cost: O(1). Ex: `for b in string.as_bytes(s) { sum += int.widen(b) }`
-pub fn as_bytes(s: String) -> View[Bytes] in s
-
-/// A view of bytes start..end of s, or None when start > end, end > byte_len(s), or
-/// either is not a scalar boundary. Needs VIEWRANGE (G1). View: anchored to s; FREEZE s.
-/// Alloc: nothing. Cost: O(1). Ex: `let Some(head) = string.slice(line, 0, 3) else { return Error(Bad) }`
-pub fn slice(s: String, start: u64, end: u64) -> Option[View[String]] in s
-
-/// Whether i is a scalar boundary of s (0 and byte_len(s) are). Cost: O(1).
-/// Ex: `string.is_boundary(s, pos)`
-pub fn is_boundary(s: String, i: u64) -> bool
-
-/// The scalar starting at byte i and the position after it; None when i == byte_len(s).
-/// Fails: Bounds (failure) when i > byte_len(s) or i is not a boundary.
-/// Cost: O(1). This is the iteration cursor until G12 lands.
-/// Ex: `let mut i: u64 = 0; while let Some((c, next)) = string.next_scalar(s, i) { ..; i = next }`
-pub fn next_scalar(s: String, i: u64) -> Option[(char, u64)]
-
-/// The scalars of s, for `for c in string.scalars(s)`. Needs G12. View: anchored to s;
-/// FREEZE s for the loop. Cost: O(1) per scalar. Ex: `for c in string.scalars(s) { .. }`
-/// PROVISIONAL (F01, G12): the cursor holds only a view and a position, so it stays copyable under the move rule for scoped values; `for` over it still needs G12.
-pub fn scalars(s: String) -> Scalars in s
-
-/// The (position, scalar) pairs of s, for `for (i, c) in string.positions(s)`. Needs G12.
-/// View: anchored to s; FREEZE s. Cost: O(1) per scalar.
-/// PROVISIONAL (F01, G12): as scalars.
-pub fn positions(s: String) -> Positions in s
-
-/// Byte position of the first occurrence of pat at or after `from`, or None.
-/// An empty pat matches at `from`. Fails: Bounds (failure) when from > byte_len(s).
-/// Cost: O(n + m) (two-way search). Ex: `string.find(s, 0, ": ")`
+/// The first byte position at or after `from` where pat occurs, or None. An empty pat is
+/// found at `from`. Fails: Bounds (failure) when from > byte_len. Alloc: nothing.
+/// Cost: O(len x len(pat)) worst case (naive search, as Go for short patterns).
+/// Ex: `let Some(colon) = string.find(line, 0, ":") else { return Error(Malformed) }`
 pub fn find(s: String, from: u64, pat: String) -> Option[u64]
 
-/// Whether s begins with p. Cost: O(byte_len(p)). Ex: `string.starts_with(line, "GET ")`
+/// Whether s begins with p. Cost: O(len(p)). Ex: `string.starts_with(line, "GET ")`
 pub fn starts_with(s: String, p: String) -> bool
 
-/// Whether s ends with p. Cost: O(byte_len(p)). Ex: `string.ends_with(name, ".json")`
+/// Whether s ends with p. Cost: O(len(p)). Ex: `string.ends_with(name, ".json")`
 pub fn ends_with(s: String, p: String) -> bool
 
-/// The rest of s after the prefix p, or None. Needs G1. View: anchored to s; FREEZE s.
-/// Cost: O(byte_len(p)). Ex: `let Some(path) = string.strip_prefix(line, "GET ") else { return Error(Method) }`
-pub fn strip_prefix(s: String, p: String) -> Option[View[String]] in s
-
-/// Splits s at the first occurrence of sep into the text before and after it (Go's Cut),
-/// or None when sep does not occur. Needs G1. Views: both anchored to s; FREEZE s.
-/// Cost: O(n + m). Ex: `let Some((name, value)) = string.split_once(line, ": ") else { return Error(Header) }`
-pub fn split_once(s: String, sep: String) -> Option[(View[String], View[String])] in s
-
-/// Bytewise three-way comparison (SEM-7); for sort callbacks. Cost: O(min length).
-/// Ex: `list.sort(mut ws, string.compare)`
+/// Bytewise order as Order (the order of `<`). Cost: O(min len). Ex: `string.compare(a, b)`
 pub fn compare(a: String, b: String) -> Order

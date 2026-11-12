@@ -115,13 +115,22 @@ whose continuation never runs ([T6.3](ownership.md#own-26-the-transition-table))
 A failure keeps its primary cause. A further failure during cleanup (a finalizer failing,
 FAIL-12) appends its cause to the chain in the order it happens, and cleanup continues with
 the next value. The chain is delivered whole to the joiner (FAIL-14). Cleaning never
-replaces the primary cause, and no cause is dropped. A **cause cell** holds one
-cause. Cells are admitted before any cause can need them: one with each task, for its
-primary cause, and one with each resource value, for the failure its cleanup may add
-([MEM-26](budgets.md#mem-26-logical-charges)); a resource created by a finalizer takes
-its cell from the finalizer's grant ([MEM-29](budgets.md#mem-29-finalizer-grants)). These are the only places a cause arises,
-so recording a cause, linking the chain and delivering it never admit, and the chain has
-no depth limit and is never truncated. A `Fail` cause takes ownership of its message.
+replaces the primary cause, and no cause is dropped.
+
+A cause is stored in a **cause cell**. Propagating a failure moves the existing chain and
+reserves nothing. A cell is reserved only with an obligation that can add a cause: each
+task has one primary cell from its start, and each resource value has one, admitted with
+the resource ([MEM-26](budgets.md#mem-26-logical-charges)); a resource created by a
+finalizer takes its cell and storage from the finalizer's grant
+([MEM-29](budgets.md#mem-29-finalizer-grants)). A cause raised by a finalizer goes into its
+resource's cell, and any other cause into the task's primary cell. If a finalizer cannot
+admit an obligation while a failure is active, its grant being exhausted, that is its own
+failure with cause `Capacity`, recorded in its resource's cell, and cleanup continues. So
+code that makes no resources performs no cause admission, the chain has no depth limit and
+is never truncated, and recording, linking and delivering causes never admit. An unused
+cell is refunded with its obligation; a used cell stays with the chain, through `join`, until
+the `Causes` value that holds it is cleaned, and is then refunded to the limit that admitted
+it. A `Fail` cause takes ownership of its message.
 
 ### FAIL-11: Resources
 

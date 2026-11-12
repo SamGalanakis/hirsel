@@ -48,7 +48,11 @@ strings.
 [MEM-13](memory.md#mem-13-own-layout). `xs[i]` and `list.get(xs, i)` read through a view and
 fail with `Bounds`, or return `None`, when `i` is out of range. `list.push` and the other
 growing operations return `Result[_, (Capacity, T)]` or `Result[_, Capacity]` and grow by
-doubling ([MEM-26](budgets.md#mem-26-logical-charges)). Removing elements never allocates.
+doubling ([MEM-26](budgets.md#mem-26-logical-charges)). Removing elements never allocates. A view
+returned by `list.get` or indexing is anchored to the list
+([OWN-20](ownership.md#own-20-scoped-results-name-their-anchor)) and freezes it until the
+view's extent ends ([OWN-10](ownership.md#own-10-freezes)); iteration freezes it for the
+loop (SEM-6).
 
 ### SEM-5: Maps
 
@@ -56,8 +60,11 @@ doubling ([MEM-26](budgets.md#mem-26-logical-charges)). Removing elements never 
 amortised constant time; removal keeps the order of the remaining entries. Inserting an
 existing key replaces its value in place, keeps the stored key, cleans the old value and
 then drops the incoming key. `map.get(m, k)` returns `Option[View[V]] in m`
-([OWN-20](ownership.md#own-20-scoped-results-name-their-anchor)). The hash function is
-private and has no seed; no program can observe it.
+([OWN-20](ownership.md#own-20-scoped-results-name-their-anchor)). Each `key` type has exactly
+one equality, the structural one of SEM-7, and one hash, which is private, has no seed and
+cannot be observed; both are fixed by the type, so every map with the same key type uses the
+same ones, and no program supplies or replaces them in v1 ([reserved](reserved.md), R11).
+Views from `map.get` are anchored to the map and freeze it as list views do.
 
 ```hirsel
 fn count(m: Map[String, u64], k: String) -> u64 { match map.get(m, k) { Some(v) => v, None => 0 } }

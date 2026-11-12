@@ -3,7 +3,11 @@
 The core operations that the rules of this specification name, with their signatures.
 Each signature is normative for the effects the rules give it: what it moves, what it
 allocates and how it fails. Everything else about the libraries is outside this
-specification. `X?` in a comment marks the rule that governs the operation.
+specification. Two rules hold for every operation here: an operation that fails
+with `Capacity` returns in its error every argument it would have taken and leaves its
+other arguments unchanged; and only the failures its signature or comment names can occur,
+`Bounds` and `Overflow` being failures ([FAIL-2](failure.md#fail-2-causes)) and the others
+`Result` errors. `X?` in a comment marks the rule that governs the operation.
 
 ## Error values
 

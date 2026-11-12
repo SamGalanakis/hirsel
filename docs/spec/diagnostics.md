@@ -14,6 +14,13 @@ freeze that a use conflicts with. The rule named is the one whose statement the 
 breaks; when a construct breaks a specific rule and the general rule it restates, the
 specific rule is named. A refusal never names a rule the program does not break.
 
+A machine-readable refusal contains the rule ID; the primary site; each **causal site**,
+the earlier construct that makes the primary site wrong (the move, the loan, the
+declaration); and the facts compared, as the declared fact and the required one (declared
+bounds `shareable` against required `send`; parameter mode view against required `take`).
+Sites are a module path with a byte span. The encoding is a tool format outside the
+language; the rule explanations shown with refusals are generated from this specification.
+
 ### PROG-8: No global order
 
 An implementation reports at least one refusal for every refused program and may report

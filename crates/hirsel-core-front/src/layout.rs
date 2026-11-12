@@ -136,7 +136,7 @@ pub(crate) fn recipes(p: &mut Program) {
         of: HashMap::new(),
     };
     let mut roots = vec![];
-    for (d, decl) in s.decls.iter().enumerate().skip(2) {
+    for (d, decl) in s.decls.iter().enumerate() {
         if !decl.generics.is_empty()
             || decl.role.is_some()
             || matches!(decl.body, DeclBody::Alias(_))

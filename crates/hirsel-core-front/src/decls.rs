@@ -59,6 +59,14 @@ pub enum Repr {
     Scoped,
 }
 
+/// Whether `path` is a declaration of the core prelude, named one of `names` when
+/// `names` is not empty.
+pub(crate) fn is_core_prelude(path: &DefPath, names: &[&str]) -> bool {
+    path.package_is("core", "1")
+        && path.0.modules == ["core"]
+        && (names.is_empty() || names.contains(&path.0.name.as_str()))
+}
+
 /// A core type whose kind and layout are fixed by its definition path (LANG-7, OWN-3).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Role {
@@ -78,7 +86,7 @@ pub enum Role {
 }
 impl Role {
     fn of(path: &DefPath) -> Option<Role> {
-        if !path.package_is("core", "1") || path.0.modules != ["core"] {
+        if !is_core_prelude(path, &[]) {
             return None;
         }
         Some(match path.0.name.as_str() {
@@ -166,6 +174,9 @@ pub struct TypeDecl {
     pub declared: u8,
     pub body: DeclBody,
     pub role: Option<Role>,
+    /// Core `Option` or `Result`: kind, bounds and copying follow the arguments
+    /// (OWN-3, SEM-7), and a scoped argument is allowed (OWN-19).
+    pub structural: bool,
     pub finalizer: bool,
     pub summary: Summary,
 }
@@ -239,69 +250,8 @@ enum Visit {
 }
 
 impl Program<'_> {
-    fn builtin_decls(&mut self) {
-        let site = Site {
-            module: self.modules[0].id.clone(),
-            item: u32::MAX,
-            span: Default::default(),
-        };
-        for (name, cases) in [
-            ("Option", vec![("Some", 1), ("None", 0)]),
-            ("Result", vec![("Ok", 1), ("Error", 1)]),
-        ] {
-            let generics: Vec<Generic> = (0..cases.len().min(if name == "Option" { 1 } else { 2 }))
-                .map(|i| Generic {
-                    name: ["T", "E"][i].into(),
-                    bounds: 0,
-                })
-                .collect();
-            let cases = cases
-                .iter()
-                .enumerate()
-                .map(|(i, &(c, n))| CaseDecl {
-                    name: c.into(),
-                    labelled: false,
-                    fields: (0..n)
-                        .map(|_| FieldDecl {
-                            name: "0".into(),
-                            ty: self
-                                .types
-                                .intern(TyKind::Param(i.min(generics.len() - 1) as u32)),
-                            site: site.clone(),
-                        })
-                        .collect(),
-                })
-                .collect();
-            self.decls.push(TypeDecl {
-                path: DefPath::core(&format!("core.{name}")),
-                site: site.clone(),
-                at: ItemRef {
-                    module: u32::MAX,
-                    item: u32::MAX,
-                },
-                repr: Repr::Own,
-                public: true,
-                opaque: false,
-                generics,
-                declared: KEY | ORDERED | SHAREABLE | SEND,
-                body: DeclBody::Variant(cases),
-                role: None,
-                finalizer: false,
-                summary: Summary::default(),
-            });
-        }
-        // Option's Some holds T (param 0); Result's Ok holds T and Error holds E.
-        let t = self.types.intern(TyKind::Param(0));
-        let e = self.types.intern(TyKind::Param(1));
-        if let DeclBody::Variant(c) = &mut self.decls[1].body {
-            c[0].fields[0].ty = t;
-            c[1].fields[0].ty = e;
-        }
-    }
-
     /// Pass 1: register every type and function definition with its header names.
     pub(crate) fn register(&mut self) {
-        self.builtin_decls();
         for (m, module) in self.modules.iter().enumerate() {
             for (i, item) in module.syntax.items.iter().enumerate() {
                 let root = item.tree.node(item.root);
@@ -344,10 +294,6 @@ impl Program<'_> {
                             }
                         }
                         NodeKind::Drop => finalizer = true,
-                        NodeKind::Brand | NodeKind::Uses => self.gaps.push(Gap::new(
-                            self.site(at, c),
-                            "brands and uses lists are removed (spec round 3)",
-                        )),
                         NodeKind::Attribute => {
                             let t = n.token.unwrap();
                             if item.tree.token_text(&item.text, t) == "compact" {
@@ -392,6 +338,7 @@ impl Program<'_> {
                 };
                 let id = DeclId(self.decls.len() as u32);
                 let role = Role::of(&path);
+                let structural = is_core_prelude(&path, &["Option", "Result"]);
                 self.decls.push(TypeDecl {
                     path: path.clone(),
                     site,
@@ -403,6 +350,7 @@ impl Program<'_> {
                     declared,
                     body: DeclBody::Record(vec![]),
                     role,
+                    structural,
                     finalizer,
                     summary: Summary::default(),
                 });
@@ -442,7 +390,7 @@ impl Program<'_> {
 
     /// Pass 2: lower every declaration's fields, alias right sides and signatures.
     pub(crate) fn lower_headers(&mut self) {
-        for d in 2..self.decls.len() {
+        for d in 0..self.decls.len() {
             self.lower_decl(DeclId(d as u32));
         }
         for f in 0..self.fns.len() {
@@ -613,12 +561,12 @@ impl Program<'_> {
         let site = self.site(at, path);
         let target = self.target(at, path).cloned();
         let decl = match target {
-            Some(Target::Builtin(name)) => match name.as_str() {
-                "Never" => return self.no_args(NEVER, args, &site),
-                "Option" => DeclId::OPTION,
-                "Result" => DeclId::RESULT,
-                s => return self.no_args(scalar(Scalar::from_name(s).unwrap()), args, &site),
-            },
+            Some(Target::Builtin(name)) => {
+                return self.no_args(scalar(Scalar::from_name(&name).unwrap()), args, &site);
+            }
+            Some(Target::Definition(p)) if is_core_prelude(&p, &["Never"]) => {
+                return self.no_args(NEVER, args, &site);
+            }
             Some(Target::Binder(b)) => {
                 let name = &self.items[at.module as usize][at.item as usize]
                     .resolution
@@ -664,7 +612,7 @@ impl Program<'_> {
         let params: Vec<u8> = generics.iter().map(|g| g.bounds).collect();
         let d = &self.decls[decl.index()];
         let role = d.role;
-        if decl != DeclId::OPTION && decl != DeclId::RESULT {
+        if !d.structural {
             for (i, (t, s)) in args.iter().enumerate() {
                 self.pending.push(Pending::NotScoped {
                     ty: *t,
@@ -686,7 +634,7 @@ impl Program<'_> {
         if role == Some(Role::View) {
             return self.types.intern(TyKind::View(arg_tys[0]));
         }
-        let alias = matches!(self.alias_kind(decl), Some(true));
+        let alias = self.is_alias(decl);
         if alias && let Some(top) = self.alias_stack.last_mut() {
             top.1 = Some(site.clone());
         }
@@ -705,13 +653,9 @@ impl Program<'_> {
     }
 
     /// Whether a declaration is an alias, read from its syntax (LANG-9).
-    fn alias_kind(&self, d: DeclId) -> Option<bool> {
-        let at = self.decls[d.index()].at;
-        if at.module == u32::MAX {
-            return Some(false);
-        }
-        let item = self.item(at);
-        Some(item.tree.children(item.root).iter().any(|&c| {
+    fn is_alias(&self, d: DeclId) -> bool {
+        let item = self.item(self.decls[d.index()].at);
+        item.tree.children(item.root).iter().any(|&c| {
             matches!(
                 item.tree.node(c).kind,
                 NodeKind::TypePath
@@ -723,7 +667,7 @@ impl Program<'_> {
                     | NodeKind::OwnCallableType
                     | NodeKind::ScopedCallableType
             )
-        }))
+        })
     }
 
     fn no_args(&mut self, t: TyId, args: &[(TyId, Site)], site: &Site) -> TyId {
@@ -751,6 +695,10 @@ impl Program<'_> {
                 NodeKind::Parameters => {
                     for &p in item.tree.children(c) {
                         let pn = item.tree.node(p);
+                        if pn.kind == NodeKind::BytesParameter {
+                            self.gaps
+                                .push(Gap::new(self.site(at, p), "sized parameters are not built"));
+                        }
                         let name = item
                             .tree
                             .token_text(&item.text, pn.token.unwrap())
@@ -774,10 +722,9 @@ impl Program<'_> {
                     self.fns[f].result_site = self.site(at, t);
                 }
                 NodeKind::Waits => waits = true,
-                NodeKind::Uses | NodeKind::Outlives => self.gaps.push(Gap::new(
-                    self.site(at, c),
-                    "uses lists and outlives clauses are not built",
-                )),
+                NodeKind::Outlives => self
+                    .gaps
+                    .push(Gap::new(self.site(at, c), "outlives clauses are not built")),
                 _ => {}
             }
         }
@@ -1003,11 +950,7 @@ impl Program<'_> {
     /// Definition identity: package, module path, byte offset (OWN-2).
     fn identity(&self, d: DeclId) -> (String, String, Vec<String>, u32) {
         let decl = &self.decls[d.index()];
-        let offset = if decl.at.module == u32::MAX {
-            0
-        } else {
-            self.item(decl.at).file_offset + decl.site.span.start
-        };
+        let offset = self.item(decl.at).file_offset + decl.site.span.start;
         let p = &decl.path.0;
         (
             p.package.name.clone(),
@@ -1070,7 +1013,7 @@ impl Program<'_> {
     /// Declared bounds are checked once against the fields, reading each field type's
     /// declared bounds (OWN-4). Scoped fields of non-scoped types are OWN-19.
     fn check_declared_bounds(&mut self) {
-        for d in 2..self.decls.len() {
+        for d in 0..self.decls.len() {
             let decl = &self.decls[d];
             if decl.role.is_some() {
                 continue;
@@ -1234,7 +1177,7 @@ pub fn kind(decls: &[TypeDecl], t: &impl TyRead, ty: TyId, params: &[u8]) -> Kin
                 Repr::Own => {
                     let s = &decl.summary;
                     let mut k = s.kind_fixed.unwrap_or(Kind::Own);
-                    if *d == DeclId::OPTION || *d == DeclId::RESULT {
+                    if decl.structural {
                         k = Kind::Plain;
                     }
                     for (i, &a) in args.iter().enumerate() {
@@ -1261,7 +1204,7 @@ pub fn copyable(decls: &[TypeDecl], t: &impl TyRead, ty: TyId, params: &[u8]) ->
                 if decl.role.is_some() {
                     return decl.role == Some(Role::Region) || decl.role == Some(Role::View);
                 }
-                if *d == DeclId::OPTION || *d == DeclId::RESULT {
+                if decl.structural {
                     return args.iter().all(|&x| copyable(decls, t, x, params));
                 }
                 // A scoped declaration copies when every field does; its fields were
@@ -1312,7 +1255,7 @@ pub fn has_bounds(decls: &[TypeDecl], t: &impl TyRead, ty: TyId, params: &[u8]) 
                     Some(Role::Map) => meet(args) & (SHAREABLE | SEND),
                     Some(Role::Capability) => PLAIN | SHAREABLE | SEND,
                     Some(_) => 0,
-                    None if *d == DeclId::OPTION || *d == DeclId::RESULT => meet(args),
+                    None if decl.structural => meet(args),
                     None => decl.declared & !PLAIN,
                 }
             }

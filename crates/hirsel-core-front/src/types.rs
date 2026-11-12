@@ -13,8 +13,6 @@ pub struct TyId(pub u32);
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct DeclId(pub u32);
 impl DeclId {
-    pub const OPTION: DeclId = DeclId(0);
-    pub const RESULT: DeclId = DeclId(1);
     pub const fn index(self) -> usize {
         self.0 as usize
     }
@@ -36,8 +34,7 @@ pub enum TyKind {
     Unit,
     Scalar(Scalar),
     Tuple(Vec<TyId>),
-    /// A nominal type: a declaration and its arguments. `Option` and `Result` are
-    /// declarations 0 and 1.
+    /// A nominal type: a declaration and its arguments.
     Adt(DeclId, Vec<TyId>),
     /// `View[T]` (OWN-8).
     View(TyId),

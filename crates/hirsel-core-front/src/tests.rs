@@ -3,9 +3,8 @@
 
 use crate::*;
 use hirsel_core_ids::PackageId;
-use hirsel_core_resolve::{DefinitionKind, Environment, ModuleId, PackageManifest};
+use hirsel_core_resolve::{Environment, ModuleId, PackageManifest};
 use hirsel_core_syntax::{ParseMode, parse};
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 fn root() -> PathBuf {
@@ -19,8 +18,8 @@ fn package(name: &str) -> PackageId {
     }
 }
 
-/// The core fixture and one application module, indexed with the prelude and the core
-/// modules exposed by name.
+/// The core fixture and one application module, indexed with the core fixture as the
+/// core package (its `core` module is the prelude).
 fn program_inputs(source: &str) -> (NameIndex, Vec<ModuleInput>) {
     let core = PackageManifest::directory(&root().join("core"), package("core"), true)
         .and_then(|m| m.read())
@@ -43,7 +42,7 @@ fn program_inputs(source: &str) -> (NameIndex, Vec<ModuleInput>) {
         modules: vec!["main".into()],
     };
     let parsed = parse(source, ParseMode::Source);
-    let mut index = NameIndex::default();
+    let mut index = NameIndex::new(Environment::default());
     for d in &parsed.diagnostics {
         index.diagnostics.push(Refusal::syntax(main.clone(), d));
     }
@@ -57,20 +56,7 @@ fn program_inputs(source: &str) -> (NameIndex, Vec<ModuleInput>) {
             index.index_item(&m.id, i as u32, item);
         }
     }
-    let mut env = Environment::default();
-    for d in index.definitions() {
-        if d.public && d.path.0.modules == ["core"] && d.kind != DefinitionKind::Constant {
-            env.prelude.insert(d.path.0.name.clone(), d.path.clone());
-        }
-    }
-    let exposed: BTreeMap<String, ModuleId> = modules
-        .iter()
-        .filter(|m| m.id.package == package("core") && m.id.modules != ["core"])
-        .map(|m| (m.id.modules[0].clone(), m.id.clone()))
-        .collect();
-    env.dependencies.insert(package("app"), exposed.clone());
-    env.dependencies.insert(package("core"), exposed);
-    index.environment = env;
+    index.configure_core(package("core"));
     (index, modules)
 }
 

@@ -1,4 +1,8 @@
-// Fixture of the core prelude (core@1/core). Role types are fixed by these paths.
+// Fixture of the core prelude (core@1/core), declared as core/core/core.hirsel declares
+// it at spec revision 3. Role types are fixed by these paths.
+pub type Option[T] = None | Some(T)
+pub type Result[T, E] = Ok(T) | Error(E)
+pub opaque type Never
 pub opaque type View[T] {}
 pub opaque type Box[T] {}
 pub opaque type Rc[T: shareable] {}

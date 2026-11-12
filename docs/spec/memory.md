@@ -161,14 +161,22 @@ declare in v1; every other layout is private ([MEM-13](#mem-13-own-layout)).
 ### MEM-10: Inline fields and links
 
 A compact field of compact type, `Text` or span type is stored inline: its bytes are part
-of the blob. A `Link[U]` field refers to a `U` inside the same blob and is stored as
-`W`-width byte offset plus one; `Option[Link[U]]` uses zero for `None`. Links are formed
-only from construction tokens that the destination returns for completed children; no
-integer converts to a link. Following a link is one load and one addition, with no check.
-Edges to other blobs or regions are ordinary stable fields of a non-compact type.
+of the blob. A `Link[U]` field refers to a `U` earlier in the same blob and is stored as
+the `W`-width byte distance back from the field to its target; `Option[Link[U]]` uses zero
+for `None`. Links are formed only from the tokens a destination returns for completed
+children, and a child is always completed before its parent refers to it, so every
+distance is positive and in bounds. Reading a link field through a view of its holder
+yields a view of the target, at the cost of one load and one subtraction with no check; a
+link is never a value apart from its field, and no integer converts to one. Edges to other
+blobs or regions are ordinary stable fields of a non-compact type.
 
 ```hirsel
 @compact(u32) stable type Expr = Num(i64) | Add(Link[Expr], Link[Expr])
+fn eval(e: Expr) -> i64 { match e { Num(n) => n, Add(a, b) => eval(a) + eval(b) } }
+```
+```hirsel
+fn keep(e: Expr) -> Link[Expr] { match e { Add(a, _) => a, _ => fail("leaf") } }
+                                              // refused: MEM-10, a link is not a value
 ```
 
 ### MEM-11: Active-size variants

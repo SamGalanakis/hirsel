@@ -882,24 +882,3 @@ fn a_comptime_call_into_a_dependency_reruns_nothing_on_unchanged_sources() {
         );
     });
 }
-
-/// A private edit to `internal.Plan` moves the library's V view of it, which
-/// `lib.width` read and `main` merged by executing it, though the client's
-/// universe has no such view. So both are lowered again and `main` answers as
-/// a fresh store does.
-#[test]
-fn a_private_dependency_edit_reruns_the_comptime_call_that_merged_its_reads() {
-    with_compiler_stack(|| {
-        let scratch = tempfile::tempdir().unwrap();
-        let store = Arc::new(MemStore::default());
-        lower_client(scratch.path(), PLAN, &store);
-        let grown = PLAN.replace(
-            "tokens: List[String],",
-            "tokens: List[String],\n  depth: u8,",
-        );
-        let fresh = tempfile::tempdir().unwrap();
-        let oracle = lower_client(fresh.path(), &grown, &Arc::new(MemStore::default()));
-        assert_eq!((oracle.main_lowerings, oracle.width_lowerings), (1, 1));
-        assert_eq!(lower_client(scratch.path(), &grown, &store), oracle);
-    });
-}

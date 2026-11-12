@@ -305,6 +305,23 @@ Buck2 from the repository root, and export the paths it prints:
 lists the path of every other variable inside its toolchain directory
 (`tools/native-toolchain/README.md` installs the LLVM tree without Buck2).
 
+Before its first link, a native build captures the selected platform: it
+identifies the linker, link kit, runtime archive, foreign libraries, loader and
+auditor byte for byte, and runs the linker and loader to resolve them. It keeps
+a platform record of that capture in the native cache (`platform-v1`). A later
+build with the same selection reuses the record while the stamps (device,
+inode, size, mtime and ctime) of every file the capture read, and of every
+directory the loader searches, are unchanged, and no record is older than a
+day. The record is a local cache that detects accidents, such as a toolchain
+upgraded in place, a file added to a library directory or a cache copied from
+another machine. It is not a security boundary: it trusts the files of your own
+account (the toolchain packages and this private cache). If a link that a
+record fed fails, the build deletes the record, captures again, and keeps no
+output from a platform the new capture disagrees with. `--timings` lists each
+hit, miss and its reason under `runner`. `HIRSEL_PLATFORM_CAPTURE=cold` reads
+no record and verifies the platform fully. Release builds, `tools/land` and
+every Buck2 gate set it.
+
 `build`, `run` and `test` validate every lowered body with V, the second checker,
 as checks do. `--no-verify` skips V: the program, its output and every
 diagnostic are the same, and only a compiler bug V would have reported can go

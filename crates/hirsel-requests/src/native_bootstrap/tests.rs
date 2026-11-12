@@ -594,6 +594,7 @@ fn actual_native_bootstrap_links_both_backends_and_restores_after_runtime_drop()
                     timeout: std::time::Duration::from_secs(20),
                     runtime_limits,
                     limits,
+                    record: None,
                 },
                 entry.clone(),
                 backend,

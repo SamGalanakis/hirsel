@@ -97,6 +97,16 @@ impl FrozenLinker {
     pub fn reference(self) -> Reference {
         self.0
     }
+    /// The stored linker a platform record names, checked by structure only:
+    /// its file list and each file's blob record, no file bytes.
+    pub(crate) fn stored(store: &dyn ResultStore, reference: Reference) -> Result<Self, String> {
+        let record: ToolRecord = get_record(store, TOOL, reference)?;
+        check_tool(&record.files)?;
+        for file in record.files {
+            blob_record(store, file.bytes.into())?;
+        }
+        Ok(Self(reference))
+    }
 
     /// Capture runs the stored tool against the original inputs once. Actual
     /// linking later runs the same tool with a closed LLVM VFS of these bytes.
@@ -238,6 +248,13 @@ impl CapturedLink {
         let result = Self(reference);
         result.validate(store)?;
         Ok(result)
+    }
+    /// A capture a platform record names, checked by structure only.
+    pub(crate) fn stored(store: &dyn ResultStore, reference: Reference) -> Result<Self, String> {
+        for file in Self(reference).record(store)?.files {
+            blob_record(store, file.bytes.into())?;
+        }
+        Ok(Self(reference))
     }
 
     /// Call before selecting a Link hit as well as on misses. A descriptor must
@@ -480,6 +497,28 @@ impl FrozenLinkKit {
         let result = Self(reference);
         result.validate(store, target)?;
         Ok(result)
+    }
+    /// A kit a platform record names, checked by structure only.
+    pub(crate) fn stored(
+        store: &dyn ResultStore,
+        reference: Reference,
+        target: &super::super::TargetSpec,
+    ) -> Result<Self, String> {
+        let record: KitRecord = get_record(store, KIT, reference)?;
+        if record.triple != target.triple || !Path::new(&record.root).is_absolute() {
+            return Err("frozen kit target or root differs".into());
+        }
+        blob_record(store, record.manifest.into())?;
+        CapturedLink::stored(store, record.capture.into())?;
+        Ok(Self(reference))
+    }
+    /// The absolute names and contents the kit capture's linker read.
+    pub(crate) fn captured_files(
+        self,
+        store: &dyn ResultStore,
+    ) -> Result<Vec<(PathBuf, Reference)>, String> {
+        let record: KitRecord = get_record(store, KIT, self.0)?;
+        CapturedLink(record.capture.into()).inputs(store)
     }
     pub fn validate(
         self,

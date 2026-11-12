@@ -52,6 +52,16 @@ pub struct CapturedPlatform {
     startup_order: Option<PathBuf>,
     foreign_paths: Vec<PathBuf>,
     static_foreign: bool,
+    /// What the runtime loader found by searching, read only to issue a
+    /// platform record; empty on every platform a build keeps.
+    search: RuntimeSearch,
+}
+#[derive(Default)]
+pub(crate) struct RuntimeSearch {
+    /// Objects the loader opened, each found by a library-path search.
+    opened: Vec<PathBuf>,
+    /// DT_RPATH or DT_RUNPATH added search directories.
+    owner_paths: bool,
 }
 struct SelectedInput {
     name: String,
@@ -250,6 +260,14 @@ impl CapturedPlatform {
                 runtime: inputs.runtime.limits,
             },
         )?;
+        let search = RuntimeSearch {
+            opened: discovered
+                .inputs
+                .iter()
+                .map(|input| input.path.clone())
+                .collect(),
+            owner_paths: discovered.owner_paths,
+        };
         reads.extend(discovered.inputs.into_iter().map(|input| PlatformRead {
             path: input.path,
             content: input.file,
@@ -299,6 +317,7 @@ impl CapturedPlatform {
             startup_order,
             foreign_paths,
             static_foreign,
+            search,
         })
     }
     /// Owned object, vector capacities, filenames and current-input path buffers.
@@ -585,6 +604,8 @@ impl<R: Read> Read for HashedReader<R> {
         Ok(count)
     }
 }
+
+pub mod record;
 
 #[cfg(test)]
 #[path = "../../tests/native-validation/platform_capture.rs"]

@@ -724,6 +724,7 @@ def _link_hosts_local_impl(ctx):
         "HIRSEL_PRODUCTS": cmd_args(tools["products"]),
         "HIRSEL_QEMU_AARCH64": cmd_args(tools["qemu"], "/qemu-aarch64", delimiter = ""),
         "HIRSEL_AARCH64_SYSROOT": cmd_args(tools["arm"], "/aarch64-none-linux-gnu/libc", delimiter = ""),
+        "HIRSEL_PLATFORM_CAPTURE": "cold",
     }
     # This host's half of the two-host gate: never the pool, whose half is the test.
     ctx.actions.run(command, env = env, local_only = True, category = "link_hosts")
@@ -791,7 +792,7 @@ def _products_impl(ctx):
                  cmd_args(tree, format = "{}/" + ctx.attrs.manifest),
                  scratch.as_output(), products.as_output(),
                  hidden = ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
-        env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1", "HIRSEL_DAEMON": "off", "HIRSEL_RESULTS": "none@1"},
+        env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1", "HIRSEL_DAEMON": "off", "HIRSEL_RESULTS": "none@1", "HIRSEL_PLATFORM_CAPTURE": "cold"},
         category = "products",
     )
     return [DefaultInfo(default_output = products)]
@@ -1096,7 +1097,7 @@ def _runtime_archives_impl(ctx):
         )
         for name, dep in ctx.attrs._startup_tools.items():
             command.add("--" + name.replace("_", "-"), dep[DefaultInfo].default_outputs[0])
-        ctx.actions.run(command, category = "startup_order", env = {"HIRSEL_JOBS": "4"})
+        ctx.actions.run(command, category = "startup_order", env = {"HIRSEL_JOBS": "4", "HIRSEL_PLATFORM_CAPTURE": "cold"})
         for path in ctx.attrs.archives:
             order = ctx.actions.declare_output(path + "/startup.order")
             ctx.actions.run(cmd_args(

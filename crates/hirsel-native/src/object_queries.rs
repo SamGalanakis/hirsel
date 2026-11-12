@@ -892,6 +892,12 @@ fn retain_link_input_in(
     Ok(input)
 }
 
+/// Forget every checked copy, as a new process starts.
+#[cfg(test)]
+pub(crate) fn forget_retained() {
+    RETAINED.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
 /// The copy of `reference` this process already checked, in either mode.
 pub(crate) fn retained_link_input(reference: Reference) -> Option<Arc<RetainedInput>> {
     let retained = RETAINED.lock().unwrap_or_else(|e| e.into_inner());
@@ -960,6 +966,20 @@ pub fn materialize_executable(
     }
     materialize_blob(store, product.executable, destination, true).map(drop)
 }
+/// Whether the bytes read from `file`, from its current offset to its end,
+/// are exactly the blob's chunks.
+fn file_matches_blob(blob: &BlobRecord, file: &mut std::fs::File) -> Result<bool, String> {
+    use std::io::Read;
+    let mut buffer = vec![0; BLOB_CHUNK];
+    for chunk in &blob.chunks {
+        let chunk: Reference = chunk.clone().into();
+        let part = &mut buffer[..usize::try_from(chunk.len).map_err(error)?];
+        if file.read_exact(part).is_err() || CHUNK.reference(part) != Some(chunk) {
+            return Ok(false);
+        }
+    }
+    Ok(file.read(&mut buffer[..1]).map_err(error)? == 0)
+}
 /// Returns the descriptor through which the bytes were checked.
 fn materialize_blob(
     store: &dyn ResultStore,
@@ -967,24 +987,14 @@ fn materialize_blob(
     destination: &Path,
     executable: bool,
 ) -> Result<std::fs::File, String> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     let blob = blob_record(store, reference)?;
     if executable && blob.chunks.is_empty() {
         return Err("empty executable output".into());
     }
     // The opened file's own bytes are hashed against each chunk identity, so
     // the check covers exactly what its consumer reads, with no store read.
-    let matches = |file: &mut std::fs::File| -> Result<bool, String> {
-        let mut buffer = vec![0; BLOB_CHUNK];
-        for chunk in &blob.chunks {
-            let chunk: Reference = chunk.clone().into();
-            let part = &mut buffer[..usize::try_from(chunk.len).map_err(error)?];
-            if file.read_exact(part).is_err() || CHUNK.reference(part) != Some(chunk) {
-                return Ok(false);
-            }
-        }
-        Ok(file.read(&mut buffer[..1]).map_err(error)? == 0)
-    };
+    let matches = |file: &mut std::fs::File| file_matches_blob(&blob, file);
     let permissions = |file: &std::fs::File| -> std::io::Result<bool> {
         #[cfg(unix)]
         {

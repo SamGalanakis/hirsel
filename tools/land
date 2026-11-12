@@ -63,7 +63,8 @@ CONFIG = ['-c', 'hirsel.clippy=true', '-c', 'hirsel.priority=75']
 # The batch is the step every lane waits on: its checkout's daemon may keep
 # 128 remote actions in flight, against a lane's 32 (.buckconfig).
 ENV = {'HIRSEL_BUCK2_CONFIG': ' '.join(CONFIG), 'GIT_EDITOR': 'true',
-       'HIRSEL_VALIDATE_STAGES': '1', 'HIRSEL_BUCK2_RE_CONCURRENCY': '128'}
+       'HIRSEL_VALIDATE_STAGES': '1', 'HIRSEL_BUCK2_RE_CONCURRENCY': '128',
+       'HIRSEL_PLATFORM_CAPTURE': 'cold'}
 # The workspace without tests, Clippy twins, campaign targets, the two-host
 # link build (it holds a host-wide lock), ordinary std product
 # precomputation (integration artifacts, not workspace compilation).

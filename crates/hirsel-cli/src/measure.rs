@@ -253,6 +253,12 @@ fn table(command: &str, wall: Duration, report: &timings::Report) -> String {
     for (kind, count) in &runner.fallbacks {
         text += &format!("  fallback: {} ({count})\n", runner.reasons[kind]);
     }
+    for (kind, count) in &runner.platform_records {
+        text += &format!(
+            "  platform record: {} ({count})\n",
+            runner.platform_reasons[kind]
+        );
+    }
     text
 }
 
@@ -369,6 +375,10 @@ fn json(
         "cached_images": runner.cached,
         "fallbacks": runner.fallbacks.iter().map(|(kind, count)| serde_json::json!({
             "reason": runner.reasons[kind],
+            "count": count,
+        })).collect::<Vec<_>>(),
+        "platform_records": runner.platform_records.iter().map(|(kind, count)| serde_json::json!({
+            "reason": runner.platform_reasons[kind],
             "count": count,
         })).collect::<Vec<_>>(),
     });

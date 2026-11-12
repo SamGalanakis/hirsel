@@ -6,6 +6,7 @@ use hirsel_engine_store::ResultStore;
 use hirsel_native::Backend;
 use hirsel_native::object_queries::capture::CaptureLimits;
 use hirsel_native::object_queries::platform::CapturedPlatform;
+use hirsel_native::object_queries::platform::record::PlatformSpec;
 use hirsel_native::object_queries::runtime::RuntimeFiles;
 use hirsel_native::object_queries::runtime::RuntimeLimits;
 use hirsel_native_queries::compilation_tasks::CompilationBackend;
@@ -18,7 +19,10 @@ use hirsel_syntax::{ContentHash, DefPath};
 use std::{
     io::Read,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -30,6 +34,10 @@ pub(super) struct LinkInputs {
     pub timeout: Duration,
     pub runtime_limits: RuntimeLimits,
     pub limits: CaptureLimits,
+    /// The selection whose platform record supplied `platform`; None when
+    /// it was captured cold. A Link failure on a record's platform deletes
+    /// the record and verifies fully before any output is kept.
+    pub record: Option<PlatformSpec>,
 }
 pub(crate) struct FrozenPlatform {
     store: Arc<dyn ResultStore>,
@@ -40,6 +48,8 @@ pub(crate) struct FrozenPlatform {
     target: hirsel_native::TargetSpec,
     requested: Option<Arc<hirsel_run_config::ValidatedRun>>,
     linker_options: ContentHash,
+    /// Set once a failed Link on a record's platform recaptured it.
+    recovered: AtomicBool,
     _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
 }
 impl FrozenPlatform {
@@ -95,6 +105,7 @@ impl FrozenPlatform {
             target,
             requested,
             linker_options,
+            recovered: AtomicBool::new(false),
             _allowance: allowance,
         }))
     }
@@ -103,7 +114,10 @@ impl FrozenPlatform {
     }
     /// Run this for reopened Link hits too, before exposing any executable.
     pub fn validate_image(&self, image: &Path) -> Result<(), String> {
-        self.inputs.platform.validate_image(
+        self.validate_image_on(&self.inputs.platform, image)
+    }
+    fn validate_image_on(&self, platform: &CapturedPlatform, image: &Path) -> Result<(), String> {
+        platform.validate_image(
             self.store.as_ref(),
             &self.target,
             image,
@@ -170,6 +184,33 @@ impl NativeLinkExecutor for FrozenPlatform {
         {
             return Err("native Link received another selected platform".into());
         }
+        let failed = match self.link_on(&self.inputs.platform, native, &input) {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) => error,
+        };
+        let Some(record) = &self.inputs.record else {
+            return Err(failed);
+        };
+        if self.recovered.swap(true, Ordering::SeqCst) {
+            return Err(failed);
+        }
+        // Rule 5: delete the record and verify fully; run again only on the
+        // recorded platform, else withhold.
+        let fresh = record.recover(
+            self.store.as_ref(),
+            self.inputs.platform.identity(),
+            &format!("Link failed: {failed}"),
+        )?;
+        self.link_on(&fresh, native, &input)
+    }
+}
+impl FrozenPlatform {
+    fn link_on(
+        &self,
+        platform: &CapturedPlatform,
+        native: &mut RootProducts,
+        input: &LinkExecution<'_>,
+    ) -> Result<Vec<u8>, String> {
         let scratch = tempfile::tempdir().map_err(|error| error.to_string())?;
         let tests = !native.test_entries(input.root)?.is_empty();
         let inputs = RootCapturedExecutableInputs {
@@ -181,7 +222,7 @@ impl NativeLinkExecutor for FrozenPlatform {
             standalone: self.requested.is_none(),
             platform: hirsel_native::CapturedExecutableLinkInputs {
                 store: self.store.as_ref(),
-                platform: &self.inputs.platform,
+                platform,
                 loader: None,
             },
         };
@@ -193,18 +234,14 @@ impl NativeLinkExecutor for FrozenPlatform {
         // Foreign code compiled against another data ABI is PROG-4's refusal.
         let refused = |error: String| plan.refusal(&error).unwrap_or(error);
         let capture = plan
-            .capture(
-                self.store.as_ref(),
-                &self.inputs.platform,
-                self.inputs.limits,
-            )
+            .capture(self.store.as_ref(), platform, self.inputs.limits)
             .map_err(refused)?;
         capture.validate(self.store.as_ref())?;
         let executable = scratch.path().join("program");
         capture
             .link(self.store.as_ref(), &executable)
             .map_err(refused)?;
-        self.validate_image(&executable)?;
+        self.validate_image_on(platform, &executable)?;
         let limit = self.inputs.limits.archive_bytes;
         let mut bytes = Vec::new();
         std::fs::File::open(executable)

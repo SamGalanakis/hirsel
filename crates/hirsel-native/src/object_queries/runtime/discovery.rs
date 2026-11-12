@@ -30,6 +30,9 @@ pub struct DiscoveredRuntime {
     pub image: Reference,
     pub runtime: FrozenRuntime,
     pub inputs: Vec<RuntimeInput>,
+    /// Whether the image or an opened object carries DT_RPATH or DT_RUNPATH,
+    /// which adds search directories outside the selected library path.
+    pub owner_paths: bool,
 }
 
 /// Discover against the actual linked image's location, preserving its ORIGIN.
@@ -113,7 +116,7 @@ pub fn discover(
     let mut inputs = Vec::new();
     let mut groups = BTreeMap::<(u64, u64), (Vec<String>, Reference)>::new();
     let mut names = BTreeMap::<String, BTreeSet<(u64, u64)>>::new();
-    let mut needed = elf_names(&image_bytes)?.0;
+    let (mut needed, _, mut owner_paths) = elf_names(&image_bytes)?;
     for path in opened {
         if !path.is_absolute() {
             return Err("runtime loader opened a nonabsolute library path".into());
@@ -125,8 +128,9 @@ pub fn discover(
         if identity != (after.dev(), after.ino()) {
             return Err("runtime library identity changed during discovery".into());
         }
-        let (dependencies, soname) = elf_names(&bytes)?;
+        let (dependencies, soname, paths) = elf_names(&bytes)?;
         needed.extend(dependencies);
+        owner_paths |= paths;
         let group = groups.entry(identity).or_insert_with(|| (Vec::new(), file));
         if group.1 != file {
             return Err("runtime library changed through an alias".into());
@@ -211,6 +215,7 @@ pub fn discover(
         image: image_ref,
         runtime,
         inputs,
+        owner_paths,
     })
 }
 
@@ -252,7 +257,9 @@ fn snapshot(
 }
 
 /// Use object crate's PT_DYNAMIC reader, rather than sections (which may be stripped).
-fn elf_names(bytes: &[u8]) -> Result<(Vec<String>, Option<String>), String> {
+/// Returns DT_NEEDED names, the DT_SONAME and whether DT_RPATH or DT_RUNPATH
+/// is present.
+fn elf_names(bytes: &[u8]) -> Result<(Vec<String>, Option<String>, bool), String> {
     let endian = object::LittleEndian;
     let header = object::elf::FileHeader64::<object::LittleEndian>::parse(bytes)
         .map_err(|e| e.to_string())?;
@@ -295,11 +302,13 @@ fn elf_names(bytes: &[u8]) -> Result<(Vec<String>, Option<String>), String> {
     let strings = object::read::StringTable::new(data, 0, data.len() as u64);
     let mut needed = Vec::new();
     let mut soname = None;
+    let mut owner_paths = false;
     for entry in dynamic {
         let tag = entry.d_tag(endian);
         if tag == object::elf::DT_NULL {
             break;
         }
+        owner_paths |= tag == object::elf::DT_RPATH || tag == object::elf::DT_RUNPATH;
         if tag == object::elf::DT_NEEDED || tag == object::elf::DT_SONAME {
             let text = entry.string(endian, strings).map_err(|e| e.to_string())?;
             let name = std::str::from_utf8(text)
@@ -312,5 +321,5 @@ fn elf_names(bytes: &[u8]) -> Result<(Vec<String>, Option<String>), String> {
             }
         }
     }
-    Ok((needed, soname))
+    Ok((needed, soname, owner_paths))
 }

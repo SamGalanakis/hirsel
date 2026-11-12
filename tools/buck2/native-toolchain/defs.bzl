@@ -84,7 +84,7 @@ def _proof(ctx):
     trees = [dep[DefaultInfo].default_outputs[0] for dep in ctx.attrs.tools]
     command = cmd_args(ctx.attrs.interpreter, ctx.attrs.script, trees)
     return [DefaultInfo(), ExternalRunnerTestInfo(
-        type = "custom", command = [command], env = {}, labels = ["gate"],
+        type = "custom", command = [command], env = {"HIRSEL_PLATFORM_CAPTURE": "cold"}, labels = ["gate"],
         run_from_project_root = True, use_project_relative_paths = True,
         supports_test_execution_caching = True,
         default_executor = test_executor(int(ctx.attrs.request[0]), int(ctx.attrs.request[1]), ctx.attrs.request[2]),

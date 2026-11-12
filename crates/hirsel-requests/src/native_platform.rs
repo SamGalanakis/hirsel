@@ -12,11 +12,8 @@ use hirsel_native::NativeError;
 use hirsel_native::StageName;
 use hirsel_native::Toolchain;
 use hirsel_native::object_queries::capture::CaptureLimits;
-use hirsel_native::object_queries::capture::FrozenLinkKit;
-use hirsel_native::object_queries::capture::FrozenLinker;
-use hirsel_native::object_queries::platform::CapturedPlatform;
-use hirsel_native::object_queries::platform::PlatformCaptureInputs;
-use hirsel_native::object_queries::platform::RuntimeSelection;
+use hirsel_native::object_queries::platform::record::CaptureMode;
+use hirsel_native::object_queries::platform::record::PlatformSpec;
 use hirsel_native::object_queries::runtime::RuntimeLimits;
 use hirsel_native_queries::compilation_tasks::CompilationOutput;
 use hirsel_syntax::{ContentHash, DefPath};
@@ -230,48 +227,59 @@ impl NativePlatformSelection {
             options.debug_tables,
         )?;
         let foreign = hirsel_native::selected_foreign_inputs(inputs.tools, target, inputs.links)?;
-        let linker = FrozenLinker::snapshot(store.as_ref(), &policy.linker).map_err(failed)?;
-        let kit =
-            FrozenLinkKit::snapshot(store.as_ref(), &inputs.tools.kit, target, linker, limits)
-                .map_err(failed)?;
-        let captured = CapturedPlatform::capture(
-            store.as_ref(),
-            target,
-            PlatformCaptureInputs {
-                linker,
-                kit,
-                runtime_archive: archive,
-                foreign: &foreign,
-                runtime: RuntimeSelection {
-                    loader: &loader,
-                    auditor: &auditor,
-                    library_path: libraries.as_os_str(),
-                    emulator: emulator.as_deref(),
+        let spec = PlatformSpec {
+            target: target.clone(),
+            linker: policy.linker.clone(),
+            kit: inputs.tools.kit.clone(),
+            runtime_archive: archive.to_path_buf(),
+            foreign,
+            loader,
+            auditor,
+            library_path: libraries.into_os_string(),
+            emulator: emulator.clone(),
+            timeout: inputs.tools.launch_timeout,
+            events_bytes: runtime_limits.name_bytes as u64,
+            runtime_limits,
+            limits,
+            debug_tables: options.debug_tables,
+        };
+        let mode = CaptureMode::from_environment().map_err(failed)?;
+        let selected = spec.select(store.as_ref(), mode).map_err(failed)?;
+        let allowance: Arc<hirsel_engine_admission::MemoryReservation> = allowance.into();
+        let new = |platform, record| {
+            FrozenPlatform::new(
+                store.clone(),
+                LinkInputs {
+                    platform,
+                    emulator: emulator.clone(),
                     timeout: inputs.tools.launch_timeout,
-                    events_bytes: runtime_limits.name_bytes as u64,
-                    limits: runtime_limits,
+                    runtime_limits,
+                    limits,
+                    record,
                 },
-                limits,
-            },
-        )
-        .map_err(failed)?;
-        let platform = FrozenPlatform::new(
-            store,
-            LinkInputs {
-                platform: captured,
-                emulator,
-                timeout: inputs.tools.launch_timeout,
-                runtime_limits,
-                limits,
-            },
-            inputs.entry.clone(),
-            options.backend,
-            options.partition,
-            target.clone(),
-            request.run.clone(),
-            allowance,
-        )
-        .map_err(failed)?;
+                inputs.entry.clone(),
+                options.backend,
+                options.partition,
+                target.clone(),
+                request.run.clone(),
+                allowance.clone(),
+            )
+        };
+        // A platform from a record that its own runtime check rejects was
+        // shown wrong: delete the record and verify fully.
+        let platform = if selected.hit {
+            match new(selected.platform, Some(spec.clone())) {
+                Ok(platform) => platform,
+                Err(error) => {
+                    let fresh = spec
+                        .recapture(store.as_ref(), &format!("runtime check failed: {error}"))
+                        .map_err(failed)?;
+                    new(fresh, None).map_err(failed)?
+                }
+            }
+        } else {
+            new(selected.platform, None).map_err(failed)?
+        };
         let profile_options = profile_options(request)?;
         Ok(Self {
             plan: NativePlan {

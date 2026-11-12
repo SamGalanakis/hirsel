@@ -811,6 +811,10 @@ pub struct Counts {
     pub cached: u64,
     pub fallbacks: BTreeMap<String, u64>,
     pub reasons: BTreeMap<String, String>,
+    /// Platform-record outcomes (hit, miss, not recorded, mismatch) by kind,
+    /// with the first reason of each kind in `platform_reasons`.
+    pub platform_records: BTreeMap<String, u64>,
+    pub platform_reasons: BTreeMap<String, String>,
 }
 
 static COUNTS: Mutex<Counts> = Mutex::new(Counts {
@@ -818,6 +822,8 @@ static COUNTS: Mutex<Counts> = Mutex::new(Counts {
     cached: 0,
     fallbacks: BTreeMap::new(),
     reasons: BTreeMap::new(),
+    platform_records: BTreeMap::new(),
+    platform_reasons: BTreeMap::new(),
 });
 
 pub fn count_image(image: &Image) {
@@ -828,13 +834,30 @@ pub fn count_image(image: &Image) {
 
 /// Count a fallback by its reason's kind.
 pub fn count_fallback(reason: &str) {
-    let kind = reason.split(':').next().unwrap_or(reason).to_string();
     let mut counts = COUNTS.lock().unwrap();
-    *counts.fallbacks.entry(kind.clone()).or_default() += 1;
-    counts
-        .reasons
-        .entry(kind)
-        .or_insert_with(|| reason.to_string());
+    let counts = &mut *counts;
+    count_kind(&mut counts.fallbacks, &mut counts.reasons, reason);
+}
+
+/// Count a platform-record outcome by its kind.
+pub fn count_platform_record(outcome: &str) {
+    let mut counts = COUNTS.lock().unwrap();
+    let counts = &mut *counts;
+    count_kind(
+        &mut counts.platform_records,
+        &mut counts.platform_reasons,
+        outcome,
+    );
+}
+
+fn count_kind(
+    counts: &mut BTreeMap<String, u64>,
+    reasons: &mut BTreeMap<String, String>,
+    reason: &str,
+) {
+    let kind = reason.split(':').next().unwrap_or(reason).to_string();
+    *counts.entry(kind.clone()).or_default() += 1;
+    reasons.entry(kind).or_insert_with(|| reason.to_string());
 }
 
 /// This process's runner counts so far.

@@ -24,10 +24,10 @@ pub struct Digests {
 }
 
 // dev, inode, mode, size, mtime seconds/nanos, ctime seconds/nanos.
-type Stamp = [u64; 8];
+pub(crate) type Stamp = [u64; 8];
 type Receipt = (u32, Vec<u8>, Stamp, [u8; 32], [u8; 32]);
 
-fn stamp(meta: &std::fs::Metadata) -> Stamp {
+pub(crate) fn stamp(meta: &std::fs::Metadata) -> Stamp {
     [
         meta.dev(),
         meta.ino(),
@@ -40,7 +40,7 @@ fn stamp(meta: &std::fs::Metadata) -> Stamp {
     ]
 }
 
-fn stable(state: &Stamp, now: SystemTime) -> bool {
+pub(crate) fn stable(state: &Stamp, now: SystemTime) -> bool {
     // Two seconds covers coarse timestamp clocks, as in a racy Git index.
     // Future timestamps (including a clock rollback) never become cache hits.
     let cutoff = now

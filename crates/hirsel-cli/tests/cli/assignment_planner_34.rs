@@ -760,7 +760,15 @@ fn native_four_engine_replay(partition: usize) {
                     for checked in [false, true] {
                         // The tape binds the request-built program, so it
                         // replays through the request pipeline, as `hirsel replay` does.
-                        let replayed = if checked { hirsel_driver::replay_observations_checked(&path, &tape, Some(1_000_000)) } else { hirsel_driver::replay_observations(&path, &tape, Some(1_000_000)) };
+                        let replayed = if checked {
+                            hirsel_driver::replay_observations_checked(
+                                &path,
+                                &tape,
+                                Some(1_000_000),
+                            )
+                        } else {
+                            hirsel_driver::replay_observations(&path, &tape, Some(1_000_000))
+                        };
                         if known_steps(id) {
                             let error = replayed.unwrap_err().to_string();
                             assert!(
@@ -828,7 +836,19 @@ fn native_four_engine_replay(partition: usize) {
                                 )
                                 .unwrap();
                                 for checked in [false, true] {
-                                    let error = (if checked { hirsel_driver::replay_observations_checked(&path, &bad, Some(1_000_000)) } else { hirsel_driver::replay_observations(&path, &bad, Some(1_000_000)) })
+                                    let error = (if checked {
+                                        hirsel_driver::replay_observations_checked(
+                                            &path,
+                                            &bad,
+                                            Some(1_000_000),
+                                        )
+                                    } else {
+                                        hirsel_driver::replay_observations(
+                                            &path,
+                                            &bad,
+                                            Some(1_000_000),
+                                        )
+                                    })
                                     .unwrap_err()
                                     .to_string();
                                     assert!(error.contains(expected), "{kind}: {error}");

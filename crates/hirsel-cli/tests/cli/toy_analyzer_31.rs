@@ -633,7 +633,13 @@ fn scripted_native(group: u8) {
                 for checked in [false, true] {
                     // The tape binds the request-built program, so it replays
                     // through the request pipeline, as `hirsel replay` does.
-                    let replay = |tape: &Path| if checked { hirsel_driver::replay_observations_checked(&path, tape, Some(steps)) } else { hirsel_driver::replay_observations(&path, tape, Some(steps)) };
+                    let replay = |tape: &Path| {
+                        if checked {
+                            hirsel_driver::replay_observations_checked(&path, tape, Some(steps))
+                        } else {
+                            hirsel_driver::replay_observations(&path, tape, Some(steps))
+                        }
+                    };
                     let observed = replay(&tape).unwrap();
                     assert_eq!(Observation::of_reference(&observed), expected);
                     let mut changed = record.clone();

@@ -1,87 +1,87 @@
 #!/usr/bin/env python3
-"""Seal actual native executables for the available configurations and workloads."""
+"""Build benchmark executables through the production `hirsel build --release` command."""
 import argparse
 import json
 import subprocess
+import time
 from pathlib import Path
 from suite import ROOT, buck2_build, native_environment, sha, text_size
 
 CONFIGURATIONS = ('regions-on-whole', 'regions-on-singleton', 'regions-off-size-class', 'regions-off-system')
+PRODUCTION = 'regions-on-whole'
+
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--case', action='append', default=[])
-    p.add_argument('--output', type=Path, default=ROOT/'build/hirsel.json')
-    p.add_argument('--configuration', action='append', choices=CONFIGURATIONS)
-    args = p.parse_args()
-    helper = Path(buck2_build('--target-platforms', '//tools/buck2:release', '//:hirsel-native-build-bin-hirsel-native-build')['hirsel-native-build-bin-hirsel-native-build'])
-    env = native_environment({'HIRSEL_JOBS':'4'})
-    revision = subprocess.run(['git','rev-parse','HEAD'],cwd=ROOT.parent.parent,capture_output=True,text=True,check=True).stdout.strip()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--case', action='append', default=[])
+    parser.add_argument('--output', type=Path, default=ROOT / 'build/hirsel.json')
+    parser.add_argument('--configuration', action='append', choices=CONFIGURATIONS)
+    args = parser.parse_args()
+    repo = ROOT.parent.parent
+    bundle = Path(buck2_build('--target-platforms', '//tools/buck2:release',
+                              '//:hirsel-toolchain')['hirsel-toolchain'])
+    compiler = bundle / 'hirsel'
+    env = native_environment({'HIRSEL_DAEMON': 'off'})
+    revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()
     specs = json.loads(args.output.read_text()) if args.output.exists() else {}
-    for c in CONFIGURATIONS:specs.setdefault(c,{'cases':{}})
-    sources = args.case or ['binarytrees']
-    for case in sources:
-        source = ROOT/'programs'/f'{case.replace("/", "-")}.hir'
-        generated = ROOT/'build/hirsel-source'/source.name
+    grants = ROOT / 'build/hirsel-grants.json'
+    grants.parent.mkdir(parents=True, exist_ok=True)
+    grants.write_text(json.dumps({'io': {'stdout': 'stdout.bytes@1',
+        'dirs': [{'path': '', 'host': str(ROOT), 'access': 'read'}]}}, indent=2) + '\n')
+    for config in CONFIGURATIONS:
+        spec = specs.setdefault(config, {'cases': {}})
+        for case, record in list(spec['cases'].items()):
+            if config != PRODUCTION or record.get('compile_kind') != 'production hirsel build --release; retained tool caches':
+                del spec['cases'][case]
+                spec.setdefault('unavailable', {})[case] = dict(
+                    reason='Retired batch build; rebuild this case through production hirsel build --release.',
+                    compiler_revision=revision)
+    for case in args.case or ['binarytrees']:
+        source = ROOT / 'programs' / f'{case.replace("/", "-")}.hir'
+        generated = ROOT / 'build/hirsel-source' / source.name
         generated.parent.mkdir(parents=True, exist_ok=True)
-        generated.write_text(source.read_text()+'\n'+(ROOT/'programs/common.hir').read_text())
+        generated.write_text(source.read_text() + '\n' + (ROOT / 'programs/common.hir').read_text())
         sidecar = dict(schema=1, package=dict(name='benchmark', version='1'),
-                       entry=dict(module=[], name='main'),
-                       sources=[dict(path=generated.name, module=[])],
-                       dependencies=[dict(manifest=str(ROOT.parent.parent/'stdlib/std@1/hirsel.json'),
+                       entry=dict(module=[], name='main'), sources=[dict(path=generated.name, module=[])],
+                       dependencies=[dict(manifest=str(repo / 'stdlib/std@1/hirsel.json'),
                                           package=dict(name='std', version='1'), expose=[])])
-        generated.with_suffix('.hir.json').write_text(json.dumps(sidecar, indent=2)+'\n')
-        batch = None
-        if not args.configuration:
-            proc = subprocess.run([str(helper), str(generated), str(ROOT/'build/hirsel'), 'all'],
-                                  capture_output=True, text=True, env=env)
-            batch = json.loads(proc.stdout) if not proc.returncode else {
-                config: {'error': proc.stderr} for config in CONFIGURATIONS}
+        generated.with_suffix('.hir.json').write_text(json.dumps(sidecar, indent=2) + '\n')
         for config in args.configuration or CONFIGURATIONS:
-            binary = ROOT/'build/hirsel'/config/source.stem/'program'
-            if batch is None:
-                proc = subprocess.run([str(helper), str(generated), str(binary), config], capture_output=True, text=True, env=env)
-            else:
-                result = batch[config].get('timing', batch[config])
-                proc = subprocess.CompletedProcess([], int('error' in result), json.dumps(result), result.get('error', ''))
-            if proc.returncode:
-                specs[config]['cases'].pop(case,None)
-                specs[config].setdefault('unavailable',{})[case] = dict(reason=proc.stderr, source_sha256=sha(generated), compiler_revision=revision,
-                    compiler_helper_sha256=sha(helper))
-                print(f'{case}/{config}: unavailable',flush=True)
+            specs[config]['cases'].pop(case, None)
+            if config != PRODUCTION:
+                reason = 'Production release builds expose whole partitioning with regions and the production allocator; this batch-only configuration has no CLI equivalent.'
+                specs[config].setdefault('unavailable', {})[case] = dict(reason=reason, compiler_revision=revision)
+                print(f'{case}/{config}: unavailable ({reason})', flush=True)
                 continue
-            specs[config].get('unavailable',{}).pop(case,None)
-            record = json.loads(proc.stdout)
-            archive = Path(record.pop("runtime_archive"))
-            record.update(compiler_revision=revision, compiler_helper_sha256=sha(helper), runtime_archive_sha256=sha(archive),
-                          dependency_source_sha256={str(p.relative_to(ROOT.parent.parent)):sha(p)
-                            for p in sorted((ROOT.parent.parent/'stdlib/std@1').glob('*')) if p.is_file()},
-                          launch_manifest_sha256=sha(generated.with_suffix('.hir.json')))
-            record.update(command=[str(binary), '{case}', '{input}', '{rounds}', '{emit}'],
-                          binary_sha256=sha(binary), source_sha256=sha(generated), text_bytes=text_size(binary),
-                          counter_status='separate measurement archive; never used for timing')
-            if case in ('binarytrees','binarytrees-region'):
-                record['binarytrees_storage'] = 'arena' if case=='binarytrees-region' else 'heap'
-            counter_binary = binary.with_name('program-measurement')
-            if batch is None:
-                measured = subprocess.run([str(helper), str(generated), str(counter_binary), config],
-                                          capture_output=True, text=True,
-                                          env=dict(env, HIRSEL_BENCH_MEASUREMENT='1'))
-            else:
-                result = batch[config].get('measurement', {'error': 'measurement build absent'})
-                measured = subprocess.CompletedProcess([], int('error' in result), json.dumps(result), result.get('error', ''))
-            if measured.returncode:
-                record['counter_status'] = measured.stderr
-            else:
-                counter_record = json.loads(measured.stdout)
-                counter_archive = Path(counter_record.pop('runtime_archive'))
-                counter_record.update(runtime_archive_sha256=sha(counter_archive),
-                                      text_bytes=text_size(counter_binary))
-                record.update(counter_command=[str(counter_binary), '{case}', '{input}', '{rounds}', '{emit}'],
-                              counter_binary_sha256=sha(counter_binary), counter_build=counter_record)
+            binary = ROOT / 'build/hirsel' / config / source.stem / 'program'
+            binary.parent.mkdir(parents=True, exist_ok=True)
+            started = time.monotonic()
+            proc = subprocess.run([str(repo / 'tools/capped'), str(compiler), 'build', '--release',
+                                   str(generated), '-o', str(binary)], capture_output=True, text=True, env=env)
+            elapsed = time.monotonic() - started
+            if proc.returncode:
+                specs[config].setdefault('unavailable', {})[case] = dict(reason=proc.stderr,
+                    source_sha256=sha(generated), compiler_revision=revision, compiler_sha256=sha(compiler))
+                print(f'{case}/{config}: unavailable\n{proc.stderr}', flush=True)
+                continue
+            specs[config].get('unavailable', {}).pop(case, None)
+            record = dict(compiler_revision=revision, compiler_sha256=sha(compiler),
+                compile_seconds=elapsed, compile_kind='production hirsel build --release; retained tool caches',
+                configuration=config, partition='whole', regions=True, hirsel_opt_level='O2', hirsel_lto=False,
+                command=[str(binary), '--hirsel-grants', str(grants), '{case}', '{input}', '{rounds}', '{emit}'],
+                binary_sha256=sha(binary), source_sha256=sha(generated), text_bytes=text_size(binary),
+                launch_manifest_sha256=sha(generated.with_suffix('.hir.json')), grants_sha256=sha(grants),
+                counter_status='Production release runtime has no measurement counters; no instrumented batch surrogate.',
+                dependency_source_sha256={str(p.relative_to(repo)): sha(p)
+                    for p in sorted((repo / 'stdlib/std@1').glob('*')) if p.is_file()})
+            if case in ('binarytrees', 'binarytrees-region'):
+                record['binarytrees_storage'] = 'arena' if case == 'binarytrees-region' else 'heap'
             specs[config]['cases'][case] = record
-            print(f'{case}/{config}: built', flush=True)
+            print(f'{case}/{config}: built in {elapsed:.3f}s', flush=True)
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(specs, indent=2)+'\n')
+        args.output.write_text(json.dumps(specs, indent=2) + '\n')
     print(args.output)
-if __name__ == '__main__': main()
+
+
+if __name__ == '__main__':
+    main()

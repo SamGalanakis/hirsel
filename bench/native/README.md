@@ -204,14 +204,21 @@ row, unsupported operation, primary partition or explicit skip is incomplete.
 
 ## Native handoff and dedicated machines
 
-`build-hirsel --case records-messages/scalar` compiles the ordinary source in
-`programs/` with `common.hir`, checks/export/imports the frozen native snapshot,
-then emits LLVM O3 objects and links the in-tree production runtime. The helper
-has its own workspace and lockfile. It reports source-to-executable compile time,
-runtime build time, partition, pass switches, source/binary hashes and text size.
-No interpreter, compilation, Python launcher or diagnostic audit enters a timed
-native process. Both primary partitions and regions-off size class run the same
-source. The default compiler uses O3; C/Rust references retain their pinned O3.
+`build-hirsel --case records-messages/scalar` builds the ordinary source in
+`programs/` with `common.hir` through the production `hirsel build --release`
+command. Its `regions-on-whole` cells measure the shipped LLVM O2 release
+pipeline, whole partitioning, regions and the production allocator. Launch
+commands pass an explicit grants file with stdout and read access to the
+benchmark input directory. The workload, input, rounds and byte oracle stay the
+same as the reference cells.
+
+The other three configuration slots are reported unavailable because production
+release builds expose no singleton, regions-off or allocator switch. Production
+release runtime counters are also unavailable. Batch builds cannot substitute
+for any of these cells. This leaves the original full benchmark gate incomplete.
+The output records source-to-executable compile time, compiler/source/binary and
+grants hashes, the release profile and text size. Compilation stays outside the
+timed executable.
 
 `--hirsel build/hirsel.json` accepts per-configuration `cases` maps, each with
 `command` argv, source/binary SHA-256, `compile_seconds` and `text_bytes`.

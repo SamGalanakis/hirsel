@@ -7552,3 +7552,4 @@ conformance/STORE/STORE-6-set-key-bad.hir
 conformance/STORE/STORE-6-set-key-ok.hir
 conformance/STORE/STORE-6-simd-key-bad.hir
 conformance/STORE/STORE-6-simd-key-ok.hir
+conformance/SEM/SEM-5-std-ordered-map-moves-model-run.hir

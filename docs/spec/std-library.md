@@ -1522,8 +1522,8 @@ fn ordered_map.empty[K: copyable, V: copyable](take by: fn(K, K) -> i32 uses {})
 fn ordered_map.len[K: copyable, V: copyable](m: ordered_map.OrderedMap[K, V]) -> u64 uses {}
 fn ordered_map.get[K: copyable, V: copyable](m: ordered_map.OrderedMap[K, V], key: K) -> Option[V] in m uses {}
 fn ordered_map.contains[K: copyable, V: copyable](m: ordered_map.OrderedMap[K, V], key: K) -> bool uses {}
-fn ordered_map.insert[K: copyable, V: copyable](mut m: ordered_map.OrderedMap[K, V], take key: K, take value: V) -> () uses {}
-fn ordered_map.remove[K: copyable, V: copyable](mut m: ordered_map.OrderedMap[K, V], key: K) -> Option[V] uses {}
+fn ordered_map.insert[K: copyable, V: copyable](mut m: ordered_map.OrderedMap[K, V], take key: K, take value: V) -> () uses {m, key, value}
+fn ordered_map.remove[K: copyable, V: copyable](mut m: ordered_map.OrderedMap[K, V], key: K) -> Option[V] uses {m}
 fn ordered_map.first[K: copyable, V: copyable](m: ordered_map.OrderedMap[K, V]) -> Option[(K, V)] in m uses {}
 fn ordered_map.last[K: copyable, V: copyable](m: ordered_map.OrderedMap[K, V]) -> Option[(K, V)] in m uses {}
 fn ordered_map.fold_range[K: copyable, V: copyable, A](m: ordered_map.OrderedMap[K, V], from: Bound[K], to: Bound[K], direction: Direction, take initial: A, step: fn(take A, K, V) -> (A, bool)) -> A uses {initial, step}

@@ -48,6 +48,19 @@ class FilterOwners(unittest.TestCase):
         self.assertEqual(homes, {('suite', 'x'): 'root//:suite-shard-2',
                                 ('suite', 'z'): 'root//:suite-cpus-4-shard-1'})
 
+    def test_unmeasured_deal_keeps_ignored_positive_matches_but_not_skip_only_matches(self):
+        for attrs in self.graph.values():
+            attrs['costs'] = None
+        def listing(_binary, _graph, _config, arguments):
+            return {'prefix_a'} if '--ignored' in arguments else {'prefix_a', 'prefix_z'}
+        for arguments, target in [(['prefix_'], 'root//:suite-shard-2'),
+                                  (['--skip', 'unrelated'], 'root//:suite-shard-1')]:
+            with self.subTest(arguments=arguments), patch.dict(self.globals,
+                    graph_for=lambda *_: self.graph, listing=listing):
+                targets, cases = self.tool['plan'](['suite'], [], arguments)
+                self.assertEqual(targets, [target])
+                self.assertEqual(cases, {'suite': {'prefix_z'}})
+
     def test_discovery_reads_a_closed_inventory_without_a_duplicate_list_flag(self):
         for inventory in (False, True):
             graph = {'root//:suite': {'test_binary': 'suite'}}

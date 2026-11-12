@@ -90,17 +90,32 @@ def owners(graph, inventories, widths=None):
     return CONSUMERS['assignments'](ROOT, graph, inventories, widths, overrides=False)
 
 
+def has_positive_filter(arguments):
+    options = iter(arguments)
+    for argument in options:
+        if argument == '--' or not argument.startswith('-'):
+            return argument != '--' or next(options, None) is not None
+        if argument in ('--logfile', '--test-threads', '--skip', '--color', '--format', '--shuffle-seed', '-Z'):
+            next(options, None)
+    return False
+
+
 def plan(binaries, config, arguments):
     graph = graph_for(binaries, config)
-    inventories = {}
+    inventories, dealt = {}, {}
     for binary in binaries:
         names = listing(binary, graph, config, arguments)
+        dealt[binary] = names
         if not any(a in ('--ignored', '--include-ignored') for a in arguments):
-            names -= listing(binary, graph, config, [*arguments, '--ignored'])
+            names = names - listing(binary, graph, config, [*arguments, '--ignored'])
+            # Without a cost table, the launcher deals all positive matches
+            # before libtest ignores bodies. A skip-only run removes them first.
+            if not has_positive_filter(arguments):
+                dealt[binary] = names
         inventories[binary] = names
     if not any(inventories.values()):
         raise ValueError(f'selector {arguments!r} matched no runnable test bodies in {binaries}')
-    assigned = owners(graph, inventories)
+    assigned = owners(graph, dealt)
     targets = sorted({assigned[binary, name] for binary, names in inventories.items() for name in names})
     return targets, inventories
 

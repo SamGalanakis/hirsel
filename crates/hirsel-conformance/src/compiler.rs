@@ -296,6 +296,16 @@ fn evaluate_on_compiler_thread(path: &Path, expect: &Expect, hash_seed: u64) -> 
         .sources
         .file(program.primary)
         .map(|file| file.path.clone());
+    // Check runs on its request owner. The independent entry-policy probe
+    // needs this loader's source and installed declaration heads too.
+    if matches!(expect, Expect::RefuseEntry)
+        && let Err(error) = program.parse_sources()
+    {
+        return whole(
+            Status::Fail(format!("entry signature indexing: {error}")),
+            Observation::default(),
+        );
+    }
     let mut engine = program.engine;
     let mut observation = Observation {
         phase: engine
@@ -326,12 +336,15 @@ fn evaluate_on_compiler_thread(path: &Path, expect: &Expect, hash_seed: u64) -> 
             return whole(Status::Fail(observation.actual.clone()), observation);
         }
     };
-    engine.sources = output.sources.clone();
+    if !matches!(expect, Expect::RefuseEntry) {
+        engine.sources = output.sources.clone();
+    }
     if let Some(d) = output
         .diagnostics
         .iter()
         .find(|d| d.severity == Severity::Error)
     {
+        engine.sources = output.sources.clone();
         observation.primary_external = output
             .sources
             .file(output.sources.resolve(d.primary).file)
@@ -361,10 +374,17 @@ fn evaluate_on_compiler_thread(path: &Path, expect: &Expect, hash_seed: u64) -> 
     }
     if matches!(expect, Expect::RefuseEntry) {
         use hirsel_engine::DefinitionQueries;
-        let refused = engine.item_signature(&entry).is_ok_and(|signature| {
-            matches!(hirsel_engine_admission::entry_launch_kind(engine.types(), &signature.value),
-                Err(hirsel_run_schema::RunRefusal::Invalid { field, .. }) if field == "entry")
-        });
+        let signature = match engine.item_signature(&entry) {
+            Ok(signature) => signature,
+            Err(error) => {
+                observation.actual = format!("entry signature lookup: {error:?}");
+                return whole(Status::Fail(observation.actual.clone()), observation);
+            }
+        };
+        let refused = matches!(
+            hirsel_engine_admission::entry_launch_kind(engine.types(), &signature.value),
+            Err(hirsel_run_schema::RunRefusal::Invalid { field, .. }) if field == "entry"
+        );
         observation.phase = "entry admission".into();
         observation.actual = if refused {
             "refused entry"

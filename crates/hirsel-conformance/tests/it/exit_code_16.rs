@@ -16,9 +16,21 @@ fn exit_code_16_refusal_twins_require_a_real_entry_admission_failure() {
     assert!(!header.expect.matches(&Actual::Accepted));
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let legal_entry = root.join("conformance/PROG/PROG-3-exit-code-run.hir");
-    let (status, _) = Compiler.evaluate(&legal_entry, &Expect::RefuseEntry);
+    let (status, observation) = Compiler.evaluate(&legal_entry, &Expect::RefuseEntry);
+    assert_eq!(observation.actual, "accepted entry");
     assert!(
         matches!(status, Status::Fail(_)),
         "a valid entry must not satisfy a refusal oracle"
     );
+    for file in [
+        "PROG-3-exit-code-u8-bad.hir",
+        "PROG-3-exit-code-result-u8-bad.hir",
+    ] {
+        let (status, observation) = Compiler.evaluate(
+            &root.join("conformance/PROG").join(file),
+            &Expect::RefuseEntry,
+        );
+        assert_eq!(status, Status::Pass, "{file}: {observation:?}");
+        assert_eq!(observation.actual, "refused entry");
+    }
 }

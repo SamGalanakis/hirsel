@@ -69,82 +69,6 @@ const PHASES: [&str; 22] = [
     "signature normalize",
     "link",
 ];
-const COUNTS: [&str; 74] = [
-    "definitions",
-    "units",
-    "V runs",
-    "store hits",
-    "store misses",
-    "object hits",
-    "object misses",
-    "native imports",
-    "import hits",
-    "import misses",
-    "lowered",
-    "dependency parses",
-    "recomputes",
-    "invalidated by signature",
-    "invalidated by failed signature",
-    "invalidated by lookup",
-    "invalidated by name set",
-    "invalidated by representation",
-    "invalidated by executed body",
-    "invalidated by executed signature",
-    "invalidated by cited text",
-    "invalidated by declaration candidates",
-    "invalidated by validation view",
-    "invalidated by universe errors",
-    "invalidated by first heap",
-    "invalidated by environment",
-    "mode memo queries",
-    "mode memo hits",
-    "S1 claims",
-    "S1 parks",
-    "S1 duplicates",
-    "S1 lock wait ns",
-    "S1 park ns",
-    "invalidated by validation universe",
-    "S1 lower hold evictions",
-    "S1 lower hold recomputes",
-    "S1 lower hold peak bytes sum",
-    "S1 lower query attempts",
-    "S1 lower adapter calls",
-    "S1 root tasks",
-    "S1 discarded roots",
-    "S1 registration rounds",
-    "S1 scalar roots",
-    "native Value structural bytes peak",
-    "native active estimated bytes peak",
-    "native admission budget bytes",
-    "native effective workers peak",
-    "native worker stack reservation bytes peak",
-    "native retained Ready structural bytes peak",
-    "query runtime budget bytes",
-    "query runtime charged bytes peak",
-    "snapshot reservation bytes",
-    "snapshot kept bytes",
-    "native Value decodes",
-    "native Value decode bytes",
-    "native Value rebinds",
-    "native effect replays",
-    "native append/expand",
-    "closure body scans",
-    "arena body scans",
-    "native late keys",
-    "image declaration rows decoded",
-    "image declaration rows adopted",
-    "declaration site reads",
-    "declaration sites materialized",
-    "image declaration bytes",
-    "image entry decode attempts",
-    "store signature hits",
-    "store signature misses",
-    "store summary hits",
-    "store summary misses",
-    "store mode hits",
-    "store mode misses",
-    "header source files materialized",
-];
 
 fn build(source: &std::path::Path, timings: &str) -> std::process::Output {
     let output = Command::new(env!("CARGO_BIN_EXE_hirsel"))
@@ -170,9 +94,11 @@ fn report(stderr: &[u8]) -> serde_json::Value {
     let mut keys: Vec<_> = object.keys().map(String::as_str).collect();
     keys.sort();
     let mut expected = vec![
+        "budget",
         "command",
         "comptime_verify",
         "counts",
+        "instructions",
         "intervals",
         "phases",
         "process_cpu_ns",
@@ -229,12 +155,14 @@ fn report(stderr: &[u8]) -> serde_json::Value {
         PHASES
     );
     let counts = report["counts"].as_object().unwrap();
-    assert_eq!(
-        counts.keys().collect::<Vec<_>>().len(),
-        COUNTS.len(),
-        "{report}"
-    );
-    assert!(COUNTS.iter().all(|c| counts[*c].is_u64()), "{report}");
+    let mut emitted = counts.keys().map(String::as_str).collect::<Vec<_>>();
+    let mut every = hirsel_intern::timings::Count::ALL
+        .map(hirsel_intern::timings::Count::name)
+        .to_vec();
+    emitted.sort_unstable();
+    every.sort_unstable();
+    assert_eq!(emitted, every, "{report}");
+    assert!(counts.values().all(serde_json::Value::is_u64), "{report}");
     report
 }
 

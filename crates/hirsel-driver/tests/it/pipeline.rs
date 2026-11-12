@@ -2121,6 +2121,15 @@ fn projected_unique_receipts_require_current_deep_owner_uniqueness() {
                     .clone(),
             );
         }
+        let arena = hirsel_syntax::DefPath::core("Arena");
+        signatures.insert(
+            arena.clone(),
+            engine
+                .signature(hirsel_syntax::DefId::intern(&arena))
+                .unwrap()
+                .as_ref()
+                .clone(),
+        );
         assert!(
             hirsel_validate::validate(&output.value, engine.types(), &signatures, &mut vec![])
                 .unwrap()

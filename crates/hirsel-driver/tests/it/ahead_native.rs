@@ -106,10 +106,12 @@ fn request_objects(
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("main.hir");
         std::fs::write(&path, SOURCE).unwrap();
-        let store: Arc<dyn ResultStore> =
-            Arc::new(crate::native_compilation_tasks_19::DiagnosedStore(
-                hirsel_engine_store::DirStore::new(directory.path().join("products")),
-            ));
+        let store: Arc<dyn ResultStore> = Arc::new(
+            crate::native_compilation_tasks_19::DiagnosedStore(Arc::new(
+                hirsel_engine_store::DirStore::new(directory.path().join("products"))
+                    .with_read_only_root(hirsel_engine_store::DirStore::installed_root().unwrap()),
+            )),
+        );
         let mut session = hirsel_driver::session::Session::open_configured(
             &path,
             hirsel_engine::CompileConfig {

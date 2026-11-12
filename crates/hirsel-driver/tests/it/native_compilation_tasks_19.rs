@@ -42,8 +42,32 @@ use std::{
 
 // Preserve the real directory provider and its validator capabilities while
 // reporting the I/O error that its ordinary Option publication seam omits.
-pub(crate) struct DiagnosedStore(pub(crate) store::DirStore);
+pub(crate) struct DiagnosedStore(pub(crate) Arc<dyn ResultStore>);
 impl ResultStore for DiagnosedStore {
+    fn installed_package(
+        &self,
+        package: &hirsel_syntax::PackageId,
+        compiler: hirsel_syntax::ContentHash,
+    ) -> Result<Arc<store::InstalledPackage>, String> {
+        self.0.installed_package(package, compiler)
+    }
+
+    fn for_operation(&self) -> Option<Arc<dyn ResultStore>> {
+        self.0
+            .for_operation()
+            .map(|store| Arc::new(Self(store)) as Arc<dyn ResultStore>)
+    }
+
+    fn for_compiler(&self, identity: hirsel_syntax::ContentHash) -> Option<Arc<dyn ResultStore>> {
+        self.0
+            .for_compiler(identity)
+            .map(|store| Arc::new(Self(store)) as Arc<dyn ResultStore>)
+    }
+
+    fn read_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        self.0.read_scope()
+    }
+
     fn admit_product_memory(&self, bytes: u64) -> Option<std::sync::Arc<dyn Send + Sync>> {
         self.0.admit_product_memory(bytes)
     }
@@ -390,9 +414,9 @@ fn run_program_case_with_frame(
     // Like every production request, it carries content on request scratch,
     // so the runtime archive is held on disk, not in the 24 MiB.
     let budget = hirsel_engine_admission::ProcessBudget::new(768 << 20);
-    let backend = Arc::new(DiagnosedStore(store::DirStore::new(
+    let backend = Arc::new(DiagnosedStore(Arc::new(store::DirStore::new(
         directory.path().join("products"),
-    )));
+    ))));
     let store: Arc<dyn ResultStore> = Arc::new(
         store::RequestStore::with_scratch(
             backend,

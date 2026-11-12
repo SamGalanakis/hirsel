@@ -476,10 +476,15 @@ fn ordinary_product_identities_ignore_id_salts() {
 fn image_diagnostics_equal_source_for_rejected_and_accepted_clients() {
     with_compiler_stack(|| {
         let f = Fixture::new();
-        let image = library_products(&f, LIBRARY).unwrap();
+        // The image answers names from its N section: a missing member, a
+        // private one and a type error read the same as from source.
+        let image =
+            library_products(&f, &format!("{LIBRARY}fn hidden() -> u64 {{\n  0\n}}\n")).unwrap();
         let images = Some(image.as_path());
         for (source, rejected) in [
             (CLIENT.replace("lib.value(1)", "lib.value(true)"), true),
+            (CLIENT.replace("lib.value(1)", "lib.missing(1)"), true),
+            (CLIENT.replace("lib.value(1)", "lib.hidden()"), true),
             (CLIENT.into(), false),
         ] {
             let client = f.program("client", &source, &f.0.join("lib.json"), "lib");

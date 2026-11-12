@@ -38,8 +38,76 @@ pub struct ManifestFixture {
     pub package: PackageId,
     pub definitions: Vec<DefinitionEntry>,
     pub exposures: Vec<DependencyExposure>,
+    /// Installed packages' names (each image's N section). A package listed
+    /// here answers from its segment alone; `definitions` of it are ignored.
+    pub installed: Vec<Arc<PackageNames>>,
     /// Covers the entire manifest, including dependency membership and visibility.
     pub revision: ContentHash,
+}
+
+/// One installed package's half of the scope tables: its definitions keyed by
+/// (module, symbol), built once per installation and shared by every index
+/// that selects it. Construction refuses what the image's construction
+/// refuses, so a segment never carries a diagnostic.
+#[derive(Debug)]
+pub struct PackageNames {
+    package: PackageId,
+    entries: DefMap<DefinitionEntry>,
+    tables: Tables,
+    retained: u64,
+}
+impl PackageNames {
+    pub fn new(
+        package: PackageId,
+        definitions: impl IntoIterator<Item = DefinitionEntry>,
+    ) -> Result<Self, String> {
+        let mut entries: DefMap<DefinitionEntry> = DefMap::default();
+        for entry in definitions {
+            let path = &entry.definition;
+            if path.0.package != package || !canonical(path) {
+                return Err(format!("{path:?} is not a canonical path of {package:?}"));
+            }
+            let id = DefId::intern(path);
+            if entries.insert(id, entry).is_some() {
+                return Err(format!("{:?} is declared twice", id.path()));
+            }
+        }
+        let tables = Tables::new(entries.keys().map(|&id| (id, id.path())));
+        let retained = retained::package_names(&package, &entries, &tables);
+        Ok(Self {
+            package,
+            entries,
+            tables,
+            retained,
+        })
+    }
+    pub fn package(&self) -> &PackageId {
+        &self.package
+    }
+    pub fn entries(&self) -> impl Iterator<Item = &DefinitionEntry> {
+        self.entries.values()
+    }
+    /// What this segment retains; its owner charges it once.
+    pub fn retained_bytes(&self) -> u64 {
+        self.retained
+    }
+}
+
+/// Its tables are a function of its entries.
+impl PartialEq for PackageNames {
+    fn eq(&self, other: &Self) -> bool {
+        self.package == other.package && self.entries == other.entries
+    }
+}
+impl Eq for PackageNames {}
+
+fn canonical(path: &DefPath) -> bool {
+    let path = &path.0;
+    let segment = |name: &str| !name.is_empty() && !name.contains(['/', '.', '@']);
+    segment(&path.package.name)
+        && !path.package.version.is_empty()
+        && segment(&path.name)
+        && path.modules.iter().all(|m| segment(m))
 }
 
 #[derive(Clone, Debug)]
@@ -49,14 +117,26 @@ pub struct ManifestIndex {
     entries: Arc<DefMap<DefinitionEntry>>,
     heads: Arc<BTreeMap<String, BTreeSet<(PackageId, Vec<String>)>>>,
     tables: Arc<Tables>,
+    /// Segments 1.. of the scope tables; segment 0 is `tables`.
+    installed: Arc<[Arc<PackageNames>]>,
     /// Each exposed head's targets, in `heads` order: a candidate set, never
     /// one answer, so ambiguity and the core/std merge stay decidable.
     head_targets: Arc<HashMap<Symbol, HeadTargets, IdHasher>>,
 }
 
-/// One node per (package, module path) some definition lives under.
+/// One node per (package, module path) some definition lives under, within
+/// one segment's tables.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 struct ModuleId(u32);
+
+/// A module node of the joined scope tables: segment 0 is the request's own
+/// tables, segment i + 1 is installed package i. A walk stays in the segment
+/// it starts in, since a package's modules all live in one segment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+struct Node {
+    segment: u32,
+    module: ModuleId,
+}
 
 /// Scope tables: module nodes keyed by (parent, symbol) and definitions keyed
 /// by (module, symbol). A lookup walks symbols; it never spells or interns a
@@ -70,7 +150,7 @@ struct Tables {
 
 #[derive(Debug)]
 struct HeadTargets {
-    targets: Vec<(PackageId, Vec<String>, Option<ModuleId>)>,
+    targets: Vec<(PackageId, Vec<String>, Option<Node>)>,
     /// Only identical core/std module paths share a namespace. Two std majors
     /// remain ambiguous even if only one declares the member.
     merged: bool,
@@ -79,8 +159,8 @@ struct HeadTargets {
 /// Where one file's unqualified paths start: its package root and its module.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ModuleScope {
-    root: Option<ModuleId>,
-    module: Option<ModuleId>,
+    root: Option<Node>,
+    module: Option<Node>,
 }
 
 impl Tables {
@@ -110,27 +190,77 @@ impl Tables {
     }
     fn walk(
         &self,
-        from: Option<ModuleId>,
+        from: ModuleId,
         names: impl IntoIterator<Item = Option<Symbol>>,
     ) -> Option<ModuleId> {
-        names.into_iter().try_fold(from?, |module, name| {
+        names.into_iter().try_fold(from, |module, name| {
             self.children.get(&(module, name?)).copied()
         })
     }
-    fn module(&self, package: &PackageId, modules: &[String]) -> Option<ModuleId> {
+}
+
+impl ManifestIndex {
+    fn segment(&self, segment: u32) -> &Tables {
+        match segment.checked_sub(1) {
+            None => &self.tables,
+            Some(i) => &self.installed[i as usize].tables,
+        }
+    }
+    fn root(&self, package: &PackageId) -> Option<Node> {
+        if let Some(i) = self.installed.iter().position(|n| n.package == *package) {
+            return Some(Node {
+                segment: i as u32 + 1,
+                module: *self.installed[i].tables.roots.get(package)?,
+            });
+        }
+        Some(Node {
+            segment: 0,
+            module: *self.tables.roots.get(package)?,
+        })
+    }
+    fn walk(
+        &self,
+        from: Option<Node>,
+        names: impl IntoIterator<Item = Option<Symbol>>,
+    ) -> Option<Node> {
+        let from = from?;
+        Some(Node {
+            segment: from.segment,
+            module: self.segment(from.segment).walk(from.module, names)?,
+        })
+    }
+    fn module(&self, package: &PackageId, modules: &[String]) -> Option<Node> {
         self.walk(
-            self.roots.get(package).copied(),
+            self.root(package),
             modules.iter().map(|m| Symbol::existing(m)),
         )
     }
     fn member(
         &self,
-        from: Option<ModuleId>,
+        from: Option<Node>,
         modules: &[Option<Symbol>],
         name: Option<Symbol>,
     ) -> Option<DefId> {
-        let module = self.walk(from, modules.iter().copied())?;
-        self.names.get(&(module, name?)).copied()
+        let node = self.walk(from, modules.iter().copied())?;
+        self.segment(node.segment)
+            .names
+            .get(&(node.module, name?))
+            .copied()
+    }
+    fn child(&self, node: Node, name: Symbol) -> bool {
+        self.segment(node.segment)
+            .children
+            .contains_key(&(node.module, name))
+    }
+    fn entry_of(&self, id: DefId) -> Option<&DefinitionEntry> {
+        self.entries
+            .get(&id)
+            .or_else(|| self.installed.iter().find_map(|n| n.entries.get(&id)))
+    }
+    fn all_entries(&self) -> impl Iterator<Item = &DefinitionEntry> {
+        self.entries
+            .values()
+            .chain(self.installed.iter().flat_map(|n| n.entries.values()))
     }
     fn heads(
         &self,
@@ -198,6 +328,7 @@ mod package_view_tests {
             package: left,
             definitions: entries.into(),
             exposures: vec![],
+            installed: vec![],
             revision: ContentHash::default(),
         });
         assert!(diagnostics.is_empty());
@@ -287,6 +418,7 @@ impl ManifestFixture {
             package,
             definitions,
             exposures: vec![],
+            installed: vec![],
             revision,
         }
     }
@@ -308,14 +440,20 @@ impl ManifestIndex {
         });
         let mut entries: DefMap<DefinitionEntry> = DefMap::default();
         let mut diagnostics = vec![];
+        let mut installed: Vec<Arc<PackageNames>> = vec![];
+        for names in fixture.installed {
+            if !installed.iter().any(|n| n.package == names.package) {
+                installed.push(names);
+            }
+        }
         for entry in fixture.definitions {
-            let path = &entry.definition.0;
-            let segment = |name: &str| !name.is_empty() && !name.contains(['/', '.', '@']);
-            if !segment(&path.package.name)
-                || path.package.version.is_empty()
-                || !segment(&path.name)
-                || !path.modules.iter().all(|m| segment(m))
+            if installed
+                .iter()
+                .any(|n| n.package == entry.definition.0.package)
             {
+                continue;
+            }
+            if !canonical(&entry.definition) {
                 diagnostics.push(Diagnostic::error(
                     const { RuleId::of("PROG-1") },
                     entry.span,
@@ -346,18 +484,18 @@ impl ManifestIndex {
                 .insert((exposure.package, exposure.modules));
         }
         let tables = Tables::new(entries.keys().map(|&id| (id, id.path())));
-        let head_targets = tables.heads(&heads);
-        (
-            Self {
-                package: fixture.package,
-                revision: fixture.revision,
-                entries: Arc::new(entries),
-                heads: Arc::new(heads),
-                tables: Arc::new(tables),
-                head_targets: Arc::new(head_targets),
-            },
-            diagnostics,
-        )
+        let mut index = Self {
+            package: fixture.package,
+            revision: fixture.revision,
+            entries: Arc::new(entries),
+            heads: Arc::new(BTreeMap::new()),
+            tables: Arc::new(tables),
+            installed: installed.into(),
+            head_targets: Arc::default(),
+        };
+        index.head_targets = Arc::new(index.heads(&heads));
+        index.heads = Arc::new(heads);
+        (index, diagnostics)
     }
 
     /// Select a current package while sharing the same immutable declaration index.
@@ -378,7 +516,7 @@ impl ManifestIndex {
                 .insert((exposure.package.clone(), exposure.modules.clone()));
         }
         Self {
-            head_targets: Arc::new(self.tables.heads(&heads)),
+            head_targets: Arc::new(self.heads(&heads)),
             heads: Arc::new(heads),
             ..self.clone()
         }
@@ -387,8 +525,7 @@ impl ManifestIndex {
     /// Type names available without a module head, including core defaults.
     /// The caller records the manifest lookup that led to this candidate search.
     pub fn unqualified_types(&self, context: &FileContext) -> Vec<DefPath> {
-        self.entries
-            .values()
+        self.all_entries()
             .filter(|entry| {
                 let path = &entry.definition;
                 entry.namespace == Namespace::Type
@@ -402,17 +539,15 @@ impl ManifestIndex {
     }
 
     pub fn entry(&self, definition: &DefPath) -> Option<&DefinitionEntry> {
-        self.entries.get(&DefId::get(definition)?)
+        self.entry_of(DefId::get(definition)?)
     }
 
     /// Where `context`'s unqualified paths start; computed once per file context.
     pub fn scope(&self, context: &FileContext) -> ModuleScope {
-        let root = self.tables.roots.get(&context.package).copied();
+        let root = self.root(&context.package);
         ModuleScope {
             root,
-            module: self
-                .tables
-                .walk(root, context.modules.iter().map(|m| Symbol::existing(m))),
+            module: self.walk(root, context.modules.iter().map(|m| Symbol::existing(m))),
         }
     }
 
@@ -426,7 +561,7 @@ impl ManifestIndex {
             || [scope.root, scope.module]
                 .into_iter()
                 .flatten()
-                .any(|module| self.tables.children.contains_key(&(module, head)))
+                .any(|module| self.child(module, head))
     }
 
     /// Accessible replacements for one path segment. Reuse real lookup so
@@ -453,7 +588,7 @@ impl ManifestIndex {
                 names.insert(spelling().nth(segment).expect("a path segment").clone());
             }
         };
-        for definition in self.entries.keys().map(|id| &id.path().0) {
+        for definition in self.all_entries().map(|entry| &entry.definition.0) {
             if let Some(package) = package {
                 if definition.package == *package {
                     consider(None, &definition.modules, &definition.name);
@@ -552,16 +687,15 @@ impl ManifestIndex {
         spell: &dyn Fn(usize) -> String,
     ) -> Result<DefPath, LookupError> {
         let (&name, modules) = segments.split_last().ok_or(LookupError::Missing)?;
-        let tables = &*self.tables;
         if let Some(package) = package {
-            return match tables.member(tables.roots.get(package).copied(), modules, name) {
+            return match self.member(self.root(package), modules, name) {
                 Some(id) => self.access_id(context, id),
                 None => Err(LookupError::Missing),
             };
         }
-        if let Some(id) = tables
+        if let Some(id) = self
             .member(scope.module, modules, name)
-            .or_else(|| tables.member(scope.root, modules, name))
+            .or_else(|| self.member(scope.root, modules, name))
         {
             return self.access_id(context, id);
         }
@@ -590,7 +724,7 @@ impl ManifestIndex {
             return Err(LookupError::Ambiguous(candidates()));
         }
         for &(_, _, module) in &head.targets {
-            if let Some(id) = tables.member(module, members, name) {
+            if let Some(id) = self.member(module, members, name) {
                 return self.access_id(context, id);
             }
         }
@@ -598,7 +732,7 @@ impl ManifestIndex {
     }
 
     fn access_id(&self, context: &FileContext, id: DefId) -> Result<DefPath, LookupError> {
-        self.access_entry(context, id.path(), self.entries.get(&id))
+        self.access_entry(context, id.path(), self.entry_of(id))
     }
 
     pub fn access(
@@ -609,7 +743,7 @@ impl ManifestIndex {
         self.access_entry(
             context,
             definition,
-            DefId::get(definition).and_then(|id| self.entries.get(&id)),
+            DefId::get(definition).and_then(|id| self.entry_of(id)),
         )
     }
 

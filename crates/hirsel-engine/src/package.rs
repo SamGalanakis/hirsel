@@ -172,6 +172,13 @@ impl LoadedProgram {
         inputs: hirsel_engine_store::InstalledInputs,
     ) -> hirsel_engine_store::InstalledPackage {
         let package = self.entry.0.package.clone();
+        let files: Vec<_> = self
+            .files
+            .iter()
+            .filter(|(_, context)| context.package == package)
+            .map(|(file, _)| *file)
+            .collect();
+        let names = self.engine.image_names(&package, &files);
         let sources = self
             .files
             .iter()
@@ -192,14 +199,18 @@ impl LoadedProgram {
             .filter(|id| **id != package)
             .cloned()
             .collect();
-        hirsel_engine_store::InstalledPackage::new(
+        let installed = hirsel_engine_store::InstalledPackage::new(
             compiler,
             package,
             manifest,
             sources,
             dependencies,
             inputs,
-        )
+        );
+        match names {
+            Some(names) => installed.with_names(names),
+            None => installed,
+        }
     }
     pub fn source_files(&self) -> impl Iterator<Item = &(FileId, FileContext)> {
         self.files
@@ -721,6 +732,67 @@ pub(crate) fn load_program_inputs_with_source_index(
             .as_deref()
             .map(|products| (package, products))
     }));
+    engine.installed_instance_bodied = graph
+        .packages
+        .iter()
+        .filter_map(|(package, selected)| Some((package, selected.products.as_deref()?.names()?)))
+        .flat_map(|(package, names)| {
+            names
+                .paths(package)
+                .filter(|(_, facts)| facts.instance_bodied)
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let installed_names = {
+        let previous = &engine.declarations.inputs().installed_names;
+        graph
+            .packages
+            .iter()
+            .filter_map(|(package, selected)| {
+                let products = selected.products.as_deref()?;
+                if let Some((identity, names)) = previous.get(package)
+                    && *identity == products.identity
+                {
+                    return Some(Ok((package.clone(), (*identity, names.clone()))));
+                }
+                let names = products.names()?;
+                let entries =
+                    names
+                        .paths(package)
+                        .map(|(path, facts)| hirsel_resolve::DefinitionEntry {
+                            definition: path,
+                            namespace: if facts.types {
+                                hirsel_resolve::Namespace::Type
+                            } else {
+                                hirsel_resolve::Namespace::Value
+                            },
+                            visibility: facts.visibility,
+                            span: hirsel_span::Span::default(),
+                        });
+                Some(
+                    hirsel_resolve::PackageNames::new(package.clone(), entries).map(|names| {
+                        (
+                            package.clone(),
+                            (products.identity, std::sync::Arc::new(names)),
+                        )
+                    }),
+                )
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()
+            .map_err(|_| invalid("installed name index is not canonical"))?
+    };
+    if engine.declarations.inputs().installed_names.len() != installed_names.len()
+        || engine
+            .declarations
+            .inputs()
+            .installed_names
+            .iter()
+            .zip(&installed_names)
+            .any(|((a, (x, _)), (b, (y, _)))| a != b || x != y)
+    {
+        engine.declarations.inputs_mut().installed_names = installed_names;
+    }
     engine.comptime_limits = limits;
     engine.package_manifests = manifests;
     engine.package_sources = package_sources;

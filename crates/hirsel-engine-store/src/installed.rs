@@ -1,9 +1,13 @@
 //! An installed package binds its discovery inputs and complete product closure.
 //! This is ordinary untrusted content. It never imports verifier authority.
 use super::*;
+mod edges;
 mod image;
+mod names;
 mod semantic;
+pub use edges::ImageEdges;
 use hirsel_syntax::{FileContext, PackageId};
+pub use names::{ImageNames, NameFacts};
 pub use semantic::{InstalledDefinition, InstalledDefinitionKey, InstalledDefinitionOwnership};
 pub use semantic::{
     InstalledSemanticInput, InstalledSpecializations, SEMANTIC_BODY, SEMANTIC_HEADER,
@@ -1351,6 +1355,12 @@ pub struct InstalledPackage {
     rows: Arc<[(ContentHash, Association)]>,
     contents: Arc<[Reference]>,
     definitions: Option<Arc<image::Definitions>>,
+    /// The name index (N), once produced or opened.
+    names: Option<Arc<ImageNames>>,
+    /// The edges (E), once published or opened.
+    edges: Option<Arc<ImageEdges>>,
+    /// The conventions (K) this package exports, once published or opened.
+    conventions: Option<Arc<[hirsel_types::conventions::Convention]>>,
     records: std::sync::Weak<InstalledRecords>,
     sources_owner: Option<Arc<InstalledSourceRecords>>,
     /// What opening the image charged before it allocated: its header and
@@ -1375,6 +1385,23 @@ impl InstalledPackage {
     pub fn source_records(&self) -> Option<Arc<InstalledSourceRecords>> {
         self.sources_owner.clone()
     }
+    /// The producer's name index, published as the image's N section.
+    pub fn with_names(mut self, names: ImageNames) -> Self {
+        self.names = Some(Arc::new(names));
+        self
+    }
+    /// The image's name index; `None` when its producer built none.
+    pub fn names(&self) -> Option<&Arc<ImageNames>> {
+        self.names.as_ref()
+    }
+    /// The image's edges; `None` when its producer built none.
+    pub fn edges(&self) -> Option<&Arc<ImageEdges>> {
+        self.edges.as_ref()
+    }
+    /// The conventions the image exports; `None` when its producer built none.
+    pub fn conventions(&self) -> Option<&[hirsel_types::conventions::Convention]> {
+        self.conventions.as_deref()
+    }
     /// The request charge for holding this package: everything opening it
     /// allocated or retains, admitted before it allocated.
     pub fn operation_metadata_bytes(&self) -> u64 {
@@ -1397,6 +1424,9 @@ impl InstalledPackage {
             dependencies,
             inputs,
             sections: None,
+            names: None,
+            edges: None,
+            conventions: None,
             rows: Arc::new([]),
             contents: Arc::new([]),
             definitions: None,
@@ -1415,7 +1445,8 @@ impl InstalledPackage {
         // that the index does not admit fails it.
         let _retention = store.retention_scope()?;
         let mut records = records.clone();
-        let definitions = self.index_definitions(store, &mut records)?;
+        let (definitions, edges) = self.index_definitions(store, &mut records)?;
+        self.edges = Some(Arc::new(edges::ImageEdges::new(&edges)));
         self.rows = records
             .rows
             .iter()

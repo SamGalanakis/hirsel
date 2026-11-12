@@ -5,6 +5,7 @@ hirsel_guard::install!();
 
 pub mod unique_rows;
 pub use unique_rows::UniqueResultRow;
+pub mod conventions;
 pub mod core_roles;
 pub mod encoding;
 pub mod entry;

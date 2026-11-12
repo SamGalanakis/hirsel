@@ -41,6 +41,7 @@ fn fixture(entries: Vec<DefinitionEntry>) -> ManifestFixture {
         package: package("test", "1"),
         definitions: entries,
         exposures: vec![],
+        installed: vec![],
         revision: ContentHash::of_bytes(b"manifest-v1"),
     }
 }
@@ -1769,13 +1770,36 @@ fn scope_tables_answer_as_the_written_path_rules() {
     ] {
         declared.insert(definition(pkg.clone(), modules, name), visibility);
     }
-    let mut f = fixture(vec![]);
-    for (path, visibility) in &declared {
-        f.definitions
-            .push(entry(path.clone(), Namespace::Value, *visibility));
-    }
-    let (index, errors) = ManifestIndex::new(f);
-    assert!(errors.is_empty());
+    // The same answers whether a dependency's names are rows of the request's
+    // own tables or an installed package's segment (the image's N section).
+    let indexes: Vec<_> = [
+        &[][..],
+        &[&library, &std1][..],
+        &[&library, &core, &std1, &std2],
+    ]
+    .into_iter()
+    .map(|installed| {
+        let mut f = fixture(vec![]);
+        for (path, visibility) in &declared {
+            f.definitions
+                .push(entry(path.clone(), Namespace::Value, *visibility));
+        }
+        f.installed = installed
+            .iter()
+            .map(|&package| {
+                let rows = f
+                    .definitions
+                    .iter()
+                    .filter(|e| e.definition.0.package == *package)
+                    .cloned();
+                std::sync::Arc::new(PackageNames::new(package.clone(), rows).unwrap())
+            })
+            .collect();
+        let (index, errors) = ManifestIndex::new(f);
+        assert!(errors.is_empty());
+        index
+    })
+    .collect();
     let expose = |head: &str, package: &PackageId, modules: &[&str]| DependencyExposure {
         head: head.into(),
         package: package.clone(),
@@ -1908,7 +1932,10 @@ fn scope_tables_answer_as_the_written_path_rules() {
         package: package.clone(),
         modules: modules.iter().map(|m| (*m).into()).collect(),
     });
-    for exposures in &exposure_sets {
+    for (index, exposures) in indexes
+        .iter()
+        .flat_map(|index| exposure_sets.iter().map(move |e| (index, e)))
+    {
         let selected = index.with_exposures(exposures);
         for context in &contexts {
             for word in words {

@@ -3,40 +3,8 @@
 //! std@1's formatting protocol, so later phases see only ordinary calls.
 use super::*;
 
-/// The std@1 operation appending a value of this type, and the declared ordinals
-/// of the written `(value, mut builder)` arguments.
-fn append_operation(primitive: Primitive) -> Option<(&'static str, &'static str, [usize; 2])> {
-    use Primitive::*;
-    let module = match primitive {
-        String => return Some(("text", "append", [1, 0])),
-        Bool => "bool",
-        U8 => "u8",
-        U16 => "u16",
-        U32 => "u32",
-        U64 => "u64",
-        U128 => "u128",
-        I8 => "i8",
-        I16 => "i16",
-        I32 => "i32",
-        I64 => "i64",
-        I128 => "i128",
-        F32 => "f32",
-        F64 => "f64",
-        Char => "char",
-        _ => return None,
-    };
-    Some((module, "format_into", [0, 1]))
-}
-fn std_operation(module: &str, name: &str) -> ast::DefPath {
-    ast::DefPath(ast::ItemPath {
-        package: ast::PackageId {
-            name: "std".into(),
-            version: "1".into(),
-        },
-        modules: vec![module.into()],
-        name: name.into(),
-    })
-}
+use hirsel_types::conventions::{Convention, FormatPrimitive};
+
 /// Integers and floats pad on the right by default, other text on the left.
 fn numeric(primitive: Primitive) -> bool {
     !matches!(
@@ -76,7 +44,7 @@ impl Checker<'_, '_> {
             ast::FormatStep::Pad(hole) => {
                 let ty = self.value(hole);
                 let primitive = match self.kind(ty) {
-                    TypeKind::Primitive(p) if append_operation(p).is_some() => Some(p),
+                    TypeKind::Primitive(p) if Convention::append(p).is_some() => Some(p),
                     TypeKind::Named { definition, .. }
                         if self.format_association(&definition)?.is_some() =>
                     {
@@ -85,15 +53,13 @@ impl Checker<'_, '_> {
                     // The hole's append reported its type.
                     _ => return self.recover_format(id, callee, arguments, expected, frame, 0),
                 };
-                let name = if primitive.is_some_and(numeric) {
-                    "pad_number_from"
-                } else {
-                    "pad_from"
+                let pad = Convention::Pad {
+                    numeric: primitive.is_some_and(numeric),
                 };
                 self.format_call(
                     id,
                     callee,
-                    std_operation("text", name),
+                    pad.path(),
                     (0..arguments.len()).collect(),
                     expected,
                     frame,
@@ -106,11 +72,11 @@ impl Checker<'_, '_> {
                 // retain finish_valid's checked UTF-8 invariant.
                 let trusted = self.format_holes.get(&id).is_some_and(|holes| {
                     holes.iter().all(|hole| match self.kind(self.value(*hole)) {
-                        TypeKind::Primitive(p) => append_operation(p).is_some(),
+                        TypeKind::Primitive(p) => Convention::append(p).is_some(),
                         _ => false,
                     })
                 });
-                let checked = std_operation("text", "finish_valid");
+                let checked = Convention::FinishValid.path();
                 // Even an empty f-string still requires the std dependency.
                 let operation = if trusted && self.snapshot(&checked).is_ok() {
                     ast::DefPath::core("$intrinsic.TextFinish")
@@ -154,7 +120,7 @@ impl Checker<'_, '_> {
             _ => None,
         };
         let primitive = match self.kind(ty) {
-            TypeKind::Primitive(p) => append_operation(p).map(|_| p),
+            TypeKind::Primitive(p) => FormatPrimitive::new(p),
             _ => None,
         };
         let association = match self.kind(ty) {
@@ -162,11 +128,11 @@ impl Checker<'_, '_> {
             _ => None,
         };
         let (operation, ordinals) = match (primitive, association, spec) {
-            (Some(primitive), _, None) => {
-                let (module, name, ordinals) = append_operation(primitive).unwrap();
-                (std_operation(module, name), ordinals.to_vec())
-            }
-            (Some(Primitive::Char), _, Some(_)) => {
+            (Some(primitive), _, None) => (
+                Convention::Append(primitive).path(),
+                Convention::append_ordinals(primitive).to_vec(),
+            ),
+            (Some(primitive), _, Some(_)) if primitive.primitive() == Primitive::Char => {
                 self.report(
                     const { RuleId::of("SEM-3") },
                     self.span(value),
@@ -175,7 +141,8 @@ impl Checker<'_, '_> {
                 );
                 return self.recover_format(id, callee, &arguments, expected, frame, 1);
             }
-            (Some(primitive), _, Some(spec)) => {
+            (Some(format), _, Some(spec)) => {
+                let primitive = format.primitive();
                 let integer =
                     numeric(primitive) && !matches!(primitive, Primitive::F32 | Primitive::F64);
                 if spec.kind != 0 && !integer {
@@ -190,13 +157,10 @@ impl Checker<'_, '_> {
                     );
                     return self.recover_format(id, callee, &arguments, expected, frame, 1);
                 }
-                let module = if primitive == Primitive::String {
-                    "text"
-                } else {
-                    append_operation(primitive).unwrap().0
-                };
                 (
-                    std_operation(module, "format_into_spec"),
+                    Convention::append_spec(primitive)
+                        .expect("a char spec was refused above")
+                        .path(),
                     (0..arguments.len()).collect(),
                 )
             }

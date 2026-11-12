@@ -31,6 +31,10 @@ pub struct ModuleInputs {
     pub package_dependencies: BTreeMap<PackageId, Vec<PackageId>>,
     pub signature_metadata: Metadata,
     pub manifest_revision: ContentHash,
+    /// Each selected installation's name index (its image's N section), by
+    /// installation identity: the scope-table segment that package's lookups
+    /// walk, decoded once per installation and shared by every projection.
+    pub installed_names: BTreeMap<PackageId, (ContentHash, Arc<hirsel_resolve::PackageNames>)>,
 }
 
 /// One immutable declaration row. Snapshots share it; owned declaration sites
@@ -885,6 +889,12 @@ impl DeclarationIndex {
             package: crate::default_context().package,
             definitions: entries,
             exposures: complete_heads(self.inputs.exposures.clone()),
+            installed: self
+                .inputs
+                .installed_names
+                .values()
+                .map(|(_, names)| names.clone())
+                .collect(),
             revision: self.inputs.manifest_revision,
         })
         .0;

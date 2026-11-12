@@ -115,12 +115,16 @@ impl InstalledPackage {
         }
     }
     /// Index the semantic inputs among `records`' contents, adding each one's
-    /// row, and refuse two inputs for one path.
+    /// row, and refuse two inputs for one path. Also returns the image's
+    /// edges (E): each input's recorded reads, by generic base.
     pub(super) fn index_definitions(
         &self,
         store: &hirsel_artifact_store::Store,
         records: &mut InstallationRecords,
-    ) -> std::io::Result<BTreeMap<DefPath, InstalledDefinition>> {
+    ) -> std::io::Result<(
+        BTreeMap<DefPath, InstalledDefinition>,
+        BTreeMap<DefPath, std::collections::BTreeSet<DefPath>>,
+    )> {
         let manifest = ContentHash::of_bytes(&self.manifest);
         let references = records
             .contents
@@ -129,6 +133,7 @@ impl InstalledPackage {
             .copied()
             .collect::<Vec<_>>();
         let mut definitions = BTreeMap::new();
+        let mut edges = BTreeMap::<DefPath, std::collections::BTreeSet<DefPath>>::new();
         for reference in references {
             let bytes = store
                 .get_owned(reference)
@@ -150,6 +155,15 @@ impl InstalledPackage {
                     ));
                 }
             }
+            let source = edges::base(&record.definition);
+            let reads = record
+                .dependencies
+                .iter()
+                .map(|dependency| edges::base(dependency.definition.path()))
+                .chain(record.semantic_dependencies.iter().map(edges::base))
+                .filter(|target| *target != source)
+                .collect::<Vec<_>>();
+            edges.entry(source).or_default().extend(reads);
             let dependencies = record.dependency_identity()?;
             let key = InstalledDefinitionKey {
                 compiler: self.compiler,
@@ -176,7 +190,7 @@ impl InstalledPackage {
                 ));
             }
         }
-        Ok(definitions)
+        Ok((definitions, edges))
     }
 }
 

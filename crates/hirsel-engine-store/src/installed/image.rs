@@ -13,7 +13,9 @@
 //! skips construction can produce one.
 use super::semantic::check_definition;
 use super::*;
+use super::{edges, names};
 use bincode::Options;
+use hirsel_types::conventions::Convention;
 use std::sync::OnceLock;
 
 /// Association rows, deduplicated and sorted by address: 112 bytes each.
@@ -46,9 +48,10 @@ const TEXT: Domain = Domain {
 // signature and representation edges, conventions, and signature rows. `None`
 // means the producer did not build the section, so a reader must treat what
 // it would answer as unavailable, never as empty; `Some` of an empty section
-// means built and empty. Today's reader decodes these slots, ignores a
-// populated one, and refuses the whole image if one names a domain or schema
-// it does not know (`Sections::domains`), so a later schema is never misread.
+// means built and empty. Open decodes and checks N, E and K; it ignores a populated
+// slot of a later land, and refuses the whole image if one names a domain or
+// schema it does not know (`Sections::domains`), so a later schema is never
+// misread.
 const NAMES: Domain = Domain {
     kind: 0x4601_0015,
     schema: 1,
@@ -89,11 +92,7 @@ impl Sections {
     /// The sections open does not read: the definition chunks and the
     /// sections of later lands. An audit verifies these; open checks the rest.
     pub(super) fn unread(&self) -> impl Iterator<Item = Reference> + '_ {
-        self.chunks.iter().copied().chain(
-            [self.names, self.edges, self.conventions, self.signatures]
-                .into_iter()
-                .flatten(),
-        )
+        self.chunks.iter().copied().chain(self.signatures)
     }
     pub(super) fn references(&self) -> impl Iterator<Item = Reference> + '_ {
         [self.rows, self.contents, self.index]
@@ -293,9 +292,85 @@ pub(super) fn build(
             .iter()
             .map(|source| store.put(TEXT, source.text.as_bytes()))
             .collect::<std::io::Result<_>>()?,
-        names: None,
-        edges: None,
-        conventions: None,
+        names: installed
+            .names
+            .as_ref()
+            .map(|names| {
+                if !names.well_formed(installed.sources.len()) {
+                    return Err(std::io::Error::other("installed name index is malformed"));
+                }
+                // D/N agreement: every installed definition, or the generic
+                // definition a specialization instantiates, is a name.
+                let named = names
+                    .paths(&installed.package)
+                    .map(|(path, _)| path)
+                    .collect::<std::collections::BTreeSet<_>>();
+                if let Some(path) = definitions
+                    .keys()
+                    .find(|path| !named.contains(&edges::base(path)))
+                {
+                    return Err(std::io::Error::other(format!(
+                        "installed definition {path} has no name in the name index"
+                    )));
+                }
+                // E/N agreement: every edge leaves a name, and every edge
+                // into this package lands on one.
+                if let Some(edges) = &installed.edges
+                    && let Some(path) = edges
+                        .sources()
+                        .chain(edges.sources().flat_map(|source| edges.targets(source)))
+                        .find(|path| path.0.package == installed.package && !named.contains(*path))
+                {
+                    return Err(std::io::Error::other(format!(
+                        "installed edge names {path}, which has no name in the name index"
+                    )));
+                }
+                store.put(
+                    NAMES,
+                    &options()
+                        .serialize(&**names)
+                        .map_err(std::io::Error::other)?,
+                )
+            })
+            .transpose()?,
+        edges: installed
+            .edges
+            .as_ref()
+            .map(|edges| {
+                if !edges.well_formed() {
+                    return Err(std::io::Error::other("installed edges are malformed"));
+                }
+                store.put(
+                    EDGES,
+                    &options()
+                        .serialize(&**edges)
+                        .map_err(std::io::Error::other)?,
+                )
+            })
+            .transpose()?,
+        // K: the conventions this package's N declares, exported only beside
+        // N. A package without one (a partial std) exports less, and a demand
+        // for it fails as a missing name at the check that makes it.
+        conventions: installed
+            .names
+            .as_ref()
+            .map(|names| {
+                let named = names
+                    .paths(&installed.package)
+                    .map(|(path, _)| path)
+                    .collect::<std::collections::BTreeSet<_>>();
+                let conventions = Convention::all()
+                    .filter(|convention| named.contains(&convention.path()))
+                    .collect::<Vec<_>>();
+                installed.conventions = Some(conventions.clone().into());
+                store.put(
+                    CONVENTIONS,
+                    &options()
+                        .serialize(&conventions)
+                        .map_err(std::io::Error::other)?,
+                )
+            })
+            .transpose()?,
         signatures: None,
     };
     let header = options()
@@ -397,6 +472,12 @@ fn section_bytes(sections: &Sections, root: &Path) -> u64 {
             std::mem::size_of::<OnceLock<Result<InstalledDefinition, String>>>(),
         ),
         descriptors.saturating_mul(1 + EXPANSION),
+        [sections.names, sections.edges, sections.conventions]
+            .iter()
+            .flatten()
+            .map(len)
+            .fold(0, u64::saturating_add)
+            .saturating_mul(1 + EXPANSION),
         trees.bytes(),
     ]
     .into_iter()
@@ -530,6 +611,56 @@ pub(super) fn read(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let names = sections
+        .names
+        .map(|reference| {
+            let bytes = section(reference)?;
+            options()
+                .with_limit(bytes.len() as u64)
+                .deserialize::<names::ImageNames>(&bytes)
+                .ok()
+                .filter(|names| names.well_formed(sources.len()))
+                .map(Arc::new)
+                .ok_or_else(invalid)
+        })
+        .transpose()?;
+    let edges = sections
+        .edges
+        .map(|reference| {
+            let bytes = section(reference)?;
+            options()
+                .with_limit(bytes.len() as u64)
+                .deserialize::<edges::ImageEdges>(&bytes)
+                .ok()
+                .filter(edges::ImageEdges::well_formed)
+                .map(Arc::new)
+                .ok_or_else(invalid)
+        })
+        .transpose()?;
+    let conventions = sections
+        .conventions
+        .map(|reference| {
+            let bytes = section(reference)?;
+            options()
+                .with_limit(bytes.len() as u64)
+                .deserialize::<Vec<Convention>>(&bytes)
+                .ok()
+                .filter(|conventions| {
+                    // K is exported only beside N, and only names N declares.
+                    names.as_ref().is_some_and(|names| {
+                        let named = names
+                            .paths(&header.package)
+                            .map(|(path, _)| path)
+                            .collect::<std::collections::BTreeSet<_>>();
+                        conventions
+                            .iter()
+                            .all(|convention| named.contains(&convention.path()))
+                    })
+                })
+                .map(Into::into)
+                .ok_or_else(invalid)
+        })
+        .transpose()?;
     let definitions = Definitions {
         store: store.clone(),
         index,
@@ -557,6 +688,9 @@ pub(super) fn read(
         rows,
         contents,
         definitions: Some(Arc::new(definitions)),
+        names,
+        edges,
+        conventions,
         records: Default::default(),
         sources_owner: None,
         charge: header_bytes(bytes_of(bytes.len())).saturating_add(charge),

@@ -82,7 +82,9 @@ impl CompilerRequestsExt for Compiler {
             ));
         }
         use hirsel_engine::loader_inputs::LoaderInputs;
-        let loaded = self.load_check_package_inputs(manifest, &completed.inputs, false)?;
+        // Indexed, so the image's name index (N) is built from the same
+        // parse heads the installation's records hold.
+        let loaded = self.load_check_package_inputs(manifest, &completed.inputs, true)?;
         let manifest_path = completed.inputs.canonicalize(manifest)?;
         let package = loaded.installation_inputs(
             self.identity(),

@@ -29,8 +29,8 @@ pub mod scratch;
 pub use dir::{DirStore, FORMAT, GcReport};
 pub use installed::InstalledSourceRecords;
 pub use installed::{
-    InstalledDefinition, InstalledDefinitionKey, InstalledDefinitionOwnership, InstalledInputs,
-    InstalledPackage, InstalledSource,
+    ImageEdges, ImageNames, InstalledDefinition, InstalledDefinitionKey,
+    InstalledDefinitionOwnership, InstalledInputs, InstalledPackage, InstalledSource, NameFacts,
 };
 pub use installed::{
     InstalledSemanticInput, InstalledSpecializations, SEMANTIC_BODY, SEMANTIC_HEADER,

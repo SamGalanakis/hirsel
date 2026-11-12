@@ -588,11 +588,17 @@ impl Catalog {
     }
     /// Ordinary heads cannot become generic generators through syntax
     /// shadowing. Consult the live syntax map only for positive candidates.
-    pub(super) fn has_instance_bodied(&self, mut shadowed: impl FnMut(&DefPath) -> bool) -> bool {
+    /// A package `indexed` by N answers from N, not from adopted heads.
+    pub(super) fn has_instance_bodied(
+        &self,
+        indexed: impl Fn(&PackageId) -> bool,
+        mut shadowed: impl FnMut(&DefPath) -> bool,
+    ) -> bool {
         self.candidates.iter().any(|(path, candidates)| {
-            candidates
-                .first()
-                .is_some_and(|candidate| candidate.facts.instance_bodied)
+            !indexed(&path.0.package)
+                && candidates
+                    .first()
+                    .is_some_and(|candidate| candidate.facts.instance_bodied)
                 && !shadowed(path)
         })
     }
@@ -1702,10 +1708,13 @@ mod tests {
                 assert_eq!(engine.catalog.paths().count(), 64 + usize::from(generic));
                 let mut probes = 0;
                 assert_eq!(
-                    engine.catalog.has_instance_bodied(|_| {
-                        probes += 1;
-                        false
-                    }),
+                    engine.catalog.has_instance_bodied(
+                        |_| false,
+                        |_| {
+                            probes += 1;
+                            false
+                        }
+                    ),
                     generic
                 );
                 assert_eq!(
@@ -1714,7 +1723,7 @@ mod tests {
                     "ordinary heads need no path lookup"
                 );
                 assert!(
-                    !engine.catalog.has_instance_bodied(|_| true),
+                    !engine.catalog.has_instance_bodied(|_| false, |_| true),
                     "live non-generated syntax shadows a positive stored head"
                 );
                 for path in engine.catalog.paths() {
@@ -1735,7 +1744,7 @@ mod tests {
                         engine.instance_bodied(&path),
                         "classification survives materialization"
                     );
-                    assert!(!engine.catalog.has_instance_bodied(|_| false));
+                    assert!(!engine.catalog.has_instance_bodied(|_| false, |_| false));
                 }
             }
         });
@@ -1869,6 +1878,51 @@ mod tests {
 }
 
 impl QueryEngine {
+    /// The image's N section for `package`, whose files are `sources` in
+    /// header order: each path's first candidate, from its parsed items when
+    /// the file was parsed and from its adopted heads otherwise (as
+    /// `instance_bodied` reads them). `None` if a head's file is not among
+    /// `sources`.
+    pub(crate) fn image_names(
+        &self,
+        package: &PackageId,
+        sources: &[FileId],
+    ) -> Option<hirsel_engine_store::ImageNames> {
+        let source = |file: FileId| sources.iter().position(|f| *f == file).map(|i| i as u32);
+        let mut names = BTreeMap::new();
+        for (path, items) in self.items.iter().filter(|(p, _)| p.0.package == *package) {
+            let Some(first) = items.first() else { continue };
+            let head = DeclarationHead::capture(&self.sources, first);
+            let (file, _) = self.sources.anchor(first.anchor)?;
+            names.insert(
+                path.clone(),
+                hirsel_engine_store::NameFacts {
+                    types: head.kind >= 2,
+                    visibility: head.visibility,
+                    source: source(file)?,
+                    instance_bodied: super::generation::instance_bodied(first),
+                },
+            );
+        }
+        for (path, candidates) in &self.catalog.candidates {
+            if path.0.package != *package || names.contains_key(path) {
+                continue;
+            }
+            let Some(first) = candidates.first() else {
+                continue;
+            };
+            names.insert(
+                path.clone(),
+                hirsel_engine_store::NameFacts {
+                    types: first.head.kind >= 2,
+                    visibility: first.head.visibility,
+                    source: source(first.file)?,
+                    instance_bodied: first.facts.instance_bodied,
+                },
+            );
+        }
+        hirsel_engine_store::ImageNames::new(package, &names)
+    }
     pub(crate) fn declared(&self, path: &DefPath) -> bool {
         self.items.contains_key(path)
             || self.catalog.body(path).is_some()

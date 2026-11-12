@@ -80,8 +80,15 @@ impl ModuleInputs {
             package_dependencies,
             signature_metadata,
             manifest_revision: _,
+            installed_names,
         } = self;
         weight.vec(exposures, exposure);
+        // The one charge for each installation's name segment: indexes that
+        // share it do not count it again.
+        weight.map(installed_names, |w, key, (_, names)| {
+            package(w, key);
+            w.add(names.retained_bytes() as usize);
+        });
         weight.map(package_exposures, |w, key, values| {
             package(w, key);
             w.vec(values, exposure);

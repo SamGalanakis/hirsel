@@ -57,11 +57,35 @@ impl Bytes {
             self.add(value.capacity());
         }
     }
+    fn tables(&mut self, tables: &Tables) {
+        self.map::<PackageId, ModuleId>(tables.roots.capacity());
+        for package in tables.roots.keys() {
+            self.package(package);
+        }
+        self.map::<(ModuleId, Symbol), ModuleId>(tables.children.capacity());
+        self.map::<(ModuleId, Symbol), DefId>(tables.names.capacity());
+    }
     fn path(&mut self, value: &DefPath) {
         self.package(&value.0.package);
         self.strings(&value.0.modules);
         self.add(value.0.name.capacity());
     }
+}
+/// One installed segment's payload, computed once when it is built.
+pub(super) fn package_names(
+    package: &PackageId,
+    entries: &DefMap<DefinitionEntry>,
+    tables: &Tables,
+) -> u64 {
+    let mut bytes = Bytes::default();
+    bytes.add(size_of::<PackageNames>());
+    bytes.package(package);
+    bytes.map::<DefId, DefinitionEntry>(entries.capacity());
+    for value in entries.values() {
+        bytes.path(&value.definition);
+    }
+    bytes.tables(tables);
+    bytes.0
 }
 impl ManifestIndex {
     /// Owned and shared metadata payload retained by this index. Excludes the
@@ -96,12 +120,10 @@ impl ManifestIndex {
             }
         }
         bytes.arc(&*self.tables);
-        bytes.map::<PackageId, ModuleId>(self.tables.roots.capacity());
-        for package in self.tables.roots.keys() {
-            bytes.package(package);
-        }
-        bytes.map::<(ModuleId, Symbol), ModuleId>(self.tables.children.capacity());
-        bytes.map::<(ModuleId, Symbol), DefId>(self.tables.names.capacity());
+        bytes.tables(&self.tables);
+        // Installed segments are charged once, by their owner
+        // (`PackageNames::retained_bytes`), not per index that shares them.
+        bytes.arc(&*self.installed);
         bytes.arc(&*self.head_targets);
         bytes.map::<Symbol, HeadTargets>(self.head_targets.capacity());
         for targets in self.head_targets.values() {

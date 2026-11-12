@@ -259,6 +259,52 @@ pub enum Keyword {
     False,
 }
 impl Keyword {
+    /// The reserved word's spelling: the inverse of `from_spelling`.
+    pub fn spelling(self) -> &'static str {
+        match self {
+            Keyword::Fn => "fn",
+            Keyword::Let => "let",
+            Keyword::Mut => "mut",
+            Keyword::Match => "match",
+            Keyword::If => "if",
+            Keyword::Else => "else",
+            Keyword::For => "for",
+            Keyword::In => "in",
+            Keyword::While => "while",
+            Keyword::Break => "break",
+            Keyword::Continue => "continue",
+            Keyword::Return => "return",
+            Keyword::Take => "take",
+            Keyword::Copy => "copy",
+            Keyword::Unique => "unique",
+            Keyword::Type => "type",
+            Keyword::Distinct => "distinct",
+            Keyword::Flat => "flat",
+            Keyword::Resource => "resource",
+            Keyword::Box => "box",
+            Keyword::Pub => "pub",
+            Keyword::Opaque => "opaque",
+            Keyword::Const => "const",
+            Keyword::Comptime => "comptime",
+            Keyword::Shape => "shape",
+            Keyword::Heap => "heap",
+            Keyword::Before => "before",
+            Keyword::Requires => "requires",
+            Keyword::Ensures => "ensures",
+            Keyword::Result => "result",
+            Keyword::Where => "where",
+            Keyword::Uses => "uses",
+            Keyword::Of => "of",
+            Keyword::Local => "local",
+            Keyword::Global => "global",
+            Keyword::Once => "once",
+            Keyword::Todo => "todo",
+            Keyword::Extern => "extern",
+            Keyword::Unsafe => "unsafe",
+            Keyword::True => "true",
+            Keyword::False => "false",
+        }
+    }
     /// The lexer and diagnostic repair admission use the same reserved words.
     pub fn from_spelling(text: &str) -> Option<Keyword> {
         Some(match text {
@@ -368,6 +414,60 @@ pub enum Punct {
     CaretEq,
     ShlEq,
     ShrEq,
+}
+impl Punct {
+    /// The punctuation's spelling.
+    pub fn spelling(self) -> &'static str {
+        match self {
+            Punct::DotDotEq => "..=",
+            Punct::ShlEq => "<<=",
+            Punct::ShrEq => ">>=",
+            Punct::DotDot => "..",
+            Punct::Arrow => "->",
+            Punct::FatArrow => "=>",
+            Punct::AndAnd => "&&",
+            Punct::OrOr => "||",
+            Punct::Shl => "<<",
+            Punct::Shr => ">>",
+            Punct::EqEq => "==",
+            Punct::Ne => "!=",
+            Punct::Le => "<=",
+            Punct::Ge => ">=",
+            Punct::PlusEq => "+=",
+            Punct::MinusEq => "-=",
+            Punct::StarEq => "*=",
+            Punct::SlashEq => "/=",
+            Punct::PercentEq => "%=",
+            Punct::AmpEq => "&=",
+            Punct::PipeEq => "|=",
+            Punct::CaretEq => "^=",
+            Punct::LParen => "(",
+            Punct::RParen => ")",
+            Punct::LBracket => "[",
+            Punct::RBracket => "]",
+            Punct::LBrace => "{",
+            Punct::RBrace => "}",
+            Punct::Comma => ",",
+            Punct::Colon => ":",
+            Punct::Semicolon => ";",
+            Punct::Dot => ".",
+            Punct::At => "@",
+            Punct::Question => "?",
+            Punct::Plus => "+",
+            Punct::Minus => "-",
+            Punct::Star => "*",
+            Punct::Slash => "/",
+            Punct::Percent => "%",
+            Punct::Bang => "!",
+            Punct::Tilde => "~",
+            Punct::Amp => "&",
+            Punct::Pipe => "|",
+            Punct::Caret => "^",
+            Punct::Eq => "=",
+            Punct::Lt => "<",
+            Punct::Gt => ">",
+        }
+    }
 }
 /// Trivia remains in the tape, including CRLF and doc comments (LANG-1; issue #21).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]

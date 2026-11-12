@@ -31,6 +31,36 @@ pub struct ParseOutput {
     pub nesting_limit: Option<Span>,
 }
 
+impl<'a> Parser<'a> {
+    fn new(file: FileId, tokens: Vec<Token>, sources: &'a mut SourceMap) -> Self {
+        let significant = tokens
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| (!matches!(t.kind, TokenKind::Trivia(_))).then_some(i))
+            .collect();
+        Parser {
+            file,
+            file_anchor: sources.file_anchor(file),
+            file_place: sources.anchor(sources.file_anchor(file)),
+            local: None,
+            tokens,
+            significant,
+            pos: 0,
+            sources,
+            tree: SyntaxTree::default(),
+            diagnostics: vec![],
+            recovered_names: std::collections::BTreeSet::new(),
+            whitespace: 0,
+            depth: 0,
+            heights: depth::Heights::default(),
+            nesting_limit: None,
+            formats: 0,
+            analyses: vec![],
+            result_parts: false,
+        }
+    }
+}
+
 /// Parse a lexer-owned tape without mutating the source. Each top-level item
 /// gets its own arenas and a new anchor at the start of its owned tokens: the
 /// spans of `file`'s own tokens become relative to it, and spans the tape
@@ -42,31 +72,7 @@ pub fn parse(
     context: &FileContext,
     sources: &mut SourceMap,
 ) -> ParseOutput {
-    let significant = tokens
-        .iter()
-        .enumerate()
-        .filter_map(|(i, t)| (!matches!(t.kind, TokenKind::Trivia(_))).then_some(i))
-        .collect();
-    let mut parser = Parser {
-        file,
-        file_anchor: sources.file_anchor(file),
-        file_place: sources.anchor(sources.file_anchor(file)),
-        local: None,
-        tokens,
-        significant,
-        pos: 0,
-        sources,
-        tree: SyntaxTree::default(),
-        diagnostics: vec![],
-        recovered_names: std::collections::BTreeSet::new(),
-        whitespace: 0,
-        depth: 0,
-        heights: depth::Heights::default(),
-        nesting_limit: None,
-        formats: 0,
-        analyses: vec![],
-        result_parts: false,
-    };
+    let mut parser = Parser::new(file, tokens, sources);
     let mut items = vec![];
     // The first token the next item owns: everything after the previous one's.
     let mut owned_start = 0usize;
@@ -179,7 +185,14 @@ impl Parser<'_> {
     }
     fn at(&self, word: &str) -> bool {
         // Spelling is only used for grammar terminals, never to classify identifiers.
-        !self.eof() && self.text_at(0) == word
+        // Punctuation, keywords and identifiers spell their own text.
+        match self.token(0).map(|t| &t.kind) {
+            None | Some(TokenKind::Eof) => false,
+            Some(TokenKind::Punct(p)) => p.spelling() == word,
+            Some(TokenKind::Keyword(k)) => k.spelling() == word,
+            Some(TokenKind::Ident(name)) => name.as_str() == word,
+            Some(_) => self.text_at(0) == word,
+        }
     }
     fn eat(&mut self, word: &str) -> bool {
         if self.at(word) {
@@ -701,4 +714,52 @@ fn size_value(text: &str) -> Option<u64> {
         (text.as_str(), 10)
     };
     u64::from_str_radix(digits, radix).ok()
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+
+    /// `Parser::at` reads a token's stored spelling instead of its source text,
+    /// so every grammar decision is the one the source text would make only if
+    /// the tape spells each token as written. At every token of sources where
+    /// the two could part (keyword-like and contextual names, names fused to
+    /// punctuation, non-ASCII text beside punctuation) the token's own text is
+    /// a terminal there and no other terminal word is.
+    #[test]
+    fn terminal_tests_answer_as_the_source_text_does() {
+        let sources = [
+            "fn letter(size: u64, iffy: u64) -> u64 { let fnx=size+iffy; fnx }",
+            "fn f(signature: u8, implementation: u8, heap: u8, with: u8) -> u8 { signature+implementation }",
+            "fn g()->u8{let a=b.c(d)[e]..=f;a<<=1u8;x!=y&&z||w}",
+            "fn h() -> String { let s=(\"é→\",\"\u{2028}\");s.0}",
+            "fn i() -> String { f\"{a}é{b:x}\"+\"é\" }",
+        ];
+        let words: Vec<&str> = concat!(
+            "( ) [ ] { } , : ; . .. ..= @ ? -> => + - * / % ! ~ & | ^ && || << >> = == != ",
+            "< <= > >= += -= *= /= %= &= |= ^= <<= >>= ",
+            "fn let if in for type uses size signature implementation ",
+            "heap with drop letter fnx iffy u8 u64 é",
+        )
+        .split_whitespace()
+        .collect();
+        for text in sources {
+            let mut map = SourceMap::default();
+            let file = map.add("t.hir", text.into()).unwrap();
+            let tokens = hirsel_lexer::lex(file, &map).tokens;
+            let mut parser = Parser::new(file, tokens, &mut map);
+            while !parser.eof() {
+                let own = parser.text_at(0).to_owned();
+                assert!(parser.at(&own), "{text:?}: `{own}` is not its own terminal");
+                for word in &words {
+                    assert_eq!(
+                        parser.at(word),
+                        own == *word,
+                        "{text:?}: `{own}` against `{word}`"
+                    );
+                }
+                parser.pos += 1;
+            }
+        }
+    }
 }

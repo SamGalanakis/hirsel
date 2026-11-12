@@ -805,60 +805,73 @@ fn bidi(ch: char) -> bool {
 }
 
 fn punctuation(bytes: &[u8]) -> Option<(usize, Punct)> {
-    // Fixed-size table, longest first: bounded work per source position (#21).
-    const TABLE: &[(&[u8], Punct)] = &[
-        (b"..=", Punct::DotDotEq),
-        (b"<<=", Punct::ShlEq),
-        (b">>=", Punct::ShrEq),
-        (b"..", Punct::DotDot),
-        (b"->", Punct::Arrow),
-        (b"=>", Punct::FatArrow),
-        (b"&&", Punct::AndAnd),
-        (b"||", Punct::OrOr),
-        (b"<<", Punct::Shl),
-        (b">>", Punct::Shr),
-        (b"==", Punct::EqEq),
-        (b"!=", Punct::Ne),
-        (b"<=", Punct::Le),
-        (b">=", Punct::Ge),
-        (b"+=", Punct::PlusEq),
-        (b"-=", Punct::MinusEq),
-        (b"*=", Punct::StarEq),
-        (b"/=", Punct::SlashEq),
-        (b"%=", Punct::PercentEq),
-        (b"&=", Punct::AmpEq),
-        (b"|=", Punct::PipeEq),
-        (b"^=", Punct::CaretEq),
-        (b"(", Punct::LParen),
-        (b")", Punct::RParen),
-        (b"[", Punct::LBracket),
-        (b"]", Punct::RBracket),
-        (b"{", Punct::LBrace),
-        (b"}", Punct::RBrace),
-        (b",", Punct::Comma),
-        (b":", Punct::Colon),
-        (b";", Punct::Semicolon),
-        (b".", Punct::Dot),
-        (b"@", Punct::At),
-        (b"?", Punct::Question),
-        (b"+", Punct::Plus),
-        (b"-", Punct::Minus),
-        (b"*", Punct::Star),
-        (b"/", Punct::Slash),
-        (b"%", Punct::Percent),
-        (b"!", Punct::Bang),
-        (b"~", Punct::Tilde),
-        (b"&", Punct::Amp),
-        (b"|", Punct::Pipe),
-        (b"^", Punct::Caret),
-        (b"=", Punct::Eq),
-        (b"<", Punct::Lt),
-        (b">", Punct::Gt),
-    ];
-    TABLE
-        .iter()
-        .find(|(text, _)| bytes.starts_with(text))
-        .map(|(text, kind)| (text.len(), *kind))
+    // Longest match on at most three bytes: bounded work per source position (#21).
+    let at = |i: usize| bytes.get(i).copied();
+    let two = |second: u8, long: Punct, short: Punct| {
+        if at(1) == Some(second) {
+            (2, long)
+        } else {
+            (1, short)
+        }
+    };
+    Some(match at(0)? {
+        b'(' => (1, Punct::LParen),
+        b')' => (1, Punct::RParen),
+        b'[' => (1, Punct::LBracket),
+        b']' => (1, Punct::RBracket),
+        b'{' => (1, Punct::LBrace),
+        b'}' => (1, Punct::RBrace),
+        b',' => (1, Punct::Comma),
+        b':' => (1, Punct::Colon),
+        b';' => (1, Punct::Semicolon),
+        b'@' => (1, Punct::At),
+        b'?' => (1, Punct::Question),
+        b'~' => (1, Punct::Tilde),
+        b'.' => match (at(1), at(2)) {
+            (Some(b'.'), Some(b'=')) => (3, Punct::DotDotEq),
+            (Some(b'.'), _) => (2, Punct::DotDot),
+            _ => (1, Punct::Dot),
+        },
+        b'<' => match (at(1), at(2)) {
+            (Some(b'<'), Some(b'=')) => (3, Punct::ShlEq),
+            (Some(b'<'), _) => (2, Punct::Shl),
+            (Some(b'='), _) => (2, Punct::Le),
+            _ => (1, Punct::Lt),
+        },
+        b'>' => match (at(1), at(2)) {
+            (Some(b'>'), Some(b'=')) => (3, Punct::ShrEq),
+            (Some(b'>'), _) => (2, Punct::Shr),
+            (Some(b'='), _) => (2, Punct::Ge),
+            _ => (1, Punct::Gt),
+        },
+        b'-' => match at(1) {
+            Some(b'>') => (2, Punct::Arrow),
+            Some(b'=') => (2, Punct::MinusEq),
+            _ => (1, Punct::Minus),
+        },
+        b'=' => match at(1) {
+            Some(b'>') => (2, Punct::FatArrow),
+            Some(b'=') => (2, Punct::EqEq),
+            _ => (1, Punct::Eq),
+        },
+        b'&' => match at(1) {
+            Some(b'&') => (2, Punct::AndAnd),
+            Some(b'=') => (2, Punct::AmpEq),
+            _ => (1, Punct::Amp),
+        },
+        b'|' => match at(1) {
+            Some(b'|') => (2, Punct::OrOr),
+            Some(b'=') => (2, Punct::PipeEq),
+            _ => (1, Punct::Pipe),
+        },
+        b'!' => two(b'=', Punct::Ne, Punct::Bang),
+        b'+' => two(b'=', Punct::PlusEq, Punct::Plus),
+        b'*' => two(b'=', Punct::StarEq, Punct::Star),
+        b'/' => two(b'=', Punct::SlashEq, Punct::Slash),
+        b'%' => two(b'=', Punct::PercentEq, Punct::Percent),
+        b'^' => two(b'=', Punct::CaretEq, Punct::Caret),
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

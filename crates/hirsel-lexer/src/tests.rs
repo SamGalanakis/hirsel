@@ -537,3 +537,47 @@ fn byte_literals_preserve_source_spellings() {
         single(literal, TokenKind::Byte);
     }
 }
+
+// LANG-1's punctuation set, spelled out independently of the lexer's matcher.
+const PUNCTUATION: [&str; 47] = [
+    "(", ")", "[", "]", "{", "}", ",", ":", ";", ".", "..", "..=", "@", "?", "->", "=>", "+", "-",
+    "*", "/", "%", "!", "~", "&", "|", "^", "&&", "||", "<<", ">>", "=", "==", "!=", "<", "<=",
+    ">", ">=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=",
+];
+
+/// Every punctuation spelling and every adjacent pair lex by longest match,
+/// and each token spells its own text, which the parser's terminal test reads.
+#[test]
+fn punctuation_lexes_by_longest_match_and_spells_itself() {
+    fn longest(mut text: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        while !text.is_empty() {
+            let len = PUNCTUATION
+                .iter()
+                .filter(|p| text.starts_with(*p))
+                .map(|p| p.len())
+                .max()
+                .unwrap();
+            out.push(&text[..len]);
+            text = &text[len..];
+        }
+        out
+    }
+    for a in PUNCTUATION {
+        for b in std::iter::once("").chain(PUNCTUATION) {
+            let text = format!("{a}{b}");
+            if text.contains("//") || text.contains("/*") {
+                continue;
+            }
+            let (_, output) = fixture(&text);
+            let spelled: Vec<_> = significant(&output)
+                .into_iter()
+                .map(|kind| match kind {
+                    TokenKind::Punct(p) => p.spelling(),
+                    other => panic!("{text:?} lexed {other:?}"),
+                })
+                .collect();
+            assert_eq!(spelled, longest(&text), "{text:?}");
+        }
+    }
+}

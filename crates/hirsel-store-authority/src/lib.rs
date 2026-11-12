@@ -91,6 +91,33 @@ impl ObjectRef {
     }
 }
 
+/// One history record, by what it is: its position and the SHA-256 of its
+/// record. The same commits name the same locators on every provider; where
+/// a record lies is the provider's to find.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub struct Locator {
+    pub position: u64,
+    pub digest: [u8; 32],
+}
+
+impl Locator {
+    pub const BYTES: usize = 40;
+
+    pub fn encode(&self) -> [u8; 40] {
+        let mut out = [0u8; 40];
+        out[..8].copy_from_slice(&self.position.to_le_bytes());
+        out[8..].copy_from_slice(&self.digest);
+        out
+    }
+
+    pub fn decode(b: &[u8]) -> Option<Locator> {
+        (b.len() == 40).then(|| Locator {
+            position: u64::from_le_bytes(b[..8].try_into().unwrap()),
+            digest: b[8..].try_into().unwrap(),
+        })
+    }
+}
+
 /// How far past the claim's next position a put may name a lifetime: the
 /// objects an entry creates are put before it is submitted.
 pub const PUT_AHEAD: u64 = 64;
@@ -181,6 +208,15 @@ pub struct Queued {
     pub(crate) at: Level,
 }
 
+impl Queued {
+    pub(crate) fn locator(&self) -> Locator {
+        Locator {
+            position: self.position,
+            digest: self.digest,
+        }
+    }
+}
+
 impl Claim {
     pub fn end(&self) -> u64 {
         self.end
@@ -200,6 +236,7 @@ impl Claim {
             end,
             epoch: self.epoch,
             identity: None,
+            appended: None,
         }
     }
     /// Records the append of `q`: the writer's end moves to it.
@@ -323,6 +360,24 @@ pub trait Authority: Send {
     /// Up to `max` records after `from` that are durable at `at`, each checked
     /// against the chain.
     fn read(&mut self, from: u64, at: Level, max: u64) -> Result<Vec<Record>, Error>;
+    /// The locator of the record at `position`: one `c` has queued, or one
+    /// this handle has followed. No provider request.
+    fn locate(&mut self, c: &Claim, position: u64) -> Result<Locator, Error> {
+        match c.queue.iter().find(|q| q.position == position) {
+            Some(q) => Ok(q.locator()),
+            None => self.followed_locator(position),
+        }
+    }
+    /// The locator of a record this handle has followed.
+    fn followed_locator(&mut self, position: u64) -> Result<Locator, Error>;
+    /// The locator of the newest append durable at `at`, `None` when there
+    /// is none: the provider's last record, or the append its claim names.
+    fn last(&mut self, at: Level) -> Result<Option<Locator>, Error>;
+    /// Up to `max` records after `from`, none past `l`, durable at `at`,
+    /// authenticated by the walk back from `l`: its digest, then each record's
+    /// `prev`. Empty when `l` names no record the provider holds, or another
+    /// one: a reader then reads [`Authority::last`] again.
+    fn at(&mut self, l: &Locator, from: u64, at: Level, max: u64) -> Result<Vec<Record>, Error>;
     /// The object `r`, `None` when absent; bytes whose digest is not `r`'s are
     /// corrupt.
     fn get(&mut self, r: ObjectRef) -> Result<Option<Vec<u8>>, Error> {
@@ -382,6 +437,117 @@ impl AuthorityError {
             _ => 0,
         })
     }
+}
+
+/// A request naming what the handle cannot answer for, refused with no effect.
+pub(crate) fn invalid() -> Error {
+    Error::Refused(AuthorityError::io(ErrorKind::InvalidInput))
+}
+
+/// The positions an [`Authority::at`] of `l` after `from` answers, oldest
+/// first, as a range; empty when `from` is at or past `l`.
+pub(crate) fn span(l: &Locator, from: u64, max: u64) -> std::ops::RangeInclusive<u64> {
+    from + 1..=l.position.min(from.saturating_add(max))
+}
+
+/// What a walk back from one locator has authenticated: the digest of each
+/// position from the locator's down to `lowest`, newest first, kept so a
+/// reader paging forward from below walks each record once.
+pub(crate) struct Anchor {
+    l: Locator,
+    lowest: u64,
+    found: Vec<[u8; 32]>,
+}
+
+/// One provider read of the record at a position with a digest: its bytes,
+/// `None` when the provider holds no such record.
+pub(crate) type Fetched = Option<Vec<u8>>;
+
+/// [`Authority::at`] over a provider's `fetch`: walks back from `l` (or from
+/// the lowest record an earlier walk from `l` reached) to the first position
+/// asked for, checking each record's digest and position, and answers the
+/// records asked for, oldest first. A record the provider does not hold ends
+/// the walk with an empty answer, and so does a record at `l` of another
+/// digest or position: nothing has authenticated `l` itself, so the reader
+/// starts again. Below `l` each digest is one an authenticated record names
+/// as its predecessor, and bytes of another digest are corrupt.
+pub(crate) fn walk(
+    anchor: &mut Option<Anchor>,
+    l: &Locator,
+    from: u64,
+    max: u64,
+    mut fetch: impl FnMut(u64, &[u8; 32]) -> Result<Fetched, Error>,
+) -> Result<Vec<Record>, Error> {
+    let span = span(l, from, max);
+    if span.is_empty() {
+        return Ok(Vec::new());
+    }
+    if anchor.as_ref().is_none_or(|a| a.l != *l) {
+        *anchor = Some(Anchor {
+            l: *l,
+            lowest: l.position,
+            found: vec![l.digest],
+        });
+    }
+    let a = anchor.as_mut().unwrap();
+    // Whether `b` is the record at `p` of digest `d`: false only for `l`'s
+    // own record, which nothing has authenticated yet.
+    let anchored = l.position;
+    let checked = |p: u64, d: &[u8; 32], b: &[u8]| -> Result<bool, Error> {
+        if envelope::digest(b) != *d || envelope::position(b).ok() != Some(p) {
+            if p == anchored {
+                return Ok(false);
+            }
+            return Err(Error::Corrupt(format!("history entry {p}")));
+        }
+        if p == 1 && envelope::prev(b).map_err(|e| bad(e, p))? != [0; 32] {
+            return Err(Error::Corrupt("history entry 1".to_string()));
+        }
+        Ok(true)
+    };
+    let mut page: Vec<(u64, Vec<u8>)> = Vec::new();
+    while a.lowest > *span.start() {
+        let p = a.lowest;
+        let d = a.found[(l.position - p) as usize];
+        let Some(b) = fetch(p, &d)? else {
+            *anchor = None;
+            return Ok(Vec::new());
+        };
+        if !checked(p, &d, &b)? {
+            *anchor = None;
+            return Ok(Vec::new());
+        }
+        let prev = envelope::prev(&b).map_err(|e| bad(e, p))?;
+        if span.contains(&p) {
+            page.push((p, b));
+        }
+        a.found.push(prev);
+        a.lowest -= 1;
+    }
+    page.reverse();
+    let mut out = Vec::with_capacity(page.len() + 1);
+    let mut kept = page.into_iter().peekable();
+    for p in span {
+        let b = match kept.next_if(|(q, _)| *q == p) {
+            Some((_, b)) => b,
+            None => {
+                let d = a.found[(l.position - p) as usize];
+                match fetch(p, &d)? {
+                    Some(b) if checked(p, &d, &b)? => b,
+                    Some(_) => {
+                        *anchor = None;
+                        return Ok(Vec::new());
+                    }
+                    None => {
+                        *anchor = None;
+                        return Ok(Vec::new());
+                    }
+                }
+            }
+        };
+        out.push(envelope::decode(&b).map_err(|e| bad(e, p))?);
+    }
+    Ok(out)
 }
 
 /// Fence a dead or foreign claim.

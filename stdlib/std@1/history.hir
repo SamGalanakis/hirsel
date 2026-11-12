@@ -83,28 +83,54 @@ pub type Holder {
   token: Bytes,
 }
 
-/// A version reader pins hold, with its holders sorted by token.
+/// A version reader pins hold, the locator of a record at or after the one
+/// holding it (`no_locator()`: the record holding this commit), and its
+/// holders sorted by token.
 pub type Reader {
   version: u64,
+  at: Bytes,
   holders: List[Holder],
 }
 
-/// A commit the engine makes on its own behalf. `Objects()` writes nothing:
-/// its record exists for the objects it inventories or retires.
-pub type Engine = Genesis(
+/// The limits a store records at creation.
+pub type Limits {
   key_bytes: u32,
   value_bytes: u32,
   transaction_bytes: u32,
   range_rows: u32,
-  bounds: Bounds
-) | Checkpoint(Descriptor) | Retain(
+}
+
+/// What a store fixes at creation and never changes: its limits and its
+/// checkpoint node bounds. The Genesis records it and each Retain repeats it
+/// byte for byte, so a reader of a pin need not read the Genesis.
+pub type Creation {
+  limits: Limits,
+  bounds: Bounds,
+}
+
+/// A checkpoint a retained version relies on, and the locator of the record
+/// whose last commit is its version: replay from it starts after that record.
+pub type Root {
+  desc: Descriptor,
+  after: Bytes,
+}
+
+/// One reader pin change a Reader commit records against the newest Retain:
+/// a holder of `token` at `version`, with the locator `at` as a Reader names
+/// it, or the holder of `token` gone.
+pub type ReaderChange = Hold(token: Bytes, principal: Bytes, version: u64, at: Bytes) | Free(token: Bytes)
+
+/// A commit the engine makes on its own behalf. `Objects()` writes nothing:
+/// its record exists for the objects it inventories or retires.
+pub type Engine = Genesis(Creation) | Checkpoint(Descriptor) | Retain(
   floor: u64,
+  creation: Creation,
   pins: List[Pin],
   readers: List[Reader],
-  checkpoints: List[Descriptor]
+  checkpoints: List[Root]
 ) | Fork(identity: Bytes, origin: Bytes, at: u64) | StreamFence(Bytes) | StreamPurge(
   Bytes
-) | Library(name: Bytes, payload: Bytes) | Objects()
+) | Library(name: Bytes, payload: Bytes) | Objects() | ReaderDelta(ReaderChange)
 
 /// What a commit records besides its writes: kind 1, 2 or 3.
 pub type Body = Transaction(Call) | Engine(Engine) | Run(run: Bytes, records: List[Record])
@@ -114,8 +140,12 @@ pub type Commit {
   writes: List[Write],
 }
 
-/// The commits of one advance: an appended record's payload.
+/// The commits of one advance: an appended record's payload. `retain` is the
+/// locator of the newest record before it holding a Retain or ReaderDelta
+/// commit, `no_locator()` when none does: a reader walks the retention state
+/// newest first.
 pub type Group {
+  retain: Bytes,
   commits: List[Commit],
   defs: List[Def],
 }
@@ -156,12 +186,16 @@ pub type Expect {
 /// `Corrupt()`. Either refuses the open; neither removes or cuts anything.
 pub type Fault = Corrupt() | Unsupported(found: Bytes)
 
-const GROUP_MAGIC: Bytes = b"HSGRUP03"
+const GROUP_MAGIC: Bytes = b"HSGRUP04"
 
 const NODE_MAGIC: Bytes = b"HSNODE02"
 
-/// The bytes of a group before its first commit: magic and count.
-pub const GROUP_HEADER: u64 = 12
+/// The bytes of a group before its first commit: magic, count and the
+/// newest earlier retention record's locator.
+pub const GROUP_HEADER: u64 = 52
+
+/// A record locator's bytes (STORE-11 "History format"): position and digest.
+pub const LOCATOR_BYTES: u64 = 40
 
 /// The bytes of a node before its first entry: magic, level and count.
 pub const NODE_HEADER: u64 = 13
@@ -196,6 +230,24 @@ pub fn digest(data: Bytes) -> unique Bytes uses {} {
 }
 
 /// Thirty-two zero bytes: a descriptor's digest and root when it names none.
+pub fn no_locator() -> Bytes uses {} {
+  let mut out: List[u8] = []
+  for _ in 0u64..LOCATOR_BYTES {
+    list.push(mut out, 0)
+  }
+  bytes.from_list(take out)
+}
+
+/// The position a locator names, 0 for `no_locator()`.
+pub fn locator_position(l: Bytes) -> u64 uses {} {
+  let mut p: u64 = 0
+  for i in 0u64..8 {
+    let b: u64 = int.widen(l[7 - i])
+    p = p << 8 | b
+  }
+  p
+}
+
 pub fn zero_digest() -> Bytes uses {} {
   bytes.from_list(zeros(32))
 }
@@ -263,6 +315,7 @@ pub fn group_writer() -> GroupWriter uses {} {
   let mut out: List[u8] = []
   put_fixed(mut out, GROUP_MAGIC)
   put_u32(mut out, 0)
+  put_fixed(mut out, no_locator())
   GroupWriter(out: take out, count: 0)
 }
 
@@ -303,8 +356,9 @@ pub fn drop_last(mut w: GroupWriter, at: u64) -> () uses {} {
   w.count -= 1
 }
 
-/// Appends the definition table and returns the group's bytes and digest.
-pub fn finish_group(take w: GroupWriter, defs: List[Def]) -> (Bytes, Bytes) uses {} {
+/// Appends the definition table and returns the group's bytes and digest;
+/// `retain` locates the newest earlier record holding retention state.
+pub fn finish_group(take w: GroupWriter, defs: List[Def], retain: Bytes) -> (Bytes, Bytes) uses {} {
   let GroupWriter(out: start, count: count) = take w
   let mut out = take start
   put_len(mut out, list.len(defs))
@@ -314,7 +368,10 @@ pub fn finish_group(take w: GroupWriter, defs: List[Def]) -> (Bytes, Bytes) uses
     put_fixed(mut out, d.code)
     put_bytes(mut out, d.revision)
   }
-  set_u32(mut out, GROUP_HEADER - 4, count)
+  set_u32(mut out, 8, count)
+  for i in 0u64..LOCATOR_BYTES {
+    out[12 + i] = retain[i]
+  }
   let data = bytes.from_list(take out)
   let d = digest(data)
   (take data, take d)
@@ -326,7 +383,7 @@ pub fn encode_group(g: Group) -> (Bytes, Bytes) uses {} {
   for c in g.commits {
     add_commit(mut w, c)
   }
-  finish_group(take w, g.defs)
+  finish_group(take w, g.defs, g.retain)
 }
 
 fn encode_body(mut out: List[u8], b: Body) -> () uses {} {
@@ -369,30 +426,58 @@ fn encode_body(mut out: List[u8], b: Body) -> () uses {} {
   }
 }
 
+fn put_limits(mut out: List[u8], l: Limits) -> () uses {} {
+  put_u32(mut out, l.key_bytes)
+  put_u32(mut out, l.value_bytes)
+  put_u32(mut out, l.transaction_bytes)
+  put_u32(mut out, l.range_rows)
+}
+
+fn get_limits(data: Bytes, mut c: Cursor) -> Result[Limits, ()] uses {} {
+  Ok(
+    Limits(
+      key_bytes: get_u32(data, mut c)?,
+      value_bytes: get_u32(data, mut c)?,
+      transaction_bytes: get_u32(data, mut c)?,
+      range_rows: get_u32(data, mut c)?
+    )
+  )
+}
+
+fn put_creation(mut out: List[u8], k: Creation) -> () uses {} {
+  put_limits(mut out, k.limits)
+  put_u32(mut out, k.bounds.node_min)
+  put_u32(mut out, k.bounds.node_mean)
+  put_u32(mut out, k.bounds.node_max)
+}
+
+// A creation tuple whose node bounds fit its limits.
+fn get_creation(data: Bytes, mut c: Cursor) -> Result[Creation, ()] uses {} {
+  let l = get_limits(data, mut c)?
+  let b = Bounds(
+    node_min: get_u32(data, mut c)?,
+    node_mean: get_u32(data, mut c)?,
+    node_max: get_u32(data, mut c)?
+  )
+  if !bounds_fit(l.key_bytes, l.value_bytes, b) {
+    return Error(())
+  }
+  Ok(Creation(limits: l, bounds: b))
+}
+
 fn encode_engine(mut out: List[u8], e: Engine) -> u8 uses {} {
   match e {
-    Genesis(
-      key_bytes: k,
-      value_bytes: v,
-      transaction_bytes: t,
-      range_rows: r,
-      bounds: b
-    ) => {
-      put_u32(mut out, k)
-      put_u32(mut out, v)
-      put_u32(mut out, t)
-      put_u32(mut out, r)
-      put_u32(mut out, b.node_min)
-      put_u32(mut out, b.node_mean)
-      put_u32(mut out, b.node_max)
+    Genesis(k) => {
+      put_creation(mut out, k)
       1
     },
     Checkpoint(d) => {
       put_descriptor(mut out, Some(copy d))
       3
     },
-    Retain(floor: floor, pins: pins, readers: readers, checkpoints: checkpoints) => {
+    Retain(floor: floor, creation: creation, pins: pins, readers: readers, checkpoints: checkpoints) => {
       put_u64(mut out, floor)
+      put_creation(mut out, creation)
       put_len(mut out, list.len(pins))
       for p in pins {
         put_bytes(mut out, p.name)
@@ -401,6 +486,7 @@ fn encode_engine(mut out: List[u8], e: Engine) -> u8 uses {} {
       put_len(mut out, list.len(readers))
       for r in readers {
         put_u64(mut out, r.version)
+        put_fixed(mut out, r.at)
         put_len(mut out, list.len(r.holders))
         for h in r.holders {
           put_bytes(mut out, h.principal)
@@ -408,8 +494,9 @@ fn encode_engine(mut out: List[u8], e: Engine) -> u8 uses {} {
         }
       }
       put_len(mut out, list.len(checkpoints))
-      for d in checkpoints {
-        put_descriptor(mut out, Some(copy d))
+      for k in checkpoints {
+        put_descriptor(mut out, Some(copy k.desc))
+        put_fixed(mut out, k.after)
       }
       4
     },
@@ -435,6 +522,19 @@ fn encode_engine(mut out: List[u8], e: Engine) -> u8 uses {} {
       7
     },
     Objects() => 8,
+    ReaderDelta(Hold(token: token, principal: principal, version: version, at: at)) => {
+      put_u8(mut out, 1)
+      put_fixed(mut out, token)
+      put_bytes(mut out, principal)
+      put_u64(mut out, version)
+      put_fixed(mut out, at)
+      9
+    },
+    ReaderDelta(Free(token: token)) => {
+      put_u8(mut out, 2)
+      put_fixed(mut out, token)
+      9
+    },
   }
 }
 
@@ -624,6 +724,7 @@ fn group_fields(data: Bytes) -> Result[Group, ()] uses {} {
   let mut c = Cursor(at: 0, end: bytes.len(data))
   magic(data, mut c, GROUP_MAGIC)?
   let count: u64 = int.widen(get_u32(data, mut c)?)
+  let retain = get_fixed(data, mut c, LOCATOR_BYTES)?
   if count == 0 {
     return Error(())
   }
@@ -662,7 +763,7 @@ fn group_fields(data: Bytes) -> Result[Group, ()] uses {} {
       return Error(())
     }
   }
-  Ok(Group(commits: take commits, defs: take defs))
+  Ok(Group(retain: retain, commits: take commits, defs: take defs))
 }
 
 fn get_writes(data: Bytes, mut c: Cursor) -> Result[List[Write], ()] uses {} {
@@ -755,19 +856,7 @@ fn get_body(data: Bytes, mut c: Cursor) -> Result[Body, ()] uses {} {
 fn decode_engine(op: u8, data: Bytes) -> Result[Engine, ()] uses {} {
   let mut c = Cursor(at: 0, end: bytes.len(data))
   let e: Engine = if op == 1 {
-    let k = get_u32(data, mut c)?
-    let v = get_u32(data, mut c)?
-    let t = get_u32(data, mut c)?
-    let r = get_u32(data, mut c)?
-    let b = Bounds(
-      node_min: get_u32(data, mut c)?,
-      node_mean: get_u32(data, mut c)?,
-      node_max: get_u32(data, mut c)?
-    )
-    if !bounds_fit(k, v, b) {
-      return Error(())
-    }
-    Genesis(key_bytes: k, value_bytes: v, transaction_bytes: t, range_rows: r, bounds: b)
+    Genesis(get_creation(data, mut c)?)
   } else if op == 3 {
     let Some(d) = get_descriptor(data, mut c)? else {
       return Error(())
@@ -775,6 +864,7 @@ fn decode_engine(op: u8, data: Bytes) -> Result[Engine, ()] uses {} {
     Checkpoint(take d)
   } else if op == 4 {
     let floor = get_u64(data, mut c)?
+    let creation = get_creation(data, mut c)?
     let n: u64 = int.widen(get_u32(data, mut c)?)
     if n > MAX_PINS {
       return Error(())
@@ -807,6 +897,7 @@ fn decode_engine(op: u8, data: Bytes) -> Result[Engine, ()] uses {} {
         }
       }
       prior_version = Some(version)
+      let at = get_fixed(data, mut c, LOCATOR_BYTES)?
       let h: u64 = int.widen(get_u32(data, mut c)?)
       held += h
       if h == 0 || held > MAX_HOLDERS {
@@ -828,17 +919,27 @@ fn decode_engine(op: u8, data: Bytes) -> Result[Engine, ()] uses {} {
         prior_token = Some(copy token)
         list.push(mut holders, Holder(principal: take principal, token: take token))
       }
-      list.push(mut readers, Reader(version: version, holders: take holders))
+      list.push(mut readers, Reader(version: version, at: take at, holders: take holders))
     }
     let m: u64 = int.widen(get_u32(data, mut c)?)
-    let mut checkpoints: List[Descriptor] = []
+    let mut checkpoints: List[Root] = []
     for _ in 0u64..m {
       let Some(d) = get_descriptor(data, mut c)? else {
         return Error(())
       }
-      list.push(mut checkpoints, take d)
+      let after = get_fixed(data, mut c, LOCATOR_BYTES)?
+      if locator_position(after) == 0 {
+        return Error(())
+      }
+      list.push(mut checkpoints, Root(desc: take d, after: take after))
     }
-    Retain(floor: floor, pins: take pins, readers: take readers, checkpoints: take checkpoints)
+    Retain(
+      floor: floor,
+      creation: creation,
+      pins: take pins,
+      readers: take readers,
+      checkpoints: take checkpoints
+    )
   } else if op == 5 {
     let identity = get_fixed(data, mut c, 32)?
     let origin = get_fixed(data, mut c, 32)?
@@ -860,6 +961,22 @@ fn decode_engine(op: u8, data: Bytes) -> Result[Engine, ()] uses {} {
     Library(name: take name, payload: take payload)
   } else if op == 8 {
     Objects()
+  } else if op == 9 {
+    let which = get_u8(data, mut c)?
+    let token = get_fixed(data, mut c, TOKEN_BYTES)?
+    if which == 1 {
+      let principal = get_bytes(data, mut c)?
+      let version = get_u64(data, mut c)?
+      let at = get_fixed(data, mut c, LOCATOR_BYTES)?
+      if bytes.len(principal) > MAX_PRINCIPAL {
+        return Error(())
+      }
+      ReaderDelta(Hold(token: take token, principal: take principal, version: version, at: take at))
+    } else if which == 2 {
+      ReaderDelta(Free(token: take token))
+    } else {
+      return Error(())
+    }
   } else {
     return Error(())
   }

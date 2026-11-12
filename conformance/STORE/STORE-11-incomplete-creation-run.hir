@@ -1,12 +1,14 @@
 // rule: STORE-11
 // expect: run
-// authorities: {"claims":{"provider":"authority.memory@1","floor":"memory"},"orphan":{"provider":"authority.memory@1","floor":"memory"},"damaged":{"provider":"authority.memory@1","floor":"memory"},"claimsobjects":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1}},"orphanobjects":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1}},"damagedobjects":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1}}}
+// authorities: {"claims":{"provider":"authority.memory@1","floor":"memory"},"orphan":{"provider":"authority.memory@1","floor":"memory"},"damaged":{"provider":"authority.memory@1","floor":"memory"},"refolded":{"provider":"authority.memory@1","floor":"memory"},"claimsobjects":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1}},"orphanobjects":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1}},"damagedobjects":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1}},"refoldedobjects":{"provider":"authority.objects@1","floor":"disk","level":"disk","objects":{"provider":"objects.sim@1","seed":1}}}
 // stdout: claims: created, kept 1, limits kept
 // stdout: orphan: corrupt history/2
 // stdout: damaged: corrupt history/2
+// stdout: refolded: corrupt history/2
 // stdout: claimsobjects: created, kept 1, limits kept
 // stdout: orphanobjects: corrupt history/2
 // stdout: damagedobjects: corrupt history/2
+// stdout: refoldedobjects: corrupt history/2
 // steps: 20000000
 // a reopen on each authority and a transaction of 200 writes at the size limit
 // An incomplete creation is no store, and nothing else is read as one. Each history is
@@ -21,6 +23,10 @@
 //   refused; one small write commits and 200 writes of 24 bytes, over the 4096
 //   transaction bytes, are refused; a range of 3 rows reads, in a transaction and in a
 //   query on a snapshot of the reopened store, and a range of 4 is refused in both.
+//   A reader pin the reopened store acquires reads under the limits its Retain fold
+//   repeats, which are the store's, never the opener's: a query on the pinned state
+//   reads a range of 3 and refuses a range of 4. Trim relies on this: once the
+//   Genesis is gone, the fold is where a reader finds the limits.
 //   The creation's node bounds hold too: its nodes are at most 1024 bytes, so after 60
 //   writes of 31- and 32-byte leaf entries a checkpoint has several leaves under an index
 //   (height 2 or more), where the default bounds hold them in one leaf. A creation whose bounds
@@ -31,6 +37,9 @@
 //   group: an established store whose Genesis is damaged. Corruption at entry 2, never
 //   a new store. The authority accepts each payload whole; the group inside is the
 //   engine's to check.
+// - refolded: a claim, then a group of the Genesis and a Retain fold whose creation
+//   tuple names node bounds other than the Genesis's (8 MiB at most, not 4). A fold
+//   repeats the tuple byte for byte, so this one is corruption at entry 2.
 pub type Failed = Failed(String)
 
 fn say(stdout: Stdout, line: String) -> Result[(), Failed] {
@@ -141,6 +150,7 @@ fn commits(mut s: store.Store, w: (u64, u64, u64), limit: Option[store.TxLimit])
 fn group(body: history.Engine) -> Bytes {
   let (data, _) = history.encode_group(
     history.Group(
+      retain: history.no_locator(),
       commits: [history.Commit(body: Engine(copy body), writes: [])],
       defs: []
     )
@@ -149,12 +159,18 @@ fn group(body: history.Engine) -> Bytes {
 }
 
 fn genesis_body() -> history.Engine {
+  Genesis(default_creation())
+}
+
+fn default_creation() -> history.Creation {
   let l = store.default_config().limits
-  Genesis(
-    key_bytes: int.narrow(l.key_bytes),
-    value_bytes: int.narrow(l.value_bytes),
-    transaction_bytes: int.narrow(l.transaction_bytes),
-    range_rows: int.narrow(l.range_rows),
+  history.Creation(
+    limits: history.Limits(
+      key_bytes: int.narrow(l.key_bytes),
+      value_bytes: int.narrow(l.value_bytes),
+      transaction_bytes: int.narrow(l.transaction_bytes),
+      range_rows: int.narrow(l.range_rows)
+    ),
     bounds: history.default_bounds()
   )
 }
@@ -232,6 +248,7 @@ fn claims_only(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
   let q4 = store.query(take snap, rows, 4u64)
   let scans = ranged(r3, Some(3)) && ranged(r4, None())
   let queries = ranged(q3, Some(1)) && ranged(q4, None())
+  let pinned = pinned_limits(rt, a, mut s2)?
   // 30 keys of 8 bytes and 30 of 7, each with a 16-byte value: 1890 bytes of leaf
   // entries, over node_max.
   let filled = commits(mut s2, (30, 8, 16), None()) && commits(
@@ -244,7 +261,7 @@ fn claims_only(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
   }
   let height = checkpoint_height(a)?
   let nodes = height >= 2
-  let mut kept_limits = scans && queries && filled && nodes
+  let mut kept_limits = scans && queries && pinned && filled && nodes
   for e in edges {
     kept_limits = kept_limits && e
   }
@@ -307,6 +324,70 @@ fn damaged(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
   say(stdout, f"{name}: {opened(store.open(a, store.default_config()))}")
 }
 
+fn refolded(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
+  let Ok(a) = io.authority(rt, name) else {
+    return Error(Failed("authority"))
+  }
+  let Ok(made) = authority.claim(a) else {
+    return Error(Failed("claim"))
+  }
+  let mut c = take made
+  let mut other = default_creation()
+  other.bounds.node_max = 8388608
+  let fold = Retain(
+    floor: 0,
+    creation: take other,
+    pins: [],
+    readers: [],
+    checkpoints: []
+  )
+  let (entry, _) = history.encode_group(
+    history.Group(
+      retain: history.no_locator(),
+      commits: [
+        history.Commit(body: Engine(genesis_body()), writes: []),
+        history.Commit(body: Engine(take fold), writes: [])
+      ],
+      defs: []
+    )
+  )
+  match authority.submit(a, mut c, take entry, [], [], authority.floor(a)) {
+    Ok(p) => match authority.wait(a, mut c, p) {
+      Advanced(_) => {},
+      _ => return Error(Failed("append")),
+    },
+    Error(_) => return Error(Failed("submit")),
+  }
+  say(stdout, f"{name}: {opened(store.open(a, store.default_config()))}")
+}
+
+// Whether a reader pin acquired on `s`, which holds four rows, reads them under
+// the store's limits: a range of 3 reads and a range of 4 is refused.
+fn pinned_limits(rt: Io, a: Authority, mut s: store.Store) -> Result[bool, Failed] {
+  let Ok(r) = io.random(rt) else {
+    return Error(Failed("random"))
+  }
+  let Ok(p) = store.new_reader_pin(r) else {
+    return Error(Failed("reader pin"))
+  }
+  let request = CallRequest(
+    stream: sha256_name(b"reader"),
+    epoch: 1,
+    position: 1,
+    digest: sha256_name(b"acquire"),
+    acknowledged: 0
+  )
+  let Ok(held) = store.call(mut s, request, store.acquire_reader_pin, p) else {
+    return Error(Failed("acquire"))
+  }
+  let Ok(snap) = store.at_pin(a, held) else {
+    return Error(Failed("at_pin"))
+  }
+  let q3 = store.query(copy snap, rows, 3u64)
+  let q4 = store.query(take snap, rows, 4u64)
+  Ok(ranged(q3, Some(3)) && ranged(q4, None()))
+}
+
 fn sha256_name(name: Bytes) -> Bytes {
   bytes.from_inline(sha256.digest(name))
 }
@@ -319,6 +400,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
     claims_only(rt, stdout, f"claims{suffix}")?
     orphan(rt, stdout, f"orphan{suffix}")?
     damaged(rt, stdout, f"damaged{suffix}")?
+    refolded(rt, stdout, f"refolded{suffix}")?
   }
   Ok(())
 }

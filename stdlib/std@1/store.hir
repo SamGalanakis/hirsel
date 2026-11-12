@@ -162,6 +162,24 @@ fn decoded_pin(value: ReaderPin) -> bool uses {} {
   true
 }
 
+/// A reader pin an acquire holds (STORE-8): the pin's token and the version
+/// the acquire pinned. Every acquire is a commit of its own, so a token
+/// acquired again after a release holds a later version, and a held pin never
+/// reads a later holder's state.
+// The token's bytes are `hi` then `lo`, each little-endian.
+@serializable(check = decoded_held)
+pub opaque type HeldPin: copyable + plain + data + sendable + inert + noalloc_drop uses {} {
+  hi: u64,
+  lo: u64,
+  version: u64,
+}
+
+// Every token and version is a held pin's.
+@noalloc
+fn decoded_held(value: HeldPin) -> bool uses {} {
+  true
+}
+
 /// Why `acquire_reader_pin` pinned nothing: the store holds its most reader
 /// pins, or the pin's token is held already, by any principal.
 @serializable
@@ -175,16 +193,21 @@ pub opaque type PinHolder: copyable uses {} {
   id: Bytes,
 }
 
-// A reader pin the store holds: the principal that acquired it and the
-// version it holds.
+// A reader pin the store holds: the principal that acquired it, the version
+// it holds and the locator of the record holding the commit that recorded
+// it, at or after the record holding the version; empty while that commit is
+// in the pending group.
 type Reading {
   principal: String,
   version: u64,
+  at: Bytes,
 }
 
-// A checkpoint a pinned version relies on, and its nodes.
+// A checkpoint a pinned version relies on, the locator of the group whose
+// last commit is its version, and its nodes.
 type Kept {
   desc: history.Descriptor,
+  after: Bytes,
   refs: List[ObjectRef],
 }
 
@@ -343,9 +366,10 @@ pub opaque type Store: () uses {Authority} {
   retired: List[ObjectRef],
   made: ordered_map.OrderedMap[Bytes, ObjectRef],
   live: ordered_map.OrderedMap[Bytes, ObjectRef],
-  // The history's end position, and the newest group's digest and the version
-  // of its last commit, which a checkpoint names.
+  // The history's end position, and the newest group's position, digest and
+  // the version of its last commit, which a checkpoint names.
   end: u64,
+  group_at: u64,
   digest: Bytes,
   group_last: u64,
   // The group being filled, the entries its commits ran, and their encoded size.
@@ -370,8 +394,21 @@ pub opaque type Store: () uses {Authority} {
   readers: ordered_map.OrderedMap[Bytes, Reading],
   kept: List[Kept],
   newest: Option[history.Descriptor],
+  // The locator of the group whose last commit is the newest checkpoint's
+  // version (`no_locator()` before the first); the locator of the newest record holding a Retain or
+  // ReaderDelta commit, the ReaderDelta commits since the newest Retain, and
+  // whether the pending group holds either kind.
+  newest_after: Bytes,
+  retain_loc: Bytes,
+  deltas: u64,
+  retaining: bool,
   closed: bool,
 }
+
+// A Retain is written in place of a ReaderDelta once the deltas since the
+// newest Retain would reach the holder count or this many (STORE-8), so a
+// newest-first lookup reads at most this many records and the newest group.
+const FOLD_DELTAS: u64 = 32
 
 // The overhead the format allows a group beyond its largest commit: header,
 // definition table and framing (STORE-11 "Bounds").
@@ -502,6 +539,7 @@ pub fn open(a: Authority, config: StoreConfig) -> Result[Store, StoreError] {
     made: ordered_map.empty(compare_keys),
     live: ordered_map.empty(compare_keys),
     end: 0,
+    group_at: 0,
     digest: history.zero_digest(),
     group_last: 0,
     pending: None(),
@@ -516,6 +554,10 @@ pub fn open(a: Authority, config: StoreConfig) -> Result[Store, StoreError] {
     readers: ordered_map.empty(compare_keys),
     kept: [],
     newest: None(),
+    newest_after: history.no_locator(),
+    retain_loc: history.no_locator(),
+    deltas: 0,
+    retaining: false,
     closed: false
   )
   let created = recover(a, mut s, end)?
@@ -535,14 +577,20 @@ pub fn open(a: Authority, config: StoreConfig) -> Result[Store, StoreError] {
 fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
   let floor = authority.floor(a)
   let mut tip = history.origin_tip()
-  // The groups after the newest checkpoint, with their digests and the
-  // version of their first commit.
-  let mut since: List[(history.Group, Bytes, u64)] = []
-  let mut newest: (Bytes, u64) = (history.zero_digest(), 0)
+  // The groups after the newest checkpoint, with their digests, the version
+  // of their first commit and their positions.
+  let mut since: List[(history.Group, Bytes, u64, u64)] = []
+  let mut newest: (Bytes, u64, u64) = (history.zero_digest(), 0, 0)
   let mut checkpoint: Option[history.Descriptor] = None()
-  let mut recorded: Option[(StoreLimits, history.Bounds)] = None()
-  // The newest Retain's floor, named pins, readers and kept checkpoints.
-  let mut retention: Option[(u64, List[history.Pin], List[history.Reader], List[history.Descriptor])] = None()
+  let mut checkpoint_after: u64 = 0
+  let mut recorded: Option[history.Creation] = None()
+  // The newest Retain's floor, named pins and kept checkpoints, the readers
+  // table it and the ReaderDelta commits since record, how many those are,
+  // and the newest record holding either kind.
+  let mut retention: Option[(u64, List[history.Pin], List[history.Root])] = None()
+  let mut table: ordered_map.OrderedMap[Bytes, Reading] = ordered_map.empty(compare_keys)
+  let mut deltas: u64 = 0
+  let mut retain_loc = history.no_locator()
   let mut epoch: u64 = 0
   // The objects the records created and none retired, and the position of
   // the newest checkpoint's record.
@@ -582,41 +630,42 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
         return Error(stop(mut s, Corrupt(entry_name(here))))
       }
       tip = take next
+      // Each group names the newest retention record before it.
+      if g.retain != retain_loc {
+        return Error(stop(mut s, Corrupt(entry_name(here))))
+      }
       let d = history.digest(e)
-      newest = (copy d, tip.last)
+      newest = (copy d, tip.last, here)
+      // A retention commit's zero locators name its own record.
+      let mut here_loc = history.no_locator()
+      for x in g.commits {
+        match x.body {
+          Engine(Retain(..)) | Engine(ReaderDelta(_)) => {
+            if here_loc == history.no_locator() {
+              here_loc = located(a, mut s, here)?
+            }
+          },
+          _ => {},
+        }
+      }
       let mut objects = false
       for x in g.commits {
         match x.body {
-          Engine(Genesis(
-            key_bytes: k,
-            value_bytes: v,
-            transaction_bytes: t,
-            range_rows: r,
-            bounds: b
-          )) => {
-            recorded = Some(
-              (
-                StoreLimits(
-                  key_bytes: int.widen(k),
-                  value_bytes: int.widen(v),
-                  transaction_bytes: int.widen(t),
-                  range_rows: int.widen(r)
-                ),
-                copy b
-              )
-            )
+          Engine(Genesis(k)) => {
+            recorded = Some(copy k)
           },
           Engine(Checkpoint(desc)) => {
             // Its version is a group's last, and that group is before it.
-            let mut kept: List[(history.Group, Bytes, u64)] = []
+            let mut kept: List[(history.Group, Bytes, u64, u64)] = []
             let mut found = false
-            for (h, hd, hfirst) in since {
+            for (h, hd, hfirst, hat) in since {
               let last = hfirst + list.len(h.commits) - 1
               if last == desc.version {
                 found = hd == desc.digest
+                checkpoint_after = hat
               }
               if last > desc.version {
-                list.push(mut kept, (copy h, copy hd, hfirst))
+                list.push(mut kept, (copy h, copy hd, hfirst, hat))
               }
             }
             if !found {
@@ -630,8 +679,30 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
           Engine(Objects()) => {
             objects = true
           },
-          Engine(Retain(floor: f, pins: p, readers: r, checkpoints: k)) => {
-            retention = Some((f, copy p, copy r, copy k))
+          Engine(Retain(floor: f, creation: c, pins: p, readers: r, checkpoints: k)) => {
+            // A fold repeats the creation tuple the Genesis recorded.
+            let same = match recorded {
+              Some(g) => g == c,
+              None() => false,
+            }
+            let Ok(folded) = reading_table(r, here_loc) else {
+              return Error(stop(mut s, Corrupt(entry_name(here))))
+            }
+            if !same {
+              return Error(stop(mut s, Corrupt(entry_name(here))))
+            }
+            table = take folded
+            retention = Some((f, copy p, copy k))
+            deltas = 0
+            retain_loc = copy here_loc
+          },
+          Engine(ReaderDelta(change)) => {
+            // A delta changes the table a Retain before it recorded.
+            if retention == None() || reading_change(mut table, change, here_loc) != Ok(()) {
+              return Error(stop(mut s, Corrupt(entry_name(here))))
+            }
+            deltas += 1
+            retain_loc = copy here_loc
           },
           _ => {},
         }
@@ -649,7 +720,7 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
           return Error(stop(mut s, Corrupt(entry_name(here))))
         }
       }
-      list.push(mut since, (take g, take d, first))
+      list.push(mut since, (take g, take d, first, here))
     }
   }
   let mut state: ordered_map.OrderedMap[Bytes, Bytes] = ordered_map.empty(compare_keys)
@@ -658,7 +729,7 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
     state = load_checkpoint(a, mut s, desc, made, checkpoint_at)?
     from = desc.version
   }
-  for (g, _, first) in since {
+  for (g, _, first, _) in since {
     let mut at_version = first
     for x in g.commits {
       if at_version > from {
@@ -670,56 +741,57 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
   s.index = take state
   s.made = take made
   s.newest = copy checkpoint
-  if let Some((f, pins, readers, kept)) = take retention {
-    adopt(a, mut s, f, take pins, readers, kept)?
+  s.newest_after = if checkpoint_after == 0 {
+    history.no_locator()
+  } else {
+    located(a, mut s, checkpoint_after)?
+  }
+  s.retain_loc = take retain_loc
+  s.deltas = deltas
+  if let Some((f, pins, kept)) = take retention {
+    adopt(a, mut s, f, take pins, take table, kept)?
   }
   s.visible = tip.last
   s.identity = unique tip.identity
   s.seed_key = seed_key(s.identity)
   s.epoch = epoch
   s.end = end
-  let (newest_digest, newest_last) = take newest
+  let (newest_digest, newest_last, newest_at) = take newest
   s.digest = take newest_digest
   s.group_last = newest_last
+  s.group_at = newest_at
   for i in 0u64..list.len(s.durable) {
     s.durable[i] = tip.last
   }
   s.held = [Held(position: end, version: tip.last, state: current(mut s))]
   match take recorded {
-    Some((limits, bounds)) => {
-      s.limits = limits
-      s.bounds = take bounds
+    Some(k) => {
+      s.limits = store_limits(k.limits)
+      s.bounds = copy k.bounds
       Ok(false)
     },
     None() => Ok(true),
   }
 }
 
-// Takes the retention state the newest Retain records: a takeover inherits
-// every reader pin. A kept checkpoint's nodes are the live ones when it is the
-// newest, and are read from its tree otherwise.
+// Takes the retention state the newest Retain and the ReaderDelta commits
+// since record: a takeover inherits every reader pin. A kept checkpoint's
+// nodes are the live ones when it is the newest, and are read from its tree
+// otherwise.
 fn adopt(
   a: Authority,
   mut s: Store,
   floor: u64,
   take pins: List[history.Pin],
-  readers: List[history.Reader],
-  kept: List[history.Descriptor]
+  take table: ordered_map.OrderedMap[Bytes, Reading],
+  kept: List[history.Root]
 ) -> Result[(), StoreError] {
   s.retain_floor = floor
   s.pins = take pins
-  let mut table: ordered_map.OrderedMap[Bytes, Reading] = ordered_map.empty(compare_keys)
-  for r in readers {
-    for h in r.holders {
-      let Ok(principal) = string.from_bytes(unique h.principal) else {
-        return Error(stop(mut s, Corrupt("hirsel.retain")))
-      }
-      ordered_map.insert(mut table, unique h.token, Reading(principal: take principal, version: r.version))
-    }
-  }
   s.readers = take table
   let mut out: List[Kept] = []
-  for d in kept {
+  for k in kept {
+    let d = k.desc
     let newest = match s.newest {
       Some(n) => n.version == d.version,
       None() => false,
@@ -729,13 +801,73 @@ fn adopt(
     } else {
       match read_tree(a, d) {
         Ok((_, refs)) => take refs,
-        Error(Missing()) => return Error(stop(mut s, Corrupt("hirsel.checkpoint"))),
+        // A tree is fetched by digest: nothing in it moves.
+        Error(Missing()) | Error(Moved()) => return Error(stop(mut s, Corrupt("hirsel.checkpoint"))),
         Error(Failed(e)) => return Error(stop(mut s, take e)),
       }
     }
-    list.push(mut out, Kept(desc: unique d, refs: take refs))
+    list.push(mut out, Kept(desc: unique d, after: copy k.after, refs: take refs))
   }
   s.kept = take out
+  Ok(())
+}
+
+// The locator a retention commit in the record at `here` names: its own,
+// `here`, for `no_locator()`.
+fn resolved(at: Bytes, here: Bytes) -> Bytes uses {} {
+  if at == history.no_locator() {
+    copy here
+  } else {
+    copy at
+  }
+}
+
+// The readers table a Retain in the record at `here` records, by token;
+// `Error(())` for a principal that is not text.
+fn reading_table(readers: List[history.Reader], here: Bytes) -> Result[
+  ordered_map.OrderedMap[Bytes, Reading],
+  ()
+] uses {} {
+  let mut table: ordered_map.OrderedMap[Bytes, Reading] = ordered_map.empty(compare_keys)
+  for r in readers {
+    for h in r.holders {
+      let Ok(principal) = string.from_bytes(unique h.principal) else {
+        return Error(())
+      }
+      ordered_map.insert(
+        mut table,
+        unique h.token,
+        Reading(principal: take principal, version: r.version, at: resolved(r.at, here))
+      )
+    }
+  }
+  Ok(take table)
+}
+
+// `table` after the change of a ReaderDelta in the record at `here`:
+// `Error(())` for a holder of a token the table holds, a gone token it does
+// not hold, a principal that is not text or a table past `MAX_HOLDERS`.
+fn reading_change(
+  mut table: ordered_map.OrderedMap[Bytes, Reading],
+  change: history.ReaderChange,
+  here: Bytes
+) -> Result[(), ()] uses {} {
+  match change {
+    Hold(token: token, principal: principal, version: held, at: at) => {
+      let Ok(who) = string.from_bytes(unique principal) else {
+        return Error(())
+      }
+      if ordered_map.contains(table, token) || ordered_map.len(table) >= history.MAX_HOLDERS {
+        return Error(())
+      }
+      ordered_map.insert(mut table, unique token, Reading(principal: take who, version: held, at: resolved(at, here)))
+    },
+    Free(token: token) => {
+      if let None() = ordered_map.remove(mut table, token) {
+        return Error(())
+      }
+    },
+  }
   Ok(())
 }
 
@@ -815,23 +947,52 @@ fn genesis(a: Authority, mut s: Store, limits: StoreLimits, bounds: history.Boun
   (),
   StoreError
 ] {
-  let k: u32 = int.narrow(limits.key_bytes)
-  let v: u32 = int.narrow(limits.value_bytes)
   s.limits = limits
   s.bounds = copy bounds
-  let body: history.Body = Engine(
-    Genesis(
-      key_bytes: k,
-      value_bytes: v,
-      transaction_bytes: int.narrow(limits.transaction_bytes),
-      range_rows: int.narrow(limits.range_rows),
-      bounds: take bounds
-    )
-  )
+  let body: history.Body = Engine(Genesis(history.Creation(limits: recorded_as(limits), bounds: take bounds)))
   let t = serial(mut s)
   let _ = commit(mut s, take t, take body, None()) ? unreleased
   strongest(a, mut s) ? unreleased
   Ok(())
+}
+
+// The limits as the creation tuple records them; `creatable` has
+// checked that each fits.
+fn recorded_as(l: StoreLimits) -> history.Limits uses {} {
+  history.Limits(
+    key_bytes: int.narrow(l.key_bytes),
+    value_bytes: int.narrow(l.value_bytes),
+    transaction_bytes: int.narrow(l.transaction_bytes),
+    range_rows: int.narrow(l.range_rows)
+  )
+}
+
+fn store_limits(l: history.Limits) -> StoreLimits uses {} {
+  StoreLimits(
+    key_bytes: int.widen(l.key_bytes),
+    value_bytes: int.widen(l.value_bytes),
+    transaction_bytes: int.widen(l.transaction_bytes),
+    range_rows: int.widen(l.range_rows)
+  )
+}
+
+// The locator of the record at `p`, which the store's claim has queued or its
+// handle has followed. A store with no live claim closes.
+fn located(a: Authority, mut s: Store, p: u64) -> Result[Bytes, StoreError] {
+  let Some(held) = replace(mut s.claim, None()) else {
+    return Error(stop(mut s, Closed()))
+  }
+  let Some(narrowed) = claim.narrow(a, take held) else {
+    return Error(stop(mut s, Closed()))
+  }
+  let mut c = take narrowed
+  let r = authority.locate(a, mut c, p)
+  let back: Claim = take c
+  s.claim = Some(take back)
+  match take r {
+    Ok(l) => Ok(take l),
+    Error(e) => Error(stop(mut s, seam(take e))),
+  }
 }
 
 // A history position as the name a refusal carries.
@@ -1151,6 +1312,7 @@ pub fn compact(mut s: Store) -> Result[(), StoreError] {
   // The state at V is the state after the newest group: a claim since writes
   // nothing, and so do the Objects commits.
   let last = s.group_last
+  let last_at = located(a, mut s, s.group_at)?
   let group = copy s.digest
   let placement = history.Placement(
     // Every failure below closes the store; success sets the new live nodes.
@@ -1224,6 +1386,7 @@ pub fn compact(mut s: Store) -> Result[(), StoreError] {
   }
   s.live = take live
   s.newest = Some(take desc)
+  s.newest_after = take last_at
   reclaim(a, mut s)
 }
 
@@ -1306,9 +1469,11 @@ fn pin_token(p: ReaderPin) -> Bytes uses {} {
 /// is released once the Retain commit that records the pin is durable at
 /// the strongest declared level. `Taken()` when the store holds `p`'s token
 /// already, for any principal; `Limit()` when it holds `MAX_HOLDERS` pins.
-/// Served with `served_transact`, a caller asks it on its own call stream,
-/// and asking the same stream position again returns the recorded reply.
-pub fn acquire_reader_pin(mut tx: Tx, info: CallInfo, p: ReaderPin) -> Result[(), PinError] {
+/// The held pin names the version pinned, which `at_pin` and
+/// `drop_reader_pin` take. Served with `served_transact`, a caller asks it on
+/// its own call stream, and asking the same stream position again returns the
+/// recorded reply.
+pub fn acquire_reader_pin(mut tx: Tx, info: CallInfo, p: ReaderPin) -> Result[HeldPin, PinError] {
   let token = pin_token(p)
   if ordered_map.contains(tx.txn.readers, token) {
     return Error(Taken())
@@ -1317,15 +1482,16 @@ pub fn acquire_reader_pin(mut tx: Tx, info: CallInfo, p: ReaderPin) -> Result[()
     return Error(Limit())
   }
   tx.txn.pin = Some(Acquire(token: take token, principal: unique info.caller))
-  Ok(())
+  Ok(HeldPin(hi: p.hi, lo: p.lo, version: tx.txn.base))
 }
 
 /// The transaction entry that drops the caller's reader pin `p`. A pin the
-/// caller does not hold changes nothing, and dropping one cannot fail.
-pub fn drop_reader_pin(mut tx: Tx, info: CallInfo, p: ReaderPin) -> Result[(), ()] {
-  let token = pin_token(p)
+/// caller does not hold at `p`'s version changes nothing, and dropping one
+/// cannot fail.
+pub fn drop_reader_pin(mut tx: Tx, info: CallInfo, p: HeldPin) -> Result[(), ()] {
+  let token = pin_token(ReaderPin(hi: p.hi, lo: p.lo))
   let held = match ordered_map.get(tx.txn.readers, token) {
-    Some(r) => r.principal == info.caller,
+    Some(r) => r.principal == info.caller && r.version == p.version,
     None() => false,
   }
   if held {
@@ -1385,10 +1551,11 @@ fn pin_id(token: Bytes) -> Bytes uses {} {
   framed_digest([b"hirsel.pin.v1", copy token])
 }
 
-/// Releases the reader pin whose id is `id`, whoever holds it, by a Retain
+/// Releases the reader pin `h` names, whoever holds it, by a retention
 /// commit the engine makes on its own behalf, durable at the strongest
-/// declared level before it returns. False when the store holds no such pin.
-pub fn release_reader_pin(mut s: Store, id: Bytes) -> Result[bool, StoreError] {
+/// declared level before it returns. False when the store holds no pin of
+/// `h`'s id at `h`'s version.
+pub fn release_reader_pin(mut s: Store, h: PinHolder) -> Result[bool, StoreError] {
   if s.closed {
     return Error(Closed())
   }
@@ -1399,8 +1566,8 @@ pub fn release_reader_pin(mut s: Store, id: Bytes) -> Result[bool, StoreError] {
     Unbounded(),
     Ascending(),
     take start,
-    fn(take acc: Option[Bytes], k: Bytes, _r: Reading) -> (Option[Bytes], bool) {
-      if pin_id(k) == id {
+    fn(take acc: Option[Bytes], k: Bytes, r: Reading) -> (Option[Bytes], bool) {
+      if r.version == h.version && pin_id(k) == h.id {
         return (Some(unique k), false)
       }
       (take acc, true)
@@ -1462,43 +1629,68 @@ pub fn unpin(mut s: Store, name: String) -> Result[bool, StoreError] {
 // at the strongest declared level before it returns.
 fn retain_by(mut s: Store, op: PinOp) -> Result[(), StoreError] {
   let r = retained(s, op, s.visible)?
-  let Retention(body: body, pins: pins, readers: readers, kept: kept) = take r
+  let Retention(body: body, pins: pins, readers: readers, kept: kept, fold: fold) = take r
   let t = serial(mut s)
   let _ = commit(mut s, take t, take body, None()) ? unreleased
   s.pins = take pins
   s.readers = take readers
   s.kept = take kept
+  retention_written(mut s, fold)
   let a = s.authority
   strongest(a, mut s) ? unreleased
   Ok(())
 }
 
-// The retention state after a reader pin entry's `op`, run at `base`, and
-// the Retain commit that records it.
+// The retention state after a reader pin entry's `op`, run at `base`, the
+// commit that records it and whether that commit is a Retain fold.
 type Retention {
   body: history.Body,
   pins: List[history.Pin],
   readers: ordered_map.OrderedMap[Bytes, Reading],
   kept: List[Kept],
+  fold: bool,
+}
+
+// Notes a retention commit the pending group holds: a fold restarts the
+// count of deltas since one.
+fn retention_written(mut s: Store, fold: bool) -> () uses {} {
+  s.deltas = if fold {
+    0
+  } else {
+    s.deltas + 1
+  }
+  s.retaining = true
 }
 
 // The retention state after `op`, run at `base`: the named and reader pins,
-// the checkpoints their versions rely on, and the Retain commit that records
-// the whole state (STORE-8). A principal longer than `MAX_PRINCIPAL` is
-// refused, never cut.
+// the checkpoints their versions rely on, and the commit that records it
+// (STORE-8). An acquire or release that keeps the same checkpoints is a
+// ReaderDelta while the deltas since the newest fold stay below
+// min(holders, `FOLD_DELTAS`); any other change is a Retain fold of the whole
+// state. A lookup thus reads at most `FOLD_DELTAS` + 1 records. A principal
+// longer than `MAX_PRINCIPAL` is refused, never cut.
 fn retained(s: Store, op: PinOp, base: u64) -> Result[Retention, StoreError] uses {} {
   let mut readers = unique s.readers
   let mut pins = unique s.pins
+  let mut change: Option[history.ReaderChange] = None()
   match op {
     Acquire(token: token, principal: principal) => {
-      let n = bytes.len(string.as_bytes(principal))
+      let name = string.as_bytes(principal)
+      let n = bytes.len(name)
       if n > history.MAX_PRINCIPAL {
         return Error(Unsupported(Size(needed: n, max_entry: history.MAX_PRINCIPAL)))
       }
-      ordered_map.insert(mut readers, unique token, Reading(principal: unique principal, version: base))
+      // The commit recording the holder is in the pending group; its record
+      // is at or after the one holding `base`.
+      if !ordered_map.contains(readers, token) {
+        change = Some(Hold(token: unique token, principal: unique name, version: base, at: history.no_locator()))
+      }
+      ordered_map.insert(mut readers, unique token, Reading(principal: unique principal, version: base, at: b""))
     },
     Release(token: token) => {
-      let _ = ordered_map.remove(mut readers, token)
+      if let Some(_) = ordered_map.remove(mut readers, token) {
+        change = Some(Free(token: unique token))
+      }
     },
     Pin(name: name, version: v) => {
       let mut out: List[history.Pin] = []
@@ -1528,13 +1720,40 @@ fn retained(s: Store, op: PinOp, base: u64) -> Result[Retention, StoreError] use
     },
   }
   let (table, kept) = relied(s, readers, pins)
-  let mut checkpoints: List[history.Descriptor] = []
+  let mut same = list.len(kept) == list.len(s.kept)
+  if same {
+    for i in 0u64..list.len(kept) {
+      same = same && kept[i].desc.version == s.kept[i].desc.version
+    }
+  }
+  let holders = ordered_map.len(readers)
+  let bound = if holders < FOLD_DELTAS {
+    holders
+  } else {
+    FOLD_DELTAS
+  }
+  if let Some(c) = take change {
+    if same && (s.retain_loc != history.no_locator() || s.retaining) && s.deltas + 1 < bound {
+      return Ok(
+        Retention(
+          body: Engine(ReaderDelta(take c)),
+          pins: take pins,
+          readers: take readers,
+          kept: take kept,
+          fold: false
+        )
+      )
+    }
+  }
+  let mut checkpoints: List[history.Root] = []
   for k in kept {
-    list.push(mut checkpoints, unique k.desc)
+    list.push(mut checkpoints, history.Root(desc: unique k.desc, after: copy k.after))
   }
   let body: history.Body = Engine(
     Retain(
       floor: s.retain_floor,
+      // The tuple recover took from the Genesis: equal to it by construction.
+      creation: history.Creation(limits: recorded_as(s.limits), bounds: copy s.bounds),
       pins: copy pins,
       readers: take table,
       checkpoints: take checkpoints
@@ -1545,7 +1764,8 @@ fn retained(s: Store, op: PinOp, base: u64) -> Result[Retention, StoreError] use
       body: take body,
       pins: take pins,
       readers: take readers,
-      kept: take kept
+      kept: take kept,
+      fold: true
     )
   )
 }
@@ -1562,23 +1782,30 @@ fn relied(s: Store, readers: ordered_map.OrderedMap[Bytes, Reading], pins: List[
 ) uses {} {
   let mut rows: List[PinRow] = []
   for (k, r) in reading_rows(readers) {
-    list.push(mut rows, PinRow(version: r.version, token: unique k, principal: unique r.principal))
+    list.push(mut rows, PinRow(version: r.version, token: unique k, principal: unique r.principal, at: unique r.at))
   }
   list.sort(mut rows, by_version)
   let mut table: List[history.Reader] = []
   let mut holders: List[history.Holder] = []
   let mut ver: u64 = 0
+  let mut at = b""
   let mut kept: List[Kept] = []
   let mut newest_kept = false
   for h in rows {
     if list.len(holders) > 0 && h.version != ver {
-      list.push(mut table, history.Reader(version: ver, holders: replace(mut holders, [])))
+      list.push(mut table, history.Reader(version: ver, at: written_at(at), holders: replace(mut holders, [])))
     }
     if list.len(holders) == 0 {
       ver = h.version
+      at = b""
       let (more, has) = keep(s, ver, take kept, newest_kept)
       kept = take more
       newest_kept = has
+    }
+    // The nearest record after the version's of those its holders name: a
+    // pending one is the newest.
+    if at == b"" || (h.at != b"" && history.locator_position(h.at) < history.locator_position(at)) {
+      at = unique h.at
     }
     list.push(
       mut holders,
@@ -1586,7 +1813,7 @@ fn relied(s: Store, readers: ordered_map.OrderedMap[Bytes, Reading], pins: List[
     )
   }
   if list.len(holders) > 0 {
-    list.push(mut table, history.Reader(version: ver, holders: take holders))
+    list.push(mut table, history.Reader(version: ver, at: written_at(at), holders: take holders))
   }
   // A named pin's version relies on a checkpoint as a reader's does.
   for p in pins {
@@ -1636,7 +1863,7 @@ fn keep(s: Store, v: u64, take kept: List[Kept], newest_kept: bool) -> (List[Kep
       if newest_kept {
         return (take kept, true)
       }
-      (by_age(take kept, Kept(desc: take d, refs: made_refs(s.live))), true)
+      (by_age(take kept, Kept(desc: take d, after: copy s.newest_after, refs: made_refs(s.live))), true)
     },
     None() => (take kept, newest_kept),
   }
@@ -1662,7 +1889,17 @@ fn by_age(take kept: List[Kept], take k: Kept) -> List[Kept] uses {} {
 }
 
 // One holder of a reader pin, as `relied` orders them.
-type PinRow { version: u64, token: Bytes, principal: String }
+type PinRow { version: u64, token: Bytes, principal: String, at: Bytes }
+
+// A Reading's locator as a retention commit writes it: the record holding
+// the commit, `no_locator()`, while it is pending.
+fn written_at(at: Bytes) -> Bytes uses {} {
+  if at == b"" {
+    history.no_locator()
+  } else {
+    copy at
+  }
+}
 
 @noalloc
 fn by_version(x: PinRow, y: PinRow) -> i32 uses {} {
@@ -1719,59 +1956,195 @@ pub fn at(a: Authority, v: Version of a) -> Result[Snapshot of a, StoreError] {
       // A missing object while the history still retains `v` is corrupt.
       Error(Missing()) if attempt == 1 => return Error(Corrupt("hirsel.checkpoint")),
       Error(Missing()) => {},
+      // A forward replay names no locator.
+      Error(Moved()) => return Error(Corrupt("hirsel.checkpoint")),
       Error(Failed(e)) => return Error(take e),
     }
   }
   Error(Corrupt("hirsel.checkpoint"))
 }
 
-/// The state at the version the reader pin `p` holds (STORE-8): the readers
-/// table durable at the strongest declared level names it. `PinReleased()`
-/// when the table holds no holder of `p`'s token, at once. A snapshot that
-/// misses an object reads the table again: `PinReleased()` when the holder
-/// has gone since, and `Corrupt(..)` when it is still there.
-pub fn at_pin(a: Authority, p: ReaderPin) -> Result[Snapshot of a, StoreError] {
-  let token = pin_token(p)
-  for attempt in 0u64..2 {
-    let past = survey(a)?
-    let Some(want) = held_version(past, token) else {
-      return Error(PinReleased())
+/// The state at the version the reader pin `p` holds (STORE-8), when the
+/// readers table durable at the strongest declared level still holds `p`'s
+/// token at that version: `PinReleased()` otherwise, at once. The table is
+/// read newest first: the newest group, the records its retention locators
+/// name and the newest Retain fold, at most `FOLD_DELTAS` + 1 records, each
+/// fetched where its locator says. A snapshot that misses an object reads
+/// the table again: `PinReleased()` when the holder has gone since, and
+/// `Corrupt(..)` when it is still there. A record not where a locator says,
+/// because the history moved under the read, starts the read again, at
+/// most `MOVES` times before `Refused(Unreachable())`.
+pub fn at_pin(a: Authority, p: HeldPin) -> Result[Snapshot of a, StoreError] {
+  let token = pin_token(ReaderPin(hi: p.hi, lo: p.lo))
+  let top = strongest_level(a)
+  let mut missed: u64 = 0
+  let mut moved: u64 = 0
+  while true {
+    let read = match pinned(a, top, token) {
+      Ok(Some(h)) if h.version == p.version => {
+        let mut base: Option[Base] = None()
+        for r in h.roots {
+          if r.desc.version <= h.version {
+            base = Some(Base(desc: unique r.desc, after: history.locator_position(r.after)))
+          }
+        }
+        replay(a, h.limits, base, h.version, Some(copy h.at))
+      },
+      Ok(_) => return Error(PinReleased()),
+      Error(e) => Error(take e),
     }
-    match materialize(a, past, want) {
+    match read {
       Ok(snap) => return Ok(take snap),
-      Error(Missing()) if attempt == 1 => return Error(Corrupt("hirsel.checkpoint")),
-      Error(Missing()) => {},
+      Error(Missing()) if missed == 1 => return Error(Corrupt("hirsel.checkpoint")),
+      Error(Missing()) => {
+        missed += 1
+      },
+      Error(Moved()) if moved == MOVES => return Error(Refused(Unreachable())),
+      Error(Moved()) => {
+        moved += 1
+      },
       Error(Failed(e)) => return Error(take e),
     }
   }
-  Error(Corrupt("hirsel.checkpoint"))
+  // Unreachable, but the source checker requires a final expression.
+  Error(Refused(Unreachable()))
+}
+
+// How many times a pinned read starts again when a record is not where a
+// locator says.
+const MOVES: u64 = 4
+
+// What the readers table holds for a token: the version, the locator of a
+// record at or after the one holding it, the checkpoints the newest Retain
+// fold keeps and the limits it repeats.
+type Pinned {
+  version: u64,
+  at: Bytes,
+  roots: List[history.Root],
+  limits: StoreLimits,
+}
+
+// The readers table durable at `top` for `token`, read newest first: the
+// newest group, then each record its `retain` locator names, down to the
+// record holding the newest fold; that fold's table, then the ReaderDelta
+// commits after it, oldest first. A zero locator in a fold or delta names
+// its own record. A record a locator names that holds no retention commit, a
+// locator not below its record, and deltas with no fold before them are
+// corrupt. `None()` when no fold or delta holds the token.
+fn pinned(a: Authority, top: Level of a, token: Bytes) -> Result[Option[Pinned], Unread] {
+  let mut l = match authority.last(a, top) {
+    Ok(x) => x,
+    Error(e) => return Error(Failed(seam(take e))),
+  }
+  // The deltas after the newest fold, newest record first, each with its
+  // record's locator.
+  let mut later: List[(List[history.ReaderChange], Bytes)] = []
+  let mut first = true
+  while history.locator_position(l) > 0 {
+    let pos = history.locator_position(l)
+    let g = located_group(a, top, l)?
+    let mut changes: List[history.ReaderChange] = []
+    let mut fold: Option[(List[history.Reader], List[history.Root], history.Limits)] = None()
+    for x in g.commits {
+      match x.body {
+        Engine(Retain(creation: m, readers: r, checkpoints: k, ..)) => {
+          fold = Some((copy r, copy k, copy m.limits))
+          changes = []
+        },
+        Engine(ReaderDelta(c)) => list.push(mut changes, copy c),
+        _ => {},
+      }
+    }
+    if !first && fold == None() && list.len(changes) == 0 {
+      return Error(Failed(Corrupt(entry_name(pos))))
+    }
+    first = false
+    list.push(mut later, (take changes, copy l))
+    if let Some((readers, roots, limits)) = take fold {
+      let mut held: Option[(u64, Bytes)] = None()
+      for r in readers {
+        for h in r.holders {
+          if h.token == token {
+            held = Some((r.version, resolved(r.at, l)))
+          }
+        }
+      }
+      let mut i = list.len(later)
+      while i > 0 {
+        i -= 1
+        let (cs, here) = later[i]
+        for c in cs {
+          match c {
+            Hold(token: t, version: v, at: at, ..) if t == token => {
+              held = Some((v, resolved(at, here)))
+            },
+            Free(token: t) if t == token => {
+              held = None()
+            },
+            _ => {},
+          }
+        }
+      }
+      return Ok(
+        match take held {
+          Some((v, at)) => Some(Pinned(version: v, at: take at, roots: take roots, limits: store_limits(limits))),
+          None() => None(),
+        }
+      )
+    }
+    if history.locator_position(g.retain) >= pos {
+      return Error(Failed(Corrupt(entry_name(pos))))
+    }
+    l = copy g.retain
+  }
+  for (cs, _) in later {
+    if list.len(cs) > 0 {
+      return Error(Failed(Corrupt("hirsel.retain")))
+    }
+  }
+  Ok(None())
+}
+
+// The group `l` locates, durable at `top`; `Moved()` when its record is not
+// there.
+fn located_group(a: Authority, top: Level of a, l: Bytes) -> Result[history.Group, Unread] {
+  let pos = history.locator_position(l)
+  let records = match authority.at(a, l, pos - 1, top, 1) {
+    Ok(x) => x,
+    Error(e) => return Error(Failed(seam(take e))),
+  }
+  if list.len(records) == 0 {
+    return Error(Moved())
+  }
+  let Appended(e, _, _) = records[0] else {
+    return Error(Failed(Corrupt(entry_name(pos))))
+  }
+  match history.decode_group(e) {
+    Ok(g) => Ok(take g),
+    Error(Unsupported(found: found)) => Error(
+      Failed(Unsupported(Format(found: unique found, object: entry_name(pos))))
+    ),
+    Error(Corrupt()) => Error(Failed(Corrupt(entry_name(pos)))),
+  }
 }
 
 // What reading a version from the authority needs, from one pass over the
-// history durable at the strongest declared level: each group's record
-// position and the versions of its first and last commits, the checkpoints
-// in order, the newest Retain's readers and checkpoints, the recorded
-// limits and the last version.
+// history durable at the strongest declared level: the checkpoints in order,
+// each with the position of the group whose last commit is its version, the
+// readers table and named pins, the checkpoints the newest Retain keeps, the
+// recorded limits and the last version.
 type Past {
-  groups: List[Placed],
-  checkpoints: List[history.Descriptor],
-  readers: List[history.Reader],
+  checkpoints: List[Base],
+  readers: ordered_map.OrderedMap[Bytes, Reading],
   pins: List[history.Pin],
-  roots: List[history.Descriptor],
+  roots: List[history.Root],
   limits: Option[StoreLimits],
   last: u64,
 }
 
-// A group's record position and the versions of its first and last commits.
-type Placed {
-  position: u64,
-  first: u64,
-  last: u64,
-}
-
-// Why a version could not be read: an object it needs is missing, or
-// another failure.
-type Unread = Missing | Failed(StoreError)
+// Why a version could not be read: an object it needs is missing, a record
+// is not where a locator says, or another failure.
+type Unread = Missing | Moved | Failed(StoreError)
 
 // The strongest level the authority declares.
 fn strongest_level(a: Authority) -> Level of a {
@@ -1786,14 +2159,15 @@ fn strongest_level(a: Authority) -> Level of a {
 fn survey(a: Authority) -> Result[Past, StoreError] {
   let top = strongest_level(a)
   let mut past = Past(
-    groups: [],
     checkpoints: [],
-    readers: [],
+    readers: ordered_map.empty(compare_keys),
     pins: [],
     roots: [],
     limits: None(),
     last: 0
   )
+  // Each group's last version and position, newest last.
+  let mut ends: List[(u64, u64)] = []
   let mut tip = history.origin_tip()
   let mut here: u64 = 0
   while true {
@@ -1820,55 +2194,50 @@ fn survey(a: Authority) -> Result[Past, StoreError] {
         ),
         Error(Corrupt()) => return Error(Corrupt(entry_name(here))),
       }
-      let first = tip.last + 1
       let Ok(next) = history.follow(tip, g) else {
         return Error(Corrupt(entry_name(here)))
       }
       tip = take next
       for x in g.commits {
         match x.body {
-          Engine(Genesis(
-            key_bytes: k,
-            value_bytes: v,
-            transaction_bytes: t,
-            range_rows: r,
-            ..
-          )) => {
-            past.limits = Some(
-              StoreLimits(
-                key_bytes: int.widen(k),
-                value_bytes: int.widen(v),
-                transaction_bytes: int.widen(t),
-                range_rows: int.widen(r)
-              )
-            )
+          Engine(Genesis(k)) => {
+            past.limits = Some(store_limits(k.limits))
           },
-          Engine(Checkpoint(desc)) => list.push(mut past.checkpoints, copy desc),
+          Engine(Checkpoint(desc)) => {
+            let mut after: u64 = 0
+            for (last, end) in ends {
+              if last == desc.version {
+                after = end
+              }
+            }
+            if after == 0 {
+              return Error(Corrupt(entry_name(here)))
+            }
+            list.push(mut past.checkpoints, Base(desc: copy desc, after: after))
+          },
           Engine(Retain(pins: pins, readers: readers, checkpoints: checkpoints, ..)) => {
-            past.readers = copy readers
+            // The locators are not read here: a version retained is read
+            // from the whole history.
+            let Ok(table) = reading_table(readers, history.no_locator()) else {
+              return Error(Corrupt(entry_name(here)))
+            }
+            past.readers = take table
             past.pins = copy pins
             past.roots = copy checkpoints
+          },
+          Engine(ReaderDelta(change)) => {
+            if reading_change(mut past.readers, change, history.no_locator()) != Ok(()) {
+              return Error(Corrupt(entry_name(here)))
+            }
           },
           _ => {},
         }
       }
-      list.push(mut past.groups, Placed(position: here, first: first, last: tip.last))
+      list.push(mut ends, (tip.last, here))
     }
   }
   past.last = tip.last
   Ok(take past)
-}
-
-// The version the readers table holds for `token`.
-fn held_version(past: Past, token: Bytes) -> Option[u64] uses {} {
-  for r in past.readers {
-    for h in r.holders {
-      if h.token == token {
-        return Some(r.version)
-      }
-    }
-  }
-  None()
 }
 
 // Whether the history retains `v`: at or above its newest checkpoint, or held
@@ -1877,7 +2246,7 @@ fn retains(past: Past, v: u64) -> bool uses {} {
   if v == 0 || v > past.last {
     return false
   }
-  for r in past.readers {
+  for (_, r) in reading_rows(past.readers) {
     if r.version == v {
       return true
     }
@@ -1888,7 +2257,7 @@ fn retains(past: Past, v: u64) -> bool uses {} {
     }
   }
   let n = list.len(past.checkpoints)
-  n == 0 || v >= past.checkpoints[n - 1].version
+  n == 0 || v >= past.checkpoints[n - 1].desc.version
 }
 
 // The state at `v`: the newest root checkpoint at or below it (the newest
@@ -1898,81 +2267,97 @@ fn materialize(a: Authority, past: Past, v: u64) -> Result[Snapshot of a, Unread
   let Some(limits) = past.limits else {
     return Error(Failed(NotRetained()))
   }
-  // No engine opened this snapshot: its queries run under the default energy.
-  let energy = default_config().energy
-  let mut base: Option[history.Descriptor] = None()
+  let mut base: Option[Base] = None()
   let mut below = false
   let n = list.len(past.checkpoints)
   for i in 0u64..n {
     let d = past.checkpoints[i]
-    if d.version <= v {
+    if d.desc.version <= v {
       below = true
       let mut root = i + 1 == n
       for r in past.roots {
-        root = root || r.version == d.version
+        root = root || r.desc.version == d.desc.version
       }
       if root {
         base = Some(unique d)
       }
     }
   }
+  if below && base == None() {
+    return Error(Failed(Corrupt("hirsel.checkpoint")))
+  }
+  replay(a, limits, base, v, None())
+}
+
+// A checkpoint replay starts from and the position of the group whose last
+// commit is its version.
+type Base {
+  desc: history.Descriptor,
+  after: u64,
+}
+
+// The state at `v`: `base`'s tree, or the empty state when it is `None()`,
+// and the commits after it up to `v`, read from the record after `base`'s
+// group: up to the record `upto` locates, at or after the one holding `v`,
+// or, for `None()`, forward. A claim counts as a version and writes nothing.
+fn replay(
+  a: Authority,
+  limits: StoreLimits,
+  base: Option[Base],
+  v: u64,
+  upto: Option[Bytes]
+) -> Result[Snapshot of a, Unread] {
+  // No engine opened this snapshot: its queries run under the default energy.
+  let energy = default_config().energy
   let mut state: ordered_map.OrderedMap[Bytes, Bytes] = ordered_map.empty(compare_keys)
-  let mut from: u64 = 0
-  match base {
-    Some(d) => {
-      let (loaded, _) = read_tree(a, d)?
-      state = take loaded
-      from = d.version
-    },
-    None() if below => return Error(Failed(Corrupt("hirsel.checkpoint"))),
-    None() => {},
-  }
-  // The groups holding commits in (from, v], by record position.
-  let mut start: u64 = 0
-  let mut found = false
-  for p in past.groups {
-    if !found && p.last > from {
-      start = p.position
-      found = true
-    }
-  }
-  if !found || from >= v {
-    return Ok(Snapshot(version: v, index: take state, limits: limits, energy: energy))
+  let mut ver: u64 = 0
+  let mut here: u64 = 0
+  if let Some(r) = base {
+    let (loaded, _) = read_tree(a, r.desc)?
+    state = take loaded
+    ver = r.desc.version
+    here = r.after
   }
   let top = strongest_level(a)
-  let mut here = start - 1
-  let mut g_i: u64 = 0
-  while g_i < list.len(past.groups) && past.groups[g_i].position < start {
-    g_i += 1
-  }
-  while g_i < list.len(past.groups) && past.groups[g_i].first <= v {
-    let records = match authority.read(a, here, top, READ_BATCH) {
+  while ver < v {
+    let read = match upto {
+      Some(l) => {
+        if here >= history.locator_position(l) {
+          return Error(Failed(Corrupt(entry_name(here))))
+        }
+        authority.at(a, l, here, top, READ_BATCH)
+      },
+      None() => authority.read(a, here, top, READ_BATCH),
+    }
+    let records = match take read {
       Ok(x) => x,
       Error(e) => return Error(Failed(seam(take e))),
     }
     if list.len(records) == 0 {
+      if upto != None() {
+        return Error(Moved())
+      }
       return Error(Failed(Corrupt(entry_name(here + 1))))
     }
     for item in records {
       here += 1
-      let Appended(e, _, _) = item else {
-        continue
+      match item {
+        Claimed(_, _, _) => {
+          ver += 1
+        },
+        Appended(e, _, _) => {
+          let Ok(g) = history.decode_group(e) else {
+            return Error(Failed(Corrupt(entry_name(here))))
+          }
+          for x in g.commits {
+            ver += 1
+            if ver <= v {
+              apply(mut state, x.writes)
+            }
+          }
+        },
       }
-      if g_i >= list.len(past.groups) || past.groups[g_i].position != here {
-        continue
-      }
-      let Ok(g) = history.decode_group(e) else {
-        return Error(Failed(Corrupt(entry_name(here))))
-      }
-      let mut ver = past.groups[g_i].first
-      for x in g.commits {
-        if ver > from && ver <= v {
-          apply(mut state, x.writes)
-        }
-        ver += 1
-      }
-      g_i += 1
-      if g_i >= list.len(past.groups) || past.groups[g_i].first > v {
+      if ver >= v {
         break
       }
     }
@@ -4005,10 +4390,11 @@ fn commit(mut s: Store, take t: Run, take body: history.Body, take def: Option[h
   s.visible += 1
   let made = s.visible
   if let Some(r) = take retention {
-    let Retention(pins: pins, readers: readers, kept: kept, ..) = take r
+    let Retention(pins: pins, readers: readers, kept: kept, fold: fold, ..) = take r
     s.pins = take pins
     s.readers = take readers
     s.kept = take kept
+    retention_written(mut s, fold)
     s.visible += 1
   }
   if pending_count(s) >= s.config.group_commits || group_size(s) >= s.config.group_bytes {
@@ -4139,7 +4525,8 @@ fn submit_claimed(a: Authority, mut s: Store, mut c: Claim of a, here: Level of 
   }
   let defs = replace(mut s.defs, [])
   s.defs_bytes = 0
-  let (entry, d) = history.finish_group(take w, defs)
+  // The group names the newest record holding retention commits before it.
+  let (entry, d) = history.finish_group(take w, defs, s.retain_loc)
   let created = replace(mut s.created, [])
   let retired = replace(mut s.retired, [])
   let submitted = authority.submit(a, mut c, take entry, created, retired, here)
@@ -4153,6 +4540,26 @@ fn submit_claimed(a: Authority, mut s: Store, mut c: Claim of a, here: Level of 
   s.end = position
   s.digest = take d
   s.group_last = s.visible
+  s.group_at = position
+  // A group holding retention commits is located once: it is the newest
+  // retention record, and the record of each holder it recorded.
+  if s.retaining {
+    let loc = match authority.locate(a, mut c, position) {
+      Ok(l) => l,
+      Error(e) => return Error(Unknown(stop(mut s, seam(take e)))),
+    }
+    let mut readers = replace(mut s.readers, ordered_map.empty(compare_keys))
+    for (token, r) in reading_rows(readers) {
+      if r.at == b"" {
+        let mut placed = unique r
+        placed.at = copy loc
+        ordered_map.insert(mut readers, unique token, take placed)
+      }
+    }
+    s.readers = take readers
+    s.retain_loc = take loc
+    s.retaining = false
+  }
   let state = current(mut s)
   list.push(mut s.held, Held(position: position, version: s.visible, state: take state))
   list.push(mut s.submitted, Submitted(position: position, version: s.visible, level: i))

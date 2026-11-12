@@ -423,6 +423,23 @@ impl Io {
                                 max: bits(max)?,
                             },
                         ),
+                        ("last", [at]) => (None, wire::Request::Last { at: level(at)? }),
+                        ("locate", [c, p]) => (
+                            Some(handle(c)?),
+                            wire::Request::Locate { position: bits(p)? },
+                        ),
+                        ("at", [OpValue::Bytes(l), from, at, max]) => {
+                            let Some(l) = hirsel_store_authority::Locator::decode(l) else {
+                                return Some(OpOutcome::Value(no_object()));
+                            };
+                            let request = wire::Request::At {
+                                l,
+                                from: bits(from)?,
+                                at: level(at)?,
+                                max: bits(max)?,
+                            };
+                            (None, request)
+                        }
                         ("get", [r]) => match object_ref(r)? {
                             Some(r) => (None, wire::Request::Get { r }),
                             None => return Some(OpOutcome::Value(no_object())),
@@ -467,6 +484,7 @@ impl Io {
                                             epoch,
                                             attempt,
                                             identity,
+                                            ..
                                         } => v(
                                             0,
                                             OpValue::Aggregate(vec![
@@ -490,6 +508,9 @@ impl Io {
                                     })
                                     .collect(),
                             )
+                        }),
+                        Outcome::Located(r) => result(r, |l| {
+                            OpValue::ByteSequence(l.unwrap_or_default().encode().to_vec())
                         }),
                         Outcome::Get(r) => result(r, |b| match b {
                             Some(b) => v(1, OpValue::ByteSequence(b)),

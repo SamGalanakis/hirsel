@@ -4,8 +4,8 @@
 use crate::envelope::{self, Chain};
 use crate::reclaim::{self, Found, Page, Space, Sweep};
 use crate::{
-    Advanced, Authority, Claim, Claimed, Error, Level, ObjectRef, Queued, Reclaimed, Record, live,
-    owner_id,
+    Advanced, Authority, Claim, Claimed, Error, Level, Locator, ObjectRef, Queued, Reclaimed, Record,
+    live, owner_id,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -62,7 +62,7 @@ impl Authority for Memory {
     fn claim(&mut self, attempt: [u8; 16], fresh: [u8; 32]) -> Result<Claimed, Error> {
         let mut w = self.world.lock().unwrap();
         let w = &mut *w;
-        let record = envelope::claimed(&w.chain.tip, attempt, fresh);
+        let record = envelope::claimed(&w.chain.tip, attempt, fresh, w.chain.appended());
         w.chain
             .follow(&record)
             .expect("a claim record follows its tip");
@@ -113,6 +113,23 @@ impl Authority for Memory {
                     .map_err(|b| crate::bad(b, p))
             })
             .collect()
+    }
+
+    fn followed_locator(&mut self, position: u64) -> Result<Locator, Error> {
+        let w = self.world.lock().unwrap();
+        w.chain.locator(position).ok_or_else(crate::invalid)
+    }
+
+    fn last(&mut self, _at: Level) -> Result<Option<Locator>, Error> {
+        Ok(self.world.lock().unwrap().chain.appended())
+    }
+
+    fn at(&mut self, l: &Locator, from: u64, at: Level, max: u64) -> Result<Vec<Record>, Error> {
+        let span = crate::span(l, from, max);
+        if self.world.lock().unwrap().chain.locator(l.position) != Some(*l) || span.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.read(from, at, span.end() - from)
     }
 
     fn get_object(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {

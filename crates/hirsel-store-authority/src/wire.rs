@@ -8,7 +8,7 @@
 //! check every engine applies to an outcome, live or recorded.
 
 use crate::{
-    Advanced, Authority, AuthorityError, Claim, Error, Level, ObjectRef, Reclaimed, Record,
+    Advanced, Authority, AuthorityError, Claim, Error, Level, Locator, ObjectRef, Reclaimed, Record,
 };
 
 /// A provider request. A level is its index among the authority's declared levels.
@@ -35,6 +35,18 @@ pub enum Request {
         at: u8,
         max: u64,
     },
+    Last {
+        at: u8,
+    },
+    Locate {
+        position: u64,
+    },
+    At {
+        l: Locator,
+        from: u64,
+        at: u8,
+        max: u64,
+    },
     Get {
         r: ObjectRef,
     },
@@ -54,6 +66,9 @@ impl Request {
             Request::Durable { .. } => "authority.durable",
             Request::Reclaim { .. } => "authority.reclaim",
             Request::Read { .. } => "authority.read",
+            Request::Last { .. } => "authority.last",
+            Request::Locate { .. } => "authority.locate",
+            Request::At { .. } => "authority.at",
             Request::Get { .. } => "authority.get",
             Request::Put { .. } => "authority.put",
         }
@@ -67,6 +82,7 @@ impl Request {
                 | Request::Wait { .. }
                 | Request::Durable { .. }
                 | Request::Reclaim { .. }
+                | Request::Locate { .. }
                 | Request::Put { .. }
         )
     }
@@ -74,9 +90,11 @@ impl Request {
     /// The level the request names, if any.
     pub fn level(&self) -> Option<u8> {
         match self {
-            Request::Submit { at, .. } | Request::Durable { at } | Request::Read { at, .. } => {
-                Some(*at)
-            }
+            Request::Submit { at, .. }
+            | Request::Durable { at }
+            | Request::Read { at, .. }
+            | Request::At { at, .. }
+            | Request::Last { at } => Some(*at),
             _ => None,
         }
     }
@@ -89,11 +107,15 @@ impl Request {
                 Request::Claim | Request::Submit { .. } | Request::Durable { .. },
                 Outcome::Position(_),
             ) => true,
+            (Request::Last { .. }, Outcome::Located(_)) => true,
+            (Request::Locate { .. }, Outcome::Located(r)) => {
+                r.as_ref().map_or(true, |l| l.is_some())
+            }
             (Request::Wait { position }, Outcome::Advanced(a)) => match a {
                 Advanced::Advanced(p) => p == position,
                 _ => true,
             },
-            (Request::Read { max, .. }, Outcome::Read(r)) => {
+            (Request::Read { max, .. } | Request::At { max, .. }, Outcome::Read(r)) => {
                 r.as_ref().map_or(true, |all| all.len() as u64 <= *max)
             }
             (Request::Get { .. }, Outcome::Get(_)) => true,
@@ -134,6 +156,18 @@ impl Request {
                 w.push(*at);
                 u64(&mut w, *max);
             }
+            Request::Last { at } => w.extend_from_slice(&[14, *at]),
+            Request::Locate { position } => {
+                w.push(15);
+                u64(&mut w, *position);
+            }
+            Request::At { l, from, at, max } => {
+                w.push(16);
+                w.extend_from_slice(&l.encode());
+                u64(&mut w, *from);
+                w.push(*at);
+                u64(&mut w, *max);
+            }
             Request::Get { r } => {
                 w.push(10);
                 object_ref(&mut w, r);
@@ -164,6 +198,14 @@ impl Request {
             2 => Request::Durable { at: r.u8()? },
             13 => Request::Reclaim { budget: r.u64()? },
             4 => Request::Read {
+                from: r.u64()?,
+                at: r.u8()?,
+                max: r.u64()?,
+            },
+            14 => Request::Last { at: r.u8()? },
+            15 => Request::Locate { position: r.u64()? },
+            16 => Request::At {
+                l: r.locator()?,
                 from: r.u64()?,
                 at: r.u8()?,
                 max: r.u64()?,
@@ -221,6 +263,9 @@ pub fn serve(
         Request::Durable { at } => Outcome::Position(p.durable(claim()?, Level(at))),
         Request::Reclaim { budget } => Outcome::Reclaimed(p.reclaim(claim()?, budget)),
         Request::Read { from, at, max } => Outcome::Read(p.read(from, Level(at), max)),
+        Request::Last { at } => Outcome::Located(p.last(Level(at))),
+        Request::Locate { position } => Outcome::Located(p.locate(claim()?, position).map(Some)),
+        Request::At { l, from, at, max } => Outcome::Read(p.at(&l, from, Level(at), max)),
         Request::Get { r } => Outcome::Get(p.get(r)),
         Request::Put { r, data } => Outcome::Unit(p.put(claim()?, r, data)),
     };
@@ -230,8 +275,11 @@ pub fn serve(
 /// What one seam operation returned.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Outcome {
-    /// `claim`: the claim's end; `submit`: the queued position; `durable`: the durable position.
+    /// `claim`: the claim's end; `submit`: the queued position; `durable`: the durable
+    /// position.
     Position(Result<u64, Error>),
+    /// `last`: the newest append's locator, none before the first; `locate`: always some.
+    Located(Result<Option<Locator>, Error>),
     Advanced(Advanced),
     Read(Result<Vec<Record>, Error>),
     Get(Result<Option<Vec<u8>>, Error>),
@@ -288,6 +336,10 @@ pub fn encode(o: &Outcome) -> Vec<u8> {
             w.push(4);
             result(&mut w, r, |_, ()| {});
         }
+        Outcome::Located(r) => {
+            w.push(6);
+            result(&mut w, r, |w, l| locator(w, l.as_ref()));
+        }
         Outcome::Reclaimed(r) => {
             w.push(5);
             result(&mut w, r, |w, done| {
@@ -332,6 +384,7 @@ pub fn decode(b: &[u8]) -> Option<Outcome> {
             1 => Some(Reclaimed::Done),
             _ => None,
         })?),
+        6 => Outcome::Located(r.result(|r| r.maybe_locator())?),
         _ => return None,
     };
     r.0.is_empty().then_some(o)
@@ -352,13 +405,15 @@ fn record(w: &mut Vec<u8>, e: &Record) {
             epoch,
             attempt,
             identity,
+            appended,
         } => {
-            w.push(0);
+            w.push(4);
             u64(w, *epoch);
             w.extend_from_slice(attempt);
             w.extend_from_slice(identity);
+            locator(w, appended.as_ref());
         }
-        // 1 and 2 were an appended record before it had an inventory and
+        // 0 was a claimed record before it named the newest append; 1 and 2 were an appended record before it had an inventory and
         // before it had retirements.
         Record::Appended {
             payload,
@@ -369,6 +424,17 @@ fn record(w: &mut Vec<u8>, e: &Record) {
             bytes(w, payload);
             refs(w, created);
             refs(w, retired);
+        }
+    }
+}
+
+/// An optional locator: a tag byte, then the locator's bytes when there is one.
+fn locator(w: &mut Vec<u8>, l: Option<&Locator>) {
+    match l {
+        None => w.push(0),
+        Some(l) => {
+            w.push(1);
+            w.extend_from_slice(&l.encode());
         }
     }
 }
@@ -455,10 +521,11 @@ impl<'a> Reader<'a> {
     }
     fn record(&mut self) -> Option<Record> {
         Some(match self.u8()? {
-            0 => Record::Claimed {
+            4 => Record::Claimed {
                 epoch: self.u64()?,
                 attempt: self.take(16)?.try_into().ok()?,
                 identity: self.take(32)?.try_into().ok()?,
+                appended: self.maybe_locator()?,
             },
             3 => Record::Appended {
                 payload: self.bytes()?.to_vec(),
@@ -467,6 +534,16 @@ impl<'a> Reader<'a> {
             },
             _ => return None,
         })
+    }
+    fn locator(&mut self) -> Option<Locator> {
+        Locator::decode(self.take(Locator::BYTES)?)
+    }
+    fn maybe_locator(&mut self) -> Option<Option<Locator>> {
+        match self.u8()? {
+            0 => Some(None),
+            1 => Some(Some(self.locator()?)),
+            _ => None,
+        }
     }
     fn object_ref(&mut self) -> Option<ObjectRef> {
         Some(ObjectRef {

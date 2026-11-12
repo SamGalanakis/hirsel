@@ -31,7 +31,7 @@ use crate::envelope::{self, Chain};
 use crate::reclaim::{self, Found, Page, Space, Sweep};
 use crate::{
     Advanced, Authority, AuthorityError, AuthorityGrant, Claim, Claimed, ConfigError, Error, Level,
-    ObjectRef, Queued, Reclaimed, Record, level_name_ok, live, owner_id,
+    Locator, ObjectRef, Queued, Reclaimed, Record, level_name_ok, live, owner_id,
 };
 use hirsel_object_storage::{
     Condition, LIST_PAGE, Listing, ObjectStorage, Put, Replaced, StorageError, Tag, check_key,
@@ -282,6 +282,27 @@ impl Sim {
 }
 
 impl Sim {
+    /// A reading request under the cut its request number draws.
+    fn reading<T>(&self, run: impl FnOnce(&Sim, &mut World) -> Result<T, Error>) -> Result<T, Error> {
+        let mut w = self.world.lock().unwrap();
+        let cut = w.cut();
+        let r = if cut.fail {
+            Err(Error::Refused(unreadable()))
+        } else if cut.tear {
+            w.power_fail();
+            Err(Error::Storage(unreadable()))
+        } else {
+            match run(self, &mut w) {
+                Ok(_) if cut.lose => Err(Error::Storage(unreadable())),
+                r => r,
+            }
+        };
+        if cut.crash {
+            w.power_fail();
+        }
+        r
+    }
+
     fn claim_in(
         &self,
         w: &mut World,
@@ -294,7 +315,7 @@ impl Sim {
         }
         w.torn = None;
         let mut chain = w.follow(w.entries.len())?;
-        let entry = envelope::claimed(&chain.tip, attempt, fresh);
+        let entry = envelope::claimed(&chain.tip, attempt, fresh, chain.appended());
         chain
             .follow(&entry)
             .expect("a claim record follows its tip");
@@ -392,7 +413,8 @@ impl Sim {
         Ok(c.durable[i])
     }
 
-    fn read_in(&self, w: &mut World, from: u64, at: Level, max: u64) -> Result<Vec<Record>, Error> {
+    /// The faults a reader meets and the barrier it issues at `at`.
+    fn barrier_in(&self, w: &mut World, at: Level) -> Result<(), Error> {
         #[cfg(test)]
         let no_barrier = w.bug == Some(Bug::ReadWithoutBarrier);
         #[cfg(not(test))]
@@ -410,6 +432,32 @@ impl Sim {
             }
             w.barrier(at);
         }
+        Ok(())
+    }
+
+    fn last_in(&self, w: &mut World, at: Level) -> Result<Option<Locator>, Error> {
+        self.barrier_in(w, at)?;
+        Ok(w.follow(w.entries.len())?.appended())
+    }
+
+    fn at_in(
+        &self,
+        w: &mut World,
+        l: &Locator,
+        from: u64,
+        at: Level,
+        max: u64,
+    ) -> Result<Vec<Record>, Error> {
+        self.barrier_in(w, at)?;
+        let span = crate::span(l, from, max);
+        if span.is_empty() || w.follow(w.entries.len())?.locator(l.position) != Some(*l) {
+            return Ok(Vec::new());
+        }
+        self.read_in(w, from, at, span.end() - from)
+    }
+
+    fn read_in(&self, w: &mut World, from: u64, at: Level, max: u64) -> Result<Vec<Record>, Error> {
+        self.barrier_in(w, at)?;
         let end = w.entries.len();
         let start = (from as usize).min(end);
         let stop = start.saturating_add(max as usize).min(end);
@@ -609,23 +657,22 @@ impl Authority for Sim {
     }
 
     fn read(&mut self, from: u64, at: Level, max: u64) -> Result<Vec<Record>, Error> {
-        let mut w = self.world.lock().unwrap();
-        let cut = w.cut();
-        let r = if cut.fail {
-            Err(Error::Refused(unreadable()))
-        } else if cut.tear {
-            w.power_fail();
-            Err(Error::Storage(unreadable()))
-        } else {
-            match self.read_in(&mut w, from, at, max) {
-                Ok(_) if cut.lose => Err(Error::Storage(unreadable())),
-                r => r,
-            }
-        };
-        if cut.crash {
-            w.power_fail();
-        }
-        r
+        self.reading(|s, w| s.read_in(w, from, at, max))
+    }
+
+    fn followed_locator(&mut self, position: u64) -> Result<Locator, Error> {
+        let w = self.world.lock().unwrap();
+        w.follow(w.entries.len())?
+            .locator(position)
+            .ok_or_else(crate::invalid)
+    }
+
+    fn last(&mut self, at: Level) -> Result<Option<Locator>, Error> {
+        self.reading(|s, w| s.last_in(w, at))
+    }
+
+    fn at(&mut self, l: &Locator, from: u64, at: Level, max: u64) -> Result<Vec<Record>, Error> {
+        self.reading(|s, w| s.at_in(w, l, from, at, max))
     }
 
     fn get_object(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {
@@ -903,6 +950,18 @@ impl Authority for Client {
     }
     fn read(&mut self, from: u64, at: Level, max: u64) -> Result<Vec<Record>, Error> {
         self.serving().read(from, at, max)
+    }
+    fn followed_locator(&mut self, position: u64) -> Result<Locator, Error> {
+        self.serving().followed_locator(position)
+    }
+    fn locate(&mut self, c: &Claim, position: u64) -> Result<Locator, Error> {
+        self.serving().locate(c, position)
+    }
+    fn last(&mut self, at: Level) -> Result<Option<Locator>, Error> {
+        self.serving().last(at)
+    }
+    fn at(&mut self, l: &Locator, from: u64, at: Level, max: u64) -> Result<Vec<Record>, Error> {
+        self.serving().at(l, from, at, max)
     }
     fn get_object(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {
         self.serving().get_object(name)

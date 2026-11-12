@@ -7510,8 +7510,10 @@ conformance/STORE/STORE-11-objects-cuts-drop-1-run.hir
 conformance/STORE/STORE-11-objects-cuts-drop-2-run.hir
 conformance/STORE/STORE-11-objects-cuts-lose-1-run.hir
 conformance/STORE/STORE-11-objects-cuts-lose-2-run.hir
+conformance/STORE/STORE-11-objects-cuts-lose-3-run.hir
 conformance/STORE/STORE-11-objects-cuts-refuse-1-run.hir
 conformance/STORE/STORE-11-objects-cuts-refuse-2-run.hir
+conformance/STORE/STORE-11-objects-cuts-refuse-3-run.hir
 conformance/STORE/STORE-11-objects-cuts-vanish-1-run.hir
 conformance/STORE/STORE-11-objects-cuts-vanish-2-run.hir
 conformance/STORE/STORE-11-objects-fence-cuts-crash-1-run.hir

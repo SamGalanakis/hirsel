@@ -339,6 +339,20 @@ fn seam_requests(n: u64, text: &str, bytes: &[u8]) -> Vec<hirsel_rt::authority::
                 max: !n,
             },
         ),
+        provider(None, W::Last { at: level }),
+        provider(Some(!n), W::Locate { position: n }),
+        provider(
+            None,
+            W::At {
+                l: hirsel_store_authority::Locator {
+                    position: n,
+                    digest: [n as u8; 32],
+                },
+                from: !n,
+                at: level,
+                max: n,
+            },
+        ),
         provider(
             None,
             W::Get {
@@ -397,6 +411,21 @@ fn seam_completions(n: u64, text: &str, bytes: &[u8]) -> Vec<Completion> {
             claim: None,
         },
         S::Outcome {
+            outcome: O::Located(Ok(None)),
+            claim: None,
+        },
+        S::Outcome {
+            outcome: O::Located(Ok(Some(hirsel_store_authority::Locator {
+                position: n,
+                digest: [!n as u8; 32],
+            }))),
+            claim: None,
+        },
+        S::Outcome {
+            outcome: O::Located(Err(error.clone())),
+            claim: None,
+        },
+        S::Outcome {
             outcome: O::Advanced(Advanced::Advanced(n)),
             claim: None,
         },
@@ -418,6 +447,10 @@ fn seam_completions(n: u64, text: &str, bytes: &[u8]) -> Vec<Completion> {
                     epoch: n,
                     attempt: [n as u8; 16],
                     identity: [!(n as u8); 32],
+                    appended: (n % 2 == 1).then_some(hirsel_store_authority::Locator {
+                        position: !n,
+                        digest: [n as u8; 32],
+                    }),
                 },
                 hirsel_store_authority::Record::Appended {
                     payload: bytes.to_vec(),

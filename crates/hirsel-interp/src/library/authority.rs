@@ -19,7 +19,7 @@ use super::dispatch::{arg, bytes, error, none, ok, some, text, u32_value, u64_va
 use crate::{Error, OperationCall, OperationContext, OperationResult, Value, invalid};
 use hirsel_store_authority::wire::{self, Outcome};
 use hirsel_store_authority::{
-    Advanced, Authority, AuthorityError, Claim, Error as SeamError, ObjectRef, Reclaimed, Record,
+    Advanced, Authority, AuthorityError, Claim, Error as SeamError, Locator, ObjectRef, Reclaimed, Record,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -355,6 +355,21 @@ impl Library {
                 at: self.level_of(&name()?, arg(a, 2)?)?,
                 max: u64_arg(arg(a, 3)?, "max")?,
             },
+            "authority.last" => wire::Request::Last {
+                at: self.level_of(&name()?, arg(a, 1)?)?,
+            },
+            "authority.locate" => wire::Request::Locate {
+                position: u64_arg(arg(a, 2)?, "position")?,
+            },
+            "authority.at" => match Locator::decode(bytes(arg(a, 1)?)?) {
+                Some(l) => wire::Request::At {
+                    l,
+                    from: u64_arg(arg(a, 2)?, "from")?,
+                    at: self.level_of(&name()?, arg(a, 3)?)?,
+                    max: u64_arg(arg(a, 4)?, "max")?,
+                },
+                None => return Ok(None),
+            },
             "authority.get" => match object_ref(arg(a, 1)?)? {
                 Some(r) => wire::Request::Get { r },
                 None => return Ok(None),
@@ -569,12 +584,41 @@ impl Library {
                     _ => unreachable!("admitted"),
                 }
             }
-            "authority.read" => {
+            "authority.last" | "authority.locate" => {
                 let name = self.authority_name(arg(a, 0)?)?;
-                let from: u64 = u64_arg(arg(a, 1)?, "from")?;
-                let at = self.level_of(&name, arg(a, 2)?)?;
-                let max: u64 = u64_arg(arg(a, 3)?, "max")?;
-                let r = wire::Request::Read { from, at, max };
+                let (held, r) = if op == "authority.locate" {
+                    let (_, held) = self.claim_arg(&name, arg(a, 1)?)?;
+                    let position = u64_arg(arg(a, 2)?, "position")?;
+                    (Some(held), wire::Request::Locate { position })
+                } else {
+                    let at = self.level_of(&name, arg(a, 1)?)?;
+                    (None, wire::Request::Last { at })
+                };
+                let Outcome::Located(r) = self.request(&name, held.as_ref(), r, context)?.0 else {
+                    unreachable!("admitted")
+                };
+                // No locator is 40 zero bytes, the encoding a record gives it.
+                result(&r, |l| Value::Bytes(l.unwrap_or_default().encode().to_vec()))
+            }
+            "authority.read" | "authority.at" => {
+                let name = self.authority_name(arg(a, 0)?)?;
+                let r = if op == "authority.at" {
+                    let Some(l) = Locator::decode(bytes(arg(a, 1)?)?) else {
+                        return Ok(OperationResult::returned(no_object()));
+                    };
+                    wire::Request::At {
+                        l,
+                        from: u64_arg(arg(a, 2)?, "from")?,
+                        at: self.level_of(&name, arg(a, 3)?)?,
+                        max: u64_arg(arg(a, 4)?, "max")?,
+                    }
+                } else {
+                    wire::Request::Read {
+                        from: u64_arg(arg(a, 1)?, "from")?,
+                        at: self.level_of(&name, arg(a, 2)?)?,
+                        max: u64_arg(arg(a, 3)?, "max")?,
+                    }
+                };
                 let Outcome::Read(r) = self.request(&name, None, r, context)?.0 else {
                     unreachable!("admitted")
                 };
@@ -586,6 +630,7 @@ impl Library {
                                     epoch,
                                     attempt,
                                     identity,
+                                    ..
                                 } => variant(
                                     0,
                                     vec![

@@ -39,7 +39,7 @@
 use crate::envelope::{self, Chain};
 use crate::reclaim::{self, Found, Page, Space, Sweep};
 use crate::{
-    Advanced, Authority, AuthorityError, Claim, Claimed, Error, Level, ObjectRef, Queued,
+    Advanced, Authority, AuthorityError, Claim, Claimed, Error, Level, Locator, ObjectRef, Queued,
     Reclaimed, Record, live, owner_id,
 };
 use sha2::{Digest, Sha256};
@@ -211,6 +211,128 @@ pub struct Log {
     active: Option<(u64, File)>,
     /// A segment this long or longer takes no more entries.
     pub(crate) segment_max: u64,
+    /// The frames each segment an `at` or `last` read has scanned holds:
+    /// where to look, never proof of what is there.
+    frames: std::collections::HashMap<u64, Frames>,
+    /// What the newest `at` walk authenticated.
+    anchor: Option<crate::Anchor>,
+}
+
+/// The whole frames a forward scan of one segment from its start has found,
+/// oldest first: each entry's offset and length.
+#[derive(Clone, Default)]
+struct Frames {
+    entries: Vec<(u64, u32)>,
+    /// How far the scan has read: the end of its last whole frame.
+    scanned: u64,
+}
+
+/// The bytes one read of a segment scan takes at most.
+const SCAN_READ: u64 = 1 << 20;
+
+/// The first positions of the segments in `dir`, in order.
+fn segment_names(dir: &Path) -> Result<Vec<u64>, Error> {
+    let mut names: Vec<u64> = Vec::new();
+    for e in fs::read_dir(dir).map_err(|e| Error::Storage(io(e)))? {
+        let e = e.map_err(|e| Error::Storage(io(e)))?;
+        let name = e.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if let Some(stem) = name.strip_suffix(".seg")
+            && stem.len() == 20
+            && let Ok(n) = stem.parse::<u64>()
+        {
+            names.push(n);
+        }
+    }
+    names.sort_unstable();
+    Ok(names)
+}
+
+/// Extends `fr` over the segment `f` whose first position is `first`,
+/// forward from where it stopped, each frame's header checked against the
+/// position it must hold, in reads of at most [`SCAN_READ`] bytes. Under the
+/// lock, so every header is whole. Where a frame cut short at the end starts,
+/// if one does.
+fn scan_frames(f: &File, first: u64, fr: &mut Frames) -> Result<Option<u64>, Error> {
+    let size = f.metadata().map_err(|e| Error::Storage(io(e)))?.len();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut base = 0u64;
+    let mut at = fr.scanned;
+    while size - at >= FRAME {
+        if at < base || at + FRAME > base + buf.len() as u64 {
+            let n = SCAN_READ.min(size - at) as usize;
+            buf.resize(n, 0);
+            f.read_exact_at(&mut buf, at)
+                .map_err(|e| Error::Storage(io(e)))?;
+            base = at;
+        }
+        let h = &buf[(at - base) as usize..(at - base + FRAME) as usize];
+        let len = u32::from_le_bytes(h[..4].try_into().unwrap());
+        let position = first + fr.entries.len() as u64;
+        if h[4..] != check(len, position) {
+            return Err(Error::Corrupt(format!("{} at {at}", segment_name(first))));
+        }
+        if size - at - FRAME < len as u64 {
+            break;
+        }
+        fr.entries.push((at + FRAME, len));
+        at += FRAME + len as u64;
+    }
+    fr.scanned = at;
+    Ok((at < size).then_some(at))
+}
+
+/// The entry at `offset`, `len` bytes, in the segment `f`; `None` when the
+/// segment is shorter.
+fn read_entry(f: &File, offset: u64, len: u32) -> Result<Option<Vec<u8>>, Error> {
+    let mut out = vec![0; len as usize];
+    match f.read_exact_at(&mut out, offset) {
+        Ok(()) => Ok(Some(out)),
+        Err(e) if e.kind() == ErrorKind::UnexpectedEof => Ok(None),
+        Err(e) => Err(Error::Storage(io(e))),
+    }
+}
+
+/// One fetch of an `at` walk: the record at `p` from the segment holding it,
+/// found by the segments' names and a forward scan of that segment. A frame
+/// the scan found before that no longer holds a record of digest `d` (a host
+/// failure since took it) sends the segment to be scanned again from its
+/// start, once. `None` when no frame holds `p`.
+fn fetch_frame(
+    dir: &Path,
+    names: &[u64],
+    frames: &mut std::collections::HashMap<u64, Frames>,
+    p: u64,
+    d: &[u8; 32],
+) -> Result<crate::Fetched, Error> {
+    let Some(&first) = names.iter().rev().find(|n| **n <= p) else {
+        return Ok(None);
+    };
+    let f = match File::open(dir.join(segment_name(first))) {
+        Ok(f) => f,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(Error::Storage(io(e))),
+    };
+    let i = (p - first) as usize;
+    for fresh in [false, true] {
+        let fr = frames.entry(first).or_default();
+        if fresh {
+            *fr = Frames::default();
+        }
+        if i >= fr.entries.len() {
+            scan_frames(&f, first, fr)?;
+        }
+        let Some(&(offset, len)) = fr.entries.get(i) else {
+            return Ok(None);
+        };
+        match read_entry(&f, offset, len)? {
+            Some(b) if envelope::digest(&b) == *d => return Ok(Some(b)),
+            Some(b) if fresh => return Ok(Some(b)),
+            _ if fresh => return Ok(None),
+            _ => {}
+        }
+    }
+    Ok(None)
 }
 
 impl Log {
@@ -232,6 +354,8 @@ impl Log {
             chain: Chain::default(),
             active: None,
             segment_max: SEGMENT_MAX,
+            frames: std::collections::HashMap::new(),
+            anchor: None,
         })
     }
 
@@ -436,7 +560,8 @@ impl Authority for Log {
         }
         let end = self.index.spots.len() as u64;
         self.follow_to(end)?;
-        let entry = envelope::claimed(&self.chain.tip, attempt, fresh);
+        let appended = self.chain.appended();
+        let entry = envelope::claimed(&self.chain.tip, attempt, fresh, appended);
         let position = end + 1;
         let (segment, length) = match last {
             Some((first, len)) if len < self.segment_max => {
@@ -573,6 +698,78 @@ impl Authority for Log {
             c.durable[i] = c.end;
         }
         Ok(c.durable[i])
+    }
+
+    fn followed_locator(&mut self, position: u64) -> Result<Locator, Error> {
+        self.chain.locator(position).ok_or_else(crate::invalid)
+    }
+
+    /// Under the lock, a forward scan of the newest segment from its start,
+    /// which is a validated boundary, then its last whole frame read; the
+    /// segment before when the newest holds no whole frame yet. At `host` it
+    /// syncs that segment. The newest append is that record, or the append
+    /// it names when it is a claim.
+    fn last(&mut self, at: Level) -> Result<Option<Locator>, Error> {
+        let _guard = self.lock().map_err(Error::Storage)?;
+        let names = segment_names(&self.dir)?;
+        for (i, &first) in names.iter().enumerate().rev() {
+            let f = File::open(self.segment_path(first)).map_err(|e| Error::Storage(io(e)))?;
+            let mut fr = Frames::default();
+            if let Some(torn) = scan_frames(&f, first, &mut fr)?
+                && i + 1 < names.len()
+            {
+                return Err(Error::Corrupt(format!("{} at {torn}", segment_name(first))));
+            }
+            let Some(&(offset, len)) = fr.entries.last() else {
+                continue;
+            };
+            let p = first + fr.entries.len() as u64 - 1;
+            let entry = read_entry(&f, offset, len)?
+                .ok_or_else(|| Error::Corrupt(segment_name(first)))?;
+            self.frames.insert(first, fr);
+            if at >= HOST {
+                disk::sync_data(&f).map_err(|e| Error::Storage(io(e)))?;
+            }
+            return match envelope::decode(&entry).map_err(|b| crate::bad(b, p))? {
+                Record::Claimed { appended, .. } => Ok(appended),
+                Record::Appended { .. } => Ok(Some(Locator {
+                    position: p,
+                    digest: envelope::digest(&entry),
+                })),
+            };
+        }
+        Ok(None)
+    }
+
+    /// The records this handle has followed when it has followed `l`;
+    /// otherwise, under the lock, a walk back from `l`, each record found in
+    /// the segment its position names by a forward scan of that segment. At
+    /// `host` it syncs `l`'s segment once: a segment is synced whole before
+    /// the next starts.
+    fn at(&mut self, l: &Locator, from: u64, at: Level, max: u64) -> Result<Vec<Record>, Error> {
+        if self.chain.locator(l.position) == Some(*l) && (l.position as usize) <= self.index.spots.len() {
+            let stop = l.position.min(from.saturating_add(max));
+            return self.read(from.min(stop), at, stop - from.min(stop));
+        }
+        if crate::span(l, from, max).is_empty() {
+            return Ok(Vec::new());
+        }
+        let _guard = self.lock().map_err(Error::Storage)?;
+        let names = segment_names(&self.dir)?;
+        if at >= HOST
+            && let Some(&first) = names.iter().rev().find(|n| **n <= l.position)
+        {
+            match File::open(self.segment_path(first)) {
+                Ok(f) => disk::sync_data(&f).map_err(|e| Error::Storage(io(e)))?,
+                Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+                Err(e) => return Err(Error::Storage(io(e))),
+            }
+        }
+        let dir = self.dir.clone();
+        let frames = &mut self.frames;
+        crate::walk(&mut self.anchor, l, from, max, |p, d| {
+            fetch_frame(&dir, &names, frames, p, d)
+        })
     }
 
     fn read(&mut self, from: u64, at: Level, max: u64) -> Result<Vec<Record>, Error> {

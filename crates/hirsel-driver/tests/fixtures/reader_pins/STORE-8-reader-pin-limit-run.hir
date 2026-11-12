@@ -11,7 +11,10 @@ fn check(ok: bool) -> Result[(), Failed] {
   }
 }
 
-fn acquire(mut s: store.Store, r: Random) -> Result[(), store.TxFailure[store.PinError]] {
+fn acquire(mut s: store.Store, r: Random) -> Result[
+  store.HeldPin,
+  store.TxFailure[store.PinError]
+] {
   let Ok(p) = store.new_reader_pin(r) else {
     return Error(Storage(InvalidInput()))
   }
@@ -27,7 +30,9 @@ pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
   }
   let mut s = store.open(a, store.default_config()) ? Store
   for _ in 0u64..1024 {
-    check(acquire(mut s, r) == Ok(()))?
+    let Ok(_) = acquire(mut s, r) else {
+      return Error(Check())
+    }
   }
   check(acquire(mut s, r) == Error(Aborted(Limit())))?
   let held = store.reader_pins(a, mut s) ? Store

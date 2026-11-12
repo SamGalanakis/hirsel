@@ -80,6 +80,9 @@ fn authority.submit(a: Authority, mut c: Claim of a, take entry: Bytes, created:
 fn authority.wait(a: Authority, mut c: Claim of a, position: u64) -> Advanced
 fn authority.durable(a: Authority, mut c: Claim of a, at: Level of a) -> Result[u64, SeamError]
 fn authority.read(a: Authority, from: u64, at: Level of a, max: u64) -> Result[List[HistoryRecord], SeamError]
+fn authority.last(a: Authority, at: Level of a) -> Result[Bytes, SeamError]
+fn authority.locate(a: Authority, mut c: Claim of a, position: u64) -> Result[Bytes, SeamError]
+fn authority.at(a: Authority, l: Bytes, from: u64, at: Level of a, max: u64) -> Result[List[HistoryRecord], SeamError]
 fn authority.get(a: Authority, r: ObjectRef) -> Result[Option[Bytes], SeamError]
 fn authority.put(a: Authority, mut c: Claim of a, r: ObjectRef, take data: Bytes) -> Result[(), SeamError]
 fn authority.reclaim(a: Authority, mut c: Claim of a, budget: u64) -> Result[Reclaimed, SeamError]

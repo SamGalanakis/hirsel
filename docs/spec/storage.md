@@ -664,17 +664,18 @@ fn store.pin(a: Authority, mut s: Store, name: String, v: Version of a) -> Resul
 fn store.unpin(mut s: Store, name: String) -> Result[bool, StoreError]
 
 ReaderPin  // opaque: a 16-byte token; copyable, plain, sendable, serializable; no version
+HeldPin    // opaque: a token and the version its acquire pinned; copyable, plain, data, sendable, serializable
 PinError   = Limit() | Taken()
 PinHolder  // opaque, of its store's authority: version, principal, id; not serializable
 fn store.new_reader_pin(r: Random) -> Result[ReaderPin, RandomError]
-fn store.acquire_reader_pin(mut tx: Tx, info: CallInfo, p: ReaderPin) -> Result[(), PinError]
-fn store.drop_reader_pin(mut tx: Tx, info: CallInfo, p: ReaderPin) -> Result[(), ()]
-fn store.at_pin(a: Authority, p: ReaderPin) -> Result[Snapshot of a, StoreError]
+fn store.acquire_reader_pin(mut tx: Tx, info: CallInfo, p: ReaderPin) -> Result[HeldPin, PinError]
+fn store.drop_reader_pin(mut tx: Tx, info: CallInfo, p: HeldPin) -> Result[(), ()]
+fn store.at_pin(a: Authority, p: HeldPin) -> Result[Snapshot of a, StoreError]
 fn store.reader_pins(a: Authority, mut s: Store) -> Result[List[PinHolder of a], StoreError]
 fn store.pin_version(a: Authority, h: PinHolder of a) -> Version of a
 fn store.pin_principal(h: PinHolder) -> String
 fn store.pin_holder_id(h: PinHolder) -> Bytes
-fn store.release_reader_pin(mut s: Store, id: Bytes) -> Result[bool, StoreError]
+fn store.release_reader_pin(mut s: Store, h: PinHolder) -> Result[bool, StoreError]
 ```
 
 A **version** names one commit version of one store. It is an opaque ordered token,
@@ -748,31 +749,52 @@ store. The reader-side calls are transaction entries the head serves with
 `served_transact` and the reader asks with `runner.transact` on its own call stream
 ([STORE-12](#store-12-transactions-at-a-runner)); `store.call` is for a caller that is
 itself a head. `acquire_reader_pin` holds the version its call runs at for
-`(info.caller, token)`, by a Retain commit made with the call's own commit, in one
-group; its reply is released only once that Retain is durable at the strongest declared
-level, so a pin whose acquire returned survives any failure the store survives. Asking
+`(info.caller, token)`, by a retention commit made with the call's own commit, in one
+group, and returns a `HeldPin` naming the token and that version; its reply is released
+only once the retention commit is durable at the strongest declared level, so a pin whose
+acquire returned survives any failure the store survives. Asking
 the same stream position again returns the recorded reply, with one holder. It is
 `Taken()` when the store holds the token already and `Limit()` when it holds 1024
 holders over all versions; a caller principal over 512 bytes, or a Retain over the
 authority's largest entry, is `Storage(Unsupported(Size(..)))`, and nothing is ever cut.
-`drop_reader_pin` removes the caller's holder of the token; a token the caller does not
-hold changes nothing, and it cannot fail. `store.at_pin` reads the readers table of the
-newest Retain durable at the strongest declared level: `PinReleased()` at once when no
-holder has the token, otherwise the state at its version, re-read as `store.at` is:
-`PinReleased()` when the holder has gone since, `Corrupt(..)` when it is still there.
-A takeover inherits the table with the rest of the retention state.
+Every acquire is a commit of its own, so a token acquired again after a release holds a
+later version: a held pin names one acquisition, and never reads a later holder's state.
+`drop_reader_pin` removes the caller's holder of the token at the held pin's version; a
+pin the caller does not hold at that version changes nothing, and it cannot fail.
+`store.at_pin` reads the readers table durable at the strongest declared level newest
+first (below): `PinReleased()` at once when no holder has the token at the held pin's
+version, otherwise the state at that version, re-read as `store.at` is: `PinReleased()`
+when the holder has gone since, `Corrupt(..)` when it is still there. A takeover inherits
+the table with the rest of the retention state.
 
 The operator, holding the head's `Store`, lists the holders with `store.reader_pins`: each
 one's version, principal and id `H("hirsel.pin.v1", token)`, 32 bytes, so no call shows a
-token. `store.release_reader_pin` releases the holder with that id, whoever holds it, by a
-Retain the engine makes on its own behalf, durable at the strongest declared level before
-it returns: `false` when no holder has the id.
+token. `store.release_reader_pin` releases the holder a listed `PinHolder` names, whoever
+holds it, by a retention commit the engine makes on its own behalf, durable at the
+strongest declared level before it returns: `false` when no holder has its id at its
+version, so a holder listed before a release and a later acquire of the same token
+releases nothing.
 
-Each acquire or release writes the whole retention state. At the limits (1024 pins with
-255-byte names, 1024 holders with 512-byte principals at distinct versions) a Retain is
-about 1 MB with its descriptors, of which the readers table is about 560 KB, written by
-every acquire and release at a full table. With 32-byte principals a full table is about
-64 KB.
+**The readers table on the history.** A Retain commit is a **fold**: the whole retention
+state. An acquire or release that leaves the checkpoints the retained versions rely on
+unchanged is instead a **ReaderDelta** commit naming the one holder it adds or removes,
+while the deltas since the newest fold number fewer than min(H, K), H the holders after
+it and K = 32; any other acquire or release, every `store.pin`, `store.unpin` and change
+of the kept checkpoints, and any change leaving at most one holder writes a fold. Each
+group names the newest earlier record holding a fold or delta (`retain` below), so the
+table at the newest durable record is the newest fold's, then the deltas after it, oldest
+first: `store.at_pin` starts at `authority.last`, reads the newest group and follows
+`retain` back to that fold, at most K + 1 records whatever H is, and reads the state
+from a checkpoint the fold keeps, or from the Genesis when the version is below every
+checkpoint. Recovery and `store.at` apply the folds and deltas forward and reach the same
+table.
+
+A holder with a principal of P bytes at a version of its own is 32 + P bytes of a fold
+and a delta 39 + P bytes, so an acquire or release writes on average a delta and 1/min(H, K)
+of a fold: at most a few hundred bytes up to H = K, and about (32 + P)·H/K beyond, about
+2 KB per change at 1023 holders with 32-byte principals and about 17 KB at the limits
+(1024 holders with 512-byte principals; 1024 pins with 255-byte names add about 270 KB
+to each fold).
 
 ### STORE-9: Schema history, renames and migrations
 
@@ -919,6 +941,9 @@ fn authority.submit(a: Authority, mut c: Claim of a, take entry: Bytes, created:
 fn authority.wait(a: Authority, mut c: Claim of a, position: u64) -> Advanced
 fn authority.durable(a: Authority, mut c: Claim of a, at: Level of a) -> Result[u64, SeamError]
 fn authority.read(a: Authority, from: u64, at: Level of a, max: u64) -> Result[List[HistoryRecord], SeamError]
+fn authority.last(a: Authority, at: Level of a) -> Result[Bytes, SeamError]
+fn authority.locate(a: Authority, mut c: Claim of a, position: u64) -> Result[Bytes, SeamError]
+fn authority.at(a: Authority, l: Bytes, from: u64, at: Level of a, max: u64) -> Result[List[HistoryRecord], SeamError]
 fn authority.get(a: Authority, r: ObjectRef) -> Result[Option[Bytes], SeamError]
 fn authority.put(a: Authority, mut c: Claim of a, r: ObjectRef, take data: Bytes) -> Result[(), SeamError]
 fn authority.reclaim(a: Authority, mut c: Claim of a, budget: u64) -> Result[Reclaimed, SeamError]
@@ -1013,6 +1038,26 @@ durable at `at`, issuing at most one barrier for every entry since the last.
 `authority.read(a, from, at, max)` returns up to `max` records after position `from`
 that are durable at `at`, each checked against the chain (**Records** below), so a record
 it returns is the one the history holds. It needs no claim: followers and `store.at` read this way.
+A **locator** is 40 bytes, `position:u64 digest:[32]`: a record's position and `H(record)`,
+all zeros for none. It names no provider placement: each provider resolves it itself (a
+log by the segment its position falls in and a scan of that segment's frames, object
+storage by the record's object name). `authority.last(a, at)` returns the locator of the
+newest `Appended` record durable at `at`, all zeros when there is none: the record the
+provider's selected end is, or the append the claim record there names. It needs no
+claim either and is where a newest-first reader starts (`store.at_pin`,
+[STORE-8](#store-8-versions-snapshots-and-forks)). `authority.at(a, l, from, at, max)`
+returns up to `max` records after `from`, none past `l`'s position, authenticated by the
+walk back from `l`: its digest, then each record's `prev`. It never reads forward: a
+record it returns is at or below a locator the reader was given, and every locator a
+reader holds came from `authority.last` or a record reached back from it, so it is a
+member of the history the provider selects, never an orphan a listing shows. A locator
+naming no record the provider holds, or another record at its position, answers empty
+and the reader starts again from `authority.last`; that is never corruption. Only a
+record below `l` whose bytes are not the digest the record above names is.
+`authority.locate(a, c, p)` is the locator of a record the claim has queued or its
+handle has followed, for a writer recording one. A locator of a record the claim has
+queued but not seen appended stays the writer's own: no record carries it until its
+append is decided.
 `authority.levels` lists the levels the provider declares, weakest first
 ([STORE-2](#store-2-transactions)); `authority.floor` is the deployment's floor for the
 place, the declared level the grant names; `authority.max_entry` bounds the bytes of one
@@ -1254,19 +1299,26 @@ own, such as `HSOBJH` for the object-storage head) and two version digits. A rea
 the magic before any digest or sum. A magic of the record's family with other version digits refuses the open with
 `Unsupported(Format(found, object))`, carrying the magic found; any other magic is
 corruption. Either refusal removes nothing, cuts nothing and writes nothing. A format
-change is a new magic and a cutover, never a second reader.
+change is a new magic and a cutover, never a second reader. There is no rolling upgrade and no
+converter: a history is in one format state, a store of an earlier one (`HSHIST05`
+records, `HSGRUP03` groups) answers `Unsupported(Format(..))` and is never appended to
+in a mixed format.
 
 **Records.** The authority owns the record at every position, whole:
 
 ```text
-record   = "HSHIST05" prev:[32] position:u64 epoch:u64 kind:u8 body
-claimed  = kind 1, body attempt:[16] identity:[32]
+record   = "HSHIST06" prev:[32] position:u64 epoch:u64 kind:u8 body
+claimed  = kind 1, body attempt:[16] identity:[32] appended:locator
 appended = kind 2, body count:u32 digest:[32]* retired:u32 ref* entry   // entry: the rest
 ref      = lifetime:u64 epoch:u64 digest:[32]
 ```
 
 `prev` is `H(record)` of the record before, all zeros at position 1, and `position` is the
-record's own. An appended record's digests are its inventory: each names the object of
+record's own. A claim record's `appended` is the locator of the newest appended record
+before it, computed from the record its claim's head replace selected as predecessor: a
+claim right after another copies its `appended`, and it is all zeros before any append.
+A reader following the chain checks it against the records it followed; a mismatch is
+corruption. An appended record's digests are its inventory: each names the object of
 that digest at the record's position and epoch, so a reference costs the record 32 bytes.
 Its refs are its retirements, 48 bytes each; one whose lifetime is 0 or not below the
 record's position, or whose epoch is 0 or above the record's, is corruption. A record **follows** the history when `prev` and `position` continue it and
@@ -1283,13 +1335,18 @@ its frame's length and position.
 **Groups.** Each appended record's entry is one **group**, the commits of one submit:
 
 ```text
-group  = "HSGRUP03" count:u32 commit* defs:u32 def*
+group  = "HSGRUP04" count:u32 retain:locator commit* defs:u32 def*
 def    = path:bytes fingerprint:bytes code:[32] revision:bytes
 commit = kind:u8 body writes
 writes = n:u32 { op:u8 key:bytes [value:bytes if op = 1] }*
 ```
 
-A group's **digest** is `H(entry)`. The definition table names each distinct entry
+`retain` is the locator of the latest strictly earlier record whose group holds a Retain
+or ReaderDelta commit, all zeros when none does
+([STORE-8](#store-8-versions-snapshots-and-forks)): retention links point strictly
+backward, folds and deltas in one group are found by their order in it, and no record
+holds a digest of itself. A reader that follows it to a record holding neither, or to
+one not below the group's own, has found corruption. A group's **digest** is `H(entry)`. The definition table names each distinct entry
 the group's commits ran (its identity: definition path, signature fingerprint and code
 hash, with the runtime contract revision, [RUN-8](runners.md#run-8-identity-and-arrival)) once, and commits refer to it by index.
 The table follows the commits, so a writer encodes each commit once into the group's
@@ -1319,14 +1376,15 @@ Every kind ends with its `writes`. Engine operations and their payloads:
 
 | Op | Payload |
 |---|---|
-| 1 Genesis | The limits `key_bytes value_bytes transaction_bytes range_rows` and the checkpoint node bounds `node_min node_mean node_max`, each `u32`; the bounds must hold the limits (**Checkpoints** below). It is the first commit after the claim records the history begins with (commit 2 unless a creation was cut before its Genesis), and nowhere else. |
+| 1 Genesis | The **creation tuple**: the limits `key_bytes value_bytes transaction_bytes range_rows` and the checkpoint node bounds `node_min node_mean node_max`, each `u32`; the bounds must hold the limits (**Checkpoints** below). The tuple never changes: each Retain repeats it byte for byte. It is the first commit after the claim records the history begins with (commit 2 unless a creation was cut before its Genesis), and nowhere else. |
 | 2 | Unassigned: a claim is the authority's claim record, never a commit in a group. Op 2 is corruption. |
 | 3 Checkpoint | A checkpoint descriptor (below). |
-| 4 Retain | The whole retention state ([STORE-8](#store-8-versions-snapshots-and-forks)): `floor:u64`, `n:u32` pins `{ name:bytes version:u64 }` sorted by name, at most 1024 with names of at most 255 bytes; then `r:u32` reader versions `{ version:u64 h:u32 holders{ principal:bytes token:[16] } }`, versions strictly ascending, each with `h >= 1` holders sorted by token, at most 1024 holders in all with principals of at most 512 bytes; then `m:u32` checkpoint descriptors that retained versions rely on. No version is checked against the floor. A group of an earlier magic, `HSGRUP02` included, is `Unsupported(Format(..))`. |
+| 4 Retain | The whole retention state ([STORE-8](#store-8-versions-snapshots-and-forks)): `floor:u64`, the creation tuple as the Genesis records it (any other tuple is corruption, so a reader of a fold needs no Genesis), `n:u32` pins `{ name:bytes version:u64 }` sorted by name, at most 1024 with names of at most 255 bytes; then `r:u32` reader versions `{ version:u64 at:locator h:u32 holders{ principal:bytes token:[16] } }`, versions strictly ascending, `at` a record at or after the one holding the version (all zeros: this record), each with `h >= 1` holders sorted by token, at most 1024 holders in all with principals of at most 512 bytes; then `m:u32` kept checkpoints `{ descriptor after:locator }` that retained versions rely on, `after` the locator of the group whose last commit is the descriptor's version, at a position of at least 1: replay from it reads the records after that one. No version is checked against the floor. |
 | 5 Fork | `identity:[32] origin:[32] at:u64`: a fork of the history `origin` at its version `at`, naming the identity of the fork's own history. It comes after the Genesis. |
 | 6 Stream | `op:u8 identity:[32]`: a fence (1) or purge (2) of a call stream ([STORE-12](#store-12-transactions-at-a-runner)). |
 | 7 Library | `name:bytes payload:bytes`: a step a library records as its own, a migration's above all ([STORE-9](#store-9-schema-history-renames-and-migrations)). |
 | 8 Objects | Empty: the record holding it exists for the objects it inventories or retires, a creation batch of a checkpoint a later record publishes or retirements after a Checkpoint commit's record (**Checkpoints** below). Any other payload is corruption. |
+| 9 ReaderDelta | One change to the readers table of the newest Retain before it ([STORE-8](#store-8-versions-snapshots-and-forks)): `1 token:[16] principal:bytes version:u64 at:locator`, `at` as a Retain's reader version names it, a holder of a token the table does not hold, principal at most 512 bytes; or `2 token:[16]`, the holder of a token it holds gone. Any other first byte, a delta with no Retain before it, a holder past 1024, a second holder of a token or a gone token the table does not hold is corruption. |
 
 **Checkpoints.** A checkpoint is the state at a group's last version as a tree of
 derived **nodes**, each an object named by its reference:
@@ -1379,7 +1437,13 @@ in frames `len:u32 check:u32 record`, where `check` is the first four bytes of t
 of `len` and the record's position, so a damaged length or a frame out of place is
 corruption, not a torn tail. A segment of 256 MiB or more takes no more records; the
 next record starts a new one. A wait is one `write` per queued record and, at `host`, one
-`fdatasync`.
+`fdatasync`. `authority.last` scans the newest segment forward from its start to its
+last whole frame (the one before it when it holds none), and `authority.at` finds a
+locator's record by the segment its position falls in and a scan of that segment's
+frames, kept per handle and scanned again once when a frame is not where it was: a
+handle scans a segment at most once more than it is written, and a cut inside the
+newest frame, the locator a claim record carries included, leaves the record before it
+the newest.
 
 **Object storage.** A record is the object `h/` followed by its history position as 20
 decimal digits, `-` and the record's digest in lowercase hexadecimal, put only if free.

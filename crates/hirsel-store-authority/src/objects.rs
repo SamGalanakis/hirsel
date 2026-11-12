@@ -42,8 +42,8 @@
 use crate::envelope::{self, Chain};
 use crate::reclaim::{self, Found, Page, Space, Sweep};
 use crate::{
-    Advanced, Authority, AuthorityError, Claim, Claimed, Error, Level, ObjectRef, Queued,
-    Reclaimed, Record, live, owner_id,
+    Advanced, Anchor, Authority, AuthorityError, Claim, Claimed, Error, Level, Locator, ObjectRef,
+    Queued, Reclaimed, Record, live, owner_id,
 };
 use hirsel_object_storage::{Condition, ObjectStorage, Put, Replaced, StorageError, Tag};
 use sha2::{Digest, Sha256};
@@ -186,6 +186,10 @@ pub struct Objects {
     /// The newest head revision this handle has read or written. A head below
     /// it is an older state a lagging replica or cache answered.
     seen: u64,
+    /// What the newest `at` walk authenticated.
+    anchor: Option<Anchor>,
+    /// The newest record `last` got, so an `at` of it gets it once.
+    newest: Option<(Locator, Vec<u8>)>,
     #[cfg(test)]
     pub(crate) bug: Option<Bug>,
 }
@@ -201,6 +205,8 @@ impl Objects {
             chain: Chain::default(),
             fetched: BTreeMap::new(),
             seen: 0,
+            anchor: None,
+            newest: None,
             #[cfg(test)]
             bug: None,
         }
@@ -494,7 +500,7 @@ impl Authority for Objects {
                 None => Condition::Absent,
             };
             self.catch_up(end, digest)?;
-            let entry = envelope::claimed(&self.chain.tip, attempt, fresh);
+            let entry = envelope::claimed(&self.chain.tip, attempt, fresh, self.chain.appended());
             let d = envelope::digest(&entry);
             let position = end + 1;
             self.store
@@ -603,6 +609,64 @@ impl Authority for Objects {
             }
         }
         Ok(out)
+    }
+
+    fn followed_locator(&mut self, position: u64) -> Result<Locator, Error> {
+        self.chain.locator(position).ok_or_else(crate::invalid)
+    }
+
+    /// Two gets: the head, then the record it ends at, which is the newest
+    /// append or a claim naming it. A handle that has followed that record
+    /// already gets only the head.
+    fn last(&mut self, _at: Level) -> Result<Option<Locator>, Error> {
+        let Some((h, _)) = self.head()? else {
+            return Ok(None);
+        };
+        let end = Locator {
+            position: h.end,
+            digest: h.digest,
+        };
+        if self.chain.locator(h.end) == Some(end) && self.chain.end() == h.end {
+            return Ok(self.chain.appended());
+        }
+        let key = group_key(h.end, &h.digest);
+        let bytes = match self.store.get(&key) {
+            Ok(Some(b)) if envelope::digest(&b) == h.digest => b,
+            Ok(Some(_)) => return Err(Error::Corrupt(key)),
+            // A head names only records already put: one not got is a lagging
+            // replica's answer, refused with no effect.
+            Ok(None) => return Err(Error::Refused(unreachable())),
+            Err(e) => return Err(Error::Refused(failure(e))),
+        };
+        match envelope::decode(&bytes).map_err(|b| crate::bad(b, h.end))? {
+            Record::Claimed { appended, .. } => Ok(appended),
+            Record::Appended { .. } => {
+                self.newest = Some((end, bytes));
+                Ok(Some(end))
+            }
+        }
+    }
+
+    /// Gets each record by its key, which names its position and digest.
+    fn at(&mut self, l: &Locator, from: u64, _at: Level, max: u64) -> Result<Vec<Record>, Error> {
+        if self.chain.locator(l.position) == Some(*l) {
+            let stop = l.position.min(from.saturating_add(max));
+            return self.followed(from.min(stop), stop);
+        }
+        let store = &self.store;
+        let newest = &self.newest;
+        crate::walk(&mut self.anchor, l, from, max, |p, d| {
+            if let Some((n, b)) = newest
+                && (n.position, n.digest) == (p, *d)
+            {
+                return Ok(Some(b.clone()));
+            }
+            match store.get(&group_key(p, d)) {
+                Ok(Some(b)) => Ok(Some(b)),
+                Ok(None) => Ok(None),
+                Err(e) => Err(Error::Refused(failure(e))),
+            }
+        })
     }
 
     fn get_object(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {

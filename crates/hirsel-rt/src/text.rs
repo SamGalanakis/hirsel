@@ -406,6 +406,7 @@ pub unsafe fn allocate_history_list(
                     epoch,
                     attempt,
                     identity,
+                    ..
                 } => {
                     at.cast::<u32>().write(0);
                     at.add(8).cast::<u64>().write(*epoch);

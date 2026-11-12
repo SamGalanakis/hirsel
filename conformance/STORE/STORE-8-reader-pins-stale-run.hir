@@ -23,7 +23,7 @@ fn d32(name: Bytes) -> Bytes {
 }
 
 fn acquire(mut s: store.Store, p: store.ReaderPin) -> Result[
-  (),
+  store.HeldPin,
   store.CallFailure[store.PinError]
 ] {
   let request = CallRequest(
@@ -48,7 +48,7 @@ fn check(ok: bool) -> Result[(), Failed] {
 
 // 1 when `p` reads the state whose `x` is 1 at `v`, 0 for a refusal; any
 // other answer is wrong.
-fn judged(a: Authority, p: store.ReaderPin, v: store.Version of a, when: String) -> Result[
+fn judged(a: Authority, p: store.HeldPin, v: store.Version of a, when: String) -> Result[
   u64,
   Failed
 ] {
@@ -110,10 +110,13 @@ fn run(rt: Io, r: Random, name: String) -> Result[u64, Failed] {
     return Ok(0)
   }
   let pinned = store.version(a, first)
-  if done != Ok(()) || acquire(mut s, p) != Ok(()) {
+  if done != Ok(()) {
     return Ok(0)
   }
-  let mut good = judged(a, p, pinned, f"{name} after the acquire")?
+  let Ok(h) = acquire(mut s, p) else {
+    return Ok(0)
+  }
+  let mut good = judged(a, h, pinned, f"{name} after the acquire")?
   let _: Result[(), store.TxFailure[store.TxError]] = store.transact(mut s, put_x, 2)
   let _ = store.close(take s)
   let Ok(again) = store.open(a, store.default_config()) else {
@@ -121,9 +124,9 @@ fn run(rt: Io, r: Random, name: String) -> Result[u64, Failed] {
   }
   let mut t = take again
   inherited(a, mut t, pinned, f"{name} after the takeover")?
-  good += judged(a, p, pinned, f"{name} after the takeover")?
+  good += judged(a, h, pinned, f"{name} after the takeover")?
   if store.compact(mut t) == Ok(()) {
-    good += judged(a, p, pinned, f"{name} after the compaction")?
+    good += judged(a, h, pinned, f"{name} after the compaction")?
   }
   let _ = store.close(take t)
   Ok(good)

@@ -171,19 +171,38 @@ fn random_commit(mut g: prng.Generator, defs: u32) -> history.Commit {
           )
         )
       }
-      list.push(mut readers, history.Reader(version: version, holders: take holders))
+      list.push(
+        mut readers,
+        history.Reader(version: version, at: fixed(mut g, 40), holders: take holders)
+      )
     }
-    let mut checkpoints: List[history.Descriptor] = []
+    let mut checkpoints: List[history.Root] = []
     for _ in 0u64..prng.u64(mut g) % 2 {
-      list.push(mut checkpoints, random_descriptor(mut g))
+      list.push(
+        mut checkpoints,
+        history.Root(
+          desc: random_descriptor(mut g),
+          after: cat([b"\x01", fixed(mut g, 39)])
+        )
+      )
     }
     Engine(
-      Retain(
+      (Retain(
         floor: prng.u64(mut g),
+        // Limits the default node bounds hold.
+        creation: history.Creation(
+          limits: history.Limits(
+            key_bytes: int.truncate(prng.u64(mut g) % 4097),
+            value_bytes: int.truncate(prng.u64(mut g) % 1048577),
+            transaction_bytes: int.truncate(prng.u64(mut g)),
+            range_rows: int.truncate(prng.u64(mut g))
+          ),
+          bounds: history.default_bounds()
+        ),
         pins: take pins,
         readers: take readers,
         checkpoints: take checkpoints
-      )
+      ))
     )
   } else if pick == 6 {
     if prng.u64(mut g) % 2 == 0 {
@@ -191,8 +210,21 @@ fn random_commit(mut g: prng.Generator, defs: u32) -> history.Commit {
     } else {
       Engine(StreamPurge(fixed(mut g, 32)))
     }
-  } else {
+  } else if prng.u64(mut g) % 2 == 0 {
     Engine(Library(name: random_bytes(mut g, 6), payload: random_bytes(mut g, 10)))
+  } else if prng.u64(mut g) % 2 == 0 {
+    Engine(
+      ReaderDelta(
+        Hold(
+          token: fixed(mut g, 16),
+          principal: random_bytes(mut g, 6),
+          version: prng.u64(mut g),
+          at: fixed(mut g, 40)
+        )
+      )
+    )
+  } else {
+    Engine(ReaderDelta(Free(token: fixed(mut g, 16))))
   }
   history.Commit(body: take body, writes: random_writes(mut g))
 }
@@ -216,23 +248,16 @@ fn random_group(mut g: prng.Generator) -> history.Group {
   for _ in 0u64..count {
     list.push(mut commits, random_commit(mut g, ndefs))
   }
-  history.Group(commits: take commits, defs: take defs)
+  history.Group(retain: fixed(mut g, 40), commits: take commits, defs: take defs)
 }
 
 fn genesis_group(mut g: prng.Generator) -> history.Group {
   let b = history.default_bounds()
   history.Group(
+    retain: history.no_locator(),
     commits: [
       history.Commit(
-        body: Engine(
-          Genesis(
-            key_bytes: 4096,
-            value_bytes: 1048576,
-            transaction_bytes: 16777216,
-            range_rows: 10000,
-            bounds: b
-          )
-        ),
+        body: Engine(Genesis(history.Creation(limits: default_limits(), bounds: b))),
         writes: random_writes(mut g)
       )
     ],
@@ -451,10 +476,17 @@ fn sha(x: Bytes) -> Bytes {
   bytes.from_inline(sha256.digest(x))
 }
 
-// A group's bytes from its count's bytes, commits and definitions.
+// A group with no earlier retention record: its count's bytes, commits and
+// definitions.
 fn wire_group(count: Bytes, commits: List[Bytes], defs: Bytes) -> Bytes {
+  wire_group_after(count, history.no_locator(), commits, defs)
+}
+
+// A group's bytes from its count's bytes, its retention locator's bytes,
+// commits and definitions.
+fn wire_group_after(count: Bytes, retain: Bytes, commits: List[Bytes], defs: Bytes) -> Bytes {
   let mut out: List[u8] = []
-  for p in [b"HSGRUP03", copy count] {
+  for p in [b"HSGRUP04", copy count, copy retain] {
     bytes.append(mut out, p)
   }
   for c in commits {
@@ -464,14 +496,18 @@ fn wire_group(count: Bytes, commits: List[Bytes], defs: Bytes) -> Bytes {
   bytes.from_list(take out)
 }
 
-// A Retain of floor 9 and no pins whose one reader version 7 is held by "p"
-// with token 16 x `first` and then by "p" with token 16 x `second`, and no
-// writes.
+// A Retain of floor 9, the default creation tuple and no pins whose one reader
+// version 7, at `wire_locator()`, is held by "p" with token 16 x `first` and
+// then by "p" with token 16 x `second`, and no writes.
 fn reader_pair(first: u8, second: u8) -> Bytes {
   cat(
     [
-      b"\x02\x04\x4a\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
-      b"\x01\x00\x00\x00\x07\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00",
+      b"\x02\x04\x8e\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00",
+      V_CREATION,
+      b"\x00\x00\x00\x00",
+      b"\x01\x00\x00\x00\x07\x00\x00\x00\x00\x00\x00\x00",
+      wire_locator(),
+      b"\x02\x00\x00\x00",
       b"\x01\x00\x00\x00p",
       rep(first, 16),
       b"\x01\x00\x00\x00p",
@@ -480,6 +516,28 @@ fn reader_pair(first: u8, second: u8) -> Bytes {
       b"\x00\x00\x00\x00"
     ]
   )
+}
+
+// The default limits: key 4096, value 1048576, transaction 16777216 bytes and
+// 10000 range rows.
+const V_LIMITS: Bytes = b"\x00\x10\x00\x00\x00\x00\x10\x00\x00\x00\x00\x01\x10\x27\x00\x00"
+
+// The default creation tuple: the default limits, then node bounds of
+// 262144, 1048576 and 4194304 bytes.
+const V_CREATION: Bytes = b"\x00\x10\x00\x00\x00\x00\x10\x00\x00\x00\x00\x01\x10\x27\x00\x00\x00\x00\x04\x00\x00\x00\x10\x00\x00\x00\x40\x00"
+
+fn default_limits() -> history.Limits {
+  history.Limits(
+    key_bytes: 4096,
+    value_bytes: 1048576,
+    transaction_bytes: 16777216,
+    range_rows: 10000
+  )
+}
+
+// A locator: position 0x2122232425262728 and digest 32 x 0x29.
+fn wire_locator() -> Bytes {
+  cat([b"\x28\x27\x26\x25\x24\x23\x22\x21", rep(41, 32)])
 }
 
 // A fork's origin position, 0x0102030405060708.
@@ -545,6 +603,7 @@ fn wire_defs() -> Bytes {
 
 fn v1_value() -> history.Group {
   history.Group(
+    retain: history.no_locator(),
     commits: [
       history.Commit(
         body: Transaction(
@@ -635,27 +694,38 @@ fn descriptor_value() -> history.Descriptor {
   )
 }
 
-// Engine commits: Checkpoint, Retain (floor 9, pins a=1 and bc=2, reader
-// version 7 held by "p" with token 16 x 0x51, one descriptor), StreamFence 32 x 0x71, StreamPurge 32 x 0x72, Genesis with the
-// default limits and bounds, Fork (identity 32 x 0x81, origin 32 x 0x82, at
-// 0x0102030405060708), Objects.
+// Engine commits: Checkpoint, Retain (floor 9, the default creation tuple, pins a=1
+// and bc=2, reader version 7 at `wire_locator()` held by "p" with token
+// 16 x 0x51, one descriptor), StreamFence 32 x 0x71, StreamPurge 32 x 0x72,
+// Genesis with the default limits and bounds, Fork (identity 32 x 0x81,
+// origin 32 x 0x82, at 0x0102030405060708), Objects, a ReaderDelta holding
+// token 16 x 0x91 for "p" at version 3 in its own record (no locator) and one
+// freeing token 16 x 0x92; the newest earlier retention record is at 0x11
+// with digest 32 x 0x12, and the Retain's descriptor is replayed after
+// record 5 of digest 32 x 0x15.
 fn v2_wire() -> Bytes {
-  wire_group(
-    b"\x07\x00\x00\x00",
+  wire_group_after(
+    b"\x09\x00\x00\x00",
+    cat([b"\x11\x00\x00\x00\x00\x00\x00\x00", rep(18, 32)]),
     [
       cat([b"\x02\x03\x69\x00\x00\x00", wire_descriptor(), b"\x00\x00\x00\x00"]),
       cat(
         [
-          b"\x02\x04\xb9\x00\x00\x00",
+          b"\x02\x04\x25\x01\x00\x00",
           b"\x09\x00\x00\x00\x00\x00\x00\x00",
+          V_CREATION,
           b"\x02\x00\x00\x00",
           b"\x01\x00\x00\x00a\x01\x00\x00\x00\x00\x00\x00\x00",
           b"\x02\x00\x00\x00bc\x02\x00\x00\x00\x00\x00\x00\x00",
-          b"\x01\x00\x00\x00\x07\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00",
+          b"\x01\x00\x00\x00\x07\x00\x00\x00\x00\x00\x00\x00",
+          wire_locator(),
+          b"\x01\x00\x00\x00",
           b"\x01\x00\x00\x00p",
           rep(81, 16),
           b"\x01\x00\x00\x00",
           wire_descriptor(),
+          b"\x05\x00\x00\x00\x00\x00\x00\x00",
+          rep(21, 32),
           b"\x00\x00\x00\x00"
         ]
       ),
@@ -671,7 +741,18 @@ fn v2_wire() -> Bytes {
           b"\x00\x00\x00\x00"
         ]
       ),
-      b"\x02\x08\x00\x00\x00\x00\x00\x00\x00\x00"
+      b"\x02\x08\x00\x00\x00\x00\x00\x00\x00\x00",
+      cat(
+        [
+          b"\x02\x09\x46\x00\x00\x00\x01",
+          rep(145, 16),
+          b"\x01\x00\x00\x00p",
+          b"\x03\x00\x00\x00\x00\x00\x00\x00",
+          rep(0, 40),
+          b"\x00\x00\x00\x00"
+        ]
+      ),
+      cat([b"\x02\x09\x11\x00\x00\x00\x02", rep(146, 16), b"\x00\x00\x00\x00"])
     ],
     b"\x00\x00\x00\x00"
   )
@@ -679,12 +760,17 @@ fn v2_wire() -> Bytes {
 
 fn v2_value() -> history.Group {
   history.Group(
+    retain: cat([b"\x11\x00\x00\x00\x00\x00\x00\x00", rep(18, 32)]),
     commits: [
       history.Commit(body: Engine(Checkpoint(descriptor_value())), writes: []),
       history.Commit(
         body: Engine(
           Retain(
             floor: 9,
+            creation: history.Creation(
+              limits: default_limits(),
+              bounds: history.default_bounds()
+            ),
             pins: [
               history.Pin(name: b"a", version: 1),
               history.Pin(name: b"bc", version: 2)
@@ -692,10 +778,16 @@ fn v2_value() -> history.Group {
             readers: [
               history.Reader(
                 version: 7,
+                at: wire_locator(),
                 holders: [history.Holder(principal: b"p", token: rep(81, 16))]
               )
             ],
-            checkpoints: [descriptor_value()]
+            checkpoints: [
+              history.Root(
+                desc: descriptor_value(),
+                after: cat([b"\x05\x00\x00\x00\x00\x00\x00\x00", rep(21, 32)])
+              )
+            ]
           )
         ),
         writes: []
@@ -705,14 +797,13 @@ fn v2_value() -> history.Group {
       history.Commit(
         body: Engine(
           Genesis(
-            key_bytes: 4096,
-            value_bytes: 1048576,
-            transaction_bytes: 16777216,
-            range_rows: 10000,
-            bounds: history.Bounds(
-              node_min: 262144,
-              node_mean: 1048576,
-              node_max: 4194304
+            history.Creation(
+              limits: default_limits(),
+              bounds: history.Bounds(
+                node_min: 262144,
+                node_mean: 1048576,
+                node_max: 4194304
+              )
             )
           )
         ),
@@ -724,7 +815,21 @@ fn v2_value() -> history.Group {
         ),
         writes: []
       ),
-      history.Commit(body: Engine(Objects()), writes: [])
+      history.Commit(body: Engine(Objects()), writes: []),
+      history.Commit(
+        body: Engine(
+          ReaderDelta(
+            Hold(
+              token: rep(145, 16),
+              principal: b"p",
+              version: 3,
+              at: history.no_locator()
+            )
+          )
+        ),
+        writes: []
+      ),
+      history.Commit(body: Engine(ReaderDelta(Free(token: rep(146, 16)))), writes: [])
     ],
     defs: []
   )
@@ -808,7 +913,7 @@ fn malformed_groups() -> List[(Bytes, Bytes)] {
       ),
       wire_group(four, [wire_call(one, V_WRITES), V_CALL2, wire_run(), V_LIBRARY], defs)
     ),
-    // A stream byte, a commit kind, an engine op (9, and 2, which no commit
+    // A stream byte, a commit kind, an engine op (10, and 2, which no commit
     // has: a claim is the authority's record), an Objects with a payload and a
     // stream op out of range.
     (
@@ -826,7 +931,7 @@ fn malformed_groups() -> List[(Bytes, Bytes)] {
     (
       plain(
         [
-          b"\x02\x09\x0c\x00\x00\x00\x02\x00\x00\x00nm\x02\x00\x00\x00pl\x00\x00\x00\x00"
+          b"\x02\x0a\x0c\x00\x00\x00\x02\x00\x00\x00nm\x02\x00\x00\x00pl\x00\x00\x00\x00"
         ]
       ),
       plain([V_LIBRARY])
@@ -858,18 +963,67 @@ fn malformed_groups() -> List[(Bytes, Bytes)] {
     (
       plain(
         [
-          b"\x02\x04\x2f\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x02\x00\x00\x00bc\x02\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00a\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+          cat(
+            [
+              b"\x02\x04\x4b\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00",
+              V_CREATION,
+              b"\x02\x00\x00\x00\x02\x00\x00\x00bc\x02\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00a\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+            ]
+          )
         ]
       ),
       plain(
         [
-          b"\x02\x04\x2f\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x01\x00\x00\x00a\x01\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00bc\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+          cat(
+            [
+              b"\x02\x04\x4b\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00",
+              V_CREATION,
+              b"\x02\x00\x00\x00\x01\x00\x00\x00a\x01\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00bc\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+            ]
+          )
         ]
       )
     ),
     // A reader version's holders not sorted by token: two encodings of one
     // table, and a token held twice would decode.
-    (plain([reader_pair(82, 81)]), plain([reader_pair(81, 82)]))
+    (plain([reader_pair(82, 81)]), plain([reader_pair(81, 82)])),
+    // A ReaderDelta that neither holds nor frees.
+    (
+      plain([cat([b"\x02\x09\x11\x00\x00\x00\x03", rep(146, 16), b"\x00\x00\x00\x00"])]),
+      plain([cat([b"\x02\x09\x11\x00\x00\x00\x02", rep(146, 16), b"\x00\x00\x00\x00"])])
+    ),
+    // A kept checkpoint replayed after record 0, which no group is.
+    (
+      plain(
+        [
+          cat(
+            [
+              b"\x02\x04\xc1\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00",
+              V_CREATION,
+              b"\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00",
+              wire_descriptor(),
+              rep(0, 40),
+              b"\x00\x00\x00\x00"
+            ]
+          )
+        ]
+      ),
+      plain(
+        [
+          cat(
+            [
+              b"\x02\x04\xc1\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00",
+              V_CREATION,
+              b"\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00",
+              wire_descriptor(),
+              b"\x01\x00\x00\x00\x00\x00\x00\x00",
+              rep(0, 32),
+              b"\x00\x00\x00\x00"
+            ]
+          )
+        ]
+      )
+    )
   ]
 }
 
@@ -1219,6 +1373,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
   chain = chain && is_error(history.follow(tip1, trailing))
   // A Fork names the identity the claims name, after the Genesis.
   let fork = history.Group(
+    retain: history.no_locator(),
     commits: [
       history.Commit(
         body: Engine(Fork(identity: copy identity, origin: fixed(mut g, 32), at: 5)),
@@ -1228,6 +1383,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
     defs: []
   )
   let stranger = history.Group(
+    retain: history.no_locator(),
     commits: [
       history.Commit(
         body: Engine(Fork(identity: fixed(mut g, 32), origin: fixed(mut g, 32), at: 5)),

@@ -563,6 +563,15 @@ unsafe fn provider(
                     Outcome::Read(r) => seam_result(ctx, r, |all, out| {
                         out.words[0] = crate::text::allocate_history_list(ctx, all) as u64;
                     }),
+                    // No locator is 40 zero bytes, the encoding a record gives it.
+                    Outcome::Located(r) => seam_result(ctx, r, |l, out| {
+                        std::ptr::addr_of_mut!(out.words)
+                            .cast::<crate::views::Slice>()
+                            .write_unaligned(crate::text::allocate_bytes(
+                                ctx,
+                                &l.unwrap_or_default().encode(),
+                            ));
+                    }),
                     Outcome::Get(r) => seam_result(ctx, r, |v, out| {
                         if let Some(b) = v {
                             std::ptr::addr_of_mut!(out.words)
@@ -966,6 +975,77 @@ pub unsafe extern "C" fn hirsel_rt_v2_authority_durable(
         at: (unsafe { at.read() } % 256) as u8,
     };
     unsafe { provider(ctx, out, a.read(), Some(c.read()), request) }
+}
+
+/// `authority.last(a, at) -> Result[Bytes, SeamError]`.
+/// # Safety
+/// Context bound; Authority and Level borrowed; out writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_rt_v2_authority_last(
+    ctx: *mut crate::TaskCtx,
+    _destination: *mut u8,
+    out: *mut SeamResult,
+    a: *const u64,
+    at: *const u64,
+) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
+    let request = wire::Request::Last {
+        at: (unsafe { at.read() } % 256) as u8,
+    };
+    unsafe { provider(ctx, out, a.read(), None, request) }
+}
+
+/// `authority.locate(a, mut c, position) -> Result[Bytes, SeamError]`.
+/// # Safety
+/// Context bound; Authority and Claim borrowed; out writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_rt_v2_authority_locate(
+    ctx: *mut crate::TaskCtx,
+    _destination: *mut u8,
+    out: *mut SeamResult,
+    a: *const u64,
+    c: *mut u64,
+    position: u64,
+) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
+    let request = wire::Request::Locate { position };
+    unsafe { provider(ctx, out, a.read(), Some(c.read()), request) }
+}
+
+/// `authority.at(a, l, from, at, max) -> Result[List[HistoryRecord], SeamError]`.
+/// # Safety
+/// Context bound; Authority, the locator Bytes and Level borrowed; out writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_rt_v2_authority_at(
+    ctx: *mut crate::TaskCtx,
+    _destination: *mut u8,
+    out: *mut SeamResult,
+    a: *const u64,
+    owner: *mut crate::Header,
+    start: u64,
+    len: u64,
+    from: u64,
+    at: *const u64,
+    max: u64,
+) -> u8 {
+    // SAFETY: this semantic entry owns its task until it suspends or returns.
+    let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
+
+    let l = unsafe { crate::io::slice_bytes(owner, start, len) };
+    let Some(l) = hirsel_store_authority::Locator::decode(l) else {
+        return unsafe { no_object(ctx, out) };
+    };
+    let request = wire::Request::At {
+        l,
+        from,
+        at: (unsafe { at.read() } % 256) as u8,
+        max,
+    };
+    unsafe { provider(ctx, out, a.read(), None, request) }
 }
 
 /// `authority.read(a, from, at, max) -> Result[List[Bytes], SeamError]`.

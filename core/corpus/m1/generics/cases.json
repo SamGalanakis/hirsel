@@ -1,0 +1,27 @@
+[
+  {
+    "name": "small",
+    "input": "inputs/small.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "normal",
+    "input": "inputs/normal.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "error",
+    "input": "inputs/error.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "capacity",
+    "input": "inputs/capacity.txt",
+    "variant": "capacity:callback2.string"
+  },
+  {
+    "name": "capacity-map",
+    "input": "inputs/capacity-map.txt",
+    "variant": "capacity:tally2.key"
+  }
+]

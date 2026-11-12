@@ -1,0 +1,4 @@
+hits=1 sum=322 evictions=0
+order=c,a,b
+acquire=cache
+release=cache

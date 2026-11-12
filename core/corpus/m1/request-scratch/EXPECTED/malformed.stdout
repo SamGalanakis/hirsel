@@ -1,0 +1,6 @@
+requests=0 bytes=0 sum=0
+acquire=socket#1
+acquire=scratch#1
+release=scratch#1
+release=socket#1
+failure=Parse@header

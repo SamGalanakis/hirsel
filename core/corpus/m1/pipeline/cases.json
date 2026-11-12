@@ -1,0 +1,37 @@
+[
+  {
+    "name": "small",
+    "input": "inputs/small.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "normal",
+    "input": "inputs/normal.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "error",
+    "input": "inputs/error.txt",
+    "variant": "error"
+  },
+  {
+    "name": "capacity",
+    "input": "inputs/capacity.txt",
+    "variant": "capacity:batch2.output"
+  },
+  {
+    "name": "cancel",
+    "input": "inputs/cancel.txt",
+    "variant": "cancel"
+  },
+  {
+    "name": "cancel-receive",
+    "input": "inputs/cancel-receive.txt",
+    "variant": "cancel-receive"
+  },
+  {
+    "name": "cancel-send",
+    "input": "inputs/cancel-send.txt",
+    "variant": "cancel-send"
+  }
+]

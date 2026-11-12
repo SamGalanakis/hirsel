@@ -1,0 +1,13 @@
+[package]
+name = "m1-bfs"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "bfs-idiomatic"
+path = "idiomatic.rs"
+
+[[bin]]
+name = "bfs-matched"
+path = "matched.rs"

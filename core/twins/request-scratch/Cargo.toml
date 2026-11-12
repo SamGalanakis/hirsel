@@ -1,0 +1,13 @@
+[package]
+name = "m1-request-scratch"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "request-scratch-idiomatic"
+path = "idiomatic.rs"
+
+[[bin]]
+name = "request-scratch-matched"
+path = "matched.rs"

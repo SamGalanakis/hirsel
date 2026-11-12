@@ -1,0 +1,37 @@
+[
+  {
+    "name": "small",
+    "input": "inputs/small.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "normal",
+    "input": "inputs/normal.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "error",
+    "input": "inputs/error.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "invalid",
+    "input": "inputs/invalid.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "capacity-0",
+    "input": "inputs/capacity-0.txt",
+    "variant": "capacity:search.parent"
+  },
+  {
+    "name": "capacity-1",
+    "input": "inputs/capacity-1.txt",
+    "variant": "capacity:search.queue"
+  },
+  {
+    "name": "capacity-2",
+    "input": "inputs/capacity-2.txt",
+    "variant": "capacity:result.path"
+  }
+]

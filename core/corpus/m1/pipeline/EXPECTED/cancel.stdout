@@ -1,0 +1,5 @@
+release-order=2,1
+sent=2 transformed=1 sink-batches=1 rows=2 bytes=3 sum=197
+backpressure=false
+released=1,2
+failure=Cancelled@transform.check

@@ -1,0 +1,6 @@
+acquire=source
+acquire=destination
+release=destination
+release=source
+destination-bytes=0 sum=0 lock-free=true
+failure=Lock@acquire

@@ -1,0 +1,13 @@
+[package]
+name = "m1-lru"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "lru-idiomatic"
+path = "idiomatic.rs"
+
+[[bin]]
+name = "lru-matched"
+path = "matched.rs"

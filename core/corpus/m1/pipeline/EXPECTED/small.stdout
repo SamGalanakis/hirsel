@@ -1,0 +1,3 @@
+sent=2 transformed=2 sink-batches=2 rows=4 bytes=7 sum=466
+backpressure=false
+released=1,2

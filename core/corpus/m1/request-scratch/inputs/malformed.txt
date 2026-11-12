@@ -1,0 +1,8 @@
+GET /alpha
+X-Id: 1
+broken
+
+GET /beta
+X-Id: 2
+Content: xy
+

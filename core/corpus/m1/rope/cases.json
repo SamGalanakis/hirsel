@@ -1,0 +1,32 @@
+[
+  {
+    "name": "small",
+    "input": "inputs/small.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "normal",
+    "input": "inputs/normal.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "error",
+    "input": "inputs/error.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "empty-undo",
+    "input": "inputs/empty-undo.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "utf8",
+    "input": "inputs/utf8.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "capacity",
+    "input": "inputs/capacity.txt",
+    "variant": "capacity:edit2.piece"
+  }
+]

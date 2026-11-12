@@ -1,0 +1,5 @@
+P a one
+P b two
+G a
+P c three
+G absent

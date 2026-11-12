@@ -1,0 +1,57 @@
+[
+  {
+    "name": "small",
+    "input": "inputs/small.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "normal",
+    "input": "inputs/normal.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "error-first",
+    "input": "inputs/error-first.txt",
+    "variant": "error-first"
+  },
+  {
+    "name": "error-second",
+    "input": "inputs/error-second.txt",
+    "variant": "error-second"
+  },
+  {
+    "name": "error-lock",
+    "input": "inputs/error-lock.txt",
+    "variant": "error-lock"
+  },
+  {
+    "name": "error-work",
+    "input": "inputs/error-work.txt",
+    "variant": "error-work"
+  },
+  {
+    "name": "error-release-lock",
+    "input": "inputs/error-release-lock.txt",
+    "variant": "error-release-lock"
+  },
+  {
+    "name": "error-release-destination",
+    "input": "inputs/error-release-destination.txt",
+    "variant": "error-release-destination"
+  },
+  {
+    "name": "error-release-source",
+    "input": "inputs/error-release-source.txt",
+    "variant": "error-release-source"
+  },
+  {
+    "name": "error-cleanup-all",
+    "input": "inputs/error-cleanup-all.txt",
+    "variant": "error-cleanup-all"
+  },
+  {
+    "name": "capacity",
+    "input": "inputs/capacity.txt",
+    "variant": "capacity:copy.buffer"
+  }
+]

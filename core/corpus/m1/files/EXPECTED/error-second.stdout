@@ -1,0 +1,4 @@
+acquire=source
+release=source
+destination-bytes=8 sum=875 lock-free=true
+failure=Io@create-destination

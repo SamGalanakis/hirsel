@@ -1,0 +1,8 @@
+acquire=source
+acquire=destination
+acquire=lock
+release=lock
+release=destination
+release=source
+destination-bytes=17 sum=1785 lock-free=true
+failure=Io@copy

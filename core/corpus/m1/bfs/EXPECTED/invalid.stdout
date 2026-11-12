@@ -1,0 +1,3 @@
+acquire=graph
+release=graph
+failure=InvalidVertex

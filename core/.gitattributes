@@ -1,0 +1,2 @@
+# Request plans retain the final blank request delimiter.
+corpus/m1/request-scratch/inputs/*.txt whitespace=-blank-at-eof

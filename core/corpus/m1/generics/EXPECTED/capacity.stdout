@@ -1,0 +1,5 @@
+acquire=list
+acquire=mapped
+release=mapped
+release=list
+failure=Capacity@callback2.string

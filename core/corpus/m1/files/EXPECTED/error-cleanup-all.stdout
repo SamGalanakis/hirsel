@@ -1,0 +1,14 @@
+acquire=source
+acquire=destination
+acquire=lock
+release=lock
+cleanup-error=Io@release-lock
+release=destination
+cleanup-error=Io@release-destination
+release=source
+cleanup-error=Io@release-source
+destination-bytes=17 sum=1785 lock-free=true
+suppressed=Io@release-lock
+suppressed=Io@release-destination
+suppressed=Io@release-source
+failure=Io@copy

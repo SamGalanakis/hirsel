@@ -1,0 +1,4 @@
+documents=0 pretty-bytes=0 sum=0
+acquire=document1
+release=document1
+failure=InvalidNumber@document1

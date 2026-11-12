@@ -1,0 +1,32 @@
+[
+  {
+    "name": "small",
+    "input": "inputs/small.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "normal",
+    "input": "inputs/normal.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "error",
+    "input": "inputs/error.txt",
+    "variant": "error"
+  },
+  {
+    "name": "malformed",
+    "input": "inputs/malformed.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "capacity",
+    "input": "inputs/capacity.txt",
+    "variant": "capacity:request2.header2"
+  },
+  {
+    "name": "capacity-reply",
+    "input": "inputs/capacity-reply.txt",
+    "variant": "capacity:request2.reply"
+  }
+]

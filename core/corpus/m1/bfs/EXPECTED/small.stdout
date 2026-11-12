@@ -1,0 +1,8 @@
+path=0,1,3,5
+visited=6
+acquire=graph
+acquire=parent
+acquire=queue
+release=queue
+release=parent
+release=graph

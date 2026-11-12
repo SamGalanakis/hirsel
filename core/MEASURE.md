@@ -1,0 +1,115 @@
+# Measurement protocol
+
+Every ratio to Rust uses the same workload, input bytes, observable result, algorithm,
+layout class, arithmetic policy, target, optimization and cache condition. Report
+idiomatic Rust and representation-matched Rust separately. Pair Hirsel check-and-lower
+with Rust check, end-to-end native build with Rust build, and executable lifecycle with
+Rust run. Check is not a native-build denominator. A retained program-record hit is an
+absolute startup number, separate from a fresh per-line compilation.
+
+## Fixed configuration
+
+Rust is 1.99.0, edition 2024, target `x86_64-unknown-linux-gnu`, target CPU `x86-64`.
+The standard library is the toolchain's prebuilt library. Both profiles enable overflow
+checks, disable incremental compilation and debug info, and use one codegen unit.
+Dev uses opt-level 0 and debug assertions; release uses opt-level 3 without debug
+assertions or LTO. Cargo manifests pin the same profile choices. No dependencies are
+fetched. Record `rustc -vV`, host CPU/OS, source base and profile flags beside the table.
+
+The serial instruction baseline runs on CPU 16, which is allowed by host rules. Run
+one measured process tree at a time, including all compiler workers and linker children.
+The pipeline still creates exactly three OS worker threads. They share that CPU for the
+serial baseline. This is a baseline of total work, not a multicore-throughput claim.
+Later wall-scaling runs use jobs 1/2/4/8 on allowed CPUs with matching limits on both
+sides and are separate configurations. Do not add them to a serial instruction ratio.
+
+The script invokes pinned rustc directly, rather than measuring the Cargo shim's
+systemd launcher. `check` emits metadata; `build` emits and links the executable.
+This keeps every compiler/linker child under the measured process. Cargo builds remain
+the normal CI and development path. End-to-end Cargo orchestration is not included in
+these rustc numbers and must not be included on only the Hirsel side of a ratio.
+
+## Source-line denominator
+
+`tools/measure.py:source_lines` counts physical Rust lines containing a nonwhitespace,
+noncomment token. It lexes line comments, nested block comments, quoted/character/raw
+strings and lifetimes. A line containing code and a trailing comment counts once.
+Braces and attribute-only lines count. Blank and comment-only lines do not. Count the
+binary root, its workload's `program.rs` and shared `support.rs`, once each. These are
+exactly the first-party modules that rustc compiles for that binary. No Cargo manifests,
+fixtures, Python, generated code, prebuilt std or other twin's implementation enters
+the denominator. Shared driver/trace code is included, so these small compile totals
+include a substantial harness/startup floor. Keep source sets and formatting fixed in
+comparisons. Count Hirsel physical source with the same comment/token rule and publish
+its set; never divide a whole process by just a selected function's lines. Also report
+input bytes, source bytes and emitted IR/instance counts when available.
+
+## Sampling and caches
+
+Follow the host's one-sample rule. Take one sample for each workload, layout, profile,
+operation and cold/warm configuration. They are distinct configurations, not repetitions
+for a median. Do not select the fastest sample or silently retry a measurement.
+
+Cold compilation means a new private output directory with no compiler products or
+incremental state. Warm compilation means a second fresh-process compilation of the
+same source after the cold compilation, again producing a fresh output with incremental
+state disabled. It measures warmed source/std/toolchain pages, not a Cargo no-op. There
+is no source edit and no persisted semantic compiler cache in either Rust compilation.
+Cold run is the first invocation of the selected executable; warm run invokes the same
+executable again with the same input. These programs keep no application cache between
+processes. Both include input read, structure construction, output, cleanup and process
+startup. Input fixture generation is outside the measurement, equally for both sides.
+
+These cache labels describe private compiler/application state. The shared host's OS
+page cache is neither flushed nor claimed cold. Newly linked executable pages may
+already be resident. Record this limitation; do not call these isolated-machine cold
+page-cache measurements. CPU contention, frequency changes and scheduler noise affect
+wall time. There are no confidence intervals from a single sample. Tiny-program ratios
+include process startup; report absolute totals and avoid a speed claim from that floor.
+
+## Counters and memory
+
+Each sample runs `tools/capped` with a 2 GiB process-tree memory cap, no swap and no
+wall/CPU timeout. Inside that cap, `perf stat -e instructions:u,duration_time` inherits
+counters across threads, fork and exec, including linker children. Never put perf
+outside a launcher that reparents its compiler children. No system-wide counters are
+used. Instructions include the `/usr/bin/time` measurement child and process startup;
+keep the same accounting on the comparison side. Duration is perf's nanosecond elapsed
+time, converted to seconds. `wrapper_seconds` separately includes capped admission and
+scope setup and is never the runtime numerator.
+
+`max_rss_kib` comes from GNU time, the largest process RSS high-water mark in the waited
+process tree. It is not a sum of concurrently live RSS. `tree_peak_mib` is capped's
+cgroup high-water memory, rounded to MiB; it includes anonymous memory, charged file
+cache and measurement tools. Report both and do not label the cgroup number RSS. If
+capped uses its process-limit fallback, the tree peak stays missing; do not fabricate
+one. Logical charges, allocated bytes and retained slack are different metrics; future
+runtime lanes report their curves separately from these physical-memory baselines.
+
+## Reproduction and reporting
+
+```sh
+python3 core/tools/measure.py --out /workspace/code/hirsel-briefs/core-corpus-885/measurement-new
+```
+
+The evidence directory must be new and outside the repo. The script writes the table
+incrementally to `core/BASELINE.tsv` and records the environment. Every normal run is
+compared against committed EXPECTED stdout. Raw perf/time/output logs stay in the lane's
+evidence directory; only the requested baseline table and environment enter Git.
+`BASELINE.md` is a compact view; the TSV contains all 216 configurations.
+
+A failed command, missing counter, wrong output, memory kill, absent build or externally
+interrupted run is a row with its status and unavailable fields empty. An externally
+timed-out run is recorded as `timeout` by the operator, with its observed bound and
+without a ratio. The script adds no timeout. Resume only the missing configurations,
+using a new evidence directory and preserving earlier rows. Never rerun a green sample
+for confidence. A ratio requires both rows to be complete, correct and equivalent;
+a censored result supplies a bound where one exists, never a complete ratio. Cost misses
+and noisy/censored measurements are findings; they do not change semantic gates.
+
+Prior art: the [Benchmarks Game method](https://benchmarksgame-team.pages.debian.net/benchmarksgame/how-programs-are-measured.html)
+supplies process-tree lifecycle and output checking; [rustc-perf](https://github.com/rust-lang/rustc-perf/blob/master/collector/README.md)
+supplies check/build/profile/scenario separation and instructions as the primary metric.
+Goose `bench/results.md:25-35,1043-1056` supplies lifecycle/checksum and startup caveats.
+The host rule replaces their repeated/best-of sampling with one sample per configuration,
+and forbids global cache flushing on this shared host.

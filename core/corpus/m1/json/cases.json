@@ -1,0 +1,42 @@
+[
+  {
+    "name": "small",
+    "input": "inputs/small.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "normal",
+    "input": "inputs/normal.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "pretty",
+    "input": "inputs/pretty.txt",
+    "variant": "print"
+  },
+  {
+    "name": "error",
+    "input": "inputs/error.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "missing",
+    "input": "inputs/missing.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "wrong-kind",
+    "input": "inputs/wrong-kind.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "invalid-number",
+    "input": "inputs/invalid-number.txt",
+    "variant": "normal"
+  },
+  {
+    "name": "capacity",
+    "input": "inputs/capacity.txt",
+    "variant": "capacity:document2.node3"
+  }
+]

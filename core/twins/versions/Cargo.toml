@@ -1,0 +1,13 @@
+[package]
+name = "m1-versions"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "versions-idiomatic"
+path = "idiomatic.rs"
+
+[[bin]]
+name = "versions-matched"
+path = "matched.rs"

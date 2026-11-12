@@ -1,0 +1,5 @@
+hits=0 sum=0 evictions=0
+order=a
+acquire=cache
+release=cache
+failure=Capacity@put2.payload

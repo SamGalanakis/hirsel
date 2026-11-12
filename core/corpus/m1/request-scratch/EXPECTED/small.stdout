@@ -1,0 +1,9 @@
+requests=2 bytes=23 sum=2147
+acquire=socket#1
+acquire=scratch#1
+release=scratch#1
+release=socket#1
+acquire=socket#2
+acquire=scratch#2
+release=scratch#2
+release=socket#2

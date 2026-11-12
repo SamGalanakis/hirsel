@@ -1,0 +1,25 @@
+name: Core Rust twins
+on:
+  push:
+    paths: ["core/**", ".github/workflows/core-twins.yml"]
+  pull_request:
+    paths: ["core/**", ".github/workflows/core-twins.yml"]
+jobs:
+  twins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --target x86_64-unknown-linux-gnu
+      - name: Check independent derivations
+        run: python3 core/tools/reference.py
+      - name: Build and compare dev
+        run: |
+          cargo +1.99.0 build --manifest-path core/twins/Cargo.toml --locked --offline --workspace --all-targets --target x86_64-unknown-linux-gnu --target-dir "${{ runner.temp }}/core-twins"
+          python3 core/tools/verify.py --target-dir "${{ runner.temp }}/core-twins"
+      - name: Build and compare release
+        run: |
+          cargo +1.99.0 build --manifest-path core/twins/Cargo.toml --locked --offline --workspace --all-targets --release --target x86_64-unknown-linux-gnu --target-dir "${{ runner.temp }}/core-twins"
+          python3 core/tools/verify.py --target-dir "${{ runner.temp }}/core-twins" --profile release
+      - name: Check format
+        run: cargo +1.99.0 fmt --manifest-path core/twins/Cargo.toml --all --check

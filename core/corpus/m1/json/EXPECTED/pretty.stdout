@@ -1,0 +1,16 @@
+query1="b\nλ"
+{
+  "items": [
+    {
+      "name": "a"
+    },
+    {
+      "name": "b\nλ",
+      "x": true
+    }
+  ],
+  "n": -2.5
+}
+documents=1 pretty-bytes=115 sum=6418
+acquire=document1
+release=document1

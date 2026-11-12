@@ -1,0 +1,13 @@
+[package]
+name = "m1-pipeline"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "pipeline-idiomatic"
+path = "idiomatic.rs"
+
+[[bin]]
+name = "pipeline-matched"
+path = "matched.rs"

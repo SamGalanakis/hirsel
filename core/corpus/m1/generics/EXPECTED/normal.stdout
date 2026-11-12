@@ -1,0 +1,14 @@
+long=8192 bytes=83968
+alpha!=2048
+beta!=4096
+gamma!=2048
+λ!=2048
+delta!=2048
+epsilon!=2048
+a!=2048
+acquire=list
+acquire=mapped
+acquire=map
+release=map
+release=mapped
+release=list

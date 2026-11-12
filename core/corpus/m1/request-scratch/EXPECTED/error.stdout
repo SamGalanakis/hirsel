@@ -1,0 +1,10 @@
+requests=1 bytes=13 sum=1207
+acquire=socket#1
+acquire=scratch#1
+release=scratch#1
+release=socket#1
+acquire=socket#2
+acquire=scratch#2
+release=scratch#2
+release=socket#2
+failure=Io@request2.write

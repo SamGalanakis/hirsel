@@ -1,0 +1,5 @@
+release-order=1,2,3,4,5,6,7,8,9
+sent=8 transformed=0 sink-batches=0 rows=0 bytes=0 sum=0
+backpressure=true
+released=1,2,3,4,5,6,7,8,9
+failure=Cancelled@source.send

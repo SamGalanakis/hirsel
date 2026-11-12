@@ -1,0 +1,4 @@
+query1="b\nλ"
+documents=1 pretty-bytes=115 sum=6418
+acquire=document1
+release=document1

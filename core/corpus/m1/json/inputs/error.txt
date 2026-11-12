@@ -1,0 +1,3 @@
+/items/1/name
+{"items":[{"name":"a"},{"name":"b\n\u03bb","x":null,"x":true}],"n":-2.5}
+{"items":[1,]}

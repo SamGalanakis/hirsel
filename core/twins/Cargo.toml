@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["request-scratch", "json", "lru", "bfs", "pipeline", "versions", "rope", "files", "generics"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.99"
+
+[profile.dev]
+codegen-units = 1
+opt-level = 0
+debug = 0
+overflow-checks = true
+incremental = false
+
+[profile.release]
+opt-level = 3
+debug = 0
+overflow-checks = true
+incremental = false
+lto = false
+codegen-units = 1

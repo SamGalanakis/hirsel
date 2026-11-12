@@ -1,0 +1,8 @@
+acquire=source
+acquire=destination
+acquire=lock
+release=lock
+release=destination
+release=source
+destination-bytes=0 sum=0 lock-free=true
+failure=Capacity@copy.buffer

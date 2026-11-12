@@ -35,8 +35,8 @@ pub opaque const where true false bytes
 ```
 
 A keyword cannot be declared or used as a name anywhere, after a `.` included. These names
-are contextual and ordinary elsewhere: `drop` after a resource declaration; `plain`, `shareable`, `send`, `key`, `ordered`, `integer` and `float` in a bound
-list; `own` before `fn` in a type; `waits` after a function or callable header. Library types and functions, including `Region`,
+are contextual and ordinary elsewhere: `drop` after a resource declaration; `plain`, `shareable`, `send`, `key`, `ordered`, `integer`, `float`, `packed` and
+`streamable` in a bound list; `own` before `fn` in a type; `waits` after a function or callable header. Library types and functions, including `Region`,
 `View`, `Rc`, `Arc` and `Capacity`, are ordinary names. `_` is the discard pattern.
 
 ```hirsel

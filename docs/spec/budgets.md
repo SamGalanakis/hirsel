@@ -85,7 +85,9 @@ A block is refunded to the limit its record leads to (MEM-20) when it is freed: 
 owner is cleaned, when a region closes, when a counted node's last holder goes, when a
 collection's storage is replaced by growth, and when a resource is wholly destructured (its
 field storage, unused cause cell and unused grant,
-[T3.7](ownership.md#own-26-the-transition-table)). Refunding
+[T3.7](ownership.md#own-26-the-transition-table)). `finish_trim`
+refunds the unused end of a builder's allocation in the same way, and the allocation keeps
+charging the rest ([T1.9](ownership.md#own-26-the-transition-table)). Refunding
 cannot fail and admits nothing ([T5.7](ownership.md#own-26-the-transition-table)).
 Mechanical release, region close and counted release never allocate
 ([FAIL-13](failure.md#fail-13-mechanical-release)); a user finalizer may, and admits only from
@@ -105,6 +107,9 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 | region allocation | its byte count, rounded up to 8 |
 | a `Text` or `FixedSpan` made outside a compact type | 8 (count) + payload bytes, rounded up to 8 |
 | a span builder's allocation | a region allocation of its current capacity × element size + 8 |
+| a `build_in` or `build_stream_in` allocation | `n`, rounded up to 8; after `finish_trim`, its used bytes, rounded up to 8 |
+| `copy_closed_in(r, x)` | `x`'s bytes, rounded up to 8 |
+| `seq.index_in` | 24 + count × 8, rounded up to 8 |
 | resource value | one block: its fields' sizes, plus 32 for its cause cell, plus its grant (MEM-27) |
 | task | 256 + its result's size + 32 for its primary cause cell + its reserved limit `n` |
 | `main`'s task at startup | 256 + 32, from the root limit before `main` runs; a root limit smaller than this does not start the run |

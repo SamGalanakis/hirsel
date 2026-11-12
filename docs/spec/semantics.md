@@ -89,7 +89,8 @@ fn count(m: Map[String, u64], k: String) -> u64 { match map.get(m, k) { Some(v) 
 
 ### SEM-6: Iteration
 
-`for x in e` iterates a range, or a view of a `List`, an `Inline` array, a `FixedSpan` or a `Causes`
+`for x in e` iterates a range, or a view of a `List`, an `Inline` array, a `FixedSpan`, a
+`SeqSpan` ([MEM-12](memory.md#mem-12-stable-sequences)) or a `Causes`
 ([core](core.md)), binding a view of each element from the lowest index. Over a view of a
 `Map` it binds `(View[K], View[V])` for each entry in insertion order. `for take x in e` consumes an own `List`, moving each
 element out from the lowest index and cleaning the rest if the loop exits early. Nothing
@@ -111,8 +112,8 @@ fn grow(mut xs: List[u64]) -> Result[(), Capacity] {
 
 `==` and `!=` need `key` operands; `<`, `<=`, `>` and `>=` need `ordered` operands
 ([OWN-4](ownership.md#own-4-bounds)). Integers, `bool`, `char`, unit, `String` and `Text`
-are both. Tuples, `Option`, `Result`, `List`, `Inline` and `FixedSpan` have a bound when
-their components do. `Unique` is `key` and not `ordered`
+are both. Tuples, `Option`, `Result`, `List`, `Inline` and the stable sequences have a
+bound when their components do. `Unique` is `key` and not `ordered`
 ([MEM-18](memory.md#mem-18-pools-are-library-code)). A nominal type has a bound when it declares it and its fields have it.
 Equality is structural. Order is numeric for integers and `char`, `false` before `true`,
 bytewise for text, lexicographic for tuples, sequences and records (fields in declaration

@@ -23,7 +23,8 @@ These goals decide between designs. A rule that would break one of them is wrong
    **declaration preprocessing** computes each type's summary
    ([OWN-2](ownership.md#own-2-type-summaries)) and each constant's value
    ([LANG-20](language.md#lang-20-constants)) once, in dependency order, from declarations
-   alone.
+   alone. An engine lowers each checked definition once; it may call a known callback
+   directly, and never checks a body again to do so.
 2. **Representation is declared.** A type's declaration fixes whether its values are
    plain, own, stable, resource, counted or scoped, and every use inherits it
    ([OWN-1](ownership.md#own-1-representation-is-declared-once)). Costs follow from the
@@ -89,6 +90,7 @@ the comment says.
 | hand-over, limit record | [MEM-20](budgets.md#mem-20-limit-records-and-hand-over) |
 | kind | [OWN-3](ownership.md#own-3-kinds) |
 | outlives | [MEM-6](memory.md#mem-6-roots) |
+| packed, streamable | [MEM-12](memory.md#mem-12-stable-sequences) |
 | pending result | [FAIL-9](failure.md#fail-9-pending-results) |
 | place, slot | [checker state](ownership.md#checker-state) |
 | provider | [CAP-5](capabilities.md#cap-5-provider-operations) |
@@ -99,6 +101,7 @@ the comment says.
 | twin | [MEM-17](memory.md#mem-17-clone) |
 | type summary | [OWN-2](ownership.md#own-2-type-summaries) |
 | writable | [OWN-5](ownership.md#own-5-availability) |
+| writer | [MEM-4](memory.md#mem-4-sized-destinations) |
 
 ## Status
 

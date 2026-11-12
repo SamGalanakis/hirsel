@@ -114,6 +114,74 @@ fn note(r: Region, s: String) -> Result[Note in r, BuildError] {
 }
 ```
 
+A document of a `streamable` type (MEM-12) is instead written top-down, each value once at
+its final offset:
+
+```
+fn build_stream_in[T: streamable](r: Region, bytes n: u64,
+                   w: scoped fn(take Writer[T, in r]) -> Result[Child[T], BuildError])
+    -> Result[Builder[T, in r], BuildError]
+```
+
+It returns `Error(Overflow)` when `n` exceeds the blob cap of `T`'s `W`, then admits `n`
+bytes as `build_in` does, and only then calls `w` once. A `Writer[U, in r]` is the right to
+write one complete `U` at the allocation's next byte. It is scoped and moves (OWN-3), has
+no size and no cleanup, and is never captured by any closure, stored, returned or held in
+another value; it passes only to a parameter that declares a writer. It is completed in one of two ways, each giving the `Child[U]` of the complete value:
+
+- `emit(take w, L)` writes the construction literal `L` of `U` in declaration order. A
+  field's operand in `L` may be `emit(f)`, where `f` is a scoped callback that takes the
+  field's writer and returns its child; `f` runs, and its captures are lent, only while
+  that field is written ([OWN-21](ownership.md#own-21-scoped-callbacks)).
+- `writer.close(take w)` completes a `Text`, `SeqSpan` or `IndexedSpan`, whose header was
+  reserved when its writer was made. Closing an `IndexedSpan` checks that its table fits,
+  then writes it in one walk of the elements.
+
+Before closing, `writer.scalar(mut w, c)` appends a `char` to a `Text`, and
+`writer.append(mut w, f)` calls `f` once with a writer for the sequence's next element; `w`
+is lent to that call alone, and the count advances only when `f` returns the element's
+child. `writer.completed(w, i)`, which walks `i` elements, and `writer.last_completed(w)`, in
+constant time, return views anchored to `r` of complete elements; nothing views an open
+value. Each operation that receives a `Child` checks that its identity and offset are
+those of the frame it handed out, and fails with `Bounds` otherwise; this guards against a
+program mixing children, not against the engine's own writes. A write that does not fit in
+`n`, or that would make a count, byte length, offset or the used prefix exceed `2^b − 1`,
+returns `Error(Overflow)` before its first byte; as for a put, the identity check comes
+first.
+
+Every call that takes a writer and returns a `Result` is the operand of `?` or in tail
+position ([LANG-11](language.md#lang-11-typing-is-local)); its result is never bound, matched
+or dropped. So an `Error` leaves the whole build: nothing is published, no abandoned frame
+resumes, the `n` bytes stay charged until `r` closes, and views of complete elements stay
+valid ([FAIL-6](failure.md#fail-6-region-prefixes)). Nothing infers `n`, runs `w` twice,
+moves or grows a written byte, or admits in `finish`; a program that wants the exact size
+computes it first from input it can read twice ([example 8](examples.md#8-a-json-document-written-in-place)).
+`finish_trim(take b)`, for either builder, publishes as `finish` does and refunds the
+unused end, `round8(n) − round8(used)`, to the limit the allocation's record leads to
+([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)), whatever limit is current; it
+moves nothing and cannot fail.
+
+```hirsel
+@compact(u32) stable type J = Null | Arr(SeqSpan[J])
+fn list[in r](take w: Writer[SeqSpan[J], in r]) -> Result[Child[SeqSpan[J]], BuildError] {
+  writer.append(mut w, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] { emit(take x, Null) })?
+  writer.close(take w)
+}
+```
+```hirsel
+@compact(u32) stable type J = Null | Arr(SeqSpan[J])
+fn quiet(f: scoped fn() -> Result[(), BuildError]) -> Result[(), BuildError] {
+  match f() { Ok(()) => Ok(()), Error(_) => Ok(()) }
+}
+fn list[in r](take w: Writer[SeqSpan[J], in r]) -> Result[Child[SeqSpan[J]], BuildError] {
+  quiet(fn() -> Result[(), BuildError] {
+    writer.append(mut w, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] { emit(take x, Null) })?
+    Ok(())                                     // refused: MEM-4, the closure captures w
+  })?
+  writer.close(take w)
+}
+```
+
 ### MEM-5: Publication
 
 A published stable value is immutable for the life of its region and never moves. No
@@ -194,20 +262,20 @@ reset or reopened; `loop { region r { .. } }` opens a fresh region each iteratio
 A compact value is one contiguous allocation (a **blob**) of at most `2^b − 1` bytes, where
 `b` is `W`'s bit width, laid out with fields in declaration order, each at the next byte
 with no padding. A compact type's fields are scalars, `bool`, `char`, other compact types
-(inline), `Text`, `FixedSpan[T]` (MEM-12), and `Link[U]` (MEM-10); an `Inline` array is not
-one in v1. A compact type held inline or as a link target is encoded with its holder's `W`,
-and a view of it, however it is projected, passed, returned or copied, keeps that `W`, its
-blob and its offset in the blob; a `Text` or `FixedSpan` that is not inside
-a compact type is encoded with `W = u64`. Every compact type's smallest encoding is at least
+(inline), `Text`, `FixedSpan[T]`, `SeqSpan[T]`, `IndexedSpan[T]` (MEM-12), and `Link[U]`
+(MEM-10); an `Inline` array is not one in v1. A compact type held inline or as a link
+target is encoded with its holder's `W`, and a view of it, however it is projected, passed,
+returned or copied, keeps that `W`, its blob and its offset in the blob; a `Text` or
+sequence that is not inside a compact type is encoded with `W = u64`. Every compact type's smallest encoding is at least
 one byte; a type that can encode to zero bytes is refused. Compact values are built only
-through MEM-3 and MEM-4. Compact layout is the only layout a program can declare in v1;
+through MEM-3, MEM-4 and MEM-17. Compact layout is the only layout a program can declare in v1;
 every other layout is private ([MEM-13](#mem-13-own-layout)).
 
 The language fixes, and an engine's backend may rely on: scalars little-endian at their
 written width; `bool` one byte, 0 or 1; `char` its scalar value as a `u32`; floats their
 IEEE bits, little-endian; a variant tag, numbered from 0 in declaration order, in the
 smallest of `u8`, `u16` and `u32` that holds the variant count; a field's offset is the
-sum of the sizes of the fields before it; the count word of MEM-12, `W` wide; the
+sum of the sizes of the fields before it; the count, byte-length and offset words of MEM-12, `W` wide; the
 link encoding of MEM-10; and the blob cap. Private: where a blob sits in its region and its
 alignment, region chunking, every non-compact layout and the calling convention.
 
@@ -222,7 +290,7 @@ alignment, region chunking, every non-compact layout and the calling convention.
 
 ### MEM-10: Inline fields and links
 
-A compact field of compact type, `Text` or `FixedSpan` type is stored inline: its bytes are part
+A compact field of compact type, `Text` or a sequence type is stored inline: its bytes are part
 of the blob. A `Link[U]` field refers to a `U` earlier in the same blob and is stored as
 the `W`-width byte distance back from the field to its target; `Option[Link[U]]` uses zero
 for `None`. Links are formed only from the `Child` values of MEM-4; a child is complete
@@ -250,20 +318,41 @@ variant of a published value is impossible (MEM-5); a new value is built instead
 
 ### MEM-12: Stable sequences
 
-This revision has two stable sequence types. `FixedSpan[T]` holds elements of a plain type
-`T`. It is a `W`-width count, then the elements at a stride of `T`'s logical size; an
-element's bytes are the encoding of MEM-9 when `T` is a scalar, `bool`, `char`, or a tuple or
-record of these, and private otherwise. `Text` is a `W`-width byte count,
-then that many bytes of valid UTF-8 ([SEM-3](semantics.md#sem-3-text)). `span.get(s, i)`
-returns `Option[T]` after one bounds test; `s[i]` fails with `Bounds` instead. OPEN: sequences of
-variable-size or stable elements; implementers must not rely on their absence. They are planned for v1 ([reserved](reserved.md#open-in-this-revision));
-until they land they are built from compact types and links.
+`FixedSpan[T]` holds elements of a plain type `T`. It is a `W`-width count, then the
+elements at a stride of `T`'s logical size; an element's bytes are the encoding of MEM-9
+when `T` is a scalar, `bool`, `char`, or a tuple or record of these, and private otherwise.
+`Text` is a `W`-width byte count, then that many bytes of valid UTF-8
+([SEM-3](semantics.md#sem-3-text)). `span.get(s, i)` returns `Option[T]` after one bounds
+test; `s[i]` fails with `Bounds` instead.
+
+`SeqSpan[T]` holds elements of a `packed` type, each of its own size: a `W`-width count, a
+`W`-width **byte length** (of the elements), then the elements back to back in order.
+`IndexedSpan[T]` is the same followed by a table of `count` offsets, each `W` wide, from the
+first element byte to each element; its own byte length excludes the table, and the byte
+length of a sequence holding it includes it. So an `IndexedSpan[T]` is read where a `SeqSpan[T]` is
+expected, and skipping any value costs work fixed by its type, never by its contents.
+`seq.len(s)` reads the count, `seq.nth(s, i)` walks `i` elements, `indexed.get(s, i)` makes
+one bounds test and one load, and `for` visits the elements in order
+([SEM-6](semantics.md#sem-6-iteration)); neither has `s[i]`. They are written only by the
+writers of MEM-4. `seq.index_in(r, s)` builds a separate `SeqIndex` of `s` in `r`, read in
+constant time by `seq.get(x, i)`; it keeps `s`'s locator, and nothing makes one from
+offsets or pairs it with another sequence.
+
+A type is **packed** when it is a scalar, `bool`, `char`, `Text`, a compact type, or a
+`SeqSpan` or `IndexedSpan` of a packed type, its holds set
+([OWN-2](ownership.md#own-2-type-summaries)) has no capability, and each `FixedSpan` in it
+has elements with MEM-9's encoding. It is **streamable** when it is packed and holds no
+`Link` at any depth. Both are bounds (OWN-4) that summaries compute; neither is declared. A
+compact type may contain itself through a sequence, whose header ends its layout (OWN-2),
+when every such cycle keeps its type arguments; inline it still may not.
 
 ```hirsel
-fn total(xs: FixedSpan[u64]) -> u64 { let mut t: u64 = 0; for x in xs { t += x }; t }
+@compact(u32) stable type J = Null | Arr(SeqSpan[J])
+fn count(j: J) -> u64 { match j { Null => 1, Arr(xs) => { let mut n: u64 = 1; for x in xs { n += count(x) }; n } } }
 ```
 ```hirsel
 fn names(xs: FixedSpan[Text]) -> u64 { span.len(xs) }       // refused: MEM-12, Text has no fixed size
+fn first(xs: SeqSpan[u64]) -> u64 { xs[0] }                 // refused: MEM-12, no s[i]
 ```
 
 ## Own and counted data
@@ -345,7 +434,9 @@ blocks charged to the current limit and shares its counted edges, a counted root
 as `U` included, and keeps the regions of its stable fields. `clone_in(r, x) -> Result[U
 in r, Capacity]` makes a stable `U` in `r`; a compact value is copied as the whole used
 blob at its original `W`, keeping the selected value's offset, never re-encoded at `U`'s
-own `W`.
+own `W`. `copy_closed_in(r, x)` copies a value of a streamable type (MEM-12) as exactly its
+own bytes, keeping its `W`, even from a blob still being written (MEM-4); it admits those
+bytes once and leaves `x` as it was.
 `@twin(P)` on a non-generic declaration names the type `P` it pairs with; the pair is
 symmetric. The two have the same field names in the same order, and each pair of field
 types is identical, a built-in pair (`String` and `Text`; `List[T]` and `FixedSpan[T]`;

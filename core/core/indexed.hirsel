@@ -1,0 +1,3 @@
+// Module `indexed` (MEM-12).
+
+pub fn get[T: packed](s: IndexedSpan[T], i: u64) -> Option[View[T]] in s

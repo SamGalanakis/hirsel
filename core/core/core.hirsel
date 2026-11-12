@@ -21,8 +21,12 @@ pub opaque type Unique: key
 pub opaque type Region
 pub opaque stable type Text
 pub opaque stable type FixedSpan[T: plain]
+pub opaque stable type SeqSpan[T: packed]
+pub opaque stable type IndexedSpan[T: packed]
+pub opaque stable type SeqIndex[T: packed, in a]
 pub opaque type Link[T]
 pub opaque type Dest[T]
+pub opaque type Writer[T, in r]
 pub opaque type Child[T]
 pub opaque type SpanBuilder[T: plain, in r]
 pub opaque type Builder[T, in r]
@@ -65,3 +69,9 @@ pub fn clone[T, U](x: T) -> Result[U, Capacity]
 pub fn clone_in[T, U](r: Region, x: T) -> Result[U in r, Capacity]
 pub fn build_in[T](r: Region, bytes n: u64, w: scoped fn(mut Dest[T]) -> Result[Child[T], BuildError]) -> Result[Builder[T, in r], BuildError]
 pub fn finish[T, in r](take b: Builder[T, in r]) -> T in r
+pub fn finish_trim[T, in r](take b: Builder[T, in r]) -> T in r
+pub fn build_stream_in[T: streamable](r: Region, bytes n: u64, w: scoped fn(take Writer[T, in r]) -> Result[Child[T], BuildError]) -> Result[Builder[T, in r], BuildError]
+// `emit` is a built-in form: x must be a construction literal of T, and a field's operand
+// in it may be `emit(f)` with f a scoped callback taking that field's writer (MEM-4).
+pub fn emit[T, in r](take w: Writer[T, in r], x: T) -> Result[Child[T], BuildError]
+pub fn copy_closed_in[T: streamable](r: Region, x: T) -> Result[T in r, Capacity]

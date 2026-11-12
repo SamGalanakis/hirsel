@@ -1,0 +1,9 @@
+// Module `writer` (MEM-4). These are built-in forms: S is the writer's type, Text for
+// `scalar`, Text, SeqSpan[T] or IndexedSpan[T] for `close`, and SeqSpan[T] or
+// IndexedSpan[T] for the others, where T is the element (docs/spec/core.md).
+
+pub fn append[S, T, in r](mut w: Writer[S, in r], f: scoped fn(take Writer[T, in r]) -> Result[Child[T], BuildError]) -> Result[(), BuildError]
+pub fn scalar[in r](mut w: Writer[Text, in r], c: char) -> Result[(), BuildError]
+pub fn close[S, in r](take w: Writer[S, in r]) -> Result[Child[S], BuildError]
+pub fn completed[S, T, in r](w: Writer[S, in r], i: u64) -> Option[View[T]] in r
+pub fn last_completed[S, T, in r](w: Writer[S, in r]) -> Option[View[T]] in r

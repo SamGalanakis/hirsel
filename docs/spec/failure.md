@@ -71,9 +71,11 @@ operation are never undone.
 
 ### FAIL-6: Region prefixes
 
-Bytes that a failed `span.push`, a failed or unused sized destination, or an abandoned
-span-builder allocation took in a region stay charged to the region until it closes
-([MEM-8](memory.md#mem-8-close)). Nothing refunds them earlier.
+Bytes that a failed `span.push`, a failed or unused sized destination or writer, or an
+abandoned span-builder allocation took in a region stay charged to the region until it
+closes ([MEM-8](memory.md#mem-8-close)). Nothing refunds them earlier, and nothing reuses
+them; only `finish_trim` of a completed builder refunds its unused end
+([MEM-4](memory.md#mem-4-sized-destinations)).
 
 ### FAIL-7: One owner per survivor
 

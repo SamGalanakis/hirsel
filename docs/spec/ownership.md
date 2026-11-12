@@ -32,6 +32,9 @@ this state; every rule of this specification that refuses a body is decided from
 - the **capture descriptors**: for each scoped callable value, the whole slots or formal
   anchors it captures, each with its mode (view or `mut`) and lexical scope, and the loans
   each activation holds ([OWN-21](#own-21-scoped-callbacks));
+- the **construction frames**: for each open `emit` literal, its type and next field, and
+  whether the current expression is a `?` operand or in tail position
+  ([MEM-4](memory.md#mem-4-sized-destinations));
 - the published **type summaries** ([OWN-2](#own-2-type-summaries)) and **constant values**
   ([LANG-20](language.md#lang-20-constants)), which declaration preprocessing computes once
   ([index](index.md)) and checking reads and never recomputes.
@@ -67,7 +70,8 @@ Each type declaration publishes one **summary**. This is its whole content:
 - its kind (OWN-3) and declared bounds (OWN-4);
 - its region parameters and anchors ([MEM-6](memory.md#mem-6-roots), OWN-22);
 - its logical size ([MEM-24](budgets.md#mem-24-logical-charges)), its layout obligations
-  ([MEM-9](memory.md#mem-9-compact-types)) and its declared twin
+  ([MEM-9](memory.md#mem-9-compact-types)), whether it is `packed` and `streamable`
+  ([MEM-12](memory.md#mem-12-stable-sequences)), and its declared twin
   ([MEM-17](memory.md#mem-17-clone));
 - its **holds** set: which of resource, capability, scoped value, stable reference and
   **opaque owner** (a builder, `Causes` or an owning closure: an owner with no copy
@@ -75,7 +79,8 @@ Each type declaration publishes one **summary**. This is its whole content:
 
 Kind, size and layout read only the fields held inline. The indirections `Box`, `List`,
 `Map`, `Rc`, `Arc`, `Task`, `Sender`, `Receiver`, callables and stable references have a
-fixed size and layout that does not read their payload's. These parts are computed in
+fixed size and layout that does not read their payload's; inside a compact type, a
+`SeqSpan` or `IndexedSpan` ends the layout the same way, by its header. These parts are computed in
 dependency order and never iterated. A declaration whose computation re-enters a type
 still being computed contains itself inline and is refused; the refusal is reported at the
 field, continuing the cycle, of the cycle member whose definition identity (package, module
@@ -112,15 +117,15 @@ Every type has exactly one kind. A value is **copyable** when `let` copies it.
 |---|---|---|---|
 | plain | OWN-2 | copies | none |
 | own | `type` with a non-plain field; `Box`, `List`, `String`, `Map`, the builders, `own fn` | moves | fields in reverse declaration order, then its blocks |
-| stable | `stable type`; `Text`, `FixedSpan` | copies | freed with its region |
+| stable | `stable type`; `Text`, `FixedSpan`, `SeqSpan`, `IndexedSpan`, `SeqIndex` | copies | freed with its region |
 | resource | `resource type`; `Sender`, `Receiver`, `Task`; capabilities that hold state | moves | finalizer, then fields |
 | counted | `Rc[T]`, `Arc[T]` | moves | release ([MEM-16](memory.md#mem-16-counting)) |
-| scoped | `View[T]`, `Region`, `Dest`, `scoped fn`, `scoped type` | copies when every component is copyable, otherwise moves | cleans each owned component |
+| scoped | `View[T]`, `Region`, `Dest`, `Writer`, `scoped fn`, `scoped type` | copies when every component is copyable, otherwise moves | cleans each owned component |
 
 A tuple, `Option` or `Result` is scoped when a component is; otherwise it is plain when every
 component is, and own otherwise. Any of them copies exactly when every component is
 copyable, and its cleanup cleans each component. `View[T]` and `Region` are copyable;
-`Dest` and `scoped fn` are not, and have no cleanup. A generic `T` is none of these until
+`Dest`, `Writer` and `scoped fn` are not, and have no cleanup. A generic `T` is none of these until
 instantiated; [OWN-23](#own-23-generic-bodies) says how a body treats it.
 
 ```hirsel
@@ -148,6 +153,8 @@ The bounds are:
   only on the type parameters of core declarations ([core](core.md)), which have no body, and
   are refused anywhere else: numeric generics are not in v1
   ([reserved](reserved.md#not-in-v1)).
+- `packed`, `streamable`: compact encodings
+  ([MEM-12](memory.md#mem-12-stable-sequences)), computed like `plain`.
 
 Plain types are `shareable` and `send` without declaring it. Otherwise a nominal type
 declares the bounds it promises after its name (`type Node: shareable + send { .. }`), and
@@ -158,7 +165,7 @@ declaration is checked as if each type parameter had those bounds as well, and a
 instance has a declared bound exactly when each of its type arguments has it, so
 `type Pair[T]: shareable { a: T, b: T }` makes `Pair[u64]` shareable and
 `Pair[HostFile]` not. A refusal is reported at the field whose type breaks the bound. A type without a declaration of `shareable`, `send`, `key` or `ordered` does
-not have it, plain types' `shareable` and `send` excepted. `plain` is never declared.
+not have it, plain types' `shareable` and `send` excepted. `plain`, `packed` and `streamable` are never declared.
 
 ```hirsel
 type Leaf: shareable + send { n: List[u64] }
@@ -494,7 +501,8 @@ fn keep(xs: List[String]) -> List[View[String]] { list.new() }  // refused: OWN-
 ### OWN-20: Scoped results name their anchor
 
 A function that returns a scoped value writes its anchors in the result type: `View[T] in
-p` for one, `R[in a, in b]` for a scoped type with several. Each names a view parameter.
+p` for one, `R[in a, in b]` for a scoped type with several. Each names a view parameter, or
+a region whose stable values the result reads.
 The caller's argument for each stays frozen for the result's extent. The result may denote
 the anchored argument, a part of it (a field, element or payload, at any depth), or a
 sub-view that a call gave for the argument or for such a part (OWN-8), core operations'
@@ -525,7 +533,9 @@ closure body: the slots or formal anchors it captures, each with its mode (view,
 when the body assigns or lends it `mut`) and lexical scope. The descriptor follows the value
 through moves, scoped aggregates, argument substitution, returned anchors and joins, where
 descriptors unite and `mut` dominates view. It is **activated** for a direct invocation,
-for that invocation, and for a call that receives it as an argument, for that whole call. At
+for that invocation, and for a call that receives it as an argument, for that whole call,
+except that a field callback of an `emit` literal is active only while its field is written
+([MEM-4](memory.md#mem-4-sized-destinations)). At
 activation each captured place must be live, and writable for a `mut` capture, and its loan
 is checked as an argument of that call against the other arguments, active loans and
 freezes (OWN-9 to OWN-12). Forwarding a received callback reborrows its loans and creates no
@@ -637,6 +647,9 @@ after a failure ([FAIL-7](failure.md#fail-7-one-owner-per-survivor)).
 | T1.5 | `clone(x)`, `clone_in(r, x)` | copy L; `chg` per new block; `share` per counted edge | `Capacity` at block k | own blocks copied so far dropped and shares released in reverse, each `ref`; region bytes stay charged until close; `x` untouched |
 | T1.6 | `span.push(mut b, x)` | value moved into the builder | `Capacity` | the error owns the value; the builder unchanged; region bytes stay charged |
 | T1.7 | `finish(take b)` | stable value L | cannot fail | |
+| T1.8 | `build_in`, `build_stream_in` | width check, then `chg(n)` (commit), then the writer runs once | `Overflow` or `Capacity` before the writer runs; the writer's `Error` | nothing allocated before commit; after it the `n` bytes stay charged until close and nothing is published |
+| T1.9 | `finish_trim(take b)` | stable value L; `ref(round8(n) − round8(used))` at the allocation's record | cannot fail | |
+| T1.10 | `seq.index_in(r, s)`, `copy_closed_in(r, x)` | `chg` (commit), then the copy or table | `Capacity` | nothing allocated; the source unchanged |
 
 **T2 Bindings and views**
 

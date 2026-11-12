@@ -1,6 +1,6 @@
 # Examples
 
-Seven complete programs, the seed of the conformance corpus. Each runs with a root limit
+Eight complete programs, the seed of the conformance corpus. Each runs with a root limit
 of 1,048,576 bytes. **Output** is the exact text the program writes to standard output,
 and **outcome** is how the run ends ([PROG-3](programs.md#prog-3-entry)). Each refusal is an
 edit of the program; the site is `line:column` in the edited program, at the start of the
@@ -510,3 +510,158 @@ Refused edits:
   refused, OWN-5 at 24:20, `xs` was moved.
 - Pass `xs` to the spawn without `take`: refused, OWN-7 at 20:47, a `take` parameter needs
   `take xs` for a place.
+
+## 8. A JSON document written in place
+
+A subset of JSON (null, booleans, unsigned integers, strings without escapes and arrays,
+with no spaces) is parsed straight into one blob. A first pass over the input, which can be
+read twice, checks it and computes the exact size; `build_stream_in` admits that size once,
+and a second pass writes each value at its final offset, with no staging copy. Arrays are
+`IndexedSpan`s, so `indexed.get` is one load, and `total` walks the document.
+
+Charges, by hand, for `[12,"ab",[true,30],[]]` with `W = u32`: a tag is 1 byte, `Num` 1 + 8
+= 9, `Str("ab")` 1 + 4 + 2 = 7, `true` 1, and an array 1 + 4 (count) + 4 (byte length) + its
+elements + 4 per element for its table. So `[true,30]` is 9 + 1 + 9 + 8 = 27, `[]` is 9, and
+the root 9 + (9 + 7 + 27 + 9) + 16 = 77, the sum `size` computes. The region allocation
+charges 80, 77 rounded up to 8; the input is a static literal and the callbacks are scoped,
+so nothing else is charged. Inside `bound bytes 72` the admission is refused with
+`requested` 80 before the writer runs. With a guessed `bytes 4096` instead, `finish_trim`
+would refund 4016 at publication and keep 80.
+
+```hirsel
+type AppError = Io(WriteError) | Mem(Capacity) | Build(BuildError) | Syntax(u64)
+@compact(u32) stable type Json = Null | False | True | Num(u64) | Str(Text) | Arr(IndexedSpan[Json])
+
+fn mem[T](take r: Result[T, Capacity]) -> Result[T, AppError] {
+  match take r { Ok(take x) => Ok(take x), Error(c) => Error(Mem(c)) }
+}
+
+fn put(out: Stdout, s: String) -> Result[(), AppError] waits {
+  match stdout.write(out, s) { Ok(()) => Ok(()), Error(e) => Error(Io(e)) }
+}
+
+fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] waits {
+  let mut buf = string.new()
+  mem(string.push(mut buf, label))?
+  mem(string.push_u64(mut buf, n))?
+  mem(string.push(mut buf, "\n"))?
+  put(out, buf)
+}
+
+fn at(s: String, i: u64) -> u8 {
+  let b = string.as_bytes(s)
+  if i < list.len(b) { b[i] } else { 0 }
+}
+
+fn is(s: String, i: u64, w: String) -> bool {
+  let n = string.byte_len(w)
+  i + n <= string.byte_len(s) && string.slice(s, i, i + n) == w
+}
+
+fn digit(c: u8) -> bool { c >= b'0' && c <= b'9' }
+
+fn size(s: String, mut i: u64) -> Result[u64, u64] {
+  if is(s, i, "null") || is(s, i, "true") { i += 4; Ok(1) }
+  else if is(s, i, "false") { i += 5; Ok(1) }
+  else if digit(at(s, i)) { while digit(at(s, i)) { i += 1 }; Ok(9) }
+  else if at(s, i) == b'"' {
+    let start = i + 1
+    i = start
+    while at(s, i) != b'"' { if i >= string.byte_len(s) { return Error(i) }; i += 1 }
+    i += 1
+    Ok(5 + (i - 1 - start))
+  } else if at(s, i) == b'[' {
+    i += 1
+    let mut n: u64 = 9
+    while at(s, i) != b']' {
+      n += size(s, mut i)? + 4
+      if at(s, i) == b',' { i += 1 } else if at(s, i) != b']' { return Error(i) }
+    }
+    i += 1
+    Ok(n)
+  } else { Error(i) }
+}
+
+fn value[in r](s: String, mut i: u64, take w: Writer[Json, in r]) -> Result[Child[Json], BuildError] {
+  if is(s, i, "null") { i += 4; emit(take w, Null) }
+  else if is(s, i, "true") { i += 4; emit(take w, True) }
+  else if is(s, i, "false") { i += 5; emit(take w, False) }
+  else if digit(at(s, i)) {
+    let mut v: u64 = 0
+    while digit(at(s, i)) { v = v * 10 + int.widen(at(s, i) - b'0'); i += 1 }
+    emit(take w, Num(v))
+  } else if at(s, i) == b'"' {
+    i += 1
+    emit(take w, Str(emit(fn(take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+      while let Some((c, next)) = string.next_scalar(s, i) { if c == '"' { break }; writer.scalar(mut t, c)?; i = next }
+      i += 1
+      writer.close(take t)
+    })))
+  } else {
+    i += 1
+    emit(take w, Arr(emit(fn(take xs: Writer[IndexedSpan[Json], in r]) -> Result[Child[IndexedSpan[Json]], BuildError] {
+      while at(s, i) != b']' {
+        writer.append(mut xs, fn(take x: Writer[Json, in r]) -> Result[Child[Json], BuildError] { value(s, mut i, take x) })?
+        if at(s, i) == b',' { i += 1 }
+      }
+      i += 1
+      writer.close(take xs)
+    })))
+  }
+}
+
+fn parse(r: Region, s: String) -> Result[Json in r, AppError] {
+  let mut i: u64 = 0
+  let n = match size(s, mut i) { Ok(n) => n, Error(p) => return Error(Syntax(p)) }
+  if i != string.byte_len(s) { return Error(Syntax(i)) }
+  let mut j: u64 = 0
+  match build_stream_in(r, bytes n, fn(take w: Writer[Json, in r]) -> Result[Child[Json], BuildError] { value(s, mut j, take w) }) {
+    Ok(take b) => Ok(finish(take b)),
+    Error(e) => Error(Build(e)),
+  }
+}
+
+fn total(j: Json) -> u64 {
+  match j { Num(v) => v, Arr(xs) => { let mut t: u64 = 0; for x in xs { t += total(x) }; t }, _ => 0 }
+}
+
+fn needs(s: String, limit: u64) -> Result[u64, Capacity] {
+  bound bytes limit {
+    region r { match parse(r, s) { Error(Build(Capacity(c))) => c.requested, _ => 0 } }
+  }
+}
+
+pub fn main(out: Stdout) -> Result[(), AppError] waits {
+  let input = "[12,\"ab\",[true,30],[]]"
+  region r {
+    let doc = parse(r, input)?
+    say(out, "sum ", total(doc))?
+    match doc {
+      Arr(xs) => {
+        say(out, "items ", seq.len(xs))?
+        match indexed.get(xs, 1) { Some(Str(t)) => say(out, "item 1 bytes ", text.len(t))?, _ => {} }
+      },
+      _ => {},
+    }
+  }
+  say(out, "needs ", mem(needs(input, 72))?)
+}
+```
+
+Output:
+
+```text
+sum 42
+items 4
+item 1 bytes 2
+needs 80
+```
+
+Outcome: success.
+
+Refused edits:
+
+- Replace `writer.append(..)?` on line 73 with `let _ = writer.append(..)`: refused, MEM-4 at
+  73:17, a writer call's result is propagated or returned.
+- Add a variant `Ref(Link[Json])` to `Json`: refused, LANG-12 at 87:37, `Json` is no longer
+  `streamable`.

@@ -1,17 +1,18 @@
 # Core library
 
 The core library is source: one signature file per core module under
-[`core/core/`](../../core/core/), 22 files. Each file is a module ([LANG-7](language.md#lang-7-names));
+[`core/core/`](../../core/core/), 25 files. Each file is a module ([LANG-7](language.md#lang-7-names));
 its functions end at their headers, and a type declared there with no body is built in, so
 its summary is the one the table below gives it.
 
 | module | file | rules |
 |---|---|---|
-| `core` (the prelude: every core type, `fail`, `replace`, `clone`, `clone_in`, `build_in`, `finish`) | [core.hirsel](../../core/core/core.hirsel) | LANG-7, MEM-4, MEM-17, OWN-13, FAIL-2 |
+| `core` (the prelude: every core type, `fail`, `replace`, `clone`, `clone_in`, `copy_closed_in`, `build_in`, `build_stream_in`, `emit`, `finish`, `finish_trim`) | [core.hirsel](../../core/core/core.hirsel) | LANG-7, MEM-4, MEM-17, OWN-13, FAIL-2 |
 | `option`, `result` | [option](../../core/core/option.hirsel), [result](../../core/core/result.hirsel) | FAIL-2 |
 | `int`, `float`, `char` | [int](../../core/core/int.hirsel), [float](../../core/core/float.hirsel), [char](../../core/core/char.hirsel) | SEM-1 to SEM-3 |
 | `box`, `rc`, `arc`, `unique` | [box](../../core/core/box.hirsel), [rc](../../core/core/rc.hirsel), [arc](../../core/core/arc.hirsel), [unique](../../core/core/unique.hirsel) | MEM-13 to MEM-18 |
 | `list`, `string`, `text`, `map`, `span`, `dest` | [list](../../core/core/list.hirsel), [string](../../core/core/string.hirsel), [text](../../core/core/text.hirsel), [map](../../core/core/map.hirsel), [span](../../core/core/span.hirsel), [dest](../../core/core/dest.hirsel) | SEM-3 to SEM-6, MEM-3, MEM-4, MEM-12 |
+| `seq`, `indexed`, `writer` | [seq](../../core/core/seq.hirsel), [indexed](../../core/core/indexed.hirsel), [writer](../../core/core/writer.hirsel) | MEM-4, MEM-12 |
 | `task`, `channel` | [task](../../core/core/task.hirsel), [channel](../../core/core/channel.hirsel) | CONC-1 to CONC-11 |
 | `args`, `host`, `stdout`, `stderr` | [args](../../core/core/args.hirsel), [host](../../core/core/host.hirsel), [stdout](../../core/core/stdout.hirsel), [stderr](../../core/core/stderr.hirsel) | PROG-3, CAP-5 |
 
@@ -47,9 +48,10 @@ an environment (OWN-19), so it has no heap size; a scoped type's own fields
 | `Rc[T]` | counted | `shareable`; `key`, `ordered` when T | 8 | T's |
 | `Arc[T]` | counted | `shareable`, `send`; `key`, `ordered` when T | 8 | T's |
 | `View[T]` | scoped, copyable | `key`, `ordered` when T | | scoped value, and T's |
-| `Region`, `Dest[T]` | scoped; `Dest` moves | none | | scoped value |
+| `Region`, `Dest[T]`, `Writer[T, in r]` | scoped; `Dest` and `Writer` move | none | | scoped value |
 | `Text` | stable | `key`, `ordered` | 16 | stable reference |
-| `FixedSpan[T]` | stable | `key`, `ordered` when T | 16 | stable reference, and T's |
+| `FixedSpan[T]`, `SeqSpan[T]`, `IndexedSpan[T]` | stable | `key`, `ordered` when T | 16 | stable reference, and T's |
+| `SeqIndex[T, in a]` | stable | none | 16 | stable reference, and T's |
 | `Link[T]` | a compact field only (MEM-10) | none | its holder's `W` | nothing |
 | `Child[T]` | plain | `shareable`, `send`, `key` | 16 | nothing |
 | `SpanBuilder[T, in r]`, `Builder[T, in r]` | own, affine | none | 16 | stable reference, opaque owner |
@@ -87,8 +89,10 @@ operations it names; nothing else about them may be inferred from an implementat
   `span.builder` allocate nothing; `list.with_capacity(n)` admits exactly `n` elements and
   `span.with_capacity(r, n)` exactly `8 + n × size(T)`, rounded up to 8, its count header
   even when `n` is 0; `text.copy_in` admits its count header even for empty text.
-  Finishing a builder admits nothing and refunds nothing. `list.reserve(mut xs, n)` leaves
-  capacity at least `len + n`; every other allocating operation grows by
+  `build_stream_in` admits `n` bytes once, and `finish_trim` refunds all of them past the
+  used bytes, rounded up to 8; `finish` admits nothing and refunds nothing.
+  `list.reserve(mut xs, n)` leaves capacity at least `len + n`; every other allocating
+  operation grows by
   [MEM-24](budgets.md#mem-24-logical-charges). `string.from` copies a literal or a view.
 - **Literals.** A string literal has type `String`, is static, allocates nothing and is never
   charged; it has capacity 0, so the first push onto it grows it into new storage, and no
@@ -164,6 +168,16 @@ operations it names; nothing else about them may be inferred from an implementat
   `Box`, `Rc` or `Arc` is read where a view of its payload is expected.
   `task.check_cancel()` fails with `Cancelled` when a request is pending, and
   `channel.new(0)` fails with `Bounds`.
-- **Built-in forms.** `dest.put(mut d, L)` accepts only a construction literal `L`
-  ([MEM-4](memory.md#mem-4-sized-destinations)). `clone` and `clone_in` are typing forms
-  whose result type selects what is copied ([MEM-17](memory.md#mem-17-clone)).
+- **Built-in forms.** `dest.put(mut d, L)` and `emit(take w, L)` accept only a construction
+  literal `L` ([MEM-4](memory.md#mem-4-sized-destinations)). `clone` and `clone_in` are
+  typing forms whose result type selects what is copied ([MEM-17](memory.md#mem-17-clone)).
+  `writer.scalar` takes a writer of `Text`; `writer.close` one of `Text`, `SeqSpan[T]` or
+  `IndexedSpan[T]`; the other `writer` operations one of `SeqSpan[T]` or `IndexedSpan[T]`,
+  with `T` their element; any other writer is refused at the argument, MEM-4.
+- **Sequences.** `seq.nth` walks `i` elements and returns `None` past the count;
+  `indexed.get` and `seq.get` return `None` past it after one test.
+
+*Not normative.* A key index over a JSON object is library code, not core: an opaque owner
+of the object's `IndexedSpan` and a `List[u32]` of member ordinals sorted by key, then
+ordinal. A lookup takes the last of equal keys, and rendering keeps each key at its first
+position with its last value; nothing in the document moves.

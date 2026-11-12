@@ -7,7 +7,8 @@ guarantee it asks of v1 binds v1.
 
 ## Reservation clauses
 
-Each clause is numbered as in the risk audit it comes from. Clauses R3, R5, R8, R11, R13,
+Each clause is numbered as in the risk audit it comes from; R25 and R26 come from the
+review of compact sequences. Clauses R3, R5, R8, R11, R13,
 R14, R15, R18, R19, R21 and R23 are quoted from that audit; the line after each says where
 v1 meets it.
 
@@ -41,13 +42,16 @@ code; FAIL-15 makes stack exhaustion a run stop.
 
 **R6.** `String`/`List` and `Text`/`FixedSpan` are distinct types; compact fields declare
 inline or linked storage and links stay in one blob; wire formats are separate;
-optimisation keeps declared shapes. Sequences of variable-size or stable elements, and an
-indexed form of them, will be new types; they are planned for v1 and open in this revision
-(below). *v1:* MEM-9 to MEM-12, MEM-28.
+optimisation keeps declared shapes. *v1:* MEM-9 to MEM-12, MEM-28; `SeqSpan` and
+`IndexedSpan` hold variable-size elements in the same blob.
 
-**R7.** Literals evaluate fields before admission; `build_in` admits before its writer
-runs; `clone_in` copies a published blob whole; only completed builders are public; `finish` cannot fail or
-allocate; failed prefixes stay charged until close. *v1:* MEM-3, MEM-4, FAIL-4, FAIL-6.
+**R7.** Literals evaluate fields before admission; `build_in` and `build_stream_in` admit
+one stated size before their writer runs, and nothing infers a size, reruns a writer or
+grows a published prefix; `clone_in` copies a published blob whole and `copy_closed_in`
+exactly one complete value without links; only completed builders are public; `finish` and
+`finish_trim` cannot fail or allocate; failed prefixes stay charged until close, and only
+`finish_trim` refunds, the unused end of a completed builder. *v1:* MEM-3, MEM-4, MEM-12,
+MEM-17, FAIL-4, FAIL-6.
 
 **R8.** "A future isolate catches language failure only after inner loans, owners,
 captures and pending results are cleaned; outer installed mutations/effects persist.
@@ -156,6 +160,17 @@ library code whose handles are plain data checked at run time (MEM-18); no rule,
 checker state names a brand, so a later brand form will be written with contextual words
 and changes the meaning of no v1 program.
 
+**R25.** `@varint` is reserved as a later opt-in encoding of a compact integer field, or of
+a `Text` length whose value is known before it is written. *v1:* every compact encoding is
+the fixed width of MEM-9 and MEM-12; a later `@varint` changes no unannotated declaration,
+and the counts and byte lengths of sequences, which are patched at close, stay fixed width.
+
+**R26.** Documents that grow in segments, or are committed in pieces, will be new types
+with their own charge contract. *v1:* `SeqSpan` and `IndexedSpan` are one blob of one
+admitted size (MEM-4); a later type never reinterprets them, moves a published value or
+turns `finish` into a copy, flattening it into a blob is an admitted copy, and no
+allocator chunk size becomes a logical capacity (MEM-28).
+
 ## Hooks for later libraries
 
 | hook | v1 | state |
@@ -180,15 +195,6 @@ conversion of errors by `?`; code generic over the numeric types: the bounds `in
 library writes one function per width; `text.as_string`, because `Text` and `String` have
 different representations (an author copies with `clone(t)` where `Result[String,
 Capacity]` is expected, or keeps a `String`); generics over an `Inline` length; persistent mutable views; derivation and codecs; contracts and
-facts; the store, runners and places; recording formats. A later opt-in execution-budget
+facts; `@varint` (R25); documents in segments (R26); the store, runners and places; recording formats. A later opt-in execution-budget
 scope may stop code at a loop back edge or a call while such a scope is present; no v1
 rule assumes that code cannot be stopped there.
-
-## Open in this revision
-
-Each item below is marked at its rule with "OPEN"; implementers must not rely on what the
-rule says about it.
-
-| item | rule | what is coming |
-|---|---|---|
-| Compact sequences of variable-size elements | [MEM-12](memory.md#mem-12-stable-sequences) | Planned for v1: a stable sequence of variable-size elements walked in order, an optional declared index, and a nested in-place builder that writes a document into one blob with no staging copy. They reuse MEM-2's element eligibility (plain or stable) and MEM-4's destinations and `Child` values, and take new type names; the names `SeqSpan` and `IndexedSpan` are kept free for them. |

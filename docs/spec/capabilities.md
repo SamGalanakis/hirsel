@@ -88,7 +88,8 @@ fn logs(d: Dir) -> Result[Dir, IoError] { dir.narrow(d, path.of("logs")) }
 
 Every input the run did not compute (a provider's results, the scheduler's choices of
 [CONC-10](tasks.md#conc-10-event-order), the entry arguments) passes one **replay point**.
-A recording provider can record each value there in order, and a replaying provider can
-supply the recorded values instead; given the same values, the run behaves identically
+A provider operation passes it twice: at issue, before any host effect, and at delivery,
+before its result reaches the task. A recording provider can record each value there in
+order, and a replaying provider can supply the delivery without performing the issue; given the same values, the run behaves identically
 ([SEM-8](semantics.md#sem-8-determinism)). The format of a recording is not part of the
 language.

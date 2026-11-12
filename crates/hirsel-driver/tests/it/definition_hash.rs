@@ -165,7 +165,9 @@ fn the_hash_is_a_pinned_function_of_content() {
         // both summaries and restoring the scalar result Root reproduces
         // def13697. Restoring Root alone reproduces 357dddcc; 589e59d4
         // deliberately removed that inert scalar proof under MODE-2.
-        const PINNED: &str = "f2eef0b90be6b80e06240bf2e0438fc2b963c53f65db5da1a7955d1d53daadaf";
+        // 8ff5b8a2 moved TIR 16 -> 17 and removed private-helper uniqueness
+        // summaries. Both changes deliberately alter the canonical preimage.
+        const PINNED: &str = "20b9bad943a96d1434360cc582c115487a808a0006c4639fae68e330b46c08dc";
         let hash = hashes("fn f(x: u64) -> u64 { x + 1u64 }\n", &["f"])[0];
         let text: String = hash.0.iter().map(|b| format!("{b:02x}")).collect();
         assert!(

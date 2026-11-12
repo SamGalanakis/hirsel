@@ -725,7 +725,6 @@ pub fn build_program_with_sources(
     let validation = hirsel_lir::validate::ValidationContext::new(&inputs);
     preflight(&validation)?;
     let finalizers = Finalizers::planned(instances, table);
-    let charged_finalizers = finalizers.charged(instances);
     let tasks = value_units
         .into_iter()
         .zip(&lowered.unit_origins)
@@ -755,12 +754,7 @@ pub fn build_program_with_sources(
                 proofs: Proofs::for_instance(instances, id),
                 guard: Some(guard),
             };
-            let finalizers = if instances.is_charged(id) {
-                &charged_finalizers
-            } else {
-                &finalizers
-            };
-            lower_local_unit(unit, options, &facts, finalizers, &inputs, &validation)
+            lower_local_unit(unit, options, &facts, &finalizers, &inputs, &validation)
         },
     );
     #[cfg(test)]

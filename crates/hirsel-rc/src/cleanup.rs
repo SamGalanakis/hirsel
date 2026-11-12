@@ -75,6 +75,9 @@ impl Finalizers {
     /// The finalizer instances of a program, from its plan alone (design §1e): each takes
     /// its resource borrowed as its first parameter, whose `FnAbi` layout names the
     /// resource. No unit is read, so a unit's cleanup needs no other unit's RC output.
+    /// Each is the finalizer's charged instance where it has one (STORE-11 energy): every
+    /// unit, charged or not, drops through it, since an uncharged library unit can run
+    /// inside an energy scope and a charged instance outside one costs only its checks.
     pub fn planned(instances: &Instances, table: &LayoutTable) -> Self {
         let mut out = BTreeMap::new();
         for id in instances.ids() {
@@ -86,7 +89,8 @@ impl Finalizers {
             let Some(parameter) = table.fn_abis[abi.0 as usize].parameters.first() else {
                 continue;
             };
-            let view = instances.view(id);
+            let called = instances.charged_of(id).unwrap_or(id);
+            let view = instances.view(called);
             out.insert(
                 parameter.layout,
                 Finalizer {
@@ -98,28 +102,9 @@ impl Finalizers {
                     definition: view.key.definition().clone(),
                     instance: view.key.digest(),
                     abi,
-                    charged: instances.is_charged(id),
+                    charged: called != id,
                 },
             );
-        }
-        Self(out)
-    }
-
-    /// The finalizers a charged unit's cleanup calls (STORE-11 energy): each
-    /// finalizer's charged instance where it has one, else the finalizer itself.
-    pub fn charged(&self, instances: &Instances) -> Self {
-        let mut out = self.0.clone();
-        for id in instances.ids() {
-            let Some(twin) = instances.charged_of(id) else {
-                continue;
-            };
-            let base = instances.view(id).key.digest();
-            for finalizer in out.values_mut() {
-                if finalizer.instance == base {
-                    finalizer.instance = instances.view(twin).key.digest();
-                    finalizer.charged = true;
-                }
-            }
         }
         Self(out)
     }
@@ -179,7 +164,7 @@ impl Finalizers {
             if !instances.roles[id.index()].is_finalizer() || instances.is_charged(id) {
                 continue;
             }
-            let unit = &units[id.index()];
+            let unit = &units[instances.charged_of(id).unwrap_or(id).index()];
             let Some(&self_value) = unit.parameters.first() else {
                 continue;
             };

@@ -1,0 +1,115 @@
+// rule: STORE-11
+// expect: run
+// authorities: {"main":{"provider":"authority.memory@1","floor":"memory"}}
+// steps: 20000000
+// A finalizer is charged to the scope that drops its value (storage.md STORE-11
+// "Energy"), also when a library operation drops it: a list truncated, a
+// map's value replaced, or a sorted-map insert whose comparison fails while it
+// holds the value. Each body drops a Spin far over its budget, so each ends
+// Limit(Energy()); the same bodies with a small Spin commit, or fail as their
+// comparison does.
+@serializable
+type Spun = Db(store.TxError)
+
+resource type Spin {
+  n: u64,
+}
+drop(x) {
+  let mut sum: u64 = 0
+  for i in 0u64..x.n {
+    sum = int.wrapping_add(sum, i)
+  }
+  let _ = sum
+}
+
+fn truncated(mut tx: store.Tx, info: store.CallInfo, n: u64) -> Result[u64, Spun] {
+  let mut xs: List[Spin] = []
+  list.push(mut xs, Spin(n: n))
+  list.truncate(mut xs, 0)
+  Ok(n)
+}
+
+fn replaced(mut tx: store.Tx, info: store.CallInfo, n: u64) -> Result[u64, Spun] {
+  let mut m: Map[u64, Spin] = map.empty()
+  map.insert(mut m, 1, Spin(n: n))
+  map.insert(mut m, 1, Spin(n: 0))
+  Ok(n)
+}
+
+fn refuse(a: u64, b: u64) -> i32 uses {} {
+  failure.check(a != 99, Bounds())
+  if a < b {
+    -1
+  } else if a > b {
+    1
+  } else {
+    0
+  }
+}
+
+fn compared(mut tx: store.Tx, info: store.CallInfo, n: u64) -> Result[u64, Spun] {
+  let by: Order[u64] = Order(compare: refuse)
+  let mut m: unique SortedMap[u64, Spin] of by = sorted_map.empty(by)
+  sorted_map.insert(by, mut m, 1, Spin(n: 0))
+  sorted_map.insert(by, mut m, 99, Spin(n: n))
+  Ok(n)
+}
+
+pub type Failed = Check | Store(store.StoreError)
+
+fn check(ok: bool) -> Result[(), Failed] {
+  if ok {
+    Ok(())
+  } else {
+    Error(Check())
+  }
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), Failed] {
+  let Ok(a) = io.authority(rt, "main") else {
+    return Error(Check())
+  }
+  let mut config = store.default_config()
+  config.energy = 100000
+  let mut s = store.open(a, config) ? Store
+  let small_1: Result[u64, store.TxFailure[Spun]] = store.transact(
+    mut s,
+    truncated,
+    10u64
+  )
+  check(small_1 == Ok(10))?
+  let big_1: Result[u64, store.TxFailure[Spun]] = store.transact(
+    mut s,
+    truncated,
+    10000000u64
+  )
+  check(big_1 == Error(Limit(Energy())))?
+  let small_2: Result[u64, store.TxFailure[Spun]] = store.transact(
+    mut s,
+    replaced,
+    10u64
+  )
+  check(small_2 == Ok(10))?
+  let big_2: Result[u64, store.TxFailure[Spun]] = store.transact(
+    mut s,
+    replaced,
+    10000000u64
+  )
+  check(big_2 == Error(Limit(Energy())))?
+  let small_3: Result[u64, store.TxFailure[Spun]] = store.transact(
+    mut s,
+    compared,
+    10u64
+  )
+  let Error(Faulted(_)) = small_3 else {
+    return Error(Check())
+  }
+  let big_3: Result[u64, store.TxFailure[Spun]] = store.transact(
+    mut s,
+    compared,
+    10000000u64
+  )
+  check(big_3 == Error(Limit(Energy())))?
+  store.close(take s) ? Store
+  Ok(())
+}

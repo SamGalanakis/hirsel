@@ -427,16 +427,14 @@ impl LocalReadyQueries {
         if finalizers.windows(2).any(|w| w[0] >= w[1]) {
             return Err("noncanonical local finalizers".into());
         }
-        // The stored rows name a charged unit's finalizers by their charged
-        // twins already (`Finalizers::charged`), but carry no flag: outside
-        // core@1, every finalizer of a charged unit is charged (STORE-11
-        // energy: a finalizer follows the code that drops its value).
-        let charged = key.instance.uncharged().is_some();
+        // The stored rows name every source finalizer by its charged twin
+        // already (`Finalizers::planned`), but carry no flag: a finalizer is
+        // charged exactly when it is not a library body (STORE-11 energy).
         let finalizers = hirsel_rc::cleanup::Finalizers(
             finalizers
                 .into_iter()
                 .map(|(layout, definition, instance, abi, library)| {
-                    let charged = charged && !definition.package_is("core", "1");
+                    let charged = !library;
                     Ok((
                         binding.layout(layout).ok_or("missing finalizer layout")?,
                         hirsel_rc::cleanup::Finalizer {

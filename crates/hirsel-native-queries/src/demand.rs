@@ -1615,21 +1615,19 @@ impl DemandInstances {
                 .charge(callee)
                 .map_err(|e| format!("native charged callee: {e:?}"))?;
         }
-        if charged {
-            // A charged unit's cleanup calls charged finalizers, which this
-            // worker requests as it requests its callees.
-            let finalizers = instances
-                .ids()
-                .filter(|&other| {
-                    let role = &instances.roles[other.index()];
-                    role.is_finalizer() && !role.is_library() && !instances.is_charged(other)
-                })
-                .collect::<Vec<_>>();
-            for finalizer in finalizers {
-                instances
-                    .charge(finalizer)
-                    .map_err(|e| format!("native charged finalizer: {e:?}"))?;
-            }
+        // Every unit's cleanup calls charged finalizers (STORE-11 energy),
+        // which this worker requests as it requests its callees.
+        let finalizers = instances
+            .ids()
+            .filter(|&other| {
+                let role = &instances.roles[other.index()];
+                role.is_finalizer() && !role.is_library() && !instances.is_charged(other)
+            })
+            .collect::<Vec<_>>();
+        for finalizer in finalizers {
+            instances
+                .charge(finalizer)
+                .map_err(|e| format!("native charged finalizer: {e:?}"))?;
         }
         // Root registration also selects callable relocations of registry
         // constants. A worker-local recipe restores only this instance, so
@@ -1796,11 +1794,6 @@ impl DemandInstances {
         constant_reads.dedup();
         let action = self.action(inputs, &request, options, &selection_reads, &constant_reads)?;
         let finalizers = hirsel_rc::cleanup::Finalizers::planned(&instances, &table);
-        let finalizers = if charged {
-            finalizers.charged(&instances)
-        } else {
-            finalizers
-        };
         let reached_finalizers = finalizers.reached(&unit, &table);
         let templates = super::optimizer::TemplateFacts::of(
             &unit,

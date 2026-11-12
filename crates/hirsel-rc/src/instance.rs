@@ -611,11 +611,6 @@ impl Instances {
         self.uncharged.get(&id).copied().unwrap_or(id)
     }
 
-    /// Whether any instance is charged.
-    pub fn any_charged(&self) -> bool {
-        !self.charged.is_empty()
-    }
-
     /// Whether `id` is a charged instance.
     pub fn is_charged(&self, id: InstanceId) -> bool {
         self.uncharged.contains_key(&id)

@@ -258,12 +258,10 @@ pub fn lower_with_sources(
     let mut next = 0;
     loop {
         if next == instances.len() {
-            // Finalizers run in whatever context drops their value: once any
-            // code is charged, each source finalizer has a charged instance
-            // too, chosen by the running context at the drop (STORE-11).
-            if !instances.any_charged() {
-                break;
-            }
+            // Every drop calls a source finalizer's charged instance
+            // (STORE-11 energy): a library unit that drops a value may run
+            // inside an energy scope, and what it calls cannot depend on
+            // whether this program has charged code.
             let finalizers: Vec<_> = instances
                 .ids()
                 .filter(|&id| {

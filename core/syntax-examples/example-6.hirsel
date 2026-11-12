@@ -1,0 +1,46 @@
+type AppError = Io(IoError) | Mem(Capacity) | Join(JoinError)
+type Ends: send { input: Receiver[u64], output: Sender[u64] }
+
+fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] {
+  let mut line = string.new()
+  string.push(mut line, label)?
+  string.push_u64(mut line, n)?
+  string.push(mut line, "\n")?
+  stdout.write(out, line)?
+  Ok(())
+}
+
+fn source(take tx: Sender[u64]) -> u64 {
+  let mut i: u64 = 1
+  while i <= 5 {
+    match channel.send(tx, i) { Ok(()) => { i += 1 }, Error(_) => break }
+  }
+  i - 1
+}
+
+fn square(take e: Ends) -> u64 {
+  let mut n: u64 = 0
+  while let Ok(x) = channel.receive(e.input) {
+    match channel.send(e.output, x * x) { Ok(()) => { n += 1 }, Error(_) => break }
+  }
+  n
+}
+
+pub fn main(out: Stdout, tasks: Tasks) -> Result[(), AppError] {
+  let (tx1, rx1): (Sender[u64], Receiver[u64]) = channel.new(2)?
+  let (tx2, rx2): (Sender[u64], Receiver[u64]) = channel.new(2)?
+  let src = match task.spawn(tasks, bytes 4096, take tx1, source) {
+    Ok(take h) => h,
+    Error((c, _)) => return Error(Mem(c)),
+  }
+  let ends = Ends(input: take rx1, output: take tx2)
+  let sq = match task.spawn(tasks, bytes 4096, take ends, square) {
+    Ok(take h) => h,
+    Error((c, _)) => return Error(Mem(c)),
+  }
+  let mut total: u64 = 0
+  while let Ok(y) = channel.receive(rx2) { total += y }
+  say(out, "sent ", task.join(take src)?)?
+  say(out, "squared ", task.join(take sq)?)?
+  say(out, "total ", total)
+}

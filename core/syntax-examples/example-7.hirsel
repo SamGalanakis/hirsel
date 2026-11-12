@@ -1,0 +1,26 @@
+type AppError = Io(IoError) | Mem(Capacity)
+
+fn sum(take xs: List[u8]) -> u8 {
+  let mut t: u8 = 0
+  for x in xs { t += x }
+  t
+}
+
+pub fn main(out: Stdout, tasks: Tasks) -> Result[(), AppError] {
+  let mut xs: List[u8] = list.new()
+  list.fill(mut xs, 2, 200)?
+  let h = match task.spawn(tasks, bytes 4096, take xs, sum) {
+    Ok(take h) => h,
+    Error((c, _)) => return Error(Mem(c)),
+  }
+  match task.join(take h) {
+    Ok(_) => stdout.write(out, "sum fits\n")?,
+    Error(Failed(causes)) => {
+      for c in causes {
+        match c.kind { Overflow => stdout.write(out, "child failed: Overflow\n")?, _ => stdout.write(out, "child failed\n")? }
+      }
+    }
+    Error(Cancelled) => stdout.write(out, "child cancelled\n")?,
+  }
+  Ok(())
+}

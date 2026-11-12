@@ -1,0 +1,42 @@
+type AppError = Io(IoError) | Mem(Capacity)
+type Piece: shareable { text: String }
+
+fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] {
+  let mut line = string.new()
+  string.push(mut line, label)?
+  string.push_u64(mut line, n)?
+  string.push(mut line, "\n")?
+  stdout.write(out, line)?
+  Ok(())
+}
+
+fn piece(s: String) -> Result[Rc[Piece], Capacity] {
+  let t = string.from(s)?
+  match rc.new(Piece(text: take t)) { Ok(take h) => Ok(take h), Error((c, _)) => Error(c) }
+}
+
+fn keep(mut xs: List[Rc[Piece]], take h: Rc[Piece]) -> Result[(), Capacity] {
+  match list.push(mut xs, take h) { Ok(()) => Ok(()), Error((c, _)) => Error(c) }
+}
+
+fn bytes_of(ps: List[Rc[Piece]]) -> u64 {
+  let mut n: u64 = 0
+  for p in ps { n += string.byte_len(p.text) }
+  n
+}
+
+pub fn main(out: Stdout) -> Result[(), AppError] {
+  let mut doc: List[Rc[Piece]] = list.new()
+  keep(mut doc, piece("hello")?)?
+  let mut undo: List[Rc[Piece]] = list.new()
+  for p in doc { keep(mut undo, rc.share(p))? }
+  keep(mut doc, piece(", world")?)?
+  say(out, "doc ", bytes_of(doc))?
+  say(out, "undo ", bytes_of(undo))?
+  let first = match list.pop(mut undo) { Some(take h) => h, None => return Ok(()) }
+  match rc.try_unwrap(take first) {
+    Ok(_) => stdout.write(out, "unique\n")?,
+    Error(_) => stdout.write(out, "shared\n")?,
+  }
+  Ok(())
+}

@@ -721,6 +721,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hirsel-core-syntax"
+version = "0.1.0"
+dependencies = [
+ "hirsel-core-ids",
+ "hirsel-guard",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "hirsel-cranelift"
 version = "0.1.0"
 dependencies = [

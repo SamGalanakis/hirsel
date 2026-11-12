@@ -1,0 +1,49 @@
+type AppError = Io(IoError) | Mem(Capacity)
+
+fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] {
+  let mut line = string.new()
+  string.push(mut line, label)?
+  string.push_u64(mut line, n)?
+  string.push(mut line, "\n")?
+  stdout.write(out, line)?
+  Ok(())
+}
+
+fn add(mut ws: List[String], take w: String) -> Result[(), Capacity] {
+  match list.push(mut ws, take w) { Ok(()) => Ok(()), Error((c, _)) => Error(c) }
+}
+
+fn tally(ws: List[String]) -> Result[Map[String, u64], Capacity] {
+  let mut m: Map[String, u64] = map.new()
+  for w in ws {
+    let n: u64 = match map.get(m, w) { Some(v) => v, None => 0 }
+    let k = string.copy(w)?
+    match map.insert(mut m, take k, n + 1) { Ok(()) => {}, Error((c, _, _)) => return Error(c) }
+  }
+  Ok(m)
+}
+
+fn first_refused(limit: u64) -> Result[u64, Capacity] {
+  bound bytes limit {
+    let mut xs: List[u64] = list.new()
+    let mut i: u64 = 0
+    let mut back: u64 = 0
+    loop {
+      match list.push(mut xs, i) { Ok(()) => { i += 1 }, Error((_, b)) => { back = b; break } }
+    }
+    back
+  }
+}
+
+pub fn main(out: Stdout) -> Result[(), AppError] {
+  let mut ws: List[String] = list.new()
+  add(mut ws, "a")?
+  add(mut ws, "b")?
+  add(mut ws, "a")?
+  add(mut ws, "c")?
+  add(mut ws, "a")?
+  let m = tally(ws)?
+  say(out, "a ", match map.get(m, "a") { Some(v) => v, None => 0 })?
+  say(out, "distinct ", map.len(m))?
+  say(out, "first refused push ", first_refused(64)?)
+}

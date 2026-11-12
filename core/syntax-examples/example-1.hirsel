@@ -1,0 +1,33 @@
+type AppError = Io(IoError) | Mem(Capacity)
+stable type Word { text: Text, len: u64 }
+
+fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] {
+  let mut line = string.new()
+  string.push(mut line, label)?
+  string.push_u64(mut line, n)?
+  string.push(mut line, "\n")?
+  stdout.write(out, line)?
+  Ok(())
+}
+
+fn word(r: Region, s: String) -> Result[Word in r, Capacity] {
+  let t = text.copy_in(r, s)?
+  Word(text: t, len: string.byte_len(s)) in r
+}
+
+fn measure(s: String, limit: u64) -> Result[u64, Capacity] {
+  bound bytes limit {
+    region r {
+      let w = word(r, s)?
+      w.len
+    }
+  }
+}
+
+pub fn main(out: Stdout) -> Result[(), AppError] {
+  say(out, "fits, length ", measure("hello", 64)?)?
+  match measure("hello", 8) {
+    Ok(n) => say(out, "fits, length ", n),
+    Error(c) => say(out, "refused, requested ", c.requested),
+  }
+}

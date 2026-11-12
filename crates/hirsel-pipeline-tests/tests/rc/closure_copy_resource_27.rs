@@ -58,7 +58,7 @@ pub fn main(t:Test)->Result[(),()] {
 fn make()->fn()->u64 {
   let text:String in heap="x"
   let pair=(text,1u8)
-  fn(){let(s,n)=pair; string.byte_len(s)}
+  fn(){let(s,n)=copy pair; string.byte_len(s)}
 }
 pub fn main(t:Test)->Result[(),()] {
   let f=make()
@@ -72,7 +72,7 @@ pub fn main(t:Test)->Result[(),()] {
         ("copied-callable-result", r#"
 fn make()->fn()->fn()->u64 {
   let cb:fn()->u64=fn(){7u64}
-  fn(){cb}
+  fn(){copy cb}
 }
 pub fn main(t:Test)->Result[(),()] {
   let f=make()

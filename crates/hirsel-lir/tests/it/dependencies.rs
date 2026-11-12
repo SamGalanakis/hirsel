@@ -60,6 +60,7 @@ const CRATES: &[(&str, Class)] = &[
     // CoreIR: neutral identities, the IR and layout recipes, below both pipelines.
     ("hirsel-core-ids", Class::Data),
     ("hirsel-core-syntax", Class::Data),
+    ("hirsel-core-resolve", Class::Implementation),
     ("hirsel-core-ir", Class::Data),
     ("hirsel-core-layout", Class::Data),
     ("hirsel-rt-operations", Class::Data),
@@ -196,6 +197,10 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
         return Ok(());
     }
     let allowed = match (source, target) {
+        _ if from == "hirsel-core-resolve" => matches!(
+            to,
+            "hirsel-core-syntax" | "hirsel-core-ids" | "hirsel-guard" | "hirsel-graph"
+        ),
         _ if from == "hirsel-core-syntax" => {
             matches!(to, "hirsel-core-ids" | "hirsel-guard" | "hirsel-graph")
         }

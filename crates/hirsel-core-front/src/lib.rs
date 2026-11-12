@@ -65,7 +65,7 @@ pub(crate) fn refusal(rule: &str, primary: Site, message: impl Into<String>) -> 
 }
 
 pub(crate) struct ItemInfo {
-    pub resolution: Resolution,
+    pub resolution: std::sync::Arc<Resolution>,
     /// Node index to its entry in `resolution.names`, or `u32::MAX`.
     pub uses: Vec<u32>,
 }
@@ -94,16 +94,37 @@ pub struct Program<'a> {
 impl<'a> Program<'a> {
     /// Resolve every item, then publish summaries and signatures (slice a).
     pub fn declare(index: &'a NameIndex, modules: &'a [ModuleInput]) -> Self {
-        let mut refusals = index.diagnostics.clone();
-        let items = modules
+        let resolutions = modules
             .iter()
             .map(|m| {
                 m.syntax
                     .items
                     .iter()
                     .enumerate()
-                    .map(|(i, item)| {
-                        let resolution = resolve(index, &m.id, i as u32, item);
+                    .map(|(i, item)| std::sync::Arc::new(resolve(index, &m.id, i as u32, item)))
+                    .collect()
+            })
+            .collect();
+        Self::declare_resolved(index, modules, resolutions)
+    }
+
+    /// Publish declarations from the resolver's completed rows without resolving again.
+    /// The driver uses this boundary to attribute resolution and declaration work separately.
+    pub fn declare_resolved(
+        index: &'a NameIndex,
+        modules: &'a [ModuleInput],
+        resolutions: Vec<Vec<std::sync::Arc<Resolution>>>,
+    ) -> Self {
+        let mut refusals = index.diagnostics.clone();
+        let items = modules
+            .iter()
+            .zip(resolutions)
+            .map(|(m, rows)| {
+                m.syntax
+                    .items
+                    .iter()
+                    .zip(rows)
+                    .map(|(item, resolution)| {
                         refusals.extend(resolution.diagnostics.iter().cloned());
                         let mut uses = vec![u32::MAX; item.tree.nodes.len()];
                         for (k, u) in resolution.names.iter().enumerate() {

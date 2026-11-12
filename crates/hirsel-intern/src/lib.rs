@@ -6,6 +6,7 @@
 hirsel_guard::install!();
 
 pub mod attribution;
+pub mod instructions;
 pub mod jobs;
 pub mod memory;
 pub mod persist;

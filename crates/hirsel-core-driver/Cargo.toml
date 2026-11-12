@@ -1,0 +1,26 @@
+[package]
+name = "hirsel-core-driver"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "hirsel-core"
+path = "src/main.rs"
+
+[dependencies]
+hirsel-core-ids = { path = "../hirsel-core-ids" }
+hirsel-core-syntax = { path = "../hirsel-core-syntax" }
+hirsel-core-resolve = { path = "../hirsel-core-resolve" }
+hirsel-core-front = { path = "../hirsel-core-front" }
+hirsel-core-ir = { path = "../hirsel-core-ir" }
+hirsel-intern = { path = "../hirsel-intern" }
+hirsel-guard = { path = "../hirsel-guard" }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+bincode = "1.3.3"
+
+[dev-dependencies]
+tempfile = "3"
+hirsel-core-ir = { path = "../hirsel-core-ir", features = ["eval"] }

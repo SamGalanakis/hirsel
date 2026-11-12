@@ -694,6 +694,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "hirsel-core-driver"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "hirsel-core-front",
+ "hirsel-core-ids",
+ "hirsel-core-ir",
+ "hirsel-core-resolve",
+ "hirsel-core-syntax",
+ "hirsel-guard",
+ "hirsel-intern",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "hirsel-core-front"
 version = "0.1.0"
 dependencies = [

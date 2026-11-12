@@ -121,7 +121,15 @@ pub fn main() -> std@1/process.ExitCode {
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = hirsel_requests::ready_supplier(&manifest, None, &loaded.entry, &hirsel_native_testing::ready_toolchain(&(&Options::new(TargetSpec::x86_64_unknown_linux_gnu())).target)).unwrap()(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
+        let ready = hirsel_requests::ready_supplier(
+            &manifest,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(
+                &(&Options::new(TargetSpec::x86_64_unknown_linux_gnu())).target,
+            ),
+        )
+        .unwrap()(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
         .unwrap();
         let ready = &ready.program;
         let heap = run_heap(&ready, &loaded.entry, &Sites::new(validated.snapshot())).unwrap();

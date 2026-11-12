@@ -11,7 +11,6 @@ fn borrow_cursor_8_projection_native_parity() {
     use hirsel_front_phases::*;
     use hirsel_host_io::launch::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     let mut matrix: Vec<_> = full_matrix()
         .into_iter()
@@ -151,7 +150,7 @@ pub fn main() -> Result[(), u64] {
                 assert!(verdict.violations.is_empty(), "{verdict:?}");
                 let compiled = crate::rc_support::program(&probe);
                 let sites = Sites::new(validated.snapshot());
-                let ready = build_program(
+                let ready = hirsel_native_batch::build_program(
                     &compiled,
                     manifest(validated.snapshot()).unwrap(),
                     &Options::new(target()),
@@ -626,7 +625,6 @@ fn cursor_native_parity_with_stack(cases: &[(&str, &str)], stack: Option<u64>) {
     use hirsel_front_phases::*;
     use hirsel_host_io::launch::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     let options = Options::new(target());
     let matrix = vec![
@@ -845,7 +843,6 @@ fn borrow_cursor_8_native_cost_evidence() {
     use hirsel_host_io::launch::*;
     use hirsel_lir::ir::Inst;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let dir = std::path::PathBuf::from("/tmp/borrow-cursor-impl-8-cost-artifacts");
@@ -902,7 +899,18 @@ pub fn main()->Result[(),u64] {
             options.elide = false;
             options.reuse = false;
             options.regions = false;
-            let ready = build(&validated, &options).unwrap();
+            let ready = {
+                let options = &options;
+                hirsel_requests::source_ready_supplier(
+                    &source,
+                    "cursor-cost.hir",
+                    &entry,
+                    &hirsel_native_testing::ready_toolchain(&options.target),
+                )
+                .unwrap()(options)
+            }
+            .unwrap();
+            let ready = &ready.program;
             let artifact = dir.join(name);
             std::fs::create_dir_all(&artifact).unwrap();
             std::fs::write(artifact.join("input.hir"), &source).unwrap();

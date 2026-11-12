@@ -77,11 +77,22 @@ fn foreign_dispatch_ordinals_are_bound_in_glue_in_both_backends() {
             hirsel_native::Backend::Llvm,
             hirsel_native::Backend::Cranelift,
         ] {
-            let mut ready = hirsel_native_batch::build(
-                &validated,
-                &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
+            let ready = hirsel_requests::ready_supplier(
+                &path,
+                None,
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(
+                    &(&hirsel_native::Options::new(
+                        hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                    ))
+                        .target,
+                ),
             )
+            .unwrap()(&hirsel_native::Options::new(
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+            ))
             .unwrap();
+            let mut ready = ready.program.clone();
             let registry = hirsel_lir::descriptor_registry::DescriptorRegistry::new(
                 &ready.table,
                 &ready.finalizers,
@@ -624,7 +635,15 @@ fn native_calls_c_with_scalars_a_byte_view_and_a_released_handle() {
         let validated = loaded.engine.import_native_input(input).unwrap();
         let options =
             hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
-        let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+        let ready = hirsel_requests::ready_supplier(
+            &path,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&(&options).target),
+        )
+        .unwrap()(&options)
+        .unwrap();
+        let ready = &ready.program;
         let sites = hirsel_native::Sites::new(validated.snapshot());
         let Err(error) = hirsel_native_testing::run_heap(&ready, &loaded.entry, &sites) else {
             panic!("expected H to refuse the extern call");
@@ -685,11 +704,10 @@ fn native_c_callbacks_follow_library_and_inline_definitions() {
         let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
         let tools = hirsel_native::Toolchain::in_tree(&root.join("runtime"), &[&target]).unwrap();
         for library in [true, false] {
-            let mut ready = hirsel_native_batch::build(
-                &validated,
-                &hirsel_native::Options::new(target.clone()),
-            )
+            let ready = hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools)
+                .unwrap()(&hirsel_native::Options::new(target.clone()))
             .unwrap();
+            let mut ready = ready.program.clone();
             let index = ready
                 .units
                 .iter()

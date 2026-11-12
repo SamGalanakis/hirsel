@@ -10,7 +10,6 @@ use hirsel_engine::*;
 use hirsel_front_phases::compiler_adapters;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use hirsel_tir::*;
 use std::{collections::BTreeSet, path::PathBuf};
@@ -530,7 +529,18 @@ fn runtime_partition(start: usize, end: usize) {
                 let mut engine = checked(&text).unwrap();
                 let input = engine.export_native_input().unwrap();
                 let validated = engine.import_native_input(input).unwrap();
-                let ready = build(&validated, &matrix()[0].options).unwrap();
+                let ready = {
+                    let options = &matrix()[0].options;
+                    hirsel_requests::source_ready_supplier(
+                        &text,
+                        "main.hir",
+                        &entry_path(&default_context()),
+                        &hirsel_native_testing::ready_toolchain(&options.target),
+                    )
+                    .unwrap()(options)
+                }
+                .unwrap();
+                let ready = &ready.program;
                 let heap = run_heap(
                     &ready,
                     &entry_path(&default_context()),

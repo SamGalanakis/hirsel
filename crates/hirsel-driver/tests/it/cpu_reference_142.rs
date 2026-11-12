@@ -68,11 +68,22 @@ fn agree_in(
         );
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let program = hirsel_native_batch::build(
-            &validated,
-            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
+        let program = hirsel_requests::source_ready_supplier(
+            &source,
+            "cpu.hir",
+            &entry,
+            &hirsel_native_testing::ready_toolchain(
+                &(&hirsel_native::Options::new(
+                    hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                ))
+                    .target,
+            ),
         )
+        .unwrap()(&hirsel_native::Options::new(
+            hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+        ))
         .unwrap();
+        let program = &program.program;
         let sites = hirsel_native::Sites::new(validated.snapshot());
         let world = hirsel_native_testing::HeapWorld {
             cpu,

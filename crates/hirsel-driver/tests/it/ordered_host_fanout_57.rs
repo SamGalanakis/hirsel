@@ -43,7 +43,7 @@ fn fanout(count: usize) {
     with_compiler_stack(|| {
         let source = SOURCE.replace("CHILDREN", &format!("{}u64", count + 1));
         let mut engine = crate::source_std::engine();
-        let file = engine.sources.add("main.hir", source.into()).unwrap();
+        let file = engine.sources.add("main.hir", source.clone()).unwrap();
         let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&default_context());
@@ -67,9 +67,16 @@ fn fanout(count: usize) {
         let sites = hirsel_native::Sites::new(&input);
         let validated = engine.import_native_input(input.clone()).unwrap();
         let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
-        let program =
-            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
-                .unwrap();
+        let program = crate::source_std::ready(
+            &source,
+            "main.hir",
+            &entry,
+            &hirsel_native_testing::ready_toolchain(
+                &(&hirsel_native::Options::new(target.clone())).target,
+            ),
+        )(&hirsel_native::Options::new(target.clone()))
+        .unwrap();
+        let program = &program.program;
         let root = tempfile::Builder::new()
             .prefix("ordered-host-fanout57-")
             .tempdir()

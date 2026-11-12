@@ -26,16 +26,25 @@ pub fn main(rt: Io) -> Result[(), GrantError] {{
 "#
         );
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
-        let file = engine.sources.add("cpu.hir", source).unwrap();
+        let file = engine.sources.add("cpu.hir", source.clone()).unwrap();
         let context = default_context();
         let output = source_check_request(&mut engine, file, &context).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
         let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
-        let program =
-            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
-                .unwrap();
+        let program = {
+            let options = &hirsel_native::Options::new(target.clone());
+            hirsel_requests::source_ready_supplier(
+                &source,
+                "cpu.hir",
+                &hirsel_engine::entry_path(&context),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let program = &program.program;
         let root = tempfile::tempdir().unwrap();
         for backend in [
             hirsel_native::Backend::Llvm,

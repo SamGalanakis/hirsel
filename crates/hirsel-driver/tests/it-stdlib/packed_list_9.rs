@@ -59,7 +59,18 @@ fn check(path: &Path, source: Option<&str>, stdout: &[u8], failure: Option<&str>
     let validated = loaded.engine.import_native_input(input).unwrap();
     let options =
         hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
-    let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+    let ready = {
+        let options = &options;
+        hirsel_requests::ready_supplier(
+            path,
+            source,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&options.target),
+        )
+        .unwrap()(options)
+    }
+    .unwrap();
+    let ready = &ready.program;
     let sites = hirsel_native::Sites::new(validated.snapshot());
     let world = hirsel_native_testing::HeapWorld {
         steps: Some(20_000_000),
@@ -282,8 +293,18 @@ pub fn main() -> Result[(), ()] {{
             let validated = loaded.engine.import_native_input(input).unwrap();
             let mut options = hirsel_native::Options::new(target.clone());
             options.regions = false;
-            let ready = hirsel_native_batch::build(&validated, &options)
-                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let ready = {
+                let options = &options;
+                hirsel_requests::ready_supplier(
+                    &fixture(),
+                    Some(&source),
+                    &loaded.entry,
+                    &hirsel_native_testing::ready_toolchain(&options.target),
+                )
+                .unwrap()(options)
+            }
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let ready = &ready.program;
             let heap = hirsel_native_testing::run_heap_in(
                 &ready,
                 &loaded.entry,

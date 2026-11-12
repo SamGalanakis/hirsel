@@ -15,7 +15,6 @@ use hirsel_native::Sites;
 use hirsel_native::Toolchain;
 use hirsel_native::link;
 use hirsel_native::observe;
-use hirsel_native_batch::build;
 use hirsel_rt::io::{Completion, Request};
 use std::path::Path;
 use std::process::Command;
@@ -91,7 +90,15 @@ fn process_runs_record_on_the_host_and_replay_without_spawning_in_smoke() {
         let input = engine.export_native_input().unwrap();
         let input = engine.import_native_input(input).unwrap();
         let sites = Sites::new(input.snapshot());
-        let program = build(&input, &Options::new(target.clone())).unwrap();
+        let program = hirsel_requests::source_ready_supplier(
+            &SOURCE,
+            "process-run.hir",
+            &hirsel_engine::entry_path(&context),
+            &tools,
+        )
+        .unwrap()(&Options::new(target.clone()))
+        .unwrap();
+        let program = &program.program;
         let work = scratch.join("work");
         std::fs::create_dir_all(&work).unwrap();
         let executable = link(

@@ -9,7 +9,6 @@ use hirsel_intern::jobs::with_compiler_stack;
 fn loop_entry_charges_precede_rebinding_and_loan_ends_on_four_engines() {
     use hirsel_driver::native::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     use hirsel_tir::{InstructionKind, SourceEventKind};
     with_compiler_stack(|| {

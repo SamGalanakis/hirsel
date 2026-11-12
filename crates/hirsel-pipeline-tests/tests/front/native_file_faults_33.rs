@@ -12,7 +12,6 @@ use hirsel_driver::replay_observations_checked;
 use hirsel_engine::{RunConfiguration, run_observed_checked, run_observed_snapshot};
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileFault, FileFaultError as E, FileFaults, FileOperation as O};
 use std::collections::{BTreeMap, VecDeque};
@@ -183,7 +182,10 @@ fn campaign_output(
         ];
         let tools =
             hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
-        let ready = build(&input, &options).unwrap();
+        let ready =
+            hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options)
+                .unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let mut runnables = vec![];
         for backend in [Backend::Llvm, Backend::Cranelift] {
@@ -811,7 +813,10 @@ fn suffix_recovery(source: &str, fixture: &Fixture) {
             ],
         )
         .unwrap();
-        let ready = build(&input, &options).unwrap();
+        let ready =
+            hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options)
+                .unwrap();
+        let ready = &ready.program;
         let mut runnables = vec![];
         for backend in [Backend::Llvm, Backend::Cranelift] {
             let dir = root.path().join(format!("{backend:?}"));

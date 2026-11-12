@@ -7,7 +7,6 @@ use hirsel_lir::ir::{
 };
 use hirsel_lir::stage::Value;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use hirsel_rc::placement::{Options as PlaceOptions, PlaceError, place};
 
@@ -173,7 +172,15 @@ fn parity(cases: &[(&str, &str)]) {
             for regions in [true, false] {
                 let mut options = Options::new(target());
                 options.regions = regions;
-                let ready = build(&validated, &options).unwrap();
+                let ready = hirsel_requests::source_ready_supplier(
+                    &source,
+                    "noalloc.hir",
+                    &hirsel_engine::entry_path(&context),
+                    &toolchain,
+                )
+                .unwrap()(&options)
+                .unwrap();
+                let ready = &ready.program;
                 let units = ready.raw_units();
                 let scratch = units
                     .iter()
@@ -674,7 +681,15 @@ fn capacity_and_hash_native_controls() {
             for regions in [true, false] {
                 let mut options = Options::new(target());
                 options.regions = regions;
-                let mut ready = build(&input, &options).unwrap();
+                let ready = hirsel_requests::source_ready_supplier(
+                    &ORIGINAL,
+                    "observer.hir",
+                    &hirsel_engine::entry_path(&context),
+                    &tools,
+                )
+                .unwrap()(&options)
+                .unwrap();
+                let mut ready = ready.program.clone();
                 let index = ready
                     .units
                     .iter()

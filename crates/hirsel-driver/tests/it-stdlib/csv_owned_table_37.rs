@@ -392,9 +392,18 @@ fn measured(source: &str, label: &str) -> String {
     let input = loaded.engine.export_native_input().unwrap();
     let validated = loaded.engine.import_native_input(input).unwrap();
     let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
-    let ready =
-        hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
-            .unwrap();
+    let ready = {
+        let options = &hirsel_native::Options::new(target.clone());
+        hirsel_requests::ready_supplier(
+            &fixture(),
+            Some(source),
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&options.target),
+        )
+        .unwrap()(options)
+    }
+    .unwrap();
+    let ready = &ready.program;
     let dir =
         PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("csv-owned-table-37-{label}"));
     std::fs::create_dir_all(&dir).unwrap();

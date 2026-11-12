@@ -11,7 +11,6 @@ use hirsel_native::Options;
 use hirsel_native::TargetSpec;
 use hirsel_native::emit_clif;
 use hirsel_native::emit_ir;
-use hirsel_native_batch::build;
 
 const PROGRAM: &str = "signature Source {
   type Item: plain
@@ -58,11 +57,18 @@ fn compile() -> Compiled {
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let ready = build(
-            &validated,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = {
+            let options = &Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+            hirsel_requests::source_ready_supplier(
+                &PROGRAM,
+                "contracts.hir",
+                &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
         .unwrap();
+        let ready = &ready.program;
         let units = ready
             .units
             .iter()

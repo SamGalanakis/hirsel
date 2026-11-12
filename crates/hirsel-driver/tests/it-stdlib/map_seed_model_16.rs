@@ -64,11 +64,19 @@ fn ordered_vector_traces_interpreted_and_checked_heap() {
         }
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = hirsel_native_batch::build(
-            &validated,
-            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = {
+            let options =
+                &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+            hirsel_requests::ready_supplier(
+                &path,
+                Some(&source),
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
         .unwrap();
+        let ready = &ready.program;
         let heap = hirsel_native_testing::run_heap_in(
             &ready,
             &loaded.entry,
@@ -138,7 +146,18 @@ fn all_engines(name: &str, source: &str, returned: hirsel_run_schema::Returned) 
         let validated = loaded.engine.import_native_input(input).unwrap();
         let options =
             hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
-        let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+        let ready = {
+            let options = &options;
+            hirsel_requests::ready_supplier(
+                &path,
+                Some(source),
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let heap = hirsel_native_testing::run_heap(
             &ready,
             &loaded.entry,

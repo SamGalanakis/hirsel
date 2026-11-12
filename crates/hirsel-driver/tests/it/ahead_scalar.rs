@@ -14,9 +14,18 @@ fn analyze(source: &str, name: &str) -> Result<ScalarGraph, Refusal> {
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
         let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
-        let ready =
-            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
-                .unwrap();
+        let ready = {
+            let options = &hirsel_native::Options::new(target.clone());
+            hirsel_requests::source_ready_supplier(
+                &source,
+                "ahead.hir",
+                &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let root = ready
             .units
             .iter()
@@ -101,11 +110,19 @@ fn scalar_alternate_loop_ir() {
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let program = hirsel_native_batch::build(
-            &validated,
-            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let program = {
+            let options =
+                &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+            hirsel_requests::source_ready_supplier(
+                &source,
+                "chunk.hir",
+                &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
         .unwrap();
+        let program = &program.program;
         let units = program.units.iter().collect::<Vec<_>>();
         let inputs = hirsel_lir::emission::EmitInputs {
             ahead: None,

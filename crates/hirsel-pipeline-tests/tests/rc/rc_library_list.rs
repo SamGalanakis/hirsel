@@ -408,10 +408,7 @@ fn list_push_agrees_natively_on_both_targets() {
     use hirsel_native::Toolchain;
     use hirsel_native::launch;
     use hirsel_native::link;
-    use hirsel_native::manifest;
     use hirsel_native::observe;
-    use hirsel_native::program;
-    use hirsel_native_batch::build_program;
     let targets = TargetSpec::executed();
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("library-native");
     let toolchain =
@@ -489,12 +486,13 @@ fn list_push_agrees_natively_on_both_targets() {
             let input = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(input).unwrap();
             let sites = Sites::new(validated.snapshot());
-            let compiled = program(&validated);
+            let mut supplier =
+                hirsel_requests::source_ready_supplier(&source, "test.hir", &entry, toolchain)
+                    .unwrap();
             for target in targets {
-                let rows = manifest(validated.snapshot()).unwrap();
-                let mut ready = build_program(&compiled, rows, &Options::new(target.clone()))
+                let ready = supplier(&Options::new(target.clone()))
                     .unwrap_or_else(|e| panic!("{name} on {}: {e}", target.triple));
-                ready.bind_revisions(&validated).unwrap();
+                let ready = &ready.program;
                 assert!(
                     ready
                         .units
@@ -549,8 +547,18 @@ fn observed_heap(source: &str) -> hirsel_native_testing::HeapRun {
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
         let sites = hirsel_native::Sites::new(validated.snapshot());
-        let ready = hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target()))
-            .unwrap_or_else(|e| panic!("{source}\n{e}"));
+        let ready = {
+            let options = &hirsel_native::Options::new(target());
+            hirsel_requests::source_ready_supplier(
+                &source,
+                "test.hir",
+                &entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap_or_else(|e| panic!("{source}\n{e}"));
+        let ready = &ready.program;
         let heap = hirsel_native_testing::heap_campaign(&ready, &entry, &sites)
             .unwrap_or_else(|e| panic!("{source}\n{e}"));
         assert_eq!(heap.observation, reference, "{source}");
@@ -684,7 +692,6 @@ int32_t __wrap_hirsel_rt_v2_main(const hirsel_rt_v2_program_descriptor *program,
 fn list_counter_run(source: &str, name: &str) -> Vec<u64> {
     use hirsel_driver::native::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     std::fs::create_dir_all(&dir).unwrap();
@@ -699,9 +706,10 @@ fn list_counter_run(source: &str, name: &str) -> Vec<u64> {
     let input = engine.export_native_input().unwrap();
     let validated = engine.import_native_input(input).unwrap();
     let entry = entry_path(&default_context());
-    let ready =
-        hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
-            .unwrap();
+    let ready = hirsel_requests::source_ready_supplier(&source, "million.hir", &entry, &toolchain)
+        .unwrap()(&hirsel_native::Options::new(target.clone()))
+    .unwrap();
+    let ready = &ready.program;
     let wrapper = dir.join("count.c");
     std::fs::write(&wrapper, LIST_COUNTER_WRAPPER).unwrap();
     let mut grows = Vec::new();

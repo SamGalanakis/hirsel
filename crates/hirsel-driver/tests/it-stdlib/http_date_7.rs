@@ -57,11 +57,22 @@ fn check(name: &str) {
             hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap());
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = hirsel_native_batch::build(
-            &validated,
-            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
+        let ready = hirsel_requests::ready_supplier(
+            &path,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(
+                &(&hirsel_native::Options::new(
+                    hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                ))
+                    .target,
+            ),
         )
+        .unwrap()(&hirsel_native::Options::new(
+            hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+        ))
         .unwrap();
+        let ready = &ready.program;
         let sites = hirsel_native::Sites::new(validated.snapshot());
         let heap = hirsel_native_testing::run_heap_in(
             &ready,

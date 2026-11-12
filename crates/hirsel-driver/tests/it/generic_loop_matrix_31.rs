@@ -11,7 +11,6 @@ use hirsel_driver::native::*;
 use hirsel_engine::*;
 use hirsel_front_phases::compiler_adapters;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 
 use hirsel_query_products::LoweringPolicy;

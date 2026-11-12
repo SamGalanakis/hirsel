@@ -371,7 +371,6 @@ fn cursor_lookup_recipe() -> String {
 fn cursor_diagnostics_16_lookup_recipes_check_export_and_observe() {
     use hirsel_driver::native::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let source = format!(

@@ -7,7 +7,6 @@ use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use hirsel_rt::io::{Completion, Event, Request};
 use serde_json::Value;
@@ -480,11 +479,18 @@ fn effects(group: &str) {
         let mut loaded = checked(&source);
         let input = loaded.engine.export_native_input().expect("V-export");
         let validated = loaded.engine.import_native_input(input).expect("V-import");
-        let ready = build(
-            &validated,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = {
+            let options = &Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+            hirsel_requests::ready_supplier(
+                &fixture(),
+                Some(&source),
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
         .unwrap();
+        let ready = &ready.program;
         let scratch = tempfile::tempdir().unwrap();
         let dir = scratch.path();
         // Use the real source package graph for public production replay admission.

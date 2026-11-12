@@ -8,7 +8,6 @@ use hirsel_driver::native::*;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::ir::{Inst, Placement, StorageOwner, ValueRepr};
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 
 const PRELUDE: &str = r#"
@@ -242,7 +241,18 @@ fn generated_siblings_all_engines() {
                 for regions in [true, false] {
                     let mut options = Options::new(support::target());
                     options.regions = regions;
-                    let ready = build(&validated, &options).unwrap();
+                    let ready = {
+                        let options = &options;
+                        hirsel_requests::source_ready_supplier(
+                            &source,
+                            "main.hir",
+                            &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                            &hirsel_native_testing::ready_toolchain(&options.target),
+                        )
+                        .unwrap()(options)
+                    }
+                    .unwrap();
+                    let ready = &ready.program;
                     let heap = run_heap(
                         &ready,
                         &entry_path(&default_context()),

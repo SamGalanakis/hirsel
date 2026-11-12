@@ -4,14 +4,13 @@ use hirsel_lir::ir::*;
 
 #[test]
 fn next_keeps_its_declared_invocation_identity() {
-    let program = compile(
-        r#"pub fn first(mut it: Iter[u64]) -> Option[u64] { iter.next(mut it) }
+    let source = r#"pub fn first(mut it: Iter[u64]) -> Option[u64] { iter.next(mut it) }
 fn step(mut state: u64) -> Option[u64] { state = state + 1u64; Some(state) }
 pub fn main() -> u64 {
   let mut it: Iter[u64] = iter.from(0u64, step)
   match first(mut it) { Some(value) => value, None() => 0u64 }
-}"#,
-    );
+}"#;
+    let program = compile(source);
     let lowered = hirsel_rc::import::lower(&program, &target()).unwrap();
     let unit = unit_named(&lowered, "first");
     let reference = program.operation_registry();
@@ -30,12 +29,8 @@ pub fn main() -> u64 {
     wrong_target.tables.symbols[symbol.index()].definition = path("step");
     assert!(hirsel_lir::invocations::check(&wrong_target, rows, 0).is_err());
 
-    let ready = hirsel_native_batch::build_program(
-        &program,
-        manifest(&program),
-        &hirsel_native::Options::new(target()),
-    )
-    .unwrap();
+    let ready = crate::rc_support::ready(source, &hirsel_native::Options::new(target()));
+    let ready = &ready.program;
     let heap = hirsel_heapcheck::Program {
         target: target(),
         layouts: ready.table.table().clone(),

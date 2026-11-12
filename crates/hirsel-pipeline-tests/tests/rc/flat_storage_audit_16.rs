@@ -662,7 +662,6 @@ fn native_flat_region_copy_parity() {
     use hirsel_engine::*;
     use hirsel_front_phases::compiler_adapters;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     let matrix = vec![
         Configuration {

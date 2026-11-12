@@ -12,7 +12,6 @@ use hirsel_driver::native::*;
 use hirsel_engine::{RunConfiguration, run_observed_snapshot};
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileFault, FileFaultError as E, FileFaults, FileOperation as O};
 use std::collections::{BTreeMap, VecDeque};
@@ -88,7 +87,18 @@ fn campaign_status(id: &str, source: &str, fixture: Fixture, allocation_campaign
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
         let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
-        let ready = build(&validated, &options).unwrap();
+        let ready = {
+            let options = &options;
+            hirsel_requests::ready_supplier(
+                &path,
+                None,
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(validated.snapshot());
         let world = HeapWorld {
             args: fixture.args.clone(),
@@ -580,11 +590,18 @@ fn treelearn_original_commit_denied() {
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = build(
-            &validated,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = {
+            let options = &Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+            hirsel_requests::ready_supplier(
+                &path,
+                None,
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
         .unwrap();
+        let ready = &ready.program;
         eprintln!("HEAP_FILE_FAULT_STARTED treelearn-original-commit-denied heap");
         let heap = run_heap_in(
             &ready,
@@ -669,11 +686,18 @@ fn heap_launch_refuses_invalid_scripts_and_counts() {
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = build(
-            &validated,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = {
+            let options = &Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+            hirsel_requests::ready_supplier(
+                &path,
+                None,
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
         .unwrap();
+        let ready = &ready.program;
         // Recovery may select only the count-mismatch cell after the eight
         // unchanged schema cells passed. Normal tests always run the full matrix.
         let first = std::env::var("HIRSEL_HEAP_FAULTS_ADMISSION_FROM")

@@ -66,11 +66,18 @@ fn direct_and_wrapper_calls_preserve_arena_and_shared_owners() {
             let input = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(input).unwrap();
             let sites = hirsel_native::Sites::new(validated.snapshot());
-            let ready = hirsel_native_batch::build(
-                &validated,
-                &hirsel_native::Options::new(support::target()),
-            )
+            let ready = {
+                let options = &hirsel_native::Options::new(support::target());
+                hirsel_requests::source_ready_supplier(
+                    &source,
+                    "test.hir",
+                    &entry,
+                    &hirsel_native_testing::ready_toolchain(&options.target),
+                )
+                .unwrap()(options)
+            }
             .unwrap();
+            let ready = &ready.program;
             let heap = hirsel_native_testing::heap_campaign(&ready, &entry, &sites).unwrap();
             assert_eq!(heap.observation, reference, "{source}");
         });

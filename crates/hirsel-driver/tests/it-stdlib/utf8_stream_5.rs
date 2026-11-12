@@ -88,11 +88,22 @@ fn corpus_import_and_error_twins() {
                 hirsel_native::Observation::of_reference(checked.observation.as_ref().unwrap());
             let input = loaded.engine.export_native_input().unwrap();
             let validated = loaded.engine.import_native_input(input.clone()).unwrap();
-            let ready = hirsel_native_batch::build(
-                &validated,
-                &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
+            let ready = hirsel_requests::ready_supplier(
+                path,
+                None,
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(
+                    &(&hirsel_native::Options::new(
+                        hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                    ))
+                        .target,
+                ),
             )
+            .unwrap()(&hirsel_native::Options::new(
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+            ))
             .unwrap();
+            let ready = &ready.program;
             let heap = hirsel_native_testing::run_heap(
                 &ready,
                 &loaded.entry,
@@ -330,11 +341,22 @@ pub(super) fn source_origin() {
             .unwrap_or_else(|e| panic!("{e}"));
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = hirsel_native_batch::build(
-            &validated,
-            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
+        let ready = hirsel_requests::ready_supplier(
+            &fixture("controls"),
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(
+                &(&hirsel_native::Options::new(
+                    hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                ))
+                    .target,
+            ),
         )
+        .unwrap()(&hirsel_native::Options::new(
+            hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+        ))
         .unwrap();
+        let ready = &ready.program;
         for name in ["decoder", "feed", "offset", "status", "pending_bytes"] {
             let unit = ready
                 .units
@@ -364,11 +386,19 @@ fn ready_source(source: &str) -> (LoadedProgram, NativeInput, hirsel_native::Rea
         .unwrap_or_else(|e| panic!("{e}"));
     let input = loaded.engine.export_native_input().unwrap();
     let validated = loaded.engine.import_native_input(input.clone()).unwrap();
-    let ready = hirsel_native_batch::build(
-        &validated,
-        &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
-    )
+    let ready = {
+        let options =
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+        hirsel_requests::ready_supplier(
+            &fixture("controls"),
+            Some(source),
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&options.target),
+        )
+        .unwrap()(options)
+    }
     .unwrap();
+    let ready = ready.program.clone();
     (loaded, input, ready)
 }
 

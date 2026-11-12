@@ -8,7 +8,6 @@ use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use hirsel_rt::io::{Completion, Event, Request};
 use std::path::{Path, PathBuf};
@@ -250,11 +249,18 @@ fn four_engine_lines_cursor_and_offline_replay() {
         let mut loaded = checked(&path, None);
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input.clone()).unwrap();
-        let ready = build(
-            &validated,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = {
+            let options = &Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+            hirsel_requests::ready_supplier(
+                &path,
+                None,
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
         .unwrap();
+        let ready = &ready.program;
         let entry = loaded.entry.clone();
         drop(validated);
         drop(loaded);
@@ -595,11 +601,18 @@ fn pending_stdin_scripted_cancel_and_four_engine_replay() {
         let mut loaded = checked(&path, None);
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = build(
-            &validated,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = {
+            let options = &Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+            hirsel_requests::ready_supplier(
+                &path,
+                None,
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
         .unwrap();
+        let ready = &ready.program;
         let dir = retained("pending-cancel");
         let tools = Toolchain::in_tree_with_runtime(
             &dir.join("runtime"),
@@ -735,11 +748,18 @@ fn real_stdin_error_after_prefix_discards_partial_text() {
         let mut loaded = checked(&path, None);
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = build(
-            &validated,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = {
+            let options = &Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+            hirsel_requests::ready_supplier(
+                &path,
+                None,
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
         .unwrap();
+        let ready = &ready.program;
         let dir = retained("real-error");
         let tools = Toolchain::in_tree_with_runtime(
             &dir.join("runtime"),

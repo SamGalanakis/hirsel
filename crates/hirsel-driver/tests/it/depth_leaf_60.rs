@@ -6,7 +6,6 @@ use hirsel_native::OptLevel;
 use hirsel_native::Options;
 use hirsel_native::TargetSpec;
 use hirsel_native::emit_ir;
-use hirsel_native_batch::build;
 
 #[test]
 fn inline_record_callee_uses_only_a_room_guard() {
@@ -18,7 +17,11 @@ fn inline_record_callee_uses_only_a_room_guard() {
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
         for target in TargetSpec::executed() {
-            let ready = build(&validated, &Options::new(target)).unwrap();
+            let ready = {
+ let options = &Options::new(target);
+ hirsel_requests::source_ready_supplier(&"fn pair(x:f64,y:f64)->(f64,f64) {(x,y)}\npub fn main()->(f64,f64) {pair(1.0,2.0)}\n", "leaf.hir", &hirsel_engine::entry_path(&hirsel_engine::default_context()), &hirsel_native_testing::ready_toolchain(&options.target)).unwrap()(options)
+}.unwrap();
+            let ready = &ready.program;
             let ir = emit_ir(&ready, OptLevel::None).unwrap();
             let body = ir
                 .lines()
@@ -58,7 +61,18 @@ fn fixed_construction_proof_excludes_box_allocation() {
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
         for target in TargetSpec::executed() {
-            let ready = build(&validated, &Options::new(target)).unwrap();
+            let ready = {
+                let options = &Options::new(target);
+                hirsel_requests::source_ready_supplier(
+                    "fn boxed(x:f64)->box f64 {box x}\npub fn main()->box f64 {boxed(1.0)}\n",
+                    "boxed.hir",
+                    &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                    &hirsel_native_testing::ready_toolchain(&options.target),
+                )
+                .unwrap()(options)
+            }
+            .unwrap();
+            let ready = &ready.program;
             let boxed = ready
                 .units
                 .iter()

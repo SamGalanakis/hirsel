@@ -39,9 +39,16 @@ fn entered_sleep_and_join_release_stacks_at_widths_one_and_four_and_replay() {
         let sites = hirsel_native::Sites::new(&input);
         let validated = engine.import_native_input(input.clone()).unwrap();
         let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
-        let program =
-            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
-                .unwrap();
+        let program = crate::source_std::ready(
+            &source,
+            "main.hir",
+            &entry,
+            &hirsel_native_testing::ready_toolchain(
+                &(&hirsel_native::Options::new(target.clone())).target,
+            ),
+        )(&hirsel_native::Options::new(target.clone()))
+        .unwrap();
+        let program = &program.program;
         let root = tempfile::Builder::new()
             .prefix("ordered-sleep57-")
             .tempdir()

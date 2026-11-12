@@ -2,7 +2,6 @@ use hirsel_driver::native::*;
 use hirsel_engine::*;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 
 const RESIDUAL_CAPTURE: &str = r#"
@@ -120,7 +119,14 @@ fn agrees(source: &str, output: &[u8]) {
         let validated = engine.import_native_input(input).unwrap();
         let options =
             Options::new(hirsel_lir::layout_types::TargetSpec::x86_64_unknown_linux_gnu());
-        let program = build(&validated, &options).unwrap();
+        let program = crate::source_std::ready(
+            &source,
+            "main.hir",
+            &entry,
+            &hirsel_native_testing::ready_toolchain(&(&options).target),
+        )(&options)
+        .unwrap();
+        let program = &program.program;
         let plans = continuation::plans(&program);
         if let Err(error) = continuation::validate(&program, &plans) {
             for unit in &program.units {

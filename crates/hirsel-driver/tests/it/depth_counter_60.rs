@@ -6,7 +6,6 @@ use hirsel_native::OptLevel;
 use hirsel_native::Options;
 use hirsel_native::TargetSpec;
 use hirsel_native::emit_ir;
-use hirsel_native_batch::build;
 
 #[test]
 fn recursive_scalar_calls_use_counters_without_invocation_metadata() {
@@ -18,7 +17,11 @@ fn recursive_scalar_calls_use_counters_without_invocation_metadata() {
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
         for target in TargetSpec::executed() {
-            let ready = build(&validated, &Options::new(target)).unwrap();
+            let ready = {
+ let options = &Options::new(target);
+ hirsel_requests::source_ready_supplier(&"fn descend(n:u64)->u64 { if n==0u64 {0u64} else {1u64+descend(n-1u64)} }\npub fn main()->u64 { let mut total=0u64; for n in 0u64..20u64 { total+=descend(n) } total }\n", "counter.hir", &hirsel_engine::entry_path(&hirsel_engine::default_context()), &hirsel_native_testing::ready_toolchain(&options.target)).unwrap()(options)
+}.unwrap();
+            let ready = &ready.program;
             let ir = emit_ir(&ready, OptLevel::None).unwrap();
             let body = ir
                 .lines()

@@ -3,8 +3,8 @@
 //! real-Io replay. A supplier owns one request engine and builds the selected
 //! entry's Ready once per pass options it is asked for.
 use super::{
-    CompileOperation, CompileRequest, CompileResult, CompilerRequests, NativeOutput, NativeReady,
-    NativeRequest, NativeSourceText,
+    CompileInputs, CompileOperation, CompileRequest, CompileResult, CompilerRequests, NativeOutput,
+    NativeReady, NativeRequest, NativeSourceText,
 };
 use hirsel_engine::{Compiler, ToolError, loader_inputs::FrozenInputs, requests::observe_inputs};
 use hirsel_native::{Backend, BuildOptions, NativeError, OptLevel, Options, StageName, Toolchain};
@@ -54,7 +54,8 @@ pub fn ready_supplier_with_compiler(
     Ok(supplier(
         requests,
         path.to_path_buf(),
-        inputs,
+        inputs.into(),
+        vec![],
         vec![],
         entry,
     ))
@@ -78,8 +79,9 @@ pub fn named_ready_supplier(
     Ok(supplier(
         requests,
         path.to_path_buf(),
-        inputs,
+        inputs.into(),
         vec![entry_source(source, name, entry)],
+        vec![],
         entry,
     ))
 }
@@ -173,7 +175,7 @@ pub fn sources_ready_supplier_with_compiler(
         .to_string(),
     )?;
     let (requests, _, inputs) = capture(&path, toolchain, compiler)?;
-    let mut ready = supplier(requests, path, inputs, sources, entry);
+    let mut ready = supplier(requests, path, inputs.into(), sources, vec![], entry);
     Ok(Box::new(move |options: &Options| {
         let _scratch_owner = &directory;
         ready(options)
@@ -209,11 +211,35 @@ fn capture(
     Ok((requests, primary?, inputs))
 }
 
+/// The test `entry`, run with `seed`, of the project at `path`, as a test run
+/// builds it: over the `inputs` and wrapper `sources` its discovery produced.
+pub fn test_ready_supplier(
+    path: &Path,
+    inputs: CompileInputs,
+    sources: Vec<NativeSourceText>,
+    entry: &DefPath,
+    seed: u64,
+    toolchain: &Toolchain,
+) -> ReadyRequests {
+    let compiler = hirsel_front_phases::COMPILER;
+    let requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration())
+        .with_toolchain(Arc::new(toolchain.clone()));
+    supplier(
+        requests,
+        path.to_path_buf(),
+        inputs,
+        sources,
+        vec![(entry.clone(), seed)],
+        entry,
+    )
+}
+
 fn supplier(
     mut requests: CompilerRequests,
     path: PathBuf,
-    inputs: FrozenInputs,
+    inputs: CompileInputs,
     supplemental_sources: Vec<NativeSourceText>,
+    test_entries: Vec<(DefPath, u64)>,
     entry: &DefPath,
 ) -> ReadyRequests {
     let entry = entry.clone();
@@ -227,10 +253,10 @@ fn supplier(
         let output = requests
             .execute_request(&CompileRequest {
                 path: path.clone(),
-                inputs: inputs.clone().into(),
+                inputs: inputs.clone(),
                 operation: CompileOperation::NativeBuild(NativeRequest {
                     definition: Some(entry.clone()),
-                    test_entries: vec![],
+                    test_entries: test_entries.clone(),
                     supplemental_sources: supplemental_sources.clone(),
                     output: NativeOutput::Ready,
                     options: BuildOptions::new(options.clone(), Backend::Llvm, OptLevel::Default),

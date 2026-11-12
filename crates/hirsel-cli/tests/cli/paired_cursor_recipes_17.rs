@@ -191,7 +191,15 @@ fn paired_cursor_recipes_17_bounded_matrix_engines() {
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let ready = hirsel_requests::source_ready_supplier(&SOURCE, "paired-recipes.hir", &hirsel_engine::entry_path(&context), &hirsel_native_testing::ready_toolchain(&(&Options::new(TargetSpec::x86_64_unknown_linux_gnu())).target)).unwrap()(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
+        let ready = hirsel_requests::source_ready_supplier(
+            &SOURCE,
+            "paired-recipes.hir",
+            &hirsel_engine::entry_path(&context),
+            &hirsel_native_testing::ready_toolchain(
+                &(&Options::new(TargetSpec::x86_64_unknown_linux_gnu())).target,
+            ),
+        )
+        .unwrap()(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
         .unwrap();
         let ready = &ready.program;
         let heap = run_heap(

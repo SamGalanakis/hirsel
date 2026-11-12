@@ -134,8 +134,14 @@ fn la_sieve_10_allocations() {
         let sources = hirsel_native::profile_sources(&input);
         let validated = loaded.engine.import_native_input(input).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let program =
-            hirsel_requests::ready_supplier(&fixture.0.join("hirsel.json"), None, &loaded.entry, &hirsel_native_testing::ready_toolchain(&(&Options::new(target.clone())).target)).unwrap()(&Options::new(target.clone())).unwrap();
+        let program = hirsel_requests::ready_supplier(
+            &fixture.0.join("hirsel.json"),
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&(&Options::new(target.clone())).target),
+        )
+        .unwrap()(&Options::new(target.clone()))
+        .unwrap();
         let program = &program.program;
         let toolchain = Toolchain::in_tree_with_runtime(
             &fixture.0.join("runtime"),

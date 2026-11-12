@@ -138,7 +138,20 @@ fn configcheck_23_pure_reference_vectors_checked_h() {
         assert_eq!(plain.observation, checked.observation);
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = hirsel_requests::ready_supplier(&path, None, &loaded.entry, &hirsel_native_testing::ready_toolchain(&(&hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu())).target)).unwrap()(&hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()))
+        let ready = hirsel_requests::ready_supplier(
+            &path,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(
+                &(&hirsel_native::Options::new(
+                    hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                ))
+                    .target,
+            ),
+        )
+        .unwrap()(&hirsel_native::Options::new(
+            hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+        ))
         .unwrap();
         let ready = &ready.program;
         let heap = hirsel_native_testing::run_heap_in(

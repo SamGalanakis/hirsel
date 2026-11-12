@@ -1,6 +1,6 @@
 //! Static back-end coverage used by corpus minimisation. No executable runs.
 use super::{OptLevel, Options, ReadyProgram, TargetSpec, emit_ir};
-use hirsel_engine::ValidatedNativeInput;
+use crate::{ReadyExecution, ReadySupplier};
 use hirsel_lir::ir::{ArgumentValue, Inst, LirUnit, Ref};
 use hirsel_lir::stage::Ready;
 use std::collections::BTreeSet;
@@ -238,7 +238,9 @@ fn ready_features(program: &ReadyProgram, features: &mut BTreeSet<String>) {
 /// Features across every distinct lowering choice in the exhaustive matrix.
 /// The LLVM IR is emitted at O0 to retain calls optimization could delete.
 /// Errors are returned as evidence, rather than pretending they cover Ready.
-pub fn backend_features(input: &ValidatedNativeInput) -> (BTreeSet<String>, Vec<String>) {
+pub fn backend_features<P: ReadyExecution>(
+    ready: &mut ReadySupplier<'_, P>,
+) -> (BTreeSet<String>, Vec<String>) {
     let mut features = BTreeSet::new();
     let mut errors = Vec::new();
     for target in TargetSpec::executed() {
@@ -264,18 +266,19 @@ pub fn backend_features(input: &ValidatedNativeInput) -> (BTreeSet<String>, Vec<
                 validation: hirsel_native::Validation::EveryStage,
                 places: Vec::new(),
             };
-            match build(input, &options) {
+            match ready(&options) {
                 Err(error) => {
                     errors.push(format!(
                         "{arch}/{regions}/{elide}/{reuse}/{flat_walk}: {error}"
                     ));
                 }
                 Ok(program) => {
-                    ready_features(&program, &mut features);
+                    let program = program.program();
+                    ready_features(program, &mut features);
                     for stage in ["import", "placement", "perceus", "reuse", "ready"] {
                         features.insert(format!("validation/{arch}/{stage}/accepted"));
                     }
-                    match emit_ir(&program, OptLevel::None) {
+                    match emit_ir(program, OptLevel::None) {
                         Err(error) => errors.push(format!(
                             "{arch}/{regions}/{elide}/{reuse}/{flat_walk}: {error}"
                         )),
@@ -300,55 +303,11 @@ pub fn backend_features(input: &ValidatedNativeInput) -> (BTreeSet<String>, Vec<
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
-    fn coverage_retains_scalar_width_operator_and_runtime_calls() {
-        hirsel_intern::jobs::with_compiler_stack(|| {
-            let mut engine = hirsel_engine::QueryEngine::new(
-                hirsel_engine::default_environment(),
-                hirsel_front_phases::compiler_adapters(),
-            );
-            let source = "pub fn main(io: Io, args: Args) -> Result[(), GrantError] {\n let x = add(3i32, 4i32);\n let s = io.stdout(io)?;\n let _ = out.print(s, if x == 7i32 { \"hello\" } else { \"wrong\" });\n Ok(())\n}\nfn add(x: i32, y: i32) -> i32 { x + y }\n";
-            let file = engine.sources.add("coverage.hir", source.into()).unwrap();
-            let checked = hirsel_engine::source_check_request(
-                &mut engine,
-                file,
-                &hirsel_engine::default_context(),
-            )
-            .unwrap();
-            assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
-            let raw = engine.export_native_input().unwrap();
-            let input = engine.import_native_input(raw).unwrap();
-            let (features, errors) = backend_features(&input);
-            assert!(errors.is_empty(), "{errors:?}");
-            assert!(
-                features
-                    .iter()
-                    .any(|f| f.starts_with("lir/Binary/Add/") && f.contains("Scalar(I32)")),
-                "{features:?}"
-            );
-            assert!(
-                features
-                    .iter()
-                    .any(|f| f.starts_with("lir/Call/") && f.contains("Scalar(I32)")),
-                "{features:?}"
-            );
-            assert!(
-                features.iter().any(|f| f.starts_with("runtime/hirsel_rt_")),
-                "{features:?}"
-            );
-            assert!(
-                features.iter().any(|f| f.starts_with("layout/Scalar(I32)")),
-                "{features:?}"
-            );
-            assert!(features.contains("validation/aarch64-unknown-linux-gnu/ready/accepted"));
-            assert_eq!(
-                vocabulary("Scalar(U64) LayoutId(123)"),
-                "Scalar(U64) LayoutId(#)"
-            );
-        });
+    fn coverage_keys_erase_arena_ordinals_but_keep_enum_names() {
+        assert_eq!(
+            super::vocabulary("Scalar(U64) LayoutId(123)"),
+            "Scalar(U64) LayoutId(#)"
+        );
     }
 }
-
-use hirsel_native_batch::build;

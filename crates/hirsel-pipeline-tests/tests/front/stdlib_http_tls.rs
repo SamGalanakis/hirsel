@@ -12,7 +12,6 @@ use hirsel_native::Sites;
 use hirsel_native::Toolchain;
 use hirsel_native::link;
 use hirsel_native::observe;
-use hirsel_native_batch::build;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use std::{
     io::{Read, Write},
@@ -65,7 +64,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), ()] {{
         );
         let mut engine = source_std::engine();
         let context = default_context();
-        let file = engine.sources.add("http-tls.hir", source).unwrap();
+        let file = engine.sources.add("http-tls.hir", source.clone()).unwrap();
         let checked = source_check_request(&mut engine, file, &context).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&context);
@@ -75,7 +74,15 @@ pub fn main(rt: Io, args: Args) -> Result[(), ()] {{
         let scratch = Path::new(env!("CARGO_TARGET_TMPDIR")).join("std-http-tls");
         std::fs::create_dir_all(&scratch).unwrap();
         let tools = Toolchain::in_tree_diagnostic(&scratch.join("runtime"), &[&target]).unwrap();
-        let program = build(&input, &Options::new(target)).unwrap();
+        let program = hirsel_requests::source_ready_supplier(
+            &source,
+            "http-tls.hir",
+            &hirsel_engine::entry_path(&context),
+            &tools,
+        )
+        .unwrap()(&Options::new(target))
+        .unwrap();
+        let program = &program.program;
         let sites = Sites::new(input.snapshot());
         let executable = link(
             &program,

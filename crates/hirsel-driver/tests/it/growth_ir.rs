@@ -9,7 +9,6 @@ use hirsel_native::OptLevel;
 use hirsel_native::Options;
 use hirsel_native::TargetSpec;
 use hirsel_native::emit_ir;
-use hirsel_native_batch::build;
 use std::collections::{BTreeMap, BinaryHeap};
 
 /// The optimized IR of `main` in `source`, compiled for `target`.
@@ -23,12 +22,23 @@ fn function_ir(source: &str, name: &str, target: TargetSpec) -> String {
     let source = source.to_owned();
     with_compiler_stack(move || {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
-        let file = engine.sources.add("growth.hir", source).unwrap();
+        let file = engine.sources.add("growth.hir", source.clone()).unwrap();
         let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let ready = build(&validated, &Options::new(target)).unwrap();
+        let ready = {
+            let options = &Options::new(target);
+            hirsel_requests::source_ready_supplier(
+                &source,
+                "growth.hir",
+                &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let ir = emit_ir(&ready, OptLevel::Speed).unwrap();
         let start = ir
             .lines()
@@ -504,12 +514,23 @@ fn module_ir(source: &str, target: TargetSpec) -> String {
     let source = source.to_owned();
     with_compiler_stack(move || {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
-        let file = engine.sources.add("growth.hir", source).unwrap();
+        let file = engine.sources.add("growth.hir", source.clone()).unwrap();
         let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let ready = build(&validated, &Options::new(target)).unwrap();
+        let ready = {
+            let options = &Options::new(target);
+            hirsel_requests::source_ready_supplier(
+                &source,
+                "growth.hir",
+                &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         emit_ir(&ready, OptLevel::Speed).unwrap()
     })
 }

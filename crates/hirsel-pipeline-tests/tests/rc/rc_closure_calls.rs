@@ -188,9 +188,18 @@ pub fn main(rt:Io,args:Args)->Result[(),GrantError] {{
             let input = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(input).unwrap();
             let sites = hirsel_native::Sites::new(validated.snapshot());
-            let ready =
-                hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target()))
-                    .unwrap();
+            let ready = {
+                let options = &hirsel_native::Options::new(target());
+                hirsel_requests::source_ready_supplier(
+                    &source,
+                    "closure.hir",
+                    &entry,
+                    &hirsel_native_testing::ready_toolchain(&options.target),
+                )
+                .unwrap()(options)
+            }
+            .unwrap();
+            let ready = &ready.program;
             assert!(
                 ready
                     .units

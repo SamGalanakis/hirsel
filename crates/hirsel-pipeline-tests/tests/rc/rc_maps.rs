@@ -10,7 +10,6 @@ use hirsel_native::Options;
 use hirsel_native::TargetSpec;
 use hirsel_native::manifest;
 use hirsel_native::program;
-use hirsel_native_batch::build_program;
 
 fn execute(body: &str, expected: u64) {
     execute_with_collisions(body, expected, false);
@@ -36,13 +35,16 @@ fn execute_with_collisions(body: &str, expected: u64, collisions: bool) {
         );
         let input = engine.export_native_input().unwrap();
         let input = engine.import_native_input(input).unwrap();
-        let p = program(&input);
-        let ready = build_program(
-            &p,
-            manifest(input.snapshot()).unwrap(),
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+        let entry = hirsel_engine::entry_path(&default_context());
+        let tools = hirsel_native_testing::ready_toolchain(&options.target);
+        let ready = if source.contains("std@1/") {
+            source_std::ready(&source, "map-test.hir", &entry, &tools)
+        } else {
+            hirsel_requests::source_ready_supplier(&source, "map-test.hir", &entry, &tools).unwrap()
+        }(&options)
         .unwrap_or_else(|e| panic!("{source}\n{e}"));
+        let ready = &ready.program;
         let mut p = hirsel_heapcheck::Program {
             invocation_bodies: ready.operations.invocation_bodies.clone(),
             invocations: ready.operations.invocations.clone(),
@@ -208,19 +210,26 @@ fn heap_independently_rejects_undeclared_borrowed_returns_and_early_loan_end() {
         source_check_request(&mut engine, file, &default_context()).unwrap();
         let input = engine.export_native_input().unwrap();
         let input = engine.import_native_input(input).unwrap();
-        let ready = hirsel_native_batch::build(
-            &input,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = {
+            let options = &Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+            hirsel_requests::source_ready_supplier(
+                &source,
+                "borrowed-return.hir",
+                &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
         .unwrap();
+        let ready = &ready.program;
         let baseline = hirsel_heapcheck::Program {
             invocation_bodies: ready.operations.invocation_bodies.clone(),
             invocations: ready.operations.invocations.clone(),
             pretransfer_adapters: ready.operations.pretransfer_adapters.clone(),
-            target: ready.target,
-            layouts: ready.table.into_table(),
+            target: ready.target.clone(),
+            layouts: ready.table.table().clone(),
             units: ready.units.iter().map(|u| u.unit().clone()).collect(),
-            statics: ready.statics,
+            statics: ready.statics.clone(),
         };
         for mutation in 0..4 {
             let mut p = baseline.clone();
@@ -347,14 +356,14 @@ fn compile_cursor_case(source: &str) {
             .unwrap();
         let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
-        let input = engine.export_native_input().unwrap();
-        let input = engine.import_native_input(input).unwrap();
-        let p = program(&input);
-        build_program(
-            &p,
-            manifest(input.snapshot()).unwrap(),
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
+        let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+        hirsel_requests::source_ready_supplier(
+            source,
+            "cursor-case.hir",
+            &hirsel_engine::entry_path(&default_context()),
+            &hirsel_native_testing::ready_toolchain(&options.target),
         )
+        .unwrap()(&options)
         .unwrap_or_else(|e| panic!("{e:?}"));
     });
 }

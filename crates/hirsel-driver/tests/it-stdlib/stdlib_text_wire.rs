@@ -23,11 +23,22 @@ fn source_codec(name: &str, module: &str, functions: &[&str]) {
             });
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = hirsel_native_batch::build(
-            &validated,
-            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
+        let ready = hirsel_requests::ready_supplier(
+            &path,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(
+                &(&hirsel_native::Options::new(
+                    hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                ))
+                    .target,
+            ),
         )
+        .unwrap()(&hirsel_native::Options::new(
+            hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+        ))
         .unwrap();
+        let ready = &ready.program;
         for function in functions {
             let unit = ready
                 .units

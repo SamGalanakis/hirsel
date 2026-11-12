@@ -32,6 +32,30 @@ pub fn item_bases(source: &str) -> std::collections::BTreeMap<DefPath, u32> {
     })
 }
 
+/// `source`'s Ready under `options`, built by the request pipeline from the
+/// project `compile` checks: the std fixture holding `source` when it names
+/// `std@1/`, else `source` alone as `test.hir`.
+pub fn ready(
+    source: &str,
+    options: &hirsel_native::Options,
+) -> std::sync::Arc<hirsel_requests::NativeReady> {
+    let entry = hirsel_engine::entry_path(&default_context());
+    let tools = hirsel_native_testing::ready_toolchain(&options.target);
+    if source.contains("std@1/") {
+        hirsel_requests::ready_supplier(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../hirsel-driver/tests/fixtures/std_numeric.hir"),
+            Some(source),
+            &entry,
+            &tools,
+        )
+    } else {
+        hirsel_requests::source_ready_supplier(source, "test.hir", &entry, &tools)
+    }
+    .unwrap()(options)
+    .unwrap_or_else(|e| panic!("{source}\n{e}"))
+}
+
 /// Check `source`, export its native snapshot and import it again, so every
 /// program a test uses passed the driver's revalidation.
 pub fn compile(source: &str) -> Program {

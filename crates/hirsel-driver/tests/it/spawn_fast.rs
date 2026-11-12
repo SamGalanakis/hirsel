@@ -90,8 +90,15 @@ fn spawn_await_preserves_the_queued_sibling_load_and_ordered_tape_in_both_backen
         let snapshot = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(snapshot).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let mut ready =
-            hirsel_native_batch::build(&validated, &Options::new(target.clone())).unwrap();
+        let ready = hirsel_requests::ready_supplier(
+            &source,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&(&Options::new(target.clone())).target),
+        )
+        .unwrap()(&Options::new(target.clone()))
+        .unwrap();
+        let mut ready = ready.program.clone();
         let tools = Toolchain::in_tree(&dir.join("runtime"), &[&target]).unwrap();
         let mut tapes = Vec::new();
         for fast in [true, false] {

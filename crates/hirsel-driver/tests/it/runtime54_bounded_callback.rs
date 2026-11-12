@@ -12,7 +12,6 @@ use hirsel_lir::continuation::{
     ContinuationError, ContinuationPlan, ContinuationPlans, RegionKind, Representation,
 };
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use hirsel_syntax::ContentHash;
 

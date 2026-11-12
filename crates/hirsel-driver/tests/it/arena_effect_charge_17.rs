@@ -162,9 +162,18 @@ fn file_histories_and_offline_replay() {
         let sites = hirsel_native::Sites::new(&input);
         let validated = engine.import_native_input(input.clone()).unwrap();
         let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
-        let ready =
-            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
-                .unwrap();
+        let ready = {
+            let options = &hirsel_native::Options::new(target.clone());
+            hirsel_requests::source_ready_supplier(
+                &source,
+                "arena-effects.hir",
+                &entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let heap = hirsel_native_testing::run_heap(&ready, &entry, &sites).unwrap();
         assert_eq!(heap.observation, reference);
         assert_eq!(heap.counters.live_heap_bytes, 0);
@@ -359,9 +368,18 @@ fn stdin_histories_and_offline_replay() {
         let sites = hirsel_native::Sites::new(&input);
         let validated = engine.import_native_input(input.clone()).unwrap();
         let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
-        let ready =
-            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
-                .unwrap();
+        let ready = {
+            let options = &hirsel_native::Options::new(target.clone());
+            hirsel_requests::source_ready_supplier(
+                STDIN,
+                "arena-effects.hir",
+                &entry_path(&default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         // The production H fixture has EOF-only stdin. Supply a small
         // explicit scripted provider through H's existing Operations seam.
         let heap = ready.heap_program();

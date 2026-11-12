@@ -43,8 +43,18 @@ fn observed_heap(source: &str) -> hirsel_native_testing::HeapRun {
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
         let sites = hirsel_native::Sites::new(validated.snapshot());
-        let ready = hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target()))
-            .unwrap_or_else(|e| panic!("{source}\n{e}"));
+        let ready = {
+            let options = &hirsel_native::Options::new(target());
+            hirsel_requests::source_ready_supplier(
+                &source,
+                "test.hir",
+                &entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap_or_else(|e| panic!("{source}\n{e}"));
+        let ready = &ready.program;
         let heap = hirsel_native_testing::heap_campaign(&ready, &entry, &sites)
             .unwrap_or_else(|e| panic!("{source}\n{e}"));
         assert_eq!(heap.observation, reference, "{source}");
@@ -176,7 +186,6 @@ fn every_owned_corpus_iterator_runs_with_failure_audits() {
 fn iterator_resource_cleanup_agrees_on_both_targets_and_all_native_configurations() {
     use hirsel_driver::native::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("iter-native");
     let toolchain =

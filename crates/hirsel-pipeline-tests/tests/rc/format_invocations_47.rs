@@ -49,8 +49,18 @@ fn primitive_formats_share_the_reserved_output_allocation() {
         let sources = hirsel_native::profile_sources(&input);
         let validated = loaded.engine.import_native_input(input).unwrap();
         let sites = hirsel_native::Sites::new(validated.snapshot());
-        let ready =
-            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target())).unwrap();
+        let ready = {
+            let options = &hirsel_native::Options::new(target());
+            hirsel_requests::ready_supplier(
+                &path,
+                Some(source),
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let run = hirsel_native_testing::run_heap(&ready, &loaded.entry, &sites).unwrap();
         assert_eq!(run.observation.exit_code, Some(0));
         assert!(run.observation.failures.is_empty(), "{:?}", run.observation);

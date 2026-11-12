@@ -10,7 +10,6 @@ use hirsel_native::Options;
 use hirsel_native::Toolchain;
 use hirsel_native::c_call;
 use hirsel_native::emit;
-use hirsel_native_batch::build;
 use hirsel_native_testing::Outcome;
 use hirsel_native_testing::full_matrix;
 use std::path::Path;
@@ -219,7 +218,7 @@ fn full_gate_text_calls_failures_c_abi_and_compiled_drops_agree_on_both_targets(
                 assert_eq!(outcome, Outcome::Agree, "{name}: {configuration}");
             }
         }
-        let (input, entry, _) = checked(DROP);
+        let (_, entry, _) = checked(DROP);
         for target in [
             TargetSpec::x86_64_unknown_linux_gnu(),
             TargetSpec::aarch64_unknown_linux_gnu(),
@@ -237,14 +236,19 @@ fn full_gate_text_calls_failures_c_abi_and_compiled_drops_agree_on_both_targets(
             );
             execute(&tools, target, &probe);
             for opt in [OptLevel::None, OptLevel::Speed] {
-                let program = build(
-                    &input,
-                    &Options {
-                        regions: false,
-                        ..Options::new(target.clone())
-                    },
+                let program = hirsel_requests::ready_supplier(
+                    &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../hirsel-driver/tests/fixtures/std_numeric.hir"),
+                    Some(DROP),
+                    &entry,
+                    &tools,
                 )
+                .unwrap()(&Options {
+                    regions: false,
+                    ..Options::new(target.clone())
+                })
                 .unwrap();
+                let program = &program.program;
                 let object = emit(&program, opt, |_| true).unwrap();
                 assert!(
                     !object

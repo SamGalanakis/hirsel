@@ -265,11 +265,22 @@ fn heap_failure_cleanup_and_backing() {
             loaded.check_for_execution().unwrap();
             let input = loaded.engine.export_native_input().unwrap();
             let validated = loaded.engine.import_native_input(input.clone()).unwrap();
-            let ready = hirsel_native_batch::build(
-                &validated,
-                &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
+            let ready = hirsel_requests::ready_supplier(
+                &p.0,
+                None,
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(
+                    &(&hirsel_native::Options::new(
+                        hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                    ))
+                        .target,
+                ),
             )
+            .unwrap()(&hirsel_native::Options::new(
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+            ))
             .unwrap();
+            let ready = &ready.program;
             let run = hirsel_native_testing::heap_campaign(
                 &ready,
                 &loaded.entry,
@@ -320,11 +331,22 @@ pub fn main() -> Result[(), ()] {
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input.clone()).unwrap();
-        let ready = hirsel_native_batch::build(
-            &validated,
-            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
+        let ready = hirsel_requests::ready_supplier(
+            &p.0,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(
+                &(&hirsel_native::Options::new(
+                    hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                ))
+                    .target,
+            ),
         )
+        .unwrap()(&hirsel_native::Options::new(
+            hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+        ))
         .unwrap();
+        let ready = &ready.program;
         let run = hirsel_native_testing::heap_campaign(
             &ready,
             &loaded.entry,

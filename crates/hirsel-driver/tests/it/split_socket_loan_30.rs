@@ -67,7 +67,6 @@ fn checked(source: &str) -> QueryEngine {
 fn split_socket_loan_30_original_and_twins_on_four_engines() {
     use hirsel_driver::native::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let mut options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());

@@ -43,9 +43,18 @@ pub fn main(rt:Io)->Result[(),E] {
         let sites = hirsel_native::Sites::new(&input);
         let validated = engine.import_native_input(input.clone()).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let program =
-            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
-                .unwrap();
+        let program = {
+            let options = &hirsel_native::Options::new(target.clone());
+            hirsel_requests::source_ready_supplier(
+                &source,
+                "main.hir",
+                &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let program = &program.program;
         let root = tempfile::Builder::new()
             .prefix("watch57-physical-")
             .tempdir()

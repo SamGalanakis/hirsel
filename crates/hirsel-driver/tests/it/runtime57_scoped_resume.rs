@@ -352,9 +352,17 @@ fn runtime57_free_owned_scope_physically_leaves_its_pending_exit_and_replays() {
         let sites = hirsel_native::Sites::new(&input);
         let validated = engine.import_native_input(input.clone()).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let program =
-            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
-                .unwrap();
+        let program = {
+            let options = &hirsel_native::Options::new(target.clone());
+            crate::source_std::ready(
+                &PHYSICAL,
+                "main.hir",
+                &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )(options)
+        }
+        .unwrap();
+        let program = &program.program;
         let plans = hirsel_native::continuation::plans(&program);
         let witness = program
             .units

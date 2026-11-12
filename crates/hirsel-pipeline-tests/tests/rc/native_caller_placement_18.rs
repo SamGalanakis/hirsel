@@ -180,7 +180,6 @@ fn native_parity(cases: &[(&str, &str)]) {
     use hirsel_front_phases::*;
     use hirsel_host_io::launch::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     let matrix: Vec<_> = [true, false]
         .into_iter()
@@ -241,7 +240,18 @@ fn native_parity(cases: &[(&str, &str)]) {
             for regions in [true, false] {
                 let mut options = Options::new(target());
                 options.regions = regions;
-                let ready = build(&validated, &options).unwrap();
+                let ready = {
+                    let options = &options;
+                    hirsel_requests::source_ready_supplier(
+                        &source,
+                        "caller.hir",
+                        &hirsel_engine::entry_path(&context),
+                        &hirsel_native_testing::ready_toolchain(&options.target),
+                    )
+                    .unwrap()(options)
+                }
+                .unwrap();
+                let ready = &ready.program;
                 let heap = run_heap(&ready, &entry, &Sites::new(validated.snapshot())).unwrap();
                 assert_eq!(heap.observation, reference);
                 assert_eq!(

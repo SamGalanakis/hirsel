@@ -8,7 +8,6 @@ use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use std::{fmt::Write, path::PathBuf};
 
@@ -154,11 +153,18 @@ fn controls(engine: &str) {
         }
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input.clone()).unwrap();
-        let ready = build(
-            &validated,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = {
+            let options = &Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+            hirsel_requests::ready_supplier(
+                &path(),
+                Some(SOURCE),
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
         .unwrap();
+        let ready = &ready.program;
         assert!(ready.units.iter().any(|unit| {
             let h = &unit.unit().header;
             h.definition.0.modules == ["stream"]
@@ -317,11 +323,18 @@ fn faults(engine: &str) {
         loaded.check_for_execution().unwrap_or_else(report);
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input.clone()).unwrap();
-        let ready = build(
-            &validated,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = {
+            let options = &Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+            hirsel_requests::ready_supplier(
+                &path,
+                Some(include_str!("../fixtures/stream-item-bound-38/fault.hir")),
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
         .unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(&input);
         let scratch = tempfile::tempdir().unwrap();
         let tools = Toolchain::in_tree_with_runtime(

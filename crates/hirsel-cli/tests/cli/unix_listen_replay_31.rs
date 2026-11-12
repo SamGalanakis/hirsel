@@ -85,7 +85,14 @@ fn replay_case(case: &str) {
         let snapshot = loaded.engine.export_native_input().unwrap();
         let input = loaded.engine.import_native_input(snapshot).unwrap();
         let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
-        let ready = hirsel_requests::ready_supplier(&manifest, None, &loaded.entry, &hirsel_native_testing::ready_toolchain(&(&options).target)).unwrap()(&options).unwrap();
+        let ready = hirsel_requests::ready_supplier(
+            &manifest,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&(&options).target),
+        )
+        .unwrap()(&options)
+        .unwrap();
         let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let matrix = [Configuration {

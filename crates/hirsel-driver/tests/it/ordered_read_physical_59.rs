@@ -20,9 +20,17 @@ fn retained_stdin_pending_releases_its_pooled_stack_and_replays_on_both_backends
         let sites = hirsel_native::Sites::new(&input);
         let validated = engine.import_native_input(input.clone()).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let program =
-            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
-                .unwrap();
+        let program = {
+            let options = &hirsel_native::Options::new(target.clone());
+            crate::source_std::ready(
+                &source,
+                "main.hir",
+                &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )(options)
+        }
+        .unwrap();
+        let program = &program.program;
         let root = tempfile::Builder::new()
             .prefix("read59-physical-")
             .tempdir()

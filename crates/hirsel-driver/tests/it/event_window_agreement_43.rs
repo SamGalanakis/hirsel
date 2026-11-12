@@ -354,7 +354,6 @@ fn tool_seal(directory: &std::path::Path, phase: &str) {
 fn replay_mutable_handback_and_generic_cursor() {
     use hirsel_driver::native::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let source = r#"

@@ -31,15 +31,15 @@ fn checked(path: &Path) -> LoadedProgram {
     });
     loaded
 }
-fn ready(loaded: &mut LoadedProgram) -> (NativeInput, hirsel_native::ReadyProgram) {
+fn ready(path: &Path, loaded: &mut LoadedProgram) -> (NativeInput, hirsel_native::ReadyProgram) {
     let input = loaded.engine.export_native_input().unwrap();
-    let validated = loaded.engine.import_native_input(input.clone()).unwrap();
-    let ready = hirsel_native_batch::build(
-        &validated,
-        &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
-    )
-    .unwrap();
-    (input, ready)
+    let options =
+        hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+    let tools = hirsel_native_testing::ready_toolchain(&options.target);
+    let ready =
+        hirsel_requests::ready_supplier(path, None, &loaded.entry, &tools).unwrap()(&options)
+            .unwrap();
+    (input, ready.program.clone())
 }
 fn ok(outcome: RunOutcome) {
     assert!(
@@ -95,7 +95,7 @@ fn controls_max_u64_errors_and_owned_result() {
         )
         .unwrap());
         let mut loaded = checked(&path);
-        let (input, program) = ready(&mut loaded);
+        let (input, program) = ready(&path, &mut loaded);
         let result = hirsel_native_testing::run_heap(
             &program,
             &loaded.entry,
@@ -136,7 +136,7 @@ fn filesystem_boundaries_cursor_requests_and_cross_engine_replay() {
     with_compiler_stack(|| {
         let path = fixture("main");
         let mut loaded = checked(&path);
-        let (_, program) = ready(&mut loaded);
+        let (_, program) = ready(&path, &mut loaded);
         let retain = std::env::var_os("FILE_READ_BOUNDED_11_EVIDENCE");
         let base = retain
             .as_ref()
@@ -445,7 +445,7 @@ fn h_boundary_matrix() {
     with_compiler_stack(|| {
         let path = fixture("boundaries");
         let mut loaded = checked(&path);
-        let (input, program) = ready(&mut loaded);
+        let (input, program) = ready(&path, &mut loaded);
         let result = hirsel_native_testing::run_heap_in(
             &program,
             &loaded.entry,

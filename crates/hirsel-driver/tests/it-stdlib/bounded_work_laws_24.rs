@@ -54,13 +54,18 @@ fn bounded_decoders_and_renderer_do_not_allocate_for_the_rejected_suffix() {
                 let mut program = load(source);
                 let input = program.engine.export_native_input().unwrap();
                 let validated = program.engine.import_native_input(input).unwrap();
-                let ready = hirsel_native_batch::build(
-                    &validated,
-                    &hirsel_native::Options::new(
-                        hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
-                    ),
+                let options = hirsel_native::Options::new(
+                    hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                );
+                let ready = hirsel_requests::ready_supplier(
+                    &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/std_numeric.hir"),
+                    Some(source),
+                    &program.entry,
+                    &hirsel_native_testing::ready_toolchain(&options.target),
                 )
+                .unwrap()(&options)
                 .unwrap();
+                let ready = &ready.program;
                 let counters = if name == "stdin" {
                     let mut input = Stdin {
                         remaining: size,

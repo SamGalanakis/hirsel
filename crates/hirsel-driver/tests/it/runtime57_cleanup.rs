@@ -7,7 +7,6 @@ use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::continuation::ResumeAction;
 use hirsel_lir::ir::CallId;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 
 const NESTED: &str = r#"

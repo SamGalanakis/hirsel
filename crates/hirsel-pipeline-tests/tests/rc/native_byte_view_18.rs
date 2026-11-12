@@ -8,7 +8,6 @@ use hirsel_engine::*;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::ir::{Holding, Inst};
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 
 // Byte-for-byte retained core-only-loan-original.hir, including its entry type.
@@ -187,8 +186,15 @@ fn nested_and_named_views_agree_on_all_executors() {
             let input = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(input).unwrap();
             let sites = Sites::new(validated.snapshot());
-            let ready =
-                build(&validated, &options).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            let ready = hirsel_requests::source_ready_supplier(
+                &source,
+                "byte-view.hir",
+                &hirsel_engine::entry_path(&context),
+                &toolchain,
+            )
+            .unwrap()(&options)
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            let ready = &ready.program;
             let heap = run_heap(&ready, &entry, &sites).unwrap();
             assert_observation(name, &heap.observation, failure);
             assert_eq!(heap.counters.live_heap_bytes, 0, "{name}");

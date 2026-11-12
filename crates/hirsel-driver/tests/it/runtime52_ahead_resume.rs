@@ -9,7 +9,6 @@ use hirsel_engine::*;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::continuation::Representation;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 
 const SOURCE: &str = include_str!("../fixtures/e1-completed-read-35/main.hir");
@@ -35,11 +34,17 @@ fn checked() -> (QueryEngine, ReadyProgram) {
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let input = engine.export_native_input().unwrap();
     let validated = engine.import_native_input(input).unwrap();
-    let ready = build(
-        &validated,
-        &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-    )
+    let ready = {
+        let options = &Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+        crate::source_std::ready(
+            &SOURCE,
+            "main.hir",
+            &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+            &hirsel_native_testing::ready_toolchain(&options.target),
+        )(options)
+    }
     .unwrap();
+    let ready = ready.program.clone();
     (engine, ready)
 }
 

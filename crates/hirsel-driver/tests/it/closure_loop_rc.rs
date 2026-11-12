@@ -14,15 +14,25 @@ fn ready(source: &str) -> Vec<LirUnit<Ready>> {
     let source = source.to_owned();
     with_compiler_stack(move || {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
-        let file = engine.sources.add("closure.hir", source).unwrap();
+        let file = engine.sources.add("closure.hir", source.clone()).unwrap();
         let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let raw = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(raw).unwrap();
         let options = hirsel_native::Options::new(TargetSpec::x86_64_unknown_linux_gnu());
-        hirsel_native_batch::build(&validated, &options)
-            .unwrap()
-            .raw_units()
+        {
+            let options = &options;
+            hirsel_requests::source_ready_supplier(
+                &source,
+                "closure.hir",
+                &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap()
+        .program
+        .raw_units()
     })
 }
 

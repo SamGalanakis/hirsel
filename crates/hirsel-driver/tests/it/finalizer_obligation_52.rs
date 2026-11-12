@@ -32,11 +32,20 @@ fn source_program(source: &str) -> hirsel_native::ReadyProgram {
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let input = engine.export_native_input().unwrap();
     let validated = engine.import_native_input(input).unwrap();
-    hirsel_native_batch::build(
-        &validated,
-        &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
-    )
+    {
+        let options =
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+        hirsel_requests::source_ready_supplier(
+            &source,
+            "finalizer-obligation.hir",
+            &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+            &hirsel_native_testing::ready_toolchain(&options.target),
+        )
+        .unwrap()(options)
+    }
     .unwrap()
+    .program
+    .clone()
 }
 
 fn main_unit(program: &hirsel_native::ReadyProgram) -> LirUnit<Ready> {

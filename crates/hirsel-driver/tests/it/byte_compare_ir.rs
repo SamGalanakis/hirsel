@@ -6,7 +6,6 @@ use hirsel_native::OptLevel;
 use hirsel_native::Options;
 use hirsel_native::TargetSpec;
 use hirsel_native::emit_ir;
-use hirsel_native_batch::build;
 
 #[test]
 fn byte_key_probes_use_a_bulk_comparison_on_both_targets() {
@@ -28,7 +27,18 @@ pub fn main(rt: Io, args: Args) -> Result[(), ()] {
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let input = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(input).unwrap();
-            let ready = build(&validated, &Options::new(target)).unwrap();
+            let ready = {
+                let options = &Options::new(target);
+                hirsel_requests::source_ready_supplier(
+                    &source,
+                    "probes.hir",
+                    &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                    &hirsel_native_testing::ready_toolchain(&options.target),
+                )
+                .unwrap()(options)
+            }
+            .unwrap();
+            let ready = &ready.program;
             let ir = emit_ir(&ready, OptLevel::Speed).unwrap();
             for name in ["5equal", "4less"] {
                 let body = ir

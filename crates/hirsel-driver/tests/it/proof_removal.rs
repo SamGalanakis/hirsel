@@ -16,7 +16,6 @@ use hirsel_native::ReadyProgram;
 use hirsel_native::TargetSpec;
 use hirsel_native::emit_ir;
 use hirsel_native::parse_sidecar;
-use hirsel_native_batch::build;
 use std::collections::BTreeMap;
 
 const BUMP: &str = "fn bump(xs: List[u32], i: u64, y: u32) -> u32
@@ -104,7 +103,16 @@ fn ready(source: &str, sidecar: Option<&str>) -> (ReadyProgram, Vec<String>) {
     if let Some(proofs) = &proofs {
         options.discharge = proofs.discharge.clone();
     }
-    let ready = build(&validated, &options).unwrap();
+    let ready = hirsel_requests::source_ready_supplier(
+        source,
+        "bump.hir",
+        &entry_path(&default_context()),
+        &hirsel_native_testing::ready_toolchain(&options.target),
+    )
+    .unwrap()(&options)
+    .unwrap()
+    .program
+    .clone();
     let report = proofs.map_or_else(Vec::new, |p| p.report(&ready));
     (ready, report)
 }
@@ -688,7 +696,10 @@ fn accepted_removal_forms_run_on_heap_and_both_native_targets() {
         for target in targets {
             let mut options = Options::new(target.clone());
             options.discharge = proofs.discharge.clone();
-            let program = build(&validated, &options).unwrap();
+            let program = hirsel_requests::source_ready_supplier(FORMS, "bump.hir", &entry, &tools)
+                .unwrap()(&options)
+            .unwrap();
+            let program = &program.program;
             let sites = Sites::new(validated.snapshot());
             assert_eq!(
                 run_heap(&program, &entry, &sites).unwrap().observation,
@@ -948,7 +959,15 @@ fn native_discovery_reports_actual_removals_on_cold_and_body_free_fresh_hits() {
                 // as a test oracle. It is dropped before new native demand.
                 let input = producer.export_native_input().unwrap();
                 let validated = producer.import_native_input(input).unwrap();
-                let ready = build(&validated, &options).unwrap();
+                let ready = hirsel_requests::source_ready_supplier(
+                    &BUMP,
+                    "bump.hir",
+                    &entry,
+                    &hirsel_native_testing::ready_toolchain(&(&options).target),
+                )
+                .unwrap()(&options)
+                .unwrap();
+                let ready = &ready.program;
                 expected = Some((ready.discharged.clone(), proofs.report(&ready)));
             }
             let inputs = NativeInstanceInputs::from_products(declarations, original).unwrap();

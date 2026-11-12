@@ -85,7 +85,9 @@ fn capacity(
         hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
     tools.execution = Execution::Executable;
     tools.launch_timeout = std::time::Duration::from_secs(60);
-    let ready = hirsel_requests::ready_supplier(manifest, None, &loaded.entry, &tools).unwrap()(&options).unwrap();
+    let ready =
+        hirsel_requests::ready_supplier(manifest, None, &loaded.entry, &tools).unwrap()(&options)
+            .unwrap();
     let ready = &ready.program;
     let sites = Sites::new(input.snapshot());
     let objects = emit_backend_objects(

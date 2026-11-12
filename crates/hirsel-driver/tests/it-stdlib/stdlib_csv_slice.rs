@@ -20,7 +20,18 @@ fn measured(source: &str, label: &str) -> String {
     let input = loaded.engine.export_native_input().unwrap();
     let validated = loaded.engine.import_native_input(input).unwrap();
     let target = TargetSpec::x86_64_unknown_linux_gnu();
-    let ready = hirsel_native_batch::build(&validated, &Options::new(target.clone())).unwrap();
+    let ready = {
+        let options = &Options::new(target.clone());
+        hirsel_requests::ready_supplier(
+            &fixture,
+            Some(source),
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&options.target),
+        )
+        .unwrap()(options)
+    }
+    .unwrap();
+    let ready = &ready.program;
     let dir = std::env::temp_dir().join(format!("hirsel-csv-{label}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let tools = Toolchain::in_tree_with_runtime(

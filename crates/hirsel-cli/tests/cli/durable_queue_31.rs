@@ -264,7 +264,14 @@ fn fixture_campaign(replay_network: bool) {
             .import_native_input(snapshot)
             .unwrap_or_else(|e| panic!("{e:?}"));
         let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
-        let ready = hirsel_requests::ready_supplier(&manifest, None, &loaded.entry, &hirsel_native_testing::ready_toolchain(&(&options).target)).unwrap()(&options).unwrap_or_else(|e| panic!("{e}"));
+        let ready = hirsel_requests::ready_supplier(
+            &manifest,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&(&options).target),
+        )
+        .unwrap()(&options)
+        .unwrap_or_else(|e| panic!("{e}"));
         let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let matrix = vec![

@@ -25,11 +25,22 @@ fn integer_policies_and_radices_are_ordinary_source_native_units() {
                 .unwrap_or_else(|error| panic!("{error}"));
             let input = loaded.engine.export_native_input().unwrap();
             let validated = loaded.engine.import_native_input(input).unwrap();
-            let ready = hirsel_native_batch::build(
-                &validated,
-                &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
+            let ready = hirsel_requests::ready_supplier(
+                &path,
+                None,
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(
+                    &(&hirsel_native::Options::new(
+                        hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                    ))
+                        .target,
+                ),
             )
+            .unwrap()(&hirsel_native::Options::new(
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+            ))
             .unwrap();
+            let ready = &ready.program;
             for unit in &ready.units {
                 let header = &unit.unit().header;
                 if header.definition.0.package.name_is("std") {

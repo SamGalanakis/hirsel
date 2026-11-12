@@ -88,7 +88,6 @@ fn tuple_compare_matches_reference_heap_llvm_and_cranelift() {
     };
     use hirsel_intern::jobs::with_compiler_stack;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let mut options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());

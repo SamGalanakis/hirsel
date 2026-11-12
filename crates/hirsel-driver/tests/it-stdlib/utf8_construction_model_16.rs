@@ -215,7 +215,18 @@ fn all_engines(name: &str, source: Option<&str>, failure: bool, campaign: bool) 
     let validated = loaded.engine.import_native_input(input).unwrap();
     let options =
         hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
-    let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+    let ready = {
+        let options = &options;
+        hirsel_requests::ready_supplier(
+            &fixture(name),
+            source,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&options.target),
+        )
+        .unwrap()(options)
+    }
+    .unwrap();
+    let ready = &ready.program;
     let sites = hirsel_native::Sites::new(validated.snapshot());
     let world = hirsel_native_testing::HeapWorld {
         steps: Some(100_000_000),

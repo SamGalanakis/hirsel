@@ -62,11 +62,22 @@ fn ordinary_indexed_rows_with_nested_text_owners() {
         let input = engine.export_native_input().unwrap();
         let sites = hirsel_native::Sites::new(&input);
         let validated = engine.import_native_input(input.clone()).unwrap();
-        let ready = hirsel_native_batch::build(
-            &validated,
-            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
+        let ready = hirsel_requests::source_ready_supplier(
+            &SOURCE,
+            "row-text.hir",
+            &entry,
+            &hirsel_native_testing::ready_toolchain(
+                &(&hirsel_native::Options::new(
+                    hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                ))
+                    .target,
+            ),
         )
+        .unwrap()(&hirsel_native::Options::new(
+            hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+        ))
         .unwrap();
+        let ready = &ready.program;
         let heap = hirsel_native_testing::run_heap(&ready, &entry, &sites).unwrap();
         assert_eq!(heap.observation, reference);
         // An ordinary list stores fixed carriers, with a distinct counted
@@ -224,13 +235,24 @@ fn detached_title_minimal_probe_and_ordinary_twin() {
             assert_eq!(reference.output, b"abc");
             let input = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(input).unwrap();
-            let ready = hirsel_native_batch::build(
-                &validated,
-                &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
+            let ready = hirsel_requests::source_ready_supplier(
+                &source,
+                "title.hir",
+                &entry,
+                &hirsel_native_testing::ready_toolchain(
+                    &(&hirsel_native::Options::new(
+                        hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                    ))
+                        .target,
+                ),
             )
+            .unwrap()(&hirsel_native::Options::new(
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+            ))
             .unwrap_or_else(|error| {
                 panic!("{kind} must compile after the projection fix: {error}")
             });
+            let ready = &ready.program;
             let sites = hirsel_native::Sites::new(validated.snapshot());
             assert_eq!(
                 hirsel_native_testing::heap_campaign(&ready, &entry, &sites)
@@ -322,11 +344,19 @@ fn heap_checks_owned_snapshots_updates_and_both_release_orders() {
         let input = loaded.engine.export_native_input().unwrap();
         let sites = hirsel_native::Sites::new(&input);
         let validated = loaded.engine.import_native_input(input.clone()).unwrap();
-        let ready = hirsel_native_batch::build(
-            &validated,
-            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = {
+            let options =
+                &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+            hirsel_requests::ready_supplier(
+                &path,
+                Some(&source),
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
         .unwrap();
+        let ready = &ready.program;
         use hirsel_lir::layout_types::{CopyRecipe, LayoutKind, SizeSpec};
         let carrier = ready
             .table
@@ -508,7 +538,7 @@ pub fn main() -> Result[(), ()] {{
                     end = count + 1
                 );
                 let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
-                let file = engine.sources.add("row-cost.hir", source).unwrap();
+                let file = engine.sources.add("row-cost.hir", source.clone()).unwrap();
                 let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
                 assert!(
                     checked.diagnostics.is_empty(),
@@ -517,13 +547,20 @@ pub fn main() -> Result[(), ()] {{
                 );
                 let input = engine.export_native_input().unwrap();
                 let validated = engine.import_native_input(input).unwrap();
-                let ready = hirsel_native_batch::build(
-                    &validated,
-                    &hirsel_native::Options::new(
+                let ready = {
+                    let options = &hirsel_native::Options::new(
                         hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
-                    ),
-                )
+                    );
+                    hirsel_requests::source_ready_supplier(
+                        &source,
+                        "row-cost.hir",
+                        &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                        &hirsel_native_testing::ready_toolchain(&options.target),
+                    )
+                    .unwrap()(options)
+                }
                 .unwrap();
+                let ready = &ready.program;
                 let program = ready.heap_program();
                 let run = hirsel_heapcheck::run_ready(
                     &program,

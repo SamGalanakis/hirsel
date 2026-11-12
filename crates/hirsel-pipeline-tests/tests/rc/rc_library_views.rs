@@ -631,19 +631,19 @@ fn transient_encoding_subslice_has_no_temporary_finite_credit() {
         "{}",
         crate::rc_support::dump(emit)
     );
-    let manifest_source = source.clone();
-    let manifest = with_compiler_stack(move || {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../hirsel-driver/tests/fixtures/std_source/main.hir");
-        let mut loaded =
-            hirsel_front_phases::load_program_source(&path, Some(&manifest_source)).unwrap();
-        loaded.check_for_execution().unwrap();
-        hirsel_native::manifest(&loaded.engine.export_native_input().unwrap()).unwrap()
-    });
+    drop(program);
+    let entry = entry_path(&default_context());
     for target in TargetSpec::executed() {
-        let ready =
-            hirsel_native_batch::build_program(&program, manifest.clone(), &Options::new(target))
-                .unwrap();
+        let ready = hirsel_requests::ready_supplier(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../hirsel-driver/tests/fixtures/std_source/main.hir"),
+            Some(&source),
+            &entry,
+            &hirsel_native_testing::ready_toolchain(&target),
+        )
+        .unwrap()(&Options::new(target))
+        .unwrap();
+        let ready = &ready.program;
         let emit = ready
             .units
             .iter()

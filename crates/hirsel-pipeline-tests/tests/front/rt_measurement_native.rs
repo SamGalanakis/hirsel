@@ -111,7 +111,18 @@ fn free_worker_reports_include_the_allocation_population_at_widths_1_and_8() {
         let sources = hirsel_native::profile_sources(&input);
         let input = loaded.engine.import_native_input(input).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let ready = hirsel_native_batch::build(&input, &Options::new(target.clone())).unwrap();
+        let ready = {
+            let options = &Options::new(target.clone());
+            hirsel_requests::ready_supplier(
+                &source,
+                None,
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let tools = Toolchain::in_tree_with_runtime(
             &dir.join("runtime"),
             &[&target],
@@ -219,11 +230,21 @@ fn free_worker_reports_include_the_allocation_population_at_widths_1_and_8() {
     });
 }
 
-fn smoke_entries(path: &Path) -> Vec<(hirsel_engine::LoadedProgram, u64)> {
+/// Each entry `path` runs, with its test seed and its Ready requests.
+fn smoke_entries(
+    path: &Path,
+    tools: &Toolchain,
+) -> Vec<(
+    hirsel_engine::LoadedProgram,
+    u64,
+    hirsel_requests::ReadyRequests,
+)> {
     use hirsel_requests::CompilerRequests;
     let source = std::fs::read_to_string(path).unwrap();
     if !source.lines().any(|line| line.trim() == "// expect: test") {
-        return vec![(hirsel_front_phases::load_program(path).unwrap(), 0)];
+        let loaded = hirsel_front_phases::load_program(path).unwrap();
+        let ready = hirsel_requests::ready_supplier(path, None, &loaded.entry, tools).unwrap();
+        return vec![(loaded, 0, ready)];
     }
     let compiler = hirsel_front_phases::COMPILER;
     let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
@@ -256,7 +277,15 @@ fn smoke_entries(path: &Path) -> Vec<(hirsel_engine::LoadedProgram, u64)> {
         .map(|test| {
             let mut loaded = compiler.load_program_inputs(path, &inputs, true).unwrap();
             loaded.entry = test.entry.clone();
-            (loaded, test.seed)
+            let ready = hirsel_requests::test_ready_supplier(
+                path,
+                discovery.inputs.clone(),
+                discovery.sources.clone(),
+                &test.entry,
+                test.seed,
+                tools,
+            );
+            (loaded, test.seed, ready)
         })
         .collect()
 }
@@ -312,7 +341,9 @@ fn full_gate_every_native_smoke_case_preserves_its_observation_in_all_runtime_va
             let _progress =
                 hirsel_intern::test_progress::enter("runtime-smoke-case", || path.to_owned());
             programs += 1;
-            for (mut loaded, test_seed) in smoke_entries(&root.join(path)) {
+            let ready_tools = hirsel_native_testing::ready_toolchain(&target);
+            for (mut loaded, test_seed, mut ready) in smoke_entries(&root.join(path), &ready_tools)
+            {
                 entries += 1;
                 loaded
                     .check_for_execution()
@@ -336,7 +367,8 @@ fn full_gate_every_native_smoke_case_preserves_its_observation_in_all_runtime_va
                 let input = loaded.engine.import_native_input(raw).unwrap();
                 let mut options = Options::new(target.clone());
                 options.launch.test_seed = test_seed;
-                let program = hirsel_native_batch::build(&input, &options).unwrap();
+                let program = ready(&options).unwrap();
+                let program = &program.program;
                 let sites = hirsel_native::Sites::new(input.snapshot());
                 for tools in &variants {
                     let name = format!(
@@ -392,7 +424,18 @@ fn trees_and_inline_counts(target: TargetSpec, name: &str) {
             assert_eq!(reference.output, b"nine\n");
             let mut options = Options::new(target.clone());
             options.regions = false;
-            let program = hirsel_native_batch::build(&input, &options).unwrap();
+            let program = {
+                let options = &options;
+                hirsel_requests::source_ready_supplier(
+                    source,
+                    "native.hir",
+                    &entry,
+                    &hirsel_native_testing::ready_toolchain(&options.target),
+                )
+                .unwrap()(options)
+            }
+            .unwrap();
+            let program = &program.program;
             let default_object = hirsel_native::emit(&program, OptLevel::Speed, |_| true).unwrap();
             assert!(
                 !default_object
@@ -525,11 +568,18 @@ fn production_corpus_object_keeps_its_uninstrumented_bytes() {
         let (input, _, _) = checked(include_str!(
             "../../../../conformance/PROV/PROV-1-copied-prefix-write-run.hir"
         ));
-        let ready = hirsel_native_batch::build(
-            &input,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = {
+            let options = &Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+            hirsel_requests::source_ready_supplier(
+                include_str!("../../../../conformance/PROV/PROV-1-copied-prefix-write-run.hir"),
+                "native.hir",
+                &entry_path(&default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
         .unwrap();
+        let ready = &ready.program;
         let object = hirsel_native::emit(&ready, OptLevel::Speed, |_| true).unwrap();
         assert!(
             !object
@@ -552,7 +602,18 @@ fn diagnostic_launch_rejects_one_leaked_block_and_accepts_its_freed_twin() {
         let cache = Path::new(env!("CARGO_TARGET_TMPDIR")).join("measurement-runtime-cache");
         let tools = Toolchain::in_tree_diagnostic(&cache, &[&target]).unwrap();
         let (input, _, _) = checked(LEAF);
-        let ready = hirsel_native_batch::build(&input, &Options::new(target.clone())).unwrap();
+        let ready = {
+            let options = &Options::new(target.clone());
+            hirsel_requests::source_ready_supplier(
+                LEAF,
+                "native.hir",
+                &entry_path(&default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let dir = scratch("measurement-leak-control");
         let source = dir.join("control.c");
         std::fs::write(&source, r#"#include "hirsel_rt_v2.h"

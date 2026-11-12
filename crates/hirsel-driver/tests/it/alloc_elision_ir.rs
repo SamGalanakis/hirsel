@@ -10,7 +10,6 @@ use hirsel_native::OptLevel;
 use hirsel_native::Options;
 use hirsel_native::TargetSpec;
 use hirsel_native::emit_ir;
-use hirsel_native_batch::build;
 
 const KERNEL: &str = "pub type Resource { id: u8, closed: bool }
 pub fn kernel(n: u64) -> u64 {
@@ -52,7 +51,18 @@ fn function_ir(name: &'static str) -> Vec<String> {
         ]
         .into_iter()
         .map(|target| {
-            let ready = build(&validated, &Options::new(target)).unwrap();
+            let ready = {
+                let options = &Options::new(target);
+                hirsel_requests::source_ready_supplier(
+                    &KERNEL,
+                    "kernel.hir",
+                    &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                    &hirsel_native_testing::ready_toolchain(&options.target),
+                )
+                .unwrap()(options)
+            }
+            .unwrap();
+            let ready = &ready.program;
             let ir = emit_ir(&ready, OptLevel::Speed).unwrap();
             let lines: Vec<&str> = ir
                 .lines()

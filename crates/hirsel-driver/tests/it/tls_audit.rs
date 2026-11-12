@@ -14,7 +14,6 @@ use hirsel_native::Options;
 use hirsel_native::Partition;
 use hirsel_native::TargetSpec;
 use hirsel_native::emit_backend_objects;
-use hirsel_native_batch::build;
 
 /// Programs whose code suspends in tasks, joins, task sets, channels, mutexes, atomics, frozen
 /// values, arenas, cancellation and finalizers.
@@ -38,7 +37,7 @@ fn emitted_objects_read_no_thread_local_storage() {
         for path in PROGRAMS {
             let source = std::fs::read_to_string(root.join(path)).unwrap();
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
-            let file = engine.sources.add(path, source).unwrap();
+            let file = engine.sources.add(path, source.clone()).unwrap();
             let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(
                 output.diagnostics.is_empty(),
@@ -51,7 +50,18 @@ fn emitted_objects_read_no_thread_local_storage() {
                 TargetSpec::x86_64_unknown_linux_gnu(),
                 TargetSpec::aarch64_unknown_linux_gnu(),
             ] {
-                let ready = build(&validated, &Options::new(target.clone())).unwrap();
+                let ready = {
+                    let options = &Options::new(target.clone());
+                    hirsel_requests::source_ready_supplier(
+                        &source,
+                        path,
+                        &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                        &hirsel_native_testing::ready_toolchain(&options.target),
+                    )
+                    .unwrap()(options)
+                }
+                .unwrap();
+                let ready = &ready.program;
                 for (backend, opt) in [
                     (Backend::Llvm, OptLevel::Speed),
                     (Backend::Llvm, OptLevel::None),

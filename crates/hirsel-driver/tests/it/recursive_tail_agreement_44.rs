@@ -368,10 +368,10 @@ fn four_engines(
         matches!(heap_results[0].1, hirsel_native_testing::Outcome::Agree),
         "{name}: {heap_results:?}"
     );
-    let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+    let ready = ready(&options).unwrap();
     let cell = NativeCell {
         name,
-        ready: &ready,
+        ready: &ready.program,
         validated: &validated,
         entry,
         reference: &reference,
@@ -637,7 +637,10 @@ fn recursive_tail_agreement_44_four_engines_and_replay() {
             original.check_for_execution().unwrap();
             let pure_input = original.engine.export_native_input().unwrap();
             let pure = original.engine.import_native_input(pure_input).unwrap();
-            let ready = hirsel_native_batch::build(&pure, &options).unwrap();
+            let ready = hirsel_requests::ready_supplier(&path, None, &original.entry, &tools)
+                .unwrap()(&options)
+            .unwrap();
+            let ready = &ready.program;
             let empty = hirsel_native::Observation {
                 exit_code: Some(0),
                 blocked: false,

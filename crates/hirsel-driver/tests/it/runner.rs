@@ -28,7 +28,6 @@ use hirsel_native::launch_runnable;
 use hirsel_native::link_objects;
 use hirsel_native::link_runnable;
 use hirsel_native::runner;
-use hirsel_native_batch::build;
 use std::path::{Path, PathBuf};
 
 /// Output without a final newline, then a failure with its exit report.
@@ -161,7 +160,18 @@ fn compiled(source: &str, target: &TargetSpec, backend: Backend) -> Compiled {
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     let input = engine.export_native_input().unwrap();
     let validated = engine.import_native_input(input).unwrap();
-    let program = build(&validated, &Options::new(target.clone())).unwrap();
+    let program = {
+        let options = &Options::new(target.clone());
+        hirsel_requests::source_ready_supplier(
+            &source,
+            "runner.hir",
+            &hirsel_engine::entry_path(&context),
+            &hirsel_native_testing::ready_toolchain(&options.target),
+        )
+        .unwrap()(options)
+    }
+    .unwrap();
+    let program = program.program.clone();
     let opt = match backend {
         Backend::Llvm => OptLevel::Speed,
         Backend::Cranelift => OptLevel::None,
@@ -634,7 +644,15 @@ pub fn main(rt: Io, u: Unsafe) -> Result[(), GrantError] {
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
         let target = x86();
-        let program = build(&validated, &Options::new(target.clone())).unwrap();
+        let program = hirsel_requests::ready_supplier(
+            &dir.join("hirsel.json"),
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&(&Options::new(target.clone())).target),
+        )
+        .unwrap()(&Options::new(target.clone()))
+        .unwrap();
+        let program = &program.program;
         let objects = emit_backend_objects(
             &program,
             Backend::Llvm,

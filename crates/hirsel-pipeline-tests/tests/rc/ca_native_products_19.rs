@@ -83,18 +83,14 @@ fn native_products_relocate_recursive_layouts_closures_and_finalizers() {
             .map(|u| hirsel_lir::validate::validate_value(u, &inputs).unwrap())
             .collect();
         roundtrip::<Value>(units, &inputs);
-        let ready = hirsel_native_batch::build_program(
-            &program,
-            manifest.clone(),
-            &hirsel_native::Options::new(target.clone()),
-        )
-        .unwrap();
+        let ready = rc_support::ready(source, &hirsel_native::Options::new(target.clone()));
+        let ready = &ready.program;
         let inputs = Inputs {
             memo: Default::default(),
             target: &target,
             layouts: &ready.table,
-            manifest: &manifest,
-            operations: &operations,
+            manifest: &ready.manifest,
+            operations: &ready.operations,
             discharge: Some(&ready.discharged),
         };
         roundtrip(ready.units.clone(), &inputs);

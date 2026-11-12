@@ -47,21 +47,16 @@ pub fn main() -> Result[(),u64] { Error(wildcard(Tick) + exhaustive(Tick) + nest
 
 #[test]
 fn a_borrowed_soa_list_count_reaches_the_vectorizer_before_unrolling() {
-    use hirsel_engine::{QueryEngine, default_context, default_environment, source_check_request};
-    use hirsel_front_phases::compiler_adapters;
+    use hirsel_engine::default_context;
     use hirsel_intern::jobs::with_compiler_stack;
     use hirsel_native::OptLevel;
     use hirsel_native::Options;
     use hirsel_native::TargetSpec;
     use hirsel_native::emit_ir;
-    use hirsel_native_batch::build;
     with_compiler_stack(|| {
-        let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
-        let file = engine
-            .sources
-            .add(
-                "tag-count.hir",
-                "@soa
+        let target = TargetSpec::x86_64_unknown_linux_gnu();
+        let ready = hirsel_requests::source_ready_supplier(
+            "@soa
  type Ev = Move(u64) | Pair(u64,u64) | Tick
  fn arm_count(xs: List[Ev], initial: u64) -> u64 {
    let mut count = initial
@@ -73,19 +68,14 @@ fn a_borrowed_soa_list_count_reaches_the_vectorizer_before_unrolling() {
    for i in 0u64..arg.len(args) { list.push(mut xs, if i % 3 == 1 { Pair(i,i) } else { Tick }) }
    Error(arm_count(xs, arg.len(args)))
  }
-"
-                .into(),
-            )
-            .unwrap();
-        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
-        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
-        let input = engine.export_native_input().unwrap();
-        let validated = engine.import_native_input(input).unwrap();
-        let ready = build(
-            &validated,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
+",
+            "tag-count.hir",
+            &hirsel_engine::entry_path(&default_context()),
+            &hirsel_native_testing::ready_toolchain(&target),
         )
+        .unwrap()(&Options::new(target))
         .unwrap();
+        let ready = &ready.program;
         let ir = emit_ir(&ready, OptLevel::Default).unwrap();
         assert!(ir.contains("count.headroom"), "{ir}");
         assert!(ir.contains("llvm.vector.reduce.add"), "{ir}");

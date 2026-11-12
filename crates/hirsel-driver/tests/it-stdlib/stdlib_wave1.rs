@@ -58,11 +58,22 @@ fn std_algorithms_are_ordinary_source_native_units(name: &str, functions: &[(&st
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = hirsel_native_batch::build(
-            &validated,
-            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
+        let ready = hirsel_requests::ready_supplier(
+            &source("SEM", name),
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(
+                &(&hirsel_native::Options::new(
+                    hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                ))
+                    .target,
+            ),
         )
+        .unwrap()(&hirsel_native::Options::new(
+            hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+        ))
         .unwrap();
+        let ready = &ready.program;
         for unit in &ready.units {
             let header = &unit.unit().header;
             if header.definition.0.package.name_is("std") {
@@ -158,10 +169,20 @@ fn a_package_program_exports_only_the_dependency_definitions_it_reaches() {
         assert_eq!(selected, expected);
         // The pruned selection imports and builds.
         let validated = loaded.engine.import_native_input(input).unwrap();
-        hirsel_native_batch::build(
-            &validated,
-            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
+        hirsel_requests::ready_supplier(
+            &program,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(
+                &(&hirsel_native::Options::new(
+                    hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                ))
+                    .target,
+            ),
         )
+        .unwrap()(&hirsel_native::Options::new(
+            hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+        ))
         .unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     });

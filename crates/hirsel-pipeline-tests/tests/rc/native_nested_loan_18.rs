@@ -118,7 +118,6 @@ fn reference_checked_heap_llvm_o0_o2_cranelift() {
     use hirsel_driver::native::*;
     use hirsel_engine::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let options = Options::new(target());
@@ -189,7 +188,15 @@ fn reference_checked_heap_llvm_o0_o2_cranelift() {
             );
             let input = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(input).unwrap();
-            let ready = build(&validated, &options).unwrap();
+            let ready = hirsel_requests::source_ready_supplier(
+                &source,
+                "nested.hir",
+                &hirsel_engine::entry_path(&context),
+                &tools,
+            )
+            .unwrap()(&options)
+            .unwrap();
+            let ready = &ready.program;
             let heap = run_heap(&ready, &entry, &Sites::new(validated.snapshot())).unwrap();
             assert_eq!(heap.observation, reference, "{name}: checked heap");
             assert_eq!(heap.counters.live_heap_bytes, 0, "{name}");

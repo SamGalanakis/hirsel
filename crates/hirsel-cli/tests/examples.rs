@@ -243,7 +243,14 @@ impl Fixture {
             let input = loaded.engine.export_native_input().unwrap();
             let validated = loaded.engine.import_native_input(input).unwrap();
             let target = TargetSpec::x86_64_unknown_linux_gnu();
-            let program = hirsel_requests::ready_supplier(&self.0.join("hirsel.json"), None, &loaded.entry, &hirsel_native_testing::ready_toolchain(&(&Options::new(target.clone())).target)).unwrap()(&Options::new(target.clone())).unwrap();
+            let program = hirsel_requests::ready_supplier(
+                &self.0.join("hirsel.json"),
+                None,
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(&(&Options::new(target.clone())).target),
+            )
+            .unwrap()(&Options::new(target.clone()))
+            .unwrap();
             let program = &program.program;
             let work = self.0.join("native");
             std::fs::create_dir_all(work.join("root")).unwrap();

@@ -8,7 +8,6 @@ use hirsel_lir::layout_types::{
     FieldLayout, LayoutId, LayoutKind, LayoutTable, ScalarKind, SizeSpec,
 };
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 
 /// Reuse seed.c's private context seed injection and exit audit for mixed traces.
@@ -30,7 +29,10 @@ pub(super) fn model_seed_harness(source: &str, traces: &[super::map_seed_model_1
         let tools = Toolchain::in_tree_diagnostic(&root.join("runtime"), &[&target]).unwrap();
         let mut options = Options::new(target.clone());
         options.regions = false;
-        let ready = build(&validated, &options).unwrap();
+        let ready = hirsel_requests::ready_supplier(&path, Some(source), &loaded.entry, &tools)
+            .unwrap()(&options)
+        .unwrap();
+        let ready = &ready.program;
         for backend in [Backend::Llvm, Backend::Cranelift] {
             let objects = emit_backend_objects(
                 &ready,
@@ -221,7 +223,7 @@ fn compiled_seed_law(composite: bool, slice: bool) {
             .unwrap();
     with_compiler_stack(move || {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
-        let file = engine.sources.add("map-seed.hir", source).unwrap();
+        let file = engine.sources.add("map-seed.hir", source.clone()).unwrap();
         let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(
             !checked
@@ -238,7 +240,15 @@ fn compiled_seed_law(composite: bool, slice: bool) {
                 let mut options = Options::new(target.clone());
                 options.regions = false;
                 options.reuse = reuse;
-                let ready = build(&validated, &options).unwrap();
+                let ready = hirsel_requests::source_ready_supplier(
+                    &source,
+                    "map-seed.hir",
+                    &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                    &tools,
+                )
+                .unwrap()(&options)
+                .unwrap();
+                let ready = &ready.program;
                 let abi_of = |name: &str| {
                     let unit = ready
                         .units
@@ -454,7 +464,11 @@ fn internal_set_order_agrees_on_heap_and_both_native_targets() {
         let sites = Sites::new(input.snapshot());
         let entry = hirsel_engine::entry_path(&default_context());
         for target in targets {
-            let mut ready = build(&input, &Options::new(target.clone())).unwrap();
+            let ready =
+                hirsel_requests::source_ready_supplier(&source, "set-order.hir", &entry, &tools)
+                    .unwrap()(&Options::new(target.clone()))
+                .unwrap();
+            let mut ready = ready.program.clone();
             let inputs = Inputs {
                 memo: Default::default(),
                 discharge: None,
@@ -544,7 +558,15 @@ fn deep_key_failures_name_the_source_operation_through_nested_library_calls() {
                 let sites = Sites::new(input.snapshot());
                 let entry = hirsel_engine::entry_path(&default_context());
                 for target in &targets {
-                    let ready = build(&input, &Options::new(target.clone())).unwrap();
+                    let ready = hirsel_requests::source_ready_supplier(
+                        &source,
+                        "map-failure-sites.hir",
+                        &entry,
+                        &tools,
+                    )
+                    .unwrap()(&Options::new(target.clone()))
+                    .unwrap();
+                    let ready = &ready.program;
                     let heap = run_heap(&ready, &entry, &sites).unwrap();
                     assert_eq!(heap.observation.failures.len(), 1);
                     let failure = &heap.observation.failures[0];

@@ -333,7 +333,6 @@ fn borrowed_capture_repairs_19_repaired_nested_copy_on_h_llvm_and_cranelift() {
     with_compiler_stack(|| {
         use hirsel_driver::native::*;
         use hirsel_native::*;
-        use hirsel_native_batch::*;
         use hirsel_native_testing::*;
         let source = format!(
             "{}\n{}",

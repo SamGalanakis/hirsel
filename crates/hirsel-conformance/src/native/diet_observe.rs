@@ -10,17 +10,16 @@ pub(super) type Observed = (BTreeSet<String>, Vec<String>);
 pub(super) fn observe(path: &Path) -> Observed {
     hirsel_intern::jobs::with_compiler_stack(|| {
         let observe = || {
-            let mut program = hirsel_front_phases::load_program(path).map_err(|e| e.to_string())?;
-            program.check_for_execution().map_err(|e| e.to_string())?;
-            let raw = program
-                .engine
-                .export_native_input()
-                .map_err(|e| format!("{e:?}"))?;
-            let input = program
-                .engine
-                .import_native_input(raw)
-                .map_err(|e| format!("{e:?}"))?;
-            Ok::<_, String>(hirsel_native_testing::backend_features(&input))
+            let targets = hirsel_native::TargetSpec::executed();
+            let toolchain = hirsel_native::Toolchain::in_tree(
+                &std::env::temp_dir().join(format!("hirsel-diet-observe-{}", std::process::id())),
+                &targets.iter().collect::<Vec<_>>(),
+            )
+            .map_err(|e| e.to_string())?;
+            let entry = hirsel_engine::entry_path(&hirsel_engine::default_context());
+            let mut ready = hirsel_requests::ready_supplier(path, None, &entry, &toolchain)
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>(hirsel_native_testing::backend_features(&mut *ready))
         };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(observe))
             .unwrap_or_else(|panic| {

@@ -178,8 +178,16 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
 "#;
         let checked = checked(source);
         for target in TargetSpec::executed() {
-            let ready =
-                hirsel_native_batch::build(&checked.validated, &Options::new(target)).unwrap();
+            let ready = {
+                let options = &Options::new(target);
+                ready(
+                    source,
+                    &checked.entry,
+                    &hirsel_native_testing::ready_toolchain(&options.target),
+                )(options)
+            }
+            .unwrap();
+            let ready = &ready.program;
             let registry = hirsel_lir::descriptor_registry::DescriptorRegistry::new(
                 &ready.table,
                 &ready.finalizers,
@@ -346,7 +354,15 @@ fn a_diverging_self_tail_call_loops_a_million_times_within_the_stack() {
         let validated = engine.import_native_input(input).unwrap();
         let entry = entry_path(&default_context());
         let target = x86();
-        let program = build(&validated, &Options::new(target.clone())).unwrap();
+        let program = hirsel_requests::source_ready_supplier(
+            &SERVE,
+            "serve.hir",
+            &entry,
+            &hirsel_native_testing::ready_toolchain(&(&Options::new(target.clone())).target),
+        )
+        .unwrap()(&Options::new(target.clone()))
+        .unwrap();
+        let program = &program.program;
         let tools = toolchain(&smoke_matrix());
         for (name, opt) in [("O0", OptLevel::None), ("O3", OptLevel::Speed)] {
             let dir = scratch(&format!("diverging-self-tail-{name}"));
@@ -399,8 +415,6 @@ use hirsel_native::OptLevel;
 use hirsel_native::Options;
 use hirsel_native::emit;
 use hirsel_native::link;
-use hirsel_native_batch::build;
-use hirsel_native_batch::build_program;
 
 fn x86() -> TargetSpec {
     TargetSpec::x86_64_unknown_linux_gnu()
@@ -413,17 +427,24 @@ fn x86() -> TargetSpec {
 fn the_ready_validator_refuses_what_a_pass_let_through() {
     with_compiler_stack(|| {
         let program = checked(HELLO);
-        let adapted = hirsel_native::program(&program.validated);
-        let skeleton =
-            hirsel_core_contract::Manifest::skeleton(adapted.operations.values().cloned());
-        let Err(error) = build_program(&adapted, skeleton, &Options::new(x86())) else {
+        let options = Options::new(x86());
+        let built = ready(
+            HELLO,
+            &program.entry,
+            &hirsel_native_testing::ready_toolchain(&options.target),
+        )(&options)
+        .unwrap();
+        let skeleton = hirsel_core_contract::Manifest::skeleton(
+            built.program.manifest.rows().map(|row| row.id.clone()),
+        );
+        let Err(error) = built.program.reseal(&skeleton) else {
             panic!("an unclassified operation reached Ready")
         };
         assert_eq!(error.stage, StageName::Ready);
         assert!(error.validator, "{error}");
         assert!(error.message.contains("UnsupportedOperation"), "{error}");
-        // Its accepted twin: the snapshot's own manifest.
-        assert!(build(&program.validated, &Options::new(x86())).is_ok());
+        // Its accepted twin: the program's own manifest.
+        built.program.reseal(&built.program.manifest).unwrap();
     });
 }
 
@@ -436,7 +457,14 @@ fn a_native_gap_is_a_tool_outcome_not_a_source_verdict() {
             "pub fn main(rt: Io, args: Args) -> Result[(), GrantError] { let net = io.net(rt)?; Ok(()) }",
         );
         assert_eq!(grant.reference.exit_code, Some(0));
-        assert!(build(&grant.validated, &Options::new(x86())).is_ok());
+        let options = Options::new(x86());
+        let tools = hirsel_native_testing::ready_toolchain(&options.target);
+        let granted = ready(
+            "pub fn main(rt: Io, args: Args) -> Result[(), GrantError] { let net = io.net(rt)?; Ok(()) }",
+            &grant.entry,
+            &tools,
+        )(&options)
+        .unwrap();
         // Resource mutexes have native support. Keep this former gap as an
         // accepted control, and make the unavailable disposition explicit so
         // this boundary test does not depend on an unimplemented feature.
@@ -444,9 +472,15 @@ fn a_native_gap_is_a_tool_outcome_not_a_source_verdict() {
             "resource type Token { n: u8 }\npub fn main(rt: Io, args: Args) -> Result[(), GrantError] { let tasks = io.tasks(rt)?; let store: Mutex[Token] = mutex.create(tasks, Token(n: 1u8)); Ok(()) }",
         );
         assert_eq!(mutex.reference.exit_code, Some(0));
-        assert!(build(&mutex.validated, &Options::new(x86())).is_ok());
-        let adapted = hirsel_native::program(&grant.validated);
-        let mut manifest = hirsel_native::manifest(grant.validated.snapshot()).unwrap();
+        assert!(
+            ready(
+                "resource type Token { n: u8 }\npub fn main(rt: Io, args: Args) -> Result[(), GrantError] { let tasks = io.tasks(rt)?; let store: Mutex[Token] = mutex.create(tasks, Token(n: 1u8)); Ok(()) }",
+                &mutex.entry,
+                &tools,
+            )(&options)
+            .is_ok()
+        );
+        let mut manifest = granted.program.manifest.clone();
         let mut unavailable = manifest
             .rows()
             .find(|row| row.id.definition == DefPath::core("io.net"))
@@ -456,7 +490,7 @@ fn a_native_gap_is_a_tool_outcome_not_a_source_verdict() {
             hirsel_core_contract::Unavailable::NotImplemented,
         );
         manifest.replace(unavailable).unwrap();
-        let Err(error) = build_program(&adapted, manifest, &Options::new(x86())) else {
+        let Err(error) = granted.program.reseal(&manifest) else {
             panic!("an explicitly unavailable operation reached Ready")
         };
         assert_eq!(error.stage, StageName::Ready, "{error}");
@@ -473,7 +507,19 @@ fn a_native_gap_is_a_tool_outcome_not_a_source_verdict() {
 "#,
         );
         assert_eq!(accepted.reference.exit_code, Some(0));
-        assert!(build(&accepted.validated, &Options::new(x86())).is_ok());
+        assert!(
+            ready(
+                r#"pub fn main(rt: Io, args: Args) -> Result[(), ()] {
+  let directory = io.dir(rt, path.of("."))
+  let text = std@1/u64.to_string(4u64)
+  Ok(())
+}
+"#,
+                &accepted.entry,
+                &tools,
+            )(&options)
+            .is_ok()
+        );
     });
 }
 
@@ -653,11 +699,19 @@ fn every_runtime_primitive_row_matches_its_export() {
             "every Hirsel ABI export has a registered primitive or compatibility contract"
         );
         // Calls of each, with each float family, on both targets.
-        let calls = checked(
-            "pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {\n  let xs: Array[f64] = [1.0f64, 2.0f64]\n  let ys: Array[f32] = [1.0f32, 2.0f32]\n  let a = std@1/f64.sum(xs) + std@1/f64.sum_exact(xs)\n  let b = std@1/f32.sum(ys) + std@1/f32.sum_exact(ys)\n  let text = std@1/u64.to_string(4u64)\n  let decoded = string.from_bytes(b\"abc\")\n  let replaced = std@1/bytes.replace(b\"abc\", b\"b\", b\"x\")\n  for pos in string.positions(text) {\n    let part = string.slice(text, pos, pos)\n  }\n  let c = io.monotonic_clock(rt)?\n  match clock.monotonic(c) { Ok(now) => { let _ = clock.sleep_until(c, now) }, Error(_) => () }\n  let _ = out.print(io.stdout(rt)?, \"x\")\n  Ok(())\n}\n",
-        );
+        let calls_source = "pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {\n  let xs: Array[f64] = [1.0f64, 2.0f64]\n  let ys: Array[f32] = [1.0f32, 2.0f32]\n  let a = std@1/f64.sum(xs) + std@1/f64.sum_exact(xs)\n  let b = std@1/f32.sum(ys) + std@1/f32.sum_exact(ys)\n  let text = std@1/u64.to_string(4u64)\n  let decoded = string.from_bytes(b\"abc\")\n  let replaced = std@1/bytes.replace(b\"abc\", b\"b\", b\"x\")\n  for pos in string.positions(text) {\n    let part = string.slice(text, pos, pos)\n  }\n  let c = io.monotonic_clock(rt)?\n  match clock.monotonic(c) { Ok(now) => { let _ = clock.sleep_until(c, now) }, Error(_) => () }\n  let _ = out.print(io.stdout(rt)?, \"x\")\n  Ok(())\n}\n";
+        let calls = checked(calls_source);
         for target in [x86(), TargetSpec::aarch64_unknown_linux_gnu()] {
-            let ready = build(&calls.validated, &Options::new(target)).unwrap();
+            let ready = {
+                let options = &Options::new(target);
+                ready(
+                    calls_source,
+                    &calls.entry,
+                    &hirsel_native_testing::ready_toolchain(&options.target),
+                )(options)
+            }
+            .unwrap();
+            let ready = &ready.program;
             hirsel_native::check_runtime_calls(&ready).unwrap();
         }
     });
@@ -677,7 +731,18 @@ fn a_same_signature_body_edit_matches_a_fresh_build() {
     with_compiler_stack(move || {
         let (before, after) = (source("n + n"), source("n * 2u64 + 1u64"));
         let digests = |program: &Checked| {
-            let ready = build(&program.validated, &Options::new(x86())).unwrap();
+            let ready = {
+                let options = &Options::new(x86());
+                hirsel_requests::source_ready_supplier(
+                    &after,
+                    "native.hir",
+                    &program.entry,
+                    &hirsel_native_testing::ready_toolchain(&options.target),
+                )
+                .unwrap()(options)
+            }
+            .unwrap();
+            let ready = &ready.program;
             let units: Vec<_> = ready.units.iter().map(|u| u.unit().digest()).collect();
             let object = emit(&ready, OptLevel::Speed, |_| true).unwrap();
             (units, object.digest())
@@ -743,7 +808,16 @@ fn a_same_signature_body_edit_matches_a_fresh_build() {
 fn linking_without_the_entry_unit_is_refused() {
     with_compiler_stack(|| {
         let program = checked(HELLO);
-        let ready = build(&program.validated, &Options::new(x86())).unwrap();
+        let ready = {
+            let options = &Options::new(x86());
+            ready(
+                HELLO,
+                &program.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let matrix = smoke_matrix();
         let toolchain = toolchain(&matrix);
         let mut other = program.entry.clone();
@@ -774,12 +848,20 @@ fn a_small_callee_inlines_across_singleton_objects_at_o3() {
     use hirsel_native::OptLevel;
     use hirsel_native::Options;
     use hirsel_native::partition_objects;
-    use hirsel_native_batch::build;
     let observed = agree("small-helper", SMALL_HELPER, &topology_matrix(2));
     assert_eq!(observed.output, b"mixed\n");
     with_compiler_stack(|| {
         let program = checked(SMALL_HELPER);
-        let ready = build(&program.validated, &Options::new(x86())).unwrap();
+        let ready = {
+            let options = &Options::new(x86());
+            ready(
+                SMALL_HELPER,
+                &program.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let registry = hirsel_lir::descriptor_registry::DescriptorRegistry::new(
             &ready.table,
             &ready.finalizers,
@@ -844,7 +926,16 @@ fn a_rooted_source_callee_in_another_object_returns_its_roots_on_both_outcomes()
     assert_eq!(observed.output, b"ok\n");
     with_compiler_stack(|| {
         let program = checked(ROOTS_ACROSS_OBJECTS);
-        let ready = hirsel_native_batch::build(&program.validated, &Options::new(x86())).unwrap();
+        let ready = {
+            let options = &Options::new(x86());
+            ready(
+                ROOTS_ACROSS_OBJECTS,
+                &program.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let registry = hirsel_lir::descriptor_registry::DescriptorRegistry::new(
             &ready.table,
             &ready.finalizers,
@@ -904,7 +995,9 @@ fn link_refuses_an_entry_import_with_a_missing_or_other_digest() {
     with_compiler_stack(move || {
         let tools = toolchain(&[configuration]);
         let program = checked(ROOTS_ACROSS_OBJECTS);
-        let ready = hirsel_native_batch::build(&program.validated, &Options::new(x86())).unwrap();
+        let ready =
+            ready(ROOTS_ACROSS_OBJECTS, &program.entry, &tools)(&Options::new(x86())).unwrap();
+        let ready = &ready.program;
         let registry = hirsel_lir::descriptor_registry::DescriptorRegistry::new(
             &ready.table,
             &ready.finalizers,
@@ -1022,8 +1115,7 @@ fn link_refuses_a_thunk_with_another_machine_signature() {
         },
     };
     with_compiler_stack(move || {
-        let program = checked(
-            r#"
+        let program_source = r#"
 type Context { n: u64 }
 fn integer(x: u64) -> u64 { x }
 fn float(x: f64) -> f64 { x }
@@ -1036,10 +1128,18 @@ pub fn main() -> Result[(), ()] {
   let v = float(1.0f64)
   if n == 16u64 && v == 1.0f64 { Ok(()) } else { Error(()) }
 }
-"#,
-        );
-        let mut ready =
-            hirsel_native_batch::build(&program.validated, &Options::new(x86())).unwrap();
+"#;
+        let program = checked(program_source);
+        let ready = {
+            let options = &Options::new(x86());
+            ready(
+                program_source,
+                &program.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )(options)
+        }
+        .unwrap();
+        let mut ready = ready.program.clone();
         // CT-2 deliberately refuses source callable constants. Exercise the
         // backend's static relocation input directly, with the same checked
         // callable layout and declaration ABI as the ordinary reference.
@@ -1381,7 +1481,6 @@ fn native_main_records_closed_stdout_and_broken_pipe_as_output_errors() {
     use hirsel_native::OptLevel;
     use hirsel_native::Options;
     use hirsel_native::link;
-    use hirsel_native_batch::build;
     use std::os::unix::process::CommandExt;
     use std::process::Command;
     with_compiler_stack(|| {
@@ -1389,7 +1488,8 @@ fn native_main_records_closed_stdout_and_broken_pipe_as_output_errors() {
         let configurations = smoke_matrix();
         let tools = toolchain(&configurations);
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let program = build(&checked.validated, &Options::new(target)).unwrap();
+        let program = ready(HELLO, &checked.entry, &tools)(&Options::new(target)).unwrap();
+        let program = &program.program;
         let root = scratch("closed-output");
         let executable = link(
             &program,
@@ -1539,7 +1639,16 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
     with_compiler_stack(|| {
         let checked = checked(source);
         let count = |options: &hirsel_native::Options| {
-            let ready = hirsel_native_batch::build(&checked.validated, options).unwrap();
+            let ready = {
+                let options = &options;
+                ready(
+                    source,
+                    &checked.entry,
+                    &hirsel_native_testing::ready_toolchain(&options.target),
+                )(options)
+            }
+            .unwrap();
+            let ready = &ready.program;
             ready
                 .units
                 .iter()
@@ -1573,7 +1682,6 @@ fn generated_main_binds_independent_seeds_and_refuses_mismatch_before_entry() {
     use hirsel_native::Tape;
     use hirsel_native::launch_with;
     use hirsel_native::link;
-    use hirsel_native_batch::build;
     with_compiler_stack(|| {
         let configs = full_matrix();
         let tools = toolchain(&configs);
@@ -1601,7 +1709,8 @@ fn generated_main_binds_independent_seeds_and_refuses_mismatch_before_entry() {
                     fixture_file_faults: None,
                     fixture_monotonic: None,
                 };
-                let program = build(&checked.validated, &options).unwrap();
+                let program = ready(source, &checked.entry, &tools)(&options).unwrap();
+                let program = &program.program;
                 let exe = link(
                     &program,
                     &checked.entry,
@@ -1738,7 +1847,15 @@ fn zero_parameter_native_launch_refuses_non_result_and_non_unit_success() {
             assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
             let input = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(input).unwrap();
-            let ready = build(&validated, &Options::new(x86())).unwrap();
+            let ready = hirsel_requests::source_ready_supplier(
+                &source,
+                "entry.hir",
+                &hirsel_engine::entry_path(&context),
+                &toolchain,
+            )
+            .unwrap()(&Options::new(x86()))
+            .unwrap();
+            let ready = &ready.program;
             let error = link(
                 &ready,
                 &entry_path(&context),
@@ -1759,14 +1876,22 @@ fn zero_parameter_native_launch_refuses_non_result_and_non_unit_success() {
 #[test]
 fn io_native_entry_without_a_harness_root_is_granted_no_projection() {
     with_compiler_stack(|| {
-        let checked = checked(
-            r#"pub fn main(rt: Io, args: Args) -> Result[(), String] {
+        let checked_source = r#"pub fn main(rt: Io, args: Args) -> Result[(), String] {
   match io.dir(rt, path.of("")) { Error(NotGranted()) => (), _ => return Error("dir") }
   match io.stdout(rt) { Error(_) => (), Ok(_) => return Error("stdout") }
   Ok(())
-}"#,
-        );
-        let ready = build(&checked.validated, &Options::new(x86())).unwrap();
+}"#;
+        let checked = checked(checked_source);
+        let ready = {
+            let options = &Options::new(x86());
+            ready(
+                checked_source,
+                &checked.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let toolchain = toolchain(&smoke_matrix());
         let dir = scratch("io-no-root");
         let executable = link(
@@ -1793,8 +1918,18 @@ fn io_native_entry_without_a_harness_root_is_granted_no_projection() {
 fn root_free_native_entry_ignores_ambient_directory_and_argument_inputs() {
     use std::os::unix::ffi::OsStringExt;
     with_compiler_stack(|| {
-        let checked = checked("pub fn main() -> Result[(), ()] { Ok(()) }");
-        let ready = build(&checked.validated, &Options::new(x86())).unwrap();
+        let checked_source = "pub fn main() -> Result[(), ()] { Ok(()) }";
+        let checked = checked(checked_source);
+        let ready = {
+            let options = &Options::new(x86());
+            ready(
+                checked_source,
+                &checked.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let toolchain = toolchain(&smoke_matrix());
         let dir = scratch("zero-ambient");
         let executable = link(
@@ -1825,15 +1960,20 @@ fn agreement_rejects_exit_codes_that_disagree_with_the_run_outcome() {
     use hirsel_native::Options;
     use hirsel_native::Sites;
     use hirsel_native::observe;
-    use hirsel_native_batch::build;
     use hirsel_run_schema::{BudgetKind, Returned, RunOutcome, Site, Wait};
     with_compiler_stack(|| {
-        let input = checked("pub fn main() -> Result[(), ()] { Ok(()) }");
-        let program = build(
-            &input.validated,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let input_source = "pub fn main() -> Result[(), ()] { Ok(()) }";
+        let input = checked(input_source);
+        let program = {
+            let options = &Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+            ready(
+                input_source,
+                &input.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )(options)
+        }
         .unwrap();
+        let program = &program.program;
         let sites = Sites::new(input.validated.snapshot());
         let waits = vec![Wait {
             spawn_path: vec![0],
@@ -1934,8 +2074,16 @@ fn template_owners_and_objects_are_identical_at_one_and_eight_workers() {
             ("finalizer", FINALIZER),
         ] {
             let checked = checked(source);
-            let ready =
-                hirsel_native_batch::build(&checked.validated, &Options::new(x86())).unwrap();
+            let ready = {
+                let options = &Options::new(x86());
+                ready(
+                    source,
+                    &checked.entry,
+                    &hirsel_native_testing::ready_toolchain(&options.target),
+                )(options)
+            }
+            .unwrap();
+            let ready = &ready.program;
             let registry = hirsel_lir::descriptor_registry::DescriptorRegistry::new(
                 &ready.table,
                 &ready.finalizers,
@@ -2969,8 +3117,7 @@ fn native_logical_depth_recording_replays_and_rejects_corruption() {
     use hirsel_native::Sites;
     use hirsel_native::Tape;
     with_compiler_stack(|| {
-        let checked = checked(
-            r#"
+        let checked_source = r#"
 fn descend(n:u64)->u64 {if n==0u64 {0u64}else {1u64+descend(n-1u64)}}
 pub fn main(rt:Io)->Result[(),GrantError] {
  let stdout=io.stdout(rt)?
@@ -2978,13 +3125,22 @@ pub fn main(rt:Io)->Result[(),GrantError] {
  let _=descend(1023u64)
  Ok(())
 }
-"#,
-        );
+"#;
+        let checked = checked(checked_source);
         assert_eq!(checked.reference.output, b"entered\n");
         assert_eq!(checked.reference.failures.len(), 1);
         assert_eq!(checked.reference.failures[0].rule, "LANG-10");
         let tools = toolchain(&hirsel_native_testing::trace_roots_matrix());
-        let ready = hirsel_native_batch::build(&checked.validated, &Options::new(x86())).unwrap();
+        let ready = {
+            let options = &Options::new(x86());
+            ready(
+                checked_source,
+                &checked.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(checked.validated.snapshot());
         for backend in [Backend::Llvm, Backend::Cranelift] {
             let dir = scratch(&format!("logical-depth-recording-{backend:?}"));
@@ -3237,4 +3393,44 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
     let observation = agree("string-map-source", source, &topology_matrix(0));
     assert_eq!(observation.output, b"string maps preserved\n");
     assert!(observation.failures.is_empty(), "{observation:?}");
+}
+
+/// Static back-end coverage, over the request-built Ready of every executed
+/// target and lowering choice, retains scalar widths, calls and runtime symbols.
+#[test]
+fn coverage_retains_scalar_width_operator_and_runtime_calls() {
+    with_compiler_stack(|| {
+        let source = "pub fn main(io: Io, args: Args) -> Result[(), GrantError] {\n let x = add(3i32, 4i32);\n let s = io.stdout(io)?;\n let _ = out.print(s, if x == 7i32 { \"hello\" } else { \"wrong\" });\n Ok(())\n}\nfn add(x: i32, y: i32) -> i32 { x + y }\n";
+        let targets = TargetSpec::executed();
+        let toolchain = Toolchain::in_tree(
+            &PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("coverage-runtime"),
+            &targets.iter().collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let entry = hirsel_engine::entry_path(&hirsel_engine::default_context());
+        let (features, errors) =
+            hirsel_native_testing::backend_features(&mut *ready(source, &entry, &toolchain));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            features
+                .iter()
+                .any(|f| f.starts_with("lir/Binary/Add/") && f.contains("Scalar(I32)")),
+            "{features:?}"
+        );
+        assert!(
+            features
+                .iter()
+                .any(|f| f.starts_with("lir/Call/") && f.contains("Scalar(I32)")),
+            "{features:?}"
+        );
+        assert!(
+            features.iter().any(|f| f.starts_with("runtime/hirsel_rt_")),
+            "{features:?}"
+        );
+        assert!(
+            features.iter().any(|f| f.starts_with("layout/Scalar(I32)")),
+            "{features:?}"
+        );
+        assert!(features.contains("validation/aarch64-unknown-linux-gnu/ready/accepted"));
+    });
 }

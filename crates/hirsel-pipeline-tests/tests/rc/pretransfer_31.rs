@@ -210,13 +210,11 @@ fn callback_recipe_c_rejects_dispatch_and_both_events_erased() {
 #[test]
 fn callback_recipe_h_rejects_dispatch_and_both_events_erased() {
     hirsel_intern::jobs::with_compiler_stack(|| {
-        let program = support::compile(CALLBACK_SOURCE);
-        let ready = hirsel_native_batch::build_program(
-            &program,
-            support::manifest(&program),
+        let ready = support::ready(
+            CALLBACK_SOURCE,
             &hirsel_native::Options::new(support::target()),
-        )
-        .unwrap();
+        );
+        let ready = &ready.program;
         let mut heap = hirsel_heapcheck::Program {
             target: ready.target.clone(),
             layouts: ready.table.table().clone(),
@@ -515,13 +513,8 @@ pub fn main()->Result[(),()] {
  insert(mut target,take (1u64,),take Payload())
  Ok(())
 }"#;
-        let program = support::compile(source);
-        let ready = hirsel_native_batch::build_program(
-            &program,
-            support::manifest(&program),
-            &hirsel_native::Options::new(support::target()),
-        )
-        .unwrap();
+        let ready = support::ready(source, &hirsel_native::Options::new(support::target()));
+        let ready = &ready.program;
         assert!(
             ready
                 .raw_units()

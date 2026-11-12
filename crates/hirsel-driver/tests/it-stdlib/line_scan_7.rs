@@ -102,11 +102,19 @@ fn ready(source: &str) -> (LoadedProgram, NativeInput, hirsel_native::ReadyProgr
         .unwrap_or_else(|error| source_error(error));
     let input = loaded.engine.export_native_input().unwrap();
     let validated = loaded.engine.import_native_input(input.clone()).unwrap();
-    let ready = hirsel_native_batch::build(
-        &validated,
-        &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
-    )
+    let ready = {
+        let options =
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+        hirsel_requests::ready_supplier(
+            &fixture("controls"),
+            Some(source),
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&options.target),
+        )
+        .unwrap()(options)
+    }
     .unwrap();
+    let ready = ready.program.clone();
     (loaded, input, ready)
 }
 #[test]

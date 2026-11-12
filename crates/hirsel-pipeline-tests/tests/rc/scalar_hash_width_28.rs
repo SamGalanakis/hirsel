@@ -9,7 +9,6 @@ use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::layout::sequence_elements_offset;
 use hirsel_lir::layout_types::{LayoutKind, SizeSpec};
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use std::fmt::Write;
 
@@ -241,7 +240,7 @@ fn native_cached_hashes_exact_across_widths_and_seeds() {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine
             .sources
-            .add("scalar-hash-width-28.hir", source)
+            .add("scalar-hash-width-28.hir", source.clone())
             .unwrap();
         let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(
@@ -255,7 +254,18 @@ fn native_cached_hashes_exact_across_widths_and_seeds() {
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let ready = build(&validated, &Options::new(target.clone())).unwrap();
+        let ready = {
+            let options = &Options::new(target.clone());
+            hirsel_requests::source_ready_supplier(
+                &source,
+                "scalar-hash-width-28.hir",
+                &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let root = tempfile::tempdir().unwrap();
         let tools =
             Toolchain::in_tree_diagnostic(&root.path().join("runtime"), &[&target]).unwrap();

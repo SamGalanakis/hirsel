@@ -227,7 +227,9 @@ fn property_kit_31_native_full_entry_and_four_engine_replay() {
                 .unwrap();
         tools.launch_timeout = std::time::Duration::from_secs(60);
         capped_tools(&mut tools, temp.path());
-        let ready = hirsel_requests::ready_supplier(&selection, None, &loaded.entry, &tools).unwrap()(&options).unwrap();
+        let ready = hirsel_requests::ready_supplier(&selection, None, &loaded.entry, &tools)
+            .unwrap()(&options)
+        .unwrap();
         let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let mut objects = vec![];

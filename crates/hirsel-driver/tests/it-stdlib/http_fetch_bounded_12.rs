@@ -35,14 +35,14 @@ fn checked(path: &Path) -> LoadedProgram {
     });
     loaded
 }
-fn ready(loaded: &mut LoadedProgram) -> hirsel_native::ReadyProgram {
-    let input = loaded.engine.export_native_input().unwrap();
-    let validated = loaded.engine.import_native_input(input).unwrap();
-    hirsel_native_batch::build(
-        &validated,
-        &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
-    )
-    .unwrap()
+fn ready(path: &Path, loaded: &LoadedProgram) -> hirsel_native::ReadyProgram {
+    let options =
+        hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+    let tools = hirsel_native_testing::ready_toolchain(&options.target);
+    hirsel_requests::ready_supplier(path, None, &loaded.entry, &tools).unwrap()(&options)
+        .unwrap()
+        .program
+        .clone()
 }
 fn ok(outcome: RunOutcome) {
     assert!(
@@ -100,7 +100,7 @@ fn scripted_error_precedence_body_send_and_resource_replay() {
         .unwrap();
         ok(replayed.outcome.unwrap());
         assert_eq!(replayed.observation.as_ref(), Some(&observation));
-        let program = ready(&mut loaded);
+        let program = ready(&path, &loaded);
         let result = hirsel_native_testing::run_heap(
             &program,
             &loaded.entry,
@@ -412,7 +412,7 @@ fn loopback_boundaries_decoding_legacy_and_offline_replay() {
         // Check before launching live peers so every run reuses its session.
         check_safe_path(&path, hirsel_driver::session::Policy::default()).unwrap();
         let mut loaded = checked(&path);
-        let program = ready(&mut loaded);
+        let program = ready(&path, &loaded);
         let retain = std::env::var_os("HTTP_FETCH_BOUNDED_12_EVIDENCE");
         let base = retain
             .as_ref()

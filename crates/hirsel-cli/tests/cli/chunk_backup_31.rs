@@ -432,7 +432,9 @@ fn chunk_backup_31_scripted_native_record_replay() {
                 .to_string_lossy()
                 .into(),
         ];
-        let ready = hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options).unwrap();
+        let ready =
+            hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options)
+                .unwrap();
         let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let mut objects = vec![];

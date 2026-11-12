@@ -6,7 +6,6 @@ use hirsel_engine::*;
 use hirsel_front_phases::compiler_adapters;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 
 const TYPES: &str = "pub flat type Item { text: String, n: u64 }\npub flat type Batch { items: List[Item] @ growable }\n";
@@ -40,7 +39,7 @@ fn flat_native_copy_oracle_17_both_backends() {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine
             .sources
-            .add("flat-native-copy-oracle-17.hir", source)
+            .add("flat-native-copy-oracle-17.hir", source.clone())
             .unwrap();
         let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
@@ -50,7 +49,15 @@ fn flat_native_copy_oracle_17_both_backends() {
         let tools = Toolchain::in_tree_diagnostic(&root.join("runtime"), &[&target]).unwrap();
         let mut options = Options::new(target.clone());
         options.regions = true;
-        let ready = build(&input, &options).unwrap();
+        let ready = hirsel_requests::source_ready_supplier(
+            &source,
+            "flat-native-copy-oracle-17.hir",
+            &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+            &tools,
+        )
+        .unwrap()(&options)
+        .unwrap();
+        let ready = &ready.program;
         for record in &ready.table.layouts {
             if record.kind == hirsel_lir::layout_types::LayoutKind::Flat {
                 assert!(

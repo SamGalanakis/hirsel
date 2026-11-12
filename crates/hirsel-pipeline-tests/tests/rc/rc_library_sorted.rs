@@ -28,8 +28,18 @@ fn observed_heap(source: &str) -> hirsel_native_testing::HeapRun {
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
         let sites = hirsel_native::Sites::new(validated.snapshot());
-        let ready = hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target()))
-            .unwrap_or_else(|e| panic!("{source}\n{e}"));
+        let ready = {
+            let options = &hirsel_native::Options::new(target());
+            hirsel_requests::source_ready_supplier(
+                &source,
+                "test.hir",
+                &entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap_or_else(|e| panic!("{source}\n{e}"));
+        let ready = &ready.program;
         let heap = hirsel_native_testing::heap_campaign(&ready, &entry, &sites)
             .unwrap_or_else(|e| panic!("{source}\n{e}"));
         assert_eq!(heap.observation, reference, "{source}");
@@ -201,13 +211,8 @@ sorted_map.insert(by,mut m,8,8)
 sorted_map.insert(by,mut m,4,4)
 Ok(())
 }"#;
-    let program = compile(source);
-    let ready = hirsel_native_batch::build_program(
-        &program,
-        manifest(&program),
-        &hirsel_native::Options::new(target()),
-    )
-    .unwrap();
+    let ready = crate::rc_support::ready(source, &hirsel_native::Options::new(target()));
+    let ready = &ready.program;
     let mut units = ready.raw_units();
     let unit = units
         .iter_mut()
@@ -358,9 +363,9 @@ Ok(())
         invocations: ready.operations.invocations.clone(),
         pretransfer_adapters: ready.operations.pretransfer_adapters.clone(),
         target: target(),
-        layouts: ready.table.into_table(),
+        layouts: ready.table.table().clone(),
         units,
-        statics: ready.statics,
+        statics: ready.statics.clone(),
     };
     let mut observer = Observer(Vec::new());
     let run = hirsel_heapcheck::run(&heap, &path("main"), &[], &mut observer, &Config::default());
@@ -403,7 +408,6 @@ Ok(())
 fn native_cases(cases: Vec<(&str, String)>, large: bool) {
     use hirsel_driver::native::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(if large {
         "sorted-large"

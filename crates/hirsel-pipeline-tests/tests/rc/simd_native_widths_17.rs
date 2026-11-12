@@ -13,7 +13,6 @@ use hirsel_engine::*;
 use hirsel_front_phases::compiler_adapters;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use std::fmt::Write as _;
 
@@ -307,7 +306,15 @@ fn parity(source: &str, expected_failure: Option<u32>, output: &[u8], name: &str
             &configurations,
         )
         .unwrap();
-        let program = build(&validated, &Options::new(target())).unwrap();
+        let program = hirsel_requests::source_ready_supplier(
+            &source,
+            "simd.hir",
+            &hirsel_engine::entry_path(&context),
+            &toolchain,
+        )
+        .unwrap()(&Options::new(target()))
+        .unwrap();
+        let program = &program.program;
         let sites = Sites::new(validated.snapshot());
         let heap = run_heap(&program, &entry, &sites).unwrap();
         assert_eq!(heap.observation, reference, "{name}: H");

@@ -6,7 +6,6 @@ use hirsel_engine::{
 };
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 
 #[test]
@@ -60,7 +59,10 @@ fn bounded_loop_matrix_reference_heap_llvm_cranelift() {
         let tools =
             hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &configurations)
                 .unwrap();
-        let ready = build(&validated, &options).unwrap();
+        let ready = hirsel_requests::source_ready_supplier(&source, "map-loop.hir", &entry, &tools)
+            .unwrap()(&options)
+        .unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(validated.snapshot());
         let heap = run_heap(&ready, &entry, &sites).unwrap();
         assert_eq!(heap.observation, reference);

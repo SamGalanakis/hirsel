@@ -14,7 +14,6 @@ use hirsel_native::Sites;
 use hirsel_native::Toolchain;
 use hirsel_native::link;
 use hirsel_native::observe;
-use hirsel_native_batch::build;
 use hirsel_rt::io::Request;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use std::io::{Read, Write};
@@ -128,7 +127,10 @@ fn campaign(targets: Vec<TargetSpec>, opts: &'static [OptLevel], scratch_name: &
             std::fs::read_to_string(root.join("native-tests/library/tls-stream.hir")).unwrap();
         let mut engine = source_std::engine();
         let context = default_context();
-        let file = engine.sources.add("tls-stream.hir", source).unwrap();
+        let file = engine
+            .sources
+            .add("tls-stream.hir", source.clone())
+            .unwrap();
         let checked = source_check_request(&mut engine, file, &context).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&context);
@@ -136,7 +138,15 @@ fn campaign(targets: Vec<TargetSpec>, opts: &'static [OptLevel], scratch_name: &
         let input = engine.import_native_input(input).unwrap();
         let sites = Sites::new(input.snapshot());
         for target in &targets {
-            let program = build(&input, &Options::new(target.clone())).unwrap();
+            let program = hirsel_requests::source_ready_supplier(
+                &source,
+                "tls-stream.hir",
+                &hirsel_engine::entry_path(&context),
+                &tools,
+            )
+            .unwrap()(&Options::new(target.clone()))
+            .unwrap();
+            let program = &program.program;
             for &opt in opts {
                 let work = scratch.join(format!("{}-{opt:?}", target.triple));
                 std::fs::create_dir_all(&work).unwrap();

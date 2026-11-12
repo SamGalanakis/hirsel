@@ -1425,7 +1425,17 @@ pub fn main() -> Result[(), ()] { probe(); Ok(()) }
         let validated = engine.import_native_input(input).unwrap();
         let options =
             hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
-        hirsel_native_batch::build(&validated, &options).unwrap();
+        {
+            let options = &options;
+            hirsel_requests::source_ready_supplier(
+                &source,
+                "joined.hir",
+                &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
 
         // A whole forwarding chain supplies no permission for an ordinary
         // counted-storage read whose original loan evidence is missing.

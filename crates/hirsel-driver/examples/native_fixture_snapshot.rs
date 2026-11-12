@@ -65,8 +65,18 @@ fn main() {
             hirsel_codec::to_text(&rc_program),
         )
         .unwrap();
-        let built =
-            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target)).unwrap();
+        let built = {
+            let options = &hirsel_native::Options::new(target);
+            hirsel_requests::source_ready_supplier(
+                &source,
+                "fixture.hir",
+                &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let built = &built.program;
         let ready: hirsel_heapcheck::Program<Ready> = built.heap_program();
         std::fs::write(
             format!("{}.ready.lir", arguments[1]),

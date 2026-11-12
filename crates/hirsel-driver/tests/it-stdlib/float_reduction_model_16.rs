@@ -278,7 +278,18 @@ fn all_engines(name: &str, source: &str, success: bool) {
         let validated = loaded.engine.import_native_input(input).unwrap();
         let options =
             hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
-        let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+        let ready = {
+            let options = &options;
+            hirsel_requests::ready_supplier(
+                &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/std_numeric.hir"),
+                Some(source),
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         if success {
             // Inspect only arithmetic flags, never compare unstable LLVM text snapshots.
             let ir = hirsel_native::emit_ir(&ready, hirsel_native::OptLevel::Speed).unwrap();

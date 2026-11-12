@@ -40,7 +40,15 @@ fn check_source_profile(backend: Backend) {
         options.elide = false;
         options.reuse = false;
         options.regions = false;
-        let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+        let ready = hirsel_requests::ready_supplier(
+            &source,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&(&options).target),
+        )
+        .unwrap()(&options)
+        .unwrap();
+        let ready = &ready.program;
         let tools = Toolchain::in_tree_with_runtimes(
             &dir.join("runtime"),
             &[&target],
@@ -290,7 +298,15 @@ pub fn main() -> Result[(), ()] { probe(false); Ok(()) }
         options.elide = false;
         options.reuse = false;
         options.regions = false;
-        let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+        let ready = hirsel_requests::ready_supplier(
+            &source,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&(&options).target),
+        )
+        .unwrap()(&options)
+        .unwrap();
+        let ready = &ready.program;
         let objects = hirsel_native::emit_backend_objects(
             &ready,
             backend,
@@ -498,7 +514,15 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
         options.elide = false;
         options.reuse = false;
         options.regions = false;
-        let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+        let ready = hirsel_requests::ready_supplier(
+            &source,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&(&options).target),
+        )
+        .unwrap()(&options)
+        .unwrap();
+        let ready = &ready.program;
         let objects = hirsel_native::emit_backend_objects(
             &ready,
             backend,

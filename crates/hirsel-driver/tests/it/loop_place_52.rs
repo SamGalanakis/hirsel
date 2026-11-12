@@ -17,7 +17,6 @@ fn vector(name: &str) -> String {
 fn runtime(source: &str) {
     use hirsel_driver::native::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     let mut engine = crate::source_std::engine();
     let file = engine
@@ -59,7 +58,14 @@ fn runtime(source: &str) {
     let validated = engine.import_native_input(input).unwrap();
     let mut options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
     options.validation = Validation::EveryStage;
-    let ready = build(&validated, &options).unwrap();
+    let ready = crate::source_std::ready(
+        &source,
+        "loop-place-52.hir",
+        &entry,
+        &hirsel_native_testing::ready_toolchain(&(&options).target),
+    )(&options)
+    .unwrap();
+    let ready = &ready.program;
     let heap = run_heap(&ready, &entry, &Sites::new(validated.snapshot())).unwrap();
     assert_eq!(heap.observation, expected, "checked H");
     assert_eq!(heap.counters.live_heap_bytes, 0);

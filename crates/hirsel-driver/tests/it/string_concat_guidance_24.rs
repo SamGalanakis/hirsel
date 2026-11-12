@@ -216,11 +216,18 @@ fn string_concat_guidance_24_checked_heap_values_and_order() {
         let entry = entry_path(&default_context());
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let ready = hirsel_native_batch::build(
-            &validated,
-            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = {
+            let options =
+                &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+            crate::source_std::ready(
+                include_str!("../fixtures/string_concat_guidance_24.hir"),
+                "concat.hir",
+                &entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )(options)
+        }
         .unwrap();
+        let ready = &ready.program;
         let heap = hirsel_native_testing::run_heap(
             &ready,
             &entry,

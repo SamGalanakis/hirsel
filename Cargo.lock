@@ -1312,7 +1312,6 @@ dependencies = [
  "hirsel-lir",
  "hirsel-llvm",
  "hirsel-native",
- "hirsel-native-batch",
  "hirsel-native-queries",
  "hirsel-query-products",
  "hirsel-rt",

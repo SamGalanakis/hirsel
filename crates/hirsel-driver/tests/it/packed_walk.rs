@@ -10,7 +10,6 @@ use hirsel_native::Options;
 use hirsel_native::ReadyProgram;
 use hirsel_native::TargetSpec;
 use hirsel_native::emit_ir;
-use hirsel_native_batch::build;
 use std::collections::BTreeMap;
 
 /// `main` pushes `n` alternating elements, then checks `total`'s sum of them.
@@ -59,7 +58,19 @@ fn ready(source: &str, options: &Options) -> ReadyProgram {
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     let input = engine.export_native_input().unwrap();
     let validated = engine.import_native_input(input).unwrap();
-    build(&validated, options).unwrap()
+    {
+        let options = &options;
+        hirsel_requests::source_ready_supplier(
+            &source,
+            "packed_walk.hir",
+            &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+            &hirsel_native_testing::ready_toolchain(&options.target),
+        )
+        .unwrap()(options)
+    }
+    .unwrap()
+    .program
+    .clone()
 }
 
 /// The optimized IR of `total`.

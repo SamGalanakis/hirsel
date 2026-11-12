@@ -600,20 +600,26 @@ pub fn main(u: Unsafe) -> Result[(), ()] {{
                 let options = hirsel_native::Options::new(
                     hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
                 );
-                let error = hirsel_native_batch::build(&validated, &options)
-                    .and_then(|ready| {
-                        hirsel_native::emit_backend_objects(
-                            &ready,
-                            backend,
-                            hirsel_native::OptLevel::None,
-                            hirsel_native::Partition::Singleton,
-                            false,
-                            None,
-                        )
-                    })
-                    .err()
-                    .expect("callback refusal")
-                    .to_string();
+                let error = hirsel_requests::ready_supplier(
+                    &fixture.manifest,
+                    None,
+                    &loaded.entry,
+                    &hirsel_native_testing::ready_toolchain(&(&options).target),
+                )
+                .unwrap()(&options)
+                .and_then(|ready| {
+                    hirsel_native::emit_backend_objects(
+                        &ready.program,
+                        backend,
+                        hirsel_native::OptLevel::None,
+                        hirsel_native::Partition::Singleton,
+                        false,
+                        None,
+                    )
+                })
+                .err()
+                .expect("callback refusal")
+                .to_string();
                 assert!(error.contains("PROG-4"), "{error}");
                 assert!(error.contains("sneak"), "{error}");
                 assert!(error.contains("homelib_tid"), "{error}");
@@ -676,9 +682,16 @@ pub extern "c" fn {package}_deep(
                 let options = hirsel_native::Options::new(
                     hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
                 );
-                let result = hirsel_native_batch::build(&validated, &options).and_then(|ready| {
+                let result = hirsel_requests::ready_supplier(
+                    &fixture.manifest,
+                    None,
+                    &loaded.entry,
+                    &hirsel_native_testing::ready_toolchain(&(&options).target),
+                )
+                .unwrap()(&options)
+                .and_then(|ready| {
                     hirsel_native::emit_backend_objects(
-                        &ready,
+                        &ready.program,
                         backend,
                         hirsel_native::OptLevel::None,
                         hirsel_native::Partition::Singleton,

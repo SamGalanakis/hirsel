@@ -5,7 +5,6 @@ use hirsel_driver::replay_loaded_observations;
 use hirsel_engine::{RunConfiguration, run_observed_checked, run_observed_snapshot};
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use hirsel_run_schema::ProcessGrant;
 use serde_json::json;
@@ -220,7 +219,10 @@ fn campaign_mode(
             ]);
         }
         eprintln!("TIMED_PHASE {id} native-build start");
-        let ready = build(&input, &options).unwrap();
+        let ready =
+            hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options)
+                .unwrap();
+        let ready = &ready.program;
         eprintln!("TIMED_PHASE {id} native-build done");
         let sites = Sites::new(input.snapshot());
         let mut runnables = vec![];

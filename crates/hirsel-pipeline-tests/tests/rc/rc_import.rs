@@ -30,8 +30,8 @@ fn main() -> bool { equal([box Word(key: b"key", count: 1, next: 0)], 0, b"key")
     for regions in [false, true] {
         let mut options = hirsel_native::Options::new(target());
         options.regions = regions;
-        let built = hirsel_native_batch::build_program(&program, manifest(&program), &options)
-            .expect("build borrowed reads");
+        let built = crate::rc_support::ready(source, &options);
+        let built = &built.program;
         let mut checked = 0;
         for unit in &built.units {
             let unit = unit.unit();
@@ -1194,7 +1194,6 @@ fn loop_version_matches_reference_heap_llvm_and_cranelift() {
     };
     use hirsel_intern::jobs::with_compiler_stack;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     let source = include_str!("../../../../conformance/LANG/LANG-13-loop-element-match-run.hir");
     with_compiler_stack(move || {

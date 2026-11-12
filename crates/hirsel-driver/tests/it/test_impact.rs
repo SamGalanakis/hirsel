@@ -518,7 +518,6 @@ fn source_finalizer_private_representation_generator_and_callable_matrix() {
 fn source_native_and_interpreter_fresh_observations_agree() {
     use hirsel_driver::native::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let config = Configuration {

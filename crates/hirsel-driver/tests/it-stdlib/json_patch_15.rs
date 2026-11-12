@@ -52,7 +52,15 @@ fn checked(name: &str) {
         let validated = loaded.engine.import_native_input(input).unwrap();
         let options =
             hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
-        let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+        let ready = hirsel_requests::ready_supplier(
+            &fixture(name),
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&(&options).target),
+        )
+        .unwrap()(&options)
+        .unwrap();
+        let ready = &ready.program;
         let heap = hirsel_native_testing::run_heap_in(
             &ready,
             &loaded.entry,

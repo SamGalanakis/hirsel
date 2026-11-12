@@ -510,7 +510,6 @@ fn closure_effect_joins_26_source_40() {
 fn runtime(index: usize, allocates: bool) {
     use hirsel_driver::native::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     let c = &CASES[index];
     let mut engine = checked(c.id, c.source, None);
@@ -547,7 +546,18 @@ fn runtime(index: usize, allocates: bool) {
     let validated = engine.import_native_input(input).unwrap();
     let mut options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
     options.validation = Validation::EveryStage;
-    let ready = build(&validated, &options).unwrap();
+    let ready = {
+        let options = &options;
+        hirsel_requests::source_ready_supplier(
+            &c.source,
+            "closure-effect-joins.hir",
+            &entry,
+            &hirsel_native_testing::ready_toolchain(&options.target),
+        )
+        .unwrap()(options)
+    }
+    .unwrap();
+    let ready = &ready.program;
     let heap = run_heap(&ready, &entry, &Sites::new(validated.snapshot())).unwrap();
     assert_eq!(heap.observation, expected, "{} checked-H", c.id);
     assert_eq!(

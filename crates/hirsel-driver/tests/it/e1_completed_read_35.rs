@@ -10,7 +10,6 @@ use hirsel_intern::jobs::with_compiler_stack;
 fn public_completed_read_compute_agrees_on_four_engines() {
     use hirsel_driver::native::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let source = include_str!("../fixtures/e1-completed-read-35/main.hir");
@@ -104,7 +103,6 @@ fn public_completed_read_compute_agrees_on_four_engines() {
 fn public_read_continuation_covers_active_callers_and_inert_cleanup() {
     use hirsel_driver::native::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let mut engine = crate::source_std::engine();
@@ -117,17 +115,23 @@ fn public_read_continuation_covers_active_callers_and_inert_cleanup() {
         );
         let file = engine
             .sources
-            .add("public-read-segment.hir", source.into())
+            .add("public-read-segment.hir", source.clone())
             .unwrap();
         let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let program = build(
-            &validated,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let program = {
+            let options = &Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+            crate::source_std::ready(
+                &source,
+                "public-read-segment.hir",
+                &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )(options)
+        }
         .unwrap();
+        let program = &program.program;
         let plan = ahead_plan(&program);
         let roots: Vec<_> = plan.roots.values().filter(|r| r.host.is_some()).collect();
         assert_eq!(roots.len(), 1, "{:?}", plan.refusals);
@@ -369,7 +373,6 @@ fn ordinary_prefix_thunk_does_not_authorize_a_post_read_private_site() {
     use hirsel_driver::native::*;
     use hirsel_lir::ir::{Callee, Inst};
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let mut engine = crate::source_std::engine();
@@ -394,17 +397,23 @@ fn ordinary_prefix_thunk_does_not_authorize_a_post_read_private_site() {
             .replace("Ok(value) => Ok(value)", "Ok((value, _)) => Ok(value)");
         let file = engine
             .sources
-            .add("prefix-thunk-barrier.hir", source.into())
+            .add("prefix-thunk-barrier.hir", source.clone())
             .unwrap();
         let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let program = build(
-            &validated,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let program = {
+            let options = &Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+            crate::source_std::ready(
+                &source,
+                "prefix-thunk-barrier.hir",
+                &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )(options)
+        }
         .unwrap();
+        let program = &program.program;
         let plan = ahead_plan(&program);
         let root = plan.roots.values().find(|r| r.host.is_some()).unwrap();
         let host = root.host.as_ref().unwrap();

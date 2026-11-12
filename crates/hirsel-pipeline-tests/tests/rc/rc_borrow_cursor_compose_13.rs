@@ -91,7 +91,6 @@ fn native_parity(cases: &[(&str, &str)]) {
     use hirsel_front_phases::*;
     use hirsel_host_io::launch::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     let options = Options::new(target());
     let matrix = vec![
@@ -366,7 +365,6 @@ fn compose_13_rebind_keeps_only_the_result_count() {
     use hirsel_driver::native::*;
     use hirsel_engine::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let mut counts = vec![];
@@ -389,7 +387,10 @@ pub fn main() -> Result[(), u64] {{
                 hirsel_front_phases::compiler_adapters(),
             );
             let context = default_context();
-            let file = engine.sources.add("result-count.hir", source).unwrap();
+            let file = engine
+                .sources
+                .add("result-count.hir", source.clone())
+                .unwrap();
             let checked = source_check_request(&mut engine, file, &context).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let snapshot = engine.export_native_input().unwrap();
@@ -398,7 +399,18 @@ pub fn main() -> Result[(), u64] {{
             options.elide = false;
             options.reuse = false;
             options.regions = false;
-            let ready = build(&validated, &options).unwrap();
+            let ready = {
+                let options = &options;
+                hirsel_requests::source_ready_supplier(
+                    &source,
+                    "result-count.hir",
+                    &hirsel_engine::entry_path(&context),
+                    &hirsel_native_testing::ready_toolchain(&options.target),
+                )
+                .unwrap()(options)
+            }
+            .unwrap();
+            let ready = &ready.program;
             let heap = run_heap(
                 &ready,
                 &entry_path(&context),

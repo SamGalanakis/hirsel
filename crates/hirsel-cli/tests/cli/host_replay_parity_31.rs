@@ -228,7 +228,15 @@ fn snapshot_file_waits_live_and_native_replay() {
         };
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = hirsel_requests::ready_supplier(&source, None, &loaded.entry, &hirsel_native_testing::ready_toolchain(&(&Options::new(TargetSpec::x86_64_unknown_linux_gnu())).target)).unwrap()(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
+        let ready = hirsel_requests::ready_supplier(
+            &source,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(
+                &(&Options::new(TargetSpec::x86_64_unknown_linux_gnu())).target,
+            ),
+        )
+        .unwrap()(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
         .unwrap();
         let ready = &ready.program;
         let sites = Sites::new(validated.snapshot());
@@ -471,7 +479,15 @@ fn record_chunk_blocked_on_current_runtime() {
             .unwrap_or_else(|error| panic!("{error}"));
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = hirsel_requests::ready_supplier(&source, None, &loaded.entry, &hirsel_native_testing::ready_toolchain(&(&Options::new(TargetSpec::x86_64_unknown_linux_gnu())).target)).unwrap()(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
+        let ready = hirsel_requests::ready_supplier(
+            &source,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(
+                &(&Options::new(TargetSpec::x86_64_unknown_linux_gnu())).target,
+            ),
+        )
+        .unwrap()(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
         .unwrap();
         let ready = &ready.program;
         let sites = Sites::new(validated.snapshot());

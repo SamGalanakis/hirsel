@@ -419,6 +419,26 @@ impl ReadyProgram {
         self.units[index] = unit;
         Ok(())
     }
+    /// Seal every unit again at Ready against `manifest` in place of the
+    /// program's own: the inspection hook through which a corruption test
+    /// shows the Ready validator refusing what a mutated manifest no longer
+    /// admits, with the error a build would report.
+    pub fn reseal(&self, manifest: &Manifest) -> Result<(), NativeError> {
+        let inputs = Inputs {
+            target: &self.target,
+            layouts: &self.table,
+            manifest,
+            operations: &self.operations,
+            discharge: Some(&self.discharged),
+            memo: Default::default(),
+        };
+        for unit in &self.units {
+            seal(StageName::Ready, || {
+                hirsel_lir::validate::validate_ready(unit.unit().clone(), &inputs)
+            })?;
+        }
+        Ok(())
+    }
     /// The Ready units, as the heap executor and dumps read them.
     pub fn raw_units(&self) -> Vec<LirUnit<Ready>> {
         self.units.iter().map(|u| u.unit().clone()).collect()

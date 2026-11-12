@@ -140,7 +140,18 @@ fn heap_source(source: &str, label: &str) -> hirsel_native::Observation {
         let validated = loaded.engine.import_native_input(input).unwrap();
         let options =
             hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
-        let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+        let ready = {
+            let options = &options;
+            hirsel_requests::ready_supplier(
+                &path,
+                Some(source),
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let heap_result = hirsel_native_testing::run_heap_in(
             &ready,
             &loaded.entry,

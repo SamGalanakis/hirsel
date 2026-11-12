@@ -8,7 +8,6 @@ use hirsel_native::OptLevel;
 use hirsel_native::Options;
 use hirsel_native::TargetSpec;
 use hirsel_native::emit_ir;
-use hirsel_native_batch::build;
 
 /// The callees come last, so an edit to their bodies moves no caller source position.
 fn program(helper: &str, pass: &str) -> String {
@@ -28,13 +27,24 @@ fn pass[T](take x: T) -> T {{ {pass} }}
 fn ir(source: String) -> String {
     with_compiler_stack(move || {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
-        let file = engine.sources.add("identity.hir", source).unwrap();
+        let file = engine.sources.add("identity.hir", source.clone()).unwrap();
         let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
         let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
-        let ready = build(&validated, &options).unwrap();
+        let ready = {
+            let options = &options;
+            hirsel_requests::source_ready_supplier(
+                &source,
+                "identity.hir",
+                &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         emit_ir(&ready, OptLevel::None).unwrap()
     })
 }

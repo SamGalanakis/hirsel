@@ -296,11 +296,18 @@ fn metadata(
 fn both_backends_emit_real_alternate_dags_across_partitions_and_reject_corruption() {
     with_compiler_stack(|| {
         let (_, validated) = checked();
-        let program = hirsel_native_batch::build(
-            &validated,
-            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let program = {
+            let options =
+                &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+            crate::source_std::ready(
+                SOURCE,
+                "main.hir",
+                &hirsel_engine::entry_path(&default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )(options)
+        }
         .unwrap();
+        let program = &program.program;
         let plan = hirsel_native::ahead_plan(&program);
         assert_eq!(plan.roots.len(), 1, "{:?}", plan.refusals);
         assert_eq!(plan.bodies.len(), 3);

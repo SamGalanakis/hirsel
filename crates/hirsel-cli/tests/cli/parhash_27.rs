@@ -363,7 +363,14 @@ fn measured_copy_cost() {
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let ready = hirsel_requests::ready_supplier(&selection, None, &loaded.entry, &hirsel_native_testing::ready_toolchain(&(&Options::new(target.clone())).target)).unwrap()(&Options::new(target.clone())).unwrap();
+        let ready = hirsel_requests::ready_supplier(
+            &selection,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&(&Options::new(target.clone())).target),
+        )
+        .unwrap()(&Options::new(target.clone()))
+        .unwrap();
         let ready = &ready.program;
         let tools = Toolchain::in_tree_with_runtime(
             &root.join("runtime"),

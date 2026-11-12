@@ -378,7 +378,18 @@ fn execute(batch: usize, engine: &str) {
             let options =
                 hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
             if engine == "heap" {
-                let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+                let ready = {
+                    let options = &options;
+                    hirsel_requests::ready_supplier(
+                        &path,
+                        Some(&source),
+                        &loaded.entry,
+                        &hirsel_native_testing::ready_toolchain(&options.target),
+                    )
+                    .unwrap()(options)
+                }
+                .unwrap();
+                let ready = &ready.program;
                 let world = hirsel_native_testing::HeapWorld {
                     steps: Some(1_000_000),
                     ..Default::default()

@@ -746,11 +746,17 @@ fn ownership_native_source_emission_binds_checked_metadata_and_preserves_ordinar
             .unwrap_or_else(|error| panic!("source fixture: {error}"));
         let input = loaded.engine.export_native_input().unwrap();
         let checked = loaded.engine.import_native_input(input).unwrap();
-        let ready = hirsel_native_batch::build(
-            &checked,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
+        let ready = hirsel_requests::ready_supplier(
+            &source,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(
+                &(&Options::new(TargetSpec::x86_64_unknown_linux_gnu())).target,
+            ),
         )
+        .unwrap()(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
         .unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(checked.snapshot());
         for backend in [Backend::Llvm, Backend::Cranelift] {
             let ordinary = || {
@@ -873,7 +879,15 @@ fn observed_native_source(body: &str, created: u64, expect_calls: bool) {
         let input = loaded.engine.export_native_input().unwrap();
         let checked = loaded.engine.import_native_input(input).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let ready = hirsel_native_batch::build(&checked, &Options::new(target.clone())).unwrap();
+        let ready = hirsel_requests::ready_supplier(
+            &source,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&(&Options::new(target.clone())).target),
+        )
+        .unwrap()(&Options::new(target.clone()))
+        .unwrap();
+        let ready = &ready.program;
         let selected: Vec<_> = ready.units.iter().collect();
         let calls = hirsel_lir::ownership_trace::native::local_calls(&selected).unwrap();
         assert_eq!(
@@ -1332,11 +1346,17 @@ fn ownership_native_call_inputs_require_original_projection_for_synthetic_moves(
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let checked = loaded.engine.import_native_input(input).unwrap();
-        let ready = hirsel_native_batch::build(
-            &checked,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
+        let ready = hirsel_requests::ready_supplier(
+            &source,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(
+                &(&Options::new(TargetSpec::x86_64_unknown_linux_gnu())).target,
+            ),
         )
+        .unwrap()(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
         .unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(checked.snapshot());
         for backend in [Backend::Llvm, Backend::Cranelift] {
             let error = hirsel_native_testing::ownership_trace::emit_leaf(

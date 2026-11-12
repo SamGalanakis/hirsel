@@ -19,7 +19,6 @@ use hirsel_native::emit_backend_objects;
 use hirsel_native::link_host;
 use hirsel_native::link_library;
 use hirsel_native::run_host;
-use hirsel_native_batch::build;
 use hirsel_native_testing::Configuration;
 use hirsel_native_testing::Engine;
 use hirsel_native_testing::Runtime;
@@ -185,7 +184,18 @@ fn native_runs_that_block_stop_or_fail_end_alone_in_one_host_process_on_both_bac
                 let input = engine.export_native_input().unwrap();
                 let validated = engine.import_native_input(input).unwrap();
                 let entry = entry_path(&context);
-                let ready = build(&validated, &Options::new(x86())).unwrap();
+                let ready = {
+                    let options = &Options::new(x86());
+                    hirsel_requests::source_ready_supplier(
+                        source,
+                        &format!("{name}.hir"),
+                        &entry,
+                        &toolchain,
+                    )
+                    .unwrap()(options)
+                }
+                .unwrap();
+                let ready = &ready.program;
                 let objects = emit_backend_objects(
                     &ready,
                     backend,

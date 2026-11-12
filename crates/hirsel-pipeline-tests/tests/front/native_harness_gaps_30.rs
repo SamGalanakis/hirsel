@@ -5,7 +5,6 @@ use hirsel_driver::replay_observations_checked;
 use hirsel_engine::{RunConfiguration, run_observed_checked, run_observed_snapshot};
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileReadScript};
 use std::collections::BTreeMap;
@@ -182,7 +181,10 @@ fn campaign(source: &str, gate: FileReadScript, expected: &[u8]) {
         ) {
             assert_eq!(outcome, Outcome::Agree, "{name}");
         }
-        let ready = build(&input, &options).unwrap();
+        let ready =
+            hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options)
+                .unwrap();
+        let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let mut runnables = vec![];
         for backend in [Backend::Llvm, Backend::Cranelift] {

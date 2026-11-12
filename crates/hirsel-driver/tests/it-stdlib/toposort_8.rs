@@ -113,7 +113,15 @@ fn run(source: &str, measured: Option<&str>, label: &str) {
         let validated = loaded.engine.import_native_input(input).unwrap();
         let options =
             hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
-        let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+        let ready = hirsel_requests::ready_supplier(
+            &path,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&(&options).target),
+        )
+        .unwrap()(&options)
+        .unwrap();
+        let ready = &ready.program;
         assert!(ready.units.iter().any(|unit| {
             let header = &unit.unit().header;
             header.definition.0.package.name_is("std")

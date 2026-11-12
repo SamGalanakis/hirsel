@@ -52,10 +52,5 @@ fn check(source: &str) {
         }
     }
     assert!(hirsel_lir::structural_access::check_key_order(&missing).is_err());
-    hirsel_native_batch::build_program(
-        &program,
-        manifest(&program),
-        &hirsel_native::Options::new(target()),
-    )
-    .unwrap();
+    crate::rc_support::ready(source, &hirsel_native::Options::new(target()));
 }

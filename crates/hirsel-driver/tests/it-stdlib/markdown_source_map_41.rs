@@ -137,7 +137,11 @@ fn run(engine: &str) {
                 hirsel_native_testing::Runtime::Diagnostic
             };
             let tools = tools.with_runtime(runtime.build());
-            let ready = hirsel_native_batch::build(&validated, &matrix[0].options).unwrap();
+            let ready =
+                hirsel_requests::ready_supplier(&path, Some(&source), &program.entry, &tools)
+                    .unwrap()(&matrix[0].options)
+                .unwrap();
+            let ready = &ready.program;
             let objects = hirsel_native::emit_backend_objects(
                 &ready,
                 if engine == "llvm" {

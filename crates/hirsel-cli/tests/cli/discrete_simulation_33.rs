@@ -290,7 +290,9 @@ fn discrete_simulation_33_native_full_entry_replay() {
             "/usr/bin/python3".into(),
             root.join("capped").to_string_lossy().into_owned(),
         ];
-        let ready = hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options).unwrap();
+        let ready =
+            hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options)
+                .unwrap();
         let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let objects: Vec<_> = [Backend::Llvm, Backend::Cranelift]
@@ -691,7 +693,9 @@ fn ordered(backend: Backend) {
             hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         tools.execution = Execution::Executable;
         tools.launch_timeout = std::time::Duration::from_secs(60);
-        let ready = hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options).unwrap();
+        let ready =
+            hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options)
+                .unwrap();
         let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let objects = emit_backend_objects(

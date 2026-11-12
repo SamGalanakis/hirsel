@@ -8,7 +8,6 @@ use hirsel_driver::native::*;
 use hirsel_engine::*;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use std::collections::BTreeMap;
 
@@ -214,7 +213,18 @@ fn bounded_order_and_failure_chain_on_h() {
         let raw = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(raw).unwrap();
         let sites = Sites::new(validated.snapshot());
-        let ready = build(&validated, &Options::new(target())).unwrap();
+        let ready = {
+            let options = &Options::new(target());
+            hirsel_requests::source_ready_supplier(
+                &SOURCE,
+                "destructure.hir",
+                &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let entry = entry_path(&default_context());
         for case in cases() {
             let run = run_heap_in(
@@ -256,7 +266,18 @@ fn bounded_order_and_failure_chain_on_both_backends() {
         let raw = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(raw).unwrap();
         let sites = Sites::new(validated.snapshot());
-        let ready = build(&validated, &Options::new(target())).unwrap();
+        let ready = {
+            let options = &Options::new(target());
+            hirsel_requests::source_ready_supplier(
+                &SOURCE,
+                "destructure.hir",
+                &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let entry = entry_path(&default_context());
         let directory = tempfile::tempdir().unwrap();
         let toolchain =
@@ -336,13 +357,24 @@ pub fn main() -> Result[(), ()] {{
                 default_environment(),
                 hirsel_front_phases::compiler_adapters(),
             );
-            let file = engine.sources.add("guard.hir", source).unwrap();
+            let file = engine.sources.add("guard.hir", source.clone()).unwrap();
             let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let raw = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(raw).unwrap();
             let sites = Sites::new(validated.snapshot());
-            let ready = build(&validated, &Options::new(target())).unwrap();
+            let ready = {
+                let options = &Options::new(target());
+                hirsel_requests::source_ready_supplier(
+                    &source,
+                    "guard.hir",
+                    &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                    &hirsel_native_testing::ready_toolchain(&options.target),
+                )
+                .unwrap()(options)
+            }
+            .unwrap();
+            let ready = &ready.program;
             let run = run_heap(&ready, &entry_path(&default_context()), &sites).unwrap();
             assert_eq!(run.observation.exit_code, Some(0));
             assert_eq!(run.counters.finalizers, u64::from(!selected));

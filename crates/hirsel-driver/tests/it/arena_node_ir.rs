@@ -7,7 +7,6 @@ use hirsel_native::OptLevel;
 use hirsel_native::Options;
 use hirsel_native::TargetSpec;
 use hirsel_native::emit_ir;
-use hirsel_native_batch::build;
 
 const TREE: &str = "type Tree = Leaf | Branch(left: box Tree, right: box Tree)
 fn tree(a: Arena, depth: u64) -> (box Tree) in a {
@@ -39,7 +38,18 @@ fn module_ir() -> Vec<String> {
         ]
         .into_iter()
         .map(|target| {
-            let ready = build(&validated, &Options::new(target)).unwrap();
+            let ready = {
+                let options = &Options::new(target);
+                hirsel_requests::source_ready_supplier(
+                    &TREE,
+                    "tree.hir",
+                    &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                    &hirsel_native_testing::ready_toolchain(&options.target),
+                )
+                .unwrap()(options)
+            }
+            .unwrap();
+            let ready = &ready.program;
             emit_ir(&ready, OptLevel::Speed).unwrap()
         })
         .collect()
@@ -61,7 +71,18 @@ fn function_ir(name: &'static str) -> Vec<String> {
         ]
         .into_iter()
         .map(|target| {
-            let ready = build(&validated, &Options::new(target)).unwrap();
+            let ready = {
+                let options = &Options::new(target);
+                hirsel_requests::source_ready_supplier(
+                    &TREE,
+                    "tree.hir",
+                    &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                    &hirsel_native_testing::ready_toolchain(&options.target),
+                )
+                .unwrap()(options)
+            }
+            .unwrap();
+            let ready = &ready.program;
             let ir = emit_ir(&ready, OptLevel::Speed).unwrap();
             let lines: Vec<&str> = ir
                 .lines()

@@ -168,11 +168,18 @@ fn signed_differences_and_comparisons_execute_source_units_without_wrapper_alloc
         }
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let ready = hirsel_native_batch::build(
-            &validated,
-            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = {
+            let options =
+                &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+            source_std::ready(
+                ARITHMETIC,
+                "clocks.hir",
+                &entry_path(&default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )(options)
+        }
         .unwrap();
+        let ready = &ready.program;
         for unit in &ready.units {
             if unit.unit().header.definition.0.package.name_is("std")
                 && unit.unit().header.definition.0.modules == ["time"]
@@ -196,9 +203,17 @@ fn full_gate_native_instant_arithmetic_matches_direct_code() {
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
         let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
-        let ready =
-            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
-                .unwrap();
+        let ready = {
+            let options = &hirsel_native::Options::new(target.clone());
+            source_std::ready(
+                ARITHMETIC,
+                "clocks.hir",
+                &entry_path(&default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let artifact =
             hirsel_native::emit(&ready, hirsel_native::OptLevel::Speed, |_| true).unwrap();
         let symbol = &artifact

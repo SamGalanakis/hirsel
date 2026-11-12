@@ -23,7 +23,10 @@ fn cleanup_version_joins_share_unchanged_dataflow() {
                 .join(" + ");
             source += "\n}\n";
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
-            let file = engine.sources.add("version-joins.hir", source).unwrap();
+            let file = engine
+                .sources
+                .add("version-joins.hir", source.clone())
+                .unwrap();
             let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
             let snapshot = engine.export_native_input().unwrap();
@@ -33,7 +36,18 @@ fn cleanup_version_joins_share_unchanged_dataflow() {
             );
             options.regions = false;
             let before = work::read(Counter::RcCleanupVersionRows);
-            let program = hirsel_native_batch::build(&validated, &options).unwrap();
+            let program = {
+                let options = &options;
+                hirsel_requests::source_ready_supplier(
+                    &source,
+                    "version-joins.hir",
+                    &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                    &hirsel_native_testing::ready_toolchain(&options.target),
+                )
+                .unwrap()(options)
+            }
+            .unwrap();
+            let program = &program.program;
             let rows = work::read(Counter::RcCleanupVersionRows) - before;
             assert!(!program.units.is_empty());
             assert!(rows > 0, "cleanup version work must be measured");

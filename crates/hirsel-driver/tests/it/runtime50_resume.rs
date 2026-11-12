@@ -13,7 +13,6 @@ use hirsel_lir::continuation::{
     Representation,
 };
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 
 use hirsel_syntax::ContentHash;
@@ -436,7 +435,18 @@ pub(crate) fn compact_runs_recording(
     let sites = hirsel_native::Sites::new(&input);
     let validated = engine.import_native_input(input.clone()).unwrap();
     let target = TargetSpec::x86_64_unknown_linux_gnu();
-    let ready = hirsel_native_batch::build(&validated, &Options::new(target.clone())).unwrap();
+    let ready = {
+        let options = &Options::new(target.clone());
+        crate::native_ready::supplier(
+            &fixture_path(),
+            Some(source),
+            &entry,
+            &hirsel_native_testing::ready_toolchain(&options.target),
+        )
+        .unwrap()(options)
+    }
+    .unwrap();
+    let ready = &ready.program;
     let root = tempfile::Builder::new()
         .prefix("runtime50-compact-")
         .tempdir()

@@ -4,7 +4,6 @@ use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
-use hirsel_native_batch::build;
 use hirsel_run_config::RunConfig;
 use hirsel_run_schema::{LaunchKind, ProgramRevision};
 use hirsel_syntax::ContentHash;
@@ -203,7 +202,18 @@ fn singleton_whole_and_partitioned_native_builds_keep_the_semantic_revision() {
         let target = TargetSpec::x86_64_unknown_linux_gnu();
         let mut options = Options::new(target.clone());
         options.launch = run.record().inputs.clone();
-        let ready = build(&validated, &options).unwrap();
+        let ready = {
+            let options = &options;
+            hirsel_requests::source_ready_supplier(
+                PROGRAM,
+                "program.hir",
+                &hirsel_engine::entry_path(&default_context()),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let root =
             std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("semantic-topologies");
         std::fs::create_dir_all(&root).unwrap();

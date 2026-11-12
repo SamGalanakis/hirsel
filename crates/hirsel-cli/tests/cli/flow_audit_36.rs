@@ -515,7 +515,9 @@ fn flow_audit_36_native_four_engine_replay() {
             root.to_string_lossy().into_owned(),
         ];
         tools.launch_timeout = std::time::Duration::from_secs(65);
-        let ready = hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options).unwrap();
+        let ready =
+            hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options)
+                .unwrap();
         let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let mut objects = vec![];
@@ -955,7 +957,9 @@ fn flow_audit_36_ordered_capacity() {
             "--inherit-exact-cpus".into(),
         ];
         tools.launch_timeout = std::time::Duration::from_secs(65);
-        let ready = hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options).unwrap();
+        let ready =
+            hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap()(&options)
+                .unwrap();
         let ready = &ready.program;
         let sites = Sites::new(input.snapshot());
         let mut objects = vec![];

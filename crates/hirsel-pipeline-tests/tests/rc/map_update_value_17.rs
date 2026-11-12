@@ -7,7 +7,6 @@ use hirsel_engine::{
 };
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 
 #[test]
@@ -106,7 +105,9 @@ fn qualify(cases: &[(&str, &str, Option<i32>, &[u8])]) {
             assert_eq!(reference.exit_code, exit, "{name}: {reference:?}");
             let input = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(input).unwrap();
-            let ready = build(&validated, &options).unwrap();
+            let ready = source_std::ready(source, &format!("{name}.hir"), &entry, &tools)(&options)
+                .unwrap();
+            let ready = &ready.program;
             let sites = Sites::new(validated.snapshot());
             // Audit every failure-capable site as well as the clean execution.
             let heap = heap_campaign(&ready, &entry, &sites).unwrap();

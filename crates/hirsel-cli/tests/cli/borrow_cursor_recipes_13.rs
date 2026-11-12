@@ -173,7 +173,15 @@ fn borrow_cursor_recipes_13_package_engines() {
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let ready = hirsel_requests::source_ready_supplier(&SOURCE, "cursor-recipes.hir", &hirsel_engine::entry_path(&context), &hirsel_native_testing::ready_toolchain(&(&Options::new(TargetSpec::x86_64_unknown_linux_gnu())).target)).unwrap()(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
+        let ready = hirsel_requests::source_ready_supplier(
+            &SOURCE,
+            "cursor-recipes.hir",
+            &hirsel_engine::entry_path(&context),
+            &hirsel_native_testing::ready_toolchain(
+                &(&Options::new(TargetSpec::x86_64_unknown_linux_gnu())).target,
+            ),
+        )
+        .unwrap()(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
         .unwrap();
         let ready = &ready.program;
         let heap = run_heap(
@@ -262,7 +270,14 @@ pub fn main() -> Result[(), ()] {
         options.elide = false;
         options.reuse = false;
         options.regions = false;
-        let ready = hirsel_requests::source_ready_supplier(&source, "transport.hir", &hirsel_engine::entry_path(&context), &hirsel_native_testing::ready_toolchain(&(&options).target)).unwrap()(&options).unwrap();
+        let ready = hirsel_requests::source_ready_supplier(
+            &source,
+            "transport.hir",
+            &hirsel_engine::entry_path(&context),
+            &hirsel_native_testing::ready_toolchain(&(&options).target),
+        )
+        .unwrap()(&options)
+        .unwrap();
         let ready = &ready.program;
         let entry = hirsel_engine::entry_path(&context);
         let heap = run_heap(&ready, &entry, &Sites::new(validated.snapshot())).unwrap();

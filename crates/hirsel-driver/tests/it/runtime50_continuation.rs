@@ -70,11 +70,19 @@ pub(crate) fn ready(source: &str) -> hirsel_native::ReadyProgram {
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     let snapshot = engine.export_native_input().unwrap();
     let validated = engine.import_native_input(snapshot).unwrap();
-    hirsel_native_batch::build(
-        &validated,
-        &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
-    )
+    {
+        let options =
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+        crate::source_std::ready(
+            &source,
+            "main.hir",
+            &hirsel_engine::entry_path(&hirsel_engine::default_context()),
+            &hirsel_native_testing::ready_toolchain(&options.target),
+        )(options)
+    }
     .unwrap()
+    .program
+    .clone()
 }
 
 /// The child body: the resumable plan whose boundaries are both sends.

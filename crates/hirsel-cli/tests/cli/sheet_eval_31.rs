@@ -280,7 +280,14 @@ fn native_cases(selected: Vec<Value>) {
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
         let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
-        let ready = hirsel_requests::ready_supplier(&path, None, &loaded.entry, &hirsel_native_testing::ready_toolchain(&(&options).target)).unwrap()(&options).unwrap();
+        let ready = hirsel_requests::ready_supplier(
+            &path,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&(&options).target),
+        )
+        .unwrap()(&options)
+        .unwrap();
         let ready = &ready.program;
         let sites = Sites::new(validated.snapshot());
         let mut tools = Toolchain::in_tree(&scratch.join("runtime"), &[&ready.target]).unwrap();
@@ -1080,7 +1087,15 @@ fn sheet_eval_31_remaining_dense_native_replay() {
             .unwrap_or_else(|e| panic!("{e}"));
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = hirsel_requests::ready_supplier(&path, None, &loaded.entry, &hirsel_native_testing::ready_toolchain(&(&Options::new(TargetSpec::x86_64_unknown_linux_gnu())).target)).unwrap()(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
+        let ready = hirsel_requests::ready_supplier(
+            &path,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(
+                &(&Options::new(TargetSpec::x86_64_unknown_linux_gnu())).target,
+            ),
+        )
+        .unwrap()(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
         .unwrap();
         let ready = &ready.program;
         let sites = Sites::new(validated.snapshot());

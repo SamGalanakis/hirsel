@@ -129,7 +129,6 @@ fn related_literal_21_interpreter_h_llvm_cranelift() {
     with_compiler_stack(|| {
         use hirsel_driver::native::*;
         use hirsel_native::*;
-        use hirsel_native_batch::*;
         use hirsel_native_testing::*;
         let mut engine = crate::source_std::engine();
         let file = engine.sources.add("runtime.hir", RUNTIME.into()).unwrap();

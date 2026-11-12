@@ -51,7 +51,7 @@ pub use ownership_selection::{OwnershipExecution, OwnershipObjects};
 pub use ready_supplier::{
     ReadyRequests, named_ready_supplier, ready_supplier, ready_supplier_with_compiler,
     source_ready_supplier, source_ready_supplier_with_compiler, sources_ready_supplier,
-    sources_ready_supplier_with_compiler,
+    sources_ready_supplier_with_compiler, test_ready_supplier,
 };
 pub use replay_product::import_replay_execution;
 pub use selector::{CompilerRequests, RequestLimits};

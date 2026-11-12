@@ -265,7 +265,6 @@ fn independent_v_requires_shape_and_rejects_forged_or_client_projection() {
 fn opaque_context_native_both_backends() {
     use hirsel_driver::native::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     hirsel_intern::jobs::with_compiler_stack(|| {
         let source = "fn invoke(f:fn()->u64 uses {})->u64 uses {f}{f()}\nfn value(n:u64)->u64{let reader=std@1/bufio.new(8u64);let x=std@1/bufio.buffered(reader)+n;let mut total=0u64;for i in 0u64..20u64{total+=invoke(fn()->u64 uses {}{invoke(fn()->u64 uses {}{x+i})})};total}\npub fn main()->Result[(),u64]{Error(value(3u64))}";
@@ -284,7 +283,18 @@ fn opaque_context_native_both_backends() {
         });
         let mut options = Options::new(target());
         options.validation = Validation::EveryStage;
-        let ready = build(&validated, &options).unwrap();
+        let ready = {
+            let options = &options;
+            hirsel_requests::ready_supplier(
+                &source_path,
+                Some(source),
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
+        .unwrap();
+        let ready = &ready.program;
         let h = heap_campaign(&ready, &entry, &sites).unwrap();
         assert_eq!(h.counters.allocations, 0);
         let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))

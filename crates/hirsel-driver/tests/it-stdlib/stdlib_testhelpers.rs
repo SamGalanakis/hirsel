@@ -58,11 +58,19 @@ pub fn trial(t: Test) -> Result[(), ()] {
         let expected = hirsel_native::Observation::of_reference(observation);
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = hirsel_native_batch::build(
-            &validated,
-            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = {
+            let options =
+                &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+            hirsel_requests::ready_supplier(
+                &source("property-run"),
+                Some(text),
+                &loaded.entry,
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
         .unwrap();
+        let ready = &ready.program;
         let found: BTreeSet<_> = ready
             .units
             .iter()
@@ -147,7 +155,15 @@ fn property_reports_use_the_recorded_test_seed_and_first_failing_case(seed: u64)
         options.launch.test_seed = seed;
         options.launch.random_seed = 17;
         options.launch.hash_seed = 91;
-        let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+        let ready = hirsel_requests::ready_supplier(
+            &source("property-case-fail"),
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&(&options).target),
+        )
+        .unwrap()(&options)
+        .unwrap();
+        let ready = &ready.program;
         let actual = hirsel_native_testing::run_heap(
             &ready,
             &loaded.entry,
@@ -208,11 +224,22 @@ fn failed_resource_laws_release_the_current_case_before_reporting(name: &str) {
         let expected = hirsel_native::Observation::of_reference(observation);
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = hirsel_native_batch::build(
-            &validated,
-            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
+        let ready = hirsel_requests::ready_supplier(
+            &path,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(
+                &(&hirsel_native::Options::new(
+                    hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                ))
+                    .target,
+            ),
         )
+        .unwrap()(&hirsel_native::Options::new(
+            hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+        ))
         .unwrap();
+        let ready = &ready.program;
         let actual = hirsel_native_testing::heap_campaign(
             &ready,
             &loaded.entry,

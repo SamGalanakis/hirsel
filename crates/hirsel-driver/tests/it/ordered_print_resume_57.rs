@@ -156,7 +156,6 @@ fn entered_print_and_join_preserve_canonical_charges_ordinals_and_first_stop() {
     use hirsel_driver::native::*;
     use hirsel_engine::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let source = r#"
@@ -202,8 +201,14 @@ pub fn main(rt:Io)->Result[(),GrantError] {
         let sites = Sites::new(&input);
         let validated = engine.import_native_input(input.clone()).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let mut program =
-            hirsel_native_batch::build(&validated, &Options::new(target.clone())).unwrap();
+        let program = crate::source_std::ready(
+            &source,
+            "main.hir",
+            &entry,
+            &hirsel_native_testing::ready_toolchain(&(&Options::new(target.clone())).target),
+        )(&Options::new(target.clone()))
+        .unwrap();
+        let mut program = program.program.clone();
         let root = tempfile::tempdir().unwrap();
         let configuration = Configuration {
             options: Options::new(target.clone()),

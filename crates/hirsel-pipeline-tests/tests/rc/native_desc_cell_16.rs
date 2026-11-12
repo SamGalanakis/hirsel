@@ -37,7 +37,6 @@ fn native_parity(cases: &[(&str, &str)]) {
     use hirsel_front_phases::*;
     use hirsel_host_io::launch::*;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     let options = Options::new(target());
     let matrix = vec![

@@ -393,8 +393,14 @@ fn scripted_native(group: u8) {
         let tools =
             hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
                 .unwrap();
-        let ready = hirsel_requests::ready_supplier_with_compiler(&path, None, &loaded.entry, &tools, compiler.clone())
-            .unwrap()(&options)
+        let ready = hirsel_requests::ready_supplier_with_compiler(
+            &path,
+            None,
+            &loaded.entry,
+            &tools,
+            compiler.clone(),
+        )
+        .unwrap()(&options)
         .unwrap();
         let ready = &ready.program;
         let sites = Sites::new(input.snapshot());

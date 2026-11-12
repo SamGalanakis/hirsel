@@ -18,7 +18,6 @@ use hirsel_native::Toolchain;
 use hirsel_native::launch_with;
 use hirsel_native::link;
 use hirsel_native::observe;
-use hirsel_native_batch::build;
 use hirsel_native_testing::Configuration;
 use hirsel_native_testing::Outcome;
 use hirsel_native_testing::full_matrix;
@@ -165,7 +164,28 @@ fn campaign_in(include: fn(&str, bool) -> bool, matrix: Vec<Configuration>, scra
             for target in &targets {
                 let work = work.join(&target.triple);
                 std::fs::create_dir_all(&work).unwrap();
-                let program = build(&input, &Options::new(target.clone())).unwrap();
+                let program = {
+                    let options = &Options::new(target.clone());
+                    (if path.with_extension("hir.json").exists() {
+                        hirsel_requests::named_ready_supplier(
+                            &path,
+                            &source,
+                            &format!("{name}.hir"),
+                            &entry,
+                            &hirsel_native_testing::ready_toolchain(&options.target),
+                        )
+                    } else {
+                        hirsel_requests::source_ready_supplier(
+                            &source,
+                            &format!("{name}.hir"),
+                            &entry,
+                            &hirsel_native_testing::ready_toolchain(&options.target),
+                        )
+                    })
+                    .unwrap()(options)
+                }
+                .unwrap();
+                let program = &program.program;
                 let executable = link(
                     &program,
                     &entry,
@@ -424,7 +444,10 @@ fn partial_write_replay(
                 QueryEngine::new(default_environment(), compiler_adapters())
             };
             let context = default_context();
-            let file = engine.sources.add(format!("{name}.hir"), source).unwrap();
+            let file = engine
+                .sources
+                .add(format!("{name}.hir"), source.clone())
+                .unwrap();
             let checked = source_check_request(&mut engine, file, &context).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
@@ -473,7 +496,28 @@ fn partial_write_replay(
                 assert!(!sim.handles().observed().contains_key(&3));
             }
             for target in &targets {
-                let program = build(&input, &Options::new(target.clone())).unwrap();
+                let program = {
+                    let options = &Options::new(target.clone());
+                    (if path.with_extension("hir.json").exists() {
+                        hirsel_requests::named_ready_supplier(
+                            &path,
+                            &source,
+                            &format!("{name}.hir"),
+                            &entry,
+                            &hirsel_native_testing::ready_toolchain(&options.target),
+                        )
+                    } else {
+                        hirsel_requests::source_ready_supplier(
+                            &source,
+                            &format!("{name}.hir"),
+                            &entry,
+                            &hirsel_native_testing::ready_toolchain(&options.target),
+                        )
+                    })
+                    .unwrap()(options)
+                }
+                .unwrap();
+                let program = &program.program;
                 for &opt in opts {
                     let work = scratch.join(format!("{name}-{}-{opt:?}", target.triple));
                     std::fs::create_dir_all(&work).unwrap();

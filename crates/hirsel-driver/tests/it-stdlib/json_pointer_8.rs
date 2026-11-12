@@ -71,7 +71,15 @@ fn check_vectors(path: PathBuf) {
                 },
             },
         ];
-        let ready = hirsel_native_batch::build(&validated, &configs[0].options).unwrap();
+        let ready = hirsel_requests::ready_supplier(
+            &path,
+            None,
+            &loaded.entry,
+            &hirsel_native_testing::ready_toolchain(&(&configs[0].options).target),
+        )
+        .unwrap()(&configs[0].options)
+        .unwrap();
+        let ready = &ready.program;
         let heap = hirsel_native_testing::run_heap(
             &ready,
             &loaded.entry,

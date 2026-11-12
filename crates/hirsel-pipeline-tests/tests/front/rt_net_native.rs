@@ -16,7 +16,6 @@ use hirsel_native::Sites;
 use hirsel_native::Toolchain;
 use hirsel_native::link;
 use hirsel_native::observe;
-use hirsel_native_batch::build;
 use hirsel_rt::io::Request;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -214,7 +213,10 @@ fn campaign(targets: Vec<TargetSpec>, opts: &'static [OptLevel], scratch_name: &
             std::fs::read_to_string(root.join("native-tests/library/net-stream.hir")).unwrap();
         let mut engine = source_std::engine();
         let context = default_context();
-        let file = engine.sources.add("net-stream.hir", source).unwrap();
+        let file = engine
+            .sources
+            .add("net-stream.hir", source.clone())
+            .unwrap();
         let checked = source_check_request(&mut engine, file, &context).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&context);
@@ -222,7 +224,15 @@ fn campaign(targets: Vec<TargetSpec>, opts: &'static [OptLevel], scratch_name: &
         let input = engine.import_native_input(input).unwrap();
         let sites = Sites::new(input.snapshot());
         for target in &targets {
-            let program = build(&input, &Options::new(target.clone())).unwrap();
+            let program = hirsel_requests::source_ready_supplier(
+                &source,
+                "net-stream.hir",
+                &hirsel_engine::entry_path(&context),
+                &tools,
+            )
+            .unwrap()(&Options::new(target.clone()))
+            .unwrap();
+            let program = &program.program;
             for &opt in opts {
                 let work = scratch.join(format!("{}-{opt:?}", target.triple));
                 std::fs::create_dir_all(&work).unwrap();
@@ -484,11 +494,18 @@ fn read_into_body_calls_its_fixed_entry_and_validation_refuses_forged_calls() {
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let input = engine.import_native_input(input).unwrap();
-        let ready = build(
-            &input,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
+        let ready = {
+            let options = &Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+            hirsel_requests::source_ready_supplier(
+                &source,
+                "read-into.hir",
+                &hirsel_engine::entry_path(&context),
+                &hirsel_native_testing::ready_toolchain(&options.target),
+            )
+            .unwrap()(options)
+        }
         .unwrap();
+        let ready = &ready.program;
         let inputs = Inputs {
             memo: Default::default(),
             discharge: None,

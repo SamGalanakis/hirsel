@@ -87,7 +87,6 @@ fn original_cleanup_and_upstream_vectors_on_all_engines() {
     use hirsel_engine::{RunConfiguration, SimulationConfig, run_observed_snapshot};
     use hirsel_intern::jobs::with_compiler_stack;
     use hirsel_native::*;
-    use hirsel_native_batch::*;
     use hirsel_native_testing::*;
     let options = Options::new(target());
     let matrix: Vec<_> = [

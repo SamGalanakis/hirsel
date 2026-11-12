@@ -9,7 +9,9 @@ informative; the rules they cite are normative.
 
 ## 1. Bounded scratch in a region
 
-A word is parsed into a region inside a bound scope. The first call fits; the second exceeds its 8-byte bound when the `Word` record (16 for `Text` plus 8) is placed, and the scope returns the `Capacity` value.
+A word is parsed into a region inside a bound scope. The first call fits; the second
+exceeds its 8-byte bound when the `Word` record (16 for `Text` plus 8) is placed, and the
+scope returns the `Capacity` value.
 
 ```hirsel
 type AppError = Io(IoError) | Mem(Capacity)
@@ -58,12 +60,16 @@ Outcome: success.
 
 Refused edits:
 
-- Make the region block's value `w` instead of `w.len`: refused, MEM-7 at 22:7, a value whose type mentions `r` leaves its block.
-- Drop the placement `in r` from the literal in `word`: refused, MEM-2 at 15:3, a stable literal needs a region.
+- Make the region block's value `w` instead of `w.len`: refused, MEM-7 at 22:7, a value
+  whose type mentions `r` leaves its block.
+- Drop the placement `in r` from the literal in `word`: refused, MEM-2 at 15:3, a stable
+  literal needs a region.
 
 ## 2. Expression tree in one compact blob
 
-`1 + (2 + 3)` is written into a sized destination, children before parents, and evaluated by following links. Each node is 9 bytes (a `u8` tag and 8 payload bytes), so the tree needs 45 bytes: 64 fits and 32 overflows at the fourth node.
+`1 + (2 + 3)` is written into a sized destination, children before parents, and evaluated
+by following links. Each node is 9 bytes (a `u8` tag and 8 payload bytes), so the tree
+needs 45 bytes: 64 fits and 32 overflows at the fourth node.
 
 ```hirsel
 type AppError = Io(IoError) | Mem(Capacity)
@@ -119,12 +125,16 @@ Outcome: success.
 
 Refused edits:
 
-- Bind a link as a value: replace `eval(a)` with `{ let k: Link[Expr] = a; eval(k) }`: refused, MEM-10 at 14:61, a link is never a value.
-- Add a variant `Str(String)` to `Expr`: refused, MEM-9 at 2:79, a compact type has no own field.
+- Bind a link as a value: replace `eval(a)` with `{ let k: Link[Expr] = a; eval(k) }`:
+  refused, MEM-10 at 14:61, a link is never a value.
+- Add a variant `Str(String)` to `Expr`: refused, MEM-9 at 2:79, a compact type has no own
+  field.
 
 ## 3. Tallying words, and a push that returns its value
 
-Map insertion returns its arguments with the `Capacity` error. In a 64-byte bound a list of `u64` takes 32 bytes for its first four elements; growing to eight requests 64 more while 32 remain, so the fifth push hands its value back.
+Map insertion returns its arguments with the `Capacity` error. In a 64-byte bound a list of
+`u64` takes 32 bytes for its first four elements; growing to eight requests 64 more while
+32 remain, so the fifth push hands its value back.
 
 ```hirsel
 type AppError = Io(IoError) | Mem(Capacity)
@@ -190,12 +200,15 @@ Outcome: success.
 
 Refused edits:
 
-- Drop the `?` after `add(mut ws, "c")`: refused, LANG-18 at 43:3, an expression statement whose value is a `Result`.
-- Grow `ws` while iterating it: insert `for w in ws { add(mut ws, "d")? }` before `let m`: refused, OWN-10 at 45:21, `ws` is frozen by the loop.
+- Drop the `?` after `add(mut ws, "c")`: refused, LANG-18 at 43:3, an expression statement
+  whose value is a `Result`.
+- Grow `ws` while iterating it: insert `for w in ws { add(mut ws, "d")? }` before `let m`:
+  refused, OWN-10 at 45:21, `ws` is frozen by the loop.
 
 ## 4. Pieces shared between a document and its undo list
 
-Pieces are counted. The undo list shares the first piece, so `try_unwrap` cannot take it and returns the handle.
+Pieces are counted. The undo list shares the first piece, so `try_unwrap` cannot take it
+and returns the handle.
 
 ```hirsel
 type AppError = Io(IoError) | Mem(Capacity)
@@ -254,12 +267,16 @@ Outcome: success.
 
 Refused edits:
 
-- Declare `type Doc: send { pieces: List[Rc[Piece]] }`: refused, CONC-2 at 3:31, `Rc` is not `send`.
-- Use `first` after `try_unwrap`: insert `let again = rc.share(first)` before the last `Ok(())`: refused, OWN-5 at 41:24, `first` was moved.
+- Declare `type Doc: send { pieces: List[Rc[Piece]] }`: refused, CONC-2 at 3:31, `Rc` is
+  not `send`.
+- Use `first` after `try_unwrap`: insert `let again = rc.share(first)` before the last
+  `Ok(())`: refused, OWN-5 at 41:24, `first` was moved.
 
 ## 5. Cleanup order and fallible close
 
-`Step` is a resource whose finalizer reports its name. `close` ends a step without its finalizer. Values are cleaned in reverse order on every exit edge; the second call fails after two steps exist, so they are dropped before the failure reaches the run.
+`Step` is a resource whose finalizer reports its name. `close` ends a step without its
+finalizer. Values are cleaned in reverse order on every exit edge; the second call fails
+after two steps exist, so they are dropped before the failure reaches the run.
 
 ```hirsel
 type AppError = Io(IoError) | Mem(Capacity)
@@ -302,16 +319,21 @@ drop b
 drop a
 ```
 
-Outcome: failure, primary cause `Fail("stop")` at 19:6; the first call printed its three lines, the second dropped `b` then `a` before the failure ended the run.
+Outcome: failure, primary cause `Fail("stop")` at 19:6; the first call printed its three
+lines, the second dropped `b` then `a` before the failure ended the run.
 
 Refused edits:
 
-- Close `c` twice: repeat the line `close(take c)?`: refused, OWN-5 at 22:14, `c` was moved.
-- Use `?` in the finalizer: `drop(s) { stdout.write(s.out, s.name)? }`: refused, FAIL-11 at 4:40, no `?` in a finalizer.
+- Close `c` twice: repeat the line `close(take c)?`: refused, OWN-5 at 22:14, `c` was
+  moved.
+- Use `?` in the finalizer: `drop(s) { stdout.write(s.out, s.name)? }`: refused, FAIL-11 at
+  4:40, no `?` in a finalizer.
 
 ## 6. Three tasks with bounded channels
 
-A source sends 1 to 5 through a channel of two slots, a second task squares them into another, and `main` sums what arrives. Each task's last sender closes its channel when the task is cleaned, which ends the next loop. The output does not depend on the schedule.
+A source sends 1 to 5 through a channel of two slots, a second task squares them into
+another, and `main` sums what arrives. Each task's last sender closes its channel when the
+task is cleaned, which ends the next loop. The output does not depend on the schedule.
 
 ```hirsel
 type AppError = Io(IoError) | Mem(Capacity) | Join(JoinError)
@@ -374,12 +396,14 @@ Outcome: success.
 
 Refused edits:
 
-- Receive from `rx1` after it moved into `ends`: insert `let _ = channel.receive(rx1)` before `let mut total`: refused, OWN-5 at 41:27, `rx1` was moved.
+- Receive from `rx1` after it moved into `ends`: insert `let _ = channel.receive(rx1)`
+  before `let mut total`: refused, OWN-5 at 41:27, `rx1` was moved.
 - Give `Ends` a field `seen: Rc[u64]`: refused, CONC-2 at 2:68, `Rc` is not `send`.
 
 ## 7. A child's failure is a value at join
 
-The child adds two `u8` values of 200 and fails with `Overflow`. Its cleanup runs in the child; the joiner receives the cause chain as an error value and carries on.
+The child adds two `u8` values of 200 and fails with `Overflow`. Its cleanup runs in the
+child; the joiner receives the cause chain as an error value and carries on.
 
 ```hirsel
 type AppError = Io(IoError) | Mem(Capacity)
@@ -420,5 +444,7 @@ Outcome: success. The child's cause is `Overflow` (SEM-1) at the `+=` in `t += x
 
 Refused edits:
 
-- Use `xs` after the spawn: insert `let n = list.len(xs)` before `match task.join`: refused, OWN-5 at 16:20, `xs` was moved.
-- Pass `xs` to the spawn without `take`: refused, OWN-7 at 12:47, a `take` parameter needs `take xs`.
+- Use `xs` after the spawn: insert `let n = list.len(xs)` before `match task.join`:
+  refused, OWN-5 at 16:20, `xs` was moved.
+- Pass `xs` to the spawn without `take`: refused, OWN-7 at 12:47, a `take` parameter needs
+  `take xs`.

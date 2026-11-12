@@ -25,7 +25,8 @@
 ; run: f3(-2.9) -> -2
 ; run: f3(2147483647) -> 2147483647  ; exactly representable in f64, fits
 ; run: f3(3e9) -> -1                 ; status 2, out of range
-; run: f3(nan) -> -1                 ; status 1, not finite
+; run: f3(-inf) -> -1                ; status 2: an infinity is out of range
+; run: f3(nan) -> -1                 ; status 1, NaN
 ; run: f4(-3) -> -3                  ; sign extension
 ; run: f4(32767) -> 32767
 ; run: f5(16777217) -> 16777216      ; 2^24+1 lies halfway; ties to even mantissa 2^24
@@ -83,7 +84,7 @@ b0(v0: f32):
 }
 fn f3 = n3 g1 {
 b0(v0: f64):
-  v1: i32, v2: i32 = float_to_i32 v0   ; result, then status 0/1/2
+  v1: i32, v2: u8 = float_to_int v0    ; result, then status 0 ok, 1 NaN, 2 out of range
   switch v2 [0 -> b1] else b2
 b1:
   return v1

@@ -1,4 +1,4 @@
-; FORM v0 sample, family: calls and instances (Call direct and indirect, FunctionRef,
+; CoreIR sample, family: calls and instances (Call direct and indirect, FunctionRef,
 ; multiple results, generic instances, an external function).
 ;
 ; Source (package samples@0, module calls):
@@ -13,10 +13,10 @@
 ;
 ; Behaviour, derived by hand:
 ; run: f2(47, 10) -> 4, 7
-; run: f2(1, 0) -> fail              ; division by zero (SEM-1)
+; run: f2(1, 0) -> fail Division     ; division by zero (SEM-1)
 ; run: f3(47, 100) -> 111            ; q 4, r 7: widen(4 + 7) + 100
 ; run: f3(5, 0) -> 5
-core v0
+core v1
 item i0 = samples@0/calls/id
 item i1 = samples@0/calls/divmod
 item i2 = samples@0/calls/use
@@ -39,26 +39,20 @@ b0(v0: u64):
 }
 fn f2 = n2 g2 {
 b0(v0: u32, v1: u32):
-  v2: u32 = div v0, v1 fail b1
-  v3: u32 = rem v0, v1 fail b1
+  v2: u32 = div v0, v1
+  v3: u32 = rem v0, v1
   return v2, v3                        ; two results: the C struct-return of (u32, u32)
-b1:
-  v4: u32 = const 0
-  return v4, v4
 }
 fn f3 = n3 g3 {
 b0(v0: u32, v1: u64):
   v2: u32 = const 10
   v3: u32, v4: u32 = call f2 g2 (v0, v2) at i2 45..58
   v5: u32 = call f0 g0 (v3) at i2 70..75
-  v6: u32 = add v5, v4 fail b1 at i2 70..79
+  v6: u32 = add v5, v4 at i2 70..79
   v7: u64 = widen v6
   v8: ptr = fnref f1
   v9: u64 = call v8 g1 (v1) at i2 83..88
-  v10: u64 = add v7, v9 fail b1 at i2 60..88
+  v10: u64 = add v7, v9 at i2 60..88
   return v10
-b1:
-  v11: u64 = const 0
-  return v11
 }
 fn f4 = n4 g1 extern

@@ -112,7 +112,7 @@ impl Width {
 
 /// A runtime-owned handle kind: an opaque pointer whose cleanup is a run-time call.
 /// Opaque engine-owned values held by pointer. Logical sizes per MEM-26: a task
-/// handle and a capability 8, a sender or receiver 24.
+/// handle and a capability 8, a sender or receiver 24, a `Causes` chain 8.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Handle {
     Task,
@@ -120,6 +120,8 @@ pub enum Handle {
     Receiver,
     /// A capability (`Dir`, `Tasks`, ...).
     Capability,
+    /// A delivered cause chain (`Causes`, CONC-6): cleaning it refunds its used cells.
+    Causes,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]

@@ -279,6 +279,12 @@ fn fixed(shapes: &[Shape], shape: &Shape, out: &[Option<Recipe>]) -> Result<Reci
                     if stable && inner.repr != Repr::Stable && !done(out, *t).plain {
                         return refuse("a stable type's fields are plain or stable (MEM-2)");
                     }
+                    if inner.repr == Repr::Resource {
+                        // A resource value is a pointer to its block, which carries
+                        // the cause cell and grant (FAIL-10, MEM-29).
+                        m.push((POINTER, POINTER, 8));
+                        continue;
+                    }
                     let Layout::Fixed(l) = &done(out, *t).layout else {
                         unreachable!("non-compact shapes have fixed layouts")
                     };
@@ -297,7 +303,9 @@ fn fixed(shapes: &[Shape], shape: &Shape, out: &[Option<Recipe>]) -> Result<Reci
                 | FieldTy::Rc(_)
                 | FieldTy::Arc(_)
                 | FieldTy::Region
-                | FieldTy::Handle(Handle::Task | Handle::Capability) => (POINTER, POINTER, 8),
+                | FieldTy::Handle(Handle::Task | Handle::Capability | Handle::Causes) => {
+                    (POINTER, POINTER, 8)
+                }
                 FieldTy::Handle(Handle::Sender | Handle::Receiver) => (POINTER, POINTER, 24),
                 FieldTy::Seq(_) | FieldTy::Map(..) => (SEQ_CARRIER, POINTER, 24),
                 FieldTy::OwnFn => (CLOSURE_CARRIER, POINTER, 16),
@@ -365,7 +373,9 @@ fn needs_drop(shapes: &[Shape], ty: &FieldTy, out: &[Option<Recipe>]) -> bool {
         | FieldTy::Arc(_)
         | FieldTy::Map(..)
         | FieldTy::OwnFn
-        | FieldTy::Handle(Handle::Task | Handle::Sender | Handle::Receiver) => true,
+        | FieldTy::Handle(Handle::Task | Handle::Sender | Handle::Receiver | Handle::Causes) => {
+            true
+        }
         _ => false,
     }
 }
@@ -393,7 +403,9 @@ fn drop_recipe(
                 .collect()
         })
         .collect();
-    (shape.finalizer.is_some() || fields.iter().any(|r| !r.is_empty())).then_some(DropRecipe {
+    // A resource always has cleanup: its block, cell and grant are freed and refunded.
+    let any = shape.repr == Repr::Resource || shape.finalizer.is_some();
+    (any || fields.iter().any(|r| !r.is_empty())).then_some(DropRecipe {
         finalizer: shape.finalizer,
         fields,
     })

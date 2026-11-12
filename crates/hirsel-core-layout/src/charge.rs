@@ -86,7 +86,11 @@ pub const fn task(result: u64, n: u64) -> Option<u64> {
 /// A `Text` or span made outside a compact type: count, extent, one offset per
 /// element when `indexed`, then the payload bytes, rounded up to 8.
 pub const fn standalone_span(elements: u64, payload: u64, indexed: bool) -> Option<u64> {
-    let table = if indexed { elements.checked_mul(8) } else { Some(0) };
+    let table = if indexed {
+        elements.checked_mul(8)
+    } else {
+        Some(0)
+    };
     match table {
         Some(t) => match (16 + t).checked_add(payload) {
             Some(n) => round8(n),

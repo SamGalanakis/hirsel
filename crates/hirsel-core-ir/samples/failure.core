@@ -1,0 +1,82 @@
+; CoreIR sample, family: failure (failure successors, raise, propagate, the cause
+; chain, a pending result, a finalizer's failure). FORM v1a, FAIL-2..14.
+;
+; Source (package samples@0, module failure):
+;   i0  fn check(x: u64) -> u64 { if x == 0 { unwrap_failed() }; x }
+;       resource Temp { id: u64 } drop { if self.id % 2 == 0 { bounds_failed() } }
+;       fn guarded(x: u64) -> u64 { let t = Temp { id: x }; check(x) }
+;
+; A call without `fail` propagates and its frame has nothing to clean (f0's raise).
+; f1 owns a Temp, so its call to f0 names a failure successor that drops it first.
+; Dropping `t` after the call returned is the cleanup of the normal exit: the u64
+; result is pending (FAIL-9); when the finalizer fails, the result is discarded and
+; the failure propagates (FAIL-12: the fields are cleaned and the block freed).
+; Temp's charge is 40: storage 8, cause cell 32, grant 0 (MEM-26, FAIL-10). A used
+; cell leaves with the chain, so after a finalizer failure the root still holds 32.
+;
+; Behaviour, derived by hand (trace: Temp ids in the order their cleanup started):
+; run: f1(3) -> 3 | used 0 | trace 3                  ; odd id: the finalizer passes
+; run: f1(0) -> fail Unwrap, Bounds | used 32 | trace 0 ; check fails, then the drop
+; run: f1(2) -> fail Bounds | used 32 | trace 2       ; check passes, the drop fails
+; run: f1(1) -> 1 | used 0 | trace 1
+; run: f0(0) -> fail Unwrap | used 0                  ; nothing to clean, no cell used
+core v1
+item i0 = samples@0/failure/guarded
+type t0 = resource "Temp" drop f2 { id: u64 }
+sig g0 = (u64) -> (u64)
+sig g1 = (ptr) -> ()
+inst n0 = samples@0/failure/check [] []
+inst n1 = samples@0/failure/guarded [] []
+inst n2 = samples@0/failure/Temp.drop [] []
+fn f0 = n0 g0 {
+b0(v0: u64):
+  v1: u64 = const 0
+  v2: bool = eq v0, v1
+  branch v2, b1, b2
+b1:
+  raise unwrap
+b2:
+  return v0
+}
+fn f1 = n1 g0 {
+  slot s0 = t0                         ; t: holds the pointer to Temp's block
+  addr a0 = s0 : t0
+  addr a1 = s0 : ptr
+  addr a2 = v2 : t0
+  addr a3 = a2 field 0 : u64
+b0(v0: u64):
+  live s0
+  address a0
+  address a1
+  v1: u64 = const 40
+  v2: ptr, v3: u64 = alloc resource grant 0 8 align 8 charge v1
+  address a2
+  address a3
+  store a3, v0
+  store a1, v2
+  v4: u64 = call f0 g0 (v0) fail b1
+  drop a0 t0 fail b2                   ; normal exit: v4 is pending
+  return v4
+b1:
+  drop a0 t0 fail b2                   ; failure exit: clean `t`, keep the chain
+  propagate
+b2:
+  propagate
+}
+fn f2 = n2 g1 {
+  addr a0 = v0 : t0
+  addr a1 = a0 field 0 : u64
+b0(v0: ptr):
+  address a0
+  address a1
+  v1: u64 = read a1
+  v2: u64 = const 2
+  v3: u64 = rem v1, v2
+  v4: u64 = const 0
+  v5: bool = eq v3, v4
+  branch v5, b1, b2
+b1:
+  raise bounds
+b2:
+  return
+}

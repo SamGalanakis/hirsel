@@ -248,7 +248,10 @@ fn compact_variant_occupies_its_active_case_only() {
     ] {
         let rw = |at| le(bytes, at, 4);
         let rt = |at, n| le(bytes, at, n);
-        assert_eq!(compact_extent(&r, TypeRef(0), Width::U32, 0, &rw, &rt), extent);
+        assert_eq!(
+            compact_extent(&r, TypeRef(0), Width::U32, 0, &rw, &rt),
+            extent
+        );
     }
 }
 
@@ -258,11 +261,18 @@ fn compact_variant_occupies_its_active_case_only() {
 /// 10 bytes, so k sits at 10 and Row's extent is 11 (at u16 it would be 6 and 7).
 #[test]
 fn inline_compact_values_use_the_holders_width() {
-    let name = record("Name", Repr::Compact(Width::U16), vec![field("t", FieldTy::Text)]);
+    let name = record(
+        "Name",
+        Repr::Compact(Width::U16),
+        vec![field("t", FieldTy::Text)],
+    );
     let row = record(
         "Row",
         Repr::Compact(Width::U32),
-        vec![field("n", FieldTy::Inline(TypeRef(0))), field("k", u(Scalar::U8))],
+        vec![
+            field("n", FieldTy::Inline(TypeRef(0))),
+            field("k", u(Scalar::U8)),
+        ],
     );
     let r = compute(&[name, row]).unwrap();
     let b = [2u8, 0, 0, 0, 2, 0, 0, 0, b'h', b'i', 7];
@@ -307,10 +317,22 @@ fn representation_refusals() {
     assert!(matches!(compute(&[empty]), Err(LayoutError::Empty { .. })));
     // MEM-2: a plain own record is a legal field of a stable type; a String is not.
     let pair = record("P", Repr::Own, vec![field("a", u(Scalar::U64))]);
-    let ok = record("S", Repr::Stable, vec![field("p", FieldTy::Inline(TypeRef(0)))]);
+    let ok = record(
+        "S",
+        Repr::Stable,
+        vec![field("p", FieldTy::Inline(TypeRef(0)))],
+    );
     assert!(compute(&[pair.clone(), ok]).is_ok());
-    let s = record("Q", Repr::Own, vec![field("s", FieldTy::Seq(Box::new(u(Scalar::U8))))]);
-    let bad = record("S", Repr::Stable, vec![field("q", FieldTy::Inline(TypeRef(0)))]);
+    let s = record(
+        "Q",
+        Repr::Own,
+        vec![field("s", FieldTy::Seq(Box::new(u(Scalar::U8))))],
+    );
+    let bad = record(
+        "S",
+        Repr::Stable,
+        vec![field("q", FieldTy::Inline(TypeRef(0)))],
+    );
     assert!(matches!(compute(&[s, bad]), Err(LayoutError::Field { .. })));
 }
 
@@ -335,4 +357,32 @@ fn charge_v1_matches_the_spec_table() {
     assert_eq!(charge::grown_capacity(8, 100), Some(100));
     assert_eq!(charge::seq(u64::MAX, 2), None);
     assert_eq!(charge::round8(u64::MAX - 3), None);
+}
+
+/// Bug: a resource is laid out inline in its holder, so its cause cell and grant
+/// (FAIL-10, MEM-29) have no block to live in, or a resource without a finalizer or
+/// owned fields gets no cleanup and its block, cell and grant are never refunded.
+/// `Temp { id: u64 }` held as `{a: u8, t: Temp}`: t is a block pointer @8, size 16.
+#[test]
+fn a_resource_is_a_cleaned_block_its_holder_points_to() {
+    let r = compute(&[
+        record("Temp", Repr::Resource, vec![field("id", u(Scalar::U64))]),
+        record(
+            "H",
+            Repr::Own,
+            vec![
+                field("a", u(Scalar::U8)),
+                field("t", FieldTy::Inline(TypeRef(0))),
+            ],
+        ),
+    ])
+    .unwrap();
+    assert!(r[0].drop.is_some(), "a bare resource still needs cleanup");
+    assert_eq!((fixed(&r[1]).offsets[0][1], fixed(&r[1]).size), (8, 16));
+    let fields = &r[1]
+        .drop
+        .as_ref()
+        .expect("the holder cleans its resource")
+        .fields[0];
+    assert_eq!(fields.iter().map(|f| f.field).collect::<Vec<_>>(), [1]);
 }

@@ -9,7 +9,7 @@
 //! slots or prove liveness before emitting.
 
 use hirsel_core_ids::{ContentHash, DefPath};
-pub use hirsel_core_layout::Scalar;
+pub use hirsel_core_layout::{Scalar, Shape};
 use std::marker::PhantomData;
 
 macro_rules! ids { ($($(#[$doc:meta])* $name:ident),* $(,)?) => {$(
@@ -44,7 +44,8 @@ ids!(
     InstanceId,
     /// A source item in `Module::items` (debug identity).
     ItemId,
-    /// A declared type in `Module::types`; its layout recipe is FORM v1.
+    /// A declared type in `Module::types`: its shape, from which
+    /// `hirsel_core_layout::compute` derives the layout and drop recipe.
     TypeId,
 );
 
@@ -237,8 +238,10 @@ pub enum ConvertMode {
     Truncate,
     /// `flag` (bool) is true exactly when the operand is representable.
     TryNarrow,
-    /// `flag` (i32): 0 fits, 1 NaN or infinity, 2 out of range; result saturated.
-    FloatToI32,
+    /// `float.to_<int>` (SEM-2) to any integer type: the value truncated toward
+    /// zero, and `flag` (u8): 0 in range, 1 NaN, 2 out of range (infinities
+    /// included). The value is 0 unless the flag is 0.
+    FloatToInt,
     IntToFloat,
     Reinterpret,
     FloatResize,
@@ -259,6 +262,9 @@ pub enum ArithOp {
     Add,
     Sub,
     Mul,
+    /// Checked only (`int.checked_div`): the flag is set on a zero divisor or
+    /// `MIN / -1`, and the value is then 0.
+    Div,
 }
 
 /// LIR `ScalarUnaryOp`, unchanged.
@@ -392,6 +398,239 @@ pub enum Inst {
     Call {
         call: CallId,
     },
+
+    // ---- FORM v1 draft (not frozen) ----
+    /// Admit `charge` and allocate a block of `size` bytes aligned to `align`
+    /// (MEM-23). On refusal `result` is null and `available` is the room left in the
+    /// limit tried (MEM-24), and nothing is allocated. Under a finalizer's grant a
+    /// refusal is a failure with cause `Capacity` instead (MEM-29).
+    Alloc {
+        result: ValueId,
+        available: ValueId,
+        kind: AllocKind,
+        place: AllocPlace,
+        charge: ValueId,
+        size: u64,
+        align: u64,
+        fail: Option<BlockId>,
+    },
+    /// Free an own, counted or resource block and refund `charge` to the limit its
+    /// record leads to (MEM-22, MEM-25). Never fails. A resource's refund leaves out
+    /// a cause cell that holds a cause and a grant its finalizer already settled.
+    Free {
+        block: ValueId,
+        charge: ValueId,
+    },
+    /// Copy `bytes` bytes from the place `from` to the place `to` (they do not
+    /// overlap). A move of a non-plain value is this copy; the source is then moved
+    /// out and its drop flag cleared by the producer. Growth copies the old storage.
+    Copy {
+        to: AddressId,
+        from: AddressId,
+        bytes: ValueId,
+    },
+    // ---- FORM v1b draft (not frozen: regions serve stable values and builders) ----
+    /// Open a region (MEM-1); `result` is its handle.
+    RegionOpen {
+        result: ValueId,
+    },
+    /// Free and refund everything allocated in the region at once (MEM-8).
+    RegionClose {
+        region: ValueId,
+    },
+    // ---- FORM v1a again ----
+    /// Enter `bound bytes n`: admit `bytes` against the current limit and make a new
+    /// limit of that size current (MEM-27). `admitted` is false, `available` the
+    /// room, and no limit is entered when the admission is refused.
+    LimitEnter {
+        admitted: ValueId,
+        available: ValueId,
+        bytes: ValueId,
+    },
+    /// Leave the innermost bound scope: refund its unused part to the parent and
+    /// hand its record over (MEM-22). Never fails.
+    LimitExit,
+    /// Clean the value at `address` by its type's drop recipe (FAIL-8): the
+    /// finalizer under its grant, then fields in reverse declaration order, then
+    /// the value's own block. A finalizer failure still cleans the fields and then
+    /// takes `fail` (FAIL-12); the cause is already in the chain.
+    Drop {
+        address: AddressId,
+        ty: TypeId,
+        fail: Option<BlockId>,
+    },
+    /// Add a holder to a counted node (MEM-16); past `2^64 - 1` holders is a run stop.
+    Share {
+        node: ValueId,
+        kind: Counted,
+    },
+    /// Drop a holder; at zero clean the payload of type `ty` with a constant-stack
+    /// worklist and refund each node (MEM-16). Never fails and runs no user code: a
+    /// shareable payload holds no resource.
+    Release {
+        node: ValueId,
+        kind: Counted,
+        ty: TypeId,
+    },
+    /// `try_unwrap`: true exactly when this is the only holder; the payload is then
+    /// the caller's (moved out with `Copy`) and the node is freed with `Free`, which
+    /// refunds the node only. False leaves the holder unchanged.
+    TryUnwrap {
+        result: ValueId,
+        node: ValueId,
+        kind: Counted,
+    },
+}
+
+/// What an `Alloc` makes (FORM v1 draft). The block's bookkeeping (its limit record,
+/// and for a resource its cause cell and grant) is the engine's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum AllocKind {
+    Own,
+    /// A counted node: the count (u64, starting at 1) at offset 0, the payload at 8.
+    Counted,
+    /// A resource block: `charge` covers its storage, its cause cell and `grant`.
+    Resource {
+        grant: u64,
+    },
+}
+
+/// Which limit an `Alloc` is charged to (FORM v1 draft).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum AllocPlace {
+    /// The current limit (MEM-21).
+    Current,
+    /// The limit the block's record leads to: growth keeps the limit (MEM-28).
+    Like(ValueId),
+    /// FORM v1b draft: in this region, charged to the current limit until it closes (MEM-1).
+    Region(ValueId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Counted {
+    Rc,
+    /// Every operation is an event in the run's order (MEM-15).
+    Arc,
+}
+
+/// Engine operations a call can name (FORM v1 draft). Rows are in the crate docs;
+/// a `take` argument is passed by address and is the callee's only after the
+/// operation's commit point (FAIL-3), so a refused operation leaves it in place.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum RtOp {
+    Spawn { x: TypeId, r: TypeId },
+    Join { r: TypeId },
+    Cancel,
+    CheckCancel,
+    ChannelNew { item: TypeId },
+    ChannelSender,
+    Send { item: TypeId },
+    TrySend { item: TypeId },
+    Receive { item: TypeId },
+}
+
+/// The primary cause a `Raise` records (FAIL-2). Overflow, Bounds and Division are
+/// recorded by the instructions that raise them; Cancelled by the engine operations
+/// that observe it; Capacity by an allocation over a grant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum RaiseCause {
+    Unwrap,
+    Bounds,
+    /// `fail(msg)`: takes the `String` at the address.
+    Fail(AddressId),
+}
+
+impl RtOp {
+    /// The signature row a call of this operation names. A `take` input is `&T` and
+    /// stays the caller's when the operation refuses before its commit point.
+    ///
+    /// | op | params | results |
+    /// |---|---|---|
+    /// | `spawn[X, R]` | `n: u64`, `&X`, `f: ptr` | task `ptr` (null on `Capacity`), `available: u64` |
+    /// | `join[R]` | task `ptr`, `&R` | status `u8`: 0 Ok (R written), 1 Failed, 2 Cancelled; `Causes` `ptr` (null when Ok) |
+    /// | `cancel` | task `ptr` | |
+    /// | `check_cancel` | | |
+    /// | `channel_new[T]` | `cap: u64` | sender `ptr`, receiver `ptr` (null on `Capacity`), `available: u64` |
+    /// | `channel_sender` | sender `ptr` | sender `ptr` |
+    /// | `send[T]` | sender `ptr`, `&T` | `bool`: published (false: `Closed`, the item stays) |
+    /// | `try_send[T]` | sender `ptr`, `&T` | status `u8`: 0 published, 1 `Full`, 2 `Closed` |
+    /// | `receive[T]` | receiver `ptr`, `&T` | `bool`: received (false: `Closed`) |
+    ///
+    /// `f` is a plain function `(&X) -> () dest R`. `channel_new` with `cap` 0 fails
+    /// with `Bounds`; `send`, `receive`, `join` and `check_cancel` fail with
+    /// `Cancelled` when they observe it (CONC-7).
+    pub fn signature(self) -> Signature {
+        use Param::{Address as A, Value as V};
+        let (u8_, u64_, bool_) = (
+            Ty::Scalar(Scalar::U8),
+            Ty::Scalar(Scalar::U64),
+            Ty::Scalar(Scalar::Bool),
+        );
+        let p = Ty::Ptr;
+        let (params, results) = match self {
+            RtOp::Spawn { x, .. } => (vec![V(u64_), A(x), V(p)], vec![p, u64_]),
+            RtOp::Join { r } => (vec![V(p), A(r)], vec![u8_, p]),
+            RtOp::Cancel => (vec![V(p)], vec![]),
+            RtOp::CheckCancel => (vec![], vec![]),
+            RtOp::ChannelNew { .. } => (vec![V(u64_)], vec![p, p, u64_]),
+            RtOp::ChannelSender => (vec![V(p)], vec![p]),
+            RtOp::Send { item } => (vec![V(p), A(item)], vec![bool_]),
+            RtOp::TrySend { item } => (vec![V(p), A(item)], vec![u8_]),
+            RtOp::Receive { item } => (vec![V(p), A(item)], vec![bool_]),
+        };
+        Signature {
+            params,
+            results,
+            dest: None,
+        }
+    }
+
+    pub fn types(self) -> Vec<TypeId> {
+        match self {
+            RtOp::Spawn { x, r } => vec![x, r],
+            RtOp::Join { r } => vec![r],
+            RtOp::ChannelNew { item }
+            | RtOp::Send { item }
+            | RtOp::TrySend { item }
+            | RtOp::Receive { item } => vec![item],
+            RtOp::Cancel | RtOp::CheckCancel | RtOp::ChannelSender => vec![],
+        }
+    }
+}
+
+impl Inst {
+    /// Whether the instruction can fail; it may name a failure block exactly then.
+    pub fn can_fail(&self, b: &Body) -> bool {
+        let ty = |v: ValueId| b.values.get(v.index()).copied();
+        match *self {
+            Inst::Unary { op, operand, .. } => {
+                op == UnaryOp::Neg && ty(operand).is_some_and(|t| t.int().is_some())
+            }
+            Inst::Binary { op, left, .. } => ty(left).is_some_and(|t| op.can_fail(t)),
+            Inst::Address { address, .. } => b.addresses.get(address.index()).is_some_and(|a| {
+                a.steps
+                    .get(&b.pools.steps)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|s| matches!(s, Step::Index(_)))
+            }),
+            Inst::Alloc { .. } | Inst::Drop { .. } | Inst::Call { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// The failure block the instruction names, if any.
+    pub fn fail(&self, b: &Body) -> Option<BlockId> {
+        match *self {
+            Inst::Unary { fail, .. }
+            | Inst::Binary { fail, .. }
+            | Inst::Address { fail, .. }
+            | Inst::Alloc { fail, .. }
+            | Inst::Drop { fail, .. } => fail,
+            Inst::Call { call } => b.calls.get(call.index()).and_then(|c| c.fail),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -399,6 +638,8 @@ pub enum Callee {
     Direct(FuncId),
     /// A code pointer value, called with the call site's signature.
     Indirect(ValueId),
+    /// An engine operation (FORM v1 draft).
+    Runtime(RtOp),
 }
 
 /// A call argument: a value, or the address of a place passed by address.
@@ -414,6 +655,9 @@ pub struct CallSite {
     pub signature: SigId,
     pub args: PoolRange<Arg>,
     pub results: PoolRange<ValueId>,
+    /// Where a failure of the callee continues (FORM v1 draft); None propagates it
+    /// out of this function with no cleanup here.
+    pub fail: Option<BlockId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -444,6 +688,15 @@ pub enum Terminator {
     },
     /// The signature's results, in order.
     Return(PoolRange<ValueId>),
+    // ---- FORM v1 draft (not frozen) ----
+    /// Record a cause in the chain (FAIL-10), then continue at `cleanup`, or
+    /// propagate when there is none.
+    Raise {
+        cause: RaiseCause,
+        cleanup: Option<BlockId>,
+    },
+    /// Leave the function failing; the caller continues at its call's `fail`.
+    Propagate,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -552,8 +805,9 @@ pub struct Static {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct Module {
     pub items: Vec<DefPath>,
-    /// Canonical text of each declared type; recipes join on this table (v1).
-    pub types: Vec<String>,
+    /// Each declared type's shape (its `name` is its canonical text). `Shape`'s
+    /// `TypeRef` and `FuncRef` index this table and `functions`.
+    pub types: Vec<Shape>,
     pub statics: Vec<Static>,
     pub signatures: Vec<Signature>,
     pub instances: Vec<InstanceKey>,

@@ -1,7 +1,9 @@
 //! Structural well-formedness, for tests only (feature `wf`): producers' tests call
 //! it on what they built; no product path does (we trust our own implementation).
-//! It checks references, single definition, arity and the operand typing each
-//! instruction states. It does not check layouts (FORM v1) or dominance.
+//! It checks references, single definition, arity, the operand typing each
+//! instruction states, that type rows have recipes, and that no failure path
+//! reaches a `return` (FAIL-14: nothing catches a failure). It does not check
+//! dominance, drop-flag discipline or limit-scope balance.
 
 use crate::*;
 
@@ -11,7 +13,48 @@ fn need(ok: bool, msg: impl FnOnce() -> String) -> R {
     if ok { Ok(()) } else { Err(msg()) }
 }
 
+fn refs_ok(f: &hirsel_core_layout::FieldTy, n: usize) -> bool {
+    use hirsel_core_layout::FieldTy as F;
+    match f {
+        F::Inline(t)
+        | F::Box(t)
+        | F::Rc(t)
+        | F::Arc(t)
+        | F::Stable(t)
+        | F::Link(t)
+        | F::OptLink(t) => t.index() < n,
+        F::Seq(e) | F::FixedSpan(e) | F::SeqSpan(e) | F::IndexedSpan(e) => refs_ok(e, n),
+        F::Map(k, v) => refs_ok(k, n) && refs_ok(v, n),
+        _ => true,
+    }
+}
+
 pub fn module(m: &Module) -> R {
+    for (i, t) in m.types.iter().enumerate() {
+        let fields = match &t.body {
+            hirsel_core_layout::Body::Record(f) => f.iter().collect::<Vec<_>>(),
+            hirsel_core_layout::Body::Variant(c) => c.iter().flat_map(|c| &c.fields).collect(),
+        };
+        need(fields.iter().all(|f| refs_ok(&f.ty, m.types.len())), || {
+            format!("t{i}: unknown type")
+        })?;
+        if let Some(f) = t.finalizer {
+            // A finalizer receives the resource block's pointer (FAIL-11).
+            let sig = m
+                .functions
+                .get(f.0 as usize)
+                .and_then(|f| m.signatures.get(f.signature.index()));
+            let want = Signature {
+                params: vec![Param::Value(Ty::Ptr)],
+                results: vec![],
+                dest: None,
+            };
+            need(sig == Some(&want), || {
+                format!("t{i}: finalizer is not (ptr) -> ()")
+            })?;
+        }
+    }
+    hirsel_core_layout::compute(&m.types).map_err(|e| format!("layout: {e:?}"))?;
     for (i, s) in m.signatures.iter().enumerate() {
         let types_ok = s.params.iter().all(|p| match p {
             Param::Address(t) => t.index() < m.types.len(),
@@ -70,16 +113,11 @@ impl Ctx<'_> {
             format!("b{} out of range", b.0)
         })
     }
+    /// A failure block only where the operation can fail; without one a failure
+    /// propagates out of the function with no cleanup in it.
     fn fail(&self, f: Option<BlockId>, can_fail: bool) -> R {
-        need(f.is_some() == can_fail, || {
-            format!(
-                "failure block {}",
-                if can_fail {
-                    "missing"
-                } else {
-                    "on an operation that cannot fail"
-                }
-            )
+        need(f.is_none() || can_fail, || {
+            "failure block on an operation that cannot fail".into()
         })?;
         if let Some(f) = f {
             self.block(f)?;
@@ -111,6 +149,14 @@ impl Ctx<'_> {
             })?;
         }
         Ok(())
+    }
+    fn tid(&self, t: TypeId) -> R {
+        need(t.index() < self.m.types.len(), || {
+            format!("t{} out of range", t.0)
+        })
+    }
+    fn is(&self, v: ValueId, t: Ty) -> R {
+        need(self.ty(v)? == t, || format!("v{} is not {t:?}", v.0))
     }
     fn place(&self, a: AddressId) -> Result<PlaceTy, String> {
         self.b
@@ -220,6 +266,13 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
                 }
                 c.edge(*otherwise)?;
             }
+            Terminator::Raise { cause, cleanup } => {
+                c.fail(*cleanup, true)?;
+                if let RaiseCause::Fail(a) = cause {
+                    c.place(*a)?;
+                }
+            }
+            Terminator::Propagate => {}
             Terminator::Return(r) => {
                 let types: Vec<Ty> = c
                     .vals(*r)?
@@ -237,6 +290,65 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
     })?;
     if let Some(v) = c.defined.iter().position(|n| *n != 1) {
         return Err(format!("v{v} defined {} times", c.defined[v]));
+    }
+    no_catch(b)
+}
+
+/// FAIL-14: no block reachable from a failure block returns normally.
+fn no_catch(b: &Body) -> R {
+    let succ = |bi: usize| -> Vec<BlockId> {
+        let blk = &b.blocks[bi];
+        let mut out: Vec<BlockId> = blk
+            .insts
+            .get(&b.insts)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|i| i.fail(b))
+            .collect();
+        let edge = |e: &EdgeId| b.edges[e.index()].target;
+        match &b.terminators[bi] {
+            Terminator::Jump(e) => out.push(edge(e)),
+            Terminator::Branch { yes, no, .. } => out.extend([edge(yes), edge(no)]),
+            Terminator::Switch {
+                arms, otherwise, ..
+            } => {
+                out.extend(
+                    arms.get(&b.pools.arms)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|a| edge(&a.edge)),
+                );
+                out.push(edge(otherwise));
+            }
+            Terminator::Raise { cleanup, .. } => out.extend(*cleanup),
+            Terminator::Return(_) | Terminator::Propagate => {}
+        }
+        out
+    };
+    let mut seen = vec![false; b.blocks.len()];
+    let mut work: Vec<BlockId> = (0..b.blocks.len())
+        .flat_map(|bi| {
+            let raise = match b.terminators[bi] {
+                Terminator::Raise { cleanup, .. } => cleanup,
+                _ => None,
+            };
+            let insts = b.blocks[bi].insts.get(&b.insts).unwrap_or_default();
+            insts
+                .iter()
+                .filter_map(|i| i.fail(b))
+                .chain(raise)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    while let Some(k) = work.pop() {
+        if std::mem::replace(&mut seen[k.index()], true) {
+            continue;
+        }
+        need(
+            !matches!(b.terminators[k.index()], Terminator::Return(_)),
+            || format!("failure path reaches the return of b{}", k.0),
+        )?;
+        work.extend(succ(k.index()));
     }
     Ok(())
 }
@@ -357,8 +469,8 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                 ConvertMode::TryNarrow => {
                     from.int().is_some() && to.int().is_some() && flag_ty == Some(bool_ty)
                 }
-                ConvertMode::FloatToI32 => {
-                    from.is_float() && to == Ty::Scalar(Scalar::I32) && flag_ty == Some(to)
+                ConvertMode::FloatToInt => {
+                    from.is_float() && to.int().is_some() && flag_ty == Some(Ty::Scalar(Scalar::U8))
                 }
                 ConvertMode::IntToFloat => {
                     from.int().is_some() && to.is_float() && flag_ty.is_none()
@@ -380,11 +492,14 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
         Inst::IntArith {
             result,
             flag,
-            op: _,
+            op,
             mode,
             left,
             right,
         } => {
+            need(op != ArithOp::Div || mode == ArithMode::Checked, || {
+                "div is checked only".into()
+            })?;
             c.def(result)?;
             if let Some(f) = flag {
                 c.def(f)?;
@@ -468,12 +583,83 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                 "mask field outside its word".into()
             })
         }
+        Inst::Alloc {
+            result,
+            available,
+            kind: _,
+            place,
+            charge,
+            size: _,
+            align,
+            fail,
+        } => {
+            c.def(result)?;
+            c.def(available)?;
+            c.is(result, Ty::Ptr)?;
+            c.is(available, Ty::Scalar(Scalar::U64))?;
+            c.is(charge, Ty::Scalar(Scalar::U64))?;
+            if let AllocPlace::Like(v) | AllocPlace::Region(v) = place {
+                c.is(v, Ty::Ptr)?;
+            }
+            need(align.is_power_of_two(), || {
+                "alignment is not a power of two".into()
+            })?;
+            c.fail(fail, true)
+        }
+        Inst::Free { block, charge } => {
+            c.is(block, Ty::Ptr)?;
+            c.is(charge, Ty::Scalar(Scalar::U64))
+        }
+        Inst::Copy { to, from, bytes } => {
+            c.place(to)?;
+            c.place(from)?;
+            c.is(bytes, Ty::Scalar(Scalar::U64))
+        }
+        Inst::RegionOpen { result } => {
+            c.def(result)?;
+            c.is(result, Ty::Ptr)
+        }
+        Inst::RegionClose { region } => c.is(region, Ty::Ptr),
+        Inst::LimitEnter {
+            admitted,
+            available,
+            bytes,
+        } => {
+            c.def(admitted)?;
+            c.def(available)?;
+            c.is(admitted, bool_ty)?;
+            c.is(available, Ty::Scalar(Scalar::U64))?;
+            c.is(bytes, Ty::Scalar(Scalar::U64))
+        }
+        Inst::LimitExit => Ok(()),
+        Inst::Drop { address, ty, fail } => {
+            c.tid(ty)?;
+            need(c.place(address)? == PlaceTy::Declared(ty), || {
+                "drop of a place of another type".into()
+            })?;
+            c.fail(fail, true)
+        }
+        Inst::Share { node, kind: _ } => c.is(node, Ty::Ptr),
+        Inst::Release { node, kind: _, ty } => {
+            c.tid(ty)?;
+            c.is(node, Ty::Ptr)
+        }
+        Inst::TryUnwrap {
+            result,
+            node,
+            kind: _,
+        } => {
+            c.def(result)?;
+            c.is(result, bool_ty)?;
+            c.is(node, Ty::Ptr)
+        }
         Inst::Call { call } => {
             let site = c.b.calls.get(call.index()).ok_or("call out of range")?;
             let sig =
                 c.m.signatures
                     .get(site.signature.index())
                     .ok_or("unknown signature")?;
+            c.fail(site.fail, true)?;
             match site.callee {
                 Callee::Direct(f) => {
                     let f = c.m.functions.get(f.index()).ok_or("unknown callee")?;
@@ -484,6 +670,14 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                 Callee::Indirect(v) => need(c.ty(v)? == Ty::Ptr, || {
                     "indirect callee is not a pointer".into()
                 })?,
+                Callee::Runtime(op) => {
+                    for t in op.types() {
+                        c.tid(t)?;
+                    }
+                    need(*sig == op.signature(), || {
+                        format!("{op:?} through another signature")
+                    })?;
+                }
             }
             let args = site.args.get(&c.b.pools.args).ok_or("args out of pool")?;
             // The destination travels as the first argument, an address of type `dest`.

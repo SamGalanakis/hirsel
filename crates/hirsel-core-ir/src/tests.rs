@@ -15,6 +15,11 @@ const SAMPLES: &[(&str, &str)] = &[
     ("control", include_str!("../samples/control.core")),
     ("slots", include_str!("../samples/slots.core")),
     ("calls", include_str!("../samples/calls.core")),
+    ("failure", include_str!("../samples/failure.core")),
+    ("cleanup", include_str!("../samples/cleanup.core")),
+    ("admission", include_str!("../samples/admission.core")),
+    ("counted", include_str!("../samples/counted.core")),
+    ("custody", include_str!("../samples/custody.core")),
 ];
 
 fn load(name: &str, text: &str) -> Module {
@@ -57,20 +62,25 @@ fn every_sample_is_well_formed() {
 /// Each case is a one-line edit of a correct body and the rule it breaks.
 #[test]
 fn well_formedness_rejects_producer_mistakes() {
-    let head = "core v0\nsig g0 = (i32, i32) -> (i32)\ninst n0 = p@0/m/f [] []\nfn f0 = n0 g0 {\n";
+    let head = "core v1\nsig g0 = (i32, i32) -> (i32)\nsig g1 = (u64) -> (ptr)\ninst n0 = p@0/m/f [] []\nfn f0 = n0 g0 {\n";
     let ok =
-        "b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1 fail b1\n  return v2\nb1:\n  return v0\n}\n";
+        "b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1 fail b1\n  return v2\nb1:\n  propagate\n}\n";
     wf::module(&parse(&format!("{head}{ok}")).unwrap()).expect("the base case is well formed");
     let cases = [
-        // integer add can overflow: it must name a failure block
+        // a failure path that returns would catch the failure (FAIL-14)
         (
-            "b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1\n  return v2\n}\n",
-            "missing",
+            "b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1 fail b1\n  return v2\nb1:\n  jump b2\nb2:\n  return v0\n}\n",
+            "failure path",
         ),
-        // a failure block receives no parameters in v0
+        // a failure block receives no parameters: the cause is in the chain
         (
-            "b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1 fail b1\n  return v2\nb1(v3: i32):\n  return v3\n}\n",
+            "b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1 fail b1\n  return v2\nb1(v3: i32):\n  propagate\n}\n",
             "parameters",
+        ),
+        // an engine operation called through a signature other than its row
+        (
+            "b0(v0: i32, v1: i32):\n  v2: u64 = const 4\n  v3: ptr = call rt.channel_sender g1 (v2)\n  return v0\n}\n",
+            "through another signature",
         ),
         // an edge passes the wrong number of arguments
         (
@@ -100,8 +110,13 @@ fn well_formedness_rejects_producer_mistakes() {
         let err = wf::module(&m).expect_err(why);
         assert!(err.contains(why), "expected `{why}`, got `{err}`");
     }
+    // v0 names a failure block on every fallible instruction: a v0 reader must not
+    // take a propagating `add` as one that cannot fail.
+    let v0 = format!("{head}b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1\n  return v2\n}}\n")
+        .replace("core v1", "core v0");
+    assert!(parse(&v0).unwrap_err().message.contains("under `core v0`"));
     let twice =
-        "b0(v0: i32, v1: i32):\n  v1: i32 = add v0, v0 fail b1\n  return v1\nb1:\n  return v0\n}\n";
+        "b0(v0: i32, v1: i32):\n  v1: i32 = add v0, v0 fail b1\n  return v1\nb1:\n  propagate\n}\n";
     assert!(
         parse(&format!("{head}{twice}"))
             .unwrap_err()
@@ -132,11 +147,20 @@ fn samples_behave_as_derived_by_hand() {
         let mut runs = 0;
         let m = load(name, text);
         for line in text.lines() {
-            let Some(run) = line.strip_prefix("; run:") else {
+            // `; run [limit N]: fK(args) -> results | used N | trace a, b`, or
+            // `-> fail Cause, ...`; `used` and `trace` are checked when written.
+            let Some(run) = line.strip_prefix("; run") else {
                 continue;
+            };
+            let (head, run) = run.split_once(':').unwrap();
+            let limit = match head.trim().strip_prefix("limit") {
+                Some(n) => n.trim().parse().unwrap(),
+                None => u64::MAX,
             };
             let run = run.split(';').next().unwrap().trim();
             let (call, expected) = run.split_once("->").unwrap();
+            let mut parts = expected.split('|');
+            let expected = parts.next().unwrap();
             let (f, args) = call.trim().trim_end_matches(')').split_once('(').unwrap();
             let f = FuncId(f.trim_start_matches('f').parse().unwrap());
             let sig = &m.signatures[m.functions[f.index()].signature.index()];
@@ -149,9 +173,15 @@ fn samples_behave_as_derived_by_hand() {
                     Param::Address(_) => panic!("by-address arguments are FORM v1"),
                 })
                 .collect();
-            let got = eval::run(&m, f, &args);
+            let got = eval::run(&m, f, &args, limit);
             let want = match expected.trim() {
-                "fail" => eval::Outcome::Failed,
+                e if e.starts_with("fail") => eval::Outcome::Failed(
+                    e["fail".len()..]
+                        .split(',')
+                        .map(|c| c.trim().to_owned())
+                        .filter(|c| !c.is_empty())
+                        .collect(),
+                ),
                 e => eval::Outcome::Returned(
                     e.split(',')
                         .zip(&sig.results)
@@ -159,7 +189,25 @@ fn samples_behave_as_derived_by_hand() {
                         .collect(),
                 ),
             };
-            assert_eq!(got, want, "{name}: {run}");
+            assert_eq!(got.outcome, want, "{name}: {run}");
+            for part in parts {
+                let (key, value) = part.trim().split_once(' ').unwrap();
+                match key {
+                    "used" => assert_eq!(
+                        got.used,
+                        value.parse::<u64>().unwrap(),
+                        "{name}: {run}: used"
+                    ),
+                    "trace" => {
+                        let want: Vec<u64> = value
+                            .split(',')
+                            .map(|v| v.trim().parse().unwrap())
+                            .collect();
+                        assert_eq!(got.trace, want, "{name}: {run}: trace");
+                    }
+                    k => panic!("unknown run check `{k}`"),
+                }
+            }
             runs += 1;
         }
         assert!(runs > 0, "{name} has no run lines");

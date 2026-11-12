@@ -22,6 +22,7 @@
 
 use crate::ir::*;
 use hirsel_core_ids::DefPath;
+use hirsel_core_layout::FieldTy;
 
 macro_rules! names {
     ($ty:ident { $($v:ident = $s:literal),* $(,)? }) => {
@@ -43,11 +44,11 @@ names!(BinaryOp {
 });
 names!(CompareOp { Eq = "eq", Ne = "ne", Lt = "lt", Le = "le", Gt = "gt", Ge = "ge" });
 names!(ConvertMode {
-    Widen = "widen", Truncate = "truncate", TryNarrow = "try_narrow", FloatToI32 = "float_to_i32",
+    Widen = "widen", Truncate = "truncate", TryNarrow = "try_narrow", FloatToInt = "float_to_int",
     IntToFloat = "int_to_float", Reinterpret = "reinterpret", FloatResize = "float_resize",
 });
 names!(ArithMode { Wrapping = "wrapping", Saturating = "saturating", Checked = "checked" });
-names!(ArithOp { Add = "add", Sub = "sub", Mul = "mul" });
+names!(ArithOp { Add = "add", Sub = "sub", Mul = "mul", Div = "div" });
 names!(ScalarUnaryOp {
     Sqrt = "sqrt", Floor = "floor", Ceil = "ceil", Trunc = "trunc", Round = "round", Abs = "abs",
     LeadingZeros = "leading_zeros", TrailingZeros = "trailing_zeros", CountOnes = "count_ones",
@@ -57,8 +58,42 @@ names!(ScalarUnaryOp {
 impl ConvertMode {
     /// Whether the conversion produces a status flag beside its result.
     pub const fn has_flag(self) -> bool {
-        matches!(self, Self::TryNarrow | Self::FloatToI32)
+        matches!(self, Self::TryNarrow | Self::FloatToInt)
     }
+}
+
+names!(Counted { Rc = "rc", Arc = "arc" });
+
+/// Whether the module uses a FORM v1 draft construct; it then prints as `core v1`,
+/// and a `core v0` text that uses one is refused.
+pub fn uses_v1(m: &Module) -> bool {
+    !m.types.is_empty()
+        || m.functions.iter().filter_map(|f| f.body.as_ref()).any(|b| {
+            b.calls
+                .iter()
+                .any(|c| c.fail.is_some() || matches!(c.callee, Callee::Runtime(_)))
+                || b.terminators
+                    .iter()
+                    .any(|t| matches!(t, Terminator::Raise { .. } | Terminator::Propagate))
+                || b.insts.iter().any(|i| {
+                    // v0 names a failure block on every fallible instruction.
+                    (i.can_fail(b) && i.fail(b).is_none() && !matches!(i, Inst::Call { .. }))
+                        || matches!(
+                            i,
+                            Inst::Alloc { .. }
+                                | Inst::Free { .. }
+                                | Inst::Copy { .. }
+                                | Inst::RegionOpen { .. }
+                                | Inst::RegionClose { .. }
+                                | Inst::LimitEnter { .. }
+                                | Inst::LimitExit
+                                | Inst::Drop { .. }
+                                | Inst::Share { .. }
+                                | Inst::Release { .. }
+                                | Inst::TryUnwrap { .. }
+                        )
+                })
+        })
 }
 
 // ---------------------------------------------------------------- printing
@@ -97,6 +132,91 @@ fn quote(s: &str) -> String {
     q.push('"');
     q
 }
+fn field_ty(f: &FieldTy) -> String {
+    use hirsel_core_layout::Handle;
+    match f {
+        FieldTy::Scalar(s) => s.name().into(),
+        FieldTy::Inline(t) => format!("t{}", t.0),
+        FieldTy::Box(t) => format!("box t{}", t.0),
+        FieldTy::Seq(e) => format!("seq {}", field_ty(e)),
+        FieldTy::Rc(t) => format!("rc t{}", t.0),
+        FieldTy::Arc(t) => format!("arc t{}", t.0),
+        FieldTy::Stable(t) => format!("stable t{}", t.0),
+        FieldTy::Region => "region".into(),
+        FieldTy::Fn => "fn".into(),
+        FieldTy::OwnFn => "ownfn".into(),
+        FieldTy::Borrow => "borrow".into(),
+        FieldTy::Handle(Handle::Task) => "task".into(),
+        FieldTy::Handle(Handle::Sender) => "sender".into(),
+        FieldTy::Handle(Handle::Receiver) => "receiver".into(),
+        FieldTy::Handle(Handle::Capability) => "cap".into(),
+        FieldTy::Handle(Handle::Causes) => "causes".into(),
+        FieldTy::Map(k, v) => format!("map {} {}", field_ty(k), field_ty(v)),
+        FieldTy::Text => "text".into(),
+        FieldTy::FixedSpan(e) => format!("fixed {}", field_ty(e)),
+        FieldTy::SeqSpan(e) => format!("seqspan {}", field_ty(e)),
+        FieldTy::IndexedSpan(e) => format!("indexed {}", field_ty(e)),
+        FieldTy::Link(t) => format!("link t{}", t.0),
+        FieldTy::OptLink(t) => format!("optlink t{}", t.0),
+    }
+}
+fn fields(fs: &[hirsel_core_layout::Field]) -> String {
+    if fs.is_empty() {
+        return "{ }".into();
+    }
+    format!(
+        "{{ {} }}",
+        list(fs, |f| format!("{}: {}", f.name, field_ty(&f.ty)))
+    )
+}
+/// `own "Pair" { a: u64 }`, `resource "Temp" drop f3 grant 64 { .. }`,
+/// `compact u32 "Row" { .. }`, `own "Opt" | None { } | Some { v: u64 }`.
+fn shape(s: &Shape) -> String {
+    use hirsel_core_layout::{Body as B, Repr, Width};
+    let repr = match s.repr {
+        Repr::Own => "own".into(),
+        Repr::Resource => "resource".into(),
+        Repr::Stable => "stable".into(),
+        Repr::Scoped => "scoped".into(),
+        Repr::Compact(w) => format!(
+            "compact {}",
+            match w {
+                Width::U16 => "u16",
+                Width::U32 => "u32",
+                Width::U64 => "u64",
+            }
+        ),
+    };
+    let mut out = format!("{repr} {}", quote(&s.name));
+    if let Some(f) = s.finalizer {
+        out += &format!(" drop f{}", f.0);
+    }
+    if s.grant != 0 {
+        out += &format!(" grant {}", s.grant);
+    }
+    match &s.body {
+        B::Record(fs) => out += &format!(" {}", fields(fs)),
+        B::Variant(cases) => {
+            for c in cases {
+                out += &format!(" | {} {}", c.name, fields(&c.fields));
+            }
+        }
+    }
+    out
+}
+fn rt(op: RtOp) -> String {
+    match op {
+        RtOp::Spawn { x, r } => format!("rt.spawn[t{}, t{}]", x.0, r.0),
+        RtOp::Join { r } => format!("rt.join[t{}]", r.0),
+        RtOp::Cancel => "rt.cancel".into(),
+        RtOp::CheckCancel => "rt.check_cancel".into(),
+        RtOp::ChannelNew { item } => format!("rt.channel_new[t{}]", item.0),
+        RtOp::ChannelSender => "rt.channel_sender".into(),
+        RtOp::Send { item } => format!("rt.send[t{}]", item.0),
+        RtOp::TrySend { item } => format!("rt.try_send[t{}]", item.0),
+        RtOp::Receive { item } => format!("rt.receive[t{}]", item.0),
+    }
+}
 fn list<T>(items: impl IntoIterator<Item = T>, f: impl Fn(T) -> String) -> String {
     items.into_iter().map(f).collect::<Vec<_>>().join(", ")
 }
@@ -120,12 +240,12 @@ impl Printer {
     }
 
     fn module(&mut self, m: &Module) {
-        self.line("core v0");
+        self.line(if uses_v1(m) { "core v1" } else { "core v0" });
         for (i, item) in m.items.iter().enumerate() {
             self.line(&format!("item i{i} = {item}"));
         }
         for (i, t) in m.types.iter().enumerate() {
-            self.line(&format!("type t{i} = {}", quote(t)));
+            self.line(&format!("type t{i} = {}", shape(t)));
         }
         for (i, s) in m.statics.iter().enumerate() {
             let hex: String = s.bytes.iter().map(|b| format!("{b:02x}")).collect();
@@ -356,13 +476,77 @@ impl Printer {
                         let callee = match c.callee {
                             Callee::Direct(f) => format!("f{}", f.0),
                             Callee::Indirect(v) => format!("v{}", v.0),
+                            Callee::Runtime(op) => rt(op),
                         };
                         let args =
                             list(c.args.get(&b.pools.args).unwrap_or_default(), |a| match a {
                                 Arg::Value(v) => format!("v{}", v.0),
                                 Arg::Address(a) => format!("&a{}", a.0),
                             });
-                        format!("{lhs}call {callee} g{} ({args})", c.signature.0)
+                        format!(
+                            "{lhs}call {callee} g{} ({args}){}",
+                            c.signature.0,
+                            fail(c.fail)
+                        )
+                    }
+                    Inst::Alloc {
+                        result,
+                        available,
+                        kind,
+                        place,
+                        charge,
+                        size,
+                        align,
+                        fail: f,
+                    } => {
+                        let kind = match kind {
+                            AllocKind::Own => "own".into(),
+                            AllocKind::Counted => "counted".into(),
+                            AllocKind::Resource { grant } => format!("resource grant {grant}"),
+                        };
+                        let place = match place {
+                            AllocPlace::Current => String::new(),
+                            AllocPlace::Like(b) => format!(" like v{}", b.0),
+                            AllocPlace::Region(r) => format!(" in v{}", r.0),
+                        };
+                        format!(
+                            "{}, {} = alloc {kind} {size} align {align} charge {}{place}{}",
+                            def(*result),
+                            def(*available),
+                            v(charge),
+                            fail(*f)
+                        )
+                    }
+                    Inst::Free { block, charge } => {
+                        format!("free {} charge {}", v(block), v(charge))
+                    }
+                    Inst::Copy { to, from, bytes } => {
+                        format!("copy a{}, a{}, {}", to.0, from.0, v(bytes))
+                    }
+                    Inst::RegionOpen { result } => format!("{} = region_open", def(*result)),
+                    Inst::RegionClose { region } => format!("region_close {}", v(region)),
+                    Inst::LimitEnter {
+                        admitted,
+                        available,
+                        bytes,
+                    } => format!(
+                        "{}, {} = limit_enter {}",
+                        def(*admitted),
+                        def(*available),
+                        v(bytes)
+                    ),
+                    Inst::LimitExit => "limit_exit".into(),
+                    Inst::Drop {
+                        address,
+                        ty,
+                        fail: f,
+                    } => format!("drop a{} t{}{}", address.0, ty.0, fail(*f)),
+                    Inst::Share { node, kind } => format!("share {} {}", v(node), kind.name()),
+                    Inst::Release { node, kind, ty } => {
+                        format!("release {} {} t{}", v(node), kind.name(), ty.0)
+                    }
+                    Inst::TryUnwrap { result, node, kind } => {
+                        format!("{} = try_unwrap {} {}", def(*result), v(node), kind.name())
                     }
                 };
                 self.line(&format!("  {text}{}", anchor(b.inst_anchors[start + k])));
@@ -390,6 +574,18 @@ impl Printer {
                         format!("return {}", list(r, |v| format!("v{}", v.0)))
                     }
                 }
+                Terminator::Raise { cause, cleanup } => {
+                    let cause = match cause {
+                        RaiseCause::Unwrap => "unwrap".into(),
+                        RaiseCause::Bounds => "bounds".into(),
+                        RaiseCause::Fail(a) => format!("fail a{}", a.0),
+                    };
+                    let cleanup = cleanup
+                        .map(|c| format!(" cleanup b{}", c.0))
+                        .unwrap_or_default();
+                    format!("raise {cause}{cleanup}")
+                }
+                Terminator::Propagate => "propagate".into(),
             };
             self.line(&format!("  {term}{}", anchor(block.anchor)));
         }
@@ -568,6 +764,123 @@ impl<'a> Line<'a> {
             Ok(PlaceTy::Value(self.ty()?))
         }
     }
+    fn tref(&mut self) -> R<hirsel_core_layout::TypeRef> {
+        Ok(hirsel_core_layout::TypeRef(self.id('t')?))
+    }
+    fn field_ty(&mut self) -> R<FieldTy> {
+        use hirsel_core_layout::Handle;
+        let boxed = |l: &mut Self| l.field_ty().map(Box::new);
+        Ok(match self.peek().ok_or("expected a field type")? {
+            "box" | "rc" | "arc" | "stable" | "link" | "optlink" => {
+                let w = self.next()?;
+                let t = self.tref()?;
+                match w {
+                    "box" => FieldTy::Box(t),
+                    "rc" => FieldTy::Rc(t),
+                    "arc" => FieldTy::Arc(t),
+                    "stable" => FieldTy::Stable(t),
+                    "link" => FieldTy::Link(t),
+                    _ => FieldTy::OptLink(t),
+                }
+            }
+            "seq" | "fixed" | "seqspan" | "indexed" => {
+                let w = self.next()?;
+                let e = boxed(self)?;
+                match w {
+                    "seq" => FieldTy::Seq(e),
+                    "fixed" => FieldTy::FixedSpan(e),
+                    "seqspan" => FieldTy::SeqSpan(e),
+                    _ => FieldTy::IndexedSpan(e),
+                }
+            }
+            "map" => {
+                self.next()?;
+                FieldTy::Map(boxed(self)?, boxed(self)?)
+            }
+            w => {
+                self.next()?;
+                match w {
+                    "region" => FieldTy::Region,
+                    "fn" => FieldTy::Fn,
+                    "ownfn" => FieldTy::OwnFn,
+                    "borrow" => FieldTy::Borrow,
+                    "task" => FieldTy::Handle(Handle::Task),
+                    "sender" => FieldTy::Handle(Handle::Sender),
+                    "receiver" => FieldTy::Handle(Handle::Receiver),
+                    "cap" => FieldTy::Handle(Handle::Capability),
+                    "causes" => FieldTy::Handle(Handle::Causes),
+                    "text" => FieldTy::Text,
+                    w => match (Scalar::from_name(w), w.strip_prefix('t').map(str::parse)) {
+                        (Some(s), _) => FieldTy::Scalar(s),
+                        (None, Some(Ok(n))) => FieldTy::Inline(hirsel_core_layout::TypeRef(n)),
+                        _ => return Err(format!("unknown field type `{w}`")),
+                    },
+                }
+            }
+        })
+    }
+    fn fields(&mut self) -> R<Vec<hirsel_core_layout::Field>> {
+        self.expect("{")?;
+        let mut out = Vec::new();
+        if self.eat("}") {
+            return Ok(out);
+        }
+        loop {
+            let name = self.next()?.to_owned();
+            self.expect(":")?;
+            out.push(hirsel_core_layout::Field {
+                name,
+                ty: self.field_ty()?,
+            });
+            if self.eat("}") {
+                return Ok(out);
+            }
+            self.expect(",")?;
+        }
+    }
+    fn shape(&mut self) -> R<Shape> {
+        use hirsel_core_layout::{Body as B, Case, FuncRef, Repr, Width};
+        let repr = match self.next()? {
+            "own" => Repr::Own,
+            "resource" => Repr::Resource,
+            "stable" => Repr::Stable,
+            "scoped" => Repr::Scoped,
+            "compact" => Repr::Compact(match self.next()? {
+                "u16" => Width::U16,
+                "u32" => Width::U32,
+                "u64" => Width::U64,
+                w => return Err(format!("bad compact width `{w}`")),
+            }),
+            r => return Err(format!("unknown representation `{r}`")),
+        };
+        let name = self.string()?;
+        let finalizer = if self.eat("drop") {
+            Some(FuncRef(self.id('f')?))
+        } else {
+            None
+        };
+        let grant = if self.eat("grant") { self.num()? } else { 0 };
+        let body = if self.peek() == Some("|") {
+            let mut cases = Vec::new();
+            while self.eat("|") {
+                let name = self.next()?.to_owned();
+                cases.push(Case {
+                    name,
+                    fields: self.fields()?,
+                });
+            }
+            B::Variant(cases)
+        } else {
+            B::Record(self.fields()?)
+        };
+        Ok(Shape {
+            name,
+            repr,
+            body,
+            finalizer,
+            grant,
+        })
+    }
     fn value(&mut self) -> R<ValueId> {
         Ok(ValueId(self.id('v')?))
     }
@@ -639,6 +952,11 @@ pub(crate) fn parse_constant(t: Ty, s: &str) -> R<u64> {
             None => Err(bad()),
         },
     }
+}
+
+fn counted(l: &mut Line) -> R<Counted> {
+    let t = l.next()?;
+    Counted::from_name(t).ok_or_else(|| format!("expected rc or arc, found `{t}`"))
 }
 
 /// The per-body state while parsing a function.
@@ -717,6 +1035,62 @@ impl BodyParser {
                 });
             }
             Some("call") => return self.call(l, Vec::new()),
+            Some("free") => {
+                l.next()?;
+                let block = l.value()?;
+                l.expect("charge")?;
+                return Ok(Inst::Free {
+                    block,
+                    charge: l.value()?,
+                });
+            }
+            Some("copy") => {
+                l.next()?;
+                let to = AddressId(l.id('a')?);
+                l.expect(",")?;
+                let from = AddressId(l.id('a')?);
+                l.expect(",")?;
+                return Ok(Inst::Copy {
+                    to,
+                    from,
+                    bytes: l.value()?,
+                });
+            }
+            Some("region_close") => {
+                l.next()?;
+                return Ok(Inst::RegionClose { region: l.value()? });
+            }
+            Some("limit_exit") => {
+                l.next()?;
+                return Ok(Inst::LimitExit);
+            }
+            Some("drop") => {
+                l.next()?;
+                let address = AddressId(l.id('a')?);
+                return Ok(Inst::Drop {
+                    address,
+                    ty: TypeId(l.id('t')?),
+                    fail: l.fail()?,
+                });
+            }
+            Some("share") => {
+                l.next()?;
+                let node = l.value()?;
+                return Ok(Inst::Share {
+                    node,
+                    kind: counted(l)?,
+                });
+            }
+            Some("release") => {
+                l.next()?;
+                let node = l.value()?;
+                let kind = counted(l)?;
+                return Ok(Inst::Release {
+                    node,
+                    kind,
+                    ty: TypeId(l.id('t')?),
+                });
+            }
             _ => {}
         }
         let mut defs = vec![self.def(l)?];
@@ -749,7 +1123,61 @@ impl BodyParser {
             l.expect(",")?;
             Ok((a, l.value()?))
         };
-        let inst = if op == "const" {
+        let pair = |defs: &[ValueId]| match defs {
+            [a, b] => Ok((*a, *b)),
+            _ => Err(format!("`{op}` takes 2 results")),
+        };
+        let inst = if op == "alloc" {
+            let (result, available) = pair(&defs)?;
+            let kind = match l.next()? {
+                "own" => AllocKind::Own,
+                "counted" => AllocKind::Counted,
+                "resource" => {
+                    l.expect("grant")?;
+                    AllocKind::Resource { grant: l.num()? }
+                }
+                k => return Err(format!("unknown allocation kind `{k}`")),
+            };
+            let size = l.num()?;
+            l.expect("align")?;
+            let align = l.num()?;
+            l.expect("charge")?;
+            let charge = l.value()?;
+            let place = if l.eat("like") {
+                AllocPlace::Like(l.value()?)
+            } else if l.eat("in") {
+                AllocPlace::Region(l.value()?)
+            } else {
+                AllocPlace::Current
+            };
+            Inst::Alloc {
+                result,
+                available,
+                kind,
+                place,
+                charge,
+                size,
+                align,
+                fail: l.fail()?,
+            }
+        } else if op == "limit_enter" {
+            let (admitted, available) = pair(&defs)?;
+            Inst::LimitEnter {
+                admitted,
+                available,
+                bytes: l.value()?,
+            }
+        } else if op == "region_open" {
+            one(&defs)?;
+            Inst::RegionOpen { result }
+        } else if op == "try_unwrap" {
+            one(&defs)?;
+            Inst::TryUnwrap {
+                result,
+                node: l.value()?,
+                kind: counted(l)?,
+            }
+        } else if op == "const" {
             one(&defs)?;
             Inst::Const {
                 result,
@@ -866,6 +1294,30 @@ impl BodyParser {
             Callee::Direct(FuncId(f.parse().map_err(|_| format!("bad callee `{t}`"))?))
         } else if let Some(v) = t.strip_prefix('v') {
             Callee::Indirect(ValueId(v.parse().map_err(|_| format!("bad callee `{t}`"))?))
+        } else if let Some(name) = t.strip_prefix("rt.") {
+            let mut tys = |n: usize| -> R<Vec<TypeId>> {
+                let ts = l.seq("[", "]", |l| Ok(TypeId(l.id('t')?)))?;
+                if ts.len() == n {
+                    Ok(ts)
+                } else {
+                    Err(format!("`{t}` takes {n} types"))
+                }
+            };
+            Callee::Runtime(match name {
+                "spawn" => {
+                    let ts = tys(2)?;
+                    RtOp::Spawn { x: ts[0], r: ts[1] }
+                }
+                "join" => RtOp::Join { r: tys(1)?[0] },
+                "cancel" => RtOp::Cancel,
+                "check_cancel" => RtOp::CheckCancel,
+                "channel_new" => RtOp::ChannelNew { item: tys(1)?[0] },
+                "channel_sender" => RtOp::ChannelSender,
+                "send" => RtOp::Send { item: tys(1)?[0] },
+                "try_send" => RtOp::TrySend { item: tys(1)?[0] },
+                "receive" => RtOp::Receive { item: tys(1)?[0] },
+                _ => return Err(format!("unknown engine operation `{t}`")),
+            })
         } else {
             return Err(format!("bad callee `{t}`"));
         };
@@ -884,6 +1336,7 @@ impl BodyParser {
             signature,
             args,
             results,
+            fail: l.fail()?,
         });
         Ok(Inst::Call {
             call: CallId(self.body.calls.len() as u32 - 1),
@@ -938,6 +1391,25 @@ impl BodyParser {
                 }
                 Terminator::Return(PoolRange::push(&mut self.body.pools.values, vals))
             }
+            Some("raise") => {
+                l.next()?;
+                let cause = match l.next()? {
+                    "unwrap" => RaiseCause::Unwrap,
+                    "bounds" => RaiseCause::Bounds,
+                    "fail" => RaiseCause::Fail(AddressId(l.id('a')?)),
+                    c => return Err(format!("unknown cause `{c}`")),
+                };
+                let cleanup = if l.eat("cleanup") {
+                    Some(BlockId(l.id('b')?))
+                } else {
+                    None
+                };
+                Terminator::Raise { cause, cleanup }
+            }
+            Some("propagate") => {
+                l.next()?;
+                Terminator::Propagate
+            }
             _ => return Ok(None),
         };
         Ok(Some(t))
@@ -961,10 +1433,15 @@ impl Parser {
     }
 
     fn module(&mut self) -> R<()> {
+        let v1;
         {
             let mut l = self.line().ok_or("empty input")?;
             l.expect("core")?;
-            l.expect("v0")?;
+            v1 = match l.next()? {
+                "v0" => false,
+                "v1" => true,
+                v => return Err(format!("unknown form `{v}`")),
+            };
             l.end()?;
         }
         while let Some(word) = self.peek_word().map(str::to_owned) {
@@ -986,7 +1463,7 @@ impl Parser {
                     let mut l = self.line().unwrap();
                     l.next()?;
                     expect_index(&mut l, 't', n)?;
-                    let s = l.string()?;
+                    let s = l.shape()?;
                     l.end()?;
                     self.module.types.push(s);
                 }
@@ -1054,6 +1531,9 @@ impl Parser {
                 "fn" => self.function()?,
                 w => return Err(format!("unexpected `{w}`")),
             }
+        }
+        if !v1 && uses_v1(&self.module) {
+            return Err("a FORM v1 construct under `core v0`".into());
         }
         Ok(())
     }

@@ -184,6 +184,7 @@ fn result(id: &str, heap: Outcome, llvm: Outcome) -> CaseResult {
         ],
         reference: None,
         wall: Default::default(),
+        heap_measures: Vec::new(),
     }
 }
 

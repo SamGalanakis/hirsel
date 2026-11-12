@@ -127,11 +127,15 @@ impl<'p, S: Stage> Machine<'p, S> {
         }
     }
 
-    fn campaign_steps(&mut self, injected: &mut dyn FnMut(u64, Run)) -> Checked<()> {
+    fn campaign_steps(
+        &mut self,
+        injected: &mut dyn FnMut(u64, Run, std::time::Duration),
+    ) -> Checked<()> {
         while !self.stack.is_empty() || self.in_child() {
             let site = self.sites;
             let checkpoint = self.checkpoint_site();
             if checkpoint && self.config.campaign_contains(site) {
+                let started = std::time::Instant::now();
                 // A fork inherits a proof of the complete prefix, including
                 // changes since the last geometric check. Refresh it once in
                 // the base, rather than once per injected suffix.
@@ -162,7 +166,7 @@ impl<'p, S: Stage> Machine<'p, S> {
                 let first = fork.step();
                 if fork.sites == site + 1 {
                     let result = first.and_then(|_| fork.run()).and_then(|_| fork.finish());
-                    injected(site, fork.report(result));
+                    injected(site, fork.report(result), started.elapsed());
                 } else if fork.sites != site {
                     return fail(
                         V::InternalAudit,
@@ -188,7 +192,7 @@ pub(crate) fn campaign<S: Stage>(
     args: &[Arg],
     ops: &mut dyn Operations,
     config: &Config,
-    injected: &mut dyn FnMut(u64, Run),
+    injected: &mut dyn FnMut(u64, Run, std::time::Duration),
 ) -> Run {
     SCANNED.with(|v| v.set(0));
     let started = std::time::Instant::now();

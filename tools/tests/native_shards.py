@@ -29,84 +29,170 @@ class NativeShards(unittest.TestCase):
         with patch.object(corpus['event_logs'], 'recorded', return_value=contextlib.nullcontext(Path('/tmp/event'))), \
              patch.object(corpus['subprocess'], 'run'), patch.object(corpus['subprocess'], 'call', return_value=0), \
              patch.object(corpus['conformance'], 'shard_outputs', return_value=outputs), \
-             patch.dict(corpus['native'].__globals__, heap_costs=lambda: {'conformance/': (1, 0.006, '')}), \
+             patch.dict(corpus['native'].__globals__, heap_costs=lambda: {'conformance/': (1, 0.006, 60.0, '')}), \
              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args), 0)
+            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args, {}), 0)
             last = outputs.pop('gate-native-selected-shard-6')
-            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args), 1)
+            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args, {}), 1)
             report = json.loads(last)
             report['heap_partition']['index'] = 2
             outputs['gate-native-selected-shard-6'] = json.dumps(report, indent=2)
-            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args), 1)
+            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args, {}), 1)
             del report['heap_partition']
             outputs['gate-native-selected-shard-6'] = json.dumps(report, indent=2)
-            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args), 1)
+            self.assertEqual(corpus['native'](['conformance/STORE'], runs, args, {}), 1)
 
-    def test_heap_parts_are_sized_by_measured_cost_and_a_rotated_family_injects_one_open_share(self):
-        # Costs a site: checkpoint 7 ms (measured), objects-world 165 ms (the
-        # worst of rule STORE-11), SEM-1 9 s (worse, another rule), nodes 18 ms
-        # in 10 shares. Round one bounds whole campaigns at 480 s of the worst
-        # planned cost: int(480 / 0.165) = 2909 sites. STORE-11-new-run has no
-        # row, so it is planned at its rule's worst, 3000 x 0.165 / 480 -> 2
-        # parts (at 6 ms or the 9 s overall worst it would be 1 or 57);
-        # checkpoint 148,802 x 0.007 / 480 -> 3 parts. Nodes injects one share:
-        # 300,000 / 10 x 0.018 / 480 -> 2 parts. Its ledger has shares 1, 2 and
-        # 4 passed in this cycle, so the open shares are 3, 5, 6, 7, 8, 9, 10;
-        # commit 0x000000000005... picks open share 5 % 7 = index 5: share 9.
-        # Its two parts are the stride partitions 9/20 and 19/20, sites
-        # congruent to 8 mod 10 (share 9's), and the run records 9/10 with its
-        # verdict; a missing part records a fail, and a selection without
-        # every run of the family records nothing.
+    def test_heap_parts_are_sized_by_a_probe_or_a_ledger_row_and_a_milestone_records_its_shares(self):
+        # Round one bounds whole campaigns at 480 s of the worst planned cost a
+        # site: checkpoint's ledger row says 7 ms, STORE-11-new-run has none
+        # and is planned at its rule's worst row, 165 ms: int(480 / 0.165) =
+        # 2909 sites. Checkpoint's current row (7 ms, clean 60 s) sizes it
+        # directly: ceil(148,802 x 0.007 / (480 - 60)) = 3 parts, no probe.
+        # New-run's 3000 sites have no row, so a probe of part 1 of 3000 // 400
+        # = 7 runs first; it measures quarters of 0.1, 0.1, 0.2 and 0.3 s a site
+        # and a clean run of 120 s, so the remaining 3000 x 6/7 = 2571.4 sites
+        # are sized at the worst quarter: ceil(2571.4 x 0.3 / 360) = 3 parts
+        # (the mean, 0.175 s, would give 2), each skipping the probe's part
+        # 1/7. The milestone's shares are recorded with the invocation's
+        # verdict: a missing part records them failed.
         corpus = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'corpus'))
         args = SimpleNamespace(slices=None, parts=None, config=['smoke'], heap_parts=1, report_json=None)
         store = 'conformance/STORE/'
         checkpoint, new = store + 'STORE-11-checkpoint-run.hir', store + 'STORE-11-new-run.hir'
-        nodes, family = store + 'STORE-11-checkpoint-nodes-crash-run.hir@3', store + 'STORE-11-checkpoint-nodes-'
-        costs = {checkpoint: (148_802, 0.007, ''), store + 'STORE-11-objects-world-run.hir': (511_376, 0.165, ''),
-                 'conformance/SEM/SEM-1-': (1, 9.0, ''), family: (69_062, 0.018, '')}
+        costs = {store + 'STORE-11-objects-world-run.hir': (511_376, 0.165, 150.0, ''),
+                 'conformance/SEM/SEM-1-': (1, 9.0, 10.0, '')}
+        measured = {checkpoint: (148_802, 0.007, 60.0, '2026-11-12T00:00:00Z')}
         name = 'x86_64/regions/elide/reuse/flat-walk/heap+inject'
         report = dict(configuration_attempts=3, baseline_executable=1, baseline_minus_native_unlisted=[],
                       stale_exclusions=[])
         def shard(i, **fields):
             return {f'gate-native-selected-shard-{i}': json.dumps(dict(report, **fields), indent=2)}
         planned = {**shard(1, heap_sites_max=2909, heap_parted=[dict(case=checkpoint, configuration=name, sites=148_802)]),
-                   **shard(2, heap_sites_max=2909, heap_parted=[dict(case=new, configuration=name, sites=3000)]),
-                   **shard(3, heap_sites_max=2909, heap_parted=[dict(case=nodes, configuration=name, sites=300_000)])}
-        def parts(indices, count):
-            return {k: v for i, index in enumerate(indices, 1) for k, v in shard(
-                i, configuration_attempts=1, heap_partition=dict(index=index, count=count)).items()}
+                   **shard(2, heap_sites_max=2909, heap_parted=[dict(case=new, configuration=name, sites=3000)])}
+        strata = [[100, 10.0], [100, 10.0], [100, 20.0], [100, 30.0]]
+        probe = shard(1, configuration_attempts=1, heap_partition=dict(index=1, count=7), heap_campaigns=[dict(
+            case=new, configuration=name, sites=3000, clean_seconds=120.0, campaign=dict(
+                partition=dict(index=1, count=7, skip=None), seconds=190.0, strata=strata, fired_seconds=0.0))])
+        def parts(count, skip=None):
+            return {k: v for index in range(1, count + 1) for k, v in shard(
+                index, configuration_attempts=1, heap_partition=dict(index=index, count=count),
+                **(dict(heap_skip=dict(index=skip[0], count=skip[1])) if skip else {})).items()}
         commit = '000000000005' + '0' * 28
-        for missing, expected, verdict, family_runs in [
-                (None, 0, 'pass', [nodes]), ('gate-native-selected-shard-2', 1, 'fail', [nodes]),
-                (None, 0, None, [nodes, nodes.replace('@3', '@4')])]:
+        shares = {store + 'STORE-11-checkpoint-': (2, 3, [checkpoint, new])}
+        for missing, expected, verdict in [(None, 0, 'pass'), ('gate-native-selected-shard-2', 1, 'fail')]:
             calls = []
-            rotated = {k: v for k, v in parts([9, 19], 20).items() if k != missing}
+            rest = {k: v for k, v in parts(3, (1, 7)).items() if k != missing}
             with tempfile.TemporaryDirectory() as tmp:
-                ledger = Path(tmp) / 'rotations.tsv'
-                ledger.write_text(''.join(f'2026-11-12T00:00:0{n}Z\tc{n}\t{family}\t{n}/10\tpass\n' for n in (1, 2, 4))
-                                  + f'2026-11-12T00:00:05Z\tc3\t{family}\t3/10\tfail\n')
+                ledger = Path(tmp) / 'milestones.tsv'
                 with patch.dict(corpus['native'].__globals__, heap_costs=lambda: costs,
-                                heap_rotations=lambda: {family: 10}, rotation_ledger=lambda: ledger,
-                                family_runs=lambda key: family_runs), \
+                                milestone_ledger=lambda: ledger, cost_ledger=lambda: Path(tmp) / 'costs.tsv',
+                                measured_costs=lambda runs, _: {r: measured[r] for r in runs if r in measured},
+                                record_costs=lambda *_: None), \
                      patch.object(corpus['event_logs'], 'recorded', return_value=contextlib.nullcontext(Path('/tmp/event'))), \
                      patch.object(corpus['subprocess'], 'run'), \
                      patch.object(corpus['subprocess'], 'check_output', return_value=commit + '\n'), \
                      patch.object(corpus['subprocess'], 'call', side_effect=lambda command, **_: calls.append(command) or 0), \
                      patch.object(corpus['conformance'], 'shard_outputs',
-                                  side_effect=[planned, parts([1, 2], 2), rotated, parts([1, 2, 3], 3)]), \
+                                  side_effect=[planned, probe, parts(3), rest]), \
                      contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                    self.assertEqual(corpus['native']([checkpoint, new, nodes], [checkpoint, new, nodes], args), expected)
-                last = ledger.read_text().splitlines()[-1].split('\t')[1:]
-                self.assertEqual(last, [commit, family, '9/10', verdict] if verdict else ['c3', family, '3/10', 'fail'])
-            self.assertIn('hirsel.native_paths_heap_sites_max=2909', calls[0])
-            self.assertIn('hirsel.native_paths_heap_parts=2', calls[1])
-            self.assertIn(f'hirsel.native_paths={new}', calls[1])
-            self.assertIn('hirsel.native_paths_heap_rotation=', calls[1])
-            self.assertIn('hirsel.native_paths_heap_parts=2', calls[2])
-            self.assertIn(f'hirsel.native_paths={nodes}', calls[2])
-            self.assertIn('hirsel.native_paths_heap_rotation=9/10', calls[2])
-            self.assertIn('hirsel.native_paths_heap_parts=3', calls[3])
-            self.assertIn(f'hirsel.native_paths={checkpoint}', calls[3])
+                    self.assertEqual(corpus['native']([checkpoint, new], [checkpoint, new], args, shares), expected)
+                self.assertEqual([line.split('\t')[1:] for line in ledger.read_text().splitlines()],
+                                 [[commit, store + 'STORE-11-checkpoint-', '2/3', verdict]])
+            def configured(call):
+                return {arg.split('=', 1)[0][len('hirsel.native_paths'):]: arg.split('=', 1)[1]
+                        for arg in call if arg.startswith('hirsel.native_paths')}
+            def targets(call):
+                return [arg.rsplit('-', 1)[1] for arg in call if arg.startswith('//:gate-native-selected-shard-')]
+            self.assertEqual(configured(calls[0])['_heap_sites_max'], '2909')
+            rounds = [(configured(call)[''], configured(call)['_heap_parts'], configured(call)['_heap_skip'],
+                       targets(call)) for call in calls[1:]]
+            self.assertEqual(rounds, [(new, '7', '', ['1']), (checkpoint, '3', '', ['1', '2', '3']),
+                                      (new, '3', '1/7', ['1', '2', '3'])])
+
+    def test_a_cost_ledger_row_retires_when_its_case_or_the_store_sources_change(self):
+        # A row a run recorded is current until its case file or a file under
+        # STORE_SOURCES changes; restoring them makes it current again, and of
+        # two current rows the later wins.
+        corpus = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'corpus'))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            case = root / 'conformance/STORE/STORE-1-a-run.hir'
+            source = root / 'crates/hirsel-store-authority/src/lib.rs'
+            for path, text in [(case, 'case\n'), (source, 'store\n'), (root / 'stdlib/std@1/a.hir', 'std\n')]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+            run, ledger = 'conformance/STORE/STORE-1-a-run.hir@2', root / 'costs.tsv'
+            def campaign(cost):
+                return [dict(case=run, configuration='c', sites=400, clean_seconds=30.0, campaign=dict(
+                    partition=None, seconds=30.0 + 400 * cost, strata=[[100, 100 * cost]] * 4, fired_seconds=0.0))]
+            with patch.dict(corpus['measured_costs'].__globals__, ROOT=root):
+                corpus['record_costs'](campaign(0.5), 'c1', ledger)
+                corpus['record_costs'](campaign(0.25), 'c2', ledger)
+                current = lambda: {r: row[:3] for r, row in corpus['measured_costs']([run], ledger).items()}
+                self.assertEqual(current(), {run: (400, 0.25, 30.0)})
+                for path, changed in [(source, 'store 2\n'), (case, 'case 2\n')]:
+                    original = path.read_text()
+                    path.write_text(changed)
+                    self.assertEqual(current(), {})
+                    path.write_text(original)
+                    self.assertEqual(current(), {run: (400, 0.25, 30.0)})
+
+    def test_plan_separates_measured_from_estimated_and_warns_first_when_estimates_dominate(self):
+        # With no configuration seconds: A (ledger, 900 sites at 4 s, clean
+        # 360 s) and B (the same figures from a heap-costs row) fit
+        # sites_max 1000 whole: clean twice plus 3600 s, 1.20 h each. C's
+        # 4000 sites at 0.9 s (clean 360 s) are estimated and over the bound:
+        # round one's clean run, a probe of 4000 / 10 = 400 sites (360 + 360
+        # s), and the other 3600 sites in ceil(3240 / 120) = 27 parts each
+        # running the clean run: 360 + 720 + 9720 + 3240 = 14,040 s = 3.90 h.
+        # Estimated 5.10 of 6.30 CPU-h is 81%, over 25%: the first line warns.
+        corpus = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'corpus'))
+        now = corpus['datetime'].datetime(2026, 11, 12, 2, tzinfo=corpus['datetime'].timezone.utc)
+        a, b, c = 'conformance/X/X-1-a-run.hir', 'conformance/X/X-1-b-run.hir', 'conformance/X/X-1-c-run.hir'
+        costs = {b: (900, 4.0, 360.0, ''), c: (4000, 0.9, 360.0, '')}
+        measured = {a: (900, 4.0, 360.0, '2026-11-12T00:00:00Z')}
+        def plan(runs):
+            out = io.StringIO()
+            with patch.dict(corpus['plan'].__globals__, NATIVE_CONFIG_SECONDS=0), contextlib.redirect_stdout(out):
+                self.assertEqual(corpus['plan'](runs, costs, measured, 1000, now), 0)
+            return out.getvalue().splitlines()
+        self.assertEqual(plan([a, b, c]), [
+            'plan: WARNING: 81% of 6.30 CPU-h is estimated from native-tests/regressions/heap-costs.tsv rows, '
+            'not measured by a run',
+            'plan: X-1-a-run.hir: 1 runs, 1.20 CPU-h, measured (ledger, 2.0 h old)',
+            'plan: X-1-b-run.hir: 1 runs, 1.20 CPU-h, estimated (native-tests/regressions/heap-costs.tsv row; '
+            'probes 0.00 CPU-h)',
+            'plan: X-1-c-run.hir: 1 runs, 3.90 CPU-h, estimated (native-tests/regressions/heap-costs.tsv row; '
+            'probes 0.20 CPU-h)',
+            'plan: 3 runs, 6.30 CPU-h: 1.20 measured, 5.10 estimated'])
+        self.assertEqual(plan([a])[0], 'plan: X-1-a-run.hir: 1 runs, 1.20 CPU-h, measured (ledger, 2.0 h old)')
+
+    def test_a_milestone_takes_an_open_share_of_every_family_and_plans_full_coverage(self):
+        # The reader-table law's two cases sweep cuts 1..=40 in 40 shares;
+        # with shares 1..=30 passed, the open ones are 31..=40 and commit
+        # 0x00000000000c... takes index 12 % 10 = 2: share 33, cut 33 of each
+        # case. With nothing else passed, full coverage takes the most shares
+        # left in any family: checkpoint-nodes' 20, not the law's 10. A swept
+        # case under no row is refused.
+        corpus = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'corpus'))
+        family = 'conformance/STORE/STORE-8-reader-table-law-'
+        swept = [c for c in corpus['cases'](corpus['ROOT']) if c.startswith('conformance/STORE/')
+                 and '// cuts:' in (corpus['ROOT'] / c).read_text()]
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Path(tmp) / 'milestones.tsv'
+            ledger.write_text(''.join(f'2026-11-12T00:00:00Z\tc\t{family}\t{n}/40\tpass\n' for n in range(1, 31)))
+            shares = corpus['milestone_shares'](sorted(swept), '00000000000c' + '0' * 28, ledger)
+            self.assertEqual(shares[family], (33, 40, [f'{family}log-run.hir@33', f'{family}objects-run.hir@33']))
+            out = io.StringIO()
+            with patch.dict(corpus['plan_selection'].__globals__, milestone_ledger=lambda: ledger,
+                            plan=lambda *_: 0, measured_costs=lambda *_: {}, cost_ledger=lambda: ledger), \
+                    contextlib.redirect_stdout(out):
+                corpus['plan_selection']([run for _, _, runs in shares.values() for run in runs], shares)
+            self.assertEqual(out.getvalue().splitlines()[-1], 'plan: full coverage after 20 milestones')
+            rows = corpus['milestone_rows']()
+            with patch.dict(corpus['milestone_shares'].__globals__, milestone_rows=lambda: rows[1:]):
+                with self.assertRaises(ValueError):
+                    corpus['milestone_shares'](sorted(swept), '0' * 40, ledger)
 
     def test_store_land_rotation_covers_each_family_cut_once_a_cycle(self):
         # Rows: crash-cuts-crash (cuts 1..=17) in thirds, the five objects-cuts
@@ -125,7 +211,7 @@ class NativeShards(unittest.TestCase):
         def chosen(count):
             with patch('subprocess.check_output', return_value=f'{count}\n'), \
                     contextlib.redirect_stderr(io.StringIO()):
-                return corpus['named_selection']('store-land', cases, 'HEAD^')
+                return corpus['named_selection']('store-land', cases, 'HEAD^')[0]
 
         self.assertEqual(chosen(6463), [f'{crash}@{k}' for k in range(2, 18, 3)]
                          + [f'{objects}lose-run.hir@{k}' for k in range(2, 39, 6)])
@@ -144,11 +230,11 @@ class NativeShards(unittest.TestCase):
         corpus = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'corpus'))
         args = SimpleNamespace(slices=None, parts=None, config=[], heap_parts=1)
         runs = [f'conformance/OWN/OWN-1-{i}-run.hir' for i in range(100)]
-        with patch.dict(corpus['native'].__globals__, heap_costs=lambda: {'conformance/': (1, 0.006, '')}), \
+        with patch.dict(corpus['native'].__globals__, heap_costs=lambda: {'conformance/': (1, 0.006, 60.0, '')}), \
              patch.object(corpus['subprocess'], 'run') as run, patch.object(corpus['subprocess'], 'call') as call, \
              contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(corpus['native'](['conformance/OWN'], runs, args), 2)
-        run.assert_not_called()
+            self.assertEqual(corpus['native'](['conformance/OWN'], runs, args, {}), 2)
+        self.assertEqual([c.args[0] for c in run.call_args_list if c.args and c.args[0][0] != 'git'], [])
         call.assert_not_called()
 
     def test_unknown_fifty_are_bounded_and_keep_both_backends(self):

@@ -281,9 +281,21 @@ fn a_failure_cleanup_that_skips_a_release_is_found_at_its_site() {
     assert_eq!(violation.kind, ViolationKind::LeakedCredit);
 }
 
-/// A missing pool part would omit the planted cleanup leak at site 1.
+/// A missing pool part would omit the planted cleanup leak at site 1. So would
+/// parts that skip a probe they do not complement (site 1 is not the probe's
+/// 1/3, so it lies in one of the parts 1/2, 2/2 that skip it), and parts that
+/// keep the probe's sites would inject them twice.
 #[test]
 fn disjoint_campaign_parts_preserve_every_run_and_the_cleanup_witness() {
+    use hirsel_heapcheck::CampaignPartition;
+    let quarters = (1..=4).map(|index| CampaignPartition::new(index, 4).unwrap());
+    let probed =
+        std::iter::once(CampaignPartition::new(1, 3).unwrap()).chain((1..=2).map(|index| {
+            CampaignPartition::new(index, 2)
+                .and_then(|part| part.skipping(1, 3))
+                .unwrap()
+        }));
+    let covers: [Vec<CampaignPartition>; 2] = [quarters.collect(), probed.collect()];
     for leaky in [false, true] {
         let p = campaign_program(leaky);
         for reexecute_campaign in [false, true] {
@@ -293,34 +305,39 @@ fn disjoint_campaign_parts_preserve_every_run_and_the_cleanup_witness() {
                 ..Config::default()
             };
             let full = fault_campaign(&p, &path("main"), &[], &mut printer, &config);
-            let mut union = Vec::new();
-            for index in 1..=4 {
-                let part = fault_campaign(
-                    &p,
-                    &path("main"),
-                    &[],
-                    &mut printer,
-                    &Config {
-                        campaign_partition: Some(
-                            hirsel_heapcheck::CampaignPartition::new(index, 4).unwrap(),
-                        ),
-                        ..config.clone()
-                    },
-                );
-                assert_eq!(part.clean, full.clean);
-                assert!(part.injected.iter().all(|(site, _)| site % 4 == index - 1));
-                union.extend(part.injected);
-            }
-            union.sort_by_key(|(site, _)| *site);
-            assert_eq!(union, full.injected);
-            if leaky {
-                assert!(union.iter().any(|(site, run)| {
-                    *site == 1
-                        && run
-                            .result
-                            .as_ref()
-                            .is_err_and(|v| v.kind == ViolationKind::LeakedCredit)
-                }));
+            for cover in &covers {
+                let mut union = Vec::new();
+                for &part_of in cover {
+                    let part = fault_campaign(
+                        &p,
+                        &path("main"),
+                        &[],
+                        &mut printer,
+                        &Config {
+                            campaign_partition: Some(part_of),
+                            ..config.clone()
+                        },
+                    );
+                    assert_eq!(part.clean, full.clean);
+                    assert!(part.injected.iter().all(|(site, _)| {
+                        site % part_of.count() == part_of.index() - 1
+                            && part_of
+                                .skip()
+                                .is_none_or(|(index, count)| site % count != index - 1)
+                    }));
+                    union.extend(part.injected);
+                }
+                union.sort_by_key(|(site, _)| *site);
+                assert_eq!(union, full.injected);
+                if leaky {
+                    assert!(union.iter().any(|(site, run)| {
+                        *site == 1
+                            && run
+                                .result
+                                .as_ref()
+                                .is_err_and(|v| v.kind == ViolationKind::LeakedCredit)
+                    }));
+                }
             }
         }
     }
@@ -343,12 +360,20 @@ fn streaming_campaign_keeps_clean_and_first_failure_without_dropping_sites() {
                         ..Config::default()
                     };
                     let collected = fault_campaign(&p, &path("main"), &[], &mut printer, &config);
-                    let streamed = hirsel_heapcheck::audit_campaign(
+                    let (streamed, timing) = hirsel_heapcheck::audit_campaign(
                         &p,
                         &path("main"),
                         &[],
                         &mut printer,
                         &config,
+                    );
+                    // The ledger's strata place each timed run at its own site.
+                    assert!(
+                        timing
+                            .injected
+                            .iter()
+                            .map(|(site, _)| *site)
+                            .eq(collected.injected.iter().map(|(site, _)| *site))
                     );
                     assert_eq!(streamed.clean, collected.clean);
                     assert_eq!(streamed.injected, collected.injected.len() as u64);

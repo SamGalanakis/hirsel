@@ -254,7 +254,7 @@ fn check(kind: Race) {
     // same complete first violation rather than only injected-failure evidence.
     for (is_fixed, collected) in [(false, &broken), (true, &fixed)] {
         let program = race(kind, is_fixed);
-        let streamed = hirsel_heapcheck::audit_campaign(
+        let (streamed, _) = hirsel_heapcheck::audit_campaign(
             &program,
             &path("main"),
             &[],

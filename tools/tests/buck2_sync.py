@@ -453,6 +453,20 @@ class NativePoolRouting(unittest.TestCase):
                            '--case-part', f'{shard}/2', '--config-part', f'{part}/3', '--heap-part', f'{heap}/4']
                           for heap in [1, 2, 3, 4] for part in [1, 2, 3] for shard in [1, 2]])
 
+        # The rest of a campaign after its probe (part 1/7, corpus) in one
+        # part: the binary needs a --heap-part to carry the skip, so the one
+        # part is 1/1, which leaves out only the probe's sites.
+        scope['read_root_config'] = lambda section, key, default: {
+            'native_paths': real, 'native_paths_heap_skip': '1/7',
+            'native_paths_configs': 'x86_64/heap+inject'}.get(key, default)
+        before = len(calls)
+        for index in range(1, 3):
+            scope['hirsel_command_test'](f'gate-native-selected-shard-{index}', '//:binary',
+                                         ['--full'], [], '.', selected=('native_paths', '--filter', index))
+        self.assertEqual([call['args'] for call in calls[before:]],
+                         [['--full', '--filter', real, '--config', 'x86_64/heap+inject',
+                           '--heap-part', '1/1', '--heap-skip', '1/7']])
+
     def test_generated_tests_have_no_host_partition(self):
         buck = (sync.ROOT / 'BUCK').read_text()
         self.assertNotIn('host_cases =', buck)
@@ -460,7 +474,7 @@ class NativePoolRouting(unittest.TestCase):
         self.assertNotIn('host = True', rust_tests)
         hosts = [block for block in buck.split('\n)\n') if 'host = True' in block]
         self.assertEqual({block.split('name = "', 1)[1].split('"', 1)[0] for block in hosts},
-                         {'gate-free-genmc', 'test-land'})
+                         {'gate-free-genmc', 'test-fmt', 'test-land'})
 
 
 class GuardedRoots(unittest.TestCase):

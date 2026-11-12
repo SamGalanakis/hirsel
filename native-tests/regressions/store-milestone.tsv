@@ -1,0 +1,16 @@
+# The cut-sweep cases each STORE milestone runs (sync.py NATIVE_STORE_MILESTONE, tools/corpus --selection
+# store-milestone): a share of every family, never a family whole. One row each, tab-separated: key (a prefix
+# naming a family's cases), N, and a note naming the ruling. Every swept STORE case falls under exactly one row.
+# A family's runs are its cases' in name order, each case's cuts in order; share T is those at positions
+# i % N == T - 1. A milestone takes, per row, a share not yet passed in the family's current cycle (chosen by the
+# checked commit) and records it with its verdict in the git common directory's hirsel-store-milestones.tsv, so N
+# passing milestones run every run of the family once. N here is sized to 40 CPU-h a milestone in all (orchestrator,
+# 2026-11-12): `tools/corpus --native --selection store-milestone --plan` prints its CPU-h, each family's cycle in
+# milestones and how many milestones full coverage takes; re-print it rather than re-plan by hand when costs move.
+conformance/STORE/STORE-11-checkpoint-cuts-	14	3-4 of 55 runs a milestone, about 2.1 CPU-h (orchestrator, 2026-11-12)
+conformance/STORE/STORE-11-checkpoint-nodes-	20	5-6 of 109 runs a milestone, every site, about 2.9 CPU-h (orchestrator, 2026-11-12)
+conformance/STORE/STORE-11-crash-cuts-	14	4-5 of 68 runs a milestone, about 3.4 CPU-h (orchestrator, 2026-11-12)
+conformance/STORE/STORE-11-fence-cuts-	16	one cut of each of 4 cases a milestone, about 1.0 CPU-h (orchestrator, 2026-11-12)
+conformance/STORE/STORE-11-objects-cuts-	14	13-14 of 190 runs a milestone, about 7.0 CPU-h (orchestrator, 2026-11-12)
+conformance/STORE/STORE-11-objects-fence-cuts-	14	13-14 of 190 runs a milestone, about 7.0 CPU-h (orchestrator, 2026-11-12)
+conformance/STORE/STORE-8-reader-table-law-	40	one window of each provider a milestone, about 15.2 CPU-h (orchestrator, 2026-11-12)

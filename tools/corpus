@@ -21,26 +21,32 @@ A case with a `// cuts: A..=B` header runs once per cut K, as `case@K`: a
 prefix selects all its cuts, `case@K` (native only; the interpreter runs every
 cut of the file) that one. `--selection store-land` and `--selection
 store-milestone` name the cut-sweep selections STORE lands and milestones run
-(named_selection; sync.py NATIVE_STORE_LAND holds the shares a land runs), and
-`--native --plan` prints a selection's planned pool CPU-h without running it.
+(named_selection; sync.py NATIVE_STORE_LAND holds the shares a land runs,
+NATIVE_STORE_MILESTONE the share of every family a milestone runs, recorded
+with its verdict in the git common directory's hirsel-store-milestones.tsv), and
+`--native --plan` prints a selection's planned pool CPU-h without running it,
+each case's figure measured (a current hirsel-heap-costs.tsv row, with its age)
+or estimated (a NATIVE_HEAP_COSTS row), warning first when estimates plan over
+PLAN_ESTIMATED of it.
 
 `--heap-parts N` distributes the entire fault domain of explicitly selected
 heap+inject configurations. Every part checks the clean run; aggregation requires
-all parts, including matching partition metadata. Without it, campaigns are
-planned from sync.py's NATIVE_HEAP_COSTS, each case's measured seconds a fault
-site (a case with no row: the worst figure of its rule, never a guess): a run's
-action runs its heap+inject campaign whole when its sites fit
-NATIVE_HEAP_FAULT_SECONDS at the worst selected cost; over that it checks the
-clean run and reports the campaign parted, and later rounds run each parted
-(case, configuration) as ceil(sites x cost / NATIVE_HEAP_FAULT_SECONDS) heap
-parts of their own, every part required, so every site is injected and judged.
-A case under a row of sync.py's NATIVE_HEAP_ROTATIONS (N shares) instead has
-one share of its sites injected a run, in ceil(sites / N x cost /
-NATIVE_HEAP_FAULT_SECONDS) parts: share T is the sites with site % N == T - 1.
-The share is chosen from the checked commit among those not yet passed in the
-current cycle, printed, and, when the selection holds every run of the family,
-recorded with its verdict in the git common directory's
-hirsel-heap-rotations.tsv, so N passing runs cover every site once.
+all parts, including matching partition metadata. Without it, a run's action
+runs its heap+inject campaign whole when its sites fit NATIVE_HEAP_FAULT_SECONDS
+at the worst planned cost a site; over that it checks the clean run and
+reports the campaign parted, and later rounds inject every site of each parted
+(case, configuration) in heap parts of their own, every part required. Parts
+are sized from what runs measured: every campaign's injected runs are timed by
+site and recorded in the git common directory's hirsel-heap-costs.tsv (a row a
+run: its sites, the mean seconds of its slowest quarter of the site range, its
+clean run's seconds, the commit, and digests of its case file and of
+STORE_SOURCES; a row whose digests no longer match is not current). A parted
+campaign with a current row runs in ceil(sites x cost / (NATIVE_HEAP_FAULT_SECONDS
+- clean)) parts; one without first runs a probe, part 1 of sites // PROBE_SITES,
+whose measured costs size the remaining parts, which skip the probe's sites.
+sync.py's NATIVE_HEAP_COSTS rows (a run's longest matching key, else the worst
+figures of its rule) only seed this: --plan's estimates and round one's site
+bound.
 
 `--native` runs the same selection through gate-native-full (`--full --filter`,
 the full gate's seed and request) as `//:gate-native-selected-shard-<i>`: one
@@ -61,6 +67,7 @@ selection that cannot fit is refused before anything runs. Prints every
 unlisted or stale exclusion row.
 """
 import datetime
+import hashlib
 import json
 import argparse
 import math
@@ -76,11 +83,19 @@ import event_logs  # noqa: E402
 from run_failures import first_error_line  # noqa: E402
 from sync import (CONFORMANCE_SLICE_PROGRAMS, NATIVE_CONFIG_SECONDS, NATIVE_COVER_PART_SECONDS,  # noqa: E402
                   NATIVE_COVER_PARTS, NATIVE_HEAP_COSTS, NATIVE_HEAP_FAULT_SECONDS, NATIVE_HEAP_PART_SECONDS,
-                  NATIVE_HEAP_ROTATIONS, NATIVE_STORE_LAND,
+                  NATIVE_STORE_LAND, NATIVE_STORE_MILESTONE,
                   NATIVE_SELECTED_SLICES, NATIVE_SLICE_SECONDS, SELECTED_SLICES)
 
 CUT = re.compile(r'^(.+\.hir)@(\d+)$')
 STORE = 'conformance/STORE/'
+# What a STORE case's fault sites and their cost follow besides the case file:
+# a cost-ledger row measured on other contents of these is not current.
+STORE_SOURCES = ('stdlib/std@1', 'crates/hirsel-store-authority/src')
+# A campaign with no current cost-ledger row first runs a probe part of about
+# this many of its sites, spread over the whole site range.
+PROBE_SITES = 400
+# --plan's first line warns when estimated figures plan more than this share.
+PLAN_ESTIMATED = 0.25
 
 
 def runs_of(corpus, prefixes):
@@ -107,19 +122,25 @@ def land_rows():
 
 
 def named_selection(name, corpus, parent):
-    """A named selection's prefixes. `store-land`: per NATIVE_STORE_LAND row,
-    one case of its key and one share of that case's cuts, both from the count
-    of commits up to the land's parent, printed. `store-milestone`: every
-    cut-sweep case of conformance/STORE but those every land runs whole."""
+    """A named selection's prefixes and the milestone shares it takes. `store-land`:
+    per NATIVE_STORE_LAND row, one case of its key and one share of that case's
+    cuts, both from the count of commits up to the land's parent, printed.
+    `store-milestone`: per NATIVE_STORE_MILESTONE row, one share of its family's
+    runs (milestone_shares), printed; every swept STORE case falls under one
+    row."""
     swept = sorted(c for c in corpus if c.startswith(STORE)
                    and conformance.run_ids(c, (ROOT / c).read_text()) != [c])
-    rows = land_rows()
     if name == 'store-milestone':
-        whole = {c for key, shares in rows if shares == 1 for c in swept if c.startswith(key)
-                 and len([d for d in swept if d.startswith(key)]) == 1}
-        return [c for c in swept if c not in whole]
+        commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+        shares = milestone_shares(swept, commit, milestone_ledger())
+        for key, (share, count, runs) in shares.items():
+            print(f'corpus: store-milestone at {commit[:12]}: {Path(key).name}*, share {share}/{count} of its '
+                  f'{len(runs_of(swept, [key]))} runs ({", ".join(Path(run).name.removeprefix(Path(key).name) for run in runs)})',
+                  file=sys.stderr, flush=True)
+        return [run for _, _, runs in shares.values() for run in runs], shares
     if name != 'store-land':
         raise ValueError(f'unknown selection {name}; known: store-land, store-milestone')
+    rows = land_rows()
     count = int(subprocess.check_output(['git', 'rev-list', '--count', parent], cwd=ROOT, text=True))
     chosen = []
     for key, shares in rows:
@@ -132,89 +153,253 @@ def named_selection(name, corpus, parent):
         print(f'corpus: store-land at parent {parent} (commit {count}): {Path(case).name}, share {share + 1}/{shares} '
               f'of its cuts ({", ".join(run.rsplit("@", 1)[1] for run in cuts)})', file=sys.stderr, flush=True)
         chosen += cuts
-    return chosen
+    return chosen, {}
+
+
+def milestone_rows():
+    """NATIVE_STORE_MILESTONE rows: (key, N), in file order."""
+    rows = []
+    for line in (ROOT / NATIVE_STORE_MILESTONE).read_text().splitlines():
+        if line and not line.startswith('#'):
+            key, shares, _ = line.split('\t')
+            rows.append((key, int(shares)))
+    return rows
+
+
+def milestone_ledger():
+    """Where milestones record each share they ran and its verdict: shared by
+    every worktree of the repository, outside every commit."""
+    return common_file('hirsel-store-milestones.tsv')
+
+
+def milestone_shares(swept, commit, ledger):
+    """The share of each NATIVE_STORE_MILESTONE row a milestone at `commit`
+    takes: key -> (T, N, runs). A family's runs are its cases' in name order,
+    each case's cuts in order, and share T is those at positions i % N == T - 1
+    (two cases of 40 cuts in 40 shares: cut T of each), T chosen by `commit`
+    among the shares not passed in the family's current cycle, so N passing
+    milestones run every run once. Every swept case must fall under exactly
+    one row."""
+    rows = milestone_rows()
+    for case in swept:
+        keys = [key for key, _ in rows if case.startswith(key)]
+        if len(keys) != 1:
+            raise ValueError(f'{NATIVE_STORE_MILESTONE}: {case} falls under {len(keys)} rows, not one')
+    shares = {}
+    for key, count in rows:
+        family = runs_of(swept, [key])
+        if not family:
+            raise ValueError(f'{NATIVE_STORE_MILESTONE}: {key} names no cut-sweep case')
+        share = rotation_share(key, count, commit, ledger)
+        shares[key] = (share, count, [run for i, run in enumerate(family) if i % count == share - 1])
+    return shares
 
 
 def heap_costs():
-    """NATIVE_HEAP_COSTS rows: case or prefix -> (sites, seconds a site, note)."""
+    """NATIVE_HEAP_COSTS rows: case or prefix -> (sites, seconds a site, clean
+    seconds, note)."""
     rows = {}
     for line in (ROOT / NATIVE_HEAP_COSTS).read_text().splitlines():
         if line and not line.startswith('#'):
-            key, sites, cost, note = line.split('\t')
-            rows[key] = (int(sites), float(cost), note)
+            key, sites, cost, clean, note = line.split('\t')
+            rows[key] = (int(sites), float(cost), float(clean), note)
     return rows
 
 
 def heap_cost(run, costs):
-    """Planned seconds a fault site of `run`: the longest matching row, else the
-    worst figure of its rule (its family), else the worst at all."""
+    """NATIVE_HEAP_COSTS's (sites, seconds a site, clean seconds) for `run`:
+    its longest matching row, else the worst figures of its rule's rows (its
+    family), else the worst at all."""
     keys = [key for key in costs if run == key or run.startswith(key)]
     if keys:
-        return costs[max(keys, key=len)][1]
+        return costs[max(keys, key=len)][:3]
     rule = re.match(r'(.*/[A-Z]+-\d+)-', run)
-    family = [cost for key, (_, cost, _) in costs.items() if rule and key.startswith(rule[1] + '-')]
-    return max(family or [cost for _, cost, _ in costs.values()])
+    family = [row for key, row in costs.items() if rule and key.startswith(rule[1] + '-')] or list(costs.values())
+    return tuple(max(row[i] for row in family) for i in range(3))
 
 
-def plan(runs, costs):
-    """Print the selection's planned pool CPU-h a native smoke run costs, per
-    case and in total: each run's clean configurations (NATIVE_CONFIG_SECONDS
-    each) and, from its NATIVE_HEAP_COSTS row, its heap+inject campaign of the
-    row's sites at the row's seconds a site, one clean run checked a heap part.
-    Returns 2 when a run has no measured row."""
-    unmeasured = sorted({CUT.sub(r'\1', run) for run in runs
-                         if not any(run == key or run.startswith(key) for key in costs)})
-    if unmeasured:
-        print(f'corpus: no {NATIVE_HEAP_COSTS} row for {", ".join(unmeasured)}; measure it first', file=sys.stderr)
-        return 2
-    total, by_case = 0.0, {}
-    for run in runs:
-        sites, cost, _ = costs[max((key for key in costs if run == key or run.startswith(key)), key=len)]
-        heap = sites * cost
-        parts = math.ceil(heap / NATIVE_HEAP_FAULT_SECONDS)
-        seconds = heap + (3 + parts) * NATIVE_CONFIG_SECONDS
+def common_file(name):
+    """A file of the git common directory: shared by every worktree of the
+    repository, outside every commit."""
+    common = subprocess.check_output(['git', 'rev-parse', '--git-common-dir'], cwd=ROOT, text=True).strip()
+    return (ROOT / common).resolve() / name
+
+
+def cost_ledger():
+    """Where runs record what each heap+inject campaign cost (record_costs)."""
+    return common_file('hirsel-heap-costs.tsv')
+
+
+def digest(paths):
+    """A digest of the files at or under `paths`, by repository path and content."""
+    files = sorted(file for path in paths for file in
+                   ([ROOT / path] if (ROOT / path).is_file() else (ROOT / path).rglob('*')) if file.is_file())
+    hashed = hashlib.sha256()
+    for file in files:
+        hashed.update(file.relative_to(ROOT).as_posix().encode() + b'\0' + file.read_bytes() + b'\0')
+    return hashed.hexdigest()[:16]
+
+
+def measured_costs(runs, ledger):
+    """Each of `runs`' current cost-ledger row: run -> (sites, seconds a site,
+    clean seconds, stamp). A row is current while its case file and
+    STORE_SOURCES digest as they do now, so a change to either retires it; the
+    last current row of a run wins."""
+    lines = ledger.read_text().splitlines() if ledger.exists() else []
+    wanted, rows, cases = set(runs), {}, {}
+    store = digest(STORE_SOURCES) if lines else None
+    for line in lines:
+        stamp, _, run, case_digest, store_digest, sites, cost, clean = line.split('\t')
+        if run not in wanted or store_digest != store:
+            continue
         case = CUT.sub(r'\1', run)
-        count, sum_ = by_case.get(case, (0, 0.0))
-        by_case[case] = (count + 1, sum_ + seconds)
-        total += seconds
-    for case, (count, seconds) in by_case.items():
-        print(f'plan: {Path(case).name}: {count} runs, {seconds / 3600:.2f} CPU-h')
-    print(f'plan: {len(runs)} runs, {total / 3600:.2f} CPU-h')
-    return 0
-
-
-def heap_rotations():
-    """NATIVE_HEAP_ROTATIONS rows: case or prefix -> the shares its fault sites
-    are split into, one injected a run."""
-    rows = {}
-    for line in (ROOT / NATIVE_HEAP_ROTATIONS).read_text().splitlines():
-        if line and not line.startswith('#'):
-            key, shares, _ = line.split('\t')
-            rows[key] = int(shares)
+        if case not in cases:
+            cases[case] = digest([case])
+        if case_digest == cases[case]:
+            rows[run] = (int(sites), float(cost), float(clean), stamp)
     return rows
 
 
-def rotation_key(run, rotations):
-    """The longest rotation row `run` falls under, or None."""
-    keys = [key for key in rotations if run == key or run.startswith(key)]
-    return max(keys, key=len) if keys else None
+def campaign_cost(measures):
+    """What `measures` (one run's heap_campaigns rows, any of its parts) say a
+    campaign of it costs: (injected sites, seconds a site, clean seconds), or
+    None with no injected site. Seconds a site is the slowest quarter of the
+    site range's mean injected run, plus the fired timer runs' time spread over
+    the injected sites: later sites can cost several times earlier ones, and
+    parts are sized from the worst. Clean seconds is the clean run timed alone
+    when it was, else a part's wall less its perturbations'."""
+    strata, fired, alone, derived = [[0, 0.0] for _ in range(4)], 0.0, [], []
+    for measure in measures:
+        if measure['clean_seconds'] is not None:
+            alone.append(measure['clean_seconds'])
+        if campaign := measure['campaign']:
+            for quarter, (n, seconds) in enumerate(campaign['strata']):
+                strata[quarter][0] += n
+                strata[quarter][1] += seconds
+            fired += campaign['fired_seconds']
+            derived.append(campaign['seconds'] - sum(s for _, s in campaign['strata']) - campaign['fired_seconds'])
+    injected = sum(n for n, _ in strata)
+    if not injected:
+        return None
+    cost = max(seconds / n for n, seconds in strata if n) + fired / injected
+    return injected, cost, max(alone or derived)
 
 
-def family_runs(key):
-    """Every corpus run under rotation row `key`."""
-    return runs_of(cases(ROOT), [key])
+def clean_seconds(measures):
+    """The clean run's seconds timed alone in `measures`, or None."""
+    alone = [m['clean_seconds'] for m in measures if m['clean_seconds'] is not None]
+    return max(alone) if alone else None
 
 
-def rotation_ledger():
-    """Where runs record each rotated share and its verdict: shared by every
-    worktree of the repository."""
-    common = subprocess.check_output(['git', 'rev-parse', '--git-common-dir'], cwd=ROOT, text=True).strip()
-    return (ROOT / common).resolve() / 'hirsel-heap-rotations.tsv'
+def record_costs(campaigns, commit, ledger):
+    """Append a cost-ledger row for each run `campaigns` (heap_campaigns rows
+    of this invocation's reports) injected sites of: when, the commit, the run,
+    the digests of its case file and of STORE_SOURCES, its sites, seconds a
+    site and clean seconds."""
+    by_run = {}
+    for measure in campaigns:
+        by_run.setdefault(measure['case'], []).append(measure)
+    rows = []
+    for run, measures in sorted(by_run.items()):
+        if measured := campaign_cost(measures):
+            _, cost, clean = measured
+            rows.append((run, max(m['sites'] for m in measures), cost, clean))
+    if not rows:
+        return
+    store = digest(STORE_SOURCES)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    with ledger.open('a') as out:
+        for run, sites, cost, clean in rows:
+            case = CUT.sub(r'\1', run)
+            out.write(f'{stamp}\t{commit}\t{run}\t{digest([case])}\t{store}\t{sites}\t{cost:.5f}\t{clean:.1f}\n')
+
+
+def figures(run, costs, measured):
+    """(sites, seconds a site, clean seconds, ledger stamp or None) for `run`:
+    its current ledger row, else its NATIVE_HEAP_COSTS figures."""
+    return measured[run] if run in measured else (*heap_cost(run, costs), None)
+
+
+def part_count(share, cost, clean):
+    """Parts of `share` fault sites at `cost` seconds each, every part also
+    running the clean run, so each holds NATIVE_HEAP_FAULT_SECONDS; None when
+    the clean run alone leaves under a minute of it."""
+    budget = NATIVE_HEAP_FAULT_SECONDS - clean
+    return max(1, math.ceil(share * cost / budget)) if budget >= 60 else None
+
+
+def probe_parts(share):
+    """P: a probe is part 1 of P of a share's sites, about PROBE_SITES of them."""
+    return max(1, int(share // PROBE_SITES))
+
+
+def age(stamp, now):
+    seconds = (now - datetime.datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%SZ').replace(
+        tzinfo=datetime.timezone.utc)).total_seconds()
+    return f'{seconds / 3600:.1f} h' if seconds < 172800 else f'{seconds / 86400:.0f} d'
+
+
+def plan(runs, costs, measured, sites_max, now):
+    """Print the selection's planned pool CPU-h a native smoke run costs, per
+    case and in total, each figure measured (a current cost-ledger row, with
+    its age) or estimated (a NATIVE_HEAP_COSTS row), the totals of each apart;
+    the first line warns when estimated figures plan over PLAN_ESTIMATED of
+    it. A run costs its round-one configurations (the clean run and two of
+    NATIVE_CONFIG_SECONDS), then its campaign: whole
+    when its sites fit sites_max, else a probe of PROBE_SITES sites when it
+    has no current row, and heap parts each running the clean run. Returns 2
+    when a run has no NATIVE_HEAP_COSTS row and no ledger row."""
+    unmeasured = sorted({CUT.sub(r'\1', run) for run in runs if run not in measured
+                         and not any(run == key or run.startswith(key) for key in costs)})
+    if unmeasured:
+        print(f'corpus: no {NATIVE_HEAP_COSTS} row for {", ".join(unmeasured)}; measure it first', file=sys.stderr)
+        return 2
+    totals, by_case = {'measured': 0.0, 'estimated': 0.0}, {}
+    for run in runs:
+        sites, cost, clean, stamp = figures(run, costs, measured)
+        seconds, probe = clean + 2 * NATIVE_CONFIG_SECONDS, 0.0
+        if sites <= sites_max:
+            seconds += clean + sites * cost
+        else:
+            remaining = sites
+            if stamp is None:
+                probed = sites / probe_parts(sites)
+                probe, remaining = clean + probed * cost, sites - probed
+            parts = (part_count(remaining, cost, clean) or math.ceil(remaining * cost / 60)) if remaining >= 1 else 0
+            seconds += probe + parts * clean + remaining * cost
+        source = 'estimated' if stamp is None else 'measured'
+        totals[source] += seconds
+        case = by_case.setdefault(CUT.sub(r'\1', run), dict(runs=0, measured=0, seconds=0.0, probes=0.0, stamps=[]))
+        case['runs'] += 1
+        case['seconds'] += seconds
+        case['probes'] += probe
+        if stamp:
+            case['measured'] += 1
+            case['stamps'].append(stamp)
+    total = sum(totals.values())
+    if total and totals['estimated'] / total > PLAN_ESTIMATED:
+        print(f'plan: WARNING: {totals["estimated"] / total:.0%} of {total / 3600:.2f} CPU-h is estimated from '
+              f'{NATIVE_HEAP_COSTS} rows, not measured by a run')
+    for name, case in by_case.items():
+        ages = sorted({age(stamp, now) for stamp in case['stamps']})
+        measured_part = f'measured (ledger, {" to ".join(ages[::max(1, len(ages) - 1)])} old)' if case['measured'] else ''
+        estimated = case['runs'] - case['measured']
+        estimated_part = (f'estimated ({NATIVE_HEAP_COSTS} row; probes {case["probes"] / 3600:.2f} CPU-h)'
+                          if estimated else '')
+        if case['measured'] and estimated:
+            source = f'{case["measured"]} {measured_part}, {estimated} {estimated_part}'
+        else:
+            source = measured_part or estimated_part
+        print(f'plan: {Path(name).name}: {case["runs"]} runs, {case["seconds"] / 3600:.2f} CPU-h, {source}')
+    print(f'plan: {len(runs)} runs, {total / 3600:.2f} CPU-h: {totals["measured"] / 3600:.2f} measured, '
+          f'{totals["estimated"] / 3600:.2f} estimated')
+    return 0
 
 
 def rotation_cycle(key, shares, ledger):
-    """The shares of `key` passed in its current cycle (a cycle ends when every
-    one of the `shares` has passed), and how many cycles have completed."""
+    """The shares of milestone row `key` passed in its current cycle (a cycle
+    ends when every one of the `shares` has passed), and how many cycles have
+    completed."""
     passed, cycles = set(), 0
     lines = ledger.read_text().splitlines() if ledger.exists() else []
     for line in lines:
@@ -228,8 +413,8 @@ def rotation_cycle(key, shares, ledger):
 
 
 def rotation_share(key, shares, commit, ledger):
-    """The share of `key` this run injects: chosen by `commit` among those not
-    passed in the current cycle."""
+    """The share of milestone row `key` a milestone at `commit` takes: chosen
+    by `commit` among those not passed in the current cycle."""
     passed, _ = rotation_cycle(key, shares, ledger)
     open_shares = [n for n in range(1, shares + 1) if n not in passed]
     return open_shares[int(commit[:12], 16) % len(open_shares)]
@@ -274,6 +459,26 @@ def execute(command, structured=False):
         return child.wait()
 
 
+def plan_selection(runs, shares):
+    """plan() of `runs` as native() would run them at this commit, from each
+    run's current cost-ledger row; for a milestone, each family's share, its
+    cycle in milestones, and how many milestones full coverage takes."""
+    costs, measured = heap_costs(), measured_costs(runs, cost_ledger())
+    worst = max(figures(run, costs, measured)[1] for run in runs)
+    sites_max = max(1, int(NATIVE_HEAP_FAULT_SECONDS / worst))
+    status = plan(runs, costs, measured, sites_max, datetime.datetime.now(datetime.timezone.utc))
+    if status or not shares:
+        return status
+    ledger, left = milestone_ledger(), []
+    for key, (share, count, _) in shares.items():
+        passed, cycles = rotation_cycle(key, count, ledger)
+        left.append(count - len(passed))
+        print(f'plan: {Path(key).name}*: share {share}/{count}, a cycle of {count} milestones; cycle {cycles + 1} '
+              f'has passed {len(passed)}')
+    print(f'plan: full coverage after {max(left)} milestones')
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--slices', type=int, help=f'pool actions (1-{SELECTED_SLICES}; default by case count)')
@@ -306,8 +511,9 @@ def main():
     if args.heap_parts > 1 and (args.full_matrix or not args.config or any(not c.endswith('/heap+inject') for c in args.config)):
         parser.error('--heap-parts requires explicit heap+inject configurations only')
     corpus = cases(ROOT)
+    shares = {}
     if args.selection:
-        args.prefixes = named_selection(args.selection, corpus, args.parent)
+        args.prefixes, shares = named_selection(args.selection, corpus, args.parent)
     prefixes = [p.rstrip('/') + '/' if (ROOT / p).is_dir() else p for p in args.prefixes]
     unmatched = [p for p in prefixes if not runs_of(corpus, [p])]
     if unmatched or any('|' in p or ';' in p for p in prefixes):
@@ -320,9 +526,9 @@ def main():
     runs = runs_of(corpus, prefixes)
     selected = len(runs)
     if args.plan:
-        return plan(runs, heap_costs())
+        return plan_selection(runs, shares)
     if args.native:
-        return native(prefixes, runs, args)
+        return native(prefixes, runs, args, shares)
     # The interpreter runs a swept case's every cut; a `case@K` prefix selects its file.
     prefixes = sorted({CUT.sub(r'\1', p) for p in prefixes})
     runs = runs_of(corpus, prefixes)
@@ -391,79 +597,98 @@ def main():
     return status
 
 
-def native(prefixes, runs, args):
+def native(prefixes, runs, args, shares):
     """The selection through gate-native-full's matrix: one action per run (or
-    run shards times configuration parts), then the parted heap campaigns,
-    each in parts sized by its measured cost (heap_cost), a rotated one's over
-    the share of its sites this run injects (heap_rotations)."""
-    costs, rotations = heap_costs(), heap_rotations()
+    run shards times configuration parts), then the parted heap campaigns. Each
+    parted campaign is sized from its current cost-ledger row; without one, a
+    probe part of about PROBE_SITES sites runs first and its measured costs
+    size the rest, which skip the probe's sites. Every measured campaign is
+    recorded in the cost ledger, and each milestone share in `shares` in the
+    milestone ledger with the invocation's verdict."""
+    costs = heap_costs()
+    commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+    costs_ledger = cost_ledger()
+    measured = measured_costs(runs, costs_ledger)
     # A whole campaign of up to sites_max sites holds at most
     # NATIVE_HEAP_FAULT_SECONDS of faults at the worst planned cost.
-    worst = max(heap_cost(run, costs) for run in runs)
+    worst = max(figures(run, costs, measured)[1] for run in runs)
     sites_max = max(1, int(NATIVE_HEAP_FAULT_SECONDS / worst)) if args.heap_parts == 1 else None
     result = native_selection(prefixes, len(runs), args, sites_max)
     if isinstance(result, int):
         return result
-    status, problems, reports, attempts, cases, parted, expected = result
-    # Each parted (case, configuration) as its own heap parts, every part
-    # checking the clean run and injecting a disjoint share of the sites, the
-    # share sized so its expected faults stay under NATIVE_HEAP_FAULT_SECONDS.
-    commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
-    ledger = rotation_ledger()
-    chosen, groups = {}, {}
-    for row in parted:
-        key = rotation_key(row['case'], rotations)
-        rotation = None
-        if key:
-            if key not in chosen:
-                chosen[key] = rotation_share(key, rotations[key], commit, ledger)
-            rotation = (chosen[key], rotations[key])
-        sites = row['sites'] / rotation[1] if rotation else row['sites']
-        parts = math.ceil(sites * heap_cost(row['case'], costs) / NATIVE_HEAP_FAULT_SECONDS)
-        groups.setdefault((parts, rotation), []).append(row)
-    for key, share in sorted(chosen.items()):
-        passed, cycles = rotation_cycle(key, rotations[key], ledger)
-        print(f'corpus: {key}: heap fault sites share {share}/{rotations[key]} at {commit[:12]}; '
-              f'cycle {cycles + 1} has passed shares {sorted(passed) or "none"}', file=sys.stderr, flush=True)
-    for (heap_parts, rotation), rows in sorted(groups.items(), key=lambda item: (item[0][0], item[0][1] or (0, 0))):
+    status, problems, reports, attempts, cases, parted, expected, campaigns = result
+    record_costs(campaigns, commit, costs_ledger)
+    measured = measured_costs(runs, costs_ledger)
+
+    def heap_round(rows, heap_parts, skip, heaps, log, what):
+        nonlocal status, attempts, expected
         configs = sorted({row['configuration'] for row in rows})
         ids = sorted({row['case'] for row in rows})
-        per_round = NATIVE_SELECTED_SLICES // (len(configs) * heap_parts)
+        per_round = NATIVE_SELECTED_SLICES // (len(configs) * len(heaps))
         if per_round == 0:
-            problems.append(f'{", ".join(ids)}: {heap_parts} heap fault parts per configuration, '
+            problems.append(f'{", ".join(ids)}: {len(heaps)} heap fault parts per configuration, '
                             f'over {NATIVE_SELECTED_SLICES} slices; not run')
-            continue
-        verdicts = {}
+            return
         for at in range(0, len(ids), per_round):
             chunk = ids[at:at + per_round]
-            print(f'corpus: {len(chunk)} parted heap campaigns x {heap_parts} heap fault parts'
-                  + (f' of share {rotation[0]}/{rotation[1]}' if rotation else ''), file=sys.stderr, flush=True)
-            more = native_round(chunk, len(chunk), len(configs), configs, heap_parts, None, 'corpus-native-heap', rotation)
+            print(f'corpus: {len(chunk)} parted heap campaigns x {what}', file=sys.stderr, flush=True)
+            more = native_round(chunk, len(chunk), len(configs), configs, heap_parts, None, log, skip, heaps)
             status = status or more[0]
-            problems += more[1]
-            reports += more[2]
+            problems.extend(more[1])
+            reports.extend(more[2])
             attempts += more[3]
             expected += more[6]
-            for case in chunk:
-                verdicts[case] = verdicts.get(case, True) and more[0] == 0 and not more[1]
-        if rotation:
-            # A share passes only when every campaign of its family under it
-            # passed, and covers the family only when the selection held all
-            # its runs.
-            by_key = {}
-            for case, ok in verdicts.items():
-                key = rotation_key(case, rotations)
-                by_key[key] = by_key.get(key, True) and ok
-            for key in sorted(by_key):
-                missing = sorted(set(family_runs(key)) - set(runs))
-                if missing:
-                    print(f'corpus: {key}: share {rotation[0]}/{rotation[1]} not recorded: the selection '
-                          f'leaves out {len(missing)} of its runs', file=sys.stderr)
-                    del by_key[key]
-            with ledger.open('a') as out:
-                for key, ok in sorted(by_key.items()):
-                    stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-                    out.write(f'{stamp}\t{commit}\t{key}\t{rotation[0]}/{rotation[1]}\t{"pass" if ok else "fail"}\n')
+            campaigns.extend(more[7])
+
+    # Probes: part 1 of P of each unmeasured campaign, about PROBE_SITES
+    # sites over the whole site range.
+    probes = {}
+    for row in parted:
+        if row['case'] not in measured:
+            probes.setdefault(probe_parts(row['sites']), []).append(row)
+    for probe, rows in sorted(probes.items()):
+        heap_round(rows, probe, None, [1], 'corpus-native-probe', f'a probe, heap fault part 1/{probe}')
+    if probes:
+        record_costs(campaigns, commit, costs_ledger)
+    by_run = {}
+    for measure in campaigns:
+        by_run.setdefault(measure['case'], []).append(measure)
+    # The rest of each campaign in parts of NATIVE_HEAP_FAULT_SECONDS, each
+    # also running the clean run, from the worst measured quarter of the sites.
+    groups = {}
+    for row in parted:
+        case = row['case']
+        probe = None if case in measured else probe_parts(row['sites'])
+        if probe:
+            measured_run = campaign_cost(by_run.get(case, []))
+            if measured_run is None:
+                problems.append(f'{case}: its probe measured no site; the rest of its campaign was not run')
+                continue
+            _, cost, clean = measured_run
+        else:
+            _, cost, clean, _ = measured[case]
+        clean = clean_seconds(by_run.get(case, [])) or clean
+        remaining = row['sites'] - (row['sites'] / probe if probe else 0)
+        if remaining < 1:
+            continue
+        parts = part_count(remaining, cost, clean)
+        if parts is None:
+            problems.append(f'{case}: its clean run takes {clean:.0f} s, leaving under a minute of '
+                            f'{NATIVE_HEAP_FAULT_SECONDS} s a part; not run')
+            continue
+        groups.setdefault((parts, (1, probe) if probe else None), []).append(row)
+    for (parts, skip), rows in sorted(groups.items(), key=lambda item: (item[0][0], item[0][1] or (0, 0))):
+        heap_round(rows, parts, skip, list(range(1, parts + 1)), 'corpus-native-heap',
+                   f'{parts} heap fault parts' + (f' skipping probe {skip[0]}/{skip[1]}' if skip else ''))
+    if groups:
+        record_costs(campaigns, commit, costs_ledger)
+    # A milestone share passes only when the whole invocation passed.
+    if shares:
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        verdict = 'pass' if status == 0 and not problems else 'fail'
+        with milestone_ledger().open('a') as out:
+            out.writelines(f'{stamp}\t{commit}\t{key}\t{share}/{count}\t{verdict}\n'
+                           for key, (share, count, _) in shares.items())
     print(f'native: {cases} executable cases, {attempts} configuration attempts, {len(reports)} of {expected} slices')
     for line in problems:
         print(line)
@@ -507,26 +732,27 @@ def native_selection(prefixes, selected, args, sites_max):
     return native_round(prefixes, shards, parts, args.config, args.heap_parts, sites_max if heap else None, 'corpus-native')
 
 
-def native_round(prefixes, shards, parts, configs, heap_parts, sites_max, log, rotation=None):
+def native_round(prefixes, shards, parts, configs, heap_parts, sites_max, log, skip=None, heaps=None):
     """One buck2 test of shards x parts x heap_parts selected slices: its exit
     status, problems, reports, configuration attempts, executable cases, parted
-    campaigns and slice count. With `rotation` (share T of N) the heap parts
-    together inject that share: part h is partition T + N(h-1) of N x heap_parts.
-    A missing slice or heap part, or wrong part metadata, is a problem."""
-    slices = shards * parts * heap_parts
-    targets = [f'//:gate-native-selected-shard-{i}' for i in range(1, slices + 1)]
+    campaigns, slice count and measured heap campaigns. `skip` (K, M) leaves
+    part K/M's sites out of each heap part; `heaps` runs only those parts. A missing slice or heap part, or
+    wrong part metadata, is a problem."""
+    heaps = heaps or range(1, heap_parts + 1)
+    targets = [f'//:gate-native-selected-shard-{i}' for heap in heaps
+               for i in range((heap - 1) * shards * parts + 1, heap * shards * parts + 1)]
     config = ['-c', 'hirsel.full=true', '-c', 'hirsel.native_paths=' + '|'.join(prefixes),
               '-c', f'hirsel.native_paths_split={shards}', '-c', f'hirsel.native_paths_parts={parts}',
               '-c', 'hirsel.native_paths_configs=' + '|'.join(configs),
               '-c', f'hirsel.native_paths_heap_parts={heap_parts}',
               '-c', f'hirsel.native_paths_heap_sites_max={sites_max or ""}',
-              '-c', 'hirsel.native_paths_heap_rotation=' + (f'{rotation[0]}/{rotation[1]}' if rotation else '')]
+              '-c', 'hirsel.native_paths_heap_skip=' + (f'{skip[0]}/{skip[1]}' if skip else '')]
     with event_logs.recorded(log) as event_log:
         status = subprocess.call([str(conformance.BUCK2), 'test', *conformance.CONFIG, *config,
                                   '--event-log', str(event_log), *targets], cwd=ROOT)
         outputs = conformance.shard_outputs(event_log)
     attempts = cases = 0
-    reports, problems, parted = [], [], []
+    reports, problems, parted, campaigns = [], [], [], []
     for name, output in sorted(outputs.items()):
         start = output.find('\n{\n') + 1 if not output.startswith('{\n') else 0
         try:
@@ -539,16 +765,18 @@ def native_round(prefixes, shards, parts, configs, heap_parts, sites_max, log, r
             for line in output.splitlines()[-20:]:
                 print(f'{slice_name}: {line}')
             continue
-        if heap_parts > 1 or rotation:
+        if heap_parts > 1 or skip:
             heap = (int(slice_name) - 1) // (shards * parts) + 1
-            expected = ({'index': rotation[0] + rotation[1] * (heap - 1), 'count': rotation[1] * heap_parts}
-                        if rotation else {'index': heap, 'count': heap_parts})
+            expected = {'index': heap, 'count': heap_parts}
             if report.get('heap_partition') != expected:
                 problems.append(f'{slice_name}: missing or incorrect heap partition: expected {expected}')
+            if skip and report.get('heap_skip') != {'index': skip[0], 'count': skip[1]}:
+                problems.append(f'{slice_name}: missing or incorrect heap skip: expected {skip[0]}/{skip[1]}')
         if sites_max:
             if report.get('heap_sites_max') != sites_max or not isinstance(report.get('heap_parted'), list):
                 problems.append(f'{slice_name}: missing or incorrect heap site bound: expected {sites_max}')
             parted += report.get('heap_parted') or []
+        campaigns += report.get('heap_campaigns') or []
         reports.append(report)
         attempts += report['configuration_attempts']
         if (int(slice_name) - 1) // shards == 0:
@@ -558,9 +786,9 @@ def native_round(prefixes, shards, parts, configs, heap_parts, sites_max, log, r
         for line in output.splitlines():
             if line.startswith('native: '):
                 print(f'{slice_name}: {line}')
-    if len(outputs) != slices:
-        problems.append(f'{len(outputs)} of {slices} slices reported')
-    return status, problems, reports, attempts, cases, parted, slices
+    if len(outputs) != len(targets):
+        problems.append(f'{len(outputs)} of {len(targets)} slices reported')
+    return status, problems, reports, attempts, cases, parted, len(targets), campaigns
 
 
 if __name__ == '__main__':

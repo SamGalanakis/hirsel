@@ -2322,6 +2322,8 @@ pub struct HeapRun {
     pub choices: u64,
     /// Instrumentation only; no check reads them.
     pub counters: Counters,
+    /// A campaign's per-perturbation wall times (None for a single run).
+    pub timing: Option<hirsel_heapcheck::CampaignTiming>,
 }
 
 fn config(
@@ -2658,6 +2660,7 @@ pub fn run_heap_in(
         sites: run.sites,
         choices: run.choices,
         counters: run.counters,
+        timing: None,
     })
 }
 
@@ -2714,7 +2717,7 @@ pub fn heap_campaign_in(
         io.runners.program = Some(std::sync::Arc::new(heap.clone()));
         io.runners.config = Some(std::sync::Arc::new(config(program, None, kind, world)?));
     }
-    let campaign = hirsel_heapcheck::audit_campaign_ready(
+    let (campaign, timing) = hirsel_heapcheck::audit_campaign_ready(
         &heap,
         entry,
         &args,
@@ -2732,6 +2735,7 @@ pub fn heap_campaign_in(
         sites: campaign.clean.sites,
         choices: campaign.clean.choices,
         counters: campaign.clean.counters,
+        timing: Some(timing),
     })
 }
 

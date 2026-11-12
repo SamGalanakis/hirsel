@@ -7,6 +7,9 @@ pub struct Fixture {
     /// sites than this is not run here: the clean run is checked, and its sites
     /// are left to `heap_campaign_partition` parts (`Outcome::Parted`).
     pub heap_campaign_sites_max: Option<u64>,
+    /// Where each heap+inject configuration records what its runs cost
+    /// (tools/corpus sizes campaign parts from them).
+    pub heap_measures: Option<HeapMeasures>,
     /// Closed CPU batches use the same explicit grant in every engine.
     pub cpu: Option<hirsel_run_schema::CpuGrant>,
     pub tasks_free: bool,
@@ -50,6 +53,29 @@ pub struct Fixture {
     pub migrate: bool,
 }
 
+/// What one heap+inject configuration's runs of a fixture cost.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeapMeasure {
+    pub configuration: String,
+    /// The clean run's failure-capable sites.
+    pub sites: u64,
+    /// The clean run's wall time, when it ran alone (under a site bound).
+    pub clean: Option<std::time::Duration>,
+    /// The campaign, when one ran: its partition, its wall time (the clean
+    /// run's interleaved steps included) and each perturbation's own time.
+    pub campaign: Option<HeapCampaignMeasure>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeapCampaignMeasure {
+    pub partition: Option<hirsel_heapcheck::CampaignPartition>,
+    pub wall: std::time::Duration,
+    pub timing: hirsel_heapcheck::CampaignTiming,
+}
+
+/// A run's heap measures, shared by the fixtures of its configurations.
+pub type HeapMeasures = std::sync::Arc<std::sync::Mutex<Vec<HeapMeasure>>>;
+
 impl Fixture {
     /// The `db@1` place heads its runners name, which a build of its program roots
     /// (`Options::places`).
@@ -71,6 +97,7 @@ impl Default for Fixture {
         Self {
             heap_campaign_partition: None,
             heap_campaign_sites_max: None,
+            heap_measures: None,
             cpu: None,
             tasks_free: false,
             args: vec![],

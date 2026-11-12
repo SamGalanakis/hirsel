@@ -323,7 +323,7 @@ impl Io {
         }
         // Every prefix's synthetic inbox failure and every ordinary injected
         // failure in that prefix must discharge the head's separate ledger.
-        let campaign = hirsel_heapcheck::audit_campaign_ready(
+        let (campaign, _) = hirsel_heapcheck::audit_campaign_ready(
             &program,
             &head,
             &args,

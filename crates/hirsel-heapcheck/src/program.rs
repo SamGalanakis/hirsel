@@ -566,17 +566,31 @@ impl Operations for NoOperations {
     }
 }
 
-/// One disjoint part of the complete injection and timer-choice domains.
+/// One disjoint part of the complete injection and timer-choice domains:
+/// the sites with `site % count == index - 1`, less those of an already run
+/// part it skips (a probe that measured the campaign's cost).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CampaignPartition {
     index: u64,
     count: u64,
+    skip: Option<(u64, u64)>,
 }
 
 impl CampaignPartition {
     /// Parts are one-based; no invalid or empty modulus can be constructed.
     pub fn new(index: u64, count: u64) -> Option<Self> {
-        (count > 0 && index > 0 && index <= count).then_some(Self { index, count })
+        (count > 0 && index > 0 && index <= count).then_some(Self {
+            index,
+            count,
+            skip: None,
+        })
+    }
+    /// This part without the sites of part `index` of `count`.
+    pub fn skipping(self, index: u64, count: u64) -> Option<Self> {
+        Self::new(index, count).map(|_| Self {
+            skip: Some((index, count)),
+            ..self
+        })
     }
     pub fn index(self) -> u64 {
         self.index
@@ -584,8 +598,15 @@ impl CampaignPartition {
     pub fn count(self) -> u64 {
         self.count
     }
+    /// The part this one leaves out, as (index, count).
+    pub fn skip(self) -> Option<(u64, u64)> {
+        self.skip
+    }
     pub(crate) fn contains(self, site: u64) -> bool {
         site % self.count == self.index - 1
+            && self
+                .skip
+                .is_none_or(|(index, count)| site % count != index - 1)
     }
 }
 

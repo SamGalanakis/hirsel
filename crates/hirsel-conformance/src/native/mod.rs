@@ -92,7 +92,8 @@ impl Case {
         partition: Option<hirsel_native::HeapCampaignPartition>,
         sites_max: Option<u64>,
     ) -> CaseResult {
-        run_source_path(
+        let measures = hirsel_native::HeapMeasures::default();
+        let mut result = run_source_path(
             &self.id,
             &self.source,
             self.path.as_deref(),
@@ -102,9 +103,12 @@ impl Case {
             Probe {
                 heap_partition: partition,
                 heap_sites_max: sites_max,
+                heap_measures: Some(measures.clone()),
                 ..Probe::default()
             },
-        )
+        );
+        result.heap_measures = std::mem::take(&mut *measures.lock().expect("heap measures"));
+        result
     }
 
     /// `--trace-roots` (S-14): run this case under `matrix` with every engine tracing its
@@ -155,7 +159,7 @@ impl Case {
 }
 
 /// What a differential run probes beyond the observation.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct Probe {
     heap_partition: Option<hirsel_native::HeapCampaignPartition>,
     /// A whole campaign over this many sites is left to parts (`--heap-sites-max`).
@@ -164,6 +168,8 @@ struct Probe {
     trace_roots: bool,
     /// Native executables migrate every suspension (`--migrate`).
     migrate: bool,
+    /// Where heap+inject configurations record what their runs cost.
+    heap_measures: Option<hirsel_native::HeapMeasures>,
 }
 
 /// B of the set rule: every discovered executable corpus case outside the gate
@@ -399,6 +405,9 @@ pub struct CaseResult {
     /// The case's wall time on its job, every configuration included;
     /// `run_cases_with` sets it.
     pub wall: std::time::Duration,
+    /// What each heap+inject configuration's runs cost, for sizing campaign
+    /// parts; `Case::run_heap_partition` records them.
+    pub heap_measures: Vec<hirsel_native::HeapMeasure>,
 }
 
 /// The configuration an exclusion row names for a case with no native
@@ -476,6 +485,7 @@ impl Prepared {
                 outcomes,
                 reference: Some(self.reference.clone()),
                 wall: Default::default(),
+                heap_measures: Vec::new(),
             },
             Err(reason) => CaseResult::failed(id, reason),
         }
@@ -494,6 +504,7 @@ impl CaseResult {
             outcomes: Vec::new(),
             reference: None,
             wall: Default::default(),
+            heap_measures: Vec::new(),
         }
     }
 }
@@ -626,7 +637,7 @@ fn run_source_path(
                 matrix,
                 toolchain,
                 dir,
-                probe,
+                &probe,
             );
             prepared.result(id, outcomes)
         }
@@ -642,7 +653,7 @@ fn matrix_campaign<P: ReadyExecution>(
     matrix: &[Configuration],
     toolchain: &Toolchain,
     dir: &Path,
-    probe: Probe,
+    probe: &Probe,
 ) -> Result<Outcomes, String> {
     let matrix: Vec<_> = matrix
         .iter()
@@ -662,6 +673,7 @@ fn matrix_campaign<P: ReadyExecution>(
         &hirsel_native::Fixture {
             heap_campaign_partition: probe.heap_partition,
             heap_campaign_sites_max: probe.heap_sites_max,
+            heap_measures: probe.heap_measures.clone(),
             trace_roots: probe.trace_roots,
             migrate: probe.migrate,
             ..prepared.fixture(source)
@@ -681,7 +693,7 @@ fn test_matrix_campaign<P: ReadyExecution>(
     matrix: &[Configuration],
     toolchain: &Toolchain,
     dir: &Path,
-    probe: Probe,
+    probe: &Probe,
 ) -> Outcomes {
     differential_ready(
         ready,
@@ -693,6 +705,7 @@ fn test_matrix_campaign<P: ReadyExecution>(
         &hirsel_native::Fixture {
             heap_campaign_partition: probe.heap_partition,
             heap_campaign_sites_max: probe.heap_sites_max,
+            heap_measures: probe.heap_measures.clone(),
             trace_roots: probe.trace_roots,
             migrate: probe.migrate,
             ..Default::default()
@@ -789,7 +802,7 @@ fn run_test_suite(
         probe.trace_roots,
         toolchain,
         |ready, test, reference, test_dir| {
-            test_matrix_campaign(ready, test, reference, matrix, toolchain, test_dir, probe)
+            test_matrix_campaign(ready, test, reference, matrix, toolchain, test_dir, &probe)
         },
     )
 }
@@ -969,6 +982,7 @@ fn visit_test_suite(
             outcomes,
             reference: first_reference,
             wall: Default::default(),
+            heap_measures: Vec::new(),
         })
     };
     run().unwrap_or_else(|reason| CaseResult {
@@ -977,6 +991,7 @@ fn visit_test_suite(
         outcomes: vec![],
         reference: None,
         wall: Default::default(),
+        heap_measures: Vec::new(),
     })
 }
 
@@ -1160,7 +1175,7 @@ pub fn smoke_case(
                 let dirs = campaigns(test_dir).expect("test campaign scratch");
                 let probe = Probe::default();
                 let mut outcomes = test_matrix_campaign(
-                    ready, test, reference, matrix, toolchain, &dirs[0], probe,
+                    ready, test, reference, matrix, toolchain, &dirs[0], &probe,
                 );
                 let launch = hirsel_native::LaunchInputs {
                     test_seed: test.seed,
@@ -1176,7 +1191,7 @@ pub fn smoke_case(
                     &Default::default(),
                 ));
                 outcomes.extend(test_matrix_campaign(
-                    ready, test, reference, cranelift, toolchain, &dirs[2], probe,
+                    ready, test, reference, cranelift, toolchain, &dirs[2], &probe,
                 ));
                 outcomes.extend(oracle_campaign(
                     ready,
@@ -1197,6 +1212,7 @@ pub fn smoke_case(
             outcomes: outcomes.by_ref().take(count).collect(),
             reference: result.reference.clone(),
             wall: Default::default(),
+            heap_measures: Vec::new(),
         };
         return Smoke {
             matrix: campaign(matrix.len()),
@@ -1227,7 +1243,7 @@ pub fn smoke_case(
             let ready = &mut |options: &hirsel_native::Options| builds.ready(options);
             let dir = &dirs[campaign];
             match campaign {
-                0 => matrix_campaign(ready, &prepared, source, matrix, toolchain, dir, probe),
+                0 => matrix_campaign(ready, &prepared, source, matrix, toolchain, dir, &probe),
                 1 => Ok(replay_campaign(
                     ready,
                     &prepared.entry,
@@ -1237,7 +1253,7 @@ pub fn smoke_case(
                     launch.clone(),
                     &fixture,
                 )),
-                2 => matrix_campaign(ready, &prepared, source, cranelift, toolchain, dir, probe),
+                2 => matrix_campaign(ready, &prepared, source, cranelift, toolchain, dir, &probe),
                 _ => Ok(oracle_campaign(
                     ready,
                     &prepared.entry,

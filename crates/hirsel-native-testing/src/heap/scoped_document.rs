@@ -213,7 +213,7 @@ fn construction_and_extraction_failures_drain_in_both_audit_modes() {
         .unwrap();
         let program = ready.heap_program();
         for full_recount_every_step in [false, true] {
-            let campaign = hirsel_heapcheck::audit_campaign_ready(
+            let (campaign, _) = hirsel_heapcheck::audit_campaign_ready(
                 &program,
                 &loaded.entry,
                 &[],
@@ -292,7 +292,7 @@ fn private_malformed_spans_links_and_tags_have_checked_twins() {
         .unwrap();
         let program = ready.heap_program();
         for full_recount_every_step in [false, true] {
-            let campaign = hirsel_heapcheck::audit_campaign_ready(
+            let (campaign, _) = hirsel_heapcheck::audit_campaign_ready(
                 &program,
                 &loaded.entry,
                 &[],
@@ -343,7 +343,7 @@ fn scratch_construction_and_extraction_failures_drain_in_both_audit_modes() {
         .unwrap();
         let program = ready.heap_program();
         for full_recount_every_step in [false, true] {
-            let campaign = hirsel_heapcheck::audit_campaign_ready(
+            let (campaign, _) = hirsel_heapcheck::audit_campaign_ready(
                 &program,
                 &loaded.entry,
                 &[],

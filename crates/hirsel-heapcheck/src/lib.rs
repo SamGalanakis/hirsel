@@ -199,11 +199,18 @@ pub fn fault_campaign<S: Stage>(
 ) -> Campaign {
     let mut injected = Vec::new();
     let mut fired = Vec::new();
-    let clean = visit_campaign(program, entry, args, ops, config, &mut |at, run| match at {
-        Perturbation::Injected(site) => injected.push((site, run)),
-        Perturbation::Fired(choice) => fired.push((choice, run)),
-        Perturbation::Clean => unreachable!("the clean run is returned separately"),
-    });
+    let clean = visit_campaign(
+        program,
+        entry,
+        args,
+        ops,
+        config,
+        &mut |at, run, _| match at {
+            Perturbation::Injected(site) => injected.push((site, run)),
+            Perturbation::Fired(choice) => fired.push((choice, run)),
+            Perturbation::Clean => unreachable!("the clean run is returned separately"),
+        },
+    );
     Campaign {
         clean,
         injected,
@@ -233,6 +240,16 @@ impl CampaignAudit {
     }
 }
 
+/// What each perturbation of a campaign cost in wall time: its own run (a
+/// forked suffix, or a replayed run), not the clean steps between sites.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CampaignTiming {
+    /// Each injected site and its run's time, in campaign order.
+    pub injected: Vec<(u64, std::time::Duration)>,
+    /// Every fired timer choice's run, together.
+    pub fired: std::time::Duration,
+}
+
 /// Execute the same campaign as [`fault_campaign`], retaining only clean evidence
 /// and the first failed perturbation. Collecting fixtures use the same executor.
 pub fn audit_campaign<S: Stage>(
@@ -241,26 +258,36 @@ pub fn audit_campaign<S: Stage>(
     args: &[Arg],
     ops: &mut dyn FnMut() -> Box<dyn Operations>,
     config: &Config,
-) -> CampaignAudit {
+) -> (CampaignAudit, CampaignTiming) {
     let mut injected = 0;
     let mut fired = 0;
     let mut first_failure = None;
-    let clean = visit_campaign(program, entry, args, ops, config, &mut |at, run| {
+    let mut timing = CampaignTiming::default();
+    let clean = visit_campaign(program, entry, args, ops, config, &mut |at, run, took| {
         match at {
-            Perturbation::Injected(_) => injected += 1,
-            Perturbation::Fired(_) => fired += 1,
+            Perturbation::Injected(site) => {
+                injected += 1;
+                timing.injected.push((site, took));
+            }
+            Perturbation::Fired(_) => {
+                fired += 1;
+                timing.fired += took;
+            }
             Perturbation::Clean => unreachable!("the clean run is returned separately"),
         }
         if first_failure.is_none() && run.result.is_err() {
             first_failure = Some((at, run));
         }
     });
-    CampaignAudit {
-        clean,
-        injected,
-        fired,
-        first_failure,
-    }
+    (
+        CampaignAudit {
+            clean,
+            injected,
+            fired,
+            first_failure,
+        },
+        timing,
+    )
 }
 
 fn visit_campaign<S: Stage>(
@@ -269,7 +296,7 @@ fn visit_campaign<S: Stage>(
     args: &[Arg],
     ops: &mut dyn FnMut() -> Box<dyn Operations>,
     config: &Config,
-    visit: &mut dyn FnMut(Perturbation, Run),
+    visit: &mut dyn FnMut(Perturbation, Run, std::time::Duration),
 ) -> Run {
     let mut model = ops();
     let clean = if !config.reexecute_campaign
@@ -283,7 +310,7 @@ fn visit_campaign<S: Stage>(
             args,
             &mut *model,
             config,
-            &mut |site, report| {
+            &mut |site, report, took| {
                 if config.compare_campaigns {
                     let reference = run(
                         program,
@@ -302,7 +329,7 @@ fn visit_campaign<S: Stage>(
                         "fork and replay campaign site {site} disagree"
                     );
                 }
-                visit(Perturbation::Injected(site), report);
+                visit(Perturbation::Injected(site), report, took);
             },
         );
         if config.compare_campaigns {
@@ -323,6 +350,7 @@ fn visit_campaign<S: Stage>(
     } else {
         let clean = run(program, entry, args, &mut *model, config);
         for site in (0..clean.sites).filter(|site| config.campaign_contains(*site)) {
+            let started = std::time::Instant::now();
             let report = run(
                 program,
                 entry,
@@ -333,11 +361,12 @@ fn visit_campaign<S: Stage>(
                     ..config.clone()
                 },
             );
-            visit(Perturbation::Injected(site), report);
+            visit(Perturbation::Injected(site), report, started.elapsed());
         }
         clean
     };
     for choice in (0..clean.choices).filter(|choice| config.campaign_contains(*choice)) {
+        let started = std::time::Instant::now();
         let report = run(
             program,
             entry,
@@ -348,7 +377,7 @@ fn visit_campaign<S: Stage>(
                 ..config.clone()
             },
         );
-        visit(Perturbation::Fired(choice), report);
+        visit(Perturbation::Fired(choice), report, started.elapsed());
     }
     clean
 }
@@ -360,7 +389,7 @@ pub fn audit_campaign_ready(
     args: &[Arg],
     ops: &mut dyn FnMut() -> Box<dyn Operations>,
     config: &Config,
-) -> CampaignAudit {
+) -> (CampaignAudit, CampaignTiming) {
     audit_campaign(program, entry, args, ops, config)
 }
 

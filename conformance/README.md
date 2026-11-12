@@ -52,9 +52,15 @@ the windows together make every check (see
 `tools/corpus --selection store-land` and `--selection store-milestone` name
 the swept STORE cases each STORE land and each milestone runs: a land runs the
 share of each family that [store-land.tsv](../native-tests/regressions/store-land.tsv)
-names, rotating land by land, and a milestone every family whole.
-`tools/corpus --native --selection store-land --plan` prints a land's planned
-pool CPU-h from [heap-costs.tsv](../native-tests/regressions/heap-costs.tsv).
+names, rotating land by land, and a milestone the share of every family that
+[store-milestone.tsv](../native-tests/regressions/store-milestone.tsv) sizes,
+taking shares not yet passed until each family's cycle is covered.
+Native runs size their heap fault parts from the costs earlier runs measured
+(a ledger in the git common directory, retired when the case or the store
+sources change), or from a small probe they run first;
+`tools/corpus --native --selection store-land --plan` (or `store-milestone`)
+prints the planned pool CPU-h, each case's figure measured or estimated from
+[heap-costs.tsv](../native-tests/regressions/heap-costs.tsv).
 
 For multiple packages, put an exact `case.hir.json` sidecar beside the case.
 It is an ordinary schema-1 launch manifest: `package` fixes the importing

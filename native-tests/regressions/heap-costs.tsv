@@ -1,32 +1,38 @@
-# Heap+inject campaign cost a fault site, for tools/corpus part sizing (sync.py NATIVE_HEAP_COSTS).
+# Heap+inject campaign costs: the seed and fallback of tools/corpus part sizing (sync.py NATIVE_HEAP_COSTS).
+# Runs measure their own costs into the git common directory's hirsel-heap-costs.tsv (a row a `case@K`, current
+# while its case file and the std store sources are unchanged), and a run with a current row is sized from it;
+# a run without one probes first. These rows give --plan its estimates and round one its site bound.
 # One row each, tab-separated: key (a case, or a prefix of run ids), sites (of the measured run), seconds a
 # site (part wall minus clean wall over the part's sites, local --jobs 1; or, from a pool run, its
-# checked-h-campaign seconds over its sites), and a note naming the sample. A run takes its longest
-# matching key (a `case@K` row is one cut); with none, the worst figure of its rule, else the worst at all.
-# heap-rotations.tsv, beside this table, names the families that inject one share of their sites a run.
-conformance/STORE/STORE-11-checkpoint-nodes-	69062	0.018	checkpoint-nodes-crash cut 12 of the 16-value history, part 1/100, main d2c16191
-conformance/STORE/STORE-11-checkpoint-run.hir	151736	0.007	part 1/100, main 7da4031a
-conformance/STORE/STORE-11-crash-cuts-	30481	0.059	crash-cuts-crash cut 9, part 1/100, main d2c16191
-conformance/STORE/STORE-11-crash-cuts-crash-run.hir@3	10421	0.0212	pool, campaign seconds over sites, 2 part(s), main 56d511ba
-conformance/STORE/STORE-11-fence-cuts-	26015	0.018	fence-cuts-fail cut 15, its history's last request, main 7da4031a
-conformance/STORE/STORE-11-fence-cuts-fail-run.hir@1	8272	0.0050	pool, campaign seconds over sites, 1 part(s), main 56d511ba
-conformance/STORE/STORE-11-fence-cuts-fail-run.hir@10	19911	0.0364	pool, campaign seconds over sites, 1 part(s), main 56d511ba
-conformance/STORE/STORE-11-fence-cuts-fail-run.hir@11	23190	0.0278	pool, campaign seconds over sites, 1 part(s), main 56d511ba
-conformance/STORE/STORE-11-fence-cuts-fail-run.hir@12	23460	0.0265	pool, campaign seconds over sites, 1 part(s), main 56d511ba
-conformance/STORE/STORE-11-fence-cuts-fail-run.hir@13	29568	0.0680	pool, campaign seconds over sites, 2 part(s), main 56d511ba
-conformance/STORE/STORE-11-fence-cuts-fail-run.hir@14	29568	0.0509	pool, campaign seconds over sites, 2 part(s), main 56d511ba
-conformance/STORE/STORE-11-fence-cuts-fail-run.hir@15	29655	0.0347	pool, campaign seconds over sites, 2 part(s), main 56d511ba
-conformance/STORE/STORE-11-fence-cuts-fail-run.hir@16	14881	0.0288	pool, campaign seconds over sites, 1 part(s), main 56d511ba
-conformance/STORE/STORE-11-fence-cuts-fail-run.hir@2	8542	0.0048	pool, campaign seconds over sites, 1 part(s), main 56d511ba
-conformance/STORE/STORE-11-fence-cuts-fail-run.hir@3	9410	0.0043	pool, campaign seconds over sites, 1 part(s), main 56d511ba
-conformance/STORE/STORE-11-fence-cuts-fail-run.hir@4	10957	0.0027	pool, campaign seconds over sites, 1 part(s), main 56d511ba
-conformance/STORE/STORE-11-fence-cuts-fail-run.hir@5	11013	0.0061	pool, campaign seconds over sites, 1 part(s), main 56d511ba
-conformance/STORE/STORE-11-fence-cuts-fail-run.hir@6	14482	0.0062	pool, campaign seconds over sites, 1 part(s), main 56d511ba
-conformance/STORE/STORE-11-fence-cuts-fail-run.hir@7	14752	0.0062	pool, campaign seconds over sites, 1 part(s), main 56d511ba
-conformance/STORE/STORE-11-fence-cuts-fail-run.hir@8	19846	0.0473	pool, campaign seconds over sites, 1 part(s), main 56d511ba
-conformance/STORE/STORE-11-fence-cuts-fail-run.hir@9	19846	0.0375	pool, campaign seconds over sites, 1 part(s), main 56d511ba
-conformance/STORE/STORE-11-objects-cuts-	33801	0.035	objects-cuts-lose cut 30, main 7da4031a
-conformance/STORE/STORE-11-objects-world-run.hir	511376	0.165	part 1/400, main 7da4031a
-conformance/STORE/STORE-3-narrow-scope-laws-run.hir	405634	0.017	part 1/N, main 7da4031a
-conformance/STORE/STORE-8-reader-table-law-log-run.hir	946604	0.0123	window 1 of 40, part 1/100, main edf86e39
-conformance/STORE/STORE-8-reader-table-law-objects-run.hir	944262	0.0269	window 1 of 40, part 1/100, main edf86e39
+# checked-h-campaign seconds over its sites), clean seconds (the clean run alone; for a 56d511ba pool row, its
+# part wall less its campaign; else that run's worst, 106, for a STORE-11 family, and the largest measured,
+# 150.56, for a larger case), and a note naming the sample. A run takes its longest matching key (a `case@K`
+# row is one cut); with none, the worst figures of its rule, else the worst at all.
+conformance/STORE/STORE-11-checkpoint-cuts-	69062	0.018	106	unmeasured seed: the checkpoint-nodes- row, the nearest measured checkpoint cut family (orchestrator, 2026-11-12)
+conformance/STORE/STORE-11-checkpoint-nodes-	69062	0.018	106	checkpoint-nodes-crash cut 12 of the 16-value history, part 1/100, main d2c16191
+conformance/STORE/STORE-11-checkpoint-run.hir	151736	0.007	150.56	part 1/100, main 7da4031a
+conformance/STORE/STORE-11-crash-cuts-	30481	0.059	106	crash-cuts-crash cut 9, part 1/100, main d2c16191
+conformance/STORE/STORE-11-crash-cuts-crash-run.hir@3	10421	0.0212	81	pool, campaign seconds over sites, 2 part(s), main 56d511ba
+conformance/STORE/STORE-11-fence-cuts-	26015	0.018	106	fence-cuts-fail cut 15, its history's last request, main 7da4031a
+conformance/STORE/STORE-11-fence-cuts-fail-run.hir@1	8272	0.0050	103	pool, campaign seconds over sites, 1 part(s), main 56d511ba
+conformance/STORE/STORE-11-fence-cuts-fail-run.hir@10	19911	0.0364	98	pool, campaign seconds over sites, 1 part(s), main 56d511ba
+conformance/STORE/STORE-11-fence-cuts-fail-run.hir@11	23190	0.0278	63	pool, campaign seconds over sites, 1 part(s), main 56d511ba
+conformance/STORE/STORE-11-fence-cuts-fail-run.hir@12	23460	0.0265	59	pool, campaign seconds over sites, 1 part(s), main 56d511ba
+conformance/STORE/STORE-11-fence-cuts-fail-run.hir@13	29568	0.0680	74	pool, campaign seconds over sites, 2 part(s), main 56d511ba
+conformance/STORE/STORE-11-fence-cuts-fail-run.hir@14	29568	0.0509	77	pool, campaign seconds over sites, 2 part(s), main 56d511ba
+conformance/STORE/STORE-11-fence-cuts-fail-run.hir@15	29655	0.0347	59	pool, campaign seconds over sites, 2 part(s), main 56d511ba
+conformance/STORE/STORE-11-fence-cuts-fail-run.hir@16	14881	0.0288	83	pool, campaign seconds over sites, 1 part(s), main 56d511ba
+conformance/STORE/STORE-11-fence-cuts-fail-run.hir@2	8542	0.0048	103	pool, campaign seconds over sites, 1 part(s), main 56d511ba
+conformance/STORE/STORE-11-fence-cuts-fail-run.hir@3	9410	0.0043	62	pool, campaign seconds over sites, 1 part(s), main 56d511ba
+conformance/STORE/STORE-11-fence-cuts-fail-run.hir@4	10957	0.0027	65	pool, campaign seconds over sites, 1 part(s), main 56d511ba
+conformance/STORE/STORE-11-fence-cuts-fail-run.hir@5	11013	0.0061	106	pool, campaign seconds over sites, 1 part(s), main 56d511ba
+conformance/STORE/STORE-11-fence-cuts-fail-run.hir@6	14482	0.0062	61	pool, campaign seconds over sites, 1 part(s), main 56d511ba
+conformance/STORE/STORE-11-fence-cuts-fail-run.hir@7	14752	0.0062	63	pool, campaign seconds over sites, 1 part(s), main 56d511ba
+conformance/STORE/STORE-11-fence-cuts-fail-run.hir@8	19846	0.0473	103	pool, campaign seconds over sites, 1 part(s), main 56d511ba
+conformance/STORE/STORE-11-fence-cuts-fail-run.hir@9	19846	0.0375	93	pool, campaign seconds over sites, 1 part(s), main 56d511ba
+conformance/STORE/STORE-11-objects-cuts-	33801	0.035	106	objects-cuts-lose cut 30, main 7da4031a
+conformance/STORE/STORE-11-objects-fence-cuts-	33801	0.035	106	unmeasured seed: the objects-cuts- row, the same 38-cut objects history with fences (orchestrator, 2026-11-12)
+conformance/STORE/STORE-11-objects-world-run.hir	511376	0.165	150.56	part 1/400, main 7da4031a
+conformance/STORE/STORE-3-narrow-scope-laws-run.hir	405634	0.017	150.56	part 1/N, main 7da4031a
+conformance/STORE/STORE-8-reader-table-law-log-run.hir	946604	0.0123	150.56	window 1 of 40, part 1/100, main edf86e39
+conformance/STORE/STORE-8-reader-table-law-objects-run.hir	944262	0.0269	148.28	window 1 of 40, part 1/100, main edf86e39

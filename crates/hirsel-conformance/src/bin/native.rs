@@ -34,7 +34,7 @@ use hirsel_native_testing::topology_matrix;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: native --std-compile [--filter MODULE] [--shard I/N] | --corpus [--seed N] [--shard I/N] | --bugs | --smoke [--filter TEXT]... | --sanitize [--filter TEXT]... | --cranelift [--clif] [--aarch64] [--filter TEXT]... [--shard I/N] | --cranelift-times [--filter TEXT]... | --trace-roots [--filter TEXT]... [--shard I/N] | --migrate [--filter TEXT]... [--shard I/N] | --full [--bless] [--filter TEXT]... [--shard I/N] [--engine heap|llvm|diagnostic|default|system] [--seed N] [--exhaustive] [--config NAME|smoke]... [--config-part K/N] [--case-part K/N] [--heap-part K/N | --heap-sites-max N] | --hash-sweep [--filter TEXT]... | --replay DIR | --reduce DIR\n\
+const USAGE: &str = "usage: native --std-compile [--filter MODULE] [--shard I/N] | --corpus [--seed N] [--shard I/N] | --bugs | --smoke [--filter TEXT]... | --sanitize [--filter TEXT]... | --cranelift [--clif] [--aarch64] [--filter TEXT]... [--shard I/N] | --cranelift-times [--filter TEXT]... | --trace-roots [--filter TEXT]... [--shard I/N] | --migrate [--filter TEXT]... [--shard I/N] | --full [--bless] [--filter TEXT]... [--shard I/N] [--engine heap|llvm|diagnostic|default|system] [--seed N] [--exhaustive] [--config NAME|smoke]... [--config-part K/N] [--case-part K/N] [--heap-part K/N [--heap-skip K/N] | --heap-sites-max N] | --hash-sweep [--filter TEXT]... | --replay DIR | --reduce DIR\n\
                      options: [--case ID]... [--root PATH] [--jobs N] [--out DIR] [--hash-seed N]";
 
 fn main() -> ExitCode {
@@ -531,6 +531,12 @@ fn run() -> Result<bool, String> {
                         Shard::parse(&value).ok_or("--heap-part must be K/N with 1 <= K <= N")?,
                     );
                 }
+                Long("heap-skip") => {
+                    let value = args.value()?.string()?;
+                    configs.skip = Some(
+                        Shard::parse(&value).ok_or("--heap-skip must be K/N with 1 <= K <= N")?,
+                    );
+                }
                 Long("heap-sites-max") => configs.sites_max = Some(args.value()?.parse()?),
                 Long("case-part") => {
                     let value = args.value()?.string()?;
@@ -568,7 +574,7 @@ fn run() -> Result<bool, String> {
     }
     if !configs.is_all() && mode != "--full" {
         return Err(
-            "--config, --config-part, --case-part, --heap-part and --heap-sites-max require --full"
+            "--config, --config-part, --case-part, --heap-part, --heap-skip and --heap-sites-max require --full"
                 .into(),
         );
     }
@@ -1079,6 +1085,7 @@ fn cranelift_times(root: &Path, jobs: usize, filter: &Filter) -> Result<bool, St
                 outcomes: Vec::new(),
                 reference: None,
                 wall: Default::default(),
+                heap_measures: Vec::new(),
             }
         },
     );
@@ -1138,6 +1145,38 @@ impl Selected {
     }
 }
 
+/// One heap+inject configuration's measured costs, for tools/corpus's cost
+/// ledger: the clean run alone (when it ran alone), and a campaign's wall time
+/// with its injected runs' times summed by quarter of the site range (the
+/// part's sites, by their site number) and its fired timer runs' time.
+fn heap_measure_json(case: &str, m: &hirsel_native::HeapMeasure) -> serde_json::Value {
+    let campaign = m.campaign.as_ref().map(|c| {
+        let mut strata = [(0u64, 0f64); 4];
+        for (site, took) in &c.timing.injected {
+            let quarter = (site.saturating_mul(4) / m.sites.max(1)).min(3) as usize;
+            strata[quarter].0 += 1;
+            strata[quarter].1 += took.as_secs_f64();
+        }
+        serde_json::json!({
+            "partition": c.partition.map(|p| serde_json::json!({
+                "index": p.index(),
+                "count": p.count(),
+                "skip": p.skip().map(|(index, count)| serde_json::json!({"index": index, "count": count})),
+            })),
+            "seconds": c.wall.as_secs_f64(),
+            "strata": strata.iter().map(|(n, s)| serde_json::json!([n, s])).collect::<Vec<_>>(),
+            "fired_seconds": c.timing.fired.as_secs_f64(),
+        })
+    });
+    serde_json::json!({
+        "case": case,
+        "configuration": m.configuration,
+        "sites": m.sites,
+        "clean_seconds": m.clean.map(|d| d.as_secs_f64()),
+        "campaign": campaign,
+    })
+}
+
 /// `--config NAME`... and `--config-part K/N`: which configurations this run
 /// executes for each case. Without names, a part of the case's own
 /// configurations (the gate's per-case choice, made over the whole matrix
@@ -1154,6 +1193,9 @@ struct Chosen {
     part: Option<Shard>,
     cases: Option<Shard>,
     heap: Option<Shard>,
+    /// `--heap-skip K/N`: the heap part leaves out part K/N's sites, which a
+    /// probe of the campaign's cost already injected.
+    skip: Option<Shard>,
     /// `--heap-sites-max N`: a heap+inject campaign over N fault sites is
     /// left to `--heap-part`s, reported as `heap_parted` with its sites.
     sites_max: Option<u64>,
@@ -1165,6 +1207,7 @@ impl Chosen {
             && self.part.is_none()
             && self.cases.is_none()
             && self.heap.is_none()
+            && self.skip.is_none()
             && self.sites_max.is_none()
     }
 
@@ -1191,6 +1234,9 @@ impl Chosen {
                 }))
         {
             return Err("--heap-part requires named heap+inject configurations only".into());
+        }
+        if self.skip.is_some() && self.heap.is_none() {
+            return Err("--heap-skip leaves sites out of a --heap-part".into());
         }
         if self.heap.is_some() && self.sites_max.is_some() {
             return Err(
@@ -1336,8 +1382,14 @@ fn full(
             &toolchain,
             dir,
             configs.heap.map(|part| {
-                hirsel_native::HeapCampaignPartition::new(part.index, part.count)
-                    .expect("validated shard")
+                let partition = hirsel_native::HeapCampaignPartition::new(part.index, part.count)
+                    .expect("validated shard");
+                match configs.skip {
+                    Some(skip) => partition
+                        .skipping(skip.index, skip.count)
+                        .expect("validated shard"),
+                    None => partition,
+                }
             }),
             configs.sites_max,
         )
@@ -1581,6 +1633,14 @@ fn full(
     if let Some(part) = configs.heap {
         json["heap_partition"] = serde_json::json!({"index": part.index, "count": part.count});
     }
+    if let Some(skip) = configs.skip {
+        json["heap_skip"] = serde_json::json!({"index": skip.index, "count": skip.count});
+    }
+    json["heap_campaigns"] = results
+        .iter()
+        .flat_map(|r| r.heap_measures.iter().map(|m| heap_measure_json(&r.id, m)))
+        .collect::<Vec<_>>()
+        .into();
     if let Some(max) = configs.sites_max {
         json["heap_sites_max"] = max.into();
         json["heap_parted"] = results
@@ -1867,6 +1927,7 @@ mod tests {
             outcomes,
             reference: None,
             wall: Default::default(),
+            heap_measures: Vec::new(),
         };
         assert!(!all_agree("empty", &[]));
         assert!(!all_agree("unconfigured", &[result(Vec::new())]));

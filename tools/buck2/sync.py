@@ -557,19 +557,21 @@ NATIVE_HEAP_PART_SECONDS = 450
 # clean run. A site's cost is the injected run, which goes on to the program's
 # end: about 7 ms in STORE-11-checkpoint-run, but 0.35-1.8 s in the unsplit
 # cut sweeps (counting run, store-crash-710, 2026-11-12). tools/corpus plans
-# campaigns from each case's measured seconds a site (NATIVE_HEAP_COSTS), so
-# that no action holds more than NATIVE_HEAP_FAULT_SECONDS of expected faults
-# and nothing planned reaches the pool's 15-minute limit.
+# campaigns from each run's measured seconds a site (the git common
+# directory's hirsel-heap-costs.tsv, else a probe; NATIVE_HEAP_COSTS rows only
+# seed --plan and round one), so that no action holds more than
+# NATIVE_HEAP_FAULT_SECONDS of faults and clean run together and nothing
+# planned reaches the pool's 15-minute limit.
 NATIVE_HEAP_FAULT_SECONDS = 480
 NATIVE_HEAP_COSTS = "native-tests/regressions/heap-costs.tsv"
-# A family whose every cut's campaign would cost a pool day injects one of N
-# shares of its fault sites a run, each run choosing a share not yet passed,
-# so N passing runs cover every site once (tools/corpus heap_rotations).
-NATIVE_HEAP_ROTATIONS = "native-tests/regressions/heap-rotations.tsv"
 # What each STORE land runs of the cut-sweep families: per row, one case of
 # its key and one share of that case's cuts, rotating land by land
 # (tools/corpus --selection store-land; --plan prints its CPU-h).
 NATIVE_STORE_LAND = "native-tests/regressions/store-land.tsv"
+# What each STORE milestone runs: per family, one of N shares of its runs, each
+# milestone taking a share not yet passed, so N passing milestones cover the
+# family (tools/corpus --selection store-milestone; --plan prints the cycle).
+NATIVE_STORE_MILESTONE = "native-tests/regressions/store-milestone.tsv"
 # The full native matrix (tools/main-runs) runs as shards of the baseline by
 # path hash, each case under its rotating pairwise cover, so each shard stays well
 # under its Buck2 timeout; gate-native-full stays whole for --bless and for a

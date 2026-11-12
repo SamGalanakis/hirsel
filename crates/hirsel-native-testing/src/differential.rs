@@ -21,6 +21,7 @@ use hirsel_native::stages::NativeError;
 use hirsel_native::stages::Options;
 use hirsel_native::stages::ReadyProgram;
 use hirsel_native::stages::StageName;
+use hirsel_native::{HeapCampaignMeasure, HeapMeasure};
 use hirsel_native_batch::build;
 use hirsel_syntax::DefPath;
 use std::path::Path;
@@ -628,19 +629,48 @@ pub fn differential_ready<P: ReadyExecution>(
             .and_then(|ready| match configuration.engine {
                 Engine::Heap { campaign: true } => {
                     let (program, sites) = (ready.program(), &ready.sites());
+                    // What the runs cost, for sizing this campaign's parts.
+                    let measure = |sites: u64, clean, campaign| {
+                        if let Some(measures) = &fixture.heap_measures {
+                            measures.lock().expect("heap measures").push(HeapMeasure {
+                                configuration: configuration.name(),
+                                sites,
+                                clean,
+                                campaign,
+                            });
+                        }
+                    };
+                    let campaign = || {
+                        let started = std::time::Instant::now();
+                        crate::heap_campaign_in(program, entry, sites, &world).map(|run| {
+                            let campaign = HeapCampaignMeasure {
+                                partition: world.campaign_partition,
+                                wall: started.elapsed(),
+                                timing: run.timing.unwrap_or_default(),
+                            };
+                            (run.observation, run.sites, campaign)
+                        })
+                    };
                     match fixture.heap_campaign_sites_max {
                         Some(max) if world.campaign_partition.is_none() => {
+                            let started = std::time::Instant::now();
                             crate::run_heap_in(program, entry, sites, &world).and_then(|clean| {
+                                let wall = Some(started.elapsed());
                                 if clean.sites > max {
+                                    measure(clean.sites, wall, None);
                                     Ok((clean.observation, Some(clean.sites)))
                                 } else {
-                                    crate::heap_campaign_in(program, entry, sites, &world)
-                                        .map(|run| (run.observation, None))
+                                    campaign().map(|(observation, sites, run)| {
+                                        measure(sites, wall, Some(run));
+                                        (observation, None)
+                                    })
                                 }
                             })
                         }
-                        _ => crate::heap_campaign_in(program, entry, sites, &world)
-                            .map(|run| (run.observation, None)),
+                        _ => campaign().map(|(observation, sites, run)| {
+                            measure(sites, None, Some(run));
+                            (observation, None)
+                        }),
                     }
                 }
                 Engine::Heap { campaign: false } => {

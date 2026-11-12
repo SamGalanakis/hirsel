@@ -212,7 +212,7 @@ pub use request_observation::NativeObservation;
 hirsel_guard::install!();
 
 pub mod fixture;
-pub use fixture::Fixture;
+pub use fixture::{Fixture, HeapCampaignMeasure, HeapMeasure, HeapMeasures};
 
 pub mod execution_objects;
 pub mod execution_plan;

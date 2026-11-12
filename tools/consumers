@@ -135,7 +135,7 @@ def case_widths(root=ROOT):
     return scope['EXACT_CASE_CPUS']
 
 
-def assignments(root, graph, inventories, widths=None):
+def assignments(root, graph, inventories, widths=None, *, overrides=True):
     """Match test_launcher.sh's longest-first greedy assignment, including mean
     costs. A binary with per-case widths deals each width group's cases over that
     group's shards (`exact_cpus`), and its undeclared cases over the measured ones."""
@@ -158,6 +158,8 @@ def assignments(root, graph, inventories, widths=None):
                                  f'{binary}-cpus-{declared[case]} shards; run tools/buck2/sync.py')
         for width, targets in groups.items():
             deal(root, binary, [case for case in cases if declared.get(case, 0) == width], targets, result, declared, width)
+    if not overrides:
+        return result
     for target, attrs in graph.items():
         case = attrs.get('extra_env', {}).get('HIRSEL_TEST_DEDICATED_CASE')
         if case and attrs.get('test_binary') in inventories:

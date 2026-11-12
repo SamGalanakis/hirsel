@@ -12,23 +12,26 @@ Expectation rewrites are not ignored tests: they run under HIRSEL_BLESS (tools/b
 from pathlib import Path
 import json
 import re
+import os
 import runpy
 import shlex
 import subprocess
 import types
+import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 # Sources whose ignored cases tools/check-native.sh runs, with the stage's selection.
 NATIVE = [
-    ('crates/hirsel-cli/tests/cli/ordered_qualification.rs', '//:hirsel-cli-test-cli-shard-1 -- $(libtest ordered_qualification:: runtime50_ordered:: --ignored --test-threads=1)'),
-    ('crates/hirsel-cli/tests/cli/runtime50_ordered.rs', '//:hirsel-cli-test-cli-shard-1 -- $(libtest ordered_qualification:: runtime50_ordered:: --ignored --test-threads=1)'),
+    ('crates/hirsel-cli/tests/cli/ordered_qualification.rs', '//:hirsel-cli-test-cli -- ordered_qualification:: runtime50_ordered:: --ignored --test-threads=1'),
+    ('crates/hirsel-cli/tests/cli/runtime50_ordered.rs', '//:hirsel-cli-test-cli -- ordered_qualification:: runtime50_ordered:: --ignored --test-threads=1'),
     ('crates/hirsel-llvm/src/', '//:hirsel-llvm-unittest //:hirsel-llvm-test-it -- $(libtest --include-ignored)'),
     ('crates/hirsel-llvm/tests/it/', '//:hirsel-llvm-unittest //:hirsel-llvm-test-it -- $(libtest --include-ignored)'),
     ('crates/hirsel-lir/tests/it/layout.rs', '//:hirsel-lir-test-it -- $(libtest layout:: --ignored)'),
-    ('crates/hirsel-driver/tests/it/native.rs', '$(libtest native:: --include-ignored --test-threads=4)'),
-    ('crates/hirsel-pipeline-tests/tests/front/llvm_scalar_library.rs', '//:hirsel-pipeline-tests-test-front-shard-1 -- $(libtest llvm_scalar_library:: --include-ignored)'),
+    ('crates/hirsel-driver/tests/it/native.rs', 'native:: --include-ignored --test-threads=4'),
+    ('crates/hirsel-pipeline-tests/tests/front/llvm_scalar_library.rs', '//:hirsel-pipeline-tests-test-front -- llvm_scalar_library:: --include-ignored'),
 ]
 # These workers require parent-supplied input and cannot run alone in a gate.
 DELEGATED = {
@@ -186,7 +189,8 @@ FUNCTION = re.compile(r'\bfn\s+(\w+)')
 
 def native_covers(path, name, prefix, selection):
     """The source home must also select this libtest name, not just its file."""
-    arguments = shlex.split(selection.split('$(libtest ', 1)[1].split(')', 1)[0])
+    arguments = shlex.split(selection.split('$(libtest ', 1)[1].split(')', 1)[0] if '$(libtest ' in selection
+                            else selection.split(' -- ', 1)[-1])
     filters = [argument for argument in arguments if not argument.startswith('--')]
     qualified = f'{Path(path).stem}::{name}'
     return path.startswith(prefix) and (not filters or any(f in qualified for f in filters))
@@ -236,6 +240,45 @@ def orphans(sources):
 
 
 class IgnoredTests(unittest.TestCase):
+    def test_archival_inputs_refuse_unset_missing_and_empty_paths_before_dispatch(self):
+        archival = {
+            'cancel_replay_31::production_cancel_recordings_refuse_incompatible_runtime': 'HIRSEL_CANCEL_REPLAY_FIXTURES',
+            'durable_queue_31::durable_queue_31_existing_tapes_and_refusal_controls': 'DURABLE_QUEUE_31_TAPES',
+            'host_replay_parity_31::retained_production_tapes': 'HOST_REPLAY_PARITY_31_CASES',
+        }
+        # These are invalid path probes, not generated recordings or tapes.
+        with tempfile.TemporaryDirectory() as directory:
+            empty = Path(directory) / 'empty-directory'
+            empty.mkdir()
+            empty_file = Path(directory) / 'empty-file'
+            empty_file.touch()
+            for case, variable in archival.items():
+                for value in (None, '', str(empty / 'missing'), str(empty), str(empty_file)):
+                    with self.subTest(case=case, value=value):
+                        environment = os.environ | {'HIRSEL_CANCEL_REPLAY_MANIFEST': str(ROOT / 'Cargo.toml')}
+                        if value is None:
+                            environment.pop(variable, None)
+                        else:
+                            environment[variable] = value
+                        result = subprocess.run([sys.executable, str(ROOT / 'tools/ignored-tests'), case],
+                                                env=environment, capture_output=True, text=True)
+                        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                        self.assertIn(case, result.stderr)
+                        self.assertIn(variable, result.stderr)
+                        self.assertNotIn('test result: ok', result.stdout)
+
+    def test_retained_path_validation_only_reads_and_preserves_supplied_paths(self):
+        runner = runpy.run_path(str(ROOT / 'tools/ignored-tests'))
+        # Existing repository paths exercise shape checking only. No audit is run.
+        case = 'cancel_replay_31::production_cancel_recordings_refuse_incompatible_runtime'
+        environment = {'HIRSEL_CANCEL_REPLAY_FIXTURES': str(ROOT / 'crates'),
+                       'HIRSEL_CANCEL_REPLAY_MANIFEST': str(ROOT / 'Cargo.toml')}
+        before = {k: Path(v).stat().st_mtime_ns for k, v in environment.items()}
+        command = runner['command'](case, environment)
+        for key, value in environment.items():
+            self.assertIn(f'{key}={value}', command)
+            self.assertEqual(Path(value).stat().st_mtime_ns, before[key])
+
     def test_every_ignored_test_in_the_workspace_runs_in_a_gate(self):
         sources = {str(p.relative_to(ROOT)): p.read_text() for p in ROOT.glob('crates/**/*.rs')}
         self.assertEqual(orphans(sources), [])
@@ -266,7 +309,8 @@ class IgnoredTests(unittest.TestCase):
                 registry = home.get('module_registry', str(source.parent / 'modules.rs'))
                 self.assertIn(f'mod {source.stem};', (ROOT / registry).read_text())
             environment = {key: f'/retained/{key} with spaces' for key in home['inputs']}
-            command = runner['command'](case, environment)
+            with patch.dict(runner['command'].__globals__, validate_retained_paths=lambda *_: None):
+                command = runner['command'](case, environment)
             if 'cpu_overlap' in home:
                 overlap = runpy.run_path(str(ROOT / 'tools/cpu-overlap'))
                 row = next(row for row in overlap['ROWS'] if row[0] == home['cpu_overlap'])
@@ -280,12 +324,13 @@ class IgnoredTests(unittest.TestCase):
                                           '--uid', environment['HIRSEL_CPU_OVERLAP_UID'],
                                           '--only', home['cpu_overlap']])
             else:
-                self.assertEqual(command[-5:], ['--test-arg=--exact', f'--test-arg={case}',
-                                               '--test-arg=--ignored', '--test-arg=--test-threads=1',
-                                               '--test-arg=--nocapture'])
-                self.assertEqual(command[1:command.index('--') + 1], ['test', '-c', 'hirsel.tests=host',
-                                               home.get('target', '//:hirsel-cli-test-cli-shard-1'),
-                                               *[argument for value in home.get('config', []) for argument in ['-c', value]], '--'])
+                self.assertEqual(command[-5:], ['--exact', case, '--ignored', '--test-threads=1', '--nocapture'])
+                self.assertEqual(command[0], str(ROOT / 'tools/test-filter'))
+                self.assertEqual(command[1:command.index('--')], ['-c', 'hirsel.tests=host',
+                                               home.get('target', '//:hirsel-cli-test-cli'),
+                                               *[argument for value in home.get('config', []) for argument in ['-c', value]],
+                                               *[argument for key in home['inputs']
+                                                 for argument in ['--env', f'{key}={environment[key]}']]])
             for value in home.get('config', []):
                 self.assertIn(value, command)
                 self.assertEqual(command[command.index(value) - 1], '-c')

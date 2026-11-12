@@ -37,7 +37,7 @@ log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 
 # `<target> <libtest filter>` rows for one in-test bless. A sharded binary runs a
-# filtered selection in its first shard (tools/buck2/README.md).
+# filtered selection on the live owners of its cases.
 cases() {
   case "$1" in
     heap) echo "//:hirsel-heapcheck-test-it heap::" ;;
@@ -45,7 +45,7 @@ cases() {
     wire) echo "//:hirsel-types-test-wire recursive_canonical_golden_vectors" ;;
     replay) echo "//:hirsel-conformance-test-it native_gate::a_stored_artifact_replays_from_another_path_and_arena_numbering" ;;
     signatures) echo "//:hirsel-signature-unittest tests::golden_vectors" ;;
-    package-docs) echo "//:hirsel-driver-test-it-shard-1 api_index::package_public_api_matches_readable_golden" ;;
+    package-docs) echo "//:hirsel-driver-test-it api_index::package_public_api_matches_readable_golden" ;;
     core-review) echo "//:hirsel-registry-unittest tests::every_declared_signature_matches_the_review_table_and_canonical_hash" ;;
     native-inventory) echo "//:hirsel-registry-test-native_inventory declaration_digests_match_the_reviewed_native_inventory" ;;
     ownership-passing) echo "//:hirsel-ownership-unittest tests::corpus::source_corpus_ratchets_rule_and_primary_line" ;;
@@ -67,17 +67,15 @@ in_test=(package-docs heap layout wire replay signatures core-review native-inve
 run_cases() {
   local target=$1 filter=$2 config=()
   shift 2
-  # Resolve the generated test target: sync may shard or unshard this binary
-  # as its measured cost changes. A filtered sharded test runs in shard 1.
-  local resolved
-  resolved="$("$buck2" uquery "attrregexfilter(name, \"^${target#//:}(-shard-1)?$\", kind(\"_rust_test\", //:))")"
-  if [[ -z $resolved || $resolved == *$'\n'* ]]; then
-    echo "bless.sh: expected one test target for $target, got: $resolved" >&2
-    exit 1
-  fi
-  target=$resolved
+  local runner=(tools/test-filter "$target") argument
   (( $# == 0 )) || config=(-c hirsel.tests=host)
-  if ! "$buck2" test "${config[@]}" "$target" -- "$@" --test-arg="$filter" 2>&1 | tee "$log"; then
+  runner=(tools/test-filter "${config[@]}" "$target")
+  while (( $# > 0 )); do
+    argument=$1; shift
+    [[ $argument == --env && $# -gt 0 ]] || { echo "bless.sh: expected --env VALUE" >&2; return 2; }
+    runner+=(--env "$1"); shift
+  done
+  if ! "${runner[@]}" -- "$filter" 2>&1 | tee "$log"; then
     echo "bless.sh: $target $filter failed" >&2
     exit 1
   fi

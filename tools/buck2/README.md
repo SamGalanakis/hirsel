@@ -302,7 +302,11 @@ executor's absolute checkout path; no Buck patch or per-target override is used.
 
 Arguments after `--` go to Buck2's test runner: `--test-arg=<a>` passes one
 libtest argument. Test commands use the shared outer bound without overrides. A case filter intersects each shard's cost-table assignment and CPU-width group.
-Select the owning shards from `tools/consumers`. A filtered run on a shard that owns
+Use `tools/test-filter BINARY -- FILTER [LIBTEST FLAGS...]` to select compiled
+cases and compute their owners with `tools/consumers`' assignment. It preserves
+substring, exact, skip and ignored selection and requires every selected body
+once. `--list` prints the selection without running it. Select the owning shards
+from `tools/consumers` when constructing a Buck command by hand. A filtered run on a shard that owns
 none of the selected cases fails and names the owning shard or CPU-width group. Every test runs on the pool by default, including
 native and full-gate cases. `-c hirsel.tests=host` explicitly opts into host
 execution; it still uses the pinned tool inputs. There are no implicit host
@@ -652,7 +656,7 @@ declared test case (`CASE_SHARDED` in `sync.py`), including ignored native
 cases. A Free replay matrix case needs most of one action's 600 s limit, and
 its one-permit cells must not share a CPU with a co-scheduled case. The existing launcher deals
 these equal-cost cases by name, preserving compiled test identities and exact
-filters; an exact example runs through `hirsel-cli-test-examples-shard-1`.
+filters; run an exact example with `tools/test-filter //:hirsel-cli-test-examples -- NAME --exact`.
 Rerun `sync.py` after adding or removing an example test.
 Each shard uses the examples binary's own measured request in `test_sizes.bzl`.
 Its reservation is independent of CLI integration tests, whose concurrency and

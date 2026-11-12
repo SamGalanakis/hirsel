@@ -3,7 +3,8 @@
 
 tools/ignored-tests --list shows exact identities and required environment inputs.
 Supply the original retained inputs named there, then select one identity. Missing
-inputs fail closed; this command never records replacement archival fixtures.
+inputs fail closed; paths typed in the registry must exist and be nonempty.
+This command never records replacement archival fixtures.
 """
 import argparse
 import json
@@ -17,11 +18,26 @@ ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = json.loads((ROOT / 'tools/ignored-tests.json').read_text())
 
 
+def validate_retained_paths(case, home, environment):
+    for variable, kind in home.get('input_types', {}).items():
+        if kind not in ('directory', 'file'):
+            raise ValueError(f'{case}: {variable}: unknown retained input type {kind}')
+        path = Path(environment[variable])
+        expected = f'nonempty retained {kind}'
+        try:
+            valid = (path.is_dir() and next(path.iterdir(), None) is not None) if kind == 'directory' else (path.is_file() and path.stat().st_size > 0)
+        except OSError as error:
+            raise ValueError(f'{case}: {variable}: cannot read {expected} {path}: {error}') from error
+        if not valid:
+            raise ValueError(f'{case}: {variable}: expected {expected}, got missing, empty or wrong-kind path {path}')
+
+
 def command(case, environment):
     home = REGISTRY[case]
     missing = [key for key in home['inputs'] if not environment.get(key)]
     if missing:
-        raise ValueError('required retained inputs: ' + ', '.join(missing))
+        raise ValueError(f'{case}: required retained inputs: ' + ', '.join(missing))
+    validate_retained_paths(case, home, environment)
     if 'cpu_overlap' in home:
         return [str(ROOT / 'tools/cpu-overlap'),
                 '--run', environment['HIRSEL_CPU_OVERLAP_COMMANDS'],
@@ -29,13 +45,12 @@ def command(case, environment):
                 '--slice', environment['HIRSEL_CPU_OVERLAP_SLICE'],
                 '--uid', environment['HIRSEL_CPU_OVERLAP_UID'],
                 '--only', home['cpu_overlap']]
-    return [str(ROOT / '.buck2/bin/buck2'), 'test', '-c', 'hirsel.tests=host',
-            home.get('target', '//:hirsel-cli-test-cli-shard-1'),
-            *[argument for value in home.get('config', []) for argument in ['-c', value]], '--',
+    return [str(ROOT / 'tools/test-filter'), '-c', 'hirsel.tests=host',
+            re.sub(r'(?:-cpus-\d+)?-shard-\d+$', '', home.get('target', '//:hirsel-cli-test-cli')),
+            *[argument for value in home.get('config', []) for argument in ['-c', value]],
             *[argument for key in home['inputs']
-              for argument in ['--env', f'{key}={environment[key]}']],
-            '--test-arg=--exact', f'--test-arg={case}', '--test-arg=--ignored',
-            '--test-arg=--test-threads=1', '--test-arg=--nocapture']
+              for argument in ['--env', f'{key}={environment[key]}']], '--',
+            '--exact', case, '--ignored', '--test-threads=1', '--nocapture']
 
 
 def main():

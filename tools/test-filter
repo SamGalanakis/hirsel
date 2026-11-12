@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Run libtest filters on their live owning shards, using tools/consumers' deal.
+
+    tools/test-filter [-c hirsel.tests=host] BINARY... -- FILTER --ignored
+    tools/test-filter --list BINARY... -- FILTER --include-ignored
+
+BINARY is the suite name without a shard suffix. Listings execute no bodies. The run retains the caller's libtest arguments and requires a body.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+import shlex
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'tools/buck2'))
+import event_logs
+
+CONSUMERS = runpy.run_path(str(ROOT / 'tools/consumers'))
+
+
+def family(label):
+    return re.sub(r'(?:-cpus-\d+)?-shard-\d+$', '', label.split(':')[-1])
+
+
+def graph_for(binaries, config):
+    pattern = '^(' + '|'.join(re.escape(b) for b in binaries) + ')((-cpus-[0-9]+)?-shard-[0-9]+|-inventory)?$'
+    query_config = []
+    options = iter(config)
+    for option in options:
+        if option == '--target-platforms':
+            next(options)
+        else:
+            query_config.append(option)
+    command = [str(ROOT / '.buck2/bin/buck2'), 'uquery', *query_config,
+               f'kind("_rust_test", attrregexfilter(name, "{pattern}", //:))',
+               '--output-attribute', '^test_binary$', '--output-attribute', '^shard',
+               '--output-attribute', '^costs$', '--output-attribute', '^exact_cpus$']
+    result = subprocess.run(command, cwd=ROOT, stdout=subprocess.PIPE, text=True, check=True)
+    graph = json.loads(result.stdout)
+    for binary in binaries:
+        if not any(a.get('test_binary') == binary for a in graph.values()):
+            raise ValueError(f'no test suite {binary}')
+    return graph
+
+
+def listing_arguments(arguments):
+    result, literal, skip = [], False, False
+    for argument in arguments:
+        if skip:
+            skip = False
+            continue
+        if literal:
+            result.append(argument)
+            continue
+        if argument == '--':
+            literal = True
+        elif argument in ('--format', '--color', '--logfile'):
+            skip = True
+            continue
+        elif argument in ('--list', '--quiet', '-q') or argument.startswith(('--format=', '--color=', '--logfile=')):
+            continue
+        result.append(argument)
+    return ['--format=terse', '--color=never', *result]
+
+
+def listing(binary, graph, config, arguments):
+    inventory = 'root//:' + binary + '-inventory' in graph
+    target = '//:' + binary + ('-inventory' if inventory else '')
+    command = [str(ROOT / '.buck2/bin/buck2'), 'test', *config, target, '--',
+               *['--test-arg=' + a for a in (([] if inventory else ['--list']) + listing_arguments(arguments))]]
+    print(f'test-filter: compiled selection for {binary}', file=sys.stderr, flush=True)
+    with event_logs.recorded('test-filter-list') as log:
+        result = subprocess.run([*command[:2], '--event-log', str(log), *command[2:]],
+                                cwd=ROOT, stdout=subprocess.PIPE, text=True)
+        if result.returncode:
+            raise ValueError(f'{binary}: compiled inventory failed\n' + (result.stdout or ''))
+    reports = event_logs.test_results(log)
+    if len(reports) != 1:
+        raise ValueError(f'{binary}: expected one compiled inventory, got {len(reports)}')
+    details = next(iter(reports.values()))['details']
+    return {m[1] for line in details.splitlines() if (m := re.fullmatch(r'(\S+): test', line))}
+
+
+def owners(graph, inventories, widths=None):
+    return CONSUMERS['assignments'](ROOT, graph, inventories, widths, overrides=False)
+
+
+def plan(binaries, config, arguments):
+    graph = graph_for(binaries, config)
+    inventories = {}
+    for binary in binaries:
+        names = listing(binary, graph, config, arguments)
+        if not any(a in ('--ignored', '--include-ignored') for a in arguments):
+            names -= listing(binary, graph, config, [*arguments, '--ignored'])
+        inventories[binary] = names
+    if not any(inventories.values()):
+        raise ValueError(f'selector {arguments!r} matched no runnable test bodies in {binaries}')
+    assigned = owners(graph, inventories)
+    targets = sorted({assigned[binary, name] for binary, names in inventories.items() for name in names})
+    return targets, inventories
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if '--' not in argv:
+        raise ValueError('separate test suite names from libtest arguments with --')
+    split = argv.index('--')
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('-c', action='append', default=[])
+    parser.add_argument('--target-platforms')
+    parser.add_argument('--env', action='append', default=[])
+    parser.add_argument('--list', action='store_true', help='show owners and cases without running bodies')
+    parser.add_argument('binaries', nargs='+')
+    args = parser.parse_args(argv[:split])
+    arguments = argv[split + 1:]
+    config = shlex.split(os.environ.get('HIRSEL_BUCK2_CONFIG', ''))
+    config += [a for value in args.c for a in ('-c', value)]
+    if args.target_platforms:
+        config += ['--target-platforms', args.target_platforms]
+    binaries = sorted({family(b) for b in args.binaries})
+    targets, inventories = plan(binaries, config, arguments)
+    expected = {(binary, name) for binary, names in inventories.items() for name in names}
+    print(f'test-filter: {len(expected)} cases on {len(targets)} owning targets; selector {arguments!r}', flush=True)
+    if args.list:
+        print(json.dumps(dict(targets=targets, cases=inventories), default=sorted))
+        return 0
+    actual, code = [], 0
+    for offset in range(0, len(targets), 2):
+        chunk = targets[offset:offset + 2]
+        command = [str(ROOT / '.buck2/bin/buck2'), 'test', *config, *chunk, '--',
+                   *[a for value in args.env for a in ('--env', value)],
+                   *['--test-arg=' + a for a in arguments]]
+        with event_logs.recorded('test-filter') as log:
+            status = subprocess.run([*command[:2], '--event-log', str(log), *command[2:]], cwd=ROOT).returncode
+            code = code or status
+        results = event_logs.test_results(log)
+        for target, result in results.items():
+            binary = family(target)
+            actual += [(binary, m[1]) for m in re.finditer(r'^test (\S+)(?: - should panic)? \.\.\. (?:ok|FAILED)\b', result['details'], re.M)]
+        print(f'test-filter: event log {log}', flush=True)
+    if set(actual) != expected or len(actual) != len(expected):
+        print(f'test-filter: expected {len(expected)} bodies, observed {len(actual)}; '
+              f'missing {sorted(expected - set(actual))}; unexpected {sorted(set(actual) - expected)}', file=sys.stderr)
+        return code or 2
+    print(f'test-filter: executed exactly {len(actual)} selected bodies', flush=True)
+
+    return code
+
+
+if __name__ == '__main__':
+    try:
+        raise SystemExit(main())
+    except (ValueError, OSError, subprocess.CalledProcessError) as error:
+        print(f'test-filter: {error}', file=sys.stderr)
+        raise SystemExit(2)

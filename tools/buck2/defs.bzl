@@ -323,15 +323,16 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
                 **common
             )
     isolated_common = {key: value for key, value in common.items() if key != "args"}
-    if costs:
+    if costs or sharded or name in EXACT_TEST_CPUS:
         _rust_test(
             name = name + "-inventory",
-            args = common["args"] + ["--list", "--include-ignored"],
+            args = common["args"] + ["--list"],
             labels = [],
             exec_compatible_with = _test_platform(name),
             request = _request(name),
             pool = not TESTS_ON_HOST,
-            **isolated_common
+            # --list cannot run a body or assert a physical CPU width.
+            **{key: value for key, value in isolated_common.items() if key != "test_binary"}
         )
     for index, case in enumerate(isolated):
         _rust_test(

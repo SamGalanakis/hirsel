@@ -319,7 +319,9 @@ class NativeCollection(unittest.TestCase):
         stages = runpy.run_path(str(ROOT / 'tools/main-runs'))['stages']
         commands = {}
         with patch.dict(os.environ), patch('subprocess.run') as run:
-            run.return_value.stdout = 'root//:example-unittest'
+            run.side_effect = lambda command, **kwargs: subprocess.CompletedProcess(
+                command, 0, json.dumps({'root//:example-unittest': {'test_binary': 'example-unittest'}})
+                if '--output-attribute' in command else 'root//:example-unittest', '')
             stages(lambda name, command, **kwargs: commands.update({name: command}), 'full')
         native = commands['native matrix: both targets and named exclusions']
         at = native.index('hirsel.native_selection=true')
@@ -853,8 +855,8 @@ class RegressionReports(unittest.TestCase):
         commands = self.tool['stage_plan']('full')
         registry = json.loads((ROOT / 'tools/ignored-tests.json').read_text())
         expected = {case for case, home in registry.items() if 'hirsel.ownership_trace=true' in home.get('config', [])}
-        selected = {arg.removeprefix('--test-arg=') for name, command in commands.items() if name.startswith('ownership trace:')
-                    for arg in command if arg.startswith('--test-arg=') and not arg.startswith('--test-arg=--')}
+        selected = {arg for name, command in commands.items() if name.startswith('ownership trace:')
+                    for arg in command[command.index('--') + 1:] if not arg.startswith('--')}
         self.assertEqual(selected, expected)
         interpreter = [name for name in commands if name.startswith('interpreter conformance: ')]
         corpus = runpy.run_path(str(ROOT / 'tools/corpus'))

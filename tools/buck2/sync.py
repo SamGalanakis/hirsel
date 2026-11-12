@@ -1157,6 +1157,8 @@ def first_party(meta: dict) -> str:
                            args=["AtomicScratch", "ProductionFeatures", "CargoUnits"],
                            data=["//tools/buck2:sync.py", "//tools/buck2:cargo_units.py", "//tools/buck2:rust_environment.py", "//tools/buck2:generated.py",
                                  "//tools/buck2:action_sizes_from_log.py", "//tools/buck2:test_sizes_from_usage.py"]))
+    out.append("\n" + call("hirsel_script_test", name="test-filter", script="tools/tests/test_filter.py", full=False,
+                           data=["tools/test-filter", "tools/consumers", "//tools/buck2:event_logs.py"]))
     out.append("\n" + call("hirsel_script_test", name="test-consumers", script="tools/tests/consumers.py", full=False,
                            args=["-v"],
                            data=Raw('["tools/consumers", "tools/capped", "//tools/buck2:consumer_results.py", '

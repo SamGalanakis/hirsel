@@ -243,17 +243,17 @@ def manual_stages(stage, tier, config):
             stage('native conformance smoke', ['tools/corpus', '--native', '--slices', '48', '--parts', '1', '--report-json', '{report}', *smoke], corpus=True)
     if tier in ('ownership-trace', 'full'):
         # These exact registry entries require the diagnostic runtime. Positive
-        # libtest filters select them on shard 1, independent of measured sharding.
+        # The shared filtered runner resolves each identity to its live owner.
         registry = json.loads((TREE / 'tools/ignored-tests.json').read_text()) if (TREE / 'tools/ignored-tests.json').exists() else {}
         traced = {}
         for identity, home in registry.items():
             if 'hirsel.ownership_trace=true' in home.get('config', []) and not home['inputs']:
-                key = home.get('target', '//:hirsel-cli-test-cli-shard-1'), identity.split('::')[0]
+                key = home.get('target', '//:hirsel-cli-test-cli'), identity.split('::')[0]
                 traced.setdefault(key, []).append(identity)
         for (target, module), identities in sorted(traced.items()):
             stage(f'ownership trace: {target.split(":")[-1]}/{module}',
-                  [*buck2, 'test', *config, '-c', 'hirsel.tests=focus', '-c', 'hirsel.ownership_trace=true', target,
-                   '--', '--test-arg=--ignored', '--test-arg=--exact', *[f'--test-arg={identity}' for identity in identities]])
+                  [PY, 'tools/test-filter', *config, '-c', 'hirsel.tests=focus', '-c', 'hirsel.ownership_trace=true', target,
+                   '--', '--ignored', '--exact', *identities])
 
 
 def stages(stage, tier, *, planning=False):
@@ -280,15 +280,19 @@ def stages(stage, tier, *, planning=False):
         return subprocess.run([*buck2, 'uquery', *config, expression], cwd=TREE, capture_output=True,
                               text=True, check=True).stdout.split()
     tests = query('(kind("_rust_test", //...) + attrfilter(labels, doctest, //...)) - attrfilter(labels, gate, //...) - attrfilter(labels, fixture, //...)')
-    libtests = query('kind("_rust_test", //...) - attrfilter(labels, gate, //...) - attrfilter(labels, fixture, //...)')
+    libtests = [] if planning or tier != 'full' else sorted({attrs['test_binary'] for attrs in json.loads(subprocess.run(
+        [*buck2, 'uquery', *config,
+         'kind("_rust_test", //...) - attrfilter(labels, gate, //...) - attrfilter(labels, fixture, //...)',
+         '--output-attribute', '^test_binary$'], cwd=TREE, capture_output=True, text=True, check=True).stdout or '{}').values()
+        if attrs.get('test_binary')})
     # hirsel-cli-test-free reserves 8 CPUs per shard, uses about 1, and found no new red in 12 fast runs
     # (kiln-usage-355: 376 of 1,280 reserved CPU-h a day). It runs in the full tier and in lanes' impact gates.
     free = [target for target in tests if target.endswith(':hirsel-cli-test-free')]
     tests = [target for target in tests if target not in free]
 
     def full_crate_tests(*arguments):
-        return [PY, 'tools/buck2/full_gate_counts.py', '--run', *buck2, 'test', *config, *arguments,
-                '--', '--test-arg=full_gate_', '--test-arg=--ignored']
+        return [PY, 'tools/buck2/full_gate_counts.py', '--run', PY, 'tools/test-filter', *config, *arguments,
+                '--', 'full_gate_', '--ignored']
 
     def test(*targets):
         return [*buck2, 'test', *config, *targets]

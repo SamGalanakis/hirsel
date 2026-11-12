@@ -254,7 +254,7 @@ fn random_group(mut g: prng.Generator) -> history.Group {
 fn genesis_group(mut g: prng.Generator) -> history.Group {
   let b = history.default_bounds()
   history.Group(
-    retain: history.no_locator(),
+    retain: history.NO_LOCATOR,
     commits: [
       history.Commit(
         body: Engine(Genesis(history.Creation(limits: default_limits(), bounds: b))),
@@ -479,7 +479,7 @@ fn sha(x: Bytes) -> Bytes {
 // A group with no earlier retention record: its count's bytes, commits and
 // definitions.
 fn wire_group(count: Bytes, commits: List[Bytes], defs: Bytes) -> Bytes {
-  wire_group_after(count, history.no_locator(), commits, defs)
+  wire_group_after(count, history.NO_LOCATOR, commits, defs)
 }
 
 // A group's bytes from its count's bytes, its retention locator's bytes,
@@ -603,7 +603,7 @@ fn wire_defs() -> Bytes {
 
 fn v1_value() -> history.Group {
   history.Group(
-    retain: history.no_locator(),
+    retain: history.NO_LOCATOR,
     commits: [
       history.Commit(
         body: Transaction(
@@ -823,7 +823,7 @@ fn v2_value() -> history.Group {
               token: rep(145, 16),
               principal: b"p",
               version: 3,
-              at: history.no_locator()
+              at: history.NO_LOCATOR
             )
           )
         ),
@@ -1524,7 +1524,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
   chain = chain && is_error(history.follow(tip1, trailing))
   // A Fork names the identity the claims name, after the Genesis.
   let fork = history.Group(
-    retain: history.no_locator(),
+    retain: history.NO_LOCATOR,
     commits: [
       history.Commit(
         body: Engine(Fork(identity: copy identity, origin: fixed(mut g, 32), at: 5)),
@@ -1534,7 +1534,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
     defs: []
   )
   let stranger = history.Group(
-    retain: history.no_locator(),
+    retain: history.NO_LOCATOR,
     commits: [
       history.Commit(
         body: Engine(Fork(identity: fixed(mut g, 32), origin: fixed(mut g, 32), at: 5)),

@@ -84,7 +84,7 @@ pub type Holder {
 }
 
 /// A version reader pins hold, the locator of a record at or after the one
-/// holding it (`no_locator()`: the record holding this commit), and its
+/// holding it (`NO_LOCATOR`: the record holding this commit), and its
 /// holders sorted by token.
 pub type Reader {
   version: u64,
@@ -142,7 +142,7 @@ pub type Commit {
 
 /// The commits of one advance: an appended record's payload. `retain` is the
 /// locator of the newest record before it holding a Retain or ReaderDelta
-/// commit, `no_locator()` when none does: a reader walks the retention state
+/// commit, `NO_LOCATOR` when none does: a reader walks the retention state
 /// newest first.
 pub type Group {
   retain: Bytes,
@@ -269,16 +269,10 @@ pub fn digest(data: Bytes) -> unique Bytes uses {} {
 
 }
 
-/// Thirty-two zero bytes: a descriptor's digest and root when it names none.
-pub fn no_locator() -> Bytes uses {} {
-  let mut out: List[u8] = []
-  for _ in 0u64..LOCATOR_BYTES {
-    list.push(mut out, 0)
-  }
-  bytes.from_list(take out)
-}
+/// The locator that names no record: LOCATOR_BYTES zero bytes.
+pub const NO_LOCATOR: Bytes = b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
 
-/// The position a locator names, 0 for `no_locator()`.
+/// The position a locator names, 0 for `NO_LOCATOR`.
 pub fn locator_position(l: Bytes) -> u64 uses {} {
   let mut p: u64 = 0
   for i in 0u64..8 {
@@ -354,7 +348,7 @@ pub fn group_writer() -> GroupWriter uses {} {
   let mut out: List[u8] = []
   put_fixed(mut out, GROUP_MAGIC)
   put_u32(mut out, 0)
-  put_fixed(mut out, no_locator())
+  put_fixed(mut out, NO_LOCATOR)
   GroupWriter(out: take out, count: 0)
 }
 
@@ -1147,7 +1141,7 @@ fn boot_fields(data: Bytes) -> Result[Boot, ()] uses {} {
   let deltas = get_u64(data, mut c)?
   let has = get_u8(data, mut c)?
   let retained: Option[Retained] = if has == 0 {
-    if retain != no_locator() || deltas != 0 {
+    if retain != NO_LOCATOR || deltas != 0 {
       return Error(())
     }
     None()

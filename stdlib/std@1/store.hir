@@ -403,7 +403,7 @@ pub opaque type Store: () uses {Authority} {
   kept: List[Kept],
   newest: Option[history.Descriptor],
   // The locator of the group whose last commit is the newest checkpoint's
-  // version (`no_locator()` before the first); the locator of the newest record holding a Retain or
+  // version (`NO_LOCATOR` before the first); the locator of the newest record holding a Retain or
   // ReaderDelta commit, the ReaderDelta commits since the newest Retain, and
   // whether the pending group holds either kind.
   newest_after: Bytes,
@@ -566,8 +566,8 @@ pub fn open(a: Authority, config: StoreConfig) -> Result[Store, StoreError] {
     readers: ordered_map.empty(compare_keys),
     kept: [],
     newest: None(),
-    newest_after: history.no_locator(),
-    retain_loc: history.no_locator(),
+    newest_after: history.NO_LOCATOR,
+    retain_loc: history.NO_LOCATOR,
     deltas: 0,
     retaining: false,
     counted: false,
@@ -672,7 +672,7 @@ fn based(a: Authority, mut s: Store) -> Result[Scan, StoreError] {
     retention: None(),
     table: ordered_map.empty(compare_keys),
     deltas: 0,
-    retain_loc: history.no_locator(),
+    retain_loc: history.NO_LOCATOR,
     epoch: 0,
     made: ordered_map.empty(compare_keys)
   )
@@ -764,11 +764,11 @@ fn scan_history(a: Authority, mut s: Store, mut sc: Scan, end: u64, level: Level
       let d = history.digest(e)
       sc.newest = (copy d, sc.tip.last, here)
       // A retention commit's zero locators name its own record.
-      let mut here_loc = history.no_locator()
+      let mut here_loc = history.NO_LOCATOR
       for x in g.commits {
         match x.body {
           Engine(Retain(..)) | Engine(ReaderDelta(_)) => {
-            if here_loc == history.no_locator() {
+            if here_loc == history.NO_LOCATOR {
               here_loc = located(a, mut s, here)?
             }
           },
@@ -903,7 +903,7 @@ fn recover(a: Authority, mut s: Store, end: u64) -> Result[bool, StoreError] {
   s.made = take made
   s.newest = copy checkpoint
   s.newest_after = if checkpoint_after == 0 {
-    history.no_locator()
+    history.NO_LOCATOR
   } else {
     located(a, mut s, checkpoint_after)?
   }
@@ -981,9 +981,9 @@ fn adopt(
 }
 
 // The locator a retention commit in the record at `here` names: its own,
-// `here`, for `no_locator()`.
+// `here`, for `NO_LOCATOR`.
 fn resolved(loc: Bytes, here: Bytes) -> Bytes uses {} {
-  if loc == history.no_locator() {
+  if loc == history.NO_LOCATOR {
     unique here
   } else {
     unique loc
@@ -2062,7 +2062,7 @@ fn retained(s: Store, op: PinOp, base: u64) -> Result[Retention, StoreError] use
             token: unique token,
             principal: unique string.as_bytes(principal),
             version: base,
-            at: history.no_locator()
+            at: history.NO_LOCATOR
           )
         )
       }
@@ -2158,7 +2158,7 @@ fn delta_room(s: Store, holders: u64) -> bool uses {} {
   } else {
     FOLD_DELTAS
   }
-  (s.retain_loc != history.no_locator() || s.retaining) && s.deltas + 1 < bound
+  (s.retain_loc != history.NO_LOCATOR || s.retaining) && s.deltas + 1 < bound
 }
 
 // The ReaderDelta for an acquire of a new token or a release of a held one,
@@ -2186,7 +2186,7 @@ fn counted_delta(s: Store, op: PinOp, base: u64) -> Option[Retention] uses {} {
                 token: unique token,
                 principal: unique string.as_bytes(principal),
                 version: base,
-                at: history.no_locator()
+                at: history.NO_LOCATOR
               )
             )
           ),
@@ -2444,10 +2444,10 @@ type PinRow {
 }
 
 // A Reading's locator as a retention commit writes it: the record holding
-// the commit, `no_locator()`, while it is pending.
+// the commit, `NO_LOCATOR`, while it is pending.
 fn written_at(loc: Bytes) -> Bytes uses {} {
   if loc == b"" {
-    history.no_locator()
+    history.NO_LOCATOR
   } else {
     unique loc
   }
@@ -2798,7 +2798,7 @@ fn survey(a: Authority) -> Result[Past, StoreError] {
           Engine(Retain(pins: pins, readers: readers, checkpoints: checkpoints, ..)) => {
             // The locators are not read here: a version retained is read
             // from the whole history.
-            let Ok(table) = reading_table(readers, history.no_locator()) else {
+            let Ok(table) = reading_table(readers, history.NO_LOCATOR) else {
               return Error(Corrupt(entry_name(here)))
             }
             past.readers = take table
@@ -2806,7 +2806,7 @@ fn survey(a: Authority) -> Result[Past, StoreError] {
             past.roots = copy checkpoints
           },
           Engine(ReaderDelta(change)) => {
-            if reading_change(mut past.readers, change, history.no_locator()) != Ok(()) {
+            if reading_change(mut past.readers, change, history.NO_LOCATOR) != Ok(()) {
               return Error(Corrupt(entry_name(here)))
             }
           },

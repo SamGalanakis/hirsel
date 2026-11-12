@@ -150,7 +150,7 @@ fn commits(mut s: store.Store, w: (u64, u64, u64), limit: Option[store.TxLimit])
 fn group(body: history.Engine) -> Bytes {
   let (data, _) = history.encode_group(
     history.Group(
-      retain: history.no_locator(),
+      retain: history.NO_LOCATOR,
       commits: [history.Commit(body: Engine(copy body), writes: [])],
       defs: []
     )
@@ -343,7 +343,7 @@ fn refolded(rt: Io, stdout: Stdout, name: String) -> Result[(), Failed] {
   )
   let (entry, _) = history.encode_group(
     history.Group(
-      retain: history.no_locator(),
+      retain: history.NO_LOCATOR,
       commits: [
         history.Commit(body: Engine(genesis_body()), writes: []),
         history.Commit(body: Engine(take fold), writes: [])

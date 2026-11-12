@@ -12,7 +12,6 @@ use hirsel_native::NativeError;
 use hirsel_native::StageName;
 use hirsel_native::Toolchain;
 use hirsel_native::object_queries::capture::CaptureLimits;
-use hirsel_native::object_queries::platform::record::CaptureMode;
 use hirsel_native::object_queries::platform::record::PlatformSpec;
 use hirsel_native::object_queries::runtime::RuntimeLimits;
 use hirsel_native_queries::compilation_tasks::CompilationOutput;
@@ -243,7 +242,7 @@ impl NativePlatformSelection {
             limits,
             debug_tables: options.debug_tables,
         };
-        let mode = CaptureMode::from_environment().map_err(failed)?;
+        let mode = options.capture_mode().map_err(failed)?;
         let selected = spec.select(store.as_ref(), mode).map_err(failed)?;
         let allowance: Arc<hirsel_engine_admission::MemoryReservation> = allowance.into();
         let new = |platform, record| {

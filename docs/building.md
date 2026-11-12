@@ -319,8 +319,9 @@ account (the toolchain packages and this private cache). If a link that a
 record fed fails, the build deletes the record, captures again, and keeps no
 output from a platform the new capture disagrees with. `--timings` lists each
 hit, miss and its reason under `runner`. `HIRSEL_PLATFORM_CAPTURE=cold` reads
-no record and verifies the platform fully. Release builds, `tools/land` and
-every Buck2 gate set it.
+no record and verifies the platform fully; `tools/land` and every Buck2 gate
+set it. Release builds always verify the platform fully, regardless of the
+environment.
 
 `build`, `run` and `test` validate every lowered body with V, the second checker,
 as checks do. `--no-verify` skips V: the program, its output and every

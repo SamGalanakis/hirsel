@@ -1,5 +1,6 @@
 //! Standalone executable compilation; launch authority is supplied by its caller at runtime.
 use super::{NativeError, OptLevel, Options, StageName, TargetSpec};
+use crate::object_queries::platform::record::CaptureMode;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -16,6 +17,8 @@ pub struct BuildOptions {
     /// Source line tables, intervals and the debug runtime archive. Independent
     /// of `opt` and of the passes' specialization policy.
     pub debug_tables: bool,
+    /// Minimum platform verification required by this build, independent of codegen.
+    pub platform_capture: CaptureMode,
 }
 impl BuildOptions {
     /// The Ready matrix `passes` under `backend`'s ordinary partition, without
@@ -30,7 +33,15 @@ impl BuildOptions {
                 super::Backend::Cranelift => super::Partition::Singleton,
             },
             debug_tables: false,
+            platform_capture: CaptureMode::Record,
         }
+    }
+    /// The build's platform policy, with the environment's forced-cold override.
+    pub fn capture_mode(&self) -> Result<CaptureMode, String> {
+        Ok(match CaptureMode::from_environment()? {
+            CaptureMode::Cold => CaptureMode::Cold,
+            CaptureMode::Record => self.platform_capture,
+        })
     }
 }
 
@@ -72,6 +83,12 @@ impl BuildProfile {
         };
         Ok(BuildOptions {
             debug_tables: matches!(self, Self::Debug | Self::Profiling),
+            platform_capture: if matches!(self, Self::Release | Self::ReleaseLto | Self::Profiling)
+            {
+                CaptureMode::Cold
+            } else {
+                CaptureMode::Record
+            },
             ..BuildOptions::new(passes, backend, opt)
         })
     }

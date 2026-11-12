@@ -6,7 +6,7 @@
 //! private cache) are trusted to that account. Full verification is the cold
 //! capture: it runs the capture children and identifies every tool, kit and
 //! input byte. It runs on every miss, under `HIRSEL_PLATFORM_CAPTURE=cold`
-//! (which reads no record) and when a record is older than a day.
+//! (which reads no record), on every release build and when a record is older than a day.
 //!
 //! A hit compares the stamps of exactly these paths, taken by the capture
 //! that issued the record:
@@ -42,6 +42,10 @@ const PLATFORM: Domain = Domain {
     schema: 1,
 };
 const FORMAT: u64 = 1;
+#[cfg(test)]
+thread_local! {
+    static RECORD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 /// A record older than this gets a full verification.
 const PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
 /// Directory and file stamps in one record, across every guarded tree.
@@ -88,8 +92,8 @@ pub enum CaptureMode {
     Cold,
 }
 impl CaptureMode {
-    /// `HIRSEL_PLATFORM_CAPTURE=cold` selects full verification. tools/land,
-    /// the conformance gates and release builds set it.
+    /// `HIRSEL_PLATFORM_CAPTURE=cold` selects full verification. tools/land
+    /// and conformance gates set it; release build options require Cold directly.
     pub fn from_environment() -> Result<Self, String> {
         match std::env::var_os("HIRSEL_PLATFORM_CAPTURE") {
             None => Ok(Self::Record),
@@ -185,7 +189,7 @@ impl PlatformSpec {
     ) -> Result<Selected, String> {
         let name = name(&self.key()?);
         let (reason, recorded) = match mode {
-            CaptureMode::Cold => ("HIRSEL_PLATFORM_CAPTURE=cold".to_string(), None),
+            CaptureMode::Cold => ("full verification required".to_string(), None),
             CaptureMode::Record => match self.lookup(store, cache, &name, now) {
                 Ok(platform) => {
                     crate::runner::count_platform_record("hit");
@@ -274,6 +278,8 @@ impl PlatformSpec {
     ) -> Result<CapturedPlatform, Miss> {
         let directory = crate::runtime_cache::private_directory(cache)
             .map_err(|error| Miss::from(format!("private cache: {error}")))?;
+        #[cfg(test)]
+        RECORD_READS.update(|count| count + 1);
         let file = match crate::runtime_cache::private_file(&cache.join(name)) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

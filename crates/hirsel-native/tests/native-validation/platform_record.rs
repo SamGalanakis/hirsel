@@ -259,7 +259,10 @@ fn a_platform_record_is_reused_until_switched_off_aged_or_shown_wrong() {
     let native = directory.path().join("native");
     // SAFETY: the proof runs this one case in its own process, before any
     // thread that reads the environment.
-    unsafe { std::env::set_var("HIRSEL_NATIVE_CACHE", &native) };
+    unsafe {
+        std::env::set_var("HIRSEL_NATIVE_CACHE", &native);
+        std::env::remove_var("HIRSEL_PLATFORM_CAPTURE");
+    };
     let cache = cache_directory();
     let store = DirStore::new(directory.path().join("products"));
     let llvm = input("LLVM_SYS_231_PREFIX");
@@ -361,6 +364,88 @@ fn a_platform_record_is_reused_until_switched_off_aged_or_shown_wrong() {
     );
     assert_eq!(hit.platform.identity, cold.platform.identity);
     assert_eq!(link(&hit.platform, &store, "hit").unwrap(), program);
+
+    // Build presets change verification, not the identity of these link inputs.
+    // A fresh cache is the byte oracle; observing lookup and actual linker
+    // capture children distinguishes full verification from a record hit.
+    let children = || crate::object_queries::capture::CAPTURE_CHILDREN.get();
+    let options = |profile: crate::BuildProfile| {
+        profile
+            .options(
+                crate::Backend::Llvm,
+                target.clone(),
+                crate::Validation::EveryStage,
+            )
+            .unwrap()
+    };
+    let fresh = directory.path().join("fresh-platform");
+    let fresh_store = DirStore::new(directory.path().join("fresh-products"));
+    let reference = spec
+        .select_in(&fresh_store, &fresh, CaptureMode::Record, now)
+        .unwrap();
+    let reference_program = link(&reference.platform, &fresh_store, "fresh").unwrap();
+    assert_eq!(program, reference_program);
+    for (index, build) in [
+        options(crate::BuildProfile::Debug),
+        options(crate::BuildProfile::Default),
+        crate::BuildProfile::run_options(
+            crate::Backend::Llvm,
+            target.clone(),
+            crate::Validation::EveryStage,
+        ),
+        crate::BuildProfile::run_options(
+            crate::Backend::Cranelift,
+            target.clone(),
+            crate::Validation::EveryStage,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let before = (RECORD_READS.get(), children());
+        let debug = select(&store, build.capture_mode().unwrap(), now);
+        assert!(debug.hit, "debug and run builds reuse the record");
+        assert_eq!(RECORD_READS.get(), before.0 + 1);
+        assert_eq!(children(), before.1, "a hit runs no capture children");
+        assert_eq!(
+            link(&debug.platform, &store, &format!("debug-{index}")).unwrap(),
+            reference_program
+        );
+    }
+    for (index, profile) in [
+        crate::BuildProfile::Release,
+        crate::BuildProfile::ReleaseLto,
+        crate::BuildProfile::Profiling,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let before = (RECORD_READS.get(), children());
+        let release = select(&store, options(profile).capture_mode().unwrap(), now);
+        assert!(
+            !release.hit,
+            "{profile:?} must verify fully even with a valid record"
+        );
+        assert_eq!(RECORD_READS.get(), before.0, "release reads no record");
+        assert!(children() > before.1, "release runs capture children");
+        assert_eq!(
+            link(&release.platform, &store, &format!("release-{index}")).unwrap(),
+            reference_program
+        );
+    }
+    // SAFETY: this proof runs alone, as at its initial environment setup.
+    unsafe { std::env::set_var("HIRSEL_PLATFORM_CAPTURE", "cold") };
+    let before = (RECORD_READS.get(), children());
+    let override_cold = select(
+        &store,
+        options(crate::BuildProfile::Debug).capture_mode().unwrap(),
+        now,
+    );
+    assert!(!override_cold.hit);
+    assert_eq!(RECORD_READS.get(), before.0);
+    assert!(children() > before.1);
+    // SAFETY: this proof runs alone.
+    unsafe { std::env::remove_var("HIRSEL_PLATFORM_CAPTURE") };
 
     let record = cache.join(name(&spec.key().unwrap()));
     let issued = std::fs::read(&record).unwrap();

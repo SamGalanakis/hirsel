@@ -10,6 +10,11 @@ use std::io::Read;
 use std::path::{Component, PathBuf};
 use std::process::{Command, Output as ProcessOutput};
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static CAPTURE_CHILDREN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 const TOOL: Domain = Domain {
     kind: 0x4f00000b,
     schema: 1,
@@ -170,6 +175,8 @@ impl FrozenLinker {
             .map_err(error)?;
             command.arg(format!("--input-overlay={}", overlay.display()));
         }
+        #[cfg(test)]
+        CAPTURE_CHILDREN.update(|count| count + 1);
         success(command.output().map_err(error)?)?;
         let file = std::fs::File::open(archive).map_err(error)?;
         if file.metadata().map_err(error)?.len() > limits.archive_bytes {

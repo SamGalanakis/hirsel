@@ -1,20 +1,22 @@
-// Module `pool`: a generational slot pool (Rust slotmap / generational-arena). Field legend:
-// API.md, "Reading a contract"; design: API.md, "Pool". Everything here is library code
-// over core list operations, checked 64-bit arithmetic and one core primitive, `Unique`
-// (P6 in SPEC-GAPS), which gives each pool its identity.
+// Module `pool`: a generational slot pool (Rust slotmap / generational-arena), library code
+// as MEM-18 describes. Field legend: API.md, "Reading a contract"; design: API.md, "Pool".
+// It uses only core operations: `unique.new` for the pool's identity, `list.with_capacity`,
+// `list.push`, `list.get`, `list.set`, `list.len`, `replace` and checked arithmetic.
 //
 // Representation: `slots` is a List[Slot[T]] (24-byte header; storage capacity x
 // size(Slot[T]) with size(Slot[T]) = 8 + max(8 + size(T), 16)), charged like any list to
-// the limit where the pool was made (MEM-28). Vacant slots form an intrusive free list,
+// the limit where the pool was made (MEM-26). Vacant slots form an intrusive free list,
 // so removing never allocates. Each slot's generation starts at 0 and rises by one on
 // every removal; a slot whose generation reaches 2^64 - 1 is retired: never reused, its
 // storage kept until the pool is cleaned.
 //
-// Checking: an Id is plain data, the pool's identity, a slot index and a generation. Every
+// Checking: an Id is plain data, the pool's Unique, a slot index and a generation. Every
 // access compares all three at run time and returns Error(Stale) on any mismatch. There
-// is no static brand, so an Id may be stored anywhere: in a local, a record, a Map's
-// values, or inside the pool's own values. Removal is explicit; cleaning the pool cleans
-// every live value in slot order from the highest index down.
+// is no static brand, so an Id may be stored anywhere: in a local, a record, a Map's keys
+// or values, or inside the pool's own values. Removal is explicit; cleaning the pool
+// cleans every live value by ordinary list cleanup (FAIL-8). Unique is plain, so a
+// `clone` of a pool keeps its identity and an Id of the original resolves in the copy
+// (MEM-18), as in slotmap.
 
 pub opaque type Pool[T] { me: Unique, slots: List[Slot[T]], free: u64, live: u64 }
 type Slot[T] = Occupied(u64, T) | Vacant(u64, u64)        // (generation, value | next free)
@@ -23,12 +25,13 @@ type Slot[T] = Occupied(u64, T) | Vacant(u64, u64)        // (generation, value 
 /// of the same pool at the same generation.
 pub opaque type Id[T]: plain + key { pool: Unique, index: u64, generation: u64 }
 
-/// Why an Id did not resolve. WrongPool: it was issued by another pool, or by this place
-/// before it was assigned a new pool. Removed: its value was removed (the slot may hold a
-/// newer value, or be vacant or retired).
+/// Why an Id did not resolve. WrongPool: it was issued by a pool with another identity
+/// (another pool, or what this place held before a new pool was assigned to it).
+/// Removed: its value was removed (the slot may hold a newer value, or be vacant or
+/// retired).
 pub type Stale = WrongPool | Removed
 
-/// An empty pool with no storage and a fresh identity (`unique.new`).
+/// An empty pool with no storage and a fresh identity (`unique.new`, which cannot fail).
 /// Alloc: nothing. Ex: `let mut p: pool.Pool[Entry] = pool.new()`
 pub fn new[T]() -> Pool[T]
 

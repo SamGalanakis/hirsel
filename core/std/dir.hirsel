@@ -6,7 +6,7 @@
 // host primitive, passes the replay point at issue and at delivery (CAP-8) and, being
 // `waits`, is a cancellation point (CONC-7). Field legend: API.md; "Prefix:" says what has
 // happened on the host when the operation fails or is cancelled part way. No operation
-// here admits anything (core.md, "None of them admits").
+// here admits anything (core.md, "Host").
 //
 // Left out: `narrow` (a Dir for a subdirectory). core.md has no host primitive that
 // returns a Dir for an existing directory, only `host.mkdtemp`.
@@ -23,10 +23,10 @@ pub fn create_dir(d: Dir, p: String) -> Result[(), IoError] waits
 /// Ex: `dir.remove_all(d, "tmp")?`
 pub fn remove_all(d: Dir, p: String) -> Result[(), IoError] waits
 
-/// Creates a new directory with a fresh name directly below d and returns a Dir for it
-/// (Go os.MkdirTemp, but the name is not returned). `host.mkdtemp`. The directory is not
-/// removed automatically, and the seed cannot remove it: `remove_all` needs its name in
-/// d (N3 in SPEC-GAPS). Fails: Error(Denied | Other(_)). Prefix: on failure nothing was
-/// created; a cancellation observed at delivery leaves the directory created.
-/// Ex: `let tmp = dir.create_temp(d)?`
-pub fn create_temp(d: Dir) -> Result[Dir, IoError] waits
+/// Creates a new empty directory with a fresh name directly below d and returns a Dir for
+/// it and its name in d (Go os.MkdirTemp). `host.mkdtemp`. It is not removed
+/// automatically: `dir.remove_all(d, name)` removes it and everything below it.
+/// Fails: Error(Denied | Other(_)). Prefix: on failure nothing was created; a cancellation
+/// observed at delivery leaves the directory created and its name lost.
+/// Ex: `let (tmp, name) = dir.create_temp(d)?; ..; dir.remove_all(d, name)?`
+pub fn create_temp(d: Dir) -> Result[(Dir, String), IoError] waits

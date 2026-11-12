@@ -1,12 +1,7 @@
-// Module `char`: Unicode scalar values (SEM-3). `char` is plain, 4 bytes, key + ordered.
-// from_u32 and to_u32 are CORE (core.md); the rest is library code over them.
-
-/// CORE. The scalar with value n, or None for a surrogate or n > 0x10FFFF. Cost: O(1).
-/// Ex: `char.from_u32(0x1F600)`
-pub fn from_u32(n: u32) -> Option[char]
-
-/// CORE. The scalar's value. Cost: O(1). Ex: `char.to_u32('A')` is 65
-pub fn to_u32(c: char) -> u32
+// Module `char`, extended (LANG-7): library members of the core module `char`, over its
+// core members from_u32 and to_u32 (core/core/char.hirsel). `char` is also the builtin type
+// name: a type position reads the type, so `fn f(c: char)` and `char.digit(c, 16)` do not
+// collide. A char is plain, 4 bytes, key + ordered.
 
 /// Number of UTF-8 bytes, 1 to 4. Cost: O(1). Ex: `char.utf8_len('é')` is 2
 pub fn utf8_len(c: char) -> u64

@@ -1,8 +1,0 @@
-// Module `stdout`: the run's standard output. Stdout is a plain, `send` capability
-// (core.md); copying it copies the designation. The core operation is restated; stderr's
-// twin (`stderr.write`) has the same contract.
-
-/// CORE. Writes s. Fails: Error(WriteError(written: n, error: e)): the first n bytes
-/// were written. Alloc: nothing. Cost: O(len) plus one host call.
-/// Ex: `stdout.write(out, line)?`
-pub fn write(out: Stdout, s: String) -> Result[(), WriteError] waits

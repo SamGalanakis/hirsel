@@ -561,6 +561,10 @@ NATIVE_HEAP_PART_SECONDS = 450
 # and nothing planned reaches the pool's 15-minute limit.
 NATIVE_HEAP_FAULT_SECONDS = 480
 NATIVE_HEAP_COSTS = "native-tests/regressions/heap-costs.tsv"
+# A family whose every cut's campaign would cost a pool day injects one of N
+# shares of its fault sites a run, each run choosing a share not yet passed,
+# so N passing runs cover every site once (tools/corpus heap_rotations).
+NATIVE_HEAP_ROTATIONS = "native-tests/regressions/heap-rotations.tsv"
 # The full native matrix (tools/main-runs) runs as shards of the baseline by
 # path hash, each case under its rotating pairwise cover, so each shard stays well
 # under its Buck2 timeout; gate-native-full stays whole for --bless and for a

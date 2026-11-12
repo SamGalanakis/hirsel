@@ -1,0 +1,5 @@
+# Families whose heap+inject campaigns inject one of N shares of their fault sites a run (sync.py
+# NATIVE_HEAP_ROTATIONS, tools/corpus heap_rotations). One row each, tab-separated: key (a case, or a prefix
+# of run ids), N, and a note naming the ruling. Share T is the sites with site % N == T - 1; each run takes a
+# share not yet passed in the current cycle, so N passing runs cover every site once.
+conformance/STORE/STORE-11-checkpoint-nodes-	10	about 30 CPU-h whole at 0.018 s a site; a tenth a milestone (orchestrator, 2026-11-12)

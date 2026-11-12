@@ -547,19 +547,22 @@ def selected_paths(key, index):
     configurations. `_heap_parts=H` adds disjoint fault partitions, with each
     --heap-part checking the complete clean run; `_heap_sites_max=S` instead
     leaves a whole campaign over S fault sites to such parts (`--heap-sites-max`).
-    None past the last slice."""
+    `_heap_rotation=T/N` makes the H parts together share T of N of the fault
+    sites: part h is `--heap-part T+N*(h-1)/N*H`, the binary's partition being
+    a stride (site % count == index - 1). None past the last slice."""
     slices = [part for part in read_root_config("hirsel", key, "").split(";") if part]
     split = int(read_root_config("hirsel", key + "_split", "1"))
     parts = int(read_root_config("hirsel", key + "_parts", "1"))
     heap_parts = int(read_root_config("hirsel", key + "_heap_parts", "1"))
     sites_max = read_root_config("hirsel", key + "_heap_sites_max", "")
+    rotation = read_root_config("hirsel", key + "_heap_rotation", "")
     configs = [name for name in read_root_config("hirsel", key + "_configs", "").split("|") if name]
-    if (parts > 1 or configs or heap_parts > 1 or sites_max) and key != "native_paths":
+    if (parts > 1 or configs or heap_parts > 1 or sites_max or rotation) and key != "native_paths":
         fail("only hirsel.native_paths takes _parts, _configs and heap bounds")
     extra = [arg for name in configs for arg in ["--config", name]]
     if sites_max:
         extra = extra + ["--heap-sites-max", sites_max]
-    if split > 1 or parts > 1 or heap_parts > 1:
+    if split > 1 or parts > 1 or heap_parts > 1 or rotation:
         if key not in ["conformance_paths", "native_paths"]:
             fail("only hirsel.conformance_paths and hirsel.native_paths take a _split")
         if len(slices) != 1:
@@ -574,8 +577,12 @@ def selected_paths(key, index):
             extra = extra + [flag, "{}/{}".format(shard, split)]
         if parts > 1:
             extra = extra + ["--config-part", "{}/{}".format(part, parts)]
-        if heap_parts > 1:
-            extra = extra + ["--heap-part", "{}/{}".format((index - 1) // (split * parts) + 1, heap_parts)]
+        heap = (index - 1) // (split * parts) + 1
+        if rotation:
+            share, shares = [int(n) for n in rotation.split("/")]
+            extra = extra + ["--heap-part", "{}/{}".format(share + shares * (heap - 1), shares * heap_parts)]
+        elif heap_parts > 1:
+            extra = extra + ["--heap-part", "{}/{}".format(heap, heap_parts)]
         return slices[0].split("|"), extra
     if index > len(slices):
         return None

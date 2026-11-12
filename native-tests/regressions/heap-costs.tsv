@@ -2,9 +2,10 @@
 # One row each, tab-separated: key (a case, or a prefix of run ids), sites (of the measured run), seconds a
 # site (part wall minus clean wall over the part's sites, local --jobs 1), and a note naming the sample.
 # A run takes its longest matching key; with none, the worst figure of its rule, else the worst at all.
-# A cost of `-` leaves the campaign out of plans (clean heap run only); the note names the gap row's owner.
-conformance/STORE/STORE-11-checkpoint-nodes-	0	-	queue:heap-campaign-checkpoint-nodes
+# heap-rotations.tsv, beside this table, names the families that inject one share of their sites a run.
+conformance/STORE/STORE-11-checkpoint-nodes-	69062	0.018	checkpoint-nodes-crash cut 12 of the 16-value history, part 1/100, main d2c16191
 conformance/STORE/STORE-11-checkpoint-run.hir	151736	0.007	part 1/100, main 7da4031a
+conformance/STORE/STORE-11-crash-cuts-	30481	0.059	crash-cuts-crash cut 9, part 1/100, main d2c16191
 conformance/STORE/STORE-11-fence-cuts-	26015	0.018	fence-cuts-fail cut 15, its history's last request, main 7da4031a
 conformance/STORE/STORE-11-objects-cuts-	33801	0.035	objects-cuts-lose cut 30, main 7da4031a
 conformance/STORE/STORE-11-objects-world-run.hir	511376	0.165	part 1/400, main 7da4031a

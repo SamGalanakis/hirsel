@@ -15,7 +15,6 @@ unsafe extern "C" fn dispatch(
 ) -> u8 {
     unsafe {
         assert_eq!((*ctx).shield, 1);
-        assert_eq!((*ctx).cleanup_invocations.len(), 1);
         assert_eq!((anchor, site), (31, 41));
         let counter = value.cast::<u64>();
         counter.write(counter.read() + 1);
@@ -114,13 +113,9 @@ fn run_ended(
 }
 
 #[test]
-fn pending_finalizer_retains_one_admission_and_shield_until_original_body_finishes() {
+fn pending_finalizer_retains_its_shield_until_original_body_finishes() {
     for fail in [false, true] {
         run(move |ctx| unsafe {
-            let mut foreground = Vec::new();
-            for _ in 0..1023 {
-                foreground.push((*ctx).activations.admit().unwrap());
-            }
             let (mut cursor, token) = cursor(ctx);
             let mut frame = crate::continuation::OwnedResumeFrame::new(16);
             frame.as_mut_ptr().add(8).write(u8::from(fail));
@@ -133,7 +128,6 @@ fn pending_finalizer_retains_one_admission_and_shield_until_original_body_finish
             );
             assert!(matches!(driver.poll(ctx), Ok(Poll::Pending)));
             assert_eq!(token.value.cast::<u64>().read(), 1);
-            assert_eq!((*ctx).activations.live(), (1023, 1));
             assert_eq!((*ctx).shield, 1);
             assert!(
                 matches!(cursor.poll_finalizers(&mut *ctx), FinalizerPoll::Finalizer(t) if t == token)
@@ -144,72 +138,16 @@ fn pending_finalizer_retains_one_admission_and_shield_until_original_body_finish
             assert_eq!(status, if fail { STATUS_FAILURE } else { STATUS_OK });
             assert_eq!(token.value.cast::<u64>().read(), 2);
             assert_eq!((*ctx).shield, 0);
-            assert_eq!(
-                (*ctx).activations.live(),
-                (1023, 1),
-                "fields retain original activation"
-            );
             cursor.finalized(&mut *ctx, token, status);
             assert!(
                 matches!(cursor.poll_finalizers(&mut *ctx), FinalizerPoll::Complete(done) if done.status == status)
             );
-            assert_eq!((*ctx).activations.live(), (1023, 0));
-            let last = (*ctx)
-                .activations
-                .admit()
-                .expect("exact foreground restoration");
-            assert!((*ctx).activations.admit().is_none());
-            assert_eq!((*ctx).activations.live(), (1024, 0));
-            (*ctx).activations.retire(last);
-            for token in foreground {
-                (*ctx).activations.retire(token);
-            }
-            assert_eq!((*ctx).activations.live(), (0, 0));
-            assert_eq!((*ctx).cleanup_invocations.len(), 0);
             if fail {
                 crate::failure::hirsel_rt_v2_failure_clear(ctx);
             }
             STATUS_OK
         });
     }
-}
-
-#[test]
-fn sixty_fifth_finalizer_refuses_before_body_and_retires_the_rejected_field_scope() {
-    run(|ctx| unsafe {
-        let mut existing = Vec::new();
-        for _ in 0..64 {
-            existing.push((*ctx).activations.admit_finalizer().unwrap());
-        }
-        let (mut cursor, token) = cursor(ctx);
-        let mut frame = crate::continuation::OwnedResumeFrame::new(16);
-        let mut driver = Driver::new(
-            crate::tasks::running_key(ctx),
-            token,
-            dispatch,
-            frame.as_mut_ptr(),
-            16,
-        );
-        assert!(matches!(
-            driver.poll(ctx),
-            Ok(Poll::Complete(STATUS_FAILURE))
-        ));
-        assert_eq!(token.value.cast::<u64>().read(), 0);
-        assert_eq!((*ctx).shield, 0);
-        assert_eq!((*ctx).cleanup_rejections, 1);
-        cursor.finalized(&mut *ctx, token, STATUS_FAILURE);
-        assert!(matches!(
-            cursor.poll_finalizers(&mut *ctx),
-            FinalizerPoll::Complete(_)
-        ));
-        assert_eq!((*ctx).cleanup_rejections, 0);
-        assert_eq!((*ctx).activations.live(), (0, 64));
-        for activation in existing {
-            (*ctx).activations.retire(activation);
-        }
-        crate::failure::hirsel_rt_v2_failure_clear(ctx);
-        STATUS_OK
-    });
 }
 
 #[test]

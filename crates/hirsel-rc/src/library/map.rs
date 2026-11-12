@@ -16,7 +16,7 @@ use hirsel_lir::stage::Value;
 use hirsel_syntax::PassingMode;
 use hirsel_types::{
     Allocation, AuthoritySummary, BuiltinType, FunctionType, GenericArgument, Parameter, Primitive,
-    Type, TypeId, TypeKind, Uses, Variant,
+    Type, TypeId, TypeKind, Uses,
 };
 
 type R<T> = Result<T, PassError>;
@@ -296,7 +296,6 @@ fn call(b: &mut Body<'_, '_>, direct: Direct, arguments: &[CallArgument]) -> R<O
     let id = CallId(b.ed.unit.tables.calls.len() as u32);
     b.ed.unit.tables.calls.push(CallSite {
         receipts: None,
-        pretransfer_failure: None,
         forward_caller: false,
         operation_arguments: Vec::new(),
         callee: Callee::Direct(symbol),
@@ -364,8 +363,8 @@ fn eq(b: &mut Body<'_, '_>, a: AddressId, c: AddressId) -> R<ValueId> {
     let layout = b.layout_of(left);
     let boolean = b.bool_layout()?;
     let result = b.fresh(boolean);
-    let failure = loan_failure(b, &[l, r], Some("MEM-3"));
     if matches!(b.record(layout).kind, LayoutKind::Scalar(_)) {
+        let failure = loan_failure(b, &[l, r], None);
         b.push(Inst::Binary {
             result,
             op: BinaryOp::Eq,
@@ -381,7 +380,6 @@ fn eq(b: &mut Body<'_, '_>, a: AddressId, c: AddressId) -> R<ValueId> {
             left,
             right,
             layout,
-            failure,
         });
     }
     b.end_loan(r);
@@ -393,13 +391,11 @@ fn hash(b: &mut Body<'_, '_>, a: AddressId) -> R<ValueId> {
     let layout = b.layout_of(value);
     let result_layout = b.u64_layout()?;
     let result = b.fresh(result_layout);
-    let failure = loan_failure(b, &[loan], Some("MEM-3"));
     b.structural_access(b.cx.type_actual(0)?, layout)?;
     b.push(Inst::Hash {
         result,
         value,
         layout,
-        failure,
     });
     b.end_loan(loan);
     Ok(result)

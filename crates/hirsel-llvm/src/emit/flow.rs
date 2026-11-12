@@ -16,7 +16,6 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         {
             return self.emit_resume_entry(plan);
         }
-        self.dispatch_foreground();
         self.find_versions()?;
         self.fresh_detaches = self
             .unit
@@ -171,9 +170,6 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
             Ref::SwitchArms(range) => arms = Some(range),
             _ => {}
         });
-        if let Terminator::Call { call, .. } = terminator {
-            failures.extend(unit.tables.calls[call.index()].pretransfer_failure);
-        }
         if let Some(range) = arms {
             edges.extend(
                 self.pool(range, &unit.pools.switch_arms)?

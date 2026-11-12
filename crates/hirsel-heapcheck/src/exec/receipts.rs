@@ -638,12 +638,6 @@ impl<S: Stage> Machine<'_, S> {
         let Some(contract) = &abi.receipts else {
             return Ok(());
         };
-        if site.pretransfer_failure.is_some() {
-            return fail(
-                V::Unsupported,
-                "H receipt rejection custody is not implemented",
-            );
-        }
         let source = self
             .config
             .receipt_sources

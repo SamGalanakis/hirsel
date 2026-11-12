@@ -448,12 +448,6 @@ impl LocalReadyQueries {
                 .collect::<Result<_, String>>()?,
         );
         let statics = bind_statics(statics, &binding)?;
-        let adapters = super::instance_operations::bind_pretransfer(
-            environment.operations,
-            &table,
-            environment.target,
-        )?;
-        let additional_abis = adapters.iter().map(|r| r.abi).collect::<Vec<_>>();
         let operations = super::instance_operations::InstanceOperations {
             inventory: None,
             receipts: None,
@@ -461,7 +455,6 @@ impl LocalReadyQueries {
             all_sources: false,
             source: (!owner.facts.body.templates.library)
                 .then_some((key.instance.definition(), key.instance.digest())),
-            pretransfer: Some(adapters),
         };
         let inputs = Inputs {
             memo: Default::default(),
@@ -482,7 +475,7 @@ impl LocalReadyQueries {
                 guard,
                 finalizers: &finalizers,
                 inputs: &inputs,
-                additional_abis: &additional_abis,
+                additional_abis: &[],
                 statics: &statics,
                 emission_context,
                 debug,

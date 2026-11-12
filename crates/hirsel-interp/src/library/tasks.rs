@@ -1626,9 +1626,8 @@ pub(super) fn failure_value(
             .location(f.site)
             .ok_or_else(|| invalid("failure source missing"))?;
         let kind = match f.kind.as_str() {
-            "Depth" => 2,
-            "OutOfSpace" => 3,
-            "DeadMutex" => 4,
+            "OutOfSpace" => 2,
+            "DeadMutex" => 3,
             "Contract" => 1,
             _ => 0,
         };

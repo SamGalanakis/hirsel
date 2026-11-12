@@ -270,14 +270,12 @@ fn niche_chains_construct_compare_and_release_by_their_null_word() {
         (CompareOp::Eq, leaf, leaf),
     ] {
         let result = f.b.plain(BOOL, f.c.bool);
-        let failure = f.raises("MEM-3", f.propagate);
         f.inst(Inst::Compare {
             result,
             op,
             left,
             right,
             layout: chain,
-            failure,
         });
         f.print(result);
     }

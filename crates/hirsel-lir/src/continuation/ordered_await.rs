@@ -146,7 +146,7 @@ fn suffix(u: &LirUnit<Ready>, start: BlockId, slot: SlotId, loan: LoanId) -> Opt
                 {
                     return None;
                 }
-                Inst::Reset { .. } | Inst::FrameEnter { .. } => return None,
+                Inst::Reset { .. } => return None,
                 _ => {}
             }
             if let Some(failure) = inst.failure() {
@@ -350,7 +350,7 @@ impl OrderedAwaitProtocol {
                         {
                             return false;
                         }
-                        Inst::Reset { .. } | Inst::FrameEnter { .. } => {
+                        Inst::Reset { .. } => {
                             return false;
                         }
                         _ => {}

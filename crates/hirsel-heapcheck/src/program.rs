@@ -16,12 +16,6 @@ pub struct Program<S> {
     pub layouts: LayoutTable,
     pub units: Vec<LirUnit<S>>,
     pub statics: Vec<StaticData>,
-    /// Independently reconstructed from validated TIR, outside candidate units.
-    /// An empty map denotes a raw component fixture without source proof.
-    pub invocation_bodies: Vec<hirsel_lir::invocations::ReferenceBody>,
-    pub pretransfer_adapters: Vec<hirsel_lir::pretransfer::AdapterReference>,
-    pub invocations:
-        std::collections::BTreeMap<DefPath, Vec<hirsel_lir::invocations::ReferenceInvocation>>,
 }
 
 impl<S: Stage> Program<S> {
@@ -61,7 +55,6 @@ impl<S: Stage> Program<S> {
                 self.function(&function.symbol)?;
             }
         }
-        let invocation_bodies = &self.invocation_bodies;
         for unit in &self.units {
             let abi = self
                 .layouts
@@ -83,42 +76,6 @@ impl<S: Stage> Program<S> {
                 })
             {
                 return fail(V::Malformed, "receipt ABI lacks entry custody");
-            }
-            crate::pretransfer::audit(unit, &self.layouts, &self.pretransfer_adapters)?;
-            if !self.invocations.is_empty()
-                && (unit.header.origin == hirsel_lir::ir::UnitOrigin::Source
-                    || invocation_bodies.iter().any(|r| {
-                        r.definition == unit.header.definition && r.instance == unit.header.instance
-                    }))
-            {
-                let reference = self
-                    .invocations
-                    .get(&unit.header.definition)
-                    .ok_or_else(|| {
-                        err(V::FrameImbalance, "source invocation reference is missing")
-                    })?;
-                let mut bodies = invocation_bodies.iter().filter(|r| {
-                    r.definition == unit.header.definition && r.instance == unit.header.instance
-                });
-                let selected = bodies.next().ok_or_else(|| {
-                    err(
-                        V::FrameImbalance,
-                        "independent source body selection is missing",
-                    )
-                })?;
-                if bodies.next().is_some() {
-                    return fail(V::FrameImbalance, "duplicate independent body selection");
-                }
-                crate::invocations::audit(
-                    unit,
-                    reference,
-                    selected.body,
-                    invocation_bodies,
-                    &self.layouts,
-                )?;
-            }
-            if unit.header.origin == hirsel_lir::ir::UnitOrigin::Library {
-                crate::invocations::audit_library(unit, invocation_bodies, &self.layouts)?;
             }
             for plan in &unit.tables.structural {
                 plan.check(&self.layouts)
@@ -215,58 +172,24 @@ impl<S: Stage> Program<S> {
 /// the layout table, each unit and the static data.
 impl<S: Stage> Snapshot for Program<S> {
     fn write(&self, w: &mut Writer) {
-        w.open("heapcheck-program-invocations-v3");
+        w.open("heapcheck-program-v4");
         self.target.write(w);
         self.layouts.write(w);
         self.units.write(w);
         self.statics.write(w);
-        self.invocation_bodies.write(w);
-        self.pretransfer_adapters.write(w);
-        w.open("invocations");
-        for (definition, sites) in &self.invocations {
-            w.open("definition");
-            definition.write(w);
-            sites.write(w);
-            w.close();
-        }
-        w.close();
         w.close();
     }
     fn read(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
-        r.open("heapcheck-program-invocations-v3")?;
+        r.open("heapcheck-program-v4")?;
         let program = Self {
             target: TargetSpec::read(r)?,
             layouts: LayoutTable::read(r)?,
             units: Vec::read(r)?,
             statics: Vec::read(r)?,
-            invocation_bodies: Vec::read(r)?,
-            pretransfer_adapters: Vec::read(r)?,
-            invocations: read_invocations(r)?,
         };
         r.close()?;
         Ok(program)
     }
-}
-
-fn read_invocations(
-    r: &mut Reader<'_>,
-) -> Result<
-    std::collections::BTreeMap<DefPath, Vec<hirsel_lir::invocations::ReferenceInvocation>>,
-    DecodeError,
-> {
-    r.open("invocations")?;
-    let mut result = std::collections::BTreeMap::new();
-    while !r.at_close() {
-        r.open("definition")?;
-        let definition = DefPath::read(r)?;
-        let sites = Vec::read(r)?;
-        r.close()?;
-        if result.insert(definition, sites).is_some() {
-            return Err(r.error("duplicate invocation reference definition"));
-        }
-    }
-    r.close()?;
-    Ok(result)
 }
 
 /// A harness root passed to the entry: only plain values. Heap inputs are
@@ -639,9 +562,6 @@ mod receipt_layout_tests {
             layouts: layouts.table,
             units: vec![],
             statics: vec![],
-            invocation_bodies: vec![],
-            pretransfer_adapters: vec![],
-            invocations: Default::default(),
         };
         program.check().unwrap();
         let record = &mut program.layouts.layouts[id.0 as usize];

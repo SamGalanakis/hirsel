@@ -341,11 +341,11 @@ fn text_views_sequences_and_paths_are_borrowed_without_adapter_calls() {
 }
 
 #[test]
-fn mechanical_wrapper_cursor_adds_no_structural_depth_limit_or_host_recursion() {
+fn mechanical_wrapper_cursor_walks_a_long_chain_without_host_recursion() {
     std::thread::Builder::new()
         .stack_size(64 * 1024)
         .spawn(|| {
-            let depth = hirsel_core_contract::depth::STRUCTURAL_LIMIT as usize + 1;
+            let depth = 4096;
             let mut nodes = (0..depth)
                 .map(|i| vec![NODE_CHECKED, 999, (i + 1) as u64])
                 .collect::<Vec<_>>();

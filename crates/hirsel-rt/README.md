@@ -280,7 +280,22 @@ Invariants and boundary:
   `hirsel_types::wire::Limits::default`'s byte and value budgets a decode returns
   `DecodeError::Limit`, and an encode stops the run with `Environmental(CodecLimit)`,
   as the interpreter's operational limit ends it.
-- No numeric Depth or frame charge exists until spec #16 rules.
+- Native stack exhaustion is the run's stack stop (`fiber/overflow.rs`): every task runs on a
+  fiber with a guard below it, both engines probe frames larger than a page, and the SIGSEGV
+  handler turns a guard fault next to the stack pointer into `BudgetExceeded(Stack)`.
+  - Every stack has an inaccessible guard below it. A fiber's guard is `STACK_GUARD_BYTES`
+    (`hirsel-rt-operations`, 64 KiB). The process's main thread has the kernel's stack guard
+    gap. Pool workers and the runtime's other threads have the guard glibc gives every
+    pthread stack. Only the runtime's Rust runs on thread stacks; language code runs on
+    fibers.
+  - Every frame probes its pages no further apart than the guard: the emitted code (LLVM
+    `probe-stack` at 4 KiB, Cranelift inline probestack at 4 KiB, both unit-tested against
+    `STACK_GUARD_BYTES`), the runtime's Rust (rustc's inline probes on both triples) and
+    ring's C (`-fstack-clash-protection`, `third-party/fixups/ring`). So the first touch
+    past a stack's end is in its guard.
+  - What the kernel maps below a guard (another fiber, a signal stack, nothing) is not
+    relied on. An unprobed frame could step over the guard into whatever sits there.
+    Foreign code would be such a frame and is not run on fibers today.
 
 `tests/it/model.rs` runs the model's `rc-trace v1` vectors (`native-tests/model/`) on the runtime and
 requires its checked final states:
@@ -795,7 +810,7 @@ failed callback has unwound when its cleanup reaches the `Isolate` terminator, w
 `hirsel_rt_v2_isolate_catch(ctx, start)` (runtime ABI 10) moves every record since that count
 into the caught chain, the task's own failures attributed to its spawn path. The body builds
 the `Failure` value innermost first from the `isolate_*` entries: kind (from the rule:
-MEM-3 `Depth`, MEM-6 `OutOfSpace`, FAIL-4 `DeadMutex`, else `Check`), rule ID, definition path,
+MEM-6 `OutOfSpace`, FAIL-4 `DeadMutex`, else `Check`), rule ID, definition path,
 line, column and spawn path, each a fresh block. A record holds compiler codes, so a program's
 descriptor carries its failure table (`program.rs`, `isolate::FailureTable`), which each of its
 runs' contexts reaches: one pointer-free byte string holding each site code's definition path and one-based position

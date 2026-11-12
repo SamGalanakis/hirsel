@@ -315,7 +315,6 @@ fn call_setup(take: bool) -> (Fixture, Config, LayoutId, ValueId, CallSite) {
         }],
     );
     let site = CallSite {
-        pretransfer_failure: None,
         forward_caller: false,
         callee: Callee::Indirect(ValueId(0)),
         operation_arguments: vec![],
@@ -667,9 +666,6 @@ fn h_empty_internal_receipt_entry_107_needs_current_source_but_no_incoming_holde
         layouts,
         units: vec![unit],
         statics: vec![],
-        invocation_bodies: vec![],
-        pretransfer_adapters: vec![],
-        invocations: Default::default(),
     };
     let config = Config {
         receipt_sources: vec![source],
@@ -933,9 +929,6 @@ fn ordinary_capture_174() -> (Program<Rc>, Config) {
             layouts,
             units: vec![unit],
             statics: vec![],
-            invocation_bodies: vec![],
-            pretransfer_adapters: vec![],
-            invocations: Default::default(),
         },
         config,
     )

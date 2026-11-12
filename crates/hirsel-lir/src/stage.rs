@@ -126,15 +126,12 @@ impl StageKind {
             | Opcode::EndOrigin
             | Opcode::Defuse
             | Opcode::Forget
-            | Opcode::FrameEnter
-            | Opcode::FrameLeave
             | Opcode::Jump
             | Opcode::Branch
             | Opcode::Switch
             | Opcode::Call
             | Opcode::Return
             | Opcode::Raise
-            | Opcode::RejectTransfer
             | Opcode::Propagate
             | Opcode::Recover
             | Opcode::Isolate

@@ -216,51 +216,6 @@ impl DescriptorRead {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct AdapterRead {
-    adapter: crate::ir::Symbol,
-    primitive: crate::ir::Symbol,
-    abi: ContentHash,
-}
-hirsel_codec::snapshot_struct!(AdapterRead {
-    adapter,
-    primitive,
-    abi
-});
-
-fn adapter_inventory(
-    declarations: &dyn OperationDeclarations,
-    target: &TargetSpec,
-) -> Option<Vec<AdapterRead>> {
-    let mut rows = declarations
-        .pretransfer_adapters()
-        .iter()
-        .map(|reference| {
-            if reference.adapter.kind != crate::ir::SymbolKind::Function
-                || reference.primitive.kind != crate::ir::SymbolKind::Function
-                || reference.adapter.instance.is_none()
-                || reference.primitive.instance.is_none()
-            {
-                return None;
-            }
-            let (abi, table) = declarations.pretransfer_abi(reference, target)?;
-            Some(AdapterRead {
-                adapter: reference.adapter.clone(),
-                primitive: reference.primitive.clone(),
-                abi: crate::LayoutKeys::new(&table).fn_abi(&abi),
-            })
-        })
-        .collect::<Option<Vec<_>>>()?;
-    rows.sort_by(|a, b| {
-        (&a.adapter.definition, a.adapter.instance)
-            .cmp(&(&b.adapter.definition, b.adapter.instance))
-    });
-    if rows.windows(2).any(|w| w[0].adapter == w[1].adapter) {
-        return None;
-    }
-    Some(rows)
-}
-
 #[derive(Clone, Debug)]
 pub(super) struct Reads {
     invocation_required: Option<bool>,
@@ -268,7 +223,6 @@ pub(super) struct Reads {
     invocations: Vec<InvocationRead>,
     bodies: Vec<BodyRead>,
     structural: Vec<StructuralRead>,
-    pretransfer: Option<Vec<AdapterRead>>,
     unavailable_events: Vec<(DefPath, ContentHash)>,
     unavailable_payloads: Vec<(DefPath, ContentHash)>,
     sealed: Vec<SealedRead>,
@@ -282,7 +236,6 @@ hirsel_codec::snapshot_struct!(Reads {
     invocations,
     bodies,
     structural,
-    pretransfer,
     unavailable_events,
     unavailable_payloads,
     sealed,
@@ -316,7 +269,7 @@ impl Reads {
     pub(super) fn matches(
         &self,
         declarations: &dyn OperationDeclarations,
-        target: &TargetSpec,
+        _target: &TargetSpec,
     ) -> bool {
         self.environments.iter().all(|read| {
             environment_read(declarations, &read.definition, read.instance)
@@ -337,9 +290,6 @@ impl Reads {
                 .all(|(definition, instance)| {
                     declarations.seal_payloads(definition, *instance).is_none()
                 })
-            && self.pretransfer.as_ref().is_none_or(|expected| {
-                adapter_inventory(declarations, target).as_ref() == Some(expected)
-            })
             && self
                 .invocation_required
                 .is_none_or(|v| v == declarations.requires_invocation_reference())
@@ -385,7 +335,6 @@ struct Observations {
     descriptors: BTreeMap<String, DescriptorRead>,
     unavailable_events: BTreeSet<(DefPath, ContentHash)>,
     unavailable_payloads: BTreeSet<(DefPath, ContentHash)>,
-    pretransfer: bool,
     receipts: BTreeMap<(DefPath, ContentHash), Option<ReceiptSource>>,
     environments:
         BTreeMap<(DefPath, ContentHash), Option<crate::sealed_payload_source::SourceEnvironments>>,
@@ -404,7 +353,7 @@ impl<'a> Observed<'a> {
     pub(super) fn finish(
         &self,
         table: &LayoutTable,
-        original: &LayoutTable,
+        _original: &LayoutTable,
         target: &TargetSpec,
     ) -> Option<Reads> {
         let reads = self.reads.lock().unwrap_or_else(|e| e.into_inner());
@@ -461,22 +410,6 @@ impl<'a> Observed<'a> {
                 })
             })
             .collect::<Option<Vec<_>>>()?;
-        let pretransfer = if reads.pretransfer {
-            let inventory = adapter_inventory(self.declarations, target)?;
-            let keys = crate::LayoutKeys::new(original);
-            for reference in self.declarations.pretransfer_adapters() {
-                let current = original.fn_abis.get(reference.abi.0 as usize)?;
-                let expected = inventory
-                    .iter()
-                    .find(|row| row.adapter == reference.adapter)?;
-                if keys.fn_abi(current) != expected.abi {
-                    return None;
-                }
-            }
-            Some(inventory)
-        } else {
-            None
-        };
         let environments = reads
             .environments
             .iter()
@@ -492,7 +425,6 @@ impl<'a> Observed<'a> {
             descriptors,
             unavailable_events: reads.unavailable_events.iter().cloned().collect(),
             unavailable_payloads: reads.unavailable_payloads.iter().cloned().collect(),
-            pretransfer,
             invocation_required: reads.invocation_required,
             structural_required: reads.structural_required,
             invocations: reads
@@ -645,20 +577,6 @@ impl OperationDeclarations for Observed<'_> {
             table,
         )?;
         Ok(descriptor)
-    }
-    fn pretransfer_adapters(&self) -> &[crate::pretransfer::AdapterReference] {
-        self.reads
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .pretransfer = true;
-        self.declarations.pretransfer_adapters()
-    }
-    fn pretransfer_abi(
-        &self,
-        reference: &crate::pretransfer::AdapterReference,
-        target: &TargetSpec,
-    ) -> Option<(FnAbi, LayoutTable)> {
-        self.declarations.pretransfer_abi(reference, target)
     }
     fn requires_structural_reference(&self) -> bool {
         let output = self.declarations.requires_structural_reference();

@@ -12,13 +12,17 @@ include!(concat!(env!("OUT_DIR"), "/reviewed.rs"));
 /// (`hirsel_rt::ABI_VERSION`) and the compiler (`hirsel_lir::RUNTIME_ABI_VERSION`)
 /// both read. `hirsel_rt_v2.h` restates it for C; hirsel-lir's schema test
 /// requires the header to match.
-pub const RUNTIME_ABI_VERSION: u32 = 114;
+pub const RUNTIME_ABI_VERSION: u32 = 115;
 /// The ownership-trace extension's version, which emitted traced code passes to
 /// `hirsel_rt_v2_ownership_enter` and the runtime requires. One definition for the
 /// runtime and both native emitters; `hirsel_rt_ownership_trace.h` restates it
 /// for C, checked by hirsel-llvm's ownership_native test.
-pub const OWNERSHIP_TRACE_ABI_VERSION: u32 = 115;
+pub const OWNERSHIP_TRACE_ABI_VERSION: u32 = 116;
 const _: () = assert!(OWNERSHIP_TRACE_ABI_VERSION > RUNTIME_ABI_VERSION);
+/// Inaccessible bytes below every task stack (`hirsel-rt`'s fibers). Both native emitters
+/// probe any frame larger than their probe interval at that interval, which must not exceed
+/// this, so running out of stack faults in the guard before touching anything below it.
+pub const STACK_GUARD_BYTES: usize = 64 << 10;
 
 /// Classify exactly the reserved inventory. The declaration producer supplies digest/ownership.
 /// Runtime ABI emission for aggregate wrappers awaits I/K; those rows explicitly say unavailable.

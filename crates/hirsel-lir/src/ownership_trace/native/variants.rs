@@ -124,7 +124,7 @@ pub(super) fn empty_retirement<S: Stage>(
         let mut used = Vec::new();
         for term in &unit.terminators {
             used.extend(term.normal_edges(&unit.pools));
-            for failure in term.failure_edges(&unit.tables) {
+            if let Some(failure) = term.failure() {
                 used.push(unit.tables.failures.get(failure.index())?.cleanup);
             }
         }

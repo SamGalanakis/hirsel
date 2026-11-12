@@ -32,7 +32,6 @@ mod roots;
 mod runtime50_life;
 mod sha;
 mod signals;
-mod structural_preflight_31;
 mod tape_property;
 mod tasks;
 mod telemetry;

@@ -305,8 +305,8 @@ producer that differs changes this crate or the producer):
   (`Malformed`);
   `FlatAt` checks its offset against the element's cursor (`Malformed`);
   `Recast` back from the opaque source names the layout the block was built
-  at (`TypeConfusion`); `Hash` hashes structurally with the same depth bound
-  as comparison and is a fault-injection site. A by-address parameter's
+  at (`TypeConfusion`); `Hash` hashes structurally with no depth bound and is
+  a fault-injection site. A by-address parameter's
   value is a slot version, so a body's version joins execute. `tests/it/revision7.rs`
   holds each check's failing program and clean twin.
 - `Encode` and `Decode` (LIR schema revision 29, `exec/codec.rs`) reimplement the
@@ -322,7 +322,7 @@ producer that differs changes this crate or the producer):
   after the build the decode holds its result in a temporary and calls each check's
   unit, inner occurrences first, on a copy of the occurrence's bytes (a checked value
   holding references is `Unsupported`). The first `false` drains the temporary and
-  yields `Error(Invalid)`. A failing check (or one whose entry LANG-10 refuses) drains
+  yields `Error(Invalid)`. A failing check drains
   the temporary the same way, then the decode takes its failure edge with the failure
   recorded (FAIL-3); `result` is never defined.
 - `ReadStatic` allocates its constant's static blocks once (`Owner::Static`,

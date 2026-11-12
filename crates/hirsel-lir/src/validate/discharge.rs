@@ -72,7 +72,7 @@ fn inventory(unit: &LirUnit<Value>) -> BTreeMap<Entry, usize> {
             }
         }
         if let Some(terminator) = unit.terminators.get(b) {
-            for failure in terminator.failure_edges(&unit.tables) {
+            if let Some(failure) = terminator.failure() {
                 add(
                     failure,
                     terminator.opcode(),

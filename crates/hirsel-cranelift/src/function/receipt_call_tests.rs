@@ -106,7 +106,6 @@ fn call_fixture(
         };
     }
     unit.tables.calls.push(CallSite {
-        pretransfer_failure: Some(FailureId(1)),
         forward_caller: true,
         callee: Callee::Direct(SymbolId(0)),
         operation_arguments: vec![],
@@ -131,7 +130,7 @@ fn call_fixture(
     (table, unit, abi, name)
 }
 
-// This uses the real backend call path, including its status-3 split. The
+// This uses the real backend call path. The
 // callee is an ABI sentinel, not an admitted source implementation/provider.
 const CALL_HARNESS: &str = r#"
 #include <stdint.h>
@@ -140,20 +139,18 @@ static unsigned char borrowed, taken, initial, sentinel;
 uint8_t callee(void *, uint64_t, uint64_t, uint64_t *, void *, void *, void **, void **) __asm__("CALLEE_NAME");
 uint8_t callee(void *ctx, uint64_t status, uint64_t other, uint64_t *ordinary, void *b, void *t, void **mutated, void **output) {
     assert(ctx == 0 && other == 23 && b == &borrowed && t == &taken);
-    if (status == 3) return 3;
     *ordinary = 42 + status; *mutated = t;
     if (status == 0) *output = b;
     return status;
 }
 extern uint8_t invoke(void *, uint64_t, uint64_t, uint64_t *, void *, void *, void **, void **);
 int main(void) {
-    for (uint64_t status = 0; status < 4; ++status) {
-        if (status == 2) continue;
+    for (uint64_t status = 0; status < 2; ++status) {
         uint64_t ordinary = 91;
         void *mutated = &initial, *output = &sentinel;
         assert(invoke(0, status, 23, &ordinary, &borrowed, &taken, &mutated, &output) == status);
-        assert(ordinary == (status == 3 ? 91 : 42 + status));
-        assert(mutated == (status == 3 ? &initial : &taken));
+        assert(ordinary == 42 + status);
+        assert(mutated == &taken);
         assert(output == (status == 0 ? &borrowed : &sentinel));
     }
 }
@@ -212,11 +209,9 @@ fn call_probe(target: &TargetSpec, malformed: u8) -> (Vec<u8>, String) {
     }
     let normal = f.b.create_block();
     let failed = f.b.create_block();
-    let rejected = f.b.create_block();
     f.blocks.push(normal);
     f.params.push(vec![]);
     f.failures.insert(FailureId(0), failed);
-    f.failures.insert(FailureId(1), rejected);
     let called = f.call_site_with_abi(CallId(0), Some(EdgeId(0)), FailureId(0), &abi);
     if malformed != 0 {
         let error = called.unwrap_err().to_string();
@@ -237,11 +232,9 @@ fn call_probe(target: &TargetSpec, malformed: u8) -> (Vec<u8>, String) {
     f.b.ins().store(flags(), result, f.entry_params[7], 0);
     let zero = f.b.ins().iconst(types::I8, 0);
     f.b.ins().return_(&[zero]);
-    for (block, status) in [(failed, 1), (rejected, 3)] {
-        f.b.switch_to_block(block);
-        let status = f.b.ins().iconst(types::I8, status);
-        f.b.ins().return_(&[status]);
-    }
+    f.b.switch_to_block(failed);
+    let status = f.b.ins().iconst(types::I8, 1);
+    f.b.ins().return_(&[status]);
     f.b.seal_all_blocks();
     f.b.finalize(f.em.module.target_config());
     em.define("invoke", id, &mut ctx).unwrap();
@@ -251,8 +244,7 @@ fn call_probe(target: &TargetSpec, malformed: u8) -> (Vec<u8>, String) {
 }
 
 #[test]
-fn native_receipt_call_keeps_rejection_entered_failure_and_normal_outputs_distinct_on_both_targets()
-{
+fn native_receipt_call_keeps_failure_and_normal_outputs_distinct_on_both_targets() {
     for target in TargetSpec::executed() {
         let (bytes, callee) = call_probe(&target, 0);
         execute(

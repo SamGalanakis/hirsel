@@ -127,10 +127,6 @@ pub struct Audit {
 #[repr(C)]
 pub struct TaskCtx {
     pub(crate) view: View,
-    /// LANG-10 counters at fixed offsets after the view (runtime ABI 65,
-    /// `CTX_FOREGROUND_COUNT_OFFSET`): a depth-leaf callee's room check reads them.
-    pub(crate) activations: hirsel_core_contract::depth::Activations,
-    pub(crate) cleanup_depth: u32,
     worker: *mut Worker,
     run: *mut RunShared,
     /// Stable scheduler identity and save slot. The task table may grow while
@@ -201,22 +197,6 @@ pub struct TaskCtx {
     /// Private execution ownership; never part of the compiled context view.
     pub(crate) ahead: Option<Box<crate::tasks::ordered::ahead::Local>>,
     pub(crate) ahead_physical: *mut crate::tasks::ordered::ahead::native::Physical,
-    pub(crate) active_invocations:
-        crate::depth::storage::Slots<hirsel_core_contract::depth::Activation>,
-    /// User finalizers retained through their field programs. Allocated at task creation.
-    pub(crate) cleanup_invocations: crate::depth::storage::Cleanup,
-    /// Rejected entries cannot execute code; their nested field scopes need no tokens.
-    pub(crate) cleanup_rejections: usize,
-    /// Invoking language sites parallel to admitted compiled invocations. Runtime
-    /// callback boundaries inherit these sites without introducing an IR selector.
-    pub(crate) invocation_sites: crate::depth::storage::Sites,
-    /// Initialized prefix of both fixed-capacity native invocation arrays.
-    pub(crate) invocation_depth: usize,
-    /// Stable pointers into the owned scratch above for the certified naked leaf.
-    /// Never serialized or copied to another task; the owner lives with this task.
-    pub(crate) invocation_tokens:
-        *mut std::mem::MaybeUninit<hirsel_core_contract::depth::Activation>,
-    pub(crate) invocation_site_slots: *mut std::mem::MaybeUninit<[u64; 2]>,
     #[cfg(test)]
     pub(crate) test_host_tail: bool,
     /// Free operation state only the running task touches: its quantum,
@@ -287,13 +267,6 @@ impl<T> Spare<T> {
         value
     }
 }
-pub const CTX_FOREGROUND_COUNT_OFFSET: usize = std::mem::offset_of!(TaskCtx, activations);
-pub const CTX_CLEANUP_COUNT_OFFSET: usize = CTX_FOREGROUND_COUNT_OFFSET + 2;
-pub const CTX_CLEANUP_MODE_OFFSET: usize = std::mem::offset_of!(TaskCtx, cleanup_depth);
-const _: () = assert!(
-    CTX_FOREGROUND_COUNT_OFFSET == crate::CTX_HEAP_ID_OFFSET + 24
-        && CTX_CLEANUP_MODE_OFFSET == CTX_FOREGROUND_COUNT_OFFSET + 4
-);
 
 /// One OS thread that runs Hirsel code, and what is its own: its heap (with its region pool),
 /// which lives in the run's registry and outlives the worker, and its idle fiber stacks.
@@ -559,12 +532,6 @@ impl RunShared {
 impl TaskCtx {
     /// A fresh task's context on `worker`, in `run`; nothing binds it yet.
     pub(crate) fn new(worker: *mut Worker, run: *mut RunShared) -> TaskCtx {
-        // SAFETY: all extents move and drop with this context. The Sites owner
-        // remains allocated until no extent can be used, including on stop.
-        let (mut active_invocations, cleanup_invocations, mut invocation_sites) =
-            unsafe { crate::depth::storage::Sites::new() };
-        let invocation_tokens = active_invocations.as_mut_ptr();
-        let invocation_site_slots = invocation_sites.as_mut_ptr();
         TaskCtx {
             view: View::new(),
             worker,
@@ -605,11 +572,6 @@ impl TaskCtx {
             point_ops: u32::MAX,
             replay_host: None,
             ordered_charge_trace: Default::default(),
-            activations: Default::default(),
-            active_invocations,
-            cleanup_depth: 0,
-            cleanup_invocations,
-            cleanup_rejections: 0,
             free_ops: Default::default(),
             compact: None,
             #[cfg(feature = "ownership-trace")]
@@ -628,10 +590,6 @@ impl TaskCtx {
             ownership_result: None,
             #[cfg(feature = "ownership-trace")]
             ownership_queue_cleanup: std::ptr::null_mut(),
-            invocation_sites,
-            invocation_depth: 0,
-            invocation_tokens,
-            invocation_site_slots,
         }
     }
 

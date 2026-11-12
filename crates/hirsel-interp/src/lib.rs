@@ -11,7 +11,6 @@ mod code;
 mod constants;
 pub mod conversion;
 mod cpu_mapper;
-mod depth;
 mod eval;
 pub mod exit_report;
 mod frame;

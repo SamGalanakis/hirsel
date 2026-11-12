@@ -10,7 +10,7 @@ use crate::PassError;
 use hirsel_core_contract::Passing;
 use hirsel_lir::abi_types::CallableShape;
 use hirsel_lir::ir::*;
-use hirsel_lir::layout_types::{LayoutId, LayoutKind};
+use hirsel_lir::layout_types::LayoutId;
 use hirsel_lir::stage::Value;
 use hirsel_types::TypeKind;
 

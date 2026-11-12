@@ -534,9 +534,7 @@ fn envelope(
                     u.tables.constants[constant.index()].value,
                     ConstantValue::Unit | ConstantValue::Integer(_) | ConstantValue::Descriptor(_)
                 ) => {}
-            Inst::FrameEnter { .. }
-            | Inst::FrameLeave { .. }
-            | Inst::Address { .. }
+            Inst::Address { .. }
             | Inst::Read { .. }
             | Inst::StorageLive { .. }
             | Inst::StorageDead { .. }

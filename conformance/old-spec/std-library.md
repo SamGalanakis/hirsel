@@ -852,7 +852,7 @@ prefix on error. Both validate every `Number` against
 `InvalidNumber` otherwise. They preserve number spelling and object order, escape ASCII
 controls, quotes and backslashes, and leave other scalars unescaped. Writing uses the same
 nesting bound, returning `Nesting(128)` at the attempted container depth. This is library
-policy, independent of the depth limits of [MEM-3](memory.md#mem-3-freeing), with no
+policy on untrusted input; the language itself has no depth limit, and there is no
 reflection, automatic record conversion or authority.
 
 ## Fixed-width binary integers

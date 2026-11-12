@@ -20,9 +20,6 @@ fn unique_inline_copy_accepts_only_initialized_absent_environments() {
         layouts,
         units: vec![body],
         statics: vec![],
-        invocation_bodies: vec![],
-        pretransfer_adapters: vec![],
-        invocations: Default::default(),
     };
     let config = Config::default();
     let mut ops = NoOperations;

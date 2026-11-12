@@ -40,7 +40,7 @@ pub(super) fn result_cell(
     host_kind(u, call)?;
     let site = u.tables.calls.get(call.index())?;
     let abi = table.fn_abis.get(site.abi.0 as usize)?;
-    if abi.shape != CallableShape::Definition || site.pretransfer_failure.is_some() {
+    if abi.shape != CallableShape::Definition {
         return None;
     }
     let result = abi.result.as_ref()?;
@@ -137,7 +137,6 @@ pub(super) fn check_result_cell(
         return false;
     };
     abi.shape == CallableShape::Definition
-        && site.pretransfer_failure.is_none()
         && result.borrowed_parameters.is_empty()
         && result.layout == ty.layout
         && ty.repr != ValueRepr::Hole

@@ -3,16 +3,13 @@
 //! This factory reads no candidate LIR. Query-backed importers can supply one
 //! original source definition without reconstructing a whole-program Lowered.
 use hirsel_core_contract::OperationId;
-use hirsel_layout::instance::InstanceView;
 use hirsel_lir::{
-    abi_types::FnAbiId,
     invocations::{ReferenceBody, ReferenceInvocation},
     ir::{Symbol, SymbolKind},
-    pretransfer::AdapterReference,
 };
 use hirsel_syntax::DefPath;
 use hirsel_tir::{BodyId, Definition};
-use hirsel_types::{GenericArgument, TypeInterner};
+use hirsel_types::TypeInterner;
 use std::collections::BTreeMap;
 
 /// Re-derive call identities and legal self restarts from original validated
@@ -147,48 +144,5 @@ pub fn source_instance_from_output(
                 callee: call.callee.clone(),
             })
             .collect(),
-    })
-}
-
-/// Bind a materialized keyed adapter and its primitive from the original
-/// instance plans. ABI is the planner's ABI, never a candidate call's selector.
-pub fn keyed_adapter(
-    types: &TypeInterner,
-    adapter: &InstanceView,
-    adapter_actuals: &[GenericArgument],
-    primitive: &InstanceView,
-    primitive_actuals: &[GenericArgument],
-    abi: FnAbiId,
-) -> Result<AdapterReference, &'static str> {
-    if hirsel_lir::pretransfer::primitive(adapter.key.definition()).as_ref()
-        != Some(primitive.key.definition())
-    {
-        return Err("keyed adapter differs from independently planned primitive or actuals");
-    }
-    let key = |path: &DefPath, arguments: &[GenericArgument]| {
-        let actuals = crate::instance::Actuals {
-            binder: (!arguments.is_empty())
-                .then(|| crate::library::binder(primitive.key.definition())),
-            arguments: arguments.to_vec(),
-            outer: Vec::new(),
-        };
-        crate::instance::key_of(types, path, BodyId(0), &actuals, None, None)
-            .map_err(|_| "keyed adapter has incomplete independently planned actuals")
-    };
-    if key(adapter.key.definition(), adapter_actuals)? != adapter.key
-        || key(primitive.key.definition(), primitive_actuals)? != primitive.key
-        || key(primitive.key.definition(), adapter_actuals)? != primitive.key
-    {
-        return Err("keyed adapter differs from independently planned primitive or actuals");
-    }
-    let symbol = |view: &InstanceView| Symbol {
-        kind: SymbolKind::Function,
-        definition: view.key.definition().clone(),
-        instance: Some(view.key.digest()),
-    };
-    Ok(AdapterReference {
-        adapter: symbol(adapter),
-        primitive: symbol(primitive),
-        abi,
     })
 }

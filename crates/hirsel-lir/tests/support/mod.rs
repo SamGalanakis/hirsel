@@ -41,8 +41,6 @@ pub fn registry() -> hirsel_layout::operation::OperationRegistry {
     hirsel_layout::operation::OperationRegistry {
         seal_sources: Default::default(),
         receipt_sources: Default::default(),
-        pretransfer_adapters: Vec::new(),
-        pretransfer_actuals: Vec::new(),
         invocation_bodies: Vec::new(),
         invocations: Default::default(),
         type_declarations: Default::default(),
@@ -638,8 +636,6 @@ impl<S: Stage> Lir<S> {
         self.operations = hirsel_layout::operation::OperationRegistry {
             seal_sources: Default::default(),
             receipt_sources: Default::default(),
-            pretransfer_adapters: Vec::new(),
-            pretransfer_actuals: Vec::new(),
             invocation_bodies: Vec::new(),
             invocations: Default::default(),
             type_declarations: Default::default(),
@@ -1431,7 +1427,6 @@ impl<S: Stage> Lir<S> {
         let result = result.map(|layout| self.owned_or_plain(layout));
         self.builder.unit.tables.calls.push(CallSite {
             receipts: None,
-            pretransfer_failure: None,
             forward_caller: true,
             operation_arguments: Vec::new(),
             callee,
@@ -1461,7 +1456,6 @@ impl<S: Stage> Lir<S> {
         let callee = Callee::Direct(self.symbol(SymbolKind::Function));
         self.builder.unit.tables.calls.push(CallSite {
             receipts: None,
-            pretransfer_failure: None,
             forward_caller: true,
             operation_arguments: Vec::new(),
             callee,

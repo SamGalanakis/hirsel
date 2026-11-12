@@ -217,9 +217,6 @@ fn program(kind: ResultKind) -> Program<Ready> {
     );
     b.term(current, Terminator::Return(None));
     Program {
-        invocations: Default::default(),
-        invocation_bodies: Vec::new(),
-        pretransfer_adapters: Vec::new(),
         target,
         layouts: table.clone(),
         units: vec![b.finish_with_layouts(&table)],
@@ -624,9 +621,6 @@ fn handle_control(kind: HandleControl) -> Program<Ready> {
     }
     b.term(block, Terminator::Return(None));
     Program {
-        invocations: Default::default(),
-        invocation_bodies: Vec::new(),
-        pretransfer_adapters: Vec::new(),
         target,
         layouts: table.clone(),
         units: vec![b.finish_with_layouts(&table)],
@@ -760,9 +754,6 @@ fn nested_aggregate_sequence_operands_and_results_stay_under_the_ledger() {
     );
     b.term(block, Terminator::Return(None));
     let program = Program {
-        invocations: Default::default(),
-        invocation_bodies: Vec::new(),
-        pretransfer_adapters: Vec::new(),
         target,
         layouts: table.clone(),
         units: vec![b.finish_with_layouts(&table)],
@@ -957,9 +948,6 @@ fn scalar_buffer_updates_audit_inline_and_counted_storage_and_require_mut_access
             );
             b.term(block, Terminator::Return(None));
             let p = Program {
-                invocations: Default::default(),
-                invocation_bodies: Vec::new(),
-                pretransfer_adapters: Vec::new(),
                 target,
                 layouts: table.clone(),
                 units: vec![b.finish_with_layouts(&table)],
@@ -1020,9 +1008,6 @@ fn terminal_handle_close_failures_are_language_failures_with_a_clean_twin() {
     let next = call(&mut b, entry, open, &[], Some(value), failure);
     b.term(next, Terminator::Return(Some(value)));
     let program = Program {
-        invocations: Default::default(),
-        invocation_bodies: Vec::new(),
-        pretransfer_adapters: Vec::new(),
         target,
         layouts: table.clone(),
         units: vec![b.finish_with_layouts(&table)],

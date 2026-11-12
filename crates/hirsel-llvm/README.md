@@ -85,8 +85,7 @@ Invariants:
   spills its operand, takes the run's key state from `hirsel_rt_v2_hash_begin` and calls
   a private per-layout `hirsel.hash.<L>` (`compare.rs`, beside `hirsel.compare.<L>`) that
   folds each scalar leaf through `hirsel_rt_v2_hash_bytes` (floats with -0 as +0,
-  variants by tag, sequences by count then elements) and sets a flag past
-  `COMPARE_MAX_DEPTH`, which takes the failure edge (MEM-3 Depth). `Encode` and `Decode`
+  variants by tag, sequences by count then elements). `Encode` and `Decode`
   spill their operand and call `hirsel_rt_v2_codec_encode`/`_decode` with a private
   `hirsel.codec` constant per plan (`descriptors.rs`): the plan's descriptor bytes and
   the program `CodecPlan::program` writes, with the linked registry's descriptor indices. Maps hash their entries in order; sets combine element hashes commutatively. Their comparators read entries, with sets sorted by structural order without allocation. A `UnitOrigin::Library` unit is `linkonce_odr`
@@ -297,7 +296,7 @@ Every immortal block (static, region owner, arena block) lays out its prefix, th
 `IMMORTAL_PREFIX_BYTES` is derived from them (all in `hirsel_lir::emission`) and
 `the_immortal_prefix_is_the_runtime_extent_then_header` pins each word to the runtime ABI.
 `Compare` calls a private generated comparator per layout (`compare.rs`), which follows the
-interpreter's order and fails MEM-3 past `COMPARE_MAX_DEPTH`. Path equality and hashing
+interpreter's order. Path equality and hashing
 use its inert intern ID; ordered comparisons resolve UTF-8 text with
 `hirsel_rt_v2_path_compare(ctx, left, right)`. Comparator helpers carry the context
 through nested layouts, including Set canonical ordering. Capability handles remain
@@ -379,7 +378,7 @@ Tests:
   and reuse blocks under the runtime's diagnostic mode and require its live block count to
   return to zero. `tests/it/ready.rs` runs the Ready-construct probes (`tests/support/ready.rs`):
   closures, function references, `IsUnique`, `Weaken`, `Compare` (records, variants and
-  null-pointer niches, NaN, strings, a chain at the MEM-3 bound), statics, literals, unique
+  null-pointer niches, NaN, strings), statics, literals, unique
   copies, finalizers by drop thunk and explicitly (the slot closed by emptiness, a
   resource with counted fields), regions, `mut` parameters, Ready `Copy`, inline `Release`
   of a record, a callable and a variant with a failing leaf, a field moved out of a block

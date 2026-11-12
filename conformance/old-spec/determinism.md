@@ -261,8 +261,8 @@ to 4 KiB; for each open region, the canonical segment sequence its own requests 
 from an empty pool. A charge happens when a task allocates and a credit when a logical
 lifetime ends, in the order the run's scheduler gives. The first charge, in that order,
 that exceeds its budget decides the stop and its kind. The interpreter charges the same
-quantities from its value model. A stopped run's outcome is **BudgetExceeded** with the
-budget's only kind, `memory`: like Blocked, it runs no user code, cancellation or
+quantities from its value model. A stopped run's outcome is **BudgetExceeded** with kind
+`memory`: like Blocked, it runs no user code, cancellation or
 destruction after the stop, keeps the output it produced, and is a tooling outcome whose
 position is comparable only within one engine and compilation ([the reference
 interpreter](implementation.md#the-reference-interpreter)). A native executable records
@@ -273,6 +273,18 @@ mode a replay applies them again and stops where the recorded run stopped. Under
 it stops at the recorded cut. An engine that cannot enforce a requested budget refuses the
 launch. A host that bounds CPU use kills the run; this is a host stop, and the
 prefix law applies to its confirmed effects.
+
+**Stack.** Every native task runs on its own fixed-size stack with an inaccessible guard
+below it, and compiled code probes any frame larger than a page, so a task that runs out
+of stack always faults in its guard. That ends the run, under every budgets provider, with
+**BudgetExceeded** of kind `stack`, stopped exactly as the memory stop is: no user code,
+cleanup, finalizer or cancellation runs after it, the output already produced is kept, and
+it is a tooling outcome whose position depends on the engine, its optimisation level and
+the program's frames, comparable only within one engine and compilation. It decides no
+program outcome ([LANG-10](language.md#lang-10-recursion)). A native executable records
+`budget_exceeded stack` and exits with status 5. The reference interpreter has no native
+stack per task; it bounds its own host recursion with a tooling limit instead
+([the reference interpreter](implementation.md#the-reference-interpreter)).
 
 **Long pure primitives.** The one-shot `bytes.sha1`, `bytes.sha224`,
 `bytes.sha256`, `bytes.sha384`, `bytes.sha512` and `bytes.sha512_256` operations

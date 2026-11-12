@@ -1,12 +1,15 @@
 //! Borrowed structural value operations. The emitted program is never parsed
-//! into owned metadata, and traversal scratch is bounded by admitted depth.
+//! into owned metadata. Traversal scratch is inline for shallow values and
+//! grows on the heap with a deeper value's depth.
 use super::{
     borrowed::{self as b, Children, Location, Program, Projection},
     *,
 };
 use crate::kernels::siphash::SipHasher13;
-use std::{cmp::Ordering, mem::MaybeUninit};
-const CAPACITY: usize = hirsel_core_contract::depth::STRUCTURAL_LIMIT as usize + 1;
+use smallvec::SmallVec;
+use std::cmp::Ordering;
+/// Pending cursors held inline; a deeper value spills its worklist to the heap.
+const INLINE: usize = 16;
 
 enum View<'a> {
     Scalar { code: u64, at: *const u8 },
@@ -86,33 +89,26 @@ impl<'a> Ordered<'a> {
             previous: None,
         }
     }
-    unsafe fn next(
-        &mut self,
-        p: Program<'a>,
-        ctx: *mut TaskCtx,
-        work: &mut [MaybeUninit<Pair<'a>>],
-    ) -> Option<Projection> {
+    unsafe fn next(&mut self, p: Program<'a>, ctx: *mut TaskCtx) -> Option<Projection> {
         unsafe {
             if !self.cursor.set {
                 return self.cursor.next(p);
             }
             // Borrowed Set storage cannot be sorted in place. Select successive
             // keys in canonical order without width-sized temporary storage.
-            // Nested key comparisons share the same bounded scratch suffix.
             let mut scan = self.cursor;
             let mut best = None;
             while let Some(key) = scan.next(p) {
-                let total = |a, b, work: &mut [MaybeUninit<Pair<'a>>]| {
-                    order(p, ctx, a, b, work)
-                        .unwrap_or_else(|| fault("unordered structural Set key"))
+                let total = |a, b| {
+                    order(p, ctx, a, b).unwrap_or_else(|| fault("unordered structural Set key"))
                 };
                 if self
                     .previous
-                    .is_some_and(|previous| total(key, previous, work) != Ordering::Greater)
+                    .is_some_and(|previous| total(key, previous) != Ordering::Greater)
                 {
                     continue;
                 }
-                if best.is_none_or(|best| total(key, best, work) == Ordering::Less) {
+                if best.is_none_or(|best| total(key, best) == Ordering::Less) {
                     best = Some(key);
                 }
             }
@@ -129,17 +125,16 @@ struct Pair<'a> {
     right: Ordered<'a>,
 }
 
-/// Every recursive entry is only a Set's key comparison and uses its caller's
-/// unused scratch suffix. Ordinary recursive values use the iterative cursor.
+/// Every recursive entry is only a Set's key comparison. Ordinary recursive
+/// values use the iterative cursor, whose stack grows with the value's depth.
 #[inline(never)]
 unsafe fn order<'a>(
     p: Program<'a>,
     ctx: *mut TaskCtx,
     mut a: Projection,
     mut c: Projection,
-    work: &mut [MaybeUninit<Pair<'a>>],
 ) -> Option<Ordering> {
-    let mut used = 0;
+    let mut work: SmallVec<[Pair<'a>; INLINE]> = SmallVec::new();
     unsafe {
         loop {
             let result = match (view(p, a), view(p, c)) {
@@ -158,15 +153,7 @@ unsafe fn order<'a>(
                         left: Ordered::new(ac),
                         right: Ordered::new(cc),
                     };
-                    let (left, right) = {
-                        let scratch = work
-                            .get_mut(used + 1..)
-                            .unwrap_or_else(|| fault("structural order depth invariant"));
-                        (
-                            pair.left.next(p, ctx, scratch),
-                            pair.right.next(p, ctx, scratch),
-                        )
-                    };
+                    let (left, right) = (pair.left.next(p, ctx), pair.right.next(p, ctx));
                     if let (Some(left), Some(right)) = (left, right) {
                         // A unary physical wrapper adds no continuation. Set
                         // cursors rescan, so retain them until they report end.
@@ -174,8 +161,7 @@ unsafe fn order<'a>(
                             || pair.right.cursor.has_more()
                             || ac.count != cc.count
                         {
-                            work[used].write(pair);
-                            used += 1;
+                            work.push(pair);
                         }
                         a = left;
                         c = right;
@@ -189,19 +175,11 @@ unsafe fn order<'a>(
                 return result;
             }
             loop {
-                if used == 0 {
+                let Some(pair) = work.last_mut() else {
                     return Some(Ordering::Equal);
-                }
-                let mut pair = work[used - 1].assume_init_read();
-                let (left, right) = {
-                    let scratch = &mut work[used..];
-                    (
-                        pair.left.next(p, ctx, scratch),
-                        pair.right.next(p, ctx, scratch),
-                    )
                 };
+                let (left, right) = (pair.left.next(p, ctx), pair.right.next(p, ctx));
                 if let (Some(left), Some(right)) = (left, right) {
-                    work[used - 1].write(pair);
                     a = left;
                     c = right;
                     break;
@@ -210,7 +188,7 @@ unsafe fn order<'a>(
                 if result != Ordering::Equal {
                     return Some(result);
                 }
-                used -= 1;
+                work.pop();
             }
         }
     }
@@ -218,14 +196,12 @@ unsafe fn order<'a>(
 
 pub(crate) unsafe fn compare(words: &[u64], ctx: *mut TaskCtx, a: *const u8, c: *const u8) -> u8 {
     let p = Program::new(words);
-    let mut work = [const { MaybeUninit::uninit() }; CAPACITY];
     match unsafe {
         order(
             p,
             ctx,
             Projection::at(p.root(), a),
             Projection::at(p.root(), c),
-            &mut work,
         )
     } {
         Some(Ordering::Equal) => 0,
@@ -238,9 +214,7 @@ pub(crate) unsafe fn compare(words: &[u64], ctx: *mut TaskCtx, a: *const u8, c: 
 pub(crate) unsafe fn hash(words: &[u64], ctx: *mut TaskCtx, at: *const u8, seed: u64) -> u64 {
     let p = Program::new(words);
     let mut hash = SipHasher13::new(seed, crate::HASH_KEY_1);
-    let mut work = [const { MaybeUninit::<Ordered<'_>>::uninit() }; CAPACITY];
-    let mut comparisons = [const { MaybeUninit::uninit() }; CAPACITY];
-    let mut used = 0;
+    let mut work: SmallVec<[Ordered<'_>; INLINE]> = SmallVec::new();
     let mut current = Projection::at(p.root(), at);
     unsafe {
         loop {
@@ -276,13 +250,9 @@ pub(crate) unsafe fn hash(words: &[u64], ctx: *mut TaskCtx, at: *const u8, seed:
                         hash.write(&count.to_le_bytes());
                     }
                     let mut cursor = Ordered::new(cursor);
-                    if let Some(child) = cursor.next(p, ctx, &mut comparisons) {
+                    if let Some(child) = cursor.next(p, ctx) {
                         if cursor.cursor.has_more() {
-                            if used == work.len() {
-                                fault("structural hash depth invariant");
-                            }
-                            work[used].write(cursor);
-                            used += 1;
+                            work.push(cursor);
                         }
                         current = child;
                         continue;
@@ -290,18 +260,52 @@ pub(crate) unsafe fn hash(words: &[u64], ctx: *mut TaskCtx, at: *const u8, seed:
                 }
             }
             loop {
-                if used == 0 {
+                let Some(cursor) = work.last_mut() else {
                     return hash.finish();
-                }
-                let mut cursor = work[used - 1].assume_init_read();
-                if let Some(child) = cursor.next(p, ctx, &mut comparisons) {
-                    work[used - 1].write(cursor);
+                };
+                if let Some(child) = cursor.next(p, ctx) {
                     current = child;
                     break;
                 }
-                used -= 1;
+                work.pop();
             }
         }
+    }
+}
+
+/// Compare two operands using a validated physical program.
+/// # Safety
+/// The static program matches both live borrowed operand addresses.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_rt_v2_structural_order(
+    ctx: *mut TaskCtx,
+    program: *const std::ffi::c_void,
+    program_length: u64,
+    left: *const std::ffi::c_void,
+    right: *const std::ffi::c_void,
+) -> u8 {
+    // SAFETY: the compiler validates the program and borrows both operands.
+    unsafe {
+        let words = std::slice::from_raw_parts(program.cast::<u64>(), program_length as usize);
+        compare(words, ctx, left.cast(), right.cast())
+    }
+}
+
+/// Hash an operand without changing it or its owner.
+/// # Safety
+/// The static program matches the live borrowed operand address.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_rt_v2_structural_hash(
+    ctx: *mut TaskCtx,
+    program: *const std::ffi::c_void,
+    program_length: u64,
+    value: *const std::ffi::c_void,
+    seed: u64,
+) -> u64 {
+    // SAFETY: the compiler validates the program and borrows the operand.
+    unsafe {
+        let words = std::slice::from_raw_parts(program.cast::<u64>(), program_length as usize);
+        hash(words, ctx, value.cast(), seed)
     }
 }
 

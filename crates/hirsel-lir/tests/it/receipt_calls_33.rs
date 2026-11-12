@@ -56,7 +56,6 @@ fn receipt_call() -> (ReceiptContract, ReceiptCall) {
 }
 fn ordinary_call() -> CallSite {
     CallSite {
-        pretransfer_failure: None,
         forward_caller: false,
         callee: Callee::Direct(SymbolId(3)),
         operation_arguments: vec![],

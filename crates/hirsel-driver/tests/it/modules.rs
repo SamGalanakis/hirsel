@@ -1,9 +1,5 @@
 mod definition_hash;
 mod depth;
-mod depth_cost_60;
-mod depth_counter_60;
-mod depth_leaf_60;
-mod depth_scope_63;
 mod host_io;
 mod invalidation;
 mod native;

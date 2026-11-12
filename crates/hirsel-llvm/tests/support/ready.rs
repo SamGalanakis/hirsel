@@ -28,10 +28,6 @@ pub const READY_CASES: &[(&str, &[(i64, i64)])] = &[
     ("compare_boxes", &[(1, 2), (2, 2), (3, 2)]),
     ("compare_options", &[(1, 2), (2, 2), (-1, 0)]),
     ("compare_floats", &[(0, 0)]),
-    (
-        "compare_chain",
-        &[(3, 0), (542, 0), (543, 0), (544, 0), (545, 0)],
-    ),
     ("read_static", &[(2, 0)]),
     ("static_box", &[(5, 0)]),
     ("unique_copy", &[(4, 5)]),
@@ -133,7 +129,6 @@ impl Unit<'_> {
         left: ValueId,
         right: ValueId,
         layout: LayoutId,
-        failure: FailureId,
     ) -> ValueId {
         self.structural(layout);
         let bool_l = self.table.scalar(ScalarKind::Bool);
@@ -146,7 +141,6 @@ impl Unit<'_> {
                 left,
                 right,
                 layout,
-                failure,
             },
         );
         result
@@ -348,30 +342,6 @@ impl Unit<'_> {
     }
 }
 
-/// The nominal recursive `Chain = Nil | Cons(i64, Box<Chain>)`.
-fn chain_owner(owners: &mut hirsel_layout::layout::Owners) -> DefPath {
-    let definition = path("Chain");
-    let mut t = super::session_types();
-    let i64_ = t.p(Primitive::I64);
-    let own = t.named(&definition, Vec::new());
-    let link = t.boxed(own);
-    let shape = t.variant(&[&[], &[i64_, link]]);
-    owners.nominals.insert(
-        hirsel_syntax::DefId::intern(&definition.clone()),
-        hirsel_layout::layout::OwnerRepresentation::Defined(hirsel_tir::RepresentationRecord {
-            definition: definition.clone(),
-            representation_revision: hash("Chain revision"),
-            generics: Vec::new(),
-            private_shape: shape,
-            layout_promises: hirsel_types::Layout::default(),
-            resource: false,
-            finalizer: None,
-            unsafe_ffi_package: false,
-        }),
-    );
-    definition
-}
-
 /// The resource `Res { i64 }` whose drop body `Res_drop` fails LANG-9 on a zero field.
 fn resource_owner(owners: &mut hirsel_layout::layout::Owners) -> DefPath {
     let definition = path("Res");
@@ -530,10 +500,6 @@ pub fn ready_program(target: &TargetSpec) -> Program {
     let u8_ = t.p(Primitive::U8);
     let bytes = t.list(u8_);
     let string = t.p(Primitive::String);
-    let chain_path = chain_owner(&mut schema.owners);
-    let t = &mut schema.types;
-    let chain = t.named(&chain_path, Vec::new());
-    let box_chain = t.boxed(chain);
     schema.name("once_fun", once_fun);
     schema.name("box_once", box_once);
     schema.name("rec_f", rec_f);
@@ -601,8 +567,6 @@ pub fn ready_program(target: &TargetSpec) -> Program {
     schema.signature("mut i64", &[(PassingMode::Mut, i64_)], unit_);
     let bool_ = schema.types.p(Primitive::Bool);
     schema.name("bool", bool_);
-    schema.name("chain", chain);
-    schema.name("box_chain", box_chain);
     schema.environment("env_box", "env_add", &[(box_rec1, Passing::Take)]);
     schema.signature(ENTRY_ABI, &[(Borrow, i64_), (Borrow, i64_)], i64_);
     schema.signature("i64 -> i64", &[(Borrow, i64_)], i64_);
@@ -622,15 +586,7 @@ pub fn ready_program(target: &TargetSpec) -> Program {
     let mut table = schema.build(target);
     table.structural = schema.structural_plans(
         &table,
-        &[
-            "box_rec1",
-            "opt",
-            "rec_f",
-            "box_chain",
-            "string",
-            "box_opt",
-            "list64",
-        ],
+        &["box_rec1", "opt", "rec_f", "string", "box_opt", "list64"],
     );
 
     let manifest = manifest();
@@ -982,8 +938,7 @@ pub fn ready_program(target: &TargetSpec) -> Program {
     );
     let mut bits = Vec::new();
     for op in [CompareOp::Lt, CompareOp::Eq, CompareOp::Gt] {
-        let failure = u.releasing(&[(a, rec1_l), (b, rec1_l)], None, SourceAnchorId(0));
-        bits.push(u.compare(ENTRY, op, a, b, box_rec1_l, failure));
+        bits.push(u.compare(ENTRY, op, a, b, box_rec1_l));
     }
     let failure = u.releasing(&[(b, rec1_l)], None, SourceAnchorId(0));
     u.release_to(ENTRY, a, rec1_l, failure);
@@ -1012,8 +967,7 @@ pub fn ready_program(target: &TargetSpec) -> Program {
         (CompareOp::Lt, none, b),
         (CompareOp::Le, a, none),
     ] {
-        let failure = u.fails(None);
-        bits.push(u.compare(ENTRY, op, l, r, opt_l, failure));
+        bits.push(u.compare(ENTRY, op, l, r, opt_l));
     }
     let (end, r) = u.weigh(ENTRY, &bits);
     u.builder.ret(end, Some(r));
@@ -1053,87 +1007,9 @@ pub fn ready_program(target: &TargetSpec) -> Program {
         (CompareOp::Eq, one_zero, one_neg_zero),
         (CompareOp::Lt, one_neg_zero, one_zero),
     ] {
-        let failure = u.fails(None);
-        bits.push(u.compare(ENTRY, op, l, r, rec_f_l, failure));
+        bits.push(u.compare(ENTRY, op, l, r, rec_f_l));
     }
     let (end, r) = u.weigh(ENTRY, &bits);
-    u.builder.ret(end, Some(r));
-    add(u);
-
-    // compare_chain(n, _): a chain of n links (each a box and a variant field, two levels)
-    // compared with itself; past COMPARE_MAX_DEPTH levels it is the MEM-3 Depth failure.
-    let (chain_l, box_chain_l) = (payload(&table, "box_chain"), table.layout("box_chain"));
-    let mut u = Unit::new(&table, "compare_chain", ENTRY_ABI);
-    let n = u.param(i64_l);
-    let _ = u.param(i64_l);
-    let symbol = u.symbol(SymbolKind::Type, "Chain");
-    let link = |variant| ConstructorKind::Variant {
-        definition: symbol,
-        variant,
-    };
-    let nil = u.construct_block(ENTRY, link(0), chain_l, box_chain_l, &[]);
-    let zero = u.int(ENTRY, ScalarKind::I64, 0);
-    let (i, acc) = (u.plain(i64_l), u.value(box_chain_l, Holding::Owned));
-    let head = u.builder.block(BlockKind::Body, &[i, acc]);
-    u.builder.jump(ENTRY, head, &[zero, nil]);
-    let more = u.plain(bool_l);
-    let failure = u.releasing(&[(acc, chain_l)], None, SourceAnchorId(0));
-    u.builder.push(
-        head,
-        Inst::Binary {
-            result: more,
-            op: BinaryOp::Lt,
-            left: i,
-            right: n,
-            failure,
-        },
-    );
-    let (body, done) = (
-        u.builder.block(BlockKind::Body, &[]),
-        u.builder.block(BlockKind::Body, &[]),
-    );
-    let (yes, no) = (u.builder.edge(body, &[]), u.builder.edge(done, &[]));
-    u.builder.term(
-        head,
-        Terminator::Branch {
-            condition: more,
-            yes,
-            no,
-        },
-    );
-    let failure = u.releasing(&[(acc, chain_l)], None, SourceAnchorId(0));
-    let one = u.int(body, ScalarKind::I64, 1);
-    let next = u.plain(i64_l);
-    u.builder.push(
-        body,
-        Inst::Binary {
-            result: next,
-            op: BinaryOp::Add,
-            left: i,
-            right: one,
-            failure,
-        },
-    );
-    let failure_cons = u.fails(None);
-    let cons = u.construct_block_to(
-        body,
-        link(1),
-        chain_l,
-        box_chain_l,
-        &[(0, i), (1, acc)],
-        failure_cons,
-        None,
-    );
-    u.builder.jump(body, head, &[next, cons]);
-    let depth = u.anchor(100, 110);
-    let cleanup = u.builder.block(BlockKind::FailureCleanup, &[]);
-    u.release(cleanup, acc, chain_l);
-    let p = u.builder.propagate();
-    u.builder.jump(cleanup, p, &[]);
-    let failure = u.failure_to(cleanup, Some("MEM-3"), depth);
-    let eq = u.compare(done, CompareOp::Eq, acc, acc, box_chain_l, failure);
-    u.release(done, acc, chain_l);
-    let (end, r) = u.weigh(done, &[eq]);
     u.builder.ret(end, Some(r));
     add(u);
 
@@ -1332,8 +1208,7 @@ pub fn ready_program(target: &TargetSpec) -> Program {
         (CompareOp::Gt, abc, ab),
         (CompareOp::Eq, abc, abd),
     ] {
-        let failure = u.fails(None);
-        bits.push(u.compare(ENTRY, op, l, r, string_l, failure));
+        bits.push(u.compare(ENTRY, op, l, r, string_l));
     }
     let (end, r) = u.weigh(ENTRY, &bits);
     u.builder.ret(end, Some(r));
@@ -1505,8 +1380,7 @@ pub fn ready_program(target: &TargetSpec) -> Program {
         u.read(ENTRY, at, v)
     };
     let (va, vb) = (read(&mut u, a), read(&mut u, b));
-    let failure = u.exits(mark);
-    let lt = u.compare(ENTRY, CompareOp::Lt, a, b, box_rec1_l, failure);
+    let lt = u.compare(ENTRY, CompareOp::Lt, a, b, box_rec1_l);
     u.exit_region(ENTRY, mark);
     // 2 * (x + y) + (a < b), after the region has exited.
     let sum = u.binary(ENTRY, BinaryOp::Add, va, vb);
@@ -1679,8 +1553,7 @@ pub fn ready_program(target: &TargetSpec) -> Program {
     let failure = u.releasing(&[(some, opt_l)], None, SourceAnchorId(0));
     let none = u.construct_block_to(ENTRY, variant(0), opt_l, box_opt_l, &[], failure, None);
     let both = [(some, opt_l), (none, opt_l)];
-    let failure = u.releasing(&both, None, SourceAnchorId(0));
-    let gt = u.compare(ENTRY, CompareOp::Gt, some, none, box_opt_l, failure);
+    let gt = u.compare(ENTRY, CompareOp::Gt, some, none, box_opt_l);
     u.builder.unit.tables.constructs.push(ConstructSite {
         arena_no_drop: false,
         tracked: false,
@@ -2478,9 +2351,8 @@ pub fn ready_program(target: &TargetSpec) -> Program {
     u.release_all(cleanup, &live);
     let p = u.builder.propagate();
     u.builder.jump(cleanup, p, &[]);
-    let failure = u.failure_to(cleanup, None, SourceAnchorId(0));
     let other = u.constant(ENTRY, string_l, ConstantValue::String("hello".into()));
-    let eq = u.compare(ENTRY, CompareOp::Eq, view, other, string_l, failure);
+    let eq = u.compare(ENTRY, CompareOp::Eq, view, other, string_l);
     u.builder.push(
         ENTRY,
         Inst::EndLoan {
@@ -2991,14 +2863,12 @@ pub fn ready_program(target: &TargetSpec) -> Program {
     let hash = |u: &mut Unit<'_>, value| {
         u.structural(list_l);
         let result = u.plain(u64_l);
-        let failure = u.releasing(&live, Some("MEM-3"), SourceAnchorId(0));
         u.builder.push(
             current,
             Inst::Hash {
                 result,
                 value,
                 layout: list_l,
-                failure,
             },
         );
         result

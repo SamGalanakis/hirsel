@@ -11,37 +11,8 @@ pub struct InstanceOperations<'a> {
     pub receipts: Option<&'a super::receipt_requests::Sources>,
     pub source: Option<(&'a DefPath, ContentHash)>,
     pub all_sources: bool,
-    pub pretransfer: Option<Vec<hirsel_lir::pretransfer::AdapterReference>>,
 }
 
-/// Numeric selectors belong to the current table. Match full independently
-/// derived ABI content before using an adapter with a portable unit binding.
-pub fn bind_pretransfer(
-    declarations: &(dyn OperationDeclarations + Sync),
-    table: &LayoutTable,
-    target: &TargetSpec,
-) -> Result<Vec<hirsel_lir::pretransfer::AdapterReference>, String> {
-    let keys = hirsel_lir::LayoutKeys::new(table);
-    declarations
-        .pretransfer_adapters()
-        .iter()
-        .map(|reference| {
-            let (abi, source) = declarations
-                .pretransfer_abi(reference, target)
-                .ok_or("missing independently derived adapter ABI")?;
-            let expected = hirsel_lir::LayoutKeys::new(&source).fn_abi(&abi);
-            let index = table
-                .fn_abis
-                .iter()
-                .position(|abi| keys.fn_abi(abi) == expected)
-                .ok_or("independently planned adapter ABI is absent from bound layouts")?;
-            Ok(hirsel_lir::pretransfer::AdapterReference {
-                abi: hirsel_lir::FnAbiId(index as u32),
-                ..reference.clone()
-            })
-        })
-        .collect()
-}
 impl OperationDeclarations for InstanceOperations<'_> {
     fn receipt_source(
         &self,
@@ -148,25 +119,6 @@ impl OperationDeclarations for InstanceOperations<'_> {
         }
         self.declarations
             .seal_descriptor_for_source(definition, instance, source, table, target)
-    }
-    fn pretransfer_adapters(&self) -> &[hirsel_lir::pretransfer::AdapterReference] {
-        self.pretransfer
-            .as_deref()
-            .unwrap_or_else(|| self.declarations.pretransfer_adapters())
-    }
-    fn pretransfer_abi(
-        &self,
-        reference: &hirsel_lir::pretransfer::AdapterReference,
-        target: &TargetSpec,
-    ) -> Option<(FnAbi, LayoutTable)> {
-        let original = self
-            .declarations
-            .pretransfer_adapters()
-            .iter()
-            .find(|original| {
-                original.adapter == reference.adapter && original.primitive == reference.primitive
-            })?;
-        self.declarations.pretransfer_abi(original, target)
     }
     fn requires_structural_reference(&self) -> bool {
         (self.all_sources || self.source.is_some())

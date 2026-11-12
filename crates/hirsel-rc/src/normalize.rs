@@ -19,7 +19,7 @@
 //! (`SlotKind::LoopCarried`). A borrowed counted temporary listed in
 //! `owned_loop_arguments` moves into that slot at the site, so the next
 //! iteration borrows it from the loop and the slot releases it on the next
-//! replacement and at the final exit (LANG-10: one count operation per call).
+//! replacement and at the final exit.
 //! The import (`crate::import`) emits the slots, the prologue and the back
 //! edges from this plan.
 use crate::instance::{

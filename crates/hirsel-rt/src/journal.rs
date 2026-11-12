@@ -338,7 +338,7 @@ pub fn render_outcome(outcome: &RunOutcome) -> String {
             hex(hirsel_run_schema::Wait::encode(waits).as_bytes())
         ),
         RunOutcome::Signaled(kind) => format!("signaled {}", kind.name()),
-        RunOutcome::BudgetExceeded(BudgetKind::Memory) => "budget memory".into(),
+        RunOutcome::BudgetExceeded(kind) => format!("budget {}", kind.name()),
         RunOutcome::Refused(why) => format!("refused {}", hex(why.as_bytes())),
         RunOutcome::Diverged(why) => format!("diverged {}", hex(why.as_bytes())),
         RunOutcome::Environmental(Environmental::CodecLimit) => "environmental codec".into(),
@@ -418,10 +418,9 @@ pub fn parse_outcome(text: &str) -> Result<RunOutcome, String> {
         "signaled" => RunOutcome::Signaled(
             hirsel_run_schema::SignalKind::parse(next()?).ok_or("bad journal signal")?,
         ),
-        "budget" => match next()? {
-            "memory" => RunOutcome::BudgetExceeded(BudgetKind::Memory),
-            _ => return Err("bad journal budget".into()),
-        },
+        "budget" => {
+            RunOutcome::BudgetExceeded(BudgetKind::parse(next()?).ok_or("bad journal budget")?)
+        }
         "refused" => RunOutcome::Refused(unhex(next()?)?),
         "diverged" => RunOutcome::Diverged(unhex(next()?)?),
         "environmental" => match next()? {

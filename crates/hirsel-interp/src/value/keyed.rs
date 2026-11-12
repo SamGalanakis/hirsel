@@ -1,6 +1,6 @@
 //! A lookup index beside ordered elements. It never supplies iteration order.
 use super::{Block, Value};
-use crate::library::collection::{KeyedError, data_equal};
+use crate::library::collection::data_equal;
 use crate::{Error, invalid};
 use hirsel_intern::work::{Counter, count};
 use std::collections::HashMap;
@@ -60,13 +60,8 @@ impl Block {
         &self,
         key: &Value,
         kind: KeyKind,
-    ) -> Result<(Option<usize>, u64), KeyedError> {
-        let hash = crate::structural::hash(key, 0).map_err(|error| match error {
-            crate::structural::StructuralError::Depth => KeyedError::Depth,
-            crate::structural::StructuralError::InvalidValue => {
-                KeyedError::Invalid(invalid("key is not key data"))
-            }
-        })?;
+    ) -> Result<(Option<usize>, u64), Error> {
+        let hash = crate::structural::hash(key, 0).map_err(|_| invalid("key is not key data"))?;
         let index = self
             .0
             .index

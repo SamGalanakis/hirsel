@@ -47,10 +47,7 @@ pub(super) fn exits<S: crate::stage::Stage>(
         return None;
     };
     let call = unit.tables.calls.get(call.index())?;
-    if !matches!(call.callee, Callee::Direct(_))
-        || call.result.is_some()
-        || call.pretransfer_failure.is_some()
-    {
+    if !matches!(call.callee, Callee::Direct(_)) || call.result.is_some() {
         return None;
     }
     let [argument] = call.arguments.get(&unit.pools.call_arguments)? else {
@@ -59,7 +56,6 @@ pub(super) fn exits<S: crate::stage::Stage>(
     if argument.parameter != 0 {
         return None;
     }
-    let mut rejected = None;
     match (argument.passing, argument.value) {
         (Passing::Borrow, ArgumentValue::Value(value)) => {
             let mut reads = code.iter().filter_map(|instruction| match *instruction {
@@ -74,27 +70,12 @@ pub(super) fn exits<S: crate::stage::Stage>(
             if reads.next() != Some(address) || reads.next().is_some() {
                 return None;
             }
-            let mut guards = code.iter().filter_map(|instruction| match *instruction {
-                Inst::FrameEnter { failure } => Some(failure),
-                _ => None,
-            });
-            rejected = Some(guards.next()?);
-            if guards.next().is_some() {
-                return None;
-            }
         }
-        (Passing::Mut, ArgumentValue::Address { address: from, .. }) if from == address => {
-            if code
-                .iter()
-                .any(|instruction| matches!(instruction, Inst::FrameEnter { .. }))
-            {
-                return None;
-            }
-        }
+        (Passing::Mut, ArgumentValue::Address { address: from, .. }) if from == address => {}
         _ => return None,
     }
     let mut targets = vec![unit.tables.edges.get(normal.index())?.target];
-    for failure in [Some(failure), rejected].into_iter().flatten() {
+    for failure in [failure] {
         let edge = unit.tables.failures.get(failure.index())?.cleanup;
         targets.push(unit.tables.edges.get(edge.index())?.target);
     }
@@ -124,11 +105,10 @@ pub(super) fn exits<S: crate::stage::Stage>(
             || !code[..index].iter().all(|instruction| {
                 matches!(
                     instruction,
-                    Inst::FrameLeave
-                        | Inst::EndLoan {
-                            if_active: false,
-                            ..
-                        }
+                    Inst::EndLoan {
+                        if_active: false,
+                        ..
+                    }
                 )
             })
         {
@@ -183,7 +163,7 @@ pub(super) fn failure_edges<S: crate::stage::Stage>(
         states[at] = 1;
         let term = unit.terminators.get(at)?;
         let mut successors = term.normal_edges(&unit.pools);
-        for failure in term.failure_edges(&unit.tables) {
+        if let Some(failure) = term.failure() {
             successors.push(unit.tables.failures.get(failure.index())?.cleanup);
         }
         for inst in block.instructions.get(&unit.instructions)? {

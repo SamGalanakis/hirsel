@@ -102,9 +102,6 @@ fn control(initialized: u8) -> Program<Ready> {
     );
     b.term(joined, Terminator::Return(None));
     Program {
-        invocations: Default::default(),
-        invocation_bodies: Vec::new(),
-        pretransfer_adapters: Vec::new(),
         target,
         layouts: table.clone(),
         units: vec![b.finish_with_layouts(&table)],

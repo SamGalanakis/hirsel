@@ -315,7 +315,7 @@ pub fn constants<'a, S>(unit: &LirUnit<S>, statics: &'a [StaticData]) -> Constan
     };
     let mut stores: Vec<Vec<crate::ir::ValueId>> = vec![Vec::new(); slots];
     let mut ruled_out = vec![false; slots];
-    let mut rule_out = |address: AddressId, ruled_out: &mut Vec<bool>| {
+    let rule_out = |address: AddressId, ruled_out: &mut Vec<bool>| {
         if let Some(slot) = root(address) {
             ruled_out[slot] = true;
         }

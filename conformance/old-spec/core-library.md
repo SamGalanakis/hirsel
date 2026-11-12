@@ -986,7 +986,7 @@ waits due at it resume.
 `{ kind: FailureKind, rule: String, site: SourceSite, spawn: List[u64], cause: Option[box Failure] }`,
 where `SourceSite` is `{ definition: String, line: u64, column: u64 }`, using a fully
 qualified definition path and one-based source coordinates, and `FailureKind` is
-`Check | Contract | Depth | OutOfSpace | DeadMutex`; all three are `serializable`. The site follows the failing
+`Check | Contract | OutOfSpace | DeadMutex`; all three are `serializable`. The site follows the failing
 operation and [`@track_caller`](failure.md#fail-1-kinds), rather than the isolation
 boundary. Tooling additionally retains the original operation and the complete file
 identity for human and JSON reports.

@@ -489,10 +489,6 @@ impl ScalarUnaryOp {
     }
 }
 
-/// Complete logical operand depth admitted by MEM-3, with the root at zero.
-/// This is independent of physical layout and native/scratch implementation choices.
-pub const COMPARE_MAX_DEPTH: u64 = hirsel_core_contract::depth::STRUCTURAL_LIMIT;
-
 /// Structural comparison operators (`Inst::Compare`): equality and the total
 /// structural order over one non-scalar layout.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -590,15 +586,13 @@ pub enum Inst {
     /// (`hirsel_interp::structural::compare`): fields in declaration order,
     /// variant tag ordinals before payloads, sequences lexicographically with
     /// the shorter prefix first, String and Bytes bytewise, floats by IEEE
-    /// (an unordered pair makes every operator but `Ne` false). It fails with
-    /// MEM-3 Depth past `COMPARE_MAX_DEPTH` nesting (spec #16).
+    /// (an unordered pair makes every operator but `Ne` false). It cannot fail.
     Compare {
         result: ValueId,
         op: CompareOp,
         left: ValueId,
         right: ValueId,
         layout: LayoutId,
-        failure: FailureId,
     },
     /// A scalar conversion (`ConvertMode`, LIR schema revision 6). `flag`
     /// is present exactly for `TryNarrow` and `FloatToI32`. Never fails.
@@ -847,17 +841,13 @@ pub enum Inst {
     },
     /// A hash of `value` at the non-scalar or scalar `layout`, keyed by the
     /// run context's seed: a Plain u64. Equal values (by `Compare Eq`) hash
-    /// equal. A value nested past `COMPARE_MAX_DEPTH` (counted as `Compare`
-    /// counts: the root at depth 0, each field, element or Box payload one
-    /// deeper) is the MEM-3 Depth failure, so every keyed operation fails
-    /// at its call whatever the container holds (spec #90). Its bits are
-    /// unobservable (SEM-5: the seed affects placement only) and need not
-    /// agree across engines (LIR schema revision 7).
+    /// equal. It cannot fail. Its bits are unobservable (SEM-5: the seed
+    /// affects placement only) and need not agree across engines (LIR schema
+    /// revision 7).
     Hash {
         result: ValueId,
         value: ValueId,
         layout: LayoutId,
-        failure: FailureId,
     },
     /// `codec.encode` (LIR schema revision 29): the SER-2 envelope of the
     /// borrowed `value`, at its plan's root layout, as a fresh owned `Bytes`
@@ -1154,11 +1144,6 @@ pub enum Inst {
     Forget {
         value: ValueId,
     },
-    // Logical frame admission, pending #16: no numeric charge is defined yet.
-    FrameEnter {
-        failure: FailureId,
-    },
-    FrameLeave,
     /// An M2 placeholder; never emitted.
     Unavailable {
         feature: UnavailableFeature,
@@ -1259,8 +1244,6 @@ pub enum Terminator {
     Raise(FailureId),
     /// Return failure status after failure cleanup finished.
     Propagate,
-    /// Private keyed-adapter rejection; actuals remain in pending caller custody.
-    RejectTransfer,
     /// In failure cleanup: when the active failure is exactly the `OutOfSpace`
     /// of the bounded arena `arena`, which this unit opened, with no failure
     /// recorded after it, forget it and resume ordinary code on `caught`;
@@ -1520,9 +1503,6 @@ pub struct ReceiptInput {
 /// effects (never body-derived public promises).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallSite {
-    /// Status 3 from a validated materialized keyed-primitive adapter. On this
-    /// edge evaluated Take actuals remain in pending caller custody.
-    pub pretransfer_failure: Option<FailureId>,
     pub forward_caller: bool,
     pub callee: Callee,
     /// Concrete registry instantiation; read only for Operation callees (LIR 21).
@@ -1542,7 +1522,6 @@ pub struct CallSite {
 // has an explicit namespace, including a contract with no dynamic carriers.
 impl std::hash::Hash for CallSite {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.pretransfer_failure.hash(state);
         self.forward_caller.hash(state);
         self.callee.hash(state);
         self.operation_arguments.hash(state);
@@ -2189,8 +2168,6 @@ impl Inst {
             | Inst::FinalizeBegin { .. }
             | Inst::FinalizeEnd { .. }
             | Inst::Forget { .. }
-            | Inst::FrameEnter { .. }
-            | Inst::FrameLeave
             | Inst::Unavailable { .. } => Vec::new(),
         }
     }
@@ -2200,8 +2177,6 @@ impl Inst {
         match *self {
             Inst::Unary { failure, .. }
             | Inst::Binary { failure, .. }
-            | Inst::Compare { failure, .. }
-            | Inst::Hash { failure, .. }
             | Inst::Decode { failure, .. }
             | Inst::Check { failure, .. }
             | Inst::Address { failure, .. }
@@ -2220,8 +2195,7 @@ impl Inst {
             | Inst::HoleOpen { failure, .. }
             | Inst::RegionReserve { failure, .. }
             | Inst::RegionExit { failure, .. }
-            | Inst::SealArena { failure, .. }
-            | Inst::FrameEnter { failure } => Some(failure),
+            | Inst::SealArena { failure, .. } => Some(failure),
             Inst::Const { .. }
             | Inst::FunctionRef { .. }
             | Inst::ReadStatic { .. }
@@ -2276,7 +2250,8 @@ impl Inst {
             | Inst::FinalizeBegin { .. }
             | Inst::FinalizeEnd { .. }
             | Inst::Forget { .. }
-            | Inst::FrameLeave
+            | Inst::Compare { .. }
+            | Inst::Hash { .. }
             | Inst::Unavailable { .. } => None,
         }
     }
@@ -2286,8 +2261,6 @@ impl Inst {
         match self {
             Inst::Unary { failure, .. }
             | Inst::Binary { failure, .. }
-            | Inst::Compare { failure, .. }
-            | Inst::Hash { failure, .. }
             | Inst::Decode { failure, .. }
             | Inst::Check { failure, .. }
             | Inst::Address { failure, .. }
@@ -2306,8 +2279,7 @@ impl Inst {
             | Inst::HoleOpen { failure, .. }
             | Inst::RegionReserve { failure, .. }
             | Inst::RegionExit { failure, .. }
-            | Inst::SealArena { failure, .. }
-            | Inst::FrameEnter { failure } => Some(failure),
+            | Inst::SealArena { failure, .. } => Some(failure),
             Inst::Const { .. }
             | Inst::FunctionRef { .. }
             | Inst::ReadStatic { .. }
@@ -2362,7 +2334,8 @@ impl Inst {
             | Inst::FinalizeBegin { .. }
             | Inst::FinalizeEnd { .. }
             | Inst::Forget { .. }
-            | Inst::FrameLeave
+            | Inst::Compare { .. }
+            | Inst::Hash { .. }
             | Inst::Unavailable { .. } => None,
         }
     }
@@ -2417,13 +2390,11 @@ impl Inst {
                 left,
                 right,
                 layout,
-                failure,
             } => {
                 f(R::Value(result));
                 f(R::Value(left));
                 f(R::Value(right));
                 f(R::Layout(layout));
-                f(R::Failure(failure));
             }
             Self::Convert {
                 result,
@@ -2489,7 +2460,6 @@ impl Inst {
             }
             Self::StorageLive { slot } | Self::StorageDead { slot, if_live: _ } => f(R::Slot(slot)),
             Self::EndScope { scope } => f(R::Scope(scope)),
-            Self::FrameLeave => {}
             Self::Address { address, failure } => {
                 f(R::Address(address));
                 f(R::Failure(failure));
@@ -2530,12 +2500,10 @@ impl Inst {
                 result,
                 value,
                 layout,
-                failure,
             } => {
                 f(R::Value(result));
                 f(R::Value(value));
                 f(R::Layout(layout));
-                f(R::Failure(failure));
             }
             Self::Encode {
                 result,
@@ -2920,7 +2888,6 @@ impl Inst {
                 f(R::Address(address));
                 f(R::CleanupAnchor(anchor));
             }
-            Self::FrameEnter { failure } => f(R::Failure(failure)),
             Self::Unavailable { feature: _, anchor } => f(R::SourceAnchor(anchor)),
         }
     }
@@ -2947,7 +2914,6 @@ impl Terminator {
             Terminator::Return(_)
             | Terminator::Raise(_)
             | Terminator::Propagate
-            | Terminator::RejectTransfer
             | Terminator::Unreachable
             | Terminator::InvariantFault { .. } => Vec::new(),
         }
@@ -2962,27 +2928,11 @@ impl Terminator {
             | Terminator::Switch { .. }
             | Terminator::Return(_)
             | Terminator::Propagate
-            | Terminator::RejectTransfer
             | Terminator::Recover { .. }
             | Terminator::Isolate { .. }
             | Terminator::Unreachable
             | Terminator::InvariantFault { .. } => None,
         }
-    }
-
-    /// Entered-callee failure and, where allowed, pending-transfer rejection.
-    pub fn failure_edges(&self, tables: &SideTables) -> Vec<FailureId> {
-        let mut failures: Vec<_> = self.failure().into_iter().collect();
-        if let Self::Call { call, .. } = self {
-            if let Some(failure) = tables
-                .calls
-                .get(call.index())
-                .and_then(|call| call.pretransfer_failure)
-            {
-                failures.push(failure);
-            }
-        }
-        failures
     }
 
     pub fn visit(&self, f: &mut impl FnMut(Ref)) {
@@ -3032,10 +2982,7 @@ impl Terminator {
                 f(Ref::Value(start));
                 f(Ref::Edge(caught));
             }
-            Self::Propagate
-            | Self::RejectTransfer
-            | Self::Unreachable
-            | Self::InvariantFault { .. } => {}
+            Self::Propagate | Self::Unreachable | Self::InvariantFault { .. } => {}
         }
     }
 }
@@ -3290,9 +3237,6 @@ impl<S: Stage> LirUnit<S> {
             }
             if let Some(destination) = &call.destination {
                 destination.visit(&mut push);
-            }
-            if let Some(failure) = call.pretransfer_failure {
-                push(Ref::Failure(failure));
             }
             push(Ref::SourceAnchor(call.anchor));
         }
@@ -3559,7 +3503,7 @@ snapshot_enum!(Inst {
     ReadStatic { result, symbol },
     Unary { result, op, operand, failure },
     Binary { result, op, left, right, failure },
-    Compare { result, op, left, right, layout, failure },
+    Compare { result, op, left, right, layout },
     Convert { result, flag, operand, mode },
     IntArith { result, flag, op, mode, left, right },
     MulAdd { result, left, right, addend },
@@ -3584,7 +3528,7 @@ snapshot_enum!(Inst {
     FlatAppend { address, construct, version },
     FlatField { address, field, op, version },
     FlatClose { address, construct, field, version },
-    Hash { result, value, layout, failure },
+    Hash { result, value, layout },
     Encode { result, value, codec },
     Decode { result, value, codec, failure },
     Recast { result, value },
@@ -3630,8 +3574,6 @@ snapshot_enum!(Inst {
     FinalizeBegin { address, anchor },
     FinalizeEnd { address, anchor },
     Forget { value },
-    FrameEnter { failure },
-    FrameLeave,
     Unavailable { feature, anchor },
     SliceView { result, value, start, end, failure },
     SealArena { result, grant, root, shape, failure, origin },
@@ -3663,7 +3605,6 @@ snapshot_enum!(Terminator {
     Isolate { start, caught },
     Unreachable,
     InvariantFault { reason },
-    RejectTransfer,
 });
 snapshot_enum!(BlockKind {
     Body,
@@ -3746,7 +3687,6 @@ snapshot_struct!(CallArgument {
 });
 snapshot_struct!(ReceiptInput { original, receipt });
 snapshot_struct!(CallSite {
-    pretransfer_failure,
     forward_caller,
     callee,
     operation_arguments,

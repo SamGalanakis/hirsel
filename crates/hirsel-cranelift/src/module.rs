@@ -301,6 +301,12 @@ fn isa_with_verifier(target: &TargetSpec, opt: OptLevel, verify: bool) -> Emitte
             },
         ),
         ("preserve_frame_pointers", "true"),
+        // A frame of a page or more touches each page in turn (inline: no libcall), so a
+        // stack overflow always faults in the fiber's guard and becomes the runtime's stack
+        // stop. The interval is one 4 KiB page, within `STACK_GUARD_BYTES`.
+        ("enable_probestack", "true"),
+        ("probestack_strategy", "inline"),
+        ("probestack_size_log2", "12"),
         // i128 parameters and results in register pairs, as LLVM passes them (SysV, AAPCS64).
         ("enable_llvm_abi_extensions", "true"),
     ] {
@@ -480,12 +486,6 @@ pub(crate) fn emit(
             resumed.push((unit, plan, name, id, sig));
         }
     }
-    let depth_leaf = hirsel_lir::invocations::room::depth_leaf_units(
-        units.iter().map(|u| u.unit()),
-        inputs.layouts,
-    );
-    let counter_units =
-        hirsel_lir::invocations::room::counter_units(units.iter().map(|u| u.unit()));
     if inputs.alternate {
         bodies
             .sort_by_key(|(unit, _, _)| !unit.header.definition.is_core("$native.list_push_spare"));
@@ -504,12 +504,6 @@ pub(crate) fn emit(
         {
             let builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
             let mut function = crate::function::FnEmitter::new(&mut emitter, unit, builder, sig);
-            function.room = hirsel_lir::invocations::room::RoomChecks::of(unit, &depth_leaf);
-            // Resumable alternates retain the runtime admission's mode token.
-            if !inputs.alternate {
-                function.counters =
-                    hirsel_lir::invocations::room::RoomChecks::counters_of(unit, &counter_units);
-            }
             function.ownership = ownership_plans
                 .as_ref()
                 .and_then(|plans| plans.get(&unit.header.instance));
@@ -550,8 +544,6 @@ pub(crate) fn emit(
         {
             let builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
             let mut function = crate::function::FnEmitter::new(&mut emitter, unit, builder, sig);
-            function.room = hirsel_lir::invocations::room::RoomChecks::of(unit, &depth_leaf);
-
             function.resume = Some(crate::resume::Resume {
                 plan,
                 state: 0,
@@ -1128,17 +1120,6 @@ fn launch_object(
     let entry_id = module
         .declare_function(entry, Linkage::Import, &entry_sig)
         .map_err(refuse(entry))?;
-    let mut admission_sig = ir::Signature::new(call_conv);
-    admission_sig.params.push(AbiParam::new(PTR));
-    admission_sig.returns.push(AbiParam::new(types::I8).uext());
-    let admission_id = module
-        .declare_function("hirsel_rt_v2_depth_enter", Linkage::Import, &admission_sig)
-        .map_err(refuse("hirsel_rt_v2_depth_enter"))?;
-    let mut retirement_sig = ir::Signature::new(call_conv);
-    retirement_sig.params.push(AbiParam::new(PTR));
-    let retirement_id = module
-        .declare_function("hirsel_rt_v2_depth_leave", Linkage::Import, &retirement_sig)
-        .map_err(refuse("hirsel_rt_v2_depth_leave"))?;
     let mut adapter_sig = ir::Signature::new(call_conv);
     adapter_sig
         .params
@@ -1168,8 +1149,6 @@ fn launch_object(
         b.append_block_params_for_function_params(block);
         b.switch_to_block(block);
         let params = b.block_params(block).to_vec();
-        let admit = module.declare_func_in_func(admission_id, b.func);
-        b.ins().call(admit, &[params[0]]);
         let mut args = vec![params[0]];
         if !callee_entry && caller_site {
             let zero = b.ins().iconst(types::I64, 0);
@@ -1211,8 +1190,6 @@ fn launch_object(
             .call(callee, &[params[0], params[2], index, offset, node]);
         b.ins().jump(done, &[]);
         b.switch_to_block(done);
-        let retire = module.declare_func_in_func(retirement_id, b.func);
-        b.ins().call(retire, &[params[0]]);
         b.ins().return_(&[status]);
         b.seal_all_blocks();
         b.finalize(module.target_config());
@@ -1450,3 +1427,40 @@ fn report_nodes(module: &mut ObjectModule, report: &ExitReport) -> Emitted<DataI
 
 #[cfg(test)]
 mod receipt_tests;
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    use cranelift_codegen::settings::ProbestackStrategy;
+
+    /// A fiber's guard is the only thing between a deep recursion and the memory below its
+    /// stack, and no program can observe whether a frame wider than the guard was probed. So
+    /// the ISA's flags are the evidence: on every target and level, every frame of at least one
+    /// probe interval is probed inline at that interval, which fits in the guard. (Cranelift's
+    /// inline strategy probes `frame / interval` pages, so frames between a page and the guard
+    /// are covered too; hand-checked once against disassembly of a 72,000-byte frame.)
+    #[test]
+    fn every_frame_is_probed_within_the_guard() {
+        for target in [
+            TargetSpec::x86_64_unknown_linux_gnu(),
+            TargetSpec::aarch64_unknown_linux_gnu(),
+        ] {
+            for opt in [OptLevel::None, OptLevel::Default, OptLevel::Speed] {
+                let isa = isa(&target, opt).unwrap();
+                let flags = isa.flags();
+                assert!(flags.enable_probestack(), "{}", target.triple);
+                assert!(
+                    matches!(flags.probestack_strategy(), ProbestackStrategy::Inline),
+                    "{}",
+                    target.triple
+                );
+                assert!(
+                    1usize << flags.probestack_size_log2()
+                        <= hirsel_lir::runtime_abi::STACK_GUARD_BYTES,
+                    "{}",
+                    target.triple
+                );
+            }
+        }
+    }
+}

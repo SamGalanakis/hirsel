@@ -5,9 +5,9 @@ use hirsel_lir::continuation::{CalleeClass, ContinuationPlans, PlanInputs};
 use hirsel_rt_operations::descriptors::{self as d, Locality, Transition};
 use hirsel_syntax::{ContentHash, DefPath};
 
-/// Startup, state getter, handoff and depth-leaf call extents composed into
-/// every ahead root's final frame bound.
-pub const AHEAD_HELPER_BYTES: [u64; 4] = [16, 8, 64, hirsel_rt::DEPTH_LEAF_STACK_BYTES];
+/// Startup, state getter and handoff call extents composed into every ahead
+/// root's final frame bound.
+pub const AHEAD_HELPER_BYTES: [u64; 3] = [16, 8, 64];
 
 /// The final-frame certificate of every ahead root the objects prove.
 pub fn ahead_certificates(

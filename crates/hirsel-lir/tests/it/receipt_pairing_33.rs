@@ -67,7 +67,6 @@ fn fixture(result: bool) -> (FnAbi, CallSite, Pools) {
         ],
     );
     let call = CallSite {
-        pretransfer_failure: Some(FailureId(1)),
         forward_caller: false,
         callee: Callee::Direct(SymbolId(0)),
         operation_arguments: vec![],

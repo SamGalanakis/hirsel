@@ -49,7 +49,7 @@ impl<'a> StorageFlow<'a> {
             let term = &unit.terminators[block.index()];
             let mut edges = term.normal_edges(&unit.pools);
             edges.extend(
-                term.failure_edges(&unit.tables)
+                term.failure()
                     .into_iter()
                     .map(|failure| unit.tables.failures[failure.index()].cleanup),
             );

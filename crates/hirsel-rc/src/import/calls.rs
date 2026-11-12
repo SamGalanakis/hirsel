@@ -118,33 +118,11 @@ impl Importer<'_> {
                 returns,
                 on_failure,
             } => {
-                self.invocation_live = false;
-                self.invocation_return = returns.map(|r| r.next);
                 self.failure = FailureContext {
                     cleanup: Some(*on_failure),
                     before: Vec::new(),
                     pending: Vec::new(),
                 };
-                let adapter = matches!(
-                    callee,
-                    tir::Callee::Indirect {
-                        forward_caller: true,
-                        ..
-                    }
-                );
-                let leaf = matches!(callee, tir::Callee::Definition { path, .. }
-                    if !hirsel_core_contract::depth::adds_activation(path));
-                if !adapter && !leaf && self.plan.is_none_or(|p| p.site(t).is_none()) {
-                    // The arguments have been evaluated into TIR temporaries.
-                    // Until admission all their storage belongs to this caller;
-                    // the entered-callee cleanup deliberately excludes takes.
-                    self.failure.cleanup = None;
-                    let failure = self.fail(Some("LANG-10".into()))?;
-                    self.push(Inst::FrameEnter { failure });
-                    self.invocation_live = true;
-                    self.failure.cleanup = Some(*on_failure);
-                }
-                let key_address = self.key_preflight(callee, arguments)?;
                 if self.builders.calls.contains(&t) {
                     return self.removed_call(*returns);
                 }
@@ -161,73 +139,11 @@ impl Importer<'_> {
                     return self.back_edge(&site, arguments);
                 }
                 self.call_block = t;
-                self.call(callee, arguments, *returns, key_address)?;
+                self.call(callee, arguments, *returns)?;
             }
             T::Match { table, from } => self.match_from(*table, *from)?,
         }
         Ok(())
-    }
-
-    fn key_preflight(
-        &mut self,
-        callee: &tir::Callee,
-        arguments: &[tir::CallArgument],
-    ) -> R<Option<(tir::PlaceId, AddressId)>> {
-        let tir::Callee::Definition { path, .. } = callee else {
-            return Ok(None);
-        };
-        if !self.program.operations.contains_key(path)
-            || !["map.insert", "set.insert", "map.get", "set.contains"]
-                .iter()
-                .any(|name| path.is_core(name))
-        {
-            return Ok(None);
-        }
-        let key = arguments
-            .iter()
-            .find(|a| a.parameter.0 == 1)
-            .ok_or_else(|| PassError::Malformed("keyed primitive lacks key actual".into()))?;
-        let entered = self.failure.cleanup.take();
-        let borrowed = tir::Operand {
-            place: key.value.place,
-            // A take actual is still caller-owned here. `compared` uses Copy
-            // to open a read-only synthetic loan without copying or taking it.
-            usage: if key.value.usage == UseKind::Take {
-                UseKind::Copy
-            } else {
-                key.value.usage
-            },
-        };
-        let mut loans = vec![];
-        let mut owned = vec![];
-        // Evaluate dynamic indices once. A second extraction can name a new
-        // SSA index even when it reads the same unchanged source local.
-        let address = if self.joined_view(&borrowed).is_some() {
-            None
-        } else {
-            let place = self.place(borrowed.place)?;
-            Some(self.address(&place)?)
-        };
-        let value = self.compared_at(&borrowed, address, &mut loans, &mut owned)?;
-        let layout = self.layout_of(self.value_type(value));
-        self.structural_access(self.body.places[key.value.place.0 as usize].ty, layout)?;
-        let scalar = self.types.intern(hirsel_types::Type::with_kind(
-            hirsel_types::TypeKind::Primitive(hirsel_types::Primitive::U64),
-        ));
-        let ty = self.lir_type(scalar)?;
-        let result = self.fresh(ty);
-        self.reading(loans, owned, |this| {
-            let failure = this.fail(Some("MEM-3".into()))?;
-            this.push(Inst::Hash {
-                result,
-                value,
-                layout,
-                failure,
-            });
-            Ok(())
-        })?;
-        self.failure.cleanup = entered;
-        Ok(address.map(|address| (key.value.place, address)))
     }
 
     /// An `ArenaPush` of the read's maximum through an address of its own
@@ -272,7 +188,6 @@ impl Importer<'_> {
         callee: &tir::Callee,
         arguments: &[tir::CallArgument],
         returns: Option<tir::CallReturn>,
-        key_address: Option<(tir::PlaceId, AddressId)>,
     ) -> R<()> {
         // `list.len` of a list inside a flat value reads its encoding's count
         // in place: a flat list has no ordinary List to lend (LIR schema
@@ -597,15 +512,7 @@ impl Importer<'_> {
                 writes.push((p.slot, version));
                 ArgumentValue::Address { address, version }
             } else {
-                let value = if let Some((place, address)) = key_address
-                    && a.parameter.0 == 1
-                    && place == a.value.place
-                {
-                    let place = self.place(place)?;
-                    self.operand_at(a.value.usage, &place, address, place.loan)?
-                } else {
-                    self.operand(&a.value)?
-                };
+                let value = self.operand(&a.value)?;
                 let value = if matches!(passing, Passing::Take | Passing::Borrow) {
                     let ty = self.intern(layout);
                     self.weaken(value, ty)
@@ -725,12 +632,6 @@ impl Importer<'_> {
         self.failure
             .before
             .splice(0..0, capture_ends.iter().cloned());
-        let pretransfer_failure =
-            if matches!(lir_callee, Callee::Indirect(_) | Callee::Bound { .. }) {
-                Some(self.fail(None)?)
-            } else {
-                None
-            };
         self.failure.cleanup = entered_cleanup;
         for a in &args {
             if let ArgumentValue::Value(v) = a.value {
@@ -787,7 +688,6 @@ impl Importer<'_> {
         let call = CallId(self.out.tables.calls.len() as u32);
         self.out.tables.calls.push(CallSite {
             receipts,
-            pretransfer_failure,
             forward_caller: match callee {
                 tir::Callee::Definition { .. } => true,
                 tir::Callee::Indirect { forward_caller, .. } => *forward_caller,

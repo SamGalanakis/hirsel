@@ -79,8 +79,6 @@ pub enum ViolationKind {
     LeakedSlot,
     /// A loan still active when its frame exits.
     LoanOutlivesFrame,
-    /// Logical frame admission and leave do not pair up.
-    FrameImbalance,
     // Failure protocol.
     /// A frame returned normally after a failure edge was taken.
     FailureSwallowed,

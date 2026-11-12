@@ -525,9 +525,7 @@ fn instruction(u: &LirUnit<Ready>, table: &LayoutTable, inst: &Inst) -> Option<A
         {
             Action::Private
         }
-        Inst::FrameEnter { .. }
-        | Inst::FrameLeave
-        | Inst::StorageLive { .. }
+        Inst::StorageLive { .. }
         | Inst::StorageDead { .. }
         | Inst::EndScope { .. }
         | Inst::Address { .. }

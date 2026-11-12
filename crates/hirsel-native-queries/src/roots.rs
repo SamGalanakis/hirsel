@@ -901,11 +901,6 @@ impl NativeRoots for RootProducts {
         // to select source identities; selectors are rebound by full ABI content.
         let mut operations = self.source.operations().clone();
         snapshot.instances.bind_source_declarations(&mut operations);
-        operations.pretransfer_adapters = super::instance_operations::bind_pretransfer(
-            environment.operations,
-            &binding.table,
-            environment.target,
-        )?;
         operations.invocation_bodies.clear();
         for owner in &root.instances {
             let definition = owner.instance.definition();

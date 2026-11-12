@@ -215,9 +215,9 @@ pub(super) fn propose(
             .iter()
             .enumerate()
             .filter_map(|(i, c)| {
-                (c.pretransfer_failure.is_some()
-                    || callee(unit, c).is_some_and(|id| reaches_read.contains(&id)))
-                .then_some(CallId(i as u32))
+                callee(unit, c)
+                    .is_some_and(|id| reaches_read.contains(&id))
+                    .then_some(CallId(i as u32))
             })
             .collect();
         let suspended = enclosing(unit, &suspended_calls);
@@ -554,11 +554,7 @@ fn safe_instruction(
             scalar_image(table, u.tables.constructs[construct.index()].layout)
         }
         Inst::Release { layout, .. } => scalar_image(table, layout),
-        // These exact task-local leaves have the published eight-byte call
-        // extent in the helper/frame proof and publish no failure themselves.
-        Inst::FrameEnter { .. }
-        | Inst::FrameLeave
-        | Inst::StorageLive { .. }
+        Inst::StorageLive { .. }
         | Inst::StorageDead { .. }
         | Inst::EndScope { .. }
         | Inst::EndLoan { .. }
@@ -625,7 +621,7 @@ fn live_owners(u: &LirUnit<Ready>, at: BlockId) -> LiveOwners {
         }
         let term = &u.terminators[b.index()];
         let mut edges = term.normal_edges(&u.pools);
-        for f in term.failure_edges(&u.tables) {
+        if let Some(f) = term.failure() {
             edges.push(u.tables.failures[f.index()].cleanup);
         }
         outgoing.extend(edges.into_iter().map(|e| {

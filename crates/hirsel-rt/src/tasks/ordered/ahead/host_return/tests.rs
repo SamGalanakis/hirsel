@@ -409,16 +409,6 @@ fn deferred_byte_frees_release_only_at_admission() {
             };
             let cert = validate(ctx, env, &info).unwrap();
             let mut n = Native::new(ctx, env, 0, cert);
-            assert_eq!(
-                crate::depth::hirsel_rt_v2_depth_enter_at_site(ctx, 111, 222),
-                crate::STATUS_OK
-            );
-            let depth = (
-                (*ctx).activations.live(),
-                (*ctx).invocation_depth,
-                (*ctx).invocation_tokens,
-                (*ctx).invocation_site_slots,
-            );
             n.host.armed = &read;
             n.host.phase = ACTIVE;
             n.host.task = crate::tasks::ordered::engine::current(ctx);
@@ -484,21 +474,6 @@ fn deferred_byte_frees_release_only_at_admission() {
             assert_eq!((*ctx).heap_ref().state(first), crate::alloc::STATE_FREE);
             assert_eq!((*ctx).heap_ref().state(second), crate::alloc::STATE_FREE);
             assert_eq!((*ctx).heap_ref().state(immortal), crate::alloc::STATE_LIVE);
-            assert_eq!(
-                (
-                    (*ctx).activations.live(),
-                    (*ctx).invocation_depth,
-                    (*ctx).invocation_tokens,
-                    (*ctx).invocation_site_slots
-                ),
-                depth,
-                "host admission retains the same task-owned invocation state"
-            );
-            assert_eq!(
-                (&(*ctx).invocation_sites)[depth.1 - 1].assume_init_ref(),
-                &[111, 222]
-            );
-            crate::depth::hirsel_rt_v2_depth_leave(ctx);
             assert!(n.host.pending.iter().all(|p| p.block.is_null()));
             assert_eq!(
                 (*ctx).ordered_freed.get(),
@@ -866,16 +841,6 @@ unsafe fn selected_pending_lifecycle(stop: bool) {
         assert!(selected(ctx));
         hirsel_rt_v2_host_enter(&raw mut (*native).physical, &read);
         assert!((*native).host.active());
-        assert_eq!(
-            crate::depth::hirsel_rt_v2_depth_enter_at_site(ctx, 111, 222),
-            crate::STATUS_OK
-        );
-        let depth = (
-            (*ctx).activations.live(),
-            (*ctx).invocation_depth,
-            (*ctx).invocation_tokens,
-            (*ctx).invocation_site_slots,
-        );
         (*ctx).heap().set_metered();
         (*ctx).heap_ref().meter.set_limit(1 << 20);
         (*ctx).heap_ref().meter.ordered((*ctx).run_ptr());
@@ -916,15 +881,6 @@ unsafe fn selected_pending_lifecycle(stop: bool) {
             assert!((*native).host.active());
             assert_eq!((*native).host.pending[0].block, first);
             assert_eq!((*native).host.pending[1].block, second);
-            assert_eq!(
-                (
-                    (*ctx).activations.live(),
-                    (*ctx).invocation_depth,
-                    (*ctx).invocation_tokens,
-                    (*ctx).invocation_site_slots
-                ),
-                depth
-            );
             (*ctx).abandon();
             let audit = (*ctx).exit();
             assert_eq!(
@@ -962,19 +918,9 @@ unsafe fn selected_pending_lifecycle(stop: bool) {
             assert_eq!((*ctx).budget_counters().meter_ops - meter_ops, 2);
             assert_eq!((*ctx).ordered_freed.get(), 2 * amount);
             assert_eq!(
-                (
-                    (*ctx).activations.live(),
-                    (*ctx).invocation_depth,
-                    (*ctx).invocation_tokens,
-                    (*ctx).invocation_site_slots
-                ),
-                depth
-            );
-            assert_eq!(
                 crate::tasks::task_canceled(ctx, task),
                 Some(crate::tasks::CANCEL_REQUESTED)
             );
-            crate::depth::hirsel_rt_v2_depth_leave(ctx);
             (*ctx).heap_ref().meter.set_limit(0);
             crate::release::release_block(&mut *ctx, env, std::ptr::null(), 0, 0);
             (*ctx).ahead_physical = std::ptr::null_mut();

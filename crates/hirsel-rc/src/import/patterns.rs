@@ -268,14 +268,12 @@ impl Importer<'_> {
         let ty = self.bool_type()?;
         let result = self.fresh(ty);
         self.reading(loans, taken, |this| {
-            let failure = this.fail(Some("MEM-3".to_string()))?;
             this.push(Inst::Compare {
                 result,
                 op: CompareOp::Eq,
                 left,
                 right,
                 layout,
-                failure,
             });
             Ok(())
         })?;

@@ -48,6 +48,13 @@ mod ahead_tests;
 #[cfg(test)]
 mod count_tests;
 mod masks;
+#[cfg(test)]
+mod probe_tests;
+
+/// How far apart emitted functions touch a frame's pages (`stack-probe-size`): one 4 KiB
+/// page, the smallest page either target maps.
+const STACK_PROBE_BYTES: usize = 4096;
+const _: () = assert!(STACK_PROBE_BYTES <= hirsel_lir::runtime_abi::STACK_GUARD_BYTES);
 
 /// The version of the libLLVM the loader resolved for this process.
 pub(crate) fn loaded_version() -> LlvmVersion {
@@ -270,8 +277,6 @@ pub(crate) enum Access {
     Capacity,
     Used,
     Value,
-    /// The task's LANG-10 counters (runtime ABI 65); only runtime calls write them.
-    Depth,
 }
 
 impl Access {
@@ -282,7 +287,6 @@ impl Access {
             Self::Capacity => "sequence capacity",
             Self::Used => "builder used bytes",
             Self::Value => "scalar value",
-            Self::Depth => "invocation depth",
         }
     }
 }
@@ -515,7 +519,41 @@ impl<'context> Module<'context> {
     }
 
     /// Generates an object file and copies its bytes out of LLVM.
+    ///
+    /// Every defined function probes its frame [`STACK_PROBE_BYTES`] at a time
+    /// (`probe-stack`), so a frame larger than that still faults in its fiber's guard: a stack
+    /// overflow is always the runtime's stack stop, never a write past the guard.
     pub(crate) fn emit_object(&self, machine: &TargetMachine) -> Result<Vec<u8>, String> {
+        let interval = STACK_PROBE_BYTES.to_string();
+        // SAFETY: each function belongs to this live module; LLVM copies the strings.
+        unsafe {
+            let attribute = |name: &str, value: &str| {
+                LLVMCreateStringAttribute(
+                    self.context.raw,
+                    name.as_ptr().cast(),
+                    name.len() as u32,
+                    value.as_ptr().cast(),
+                    value.len() as u32,
+                )
+            };
+            let attributes = [
+                attribute("probe-stack", "inline-asm"),
+                attribute("stack-probe-size", &interval),
+            ];
+            let mut function = LLVMGetFirstFunction(self.raw);
+            while !function.is_null() {
+                if LLVMCountBasicBlocks(function) != 0 {
+                    for attribute in attributes {
+                        LLVMAddAttributeAtIndex(
+                            function,
+                            llvm_sys::LLVMAttributeFunctionIndex,
+                            attribute,
+                        );
+                    }
+                }
+                function = LLVMGetNextFunction(function);
+            }
+        }
         let mut message = ptr::null_mut();
         let mut buffer: LLVMMemoryBufferRef = ptr::null_mut();
         // SAFETY: the module and machine are live; LLVM writes either an error message or a

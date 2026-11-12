@@ -179,8 +179,6 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
             | Inst::BindOrigin { .. }
             | Inst::BindFields { .. }
             | Inst::EndOrigin { .. }
-            | Inst::FrameEnter { .. }
-            | Inst::FrameLeave
             | Inst::Forget { .. }
             | Inst::Weaken { .. }
             | Inst::IsUnique { .. }
@@ -454,39 +452,6 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 let one = self.module.const_int(self.module.int_type(1), 1);
                 let failed = self.builder.binary(BinOp::Xor, condition, one);
                 self.guard(failed, failure)
-            }
-            Inst::FrameEnter { failure }
-                if self.room.enters.contains(&self.instruction_index()) =>
-            {
-                let failed = self.no_room();
-                self.guard(failed, failure)
-            }
-            Inst::FrameLeave if self.room.leaves.contains(&self.instruction_index()) => Ok(()),
-            Inst::FrameEnter { failure }
-                if self.counters.enters.contains(&self.instruction_index()) =>
-            {
-                self.counter_enter(failure)
-            }
-            Inst::FrameLeave if self.counters.leaves.contains(&self.instruction_index()) => {
-                self.counter_leave();
-                Ok(())
-            }
-            Inst::FrameEnter { failure } => {
-                let anchor = self.unit.tables.failures[failure.index()].anchor;
-                let (caller, operation) = self.failure_sites(self.anchor_code(anchor)?);
-                let entry = self.runtime(RuntimeEntry::DepthEnterAtSite)?;
-                let status = self.builder.call(entry, &[self.context, caller, operation]);
-                let failed = self.builder.icmp(
-                    crate::context::IntPredicate::Ne,
-                    status,
-                    self.module.const_int(self.module.int_type(8), 0),
-                );
-                self.guard(failed, failure)
-            }
-            Inst::FrameLeave => {
-                let leave = self.runtime(RuntimeEntry::DepthLeave)?;
-                self.builder.call(leave, &[self.context]);
-                Ok(())
             }
             // Static lifetime events: no machine bytes.
             Inst::StorageLive { .. }
@@ -989,7 +954,6 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 left,
                 right,
                 layout,
-                failure,
             } => {
                 let comparator = if self.needs_value_program(layout) {
                     None
@@ -1026,11 +990,8 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 let (left, right) = (self.counted_view(left)?, self.counted_view(right)?);
                 self.store(shape, left, l);
                 self.store(shape, right, r);
-                self.structural_preflight_at(layout, l.ptr, failure)?;
-                self.structural_preflight_at(layout, r.ptr, failure)?;
                 let code = if let Some(comparator) = comparator {
-                    self.builder
-                        .call(comparator, &[l.ptr, r.ptr, self.const_u64(0), self.context])
+                    self.builder.call(comparator, &[l.ptr, r.ptr, self.context])
                 } else {
                     self.structural_order_at(layout, l.ptr, r.ptr)?
                 };
@@ -1042,9 +1003,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                         self.module.const_int(i8_ty, u128::from(c)),
                     )
                 };
-                let deep = is(ORDER_DEPTH);
                 let (equal, less, greater) = (is(ORDER_EQUAL), is(ORDER_LESS), is(ORDER_GREATER));
-                self.guard(deep, failure)?;
                 let holds = match op {
                     CompareOp::Eq => equal,
                     CompareOp::Ne => self.builder.binary(
@@ -1572,9 +1531,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 result,
                 value,
                 layout,
-                failure,
             } => {
-                self.structural_preflight_value(layout, value, failure)?;
                 // Scalars remain a single one-shot leaf. Composite values
                 // share one stream across all layout helpers.
                 let begin = self.runtime(RuntimeEntry::HashBegin)?;
@@ -1657,18 +1614,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 let init = self.runtime(RuntimeEntry::HashInit)?;
                 self.builder.call(init, &[storage, seed]);
                 let state = storage;
-                let i8_ty = self.module.int_type(8);
-                let deep = self.prologue.alloca(i8_ty, 1);
-                self.builder.store(self.module.const_int(i8_ty, 0), deep, 1);
-                let hash = self.builder.call(
-                    hasher,
-                    &[at.ptr, state, self.const_u64(0), deep, self.context],
-                );
-                let flag = self.builder.load(i8_ty, deep, 1);
-                let too_deep =
-                    self.builder
-                        .icmp(IntPredicate::Ne, flag, self.module.const_int(i8_ty, 0));
-                self.guard(too_deep, failure)?;
+                let hash = self.builder.call(hasher, &[at.ptr, state, self.context]);
                 let finish = self.runtime(RuntimeEntry::HashFinish)?;
                 let finish = crate::runtime::hash_stream(self.module, finish, true);
                 let hash = self.builder.call(finish, &[hash]);

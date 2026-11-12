@@ -884,7 +884,8 @@ wire_enum!(hirsel_run_schema::SignalKind {
 });
 
 wire_enum!(hirsel_run_schema::BudgetKind {
-    1 => Memory
+    1 => Memory,
+    2 => Stack
 });
 
 wire_enum!(hirsel_run_schema::Returned {

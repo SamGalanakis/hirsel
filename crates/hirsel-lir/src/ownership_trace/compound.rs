@@ -45,7 +45,7 @@ pub(super) fn selected_addresses<S: Stage>(
         for edge in term.normal_edges(&unit.pools) {
             add(edge)?;
         }
-        for failure in term.failure_edges(&unit.tables) {
+        if let Some(failure) = term.failure() {
             add(unit.tables.failures.get(failure.index())?.cleanup)?;
         }
     }
@@ -443,7 +443,7 @@ pub(super) fn parts<S: Stage>(
             } else {
                 next.extend(term.normal_edges(&unit.pools));
             }
-            for failure in term.failure_edges(&unit.tables) {
+            if let Some(failure) = term.failure() {
                 next.push(unit.tables.failures.get(failure.index())?.cleanup);
             }
         }
@@ -554,7 +554,7 @@ pub(super) fn parts<S: Stage>(
         for edge in term.normal_edges(&unit.pools) {
             pending.push((unit.tables.edges.get(edge.index())?.target, 0));
         }
-        for failure in term.failure_edges(&unit.tables) {
+        if let Some(failure) = term.failure() {
             let edge = unit.tables.failures.get(failure.index())?.cleanup;
             pending.push((unit.tables.edges.get(edge.index())?.target, 0));
         }

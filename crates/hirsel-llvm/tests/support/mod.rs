@@ -65,7 +65,6 @@ pub fn failure_codes() -> FailureCodes {
     let mut codes = BTreeMap::new();
     for (rule, kind, code) in [
         ("SEM-1", 1, 101),
-        ("MEM-3", 1, 103),
         ("MEM-13", 1, 113),
         ("MEM-14", 1, 114),
         ("LANG-9", 1, 9),
@@ -317,8 +316,6 @@ impl Schema {
                 signatures: BTreeMap::new(),
                 invocations: BTreeMap::new(),
                 invocation_bodies: Vec::new(),
-                pretransfer_adapters: Vec::new(),
-                pretransfer_actuals: Vec::new(),
             },
         }
     }
@@ -939,7 +936,6 @@ impl<'t> Unit<'t> {
         let result = fn_abi.result.as_ref().map(|r| self.plain(r.layout));
         self.builder.unit.tables.calls.push(CallSite {
             receipts: None,
-            pretransfer_failure: None,
             forward_caller: true,
             operation_arguments: Vec::new(),
             callee,
@@ -969,7 +965,6 @@ impl<'t> Unit<'t> {
         let abi = self.table.abi(abi);
         self.builder.unit.tables.calls.push(CallSite {
             receipts: None,
-            pretransfer_failure: None,
             forward_caller: true,
             operation_arguments: Vec::new(),
             callee,

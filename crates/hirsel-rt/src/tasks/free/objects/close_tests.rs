@@ -122,7 +122,7 @@ fn free51_resolved_close_kill_cause_take_no_role() {
         let mut status = 99;
         hirsel_rt_v2_mutex_take(ctx, &mut status, &handle, payload.as_mut_ptr().cast());
         assert_eq!((status, payload), (0, [1, 3]));
-        crate::failure::record_runtime(ctx, "LANG-10", 0, 0);
+        crate::failure::record_runtime(ctx, "LANG-9", 0, 0);
         crate::pool::free::renew(ctx);
         measured.push(roles(|| hirsel_rt_v2_mutex_kill(ctx, &handle)).1);
         let mut dead = [0u64; 2];
@@ -344,7 +344,7 @@ unsafe extern "C" fn killed_waiter(ctx: *mut TaskCtx, env: *mut Header, _: u64, 
         // The reserved first waiter fails in its body and kills the mutex
         // its successors still wait on.
         assert!(killing.reserved);
-        crate::failure::record_runtime(ctx, "LANG-10", 0, 0);
+        crate::failure::record_runtime(ctx, "LANG-9", 0, 0);
         roles(|| unsafe { hirsel_rt_v2_mutex_kill(ctx, &killing.mutex) }).1
     } else {
         assert_eq!(payload, [0, 0]);
@@ -407,7 +407,7 @@ fn free51_kill_wakes_reserved_and_registered_waiters_without_role() {
                 // it; that waiter's kill reaches the two still registered.
                 roles(|| hirsel_rt_v2_mutex_put(ctx, &handle, payload.as_mut_ptr().cast())).1
             } else {
-                crate::failure::record_runtime(ctx, "LANG-10", 0, 0);
+                crate::failure::record_runtime(ctx, "LANG-9", 0, 0);
                 let roles = roles(|| hirsel_rt_v2_mutex_kill(ctx, &handle)).1;
                 (*ctx).failure.truncate(0);
                 roles

@@ -225,7 +225,7 @@ pub(super) fn used_edges<S>(unit: &LirUnit<S>) -> std::collections::BTreeSet<Edg
     let mut edges = std::collections::BTreeSet::new();
     for term in &unit.terminators {
         edges.extend(term.normal_edges(&unit.pools));
-        for failure in term.failure_edges(&unit.tables) {
+        if let Some(failure) = term.failure() {
             if let Some(failure) = unit.tables.failures.get(failure.index()) {
                 edges.insert(failure.cleanup);
             }
@@ -301,7 +301,7 @@ pub(super) fn call_alias<S: Stage>(unit: &LirUnit<S>, observation: &Observation)
     let Some(call) = unit.tables.calls.get(call.index()) else {
         return false;
     };
-    if call.callee.value() != Some(view) || call.pretransfer_failure.is_some() {
+    if call.callee.value() != Some(view) {
         return false;
     }
     // Arena controls split an ordinary store/loan/call sequence into blocks.
@@ -321,7 +321,7 @@ pub(super) fn call_alias<S: Stage>(unit: &LirUnit<S>, observation: &Observation)
     }
     let mut failure_targets = std::collections::BTreeSet::new();
     for (index, term) in unit.terminators.iter().enumerate() {
-        let failures = term.failure_edges(&unit.tables).into_iter().chain(
+        let failures = term.failure().into_iter().chain(
             unit.blocks[index]
                 .instructions
                 .get(&unit.instructions)
@@ -495,7 +495,7 @@ pub(super) fn mutable_alias<S>(unit: &LirUnit<S>, observation: &Observation) -> 
     let Some(call) = unit.tables.calls.get(call.index()) else {
         return false;
     };
-    matches!(call.callee, Callee::Direct(_) | Callee::Operation(_)) && call.pretransfer_failure.is_none()
+    matches!(call.callee, Callee::Direct(_) | Callee::Operation(_))
         && call.arguments.get(&unit.pools.call_arguments).is_some_and(|arguments| arguments.iter().any(|argument|
             argument.parameter == parameter && argument.passing == Passing::Mut
                 && matches!(argument.value, ArgumentValue::Address { address: actual, .. } if actual == address)))
@@ -995,16 +995,16 @@ fn unreachable<S: Stage>(
             unit.tables.calls.get(call.index())?;
         }
         let mut next = term.normal_edges(&unit.pools);
-        for failure in
-            term.failure_edges(&unit.tables)
-                .into_iter()
-                .chain(code.iter().enumerate().filter_map(|(index, inst)| {
-                    if erased.contains(&(block, index as u32)) {
-                        None
-                    } else {
-                        inst.failure()
-                    }
-                }))
+        for failure in term
+            .failure()
+            .into_iter()
+            .chain(code.iter().enumerate().filter_map(|(index, inst)| {
+                if erased.contains(&(block, index as u32)) {
+                    None
+                } else {
+                    inst.failure()
+                }
+            }))
         {
             next.push(unit.tables.failures.get(failure.index())?.cleanup);
         }

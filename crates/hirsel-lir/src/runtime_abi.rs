@@ -13,6 +13,8 @@ use crate::layout_types::{ScalarKind, StorageKind};
 use hirsel_codec::snapshot_enum;
 
 pub const ABI_VERSION: u32 = hirsel_rt_operations::RUNTIME_ABI_VERSION;
+/// Inaccessible bytes below every task stack; both emitters probe at most this far apart.
+pub const STACK_GUARD_BYTES: usize = hirsel_rt_operations::STACK_GUARD_BYTES;
 /// Original CPU worker capture in the runtime's fixed native record prefix.
 /// The runtime asserts this existing offset; no Rust service frame is read.
 pub const AHEAD_WORKER_ENVIRONMENT_OFFSET: u64 = 40;
@@ -49,9 +51,6 @@ pub const STATUS_FAILURE: u8 = 1;
 /// A deep copy into a bounded arena whose budget does not cover it (MEM-6, runtime
 /// ABI 7): nothing is copied or recorded; the caller records the arena's `OutOfSpace`.
 pub const STATUS_EXHAUSTED: u8 = 2;
-/// Private call status, emitted only by validated keyed-primitive adapters.
-/// Actuals remain caller-owned; this is not an entered-callee failure.
-pub const STATUS_PRETRANSFER_FAILURE: u8 = 3;
 /// A resumable continuation alternate saved its frame at a boundary (runtime ABI 63):
 /// its live state is materialized at the frame header's state and the boundary call
 /// has not run. Only continuation alternates and their callers see it.
@@ -159,23 +158,12 @@ pub const CTX_IDLE_SLABS_OFFSET: u64 = 8;
 pub const CTX_PAGES_OFFSET: u64 = 16;
 pub const POOL_COUNT: u64 = 64;
 pub const CTX_HEAP_ID_OFFSET: u64 = CTX_PAGES_OFFSET + 8 * POOL_COUNT;
-/// After the view (the compiled words, then its `u32` heap and `u64` epoch stamp), the
-/// task's LANG-10 counters (runtime ABI 65): the `u16` foreground and cleanup admission
-/// counts, then the `u32` finalizer nesting. An admission in cleanup mode (nesting or
-/// cleanup count nonzero) has room while the cleanup count is below
-/// `depth::CLEANUP_LIMIT`, otherwise while the foreground count is below
-/// `depth::FOREGROUND_LIMIT`. Validated native single-call scopes update their
-/// selected counter directly; depth-leaf callees need only a read-only room
-/// check (`invocations::room`). Runtime callback scopes retain their sites.
-pub const CTX_FOREGROUND_COUNT_OFFSET: u64 = CTX_HEAP_ID_OFFSET + 24;
-pub const CTX_CLEANUP_COUNT_OFFSET: u64 = CTX_FOREGROUND_COUNT_OFFSET + 2;
-pub const CTX_CLEANUP_MODE_OFFSET: u64 = CTX_FOREGROUND_COUNT_OFFSET + 4;
 pub const PAGE_FREE_OFFSET: u64 = 16;
 pub const PAGE_LIVE_OFFSET: u64 = 24;
 pub const PAGE_LOCAL_FREE_OFFSET: u64 = 72;
 pub const PAGE_OWNER_OFFSET: u64 = 96;
 pub const PAGE_XTHREAD_FREE_OFFSET: u64 = 104;
-const _: () = assert!(CTX_HEAP_ID_OFFSET == 528 && CTX_FOREGROUND_COUNT_OFFSET == 552);
+const _: () = assert!(CTX_HEAP_ID_OFFSET == 528);
 
 /// The small pool serving `extent` payload bytes at `align`: the size class (16-byte steps to
 /// 256 bytes, then quarter powers of two to [`SMALL_MAX`]), offset by the class count when the
@@ -481,10 +469,6 @@ pub struct CParam {
 /// Every entry `hirsel_rt_v2.h` declares.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum RuntimeEntry {
-    DepthEnter,
-    DepthEnterAtSite,
-    DepthLeave,
-    DepthPreflight,
     StructuralOrder,
     StructuralHash,
     AbiVersion,
@@ -691,11 +675,7 @@ const OPERATION_SITE: CParam = p("operation_site", U64);
 const REGION: CParam = p("region", ptr(CName::Region, 1));
 
 impl RuntimeEntry {
-    pub const ALL: [RuntimeEntry; 119] = [
-        Self::DepthEnter,
-        Self::DepthEnterAtSite,
-        Self::DepthLeave,
-        Self::DepthPreflight,
+    pub const ALL: [RuntimeEntry; 115] = [
         Self::StructuralOrder,
         Self::StructuralHash,
         Self::AbiVersion,
@@ -816,27 +796,6 @@ impl RuntimeEntry {
     pub const fn declaration(self) -> RuntimeDeclaration {
         use CName as N;
         let (symbol, returns, parameters): (&'static str, CType, &'static [CParam]) = match self {
-            Self::DepthEnter => ("hirsel_rt_v2_depth_enter", U8, const { &[CTX] }),
-            Self::DepthEnterAtSite => (
-                "hirsel_rt_v2_depth_enter_at_site",
-                U8,
-                const { &[CTX, ANCHOR, OPERATION_SITE] },
-            ),
-            Self::DepthLeave => ("hirsel_rt_v2_depth_leave", VOID, const { &[CTX] }),
-            Self::DepthPreflight => (
-                "hirsel_rt_v2_depth_preflight",
-                U8,
-                const {
-                    &[
-                        CTX,
-                        p("program", cptr(N::Void)),
-                        p("program_length", U64),
-                        p("edges", cptr(N::Void)),
-                        p("edge_count", U64),
-                        p("value", cptr(N::Void)),
-                    ]
-                },
-            ),
             Self::StructuralOrder => (
                 "hirsel_rt_v2_structural_order",
                 U8,
@@ -1739,10 +1698,6 @@ impl RuntimeThunk {
 }
 
 snapshot_enum!(RuntimeEntry {
-    DepthEnter,
-    DepthEnterAtSite,
-    DepthLeave,
-    DepthPreflight,
     StructuralOrder,
     StructuralHash,
     AbiVersion,

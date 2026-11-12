@@ -337,7 +337,7 @@ impl DemandInstances {
         let mut rows = BTreeMap::new();
         for (encoding, (key, candidate)) in candidates {
             let (origin, request) = &selected[&encoding];
-            let (original, stored) = &originals[*origin];
+            let (original, _) = &originals[*origin];
             select_invocations(
                 self,
                 original,
@@ -348,14 +348,13 @@ impl DemandInstances {
             if source(&key, operations).is_err() {
                 return Ok(None);
             }
-            let adapters = stored.adapters(self)?;
             let environment = NativeEnvironment {
                 target: &self.target,
                 manifest,
                 operations,
                 discharge: Some(&options.discharge),
             };
-            let Ok(scoped) = self.operations_input(&key, &adapters, request, &environment) else {
+            let Ok(scoped) = self.operations_input(&key, request, &environment) else {
                 return Ok(None);
             };
             let Some(product) = publisher.lookup(
@@ -372,7 +371,7 @@ impl DemandInstances {
             if product.product != candidate.product {
                 return Ok(None);
             }
-            let Ok(output) = self.decode_completed(&key, product, adapters) else {
+            let Ok(output) = self.decode_completed(&key, product) else {
                 return Ok(None);
             };
             rows.insert(
@@ -382,7 +381,7 @@ impl DemandInstances {
                     key: NamedKey::of(&key.instance),
                     origin: NamedKey::of(&original.instance),
                     request: request.clone(),
-                    output: StoredInstance::capture(self.store.as_ref(), &output)?.record()?,
+                    output: StoredInstance::capture(&output).record()?,
                 })?,
             );
         }
@@ -758,8 +757,7 @@ impl DemandInstances {
                 discharge: Some(&options.discharge),
             };
             let (request, _request_charge) = self.callable_request(request_records[origin])?;
-            let scoped =
-                self.operations_input(original, &output.facts.source.adapters, &request, &env)?;
+            let scoped = self.operations_input(original, &request, &env)?;
             let (closure, body) = self.queries.read(
                 original,
                 &output.product,
@@ -1113,25 +1111,6 @@ impl DemandInstances {
                     .ok_or("missing callable static ABI")?;
                 additional_abis.push(abi);
             }
-            let original_request: Request =
-                read_json(self.store.as_ref(), request_records[origin])?;
-            let original_operations = self.operations_input(
-                &originals[origin].0,
-                &originals[origin].1.adapters(self)?,
-                &original_request,
-                &NativeEnvironment {
-                    target: &self.target,
-                    manifest,
-                    operations: &operations,
-                    discharge: Some(&options.discharge),
-                },
-            )?;
-            let pretransfer = super::super::instance_operations::bind_pretransfer(
-                &original_operations,
-                &table,
-                &self.target,
-            )?;
-            additional_abis.extend(pretransfer.iter().map(|row| row.abi));
             let selected_operations = super::super::instance_operations::InstanceOperations {
                 inventory: Some(&self.seal_inventory),
                 declarations: &operations,
@@ -1140,26 +1119,6 @@ impl DemandInstances {
                     .source_definition()
                     .map(|_| (key.instance.definition(), key.instance.digest())),
                 all_sources: false,
-                pretransfer: Some(
-                    original
-                        .facts
-                        .source
-                        .adapters
-                        .iter()
-                        .map(|symbol| {
-                            let mut rows = pretransfer.iter().filter(|row| &row.adapter == symbol);
-                            let selected = rows.next().ok_or(
-                                "callable publication lost an independently planned adapter",
-                            )?;
-                            if rows.next().is_some() {
-                                return Err(
-                                    "callable publication repeats an independently planned adapter",
-                                );
-                            }
-                            Ok(selected.clone())
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
-                ),
             };
             let inputs = Inputs {
                 memo: Default::default(),
@@ -1211,7 +1170,7 @@ impl DemandInstances {
                     key: NamedKey::of(&key.instance),
                     origin: NamedKey::of(&originals[origin].0.instance),
                     request: selected_request.clone(),
-                    output: StoredInstance::capture(self.store.as_ref(), &output)?.record()?,
+                    output: StoredInstance::capture(&output).record()?,
                 })?,
             );
         }
@@ -1303,7 +1262,6 @@ mod tests {
                 selection_reads: Vec::new(),
                 constant_reads: Vec::new(),
                 discharge: Default::default(),
-                adapters: Vec::new(),
                 ready_source: ReadySourceFacts::decode(
                     &serde_json::to_vec(&(
                         1u32,

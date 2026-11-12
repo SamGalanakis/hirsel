@@ -91,25 +91,13 @@ pub fn push(list: &mut Value, item: Value) -> Result<(), Error> {
     elements.push(Some(item));
     Ok(())
 }
-/// Every keyed operation reads its key as a hashing engine would, so a key past
-/// the structural depth limit is MEM-3 Depth whatever the container holds.
-#[derive(Debug)]
-pub enum KeyedError {
-    Depth,
-    Invalid(Error),
-}
-impl From<Error> for KeyedError {
-    fn from(error: Error) -> Self {
-        Self::Invalid(error)
-    }
-}
-pub(super) fn map_index(map: &Value, key: &Value) -> Result<(Option<usize>, u64), KeyedError> {
+pub(super) fn map_index(map: &Value, key: &Value) -> Result<(Option<usize>, u64), Error> {
     let Value::Map { entries, .. } = map else {
         return Err(invalid("map update requires Map").into());
     };
     entries.find_key(key, KeyKind::Map)
 }
-pub fn insert(map: &mut Value, key: Value, item: Value) -> Result<Displaced, KeyedError> {
+pub fn insert(map: &mut Value, key: Value, item: Value) -> Result<Displaced, Error> {
     let Value::Map {
         entries: elements, ..
     } = map
@@ -134,7 +122,7 @@ pub fn insert(map: &mut Value, key: Value, item: Value) -> Result<Displaced, Key
     );
     Ok(Displaced(vec![]))
 }
-pub fn set_insert(set: &mut Value, item: Value) -> Result<Displaced, KeyedError> {
+pub fn set_insert(set: &mut Value, item: Value) -> Result<Displaced, Error> {
     let Value::Set {
         entries: elements, ..
     } = set
@@ -150,7 +138,7 @@ pub fn set_insert(set: &mut Value, item: Value) -> Result<Displaced, KeyedError>
     }))
 }
 /// The value stored under an equal key, as a semantic copy.
-pub fn get(map: &Value, key: &Value) -> Result<Option<Value>, KeyedError> {
+pub fn get(map: &Value, key: &Value) -> Result<Option<Value>, Error> {
     let Value::Map {
         entries: elements, ..
     } = map
@@ -168,7 +156,7 @@ pub fn get(map: &Value, key: &Value) -> Result<Option<Value>, KeyedError> {
     value.share_arena_storage();
     Ok(Some(value))
 }
-pub fn contains(collection: &Value, key: &Value) -> Result<bool, KeyedError> {
+pub fn contains(collection: &Value, key: &Value) -> Result<bool, Error> {
     let found = match collection {
         Value::Map {
             entries: elements, ..
@@ -294,7 +282,7 @@ pub fn order(a: Integer, b: Integer) -> Option<i32> {
 }
 
 /// Ordered eviction transfers V and separately releases the stored key.
-pub fn map_remove(map: &mut Value, key: &Value) -> Result<OperationResult, KeyedError> {
+pub fn map_remove(map: &mut Value, key: &Value) -> Result<OperationResult, Error> {
     let Value::Map {
         entries: elements, ..
     } = map
@@ -318,7 +306,7 @@ pub fn map_remove(map: &mut Value, key: &Value) -> Result<OperationResult, Keyed
         released,
     })
 }
-pub fn set_remove(set: &mut Value, key: &Value) -> Result<OperationResult, KeyedError> {
+pub fn set_remove(set: &mut Value, key: &Value) -> Result<OperationResult, Error> {
     let Value::Set {
         entries: elements, ..
     } = set

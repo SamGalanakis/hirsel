@@ -221,24 +221,9 @@ impl ReadyProgram {
     pub fn semantic_owners(&self) -> &BTreeMap<DefPath, Option<DefPath>> {
         &self.semantic_owners
     }
-    /// The checked heap program with independently planned invocation evidence,
-    /// including each derived definition's original source owner.
+    /// The checked heap program.
     pub fn heap_program(&self) -> hirsel_heapcheck::Program<hirsel_lir::stage::Ready> {
-        // Reference identities come from validated TIR and the independent planner's
-        // derived-definition ownership, never from candidate units or their events.
-        let mut invocations = self.operations.invocations.clone();
-        for (definition, owner) in &self.semantic_owners {
-            if let Some(reference) = owner
-                .as_ref()
-                .and_then(|owner| self.operations.invocations.get(owner))
-            {
-                invocations.insert(definition.clone(), reference.clone());
-            }
-        }
         hirsel_heapcheck::Program {
-            invocation_bodies: self.operations.invocation_bodies.clone(),
-            pretransfer_adapters: self.operations.pretransfer_adapters.clone(),
-            invocations,
             target: self.target.clone(),
             layouts: self.table.table().clone(),
             units: self.raw_units(),

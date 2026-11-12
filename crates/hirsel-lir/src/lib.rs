@@ -64,7 +64,7 @@ pub use stage::{
 /// The front-end interface version these schemas consume
 /// (`QueryEnvironment.interface_version`). A change invalidates every artifact.
 pub const INTERFACE_VERSION: u32 = 11;
-pub const LIR_VERSION: u32 = 71;
+pub const LIR_VERSION: u32 = 72;
 pub const LAYOUT_VERSION: u32 = 10;
 /// Hirsel cross-unit ABI v5: adds independently checked nested scoped entry identity.
 pub const ABI_VERSION: u32 = 5;
@@ -80,5 +80,3 @@ pub mod testing;
 
 pub mod liveness;
 pub mod logical_storage;
-
-pub mod pretransfer;

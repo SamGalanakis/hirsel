@@ -118,8 +118,6 @@ impl Program {
         hirsel_layout::operation::OperationRegistry {
             seal_sources: Default::default(),
             receipt_sources: Default::default(),
-            pretransfer_adapters: Vec::new(),
-            pretransfer_actuals: Vec::new(),
             invocation_bodies: Vec::new(),
             invocations,
             type_declarations: self

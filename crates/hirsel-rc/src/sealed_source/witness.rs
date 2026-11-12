@@ -511,9 +511,6 @@ impl<D: OperationDeclarations> OperationDeclarations for SourceDeclarations<D> {
         self.registry.receipt_source(definition, instance)
     }
 
-    fn pretransfer_adapters(&self) -> &[hirsel_lir::pretransfer::AdapterReference] {
-        self.registry.pretransfer_adapters()
-    }
     fn requires_structural_reference(&self) -> bool {
         self.registry.requires_structural_reference()
     }
@@ -588,14 +585,6 @@ impl<D: OperationDeclarations> OperationDeclarations for SourceDeclarations<D> {
                 "missing original source storage type".into(),
             ))
         }
-    }
-
-    fn pretransfer_abi(
-        &self,
-        reference: &hirsel_lir::pretransfer::AdapterReference,
-        target: &hirsel_lir::TargetSpec,
-    ) -> Option<(hirsel_lir::FnAbi, hirsel_lir::LayoutTable)> {
-        self.registry.pretransfer_abi(reference, target)
     }
 
     fn seal_source_witness(

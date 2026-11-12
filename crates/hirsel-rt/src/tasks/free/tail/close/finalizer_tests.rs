@@ -14,7 +14,6 @@ unsafe extern "C" fn dispatch(
 ) -> u8 {
     unsafe {
         assert_eq!((*ctx).shield, 2, "close and finalizer shields persist");
-        assert_eq!((*ctx).cleanup_invocations.len(), 1);
         assert_eq!((anchor, operation_site), (31, 41));
         let pc = frame.cast::<u32>();
         let words = value.cast::<u64>();
@@ -123,7 +122,6 @@ fn a_close_retains_its_original_child_through_nested_finalizer_pending_and_failu
                     Ok(CleanupPoll::Pending(CleanupPending::Nested))
                 ));
                 assert_eq!((*ctx).shield, 2);
-                assert_eq!((*ctx).cleanup_invocations.len(), 1);
                 assert_eq!((*ctx).detached_images.len(), 1);
                 assert!(!(*ctx).work.is_null());
                 assert_eq!(frame.as_mut_ptr().add(32).cast::<u32>().read(), 1);
@@ -133,7 +131,6 @@ fn a_close_retains_its_original_child_through_nested_finalizer_pending_and_failu
                 ));
                 assert!((*ctx).free_ops.tails.drivers.is_empty());
                 assert_eq!((*ctx).shield, 0);
-                assert_eq!((*ctx).cleanup_invocations.len(), 0);
                 assert_eq!((*ctx).detached_images.len(), 0);
                 assert!((*ctx).work.is_null());
                 assert_eq!(frame.as_mut_ptr().add(32).cast::<u32>().read(), 2);

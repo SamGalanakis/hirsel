@@ -44,8 +44,7 @@ A contract site is a `Check { rule: FACT-1 }` whose condition is the result of a
 entry body. Its clause is the `Definition.contracts` ordinal, and its kind comes from the
 owner signature's `Contract` with that ordinal. Library operation failures belong to the
 callee, call failure edges to the callee's obligations, `Unreachable` to the IR validator
-(it is a compiler assertion, not a user obligation), and MEM-3 depth failures to resource
-limits ([PS-11](#ps-11-proof-never-decides)): none of these produce obligations.
+(it is a compiler assertion, not a user obligation): none of these produce obligations.
 
 ### PS-3: Canonical traversal
 

@@ -40,7 +40,7 @@ pub(super) fn variant_failures<S: Stage>(unit: &LirUnit<S>) -> Option<Excluded> 
                 .get(&unit.instructions)?;
             let term = unit.terminators.get(block.index())?;
             let mut next = term.normal_edges(&unit.pools);
-            for failure in term.failure_edges(&unit.tables) {
+            if let Some(failure) = term.failure() {
                 next.push(unit.tables.failures.get(failure.index())?.cleanup);
             }
             for (index, inst) in code.iter().enumerate() {

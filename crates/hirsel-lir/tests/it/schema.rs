@@ -639,7 +639,6 @@ fn fixture_unit<S: Stage>(table: &LayoutTable) -> LirUnit<S> {
     .into_iter()
     .map(|callee| CallSite {
         receipts: None,
-        pretransfer_failure: None,
         forward_caller: true,
         operation_arguments: Vec::new(),
         callee,
@@ -935,8 +934,6 @@ fn fixture_unit<S: Stage>(table: &LayoutTable) -> LirUnit<S> {
             anchor,
         },
         Inst::Forget { value: v(2) },
-        Inst::FrameEnter { failure: f },
-        Inst::FrameLeave,
     ];
     for (i, op) in [UnaryOp::Neg, UnaryOp::Not, UnaryOp::BitNot]
         .into_iter()
@@ -996,7 +993,6 @@ fn fixture_unit<S: Stage>(table: &LayoutTable) -> LirUnit<S> {
             left: v(2),
             right: v(13),
             layout: LayoutId(7),
-            failure: f,
         });
     }
     for (mode, flag) in [
@@ -1122,7 +1118,6 @@ fn fixture_unit<S: Stage>(table: &LayoutTable) -> LirUnit<S> {
         result: v(60),
         value: v(2),
         layout: LayoutId(0),
-        failure: FailureId(0),
     });
     insts.push(Inst::Recast {
         result: v(61),
@@ -1766,8 +1761,6 @@ fn every_opcode_is_covered_and_admitted_by_a_stage() {
         );
         seen.push(opcode);
     }
-    assert_round_trip(&Terminator::RejectTransfer);
-    seen.push(Terminator::RejectTransfer.opcode());
     seen.sort();
     seen.dedup();
     let mut all = Opcode::ALL.to_vec();
@@ -2294,18 +2287,6 @@ fn runtime_declarations_match_the_landed_c_header() {
         ("CTX_IDLE_SLABS_OFFSET", runtime_abi::CTX_IDLE_SLABS_OFFSET),
         ("CTX_PAGES_OFFSET", runtime_abi::CTX_PAGES_OFFSET),
         ("CTX_HEAP_ID_OFFSET", runtime_abi::CTX_HEAP_ID_OFFSET),
-        (
-            "CTX_FOREGROUND_COUNT_OFFSET",
-            runtime_abi::CTX_FOREGROUND_COUNT_OFFSET,
-        ),
-        (
-            "CTX_CLEANUP_COUNT_OFFSET",
-            runtime_abi::CTX_CLEANUP_COUNT_OFFSET,
-        ),
-        (
-            "CTX_CLEANUP_MODE_OFFSET",
-            runtime_abi::CTX_CLEANUP_MODE_OFFSET,
-        ),
         ("PAGE_OWNER_OFFSET", runtime_abi::PAGE_OWNER_OFFSET),
         (
             "PAGE_XTHREAD_FREE_OFFSET",

@@ -772,7 +772,7 @@ fn storage_before(
         let term = &u.terminators[b.index()];
         let mut edges = term.normal_edges(&u.pools);
         edges.extend(
-            term.failure_edges(&u.tables)
+            term.failure()
                 .into_iter()
                 .map(|f| u.tables.failures[f.index()].cleanup),
         );
@@ -827,7 +827,7 @@ fn anchors_from(u: &LirUnit<Ready>, entry: BlockId) -> Vec<CleanupAnchorId> {
         let term = &u.terminators[b.index()];
         let mut edges = term.normal_edges(&u.pools);
         edges.extend(
-            term.failure_edges(&u.tables)
+            term.failure()
                 .into_iter()
                 .map(|f| u.tables.failures[f.index()].cleanup),
         );
@@ -896,7 +896,7 @@ pub(crate) fn successors_of(u: &LirUnit<Ready>, b: BlockId) -> Vec<BlockId> {
     for e in term.normal_edges(&u.pools) {
         out.push(u.tables.edges[e.index()].target);
     }
-    for f in term.failure_edges(&u.tables) {
+    if let Some(f) = term.failure() {
         out.push(u.tables.edges[u.tables.failures[f.index()].cleanup.index()].target);
     }
     out
@@ -910,7 +910,7 @@ pub fn resumed_successors(u: &LirUnit<Ready>, block: BlockId) -> Vec<BlockId> {
         .into_iter()
         .map(|e| u.tables.edges[e.index()].target)
         .chain(
-            term.failure_edges(&u.tables)
+            term.failure()
                 .into_iter()
                 .map(|f| u.tables.edges[u.tables.failures[f.index()].cleanup.index()].target),
         )
@@ -979,7 +979,7 @@ pub(crate) fn carried_from(
 ) -> (BTreeSet<AddressId>, BTreeSet<ValueId>) {
     let mut used = Vec::new();
     let mut prepared = BTreeSet::new();
-    let mut call_uses = |term: &Terminator, used: &mut Vec<AddressId>| {
+    let call_uses = |term: &Terminator, used: &mut Vec<AddressId>| {
         if let Terminator::Call { call, .. } = *term {
             for a in u.tables.calls[call.index()]
                 .arguments
@@ -1070,7 +1070,7 @@ fn reaches(u: &LirUnit<Ready>, from: BlockId, to: BlockId) -> bool {
                 .map(|e| u.tables.edges[e.index()].target),
         );
         next.extend(
-            term.failure_edges(&u.tables)
+            term.failure()
                 .into_iter()
                 .map(|f| u.tables.edges[u.tables.failures[f.index()].cleanup.index()].target),
         );
@@ -1218,8 +1218,7 @@ fn fixed_area(
 /// None unless a direct call passes, as the callee's exclusive parameter, a
 /// whole local slot (no projection) with the parameter's layout, frame storage
 /// live at the boundary and aligned there, under exactly one active loan of
-/// that place, mutable, with no other argument or active loan reaching the slot
-/// and no pretransfer gate.
+/// that place, mutable, and no other argument or active loan reaching the slot.
 #[allow(clippy::too_many_arguments)]
 fn exclusive_edge(
     u: &LirUnit<Ready>,
@@ -1240,7 +1239,7 @@ fn exclusive_edge(
     else {
         return None;
     };
-    if !matches!(call.callee, Callee::Direct(_)) || call.pretransfer_failure.is_some() {
+    if !matches!(call.callee, Callee::Direct(_)) {
         return None;
     }
     let arguments = call.arguments.get(&u.pools.call_arguments).unwrap_or(&[]);

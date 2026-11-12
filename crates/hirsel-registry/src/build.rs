@@ -280,7 +280,7 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         (
             "FailureKind",
             "",
-            "Check()|Contract()|Depth()|OutOfSpace()|DeadMutex()",
+            "Check()|Contract()|OutOfSpace()|DeadMutex()",
         ),
         ("ShapeVisibility", "", "Private()|Public()|Opaque()"),
         (

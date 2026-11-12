@@ -2719,56 +2719,40 @@ primary_operations! { library, call, context, name, a, value;
     Primitive: "map.len" | "set.len" => u64_value(collection::len(arg(a, 0)?)?),
     Primitive: "map.remove" => {
         let (map, key) = call.arguments.split_first_mut().ok_or_else(|| invalid("missing builtin argument"))?;
-        return Ok(Some(keyed(collection::map_remove(map, arg(key, 0)?), &call, context)?));
+        return Ok(Some(collection::map_remove(map, arg(key, 0)?)?));
     },
     Primitive: "set.remove" => {
         let (set, key) = call.arguments.split_first_mut().ok_or_else(|| invalid("missing builtin argument"))?;
-        return Ok(Some(keyed(collection::set_remove(set, arg(key, 0)?), &call, context)?));
+        return Ok(Some(collection::set_remove(set, arg(key, 0)?)?));
     },
     Primitive: "map.empty" => collection::sequence(BuiltinType::Map, []),
     Primitive: "set.empty" => collection::sequence(BuiltinType::Set, []),
     Primitive: "map.try_insert_with" => {
-        return Ok(Some(keyed(library.map_try_insert_with(a), &call, context)?));
+        return Ok(Some(library.map_try_insert_with(a)?));
     },
     Primitive: "map.update_value_with" => {
-        return Ok(Some(keyed(library.map_update_value(a), &call, context)?));
+        return Ok(Some(library.map_update_value(a)?));
     },
     Primitive: "map.upsert_with" | "map.update_with" => {
-        return Ok(Some(keyed(library.map_edit(a, name == "map.upsert_with"), &call, context)?));
+        return Ok(Some(library.map_edit(a, name == "map.upsert_with")?));
     },
     Primitive: "map.insert" => {
                 let (key, item) = (take_arg(call.arguments, 1)?, take_arg(call.arguments, 2)?);
-                return Ok(Some(keyed(
-                    collection::insert(arg_mut(call.arguments, 0)?, key, item)
-                        .map(|displaced| displaced.into_result(vec![1, 2])),
-                    &call,
-                    context,
-                )?));
+                return Ok(Some(collection::insert(arg_mut(call.arguments, 0)?, key, item)
+                        .map(|displaced| displaced.into_result(vec![1, 2]))?));
             },
     Primitive: "set.insert" => {
                 let item = take_arg(call.arguments, 1)?;
-                return Ok(Some(keyed(
-                    collection::set_insert(arg_mut(call.arguments, 0)?, item)
-                        .map(|displaced| displaced.into_result(vec![1])),
-                    &call,
-                    context,
-                )?));
+                return Ok(Some(collection::set_insert(arg_mut(call.arguments, 0)?, item)
+                        .map(|displaced| displaced.into_result(vec![1]))?));
             },
     Primitive: "map.get" => {
-                return Ok(Some(keyed(
-                    collection::get(arg(a, 0)?, arg(a, 1)?)
-                        .map(|v| OperationResult::returned(v.map_or_else(none, some))),
-                    &call,
-                    context,
-                )?));
+                return Ok(Some(collection::get(arg(a, 0)?, arg(a, 1)?)
+                        .map(|v| OperationResult::returned(v.map_or_else(none, some)))?));
             },
     Primitive: "map.contains" | "set.contains" => {
-                return Ok(Some(keyed(
-                    collection::contains(arg(a, 0)?, arg(a, 1)?)
-                        .map(|b| OperationResult::returned(Value::Bool(b))),
-                    &call,
-                    context,
-                )?));
+                return Ok(Some(collection::contains(arg(a, 0)?, arg(a, 1)?)
+                        .map(|b| OperationResult::returned(Value::Bool(b)))?));
             },
     Primitive: "iter.from" => {
                 return Ok(Some(
@@ -2995,20 +2979,6 @@ pub(super) fn fault_result(f: Fault) -> Value {
         Fault::Canceled(c) => error(variant(1, vec![variant(c, vec![])])),
         Fault::Fault { code, .. } => file_fault(code),
         Fault::File { error, .. } => file_error(error),
-    }
-}
-/// A key past the structural depth limit fails the keyed operation (MEM-3).
-fn keyed(
-    result: Result<OperationResult, collection::KeyedError>,
-    call: &OperationCall<'_>,
-    context: &OperationContext<'_>,
-) -> Result<OperationResult, Error> {
-    match result {
-        Ok(result) => Ok(result),
-        Err(collection::KeyedError::Depth) => Ok(OperationResult::Failed(fail(
-            call, context, "MEM-3", "Depth",
-        ))),
-        Err(collection::KeyedError::Invalid(error)) => Err(error),
     }
 }
 pub(super) fn fail(

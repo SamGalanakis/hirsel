@@ -168,32 +168,19 @@ impl Drop for WindowRead {
     }
 }
 
-const ADAPTERS: Domain = Domain {
-    kind: INSTANCE_KIND,
-    schema: 3,
-};
 /// Identity and an ordinary recipe for reopening facts. No decoded fact owner
 /// crosses a consumer boundary, and this object conveys no native C authority.
 #[derive(Clone)]
 pub struct StoredInstance {
     pub product: Arc<InstanceProduct>,
-    adapters: Reference,
     bytes: u64,
 }
 impl StoredInstance {
-    pub fn capture(store: &dyn ResultStore, output: &DiscoveredInstance) -> Result<Self, String> {
-        let bytes = hirsel_codec::to_text(&output.facts.source.adapters).into_bytes();
-        let adapters = store
-            .put_content(ADAPTERS, &bytes)
-            .ok_or("native adapter publication failed")?;
-        if ADAPTERS.reference(&bytes) != Some(adapters) {
-            return Err("native adapter publication identity differs".into());
-        }
-        Ok(Self {
+    pub fn capture(output: &DiscoveredInstance) -> Self {
+        Self {
             product: output.product.clone(),
-            adapters,
             bytes: output.retained_metadata_bytes(),
-        })
+        }
     }
     pub fn read(
         &self,
@@ -206,8 +193,7 @@ impl StoredInstance {
             .map(|window| window.read(self.bytes))
             .transpose()
             .map_err(|e| format!("native facts for {}: {e}", key.instance.definition()))?;
-        let adapters = self.adapters(instances)?;
-        let mut output = instances.decode_completed(key, self.product.clone(), adapters)?;
+        let mut output = instances.decode_completed(key, self.product.clone())?;
         // Decode uses the consumer's scratch. Reopening may change allocation
         // capacities and structural sharing without changing any content.
         // Transfer the actual retained representation into the same quota
@@ -223,22 +209,6 @@ impl StoredInstance {
         Arc::make_mut(&mut Arc::make_mut(&mut output.facts).body)._window = lease.clone();
         output._window = lease;
         Ok(Arc::new(output))
-    }
-    /// Only the pretransfer adapter facts, the same content `read` decodes into
-    /// `facts.source.adapters`; an operation scope needs nothing else.
-    pub fn adapters(
-        &self,
-        instances: &DemandInstances,
-    ) -> Result<Vec<hirsel_lir::ir::Symbol>, String> {
-        let bytes = instances
-            .store
-            .read_product_content(self.adapters)
-            .map_err(|error| format!("native adapter facts: {error}"))?;
-        if ADAPTERS.reference(&bytes) != Some(self.adapters) {
-            return Err("native adapter facts identity differs".into());
-        }
-        hirsel_codec::from_text(std::str::from_utf8(&bytes).map_err(|e| e.to_string())?)
-            .map_err(|e| format!("native adapter facts: {e:?}"))
     }
     pub fn retained_bytes(&self) -> u64 {
         size_of::<Self>() as u64
@@ -257,7 +227,6 @@ pub(crate) struct StoredRecord {
     equations: Reference,
     discovery: Reference,
     statics: Reference,
-    adapters: Reference,
     bytes: u64,
 }
 impl StoredInstance {
@@ -276,7 +245,6 @@ impl StoredInstance {
             equations: self.product.local_equations,
             discovery: self.product.discovery,
             statics: self.product.statics_finalizers,
-            adapters: self.adapters,
             bytes: self.bytes,
         })
     }
@@ -297,7 +265,6 @@ impl StoredInstance {
                 discovery: row.discovery,
                 statics_finalizers: row.statics,
             }),
-            adapters: row.adapters,
             bytes: row.bytes,
         })
     }

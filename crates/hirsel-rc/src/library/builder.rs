@@ -18,12 +18,12 @@ use hirsel_core_contract::Passing;
 use hirsel_layout::layout::{EnvironmentShape, LayoutBuilder, Owners};
 use hirsel_lir::abi_types::{CallableShape, FnAbi, FnAbiId};
 use hirsel_lir::ir::{
-    AddressBase, AddressId, AddressInfo, ArgumentValue, ArithMode, BinaryOp, BlockId, BlockKind,
-    CallArgument, CallId, CallSite, Callee, CleanupAnchor, CleanupAnchorId, ConstantData,
-    ConstantId, ConstantValue, DestinationClass, EdgeId, FailureEdge, FailureId, Holding, Inst,
-    LirType, LirTypeId, LirUnit, LoanId, LoanInfo, PoolRange, ProjectionStep, ReadMode, ScopeId,
-    ScopeInfo, SiteRange, SlotId, SlotInfo, SlotKind, SourceAnchor, SourceAnchorId, Symbol,
-    SymbolId, SymbolKind, Terminator, UnitHeader, UnitOrigin, ValueId, ValueRepr,
+    AddressBase, AddressId, AddressInfo, ArithMode, BinaryOp, BlockId, BlockKind, CallArgument,
+    CallId, CallSite, Callee, CleanupAnchor, CleanupAnchorId, ConstantData, ConstantId,
+    ConstantValue, DestinationClass, EdgeId, FailureEdge, FailureId, Holding, Inst, LirType,
+    LirTypeId, LirUnit, LoanId, LoanInfo, PoolRange, ProjectionStep, ReadMode, ScopeId, ScopeInfo,
+    SiteRange, SlotId, SlotInfo, SlotKind, SourceAnchor, SourceAnchorId, Symbol, SymbolId,
+    SymbolKind, Terminator, UnitHeader, UnitOrigin, ValueId, ValueRepr,
 };
 use hirsel_lir::layout::LayoutError;
 use hirsel_lir::layout_types::{LayoutId, LayoutKind, LayoutRecord, LayoutTable, ScalarKind};
@@ -1095,70 +1095,6 @@ impl<'c, 'a> Body<'c, 'a> {
     /// on both outcomes, in reverse, before a failure enters the body's
     /// held-owner cleanup; mutable arguments publish their write-back version
     /// on failure too.
-    /// Admission keeps evaluated owned actuals here, before the callee
-    /// consumes them. Its failure ends prepared loans, drains all owners,
-    /// and then reaches the caller's original cleanup continuation.
-    pub(super) fn admission_failure(
-        &mut self,
-        callee: &Callee,
-        arguments: &[CallArgument],
-        loans: &[LoanId],
-        tail: FailureId,
-    ) -> FailureId {
-        let mut owners: Vec<ValueId> = arguments
-            .iter()
-            .filter_map(|argument| match argument.value {
-                ArgumentValue::Value(value)
-                    if argument.passing == Passing::Take
-                        && self.ed.unit.values[value.index()].holding == Holding::Owned =>
-                {
-                    Some(value)
-                }
-                _ => None,
-            })
-            .collect();
-        let closure = match callee {
-            Callee::Indirect(value) => Some(*value),
-            Callee::Bound { closure, .. } => Some(*closure),
-            _ => None,
-        };
-        if let Some(value) = closure
-            && self.ed.unit.values[value.index()].holding == Holding::Owned
-        {
-            owners.insert(0, value);
-        }
-        let at = self.current();
-        let mut next = self.ed.unit.tables.edges
-            [self.ed.unit.tables.failures[tail.index()].cleanup.index()]
-        .target;
-        // Construct forwards so execution drains reverse evaluation order.
-        for value in owners {
-            let block = self.block(BlockKind::FailureCleanup, &[]);
-            self.at(block);
-            let failure = self.failure_to(next, &[], None);
-            let (_, address) = super::iter::local(self, value)
-                .expect("evaluated invocation owner has a closed local layout");
-            self.forget_held(address);
-            let anchor = self.drop_anchor();
-            self.push(Inst::Drop {
-                address,
-                if_live: false,
-                anchor,
-                failure,
-            });
-            self.jump(next, &[]);
-            next = block;
-        }
-        let rejected = self.block(BlockKind::FailureCleanup, &[]);
-        self.at(rejected);
-        for &loan in loans.iter().rev() {
-            self.end_loan(loan);
-        }
-        self.jump(next, &[]);
-        self.at(at);
-        self.failure_to(rejected, &[], Some("LANG-10"))
-    }
-
     pub fn call(
         &mut self,
         callee: Callee,
@@ -1167,37 +1103,11 @@ impl<'c, 'a> Body<'c, 'a> {
         arguments: Vec<CallArgument>,
         loans: &[LoanId],
     ) -> Option<ValueId> {
-        let invocation = matches!(callee, Callee::Indirect(_) | Callee::Bound { .. });
-        if invocation {
-            let tail = self.failure(None);
-            let admission = self.admission_failure(&callee, &arguments, loans, tail);
-            self.push(Inst::FrameEnter { failure: admission });
-        }
-        let pretransfer_failure = if invocation {
-            let tail = self.failure(None);
-            let rejected = self.admission_failure(&callee, &arguments, loans, tail);
-            self.ed.unit.tables.failures[rejected.index()].rule = None;
-            let edge = self.ed.unit.tables.failures[rejected.index()].cleanup;
-            let cleanup = self.ed.unit.tables.edges[edge.index()].target;
-            let at = self.current();
-            let retire = self.block(BlockKind::FailureCleanup, &[]);
-            self.at(retire);
-            self.push(Inst::FrameLeave);
-            self.jump(cleanup, &[]);
-            self.at(at);
-            self.ed.unit.tables.edges[edge.index()].target = retire;
-            Some(rejected)
-        } else {
-            None
-        };
         let shape = self.cx.layouts.table().fn_abis[abi.0 as usize].clone();
         let result = shape.result.map(|r| self.fresh(r.layout));
         let failed = self.block(BlockKind::FailureCleanup, &[]);
         let at = self.current();
         self.at(failed);
-        if invocation {
-            self.push(Inst::FrameLeave);
-        }
         for &loan in loans.iter().rev() {
             self.end_loan(loan);
         }
@@ -1212,7 +1122,6 @@ impl<'c, 'a> Body<'c, 'a> {
         let id = CallId(self.ed.unit.tables.calls.len() as u32);
         self.ed.unit.tables.calls.push(CallSite {
             receipts: None,
-            pretransfer_failure,
             forward_caller: !matches!(callee, Callee::Indirect(_) | Callee::Bound { .. }),
             operation_arguments,
             callee,
@@ -1229,9 +1138,6 @@ impl<'c, 'a> Body<'c, 'a> {
             failure,
         });
         self.at(after);
-        if invocation {
-            self.push(Inst::FrameLeave);
-        }
         for &loan in loans.iter().rev() {
             self.end_loan(loan);
         }

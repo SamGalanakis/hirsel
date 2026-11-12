@@ -15,22 +15,9 @@ pub(crate) fn target(w: &mut Weight, value: &hirsel_lir::TargetSpec) {
     w.add(value.llvm_data_layout.capacity());
     w.vec(&value.features, |w, feature| w.add(feature.capacity()));
 }
-use hirsel_native::native_metadata::argument;
 pub(crate) fn operations(value: &mut hirsel_layout::operation::OperationRegistry) -> u64 {
     let mut w = Weight::default();
     w.add(size_of_val(value) + 2 * size_of::<usize>());
-    w.vec(&value.pretransfer_adapters, |w, row| {
-        w.path(&row.adapter.definition);
-        w.path(&row.primitive.definition);
-    });
-    w.vec(
-        &value.pretransfer_actuals,
-        |w, (symbol, _, operation, actuals)| {
-            w.path(&symbol.definition);
-            w.path(&operation.definition);
-            w.vec(actuals, argument);
-        },
-    );
     w.vec(&value.invocation_bodies, |w, row| w.path(&row.definition));
     w.packed_map(&mut value.invocations, |w, path, rows| {
         w.path(path);

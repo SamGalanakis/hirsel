@@ -196,14 +196,6 @@ pub struct OperationRegistry {
         (hirsel_syntax::DefPath, hirsel_syntax::ContentHash),
         hirsel_lir::sealed_payload_source::ReceiptSource,
     >,
-    pub pretransfer_adapters: Vec<hirsel_lir::pretransfer::AdapterReference>,
-    /// Actuals come from the independent materialized primitive plan.
-    pub pretransfer_actuals: Vec<(
-        hirsel_lir::ir::Symbol,
-        hirsel_lir::FnAbiId,
-        OperationId,
-        Vec<OperationArgument>,
-    )>,
     pub invocation_bodies: Vec<hirsel_lir::invocations::ReferenceBody>,
     pub invocations:
         BTreeMap<hirsel_syntax::DefPath, Vec<hirsel_lir::invocations::ReferenceInvocation>>,
@@ -293,34 +285,6 @@ impl OperationDeclarations for OperationRegistry {
             ));
         }
         self.seal_descriptor(root, table, target)
-    }
-
-    fn pretransfer_adapters(&self) -> &[hirsel_lir::pretransfer::AdapterReference] {
-        &self.pretransfer_adapters
-    }
-
-    fn pretransfer_abi(
-        &self,
-        reference: &hirsel_lir::pretransfer::AdapterReference,
-        target: &hirsel_lir::TargetSpec,
-    ) -> Option<(FnAbi, hirsel_lir::LayoutTable)> {
-        if hirsel_lir::pretransfer::primitive(&reference.adapter.definition).as_ref()
-            != Some(&reference.primitive.definition)
-        {
-            return None;
-        }
-        let mut matches = self
-            .pretransfer_actuals
-            .iter()
-            .filter(|(adapter, _, _, _)| adapter == &reference.adapter);
-        let (_, abi, operation, arguments) = matches.next()?;
-        if matches.next().is_some()
-            || *abi != reference.abi
-            || operation.definition != reference.primitive.definition
-        {
-            return None;
-        }
-        self.derive_abi(operation, arguments, target, true).ok()
     }
 
     fn invocation_body(

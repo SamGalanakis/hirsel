@@ -12,7 +12,6 @@ hirsel_guard::install!();
 
 pub mod build;
 mod exec;
-mod invocations;
 pub mod ledger;
 pub mod observe;
 pub mod program;
@@ -426,5 +425,3 @@ pub fn audit_campaign_ready(
 ) -> (CampaignAudit, CampaignTiming) {
     audit_campaign(program, entry, args, ops, config)
 }
-
-mod pretransfer;

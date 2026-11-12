@@ -2,7 +2,9 @@
 //!
 //! A run's root task runs on a fiber of its own ([`run_root`]), so the launcher keeps its stack
 //! while the run executes. A [`Stop`] (Blocked, a spent budget, an adapter refusal, a replay
-//! divergence, a codec limit or a failure recorded where no compiled frame can unwind it) ends the run from wherever it is raised: the runtime's internal
+//! divergence, a codec limit, a task's native stack running into its guard
+//! ([`fiber::overflow`]) or a failure recorded where no compiled frame can unwind it) ends the
+//! run from wherever it is raised: the runtime's internal
 //! functions return `Result<T, Stop>` up to the entry compiled code called, which checks it
 //! ([`check`]) and switches back to the launcher's stack ([`raise`]). The Rust frames below that
 //! entry have returned and dropped their locals by then; the entry's own frame and compiled
@@ -11,8 +13,9 @@
 //! outcome to its host.
 //!
 //! Process-fatal by design: a broken invariant ([`crate::fault`]), host exhaustion
-//! ([`crate::environmental`]), a PROG-4 violation, a stack overflow, and a stop raised inside a
-//! foreign call, whose C frames cannot be abandoned.
+//! ([`crate::environmental`]), a PROG-4 violation, an overflow of a thread's own stack (only
+//! runtime code runs there), and a stop raised inside a foreign call, whose C frames cannot be
+//! abandoned.
 use hirsel_run_schema::{BudgetKind, Environmental, RunOutcome};
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -93,6 +96,9 @@ pub(crate) fn running() -> *mut TaskCtx {
 /// `ctx`'s task runs on this thread from here on (`TaskCtx::switch_in`).
 #[inline(never)]
 pub(crate) fn set_running(ctx: *mut TaskCtx) {
+    if !ctx.is_null() {
+        fiber::overflow::arm();
+    }
     RUNNING.with(|r| r.set(ctx));
 }
 
@@ -703,6 +709,7 @@ pub(crate) unsafe fn run_root(ctx: *mut TaskCtx, frame: Box<LaunchFrame>) -> Sto
         }
         crate::pool::enter_root(ctx)?;
         let enclosing_foreign = crate::foreign::save();
+        fiber::overflow::arm();
         let enclosing = RUNNING.with(|r| r.replace(ctx));
         fiber::switch(&raw mut (*(*run).driver.get()).sp, sp);
         // A stop may leave any task of the run bound to the worker.

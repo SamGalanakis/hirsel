@@ -9,8 +9,8 @@
 //! arguments; the entry never returns (it switches away for the last time).
 //!
 //! Stacks are anonymous mappings reserved at [`STACK_BYTES`] without committing memory, with an
-//! inaccessible guard of [`GUARD_BYTES`] below, so running out of stack faults like the main
-//! thread's: environmental termination, never a language failure. The top of each mapping
+//! inaccessible guard of [`GUARD_BYTES`] below, so running out of stack faults in the guard,
+//! which [`overflow`] turns into the run's stack stop, never a language failure. The top of each mapping
 //! holds the context of the task that runs on it ([`Stack::context`]). Valgrind is told about each
 //! stack (`STACK_REGISTER`) so a switch is not mistaken for a huge frame, and, with the `tsan`
 //! feature, ThreadSanitizer which fiber each switch resumes.
@@ -29,10 +29,12 @@ use crate::environmental;
 
 /// Usable bytes of a fiber stack: the default main-thread limit, reserved lazily.
 pub(crate) const STACK_BYTES: usize = 8 << 20;
-/// Inaccessible bytes below each stack, so a frame larger than a page still lands in them.
-pub(crate) const GUARD_BYTES: usize = 64 << 10;
+/// Inaccessible bytes below each stack. Both engines probe frames larger than a page, so an
+/// overflow always faults here first.
+pub(crate) const GUARD_BYTES: usize = hirsel_rt_operations::STACK_GUARD_BYTES;
 
 mod native_stack;
+pub(crate) mod overflow;
 
 /// The admitting thread's cached bounds, invalidated when its limit changes.
 pub(crate) fn native_stack_bytes() -> u64 {

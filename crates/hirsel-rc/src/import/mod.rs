@@ -121,25 +121,6 @@ impl std::fmt::Display for LowerError {
     }
 }
 
-/// Finish code-target-dependent cleanup before any strict C qualification.
-/// The validator independently reconstructs necessity; this only removes the
-/// speculative caller-owned branch for dispatch proven ordinary by the producer.
-pub fn prune_pretransfer(
-    units: &mut [LirUnit<Value>],
-    table: &LayoutTable,
-    inventory: &[hirsel_lir::pretransfer::AdapterReference],
-) {
-    for unit in units {
-        let required = hirsel_lir::pretransfer::required(unit, table, inventory);
-        for (call, required) in unit.tables.calls.iter_mut().zip(required) {
-            if !required {
-                call.pretransfer_failure = None;
-            }
-        }
-        *unit = crate::insert::Editor::new(unit.clone()).finish();
-    }
-}
-
 /// The sole miss import of one source/library instance. Discovery and
 /// publication are explicit outputs; no cache, effect replay or whole-program
 /// traversal participates in this operation. Native validation remains required.
@@ -220,68 +201,6 @@ pub fn import_instance(
     })
 }
 
-/// Bind materialized keyed adapters from the independent instance plan, never
-/// candidate calls, symbols, anchors or ABI tables. Both batch and one-instance
-/// import use this exact inventory before target-dependent edge cleanup and C.
-pub fn bind_pretransfer_inventory(
-    registry: &mut hirsel_layout::operation::OperationRegistry,
-    program: &Program,
-    instances: &Instances,
-) -> Result<(), String> {
-    if !std::sync::Arc::ptr_eq(&registry.types, &program.types)
-        || !registry.pretransfer_adapters.is_empty()
-        || !registry.pretransfer_actuals.is_empty()
-    {
-        return Err(
-            "pretransfer inventory belongs to another or already bound declaration scope".into(),
-        );
-    }
-    for id in instances.ids() {
-        let view = instances.view(id);
-        let Some(primitive) = hirsel_lir::pretransfer::primitive(view.key.definition()) else {
-            continue;
-        };
-        let primitive_key = crate::instance::key_of(
-            &program.types,
-            &primitive,
-            tir::BodyId(0),
-            &instances.actuals[id.index()],
-            None,
-            None,
-        )
-        .map_err(|e| format!("materialized adapter primitive key: {e:?}"))?;
-        let Some(body) = instances.get(&primitive_key) else {
-            return Err("materialized adapter has no independently planned primitive".into());
-        };
-        let reference = crate::invocations::keyed_adapter(
-            &program.types,
-            view,
-            &instances.actuals[id.index()].arguments,
-            instances.view(body),
-            &instances.actuals[body.index()].arguments,
-            instances.abis[id.index()],
-        )
-        .map_err(str::to_owned)?;
-        let operation = program
-            .operations
-            .get(&primitive)
-            .ok_or("materialized adapter has no independent primitive declaration")?;
-        let arguments = hirsel_layout::operation::collect_arguments(
-            &program.types,
-            &instances.actuals[body.index()].arguments,
-        )
-        .map_err(|error| format!("materialized adapter actuals: {error:?}"))?;
-        registry.pretransfer_actuals.push((
-            reference.adapter.clone(),
-            reference.abi,
-            operation.clone(),
-            arguments,
-        ));
-        registry.pretransfer_adapters.push(reference);
-    }
-    Ok(())
-}
-
 /// The definition of every static empty sequence; its instance names the
 /// sequence's payload layout.
 pub fn empty_sequence() -> DefPath {
@@ -300,8 +219,7 @@ pub fn nullary_variant() -> DefPath {
 /// each boxed nullary variant (its tag, at its payload layout).
 /// Static data read by one demanded native unit, using the same encoder as
 /// program assembly. The caller publishes content-named layout bindings.
-/// The callable a constant's function reference names: its path (an
-/// adapter's where it has one) and its instance.
+/// The callable a constant's function reference names: its path and its instance.
 pub(crate) fn static_callable(
     program: &Program,
     instances: &Instances,
@@ -313,12 +231,8 @@ pub(crate) fn static_callable(
         arguments: arguments.to_vec(),
         outer: vec![],
     };
-    let adapter = crate::library::keyed::request(program, path, arguments.to_vec())
-        .map_err(|e| crate::statics::StaticError(format!("static adapter: {e:?}")))?;
-    let callable_path = adapter.as_ref().map(|r| &r.path).unwrap_or(path);
-    let callable_actuals = adapter.as_ref().map(|r| &r.actuals).unwrap_or(&actuals);
     let id = instances
-        .find(program, callable_path, callable_actuals)
+        .find(program, path, &actuals)
         .or_else(|error| {
             if arguments.is_empty() {
                 instances
@@ -330,7 +244,7 @@ pub(crate) fn static_callable(
             }
         })
         .map_err(|e| crate::statics::StaticError(format!("static callable instance: {e:?}")))?;
-    Ok((callable_path.clone(), id))
+    Ok((path.clone(), id))
 }
 
 pub fn instance_statics(
@@ -1070,8 +984,6 @@ pub fn import(
         unreachable: None,
         propagate: None,
         current: BlockId(0),
-        invocation_live: false,
-        invocation_return: None,
         state: State {
             slots: PVec::default(),
             loans: PVec::default(),
@@ -1155,8 +1067,6 @@ fn converged(used: &[Option<State>], entry: &[Option<State>]) -> bool {
 }
 
 struct Importer<'a> {
-    invocation_live: bool,
-    invocation_return: Option<tir::BlockId>,
     source_anchors: Vec<hirsel_span::Anchor>,
     source_places: Vec<u32>,
     /// Payload layouts are complete before construction; later rows cannot

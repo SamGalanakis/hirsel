@@ -441,8 +441,7 @@ pub(super) unsafe fn children<'a>(p: Program<'a>, projection: Projection) -> Chi
 /// Flat extents use the emitted framing/active-arm sizes. Unframed field
 /// concatenations are traversed with one sibling slice per containing record.
 unsafe fn flat_extent(p: Program<'_>, root: usize, at: *const u8) -> u64 {
-    let mut work = [(&[][..], 0usize); hirsel_core_contract::depth::STRUCTURAL_LIMIT as usize + 1];
-    let mut used = 0;
+    let mut work: smallvec::SmallVec<[(&[u64], usize); 16]> = smallvec::SmallVec::new();
     let mut node = root;
     let mut extent = 0u64;
     loop {
@@ -496,11 +495,7 @@ unsafe fn flat_extent(p: Program<'_>, root: usize, at: *const u8) -> u64 {
                     if !fields.is_empty() {
                         node = fields[width - 1] as usize;
                         if fields.len() > width {
-                            if used == work.len() {
-                                fault("flat extent exceeds admitted depth");
-                            }
-                            work[used] = (&fields[width..], width);
-                            used += 1;
+                            work.push((&fields[width..], width));
                         }
                         continue;
                     }
@@ -512,14 +507,13 @@ unsafe fn flat_extent(p: Program<'_>, root: usize, at: *const u8) -> u64 {
                 .checked_add(n)
                 .unwrap_or_else(|| fault("flat extent overflow"));
         }
-        if used == 0 {
+        let Some((fields, width)) = work.last_mut() else {
             return extent;
-        }
-        let (fields, width) = &mut work[used - 1];
+        };
         node = fields[*width - 1] as usize;
         *fields = &fields[*width..];
         if fields.is_empty() {
-            used -= 1;
+            work.pop();
         }
     }
 }

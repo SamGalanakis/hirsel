@@ -67,13 +67,6 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
             ownership_frame: None,
             ownership_cleanup: None,
             resume: None,
-            room: Default::default(),
-            no_room: None,
-            counters: Default::default(),
-            counter_cell: None,
-            depth_mode: None,
-            foreground_entry: None,
-            foreground_calls: None,
             checkpoint_points: if inputs.alternate {
                 hirsel_lir::checkpoints::checkpoint_points(unit)
             } else {

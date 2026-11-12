@@ -125,8 +125,7 @@ impl From<&CleanupAnchor> for ErasedCleanup {
     }
 }
 
-/// A commit point, rather than a scheduling point. In particular CallEntered is
-/// not the attempted call: pretransfer rejection leaves its actuals with caller.
+/// A commit point, rather than a scheduling point.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Point {
     Entry,

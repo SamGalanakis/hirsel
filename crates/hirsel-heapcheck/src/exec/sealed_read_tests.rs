@@ -103,9 +103,6 @@ pub(super) fn program(scalar: bool) -> Program<Rc> {
         layouts,
         units: vec![unit],
         statics: vec![],
-        invocation_bodies: vec![],
-        pretransfer_adapters: vec![],
-        invocations: Default::default(),
     }
 }
 

@@ -53,14 +53,13 @@ fn ahead_objects(
             if machine_helpers {
                 return None;
             }
-            let [startup, getter, handoff, depth] = crate::continuation::AHEAD_HELPER_BYTES;
-            hirsel_lir::ahead::stack_bound_with_depth(
+            let [startup, getter, handoff] = crate::continuation::AHEAD_HELPER_BYTES;
+            hirsel_lir::ahead::stack_bound(
                 &root.graph,
                 &frames,
                 startup,
                 getter,
                 root.handoff_bytes(handoff),
-                depth,
             )
             .map(|n| (*id, n))
         })

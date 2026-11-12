@@ -4,7 +4,6 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
     // Blocks and edges.
 
     pub(super) fn emit_block(&mut self, b: BlockId) -> Emitted {
-        let unit = self.unit;
         self.builder.position(self.blocks[b.index()]);
         if self
             .checkpoint_points
@@ -275,61 +274,6 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
     }
 
     /// Branches to `failure` when `failed` holds and continues in a fresh block.
-    /// The index in `LirUnit::instructions` of the instruction being emitted.
-    pub(super) fn instruction_index(&self) -> usize {
-        self.unit.blocks[self.at.0.index()].instructions.start as usize + self.at.1
-    }
-
-    /// A depth-leaf callee's admission (`invocations::room`): whether the task has no
-    /// room for one more activation, as `hirsel_rt_v2_depth_enter_at_site` decides. In
-    /// cleanup mode (nesting or cleanup count nonzero) the cleanup count is tested,
-    /// otherwise the foreground count; the invocation stack's capacity is their sum.
-    ///
-    /// Like Go's stack-split prologue (cmd/internal/obj/x86/obj6.go `stacksplit`), the
-    /// counters are read once, in the prologue: every admission a callee, finalizer or
-    /// callback makes is retired before control returns to this frame, so outside its
-    /// own admission a frame always sees its entry values. One test then serves every
-    /// such call, and a loop's is invariant.
-    pub(super) fn no_room(&mut self) -> Value<'m> {
-        if let Some(full) = self.no_room {
-            return full;
-        }
-        use hirsel_core_contract::depth::{CLEANUP_LIMIT, FOREGROUND_LIMIT};
-        use hirsel_lir::runtime_abi::{CTX_CLEANUP_COUNT_OFFSET, CTX_FOREGROUND_COUNT_OFFSET};
-        let b = &self.prologue;
-        let i16_ty = self.module.int_type(16);
-        let foreground = b.load_access(
-            i16_ty,
-            b.offset(self.context, self.const_u64(CTX_FOREGROUND_COUNT_OFFSET)),
-            2,
-            Access::Depth,
-        );
-        let mode = if self.foreground_calls.is_some() {
-            None
-        } else {
-            let cleanup_at = b.offset(self.context, self.const_u64(CTX_CLEANUP_COUNT_OFFSET));
-            Some(self.depth_mode(cleanup_at))
-        };
-        let b = &self.prologue;
-        let limit = |count, limit: u16| {
-            b.icmp(
-                IntPredicate::Uge,
-                count,
-                self.module.const_int(i16_ty, limit.into()),
-            )
-        };
-        let full = match mode {
-            Some((cleanup, cleaning)) => {
-                let cleanup_full = limit(cleanup, CLEANUP_LIMIT);
-                let foreground_full = limit(foreground, FOREGROUND_LIMIT);
-                b.select(cleaning, cleanup_full, foreground_full)
-            }
-            None => limit(foreground, FOREGROUND_LIMIT),
-        };
-        self.no_room = Some(full);
-        full
-    }
-
     pub(super) fn guard(&mut self, failed: Value<'m>, failure: FailureId) -> Emitted {
         let fail = self.failure_block(failure)?;
         let next = self.module.append_block(self.function);
@@ -429,125 +373,5 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
             &self.unit.header.implementation_revision,
             anchor.site,
         ))
-    }
-}
-
-impl<'m, 'a> FnEmitter<'m, 'a> {
-    /// This frame's allowance cannot change outside its own admissions: the
-    /// selector refuses FinalizeBegin/End and every callee retires its counters.
-    fn counter_cell(&mut self) -> CounterCell<'m> {
-        if let Some(cell) = self.counter_cell {
-            return cell;
-        }
-        use hirsel_core_contract::depth::{CLEANUP_LIMIT, FOREGROUND_LIMIT};
-        use hirsel_lir::runtime_abi::{CTX_CLEANUP_COUNT_OFFSET, CTX_FOREGROUND_COUNT_OFFSET};
-        let b = &self.prologue;
-        let i16_ty = self.module.int_type(16);
-        let foreground_at = b.offset(self.context, self.const_u64(CTX_FOREGROUND_COUNT_OFFSET));
-        let mode = if self.foreground_calls.is_some() {
-            None
-        } else {
-            let cleanup_at = b.offset(self.context, self.const_u64(CTX_CLEANUP_COUNT_OFFSET));
-            Some((cleanup_at, self.depth_mode(cleanup_at).1))
-        };
-        let b = &self.prologue;
-        let (at, limit) = match mode {
-            Some((cleanup_at, cleaning)) => (
-                b.select(cleaning, cleanup_at, foreground_at),
-                b.select(
-                    cleaning,
-                    self.module.const_int(i16_ty, CLEANUP_LIMIT.into()),
-                    self.module.const_int(i16_ty, FOREGROUND_LIMIT.into()),
-                ),
-            ),
-            None => (
-                foreground_at,
-                self.module.const_int(i16_ty, FOREGROUND_LIMIT.into()),
-            ),
-        };
-        // Repeated compiled calls can amortize keeping the entry count live.
-        // Primitives can inline to short memory operations; do not carry their
-        // count across a loop just to replace its local updates.
-        let successors: Vec<_> = self
-            .unit
-            .terminators
-            .iter()
-            .map(|terminator| {
-                terminator
-                    .normal_edges(&self.unit.pools)
-                    .iter()
-                    .map(|edge| self.unit.tables.edges[edge.index()].target.index())
-                    .collect()
-            })
-            .collect();
-        let cycles: Vec<_> = hirsel_graph::components(&successors)
-            .into_iter()
-            .filter(|component| {
-                component.len() > 1 || successors[component[0]].contains(&component[0])
-            })
-            .collect();
-        let repeated = cycles.iter().flatten().any(|&block| {
-            let Terminator::Call { call, .. } = self.unit.terminators[block] else {
-                return false;
-            };
-            if !matches!(
-                self.unit.tables.calls[call.index()].callee,
-                Callee::Direct(_)
-            ) {
-                return false;
-            }
-            let range = self.unit.blocks[block].instructions;
-            let start = range.start as usize;
-            self.counters
-                .enters
-                .range(start..start + range.len as usize)
-                .any(|index| !self.room.enters.contains(index))
-        });
-        let specialized = self.foreground_calls.is_some() || self.foreground_entry.is_some();
-        let cell = if specialized && repeated {
-            let count = b.load_access(i16_ty, at, 2, Access::Depth);
-            let full = b.icmp(IntPredicate::Uge, count, limit);
-            CounterCell::Snapshot { at, count, full }
-        } else {
-            CounterCell::Dynamic { at, limit }
-        };
-        self.counter_cell = Some(cell);
-        cell
-    }
-    pub(super) fn counter_enter(&mut self, failure: FailureId) -> Emitted {
-        use crate::context::{Access, BinOp, IntPredicate};
-        let cell = self.counter_cell();
-        let ty = self.module.int_type(16);
-        let (at, count, full) = match cell {
-            CounterCell::Snapshot { at, count, full } => (at, count, full),
-            CounterCell::Dynamic { at, limit } => {
-                let count = self.builder.load_access(ty, at, 2, Access::Depth);
-                let full = self.builder.icmp(IntPredicate::Uge, count, limit);
-                (at, count, full)
-            }
-        };
-        self.guard(full, failure)?;
-        let builder = match cell {
-            CounterCell::Snapshot { .. } => &self.prologue,
-            CounterCell::Dynamic { .. } => &self.builder,
-        };
-        let next = builder.binary(BinOp::Add, count, self.module.const_int(ty, 1));
-        self.builder.store_access(next, at, 2, Access::Depth);
-        Ok(())
-    }
-    pub(super) fn counter_leave(&mut self) {
-        use crate::context::{Access, BinOp};
-        let (at, count) = match self.counter_cell() {
-            CounterCell::Snapshot { at, count, .. } => (at, count),
-            CounterCell::Dynamic { at, .. } => {
-                let ty = self.module.int_type(16);
-                let count = self.builder.load_access(ty, at, 2, Access::Depth);
-                let next = self
-                    .builder
-                    .binary(BinOp::Sub, count, self.module.const_int(ty, 1));
-                (at, next)
-            }
-        };
-        self.builder.store_access(count, at, 2, Access::Depth);
     }
 }

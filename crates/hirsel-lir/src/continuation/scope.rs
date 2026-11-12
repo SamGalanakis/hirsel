@@ -305,7 +305,7 @@ fn flow(u: &LirUnit<Ready>, wrapper: &Wrapper) -> bool {
                         .into_iter()
                         .map(|edge| (u.tables.edges[edge.index()].target, entered)),
                 );
-                work.extend(term.failure_edges(&u.tables).into_iter().map(|failure| {
+                work.extend(term.failure().into_iter().map(|failure| {
                     (
                         u.tables.edges[u.tables.failures[failure.index()].cleanup.index()].target,
                         entered,

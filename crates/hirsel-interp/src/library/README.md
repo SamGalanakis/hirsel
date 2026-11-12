@@ -93,7 +93,7 @@ index beside it. Index traversal never determines iteration. Insertion extends
 the index, value-only Map callbacks preserve it, and other writes invalidate it;
 a detached copy rebuilds its own index on demand. `map.insert`, `set.insert`,
 `map.get` and `set.contains` use the same hashed lookup and equality candidates.
-A key past the structural depth limit is MEM-3 Depth whatever the container holds. `map.get` returns a semantic copy of the stored value.
+`map.get` returns a semantic copy of the stored value.
 
 Slots use generation-checked entries. Removal increments the generation; wrapping
 into reserved zero retires the vacancy. Insertion reuses an earlier vacancy before

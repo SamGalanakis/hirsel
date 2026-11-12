@@ -1407,15 +1407,6 @@ unsafe fn run_step(
                 if (*step.layout).flags & LAYOUT_IMPLEMENTATION_FINALIZER != 0 {
                     return ptr::null_mut();
                 }
-                if ctx.cleanup_rejections != 0 {
-                    ctx.cleanup_rejections -= 1;
-                } else {
-                    let activation = ctx
-                        .cleanup_invocations
-                        .pop()
-                        .unwrap_or_else(|| fault("finalizer retirement without admission"));
-                    ctx.activations.retire(activation);
-                }
             }
             // The last root died: the value is ordinary again before its steps release it.
             STEP_THAW => crate::shared::thaw_value(ctx, step.layout, at),

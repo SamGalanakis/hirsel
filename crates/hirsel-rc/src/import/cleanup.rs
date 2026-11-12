@@ -165,8 +165,7 @@ impl Importer<'_> {
     }
 
     /// Structural equality or order of two non-scalar operands:
-    /// `Inst::Compare` over the left operand's layout, failing with MEM-3
-    /// Depth (`hirsel_interp::structural::binary`). The comparison only reads,
+    /// `Inst::Compare` over the left operand's layout. The comparison only reads,
     /// so an owned operand is read through a view under a synthetic loan; a
     /// taken one is released after the comparison, as the interpreter discards
     /// it, and a copied one is never copied.
@@ -218,14 +217,12 @@ impl Importer<'_> {
         let layout = self.layout_of(self.value_type(l));
         self.structural_access(self.body.places[left.place.0 as usize].ty, layout)?;
         self.reading(loans, taken, |this| {
-            let failure = this.fail(Some("MEM-3".to_string()))?;
             this.push(Inst::Compare {
                 result,
                 op,
                 left: l,
                 right: r,
                 layout,
-                failure,
             });
             Ok(())
         })?;
@@ -383,26 +380,8 @@ impl Importer<'_> {
     /// A failure successor for the operation at hand: dispose pending owned
     /// values, run the failure cleanup, propagate.
     pub(super) fn fail(&mut self, rule: Option<String>) -> R<FailureId> {
-        let live = std::mem::replace(&mut self.invocation_live, false);
         let pending = self.failure.pending.clone();
-        let mut target = self.failure_target(&pending)?;
-        self.invocation_live = live;
-        if live {
-            let saved = self.current;
-            let retired = self.block(BlockKind::FailureCleanup);
-            self.current = retired;
-            let mut arguments = Vec::new();
-            for &value in &pending {
-                let replacement = self.value(self.value_type(value), Holding::Owned);
-                self.out.blocks[retired.index()].params.push(replacement);
-                arguments.push(replacement);
-            }
-            self.push(Inst::FrameLeave);
-            let edge = self.edge(target, arguments);
-            self.terminate(Terminator::Jump(edge));
-            self.current = saved;
-            target = retired;
-        }
+        let target = self.failure_target(&pending)?;
         let anchor = self.anchor_here();
         let edge = self.edge(target, pending);
         Ok(self.failure_edge(edge, rule, anchor))

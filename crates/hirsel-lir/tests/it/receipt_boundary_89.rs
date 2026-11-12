@@ -25,9 +25,6 @@ impl OperationDeclarations for Declarations {
     fn seal_environments(&self, _: &DefPath, _: ContentHash) -> Option<SourceEnvironments> {
         self.environments.clone()
     }
-    fn pretransfer_adapters(&self) -> &[hirsel_lir::pretransfer::AdapterReference] {
-        &self.ordinary.pretransfer_adapters
-    }
     fn receipt_source(&self, definition: &DefPath, instance: ContentHash) -> Option<ReceiptSource> {
         self.sources
             .iter()
@@ -363,61 +360,6 @@ fn fixture_passing(
             instance: symbol.instance.unwrap(),
             ..own_source
         });
-        if take || mutable {
-            let mut pending = t.builder.unit.tables.calls[0]
-                .receipts
-                .as_ref()
-                .unwrap()
-                .inputs()
-                .collect::<Vec<_>>();
-            pending.reverse();
-            if take {
-                pending.extend(t.builder.unit.parameters.iter().copied());
-            }
-            let rejected = t.releasing(&pending);
-            if mutable {
-                for binding in &bindings {
-                    let address = t
-                        .builder
-                        .unit
-                        .addresses
-                        .iter()
-                        .position(|a| a.base == AddressBase::Slot(binding.slot))
-                        .unwrap();
-                    let address = AddressId(address as u32);
-                    let loan = t.loan(address, false);
-                    t.begin(rejected, loan);
-                    let result =
-                        t.value_as(ValueRepr::PayloadReceipt, meta, Holding::Borrowed(loan));
-                    t.builder.push(
-                        rejected,
-                        Inst::Read {
-                            result,
-                            address,
-                            reaching: binding.version,
-                            mode: ReadMode::Borrow,
-                        },
-                    );
-                    t.end(rejected, loan);
-                }
-            }
-            let failure = t.failure(rejected);
-            t.builder.unit.tables.calls[0].pretransfer_failure = Some(failure);
-            let Callee::Direct(symbol) = t.builder.unit.tables.calls[0].callee else {
-                unreachable!()
-            };
-            t.operations
-                .pretransfer_adapters
-                .push(hirsel_lir::pretransfer::AdapterReference {
-                    adapter: t.builder.unit.tables.symbols[symbol.index()].clone(),
-                    primitive: Symbol {
-                        kind: SymbolKind::Function,
-                        definition: DefPath::core("map.insert"),
-                        instance: Some(support::hash("independent primitive")),
-                    },
-                    abi: id,
-                });
-        }
         if mutable {
             let writebacks = t.builder.unit.tables.calls[0]
                 .writebacks(&t.builder.unit.pools)
@@ -731,12 +673,11 @@ fn cached_call_output_replays_absent_and_present_callee_source_without_materiali
 }
 
 #[test]
-fn take_data_entry_and_call_transfer_companions_only_after_admission() {
+fn take_data_entry_and_call_transfer_companions() {
     let (unit, table, manifest, declarations) = fixture_mode(true, true);
     let errors = check(&unit, &table, &manifest, &declarations);
     assert!(errors.is_empty(), "{errors:#?}");
     let call = &unit.tables.calls[0];
-    assert!(call.pretransfer_failure.is_some());
     assert!(
         call.receipts
             .as_ref()
@@ -746,7 +687,7 @@ fn take_data_entry_and_call_transfer_companions_only_after_admission() {
             .all(|argument| matches!(argument, ReceiptArgument::Take { .. }))
     );
     // Normal and entered-failure continuations hold no transferred owners.
-    for mutation in 0..4 {
+    for mutation in [0, 2] {
         let mut unit = unit.clone();
         match mutation {
             0 => {
@@ -759,31 +700,6 @@ fn take_data_entry_and_call_transfer_companions_only_after_admission() {
                     unreachable!()
                 };
                 std::mem::swap(a, b);
-            }
-            1 => {
-                // Rejected admission still owes every pending metadata owner.
-                let metadata = unit.tables.calls[0]
-                    .receipts
-                    .as_ref()
-                    .unwrap()
-                    .inputs()
-                    .next()
-                    .unwrap();
-                let released = unit
-                    .instructions
-                    .iter_mut()
-                    .find(|i| matches!(i, Inst::Release { value, .. } if *value == metadata))
-                    .unwrap();
-                let Inst::Release { value, .. } = released else {
-                    unreachable!()
-                };
-                *value = unit.tables.calls[0]
-                    .receipts
-                    .as_ref()
-                    .unwrap()
-                    .inputs()
-                    .nth(1)
-                    .unwrap();
             }
             2 => {
                 // A taken entry is a real owner, not a borrowed-slot exemption.
@@ -801,15 +717,6 @@ fn take_data_entry_and_call_transfer_companions_only_after_admission() {
                 };
                 *reaching = unit.tables.receipt_entry.as_ref().unwrap().parameters[1].version;
             }
-            3 => {
-                // Entered failure cannot run rejected-admission cleanup again.
-                let rejected = unit.tables.calls[0].pretransfer_failure.unwrap();
-                let Terminator::Call { failure, .. } = unit.terminators[ENTRY.index()] else {
-                    unreachable!()
-                };
-                unit.tables.failures[failure.index()].cleanup =
-                    unit.tables.failures[rejected.index()].cleanup;
-            }
             _ => unreachable!(),
         }
         let errors = check(&unit, &table, &manifest, &declarations);
@@ -818,14 +725,6 @@ fn take_data_entry_and_call_transfer_companions_only_after_admission() {
             assert!(
                 errors.iter().any(|e| matches!(&e.kind,
                 validate::ViolationKind::Sealed(text) if text.contains("not paired"))),
-                "{errors:#?}"
-            );
-        }
-        if mutation == 1 {
-            assert!(
-                errors
-                    .iter()
-                    .any(|e| matches!(e.kind, validate::ViolationKind::Leak(_))),
                 "{errors:#?}"
             );
         }
@@ -861,7 +760,7 @@ fn mutable_receipts_refuse_crossed_input_slots_and_stale_entered_versions() {
     let (unit, table, manifest, declarations) = fixture_passing(true, Passing::Mut);
     let errors = check(&unit, &table, &manifest, &declarations);
     assert!(errors.is_empty(), "{errors:#?}");
-    for mutation in 0..5 {
+    for mutation in 0..4 {
         let mut bad = unit.clone();
         let entry = bad.tables.receipt_entry.as_ref().unwrap().clone();
         match mutation {
@@ -887,7 +786,7 @@ fn mutable_receipts_refuse_crossed_input_slots_and_stale_entered_versions() {
                     *address = first;
                 }
             }
-            2 | 3 | 4 => {
+            2 | 3 => {
                 let Terminator::Call {
                     normal, failure, ..
                 } = bad.terminators[ENTRY.index()]
@@ -896,22 +795,10 @@ fn mutable_receipts_refuse_crossed_input_slots_and_stale_entered_versions() {
                 };
                 let edge = if mutation == 2 {
                     normal.unwrap()
-                } else if mutation == 3 {
+                } else {
                     bad.tables.failures[failure.index()].cleanup
-                } else {
-                    bad.tables.failures[bad.tables.calls[0].pretransfer_failure.unwrap().index()]
-                        .cleanup
                 };
-                let replacement = if mutation == 4 {
-                    let ReceiptArgument::Mut { version, .. } =
-                        bad.tables.calls[0].receipts.as_ref().unwrap().arguments[0]
-                    else {
-                        unreachable!()
-                    };
-                    version
-                } else {
-                    entry.parameters[0].version
-                };
+                let replacement = entry.parameters[0].version;
                 let block = &bad.blocks[bad.tables.edges[edge.index()].target.index()];
                 let instructions = block.instructions;
                 for inst in &mut bad.instructions
@@ -1215,61 +1102,6 @@ fn receipt_results_refuse_failure_reads_missing_output_and_crossed_return_snapsh
             assert!(errors.iter().any(|e| matches!(&e.kind, validate::ViolationKind::Sealed(message) if message.contains("ordinary return snapshot"))), "{errors:#?}");
         }
     }
-}
-
-#[test]
-fn mutable_pairing_survives_shared_cleanup_of_rejected_and_entered_outcomes() {
-    let (mut unit, table, manifest, declarations) = fixture_passing(true, Passing::Mut);
-    let Terminator::Call { failure, .. } = unit.terminators[ENTRY.index()] else {
-        unreachable!()
-    };
-    let rejected = unit.tables.calls[0].pretransfer_failure.unwrap();
-    let rejected = unit.tables.edges[unit.tables.failures[rejected.index()].cleanup.index()].target;
-    let entered = unit.tables.edges[unit.tables.failures[failure.index()].cleanup.index()].target;
-    let shared = BlockId(unit.blocks.len() as u32);
-    unit.blocks.push(Block {
-        kind: BlockKind::FailureCleanup,
-        parameters: PoolRange::EMPTY,
-        instructions: PoolRange::EMPTY,
-        anchor: SourceAnchorId(0),
-    });
-    unit.terminators.push(Terminator::Propagate);
-    for block in [entered, rejected] {
-        let edge = EdgeId(unit.tables.edges.len() as u32);
-        unit.tables.edges.push(Edge {
-            target: shared,
-            arguments: PoolRange::EMPTY,
-        });
-        unit.terminators[block.index()] = Terminator::Jump(edge);
-    }
-    let errors = check(&unit, &table, &manifest, &declarations);
-    assert!(errors.is_empty(), "{errors:#?}");
-    // An ordinary write without its companion invalidates the relational fact.
-    let binding = &unit.tables.receipt_entry.as_ref().unwrap().parameters[0];
-    let metadata = binding.version;
-    let pair = unit.tables.calls[0].receipts.as_ref().unwrap().arguments[0];
-    let ReceiptArgument::Mut { address, .. } = pair else {
-        unreachable!()
-    };
-    let code = unit.blocks[rejected.index()].instructions;
-    let mut instructions = code.get(&unit.instructions).unwrap().to_vec();
-    let ty = unit.values[metadata.index()].ty;
-    let result = ValueId(unit.values.len() as u32);
-    unit.values.push(ValueInfo {
-        ty,
-        holding: Holding::Owned,
-    });
-    instructions.push(Inst::Read {
-        result,
-        address,
-        reaching: metadata,
-        mode: ReadMode::Take,
-    });
-    // Taking only the receipt leaves the caller's mut slot incomplete.
-    unit.blocks[rejected.index()].instructions =
-        PoolRange::push(&mut unit.instructions, instructions);
-    let errors = check(&unit, &table, &manifest, &declarations);
-    assert!(!errors.is_empty(), "{errors:#?}");
 }
 
 #[test]

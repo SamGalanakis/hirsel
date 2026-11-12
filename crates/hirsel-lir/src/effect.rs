@@ -168,8 +168,6 @@ opcodes!(
     Defuse,
     FinalizeEnd,
     Forget,
-    FrameEnter,
-    FrameLeave,
     Unavailable,
     Jump,
     Branch,
@@ -178,7 +176,6 @@ opcodes!(
     Return,
     Raise,
     Propagate,
-    RejectTransfer,
     Recover,
     Isolate,
     Unreachable,
@@ -269,8 +266,6 @@ impl Inst {
             Self::Defuse { .. } => Opcode::Defuse,
             Self::FinalizeEnd { .. } => Opcode::FinalizeEnd,
             Self::Forget { .. } => Opcode::Forget,
-            Self::FrameEnter { .. } => Opcode::FrameEnter,
-            Self::FrameLeave => Opcode::FrameLeave,
             Self::Unavailable { .. } => Opcode::Unavailable,
         }
     }
@@ -286,7 +281,6 @@ impl Terminator {
             Self::Return(_) => Opcode::Return,
             Self::Raise(_) => Opcode::Raise,
             Self::Propagate => Opcode::Propagate,
-            Self::RejectTransfer => Opcode::RejectTransfer,
             Self::Recover { .. } => Opcode::Recover,
             Self::Isolate { .. } => Opcode::Isolate,
             Self::Unreachable => Opcode::Unreachable,

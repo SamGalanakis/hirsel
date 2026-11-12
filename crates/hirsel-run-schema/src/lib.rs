@@ -45,7 +45,6 @@ pub use outcome::{
 };
 mod program;
 pub use program::{ProgramGraph, ProgramNode, ProgramRevision, RevisionError};
-pub const DEPTH_SEMANTICS: &str = hirsel_core_contract::depth::SEMANTICS;
 mod net;
 pub use net::{
     NetClient, NetConnection, NetGrant, NetListener, NetPeer, NetRule, NetStep, PeerTls,
@@ -348,10 +347,13 @@ impl BudgetKind {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Memory => "memory",
+            Self::Stack => "stack",
         }
     }
     pub fn parse(name: &str) -> Option<Self> {
-        [Self::Memory].into_iter().find(|kind| kind.name() == name)
+        [Self::Memory, Self::Stack]
+            .into_iter()
+            .find(|kind| kind.name() == name)
     }
 }
 

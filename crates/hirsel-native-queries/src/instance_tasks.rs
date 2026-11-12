@@ -133,7 +133,7 @@ impl OriginalOutput {
     }
     fn set(&self, output: &DiscoveredInstance, store: &dyn ResultStore) -> Result<(), String> {
         let row = OriginalRecord {
-            output: StoredInstance::capture(store, output)?.record()?,
+            output: StoredInstance::capture(output).record()?,
             dependencies: output
                 .facts
                 .body
@@ -661,12 +661,6 @@ impl InstanceTasks {
         let entries = self.entries();
         let mut source = self.current_source()?;
         let mut registry = self.source.declarations.program.operation_registry();
-        let requests = entries
-            .iter()
-            .map(|entry| entry.request.open(self.store.as_ref()))
-            .collect::<Result<Vec<_>, _>>()?;
-        self.producer()
-            .bind_planned_adapters(&source, requests.iter(), &mut registry)?;
         for entry in entries {
             let key = entry.key(self.store.as_ref())?;
             let Some(path) = (entry.request.source).then(|| key.instance.definition()) else {

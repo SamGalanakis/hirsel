@@ -253,13 +253,6 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 self.builder.br(caught);
                 Ok(())
             }
-            Terminator::RejectTransfer => {
-                self.return_status(
-                    hirsel_lir::runtime_abi::STATUS_PRETRANSFER_FAILURE as u128,
-                    None,
-                )?;
-                Ok(())
-            }
             Terminator::Propagate => {
                 self.flush_on_return()?;
                 self.return_status(1, None)?;
@@ -528,13 +521,8 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
             Callee::Operation(_) => Aliasing::Unstated,
             _ => Aliasing::of(self.inputs.callbacks),
         };
-        let specialized = name
-            .as_ref()
-            .and_then(|name| self.foreground_calls.as_ref()?.get(name))
-            .copied();
-        let function = match (&name, specialized) {
-            (_, Some(function)) => Some(function),
-            (Some(name), None) => Some(signature.declare(
+        let function = match &name {
+            Some(name) => Some(signature.declare(
                 self.module,
                 self.inputs.layouts,
                 name,
@@ -542,7 +530,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 false,
                 aliasing,
             )?),
-            (None, None) => None,
+            None => None,
         };
         if name.as_deref() == Some("hirsel_rt_v2_net_read_into")
             && let Some(function) = function
@@ -937,20 +925,6 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         let status = signature.status(&self.builder, returned);
         if suspends {
             self.resume_propagate(status)?;
-        }
-        if let Some(rejected) = site.pretransfer_failure {
-            let rejected = self.failure_block(rejected)?;
-            let entered = self.module.append_block(self.function);
-            let pending = self.builder.icmp(
-                IntPredicate::Eq,
-                status,
-                self.module.const_int(
-                    self.module.int_type(8),
-                    hirsel_lir::runtime_abi::STATUS_PRETRANSFER_FAILURE as u128,
-                ),
-            );
-            self.builder.cond_br(pending, rejected, entered);
-            self.builder.position(entered);
         }
         // Publish temporary mutations even when the entered callee failed.
         for (destination, temporary) in temporary_returns {

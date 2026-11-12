@@ -328,11 +328,6 @@ impl OwnershipTasks {
                     request.owner(&self.native).instance.definition(),
                     request.owner(&self.native).instance.digest(),
                 )),
-                pretransfer: Some(super::instance_operations::bind_pretransfer(
-                    &declarations,
-                    &observed.layouts,
-                    environment.target,
-                )?),
             };
             let inputs = Inputs {
                 memo: Default::default(),
@@ -355,11 +350,6 @@ impl OwnershipTasks {
             declarations: environment.operations,
             all_sources: true,
             source: None,
-            pretransfer: Some(super::instance_operations::bind_pretransfer(
-                environment.operations,
-                &binding.table,
-                environment.target,
-            )?),
         };
         let bound_inputs = Inputs {
             memo: Default::default(),
@@ -394,11 +384,6 @@ impl OwnershipTasks {
                     request.owner(&self.native).instance.definition(),
                     request.owner(&self.native).instance.digest(),
                 )),
-                pretransfer: Some(super::instance_operations::bind_pretransfer(
-                    &declarations,
-                    &observed.layouts,
-                    environment.target,
-                )?),
             };
             let inputs = Inputs {
                 memo: Default::default(),
@@ -724,11 +709,6 @@ impl OwnershipTasks {
                 request.owner(&self.native).instance.definition(),
                 request.owner(&self.native).instance.digest(),
             )),
-            pretransfer: Some(super::instance_operations::bind_pretransfer(
-                &declarations,
-                &layouts,
-                environment.target,
-            )?),
         };
         let inputs = hirsel_lir::validate::Inputs {
             memo: Default::default(),

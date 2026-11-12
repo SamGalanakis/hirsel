@@ -38,9 +38,6 @@ pub struct IsolateProtocol {
     pub begin: CallPoint,
     pub mark: ValueId,
     pub callback: CallPoint,
-    pub admission: InstructionPoint,
-    pub admission_failure: FailureId,
-    pub pretransfer_failure: Option<FailureId>,
     pub caught_block: BlockId,
     pub caught: EdgeId,
     pub result: Option<HeldResult>,
@@ -141,7 +138,6 @@ impl IsolateProtocol {
         };
         let mark = unit.tables.calls[begin.index()].result?;
         let callback = call_point(unit, identity.callback)?;
-        let mut admissions = Vec::new();
         let mut cleanups = Vec::new();
         let mut stores = Vec::new();
         let result = unit.tables.calls[identity.callback.index()].result;
@@ -156,11 +152,6 @@ impl IsolateProtocol {
                     block: BlockId(b as u32),
                     instruction: i as u32,
                 };
-                if let Inst::FrameEnter { failure } = *inst
-                    && at.block == callback.block
-                {
-                    admissions.push((at, failure));
-                }
                 if let Some((anchor, failure)) = cleanup(inst) {
                     cleanups.push(CleanupPoint {
                         at,
@@ -180,9 +171,6 @@ impl IsolateProtocol {
                 }
             }
         }
-        let &[(admission, admission_failure)] = admissions.as_slice() else {
-            return None;
-        };
         let held = match (result, stores.as_slice()) {
             (None, []) => None,
             (Some(_), [held]) => Some(held.clone()),
@@ -221,9 +209,6 @@ impl IsolateProtocol {
             begin: call_point(unit, begin)?,
             mark,
             callback,
-            admission,
-            admission_failure,
-            pretransfer_failure: unit.tables.calls[identity.callback.index()].pretransfer_failure,
             identity,
             caught_block,
             caught,
@@ -269,17 +254,8 @@ impl IsolateProtocol {
         {
             return Err("isolate begin provenance");
         }
-        if !point_matches(&self.callback)
-            || self.callback.call != self.identity.callback
-            || self.pretransfer_failure
-                != unit.tables.calls[self.callback.call.index()].pretransfer_failure
-        {
+        if !point_matches(&self.callback) || self.callback.call != self.identity.callback {
             return Err("isolate callback edges");
-        }
-        if self.admission.block != self.callback.block
-            || !matches!(instruction(unit, self.admission), Some(Inst::FrameEnter { failure }) if *failure == self.admission_failure)
-        {
-            return Err("isolate callback admission");
         }
         if !matches!(unit.terminators.get(self.caught_block.index()), Some(Terminator::Isolate { start, caught }) if *start == self.mark && *caught == self.caught)
         {

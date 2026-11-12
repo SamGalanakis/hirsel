@@ -254,7 +254,7 @@ impl Library {
         &mut self,
         args: &[Value],
         insert: bool,
-    ) -> Result<OperationResult, collection::KeyedError> {
+    ) -> Result<OperationResult, Error> {
         let map = args
             .first()
             .ok_or_else(|| invalid("map update arguments"))?;
@@ -350,10 +350,7 @@ impl Library {
             None => result,
         })
     }
-    pub(super) fn map_try_insert_with(
-        &mut self,
-        args: &[Value],
-    ) -> Result<OperationResult, collection::KeyedError> {
+    pub(super) fn map_try_insert_with(&mut self, args: &[Value]) -> Result<OperationResult, Error> {
         let [map, key, state, initial] = args else {
             return Err(invalid("map.try_insert_with arguments").into());
         };
@@ -421,10 +418,7 @@ impl Library {
     /// The unique operations keep their existing path. Ordinary value access
     /// prepares the selected owner before the callback is published, under
     /// the same charge wrapper and failure writeback protocol.
-    pub(super) fn map_update_value(
-        &mut self,
-        args: &[Value],
-    ) -> Result<OperationResult, collection::KeyedError> {
+    pub(super) fn map_update_value(&mut self, args: &[Value]) -> Result<OperationResult, Error> {
         let mut result = self.map_edit(args, false)?;
         let mut prepared = &mut result;
         if let OperationResult::ArenaCharge { result, .. } = prepared {

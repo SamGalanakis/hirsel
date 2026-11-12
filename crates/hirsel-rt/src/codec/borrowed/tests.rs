@@ -12,14 +12,8 @@ fn program(nodes: &[Vec<u64>]) -> Vec<u64> {
 }
 thread_local! { static DIGEST: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
 
-unsafe fn check(p: &[u64], edges: &[u8], a: *const u8, c: *const u8) {
+unsafe fn check(p: &[u64], a: *const u8, c: *const u8) {
     unsafe {
-        let before = allocation_calls();
-        let admitted = crate::codec::structural::preflight(p, edges, a);
-        assert_eq!(allocation_calls(), before);
-        if !admitted {
-            return;
-        }
         let before = allocation_calls();
         let forward = crate::codec::value_access::compare(p, std::ptr::null_mut(), a, c);
         let reverse = crate::codec::value_access::compare(p, std::ptr::null_mut(), c, a);
@@ -60,27 +54,22 @@ fn physical_formats_and_structural_operations_allocate_nothing() {
             let p = program(&[vec![NODE_SCALAR, code]]);
             let a = if code == 0 { 1u128 } else { u128::MAX };
             let c = 1u128;
-            check(&p, &[0], ptr(&a), ptr(&c));
+            check(&p, ptr(&a), ptr(&c));
         }
-        for depth in [0, 1, 1087, 1088, 1089, 4096] {
+        // A checked wrapper chain of any length is the empty record: every
+        // chain compares equal and hashes alike, with no traversal scratch.
+        for depth in [0, 1, 2, 3, 1087, 1088, 1089, 2048, 4096, 8192] {
             let mut nodes = (0..depth)
                 .map(|i| vec![NODE_CHECKED, 0, i + 1])
                 .collect::<Vec<_>>();
             nodes.push(vec![NODE_FIELDS, 0]);
             let p = program(&nodes);
-            let edges = (0..=depth).map(|i| u8::from(i < depth)).collect::<Vec<_>>();
-            check(&p, &edges, std::ptr::null(), std::ptr::null());
-            check(
-                &p,
-                &vec![0; nodes.len()],
-                std::ptr::null(),
-                std::ptr::null(),
-            );
+            check(&p, std::ptr::null(), std::ptr::null());
         }
         let p = program(&[vec![NODE_FIELDS, 2, 0, 1, 8, 1], vec![NODE_SCALAR, 4]]);
         for a in [[1u64, 2], [1, 3], [2, 1]] {
             for c in [[1u64, 2], [1, 3], [2, 1]] {
-                check(&p, &[1, 0], ptr(&a), ptr(&c));
+                check(&p, ptr(&a), ptr(&c));
             }
         }
         let p = program(&[
@@ -89,7 +78,7 @@ fn physical_formats_and_structural_operations_allocate_nothing() {
         ]);
         for a in [[0u64, 2, 3], [1, 2, 3]] {
             for c in [[0u64, 2, 3], [1, 2, 3]] {
-                check(&p, &[1, 0], ptr(&a), ptr(&c));
+                check(&p, ptr(&a), ptr(&c));
             }
         }
         let p = program(&[
@@ -103,12 +92,12 @@ fn physical_formats_and_structural_operations_allocate_nothing() {
         a[8..16].copy_from_slice(&3u64.to_ne_bytes());
         a[16..19].copy_from_slice(b"abc");
         a[19..].copy_from_slice(&7u64.to_ne_bytes());
-        check(&p, &[0, 1, 0, 0], ptr(&a), ptr(&a));
+        check(&p, ptr(&a), ptr(&a));
         let p = program(&[vec![NODE_SEQUENCE, 0, 8, 16, 8, 1], vec![NODE_SCALAR, 4]]);
         for n in 0u64..=4 {
             let a = block([n, 4, 1, 2, 3, 4]);
             let a = owner(&a);
-            check(&p, &[1, 0], ptr(&a), ptr(&a));
+            check(&p, ptr(&a), ptr(&a));
         }
         let p = program(&[
             vec![NODE_COLUMNS, 2, 8, 16, 12, 1, 2, 0, 8, 3, 8, 4, 4],
@@ -126,7 +115,7 @@ fn physical_formats_and_structural_operations_allocate_nothing() {
         a[36..].copy_from_slice(&44u32.to_ne_bytes());
         let a = block(a);
         let a = owner(&a);
-        check(&p, &[1, 1, 1, 0, 0], ptr(&a), ptr(&a));
+        check(&p, ptr(&a), ptr(&a));
         for set in [false, true] {
             let p = program(&[
                 vec![
@@ -158,7 +147,7 @@ fn physical_formats_and_structural_operations_allocate_nothing() {
             let entries = block([3u64, 3, 1, 9, 90, 0, 999, 999, 1, 7, 70]);
             let container = block([owner(&entries), std::ptr::null_mut()]);
             let a = owner(&container);
-            check(&p, &[1, 0], ptr(&a), ptr(&a));
+            check(&p, ptr(&a), ptr(&a));
         }
 
         // Pinned against the pre-cutover owning walker on the identical vectors.

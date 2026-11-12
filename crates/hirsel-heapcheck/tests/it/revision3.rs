@@ -28,14 +28,12 @@ fn output(run: &Run) -> String {
 impl<S: Stage> F<S> {
     fn compare(&mut self, op: CompareOp, left: ValueId, right: ValueId, layout: LayoutId) {
         let result = self.b.plain(BOOL, self.c.bool);
-        let failure = self.raises("MEM-3", self.propagate);
         self.inst(Inst::Compare {
             result,
             op,
             left,
             right,
             layout,
-            failure,
         });
         self.print(result);
     }
@@ -132,42 +130,6 @@ fn structural_comparison_follows_the_interpreter_order() {
     let main = f.finish(&table);
     let run = execute(&program(target, table, vec![main]));
     assert_eq!(output(&run), "1\n0\n1\n0\n1\n1\n0\n1\n1\n0\n1\n0\n1\n");
-}
-
-/// Records nested `wrappers` deep around a u64: the leaf pair is at depth
-/// `wrappers + 1`, and a pair deeper than `COMPARE_MAX_DEPTH` is MEM-3 Depth.
-fn nested(wrappers: u64) -> Run {
-    let mut l = Layouts::new(TargetSpec::x86_64_unknown_linux_gnu());
-    let c = common(&mut l);
-    let mut layouts = vec![l.record(&[c.u64])];
-    for _ in 0..wrappers {
-        let inner = *layouts.last().unwrap();
-        layouts.push(l.record(&[inner]));
-    }
-    let (target, table) = l.finish();
-    let mut f = F::<Rc>::new("main", c);
-    let mut v = f.int(7);
-    for &layout in &layouts {
-        v = f.inline(layout, ConstructorKind::Tuple, &[v]);
-    }
-    f.compare(CompareOp::Eq, v, v, *layouts.last().unwrap());
-    f.ret(None);
-    let main = f.finish(&table);
-    execute(&program(target, table, vec![main]))
-}
-
-#[test]
-fn a_comparison_fails_with_depth_past_the_interpreter_bound() {
-    let limit = COMPARE_MAX_DEPTH;
-    assert_eq!(output(&nested(limit - 1)), "1\n");
-    let deep = nested(limit);
-    let audit = deep
-        .result
-        .as_ref()
-        .expect("a language failure audits cleanly");
-    assert_eq!(audit.observation.output, b"");
-    assert_eq!(audit.observation.failures.len(), 1);
-    assert_eq!(audit.observation.failures[0].rule, "MEM-3");
 }
 
 /// The ledger's count decides: one holder is unique, a second holder or an

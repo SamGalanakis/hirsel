@@ -312,12 +312,10 @@ fn entered_finalizers_keep_original_fresh_and_loop_suffixes_without_repeating_ad
             match cursor.poll_finalizers(&mut *ctx.0) {
                 FinalizerPoll::Finalizer(token) => {
                     let before = token.value.cast::<u64>().read();
-                    let admissions = (*ctx.0).cleanup_invocations.len();
                     assert!(
                         matches!(cursor.poll_finalizers(&mut *ctx.0), FinalizerPoll::Finalizer(t) if t == token)
                     );
                     assert_eq!(token.value.cast::<u64>().read(), before);
-                    assert_eq!((*ctx.0).cleanup_invocations.len(), admissions);
                     assert_eq!((token.anchor, token.operation_site), (31, 41));
                     if let Some(stale) = previous {
                         assert!(
@@ -341,7 +339,6 @@ fn entered_finalizers_keep_original_fresh_and_loop_suffixes_without_repeating_ad
                         token.anchor,
                         token.operation_site,
                     );
-                    assert_eq!((*ctx.0).cleanup_invocations.len(), admissions + 1);
                     assert_eq!((*ctx.0).shield, 0);
                     cursor.finalized(&mut *ctx.0, token, status);
                     assert_eq!(token.value.cast::<u64>().read(), before + 1);
@@ -364,7 +361,6 @@ fn entered_finalizers_keep_original_fresh_and_loop_suffixes_without_repeating_ad
         assert_eq!(closes, [3, 2, 1, 9]);
         assert_eq!(ctx.live(), 0);
         assert!((*ctx.0).work.is_null());
-        assert_eq!((*ctx.0).cleanup_invocations.len(), 0);
         assert_eq!((*ctx.0).shield, 0);
         crate::failure::hirsel_rt_v2_failure_clear(ctx.0);
     }
@@ -411,7 +407,6 @@ fn abandoning_an_exposed_finalizer_runs_no_body_or_language_cleanup() {
         ));
         drop(cursor);
         assert_eq!(ctx.live(), 1);
-        assert_eq!((*ctx.0).cleanup_invocations.len(), 0);
         assert_eq!((*ctx.0).shield, 0);
     }
     // Host stop abandons the task's mechanical work before normal wholesale

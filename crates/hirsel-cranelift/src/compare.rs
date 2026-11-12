@@ -2,14 +2,13 @@
 //! comparator or hash function per layout, defined once per object, as `hirsel-llvm`'s
 //! `compare` generates them.
 //!
-//! A comparator `hirsel.compare.<layout key>[.eq](left, right, depth, context) -> i8` reads two
+//! A comparator `hirsel.compare.<layout key>[.eq](left, right, context) -> i8` reads two
 //! values of its layout at the given addresses and returns one of the `ORDER_*` codes: the
 //! interpreter's order, the first unequal pair deciding, variant ordinals before payloads,
 //! sequences element by element then by length, String and Bytes bytewise then by length,
-//! floats by IEEE with an unordered pair deciding at once. Complete logical
-//! admission precedes this physical traversal; layout wrappers set no language limit.
+//! floats by IEEE with an unordered pair deciding at once.
 //!
-//! A hash function `hirsel.hash.<layout>(at, state, depth, deep, context) -> i64` feeds the scalar
+//! A hash function `hirsel.hash.<layout>(at, state, context) -> i64` feeds the scalar
 //! leaves of its value to `hirsel_rt_v2_hash_update` in layout order and returns the
 //! caller-owned stream. Only the root finalizes it. Floats feed `-0.0` as `+0.0`,
 //! a variant its ordinal, a sequence its count first.
@@ -23,7 +22,7 @@ use cranelift_codegen::ir::{
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch};
 use cranelift_module::{FuncId, Module};
 use hirsel_lir::emission::slice_storage_with_index;
-use hirsel_lir::ir::{CompareOp, FailureId, ValueId};
+use hirsel_lir::ir::{CompareOp, ValueId};
 use hirsel_lir::layout::{payload_offset, sequence_elements_offset, slice_data_offset};
 use hirsel_lir::layout_types::{
     FieldLayout, LayoutId, LayoutKind, LayoutRecord, ScalarKind, ScanStep, SizeSpec, TagForm,
@@ -44,20 +43,14 @@ pub(crate) const ORDER_LESS: u8 = 1;
 pub(crate) const ORDER_GREATER: u8 = 2;
 /// A float pair is unordered: every operator but `Ne` is false.
 pub(crate) const ORDER_UNORDERED: u8 = 3;
-/// A pair deeper than `COMPARE_MAX_DEPTH`.
-pub(crate) const ORDER_DEPTH: u8 = 4;
 
 type Generated<T = ()> = Result<T, CodegenError>;
 
 impl Emitter<'_> {
     fn comparator_signature(&self) -> ir::Signature {
         let mut sig = ir::Signature::new(self.call_conv);
-        sig.params.extend([
-            AbiParam::new(PTR),
-            AbiParam::new(PTR),
-            AbiParam::new(types::I64),
-            AbiParam::new(PTR),
-        ]);
+        sig.params
+            .extend([AbiParam::new(PTR), AbiParam::new(PTR), AbiParam::new(PTR)]);
         sig.returns.push(AbiParam::new(types::I8).uext());
         sig
     }
@@ -67,8 +60,6 @@ impl Emitter<'_> {
         sig.params.extend([
             AbiParam::new(PTR),
             AbiParam::new(types::I64),
-            AbiParam::new(types::I64),
-            AbiParam::new(PTR),
             AbiParam::new(PTR),
         ]);
         sig.returns.push(AbiParam::new(types::I64));
@@ -257,11 +248,6 @@ impl Gen<'_, '_> {
         self.b.ins().select(less, l, other)
     }
 
-    /// The comparator's pair at `depth` is too deep: return the Depth code.
-    fn check_depth(&mut self, _depth: Value) {
-        // Logical preflight precedes this physical value traversal.
-    }
-
     fn call(&mut self, id: FuncId, args: &[Value]) -> Value {
         let r = self.em.module.declare_func_in_func(id, self.b.func);
         let call = self.b.ins().call(r, args);
@@ -338,10 +324,8 @@ impl Gen<'_, '_> {
     // Comparators.
 
     fn define_comparator(mut self, layout: LayoutId) -> Generated {
-        let (left, right, depth) = (self.params[0], self.params[1], self.params[2]);
-        self.check_depth(depth);
+        let (left, right) = (self.params[0], self.params[1]);
         let record = self.record(layout)?.clone();
-        let deeper = self.b.ins().iadd_imm_s(depth, 1);
         match &record.kind {
             LayoutKind::Path => {
                 let code = if self.equality {
@@ -379,7 +363,7 @@ impl Gen<'_, '_> {
                 let code = self.scalar(*kind, left, right)?;
                 self.decide(code);
             }
-            LayoutKind::Aggregate => self.fields(&record.fields, left, right, deeper)?,
+            LayoutKind::Aggregate => self.fields(&record.fields, left, right)?,
             LayoutKind::Variant => {
                 let Some(tag) = &record.tag else {
                     return self.invalid("a variant layout without a tag");
@@ -402,7 +386,7 @@ impl Gen<'_, '_> {
                 switch.emit(&mut self.b, on, done);
                 for (arm, fields) in arms {
                     self.b.switch_to_block(arm);
-                    self.fields(fields, left, right, deeper)?;
+                    self.fields(fields, left, right)?;
                     self.b.ins().jump(done, &[]);
                 }
                 self.b.switch_to_block(done);
@@ -410,13 +394,13 @@ impl Gen<'_, '_> {
             LayoutKind::Inline { element, count } => {
                 let stride = self.size(*element)?;
                 let count = self.u64(*count);
-                self.elements(*element, stride, left, right, count, deeper)?;
+                self.elements(*element, stride, left, right, count)?;
             }
             LayoutKind::Simd { element, lanes } => {
                 // GEN-1/MEM-8: structural equality compares scalar lanes in order.
                 let stride = self.size(*element)?;
                 let count = self.u64(u64::from(*lanes));
-                self.elements(*element, stride, left, right, count, deeper)?;
+                self.elements(*element, stride, left, right, count)?;
             }
             LayoutKind::Block { payload } | LayoutKind::Box { payload } => {
                 let l = self.load(PTR, left);
@@ -430,7 +414,7 @@ impl Gen<'_, '_> {
                     _ => None,
                 };
                 match element {
-                    // A List or Array: its elements one level deeper, then the lengths.
+                    // A List or Array: its elements, then the lengths.
                     Some(element) => {
                         let start = self.element_offset(element)?;
                         let stride = self.size(element)?;
@@ -438,24 +422,24 @@ impl Gen<'_, '_> {
                         let fewer = self.b.ins().icmp(IntCC::UnsignedLessThan, lc, rc);
                         let count = self.b.ins().select(fewer, lc, rc);
                         let (le, re) = (self.at(l, start), self.at(r, start));
-                        self.elements(element, stride, le, re, count, deeper)?;
+                        self.elements(element, stride, le, re, count)?;
                         let less = self.b.ins().icmp(IntCC::UnsignedLessThan, lc, rc);
                         let greater = self.b.ins().icmp(IntCC::UnsignedGreaterThan, lc, rc);
                         let code = self.order(less, greater);
                         self.decide(code);
                     }
                     None if matches!(self.record(*payload)?.kind, LayoutKind::Opaque { .. }) => {
-                        self.container(*payload, l, r, deeper)?;
+                        self.container(*payload, l, r)?;
                     }
-                    // A Box: its payload one level deeper.
+                    // A Box: its payload.
                     None => {
-                        let code = self.child(*payload, l, r, deeper)?;
+                        let code = self.child(*payload, l, r)?;
                         self.decide(code);
                     }
                 }
             }
             LayoutKind::Slice { element } => {
-                // String and Bytes: bytewise, then by length, with no depth below the value.
+                // String and Bytes: bytewise, then by length.
                 if self.size(*element)? != 1 {
                     return self.unsupported("a slice of elements wider than a byte");
                 }
@@ -478,7 +462,7 @@ impl Gen<'_, '_> {
                     self.decide(lengths);
                 }
             }
-            LayoutKind::Opaque { .. } => self.container(layout, left, right, deeper)?,
+            LayoutKind::Opaque { .. } => self.container(layout, left, right)?,
             LayoutKind::Packed
             | LayoutKind::Flat
             | LayoutKind::SoaColumns { .. }
@@ -512,13 +496,7 @@ impl Gen<'_, '_> {
         self.b.finalize(config);
     }
 
-    fn container(
-        &mut self,
-        layout: LayoutId,
-        left: Value,
-        right: Value,
-        depth: Value,
-    ) -> Generated {
+    fn container(&mut self, layout: LayoutId, left: Value, right: Value) -> Generated {
         let record = self.record(layout)?.clone();
         let LayoutKind::Opaque { owner } = &record.kind else {
             return self.invalid("container payload");
@@ -579,7 +557,7 @@ impl Gen<'_, '_> {
             let rn = self.map_next(&tag, stride, rp);
             let la = self.at(ln, pair.offset);
             let ra = self.at(rn, pair.offset);
-            let code = self.child(pair.layout, la, ra, depth)?;
+            let code = self.child(pair.layout, la, ra)?;
             self.decide(code);
             let next = self.b.ins().iadd_imm_s(i, 1);
             let ln = self.at(ln, stride);
@@ -609,9 +587,9 @@ impl Gen<'_, '_> {
             self.b.ins().brif(more, compare, &[], done, &[]);
             self.b.switch_to_block(compare);
             let first = self.b.ins().icmp_imm_s(IntCC::Equal, i, 0);
-            let ln = self.sorted_next(element, stride, l, lc, lp, first, depth, None)?;
-            let rn = self.sorted_next(element, stride, r, rc, rp, first, depth, None)?;
-            let code = self.child(key_layout, ln, rn, depth)?;
+            let ln = self.sorted_next(element, stride, l, lc, lp, first, false)?;
+            let rn = self.sorted_next(element, stride, r, rc, rp, first, false)?;
+            let code = self.child(key_layout, ln, rn)?;
             self.decide(code);
             let next = self.b.ins().iadd_imm_s(i, 1);
             self.b
@@ -635,8 +613,7 @@ impl Gen<'_, '_> {
         count: Value,
         previous: Value,
         first: Value,
-        depth: Value,
-        hash: Option<(Value, Value)>,
+        hash: bool,
     ) -> Generated<Value> {
         let tag = self
             .record(element)?
@@ -677,28 +654,26 @@ impl Gen<'_, '_> {
         let candidate = self.at(entry, key_offset);
         let equality = self.equality;
         self.equality = false;
-        let after = if hash.is_some() {
+        let after = if hash {
             let callee = self.em.declare_comparator(element, false)?;
             let context = *self.params.last().unwrap();
-            self.call(callee, &[candidate, previous, depth, context])
+            self.call(callee, &[candidate, previous, context])
         } else {
-            self.child(element, candidate, previous, depth)?
+            self.child(element, candidate, previous)?
         };
-        self.selection_depth(after, hash);
         let greater = self
             .b
             .ins()
             .icmp_imm_s(IntCC::Equal, after, i64::from(ORDER_GREATER));
         let eligible = self.b.ins().bor(first, greater);
-        let smaller = if hash.is_some() {
+        let smaller = if hash {
             let callee = self.em.declare_comparator(element, false)?;
             let context = *self.params.last().unwrap();
-            self.call(callee, &[candidate, best, depth, context])
+            self.call(callee, &[candidate, best, context])
         } else {
-            self.child(element, candidate, best, depth)?
+            self.child(element, candidate, best)?
         };
         self.equality = equality;
-        self.selection_depth(smaller, hash);
         let less = self
             .b
             .ins()
@@ -721,32 +696,6 @@ impl Gen<'_, '_> {
         );
         self.b.switch_to_block(done);
         Ok(best)
-    }
-
-    fn selection_depth(&mut self, code: Value, hash: Option<(Value, Value)>) {
-        if let Some((state, deep)) = hash {
-            let too = self
-                .b
-                .ins()
-                .icmp_imm_s(IntCC::Equal, code, i64::from(ORDER_DEPTH));
-            let failed = self.b.create_block();
-            let next = self.b.create_block();
-            self.b.ins().brif(too, failed, &[], next, &[]);
-            self.b.switch_to_block(failed);
-            let one = self.b.ins().iconst(types::I8, 1);
-            self.b.ins().store(flags(), one, deep, 0);
-            self.b.ins().return_(&[state]);
-            self.b.switch_to_block(next);
-        } else {
-            self.depth_code(code);
-        }
-    }
-    fn depth_code(&mut self, code: Value) {
-        let deep = self
-            .b
-            .ins()
-            .icmp_imm_s(IntCC::Equal, code, i64::from(ORDER_DEPTH));
-        self.return_if(deep, code);
     }
 
     /// Compare the byte intervals in unsigned-byte order through `memcmp`; empty intervals
@@ -801,7 +750,7 @@ impl Gen<'_, '_> {
         Ok(())
     }
 
-    /// Compares `count` elements of `element`, `stride` apart, each at `depth`.
+    /// Compares `count` elements of `element`, `stride` apart, in order.
     fn elements(
         &mut self,
         element: LayoutId,
@@ -809,32 +758,25 @@ impl Gen<'_, '_> {
         left: Value,
         right: Value,
         count: Value,
-        depth: Value,
     ) -> Generated {
         let callee = self.callee(element)?;
         self.each(count, |g, i| {
             let offset = g.b.ins().imul_imm_s(i, stride as i64);
             let l = g.b.ins().iadd(left, offset);
             let r = g.b.ins().iadd(right, offset);
-            let code = g.compare(element, callee, l, r, depth)?;
+            let code = g.compare(element, callee, l, r)?;
             g.decide(code);
             Ok(())
         })
     }
 
-    /// Compares each field in ordinal order at `depth`.
-    fn fields(
-        &mut self,
-        fields: &[FieldLayout],
-        left: Value,
-        right: Value,
-        depth: Value,
-    ) -> Generated {
+    /// Compares each field in ordinal order.
+    fn fields(&mut self, fields: &[FieldLayout], left: Value, right: Value) -> Generated {
         let mut fields: Vec<&FieldLayout> = fields.iter().collect();
         fields.sort_by_key(|f| f.ordinal);
         for field in fields {
             let (l, r) = (self.at(left, field.offset), self.at(right, field.offset));
-            let code = self.child(field.layout, l, r, depth)?;
+            let code = self.child(field.layout, l, r)?;
             self.decide(code);
         }
         Ok(())
@@ -848,37 +790,29 @@ impl Gen<'_, '_> {
         })
     }
 
-    fn child(
-        &mut self,
-        layout: LayoutId,
-        left: Value,
-        right: Value,
-        depth: Value,
-    ) -> Generated<Value> {
+    fn child(&mut self, layout: LayoutId, left: Value, right: Value) -> Generated<Value> {
         let callee = self.callee(layout)?;
-        self.compare(layout, callee, left, right, depth)
+        self.compare(layout, callee, left, right)
     }
 
-    /// The code of the pair at `depth`: a scalar leaf inline after its depth check, any
-    /// other layout through its comparator.
+    /// The code of the pair: a scalar leaf inline, any other layout through its
+    /// comparator.
     fn compare(
         &mut self,
         layout: LayoutId,
         callee: Option<FuncId>,
         left: Value,
         right: Value,
-        depth: Value,
     ) -> Generated<Value> {
         match callee {
             Some(id) => {
                 let context = *self.params.last().unwrap();
-                Ok(self.call(id, &[left, right, depth, context]))
+                Ok(self.call(id, &[left, right, context]))
             }
             None => {
                 let LayoutKind::Scalar(kind) = self.record(layout)?.kind else {
                     return self.invalid("an inline leaf that is not a scalar");
                 };
-                self.check_depth(depth);
                 self.scalar(kind, left, right)
             }
         }
@@ -948,30 +882,18 @@ impl Gen<'_, '_> {
         self.feed(state, slot, length)
     }
 
-    /// Too deep: set the flag and return `state`; otherwise continue.
-    fn hash_depth(&mut self, _depth: Value, _state: Value, _deep: Value) {
-        // Logical preflight precedes this physical value traversal.
-    }
-
     fn define_hasher(mut self, layout: LayoutId) -> Generated {
         let slot =
             self.b
                 .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 16, 4));
         self.scratch = Some(self.b.ins().stack_addr(PTR, slot, 0));
-        let (at, state, depth, deep) = (
-            self.params[0],
-            self.params[1],
-            self.params[2],
-            self.params[3],
-        );
-        self.hash_depth(depth, state, deep);
+        let (at, state) = (self.params[0], self.params[1]);
         let record = self.record(layout)?.clone();
-        let deeper = self.b.ins().iadd_imm_s(depth, 1);
         let state = match &record.kind {
             LayoutKind::Path => self.hash_scalar(ScalarKind::U64, at, state)?,
             LayoutKind::Unit => state,
             LayoutKind::Scalar(kind) => self.hash_scalar(*kind, at, state)?,
-            LayoutKind::Aggregate => self.hash_fields(&record.fields, at, state, deeper, deep)?,
+            LayoutKind::Aggregate => self.hash_fields(&record.fields, at, state)?,
             LayoutKind::Variant => {
                 let Some(tag) = &record.tag else {
                     return self.invalid("a variant layout without a tag");
@@ -994,7 +916,7 @@ impl Gen<'_, '_> {
                 self.b.ins().jump(done, &[state.into()]);
                 for (arm, fields) in arms {
                     self.b.switch_to_block(arm);
-                    let after = self.hash_fields(fields, at, state, deeper, deep)?;
+                    let after = self.hash_fields(fields, at, state)?;
                     self.b.ins().jump(done, &[after.into()]);
                 }
                 self.b.switch_to_block(done);
@@ -1003,31 +925,29 @@ impl Gen<'_, '_> {
             LayoutKind::Inline { element, count } => {
                 let stride = self.size(*element)?;
                 let count = self.u64(*count);
-                self.hash_elements(*element, stride, at, count, state, deeper, deep)?
+                self.hash_elements(*element, stride, at, count, state)?
             }
             LayoutKind::Simd { element, lanes } => {
                 let stride = self.size(*element)?;
                 let count = self.u64(u64::from(*lanes));
-                self.hash_elements(*element, stride, at, count, state, deeper, deep)?
+                self.hash_elements(*element, stride, at, count, state)?
             }
             LayoutKind::Block { payload } | LayoutKind::Box { payload } => {
                 let pointer = self.load(PTR, at);
                 let data = self.payload(pointer, &record, *payload)?;
                 match self.record(*payload)?.kind {
-                    // A List or Array: its count, then its elements one level deeper.
+                    // A List or Array: its count, then its elements.
                     LayoutKind::Sequence { element } => {
                         let count = self.load(types::I64, data);
                         let state = self.feed_int(state, count, 8)?;
                         let start = self.element_offset(element)?;
                         let stride = self.size(element)?;
                         let first = self.at(data, start);
-                        self.hash_elements(element, stride, first, count, state, deeper, deep)?
+                        self.hash_elements(element, stride, first, count, state)?
                     }
-                    LayoutKind::Opaque { .. } => {
-                        self.container_hash(*payload, data, state, deeper, deep)?
-                    }
-                    // A Box: its payload one level deeper.
-                    _ => self.hash_child(*payload, data, state, deeper, deep)?,
+                    LayoutKind::Opaque { .. } => self.container_hash(*payload, data, state)?,
+                    // A Box: its payload.
+                    _ => self.hash_child(*payload, data, state)?,
                 }
             }
             LayoutKind::Slice { element } => {
@@ -1039,7 +959,7 @@ impl Gen<'_, '_> {
                 let state = self.feed_int(state, length, 8)?;
                 self.feed(state, data, length)?
             }
-            LayoutKind::Opaque { .. } => self.container_hash(layout, at, state, deeper, deep)?,
+            LayoutKind::Opaque { .. } => self.container_hash(layout, at, state)?,
             LayoutKind::Packed
             | LayoutKind::Flat
             | LayoutKind::SoaColumns { .. }
@@ -1067,14 +987,7 @@ impl Gen<'_, '_> {
         Ok(())
     }
 
-    fn container_hash(
-        &mut self,
-        layout: LayoutId,
-        at: Value,
-        state: Value,
-        depth: Value,
-        deep: Value,
-    ) -> Generated<Value> {
+    fn container_hash(&mut self, layout: LayoutId, at: Value, state: Value) -> Generated<Value> {
         let record = self.record(layout)?.clone();
         let LayoutKind::Opaque { owner } = &record.kind else {
             return self.invalid("container payload");
@@ -1134,7 +1047,7 @@ impl Gen<'_, '_> {
             let entry = self.map_next(&tag, stride, pointer);
             let pair_at = self.at(entry, pair.offset);
             let callee = self.em.declare_hasher(pair.layout)?;
-            let state = self.call(callee, &[pair_at, state_phi, depth, deep, self.params[4]]);
+            let state = self.call(callee, &[pair_at, state_phi, self.params[2]]);
             let next = self.b.ins().iadd_imm_s(i, 1);
             let pointer = self.at(entry, stride);
             self.b
@@ -1163,17 +1076,8 @@ impl Gen<'_, '_> {
         self.b.ins().brif(more, fold, &[], done, &[]);
         self.b.switch_to_block(fold);
         let is_first = self.b.ins().icmp_imm_s(IntCC::Equal, i, 0);
-        let entry = self.sorted_next(
-            element,
-            stride,
-            first,
-            count,
-            previous,
-            is_first,
-            depth,
-            Some((state_phi, deep)),
-        )?;
-        let state = self.call(callee, &[entry, state_phi, depth, deep, self.params[4]]);
+        let entry = self.sorted_next(element, stride, first, count, previous, is_first, true)?;
+        let state = self.call(callee, &[entry, state_phi, self.params[2]]);
         let next = self.b.ins().iadd_imm_s(i, 1);
         self.b
             .ins()
@@ -1219,28 +1123,19 @@ impl Gen<'_, '_> {
         fields: &[FieldLayout],
         at: Value,
         mut state: Value,
-        depth: Value,
-        deep: Value,
     ) -> Generated<Value> {
         let mut fields: Vec<&FieldLayout> = fields.iter().collect();
         fields.sort_by_key(|f| f.ordinal);
         for field in fields {
             let field_at = self.at(at, field.offset);
-            state = self.hash_child(field.layout, field_at, state, depth, deep)?;
+            state = self.hash_child(field.layout, field_at, state)?;
         }
         Ok(state)
     }
 
-    fn hash_child(
-        &mut self,
-        layout: LayoutId,
-        at: Value,
-        state: Value,
-        depth: Value,
-        deep: Value,
-    ) -> Generated<Value> {
+    fn hash_child(&mut self, layout: LayoutId, at: Value, state: Value) -> Generated<Value> {
         let callee = self.em.declare_hasher(layout)?;
-        Ok(self.call(callee, &[at, state, depth, deep, self.params[4]]))
+        Ok(self.call(callee, &[at, state, self.params[2]]))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1251,8 +1146,6 @@ impl Gen<'_, '_> {
         first: Value,
         count: Value,
         state: Value,
-        depth: Value,
-        deep: Value,
     ) -> Generated<Value> {
         let callee = self.em.declare_hasher(element)?;
         let (head, work, after) = (
@@ -1270,7 +1163,7 @@ impl Gen<'_, '_> {
         self.b.switch_to_block(work);
         let offset = self.b.ins().imul_imm_s(index, stride as i64);
         let at = self.b.ins().iadd(first, offset);
-        let next_state = self.call(callee, &[at, running, depth, deep, self.params[4]]);
+        let next_state = self.call(callee, &[at, running, self.params[2]]);
         let next = self.b.ins().iadd_imm_s(index, 1);
         self.b.ins().jump(head, &[next.into(), next_state.into()]);
         self.b.switch_to_block(after);
@@ -1333,7 +1226,6 @@ impl FnEmitter<'_, '_, '_> {
         left: ValueId,
         right: ValueId,
         layout: LayoutId,
-        failure: FailureId,
     ) -> Emitted {
         let comparator = if self.needs_value_program(layout) {
             None
@@ -1350,18 +1242,13 @@ impl FnEmitter<'_, '_, '_> {
         let (left, right) = (self.counted_view(left)?, self.counted_view(right)?);
         self.store(shape, left, l)?;
         self.store(shape, right, r)?;
-        self.structural_preflight_at(layout, l.ptr, failure)?;
-        self.structural_preflight_at(layout, r.ptr, failure)?;
-        let zero = self.u64c(0);
         let context = self.context;
         let code = if let Some(comparator) = comparator {
-            self.call(comparator, &[l.ptr, r.ptr, zero, context])[0]
+            self.call(comparator, &[l.ptr, r.ptr, context])[0]
         } else {
             self.structural_order_at(layout, l.ptr, r.ptr)?
         };
         let is = |this: &mut Self, c: u8| this.b.ins().icmp_imm_s(IntCC::Equal, code, i64::from(c));
-        let deep = is(self, ORDER_DEPTH);
-        self.guard(deep, failure)?;
         let (equal, less, greater) = (
             is(self, ORDER_EQUAL),
             is(self, ORDER_LESS),
@@ -1379,15 +1266,8 @@ impl FnEmitter<'_, '_, '_> {
     }
 
     /// `Hash`: integer roots stay in SSA; other layouts use their framed hash function.
-    pub(crate) fn hash(
-        &mut self,
-        result: ValueId,
-        value: ValueId,
-        layout: LayoutId,
-        failure: FailureId,
-    ) -> Emitted {
+    pub(crate) fn hash(&mut self, result: ValueId, value: ValueId, layout: LayoutId) -> Emitted {
         let context = self.context;
-        self.structural_preflight_value(layout, value, failure)?;
         let seed = self.rt1(RuntimeEntry::HashBegin, &[context])?;
         if self.needs_value_program(layout) {
             let at = self.stack(layout)?;
@@ -1451,13 +1331,7 @@ impl FnEmitter<'_, '_, '_> {
             hirsel_lir::runtime_abi::HASH_STATE_ALIGN,
         );
         self.rt(RuntimeEntry::HashInit, &[state, seed])?;
-        let (deep, _) = self.stack_bytes(1, 1);
-        let zero = self.b.ins().iconst(types::I8, 0);
-        self.store_at(zero, deep, 0);
-        let depth = self.u64c(0);
-        let hash = self.call(hasher, &[at.ptr, state, depth, deep, context])[0];
-        let flag = self.load_ty(types::I8, deep, 0);
-        self.guard(flag, failure)?;
+        let hash = self.call(hasher, &[at.ptr, state, context])[0];
         let hash = self.rt1(RuntimeEntry::HashFinish, &[hash])?;
         let hash = if let Some(done) = short {
             self.b.ins().jump(done, &[hash.into()]);

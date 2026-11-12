@@ -43,7 +43,7 @@ use hirsel_lir::stage::{
 };
 use hirsel_syntax::{ContentHash, DefPath};
 
-use crate::compare::{self, CompareError, ORDER_DEPTH, ORDER_EQUAL, ORDER_GREATER, ORDER_LESS};
+use crate::compare::{self, CompareError, ORDER_EQUAL, ORDER_GREATER, ORDER_LESS};
 use crate::context::{
     Access, Attribute, AttributeSlot, BasicBlock, BinOp, Builder, Cast, Context, Function,
     IntPredicate, Module, TargetMachine, Type, Value, loaded_version,
@@ -64,7 +64,6 @@ mod construction;
 mod descriptors;
 mod flat;
 mod flow;
-mod foreground;
 mod foreign;
 mod instructions;
 mod ownership;
@@ -929,71 +928,7 @@ fn lower<T>(
             });
             emitter.emit()?;
         }
-        let depth_leaf = hirsel_lir::invocations::room::depth_leaf_units(
-            units.iter().map(|u| u.unit()),
-            inputs.layouts,
-        );
-        let counter_units =
-            hirsel_lir::invocations::room::counter_units(units.iter().map(|u| u.unit()));
-        let mut foreground_functions = BTreeMap::new();
-        let mut specialized = Vec::new();
-        if !inputs.alternate && !profile.debug && !inputs.measurement && ownership_plans.is_none() {
-            let recursive = foreground::recursive(functions.iter().map(|(unit, _, _)| *unit));
-            let profitable = foreground::profitable_units(
-                functions.iter().map(|(unit, _, _)| *unit),
-                &depth_leaf,
-                &recursive,
-            );
-            for (unit, _, signature) in &functions {
-                if unit.header.origin != UnitOrigin::Source
-                    || !unit
-                        .instructions
-                        .iter()
-                        .any(|inst| matches!(inst, Inst::FrameEnter { .. }))
-                    || unit.instructions.iter().any(|inst| {
-                        matches!(inst, Inst::FinalizeBegin { .. } | Inst::FinalizeEnd { .. })
-                    })
-                    || inputs
-                        .continuation
-                        .is_some_and(|p| p.task_entry(unit).is_some())
-                {
-                    continue;
-                }
-                if !profitable.contains(&unit.header.instance) {
-                    continue;
-                }
-                let mut name = symbol_name(&unit.header.definition, Some(&unit.header.instance));
-                if !signature.roots.is_empty() || signature.ahead.is_some() {
-                    name.push_str(ROOTS_SUFFIX);
-                }
-                let function = signature.declare(
-                    &module,
-                    inputs.layouts,
-                    &format!("{name}.foreground"),
-                    &unit.header.definition,
-                    true,
-                    Aliasing::of(inputs.callbacks),
-                )?;
-                module.make_private(function);
-                module.add_attribute(function, AttributeSlot::Function, Attribute::InlineHint);
-                // A helper kept in its callers stays there on the foreground path.
-                if always_inline.contains(&unit.header.instance) {
-                    module.add_attribute(
-                        function,
-                        AttributeSlot::Function,
-                        Attribute::AlwaysInline,
-                    );
-                }
-                foreground_functions.insert(name, function);
-                specialized.push((*unit, function, signature.clone(), true));
-            }
-        }
-        let foreground_functions = std::rc::Rc::new(foreground_functions);
-        let functions = functions
-            .into_iter()
-            .map(|(unit, function, signature)| (unit, function, signature, false))
-            .chain(specialized);
-        for (unit, function, signature, foreground) in functions {
+        for (unit, function, signature) in functions {
             let rooted = !signature.roots.is_empty();
             let mut name = symbol_name(&unit.header.definition, Some(&unit.header.instance));
             if rooted || signature.ahead.is_some() {
@@ -1001,18 +936,6 @@ fn lower<T>(
             }
             let mut emitter =
                 FnEmitter::new(&module, inputs, unit, function, signature, &mut manifested);
-            if foreground {
-                emitter.foreground_calls = Some(foreground_functions.clone());
-            } else {
-                emitter.foreground_entry = foreground_functions.get(&name).copied();
-            }
-            emitter.room = hirsel_lir::invocations::room::RoomChecks::of(unit, &depth_leaf);
-            // A continuation re-enters with its callee's cleanup mode still
-            // live. Its saved admission needs the runtime's retained token.
-            if !inputs.alternate {
-                emitter.counters =
-                    hirsel_lir::invocations::room::RoomChecks::counters_of(unit, &counter_units);
-            }
             emitter.ownership = ownership_plans
                 .as_ref()
                 .and_then(|plans| plans.get(&unit.header.instance));
@@ -1271,6 +1194,40 @@ fn ahead_value_entry(definition: &DefPath) -> bool {
 /// The name suffix of a body's root-value entry. It changes with that
 /// entry's signature, so a `linkonce_odr` body of an older signature never merges
 /// with a caller of this one.
+/// The complete direct call-graph SCCs, including bound closure calls.
+fn recursive<'a>(units: impl Iterator<Item = &'a LirUnit<Ready>>) -> BTreeSet<ContentHash> {
+    let units: Vec<_> = units.collect();
+    let indices: BTreeMap<_, _> = units
+        .iter()
+        .enumerate()
+        .map(|(index, unit)| (unit.header.instance, index))
+        .collect();
+    let calls: Vec<Vec<usize>> = units
+        .iter()
+        .map(|unit| {
+            unit.tables
+                .calls
+                .iter()
+                .filter_map(|call| {
+                    let symbol = match call.callee {
+                        Callee::Direct(symbol) | Callee::Bound { code: symbol, .. } => symbol,
+                        _ => return None,
+                    };
+                    indices
+                        .get(&unit.tables.symbols[symbol.index()].instance?)
+                        .copied()
+                })
+                .collect()
+        })
+        .collect();
+    hirsel_graph::components(&calls)
+        .into_iter()
+        .filter(|component| component.len() > 1 || calls[component[0]].contains(&component[0]))
+        .flatten()
+        .map(|index| units[index].header.instance)
+        .collect()
+}
+
 const ROOTS_SUFFIX: &str = ".roots9";
 
 /// The private descriptor of the empty environment a function reference carries.
@@ -1496,28 +1453,6 @@ struct FnEmitter<'m, 'a> {
     ownership_cleanup: Option<hirsel_lir::ownership_trace::native::NativeMarker>,
     /// A resumable state alternate (`resume`).
     resume: Option<resume::Resume<'a, 'm>>,
-    /// Admissions of depth-leaf callees, lowered to room checks with no retirement.
-    room: hirsel_lir::invocations::room::RoomChecks,
-    /// The prologue's room test, built at the first room check (`no_room`).
-    no_room: Option<Value<'m>>,
-    counters: hirsel_lir::invocations::room::RoomChecks,
-    counter_cell: Option<CounterCell<'m>>,
-    depth_mode: Option<(Value<'m>, Value<'m>)>,
-    foreground_entry: Option<Function<'m>>,
-    foreground_calls: Option<std::rc::Rc<BTreeMap<String, Function<'m>>>>,
-}
-
-#[derive(Clone, Copy)]
-enum CounterCell<'m> {
-    Dynamic {
-        at: Value<'m>,
-        limit: Value<'m>,
-    },
-    Snapshot {
-        at: Value<'m>,
-        count: Value<'m>,
-        full: Value<'m>,
-    },
 }
 
 type Emitted<T = ()> = Result<T, CodegenError>;

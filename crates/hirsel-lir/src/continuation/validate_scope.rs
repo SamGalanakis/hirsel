@@ -325,7 +325,7 @@ fn facts(u: &LirUnit<Ready>, units: &BTreeMap<ContentHash, &LirUnit<Ready>>) -> 
                     .into_iter()
                     .map(|e| (u.tables.edges[e.index()].target, live)),
             );
-            pending.extend(term.failure_edges(&u.tables).into_iter().map(|f| {
+            pending.extend(term.failure().into_iter().map(|f| {
                 (
                     u.tables.edges[u.tables.failures[f.index()].cleanup.index()].target,
                     live,

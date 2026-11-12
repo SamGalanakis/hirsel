@@ -100,11 +100,7 @@ pub(crate) fn pure_scalar(
 fn scalar_instruction(table: &LayoutTable, unit: &LirUnit<Ready>, inst: &Inst) -> bool {
     pure_scalar(unit, inst, |_| true)
         || match inst {
-            // Exact native depth leaves are bound by the machine helper
-            // identity and extent; they never publish a failure themselves.
-            Inst::FrameEnter { .. }
-            | Inst::FrameLeave
-            | Inst::StorageLive { .. }
+            Inst::StorageLive { .. }
             | Inst::StorageDead { .. }
             | Inst::EndScope { .. }
             | Inst::Address { .. }
@@ -478,19 +474,6 @@ pub fn stack_bound(
     getter: u64,
     handoff: u64,
 ) -> Option<u64> {
-    stack_bound_with_depth(graph, frames, startup, getter, handoff, 0)
-}
-
-/// Compose the same final frame proof with the exact certified depth-leaf
-/// footprint. Callers bind the helper implementation into the plan identity.
-pub fn stack_bound_with_depth(
-    graph: &ScalarGraph,
-    frames: &BTreeMap<ContentHash, u64>,
-    startup: u64,
-    getter: u64,
-    handoff: u64,
-    depth: u64,
-) -> Option<u64> {
     fn visit(
         id: ContentHash,
         graph: &ScalarGraph,
@@ -519,7 +502,7 @@ pub fn stack_bound_with_depth(
         graph.root,
         graph,
         frames,
-        getter.max(handoff).max(depth),
+        getter.max(handoff),
         &mut BTreeSet::new(),
         &mut BTreeMap::new(),
     )?)?;

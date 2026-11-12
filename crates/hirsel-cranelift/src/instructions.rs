@@ -193,36 +193,6 @@ impl FnEmitter<'_, '_, '_> {
                 let failed = self.b.ins().bxor_imm_s(condition, 1);
                 self.guard(failed, failure)
             }
-            Inst::FrameEnter { failure } if self.room.enters.contains(&self.instruction_index) => {
-                let failed = self.no_room();
-                self.guard(failed, failure)
-            }
-            Inst::FrameLeave if self.room.leaves.contains(&self.instruction_index) => Ok(()),
-            Inst::FrameEnter { failure }
-                if self.counters.enters.contains(&self.instruction_index) =>
-            {
-                self.counter_enter(failure)
-            }
-            Inst::FrameLeave if self.counters.leaves.contains(&self.instruction_index) => {
-                self.counter_leave();
-                Ok(())
-            }
-            Inst::FrameEnter { failure } => {
-                let context = self.context;
-                let anchor = self.unit.tables.failures[failure.index()].anchor;
-                let (caller, operation) = self.failure_sites(self.anchor_code(anchor)?);
-                let status = self.rt1(
-                    RuntimeEntry::DepthEnterAtSite,
-                    &[context, caller, operation],
-                )?;
-                let failed = self.b.ins().icmp_imm_s(IntCC::NotEqual, status, 0);
-                self.guard(failed, failure)
-            }
-            Inst::FrameLeave => {
-                let context = self.context;
-                self.rt(RuntimeEntry::DepthLeave, &[context])?;
-                Ok(())
-            }
             // Static lifetime events: no machine bytes.
             Inst::StorageLive { .. }
             | Inst::StorageDead { .. }
@@ -388,8 +358,7 @@ impl FnEmitter<'_, '_, '_> {
                 left,
                 right,
                 layout,
-                failure,
-            } => self.compare(result, op, left, right, layout, failure),
+            } => self.compare(result, op, left, right, layout),
             Inst::SliceView {
                 result,
                 value,
@@ -583,8 +552,7 @@ impl FnEmitter<'_, '_, '_> {
                 result,
                 value,
                 layout,
-                failure,
-            } => self.hash(result, value, layout, failure),
+            } => self.hash(result, value, layout),
             // The same pointer at another payload layout: no code.
             // MEM-11: a fresh root block holding the value, whose blocks the runtime freezes.
             Inst::Freeze { result, value } => {

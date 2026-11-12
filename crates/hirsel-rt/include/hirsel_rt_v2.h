@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define HIRSEL_RT_V2_ABI_VERSION 114
+#define HIRSEL_RT_V2_ABI_VERSION 115
 /* TaskSpawn trailing flags: compiler proofs, ignored in ordered execution and replay. */
 #define HIRSEL_RT_V2_SPAWN_IMMEDIATE_AWAIT 1
 #define HIRSEL_RT_V2_SPAWN_OP_FREE 2
@@ -128,14 +128,6 @@ extern "C" {
  * (the running worker's). A slab's u32 owner is its heap's id; its xthread_free word is the
  * runtime's list of blocks other heaps freed, which compiled code never touches. */
 #define HIRSEL_RT_V2_CTX_HEAP_ID_OFFSET 528
-/* Runtime ABI 65: after the context's view (the words above, then a u32 heap and a u64
- * epoch), the task's LANG-10 counters, written only by the runtime: the u16 foreground
- * and cleanup admission counts and the u32 finalizer nesting. Compiled code reads them to
- * test a depth-leaf callee's room: in cleanup mode (nesting or cleanup count nonzero)
- * while the cleanup count is below 64, otherwise while the foreground count is below 1024. */
-#define HIRSEL_RT_V2_CTX_FOREGROUND_COUNT_OFFSET 552
-#define HIRSEL_RT_V2_CTX_CLEANUP_COUNT_OFFSET 554
-#define HIRSEL_RT_V2_CTX_CLEANUP_MODE_OFFSET 556
 #define HIRSEL_RT_V2_PAGE_FREE_OFFSET 16
 #define HIRSEL_RT_V2_PAGE_LIVE_OFFSET 24
 #define HIRSEL_RT_V2_PAGE_LOCAL_FREE_OFFSET 72
@@ -231,10 +223,6 @@ _Static_assert(HIRSEL_RT_V2_PAGE_XTHREAD_FREE_OFFSET == HIRSEL_RT_V2_PAGE_OWNER_
 #define HIRSEL_RT_V2_REGION_POOL_IDLE_CAP 8388608
 
 typedef struct hirsel_rt_v2_ctx hirsel_rt_v2_ctx;
-uint8_t hirsel_rt_v2_depth_enter(hirsel_rt_v2_ctx *ctx);
-uint8_t hirsel_rt_v2_depth_enter_at_site(hirsel_rt_v2_ctx *ctx, uint64_t anchor, uint64_t operation_site);
-void hirsel_rt_v2_depth_leave(hirsel_rt_v2_ctx *ctx);
-uint8_t hirsel_rt_v2_depth_preflight(hirsel_rt_v2_ctx *ctx, const void *program, uint64_t program_length, const void *edges, uint64_t edge_count, const void *value);
 /* Value walkers after complete logical admission: order is equal=0, less=1,
  * greater=2, unordered=3. No serialization or arena budget is involved. */
 uint8_t hirsel_rt_v2_structural_order(hirsel_rt_v2_ctx *ctx, const void *program, uint64_t program_length, const void *left, const void *right);

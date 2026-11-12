@@ -607,14 +607,6 @@ pub(super) fn check<S: Stage>(cx: &Cx<'_, S>, facts: &Facts, report: &mut Report
         flags: Rc::default(),
         flag_phases: Rc::default(),
     };
-    let cleanup_retirements =
-        match crate::invocations::cleanup_retirements(unit, cx.operations, cx.layouts.0) {
-            Ok(retirements) => retirements,
-            Err(message) => {
-                report.add(Site::UNIT, K::Schema(message));
-                BTreeMap::new()
-            }
-        };
     let mut receipt_slots = BTreeSet::new();
     if let Some(entry) = &unit.tables.receipt_entry {
         for binding in &entry.parameters {
@@ -664,7 +656,6 @@ pub(super) fn check<S: Stage>(cx: &Cx<'_, S>, facts: &Facts, report: &mut Report
         placed: &placed,
         bases: &bases,
         joined: &joined,
-        cleanup_retirements: &cleanup_retirements,
         report: None,
         discharged: BTreeSet::new(),
         flat_reaching: BTreeMap::new(),
@@ -698,7 +689,6 @@ pub(super) fn check<S: Stage>(cx: &Cx<'_, S>, facts: &Facts, report: &mut Report
         placed: &placed,
         bases: &bases,
         joined: &joined,
-        cleanup_retirements: &cleanup_retirements,
         report: Some(report),
         discharged: BTreeSet::new(),
         flat_reaching: BTreeMap::new(),
@@ -805,7 +795,6 @@ struct Walker<'w, 'a, S> {
     bases: &'w BTreeMap<ValueId, Vec<ValueId>>,
     /// Per loan, the joined views it covers: they go stale when it ends.
     joined: &'w BTreeMap<LoanId, Vec<ValueId>>,
-    cleanup_retirements: &'w BTreeMap<(BlockId, u32), AddressId>,
     report: Option<&'w mut Report>,
     discharged: BTreeSet<CleanupAnchorId>,
     flat_reaching: BTreeMap<Site, Option<ValueId>>,
@@ -933,9 +922,6 @@ impl<S: Stage> Walker<'_, '_, S> {
                             self.check_mut_receipt(site, &st, site_data, parameter, address);
                         }
                     }
-                }
-                if let Some(rejected) = site_data.pretransfer_failure {
-                    outs.push(self.failure(site, b, rejected, st.clone(), cr.clone()));
                 }
                 let receipt_before = (!self.receipt_slots.is_empty()).then(|| st.clone());
                 for arg in args {
@@ -1073,28 +1059,6 @@ impl<S: Stage> Walker<'_, '_, S> {
                 self.exit(site, &st, &cr);
             }
             Terminator::Propagate => self.exit(site, &st, &cr),
-            Terminator::RejectTransfer => {
-                // The protocol audit establishes the adapter role. This replay
-                // independently requires every pending formal to be untouched.
-                for (ordinal, &(passing, slot)) in self.facts.parameters.iter().enumerate() {
-                    if passing != Passing::Take {
-                        continue;
-                    }
-                    if let Some(slot) = slot {
-                        let s = &st.slots[slot.index()];
-                        if content(s) != Tri::Yes
-                            || !s.taken.is_empty()
-                            || !s.moved.is_empty()
-                            || !s.finalize.is_empty()
-                            || s.versions != Versions::One(unit.parameters[ordinal])
-                        {
-                            self.err(site, K::LeakedStorage(slot));
-                        }
-                        st.slots[slot.index()].init = Tri::No;
-                    }
-                }
-                self.exit(site, &st, &cr);
-            }
             Terminator::Raise(failure) => {
                 outs.push(self.failure(site, b, failure, st, cr));
                 return outs;
@@ -2790,23 +2754,7 @@ impl<S: Stage> Walker<'_, '_, S> {
             | Inst::BindOrigin { .. }
             | Inst::BindFields { .. }
             | Inst::EndOrigin { .. }
-            | Inst::FrameEnter { .. }
             | Inst::Unavailable { .. } => {}
-            Inst::FrameLeave => {
-                if let Some(&address) = self
-                    .cleanup_retirements
-                    .get(&(b, site.index.unwrap_or(u32::MAX)))
-                {
-                    if let Some((Root::Slot(slot), mut path)) = self.place(address) {
-                        if !self.covered(slot, &st.slots[slot.index()], &mut path) {
-                            self.err(
-                                site,
-                                K::Schema("finalizer retires before owned descendants".into()),
-                            );
-                        }
-                    }
-                }
-            }
             Inst::Address { address, .. } => {
                 let info = &unit.addresses[address.index()];
                 if let crate::ir::AddressBase::Value(v) = info.base {

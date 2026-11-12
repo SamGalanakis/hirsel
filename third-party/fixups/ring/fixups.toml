@@ -1,5 +1,7 @@
 # ring 0.17.14 build.rs RING_SRCS and ASM_TARGETS, using the published
 # pregenerated ELF assembly and symbol-prefix headers (no Perl/build script).
+# Its C is linked into program runtimes and can run on a task's fiber stack, so it
+# probes large frames (-fstack-clash-protection) as the emitted code and Rust do.
 buildscript.run = false
 
 [['cfg(target_arch = "x86_64")'.cxx_library]]
@@ -37,7 +39,7 @@ srcs = [
 ]
 headers = ["include/**/*.h", "crypto/**/*.h", "third_party/fiat/**/*.h", "pregenerated/**/*.h"]
 include_paths = ["include", "pregenerated"]
-compiler_flags = ["-O3", "-std=c11", "-fvisibility=hidden", "-DNDEBUG"]
+compiler_flags = ["-O3", "-std=c11", "-fvisibility=hidden", "-fstack-clash-protection", "-DNDEBUG"]
 
 [['cfg(target_arch = "aarch64")'.cxx_library]]
 name = "ring-core-aarch64"
@@ -70,4 +72,4 @@ headers = ["include/**/*.h", "crypto/**/*.h", "third_party/fiat/**/*.h", "pregen
 include_paths = ["include", "pregenerated"]
 # ring build.rs configure_cc: clang-only mode without a target sysroot.
 # Its crypto/internal.h uses portable memory routines; clang supplies stdint.
-compiler_flags = ["--target=aarch64-unknown-linux-gnu", "-nostdlibinc", "-DRING_CORE_NOSTDLIBINC=1", "-O3", "-std=c11", "-fvisibility=hidden", "-DNDEBUG"]
+compiler_flags = ["--target=aarch64-unknown-linux-gnu", "-nostdlibinc", "-DRING_CORE_NOSTDLIBINC=1", "-O3", "-std=c11", "-fvisibility=hidden", "-fstack-clash-protection", "-DNDEBUG"]

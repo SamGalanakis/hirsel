@@ -21,7 +21,6 @@ pub mod cpu;
 pub mod failure;
 pub mod isolate;
 pub mod iter;
-pub mod keyed;
 pub mod length;
 pub mod list;
 pub mod map;
@@ -71,10 +70,6 @@ pub struct LibraryBody {
 /// Every registered body. A family adds its rows in its own module and
 /// one line here.
 pub const BODIES: &[&LibraryBody] = &[
-    &keyed::MAP_INSERT,
-    &keyed::SET_INSERT,
-    &keyed::MAP_GET,
-    &keyed::SET_CONTAINS,
     &arena::WITH,
     &arena::BOUNDED,
     &arena::COPY_TO,

@@ -25,8 +25,6 @@ pub fn helper_identity() -> ContentHash {
             } else {
                 &[]
             },
-            hirsel_rt::DEPTH_HELPERS,
-            hirsel_rt::DEPTH_LEAF_STACK_BYTES.to_le_bytes().as_slice(),
         ],
     )
 }
@@ -194,8 +192,6 @@ pub fn unknown_machine_calls(
                     "hirsel_rt_v2_ahead_state"
                         | "hirsel_rt_v2_ahead_handoff"
                         | "hirsel_rt_v2_resume_point"
-                        | "hirsel_rt_v2_depth_enter_at_site"
-                        | "hirsel_rt_v2_depth_leave"
                         | "hirsel_rt_v2_failure_begin"
                         | "hirsel_rt_v2_failure_reanchor"
                         | "hirsel_rt_v2_release"
@@ -275,13 +271,12 @@ pub fn check_objects_with_plan(
                     if unknown_machine_calls(code, &plan, &plans, program) {
                         return None;
                     }
-                    hirsel_lir::ahead::stack_bound_with_depth(
+                    hirsel_lir::ahead::stack_bound(
                         &root.graph,
                         &frames,
                         16,
                         8,
                         root.handoff_bytes(64),
-                        hirsel_rt::DEPTH_LEAF_STACK_BYTES,
                     )
                     .map(|n| (*id, n))
                 })

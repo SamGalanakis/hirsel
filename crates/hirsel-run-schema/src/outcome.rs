@@ -7,6 +7,9 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BudgetKind {
     Memory,
+    /// A task's native stack ran into its guard. Where that happens depends on the engine
+    /// and optimization level; it decides no program outcome.
+    Stack,
 }
 
 /// A completed entry's status: the legacy 0/1 pair or an explicit unsigned byte code.

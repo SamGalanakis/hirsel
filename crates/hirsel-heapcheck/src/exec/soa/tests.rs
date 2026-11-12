@@ -20,9 +20,6 @@ fn variant_rows_read_their_payload_only_through_the_tagged_arm() {
         layouts,
         units: vec![],
         statics: vec![],
-        invocations: Default::default(),
-        invocation_bodies: Vec::new(),
-        pretransfer_adapters: Vec::new(),
     };
     let config = Config::default();
     let mut ops = NoOperations;

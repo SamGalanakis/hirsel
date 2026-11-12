@@ -1419,7 +1419,7 @@ impl<S: Stage> Editor<S> {
             if let Terminator::Call { call, .. } = term {
                 call_used[call.index()] = true;
             }
-            for f in term.failure_edges(&self.unit.tables) {
+            if let Some(f) = term.failure() {
                 failure_used[f.index()] = true;
             }
             for e in Terminator::normal_edges(term, &self.unit.pools) {
@@ -1546,7 +1546,6 @@ impl<S: Stage> Editor<S> {
             .enumerate()
             .filter(|(call, _)| call_used[*call])
             .map(|(_, mut call)| {
-                call.pretransfer_failure = call.pretransfer_failure.map(fm);
                 call.arguments = PoolRange::push(
                     &mut self.unit.pools.call_arguments,
                     call.arguments
@@ -1572,7 +1571,7 @@ impl<S: Stage> Editor<S> {
 /// Every edge a terminator names, normal ones first, then its failure cleanup.
 pub(crate) fn terminator_edges<S: Stage>(unit: &LirUnit<S>, term: &Terminator) -> Vec<EdgeId> {
     let mut out = Terminator::normal_edges(term, &unit.pools);
-    for f in term.failure_edges(&unit.tables) {
+    if let Some(f) = term.failure() {
         out.push(unit.tables.failures[f.index()].cleanup);
     }
     out
@@ -1796,21 +1795,12 @@ impl Element for SlotState {
 /// structure with the states they were cloned from (`PVec`). Credits are
 /// exact: a valid unit agrees on them at every join, so a join keeps the
 /// first.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Invocation {
-    Inactive,
-    Active(SourceAnchorId),
-    Ambiguous,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct State {
     pub slots: PVec<SlotState>,
     pub loans: PVec<Tri>,
     pub regions: PVec<Tri>,
     pub credits: BTreeMap<ValueId, u32>,
-    /// The call admission to retire before failure cleanup releases caller storage.
-    pub invocation: Invocation,
 }
 
 impl State {
@@ -1820,20 +1810,15 @@ impl State {
             loans,
             regions,
             credits,
-            invocation,
         } = self;
         slots.state_eq(&other.slots)
             && loans.state_eq(&other.loans)
             && regions.state_eq(&other.regions)
             && credits == &other.credits
-            && invocation == &other.invocation
     }
 
     #[cfg(feature = "testing")]
     fn reference_join(&mut self, other: &Self) {
-        if self.invocation != other.invocation {
-            self.invocation = Invocation::Ambiguous;
-        }
         for i in 0..self.slots.len() {
             self.slots[i].join(&other.slots[i]);
         }
@@ -1846,9 +1831,6 @@ impl State {
     }
 
     fn join(&mut self, other: &State) {
-        if self.invocation != other.invocation {
-            self.invocation = Invocation::Ambiguous;
-        }
         self.slots.join(&other.slots, SlotState::join);
         self.loans.join(&other.loans, |x, y| *x = x.join(*y));
         self.regions.join(&other.regions, |x, y| *x = x.join(*y));
@@ -1934,7 +1916,6 @@ impl<S: Stage> Flow<'_, S> {
             })
             .collect();
         State {
-            invocation: Invocation::Inactive,
             slots,
             loans: unit.tables.loans.iter().map(|_| Tri::No).collect(),
             regions: unit.tables.regions.iter().map(|_| Tri::No).collect(),
@@ -1970,7 +1951,7 @@ impl<S: Stage> Flow<'_, S> {
                         .map(|e| unit.tables.edges[e.index()].target),
                 );
                 out.extend(
-                    term.failure_edges(&unit.tables)
+                    term.failure()
                         .into_iter()
                         .filter(|&f| f != PENDING_FAILURE)
                         .map(target),
@@ -2204,9 +2185,6 @@ impl<S: Stage> Flow<'_, S> {
                 normal,
                 failure,
             } => {
-                if let Some(rejected) = unit.tables.calls[call.index()].pretransfer_failure {
-                    outs.push(self.failure(rejected, st.clone()));
-                }
                 for a in call_arguments(unit, call) {
                     match a.value {
                         ArgumentValue::Value(v) if a.passing == Passing::Take => {
@@ -2459,9 +2437,6 @@ impl<S: Stage> Flow<'_, S> {
             | Inst::ArenaInventory { .. }
             | Inst::RegionPublish { .. }
             | Inst::FinalizeBegin { .. } => {}
-            Inst::FrameEnter { failure } =>
-                st.invocation = Invocation::Active(unit.tables.failures[failure.index()].anchor),
-            Inst::FrameLeave => st.invocation = Invocation::Inactive,
             Inst::FinalizeEnd { address, .. } | Inst::Defuse { address } => {
                 self.fields_pending(st, address);
                 if let Some((slot, _)) = self.place(address) {
@@ -2951,7 +2926,7 @@ impl<S: Stage> Flow<'_, S> {
     fn exit_live(&self, live: &SlotLiveness, b: BlockId) -> SlotSet {
         let mut set = live.live_out[b.index()].clone();
         let term = &self.unit.terminators[b.index()];
-        for f in term.failure_edges(&self.unit.tables) {
+        if let Some(f) = term.failure() {
             set.union(&self.failure_needs(live, f));
         }
         for s in self.terminator_uses(term) {
@@ -3155,21 +3130,13 @@ fn synthesize_failure_reporting<S: Stage, const TRACE: bool>(
     let (body, site) = anchor_site(unit, at);
     // Build the chain back to front: each link's failure continues with the
     // rest of the chain, as a cleanup operation finishes before failing.
-    let active = match state.invocation {
-        Invocation::Inactive => None,
-        Invocation::Active(anchor) => Some(anchor),
-        Invocation::Ambiguous => return None,
-    };
-    let tail = match shared
-        .as_deref()
-        .and_then(|s| s.tails.get(&active).copied())
-    {
+    let tail = match shared.as_deref().and_then(|s| s.tail) {
         Some(tail) => tail,
         None => {
             let tail = ed.block(BlockKind::FailureCleanup, &[], at);
             ed.unit.terminators[tail.index()] = Terminator::Propagate;
             if let Some(s) = shared.as_deref_mut() {
-                s.tails.insert(active, tail);
+                s.tail = Some(tail);
             }
             tail
         }
@@ -3297,16 +3264,6 @@ fn synthesize_failure_reporting<S: Stage, const TRACE: bool>(
             },
         );
     }
-    if active.is_some() {
-        // The failed preparation belongs to the admitted call. Retire it
-        // before releasing caller storage: a resource drop can enter a source
-        // finalizer, which requires its own independent admission.
-        let retired = ed.block(BlockKind::FailureCleanup, &[], at);
-        ed.code[retired.index()].push(Inst::FrameLeave);
-        let edge = ed.edge(next, &[]);
-        ed.unit.terminators[retired.index()] = Terminator::Jump(edge);
-        next = retired;
-    }
     let head = ed.edge(next, &[]);
     Some(ed.failure(head, at))
 }
@@ -3321,7 +3278,7 @@ fn synthesize_failure_reporting<S: Stage, const TRACE: bool>(
 /// the anchor site of the release that first needed it.
 #[derive(Default)]
 pub(crate) struct SharedChains {
-    tails: BTreeMap<Option<SourceAnchorId>, BlockId>,
+    tail: Option<BlockId>,
     links: HashMap<(SharedLink, BlockId), BlockId>,
 }
 
@@ -3481,10 +3438,7 @@ fn split_cleanups(
             } else {
                 Vec::new()
             };
-            match groups
-                .iter_mut()
-                .find(|(k, members)| *k == key && members[0].1.invocation == state.invocation)
-            {
+            match groups.iter_mut().find(|(k, _)| *k == key) {
                 Some((_, members)) => members.push((e, state)),
                 None => groups.push((key, vec![(e, state)])),
             }
@@ -4603,9 +4557,7 @@ pub(crate) fn remap_values<S>(unit: &mut LirUnit<S>, map: &impl Fn(ValueId) -> V
             | Inst::Defuse { .. }
             | Inst::FinalizeBegin { .. }
             | Inst::FinalizeEnd { .. }
-            | Inst::FrameEnter { .. }
             | Inst::Address { .. }
-            | Inst::FrameLeave
             | Inst::Unavailable { .. } => {}
         }
     }
@@ -4621,7 +4573,6 @@ pub(crate) fn remap_values<S>(unit: &mut LirUnit<S>, map: &impl Fn(ValueId) -> V
             | Terminator::Return(None)
             | Terminator::Raise(_)
             | Terminator::Propagate
-            | Terminator::RejectTransfer
             | Terminator::Unreachable
             | Terminator::InvariantFault { .. } => {}
         }

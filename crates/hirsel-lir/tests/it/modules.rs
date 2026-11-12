@@ -5,7 +5,6 @@ mod operation_abi;
 mod projection_proofs;
 mod schema;
 mod validation_context;
-mod logical_depth_31;
 mod receipt_calls_33;
 mod receipt_pairing_33;
 mod receipt_layout_33;

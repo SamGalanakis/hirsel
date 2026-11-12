@@ -169,26 +169,6 @@ function bodies are [CT-5](compile-time.md#ct-5-generation), and conditional let
   destructors, recoverable mutex poisoning, per-task heap budgets, and manual freeing of
   ordinary values outside `Unsafe`.
 
-## Deterministic depth revision
-
-The depth semantics identity is `hirsel.depth.invocations.v2` (2026-10-25). It specifies
-[LANG-10](language.md#lang-10-recursion)'s 1,024 foreground invocations, which leaf
-operations do not add to,
-[FAIL-3](failure.md#fail-3-what-runs)'s independent 64 cleanup invocations and
-[MEM-3](memory.md#mem-3-freeing)'s 1,088 logical structural edges, with the root at zero.
-This revision replaces the unfinished frame-byte promise and visited-only structural
-depth controls. Artifact validation and recording identities bind this semantic revision;
-artifacts and recordings made under the former rule, or without the revision, are refused
-with an explicit incompatible depth-semantics diagnostic. They are never reinterpreted.
-There is no rollout flag. Bounded-arena charges remain independently normative under
-[MEM-6](memory.md#mem-6-bounded-arenas).
-
-Only the language activation and logical structural-depth rules produce comparable
-Depth outcomes. Evaluator guards, proof/checker traversal limits, host resource budgets,
-physical-stack guards and scratch-allocation failures do not become Depth because an
-implementation could not complete an operation. An incomplete engine cell is not a
-language failure, successful agreement, or evidence that the source is invalid.
-
 ## Unspecified
 
 These contracts are deliberately open. Implementations report them as unresolved rather

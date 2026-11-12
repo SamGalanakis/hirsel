@@ -226,7 +226,6 @@ impl UnitInputs<'_> {
             crate::INTERFACE_VERSION.to_le_bytes().to_vec(),
             crate::LIR_VERSION.to_le_bytes().to_vec(),
             crate::VALIDATOR_VERSION.to_le_bytes().to_vec(),
-            hirsel_core_contract::depth::SEMANTICS.as_bytes().to_vec(),
             (closure.layouts.len() as u64).to_le_bytes().to_vec(),
         ];
         for id in closure.layouts {
@@ -728,68 +727,6 @@ fn check_with_context<S: Stage>(
     }
     let facts = structure::check(&cx, &mut report);
     if let Some(facts) = facts.filter(|_| report.0.is_empty()) {
-        for result in [
-            crate::pretransfer::check_edges(
-                unit,
-                inputs.layouts,
-                inputs.operations.pretransfer_adapters(),
-            ),
-            crate::pretransfer::check_adapter(
-                unit,
-                inputs.layouts,
-                inputs.operations.pretransfer_adapters(),
-            )
-            .map(|_| ()),
-        ] {
-            if let Err(error) = result {
-                report.add(Site::UNIT, ViolationKind::Schema(error));
-            }
-        }
-        if unit.header.origin == crate::ir::UnitOrigin::Library {
-            if let Err(error) = crate::invocations::check_library_with_layouts(
-                unit,
-                inputs.operations,
-                inputs.layouts,
-            ) {
-                report.add(Site::UNIT, ViolationKind::Schema(error));
-            }
-        }
-        if let Some(reference) = inputs.operations.invocations(&unit.header.definition) {
-            let selected = inputs
-                .operations
-                .invocation_body(&unit.header.definition, unit.header.instance)
-                .ok_or_else(|| "independent source body selection is missing".to_owned());
-            if let Err(error) = selected.and_then(|body| {
-                crate::invocations::check_with_layouts(
-                    unit,
-                    reference,
-                    body,
-                    inputs.operations,
-                    inputs.layouts,
-                )
-            }) {
-                report.add(Site::UNIT, ViolationKind::Schema(error));
-            }
-        }
-        if unit.header.origin == crate::ir::UnitOrigin::Source
-            && inputs.operations.requires_invocation_reference()
-            && inputs
-                .operations
-                .invocations(&unit.header.definition)
-                .is_none()
-        {
-            report.add(
-                Site::UNIT,
-                ViolationKind::Schema("source invocation reference is missing".into()),
-            );
-        }
-        if unit.header.origin == crate::ir::UnitOrigin::Source
-            && inputs.operations.requires_structural_reference()
-        {
-            if let Err(error) = crate::structural_access::check_key_order(unit) {
-                report.add(Site::UNIT, ViolationKind::Schema(error));
-            }
-        }
         sealed::check(&cx, &facts, &mut report);
         sealed_payload::check(&cx, &mut report);
         receipt_custody::check(&cx, &mut report);

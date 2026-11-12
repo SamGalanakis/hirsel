@@ -6,7 +6,7 @@
 
 use crate::TaskCtx;
 use crate::alloc::Header;
-use crate::release::{Finalizer, LAYOUT_IMPLEMENTATION_FINALIZER, LAYOUT_UNSAFE_FFI};
+use crate::release::{Finalizer, LAYOUT_UNSAFE_FFI};
 use crate::stop::Stopped;
 use crate::tasks::registry::TaskKey;
 use crate::{STATUS_FAILURE, STATUS_OK, STATUS_SUSPENDED};
@@ -22,11 +22,7 @@ pub(crate) enum Poll {
 
 enum Stage {
     New,
-    Active {
-        work: *mut Header,
-        shield: u32,
-        admissions: usize,
-    },
+    Active { work: *mut Header, shield: u32 },
     Complete,
 }
 
@@ -82,28 +78,6 @@ impl Driver {
             "stale finalizer task"
         );
         if matches!(self.stage, Stage::New) {
-            let flags = unsafe { (*self.token.layout).flags };
-            if flags & LAYOUT_IMPLEMENTATION_FINALIZER == 0 {
-                let Some(activation) = (unsafe { &mut (*ctx).activations }).admit_finalizer()
-                else {
-                    let rejections = unsafe { &mut (*ctx).cleanup_rejections };
-                    *rejections = rejections
-                        .checked_add(1)
-                        .expect("finalizer rejection overflow");
-                    crate::failure::record_runtime(
-                        ctx,
-                        "LANG-10",
-                        self.token.anchor,
-                        self.token.operation_site,
-                    );
-                    if flags & LAYOUT_UNSAFE_FFI != 0 {
-                        super::terminate_unsafe_ffi();
-                    }
-                    self.stage = Stage::Complete;
-                    return Ok(Poll::Complete(STATUS_FAILURE));
-                };
-                unsafe { (*ctx).cleanup_invocations.push(activation) };
-            }
             let shield = unsafe { (*ctx).shield };
             unsafe {
                 (*ctx).shield = shield.checked_add(1).expect("finalizer shield overflow");
@@ -112,15 +86,9 @@ impl Driver {
             self.stage = Stage::Active {
                 work: unsafe { (*ctx).work },
                 shield,
-                admissions: unsafe { (*ctx).cleanup_invocations.len() },
             };
         }
-        let Stage::Active {
-            work,
-            shield,
-            admissions,
-        } = self.stage
-        else {
+        let Stage::Active { work, shield } = self.stage else {
             panic!("completed finalizer polled");
         };
         // The borrowed role is local to this one call. Its guard and Segment
@@ -160,11 +128,6 @@ impl Driver {
                     unsafe { (*ctx).shield },
                     shield + 1,
                     "unbalanced nested finalizer shield"
-                );
-                assert_eq!(
-                    unsafe { (*ctx).cleanup_invocations.len() },
-                    admissions,
-                    "unretired nested finalizer admission"
                 );
                 unsafe {
                     (*ctx).shield = shield;

@@ -670,11 +670,7 @@ pub const ENTRIES: &[Entry] = &[
     entry("hirsel_rt_v2_block_grow", Local),
     entry("hirsel_rt_v2_payload", Local),
     entry("hirsel_rt_v2_capacity", Local),
-    // depth.rs: semantic counters belong exclusively to the running task.
-    entry("hirsel_rt_v2_depth_enter", Local),
-    entry("hirsel_rt_v2_depth_enter_at_site", Local),
-    entry("hirsel_rt_v2_depth_leave", Local),
-    entry("hirsel_rt_v2_depth_preflight", Local),
+    // codec/value_access.rs: structural walkers over the task's own values.
     entry("hirsel_rt_v2_structural_order", Local),
     entry("hirsel_rt_v2_structural_hash", Local),
     // budget.rs
@@ -1115,21 +1111,6 @@ pub const INLINE: &[Inline] = &[
         word: "CTX_HEAP_ID_OFFSET",
         locality: Local,
         effect: "inline free's owner check: a block of another worker's heap goes to the runtime",
-    },
-    Inline {
-        word: "CTX_FOREGROUND_COUNT_OFFSET",
-        locality: Local,
-        effect: "a depth-leaf call's read-only room test of the task's foreground depth",
-    },
-    Inline {
-        word: "CTX_CLEANUP_COUNT_OFFSET",
-        locality: Local,
-        effect: "a depth-leaf call's read-only room test of the task's cleanup depth",
-    },
-    Inline {
-        word: "CTX_CLEANUP_MODE_OFFSET",
-        locality: Local,
-        effect: "a depth-leaf call's read-only test of the task's finalizer nesting",
     },
     Inline {
         word: "COUNT_OFFSET",

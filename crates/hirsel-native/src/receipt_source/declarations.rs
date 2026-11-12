@@ -104,16 +104,6 @@ impl OperationDeclarations for ReceiptDeclarations<'_> {
         self.ordinary
             .seal_descriptor_for_source(definition, instance, source, table, target)
     }
-    fn pretransfer_adapters(&self) -> &[hirsel_lir::pretransfer::AdapterReference] {
-        self.ordinary.pretransfer_adapters()
-    }
-    fn pretransfer_abi(
-        &self,
-        reference: &hirsel_lir::pretransfer::AdapterReference,
-        target: &TargetSpec,
-    ) -> Option<(FnAbi, LayoutTable)> {
-        self.ordinary.pretransfer_abi(reference, target)
-    }
 
     fn requires_structural_reference(&self) -> bool {
         self.ordinary.requires_structural_reference()

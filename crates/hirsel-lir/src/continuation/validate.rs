@@ -145,7 +145,7 @@ impl Live {
         for e in term.normal_edges(&u.pools) {
             out.extend(self.edge(u, e));
         }
-        for f in term.failure_edges(&u.tables) {
+        if let Some(f) = term.failure() {
             out.extend(self.failure(u, f));
         }
         out
@@ -277,7 +277,7 @@ fn storage_before_instruction(
                 (slots.clone(), loans.clone()),
             ));
         }
-        for f in term.failure_edges(&u.tables) {
+        if let Some(f) = term.failure() {
             let t = u.tables.edges[u.tables.failures[f.index()].cleanup.index()].target;
             leaving.push((t, (slots.clone(), loans.clone())));
         }
@@ -347,7 +347,7 @@ fn root_slot(u: &LirUnit<Ready>, address: AddressId) -> Option<SlotId> {
 /// place of one local slot whose layout is the parameter's non-owning scalar
 /// layout, held at an aligned offset of this frame's storage while the call
 /// runs, and the only active loan reaching that slot must be the argument's,
-/// mutable. A direct call without a pretransfer gate only.
+/// mutable. A direct call only.
 #[allow(clippy::too_many_arguments)]
 fn exclusive_proof(
     u: &LirUnit<Ready>,
@@ -369,7 +369,7 @@ fn exclusive_proof(
         return None;
     };
     let site = u.tables.calls.get(call.index())?;
-    if at != call || site.pretransfer_failure.is_some() {
+    if at != call {
         return None;
     }
     let Callee::Direct(_) = site.callee else {
@@ -1293,7 +1293,7 @@ pub struct ResultCleanupProof {
 }
 
 /// Final-frame certificate of one ahead root, separate from the ordinary
-/// entry's frames. Helpers are (startup, getter, handoff, depth-leaf) bytes.
+/// entry's frames. Helpers are (startup, getter, handoff) bytes.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct AheadCertificate {
     pub kind: AheadKind,
@@ -1302,7 +1302,7 @@ pub struct AheadCertificate {
     pub ordinary_symbol: String,
     pub ahead_symbol: String,
     pub final_frames: FrameDag,
-    pub helpers: [u64; 4],
+    pub helpers: [u64; 3],
     pub max_stack_bytes: u32,
     pub caller: CallerProof,
     pub result: ResultCleanupProof,
@@ -1397,7 +1397,7 @@ impl AheadCertificate {
         plans: &ContinuationPlans,
         root: ContentHash,
         evidence: &MachineEvidence,
-        helpers: [u64; 4],
+        helpers: [u64; 3],
     ) -> Option<Self> {
         let r = plan.roots.get(&root)?;
         let symbol = plan.symbols.get(&root)?;
@@ -1463,16 +1463,10 @@ impl AheadCertificate {
             }
             frames.insert(*id, *bytes);
         }
-        let [startup, getter, handoff, depth] = self.helpers;
-        let bound = crate::ahead::stack_bound_with_depth(
-            &r.graph,
-            &frames,
-            startup,
-            getter,
-            r.handoff_bytes(handoff),
-            depth,
-        )
-        .ok_or("frame bound")?;
+        let [startup, getter, handoff] = self.helpers;
+        let bound =
+            crate::ahead::stack_bound(&r.graph, &frames, startup, getter, r.handoff_bytes(handoff))
+                .ok_or("frame bound")?;
         if bound != u64::from(self.max_stack_bytes)
             || bound > crate::ahead::MAX_STACK_BYTES
             || !evidence.bounds.contains(&(self.root, bound))

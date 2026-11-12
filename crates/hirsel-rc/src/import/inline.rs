@@ -332,7 +332,6 @@ impl Inline for Importer<'_> {
         let call = CallId(self.out.tables.calls.len() as u32);
         self.out.tables.calls.push(CallSite {
             receipts: None,
-            pretransfer_failure: None,
             forward_caller: true,
             operation_arguments: Vec::new(),
             callee: Callee::Direct(symbol),

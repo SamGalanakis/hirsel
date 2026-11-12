@@ -12,9 +12,6 @@ pub struct AccessPlan {
     pub root: Id,
     pub nodes: Vec<N>,
     pub logical_nodes: Vec<u32>,
-    /// Logical child-edge cost of each physical access. Representation
-    /// unwrapping costs zero; a distinct payload costs one even when empty.
-    pub edges: Vec<u8>,
 }
 
 snapshot_struct!(AccessPlan {
@@ -22,8 +19,7 @@ snapshot_struct!(AccessPlan {
     graph,
     root,
     nodes,
-    logical_nodes,
-    edges
+    logical_nodes
 });
 
 impl AccessPlan {
@@ -69,11 +65,7 @@ impl AccessPlan {
             return Err("structural access root outside graph".into());
         }
         let expected = Builder::new(&self.graph, table).build(self.root_layout())?;
-        if self.root != expected.0
-            || self.nodes != expected.1
-            || self.edges != expected.2
-            || self.logical_nodes != expected.3
-        {
+        if self.root != expected.0 || self.nodes != expected.1 || self.logical_nodes != expected.2 {
             return Err("physical access differs from logical graph and layouts".into());
         }
         Ok(())
@@ -109,14 +101,13 @@ impl AccessPlan {
         table: &LayoutTable,
         root: LayoutId,
     ) -> Result<Self, String> {
-        let (root, nodes, edges, logical_nodes) = Builder::new(&graph, table).build(root)?;
+        let (root, nodes, logical_nodes) = Builder::new(&graph, table).build(root)?;
         Ok(Self {
             source,
             graph,
             root,
             nodes,
             logical_nodes,
-            edges,
         })
     }
 }
@@ -125,7 +116,6 @@ struct Builder<'a> {
     graph: &'a ShapeGraph,
     table: &'a LayoutTable,
     nodes: Vec<N>,
-    edges: Vec<u8>,
     logical_nodes: Vec<u32>,
     known: BTreeMap<(u32, LayoutId), Id>,
     pending: Vec<(u32, LayoutId, Id)>,
@@ -136,7 +126,6 @@ impl<'a> Builder<'a> {
             graph,
             table,
             nodes: vec![],
-            edges: vec![],
             logical_nodes: vec![],
             known: BTreeMap::new(),
             pending: vec![],
@@ -157,20 +146,17 @@ impl<'a> Builder<'a> {
             layout,
             fields: vec![],
         });
-        self.edges.push(0);
         self.logical_nodes.push(s);
         self.pending.push((s, layout, id));
         id
     }
-    fn build(mut self, layout: LayoutId) -> Result<(Id, Vec<N>, Vec<u8>, Vec<u32>), String> {
+    fn build(mut self, layout: LayoutId) -> Result<(Id, Vec<N>, Vec<u32>), String> {
         self.graph.check().map_err(str::to_owned)?;
         let root = self.node(self.graph.root, layout);
         while let Some((s, layout, id)) = self.pending.pop() {
-            let (node, edge) = self.describe(s, layout)?;
-            self.nodes[id.index()] = node;
-            self.edges[id.index()] = edge;
+            self.nodes[id.index()] = self.describe(s, layout)?;
         }
-        Ok((root, self.nodes, self.edges, self.logical_nodes))
+        Ok((root, self.nodes, self.logical_nodes))
     }
     fn field(&self, l: LayoutId, n: u32) -> Result<LayoutId, String> {
         self.record(l)?
@@ -203,27 +189,21 @@ impl<'a> Builder<'a> {
             _ => false,
         })
     }
-    fn describe(&mut self, s: u32, l: LayoutId) -> Result<(N, u8), String> {
+    fn describe(&mut self, s: u32, l: LayoutId) -> Result<N, String> {
         let r = self.record(l)?;
         if let K::Block { payload } = r.kind
             && self.record(payload)?.kind == K::Flat
         {
-            return Ok((
-                N::Box {
-                    layout: l,
-                    payload: self.node(s, payload),
-                },
-                0,
-            ));
+            return Ok(N::Box {
+                layout: l,
+                payload: self.node(s, payload),
+            });
         }
         if let K::Frozen { value } = r.kind {
-            return Ok((
-                N::Fields {
-                    layout: l,
-                    fields: vec![self.node(s, value)],
-                },
-                0,
-            ));
+            return Ok(N::Fields {
+                layout: l,
+                fields: vec![self.node(s, value)],
+            });
         }
         let shape = self.graph.nodes[s as usize].clone();
         if r.kind == K::Flat
@@ -232,71 +212,55 @@ impl<'a> Builder<'a> {
             && field.offset == 8
             && matches!(r.size, crate::layout_types::SizeSpec::Dynamic(_))
         {
-            return Ok((
-                N::Framed {
-                    layout: l,
-                    value: self.node(s, field.layout),
-                },
-                0,
-            ));
+            return Ok(N::Framed {
+                layout: l,
+                value: self.node(s, field.layout),
+            });
         }
         Ok(match shape {
-            Shape::Leaf => (
-                match r.kind {
-                    // A handle leaf is read as its u64 word: an `ordered of`
-                    // token's ticks or ordinal (SEM-5), or a boundary capability's
-                    // ID in transport. Comparing or hashing one is gated by the
-                    // validator (`Layouts::comparable`), not here.
-                    K::Scalar(_) | K::Handle => N::Scalar(l),
-                    K::Path => N::Path(l),
-                    K::Flat => N::FlatText {
-                        layout: l,
-                        utf8: false,
-                    },
-                    K::Slice { element } => {
-                        let storage = self
-                            .table
-                            .layouts
-                            .iter()
-                            .position(|r| r.kind == K::Sequence { element })
-                            .ok_or("text storage missing")?;
-                        N::Text {
-                            layout: l,
-                            storage: LayoutId(storage as u32),
-                            utf8: false,
-                        }
-                    }
-                    _ => return Err("non-leaf physical representation for logical leaf".into()),
+            Shape::Leaf => match r.kind {
+                // A handle leaf is read as its u64 word: an `ordered of`
+                // token's ticks or ordinal (SEM-5), or a boundary capability's
+                // ID in transport. Comparing or hashing one is gated by the
+                // validator (`Layouts::comparable`), not here.
+                K::Scalar(_) | K::Handle => N::Scalar(l),
+                K::Path => N::Path(l),
+                K::Flat => N::FlatText {
+                    layout: l,
+                    utf8: false,
                 },
-                0,
-            ),
+                K::Slice { element } => {
+                    let storage = self
+                        .table
+                        .layouts
+                        .iter()
+                        .position(|r| r.kind == K::Sequence { element })
+                        .ok_or("text storage missing")?;
+                    N::Text {
+                        layout: l,
+                        storage: LayoutId(storage as u32),
+                        utf8: false,
+                    }
+                }
+                _ => return Err("non-leaf physical representation for logical leaf".into()),
+            },
             Shape::Transparent(child) | Shape::Distinct(child) => {
-                let edge = u8::from(matches!(self.graph.nodes[s as usize], Shape::Distinct(_)));
                 if matches!(r.kind, K::Shared { .. }) {
-                    (
-                        N::Box {
-                            layout: l,
-                            payload: self.node(child, self.payload(l)?),
-                        },
-                        0,
-                    )
+                    N::Box {
+                        layout: l,
+                        payload: self.node(child, self.payload(l)?),
+                    }
                 } else if self.flattened(child, l)? {
-                    (
-                        N::Checked {
-                            layout: l,
-                            check: 0,
-                            value: self.node(child, l),
-                        },
-                        edge,
-                    )
+                    N::Checked {
+                        layout: l,
+                        check: 0,
+                        value: self.node(child, l),
+                    }
                 } else {
-                    (
-                        N::Fields {
-                            layout: l,
-                            fields: vec![self.node(child, self.field(l, 0)?)],
-                        },
-                        edge,
-                    )
+                    N::Fields {
+                        layout: l,
+                        fields: vec![self.node(child, self.field(l, 0)?)],
+                    }
                 }
             }
             Shape::Fields(children) => {
@@ -308,7 +272,7 @@ impl<'a> Builder<'a> {
                     .enumerate()
                     .map(|(n, s)| Ok(self.node(s, self.field(l, n as u32)?)))
                     .collect::<Result<_, String>>()?;
-                (N::Fields { layout: l, fields }, 1)
+                N::Fields { layout: l, fields }
             }
             Shape::Variant(children) => {
                 let tag = r.tag.as_ref().ok_or("logical variant lacks physical tag")?;
@@ -339,30 +303,21 @@ impl<'a> Builder<'a> {
                     }
                     arms.push(fields);
                 }
-                (N::Variant { layout: l, arms }, 1)
+                N::Variant { layout: l, arms }
             }
-            Shape::Box(child) => (
-                N::Box {
-                    layout: l,
-                    payload: self.node(child, self.payload(l)?),
-                },
-                1,
-            ),
+            Shape::Box(child) => N::Box {
+                layout: l,
+                payload: self.node(child, self.payload(l)?),
+            },
             Shape::Sequence(child) => match r.kind {
-                K::Inline { element, .. } | K::Simd { element, .. } => (
-                    N::Repeat {
-                        layout: l,
-                        element: self.node(child, element),
-                    },
-                    1,
-                ),
-                K::Flat => (
-                    N::Sequence {
-                        layout: l,
-                        element: self.node(child, self.field(l, 0)?),
-                    },
-                    1,
-                ),
+                K::Inline { element, .. } | K::Simd { element, .. } => N::Repeat {
+                    layout: l,
+                    element: self.node(child, element),
+                },
+                K::Flat => N::Sequence {
+                    layout: l,
+                    element: self.node(child, self.field(l, 0)?),
+                },
                 _ => {
                     let payload = self.record(self.payload(l)?)?;
                     let element = match payload.kind {
@@ -371,13 +326,10 @@ impl<'a> Builder<'a> {
                         | K::SoaColumns { element } => element,
                         _ => return Err("logical sequence lacks physical storage".into()),
                     };
-                    (
-                        N::Sequence {
-                            layout: l,
-                            element: self.node(child, element),
-                        },
-                        1,
-                    )
+                    N::Sequence {
+                        layout: l,
+                        element: self.node(child, element),
+                    }
                 }
             },
             Shape::Map { key, .. } | Shape::Set(key) => {
@@ -401,185 +353,17 @@ impl<'a> Builder<'a> {
                     .layout;
                 let k = self.node(key, self.field(entry, 0)?);
                 match value {
-                    Some(value) => (
-                        N::Map {
-                            layout: l,
-                            key: k,
-                            value: self.node(value, self.field(entry, 1)?),
-                        },
-                        1,
-                    ),
-                    None => (
-                        N::Set {
-                            layout: l,
-                            element: k,
-                        },
-                        1,
-                    ),
+                    Some(value) => N::Map {
+                        layout: l,
+                        key: k,
+                        value: self.node(value, self.field(entry, 1)?),
+                    },
+                    None => N::Set {
+                        layout: l,
+                        element: k,
+                    },
                 }
             }
         })
     }
-}
-
-/// A keyed primitive's preflight must occur after admission, before the first
-/// taken actual, and read the actual key's caller storage. Canonical operation
-/// identity comes from the call's independently checked declaration.
-pub fn check_key_order<S: crate::stage::Stage>(unit: &crate::ir::LirUnit<S>) -> Result<(), String> {
-    use crate::ir::*;
-    fn origin<S>(
-        unit: &LirUnit<S>,
-        mut value: ValueId,
-    ) -> Option<(AddressBase, Vec<ProjectionStep>)> {
-        for _ in 0..=unit.values.len() {
-            let instruction = unit
-                .instructions
-                .iter()
-                .find(|inst| inst.defs().contains(&value))?;
-            match *instruction {
-                Inst::Read { address, .. } | Inst::Copy { address, .. } => {
-                    let info = unit.addresses.get(address.index())?;
-                    return Some((
-                        info.base,
-                        info.projection.get(&unit.pools.projections)?.to_vec(),
-                    ));
-                }
-                Inst::Weaken { value: input, .. } | Inst::CopyValue { value: input, .. } => {
-                    value = input
-                }
-                _ => return None,
-            }
-        }
-        None
-    }
-    // RC may split a prefix to detach an aliased container. This independent
-    // must-analysis retains only facts proved on every path, including each
-    // instruction's failure edge before its successful effect.
-    #[derive(Clone, Default, Eq, PartialEq)]
-    struct Gate {
-        admitted: bool,
-        transferred: bool,
-        keys: Vec<(AddressBase, Vec<ProjectionStep>)>,
-    }
-    let edge = |id: EdgeId| {
-        unit.tables
-            .edges
-            .get(id.index())
-            .map(|edge| edge.target)
-            .ok_or("keyed edge outside table")
-    };
-    let failure_edge = |id: FailureId| {
-        unit.tables
-            .failures
-            .get(id.index())
-            .ok_or("keyed failure outside table")
-            .and_then(|failure| edge(failure.cleanup))
-    };
-    let mut incoming = BTreeMap::from([(unit.entry, Gate::default())]);
-    let mut pending = std::collections::VecDeque::from([unit.entry]);
-    while let Some(block_id) = pending.pop_front() {
-        let mut gate = incoming[&block_id].clone();
-        let block = unit
-            .blocks
-            .get(block_id.index())
-            .ok_or("keyed block outside table")?;
-        let mut outgoing = Vec::new();
-        for instruction in block
-            .instructions
-            .get(&unit.instructions)
-            .ok_or("keyed instruction range outside table")?
-        {
-            if let Some(failure) = instruction.failure() {
-                outgoing.push((failure_edge(failure)?, gate.clone()));
-            }
-            match instruction {
-                Inst::FrameEnter { .. } => {
-                    gate = Gate {
-                        admitted: true,
-                        ..Gate::default()
-                    }
-                }
-                Inst::FrameLeave => gate = Gate::default(),
-                Inst::Read {
-                    mode: ReadMode::Take,
-                    ..
-                } => gate.transferred = true,
-                Inst::Hash { value, .. } if gate.admitted && !gate.transferred => {
-                    if let Some(storage) = origin(unit, *value) {
-                        if !gate.keys.contains(&storage) {
-                            gate.keys.push(storage);
-                        }
-                    }
-                }
-                _ => (),
-            }
-        }
-        let terminator = &unit.terminators[block_id.index()];
-        if let Terminator::Call { call, .. } = *terminator {
-            let call = unit
-                .tables
-                .calls
-                .get(call.index())
-                .ok_or("keyed call outside table")?;
-            let definition = match call.callee {
-                Callee::Operation(operation) => Some(
-                    &unit
-                        .tables
-                        .operations
-                        .get(operation.index())
-                        .ok_or("keyed primitive declaration outside table")?
-                        .definition,
-                ),
-                Callee::Direct(symbol) | Callee::Bound { code: symbol, .. } => Some(
-                    &unit
-                        .tables
-                        .symbols
-                        .get(symbol.index())
-                        .ok_or("keyed library symbol outside table")?
-                        .definition,
-                ),
-                Callee::Indirect(_) => None,
-            };
-            if definition.is_some_and(|definition| {
-                ["map.insert", "set.insert", "map.get", "set.contains"]
-                    .iter()
-                    .any(|name| definition.is_core(name))
-            }) {
-                let key = call
-                    .arguments
-                    .get(&unit.pools.call_arguments)
-                    .and_then(|args| args.iter().find(|a| a.parameter == 1))
-                    .ok_or("keyed primitive lacks key actual")?;
-                let ArgumentValue::Value(value) = key.value else {
-                    return Err("key is not a value actual".into());
-                };
-                let storage =
-                    origin(unit, value).ok_or("key actual has no attributable caller storage")?;
-                if !gate.admitted || !gate.keys.contains(&storage) {
-                    return Err("key preflight is missing or follows argument transfer".into());
-                }
-            }
-        }
-        for id in terminator.normal_edges(&unit.pools) {
-            outgoing.push((edge(id)?, gate.clone()));
-        }
-        for id in terminator.failure_edges(&unit.tables) {
-            outgoing.push((failure_edge(id)?, gate.clone()));
-        }
-        for (target, state) in outgoing {
-            if let Some(previous) = incoming.get_mut(&target) {
-                let before = previous.clone();
-                previous.admitted &= state.admitted;
-                previous.transferred |= state.transferred;
-                previous.keys.retain(|key| state.keys.contains(key));
-                if *previous != before {
-                    pending.push_back(target);
-                }
-            } else {
-                incoming.insert(target, state);
-                pending.push_back(target);
-            }
-        }
-    }
-    Ok(())
 }

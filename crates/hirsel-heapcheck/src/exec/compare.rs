@@ -1,8 +1,7 @@
 //! `Inst::Compare` over ledger values: the interpreter's structural order
 //! (`hirsel_interp::structural::compare`, reimplemented here because this crate
 //! never depends on the interpreter) read from layouts. Pairs are visited depth
-//! first in field order and the first unequal pair decides. Complete logical
-//! admission is audited independently before these physical value walks.
+//! first in field order and the first unequal pair decides.
 
 use super::*;
 use std::cmp::Ordering;
@@ -17,7 +16,7 @@ pub(super) enum At<'e> {
 /// One step of a comparison: a pair to compare, or two sequences' lengths,
 /// decided once their common elements are equal.
 enum Item<'e> {
-    Pair(At<'e>, At<'e>, LayoutId, u64),
+    Pair(At<'e>, At<'e>, LayoutId),
     Lengths(u64, u64),
 }
 
@@ -31,14 +30,13 @@ impl At<'_> {
 }
 
 impl<S: Stage> Machine<'_, S> {
-    /// The structural order of `a` and `b` of `layout`; `Ok(None)` is unordered,
-    /// `Err(LangFailure)` the Depth failure.
+    /// The structural order of `a` and `b` of `layout`; `None` is unordered.
     pub(super) fn structural_order(
         &self,
         a: &Val,
         b: &Val,
         layout: LayoutId,
-    ) -> Checked<Result<Option<Ordering>, LangFailure>> {
+    ) -> Checked<Option<Ordering>> {
         let mut work: Vec<Item<'_>> = Vec::new();
         match (a, b, &self.record(layout)?.kind) {
             (
@@ -51,19 +49,19 @@ impl<S: Stage> Machine<'_, S> {
                     bits: b,
                 },
                 LayoutKind::Path,
-            ) => return Ok(Ok(Some(self.path_order(*a as u64, *b as u64)?))),
-            (Val::Unit, Val::Unit, LayoutKind::Unit) => return Ok(Ok(Some(Ordering::Equal))),
+            ) => return Ok(Some(self.path_order(*a as u64, *b as u64)?)),
+            (Val::Unit, Val::Unit, LayoutKind::Unit) => return Ok(Some(Ordering::Equal)),
             // SEM-5: an `ordered of` token orders by its unsigned word.
-            (Val::Word(a), Val::Word(b), LayoutKind::Handle) => return Ok(Ok(Some(a.cmp(b)))),
+            (Val::Word(a), Val::Word(b), LayoutKind::Handle) => return Ok(Some(a.cmp(b))),
             (
                 Val::Ptr(pa),
                 Val::Ptr(pb),
                 LayoutKind::Block { payload } | LayoutKind::Box { payload },
             ) => {
-                self.block(At::Heap(*pa), At::Heap(*pb), *payload, 0, &mut work)?;
+                self.block(At::Heap(*pa), At::Heap(*pb), *payload, &mut work)?;
             }
             (Val::Image(x), Val::Image(y), _) => {
-                work.push(Item::Pair(At::Image(x, 0), At::Image(y, 0), layout, 0));
+                work.push(Item::Pair(At::Image(x, 0), At::Image(y, 0), layout));
             }
             (a, b, kind) => {
                 return fail(
@@ -88,16 +86,13 @@ impl<S: Stage> Machine<'_, S> {
             .ok_or_else(|| err(V::Malformed, "unknown Path ID"))?;
         Ok(a.as_bytes().cmp(b.as_bytes()))
     }
-    fn order_work(
-        &self,
-        mut work: Vec<Item<'_>>,
-    ) -> Checked<Result<Option<Ordering>, LangFailure>> {
+    fn order_work(&self, mut work: Vec<Item<'_>>) -> Checked<Option<Ordering>> {
         while let Some(item) = work.pop() {
-            let (x, y, layout, depth) = match item {
-                Item::Pair(x, y, layout, depth) => (x, y, layout, depth),
+            let (x, y, layout) = match item {
+                Item::Pair(x, y, layout) => (x, y, layout),
                 Item::Lengths(l, r) => match l.cmp(&r) {
                     Ordering::Equal => continue,
-                    other => return Ok(Ok(Some(other))),
+                    other => return Ok(Some(other)),
                 },
             };
             let record = self.record(layout)?;
@@ -105,12 +100,7 @@ impl<S: Stage> Machine<'_, S> {
                 let mut sorted: Vec<_> = fields.iter().collect();
                 sorted.sort_by_key(|f| f.ordinal);
                 for f in sorted.into_iter().rev() {
-                    work.push(Item::Pair(
-                        x.at(f.offset),
-                        y.at(f.offset),
-                        f.layout,
-                        depth + 1,
-                    ));
+                    work.push(Item::Pair(x.at(f.offset), y.at(f.offset), f.layout));
                 }
             };
             match &record.kind {
@@ -118,14 +108,14 @@ impl<S: Stage> Machine<'_, S> {
                     let order =
                         self.path_order(self.bits_at(x, 8)? as u64, self.bits_at(y, 8)? as u64)?;
                     if order != Ordering::Equal {
-                        return Ok(Ok(Some(order)));
+                        return Ok(Some(order));
                     }
                 }
                 LayoutKind::Unit => {}
                 LayoutKind::Handle => {
                     let order = self.bits_at(x, 8)?.cmp(&self.bits_at(y, 8)?);
                     if order != Ordering::Equal {
-                        return Ok(Ok(Some(order)));
+                        return Ok(Some(order));
                     }
                 }
                 LayoutKind::Scalar(kind) => {
@@ -135,7 +125,7 @@ impl<S: Stage> Machine<'_, S> {
                     let order = scalar::order(*kind, l, r).map_err(|m| err(V::TypeConfusion, m))?;
                     match order {
                         Some(Ordering::Equal) => {}
-                        other => return Ok(Ok(other)),
+                        other => return Ok(other),
                     }
                 }
                 LayoutKind::Aggregate => children(&record.fields),
@@ -149,7 +139,7 @@ impl<S: Stage> Machine<'_, S> {
                         self.tag_at(y.at(tag.offset), tag.form)?,
                     );
                     if l != r {
-                        return Ok(Ok(Some(l.cmp(&r))));
+                        return Ok(Some(l.cmp(&r)));
                     }
                     let variant = tag
                         .variants
@@ -168,20 +158,15 @@ impl<S: Stage> Machine<'_, S> {
                     let (element, count) = (&element, &count);
                     let stride = self.size(*element)?;
                     for i in (0..*count).rev() {
-                        work.push(Item::Pair(
-                            x.at(i * stride),
-                            y.at(i * stride),
-                            *element,
-                            depth + 1,
-                        ));
+                        work.push(Item::Pair(x.at(i * stride), y.at(i * stride), *element));
                     }
                 }
                 LayoutKind::Block { payload } | LayoutKind::Box { payload } => {
                     let (l, r) = (self.ptr_at(x)?, self.ptr_at(y)?);
-                    self.block(At::Heap(l), At::Heap(r), *payload, depth, &mut work)?;
+                    self.block(At::Heap(l), At::Heap(r), *payload, &mut work)?;
                 }
-                // String and Bytes: bytewise, a proper prefix first, with no depth below
-                // the value (as emission's comparator reads them).
+                // String and Bytes: bytewise, a proper prefix first (as emission's
+                // comparator reads them).
                 LayoutKind::Slice { element } => {
                     if self.size(*element)? != 1 {
                         return fail(V::Unsupported, "structural comparison of a wide slice");
@@ -192,7 +177,7 @@ impl<S: Stage> Machine<'_, S> {
                     let r = self.slice_content(ey, oy, layout)?;
                     match l.cmp(&r) {
                         Ordering::Equal => {}
-                        other => return Ok(Ok(Some(other))),
+                        other => return Ok(Some(other)),
                     }
                 }
                 LayoutKind::Opaque { owner }
@@ -261,17 +246,12 @@ impl<S: Stage> Machine<'_, S> {
                     }
                     if owner.0.name == "Set" {
                         // SEM-5, #93: structural sorted element order.
-                        let mut language_failure = false;
                         let mut invariant = None;
                         let mut compare = |a: &At<'_>, b: &At<'_>| match self
-                            .order_work(vec![Item::Pair(*a, *b, element, depth + 1)])
+                            .order_work(vec![Item::Pair(*a, *b, element)])
                         {
-                            Ok(Ok(Some(order))) => order,
-                            Ok(Err(_)) => {
-                                language_failure = true;
-                                Ordering::Equal
-                            }
-                            Ok(Ok(None)) => {
+                            Ok(Some(order)) => order,
+                            Ok(None) => {
                                 invariant = Some(err(V::TypeConfusion, "unordered Set key"));
                                 Ordering::Equal
                             }
@@ -285,22 +265,19 @@ impl<S: Stage> Machine<'_, S> {
                         if let Some(error) = invariant {
                             return Err(error);
                         }
-                        if language_failure {
-                            return Ok(Err(LangFailure));
-                        }
                     }
                     for (x, y) in xs.into_iter().zip(ys) {
-                        match self.order_work(vec![Item::Pair(x, y, element, depth + 1)])? {
-                            Ok(Some(Ordering::Equal)) => {}
+                        match self.order_work(vec![Item::Pair(x, y, element)])? {
+                            Some(Ordering::Equal) => {}
                             other => return Ok(other),
                         }
                     }
                     if xc != yc {
-                        return Ok(Ok(Some(xc.cmp(&yc))));
+                        return Ok(Some(xc.cmp(&yc)));
                     }
                 }
                 LayoutKind::Sequence { .. } => {
-                    self.block(x, y, layout, depth, &mut work)?;
+                    self.block(x, y, layout, &mut work)?;
                 }
                 LayoutKind::Packed
                 | LayoutKind::Sequential { .. }
@@ -330,22 +307,17 @@ impl<S: Stage> Machine<'_, S> {
                 }
             }
         }
-        Ok(Ok(Some(Ordering::Equal)))
+        Ok(Some(Ordering::Equal))
     }
 
     /// `Inst::Hash`: a hash of `value` at `layout` that equal values (by
     /// `Compare Eq`) share. Its bits are unobservable and need not agree
     /// with compiled code (SEM-5: a hash decides placement only), so this
     /// is a plain FNV-1a fold of the scalar leaves in layout order, with
-    /// `-0.0` folded as `+0.0`. `Err(LangFailure)` is the MEM-3 Depth
-    /// failure, at the depth `structural_order` fails a pair.
-    pub(super) fn structural_hash(
-        &self,
-        value: &Val,
-        layout: LayoutId,
-    ) -> Checked<Result<u64, LangFailure>> {
+    /// `-0.0` folded as `+0.0`.
+    pub(super) fn structural_hash(&self, value: &Val, layout: LayoutId) -> Checked<u64> {
         let at = match value {
-            Val::Unit => return Ok(Ok(0xcbf2_9ce4_8422_2325)),
+            Val::Unit => return Ok(0xcbf2_9ce4_8422_2325),
             Val::Bits { scalar, bits } => {
                 return self.hash_bits(*scalar, *bits);
             }
@@ -355,31 +327,21 @@ impl<S: Stage> Machine<'_, S> {
                 else {
                     return fail(V::TypeConfusion, "hash pointer layout");
                 };
-                return self.hash_work(vec![(
-                    At::Heap(*p),
-                    payload,
-                    u64::from(!matches!(
-                        self.record(payload)?.kind,
-                        LayoutKind::Sequence { .. } | LayoutKind::Opaque { .. }
-                    )),
-                )]);
+                return self.hash_work(vec![(At::Heap(*p), payload)]);
             }
             Val::Image(image) => At::Image(image, 0),
             value => return fail(V::TypeConfusion, format!("hash {value:?}")),
         };
-        self.hash_work(vec![(at, layout, 0)])
+        self.hash_work(vec![(at, layout)])
     }
-    fn hash_bits(&self, scalar: ScalarKind, bits: u128) -> Checked<Result<u64, LangFailure>> {
+    fn hash_bits(&self, scalar: ScalarKind, bits: u128) -> Checked<u64> {
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
         for b in hash_leaf(scalar, bits).to_le_bytes() {
             hash = (hash ^ u64::from(b)).wrapping_mul(0x100000001b3);
         }
-        Ok(Ok(hash))
+        Ok(hash)
     }
-    fn hash_work(
-        &self,
-        mut work: Vec<(At<'_>, LayoutId, u64)>,
-    ) -> Checked<Result<u64, LangFailure>> {
+    fn hash_work(&self, mut work: Vec<(At<'_>, LayoutId)>) -> Checked<u64> {
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
         let mut fold = |bytes: &[u8]| {
             for b in bytes {
@@ -387,7 +349,7 @@ impl<S: Stage> Machine<'_, S> {
             }
         };
         // Depth first in layout order: children are pushed in reverse.
-        while let Some((at, layout, depth)) = work.pop() {
+        while let Some((at, layout)) = work.pop() {
             let record = self.record(layout)?;
             let children = |fields: &[hirsel_lir::layout_types::FieldLayout]| {
                 let mut sorted: Vec<_> = fields
@@ -408,19 +370,19 @@ impl<S: Stage> Machine<'_, S> {
                 }
                 LayoutKind::Aggregate => {
                     for (_, offset, layout) in children(&record.fields) {
-                        work.push((at.at(offset), layout, depth + 1));
+                        work.push((at.at(offset), layout));
                     }
                 }
                 LayoutKind::Inline { element, count } => {
                     let stride = self.size(element)?;
                     for i in (0..count).rev() {
-                        work.push((at.at(i * stride), element, depth + 1));
+                        work.push((at.at(i * stride), element));
                     }
                 }
                 LayoutKind::Simd { element, lanes } => {
                     let stride = self.size(element)?;
                     for i in (0..u64::from(lanes)).rev() {
-                        work.push((at.at(i * stride), element, depth + 1));
+                        work.push((at.at(i * stride), element));
                     }
                 }
                 LayoutKind::Variant => {
@@ -436,16 +398,12 @@ impl<S: Stage> Machine<'_, S> {
                         .find(|v| v.ordinal == active)
                         .ok_or_else(|| err(V::Malformed, "unknown variant"))?;
                     for (_, offset, layout) in children(&variant.fields) {
-                        work.push((at.at(offset), layout, depth + 1));
+                        work.push((at.at(offset), layout));
                     }
                 }
                 LayoutKind::Block { payload } | LayoutKind::Box { payload } => {
                     let target = self.ptr_at(at)?;
-                    work.push((
-                        At::Heap(target),
-                        payload,
-                        self.payload_depth(payload, depth)?,
-                    ));
+                    work.push((At::Heap(target), payload));
                 }
                 LayoutKind::Sequence { element } => {
                     let count = self.bits_at(at, 8)? as u64;
@@ -454,7 +412,7 @@ impl<S: Stage> Machine<'_, S> {
                         .map_err(|_| err(V::Malformed, "a sequence element offset"))?;
                     let stride = self.size(element)?;
                     for i in (0..count).rev() {
-                        work.push((at.at(start + i * stride), element, depth + 1));
+                        work.push((at.at(start + i * stride), element));
                     }
                 }
                 LayoutKind::Slice { .. } => {
@@ -495,14 +453,10 @@ impl<S: Stage> Machine<'_, S> {
                             if self.tag_at(entry.at(tag.offset), tag.form)? != 1 {
                                 continue;
                             }
-                            let Ok(child) = self.hash_work(vec![(
+                            let child = self.hash_work(vec![(
                                 entry.at(pair.offset + key.offset),
                                 key.layout,
-                                depth + 1,
-                            )])?
-                            else {
-                                return Ok(Err(LangFailure));
-                            };
+                            )])?;
                             combined = combined.wrapping_add(child);
                         }
                         fold(&combined.to_le_bytes());
@@ -521,7 +475,7 @@ impl<S: Stage> Machine<'_, S> {
                         for i in (0..count).rev() {
                             let entry = At::Heap(entries.at(start + i * stride));
                             if self.tag_at(entry.at(tag.offset), tag.form)? == 1 {
-                                work.push((entry.at(pair.offset), pair.layout, depth + 1));
+                                work.push((entry.at(pair.offset), pair.layout));
                             }
                         }
                     }
@@ -549,38 +503,21 @@ impl<S: Stage> Machine<'_, S> {
                 }
             }
         }
-        Ok(Ok(hash))
+        Ok(hash)
     }
 
-    /// The depth a hash walks `payload` at, held by a value at `depth`: a
-    /// Box's payload one level deeper; a sequence's at the value's own, so
-    /// its elements are one level deeper, as `block` compares them.
-    fn payload_depth(&self, payload: LayoutId, depth: u64) -> Checked<u64> {
-        Ok(match self.record(payload)?.kind {
-            LayoutKind::Sequence { .. } | LayoutKind::Opaque { .. } => depth,
-            _ => depth + 1,
-        })
-    }
-
-    /// The pairs of two blocks of `payload` held by a value at `depth`, as
-    /// emission's comparator reads them: a Box's payload one level deeper;
-    /// a List's or Array's common elements one level deeper in order, then
-    /// their lengths, a proper prefix first.
+    /// The pairs of two blocks of `payload`, as emission's comparator reads
+    /// them: a Box's payload; a List's or Array's common elements in order,
+    /// then their lengths, a proper prefix first.
     fn block<'e>(
         &self,
         x: At<'e>,
         y: At<'e>,
         payload: LayoutId,
-        depth: u64,
         work: &mut Vec<Item<'e>>,
     ) -> Checked<()> {
         let LayoutKind::Sequence { element } = self.record(payload)?.kind else {
-            work.push(Item::Pair(
-                x,
-                y,
-                payload,
-                self.payload_depth(payload, depth)?,
-            ));
+            work.push(Item::Pair(x, y, payload));
             return Ok(());
         };
         let (l, r) = (self.bits_at(x, 8)? as u64, self.bits_at(y, 8)? as u64);
@@ -590,7 +527,7 @@ impl<S: Stage> Machine<'_, S> {
         work.push(Item::Lengths(l, r));
         for i in (0..l.min(r)).rev() {
             let at = start + i * stride;
-            work.push(Item::Pair(x.at(at), y.at(at), element, depth + 1));
+            work.push(Item::Pair(x.at(at), y.at(at), element));
         }
         Ok(())
     }

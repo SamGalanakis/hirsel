@@ -1,49 +1,12 @@
-//! Complete logical-depth admission before iterative structural reads (MEM-3).
+//! Iterative structural equality, order and hashing (MEM-3).
 use crate::{
     Value,
     scalar::{self, ScalarError},
 };
 use hirsel_syntax::BinaryOp;
 use std::cmp::Ordering;
-pub const NATIVE_DEPTH: usize = 64;
-pub const SCRATCH_LEVELS: usize = 1024;
-pub const MAX_DEPTH: usize = hirsel_core_contract::depth::STRUCTURAL_LIMIT as usize;
-
-/// A complete operand preflight: no scalar, tag, length or pointer shortcut may
-/// hide an excessive path. Map entries are storage pairs, not logical nodes.
-pub fn preflight(value: &Value) -> Result<(), StructuralError> {
-    let mut pending = vec![(value, 0usize)];
-    while let Some((value, depth)) = pending.pop() {
-        if depth > MAX_DEPTH {
-            return Err(StructuralError::Depth);
-        }
-        if let Value::Map { entries, .. } = value {
-            for entry in entries.iter().flatten() {
-                let Value::Tuple(fields) = entry else {
-                    return Err(StructuralError::InvalidValue);
-                };
-                for field in fields {
-                    pending.push((
-                        field.as_ref().ok_or(StructuralError::InvalidValue)?,
-                        depth + 1,
-                    ));
-                }
-            }
-        } else if let Some(fields) = children(value) {
-            for field in fields {
-                if let Some(field) = field {
-                    pending.push((field, depth + 1));
-                } else if !matches!(value, Value::Set { .. }) {
-                    return Err(StructuralError::InvalidValue);
-                }
-            }
-        }
-    }
-    Ok(())
-}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StructuralError {
-    Depth,
     InvalidValue,
 }
 fn children(v: &Value) -> Option<&[Option<Value>]> {
@@ -83,21 +46,18 @@ fn identity(a: &Value, b: &Value) -> Result<Ordering, StructuralError> {
 }
 /// None is IEEE unordered; language equality never uses Rust bit equality.
 pub fn compare(a: &Value, b: &Value) -> Result<Option<Ordering>, StructuralError> {
-    preflight(a)?;
-    preflight(b)?;
-    compare_at(a, b, 0, false)
+    compare_at(a, b, false)
 }
 fn compare_at(
     a: &Value,
     b: &Value,
-    initial_depth: usize,
     equality_only: bool,
 ) -> Result<Option<Ordering>, StructuralError> {
     enum Work<'a> {
-        Pair(&'a Value, &'a Value, usize),
+        Pair(&'a Value, &'a Value),
         Length(usize, usize),
     }
-    let mut work = vec![Work::Pair(a, b, initial_depth)];
+    let mut work = vec![Work::Pair(a, b)];
     while let Some(w) = work.pop() {
         match w {
             Work::Length(a, b) => {
@@ -105,10 +65,7 @@ fn compare_at(
                     return Ok(Some(a.cmp(&b)));
                 }
             }
-            Work::Pair(a, b, depth) => {
-                if depth > MAX_DEPTH {
-                    return Err(StructuralError::Depth);
-                }
+            Work::Pair(a, b) => {
                 // SEM-5: an `ordered of` token (an Instant's ticks, a Level's
                 // `authority * 256 + ordinal` word) orders by its unsigned word. The
                 // checker established one domain, so no identity check happens here.
@@ -144,7 +101,7 @@ fn compare_at(
                     // Canonical encoding proves equality even for hand-built
                     // heterogeneous sets; its byte order is not structural order.
                     if equality_only {
-                        let order = encoding(a, depth)?.cmp(&encoding(b, depth)?);
+                        let order = encoding(a)?.cmp(&encoding(b)?);
                         if order != Ordering::Equal {
                             return Ok(Some(order));
                         }
@@ -156,13 +113,10 @@ fn compare_at(
                     else {
                         unreachable!()
                     };
-                    fn canonical(
-                        fields: &[Option<Value>],
-                        depth: usize,
-                    ) -> Result<Vec<&Value>, StructuralError> {
+                    fn canonical(fields: &[Option<Value>]) -> Result<Vec<&Value>, StructuralError> {
                         let mut values: Vec<_> = fields.iter().filter_map(Option::as_ref).collect();
                         let mut failure = None;
-                        values.sort_by(|a, b| match compare_at(a, b, depth + 1, false) {
+                        values.sort_by(|a, b| match compare_at(a, b, false) {
                             Ok(Some(order)) => order,
                             Ok(None) => {
                                 failure = Some(StructuralError::InvalidValue);
@@ -178,11 +132,10 @@ fn compare_at(
                         }
                         Ok(values)
                     }
-                    let (ac, bc) = (canonical(ac, depth)?, canonical(bc, depth)?);
+                    let (ac, bc) = (canonical(ac)?, canonical(bc)?);
                     let mut order = Ordering::Equal;
                     for (a, b) in ac.iter().zip(&bc) {
-                        order = compare_at(a, b, depth + 1, false)?
-                            .ok_or(StructuralError::InvalidValue)?;
+                        order = compare_at(a, b, false)?.ok_or(StructuralError::InvalidValue)?;
                         if order != Ordering::Equal {
                             break;
                         }
@@ -210,7 +163,6 @@ fn compare_at(
                         work.push(Work::Pair(
                             a.as_ref().ok_or(StructuralError::InvalidValue)?,
                             b.as_ref().ok_or(StructuralError::InvalidValue)?,
-                            depth + usize::from(!keyed),
                         ));
                     }
                     work[first..].reverse();
@@ -238,9 +190,7 @@ fn compare_at(
     Ok(Some(Ordering::Equal))
 }
 pub fn binary(op: BinaryOp, a: &Value, b: &Value) -> Result<Value, StructuralError> {
-    preflight(a)?;
-    preflight(b)?;
-    let order = compare_at(a, b, 0, matches!(op, BinaryOp::Eq | BinaryOp::Ne))?;
+    let order = compare_at(a, b, matches!(op, BinaryOp::Eq | BinaryOp::Ne))?;
     use BinaryOp::*;
     Ok(Value::Bool(match op {
         Eq => order == Some(Ordering::Equal),
@@ -254,19 +204,18 @@ pub fn binary(op: BinaryOp, a: &Value, b: &Value) -> Result<Value, StructuralErr
 }
 /// Stable length-framed encoding, using SipHash-1-3. Equal keys hash identically.
 pub fn hash(value: &Value, seed: u64) -> Result<u64, StructuralError> {
-    preflight(value)?;
     Ok(hirsel_kernels::siphash::siphash13(
-        &encoding(value, 0)?,
+        &encoding(value)?,
         seed,
         0,
     ))
 }
-fn encoding(value: &Value, depth: usize) -> Result<Vec<u8>, StructuralError> {
+fn encoding(value: &Value) -> Result<Vec<u8>, StructuralError> {
     enum Work<'a> {
-        Enter(&'a Value, usize),
+        Enter(&'a Value),
         Finish(Vec<u8>, usize, bool),
     }
-    let mut work = vec![Work::Enter(value, depth)];
+    let mut work = vec![Work::Enter(value)];
     let mut output: Vec<Vec<u8>> = Vec::new();
     while let Some(item) = work.pop() {
         match item {
@@ -281,10 +230,7 @@ fn encoding(value: &Value, depth: usize) -> Result<Vec<u8>, StructuralError> {
                 }
                 output.push(prefix);
             }
-            Work::Enter(v, d) => {
-                if d > MAX_DEPTH {
-                    return Err(StructuralError::Depth);
-                }
+            Work::Enter(v) => {
                 let tag = match v {
                     Value::Unit => 0,
                     Value::Bool(_) => 1,
@@ -338,7 +284,6 @@ fn encoding(value: &Value, depth: usize) -> Result<Vec<u8>, StructuralError> {
                     for f in fields.iter().rev().filter(|v| !keyed || v.is_some()) {
                         work.push(Work::Enter(
                             f.as_ref().ok_or(StructuralError::InvalidValue)?,
-                            d + usize::from(!matches!(v, Value::Map { .. })),
                         ));
                     }
                 } else {

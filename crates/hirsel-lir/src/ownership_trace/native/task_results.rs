@@ -92,7 +92,7 @@ pub fn task_result_call<S>(
     let Callee::Operation(operation) = call.callee else {
         return None;
     };
-    if call.pretransfer_failure.is_some() || call.result.is_some() {
+    if call.result.is_some() {
         return None;
     }
     let definition = &unit.tables.operations.get(operation.index())?.definition;
@@ -399,7 +399,7 @@ mod tests {
             let binding = task_result_call(&unit, &table, call).unwrap();
             assert_eq!(binding.direction, direction);
             assert_eq!(binding.layout, LayoutId(3));
-            for mutation in 0..6 {
+            for mutation in 0..5 {
                 let mut forged = unit.clone();
                 let arguments = &mut forged.pools.call_arguments;
                 match mutation {
@@ -412,13 +412,12 @@ mod tests {
                         }]
                         .passing = Passing::Borrow
                     }
-                    2 => forged.tables.calls[0].pretransfer_failure = Some(FailureId(0)),
-                    3 => forged.tables.calls[0].result = Some(ValueId(0)),
-                    4 => {
+                    2 => forged.tables.calls[0].result = Some(ValueId(0)),
+                    3 => {
                         forged.tables.operations[0].definition =
                             hirsel_syntax::DefPath::core("$intrinsic.Other")
                     }
-                    5 => arguments[1].passing = Passing::Mut,
+                    4 => arguments[1].passing = Passing::Mut,
                     _ => unreachable!(),
                 }
                 assert!(

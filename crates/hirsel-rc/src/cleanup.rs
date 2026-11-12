@@ -312,7 +312,6 @@ fn lower_reporting<S: Stage, R: Reporter>(
         inserted: Vec::new(),
         prepared: Vec::new(),
         flags: BTreeMap::new(),
-        retire_flags: BTreeMap::new(),
         drop_at: BlockId(0),
         drop_source: None,
         staged: None,
@@ -488,17 +487,8 @@ fn retie_versions(ed: &mut Editor<Ready>, facts: &Facts, lay: Lay<'_>) {
                 for edge in Terminator::normal_edges(term, &ed.unit.pools) {
                     record(edge, post);
                 }
-                for failure in term.failure_edges(&ed.unit.tables) {
-                    let state = if let Terminator::Call { call, .. } = term {
-                        if ed.unit.tables.calls[call.index()].pretransfer_failure == Some(failure) {
-                            pre
-                        } else {
-                            post
-                        }
-                    } else {
-                        post
-                    };
-                    record(ed.unit.tables.failures[failure.index()].cleanup, state);
+                if let Some(failure) = term.failure() {
+                    record(ed.unit.tables.failures[failure.index()].cleanup, post);
                 }
             }
         });
@@ -763,19 +753,8 @@ impl VersionInputs {
                     for edge in term.normal_edges(&ed.unit.pools) {
                         record(edge, i, post);
                     }
-                    for failure in term.failure_edges(&ed.unit.tables) {
-                        let state = if let Terminator::Call { call, .. } = term {
-                            if ed.unit.tables.calls[call.index()].pretransfer_failure
-                                == Some(failure)
-                            {
-                                pre
-                            } else {
-                                post
-                            }
-                        } else {
-                            post
-                        };
-                        record(ed.unit.tables.failures[failure.index()].cleanup, i, state);
+                    if let Some(failure) = term.failure() {
+                        record(ed.unit.tables.failures[failure.index()].cleanup, i, post);
                     }
                 }
             });
@@ -1467,9 +1446,6 @@ enum Action {
         fields: Vec<Action>,
     },
     /// An intact variant containing inline finalizers needs an active-arm plan.
-    Retire {
-        slot: SlotId,
-    },
     Variant {
         path: Vec<Step>,
         layout: LayoutId,
@@ -1497,7 +1473,6 @@ struct Lowering<'e, 'a, R: Reporter> {
     inserted: Vec<(BlockId, usize)>,
     prepared: Vec<(SlotId, Vec<Step>, AddressId)>,
     flags: BTreeMap<Vec<Step>, ValueId>,
-    retire_flags: BTreeMap<(SlotId, Vec<Step>), (SlotId, AddressId, ValueId)>,
     /// The block of the drop being lowered.
     drop_at: BlockId,
     drop_source: Option<AddressId>,
@@ -1825,21 +1800,12 @@ impl<R: Reporter> Lowering<'_, '_, R> {
                 fields,
             } = action
             {
-                let source = self
-                    .finalizers
-                    .0
-                    .get(layout)
-                    .is_some_and(|f| f.origin == hirsel_lir::ir::UnitOrigin::Source);
-                let guard = source.then(|| self.retire_flag(site, path)).transpose()?;
                 out.push(Action::Finalize {
                     path: path.clone(),
                     layout: *layout,
                     fields: vec![],
                 });
                 self.flatten(fields, site, out)?;
-                if let Some((slot, _, _)) = guard {
-                    out.push(Action::Retire { slot });
-                }
             } else {
                 out.push(action.clone());
             }
@@ -1870,74 +1836,6 @@ impl<R: Reporter> Lowering<'_, '_, R> {
             self.inserted_at(self.ed.unit.entry, insertion);
         }
         address
-    }
-
-    fn retire_flag(
-        &mut self,
-        site: &Site,
-        path: &[Step],
-    ) -> Result<(SlotId, AddressId, ValueId), PassError> {
-        let key = (site.slot, path.to_vec());
-        if let Some(&flag) = self.retire_flags.get(&key) {
-            return Ok(flag);
-        }
-        let layout = self
-            .index
-            .scalar(hirsel_lir::layout_types::ScalarKind::Bool)
-            .ok_or_else(|| PassError::Malformed("finalizer retirement needs bool layout".into()))?;
-        let ty = type_of(
-            &mut self.ed.unit,
-            ValueRepr::Scalar(hirsel_lir::layout_types::ScalarKind::Bool),
-            layout,
-        );
-        let slot = SlotId(self.ed.unit.slots.len() as u32);
-        self.ed.unit.slots.push(hirsel_lir::ir::SlotInfo {
-            ty,
-            kind: hirsel_lir::ir::SlotKind::Temporary,
-            scope: self.ed.unit.slots[site.slot.index()].scope,
-        });
-        let address = self.whole(slot);
-        let reaching = self.ed.value(ty, Holding::Plain);
-        let flag = (slot, address, reaching);
-        self.retire_flags.insert(key, flag);
-        Ok(flag)
-    }
-
-    fn store_retirement_flag(
-        &mut self,
-        at: BlockId,
-        flag: (SlotId, AddressId, ValueId),
-        value: bool,
-    ) {
-        let ty = self.ed.unit.slots[flag.0.index()].ty;
-        let constant = hirsel_lir::ir::ConstantId(self.ed.unit.tables.constants.len() as u32);
-        self.ed
-            .unit
-            .tables
-            .constants
-            .push(hirsel_lir::ir::ConstantData {
-                ty,
-                value: hirsel_lir::ir::ConstantValue::Bool(value),
-            });
-        let result = self.ed.value(ty, Holding::Plain);
-        let version = self.ed.value(ty, Holding::Plain);
-        if value {
-            let old = self.ed.value(ty, Holding::Plain);
-            self.ed.code[at.index()].push(Inst::Read {
-                result: old,
-                address: flag.1,
-                reaching: flag.2,
-                mode: ReadMode::Take,
-            });
-        }
-        self.ed.code[at.index()].extend([
-            Inst::Const { result, constant },
-            Inst::Store {
-                address: flag.1,
-                value: result,
-                version,
-            },
-        ]);
     }
 
     /// The edge into chain position `j`: the next chain block, or the drop's
@@ -2018,37 +1916,6 @@ impl<R: Reporter> Lowering<'_, '_, R> {
                 let end = self.sequence(full, actions, &inner)?;
                 self.ed.unit.terminators[end.index()] = Terminator::Jump(self.ed.edge(joined, &[]));
                 self.prepared.truncate(base);
-                Ok(joined)
-            }
-            Action::Retire { slot } => {
-                let (_, address, reaching) = self
-                    .retire_flags
-                    .values()
-                    .find(|(candidate, _, _)| candidate == slot)
-                    .copied()
-                    .unwrap();
-                let ty = self.ed.unit.slots[slot.index()].ty;
-                let condition = self.ed.value(ty, Holding::Plain);
-                self.ed.code[at.index()].push(Inst::Read {
-                    result: condition,
-                    address,
-                    reaching,
-                    mode: ReadMode::Bits,
-                });
-                let block = &self.ed.unit.blocks[at.index()];
-                let (kind, anchor) = (block.kind, block.anchor);
-                let retire = self.ed.block(kind, &[], anchor);
-                let joined = self.ed.block(kind, &[], anchor);
-                let yes = self.ed.edge(retire, &[]);
-                let no = self.ed.edge(joined, &[]);
-                self.ed.unit.terminators[at.index()] = Terminator::Branch { condition, yes, no };
-                self.ed.code[retire.index()].push(Inst::FrameLeave);
-                self.ed.unit.terminators[retire.index()] =
-                    Terminator::Jump(self.ed.edge(joined, &[]));
-                self.ed.code[joined.index()].push(Inst::StorageDead {
-                    slot: *slot,
-                    if_live: false,
-                });
                 Ok(joined)
             }
             Action::EmptyVariant { path, layout } => {
@@ -2188,8 +2055,6 @@ impl<R: Reporter> Lowering<'_, '_, R> {
                 let anchor = self.ed.unit.blocks[at.index()].anchor;
                 let normal = self.ed.block(kind, &[], anchor);
                 let failed = self.ed.block(BlockKind::FailureCleanup, &[], anchor);
-                let rejected =
-                    (!mutable).then(|| self.ed.block(BlockKind::FailureCleanup, &[], anchor));
                 for b in [normal, failed] {
                     let code = &mut self.ed.code[b.index()];
                     if let Some(loan) = loan {
@@ -2208,33 +2073,6 @@ impl<R: Reporter> Lowering<'_, '_, R> {
                 // the remaining fields are released after it, in the chain.
                 let rest = fail(self, ());
                 let rest = self.ed.unit.tables.failures[rest.index()].clone();
-                if let Some(rejected) = rejected {
-                    if let Some(loan) = loan {
-                        self.ed.code[rejected.index()].push(Inst::EndLoan {
-                            loan,
-                            if_active: false,
-                        });
-                    }
-                    self.ed.code[rejected.index()].push(Inst::FinalizeEnd {
-                        address,
-                        anchor: site.anchor,
-                    });
-                    let cleanup = extended(self.ed, rest.cleanup, &[]);
-                    self.ed.unit.terminators[rejected.index()] = Terminator::Jump(cleanup);
-                    let cleanup = self.ed.edge(rejected, &[]);
-                    let failure = FailureId(self.ed.unit.tables.failures.len() as u32);
-                    self.ed.unit.tables.failures.push(FailureEdge {
-                        cleanup,
-                        rule: Some("LANG-10".into()),
-                        anchor: self.ed.unit.tables.calls[call.index()].anchor,
-                        dispose: rest.dispose,
-                    });
-                    let flag = self.retire_flag(site, path)?;
-                    self.ed.code[at.index()].push(Inst::StorageLive { slot: flag.0 });
-                    self.store_retirement_flag(at, flag, false);
-                    self.ed.code[at.index()].push(Inst::FrameEnter { failure });
-                    self.store_retirement_flag(at, flag, true);
-                }
                 let into_failed = self.ed.edge(failed, &[]);
                 let call_failure = FailureId(self.ed.unit.tables.failures.len() as u32);
                 self.ed.unit.tables.failures.push(FailureEdge {
@@ -2640,7 +2478,7 @@ impl<R: Reporter> Lowering<'_, '_, R> {
             }
             let (path, layout) = match action {
                 Action::Conditional { .. } => continue,
-                Action::EmptyVariant { .. } | Action::Retire { .. } => continue,
+                Action::EmptyVariant { .. } => continue,
                 Action::Release { path, layout, .. }
                 | Action::Finalize { path, layout, .. }
                 | Action::Variant { path, layout }
@@ -2788,7 +2626,6 @@ impl<R: Reporter> Lowering<'_, '_, R> {
         let id = CallId(self.ed.unit.tables.calls.len() as u32);
         self.ed.unit.tables.calls.push(CallSite {
             receipts: None,
-            pretransfer_failure: None,
             forward_caller: true,
             operation_arguments: Vec::new(),
             callee: Callee::Direct(symbol),

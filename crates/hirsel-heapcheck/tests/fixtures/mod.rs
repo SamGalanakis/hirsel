@@ -216,9 +216,6 @@ pub fn program<S: Stage>(
         structural::attach(unit, &table);
     }
     Program {
-        invocations: Default::default(),
-        invocation_bodies: Vec::new(),
-        pretransfer_adapters: Vec::new(),
         target,
         layouts: table,
         units,

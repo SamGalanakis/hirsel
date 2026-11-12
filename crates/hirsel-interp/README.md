@@ -128,11 +128,9 @@ is reported before the next scheduled operation and still runs cleanup. Goto/Bra
 on those edges runs no current-frame actions, then unwinds suspended calls.
 Depth counts the root frame; an over-limit callee is entered, then fails at its
 first scheduled site, so transferred arguments are covered by its emitted entry
-cleanup. At most one over-limit frame is allocated. These local adapter policies
-are provisional under [#34](https://github.com/SamGalanakis/hirsel-lang/issues/34):
-Revision 1 classifies these as ToolingLimitKind::Steps/CallDepth with no RuleId;
-trace and outcome distinguish them from language failures. A logical-frame-byte limit is future
-work, distinct from the required call-depth host-stack safeguard.
+cleanup. At most one over-limit frame is allocated. Both are
+ToolingLimitKind::Steps/CallDepth with no RuleId: the language has no depth limit
+(LANG-10), and the call-depth limit only keeps the interpreter off its host stack.
 
 Entry return mapping preserves unit Ok (0) and Error (1); a returned std process ExitCode or Ok(ExitCode) preserves its unsigned byte value.
 Other return values are core fixtures and exit 0. v20 PROG-3 fixes exit 0/1; M supplies the nominal Result registry mapping.
@@ -239,11 +237,8 @@ to the tool API.
 rules survive nesting. Hashing uses keyed SipHash-1-3 over a stable length-framed
 encoding; set members have a canonical sorted encoding. Order helpers are available
 to explicit dictionaries, not implicit Order derivation. Type bounds must authorize
-an operation; resources/functions/handles and float keys are rejected. The provisional
-MEM-3 boundary is 64 native plus 1024 scratch levels, root depth zero; exceeding 1088
-edges fails MEM-3/Depth at the operation and runs its cleanup. The numeric constants
-remain [#16](https://github.com/SamGalanakis/hirsel-lang/issues/16), not settled spec.
-The existing step/depth ToolingLimit accounting and cleanup policy remains #34;
+an operation; resources/functions/handles and float keys are rejected. Structural
+operations have no depth limit (MEM-3). The existing step/depth ToolingLimit accounting and cleanup policy remains #34;
 finalizer bodies and callbacks use the same limits.
 
 ## Library callbacks and handle cleanup

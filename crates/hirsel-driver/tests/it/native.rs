@@ -730,3 +730,134 @@ fn zero_parameter_entries_agree_without_host_roots() {
         assert_eq!(observed.failures.len(), usize::from(exit.is_none()));
     }
 }
+
+// Native stack exhaustion is a run stop: unbounded recursion on the root task's stack and on a
+// spawned task's stack, and recursion through frames wider than a fiber's guard, each end with
+// the typed stack stop after the output they produced, on both backends, never a crash. How
+// deep each run gets is the backend's business and is not compared.
+
+const DEEP: &str = r#"fn deep(n: u64) -> u64 {
+  deep(n + 1u64) + deep(n + 2u64)
+}
+"#;
+
+fn on_root() -> String {
+    format!(
+        r#"{DEEP}
+pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {{
+  let _ = out.print(io.stdout(rt)?, "start\n")
+  let d = deep(0u64)
+  let _ = out.print(io.stdout(rt)?, if d == 0u64 {{ "zero\n" }} else {{ "nonzero\n" }})
+  Ok(())
+}}
+"#
+    )
+}
+
+fn on_task() -> String {
+    format!(
+        r#"{DEEP}
+pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {{
+  let tasks = io.tasks(rt)?
+  let _ = out.print(io.stdout(rt)?, "start\n")
+  task.scope(
+    tasks,
+    fn(s: Scope) {{
+      let h = task.async(s, fn() {{
+        let d = deep(0u64)
+      }})
+      task.await(s, take h)
+    }}
+  )
+  Ok(())
+}}
+"#
+    )
+}
+
+/// Each activation keeps a 72,000-byte inline array, wider than a fiber's 64 KiB guard, live
+/// across its call, so each engine's probe loop is what meets the guard. The unreachable base
+/// case keeps the call's result live (without it LLVM proves the call never returns and drops
+/// the array), and one element differs from the rest so the read after the call cannot fold
+/// the array away. Whether a missing probe would still fault in the guard depends on what the
+/// kernel maps below it, so no run can observe the probes themselves.
+fn large_frames() -> String {
+    r#"fn wide(n: u64) -> u64 {
+  if n == 1000000000000u64 {
+    return 0u64
+  }
+  let mut w: Inline[u64, 9000] = [n; 9000]
+  w[(n * 7u64) % 9000u64] = n * 3u64
+  let below = wide(n + 1u64)
+  w[(n * 13u64) % 9000u64] + below
+}
+
+pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
+  let _ = out.print(io.stdout(rt)?, "start\n")
+  let d = wide(0u64)
+  let _ = out.print(io.stdout(rt)?, if d == 0u64 { "zero\n" } else { "nonzero\n" })
+  Ok(())
+}
+"#
+    .to_owned()
+}
+
+/// Builds `source` with each backend as `run --native` does (LLVM optimized as one object,
+/// Cranelift unoptimized per unit), launches it and decodes its observation record: the run
+/// printed `start` and then stopped on the stack budget.
+fn assert_stack_stop(name: &str, source: &str) {
+    use hirsel_native::{Backend, OptLevel, Options};
+    with_compiler_stack(|| {
+        let entry = entry_path(&default_context());
+        let tools = toolchain(&smoke_matrix());
+        let program = ready(source, &entry, &tools)(&Options::new(x86())).unwrap();
+        for (backend, opt, partition) in [
+            (Backend::Llvm, OptLevel::Default, Partition::Whole),
+            (Backend::Cranelift, OptLevel::None, Partition::Singleton),
+        ] {
+            let root = scratch(&format!("stack-{name}-{backend:?}"));
+            let objects = hirsel_native::emit_backend_objects(
+                &program.program,
+                backend,
+                opt,
+                partition,
+                false,
+                None,
+            )
+            .unwrap();
+            let executable =
+                hirsel_native::link_objects(&program.program, &entry, &objects, &tools, &root)
+                    .unwrap();
+            let launched =
+                hirsel_native::launch(&executable, &x86(), &tools, &root, false).unwrap();
+            let sources = Default::default();
+            let sites = hirsel_native::Sites::from_anchors(&sources, Default::default());
+            let hirsel_native::Observed::Ran(observation, waits) =
+                hirsel_native::observe_run(&launched, &program.program, &sites).unwrap()
+            else {
+                panic!("{backend:?} {launched:?}")
+            };
+            assert_eq!(observation.output, b"start\n", "{backend:?}");
+            assert_eq!(
+                observation.outcome(&sites, waits).unwrap(),
+                hirsel_run_schema::RunOutcome::BudgetExceeded(hirsel_run_schema::BudgetKind::Stack),
+                "{backend:?}"
+            );
+        }
+    })
+}
+
+#[test]
+fn unbounded_recursion_on_the_root_stack_is_a_stack_stop() {
+    assert_stack_stop("root", &on_root());
+}
+
+#[test]
+fn unbounded_recursion_on_a_task_stack_is_a_stack_stop() {
+    assert_stack_stop("task", &on_task());
+}
+
+#[test]
+fn frames_wider_than_the_guard_are_probed_into_a_stack_stop() {
+    assert_stack_stop("wide", &large_frames());
+}

@@ -83,7 +83,6 @@ impl IsolateProtocol {
             .definition
             .is_core("$intrinsic.IsolateBegin")
             || call.result != Some(self.mark)
-            || call.pretransfer_failure.is_some()
             || !matches!(unit.terminators.get(self.begin.block.index()),
                 Some(Terminator::Call { call, normal: Some(normal), failure })
                 if *call == self.begin.call && Some(*normal) == self.begin.normal && *failure == self.begin.failure)
@@ -154,7 +153,6 @@ impl IsolateProtocol {
             .operations
             .get(op.index())
             .is_some_and(|o| o.definition.is_core("$intrinsic.IsolateBegin"))
-            || site.pretransfer_failure.is_some()
         {
             return false;
         }

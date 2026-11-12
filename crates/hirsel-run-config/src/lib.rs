@@ -121,9 +121,6 @@ pub const IDENTITY_DOMAIN: &str = "hirsel.run-config.v1";
 #[serde(deny_unknown_fields)]
 pub struct RunConfig {
     pub schema: u32,
-    /// Missing legacy revisions deserialize only to produce a precise refusal.
-    #[serde(default)]
-    pub depth_semantics: String,
     pub program: String,
     pub entry: String,
     pub launch: LaunchKind,
@@ -389,7 +386,6 @@ impl RunConfig {
     pub fn empty(program: [u8; 32], entry: String, launch: LaunchKind) -> Self {
         Self {
             schema: SCHEMA,
-            depth_semantics: hirsel_run_schema::DEPTH_SEMANTICS.into(),
             program: hex(&program),
             entry,
             launch,
@@ -421,12 +417,6 @@ impl RunConfig {
             return Err(RunRefusal::Schema {
                 found: record.schema,
             });
-        }
-        if record.depth_semantics != hirsel_run_schema::DEPTH_SEMANTICS {
-            return Err(invalid(
-                "depth_semantics",
-                "incompatible depth semantics; expected hirsel.depth.invocations.v2",
-            ));
         }
         let program = digest(&record.program)
             .ok_or_else(|| invalid("program", "expected 64 lowercase hex digits"))?;

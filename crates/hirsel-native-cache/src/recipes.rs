@@ -9,9 +9,8 @@ use hirsel_syntax::DefPath;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-/// Bodyless original instance inputs used to re-plan adapter declarations on
-/// both misses and hits. Key validation binds every actual and lexical binder;
-/// the current GEN-5 catalogue, not native discovery output, selects references.
+/// Bodyless original instance inputs: the typed actuals a sealed library
+/// source expectation is re-derived from on both misses and hits.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InstancePlan {
     actuals: Actuals,
@@ -41,78 +40,6 @@ impl InstancePlan {
             return Err("sealed library source actuals differ from selected instance".into());
         }
         Ok(Some(expected))
-    }
-    pub fn register(
-        &self,
-        program: &Program,
-        context: &DiscoveryContext,
-        key: &InstanceKey,
-        library: bool,
-        layouts: &mut LayoutBuilder<'_>,
-        instances: &mut Instances,
-    ) -> Result<(), String> {
-        let (convention, environment) = key
-            .identity_shape()
-            .map_err(|e| format!("native original key shape: {e:?}"))?;
-        let selected = hirsel_rc::instance::key_of(
-            &program.types,
-            key.definition(),
-            hirsel_tir::BodyId(key.body()),
-            &self.actuals,
-            convention.as_ref(),
-            environment,
-        )
-        .map_err(|e| format!("native original plan key: {e:?}"))?;
-        if &selected != key {
-            return Err("native original plan actuals differ from selected key".into());
-        }
-        let mut requests = if library {
-            if let Some(primitive) = hirsel_lir::pretransfer::primitive(key.definition()) {
-                let request = hirsel_rc::library::keyed::request(
-                    program,
-                    &primitive,
-                    self.actuals.arguments.clone(),
-                )
-                .map_err(|e| format!("native adapter declaration: {e:?}"))?
-                .ok_or("missing native adapter declaration")?;
-                if request
-                    .key(&program.types, layouts)
-                    .map_err(|e| format!("native adapter declaration key: {e:?}"))?
-                    != *key
-                {
-                    return Err("native adapter declaration differs from original plan".into());
-                }
-                vec![request]
-            } else {
-                Vec::new()
-            }
-        } else {
-            hirsel_rc::library::keyed::source_requests(
-                program,
-                context,
-                key.definition(),
-                &self.actuals,
-            )
-            .map_err(|e| format!("native source adapter requirements: {e:?}"))?
-        };
-        requests.extend(
-            hirsel_rc::library::keyed::root_requests(program, context)
-                .map_err(|e| format!("native root adapter requirements: {e:?}"))?,
-        );
-        for adapter in requests {
-            let primitive = hirsel_rc::library::keyed::primitive_request(
-                program,
-                &adapter.path,
-                adapter.actuals.arguments.clone(),
-            )
-            .map_err(|e| format!("native primitive declaration: {e:?}"))?
-            .ok_or("missing native primitive declaration")?;
-            for request in [adapter, primitive] {
-                hirsel_rc::library::instantiate(layouts, instances, request)
-                    .map_err(|e| format!("native original adapter plan: {e:?}"))?;
-            }
-        }
-        Ok(())
     }
 }
 

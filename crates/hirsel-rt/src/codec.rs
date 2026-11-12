@@ -11,7 +11,6 @@
 //! entry) a decode is `DecodeError::Limit` and an encode stops environmentally.
 pub mod access;
 mod borrowed;
-pub(crate) mod structural;
 pub(crate) mod value_access;
 
 use crate::alloc::{
@@ -1221,18 +1220,9 @@ unsafe fn encode_payload(
                     .and_then(|checks| checks.get(check))
                     .unwrap_or_else(|| fault("a codec check outside the codec's checks"));
                 let mut verdict = 0u8;
-                // SAFETY: the check borrows the reconstructed value at `at`, of its layout.
-                // A refused entry has recorded LANG-10.
-                if unsafe { crate::depth::enter_callback(ctx) } != crate::STATUS_OK {
-                    return Ok(Verdict::Failed);
-                }
-                // SAFETY: successful admission retains the borrowed occurrence;
-                // the thunk returns only after its ordinary cleanup.
+                // SAFETY: the check borrows the reconstructed value at `at`, of its
+                // layout, and returns only after its ordinary cleanup.
                 let status = unsafe { thunk(ctx, at, &mut verdict) };
-                // SAFETY: this check's successful entry retires exactly once.
-                unsafe {
-                    crate::depth::hirsel_rt_v2_depth_leave(ctx);
-                }
                 match (status, verdict) {
                     (crate::STATUS_OK, 1) => (),
                     (crate::STATUS_OK, 0) => return Ok(Verdict::Rejected),

@@ -166,10 +166,6 @@ pub(crate) struct FnEmitter<'e, 'a, 'f> {
     pub(crate) ownership_cleanup: Option<hirsel_lir::ownership_trace::native::NativeMarker>,
     /// Set while emitting one state of a resumable continuation alternate.
     pub(crate) resume: Option<crate::resume::Resume<'a>>,
-    /// Admissions of depth-leaf callees, lowered to room checks with no retirement.
-    pub(crate) room: hirsel_lir::invocations::room::RoomChecks,
-    pub(crate) counters: hirsel_lir::invocations::room::RoomChecks,
-    counter_cell: Option<(Value, Value)>,
 }
 
 /// Bytes of a `hirsel_rt_v2_region` record.
@@ -264,9 +260,6 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
             ownership_frame: None,
             ownership_cleanup: None,
             resume: None,
-            room: Default::default(),
-            counters: Default::default(),
-            counter_cell: None,
         }
     }
 
@@ -741,9 +734,6 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
     // The function.
 
     pub(crate) fn emit(mut self) -> Emitted {
-        if !self.counters.enters.is_empty() {
-            self.counter_cell = Some(self.make_counter_cell());
-        }
         if self.resume.is_some() {
             return self.emit_resume();
         }
@@ -894,9 +884,6 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
             Ref::SwitchArms(range) => arms = Some(range),
             _ => {}
         });
-        if let Terminator::Call { call, .. } = terminator {
-            failures.extend(unit.tables.calls[call.index()].pretransfer_failure);
-        }
         if let Some(range) = arms {
             edges.extend(
                 self.pool(range, &unit.pools.switch_arms)?
@@ -1450,34 +1437,6 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
             self.ownership_point(hirsel_lir::ownership_trace::Point::Return(b))?;
         }
         self.terminator(terminator)
-    }
-
-    /// A depth-leaf callee's admission (`invocations::room`): whether the task has no
-    /// room for one more activation, as `hirsel_rt_v2_depth_enter_at_site` decides. In
-    /// cleanup mode (nesting or cleanup count nonzero) the cleanup count is tested,
-    /// otherwise the foreground count.
-    pub(crate) fn no_room(&mut self) -> Value {
-        use hirsel_core_contract::depth::{CLEANUP_LIMIT, FOREGROUND_LIMIT};
-        use hirsel_lir::runtime_abi::{
-            CTX_CLEANUP_COUNT_OFFSET, CTX_CLEANUP_MODE_OFFSET, CTX_FOREGROUND_COUNT_OFFSET,
-        };
-        let foreground = self.load_ty(types::I16, self.context, CTX_FOREGROUND_COUNT_OFFSET);
-        let cleanup = self.load_ty(types::I16, self.context, CTX_CLEANUP_COUNT_OFFSET);
-        let mode = self.load_ty(types::I32, self.context, CTX_CLEANUP_MODE_OFFSET);
-        let wide = self.b.ins().uextend(types::I32, cleanup);
-        let either = self.b.ins().bor(mode, wide);
-        let cleaning = self.b.ins().icmp_imm(IntCC::NotEqual, either, 0);
-        let cleanup_full = self.b.ins().icmp_imm(
-            IntCC::UnsignedGreaterThanOrEqual,
-            cleanup,
-            i64::from(CLEANUP_LIMIT),
-        );
-        let foreground_full = self.b.ins().icmp_imm(
-            IntCC::UnsignedGreaterThanOrEqual,
-            foreground,
-            i64::from(FOREGROUND_LIMIT),
-        );
-        self.b.ins().select(cleaning, cleanup_full, foreground_full)
     }
 
     fn source_location(&mut self, site: SiteRange) {
@@ -2101,10 +2060,6 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
                 self.fill_trampolines(trampolines)
             }
             Terminator::Propagate => self.return_status(1, None),
-            Terminator::RejectTransfer => self.return_status(
-                hirsel_lir::runtime_abi::STATUS_PRETRANSFER_FAILURE as i64,
-                None,
-            ),
             Terminator::InvariantFault { .. } => {
                 self.rt(RuntimeEntry::InvariantFault, &[])?;
                 self.b.ins().trap(TRAP);
@@ -2675,17 +2630,6 @@ impl<'e, 'a, 'f> FnEmitter<'e, 'a, 'f> {
         if suspends {
             self.resume_propagate(status)?;
         }
-        if let Some(rejected) = site.pretransfer_failure {
-            let rejected = self.failure_block(rejected)?;
-            let entered = self.b.create_block();
-            let pending = self.b.ins().icmp_imm(
-                IntCC::Equal,
-                status,
-                hirsel_lir::runtime_abi::STATUS_PRETRANSFER_FAILURE as i64,
-            );
-            self.b.ins().brif(pending, rejected, &[], entered, &[]);
-            self.b.switch_to_block(entered);
-        }
         // Both entered continuations observe the callee's mutations, including partial failure.
         for (destination, temporary) in column_returns {
             let shape = self.layout_shape(destination.layout)?;
@@ -2795,53 +2739,3 @@ mod receipt_call_tests;
 
 #[cfg(test)]
 mod guard_tests;
-
-impl FnEmitter<'_, '_, '_> {
-    fn make_counter_cell(&mut self) -> (Value, Value) {
-        use hirsel_core_contract::depth::{CLEANUP_LIMIT, FOREGROUND_LIMIT};
-        use hirsel_lir::runtime_abi::{
-            CTX_CLEANUP_COUNT_OFFSET, CTX_CLEANUP_MODE_OFFSET, CTX_FOREGROUND_COUNT_OFFSET,
-        };
-        let cleanup = self.load_ty(types::I16, self.context, CTX_CLEANUP_COUNT_OFFSET);
-        let mode = self.load_ty(types::I32, self.context, CTX_CLEANUP_MODE_OFFSET);
-        let wide = self.b.ins().uextend(types::I32, cleanup);
-        let either = self.b.ins().bor(mode, wide);
-        let cleaning = self.b.ins().icmp_imm(IntCC::NotEqual, either, 0);
-        let fg_at = self
-            .b
-            .ins()
-            .iadd_imm(self.context, CTX_FOREGROUND_COUNT_OFFSET as i64);
-        let cl_at = self
-            .b
-            .ins()
-            .iadd_imm(self.context, CTX_CLEANUP_COUNT_OFFSET as i64);
-        let fg_limit = self.b.ins().iconst(types::I16, i64::from(FOREGROUND_LIMIT));
-        let cl_limit = self.b.ins().iconst(types::I16, i64::from(CLEANUP_LIMIT));
-        (
-            self.b.ins().select(cleaning, cl_at, fg_at),
-            self.b.ins().select(cleaning, cl_limit, fg_limit),
-        )
-    }
-    pub(crate) fn counter_enter(&mut self, failure: FailureId) -> Emitted {
-        let (at, limit) = self
-            .counter_cell
-            .expect("counter scopes initialize their allowance in the prologue");
-        let count = self.b.ins().load(types::I16, flags(), at, 0);
-        let full = self
-            .b
-            .ins()
-            .icmp(IntCC::UnsignedGreaterThanOrEqual, count, limit);
-        self.guard(full, failure)?;
-        let next = self.b.ins().iadd_imm(count, 1);
-        self.b.ins().store(flags(), next, at, 0);
-        Ok(())
-    }
-    pub(crate) fn counter_leave(&mut self) {
-        let (at, _) = self
-            .counter_cell
-            .expect("counter scopes initialize their allowance in the prologue");
-        let count = self.b.ins().load(types::I16, flags(), at, 0);
-        let next = self.b.ins().iadd_imm(count, -1);
-        self.b.ins().store(flags(), next, at, 0);
-    }
-}

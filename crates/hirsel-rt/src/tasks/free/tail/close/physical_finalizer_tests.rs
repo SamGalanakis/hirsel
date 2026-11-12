@@ -34,7 +34,6 @@ unsafe extern "C" fn finalizer(
             .unwrap()
             .push((pc.read(), ctx as usize));
         assert_eq!((*ctx).shield, 1);
-        assert_eq!((*ctx).cleanup_invocations.len(), 1);
         if pc.read() == 0 {
             assert_eq!(count.read(), 0);
             count.write(1);
@@ -139,7 +138,6 @@ unsafe extern "C" fn dispatch(
             );
             crate::continuation::binding::complete_bound(ctx, site);
             assert_eq!((*ctx).shield, 0);
-            assert_eq!((*ctx).cleanup_invocations.len(), 0);
             assert!((*ctx).work.is_null());
             result.write([1, 7]);
             pc.write(2);

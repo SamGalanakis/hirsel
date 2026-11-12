@@ -25,9 +25,6 @@ fn inspect(layouts: Layouts, check: impl FnOnce(&mut Machine<'_, Rc>)) {
         layouts,
         units: vec![],
         statics: vec![],
-        invocations: Default::default(),
-        invocation_bodies: Vec::new(),
-        pretransfer_adapters: Vec::new(),
     };
     let config = Config::default();
     let mut ops = NoOperations;

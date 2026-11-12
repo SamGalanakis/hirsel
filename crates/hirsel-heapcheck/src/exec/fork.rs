@@ -22,7 +22,6 @@ impl<'p, S: Stage> Machine<'p, S> {
             seal_allocations: self.seal_allocations.clone(),
             seal_sources_checked: self.seal_sources_checked,
             stack: self.stack.clone(),
-            invocation_events: self.invocation_events.clone(),
             entry: self.entry,
             output: self.output.clone(),
             failures: self.failures.clone(),
@@ -91,14 +90,11 @@ impl<'p, S: Stage> Machine<'p, S> {
                     Inst::Address { address, .. } => {
                         self.checked_steps(f.unit, address).unwrap_or(true)
                     }
-                    Inst::Compare { .. }
-                    | Inst::Check { .. }
+                    Inst::Check { .. }
                     | Inst::Copy { .. }
                     | Inst::FlatCopy { .. }
                     | Inst::SliceView { .. }
-                    | Inst::UniqueCopy { .. }
-                    | Inst::Hash { .. }
-                    | Inst::FrameEnter { .. } => true,
+                    | Inst::UniqueCopy { .. } => true,
                     _ => false,
                 }
             }
@@ -244,9 +240,6 @@ mod tests {
             layouts,
             units: vec![],
             statics: vec![],
-            invocation_bodies: vec![],
-            pretransfer_adapters: vec![],
-            invocations: Default::default(),
         };
         let config = Config::default();
         let mut ops = NoOperations;
@@ -413,9 +406,6 @@ mod tests {
                 layouts,
                 units: vec![],
                 statics: vec![],
-                invocation_bodies: vec![],
-                pretransfer_adapters: vec![],
-                invocations: Default::default(),
             };
             let config = Config::default();
             let mut ops = NoOperations;
@@ -491,9 +481,6 @@ mod tests {
         );
         b.term(block, Terminator::Return(None));
         let program = Program {
-            invocations: Default::default(),
-            invocation_bodies: Vec::new(),
-            pretransfer_adapters: Vec::new(),
             target,
             layouts: table.clone(),
             units: vec![b.finish_with_layouts(&table)],

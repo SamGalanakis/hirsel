@@ -227,8 +227,6 @@ pub(crate) fn immediately_awaited(u: &LirUnit<Value>, call: usize) -> bool {
                 | Inst::BindOrigin { .. }
                 | Inst::BindFields { .. }
                 | Inst::EndOrigin { .. }
-                | Inst::FrameEnter { .. }
-                | Inst::FrameLeave
                 | Inst::EndScope { .. } => {}
                 _ => return false,
             }

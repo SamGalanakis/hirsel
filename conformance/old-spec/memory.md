@@ -36,43 +36,11 @@ The order in which memory is freed is unobservable; resource drops follow
 headers, so it uses constant native stack and never allocates; children are visited so
 that resource drops run in DROP-2's order.
 
-Structural depth is measured over logical values, independently of memory layout and
-call depth. A root has depth zero. Each tuple or record field, active variant payload
-field, distinct-type payload, box payload, sequence element, map key or value, and set
-member is one edge deeper than its containing value. Inline and Simd elements count as
-sequence elements where a structural operation is defined. A map entry introduces no
-additional pair node. Aliases and Packed representation wrappers introduce no edge;
-Packed payload fields and flat record fields count as their logical fields. Primitive
-scalars, unit, String and Bytes have no structural children. A String or Bytes length
-does not increase depth. Physical headers, capacity, map holes and indices, environment
-descriptors and compiler-generated layout wrappers introduce no edge. Opaque primitives
-retain their declared abstract structural view; types without a structural operation
-acquire none through this rule. Shared ownership does not add an edge to an otherwise
-defined structural view or let any path evade depth checking.
-
-Before evaluating built-in structural equality, inequality, order or hashing, check
-every operand's complete logical depth. If any path exceeds 1,088 edges, fail with
-`Depth`, rule MEM-3, at the invoking operation, with ordinary FAIL-1 attribution and
-FAIL-3 cleanup. This check precedes value, tag, length, identity, hash-cache and early
-mismatch shortcuts. Repeated shared subvalues are checked at every incoming logical
-depth, or by an equivalent sound height summary; pointer identity alone proves nothing.
-Insertion order, sorting strategy and hash seed do not affect admission. A successful
-preflight does not change scalar equality, NaN behavior, canonical order or hashing.
-
-Hash-key admission for map.insert, set.insert, map.get and set.contains starts with the
-key at depth zero, before container inspection, bounded-arena charge or argument
-consumption. An empty container is no exception. Already-admitted stored keys compared
-with an admitted probe start at the same key depth and cannot fail this check. Hashing
-a whole map as a value starts at that map's root and counts its key/value edges.
-User comparator calls remain ordinary invocations; this rule adds no structural read
-to an operation that did not otherwise perform one.
-
-The limit bounds logical path depth, not native recursion, worklist occupancy, type-graph
-depth, width, byte length or total work. Implementations may choose any native/scratch
-split or iterative algorithm that preserves these outcomes. Structural admission makes
-no debit to the activation count or a bounded arena. Its temporary accounting ends
-before failure cleanup or return; it cannot leak into a later operation. Mechanical
-release is not a structural read and cannot fail Depth because a value is deeply nested.
+Built-in structural equality, inequality, order and hashing have no depth limit and no
+admission check: they read as deep as the values are. Where an implementation's traversal
+uses the task's native stack, running out of it ends the run with the stack stop
+([LANG-10](language.md#lang-10-recursion)), never a failure. Mechanical release stays
+constant-stack however deeply a value is nested.
 
 Finite or regular nominal type graphs have no semantic width or depth cutoff.
 
@@ -126,8 +94,7 @@ artifact and replay semantic compatibility.
 Seal preflights the whole charge before evacuation and publishes only after all fallible
 preparation. Failure publishes no owner and entered-operation cleanup releases grant/root
 once. `arena.bounded` catches only its own sole OutOfSpace, retaining its identity after
-transfer. Seal adds no cancellation point; mechanical evacuation/drop adds no structural
-Depth limit. Invocation admission follows the ordinary call ownership contract.
+transfer. Seal adds no cancellation point. Invocation admission follows the ordinary call ownership contract.
 
 `region.with(mut r, body)` exclusively borrows the owner and lends a read-only root for
 that invocation. Mut applies to the owner guard, never the payload. The callback cannot
@@ -234,8 +201,7 @@ of a key a Map, Set or SortedMap in it does not hold charges that entry's logica
 before it consumes its arguments, and each Io read into a List in it (`stdin.read`,
 `file.read`, `net.read`) charges its maximum bytes before its effect, whatever it then
 reads; exceeding `cap` is a failure that unwinds to this call, which returns
-`Error(OutOfSpace)`, and a read that exceeds it reads nothing. A key that fails `Depth`
-([MEM-3](#mem-3-freeing)) charges nothing. Spare capacity, growth relocation, a Map's or
+`Error(OutOfSpace)`, and a read that exceeds it reads nothing. Spare capacity, growth relocation, a Map's or
 Set's hash index and abandoned storage are not charged, so the charge is the same on every
 engine. A SortedMap insert completes its order comparisons before charging or consuming
 its key and value; a failing comparator charges nothing. The logical size table is in the

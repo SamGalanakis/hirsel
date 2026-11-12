@@ -27,9 +27,6 @@ const ROUNDS: u32 = 1000;
 fn heap_program(program: &Program) -> hirsel_heapcheck::Program<Ready> {
     // These probes are hand-built Ready component units, without source bodies.
     hirsel_heapcheck::Program {
-        invocation_bodies: Vec::new(),
-        invocations: Default::default(),
-        pretransfer_adapters: Vec::new(),
         target: program.table.target.clone(),
         layouts: program.table.table.table().clone(),
         units: program.units.iter().map(|u| u.unit().clone()).collect(),

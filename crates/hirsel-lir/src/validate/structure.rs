@@ -183,7 +183,7 @@ pub(super) enum Usage {
 /// The edges a terminator names, normal ones first.
 pub(super) fn terminator_edges<S>(cx: &Cx<'_, S>, term: &Terminator) -> Vec<EdgeId> {
     let mut edges = term.normal_edges(&cx.unit.pools);
-    for failure in term.failure_edges(&cx.unit.tables) {
+    if let Some(failure) = term.failure() {
         edges.push(cx.unit.tables.failures[failure.index()].cleanup);
     }
     edges
@@ -764,7 +764,7 @@ impl<S: Stage> Checker<'_, '_, S> {
                 }
             }
             let term = &unit.terminators[b.index()];
-            for failure in term.failure_edges(&unit.tables) {
+            if let Some(failure) = term.failure() {
                 failure_uses[failure.index()] += 1;
             }
             for edge in terminator_edges(self.cx, term) {
@@ -824,7 +824,7 @@ impl<S: Stage> Checker<'_, '_, S> {
                 let failure_edge = match out.origin {
                     Origin::Instruction(_) => true,
                     Origin::Terminator => term
-                        .failure_edges(&unit.tables)
+                        .failure()
                         .iter()
                         .any(|f| unit.tables.failures[f.index()].cleanup == out.edge),
                 };
@@ -1607,8 +1607,6 @@ impl<S: Stage> Checker<'_, '_, S> {
             | Inst::StorageDead { .. }
             | Inst::EndScope { .. }
             | Inst::EndLoan { .. }
-            | Inst::FrameEnter { .. }
-            | Inst::FrameLeave
             | Inst::Unavailable { .. } => {}
             Inst::Address { address, failure } => {
                 let info = &unit.addresses[address.index()];
@@ -3251,12 +3249,6 @@ impl<S: Stage> Checker<'_, '_, S> {
                         self.add(site, K::Type("returned value"));
                     }
                 }
-                Terminator::RejectTransfer => {
-                    self.library_only(site, Opcode::RejectTransfer);
-                    if unit.blocks[b.index()].kind != BlockKind::FailureCleanup {
-                        self.add(site, K::Type("private rejection outside failure cleanup"));
-                    }
-                }
                 Terminator::Unreachable => {
                     if !self.unreachable_proved(facts, b) {
                         self.add(site, K::UnprovedUnreachable);
@@ -3449,7 +3441,7 @@ impl<S: Stage> Checker<'_, '_, S> {
                     for edge in term.normal_edges(&unit.pools) {
                         pending.push((target(edge), state));
                     }
-                    for failure in term.failure_edges(&unit.tables) {
+                    if let Some(failure) = term.failure() {
                         pending.push((
                             target(unit.tables.failures[failure.index()].cleanup),
                             State {
@@ -4594,7 +4586,7 @@ impl<S: Stage> Checker<'_, '_, S> {
                     }
                 }
             }
-            for failure in term.failure_edges(&unit.tables) {
+            if let Some(failure) = term.failure() {
                 self.failure_uses(facts, at, failure);
             }
             for edge in terminator_edges(self.cx, term) {

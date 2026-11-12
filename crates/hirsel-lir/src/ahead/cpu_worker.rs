@@ -490,9 +490,7 @@ fn spine(u: &LirUnit<Ready>, protocol: &CpuWorkerProtocol) -> Spine {
         .map(|inst| {
             matches!(
                 inst,
-                Inst::FrameEnter { .. }
-                    | Inst::FrameLeave
-                    | Inst::Const { .. }
+                Inst::Const { .. }
                     | Inst::Address { .. }
                     | Inst::Read { .. }
                     | Inst::Store { .. }

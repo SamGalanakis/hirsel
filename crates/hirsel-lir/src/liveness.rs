@@ -93,10 +93,10 @@ impl Liveness {
 
     /// Values retained by normal and every failure successor, including
     /// call-defined write-back versions. A saved caller owns their storage
-    /// until the selected return or pretransfer rejection resumes it.
+    /// until the selected return resumes it.
     pub fn successor_needs<S: Stage>(&self, unit: &LirUnit<S>, block: BlockId) -> ValueSet {
         let mut live = self.live_out[block.index()].clone();
-        for f in unit.terminators[block.index()].failure_edges(&unit.tables) {
+        if let Some(f) = unit.terminators[block.index()].failure() {
             live.union(&self.failure_needs(unit, f));
         }
         live

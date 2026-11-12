@@ -135,7 +135,7 @@ scope and mutation checks precede aliasing, and C/H check the resulting lifetime
   Float literal tests use IEEE equality. String and Bytes literal tests borrow
   the scrutinee and use slice equality (length first, then byte comparison),
   including when nested in structural patterns.
-  A comparison of non-scalar operands is `Inst::Compare` (MEM-3 Depth), its
+  A comparison of non-scalar operands is `Inst::Compare`, its
   owned operands read through views under synthetic loans and the taken ones
   released after. Taken comparison and flat-construction operands move into
   fresh operation-owned temporaries, so their cleanup precedes kept sources

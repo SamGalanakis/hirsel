@@ -375,7 +375,6 @@ mod tests {
         });
         caller.tables.calls.push(CallSite {
             forward_caller: false,
-            pretransfer_failure: None,
             receipts: None,
             callee: Callee::Direct(SymbolId(0)),
             operation_arguments: vec![],

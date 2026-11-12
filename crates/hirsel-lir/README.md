@@ -235,8 +235,7 @@ Invariants:
   and `SeqSetLen` through a place holding a sequence block by a u64
   (`Type("sequence write")`), writes of that block like a store through
   `Index` (never through borrowed storage), defining the slot's next
-  version; `Hash` of a hashable layout into a u64, failing MEM-3 Depth like
-  `Compare` (`Type("hash")`); `Recast` between a block view and the cursor's
+  version; `Hash` of a hashable layout into a u64 (`Type("hash")`); `Recast` between a block view and the cursor's
   opaque source under the view's loan (`Type("recast")`); `FlatAt` and
   `FlatNext` walk a flat sequence of variable elements by content offset, or
   a sequential Packed sequence by offset from its first element (MEM-13),

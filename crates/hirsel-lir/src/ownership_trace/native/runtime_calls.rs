@@ -145,7 +145,6 @@ fn channel_none_argument<S>(
     value: ValueId,
 ) -> bool {
     parameter == 1
-        && call.pretransfer_failure.is_none()
         && matches!(call.callee, Callee::Operation(operation)
             if unit.tables.operations[operation.index()].definition.is_core("$intrinsic.ChannelOpen"))
         && empty_option(unit, layouts, value)
@@ -175,9 +174,6 @@ pub(super) fn channel_call<S>(
     } else {
         return None;
     };
-    if call.pretransfer_failure.is_some() {
-        return None;
-    }
     let result = call.result?;
     let result_layout = unit.types[unit.values[result.index()].ty.index()].layout;
     if layouts.layout(result_layout)?.kind != LayoutKind::Scalar(ScalarKind::U32) {
@@ -285,7 +281,6 @@ pub(super) fn data_callback<S>(
 ) -> bool {
     if selection != Selection::Resources
         || call.callee.value().is_none()
-        || call.pretransfer_failure.is_some()
         || !layouts
             .fn_abis
             .get(call.abi.0 as usize)
@@ -367,7 +362,7 @@ pub(super) fn runtime_call<S>(
     let task_result = (selection == Selection::Resources)
         .then(|| task_result_call(unit, layouts, call))
         .flatten();
-    if call.pretransfer_failure.is_some() || call.result.is_some_and(carried) {
+    if call.result.is_some_and(carried) {
         return Err(format!(
             "native ownership tracing: runtime result transport in {}",
             unit.header.definition

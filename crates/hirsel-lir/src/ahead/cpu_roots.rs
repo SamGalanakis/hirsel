@@ -226,7 +226,7 @@ fn storage(u: &LirUnit<Ready>) -> BTreeMap<CpuSavePoint, Storage> {
                 .map(|e| (e, state.clone())),
         );
         edges.extend(
-            term.failure_edges(&u.tables)
+            term.failure()
                 .into_iter()
                 .map(|f| (u.tables.failures[f.index()].cleanup, state.clone())),
         );

@@ -5,11 +5,9 @@
 //! depth first in field ordinal order, the first unequal pair decides; variant tag ordinals
 //! before payloads; sequences element by element, then by length (a proper prefix first);
 //! String and Bytes slices bytewise, then by length; floats by IEEE, an unordered pair
-//! deciding at once. The root pair is at depth 0 and each field, element or Box payload one
-//! deeper for private traversal bookkeeping. Complete logical admission happens
-//! before entering this physical walker; representation wrappers set no language limit.
+//! deciding at once.
 //!
-//! A comparator `hirsel.compare.<layout key>(left, right, depth, context) -> i8` reads two values of its
+//! A comparator `hirsel.compare.<layout key>(left, right, context) -> i8` reads two values of its
 //! layout at the given addresses and returns one of the `ORDER_*` codes. Loads are unaligned
 //! (a `@packed` field may hold a comparable value at any offset).
 
@@ -34,8 +32,6 @@ pub(crate) const ORDER_LESS: u8 = 1;
 pub(crate) const ORDER_GREATER: u8 = 2;
 /// A float pair is unordered: every operator but `Ne` is false.
 pub(crate) const ORDER_UNORDERED: u8 = 3;
-/// A pair deeper than `COMPARE_MAX_DEPTH`: the MEM-3 Depth failure.
-pub(crate) const ORDER_DEPTH: u8 = 4;
 
 /// Why a layout has no comparator.
 pub(crate) enum CompareError {
@@ -93,7 +89,7 @@ fn declare<'m>(
     pending: &mut Vec<Pending<'m>>,
 ) -> Function<'m> {
     let ptr = module.ptr_type();
-    let ty = module.function_type(module.int_type(8), &[ptr, ptr, module.int_type(64), ptr]);
+    let ty = module.function_type(module.int_type(8), &[ptr, ptr, ptr]);
     let name = format!(
         "{}{}",
         name(keys, layout),
@@ -180,23 +176,13 @@ impl<'m> Generator<'m, '_> {
         self.builder.select(less, self.code(ORDER_LESS), other)
     }
 
-    /// The pair `(left, right)` at `depth` is too deep: return the Depth code.
-    fn check_depth(&self, _depth: Value<'m>) {
-        // Logical preflight precedes this physical value traversal.
-    }
-
     fn define(mut self, layout: LayoutId, entry: BasicBlock<'m>) -> Compared<()> {
         self.builder.position(entry);
-        let (left, right, depth) = (
+        let (left, right) = (
             self.module.parameter(self.function, 0),
             self.module.parameter(self.function, 1),
-            self.module.parameter(self.function, 2),
         );
-        self.check_depth(depth);
         let record = self.record(layout)?.clone();
-        let deeper = self
-            .builder
-            .binary(crate::context::BinOp::Add, depth, self.u64(1));
         match &record.kind {
             LayoutKind::Path => {
                 let code = if self.equality {
@@ -215,7 +201,7 @@ impl<'m> Generator<'m, '_> {
                     let result = self.builder.call(
                         leaf,
                         &[
-                            self.module.parameter(self.function, 3),
+                            self.module.parameter(self.function, 2),
                             self.builder.load(word, left, 1),
                             self.builder.load(word, right, 1),
                         ],
@@ -238,7 +224,7 @@ impl<'m> Generator<'m, '_> {
                 let code = self.scalar(*kind, left, right)?;
                 self.decide(code);
             }
-            LayoutKind::Aggregate => self.fields(&record.fields, left, right, deeper)?,
+            LayoutKind::Aggregate => self.fields(&record.fields, left, right)?,
             LayoutKind::Variant => {
                 let Some(tag) = &record.tag else {
                     return Err(CompareError::Invalid(
@@ -259,7 +245,7 @@ impl<'m> Generator<'m, '_> {
                 for variant in &tag.variants {
                     let arm = self.block();
                     self.builder.position(arm);
-                    self.fields(&variant.fields, left, right, deeper)?;
+                    self.fields(&variant.fields, left, right)?;
                     self.builder.br(done);
                     cases.push((
                         self.module
@@ -274,13 +260,13 @@ impl<'m> Generator<'m, '_> {
             LayoutKind::Inline { element, count } => {
                 let stride = self.size(*element)?;
                 let count = self.u64(*count);
-                self.elements(*element, stride, left, right, count, deeper)?;
+                self.elements(*element, stride, left, right, count)?;
             }
             LayoutKind::Simd { element, lanes } => {
                 // GEN-1/MEM-8: structural equality compares scalar lanes in order.
                 let stride = self.size(*element)?;
                 let count = self.u64(u64::from(*lanes));
-                self.elements(*element, stride, left, right, count, deeper)?;
+                self.elements(*element, stride, left, right, count)?;
             }
             LayoutKind::Block { payload } | LayoutKind::Box { payload } => {
                 let ptr = self.module.ptr_type();
@@ -295,7 +281,7 @@ impl<'m> Generator<'m, '_> {
                     _ => None,
                 };
                 match element {
-                    // A List or Array: its elements are one level deeper, then the lengths.
+                    // A List or Array: its elements, then the lengths.
                     Some(element) => {
                         let start = self.element_offset(element)?;
                         let stride = self.size(element)?;
@@ -307,24 +293,24 @@ impl<'m> Generator<'m, '_> {
                         let fewer = self.builder.icmp(IntPredicate::Ult, lc, rc);
                         let count = self.builder.select(fewer, lc, rc);
                         let (le, re) = (self.at(l, start), self.at(r, start));
-                        self.elements(element, stride, le, re, count, deeper)?;
+                        self.elements(element, stride, le, re, count)?;
                         let less = self.builder.icmp(IntPredicate::Ult, lc, rc);
                         let greater = self.builder.icmp(IntPredicate::Ugt, lc, rc);
                         let code = self.order(less, greater);
                         self.decide(code);
                     }
-                    // A Box: its payload is one level deeper.
+                    // A Box: its payload.
                     None if matches!(self.record(*payload)?.kind, LayoutKind::Opaque { .. }) => {
-                        self.container(*payload, l, r, deeper)?;
+                        self.container(*payload, l, r)?;
                     }
                     None => {
-                        let code = self.child(*payload, l, r, deeper)?;
+                        let code = self.child(*payload, l, r)?;
                         self.decide(code);
                     }
                 }
             }
             LayoutKind::Slice { element } => {
-                // String and Bytes: bytewise, then by length, with no depth below the value.
+                // String and Bytes: bytewise, then by length.
                 if self.size(*element)? != 1 {
                     return Err(CompareError::Unsupported(
                         "a slice of elements wider than a byte".into(),
@@ -336,7 +322,7 @@ impl<'m> Generator<'m, '_> {
                 let greater = self.builder.icmp(IntPredicate::Ugt, ll, rl);
                 let lengths = self.order(less, greater);
                 if self.equality {
-                    // Slices have no child depth check or observable byte reads.
+                    // Slices have no observable byte reads.
                     // Unequal lengths therefore decide equality before any bytes.
                     self.decide(lengths);
                 }
@@ -350,7 +336,7 @@ impl<'m> Generator<'m, '_> {
                     self.decide(lengths);
                 }
             }
-            LayoutKind::Opaque { .. } => self.container(layout, left, right, deeper)?,
+            LayoutKind::Opaque { .. } => self.container(layout, left, right)?,
             LayoutKind::Packed
             | LayoutKind::Flat
             | LayoutKind::SoaColumns { .. }
@@ -382,13 +368,7 @@ impl<'m> Generator<'m, '_> {
         Ok(())
     }
 
-    fn container(
-        &mut self,
-        layout: LayoutId,
-        left: Value<'m>,
-        right: Value<'m>,
-        depth: Value<'m>,
-    ) -> Compared<()> {
+    fn container(&mut self, layout: LayoutId, left: Value<'m>, right: Value<'m>) -> Compared<()> {
         let record = self.record(layout)?.clone();
         let LayoutKind::Opaque { owner } = &record.kind else {
             return Err(CompareError::Invalid("container payload".into()));
@@ -453,7 +433,6 @@ impl<'m> Generator<'m, '_> {
                 pair.layout,
                 self.at(ln, pair.offset),
                 self.at(rn, pair.offset),
-                depth,
             )?;
             self.decide(code);
             let next = self
@@ -489,9 +468,9 @@ impl<'m> Generator<'m, '_> {
             self.builder.cond_br(more, compare, done);
             self.builder.position(compare);
             let first = self.builder.icmp(IntPredicate::Eq, i, self.u64(0));
-            let ln = self.sorted_next(element, stride, l, lc, lp, first, depth)?;
-            let rn = self.sorted_next(element, stride, r, rc, rp, first, depth)?;
-            let code = self.child(key_layout, ln, rn, depth)?;
+            let ln = self.sorted_next(element, stride, l, lc, lp, first)?;
+            let rn = self.sorted_next(element, stride, r, rc, rp, first)?;
+            let code = self.child(key_layout, ln, rn)?;
             self.decide(code);
             let next = self
                 .builder
@@ -517,7 +496,6 @@ impl<'m> Generator<'m, '_> {
         count: Value<'m>,
         previous: Value<'m>,
         first: Value<'m>,
-        depth: Value<'m>,
     ) -> Compared<Value<'m>> {
         let tag = self
             .record(element)?
@@ -558,15 +536,13 @@ impl<'m> Generator<'m, '_> {
         let candidate = self.at(entry, key_offset);
         let equality = self.equality;
         self.equality = false;
-        let after = self.child(element, candidate, previous, depth)?;
-        self.depth_code(after);
+        let after = self.child(element, candidate, previous)?;
         let greater = self
             .builder
             .icmp(IntPredicate::Eq, after, self.code(ORDER_GREATER));
         let eligible = self.builder.binary(BinOp::Or, first, greater);
-        let smaller = self.child(element, candidate, best, depth)?;
+        let smaller = self.child(element, candidate, best)?;
         self.equality = equality;
-        self.depth_code(smaller);
         let less = self
             .builder
             .icmp(IntPredicate::Eq, smaller, self.code(ORDER_LESS));
@@ -587,17 +563,6 @@ impl<'m> Generator<'m, '_> {
         self.builder.add_incoming(found, next_found, from);
         self.builder.position(done);
         Ok(best)
-    }
-    fn depth_code(&self, code: Value<'m>) {
-        let deep = self
-            .builder
-            .icmp(IntPredicate::Eq, code, self.code(ORDER_DEPTH));
-        let fail = self.block();
-        let next = self.block();
-        self.builder.cond_br(deep, fail, next);
-        self.builder.position(fail);
-        self.builder.ret(code);
-        self.builder.position(next);
     }
 
     /// The payload a block reference of `record` points at: behind the header of a counted
@@ -784,7 +749,7 @@ impl<'m> Generator<'m, '_> {
         Ok(())
     }
 
-    /// Compares `count` elements of `element`, `stride` apart, each at `depth`.
+    /// Compares `count` elements of `element`, `stride` apart.
     fn elements(
         &mut self,
         element: LayoutId,
@@ -792,7 +757,6 @@ impl<'m> Generator<'m, '_> {
         left: Value<'m>,
         right: Value<'m>,
         count: Value<'m>,
-        depth: Value<'m>,
     ) -> Compared<()> {
         let callee = self.callee(element)?;
         self.each(count, |g, i| {
@@ -803,25 +767,24 @@ impl<'m> Generator<'m, '_> {
                 g.builder.offset(left, offset),
                 g.builder.offset(right, offset),
             );
-            let code = g.compare(element, callee, l, r, depth)?;
+            let code = g.compare(element, callee, l, r)?;
             g.decide(code);
             Ok(())
         })
     }
 
-    /// Compares each field in ordinal order at `depth`.
+    /// Compares each field in ordinal order.
     fn fields(
         &mut self,
         fields: &[FieldLayout],
         left: Value<'m>,
         right: Value<'m>,
-        depth: Value<'m>,
     ) -> Compared<()> {
         let mut fields: Vec<&FieldLayout> = fields.iter().collect();
         fields.sort_by_key(|f| f.ordinal);
         for field in fields {
             let (l, r) = (self.at(left, field.offset), self.at(right, field.offset));
-            let code = self.child(field.layout, l, r, depth)?;
+            let code = self.child(field.layout, l, r)?;
             self.decide(code);
         }
         Ok(())
@@ -846,13 +809,12 @@ impl<'m> Generator<'m, '_> {
         layout: LayoutId,
         left: Value<'m>,
         right: Value<'m>,
-        depth: Value<'m>,
     ) -> Compared<Value<'m>> {
         let callee = self.callee(layout)?;
-        self.compare(layout, callee, left, right, depth)
+        self.compare(layout, callee, left, right)
     }
 
-    /// The code of the pair at `depth`: a scalar leaf inline after its depth check, any
+    /// The code of the pair : a scalar leaf inline, any
     /// other layout through its comparator.
     fn compare(
         &self,
@@ -860,12 +822,11 @@ impl<'m> Generator<'m, '_> {
         callee: Option<Function<'m>>,
         left: Value<'m>,
         right: Value<'m>,
-        depth: Value<'m>,
     ) -> Compared<Value<'m>> {
         match callee {
             Some(function) => Ok(self.builder.call(
                 function,
-                &[left, right, depth, self.module.parameter(self.function, 3)],
+                &[left, right, self.module.parameter(self.function, 2)],
             )),
             None => {
                 let LayoutKind::Scalar(kind) = self.record(layout)?.kind else {
@@ -873,7 +834,6 @@ impl<'m> Generator<'m, '_> {
                         "an inline leaf that is not a scalar".into(),
                     ));
                 };
-                self.check_depth(depth);
                 self.scalar(kind, left, right)
             }
         }
@@ -939,12 +899,11 @@ impl<'m> Generator<'m, '_> {
 
 /// The hash function of `layout` in `module`, generating it and every hash function it calls.
 ///
-/// A hash function `hirsel.hash.<layout>(at, state, depth, deep, context) -> ptr`
+/// A hash function `hirsel.hash.<layout>(at, state, context) -> ptr`
 /// feeds framed leaves into one caller-owned SipHash stream through `hash_update`.
 /// It returns the unchanged scratch pointer; only the root finalizes it. Floats feed `-0.0` as `+0.0`, so values `Compare Eq` calls equal hash equal; a
 /// variant feeds its active ordinal, a sequence its count, a String or Bytes slice its length
-/// and bytes. Complete logical admission happens before this physical traversal;
-/// its private depth and failure parameters retain the helper calling convention. `Opaque` containers (Map, Set) are lib-map's.
+/// and bytes. `Opaque` containers (Map, Set) are lib-map's.
 type HashPending<'m> = (LayoutId, Function<'m>, BasicBlock<'m>);
 
 pub(crate) fn hasher<'m>(
@@ -980,8 +939,8 @@ fn declare_hash<'m>(
     layout: LayoutId,
     pending: &mut Vec<HashPending<'m>>,
 ) -> Function<'m> {
-    let (ptr, i64_ty) = (module.ptr_type(), module.int_type(64));
-    let ty = module.function_type(ptr, &[ptr, ptr, i64_ty, ptr, ptr]);
+    let ptr = module.ptr_type();
+    let ty = module.function_type(ptr, &[ptr, ptr, ptr]);
     let name = format!("hirsel.hash.{}", keys.key(layout).hex());
     let fresh = !module.defines(&name);
     let function = module
@@ -1051,27 +1010,18 @@ impl<'m> HashGenerator<'m, '_> {
         self.feed(state, slot, self.u64(bytes))
     }
 
-    /// Too deep: set the flag and return `state`; otherwise continue.
-    fn check_depth(&self, _depth: Value<'m>, _state: Value<'m>, _deep: Value<'m>) {
-        // Logical preflight precedes this physical value traversal.
-    }
-
     fn define(mut self, layout: LayoutId, entry: BasicBlock<'m>) -> Compared<()> {
         self.builder.position(entry);
         let scratch_ty = self.module.array_type(self.module.int_type(8), 16);
         self.scratch = Some(self.builder.alloca(scratch_ty, 16));
         let p = |i| self.module.parameter(self.function, i);
-        let (at, state, depth, deep) = (p(0), p(1), p(2), p(3));
-        self.check_depth(depth, state, deep);
+        let (at, state) = (p(0), p(1));
         let record = self.record(layout)?.clone();
-        let deeper = self
-            .builder
-            .binary(crate::context::BinOp::Add, depth, self.u64(1));
         let state = match &record.kind {
             LayoutKind::Path => self.scalar(ScalarKind::U64, at, state)?,
             LayoutKind::Unit => state,
             LayoutKind::Scalar(kind) => self.scalar(*kind, at, state)?,
-            LayoutKind::Aggregate => self.fields(&record.fields, at, state, deeper, deep)?,
+            LayoutKind::Aggregate => self.fields(&record.fields, at, state)?,
             LayoutKind::Variant => {
                 let Some(tag) = &record.tag else {
                     return Err(CompareError::Invalid(
@@ -1095,7 +1045,7 @@ impl<'m> HashGenerator<'m, '_> {
                 for variant in &tag.variants {
                     let arm = self.module.append_block(self.function);
                     self.builder.position(arm);
-                    let after = self.fields(&variant.fields, at, state, deeper, deep)?;
+                    let after = self.fields(&variant.fields, at, state)?;
                     incoming.push((after, self.builder.current()));
                     self.builder.br(done);
                     arms.push((
@@ -1115,12 +1065,12 @@ impl<'m> HashGenerator<'m, '_> {
             }
             LayoutKind::Inline { element, count } => {
                 let stride = self.size(*element)?;
-                self.elements(*element, stride, at, self.u64(*count), state, deeper, deep)?
+                self.elements(*element, stride, at, self.u64(*count), state)?
             }
             LayoutKind::Simd { element, lanes } => {
                 let stride = self.size(*element)?;
                 let count = self.u64(u64::from(*lanes));
-                self.elements(*element, stride, at, count, state, deeper, deep)?
+                self.elements(*element, stride, at, count, state)?
             }
             LayoutKind::Block { payload } | LayoutKind::Box { payload } => {
                 let pointer = self.builder.load(self.module.ptr_type(), at, 1);
@@ -1136,7 +1086,7 @@ impl<'m> HashGenerator<'m, '_> {
                     self.at(pointer, offset)
                 };
                 match self.record(*payload)?.kind {
-                    // A List or Array: its count, then its elements one level deeper.
+                    // A List or Array: its count, then its elements.
                     LayoutKind::Sequence { element } => {
                         let i64_ty = self.module.int_type(64);
                         let count = self.builder.load(i64_ty, data, 1);
@@ -1145,17 +1095,15 @@ impl<'m> HashGenerator<'m, '_> {
                             .map_err(|e| CompareError::Invalid(format!("{e:?}")))?;
                         let stride = self.size(element)?;
                         let first = self.at(data, start);
-                        self.elements(element, stride, first, count, state, deeper, deep)?
+                        self.elements(element, stride, first, count, state)?
                     }
-                    LayoutKind::Opaque { .. } => {
-                        self.container_hash(*payload, data, state, deeper, deep)?
-                    }
-                    // A Box: its payload one level deeper.
-                    _ => self.child(*payload, data, state, deeper, deep)?,
+                    LayoutKind::Opaque { .. } => self.container_hash(*payload, data, state)?,
+                    // A Box: its payload.
+                    _ => self.child(*payload, data, state)?,
                 }
             }
             LayoutKind::Slice { element } => {
-                // String and Bytes: the length, then the bytes; no depth below the value.
+                // String and Bytes: the length, then the bytes.
                 if self.size(*element)? != 1 {
                     return Err(CompareError::Unsupported(
                         "a hash of a slice of elements wider than a byte".into(),
@@ -1165,7 +1113,7 @@ impl<'m> HashGenerator<'m, '_> {
                 let state = self.feed_int(state, length, 8);
                 self.feed(state, data, length)
             }
-            LayoutKind::Opaque { .. } => self.container_hash(layout, at, state, deeper, deep)?,
+            LayoutKind::Opaque { .. } => self.container_hash(layout, at, state)?,
             LayoutKind::Packed
             | LayoutKind::Flat
             | LayoutKind::SoaColumns { .. }
@@ -1206,9 +1154,6 @@ impl<'m> HashGenerator<'m, '_> {
         count: Value<'m>,
         previous: Value<'m>,
         first: Value<'m>,
-        depth: Value<'m>,
-        state: Value<'m>,
-        deep: Value<'m>,
     ) -> Compared<Value<'m>> {
         let tag = self
             .record(element)?
@@ -1255,11 +1200,10 @@ impl<'m> HashGenerator<'m, '_> {
             element,
             false,
         )?;
-        let context = self.module.parameter(self.function, 4);
+        let context = self.module.parameter(self.function, 2);
         let after = self
             .builder
-            .call(comparator, &[candidate, previous, depth, context]);
-        self.hash_order_depth(after, state, deep);
+            .call(comparator, &[candidate, previous, context]);
         let greater = self.builder.icmp(
             IntPredicate::Eq,
             after,
@@ -1267,10 +1211,7 @@ impl<'m> HashGenerator<'m, '_> {
                 .const_int(self.module.int_type(8), u128::from(ORDER_GREATER)),
         );
         let eligible = self.builder.binary(BinOp::Or, first, greater);
-        let smaller = self
-            .builder
-            .call(comparator, &[candidate, best, depth, context]);
-        self.hash_order_depth(smaller, state, deep);
+        let smaller = self.builder.call(comparator, &[candidate, best, context]);
         let less = self.builder.icmp(
             IntPredicate::Eq,
             smaller,
@@ -1295,29 +1236,11 @@ impl<'m> HashGenerator<'m, '_> {
         self.builder.position(done);
         Ok(best)
     }
-    fn hash_order_depth(&self, code: Value<'m>, state: Value<'m>, deep: Value<'m>) {
-        let too = self.builder.icmp(
-            IntPredicate::Eq,
-            code,
-            self.module
-                .const_int(self.module.int_type(8), u128::from(ORDER_DEPTH)),
-        );
-        let failed = self.module.append_block(self.function);
-        let next = self.module.append_block(self.function);
-        self.builder.cond_br(too, failed, next);
-        self.builder.position(failed);
-        self.builder
-            .store(self.module.const_int(self.module.int_type(8), 1), deep, 1);
-        self.builder.ret(state);
-        self.builder.position(next);
-    }
     fn container_hash(
         &mut self,
         layout: LayoutId,
         at: Value<'m>,
         state: Value<'m>,
-        depth: Value<'m>,
-        deep: Value<'m>,
     ) -> Compared<Value<'m>> {
         use crate::context::BinOp;
         let record = self.record(layout)?.clone();
@@ -1378,13 +1301,7 @@ impl<'m> HashGenerator<'m, '_> {
             self.builder.cond_br(more, fold, done);
             self.builder.position(fold);
             let entry = map_next(&self.builder, self.function, &tag, stride, pointer);
-            let state = self.child(
-                pair.layout,
-                self.at(entry, pair.offset),
-                state_phi,
-                depth,
-                deep,
-            )?;
+            let state = self.child(pair.layout, self.at(entry, pair.offset), state_phi)?;
             let next = self.builder.binary(BinOp::Add, i, self.u64(1));
             let next_entry = self.at(entry, stride);
             let from = self.builder.current();
@@ -1416,10 +1333,8 @@ impl<'m> HashGenerator<'m, '_> {
         self.builder.cond_br(more, fold, done);
         self.builder.position(fold);
         let is_first = self.builder.icmp(IntPredicate::Eq, i, self.u64(0));
-        let entry = self.sorted_next(
-            element, stride, first, count, previous, is_first, depth, state_phi, deep,
-        )?;
-        let state = self.child(key_layout, entry, state_phi, depth, deep)?;
+        let entry = self.sorted_next(element, stride, first, count, previous, is_first)?;
+        let state = self.child(key_layout, entry, state_phi)?;
         let next = self.builder.binary(BinOp::Add, i, self.u64(1));
         let from = self.builder.current();
         self.builder.br(head);
@@ -1467,35 +1382,20 @@ impl<'m> HashGenerator<'m, '_> {
         fields: &[FieldLayout],
         at: Value<'m>,
         mut state: Value<'m>,
-        depth: Value<'m>,
-        deep: Value<'m>,
     ) -> Compared<Value<'m>> {
         let mut fields: Vec<&FieldLayout> = fields.iter().collect();
         fields.sort_by_key(|f| f.ordinal);
         for field in fields {
-            state = self.child(field.layout, self.at(at, field.offset), state, depth, deep)?;
+            state = self.child(field.layout, self.at(at, field.offset), state)?;
         }
         Ok(state)
     }
 
-    fn child(
-        &mut self,
-        layout: LayoutId,
-        at: Value<'m>,
-        state: Value<'m>,
-        depth: Value<'m>,
-        deep: Value<'m>,
-    ) -> Compared<Value<'m>> {
+    fn child(&mut self, layout: LayoutId, at: Value<'m>, state: Value<'m>) -> Compared<Value<'m>> {
         let callee = declare_hash(self.module, self.keys, layout, self.pending);
         Ok(self.builder.call(
             callee,
-            &[
-                at,
-                state,
-                depth,
-                deep,
-                self.module.parameter(self.function, 4),
-            ],
+            &[at, state, self.module.parameter(self.function, 2)],
         ))
     }
 
@@ -1507,8 +1407,6 @@ impl<'m> HashGenerator<'m, '_> {
         first: Value<'m>,
         count: Value<'m>,
         state: Value<'m>,
-        depth: Value<'m>,
-        deep: Value<'m>,
     ) -> Compared<Value<'m>> {
         let callee = declare_hash(self.module, self.keys, element, self.pending);
         let i64_ty = self.module.int_type(64);
@@ -1531,13 +1429,7 @@ impl<'m> HashGenerator<'m, '_> {
         let at = self.builder.offset(first, offset);
         let next_state = self.builder.call(
             callee,
-            &[
-                at,
-                running,
-                depth,
-                deep,
-                self.module.parameter(self.function, 4),
-            ],
+            &[at, running, self.module.parameter(self.function, 2)],
         );
         let next = self
             .builder
@@ -1588,7 +1480,7 @@ impl<'m> HashGenerator<'m, '_> {
     }
 }
 
-/// Private Map holes do not contribute a structural field or a depth level.
+/// Private Map holes do not contribute a structural field.
 fn map_next<'m>(
     builder: &Builder<'m>,
     function: Function<'m>,

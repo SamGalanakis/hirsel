@@ -56,11 +56,11 @@ cleanup: that cleanup is absent from the uninterrupted recording. The guard rema
 non-comparable tooling outcome; completed replay still requires exact requests and full
 tape consumption.
 
-Only the language activation and logical structural-depth rules produce comparable
-Depth outcomes. Evaluator guards, proof/checker traversal limits, host resource budgets,
-physical-stack guards and scratch-allocation failures do not become Depth because an
-implementation could not complete an operation. An incomplete engine cell is not a
-language failure, successful agreement, or evidence that the source is invalid.
+Evaluator guards, proof/checker traversal limits, host resource budgets, native stack
+exhaustion and scratch-allocation failures are never language failures: an implementation
+that could not complete an operation stops or reports a tooling limit. An incomplete
+engine cell is not a language failure, successful agreement, or evidence that the source is
+invalid.
 
 ## Checked execution
 

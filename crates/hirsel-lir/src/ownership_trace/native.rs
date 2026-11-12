@@ -620,8 +620,6 @@ impl LeafPlan {
                     | Inst::StorageDead { .. }
                     | Inst::EndScope { .. }
                     | Inst::Address { .. }
-                    | Inst::FrameEnter { .. }
-                    | Inst::FrameLeave
                     | Inst::BeginLoan { .. }
                     | Inst::EndLoan { .. }
                     | Inst::FinalizeBegin { .. }
@@ -713,15 +711,10 @@ impl LeafPlan {
                         });
                     let data_callback =
                         program && runtime_calls::data_callback(unit, layouts, selection, call);
-                    if (!matches!(call.callee, Callee::Direct(_)) && !once && !data_callback)
-                        || call.pretransfer_failure.is_some()
-                    {
+                    if !matches!(call.callee, Callee::Direct(_)) && !once && !data_callback {
                         return Err(format!(
-                            "native ownership tracing: mutable or indirect call transport is not implemented in {} block {}: {:?}, pretransfer failure {}",
-                            unit.header.definition,
-                            b.0,
-                            call.callee,
-                            call.pretransfer_failure.is_some()
+                            "native ownership tracing: mutable or indirect call transport is not implemented in {} block {}: {:?}",
+                            unit.header.definition, b.0, call.callee,
                         ));
                     }
                     if once {

@@ -802,9 +802,6 @@ mod tests {
                 layouts: layouts.clone(),
                 units: vec![b.finish_with_layouts(&layouts)],
                 statics: vec![],
-                invocations: Default::default(),
-                invocation_bodies: vec![],
-                pretransfer_adapters: vec![],
             };
             let config = Config {
                 context_handles: vec![(authority, "authority".into()), (0, "level".into())],

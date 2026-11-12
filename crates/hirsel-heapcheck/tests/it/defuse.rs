@@ -59,9 +59,6 @@ fn program(missing: bool, twice: bool) -> Program<Ready> {
     });
     f.ret(None);
     Program {
-        invocations: Default::default(),
-        invocation_bodies: Vec::new(),
-        pretransfer_adapters: Vec::new(),
         target,
         layouts: table.clone(),
         units: vec![f.finish(&table)],
@@ -218,9 +215,6 @@ fn child_occurrences(count: u32, empty: bool, twice: bool) -> Program<Ready> {
     });
     f.ret(None);
     Program {
-        invocations: Default::default(),
-        invocation_bodies: Vec::new(),
-        pretransfer_adapters: Vec::new(),
         target,
         layouts: table.clone(),
         units: vec![f.finish(&table)],
@@ -340,9 +334,6 @@ fn a_whole_empty_resource_move_across_a_call_keeps_its_finalizer() {
     );
     main.ret(None);
     let program = Program {
-        invocations: Default::default(),
-        invocation_bodies: Vec::new(),
-        pretransfer_adapters: Vec::new(),
         target,
         layouts: table.clone(),
         units: vec![main.finish(&table), callee.finish(&table)],
@@ -438,9 +429,6 @@ fn indexed_occurrences(same_index: bool) -> Program<Ready> {
     });
     f.ret(None);
     Program {
-        invocations: Default::default(),
-        invocation_bodies: Vec::new(),
-        pretransfer_adapters: Vec::new(),
         target,
         layouts: table.clone(),
         units: vec![f.finish(&table)],
@@ -547,9 +535,6 @@ fn zero_sized_sibling_drop_program<S: hirsel_lir::stage::Stage>(take_first: bool
     }
     main.ret(None);
     Program {
-        invocations: Default::default(),
-        invocation_bodies: Vec::new(),
-        pretransfer_adapters: Vec::new(),
         target,
         layouts: table.clone(),
         units: vec![main.finish(&table), fin.finish(&table)],
@@ -649,9 +634,6 @@ fn empty_resource_replace(overwrite: bool) -> Program<Ready> {
     }
     f.ret(None);
     Program {
-        invocations: Default::default(),
-        invocation_bodies: Vec::new(),
-        pretransfer_adapters: Vec::new(),
         target,
         layouts: table.clone(),
         units: vec![f.finish(&table)],
@@ -814,9 +796,6 @@ fn variant_resource_paths(resource_variant: bool, present: bool) -> Program<Read
     });
     f.ret(None);
     Program {
-        invocations: Default::default(),
-        invocation_bodies: Vec::new(),
-        pretransfer_adapters: Vec::new(),
         target,
         layouts: table.clone(),
         units: vec![f.finish(&table)],

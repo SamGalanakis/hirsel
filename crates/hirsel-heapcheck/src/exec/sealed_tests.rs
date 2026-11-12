@@ -20,9 +20,6 @@ fn program() -> Program<Ready> {
         layouts,
         units: vec![unit],
         statics: vec![],
-        invocation_bodies: vec![],
-        pretransfer_adapters: vec![],
-        invocations: Default::default(),
     }
 }
 

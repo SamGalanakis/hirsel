@@ -34,15 +34,12 @@ fn a_tooling_budget_still_stops_a_runaway_and_accepts_its_finite_twin() {
         let (l, c) = layouts();
         let (target, table) = l.finish();
         let mut f = F::<Rc>::new("main", c);
-        let failure = f.propagates();
-        f.inst(Inst::FrameEnter { failure });
         if runaway {
             let body = f.b.block(BlockKind::Body, &[]);
             let edge = f.b.edge(body, &[]);
             f.b.term(f.cur, Terminator::Jump(edge));
             f.b.term(body, Terminator::Jump(edge));
         } else {
-            f.inst(Inst::FrameLeave);
             f.ret(None);
         }
         program(target, table.clone(), vec![f.finish(&table)])
@@ -138,10 +135,7 @@ fn campaign_program_with_return(leaky: bool, return_resource: bool) -> Program<R
         .value(ValueRepr::Uncounted, resource_ref, Holding::Plain);
     fin.b.parameter(this);
     let leave = fin.b.block(BlockKind::FailureCleanup, &[]);
-    fin.b.push(leave, Inst::FrameLeave);
     fin.b.term(leave, Terminator::Propagate);
-    let entered = fin.propagates();
-    fin.inst(Inst::FrameEnter { failure: entered });
     let t = {
         let k = fin.b.constant(BOOL, c.bool, ConstantValue::Bool(true));
         let v = fin.b.plain(BOOL, c.bool);
@@ -156,7 +150,6 @@ fn campaign_program_with_return(leaky: bool, return_resource: bool) -> Program<R
         condition: t,
         failure,
     });
-    fin.inst(Inst::FrameLeave);
     fin.ret(None);
     let fin = fin.finish(&table);
 
@@ -164,8 +157,6 @@ fn campaign_program_with_return(leaky: bool, return_resource: bool) -> Program<R
     // Failure cleanups, innermost last.
     let fail_x = f.b.block(BlockKind::FailureCleanup, &[]);
     let fail_s = f.b.block(BlockKind::FailureCleanup, &[]);
-    let entered = f.propagates();
-    f.inst(Inst::FrameEnter { failure: entered });
     let ten = f.int(10);
     let x = f.boxed(ten);
     let v = f.unbox(x);
@@ -255,7 +246,6 @@ fn campaign_program_with_return(leaky: bool, return_resource: bool) -> Program<R
         if_live: false,
     });
     f.release(x, boxed);
-    f.inst(Inst::FrameLeave);
     f.ret(returned);
     // The finalizer failed while dropping s: its fields are already released.
     f.cur = drop_failed;
@@ -264,7 +254,6 @@ fn campaign_program_with_return(leaky: bool, return_resource: bool) -> Program<R
         if_live: false,
     });
     f.release(x, boxed);
-    f.inst(Inst::FrameLeave);
     f.b.term(drop_failed, Terminator::Propagate);
     // Before s holds the resource.
     f.cur = fail_s;
@@ -280,13 +269,11 @@ fn campaign_program_with_return(leaky: bool, return_resource: bool) -> Program<R
         if_live: false,
     });
     f.release(x, boxed);
-    f.inst(Inst::FrameLeave);
     f.b.term(fail_s, Terminator::Propagate);
     f.cur = fail_x;
     if !leaky {
         f.release(x, boxed);
     }
-    f.inst(Inst::FrameLeave);
     f.b.term(fail_x, Terminator::Propagate);
     let main = f.finish(&table);
     program(target, table, vec![main, fin])

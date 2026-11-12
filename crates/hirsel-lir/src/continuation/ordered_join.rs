@@ -40,7 +40,6 @@ pub fn ordered_join_result(
     if core_name(&u.tables.operations.get(op.index())?.definition)?.as_str()
         != "$intrinsic.TaskJoin"
         || site.result.is_some()
-        || site.pretransfer_failure.is_some()
     {
         return None;
     }
@@ -283,7 +282,6 @@ pub fn check_ordered_join_result(
     };
     if core_name(&operation.definition).as_deref() != Some("$intrinsic.TaskJoin")
         || site.result.is_some()
-        || site.pretransfer_failure.is_some()
     {
         return false;
     }

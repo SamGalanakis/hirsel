@@ -232,8 +232,20 @@ fn parity(cases: &[(&str, &str)]) {
             let directory = directory.join(name);
             std::fs::create_dir_all(&directory).unwrap();
             let mut executions = 0;
-            for (configuration, outcome) in differential(
-                &validated, &entry, &reference, &matrix, &toolchain, &directory,
+            for (configuration, outcome) in hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::source_ready_supplier(
+                    &source,
+                    "noalloc.hir",
+                    &entry,
+                    &toolchain,
+                )
+                .unwrap(),
+                &entry,
+                &reference,
+                &matrix,
+                &toolchain,
+                &directory,
+                &hirsel_native::Fixture::default(),
             ) {
                 assert!(
                     matches!(outcome, Outcome::Agree),
@@ -883,13 +895,20 @@ fn empty_variant_observers_preserve_regional_construction_provenance() {
         )
         .unwrap();
         let mut executions = 0;
-        for (configuration, outcome) in differential(
-            &validated,
+        for (configuration, outcome) in hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::source_ready_supplier(
+                &EMPTY_VARIANT,
+                "empty-variant.hir",
+                &entry,
+                &tools,
+            )
+            .unwrap(),
             &entry,
             &reference,
             &configurations,
             &tools,
             &directory,
+            &hirsel_native::Fixture::default(),
         ) {
             assert!(
                 matches!(outcome, Outcome::Agree),

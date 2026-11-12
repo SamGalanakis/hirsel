@@ -15,7 +15,6 @@ use hirsel_native_testing::Configuration;
 use hirsel_native_testing::Engine;
 use hirsel_native_testing::Outcome;
 use hirsel_native_testing::Runtime;
-use hirsel_native_testing::differential;
 use std::path::PathBuf;
 
 fn agree(source: String, configurations: Vec<Configuration>, name: &str, limits: Limits) {
@@ -71,13 +70,21 @@ fn agree(source: String, configurations: Vec<Configuration>, name: &str, limits:
         let tools =
             Toolchain::in_tree_diagnostic(&target_root.join("views-runtime"), &targets).unwrap();
         std::fs::create_dir_all(target_root.join(&name)).unwrap();
-        let outcomes = differential(
-            &validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::named_ready_supplier(
+                &path,
+                &source,
+                "views.hir",
+                &entry,
+                &tools,
+            )
+            .unwrap(),
             &entry,
             &reference,
             &configurations,
             &tools,
             &target_root.join(name),
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), configurations.len());
         for (configuration, outcome) in outcomes {
@@ -486,13 +493,14 @@ fn encoding_audit(source: &str, name: &str) {
                 },
             ]
         };
-        for (configuration, outcome) in differential(
-            &validated,
+        for (configuration, outcome) in hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::ready_supplier(&path, Some(&source), &entry, &tools).unwrap(),
             &entry,
             &reference,
             &configurations,
             &tools,
             &directory,
+            &hirsel_native::Fixture::default(),
         ) {
             assert_eq!(outcome, Outcome::Agree, "{name} {configuration}\n{source}");
         }

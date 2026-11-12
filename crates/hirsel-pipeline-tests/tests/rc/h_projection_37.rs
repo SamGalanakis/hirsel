@@ -91,9 +91,21 @@ fn nested_unique_projection_engines() {
             let validated = engine.import_native_input(input).unwrap();
             let case = directory.path().join(name);
             std::fs::create_dir_all(&case).unwrap();
-            for (configuration, outcome) in
-                differential(&validated, &entry, &reference, &matrix, &tools, &case)
-            {
+            for (configuration, outcome) in hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::source_ready_supplier(
+                    &source,
+                    "projection.hir",
+                    &entry,
+                    &tools,
+                )
+                .unwrap(),
+                &entry,
+                &reference,
+                &matrix,
+                &tools,
+                &case,
+                &hirsel_native::Fixture::default(),
+            ) {
                 eprintln!("{name}: {configuration}: {outcome:?}");
                 assert_eq!(outcome, Outcome::Agree, "{name}: {configuration}");
             }

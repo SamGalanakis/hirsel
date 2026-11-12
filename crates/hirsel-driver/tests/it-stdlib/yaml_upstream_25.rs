@@ -271,13 +271,20 @@ fn run_partition(prefix: &str, start: usize, end: usize, modes: &[bool]) {
                 config.name(),
                 selected.len() * modes.len()
             );
-            let outcomes = hirsel_native_testing::differential(
-                &validated,
+            let outcomes = hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::ready_supplier(
+                    &path,
+                    Some(&source),
+                    &loaded.entry,
+                    &toolchain,
+                )
+                .unwrap(),
                 &loaded.entry,
                 &expected,
                 &[config],
                 &toolchain,
                 scratch.path(),
+                &hirsel_native::Fixture::default(),
             );
             assert_eq!(outcomes.len(), 1);
             for (engine, outcome) in outcomes {

@@ -66,13 +66,15 @@ fn bounded_loop_matrix_reference_heap_llvm_cranelift() {
         assert_eq!(heap.observation, reference);
         assert_eq!(heap.counters.live_heap_bytes, 0);
         std::fs::create_dir_all(root.join("native")).unwrap();
-        let outcomes = differential(
-            &validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::source_ready_supplier(&source, "map-loop.hir", &entry, &tools)
+                .unwrap(),
             &entry,
             &reference,
             &configurations,
             &tools,
             &root.join("native"),
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), 2);
         for (configuration, outcome) in outcomes {

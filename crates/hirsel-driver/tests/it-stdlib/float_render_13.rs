@@ -165,13 +165,15 @@ fn check_engines(source: &str) {
         .keep();
     let tools =
         hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs).unwrap();
-    for (config, outcome) in hirsel_native_testing::differential(
-        &validated,
+    for (config, outcome) in hirsel_native_testing::differential_ready(
+        &mut *hirsel_requests::ready_supplier(&fixture, Some(source), &loaded.entry, &tools)
+            .unwrap(),
         &loaded.entry,
         &expected,
         &configs,
         &tools,
         &dir,
+        &hirsel_native::Fixture::default(),
     ) {
         assert!(
             matches!(outcome, hirsel_native_testing::Outcome::Agree),

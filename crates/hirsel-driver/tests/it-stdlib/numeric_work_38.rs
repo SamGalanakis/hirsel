@@ -157,13 +157,20 @@ fn clinger_exact_bits_and_fallback_twins_on_four_engines() {
         let tools =
             hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &configs)
                 .unwrap();
-        for (config, outcome) in hirsel_native_testing::differential(
-            &validated,
+        for (config, outcome) in hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::ready_supplier(
+                &path,
+                Some(include_str!("../fixtures/float-fast-38.hir")),
+                &loaded.entry,
+                &tools,
+            )
+            .unwrap(),
             &loaded.entry,
             &expected,
             &configs,
             &tools,
             scratch.path(),
+            &hirsel_native::Fixture::default(),
         ) {
             assert!(
                 matches!(outcome, hirsel_native_testing::Outcome::Agree),
@@ -218,13 +225,14 @@ fn numeric_decimal_oracle_runs_heap_with_fault_injection() {
         let tools =
             hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &configs)
                 .unwrap();
-        for (config, outcome) in hirsel_native_testing::differential(
-            &validated,
+        for (config, outcome) in hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap(),
             &loaded.entry,
             &expected,
             &configs,
             &tools,
             scratch.path(),
+            &hirsel_native::Fixture::default(),
         ) {
             assert!(
                 matches!(outcome, hirsel_native_testing::Outcome::Agree),
@@ -322,13 +330,15 @@ fn short_decimal_appends_agree_on_four_engines() {
         let tools =
             hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &configs)
                 .unwrap();
-        let outcomes = hirsel_native_testing::differential(
-            &validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::ready_supplier(&path, Some(&source), &loaded.entry, &tools)
+                .unwrap(),
             &loaded.entry,
             &expected,
             &configs,
             &tools,
             scratch.path(),
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), 3);
         for (config, outcome) in outcomes {

@@ -2583,6 +2583,12 @@ impl Default for HeapWorld {
     }
 }
 
+/// The harness's Io operations, for a direct heapcheck run or campaign over a
+/// Ready program built elsewhere.
+pub fn harness_operations() -> Box<dyn Operations> {
+    Box::new(Io::new())
+}
+
 /// Run `entry` once and audit it.
 pub fn run_heap(
     program: &ReadyProgram,
@@ -3002,6 +3008,3 @@ mod mount_rights {
         }
     }
 }
-
-#[cfg(test)]
-mod scoped_document;

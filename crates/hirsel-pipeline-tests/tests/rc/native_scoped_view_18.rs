@@ -93,13 +93,15 @@ fn agree(name: &str, source: &str, failure: Option<&str>) {
             &configurations,
         )
         .unwrap();
-        let outcomes = differential(
-            &input,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::ready_supplier(&fixture(), Some(source), &entry, &tools)
+                .unwrap(),
             &entry,
             &reference,
             &configurations,
             &tools,
             &directory,
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), 3, "{name}");
         for (configuration, outcome) in &outcomes {

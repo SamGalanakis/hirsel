@@ -169,7 +169,10 @@ fn reference_checked_h_llvm_cranelift() {
         for (name, source) in cases() {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let context = default_context();
-            let file = engine.sources.add("closure-resource.hir", source).unwrap();
+            let file = engine
+                .sources
+                .add("closure-resource.hir", source.clone())
+                .unwrap();
             let checked = source_check_request(&mut engine, file, &context).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
@@ -211,13 +214,20 @@ fn reference_checked_h_llvm_cranelift() {
             let validated = engine.import_native_input(input).unwrap();
             let case_dir = directory.path().join(name);
             std::fs::create_dir_all(&case_dir).unwrap();
-            for (configuration, outcome) in differential(
-                &validated,
+            for (configuration, outcome) in hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::source_ready_supplier(
+                    &source,
+                    "closure-resource.hir",
+                    &entry,
+                    &tools,
+                )
+                .unwrap(),
                 &entry,
                 &expected,
                 &configurations,
                 &tools,
                 &case_dir,
+                &hirsel_native::Fixture::default(),
             ) {
                 eprintln!("{name}: {configuration}: {outcome:?}");
                 if outcome != Outcome::Agree {

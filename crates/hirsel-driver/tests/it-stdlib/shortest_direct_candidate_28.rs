@@ -322,13 +322,15 @@ for (bits, expected_digits, expected_exponent, expected) in rows {
             eprintln!(
                 "SHORTEST28 started {name} {start} selected_f64={count} selected_f32={narrow_count}"
             );
-            let outcomes = hirsel_native_testing::differential(
-                &validated,
+            let outcomes = hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::ready_supplier(&path, Some(&source), &loaded.entry, &tools)
+                    .unwrap(),
                 &loaded.entry,
                 &expected,
                 &[config],
                 &tools,
                 scratch.path(),
+                &hirsel_native::Fixture::default(),
             );
             assert_eq!(outcomes.len(), 1);
             for (_, outcome) in outcomes {

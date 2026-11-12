@@ -254,7 +254,12 @@ fn native_parity(cases: &[(&str, &str)]) {
                 }
                 eprintln!("{name} regions={regions}: {:?}", heap.counters);
             }
-            let report = runner.compare(&validated, &entry, &reference, name);
+            let report = runner.compare(
+                &mut runner.source(source, "caller.hir", &entry).unwrap(),
+                &entry,
+                &reference,
+                name,
+            );
             assert_eq!(report.cells.len(), 7); // reference plus the six existing configurations
             assert!(report.agrees(), "{name}: {report:#?}");
             eprintln!("{name}: six configurations agree");

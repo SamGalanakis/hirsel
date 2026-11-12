@@ -9,7 +9,6 @@ use hirsel_native::Toolchain;
 use hirsel_native_testing::Configuration;
 use hirsel_native_testing::Engine;
 use hirsel_native_testing::Runtime;
-use hirsel_native_testing::differential;
 
 const APP: &str = include_str!("../../../../../examples/wc2/main.hir");
 
@@ -133,13 +132,20 @@ fn wc2_contract_original_and_strong_all_engines() {
             let validated = program.engine.import_native_input(input).unwrap();
             let directory = scratch.path().join(name);
             std::fs::create_dir_all(&directory).unwrap();
-            let results = differential(
-                &validated,
+            let results = hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::ready_supplier(
+                    &fixture.0.join("hirsel.json"),
+                    None,
+                    &program.entry,
+                    &toolchain,
+                )
+                .unwrap(),
                 &program.entry,
                 &reference,
                 &matrix,
                 &toolchain,
                 &directory,
+                &hirsel_native::Fixture::default(),
             );
             assert_eq!(results.len(), 3);
             for (configuration, outcome) in results {
@@ -267,13 +273,20 @@ pub fn main(rt: Io) -> Result[(), AppError] {{
                 let validated = program.engine.import_native_input(input).unwrap();
                 let directory = scratch.path().join(format!("{case}-{name}"));
                 std::fs::create_dir_all(&directory).unwrap();
-                let results = differential(
-                    &validated,
+                let results = hirsel_native_testing::differential_ready(
+                    &mut *hirsel_requests::ready_supplier(
+                        &fixture.0.join("hirsel.json"),
+                        None,
+                        &program.entry,
+                        &toolchain,
+                    )
+                    .unwrap(),
                     &program.entry,
                     &reference,
                     &matrix,
                     &toolchain,
                     &directory,
+                    &hirsel_native::Fixture::default(),
                 );
                 assert_eq!(results.len(), 3);
                 for (configuration, outcome) in results {

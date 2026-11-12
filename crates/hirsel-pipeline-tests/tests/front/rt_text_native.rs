@@ -12,7 +12,6 @@ use hirsel_native::c_call;
 use hirsel_native::emit;
 use hirsel_native_batch::build;
 use hirsel_native_testing::Outcome;
-use hirsel_native_testing::differential;
 use hirsel_native_testing::full_matrix;
 use std::path::Path;
 use std::process::Command;
@@ -201,9 +200,22 @@ fn full_gate_text_calls_failures_c_abi_and_compiled_drops_agree_on_both_targets(
             }
             let work = scratch.join(name);
             std::fs::create_dir_all(&work).unwrap();
-            for (configuration, outcome) in
-                differential(&input, &entry, &reference, &matrix, &tools, &work)
-            {
+            for (configuration, outcome) in hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::ready_supplier(
+                    &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../hirsel-driver/tests/fixtures/std_numeric.hir"),
+                    Some(source),
+                    &entry,
+                    &tools,
+                )
+                .unwrap(),
+                &entry,
+                &reference,
+                &matrix,
+                &tools,
+                &work,
+                &hirsel_native::Fixture::default(),
+            ) {
                 assert_eq!(outcome, Outcome::Agree, "{name}: {configuration}");
             }
         }

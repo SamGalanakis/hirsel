@@ -557,7 +557,14 @@ fn partition(index: usize) {
         let reference =
             hirsel_native::Observation::of_reference(execution.observation.as_ref().unwrap());
         runner.compare(
-            &validated,
+            &mut runner
+                .project(
+                    &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../hirsel-driver/tests/fixtures/std_numeric.hir"),
+                    Some(&source),
+                    &loaded.entry,
+                )
+                .unwrap(),
             &loaded.entry,
             &reference,
             &format!("float-conversion-26-{index}"),

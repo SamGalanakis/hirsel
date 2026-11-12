@@ -279,13 +279,15 @@ fn run_selection(
                     .unwrap();
             toolchain.launch_timeout = std::time::Duration::from_secs(60);
             std::fs::create_dir_all(temp.path().join("launch")).unwrap();
-            let cells = hirsel_native_testing::differential(
-                &validated,
+            let cells = hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::ready_supplier(&path, None, &loaded.entry, &toolchain)
+                    .unwrap(),
                 &loaded.entry,
                 &success,
                 &matrix,
                 &toolchain,
                 &temp.path().join("launch"),
+                &hirsel_native::Fixture::default(),
             );
             assert_eq!(cells.len(), 1);
             for (name, outcome) in cells {

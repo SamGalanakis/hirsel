@@ -97,7 +97,7 @@ fn proven_match_native_parity() {
             let context = default_context();
             let file = engine
                 .sources
-                .add("native-import-state.hir", source)
+                .add("native-import-state.hir", source.clone())
                 .unwrap();
             let checked = source_check_request(&mut engine, file, &context).unwrap();
             assert!(
@@ -122,9 +122,21 @@ fn proven_match_native_parity() {
             let validated = engine.import_native_input(input).unwrap();
             let path = directory.path().join(name);
             std::fs::create_dir_all(&path).unwrap();
-            for (configuration, outcome) in
-                differential(&validated, &entry, &reference, &matrix, &toolchain, &path)
-            {
+            for (configuration, outcome) in hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::source_ready_supplier(
+                    &source,
+                    "native-import-state.hir",
+                    &entry,
+                    &toolchain,
+                )
+                .unwrap(),
+                &entry,
+                &reference,
+                &matrix,
+                &toolchain,
+                &path,
+                &hirsel_native::Fixture::default(),
+            ) {
                 assert!(
                     matches!(outcome, Outcome::Agree),
                     "{name}: {configuration}: {outcome:?}"

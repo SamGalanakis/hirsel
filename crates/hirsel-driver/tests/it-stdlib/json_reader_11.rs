@@ -342,13 +342,15 @@ fn strict_vectors_on_h_llvm_and_cranelift() {
         let tools =
             hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &configs)
                 .unwrap();
-        for (config, outcome) in hirsel_native_testing::differential(
-            &validated,
+        for (config, outcome) in hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::ready_supplier(&path, Some(SOURCE), &loaded.entry, &tools)
+                .unwrap(),
             &loaded.entry,
             &expected,
             &configs,
             &tools,
             scratch.path(),
+            &hirsel_native::Fixture::default(),
         ) {
             assert!(
                 matches!(outcome, hirsel_native_testing::Outcome::Agree),

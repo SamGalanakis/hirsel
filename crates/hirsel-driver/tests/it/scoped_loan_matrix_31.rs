@@ -458,7 +458,7 @@ fn execute(runner: &Runner, name: &str, source: &str) -> Report {
         };
     };
     runner.compare(
-        &validated,
+        &mut runner.source(source, "main.hir", &entry).unwrap(),
         &entry,
         &Observation::of_reference(&observation),
         name,

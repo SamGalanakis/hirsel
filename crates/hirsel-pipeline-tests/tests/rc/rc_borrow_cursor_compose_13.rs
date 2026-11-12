@@ -150,8 +150,20 @@ fn native_parity(cases: &[(&str, &str)]) {
             let directory = directory.join(name);
             std::fs::create_dir_all(&directory).unwrap();
             let mut executions = 0;
-            for (configuration, outcome) in differential(
-                &validated, &entry, &reference, &matrix, &toolchain, &directory,
+            for (configuration, outcome) in hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::source_ready_supplier(
+                    &source,
+                    "compose.hir",
+                    &entry,
+                    &toolchain,
+                )
+                .unwrap(),
+                &entry,
+                &reference,
+                &matrix,
+                &toolchain,
+                &directory,
+                &hirsel_native::Fixture::default(),
             ) {
                 assert!(
                     matches!(outcome, Outcome::Agree),

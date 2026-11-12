@@ -66,13 +66,15 @@ fn parity(source: &str) {
         let toolchain =
             hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &configurations)
                 .unwrap();
-        let outcomes = hirsel_native_testing::differential(
-            &validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::ready_supplier(&path, Some(source), &loaded.entry, &toolchain)
+                .unwrap(),
             &loaded.entry,
             &reference,
             &configurations,
             &toolchain,
             &scratch,
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), 3);
         for (configuration, outcome) in outcomes {

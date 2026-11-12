@@ -118,13 +118,14 @@ fn qualify(cases: &[(&str, &str, Option<i32>, &[u8])]) {
             );
             let dir = root.join(name);
             std::fs::create_dir_all(&dir).unwrap();
-            let outcomes = differential(
-                &validated,
+            let outcomes = hirsel_native_testing::differential_ready(
+                &mut *source_std::ready(source, &format!("{name}.hir"), &entry, &tools),
                 &entry,
                 &reference,
                 &configurations,
                 &tools,
                 &dir,
+                &hirsel_native::Fixture::default(),
             );
             assert_eq!(outcomes.len(), 2);
             for (configuration, outcome) in outcomes {

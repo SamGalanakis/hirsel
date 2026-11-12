@@ -94,13 +94,20 @@ fn loop_entry_charges_precede_rebinding_and_loan_ends_on_four_engines() {
         let toolchain =
             hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
                 .unwrap();
-        let outcomes = differential(
-            &validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::source_ready_supplier(
+                &source,
+                "charge-placement.hir",
+                &entry,
+                &toolchain,
+            )
+            .unwrap(),
             &entry,
             &reference,
             &matrix,
             &toolchain,
             scratch.path(),
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), 3);
         for (configuration, outcome) in outcomes {

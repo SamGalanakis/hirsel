@@ -7,9 +7,10 @@ use hirsel_intern::jobs::with_compiler_stack;
 const BATCH: &str = include_str!("../fixtures/while_consume_mode_30/batch.hir");
 const RUNTIME_MAIN: &str = include_str!("../fixtures/while_consume_mode_30/runtime-main.hir");
 
-fn modules(batch: &str, main: &str) -> QueryEngine {
+fn modules(batch: &str, main: &str) -> (QueryEngine, Vec<hirsel_requests::NativeSourceText>) {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let mut file = None;
+    let mut texts = vec![];
     for (name, source, module) in [
         ("main.hir", main, None),
         ("batch.hir", batch, Some("batch")),
@@ -30,13 +31,18 @@ fn modules(batch: &str, main: &str) -> QueryEngine {
             context.modules.push(module.into());
         }
         engine.parse_file(id, &context).unwrap();
+        texts.push(hirsel_requests::NativeSourceText {
+            name: name.into(),
+            context: context.clone(),
+            text: source.into(),
+        });
         if module.is_none() {
             file = Some(id);
         }
     }
     let checked = source_check_request(&mut engine, file.unwrap(), &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
-    engine
+    (engine, texts)
 }
 
 #[test]
@@ -48,12 +54,13 @@ fn while_consume_mode_30_original_exports() {
             BATCH,
             include_str!("../fixtures/while_consume_mode_30/main.hir"),
         )
+        .0
         .export_native_input()
         .unwrap();
     });
 }
 
-fn runtime(mut engine: QueryEngine) {
+fn runtime((mut engine, texts): (QueryEngine, Vec<hirsel_requests::NativeSourceText>)) {
     use hirsel_driver::native::*;
     use hirsel_native::*;
     use hirsel_native_batch::*;
@@ -115,13 +122,14 @@ fn runtime(mut engine: QueryEngine) {
     let toolchain =
         hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
             .unwrap();
-    let outcomes = differential(
-        &validated,
+    let outcomes = hirsel_native_testing::differential_ready(
+        &mut *hirsel_requests::sources_ready_supplier(texts, &entry, &toolchain).unwrap(),
         &entry,
         &expected,
         &matrix,
         &toolchain,
         scratch.path(),
+        &hirsel_native::Fixture::default(),
     );
     assert_eq!(outcomes.len(), 2);
     for (configuration, outcome) in outcomes {
@@ -214,7 +222,14 @@ fn while_consume_mode_30_minimal_exports() {
             .unwrap();
         let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
-        runtime(engine);
+        runtime((
+            engine,
+            vec![hirsel_requests::NativeSourceText {
+                name: "minimal.hir".into(),
+                context: default_context(),
+                text: include_str!("../fixtures/while_consume_mode_30/minimal.hir").into(),
+            }],
+        ));
     });
 }
 
@@ -224,7 +239,10 @@ fn while_consume_mode_30_v_rejects_forged_cursor_modes() {
     use hirsel_types::{GenericArgument, Sendability, TypeKind, Uniqueness};
     use hirsel_validate::ViolationKind;
     with_compiler_stack(|| {
-        let input = modules(BATCH, RUNTIME_MAIN).export_native_input().unwrap();
+        let input = modules(BATCH, RUNTIME_MAIN)
+            .0
+            .export_native_input()
+            .unwrap();
         let original = input
             .definitions
             .iter()

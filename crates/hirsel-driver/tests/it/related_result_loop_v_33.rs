@@ -170,7 +170,9 @@ fn related_result_loop_four_engines() {
             )
             .unwrap();
             let report = runner.compare(
-                &validated,
+                &mut runner
+                    .project(&root.join(name), Some(&source), &entry)
+                    .unwrap(),
                 &entry,
                 &Observation::of_reference(reference.observation.as_ref().unwrap()),
                 name,

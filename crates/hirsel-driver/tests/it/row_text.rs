@@ -103,8 +103,15 @@ fn ordinary_indexed_rows_with_nested_text_owners() {
         let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("row-text-shape");
         let tools =
             hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs).unwrap();
-        for (config, outcome) in hirsel_native_testing::differential(
-            &validated, &entry, &reference, &configs, &tools, &dir,
+        for (config, outcome) in hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::source_ready_supplier(&SOURCE, "row-text.hir", &entry, &tools)
+                .unwrap(),
+            &entry,
+            &reference,
+            &configs,
+            &tools,
+            &dir,
+            &hirsel_native::Fixture::default(),
         ) {
             assert!(
                 matches!(outcome, hirsel_native_testing::Outcome::Agree),
@@ -162,8 +169,15 @@ fn adapter_matches_ordinary_items_and_encoded_snapshots() {
         let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("row-text-adapter");
         let tools =
             hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs).unwrap();
-        for (config, outcome) in hirsel_native_testing::differential(
-            &validated, &entry, &reference, &configs, &tools, &dir,
+        for (config, outcome) in hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::ready_supplier(&path, Some(&projected_source()), &entry, &tools)
+                .unwrap(),
+            &entry,
+            &reference,
+            &configs,
+            &tools,
+            &dir,
+            &hirsel_native::Fixture::default(),
         ) {
             assert!(
                 matches!(outcome, hirsel_native_testing::Outcome::Agree),
@@ -191,7 +205,7 @@ fn detached_title_minimal_probe_and_ordinary_twin() {
                 source.replace("flat type", "type")
             };
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
-            let file = engine.sources.add("title.hir", source).unwrap();
+            let file = engine.sources.add("title.hir", source.clone()).unwrap();
             let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let entry = entry_path(&default_context());
@@ -238,8 +252,15 @@ fn detached_title_minimal_probe_and_ordinary_twin() {
                 std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("row-title-{kind}"));
             let tools = hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs)
                 .unwrap();
-            for (config, outcome) in hirsel_native_testing::differential(
-                &validated, &entry, &reference, &configs, &tools, &dir,
+            for (config, outcome) in hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::source_ready_supplier(&source, "title.hir", &entry, &tools)
+                    .unwrap(),
+                &entry,
+                &reference,
+                &configs,
+                &tools,
+                &dir,
+                &hirsel_native::Fixture::default(),
             ) {
                 assert!(
                     matches!(outcome, hirsel_native_testing::Outcome::Agree),
@@ -404,8 +425,15 @@ fn exact10k_owned_and_direct_builders_keep_the_fixture_bytes() {
             );
             let tools = hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs)
                 .unwrap();
-            for (config, outcome) in hirsel_native_testing::differential(
-                &validated, &entry, &reference, &configs, &tools, &dir,
+            for (config, outcome) in hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::ready_supplier(&path, Some(&source), &entry, &tools)
+                    .unwrap(),
+                &entry,
+                &reference,
+                &configs,
+                &tools,
+                &dir,
+                &hirsel_native::Fixture::default(),
             ) {
                 match outcome {
                     hirsel_native_testing::Outcome::Agree => {}

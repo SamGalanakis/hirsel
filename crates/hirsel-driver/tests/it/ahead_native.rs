@@ -505,13 +505,14 @@ fn bounded_ordinary_spawn_twin_agrees_on_reference_checked_heap_and_both_natives
         let tools =
             hirsel_native::Toolchain::in_tree_diagnostic(&dir.path().join("runtime"), &[&target])
                 .unwrap();
-        for (configuration, outcome) in hirsel_native_testing::differential(
-            &validated,
+        for (configuration, outcome) in hirsel_native_testing::differential_ready(
+            &mut *crate::source_std::ready(SOURCE, "main.hir", &entry, &tools),
             &entry,
             &reference,
             &matrix,
             &tools,
             dir.path(),
+            &hirsel_native::Fixture::default(),
         ) {
             assert!(
                 matches!(outcome, hirsel_native_testing::Outcome::Agree),

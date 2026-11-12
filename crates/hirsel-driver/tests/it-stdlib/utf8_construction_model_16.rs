@@ -267,13 +267,15 @@ fn all_engines(name: &str, source: Option<&str>, failure: bool, campaign: bool) 
     let tools =
         hirsel_native_testing::toolchain_for_matrix(&dir.path().join("runtime"), &configs).unwrap();
     let mut count = 0;
-    for (config, outcome) in hirsel_native_testing::differential(
-        &validated,
+    for (config, outcome) in hirsel_native_testing::differential_ready(
+        &mut *hirsel_requests::ready_supplier(&fixture(name), source, &loaded.entry, &tools)
+            .unwrap(),
         &loaded.entry,
         &expected,
         &configs,
         &tools,
         dir.path(),
+        &hirsel_native::Fixture::default(),
     ) {
         assert!(
             matches!(outcome, hirsel_native_testing::Outcome::Agree),

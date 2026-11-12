@@ -167,7 +167,7 @@ fn reference_checked_heap_llvm_o0_o2_cranelift() {
                 hirsel_front_phases::compiler_adapters(),
             );
             let context = default_context();
-            let file = engine.sources.add("nested.hir", source).unwrap();
+            let file = engine.sources.add("nested.hir", source.clone()).unwrap();
             let diagnostics = check_snapshot(&mut engine, file, &context).unwrap();
             assert!(diagnostics.is_empty(), "{name}: {diagnostics:?}");
             let entry = entry_path(&context);
@@ -195,13 +195,15 @@ fn reference_checked_heap_llvm_o0_o2_cranelift() {
             assert_eq!(heap.counters.live_heap_bytes, 0, "{name}");
             let directory = root.join(name);
             std::fs::create_dir_all(&directory).unwrap();
-            let outcomes = differential(
-                &validated,
+            let outcomes = hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::source_ready_supplier(&source, "nested.hir", &entry, &tools)
+                    .unwrap(),
                 &entry,
                 &reference,
                 &configurations,
                 &tools,
                 &directory,
+                &hirsel_native::Fixture::default(),
             );
             assert_eq!(outcomes.len(), 4);
             for (configuration, outcome) in outcomes {

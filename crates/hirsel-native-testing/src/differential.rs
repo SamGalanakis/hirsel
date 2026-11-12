@@ -3,7 +3,6 @@
 //! choice. A configuration names its target, placement, reuse, engine,
 //! optimization level and build topology, so a report row is reproducible
 //! from its name alone.
-use hirsel_engine::ValidatedNativeInput;
 use hirsel_lir::emission::OptLevel;
 use hirsel_lir::layout_types::TargetSpec;
 use hirsel_lir::stage::ObjectArtifact;
@@ -22,7 +21,6 @@ use hirsel_native::stages::Options;
 use hirsel_native::stages::ReadyProgram;
 use hirsel_native::stages::StageName;
 use hirsel_native::{HeapCampaignMeasure, HeapMeasure};
-use hirsel_native_batch::build;
 use hirsel_syntax::DefPath;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -146,27 +144,6 @@ impl<P: ReadyExecution, F: FnMut(&Options) -> Result<P, NativeError>> Builds<P, 
             })
         })
         .clone()
-    }
-}
-/// A harness program built over a validated snapshot.
-pub struct SnapshotReady<'a> {
-    program: ReadyProgram,
-    input: &'a ValidatedNativeInput,
-}
-impl ReadyExecution for SnapshotReady<'_> {
-    fn program(&self) -> &ReadyProgram {
-        &self.program
-    }
-    fn sites(&self) -> Sites<'_> {
-        Sites::new(self.input.snapshot())
-    }
-}
-impl<'a> SnapshotReady<'a> {
-    fn build(input: &'a ValidatedNativeInput, options: &Options) -> Result<Self, NativeError> {
-        Ok(Self {
-            program: build(input, options)?,
-            input,
-        })
     }
 }
 /// Supplies the Ready program of each distinct pass `Options`.
@@ -519,28 +496,6 @@ pub fn same_options(a: &Options, b: &Options) -> bool {
         && a.places == b.places
 }
 
-/// Run `entry` under each configuration and compare with `reference`.
-/// Configurations that share pass options share one Ready program, and native
-/// configurations that differ only by runtime archive share its objects.
-pub fn differential(
-    validated: &ValidatedNativeInput,
-    entry: &DefPath,
-    reference: &Observation,
-    configurations: &[Configuration],
-    toolchain: &Toolchain,
-    dir: &Path,
-) -> Vec<(String, Outcome)> {
-    differential_ready(
-        &mut |options: &Options| SnapshotReady::build(validated, options),
-        entry,
-        reference,
-        configurations,
-        toolchain,
-        dir,
-        &Fixture::default(),
-    )
-}
-
 /// `options` building `fixture`'s program: with the place heads its runners name
 /// (`Options::places`), whatever its passes.
 fn fixture_options(options: &Options, fixture: &Fixture) -> Options {
@@ -879,49 +834,6 @@ fn recorded_prints(events: &[hirsel_rt::io::Event]) -> Vec<u8> {
     printed
 }
 
-/// Real Io replay: run the program as an optimized x86-64
-/// executable on real Io with its completion tape recorded, then run the same
-/// executable on simulated Io consuming exactly that tape. Both runs must
-/// observe what the reference does, and the tape's prints, in order, must be
-/// the reference's output. A run with runners replays without its callees (RUN-11): its
-/// replay observes the recorded run with only the tape's own prints. The first
-/// disagreement is the outcome.
-pub fn real_io_replay(
-    validated: &ValidatedNativeInput,
-    entry: &DefPath,
-    reference: &Observation,
-    toolchain: &Toolchain,
-    dir: &Path,
-) -> Outcome {
-    real_io_replay_with_config(
-        validated,
-        entry,
-        reference,
-        toolchain,
-        dir,
-        Default::default(),
-    )
-}
-
-pub fn real_io_replay_with_config(
-    validated: &ValidatedNativeInput,
-    entry: &DefPath,
-    reference: &Observation,
-    toolchain: &Toolchain,
-    dir: &Path,
-    launch_config: hirsel_native::LaunchInputs,
-) -> Outcome {
-    real_io_replay_ready(
-        &mut |options: &Options| SnapshotReady::build(validated, options),
-        entry,
-        reference,
-        toolchain,
-        dir,
-        launch_config,
-        &Fixture::default(),
-    )
-}
-
 /// The Ready pass options real Io replay builds under `launch`.
 pub fn real_io_replay_options(launch: hirsel_native::LaunchInputs) -> Options {
     let mut options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
@@ -929,7 +841,13 @@ pub fn real_io_replay_options(launch: hirsel_native::LaunchInputs) -> Options {
     options
 }
 
-/// Record and replay a supplied Ready program.
+/// Real Io replay: run the program as an optimized x86-64
+/// executable on real Io with its completion tape recorded, then run the same
+/// executable on simulated Io consuming exactly that tape. Both runs must
+/// observe what the reference does, and the tape's prints, in order, must be
+/// the reference's output. A run with runners replays without its callees (RUN-11): its
+/// replay observes the recorded run with only the tape's own prints. The first
+/// disagreement is the outcome.
 pub fn real_io_replay_ready<P: ReadyExecution>(
     ready: &mut ReadySupplier<'_, P>,
     entry: &DefPath,

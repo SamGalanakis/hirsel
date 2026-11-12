@@ -429,13 +429,15 @@ fn partition(part: usize) {
         let mut toolchain =
             hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &matrix).unwrap();
         toolchain.launch_timeout = std::time::Duration::from_secs(60);
-        let outcomes = hirsel_native_testing::differential(
-            &validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::ready_supplier(&path, Some(&source), &loaded.entry, &toolchain)
+                .unwrap(),
             &loaded.entry,
             &expected,
             &matrix,
             &toolchain,
             &scratch,
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), 3, "all required engines must execute");
         for (engine, outcome) in outcomes {

@@ -447,8 +447,20 @@ fn run(
             ),
         )
     })?;
+    let texts = modules
+        .sources
+        .iter()
+        .map(|(path, module, text)| hirsel_requests::NativeSourceText {
+            name: path.clone(),
+            context: hirsel_syntax::FileContext {
+                modules: module.clone(),
+                ..default_context()
+            },
+            text: text.as_str().into(),
+        })
+        .collect();
     Ok(runner.compare(
-        &validated,
+        &mut runner.sources(texts, &entry).unwrap(),
         &entry,
         &Observation::of_reference(&observation),
         name,

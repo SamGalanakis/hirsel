@@ -128,7 +128,7 @@ fn tuple_compare_matches_reference_heap_llvm_and_cranelift() {
             );
             let file = engine
                 .sources
-                .add(format!("tuple-{name}.hir"), source)
+                .add(format!("tuple-{name}.hir"), source.clone())
                 .unwrap();
             let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(
@@ -152,13 +152,20 @@ fn tuple_compare_matches_reference_heap_llvm_and_cranelift() {
             let input = engine.export_native_input().unwrap();
             let input = engine.import_native_input(input).unwrap();
             std::fs::create_dir_all(directory.join(name)).unwrap();
-            let outcomes = differential(
-                &input,
+            let outcomes = hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::source_ready_supplier(
+                    &source,
+                    &format!("tuple-{name}.hir"),
+                    &entry,
+                    &toolchain,
+                )
+                .unwrap(),
                 &entry,
                 &reference,
                 &matrix,
                 &toolchain,
                 &directory.join(name),
+                &hirsel_native::Fixture::default(),
             );
             assert_eq!(outcomes.len(), 3);
             for (configuration, outcome) in outcomes {

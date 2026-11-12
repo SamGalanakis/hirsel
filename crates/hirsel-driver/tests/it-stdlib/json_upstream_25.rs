@@ -269,13 +269,20 @@ fn run_partition(prefix: &str, start: usize, end: usize) {
         toolchain.launch_timeout = std::time::Duration::from_secs(60);
         for config in configurations {
             eprintln!("JSON25 started {} count={}", config.name(), selected.len());
-            let outcomes = hirsel_native_testing::differential(
-                &validated,
+            let outcomes = hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::ready_supplier(
+                    &path,
+                    Some(&source),
+                    &loaded.entry,
+                    &toolchain,
+                )
+                .unwrap(),
                 &loaded.entry,
                 &expected,
                 &[config],
                 &toolchain,
                 scratch.path(),
+                &hirsel_native::Fixture::default(),
             );
             assert_eq!(outcomes.len(), 1);
             for (engine, outcome) in outcomes {

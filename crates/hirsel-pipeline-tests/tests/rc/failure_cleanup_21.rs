@@ -388,7 +388,12 @@ fn finite_exits_all_engines() {
                 assert_eq!(failure.cause_indices, causes, "{case:?}");
             }
             let reference = hirsel_native::Observation::of_reference(&observation);
-            runner.compare(&validated, &entry, &reference, &format!("exit-{index}"))
+            runner.compare(
+                &mut runner.source(&source, "main.hir", &entry).unwrap(),
+                &entry,
+                &reference,
+                &format!("exit-{index}"),
+            )
         });
         persist(
             &artifacts,

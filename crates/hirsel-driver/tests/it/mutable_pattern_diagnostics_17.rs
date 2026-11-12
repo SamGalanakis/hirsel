@@ -172,13 +172,20 @@ fn mutable_pattern_diagnostics_17_checked_repairs_execute_on_both_backends() {
         let toolchain =
             hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &configurations)
                 .unwrap();
-        let outcomes = hirsel_native_testing::differential(
-            &validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::source_ready_supplier(
+                &REPAIRED,
+                "repaired.hir",
+                &entry,
+                &toolchain,
+            )
+            .unwrap(),
             &entry,
             &reference,
             &configurations,
             &toolchain,
             &scratch,
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), 2);
         for (configuration, outcome) in outcomes {

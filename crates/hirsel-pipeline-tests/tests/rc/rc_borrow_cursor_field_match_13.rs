@@ -107,7 +107,7 @@ fn field_match_cursor_native_parity() {
             let context = default_context();
             let file = engine
                 .sources
-                .add("field-match-cursor.hir", source)
+                .add("field-match-cursor.hir", source.clone())
                 .unwrap();
             let checked = source_check_request(&mut engine, file, &context).unwrap();
             assert!(
@@ -132,8 +132,20 @@ fn field_match_cursor_native_parity() {
             let validated = engine.import_native_input(snapshot).unwrap();
             let directory = directory.join(name);
             std::fs::create_dir_all(&directory).unwrap();
-            for (configuration, outcome) in differential(
-                &validated, &entry, &reference, &matrix, &toolchain, &directory,
+            for (configuration, outcome) in hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::source_ready_supplier(
+                    &source,
+                    "field-match-cursor.hir",
+                    &entry,
+                    &toolchain,
+                )
+                .unwrap(),
+                &entry,
+                &reference,
+                &matrix,
+                &toolchain,
+                &directory,
+                &hirsel_native::Fixture::default(),
             ) {
                 assert!(
                     matches!(outcome, Outcome::Agree),

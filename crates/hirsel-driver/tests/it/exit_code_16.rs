@@ -70,13 +70,20 @@ fn exit_code_16_all_entry_shapes_and_status_bytes_agree() {
                 let validated = program.engine.import_native_input(input).unwrap();
                 let directory = scratch.path().join(format!("{wrapped}-{code}"));
                 std::fs::create_dir_all(&directory).unwrap();
-                let outcomes = hirsel_native_testing::differential(
-                    &validated,
+                let outcomes = hirsel_native_testing::differential_ready(
+                    &mut *hirsel_requests::ready_supplier(
+                        &fixture,
+                        Some(&source),
+                        &run.entry,
+                        &tools,
+                    )
+                    .unwrap(),
                     &run.entry,
                     &observation,
                     &matrix,
                     &tools,
                     &directory,
+                    &hirsel_native::Fixture::default(),
                 );
                 assert_eq!(outcomes.len(), 3);
                 for (configuration, outcome) in outcomes {

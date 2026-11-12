@@ -574,9 +574,21 @@ fn source_native_and_interpreter_fresh_observations_agree() {
                     Observation::of_reference(reference.observation.as_ref().unwrap());
                 let dir = root.join(format!("{index}-{name}"));
                 std::fs::create_dir_all(&dir).unwrap();
-                for (configuration, outcome) in
-                    differential(&validated, &entry, &observation, &matrix, &toolchain, &dir)
-                {
+                for (configuration, outcome) in hirsel_native_testing::differential_ready(
+                    &mut *hirsel_requests::source_ready_supplier(
+                        &source,
+                        "shadow-fixture.hir",
+                        &entry,
+                        &toolchain,
+                    )
+                    .unwrap(),
+                    &entry,
+                    &observation,
+                    &matrix,
+                    &toolchain,
+                    &dir,
+                    &hirsel_native::Fixture::default(),
+                ) {
                     assert!(
                         matches!(outcome, Outcome::Agree),
                         "{index} {name} {configuration}: {outcome:?}"

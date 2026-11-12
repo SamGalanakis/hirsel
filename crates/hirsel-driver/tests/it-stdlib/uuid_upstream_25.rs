@@ -183,13 +183,15 @@ fn partition(group: &str, start: usize, end: usize) {
         let dir = tempfile::tempdir().unwrap();
         let mut tools = hirsel_native_testing::toolchain_for_matrix(dir.path(), &matrix).unwrap();
         tools.launch_timeout = std::time::Duration::from_secs(60);
-        let outcomes = differential(
-            &validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::ready_supplier(&fixture(), Some(&source), &loaded.entry, &tools)
+                .unwrap(),
             &loaded.entry,
             &expected,
             &matrix,
             &tools,
             dir.path(),
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), 3);
         for (engine, result) in outcomes {

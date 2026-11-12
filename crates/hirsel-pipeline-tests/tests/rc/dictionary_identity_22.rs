@@ -54,7 +54,12 @@ fn compare(name: &str, failure: bool) {
         })
         .collect();
         let runner = Runner::with_matrix(directory.path(), matrix).unwrap();
-        let report = runner.compare(&validated, &program.entry, &reference, name);
+        let report = runner.compare(
+            &mut runner.project(&fixture, None, &program.entry).unwrap(),
+            &program.entry,
+            &reference,
+            name,
+        );
         eprintln!("DICTIONARY_IDENTITY_22_ENGINES {name}: {report:#?}");
         assert!(
             report.validated && report.cells.len() == 5 && report.agrees(),

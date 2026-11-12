@@ -5,7 +5,6 @@ use hirsel_engine::*;
 use hirsel_front_phases::compiler_adapters;
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 use std::path::{Path, PathBuf};
 
@@ -247,13 +246,10 @@ impl Runner {
                     return report;
                 }
             };
-            let validated = match engine.import_native_input(input) {
-                Ok(validated) => validated,
-                Err(e) => {
-                    report.cells.push(query_error("V-import", e));
-                    return report;
-                }
-            };
+            if let Err(e) = engine.import_native_input(input) {
+                report.cells.push(query_error("V-import", e));
+                return report;
+            }
             report.validated = true;
             let entry = entry_path(&context);
             let reference = match run_observed_snapshot(
@@ -281,14 +277,55 @@ impl Runner {
                     return report;
                 }
             };
-            self.compare(&validated, &entry, &reference, name)
+            let mut ready = match self.source(source, "main.hir", &entry) {
+                Ok(ready) => ready,
+                Err(e) => {
+                    report
+                        .cells
+                        .push(error_cell("request", Category::ToolError, e));
+                    return report;
+                }
+            };
+            self.compare(&mut ready, &entry, &reference, name)
         })
     }
 
-    /// Reuse an already checked source/V snapshot and reference execution.
+    /// The request pipeline's Ready programs for one standalone source that
+    /// the reference ran as the file `name`.
+    pub fn source(
+        &self,
+        source: &str,
+        name: &str,
+        entry: &hirsel_syntax::DefPath,
+    ) -> Result<hirsel_requests::ReadyRequests, hirsel_engine::ToolError> {
+        hirsel_requests::source_ready_supplier(source, name, entry, &self.toolchain)
+    }
+
+    /// The request pipeline's Ready programs for the project at `path`, with
+    /// its primary source replaced by `replacement` when given.
+    pub fn project(
+        &self,
+        path: &Path,
+        replacement: Option<&str>,
+        entry: &hirsel_syntax::DefPath,
+    ) -> Result<hirsel_requests::ReadyRequests, hirsel_engine::ToolError> {
+        hirsel_requests::ready_supplier(path, replacement, entry, &self.toolchain)
+    }
+
+    /// The request pipeline's Ready programs for standalone sources, each
+    /// named as the reference's source map names it.
+    pub fn sources(
+        &self,
+        sources: Vec<hirsel_requests::NativeSourceText>,
+        entry: &hirsel_syntax::DefPath,
+    ) -> Result<hirsel_requests::ReadyRequests, hirsel_engine::ToolError> {
+        hirsel_requests::sources_ready_supplier(sources, entry, &self.toolchain)
+    }
+
+    /// Compare supplied Ready programs with an already computed reference.
     pub fn compare(
         &self,
-        validated: &ValidatedNativeInput,
+        ready: &mut hirsel_requests::ReadyRequests,
         entry: &hirsel_syntax::DefPath,
         reference: &Observation,
         name: &str,
@@ -305,13 +342,14 @@ impl Runner {
         };
         let directory = self.directory.join(name);
         std::fs::create_dir_all(&directory).unwrap();
-        for (configuration, outcome) in differential(
-            validated,
+        for (configuration, outcome) in differential_ready(
+            &mut **ready,
             entry,
             reference,
             &self.matrix,
             &self.toolchain,
             &directory,
+            &Fixture::default(),
         ) {
             report.cells.push(match outcome {
                 Outcome::Agree => Cell {

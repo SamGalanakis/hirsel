@@ -98,13 +98,14 @@ fn check(name: &str) {
             let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("http-date-7-calendar");
             let tools = hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs)
                 .unwrap();
-            for (config, outcome) in hirsel_native_testing::differential(
-                &validated,
+            for (config, outcome) in hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap(),
                 &loaded.entry,
                 &expected,
                 &configs,
                 &tools,
                 &dir,
+                &hirsel_native::Fixture::default(),
             ) {
                 assert!(
                     matches!(outcome, hirsel_native_testing::Outcome::Agree),

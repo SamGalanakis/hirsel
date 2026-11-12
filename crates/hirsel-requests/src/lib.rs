@@ -34,6 +34,7 @@ mod ownership_admission;
 mod ownership_bootstrap;
 mod ownership_selection;
 mod proof_export;
+mod ready_supplier;
 mod replay_product;
 mod safe_check;
 mod selector;
@@ -47,6 +48,11 @@ pub use output::{
     RequestWork, TirBatchExecution, TirExecution, TirProducts,
 };
 pub use ownership_selection::{OwnershipExecution, OwnershipObjects};
+pub use ready_supplier::{
+    ReadyRequests, named_ready_supplier, ready_supplier, ready_supplier_with_compiler,
+    source_ready_supplier, source_ready_supplier_with_compiler, sources_ready_supplier,
+    sources_ready_supplier_with_compiler,
+};
 pub use replay_product::import_replay_execution;
 pub use selector::{CompilerRequests, RequestLimits};
 

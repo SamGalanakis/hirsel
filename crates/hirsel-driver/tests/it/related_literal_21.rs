@@ -181,13 +181,14 @@ fn related_literal_21_interpreter_h_llvm_cranelift() {
         let toolchain =
             hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
                 .unwrap();
-        let outcomes = differential(
-            &validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *crate::source_std::ready(&RUNTIME, "runtime.hir", &entry, &toolchain),
             &entry,
             &reference,
             &matrix,
             &toolchain,
             scratch.path(),
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), 3);
         for (configuration, outcome) in outcomes {

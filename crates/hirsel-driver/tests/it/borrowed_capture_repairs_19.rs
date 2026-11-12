@@ -357,7 +357,7 @@ pub fn main() -> Result[(), ()] {
 "#
         );
         let mut engine = crate::source_std::engine();
-        let file = engine.sources.add("repaired.hir", source).unwrap();
+        let file = engine.sources.add("repaired.hir", source.clone()).unwrap();
         let diagnostics = check_snapshot(&mut engine, file, &default_context()).unwrap();
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         let entry = entry_path(&default_context());
@@ -404,13 +404,14 @@ pub fn main() -> Result[(), ()] {
         let tools =
             hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &configurations)
                 .unwrap();
-        let outcomes = differential(
-            &validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *crate::source_std::ready(&source, "repaired.hir", &entry, &tools),
             &entry,
             &reference,
             &configurations,
             &tools,
             &scratch,
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), 3);
         for (configuration, outcome) in outcomes {

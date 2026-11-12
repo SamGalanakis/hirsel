@@ -294,6 +294,7 @@ fn four_engines(
     oracle: Oracle<'_>,
     tools: &hirsel_native::Toolchain,
     directory: &std::path::Path,
+    mut ready: hirsel_requests::ReadyRequests,
 ) {
     let Oracle {
         output: expected,
@@ -353,13 +354,14 @@ fn four_engines(
         options: options.clone(),
         engine: hirsel_native_testing::Engine::Heap { campaign: true },
     };
-    let heap_results = hirsel_native_testing::differential(
-        &validated,
+    let heap_results = hirsel_native_testing::differential_ready(
+        &mut *ready,
         entry,
         &reference,
         &[heap],
         tools,
         &directory.join(format!("{name}-h")),
+        &hirsel_native::Fixture::default(),
     );
     assert_eq!(heap_results.len(), 1);
     assert!(
@@ -675,6 +677,8 @@ fn recursive_tail_agreement_44_four_engines_and_replay() {
                 },
                 &tools,
                 directory.path(),
+                hirsel_requests::ready_supplier(&path, Some(&effect), &companion.entry, &tools)
+                    .unwrap(),
             );
         }
         if selected.contains(&"opaque-reachable") {
@@ -702,6 +706,8 @@ fn recursive_tail_agreement_44_four_engines_and_replay() {
                 },
                 &tools,
                 directory.path(),
+                hirsel_requests::ready_supplier(&path, Some(&reachable), &opaque.entry, &tools)
+                    .unwrap(),
             );
         }
         for (name,source,expected,failed,owners) in [
@@ -724,7 +730,7 @@ pub fn main()->Result[(),()]{failure.check(descend(1030u64)==7u64,TextInvariant(
                 let (line,column)=coordinate(&source,if name=="ordinary-depth" {"descend(n-1u64)"}else{"failure.check(false"});
                 Some((if name=="ordinary-depth"{"LANG-10"}else{"SEM-3"},"descend",line,column))
             }else{None};
-            four_engines(name,&mut engine,&entry_path(&default_context()),Oracle{output:expected,failure,owners},&tools,directory.path());
+            four_engines(name,&mut engine,&entry_path(&default_context()),Oracle{output:expected,failure,owners},&tools,directory.path(),hirsel_requests::source_ready_supplier(&source,"recursive-tail-44.hir",&entry_path(&default_context()),&tools).unwrap());
         }
         assert_eq!(native_seal(&tool_inputs), sealed_tools);
     });

@@ -1247,7 +1247,21 @@ fn loop_version_matches_reference_heap_llvm_and_cranelift() {
         let toolchain =
             hirsel_native_testing::toolchain_for_matrix(&directory.join("runtime"), &matrix)
                 .unwrap();
-        let outcomes = differential(&input, &entry, &reference, &matrix, &toolchain, &directory);
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::source_ready_supplier(
+                &source,
+                "loop-element.hir",
+                &entry,
+                &toolchain,
+            )
+            .unwrap(),
+            &entry,
+            &reference,
+            &matrix,
+            &toolchain,
+            &directory,
+            &hirsel_native::Fixture::default(),
+        );
         assert_eq!(outcomes.len(), 3);
         for (configuration, outcome) in outcomes {
             assert!(

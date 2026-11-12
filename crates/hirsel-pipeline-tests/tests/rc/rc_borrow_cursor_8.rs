@@ -163,8 +163,20 @@ pub fn main() -> Result[(), u64] {
                 // execution. Native parity uses ordinary attested source below.
                 return;
             }
-            for (configuration, outcome) in differential(
-                &validated, &entry, &reference, &matrix, &toolchain, &directory,
+            for (configuration, outcome) in hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::source_ready_supplier(
+                    &source,
+                    "borrow-cursor-projection.hir",
+                    &entry,
+                    &toolchain,
+                )
+                .unwrap(),
+                &entry,
+                &reference,
+                &matrix,
+                &toolchain,
+                &directory,
+                &hirsel_native::Fixture::default(),
             ) {
                 assert!(
                     matches!(outcome, Outcome::Agree),
@@ -700,13 +712,30 @@ fn cursor_native_parity_with_stack(cases: &[(&str, &str)], stack: Option<u64>) {
             std::fs::create_dir_all(directory.join(name)).unwrap();
             let snapshot = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(snapshot).unwrap();
-            for (configuration, outcome) in differential(
-                &validated,
+            for (configuration, outcome) in hirsel_native_testing::differential_ready(
+                &mut *if source.contains("std@1/") {
+                    hirsel_requests::ready_supplier(
+                        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .join("../hirsel-driver/tests/fixtures/std_numeric.hir"),
+                        Some(source),
+                        &entry,
+                        &toolchain,
+                    )
+                } else {
+                    hirsel_requests::source_ready_supplier(
+                        source,
+                        "borrow-cursor-source.hir",
+                        &entry,
+                        &toolchain,
+                    )
+                }
+                .unwrap(),
                 &entry,
                 &reference,
                 &matrix,
                 &toolchain,
                 &directory.join(name),
+                &hirsel_native::Fixture::default(),
             ) {
                 assert!(
                     matches!(outcome, Outcome::Agree),

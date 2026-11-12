@@ -156,7 +156,12 @@ fn partition(name: &str, file: &str, fixture: &str) {
         })
         .collect();
         let runner = history::Runner::with_matrix(scratch.path(), matrix).unwrap();
-        let report = runner.compare(&validated, &loaded.entry, &reference, name);
+        let report = runner.compare(
+            &mut runner.project(&path, Some(&source), &loaded.entry).unwrap(),
+            &loaded.entry,
+            &reference,
+            name,
+        );
         let mut failures = Vec::new();
         eprintln!(
             "DECIMAL_SOURCE {} {:?} {:?}",

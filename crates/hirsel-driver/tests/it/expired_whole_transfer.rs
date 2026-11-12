@@ -255,7 +255,7 @@ fn whole_transfers_execute_on_h_llvm_and_cranelift() {
             let source = format!(
                 "{source}\npub fn main() -> Result[(), ()] {{ probe(take [0u64]); Ok(()) }}\n"
             );
-            let file = engine.sources.add("execute.hir", source).unwrap();
+            let file = engine.sources.add("execute.hir", source.clone()).unwrap();
             let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
@@ -278,13 +278,20 @@ fn whole_transfers_execute_on_h_llvm_and_cranelift() {
             let validated = engine.import_native_input(input).unwrap();
             let case_dir = scratch.join(name);
             std::fs::create_dir_all(&case_dir).unwrap();
-            let outcomes = hirsel_native_testing::differential(
-                &validated,
+            let outcomes = hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::source_ready_supplier(
+                    &source,
+                    "execute.hir",
+                    &entry,
+                    &tools,
+                )
+                .unwrap(),
                 &entry,
                 &reference,
                 &configurations,
                 &tools,
                 &case_dir,
+                &hirsel_native::Fixture::default(),
             );
             assert_eq!(outcomes.len(), 3);
             for (configuration, outcome) in outcomes {

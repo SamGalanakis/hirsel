@@ -10,7 +10,6 @@ fn a_match_that_moves_only_the_ok_payload_agrees_in_all_configurations() {
     use hirsel_native::Observation;
     use hirsel_native::Toolchain;
     use hirsel_native_testing::Outcome;
-    use hirsel_native_testing::differential;
     use hirsel_native_testing::full_matrix;
     with_compiler_stack(|| {
         let source = r#"pub fn main(rt: Io, args: Args) -> Result[(), LaunchError] {
@@ -46,13 +45,20 @@ pub type LaunchError = Grant(GrantError) | Output(OutputError)
         let toolchain =
             hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configurations)
                 .unwrap();
-        for (name, outcome) in differential(
-            &validated,
+        for (name, outcome) in hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::source_ready_supplier(
+                &source,
+                "payload-join.hir",
+                &entry,
+                &toolchain,
+            )
+            .unwrap(),
             &entry,
             &reference,
             &configurations,
             &toolchain,
             &dir,
+            &hirsel_native::Fixture::default(),
         ) {
             assert!(matches!(outcome, Outcome::Agree), "{name}: {outcome:?}");
         }

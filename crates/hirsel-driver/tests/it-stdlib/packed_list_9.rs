@@ -99,13 +99,14 @@ fn check(path: &Path, source: Option<&str>, stdout: &[u8], failure: Option<&str>
     ));
     let tools =
         hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs).unwrap();
-    for (configuration, outcome) in hirsel_native_testing::differential(
-        &validated,
+    for (configuration, outcome) in hirsel_native_testing::differential_ready(
+        &mut *hirsel_requests::ready_supplier(path, source, &loaded.entry, &tools).unwrap(),
         &loaded.entry,
         &expected,
         &configs,
         &tools,
         &dir,
+        &hirsel_native::Fixture::default(),
     ) {
         assert!(
             matches!(outcome, hirsel_native_testing::Outcome::Agree),

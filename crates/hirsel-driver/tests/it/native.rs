@@ -20,7 +20,6 @@ use hirsel_native::Toolchain;
 use hirsel_native_testing::Configuration;
 use hirsel_native_testing::Engine;
 use hirsel_native_testing::Outcome;
-use hirsel_native_testing::differential;
 use hirsel_native_testing::full_matrix;
 use hirsel_native_testing::smoke_matrix;
 use hirsel_native_testing::topology_matrix;
@@ -85,6 +84,22 @@ fn checked_engine(engine: &mut QueryEngine) -> Checked {
     }
 }
 
+/// `source`'s Ready requests, as `checked` loads it.
+fn ready(source: &str, entry: &DefPath, toolchain: &Toolchain) -> hirsel_requests::ReadyRequests {
+    if source.contains("std@1/") {
+        hirsel_requests::ready_supplier(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/std_numeric.hir"),
+            Some(source),
+            entry,
+            toolchain,
+        )
+    } else {
+        hirsel_requests::source_ready_supplier(source, "native.hir", entry, toolchain)
+    }
+    .unwrap()
+}
+
 fn checked(source: &str) -> Checked {
     let mut engine = if source.contains("std@1/") {
         source_std::engine()
@@ -114,13 +129,14 @@ fn agree(name: &str, source: &str, configurations: &[Configuration]) -> Observat
     with_compiler_stack(move || {
         let program = checked(&source);
         let toolchain = toolchain(&configurations);
-        let outcomes = differential(
-            &program.validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *ready(source, &program.entry, &toolchain),
             &program.entry,
             &program.reference,
             &configurations,
             &toolchain,
             &scratch(&name),
+            &hirsel_native::Fixture::default(),
         );
         for (configuration, outcome) in outcomes {
             match outcome {
@@ -216,13 +232,14 @@ fn a_hanging_launch_fails_its_configuration_by_name() {
             .map(String::from)
             .to_vec();
         toolchain.launch_timeout = std::time::Duration::from_millis(300);
-        let outcomes = differential(
-            &program.validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *ready(HELLO, &program.entry, &toolchain),
             &program.entry,
             &program.reference,
             &matrix,
             &toolchain,
             &scratch("hanging-launch"),
+            &hirsel_native::Fixture::default(),
         );
         let names: Vec<_> = matrix.iter().map(Configuration::name).collect();
         assert_eq!(
@@ -700,13 +717,20 @@ fn a_same_signature_body_edit_matches_a_fresh_build() {
         let toolchain = toolchain(&matrix);
         let dir = scratch("body-edit");
         for program in [&edited, &fresh] {
-            for (configuration, outcome) in differential(
-                &program.validated,
+            for (configuration, outcome) in hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::source_ready_supplier(
+                    &after,
+                    "native.hir",
+                    &program.entry,
+                    &toolchain,
+                )
+                .unwrap(),
                 &program.entry,
                 &fresh.reference,
                 &matrix,
                 &toolchain,
                 &dir,
+                &hirsel_native::Fixture::default(),
             ) {
                 assert_eq!(outcome, Outcome::Agree, "{configuration}");
             }
@@ -2913,13 +2937,15 @@ pub fn main() -> Result[(), ()] {
             "{:?}",
             program.reference
         );
-        let outcomes = differential(
-            &program.validated,
+        let tools = toolchain(&configurations);
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *ready(source, &program.entry, &tools),
             &program.entry,
             &program.reference,
             &configurations,
-            &toolchain(&configurations),
+            &tools,
             &scratch("nested-copied-prefix-brands"),
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), 3);
         for (configuration, outcome) in outcomes {

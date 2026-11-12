@@ -526,21 +526,18 @@ fn evaluate(row: Row, ops: &[Op], runner: Option<&history::Runner>, name: &str) 
         detail.push_str(&format!("V={e}"));
         return failed(true, false, Fingerprint::Validator { rule: e }, detail);
     }
-    let validated = match engine.import_native_input(input) {
-        Ok(input) => input,
-        Err(e) => {
-            let cell = history::query_error("V-import", e);
-            detail.push_str(&format!("import={cell:?}"));
-            return failed(
-                true,
-                false,
-                Fingerprint::Validator {
-                    rule: format!("{:?}:{}:{}", cell.category, cell.disagreement, cell.detail),
-                },
-                detail,
-            );
-        }
-    };
+    if let Err(e) = engine.import_native_input(input) {
+        let cell = history::query_error("V-import", e);
+        detail.push_str(&format!("import={cell:?}"));
+        return failed(
+            true,
+            false,
+            Fingerprint::Validator {
+                rule: format!("{:?}:{}:{}", cell.category, cell.disagreement, cell.detail),
+            },
+            detail,
+        );
+    }
     detail.push_str("SOURCE+V ACCEPT\nADAPTER: visible destructor tokens are output; separate native effects/return-value graph unavailable (INCOMPLETE fields); entry returns unit; roots disabled/empty; no file stages so Pending/AfterWrite not applicable.\n");
     let Some(runner) = runner else {
         return Attempt {
@@ -585,7 +582,21 @@ fn evaluate(row: Row, ops: &[Op], runner: Option<&history::Runner>, name: &str) 
         );
     };
     let reference = Observation::of_reference(observation);
-    let report = runner.compare(&validated, &entry, &reference, name);
+    let mut ready = match runner.project(&path, None, &entry) {
+        Ok(ready) => ready,
+        Err(e) => {
+            return failed(
+                true,
+                true,
+                Fingerprint::Setup {
+                    phase: "request".into(),
+                    category: format!("{e:?}"),
+                },
+                format!("{detail}request={e:?}"),
+            );
+        }
+    };
+    let report = runner.compare(&mut ready, &entry, &reference, name);
     let expected = model(row, ops).unwrap();
     let differences = report.disagreements(expected.output.as_bytes(), false);
     detail.push_str(&format!("report={report:#?}\ndifferences={differences:?}"));
@@ -1182,7 +1193,7 @@ fn nested_generic_result_twins_runtime() {
                     .filter(|(p, _)| p.0.name == "relay")
                     .all(|(_, d)| d.bodies.iter().all(|b| b.scoped_parameters.is_empty()))
             );
-            let validated = engine.import_native_input(input).unwrap();
+            engine.import_native_input(input).unwrap();
             let entry = entry_path(&default_context());
             let reference = run_observed_snapshot(
                 &mut engine,
@@ -1194,8 +1205,9 @@ fn nested_generic_result_twins_runtime() {
                 SimulationConfig::default(),
             )
             .unwrap();
+            let mut ready = runner.source(&text, "main.hir", &entry).unwrap();
             let report = runner.compare(
-                &validated,
+                &mut ready,
                 &entry,
                 &Observation::of_reference(reference.observation.as_ref().unwrap()),
                 name,
@@ -1270,7 +1282,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
                 .iter()
                 .any(|p| p.parameter == 0 && p.fields.is_empty())
         }));
-        let validated = engine.import_native_input(input).unwrap();
+        engine.import_native_input(input).unwrap();
         let entry = entry_path(&default_context());
         let reference = run_observed_snapshot(
             &mut engine,
@@ -1283,8 +1295,9 @@ pub fn main(rt:Io)->Result[(),GrantError] {
         )
         .unwrap();
         let runner = history::Runner::with_matrix(&dir.join("runs"), configurations()).unwrap();
+        let mut ready = runner.source(text, "main.hir", &entry).unwrap();
         let report = runner.compare(
-            &validated,
+            &mut ready,
             &entry,
             &Observation::of_reference(reference.observation.as_ref().unwrap()),
             "generic-receipt",
@@ -1376,7 +1389,7 @@ fn sheet_originals_runtime_and_capture_transfer_adversaries() {
                 assert!(report.violations.iter().any(|v|matches!(v.kind,hirsel_validate::ViolationKind::TypeMismatch{entity} if entity==expected)),"{report:?}");
             }
             mutation_sites += 1;
-            let validated = program.engine.import_native_input(input).unwrap();
+            program.engine.import_native_input(input).unwrap();
             let entry = program.entry;
             let reference = run_observed_snapshot(
                 &mut program.engine,
@@ -1388,8 +1401,9 @@ fn sheet_originals_runtime_and_capture_transfer_adversaries() {
                 SimulationConfig::default(),
             )
             .unwrap();
+            let mut ready = runner.project(&root.join(name), None, &entry).unwrap();
             let report = runner.compare(
-                &validated,
+                &mut ready,
                 &entry,
                 &Observation::of_reference(reference.observation.as_ref().unwrap()),
                 name,

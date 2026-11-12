@@ -119,13 +119,15 @@ fn regex_prefilter_17_forced_candidates_preserve_vm_results_and_work_limits() {
             let input = loaded.engine.import_native_input(snapshot).unwrap();
             let scratch = directory.path().join(format!("group-{index}"));
             std::fs::create_dir_all(&scratch).unwrap();
-            let outcomes = hirsel_native_testing::differential(
-                &input,
+            let outcomes = hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::ready_supplier(&path, Some(source), &run.entry, &tools)
+                    .unwrap(),
                 &run.entry,
                 &observation,
                 &matrix,
                 &tools,
                 &scratch,
+                &hirsel_native::Fixture::default(),
             );
             assert_eq!(outcomes.len(), 2);
             for (backend, outcome) in outcomes {

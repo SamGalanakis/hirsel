@@ -110,7 +110,21 @@ fn alias_cleanup_equality_24_reference_h_llvm_cranelift() {
                 let input = engine.import_native_input(input).unwrap();
                 let case = directory.join(format!("{name}-{failure}"));
                 std::fs::create_dir_all(&case).unwrap();
-                let outcomes = differential(&input, &entry, &reference, &matrix, &toolchain, &case);
+                let outcomes = hirsel_native_testing::differential_ready(
+                    &mut *hirsel_requests::source_ready_supplier(
+                        &source,
+                        "alias-cleanup.hir",
+                        &entry,
+                        &toolchain,
+                    )
+                    .unwrap(),
+                    &entry,
+                    &reference,
+                    &matrix,
+                    &toolchain,
+                    &case,
+                    &hirsel_native::Fixture::default(),
+                );
                 assert_eq!(outcomes.len(), 3);
                 for (configuration, outcome) in outcomes {
                     assert!(

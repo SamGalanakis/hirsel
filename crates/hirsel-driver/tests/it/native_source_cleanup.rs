@@ -222,7 +222,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {{
             );
             let mut producer = engine(&source);
             let input = producer.export_native_input().unwrap();
-            let validated = producer.import_native_input(input.clone()).unwrap();
+            producer.import_native_input(input.clone()).unwrap();
             let observed = run_observed_snapshot(
                 &mut producer,
                 &RunConfiguration {
@@ -273,8 +273,11 @@ pub fn main(rt:Io)->Result[(),GrantError] {{
             }
             let reference = hirsel_native::Observation::of_reference(&observation);
             let name = format!("call-{call_fails}-drop-{bad}");
+            let mut ready = runner
+                .source(&source, "snapshot.hir", &entry_path(&default_context()))
+                .unwrap();
             let report = runner.compare(
-                &validated,
+                &mut ready,
                 &entry_path(&default_context()),
                 &reference,
                 &name,

@@ -21,7 +21,6 @@ use hirsel_native::observe;
 use hirsel_native_batch::build;
 use hirsel_native_testing::Configuration;
 use hirsel_native_testing::Outcome;
-use hirsel_native_testing::differential;
 use hirsel_native_testing::full_matrix;
 use hirsel_native_testing::smoke_matrix;
 use hirsel_rt::{io::Adapter, io_sim::SimIo};
@@ -133,9 +132,31 @@ fn campaign_in(include: fn(&str, bool) -> bool, matrix: Vec<Configuration>, scra
             let input = engine.import_native_input(input).unwrap();
             let work = scratch.join(name);
             std::fs::create_dir_all(&work).unwrap();
-            for (configuration, outcome) in
-                differential(&input, &entry, &reference, &matrix, &tools, &work)
-            {
+            for (configuration, outcome) in hirsel_native_testing::differential_ready(
+                &mut *(if path.with_extension("hir.json").exists() {
+                    hirsel_requests::named_ready_supplier(
+                        &path,
+                        &source,
+                        &format!("{name}.hir"),
+                        &entry,
+                        &tools,
+                    )
+                } else {
+                    hirsel_requests::source_ready_supplier(
+                        &source,
+                        &format!("{name}.hir"),
+                        &entry,
+                        &tools,
+                    )
+                })
+                .unwrap(),
+                &entry,
+                &reference,
+                &matrix,
+                &tools,
+                &work,
+                &hirsel_native::Fixture::default(),
+            ) {
                 if outcome != Outcome::Agree {
                     failures.push(format!("{name}: {configuration}: {outcome:?}"));
                     continue 'cases;

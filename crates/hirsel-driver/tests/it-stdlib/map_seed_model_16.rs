@@ -168,13 +168,15 @@ fn all_engines(name: &str, source: &str, returned: hirsel_run_schema::Returned) 
             .join(format!("map-seed-model-16-{name}"));
         let tools =
             hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs).unwrap();
-        let outcomes = hirsel_native_testing::differential(
-            &validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::ready_supplier(&path, Some(source), &loaded.entry, &tools)
+                .unwrap(),
             &loaded.entry,
             &expected,
             &configs,
             &tools,
             &dir,
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), 2);
         for (config, outcome) in outcomes {

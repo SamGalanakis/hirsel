@@ -75,7 +75,7 @@ fn sha_primitive_38_cavp_four_engines() {
         assert_eq!(reference.observation, checked.observation);
         assert_eq!(reference.step_usage, checked.step_usage);
         let input = program.engine.export_native_input().unwrap();
-        let validated = program.engine.import_native_input(input).unwrap();
+        program.engine.import_native_input(input).unwrap();
         let temp = tempfile::tempdir().unwrap();
         let matrix = [
             hirsel_native_testing::Engine::Heap { campaign: false },
@@ -98,8 +98,9 @@ fn sha_primitive_38_cavp_four_engines() {
         })
         .collect();
         let runner = history::Runner::with_matrix(temp.path(), matrix).unwrap();
+        let mut ready = runner.project(&path, Some(&source), &entry).unwrap();
         let report = runner.compare(
-            &validated,
+            &mut ready,
             &entry,
             &hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap()),
             "sha-cavp",

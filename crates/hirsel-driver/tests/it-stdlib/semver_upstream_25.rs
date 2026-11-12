@@ -131,13 +131,20 @@ fn partition(start: usize, end: usize) {
         let mut toolchain =
             hirsel_native_testing::toolchain_for_matrix(scratch.path(), &configurations).unwrap();
         toolchain.launch_timeout = std::time::Duration::from_secs(60);
-        for (engine, result) in hirsel_native_testing::differential(
-            &validated,
+        for (engine, result) in hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::ready_supplier(
+                &fixture("probe.hir"),
+                Some(&source),
+                &loaded.entry,
+                &toolchain,
+            )
+            .unwrap(),
             &loaded.entry,
             &oracle,
             &configurations,
             &toolchain,
             scratch.path(),
+            &hirsel_native::Fixture::default(),
         ) {
             eprintln!("SEMVER_CELL {engine} {start}..{end} {result:?}");
             if !matches!(result, hirsel_native_testing::Outcome::Agree) {

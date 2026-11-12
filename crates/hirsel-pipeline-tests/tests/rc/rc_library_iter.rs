@@ -218,13 +218,17 @@ fn iterator_resource_cleanup_agrees_on_both_targets_and_all_native_configuration
             let reference = Observation::of_reference(reference.observation.as_ref().unwrap());
             let input = engine.export_native_input().unwrap();
             let input = engine.import_native_input(input).unwrap();
-            for (configuration, outcome) in differential(
-                &input,
+            for (configuration, outcome) in hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::source_ready_supplier(
+                    &source, "test.hir", &entry, toolchain,
+                )
+                .unwrap(),
                 &entry,
                 &reference,
                 &full_matrix(),
                 toolchain,
                 &directory,
+                &hirsel_native::Fixture::default(),
             ) {
                 assert!(
                     matches!(outcome, Outcome::Agree),

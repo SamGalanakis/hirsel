@@ -128,13 +128,20 @@ fn ownership_repairs_payloads_and_lifetimes_agree_on_h_llvm_and_cranelift() {
         let toolchain =
             hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &configurations)
                 .unwrap();
-        let outcomes = hirsel_native_testing::differential(
-            &validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::ready_supplier(
+                &root().join("examples/ownership-repairs/hirsel.json"),
+                None,
+                &program.entry,
+                &toolchain,
+            )
+            .unwrap(),
             &program.entry,
             &reference,
             &configurations,
             &toolchain,
             &scratch,
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), 3);
         for (configuration, outcome) in outcomes {
@@ -439,13 +446,14 @@ pub fn main()->Result[(),()] {
         let toolchain =
             hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &configurations)
                 .unwrap();
-        let outcomes = hirsel_native_testing::differential(
-            &validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *crate::source_std::ready(&source, "snapshot-run.hir", &entry, &toolchain),
             &entry,
             &reference,
             &configurations,
             &toolchain,
             &scratch,
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), 2);
         for (configuration, outcome) in outcomes {

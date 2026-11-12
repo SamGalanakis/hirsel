@@ -1,26 +1,32 @@
-//! The scoped document stays within ordinary layout and cleanup machinery.
-use super::*;
+//! The scoped document stays within ordinary layout and cleanup machinery,
+//! on the Ready the request pipeline builds.
 use hirsel_heapcheck::{Config, Event};
 use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::layout_types::{LayoutKind, ScalarKind, SizeSpec};
-use hirsel_native::Options;
-use hirsel_native::TargetSpec;
-use std::collections::BTreeMap;
+use hirsel_native::{Options, TargetSpec, Toolchain};
+use hirsel_native_testing::heap::harness_operations;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-fn load_document(path: &Path, replacement: Option<&str>) -> hirsel_engine::LoadedProgram {
-    use std::sync::{Arc, OnceLock};
-    static STORE: OnceLock<Arc<hirsel_engine_store::MemStore>> = OnceLock::new();
-    let store = STORE.get_or_init(|| {
-        Arc::new(hirsel_engine_store::MemStore::bounded(256 << 20).with_installed_products())
-    });
-    hirsel_front_phases::COMPILER
-        .with_config(hirsel_engine::CompileConfig {
-            store: store.clone(),
-            ..hirsel_front_phases::COMPILER.configuration()
-        })
-        .load_program_source(path, replacement)
+/// The document program at `path` with its primary source replaced, built
+/// through the request pipeline, and its entry.
+fn ready_document(
+    path: &Path,
+    replacement: &str,
+) -> (
+    std::sync::Arc<hirsel_requests::NativeReady>,
+    hirsel_syntax::DefPath,
+) {
+    let entry = hirsel_front_phases::load_program_source(path, Some(replacement))
         .unwrap_or_else(|error| panic!("{error}"))
+        .entry;
+    let target = TargetSpec::x86_64_unknown_linux_gnu();
+    let runtime = tempfile::tempdir().unwrap();
+    let tools = Toolchain::in_tree(runtime.path(), &[&target]).unwrap();
+    let mut requests =
+        hirsel_requests::ready_supplier(path, Some(replacement), &entry, &tools).unwrap();
+    let ready = requests(&Options::new(target)).unwrap_or_else(|error| panic!("{error:?}"));
+    (ready, entry)
 }
 
 #[test]
@@ -46,17 +52,8 @@ fn check_detached_retention(fixture: &str) {
             .unwrap()
             .replace("0u64..96u64", "0u64..2u64")
             .replace("0u64..4u64", &format!("0u64..{parses}u64"));
-        let mut loaded = load_document(&path, Some(&source));
-        loaded
-            .check_for_execution()
-            .unwrap_or_else(|e| panic!("{e}"));
-        let snapshot = loaded.engine.export_native_input().unwrap();
-        let input = loaded.engine.import_native_input(snapshot).unwrap();
-        let ready = hirsel_native_batch::build(
-            &input,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
-        .unwrap();
+        let (built, entry) = ready_document(&path, &source);
+        let ready = &built.program;
         let table = &ready.table;
         let nodes: Vec<_> = table
             .layouts
@@ -85,9 +82,9 @@ fn check_detached_retention(fixture: &str) {
         for full_recount_every_step in [false, true] {
             let clean = hirsel_heapcheck::run_ready(
                 &program,
-                &loaded.entry,
+                &entry,
                 &[],
-                &mut Io::new(),
+                &mut *harness_operations(),
                 &Config {
                     full_recount_every_step,
                     ..Config::default()
@@ -200,24 +197,15 @@ fn construction_and_extraction_failures_drain_in_both_audit_modes() {
             .unwrap()
             .replace("0u64..4u64", "0u64..1u64")
             .replace("0u64..96u64", "0u64..2u64");
-        let mut loaded = load_document(&path, Some(&source));
-        loaded
-            .check_for_execution()
-            .unwrap_or_else(|e| panic!("{e}"));
-        let snapshot = loaded.engine.export_native_input().unwrap();
-        let input = loaded.engine.import_native_input(snapshot).unwrap();
-        let ready = hirsel_native_batch::build(
-            &input,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
-        .unwrap();
+        let (built, entry) = ready_document(&path, &source);
+        let ready = &built.program;
         let program = ready.heap_program();
         for full_recount_every_step in [false, true] {
             let (campaign, _) = hirsel_heapcheck::audit_campaign_ready(
                 &program,
-                &loaded.entry,
+                &entry,
                 &[],
-                &mut || Box::new(Io::new()),
+                &mut harness_operations,
                 &Config {
                     full_recount_every_step,
                     ..Config::default()
@@ -279,24 +267,15 @@ fn private_malformed_spans_links_and_tags_have_checked_twins() {
   Ok(())
 }"#
         );
-        let mut loaded = load_document(&fixture, Some(&source));
-        loaded
-            .check_for_execution()
-            .unwrap_or_else(|e| panic!("{e}"));
-        let snapshot = loaded.engine.export_native_input().unwrap();
-        let input = loaded.engine.import_native_input(snapshot).unwrap();
-        let ready = hirsel_native_batch::build(
-            &input,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
-        .unwrap();
+        let (built, entry) = ready_document(&fixture, &source);
+        let ready = &built.program;
         let program = ready.heap_program();
         for full_recount_every_step in [false, true] {
             let (campaign, _) = hirsel_heapcheck::audit_campaign_ready(
                 &program,
-                &loaded.entry,
+                &entry,
                 &[],
-                &mut || Box::new(Io::new()),
+                &mut harness_operations,
                 &Config {
                     full_recount_every_step,
                     ..Config::default()
@@ -330,24 +309,15 @@ fn scratch_construction_and_extraction_failures_drain_in_both_audit_modes() {
   failure.check(observed == Ok(Some("aaaaaaaaaaaaaaaaa")), TextInvariant())
   Ok(())
 }"#;
-        let mut loaded = load_document(&path, Some(source));
-        loaded
-            .check_for_execution()
-            .unwrap_or_else(|e| panic!("{e}"));
-        let snapshot = loaded.engine.export_native_input().unwrap();
-        let input = loaded.engine.import_native_input(snapshot).unwrap();
-        let ready = hirsel_native_batch::build(
-            &input,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
-        .unwrap();
+        let (built, entry) = ready_document(&path, source);
+        let ready = &built.program;
         let program = ready.heap_program();
         for full_recount_every_step in [false, true] {
             let (campaign, _) = hirsel_heapcheck::audit_campaign_ready(
                 &program,
-                &loaded.entry,
+                &entry,
                 &[],
-                &mut || Box::new(Io::new()),
+                &mut harness_operations,
                 &Config {
                     full_recount_every_step,
                     ..Config::default()
@@ -384,17 +354,8 @@ fn scratch_full_hash_collisions_preserve_exact_key_comparison() {
   failure.check(observed == Error(DuplicateKey(55)), TextInvariant())
   Ok(())
 }"#;
-        let mut loaded = load_document(&path, Some(source));
-        loaded
-            .check_for_execution()
-            .unwrap_or_else(|e| panic!("{e}"));
-        let snapshot = loaded.engine.export_native_input().unwrap();
-        let input = loaded.engine.import_native_input(snapshot).unwrap();
-        let ready = hirsel_native_batch::build(
-            &input,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
-        .unwrap();
+        let (built, entry) = ready_document(&path, source);
+        let ready = &built.program;
         let mut program = ready.heap_program();
         // Reuse rc_maps.rs's adversarial full-hash-collision control; equality
         // and the production map probing code remain unchanged.
@@ -417,9 +378,9 @@ fn scratch_full_hash_collisions_preserve_exact_key_comparison() {
         for full_recount_every_step in [false, true] {
             let clean = hirsel_heapcheck::run_ready(
                 &program,
-                &loaded.entry,
+                &entry,
                 &[],
-                &mut Io::new(),
+                &mut *harness_operations(),
                 &Config {
                     full_recount_every_step,
                     ..Config::default()

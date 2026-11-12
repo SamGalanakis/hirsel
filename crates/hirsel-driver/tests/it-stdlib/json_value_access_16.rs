@@ -78,13 +78,20 @@ fn vectors_heap_llvm_cranelift() {
             failures: vec![],
             roots: vec![],
         };
-        let outcomes = hirsel_native_testing::differential(
-            &validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::ready_supplier(
+                &fixture("vectors"),
+                None,
+                &loaded.entry,
+                &toolchain,
+            )
+            .unwrap(),
             &loaded.entry,
             &reference,
             &configurations,
             &toolchain,
             &scratch,
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), 3);
         for (configuration, outcome) in outcomes {

@@ -455,9 +455,18 @@ fn native_cases(cases: Vec<(&str, String)>, large: bool) {
             }
             let input = engine.export_native_input().unwrap();
             let input = engine.import_native_input(input).unwrap();
-            for (configuration, outcome) in
-                differential(&input, &entry, &reference, matrix, toolchain, &directory)
-            {
+            for (configuration, outcome) in hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::source_ready_supplier(
+                    &source, "test.hir", &entry, toolchain,
+                )
+                .unwrap(),
+                &entry,
+                &reference,
+                matrix,
+                toolchain,
+                &directory,
+                &hirsel_native::Fixture::default(),
+            ) {
                 assert!(
                     matches!(outcome, Outcome::Agree),
                     "{name}: {configuration}: {outcome:?}\n{source}"

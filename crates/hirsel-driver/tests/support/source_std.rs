@@ -30,9 +30,13 @@ struct Checked {
     store: Arc<MemStore>,
 }
 
+fn project() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/hirsel-driver/tests/fixtures/std_source/main.hir")
+}
+
 pub fn engine() -> QueryEngine {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../crates/hirsel-driver/tests/fixtures/std_source/main.hir");
+    let path = project();
     engine_for(&path, LoweringPolicy::Reachable, ComptimeLimits::default()).unwrap_or_else(
         |output| {
             panic!(
@@ -41,6 +45,17 @@ pub fn engine() -> QueryEngine {
             )
         },
     )
+}
+
+/// `engine()`'s project with `source` added as `name`, built through requests.
+#[allow(dead_code)] // Binaries without request-built native runs.
+pub fn ready(
+    source: &str,
+    name: &str,
+    entry: &hirsel_syntax::DefPath,
+    toolchain: &hirsel_native::Toolchain,
+) -> hirsel_requests::ReadyRequests {
+    hirsel_requests::named_ready_supplier(&project(), source, name, entry, toolchain).unwrap()
 }
 
 // Capture the complete selected graph on each request, including source bytes

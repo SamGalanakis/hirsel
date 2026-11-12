@@ -393,7 +393,10 @@ pub fn main()->Result[(),u64] {
 "
         );
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
-        let file = engine.sources.add("lookup.hir", source.into()).unwrap();
+        let file = engine
+            .sources
+            .add("lookup.hir", source.clone().into())
+            .unwrap();
         let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let entry = entry_path(&default_context());
@@ -447,7 +450,16 @@ pub fn main()->Result[(),u64] {
                 .unwrap();
         let input = engine.export_native_input().unwrap();
         let input = engine.import_native_input(input).unwrap();
-        let outcomes = differential(&input, &entry, &reference, &matrix, &toolchain, &directory);
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::source_ready_supplier(&source, "lookup.hir", &entry, &toolchain)
+                .unwrap(),
+            &entry,
+            &reference,
+            &matrix,
+            &toolchain,
+            &directory,
+            &hirsel_native::Fixture::default(),
+        );
         assert_eq!(outcomes.len(), 3);
         for (configuration, outcome) in outcomes {
             assert!(

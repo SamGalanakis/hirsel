@@ -81,13 +81,20 @@ fn parity(source: &str, native: bool) {
         let toolchain =
             hirsel_native_testing::toolchain_for_matrix(&directory.path().join("runtime"), &matrix)
                 .unwrap();
-        let outcomes = differential(
-            &validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::source_ready_supplier(
+                &source,
+                "nested-copy.hir",
+                &entry,
+                &toolchain,
+            )
+            .unwrap(),
             &entry,
             &reference,
             &matrix,
             &toolchain,
             directory.path(),
+            &hirsel_native::Fixture::default(),
         );
         for (configuration, outcome) in &outcomes {
             eprintln!("{configuration}: {outcome:?}");

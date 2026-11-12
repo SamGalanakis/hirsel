@@ -87,13 +87,14 @@ fn runtime(source: &str) {
     let toolchain =
         hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
             .unwrap();
-    let outcomes = differential(
-        &validated,
+    let outcomes = hirsel_native_testing::differential_ready(
+        &mut *crate::source_std::ready(&source, "loop-place-52.hir", &entry, &toolchain),
         &entry,
         &expected,
         &matrix,
         &toolchain,
         scratch.path(),
+        &hirsel_native::Fixture::default(),
     );
     assert_eq!(outcomes.len(), 2);
     for (configuration, outcome) in outcomes {

@@ -404,13 +404,20 @@ fn agree_source(source: &'static str, scratch_name: &'static str) {
         let toolchain =
             hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &configurations)
                 .unwrap();
-        let outcomes = hirsel_native_testing::differential(
-            &validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::source_ready_supplier(
+                &source,
+                "receipt-original-actuals-33.hir",
+                &entry,
+                &toolchain,
+            )
+            .unwrap(),
             &entry,
             &reference,
             &configurations,
             &toolchain,
             &root,
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), 3);
         for (configuration, outcome) in outcomes {

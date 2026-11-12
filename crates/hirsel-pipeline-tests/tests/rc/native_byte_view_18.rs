@@ -195,9 +195,21 @@ fn nested_and_named_views_agree_on_all_executors() {
             let output = directory.path().join(name);
             std::fs::create_dir_all(&output).unwrap();
             let mut executions = 0;
-            for (configuration, outcome) in
-                differential(&validated, &entry, &reference, &matrix, &toolchain, &output)
-            {
+            for (configuration, outcome) in hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::source_ready_supplier(
+                    &source,
+                    "byte-view.hir",
+                    &entry,
+                    &toolchain,
+                )
+                .unwrap(),
+                &entry,
+                &reference,
+                &matrix,
+                &toolchain,
+                &output,
+                &hirsel_native::Fixture::default(),
+            ) {
                 assert_eq!(outcome, Outcome::Agree, "{name}: {configuration}");
                 executions += 1;
             }

@@ -235,7 +235,7 @@ fn partition(name: &str, file: &str, fixture: &str) {
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{name}: source check {}\n{source}", describe(e)));
         let input = loaded.engine.export_native_input().unwrap();
-        let validated = loaded.engine.import_native_input(input).unwrap();
+        loaded.engine.import_native_input(input).unwrap();
         let hash_seed = if name.ends_with('0') || name == "partition_12" {
             0
         } else {
@@ -296,7 +296,10 @@ fn partition(name: &str, file: &str, fixture: &str) {
         })
         .collect();
         let runner = history::Runner::with_matrix(scratch.path(), matrix).unwrap();
-        let mut report = runner.compare(&validated, &loaded.entry, &reference, name);
+        let mut report = {
+            let mut ready = runner.project(&path, Some(&source), &loaded.entry).unwrap();
+            runner.compare(&mut ready, &loaded.entry, &reference, name)
+        };
         if native_only {
             report.cells.retain(|cell| cell.engine != "reference");
         }

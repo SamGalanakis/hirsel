@@ -73,13 +73,14 @@ fn html_tokenizer_15_vectors_on_h_llvm_and_cranelift() {
         let tools =
             hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs).unwrap();
         eprintln!("html-tokenizer-15: LLVM and Cranelift execution");
-        for (config, outcome) in hirsel_native_testing::differential(
-            &validated,
+        for (config, outcome) in hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::ready_supplier(&path, None, &loaded.entry, &tools).unwrap(),
             &loaded.entry,
             &expected,
             &configs,
             &tools,
             &dir,
+            &hirsel_native::Fixture::default(),
         ) {
             assert!(
                 matches!(outcome, hirsel_native_testing::Outcome::Agree),

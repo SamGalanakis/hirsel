@@ -94,14 +94,15 @@ fn run_selected(
                     .tempdir()
                     .unwrap();
                 let dir = dir_scratch.path().to_path_buf();
-                let input = loaded.engine.export_native_input().unwrap();
-                let validated = loaded.engine.import_native_input(input).unwrap();
                 let target = TargetSpec::x86_64_unknown_linux_gnu();
-                let ready = hirsel_native_batch::build(&validated, &Options::new(target.clone()))
-                    .unwrap_or_else(|error| panic!("{suite} {ids:?}: {error:?}"));
                 let tools = Toolchain::in_tree(&dir.join("runtime"), &[&target]).unwrap();
+                let mut requests =
+                    hirsel_requests::ready_supplier(&fixture, Some(&source), &loaded.entry, &tools)
+                        .unwrap_or_else(|error| panic!("{suite} {ids:?}: {error:?}"));
+                let ready = requests(&Options::new(target.clone()))
+                    .unwrap_or_else(|error| panic!("{suite} {ids:?}: {error:?}"));
                 let exe = hirsel_native::link(
-                    &ready,
+                    hirsel_native_testing::ReadyExecution::program(&*ready),
                     &loaded.entry,
                     OptLevel::Speed,
                     Partition::Whole,

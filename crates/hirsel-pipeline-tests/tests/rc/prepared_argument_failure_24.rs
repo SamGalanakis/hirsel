@@ -96,13 +96,15 @@ pub fn main(rt: Io) -> Result[(), GrantError] {{
                 .join(format!("prepared-argument-failure-{cap}"));
             let tools =
                 hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &matrix).unwrap();
-            let outcomes = hirsel_native_testing::differential(
-                &validated,
+            let outcomes = hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::ready_supplier(&path, Some(&source), &program.entry, &tools)
+                    .unwrap(),
                 &program.entry,
                 &expected,
                 &matrix,
                 &tools,
                 &dir,
+                &hirsel_native::Fixture::default(),
             );
             assert_eq!(outcomes.len(), 3);
             for (configuration, outcome) in outcomes {

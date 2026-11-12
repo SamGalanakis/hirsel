@@ -208,13 +208,15 @@ fn json_skip_small_keys_32_four_engines() {
         let tools =
             hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &configs)
                 .unwrap();
-        let outcomes = hirsel_native_testing::differential(
-            &validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *hirsel_requests::ready_supplier(&path, Some(SOURCE), &loaded.entry, &tools)
+                .unwrap(),
             &loaded.entry,
             &expected,
             &configs,
             &tools,
             scratch.path(),
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), 3);
         for (config, outcome) in outcomes {

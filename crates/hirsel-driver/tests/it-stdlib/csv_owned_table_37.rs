@@ -215,13 +215,20 @@ fn run(engine: &str, part: usize) {
                 failures: vec![],
                 roots: vec![],
             };
-            let outcomes = hirsel_native_testing::differential(
-                &validated,
+            let outcomes = hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::ready_supplier(
+                    &fixture(),
+                    Some(&source),
+                    &loaded.entry,
+                    &tools,
+                )
+                .unwrap(),
                 &loaded.entry,
                 &expected,
                 &matrix,
                 &tools,
                 &scratch,
+                &hirsel_native::Fixture::default(),
             );
             assert_eq!(outcomes.len(), 1);
             for (name, outcome) in outcomes {

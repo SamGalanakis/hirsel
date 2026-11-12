@@ -162,13 +162,20 @@ pub fn main(rt:Io,args:Args)->Result[(),GrantError] {
             let input = engine.export_native_input().unwrap();
             let input = engine.import_native_input(input).unwrap();
             std::fs::create_dir_all(directory.join(name)).unwrap();
-            let outcomes = differential(
-                &input,
+            let outcomes = hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::source_ready_supplier(
+                    source,
+                    &format!("unique-{name}.hir"),
+                    &entry,
+                    &toolchain,
+                )
+                .unwrap(),
                 &entry,
                 &reference,
                 &matrix,
                 &toolchain,
                 &directory.join(name),
+                &hirsel_native::Fixture::default(),
             );
             assert_eq!(outcomes.len(), 3);
             for (configuration, outcome) in outcomes {

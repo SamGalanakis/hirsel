@@ -165,7 +165,10 @@ pub fn main() -> Result[(), String] {
 }
 "#;
         let mut engine = crate::source_std::engine();
-        let file = engine.sources.add("repaired.hir", repaired.into()).unwrap();
+        let file = engine
+            .sources
+            .add("repaired.hir", repaired.clone().into())
+            .unwrap();
         let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let entry = entry_path(&default_context());
@@ -201,13 +204,14 @@ pub fn main() -> Result[(), String] {
         let toolchain =
             hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &configurations)
                 .unwrap();
-        let outcomes = hirsel_native_testing::differential(
-            &validated,
+        let outcomes = hirsel_native_testing::differential_ready(
+            &mut *crate::source_std::ready(&repaired, "repaired.hir", &entry, &toolchain),
             &entry,
             &reference,
             &configurations,
             &toolchain,
             &scratch,
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), 1);
         for (configuration, outcome) in outcomes {

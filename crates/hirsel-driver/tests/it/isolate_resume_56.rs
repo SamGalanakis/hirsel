@@ -217,13 +217,14 @@ fn agrees(source: &str, output: &[u8]) {
         let toolchain =
             hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
                 .unwrap();
-        let results = differential(
-            &validated,
+        let results = hirsel_native_testing::differential_ready(
+            &mut *crate::source_std::ready(&source, "main.hir", &entry, &toolchain),
             &entry,
             &expected,
             &matrix,
             &toolchain,
             scratch.path(),
+            &hirsel_native::Fixture::default(),
         );
         for (configuration, outcome) in &results {
             eprintln!("ISOLATE56 {configuration}: {outcome:?}");

@@ -206,13 +206,20 @@ pub fn main()->Result[(),u64] {
             let input = engine.import_native_input(input).unwrap();
             let name = if failure { "failure" } else { "return" };
             std::fs::create_dir_all(directory.join(name)).unwrap();
-            let outcomes = differential(
-                &input,
+            let outcomes = hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::source_ready_supplier(
+                    &source,
+                    "generic-result.hir",
+                    &entry,
+                    &toolchain,
+                )
+                .unwrap(),
                 &entry,
                 &reference,
                 &matrix,
                 &toolchain,
                 &directory.join(name),
+                &hirsel_native::Fixture::default(),
             );
             assert_eq!(outcomes.len(), 3);
             for (configuration, outcome) in outcomes {

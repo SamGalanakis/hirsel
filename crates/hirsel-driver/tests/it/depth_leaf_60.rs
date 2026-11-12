@@ -84,7 +84,10 @@ fn fixed_inline_constructor_keeps_the_exact_last_admissible_depth() {
             let source = format!(
                 "fn pair(x:u64,y:u64)->(u64,u64) {{(x,y)}}\nfn descend(n:u64)->u64 {{if n==0u64 {{let (x,y)=pair(1u64,2u64);x+y}} else {{1u64+descend(n-1u64)}}}}\npub fn main()->Result[(),()] {{let _=descend({n}u64);Ok(())}}\n"
             );
-            let file = engine.sources.add("limit.hir", source.into()).unwrap();
+            let file = engine
+                .sources
+                .add("limit.hir", source.clone().into())
+                .unwrap();
             let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let entry = entry_path(&default_context());
@@ -120,13 +123,15 @@ fn fixed_inline_constructor_keeps_the_exact_last_admissible_depth() {
                 &matrix,
             )
             .unwrap();
-            for (configuration, outcome) in hirsel_native_testing::differential(
-                &validated,
+            for (configuration, outcome) in hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::source_ready_supplier(&source, "limit.hir", &entry, &tools)
+                    .unwrap(),
                 &entry,
                 &expected,
                 &matrix,
                 &tools,
                 scratch.path(),
+                &hirsel_native::Fixture::default(),
             ) {
                 assert_eq!(
                     outcome,

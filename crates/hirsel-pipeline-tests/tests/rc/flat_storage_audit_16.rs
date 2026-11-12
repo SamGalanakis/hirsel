@@ -732,8 +732,20 @@ fn native_flat_region_copy_parity() {
             }
             let snapshot = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(snapshot).unwrap();
-            for (configuration, outcome) in differential(
-                &validated, &entry, &reference, &matrix, &toolchain, &directory,
+            for (configuration, outcome) in hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::source_ready_supplier(
+                    &source,
+                    "flat-region-copy.hir",
+                    &entry,
+                    &toolchain,
+                )
+                .unwrap(),
+                &entry,
+                &reference,
+                &matrix,
+                &toolchain,
+                &directory,
+                &hirsel_native::Fixture::default(),
             ) {
                 assert!(
                     matches!(outcome, Outcome::Agree),

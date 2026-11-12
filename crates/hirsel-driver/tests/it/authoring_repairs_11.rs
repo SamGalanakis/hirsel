@@ -146,13 +146,20 @@ fn authoring_repairs_11_accepted_twins_agree_on_h_llvm_and_cranelift() {
                 &configurations,
             )
             .unwrap();
-            let outcomes = hirsel_native_testing::differential(
-                &validated,
+            let outcomes = hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::ready_supplier(
+                    &root().join(manifest),
+                    None,
+                    &program.entry,
+                    &toolchain,
+                )
+                .unwrap(),
                 &program.entry,
                 &reference,
                 &configurations,
                 &toolchain,
                 &scratch,
+                &hirsel_native::Fixture::default(),
             );
             assert_eq!(outcomes.len(), 3);
             for (configuration, outcome) in outcomes {
@@ -737,13 +744,20 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
                 &configurations,
             )
             .unwrap();
-            let outcomes = hirsel_native_testing::differential(
-                &validated,
+            let outcomes = hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::ready_supplier(
+                    &dir.path().join("hirsel.json"),
+                    None,
+                    &program.entry,
+                    &toolchain,
+                )
+                .unwrap(),
                 &program.entry,
                 &reference,
                 &configurations,
                 &toolchain,
                 scratch.path(),
+                &hirsel_native::Fixture::default(),
             );
             assert_eq!(outcomes.len(), 3);
             for (configuration, outcome) in outcomes {

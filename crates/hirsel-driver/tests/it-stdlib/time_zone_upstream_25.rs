@@ -166,7 +166,7 @@ fn partition(zone: &str, operation: &str, part: usize) {
             .engine
             .export_native_input()
             .unwrap_or_else(|e| panic!("V-export {ids:?}: {e:?}"));
-        let validated = loaded
+        loaded
             .engine
             .import_native_input(input)
             .unwrap_or_else(|e| panic!("VRejection {ids:?}: {e:?}"));
@@ -213,7 +213,10 @@ fn partition(zone: &str, operation: &str, part: usize) {
         .collect();
         let runner = history::Runner::with_matrix(dir.path(), matrix)
             .expect("required four-engine toolchain");
-        let report = runner.compare(&validated, &loaded.entry, &observation, &name);
+        let report = {
+            let mut ready = runner.project(&path, Some(&source), &loaded.entry).unwrap();
+            runner.compare(&mut ready, &loaded.entry, &observation, &name)
+        };
         assert_eq!(report.cells.len(), 4, "missing required engine: {report:?}");
         let mut failed = Vec::new();
         for cell in &report.cells {

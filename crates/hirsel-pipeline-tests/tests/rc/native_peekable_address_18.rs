@@ -196,13 +196,15 @@ fn original_cleanup_and_upstream_vectors_on_all_engines() {
             let input = loaded.engine.import_native_input(input).unwrap();
             let directory = directory.join(path.file_stem().unwrap());
             std::fs::create_dir_all(&directory).unwrap();
-            let outcomes = differential(
-                &input,
+            let outcomes = hirsel_native_testing::differential_ready(
+                &mut *hirsel_requests::ready_supplier(&path, None, &loaded.entry, &toolchain)
+                    .unwrap(),
                 &loaded.entry,
                 &reference,
                 &matrix,
                 &toolchain,
                 &directory,
+                &hirsel_native::Fixture::default(),
             );
             assert_eq!(outcomes.len(), 4);
             for (configuration, outcome) in outcomes {

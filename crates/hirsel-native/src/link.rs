@@ -1777,14 +1777,18 @@ done:
     }
     let table = failure_table(program)?;
     let name = revision.entry().as_bytes();
-    // Existing unit summaries retain code identities even for cached units.
-    // These diagnostic relocations do not extend the RUN-3 entries table.
+    // The code identities a stored callable can hold, from unit summaries, which
+    // cached units retain: a closure body's `X` (its FnAbi has an environment) and the
+    // function-ref thunk of each escaping definition. These diagnostic relocations do
+    // not extend the RUN-3 entries table.
     let mut value_codes = std::collections::BTreeSet::new();
     for unit in &program.summaries {
-        value_codes.insert(hirsel_lir::emission::symbol_name(
-            &unit.definition,
-            Some(&unit.instance),
-        ));
+        if program.table.fn_abis[unit.abi.0 as usize].environment {
+            value_codes.insert(hirsel_lir::emission::symbol_name(
+                &unit.definition,
+                Some(&unit.instance),
+            ));
+        }
         for (path, instance) in &unit.glue.entries {
             value_codes.insert(hirsel_lir::emission::function_thunk_name(
                 path,

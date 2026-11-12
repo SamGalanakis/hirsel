@@ -755,8 +755,6 @@ fn lower<T>(
                         optimizer_only
                             .insert(name.clone(), ObjectSymbol::entry(name, definition, entry));
                     }
-                } else if template {
-                    module.make_weak_odr(entry);
                 }
                 module.add_attribute(entry, AttributeSlot::Function, Attribute::InlineHint);
                 manifested.library.insert(body_name.clone());
@@ -839,8 +837,6 @@ fn lower<T>(
                         body_name.clone(),
                         ObjectSymbol::entry(&body_name, &unit.header.definition, entry),
                     );
-                } else {
-                    module.make_weak_odr(function);
                 }
                 let inline_map = [
                     "map.get",
@@ -901,8 +897,6 @@ fn lower<T>(
                             name.clone(),
                             ObjectSymbol::entry(&name, &unit.header.definition, entry),
                         );
-                    } else {
-                        module.make_weak_odr(thunk);
                     }
                     module.add_attribute(thunk, AttributeSlot::Function, Attribute::InlineHint);
                     manifested.library.insert(name);
@@ -1123,6 +1117,11 @@ fn lower<T>(
                 if manifested.library.remove(&name) {
                     let entry = entry_of(inputs.keys, kind, Some(abi));
                     manifested.export_entry(&name, &header.definition, entry);
+                }
+                // The owner's one definition of each Hirsel entry kind is hidden; a C
+                // callback thunk keeps the platform's visibility.
+                if kind != EntryKind::Callback && manifested.exports.contains_key(&name) {
+                    module.hide(&name);
                 }
             }
         }

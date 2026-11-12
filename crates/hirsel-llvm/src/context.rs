@@ -871,14 +871,17 @@ impl<'context> Module<'context> {
 
     /// Retain a template's out-of-line implementation in its own object even when
     /// this module inlines every local call. Other programs may share this object.
-    pub(crate) fn make_weak_odr(&self, function: Function<'_>) {
-        // SAFETY: `function` is a live function of this module.
-        unsafe {
-            LLVMSetLinkage(
-                function.value.raw,
-                llvm_sys::LLVMLinkage::LLVMWeakODRLinkage,
-            )
-        };
+    /// Gives the function `name` this module defines hidden visibility: its owner's one
+    /// definition, which other objects of the same link reach and no image exports.
+    pub(crate) fn hide(&self, name: &str) {
+        let c_name = c_string(name);
+        // SAFETY: the module is live and the name NUL-terminated.
+        let existing = unsafe { LLVMGetNamedFunction(self.raw, c_name.as_ptr()) };
+        // SAFETY: `existing` is null or a live function of this module.
+        if !existing.is_null() && unsafe { LLVMIsDeclaration(existing) } == 0 {
+            // SAFETY: as above.
+            unsafe { LLVMSetVisibility(existing, llvm_sys::LLVMVisibility::LLVMHiddenVisibility) };
+        }
     }
 
     /// Gives a function `available_externally` linkage: another object implements it, and

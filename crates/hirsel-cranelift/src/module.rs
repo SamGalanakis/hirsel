@@ -422,19 +422,16 @@ pub(crate) fn emit(
             } else {
                 sig
             };
-        let library = !inputs.alternate
-            && (header.origin == UnitOrigin::Library
-                || inputs.inline_instances.contains(&header.instance));
-        let linkage = if library {
-            Linkage::Preemptible
-        } else {
+        // The owner defines each entry once, hidden: a template's owner like an
+        // ordinary source unit's, and callers import it. Ahead alternates stay exported.
+        let linkage = if inputs.alternate {
             Linkage::Export
+        } else {
+            Linkage::Hidden
         };
         let id = emitter.declare_function(&name, linkage, &sig.ir)?;
         let thunk = (!inputs.alternate && abi.shape == CallableShape::Definition)
             .then(|| function_thunk_name(&header.definition, Some(&header.instance)));
-        // A template's own object retains weak definitions; callers import them.
-        // The owner participates in the same link manifest as an ordinary source unit.
         // Cranelift bodies have no root-value entry: `X` is the value entry.
         let kind = if inputs.alternate {
             EntryKind::Ahead

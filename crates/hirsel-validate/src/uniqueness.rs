@@ -671,18 +671,25 @@ impl Checker<'_, '_> {
                 ..
             } => {
                 let mut parts = crossing::Parts::default();
+                // Every element shares the one Elements path: its evidence is
+                // what all of them prove, not the last one's.
+                let mut elements: Option<crossing::Parts> = None;
                 for field in fields {
-                    let path = match constructor {
-                        Constructor::Variant { variant, .. } => {
-                            crossing::Part::Variant(*variant, field.field)
-                        }
-                        Constructor::Sequence | Constructor::Map | Constructor::Set => {
-                            crossing::Part::Elements
-                        }
-                        _ => crossing::Part::Field(field.field),
-                    };
                     let incoming = self.operand_crossing_parts(state, &field.value);
-                    parts.install(&[path], &incoming);
+                    match constructor {
+                        Constructor::Variant { variant, .. } => parts
+                            .install(&[crossing::Part::Variant(*variant, field.field)], &incoming),
+                        Constructor::Sequence | Constructor::Map | Constructor::Set => {
+                            match &mut elements {
+                                Some(all) => all.join(&incoming),
+                                None => elements = Some(incoming),
+                            }
+                        }
+                        _ => parts.install(&[crossing::Part::Field(field.field)], &incoming),
+                    }
+                }
+                if let Some(elements) = elements {
+                    parts.install(&[crossing::Part::Elements], &elements);
                 }
                 if self.rvalue_sendable(state, destination, value) {
                     parts.set(&[], true);
@@ -1437,19 +1444,26 @@ impl Checker<'_, '_> {
                         }
                     }
                 }
+                // MODE-2: every element shares the one Elements path, so its
+                // proof is what all of them prove, not the last one's.
+                let mut elements: Option<crossing::Parts> = None;
                 for field in fields {
-                    let prefix = match constructor {
-                        Constructor::Variant { variant, .. } => {
-                            vec![crossing::Part::Variant(*variant, field.field)]
-                        }
-                        Constructor::Sequence => vec![crossing::Part::Elements],
-                        _ => vec![crossing::Part::Field(field.field)],
-                    };
                     let mut incoming = self.operand_unique_parts(state, &field.value);
                     if !needs_release(self, self.place_type(field.value.place), self.t) {
                         incoming.set(&[], true);
                     }
-                    parts.install(&prefix, &incoming);
+                    match constructor {
+                        Constructor::Variant { variant, .. } => parts
+                            .install(&[crossing::Part::Variant(*variant, field.field)], &incoming),
+                        Constructor::Sequence => match &mut elements {
+                            Some(all) => all.join(&incoming),
+                            None => elements = Some(incoming),
+                        },
+                        _ => parts.install(&[crossing::Part::Field(field.field)], &incoming),
+                    }
+                }
+                if let Some(elements) = elements {
+                    parts.install(&[crossing::Part::Elements], &elements);
                 }
                 parts
             }

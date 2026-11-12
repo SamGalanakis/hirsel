@@ -2046,6 +2046,126 @@ fn a_deep_unique_copy_of_a_view_is_independent_but_its_move_is_not() {
     );
 }
 
+/// `fn main(s: String) { let rows: List[String] = [e, fresh]; need(mut rows[0]) }`
+/// for `need(mut x: unique String)`, where `e` is `copy s` (`shared`) or a
+/// fresh string (oldv-attack-770 candidate 1:
+/// `[copy xs, [[2]]]` then `demand(mut rows[0])` trapped in checked H).
+fn sequence_element_needed(shared: bool) -> Fixture {
+    let mut f = Fixture::unit();
+    let string = TypeKind::Primitive(Primitive::String);
+    let s = param(&mut f, string.clone());
+    let index = f.slot(TypeKind::Primitive(Primitive::U32), Storage::Temporary);
+    f.assign(index, Rvalue::Constant(Constant::Integer(0)), 0);
+    let element = f.definition.types.push(ty(string.clone()));
+    let list = TypeKind::Builtin {
+        kind: BuiltinType::List,
+        arguments: vec![GenericArgument::Type(element)].into(),
+    };
+    let first = if shared {
+        copy(s)
+    } else {
+        let a = f.slot(string.clone(), Storage::Temporary);
+        f.assign(a, Rvalue::Constant(Constant::String("a".into())), 0);
+        take(a)
+    };
+    let held: Vec<_> = (!shared).then(|| drop(first.place.0)).into_iter().collect();
+    let b = f.slot(string.clone(), Storage::Temporary);
+    let c = f.cleanup(held.clone());
+    f.assign(b, Rvalue::Constant(Constant::String("b".into())), c);
+    let rows = f.slot(list, Storage::Local);
+    let c = f.cleanup([drop(b)].into_iter().chain(held).collect());
+    f.assign(
+        rows,
+        Rvalue::Construct {
+            constructor: Constructor::Sequence,
+            fields: vec![
+                ConstructField {
+                    field: 0,
+                    value: first,
+                },
+                ConstructField {
+                    field: 1,
+                    value: take(b),
+                },
+            ],
+            destination: Destination::Inferred,
+        },
+        c,
+    );
+    let owned = f.cleanup(vec![drop(rows)]);
+    f.emit(InstructionKind::BeginLoan {
+        id: LoanId(0),
+        place: PlaceId(rows),
+        mutable: true,
+        if_inactive: false,
+    });
+    f.body().blocks[0]
+        .instructions
+        .last_mut()
+        .unwrap()
+        .on_failure = CleanupId(owned);
+    let index_root = f.body().places[index as usize].root;
+    let root = f.body().places[rows as usize].root;
+    let row = f.body().places.len() as u32;
+    f.body().places.push(Place {
+        root,
+        projection: vec![Projection::Index(index_root)].into(),
+        ty: element,
+        loan: Some(LoanId(0)),
+        binding: None,
+    });
+    let unit = f.slot(TypeKind::Tuple(vec![].into()), Storage::Temporary);
+    let lent = CleanupAction::EndLoan {
+        loan: LoanId(0),
+        if_active: false,
+    };
+    let failed = f.cleanup(vec![lent.clone(), drop(rows)]);
+    f.body().blocks[0].terminator = Terminator::Call {
+        callee: Callee::Definition {
+            path: path("need"),
+            arguments: vec![],
+        },
+        arguments: vec![CallArgument {
+            parameter: ParamId(0),
+            value: operand(row, UseKind::Mut),
+        }],
+        returns: Some(CallReturn {
+            destination: PlaceId(unit),
+            next: BlockId(1),
+        }),
+        on_failure: CleanupId(failed),
+    };
+    let exit = f.cleanup(vec![drop(unit), lent, drop(rows)]);
+    f.body().blocks.push(block(vec![], ret(0, exit)));
+    owner_sig(&mut f, &[PassingMode::Borrow]);
+    let mut need = function_signature(
+        "need",
+        vec![(PassingMode::Mut, string)],
+        TypeKind::Tuple(vec![].into()),
+    );
+    let SignatureKind::Function(fun) = &mut need.kind else {
+        panic!()
+    };
+    let mut row = interner().get(fun.parameters[0].ty).unwrap().clone();
+    row.modes.uniqueness = Uniqueness::Unique;
+    fun.parameters[0].ty = interner().intern(row);
+    f.signatures.insert(id("need"), need);
+    f
+}
+
+#[test]
+fn a_sequence_element_is_unique_only_if_every_element_is() {
+    // MODE-2: all elements share one Elements path, so `mut rows[0]` into a
+    // unique parameter needs every element unique, not just the last one.
+    sequence_element_needed(false).valid();
+    assert_eq!(
+        sequence_element_needed(true).kinds(),
+        vec![ViolationKind::TypeMismatch {
+            entity: "call argument"
+        }]
+    );
+}
+
 /// `fn main(p: String) -> unique String { let x = <fresh "a" | copy p>; take x }`:
 /// the move Lower emits for `unique x` when the ownership pass proved `x`
 /// unique (`OwnershipFacts::unique_identities`). V judges it on its own fact.

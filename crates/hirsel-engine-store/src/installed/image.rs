@@ -511,6 +511,7 @@ impl Definitions {
         Ok((definition.key.definition == *path).then_some(definition))
     }
     fn load(&self, at: usize) -> Result<InstalledDefinition, String> {
+        hirsel_intern::work::count(hirsel_intern::work::Counter::InstalledDefinitionDecodes);
         let entry = self.entry(at);
         let (chunk, offset, len) = (
             u32_at(entry, 32) as usize,
@@ -552,10 +553,16 @@ impl Definitions {
         )?;
         Ok(definition)
     }
-    /// Decode and check every listed definition without keeping any: the
-    /// whole-package audit that open defers to first demand.
+    /// Decode and check every listed definition, keeping each for its first
+    /// demand: the whole-package admission an authenticated open defers.
     pub(crate) fn audit(&self) -> Result<(), String> {
-        (0..self.count).try_for_each(|at| self.load(at).map(drop))
+        (0..self.count).try_for_each(|at| {
+            self.slots[at]
+                .get_or_init(|| self.load(at))
+                .as_ref()
+                .map(drop)
+                .map_err(Clone::clone)
+        })
     }
     /// The most this owner can come to hold: the index, every chunk, and the
     /// decoded definitions, whose heap parts are no larger than their encoding.

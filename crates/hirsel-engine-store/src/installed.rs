@@ -81,6 +81,7 @@ mod tests {
     /// installation it had, rather than associate a header whose rows section
     /// never reached storage.
     #[test]
+    #[cfg(debug_assertions)]
     fn a_skipped_section_write_fails_publication_and_keeps_the_old_header() {
         let directory = tempfile::tempdir().unwrap();
         let (store, compiler, package, _) = fixture(directory.path());
@@ -586,11 +587,11 @@ mod tests {
         );
         assert_eq!(registration(directory.path()), before);
     }
-    /// An inconsistent descriptor nobody demands no longer refuses the open;
-    /// the one that is demanded is refused on that first load, and the others,
-    /// in its chunk and outside it, load. The registration authenticated the
-    /// header, not the descriptor, and the refusal leaves it unchanged. The
-    /// store audit, which decodes every descriptor, refuses the image.
+    /// An inconsistent descriptor nobody demands does not refuse a registered
+    /// open; the one that is demanded is refused on that first load, and the
+    /// others, in its chunk and outside it, load. The registration
+    /// authenticated the header, not the descriptor, and the refusal leaves
+    /// it unchanged.
     #[test]
     fn one_bad_descriptor_is_refused_at_its_first_load_and_the_others_load() {
         let directory = tempfile::tempdir().unwrap();
@@ -598,12 +599,6 @@ mod tests {
         let (_, compiler, package, header, _) = imaged(&root, true);
         let request = registered(directory.path(), &root, compiler, &package, header);
         let before = registration(directory.path());
-        // The audit decodes and checks what no request demanded.
-        let audit = InstalledPackage::verify_store(&root).unwrap_err();
-        assert!(
-            audit.contains("invalid installed definition descriptor"),
-            "{audit}"
-        );
         let opened = request().unwrap();
         let refused = opened.definition(&item(&package, "a", "two")).unwrap_err();
         assert!(
@@ -618,6 +613,87 @@ mod tests {
             );
         }
         assert_eq!(registration(directory.path()), before);
+    }
+    /// The store audit, and any open no registration covers, decodes and
+    /// checks every descriptor, including the one no request demanded.
+    #[test]
+    fn an_undemanded_bad_descriptor_refuses_the_audit_and_an_unregistered_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, compiler, package, _, _) = imaged(directory.path(), true);
+        let audit = InstalledPackage::verify_store(directory.path()).unwrap_err();
+        assert!(
+            audit.contains("invalid installed definition descriptor"),
+            "{audit}"
+        );
+        let refused = InstalledPackage::open(&store, &package, compiler).unwrap_err();
+        assert!(
+            refused.contains("invalid installed definition descriptor"),
+            "{refused}"
+        );
+    }
+    /// Open checks the index's order and tiling, not that each entry's
+    /// fingerprint names the descriptor its range holds. An image that
+    /// relabels one entry with a path it does not hold, re-sorted so order and
+    /// tiling still pass, would report that definition absent. No registration
+    /// authenticates such an image, so an unregistered open must decode every
+    /// entry first and refuse it; under the header taken as authenticated,
+    /// the lazy open accepts it and answers absent, which is the attack.
+    #[test]
+    fn a_relabeled_and_resorted_index_is_refused_at_an_unregistered_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, compiler, package, header, _) = imaged(directory.path(), false);
+        let one = item(&package, "a", "one");
+        // An index entry: fingerprint, then chunk, offset and length as u32.
+        const ENTRY: usize = 44;
+        let unused = item(&package, "a", "unlisted").fingerprint().0;
+        let header = rewritten(
+            &store,
+            header,
+            |sections| &mut sections.index,
+            |bytes| {
+                let count = (bytes.len() - 8) / (ENTRY + 4);
+                let entries = 8..8 + count * ENTRY;
+                let at = bytes[entries.clone()]
+                    .chunks(ENTRY)
+                    .position(|entry| entry[..32] == one.fingerprint().0)
+                    .unwrap();
+                bytes[8 + at * ENTRY..8 + at * ENTRY + 32].copy_from_slice(&unused);
+                let mut order = (0..count as u32).collect::<Vec<_>>();
+                order.sort_by_key(|&k| {
+                    let start = 8 + k as usize * ENTRY;
+                    bytes[start..start + 32].to_vec()
+                });
+                for (k, position) in order.into_iter().enumerate() {
+                    let start = entries.end + 4 * k;
+                    bytes[start..start + 4].copy_from_slice(&position.to_le_bytes());
+                }
+            },
+        );
+        let lazy = InstalledPackage::open_header(&store, Some(header), &package, compiler).unwrap();
+        assert!(lazy.package.definition(&one).unwrap().is_none());
+        let refused = InstalledPackage::open(&store, &package, compiler).unwrap_err();
+        assert!(
+            refused.contains("invalid installed definition index"),
+            "{refused}"
+        );
+    }
+    /// A registered open of an honestly built image decodes no definition;
+    /// the first demand of one decodes exactly that one.
+    #[test]
+    fn a_registered_open_decodes_no_definition_until_demanded() {
+        use hirsel_intern::work::{Counter, read};
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("installed");
+        let (_, compiler, package, header, _) = imaged(&root, false);
+        let request = registered(directory.path(), &root, compiler, &package, header);
+        let before = read(Counter::InstalledDefinitionDecodes);
+        let opened = request().unwrap();
+        assert_eq!(read(Counter::InstalledDefinitionDecodes), before);
+        opened
+            .definition(&item(&package, "b", "three"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(read(Counter::InstalledDefinitionDecodes), before + 1);
     }
     /// The image of `header` with one section rewritten by `edit`, under a new
     /// header that the root now associates.
@@ -1340,17 +1416,12 @@ impl InstalledPackage {
         store: &hirsel_artifact_store::Store,
     ) -> Result<hirsel_artifact_store::VerifiedRecords, String> {
         let _scope = store.batch();
-        let installed = Self::read(store)?;
-        let records = installed.check_records(store)?;
-        installed
-            .definitions
-            .as_ref()
-            .ok_or("installed package without a definition index")?
-            .audit()?;
-        Ok(records)
+        // `read` opens the root's current header unauthenticated, so it has
+        // already admitted every definition.
+        Self::read(store)?.check_records(store)
     }
     fn read(store: &hirsel_artifact_store::Store) -> Result<Self, String> {
-        Self::read_header(store, None)
+        Self::read_header(store, None)?.admit(false)
     }
     /// Read the installation `header` names, or without one the root's
     /// current header. A header a registration authenticated is opened as
@@ -1391,6 +1462,20 @@ impl InstalledPackage {
         }
         Ok(installed)
     }
+    /// Open checks the index's order and tiling but not that each entry's
+    /// fingerprint names its descriptor, so a self-consistent image could
+    /// relabel a definition and have it reported absent. A header a
+    /// registration `authenticated` authenticates every section, so its image
+    /// stays lazy; any other image is admitted whole before it answers.
+    fn admit(self, authenticated: bool) -> Result<Self, String> {
+        if !authenticated {
+            self.definitions
+                .as_ref()
+                .ok_or("installed package without a definition index")?
+                .audit()?;
+        }
+        Ok(self)
+    }
     #[cfg(test)]
     pub(crate) fn open(
         store: &hirsel_artifact_store::Store,
@@ -1416,7 +1501,7 @@ impl InstalledPackage {
             if installed.package != *package {
                 return Err("installed package identity mismatch".into());
             }
-            Self::attach(store, scope, installed)
+            Self::attach(store, scope, installed.admit(header.is_some())?)
         };
         read().map_err(|error| format!("installed products {}: {error}", store.root().display()))
     }
@@ -1428,7 +1513,8 @@ impl InstalledPackage {
         header: Option<(Address, hirsel_artifact_store::Association)>,
     ) -> Result<Arc<InstalledRecords>, String> {
         let scope = store.batch();
-        Ok(Self::attach(store, scope, Self::read_header(store, header)?)?.records)
+        let installed = Self::read_header(store, header)?.admit(header.is_some())?;
+        Ok(Self::attach(store, scope, installed)?.records)
     }
     fn attach(
         store: &hirsel_artifact_store::Store,

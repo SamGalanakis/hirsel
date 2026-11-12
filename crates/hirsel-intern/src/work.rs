@@ -133,6 +133,8 @@ pub enum Counter {
     SourcePathCopies,
     /// Verifier installation registrations read and authenticated from private state.
     VerifierRegistrationReads,
+    /// Installed definition descriptors decoded from their chunk and admitted against the index.
+    InstalledDefinitionDecodes,
     /// Cached dependency-node inspections.
     CacheValidationRows,
 }

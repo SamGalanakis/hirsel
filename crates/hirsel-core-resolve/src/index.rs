@@ -1,6 +1,6 @@
 use hirsel_core_ids::{DefPath, ItemPath, PackageId};
 use hirsel_core_syntax::{Diagnostic, Item, NodeId, NodeKind, Span, TokenKind};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub struct ModuleId {
@@ -83,6 +83,7 @@ pub struct Environment {
 #[derive(Clone, Debug, Default)]
 pub struct NameIndex {
     definitions: BTreeMap<DefPath, Definition>,
+    module_heads: BTreeMap<PackageId, BTreeSet<String>>,
     variants: BTreeMap<String, Vec<DefPath>>,
     pub environment: Environment,
     pub diagnostics: Vec<Refusal>,
@@ -94,6 +95,19 @@ impl NameIndex {
             ..Self::default()
         }
     }
+    pub fn add_module(&mut self, module: &ModuleId) {
+        if let Some(head) = module.modules.first() {
+            self.module_heads
+                .entry(module.package.clone())
+                .or_default()
+                .insert(head.clone());
+        }
+    }
+    pub fn has_module_head(&self, package: &PackageId, name: &str) -> bool {
+        self.module_heads
+            .get(package)
+            .is_some_and(|heads| heads.contains(name))
+    }
     pub fn definitions(&self) -> impl Iterator<Item = &Definition> {
         self.definitions.values()
     }
@@ -104,6 +118,7 @@ impl NameIndex {
         self.variants.get(name).map_or(&[], Vec::as_slice)
     }
     pub fn add(&mut self, definition: Definition) {
+        self.add_module(&definition.site.module);
         if let Some(old) = self.definitions.get(&definition.path) {
             let mut d = Refusal::new("LANG-7", definition.site.clone(), "duplicate definition");
             d.causal.push(old.site.clone());
@@ -130,6 +145,7 @@ impl NameIndex {
             _ => return,
         };
         let Some(name) = root.token else { return };
+        let name_span = item.tree.tokens[name.0 as usize].span;
         let name = item.tree.token_text(&item.text, name);
         let mut definition = Definition {
             path: module.definition(name),
@@ -139,7 +155,7 @@ impl NameIndex {
             site: Site {
                 module: module.clone(),
                 item: ordinal,
-                span: root.origin.span,
+                span: name_span,
             },
             fields: vec![],
             variants: vec![],

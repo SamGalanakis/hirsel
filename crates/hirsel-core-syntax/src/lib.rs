@@ -8,7 +8,7 @@ mod parser;
 mod token;
 pub use lexer::{LexOutput, lex};
 pub use literals::{byte_value, character_value};
-pub use parser::{ParseMode, ParseOutput, ResourceRefusal, parse};
+pub use parser::{ParseMode, ParseOutput, ResourceRefusal, parse, parse_bytes};
 use std::ops::Range;
 pub use token::*;
 
@@ -193,7 +193,12 @@ impl SyntaxFile {
     pub fn text(&self) -> String {
         self.items
             .iter()
-            .map(|i| i.text.as_str())
+            .flat_map(|item| {
+                item.tree.tokens.iter().map(move |token| {
+                    let span = token.span;
+                    &item.text[span.start as usize..span.end as usize]
+                })
+            })
             .chain([self.trailing.as_str()])
             .collect()
     }

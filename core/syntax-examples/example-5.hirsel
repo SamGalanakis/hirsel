@@ -1,19 +1,19 @@
-type AppError = Io(IoError) | Mem(Capacity)
+type AppError = Io(WriteError) | Mem(Capacity)
 
-resource type Step { name: String, out: Stdout }
+resource type Step uses Stdout { name: String, out: Stdout }
   drop(s) { let _ = stdout.write(s.out, "drop "); let _ = stdout.write(s.out, s.name) }
 
 fn step(out: Stdout, take name: String) -> Result[Step, Capacity] {
   Step(name: take name, out: out)
 }
 
-fn close(take s: Step) -> Result[(), IoError] {
+fn close(take s: Step) -> Result[(), WriteError] waits {
   let Step(name: n, out: o) = take s
   stdout.write(o, "close ")?
   stdout.write(o, n)
 }
 
-fn steps(out: Stdout, fail_at: u64) -> Result[(), AppError] {
+fn steps(out: Stdout, fail_at: u64) -> Result[(), AppError] waits {
   let a = step(out, "a\n")?
   let b = step(out, "b\n")?
   if fail_at == 2 { fail("stop") }
@@ -22,7 +22,7 @@ fn steps(out: Stdout, fail_at: u64) -> Result[(), AppError] {
   Ok(())
 }
 
-pub fn main(out: Stdout) -> Result[(), AppError] {
+pub fn main(out: Stdout) -> Result[(), AppError] waits {
   steps(out, 0)?
   steps(out, 2)
 }

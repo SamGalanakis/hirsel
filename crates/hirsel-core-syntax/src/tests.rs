@@ -94,6 +94,8 @@ fn literals_are_lossless_and_decode_the_new_rules() {
     );
     for (s, r) in [
         ("1u128", "LANG-3"),
+        ("'ab'", "LANG-3"),
+        ("b'é'", "LANG-3"),
         ("0b2", "LANG-3"),
         ("\"\\q\"", "LANG-3"),
         ("b\"é\"", "LANG-3"),
@@ -151,4 +153,30 @@ fn nesting_exhaustion_is_an_incomplete_tool_result() {
         Some(ResourceRefusal::ParserStack { .. })
     ));
     assert_eq!(p.syntax.text(), text);
+}
+
+#[test]
+fn invalid_utf8_has_a_raw_primary_byte_span() {
+    let p = parse_bytes(b"fn f() {}\n\xff", ParseMode::Source);
+    assert_eq!(p.diagnostics.len(), 1);
+    assert_eq!(p.diagnostics[0].rule, "LANG-1");
+    assert_eq!(p.diagnostics[0].primary, Span { start: 10, end: 11 });
+}
+
+#[test]
+fn restricted_subjects_and_exit_labels_follow_revision_two() {
+    for source in [
+        "fn f() { let x = {} else { return } }",
+        "fn f() { if 1 + {} {} }",
+        "fn f() { return 'target 1 }",
+    ] {
+        let p = parse(source, ParseMode::Source);
+        assert!(p.diagnostics.iter().any(|d| d.rule == "LANG-5"), "{source}");
+        assert_eq!(p.syntax.text(), source);
+    }
+    good("fn f() { let x = ({}) else { return } }");
+    assert_eq!(
+        parse("const BAD: u64 = 1.", ParseMode::Source).diagnostics[0].rule,
+        "LANG-3"
+    );
 }

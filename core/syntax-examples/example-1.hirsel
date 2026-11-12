@@ -1,7 +1,7 @@
-type AppError = Io(IoError) | Mem(Capacity)
+type AppError = Io(WriteError) | Mem(Capacity)
 stable type Word { text: Text, len: u64 }
 
-fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] {
+fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] waits {
   let mut line = string.new()
   string.push(mut line, label)?
   string.push_u64(mut line, n)?
@@ -24,7 +24,7 @@ fn measure(s: String, limit: u64) -> Result[u64, Capacity] {
   }
 }
 
-pub fn main(out: Stdout) -> Result[(), AppError] {
+pub fn main(out: Stdout) -> Result[(), AppError] waits {
   say(out, "fits, length ", measure("hello", 64)?)?
   match measure("hello", 8) {
     Ok(n) => say(out, "fits, length ", n),

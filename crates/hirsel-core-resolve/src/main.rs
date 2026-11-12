@@ -6,27 +6,49 @@ use hirsel_core_syntax::{ParseMode, TokenKind, lex, parse};
 use std::{hint::black_box, path::Path};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
-    let root=args.first().ok_or("usage: hirsel-core-resolve DIRECTORY [--signatures] [--library DIRECTORY] [--prelude JSON] [--phase parse|resolve] [--iterations N]")?;
+    let root=args.first().ok_or("usage: hirsel-core-resolve DIRECTORY [--corpus] [--signatures] [--library DIRECTORY] [--prelude JSON] [--phase parse|resolve] [--iterations N]")?;
     let signatures = args.iter().any(|a| a == "--signatures");
     let option = |key: &str| args.windows(2).find(|a| a[0] == key).map(|a| a[1].as_str());
     let phase = option("--phase").unwrap_or("both");
     let iterations: usize = option("--iterations").unwrap_or("1").parse()?;
-    let manifest = PackageManifest::directory(
-        Path::new(root),
-        PackageId {
-            name: if signatures { "core" } else { "example" }.into(),
-            version: "1".into(),
-        },
-        signatures,
-    )?;
-    let sources = manifest
-        .sources
+    let package = |name: &str| PackageId {
+        name: name.into(),
+        version: "1".into(),
+    };
+    let manifests = if args.iter().any(|a| a == "--corpus") {
+        vec![
+            PackageManifest::directory(&Path::new(root).join("std"), package("core"), true)?,
+            PackageManifest::directory(
+                &Path::new(root).join("syntax-examples"),
+                package("example"),
+                false,
+            )?,
+        ]
+    } else {
+        vec![PackageManifest::directory(
+            Path::new(root),
+            package(if signatures { "core" } else { "example" }),
+            signatures,
+        )?]
+    };
+    let mut modules = vec![];
+    let mut modes = vec![];
+    for manifest in &manifests {
+        for source in &manifest.sources {
+            modes.push(if source.signatures {
+                ParseMode::Signatures
+            } else {
+                ParseMode::Source
+            });
+        }
+        modules.extend(manifest.read()?);
+    }
+    let sources = modules
         .iter()
-        .map(|s| std::fs::read_to_string(&s.file))
+        .map(|m| std::fs::read_to_string(&m.file))
         .collect::<Result<Vec<_>, _>>()?;
     let lines: usize = sources.iter().map(|s| code_lines(s)).sum();
     let bytes: usize = sources.iter().map(String::len).sum();
-    let mut modules = manifest.read()?;
     let mut environment = Environment::default();
     if let Some(file) = option("--prelude") {
         let mappings: std::collections::BTreeMap<String, String> =
@@ -40,51 +62,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let library = if let Some(root) = option("--library") {
-        PackageManifest::directory(
-            Path::new(root),
-            PackageId {
-                name: "core".into(),
-                version: "1".into(),
-            },
-            true,
-        )?
-        .read()?
+        PackageManifest::directory(Path::new(root), package("core"), true)?.read()?
     } else {
         vec![]
     };
-    for m in &library {
-        if let Some(head) = m.module.modules.first() {
-            environment
-                .dependencies
-                .entry(manifest.package.clone())
-                .or_default()
-                .insert(
-                    head.clone(),
-                    ModuleId {
-                        package: m.module.package.clone(),
-                        modules: vec![head.clone()],
-                    },
-                );
+    let core_modules = library
+        .iter()
+        .chain(&modules)
+        .filter(|m| m.module.package.name == "core")
+        .map(|m| m.module.clone())
+        .collect::<Vec<_>>();
+    for manifest in &manifests {
+        if manifest.package.name != "core" {
+            for module in &core_modules {
+                if let Some(head) = module.modules.first() {
+                    environment
+                        .dependencies
+                        .entry(manifest.package.clone())
+                        .or_default()
+                        .insert(
+                            head.clone(),
+                            ModuleId {
+                                package: module.package.clone(),
+                                modules: vec![head.clone()],
+                            },
+                        );
+                }
+            }
         }
     }
-    let mut index = NameIndex::new(environment);
+    let mut index = NameIndex::new(environment.clone());
     for module in library.iter().chain(&modules) {
+        index.add_module(&module.module);
         for (i, item) in module.parsed.syntax.items.iter().enumerate() {
             index.index_item(&module.module, i as u32, item);
         }
     }
     if phase == "parse" {
         for _ in 0..iterations {
-            let mut index = NameIndex::default();
+            let mut index = NameIndex::new(environment.clone());
             for (i, s) in sources.iter().enumerate() {
-                let p = parse(
-                    black_box(s),
-                    if signatures {
-                        ParseMode::Signatures
-                    } else {
-                        ParseMode::Source
-                    },
-                );
+                let p = parse(black_box(s), modes[i]);
                 for (j, item) in p.syntax.items.iter().enumerate() {
                     index.index_item(&modules[i].module, j as u32, item);
                 }
@@ -129,6 +147,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             names += r.names.len();
             reads += r.reads.len();
             errors += r.diagnostics.len();
+            if let Some(site) = &r.resource_refusal {
+                eprintln!("resolver stack resource refusal: {site:?}");
+                errors += 1;
+            }
             for d in r.diagnostics {
                 eprintln!("{}", serde_json::to_string(&d)?);
             }

@@ -176,7 +176,16 @@ impl<'a> Scanner<'a> {
             )
         };
         if !valid {
-            self.error("LANG-1", start, self.pos, message);
+            self.error(
+                if spelling.is_some_and(|s| s.chars().any(bidi)) {
+                    "LANG-1"
+                } else {
+                    "LANG-3"
+                },
+                start,
+                self.pos,
+                message,
+            );
         }
         kind
     }
@@ -292,7 +301,7 @@ impl<'a> Scanner<'a> {
         };
         if !valid {
             self.error(
-                if float { "LANG-3" } else { "LANG-3" },
+                "LANG-3",
                 start,
                 self.pos,
                 "malformed numeric literal or suffix",

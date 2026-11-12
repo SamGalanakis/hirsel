@@ -1,7 +1,7 @@
-type AppError = Io(IoError) | Mem(Capacity)
+type AppError = Io(WriteError) | Mem(Capacity)
 @compact(u32) stable type Expr = Num(u64) | Add(Link[Expr], Link[Expr])
 
-fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] {
+fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] waits {
   let mut line = string.new()
   string.push(mut line, label)?
   string.push_u64(mut line, n)?
@@ -14,7 +14,7 @@ fn eval(e: Expr) -> u64 {
   match e { Num(n) => n, Add(a, b) => eval(a) + eval(b) }
 }
 
-fn write(mut d: Dest[Expr]) -> Result[Child[Expr], BuildError] {
+fn write(mut d: Dest[Expr]) -> Result[Child[Expr] of d, BuildError] {
   let two = dest.put(mut d, Num(2))?
   let three = dest.put(mut d, Num(3))?
   let sum = dest.put(mut d, Add(two, three))?
@@ -24,12 +24,12 @@ fn write(mut d: Dest[Expr]) -> Result[Child[Expr], BuildError] {
 
 fn run(n: u64) -> Result[u64, BuildError] {
   region r {
-    let b = build_in(r, bytes n, fn(mut d: Dest[Expr]) -> Result[Child[Expr], BuildError] { write(mut d) })?
+    let b = build_in(r, bytes n, fn(mut d: Dest[Expr]) -> Result[Child[Expr] of d, BuildError] { write(mut d) })?
     Ok(eval(finish(take b)))
   }
 }
 
-pub fn main(out: Stdout) -> Result[(), AppError] {
+pub fn main(out: Stdout) -> Result[(), AppError] waits {
   let v = match run(64) { Ok(v) => v, Error(_) => 0 }
   say(out, "value ", v)?
   match run(32) {

@@ -1,5 +1,5 @@
 use hirsel_core_ids::PackageId;
-use hirsel_core_syntax::{ParseMode, ParseOutput, parse};
+use hirsel_core_syntax::{ParseMode, ParseOutput, parse_bytes};
 use std::path::{Path, PathBuf};
 
 /// Tool input, not language syntax: one explicitly mapped module per source (PROG-1).
@@ -75,15 +75,15 @@ impl PackageManifest {
         self.sources
             .iter()
             .map(|s| {
-                let text = std::fs::read_to_string(&s.file)?;
+                let bytes = std::fs::read(&s.file)?;
                 Ok(ParsedModule {
                     module: ModuleId {
                         package: self.package.clone(),
                         modules: s.modules.clone(),
                     },
                     file: s.file.clone(),
-                    parsed: parse(
-                        &text,
+                    parsed: parse_bytes(
+                        &bytes,
                         if s.signatures {
                             ParseMode::Signatures
                         } else {

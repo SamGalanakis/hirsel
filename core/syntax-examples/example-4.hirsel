@@ -1,7 +1,7 @@
-type AppError = Io(IoError) | Mem(Capacity)
+type AppError = Io(WriteError) | Mem(Capacity)
 type Piece: shareable { text: String }
 
-fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] {
+fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] waits {
   let mut line = string.new()
   string.push(mut line, label)?
   string.push_u64(mut line, n)?
@@ -25,7 +25,7 @@ fn bytes_of(ps: List[Rc[Piece]]) -> u64 {
   n
 }
 
-pub fn main(out: Stdout) -> Result[(), AppError] {
+pub fn main(out: Stdout) -> Result[(), AppError] waits {
   let mut doc: List[Rc[Piece]] = list.new()
   keep(mut doc, piece("hello")?)?
   let mut undo: List[Rc[Piece]] = list.new()

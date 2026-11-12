@@ -21,6 +21,36 @@ pub struct ParseOutput {
     pub resource_refusal: Option<ResourceRefusal>,
 }
 
+/// Decode external source bytes. Invalid UTF-8 has a raw byte span (PROG-7).
+pub fn parse_bytes(bytes: &[u8], mode: ParseMode) -> ParseOutput {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => parse(text, mode),
+        Err(error) => {
+            if bytes.len() > u32::MAX as usize {
+                return ParseOutput {
+                    syntax: SyntaxFile::default(),
+                    diagnostics: vec![],
+                    resource_refusal: Some(ResourceRefusal::SourceTooLarge),
+                };
+            }
+            let start = error.valid_up_to();
+            let end = start + error.error_len().unwrap_or(bytes.len() - start);
+            ParseOutput {
+                syntax: SyntaxFile::default(),
+                diagnostics: vec![Diagnostic::error(
+                    "LANG-1",
+                    Span {
+                        start: start as u32,
+                        end: end as u32,
+                    },
+                    "source is not UTF-8",
+                )],
+                resource_refusal: None,
+            }
+        }
+    }
+}
+
 pub fn parse(text: &str, mode: ParseMode) -> ParseOutput {
     if text.len() > u32::MAX as usize {
         return ParseOutput {
@@ -739,6 +769,7 @@ impl Parser<'_> {
             if self.eat("=") {
                 c.push(self.required(|p| p.expr(0))?);
                 if self.eat("else") {
+                    self.subject(*c.last().unwrap())?;
                     c.push(self.block()?);
                 }
             }
@@ -826,6 +857,9 @@ impl Parser<'_> {
                     continue;
                 }
                 if self.eat(".") {
+                    if self.tree.node(left).kind == NodeKind::Literal && self.eof() {
+                        return self.fail("LANG-3", "fractional point requires a following digit");
+                    }
                     let n = if self.token(0).kind == TokenKind::Integer {
                         let raw = self.word(0);
                         if !raw.bytes().all(|b| b.is_ascii_digit()) {
@@ -901,6 +935,9 @@ impl Parser<'_> {
             let mut label = None;
             let mut c = vec![];
             if !self.newline() && self.token(0).kind == TokenKind::Label {
+                if k == NodeKind::Return {
+                    return self.fail("LANG-5", "return has no label");
+                }
                 label = Some(self.bump());
             }
             if k != NodeKind::Continue
@@ -1044,21 +1081,41 @@ impl Parser<'_> {
             Ok(n)
         }
     }
-    fn subject(&mut self, n: NodeId) -> Parsed<()> {
-        if matches!(
-            self.tree.node(n).kind,
-            NodeKind::Block
+    fn subject(&mut self, mut n: NodeId) -> Parsed<()> {
+        loop {
+            let node = self.tree.node(n);
+            match node.kind {
+                NodeKind::Unary | NodeKind::Binary | NodeKind::Return | NodeKind::Break
+                    if !self.tree.children(n).is_empty() =>
+                {
+                    n = *self.tree.children(n).last().unwrap()
+                }
+                NodeKind::Block
                 | NodeKind::If
                 | NodeKind::Match
                 | NodeKind::Loop
+                | NodeKind::While
+                | NodeKind::For
+                | NodeKind::ForTake
                 | NodeKind::Region
                 | NodeKind::Bound
                 | NodeKind::Closure
                 | NodeKind::ScopedClosure
-        ) {
-            return self.fail("LANG-5", "subject cannot end in an unparenthesized block");
+                | NodeKind::Labelled => {
+                    let span = node.origin.span;
+                    self.diagnostics.push(Diagnostic::error(
+                        "LANG-5",
+                        Span {
+                            start: self.base + span.start,
+                            end: self.base + span.end,
+                        },
+                        "subject cannot end in an unparenthesized block",
+                    ));
+                    return Err(());
+                }
+                _ => return Ok(()),
+            }
         }
-        Ok(())
     }
     fn pattern(&mut self) -> Parsed<NodeId> {
         self.nested(|p| p.pattern_inner())

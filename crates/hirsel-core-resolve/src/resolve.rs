@@ -1,5 +1,5 @@
 use crate::{index::path_parts, *};
-use hirsel_core_ids::DefPath;
+use hirsel_core_ids::{DefPath, PackageId};
 use hirsel_core_syntax::{Item, NodeId, NodeKind, TokenId};
 use std::collections::BTreeMap;
 
@@ -22,12 +22,17 @@ pub struct Binder {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Target {
     Definition(DefPath),
+    Module(ModuleId),
     Binder(u32),
     Builtin(String),
     /// Expected-type selection belongs to checking. Never choose an owner here.
     ContextualVariant {
         name: String,
         candidates: Vec<DefPath>,
+    },
+    Field {
+        owner: DefPath,
+        name: String,
     },
     Missing,
 }
@@ -36,6 +41,8 @@ pub enum LookupScope {
     Local,
     Module(ModuleId),
     Prelude,
+    Fields(DefPath),
+    Modules(PackageId),
     Variants,
     Dependency(String),
 }
@@ -68,8 +75,29 @@ pub struct Resolution {
     pub binders: Vec<Binder>,
     pub reads: Vec<Lookup>,
     pub diagnostics: Vec<Refusal>,
+    pub resource_refusal: Option<Site>,
 }
 
+fn builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "bool"
+            | "char"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "f32"
+            | "f64"
+            | "Never"
+            | "Option"
+            | "Result"
+    )
+}
 pub fn resolve(index: &NameIndex, module: &ModuleId, ordinal: u32, item: &Item) -> Resolution {
     let mut r = Resolver {
         index,
@@ -78,6 +106,8 @@ pub fn resolve(index: &NameIndex, module: &ModuleId, ordinal: u32, item: &Item) 
         ordinal,
         scopes: vec![BTreeMap::new()],
         labels: vec![],
+        owner: None,
+        depth: 0,
         out: Resolution::default(),
     };
     r.visit(item.root);
@@ -90,6 +120,8 @@ struct Resolver<'a> {
     ordinal: u32,
     scopes: Vec<BTreeMap<String, u32>>,
     labels: Vec<BTreeMap<String, u32>>,
+    owner: Option<DefPath>,
+    depth: usize,
     out: Resolution,
 }
 impl Resolver<'_> {
@@ -121,7 +153,7 @@ impl Resolver<'_> {
     fn bind(&mut self, n: NodeId, t: TokenId, kind: BinderKind) {
         let name = self.name(t);
         let path = self.module.definition(&name);
-        let existing = self.local(&name).map(Target::Binder).or_else(|| {
+        let mut existing = self.local(&name).map(Target::Binder).or_else(|| {
             self.index
                 .get(&path)
                 .map(|_| Target::Definition(path.clone()))
@@ -142,6 +174,62 @@ impl Resolver<'_> {
                 LookupResult::Found(Target::Definition(path.clone()))
             }),
         );
+        let head = self.index.has_module_head(&self.module.package, &name);
+        let module_target = Target::Module(ModuleId {
+            package: self.module.package.clone(),
+            modules: vec![name.clone()],
+        });
+        self.read(
+            n,
+            LookupScope::Modules(self.module.package.clone()),
+            vec![name.clone()],
+            if head {
+                LookupResult::Found(module_target.clone())
+            } else {
+                LookupResult::Missing
+            },
+        );
+        if existing.is_none() && head {
+            existing = Some(module_target);
+        }
+        let dependency = self
+            .index
+            .environment
+            .dependencies
+            .get(&self.module.package)
+            .and_then(|e| e.get(&name))
+            .cloned();
+        self.read(
+            n,
+            LookupScope::Dependency(name.clone()),
+            vec![name.clone()],
+            dependency.clone().map_or(LookupResult::Missing, |m| {
+                LookupResult::Found(Target::Module(m))
+            }),
+        );
+        if existing.is_none() {
+            existing = dependency.map(Target::Module);
+        }
+        let core = self
+            .index
+            .environment
+            .prelude
+            .get(&name)
+            .cloned()
+            .filter(|p| self.index.get(p).is_some());
+        self.read(
+            n,
+            LookupScope::Prelude,
+            vec![name.clone()],
+            core.clone().map_or(LookupResult::Missing, |p| {
+                LookupResult::Found(Target::Definition(p))
+            }),
+        );
+        if existing.is_none() {
+            existing = core
+                .map(Target::Definition)
+                .or_else(|| builtin(&name).then(|| Target::Builtin(name.clone())));
+        }
         if let Some(target) = existing {
             self.read(
                 n,
@@ -152,7 +240,7 @@ impl Resolver<'_> {
             let mut d = Refusal::new(
                 "LANG-7",
                 self.site(n),
-                format!("`{name}` shadows an active binding or module definition"),
+                format!("`{name}` shadows a visible name"),
             );
             match target {
                 Target::Binder(b) => d.causal.push(self.out.binders[b as usize].site.clone()),
@@ -199,6 +287,12 @@ impl Resolver<'_> {
             );
             self.global(n, &parts, type_context, construct)
         };
+        if projections.is_empty()
+            && parts.len() > 1
+            && matches!(&target,Target::Definition(p) if p==&self.module.definition(&parts[0]))
+        {
+            projections = parts[1..].to_vec();
+        }
         self.out.names.push(ResolvedUse {
             node: n,
             target,
@@ -244,6 +338,23 @@ impl Resolver<'_> {
     ) -> Target {
         let name = parts.last().unwrap();
         if parts.len() > 1 {
+            if let Some(target) = self.lookup_definition(n, self.module.clone(), &parts[0], false) {
+                return target;
+            }
+            let local_module = self.index.has_module_head(&self.module.package, &parts[0]);
+            self.read(
+                n,
+                LookupScope::Modules(self.module.package.clone()),
+                vec![parts[0].clone()],
+                if local_module {
+                    LookupResult::Found(Target::Module(ModuleId {
+                        package: self.module.package.clone(),
+                        modules: vec![parts[0].clone()],
+                    }))
+                } else {
+                    LookupResult::Missing
+                },
+            );
             let mut module = ModuleId {
                 package: self.module.package.clone(),
                 modules: parts[..parts.len() - 1].to_vec(),
@@ -254,7 +365,7 @@ impl Resolver<'_> {
                 .dependencies
                 .get(&self.module.package)
             {
-                if let Some(exposure) = exposures.get(&parts[0]) {
+                if let Some(exposure) = exposures.get(&parts[0]).filter(|_| !local_module) {
                     module = exposure.clone();
                     module.modules.extend_from_slice(&parts[1..parts.len() - 1]);
                     self.read(
@@ -279,6 +390,42 @@ impl Resolver<'_> {
             if let Some(t) = self.lookup_definition(n, self.module.clone(), name, construct) {
                 return t;
             }
+            let module_head = self.index.has_module_head(&self.module.package, name);
+            let module = ModuleId {
+                package: self.module.package.clone(),
+                modules: vec![name.clone()],
+            };
+            self.read(
+                n,
+                LookupScope::Modules(self.module.package.clone()),
+                parts.to_vec(),
+                if module_head {
+                    LookupResult::Found(Target::Module(module.clone()))
+                } else {
+                    LookupResult::Missing
+                },
+            );
+            if module_head {
+                return Target::Module(module);
+            }
+            let dependency = self
+                .index
+                .environment
+                .dependencies
+                .get(&self.module.package)
+                .and_then(|e| e.get(name))
+                .cloned();
+            self.read(
+                n,
+                LookupScope::Dependency(name.clone()),
+                parts.to_vec(),
+                dependency.clone().map_or(LookupResult::Missing, |m| {
+                    LookupResult::Found(Target::Module(m))
+                }),
+            );
+            if let Some(module) = dependency {
+                return Target::Module(module);
+            }
             if let Some(path) = self.index.environment.prelude.get(name).cloned() {
                 self.read(
                     n,
@@ -286,7 +433,13 @@ impl Resolver<'_> {
                     parts.to_vec(),
                     LookupResult::Found(Target::Definition(path.clone())),
                 );
-                return Target::Definition(path);
+                let module = ModuleId {
+                    package: path.0.package.clone(),
+                    modules: path.0.modules.clone(),
+                };
+                if let Some(target) = self.lookup_definition(n, module, &path.0.name, construct) {
+                    return target;
+                }
             }
             self.read(
                 n,
@@ -317,28 +470,7 @@ impl Resolver<'_> {
                 return Target::Builtin(name.clone());
             }
             if !type_context {
-                let candidates = self
-                    .index
-                    .variants(name)
-                    .iter()
-                    .filter(|path| {
-                        self.index.get(path).is_some_and(|d| {
-                            let here = d.site.module == *self.module;
-                            here || (d.public
-                                && !d.opaque
-                                && (path.0.package == self.module.package
-                                    || self
-                                        .index
-                                        .environment
-                                        .dependencies
-                                        .get(&self.module.package)
-                                        .is_some_and(|e| {
-                                            e.values().any(|m| m.package == path.0.package)
-                                        })))
-                        })
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
+                let candidates = self.visible_variants(name);
                 if !candidates.is_empty()
                     || matches!(name.as_str(), "Some" | "None" | "Ok" | "Error")
                 {
@@ -369,6 +501,27 @@ impl Resolver<'_> {
         ));
         Target::Missing
     }
+    fn visible_variants(&self, name: &str) -> Vec<DefPath> {
+        self.index
+            .variants(name)
+            .iter()
+            .filter(|path| {
+                self.index.get(path).is_some_and(|d| {
+                    let here = d.site.module == *self.module;
+                    here || (d.public
+                        && !d.opaque
+                        && (path.0.package == self.module.package
+                            || self
+                                .index
+                                .environment
+                                .dependencies
+                                .get(&self.module.package)
+                                .is_some_and(|e| e.values().any(|m| m.package == path.0.package))))
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    }
     fn pattern(&mut self, n: NodeId) {
         let node = self.item.tree.node(n);
         let kind = node.kind;
@@ -377,12 +530,13 @@ impl Resolver<'_> {
             NodeKind::BindPattern => {
                 let t = token.unwrap();
                 let name = self.name(t);
-                if !self.index.variants(&name).is_empty()
+                if !self.visible_variants(&name).is_empty()
                     || matches!(name.as_str(), "None" | "Ok" | "Some" | "Error")
                 {
                     // The checker decides bare constructor versus binding from expected type.
                     self.use_bare_pattern(n, &name);
                 } else {
+                    self.read(n, LookupScope::Variants, vec![name], LookupResult::Missing);
                     self.bind(n, t, BinderKind::Local);
                 }
             }
@@ -407,7 +561,7 @@ impl Resolver<'_> {
     fn use_bare_pattern(&mut self, n: NodeId, name: &str) {
         let target = Target::ContextualVariant {
             name: name.into(),
-            candidates: self.index.variants(name).to_vec(),
+            candidates: self.visible_variants(name),
         };
         self.read(
             n,
@@ -426,7 +580,7 @@ impl Resolver<'_> {
         f(self);
         self.scopes.pop();
     }
-    fn function(&mut self, n: NodeId, closure: bool) {
+    fn function(&mut self, n: NodeId) {
         let old_labels = std::mem::take(&mut self.labels);
         self.scope(|r| {
             let children = r.children(n);
@@ -451,7 +605,6 @@ impl Resolver<'_> {
             }
         });
         self.labels = old_labels;
-        let _ = closure;
     }
     fn condition(&mut self, n: NodeId) {
         if self.item.tree.node(n).kind == NodeKind::ConditionLet {
@@ -463,28 +616,49 @@ impl Resolver<'_> {
         }
     }
     fn visit(&mut self, n: NodeId) {
+        if self.out.resource_refusal.is_some() {
+            return;
+        }
+        if self.depth >= 384 {
+            self.out.resource_refusal = Some(self.site(n));
+            return;
+        }
+        self.depth += 1;
+        self.visit_inner(n);
+        self.depth -= 1;
+    }
+    fn visit_inner(&mut self, n: NodeId) {
         let node = self.item.tree.node(n);
         let kind = node.kind;
         let token = node.token;
         let c = self.children(n);
         match kind {
-            NodeKind::Function => self.function(n, false),
-            NodeKind::Closure | NodeKind::ScopedClosure => self.function(n, true),
+            NodeKind::Function => self.function(n),
+            NodeKind::Closure | NodeKind::ScopedClosure => self.function(n),
             NodeKind::CallableType | NodeKind::ScopedCallableType | NodeKind::OwnCallableType => {
-                self.scope(|r| {
-                    for &child in &c {
-                        r.visit(child);
-                    }
-                })
+                self.function(n)
             }
             NodeKind::TypeDecl
             | NodeKind::StableType
             | NodeKind::ResourceType
-            | NodeKind::ScopedType => self.scope(|r| {
-                for &child in &c {
-                    r.visit(child);
-                }
-            }),
+            | NodeKind::ScopedType => {
+                let owner = self.module.definition(&self.name(token.unwrap()));
+                let old = self.owner.replace(owner);
+                self.scope(|r| {
+                    for &child in &c {
+                        if r.item.tree.node(child).kind == NodeKind::Brand {
+                            let path = r.children(child)[0];
+                            let path_node = r.item.tree.node(path);
+                            if path_node.kind == NodeKind::Path {
+                                r.bind(path, path_node.token.unwrap(), BinderKind::Brand);
+                                continue;
+                            }
+                        }
+                        r.visit(child);
+                    }
+                });
+                self.owner = old;
+            }
             NodeKind::Block => self.scope(|r| {
                 for &child in &c {
                     r.visit(child);
@@ -504,7 +678,50 @@ impl Resolver<'_> {
                     self.visit(child);
                 }
             }
-            NodeKind::FreshBrand => self.bind(n, token.unwrap(), BinderKind::Brand),
+            NodeKind::FreshBrand => {
+                let name = self.name(token.unwrap());
+                if let Some(owner) = self.owner.clone() {
+                    let target = Target::Field {
+                        owner: owner.clone(),
+                        name: name.clone(),
+                    };
+                    if self
+                        .index
+                        .get(&owner)
+                        .is_some_and(|d| d.fields.contains(&name))
+                    {
+                        self.read(
+                            n,
+                            LookupScope::Fields(owner),
+                            vec![name],
+                            LookupResult::Found(target.clone()),
+                        );
+                        self.out.names.push(ResolvedUse {
+                            node: n,
+                            target,
+                            projections: vec![],
+                        });
+                    } else {
+                        self.read(
+                            n,
+                            LookupScope::Fields(owner),
+                            vec![name],
+                            LookupResult::Missing,
+                        );
+                        self.out.diagnostics.push(Refusal::new(
+                            "LANG-7",
+                            self.site(n),
+                            "sibling brand field was not found",
+                        ));
+                    }
+                } else {
+                    self.out.diagnostics.push(Refusal::new(
+                        "LANG-7",
+                        self.site(n),
+                        "sibling brand outside a record",
+                    ));
+                }
+            }
             NodeKind::Path => self.use_path(n, false, false),
             NodeKind::TypePath => self.use_path(n, true, false),
             NodeKind::Let | NodeKind::LetMut => {
@@ -571,7 +788,7 @@ impl Resolver<'_> {
                             || matches!(target, Some(Target::Binder(_)));
                         if ordinary {
                             self.out.diagnostics.push(Refusal::new(
-                                "LANG-5",
+                                "LANG-9",
                                 self.site(n),
                                 "ordinary calls have no labelled arguments",
                             ));

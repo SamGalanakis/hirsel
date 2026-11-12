@@ -1,4 +1,4 @@
-type AppError = Io(IoError) | Mem(Capacity)
+type AppError = Io(WriteError) | Mem(Capacity)
 
 fn sum(take xs: List[u8]) -> u8 {
   let mut t: u8 = 0
@@ -6,7 +6,7 @@ fn sum(take xs: List[u8]) -> u8 {
   t
 }
 
-pub fn main(out: Stdout, tasks: Tasks) -> Result[(), AppError] {
+pub fn main(out: Stdout, tasks: Tasks) -> Result[(), AppError] waits {
   let mut xs: List[u8] = list.new()
   list.fill(mut xs, 2, 200)?
   let h = match task.spawn(tasks, bytes 4096, take xs, sum) {
@@ -20,7 +20,7 @@ pub fn main(out: Stdout, tasks: Tasks) -> Result[(), AppError] {
         match c.kind { Overflow => stdout.write(out, "child failed: Overflow\n")?, _ => stdout.write(out, "child failed\n")? }
       }
     }
-    Error(Cancelled) => stdout.write(out, "child cancelled\n")?,
+    Error(Cancelled(causes)) => stdout.write(out, "child cancelled\n")?,
   }
   Ok(())
 }

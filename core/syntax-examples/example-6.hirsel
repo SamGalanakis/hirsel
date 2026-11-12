@@ -1,7 +1,7 @@
-type AppError = Io(IoError) | Mem(Capacity) | Join(JoinError)
+type AppError = Io(WriteError) | Mem(Capacity) | Join(JoinError)
 type Ends: send { input: Receiver[u64], output: Sender[u64] }
 
-fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] {
+fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] waits {
   let mut line = string.new()
   string.push(mut line, label)?
   string.push_u64(mut line, n)?
@@ -10,7 +10,7 @@ fn say(out: Stdout, label: String, n: u64) -> Result[(), AppError] {
   Ok(())
 }
 
-fn source(take tx: Sender[u64]) -> u64 {
+fn source(take tx: Sender[u64]) -> u64 waits {
   let mut i: u64 = 1
   while i <= 5 {
     match channel.send(tx, i) { Ok(()) => { i += 1 }, Error(_) => break }
@@ -18,7 +18,7 @@ fn source(take tx: Sender[u64]) -> u64 {
   i - 1
 }
 
-fn square(take e: Ends) -> u64 {
+fn square(take e: Ends) -> u64 waits {
   let mut n: u64 = 0
   while let Ok(x) = channel.receive(e.input) {
     match channel.send(e.output, x * x) { Ok(()) => { n += 1 }, Error(_) => break }
@@ -26,7 +26,7 @@ fn square(take e: Ends) -> u64 {
   n
 }
 
-pub fn main(out: Stdout, tasks: Tasks) -> Result[(), AppError] {
+pub fn main(out: Stdout, tasks: Tasks) -> Result[(), AppError] waits {
   let (tx1, rx1): (Sender[u64], Receiver[u64]) = channel.new(2)?
   let (tx2, rx2): (Sender[u64], Receiver[u64]) = channel.new(2)?
   let src = match task.spawn(tasks, bytes 4096, take tx1, source) {

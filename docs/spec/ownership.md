@@ -517,7 +517,7 @@ column names the one owner of every surviving value after a failure
 
 | row | operation | success | failure | owner after failure |
 |---|---|---|---|---|
-| T7.1 | `spawn(..)` | captures moved into an environment temporary; admission (commit); the task owns it | `Capacity` | the temporary's captures dropped in reverse capture order; the error is `Capacity` |
+| T7.1 | `task.spawn(.., take x, f)` | admission (commit); the child owns `x` | `Capacity` | the error owns `x` |
 | T7.2 | `send(tx, take x)` | recorded publication; the queue owns `x` | `Closed` | the error owns `x` |
 | T7.3 | cancelled before publication | | `Cancelled` | the sender's cleanup drops `x` |
 | T7.4 | `receive(rx)` | the receiver owns the item | `Closed` | |

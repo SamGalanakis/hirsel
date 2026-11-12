@@ -186,7 +186,7 @@ extent, then the elements; it supports iteration and length only, never `s[i]`.
 Skipping a nested sequence reads its stored extent and costs constant work.
 
 ```hirsel
-fn total(xs: FixedSpan[u64]) -> u64 { let mut t = 0; for x in xs { t += x }; t }
+fn total(xs: FixedSpan[u64]) -> u64 { let mut t: u64 = 0; for x in xs { t += x }; t }
 ```
 ```hirsel
 fn second(xs: SeqSpan[Text]) -> Text { xs[1] }               // refused: MEM-12

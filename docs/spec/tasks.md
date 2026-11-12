@@ -32,23 +32,24 @@ type Job: send { id: u64, cache: Rc[Node] }            // refused: CONC-2, Rc is
 
 ### CONC-3: Spawn
 
-`task.spawn(tasks, bytes n, take f) -> Result[Task[R], Capacity]` starts a task that runs
-the escaping closure `f: fn() -> R` ([LANG-13](language.md#lang-13-callables)), where `f` and
-`R` are `send`. It admits the task charge ([MEM-26](budgets.md#mem-26-logical-charges)) plus
-`n` against the spawner's current limit, and the child's root limit is `n`
-([MEM-21](budgets.md#mem-21-limits)). Captures are moved into `f` before the call;
-admission is the commit point; on `Capacity`, `f` is dropped with its captures in reverse
-capture order ([T7.1](ownership.md#own-26-the-transition-table)).
+`task.spawn(tasks, bytes n, take x, f) -> Result[Task[R], (Capacity, X)]` starts a task
+that runs `f(take x)`, where `x: X`, `f: fn(take X) -> R`
+([LANG-13](language.md#lang-13-callables)), and `X`, `R` and `f` are `send`. Everything
+the child owns arrives as `x`. Spawn admits the task charge
+([MEM-26](budgets.md#mem-26-logical-charges)) plus `n` against the spawner's current limit,
+and the child's root limit is `n` ([MEM-21](budgets.md#mem-21-limits)). Admission is the
+commit point; on `Capacity` the error owns `x`
+([T7.1](ownership.md#own-26-the-transition-table)).
 
 ```hirsel
-fn count(tasks: Tasks, take words: List[String]) -> Result[Task[u64], Capacity] {
-  task.spawn(tasks, bytes 4096, fn() -> u64 { list.len(words) })
+fn count(tasks: Tasks, take words: List[String]) -> Result[Task[u64], (Capacity, List[String])] {
+  task.spawn(tasks, bytes 4096, take words, fn(take w: List[String]) -> u64 { list.len(w) })
 }
 ```
 ```hirsel
-fn count(tasks: Tasks, words: List[String]) -> Result[Task[u64], Capacity] {
-  task.spawn(tasks, bytes 4096, fn() -> u64 { list.len(words) })   // refused: LANG-14, a view captured by an escaping closure
-}
+fn count(tasks: Tasks, take words: List[Rc[Node]]) -> Result[Task[u64], (Capacity, List[Rc[Node]])] {
+  task.spawn(tasks, bytes 4096, take words, fn(take w: List[Rc[Node]]) -> u64 { list.len(w) })
+}                                                          // refused: CONC-2, Rc is not send
 ```
 
 ### CONC-4: Channels
@@ -89,10 +90,11 @@ cancellation point: if the joiner observes cancellation while waiting, `h` is dr
 the joiner's cleanup (CONC-8).
 
 ```hirsel
-type TotalError = Cap(Capacity) | Join(JoinError)
-fn total(tasks: Tasks, take a: List[String]) -> Result[u64, TotalError] {
-  let h = task.spawn(tasks, bytes 4096, fn() -> u64 { list.len(a) })?
-  Ok(task.join(take h)?)
+fn total(tasks: Tasks, take a: List[String]) -> Result[u64, JoinError] {
+  let h = match task.spawn(tasks, bytes 4096, take a, fn(take w: List[String]) -> u64 { list.len(w) }) {
+    Ok(take h) => h, Error((_, take a)) => return Ok(list.len(a)),
+  }
+  task.join(take h)
 }
 ```
 
@@ -107,7 +109,7 @@ interrupted, finalizers are shielded, and no engine inserts a yield or a check. 
 should be cancellable calls `task.check_cancel()`.
 
 ```hirsel
-fn spin(n: u64) -> u64 { let mut i = 0; while i < n { task.check_cancel(); i += 1 }; i }
+fn spin(n: u64) -> u64 { let mut i: u64 = 0; while i < n { task.check_cancel(); i += 1 }; i }
 ```
 
 ### CONC-8: Abandoned handles

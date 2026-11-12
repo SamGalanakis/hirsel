@@ -72,7 +72,7 @@ plain and iterate upward. A sequence is frozen for the loop
 ([OWN-10](ownership.md#own-10-freezes)), so iteration never observes a change.
 
 ```hirsel
-fn sum(xs: List[u64]) -> u64 { let mut t = 0; for x in xs { t += x }; t }
+fn sum(xs: List[u64]) -> u64 { let mut t: u64 = 0; for x in xs { t += x }; t }
 ```
 ```hirsel
 fn grow(mut xs: List[u64]) -> Result[(), Capacity] {

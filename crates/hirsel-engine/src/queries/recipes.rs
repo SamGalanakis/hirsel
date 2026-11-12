@@ -458,7 +458,9 @@ fn checks(
         lint_package: None,
         unsafe_ffi: Vec::new(),
     };
-    trial.check_scheduled(&selection).is_ok_and(|out| {
-        out.completion == CheckCompletion::Complete && !has_errors(&out.diagnostics)
-    })
+    trial
+        .check_scheduled_without_recipes(&selection)
+        .is_ok_and(|out| {
+            out.completion == CheckCompletion::Complete && !has_errors(&out.diagnostics)
+        })
 }

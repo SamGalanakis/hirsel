@@ -1063,6 +1063,26 @@ impl QueryEngine {
         &mut self,
         selection: &SourceSelection,
     ) -> Result<CheckOutput, ToolError> {
+        let mut output = self.check_scheduled_without_recipes(selection)?;
+        // Repairs decorate the terminal diagnostics, never the cached Check
+        // product. Their edited twins use the same graph without asking for
+        // further repairs when a candidate fails.
+        for (file, context, lowering) in &selection.files {
+            crate::queries::recipes::offer(
+                self,
+                *file,
+                context,
+                *lowering,
+                &mut output.diagnostics,
+            );
+        }
+        Ok(output)
+    }
+
+    pub(crate) fn check_scheduled_without_recipes(
+        &mut self,
+        selection: &SourceSelection,
+    ) -> Result<CheckOutput, ToolError> {
         let (budget, cap) = host_budget();
         let jobs = self.jobs();
         let limits = host_limits(cap);

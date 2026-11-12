@@ -27,7 +27,8 @@ A library module may extend a core module by name (LANG-7). The scalar types, `b
   `list.with_capacity(n)` admits exactly `n` elements; `list.reserve(mut xs, n)` leaves
   capacity at least `len + n`; every other allocating operation grows by
   [MEM-24](budgets.md#mem-24-logical-charges). A string literal has type `String`, is
-  static, allocates nothing and is never charged; `string.from` copies a literal or a view.
+  static, allocates nothing and is never charged; it has capacity 0, so the first push onto
+  it grows it into new storage. `string.from` copies a literal or a view.
 - **Failures.** `list.slice`, `string.slice` and `list.set` fail with `Bounds` out of range,
   as `xs[i]` does where `list.get` returns `None`; `list.sum` and `int.narrow` fail with
   `Overflow`; `channel.new(0)` fails with `Bounds`; `task.check_cancel()` fails with

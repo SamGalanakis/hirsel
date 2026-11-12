@@ -52,7 +52,8 @@ builders are own, affine and not `send`, expose no view of their contents, and c
 the block that opened `r` (MEM-7). Neither `finish` can fail or allocate. When a span
 builder outgrows its current allocation it continues in a new, larger one; the bytes it
 abandons stay charged until the region closes ([FAIL-6](failure.md#fail-6-region-prefixes)).
-Dropping an unfinished builder publishes nothing.
+`span.builder` admits nothing; finishing a builder that holds no element publishes the
+empty span, which allocates nothing. Dropping an unfinished builder publishes nothing.
 
 ```hirsel
 fn digits(n: u64, r: Region) -> Result[FixedSpan[u8] in r, (Capacity, u8)] {

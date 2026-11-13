@@ -116,6 +116,20 @@ fn truncated_literal() -> u64 {
     syntax_at("nul")
 }
 
+// First-byte dispatch must still validate the whole keyword. Each literal takes one
+// tag byte, so [null,true,false] is 9 +3 tags +3 offsets of4 =24. An unknown UTF-8
+// head is Syntax at its first byte, without slicing through a later scalar.
+// A mutant accepting any n/t/f head breaks nxll/truX; probing keywords before their
+// first-byte branch breaks the unknown non-ASCII head instead of returning Syntax.
+// expect: run keyword_dispatch_and_bad_heads() = true
+fn keyword_dispatch_and_bad_heads() -> bool {
+    size_of("[null,true,false]") == 24 &&
+    syntax_at("nxll") == 0 && syntax_at("truX") == 0 && syntax_at("falsX") == 0 &&
+    syntax_at("n") == 0 && syntax_at("tru") == 0 && syntax_at("fals") == 0 &&
+    syntax_at("truex") == 4 && syntax_at("1x") == 1 &&
+    not_finite_at("1e999x") == 0 && syntax_at("€€") == 0 && syntax_at(" [€€]") == 2
+}
+
 /// Whether v is a number spelled w.
 fn spelled(v: json.Json, w: String) -> bool {
     match v {

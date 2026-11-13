@@ -64,6 +64,10 @@ impl<'c, 'a> Cx<'c, 'a> {
         };
         if !rest.is_empty() {
             self.gap(rest[0], "let-else is not built");
+            return false;
+        }
+        if !matches!(self.kind(pat), NodeKind::BindPattern | NodeKind::Wildcard) {
+            return self.destructure_let(s, pat, value, declared);
         }
         let freezes = self.freezes.len();
         let (t, v) = self.expr(value, declared.and_then(expect));

@@ -40,6 +40,7 @@ use std::collections::HashMap;
 mod calls;
 mod control;
 mod ops;
+mod patterns;
 mod places;
 mod types;
 mod values;
@@ -495,6 +496,7 @@ struct Cx<'c, 'a> {
     tail_ty: TyId,
     scope_slots: Vec<u32>,
     call_seq: u32,
+    patterns: patterns::Patterns,
     /// Reused call workspaces, one for each active nesting level.
     call_scratch: Vec<calls::CallScratch>,
     binder_at: HashMap<(u32, u32), u32>,
@@ -566,6 +568,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             tail_ty: UNIT,
             scope_slots: vec![],
             call_seq: 0,
+            patterns: patterns::Patterns::default(),
             call_scratch: vec![],
             binder_at,
             frames: vec![],
@@ -1051,9 +1054,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             NodeKind::Tuple => self.gap_ty(n, "tuples are not built"),
             NodeKind::Index | NodeKind::Projection => self.place_value(n),
             NodeKind::Try => self.gap_ty(n, "`?` is not built"),
-            NodeKind::Match | NodeKind::ConditionLet => {
-                self.gap_ty(n, "match and patterns are not built")
-            }
+            NodeKind::Match => self.match_(n, want),
             NodeKind::For | NodeKind::ForTake => self.gap_ty(n, "for loops are not built"),
             NodeKind::Region | NodeKind::Bound | NodeKind::Placement => {
                 self.gap_ty(n, "regions and bounded scopes are not built")

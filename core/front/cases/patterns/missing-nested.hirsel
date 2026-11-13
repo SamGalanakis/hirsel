@@ -1,0 +1,5 @@
+// Some(false) remains uncovered even though Some has already appeared.
+// expect: refuse LANG-17 at 4:3
+fn f(o: Option[bool]) -> u64 {
+  match o { Some(true) => 1, None => 2 }
+}

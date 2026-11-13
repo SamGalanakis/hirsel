@@ -819,7 +819,7 @@ fn reachable_build_ignores_unreached_bodies_and_declarations_after_disk_reuse() 
 #[test]
 fn reachable_build_refuses_and_censuses_the_incomplete_callee() {
     let dir = tempfile::tempdir().unwrap();
-    let source = "fn answer() -> u8 { unfinished() }\nfn unfinished() -> u8 { match 1u8 { _ => 7u8 } }\nfn unused[T](take x: T) -> T { x }\n";
+    let source = "fn answer() -> u8 { unfinished() }\nfn unfinished() -> u8 { let _ = fn(x: u8) -> u8 { x }; 7u8 }\nfn unused[T](take x: T) -> T { x }\n";
     let entry = DefPath::from_full("app@1/main/answer").unwrap();
     let product = Driver::default()
         .check(request(source, dir.path()), &mut Meter::new(false))
@@ -870,7 +870,7 @@ fn reachable_build_keeps_refusals_in_named_signature_declarations() {
 #[test]
 fn reachable_census_follows_names_beyond_an_incomplete_entry() {
     let dir = tempfile::tempdir().unwrap();
-    let source = "fn answer() -> u8 { match 1u8 { _ => 0u8 }; unfinished() }\nfn unfinished() -> u8 { match 2u8 { _ => 7u8 } }\n";
+    let source = "fn answer() -> u8 { let _ = fn(x: u8) -> u8 { x }; unfinished() }\nfn unfinished() -> u8 { let _ = fn(x: u8) -> u8 { x }; 7u8 }\n";
     let product = Driver::default()
         .check(request(source, dir.path()), &mut Meter::new(false))
         .unwrap();

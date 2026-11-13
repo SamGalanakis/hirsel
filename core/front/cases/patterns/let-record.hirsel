@@ -1,0 +1,8 @@
+// Destructuring binds declaration fields in pattern order; .. omits only the rest.
+// expect: accept
+// expect: run f(4,9) = 49
+type Pair { a: u64, b: u64 }
+fn f(a: u64, b: u64) -> u64 {
+  let Pair(a: x, b: y) = Pair(a: a, b: b)
+  x * 10 + y
+}

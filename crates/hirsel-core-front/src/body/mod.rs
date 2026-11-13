@@ -1759,7 +1759,13 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     /// it there and returns `want`'s type, so the outer check here passes.
     fn expr(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         self.out.counts.nodes += 1;
-        let (t, v) = self.checked(n, want);
+        let (mut t, mut v) = self.checked(n, want);
+        if let Some(w) = want.filter(|w| w.payload == 0 && (w.view || self.is_view(w.ty)))
+            && let Some((payload, value)) = self.payload_view_value(t, v, w.ty, n)
+        {
+            t = payload;
+            v = value;
+        }
         match want {
             Some(w) if t != NEVER && w.payload != 0 => {
                 self.coerce(t, w, n);
@@ -1861,7 +1867,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             }
             NodeKind::Array | NodeKind::RepeatArray => self.array(n, want),
             NodeKind::Tuple => self.tuple(n, want),
-            NodeKind::Index | NodeKind::Projection => self.place_value(n),
+            NodeKind::Index | NodeKind::Projection => self.place_value(n, want),
             NodeKind::Try => self.try_(n, want),
             NodeKind::Match => self.match_(n, want),
             NodeKind::For | NodeKind::ForTake => self.for_(n, None),
@@ -1873,9 +1879,36 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         }
     }
     /// A place in a value position: moved when its type moves, else copied (OWN-6).
-    fn place_value(&mut self, n: NodeId) -> (TyId, Option<ValueId>) {
+    fn place_value(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         match self.place(n) {
             Ok(Some(at)) => {
+                if let Some(w) = want.filter(|w| w.payload == 0 && (w.view || self.is_view(w.ty)))
+                    && let Some(payload) = self.payload_view_at(at, w.ty)
+                {
+                    let copies = self.copies(payload.ty) && !self.is_view(w.ty);
+                    self.use_place(
+                        payload,
+                        if copies {
+                            Use::Value
+                        } else {
+                            Use::View(Hold::View(Extent::Temp))
+                        },
+                        n,
+                    );
+                    let value = if copies
+                        || matches!(self.rep(payload.ty), Ok(Rep::Scalar(_) | Rep::None))
+                    {
+                        self.emit_place(payload, n)
+                    } else {
+                        self.place_ptr(payload, n)
+                    };
+                    let ty = if copies || self.is_view(payload.ty) {
+                        payload.ty
+                    } else {
+                        self.t.mk(TyKind::View(payload.ty))
+                    };
+                    return (ty, value);
+                }
                 if self.borrowed_index(at) {
                     self.use_place(at, Use::View(Hold::View(Extent::Temp)), n);
                     let ty = self.t.mk(TyKind::View(at.ty));

@@ -1,0 +1,12 @@
+// The implicit payload read never authorizes a write or ends its holder's freeze.
+// expect: refuse OWN-12 at 6:25
+// expect: refuse OWN-10 at 11:18
+type P:shareable { n:u64 }
+fn borrow(b:Box[P])->View[P] in b { b }
+fn write(mut r:Rc[P]) { r.n=1u64 }
+fn held() {
+ let b=result.unwrap(box.new(P(n:4u64)))
+ let v=borrow(b)
+ let _=v.n
+ let _=box.unbox(take b)
+}

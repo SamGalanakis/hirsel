@@ -2553,3 +2553,13 @@ fn word_load_and_bit_counts_follow_width_and_bounds() {
         "no kernel call"
     );
 }
+
+#[test]
+fn holder_payloads_are_read_where_a_view_is_expected() {
+    let failures = run_case(&root().join("cases/body/holder-payload-read.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+    let failures = run_case(&root().join("cases/body/holder-payload-root-refused.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+    let failures = run_case(&root().join("cases/body/holder-payload-refused.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+}

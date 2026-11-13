@@ -1100,3 +1100,117 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.scope_slots.truncate(start);
     }
 }
+
+impl<'c, 'a> Cx<'c, 'a, '_> {
+    /// A typed borrow can follow Box/Rc/Arc payloads, keeping the holder as its
+    /// place root. A generic parameter without a selected type keeps its holder.
+    fn payload_read_matches(&self, actual: TyId, expected: TyId) -> bool {
+        let expected = match self.t.kind(expected) {
+            TyKind::View(t) => *t,
+            _ => expected,
+        };
+        actual == expected
+            || crate::decls::stable_parameter(&self.p.decls, &self.t, actual, expected)
+    }
+    pub(super) fn payload_view_at(&mut self, mut at: At, expected: TyId) -> Option<At> {
+        if self.payload_read_matches(at.ty, expected) {
+            return None;
+        }
+        let saved = self.steps.len();
+        let (start, len) = (at.place.start as usize, at.place.len as usize);
+        if start + len != saved {
+            self.steps.extend_from_within(start..start + len);
+            at.place.start = (self.steps.len() - len) as u32;
+        }
+        loop {
+            let TyKind::Adt(d, args) = self.t.kind(self.bare(at.ty)) else {
+                break;
+            };
+            if !matches!(
+                self.p.decls[d.index()].role,
+                Some(Role::Box | Role::Rc | Role::Arc)
+            ) {
+                break;
+            }
+            let payload = args[0];
+            self.steps.push(PStep::Payload);
+            at.place.len += 1;
+            at.shared = true;
+            at.ty = payload;
+            if self.payload_read_matches(payload, expected) {
+                if self.is_view(expected) {
+                    at.ty = expected;
+                }
+                return Some(at);
+            }
+        }
+        self.steps.truncate(saved);
+        None
+    }
+    /// The same read for a temporary holder. Its own temporary remains live; the
+    /// resulting pointer or plain scalar never consumes or cleans the payload.
+    pub(super) fn payload_view_value(
+        &mut self,
+        ty: TyId,
+        value: Option<ValueId>,
+        expected: TyId,
+        n: NodeId,
+    ) -> Option<(TyId, Option<ValueId>)> {
+        let mut current = ty;
+        let mut levels = 0;
+        while !self.payload_read_matches(current, expected) {
+            let TyKind::Adt(d, args) = self.t.kind(self.bare(current)) else {
+                return None;
+            };
+            if !matches!(
+                self.p.decls[d.index()].role,
+                Some(Role::Box | Role::Rc | Role::Arc)
+            ) {
+                return None;
+            }
+            current = args[0];
+            levels += 1;
+        }
+        if levels == 0 {
+            return None;
+        }
+        let mut result = value;
+        let mut current = ty;
+        for _ in 0..levels {
+            let TyKind::Adt(_, args) = self.t.kind(self.bare(current)) else {
+                unreachable!()
+            };
+            let payload = args[0];
+            result = (|| {
+                if !self.live() {
+                    return None;
+                }
+                let pointer = result?;
+                let place = self.place_ty(current, n)?;
+                let element = self.place_ty(payload, n)?;
+                let from = self.address(AddressBase::Value(pointer), &[], place, n);
+                let to = self.address(
+                    AddressBase::Address(from),
+                    &[Step::Field(0), Step::Deref],
+                    element,
+                    n,
+                );
+                match self.rep(payload).ok()? {
+                    Rep::None => None,
+                    Rep::Scalar(ty) => Some(self.read_bits(to, ty, n)),
+                    Rep::Place(_) => Some(self.pointer(to, n)),
+                }
+            })();
+            current = payload;
+        }
+        self.reach_temporary(value);
+        Some((
+            if self.is_view(expected) {
+                expected
+            } else {
+                current
+            },
+            result,
+        ))
+    }
+}

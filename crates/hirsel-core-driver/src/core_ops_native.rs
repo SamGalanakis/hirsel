@@ -929,3 +929,22 @@ fn word_load_bit_counts_cranelift(){word_load_bit_counts(Backend::Cranelift);}
 #[test]
 #[ignore="explicit native integration target"]
 fn word_load_bit_counts_llvm(){word_load_bit_counts(Backend::Llvm);}
+
+fn holder_payload_read(backend:Backend) {
+    let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir=tempfile::tempdir().unwrap();
+    let source=include_str!("../../../core/front/cases/body/holder-payload-read.hirsel");
+    let source=format!("{source}\npub fn main()->Result[(),Exit] {{ if positive() {{ Ok(()) }} else {{ Error(Exit(status:1)) }} }}");
+    let mut request=source_request(&source,dir.path());
+    request.inputs.packages[1]=PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
+    let product=Driver::default().check(request,&mut Meter::new(false)).unwrap();
+    let entry=DefPath::from_full("app@1/main/main").unwrap();
+    let built=product.build(&entry,&native_options(backend,dir.path())).unwrap();
+    run_clean(&built.executable,0);
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn holder_payload_read_cranelift(){holder_payload_read(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn holder_payload_read_llvm(){holder_payload_read(Backend::Llvm);}

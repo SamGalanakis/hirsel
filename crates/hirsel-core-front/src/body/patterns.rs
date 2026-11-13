@@ -942,9 +942,98 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         subject.ty == NEVER
     }
 
+    /// A structural pattern supplies the expected payload shape of a holder read.
+    /// A bare binding/wildcard supplies no expected type and keeps the holder.
+    fn pattern_holder_payload(&self, pattern: NodeId, original: TyId) -> Option<TyId> {
+        let mut ty = original;
+        loop {
+            let TyKind::Adt(d, args) = self.t.kind(self.bare(ty)) else {
+                return None;
+            };
+            if !matches!(
+                self.p.decls[d.index()].role,
+                Some(Role::Box | Role::Rc | Role::Arc)
+            ) {
+                return None;
+            }
+            ty = args[0];
+            let inner = self.bare(ty);
+            let fits = match self.kind(pattern) {
+                NodeKind::TuplePattern => matches!(self.t.kind(inner), TyKind::Tuple(_)),
+                NodeKind::UnitPattern => inner == UNIT,
+                NodeKind::LiteralPattern | NodeKind::RangePattern => {
+                    matches!(self.t.kind(inner), TyKind::Scalar(_))
+                }
+                NodeKind::ConstructorPattern | NodeKind::BindPattern
+                    if self.binder(pattern).is_none() =>
+                {
+                    let path = if self.kind(pattern) == NodeKind::ConstructorPattern {
+                        self.kids(pattern)[0]
+                    } else {
+                        pattern
+                    };
+                    if let TyKind::Adt(d, _) = self.t.kind(inner) {
+                        match self.p.target(self.at, path) {
+                            Some(Target::Definition(id)) => {
+                                self.p.by_definition[id.0 as usize] == Some(Def::Type(*d))
+                            }
+                            Some(Target::ContextualConstructor { name }) => self
+                                .p
+                                .index
+                                .constructor_candidates(
+                                    self.p.modules[self.at.module as usize].id,
+                                    *name,
+                                )
+                                .any(|id| {
+                                    self.p.by_definition[id.0 as usize] == Some(Def::Type(*d))
+                                }),
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+            if fits {
+                return Some(ty);
+            }
+        }
+    }
+    fn holder_subject(&mut self, mut subject: Subject, expected: TyId, n: NodeId) -> Subject {
+        if let Some(at) = subject.place {
+            if let Some(at) = self.payload_view_at(at, expected) {
+                self.use_place(at, Use::View(Hold::View(Extent::Temp)), n);
+                subject.value = if matches!(self.rep(at.ty), Ok(Rep::Place(_))) {
+                    self.place_ptr(at, n)
+                } else {
+                    self.emit_place(at, n)
+                };
+                subject.place = Some(at);
+                subject.ty = at.ty;
+                subject.viewed = true;
+                subject.owned = false;
+            }
+        } else if let Some((ty, value)) =
+            self.payload_view_value(subject.ty, subject.value, expected, n)
+        {
+            subject.ty = ty;
+            subject.value = value;
+            subject.viewed = true;
+            subject.owned = false;
+        }
+        subject
+    }
+
     pub(super) fn match_(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let c = self.kids(n);
-        let subject = self.subject(c[0], false, None);
+        let mut subject = self.subject(c[0], false, None);
+        if let Some(expected) = c[1..]
+            .iter()
+            .find_map(|&arm| self.pattern_holder_payload(self.kids(arm)[0], subject.ty))
+        {
+            subject = self.holder_subject(subject, expected, c[0]);
+        }
         // A scrutinee temporary lives to the statement's end unless the chosen arm
         // takes it; when only some arms do, its flag says which (OWN-15, OWN-18).
         let temp = subject

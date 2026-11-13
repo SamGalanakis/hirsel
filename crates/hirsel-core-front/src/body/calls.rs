@@ -405,13 +405,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 true
             }
             Mode::View | Mode::Take if unary.is_none() => {
-                let at = match self.place(e) {
+                let mut at = match self.place(e) {
                     Ok(Some(at)) => at,
                     Ok(None) => return false,
                     Err(()) => return true,
                 };
+                let projected = mode == Mode::View
+                    && self
+                        .known(pt, found)
+                        .and_then(|expected| self.payload_view_at(at, expected))
+                        .map(|payload| {
+                            at = payload;
+                        })
+                        .is_some();
                 let ty = at.ty;
-                if self.copies(ty) {
+                if projected && (self.is_view(ty) || !self.copies(ty)) {
+                    self.use_place(at, Use::View(Hold::CallView(call, i as u32)), e);
+                    *val = self.place_ptr(at, e);
+                } else if self.copies(ty) {
                     // A copyable value is copied (OWN-7).
                     self.use_place(at, Use::Value, e);
                     *val = self.emit_place(at, e);

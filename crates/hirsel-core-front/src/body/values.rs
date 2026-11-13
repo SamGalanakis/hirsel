@@ -802,7 +802,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return (ERROR, None);
         };
         match &u.target {
-            Target::Binder(_) => self.place_value(n),
+            Target::Binder(_) => self.place_value(n, want),
             Target::Missing => {
                 self.halt();
                 (ERROR, None)

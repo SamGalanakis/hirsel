@@ -227,8 +227,10 @@ void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
         // argument promotion. Revisit those arguments, then expose their local
         // carrier values and fold checks implied by the caller's room test.
         // Scalar cleanup also exposes checked end offsets to constraints again.
+        // A typed empty-drop guard can disappear in that round. DSE then
+        // removes carrier clears/restores that its cleanup used to observe.
         LLVMErrorRef e = LLVMRunPasses(module,
-            "default<O3>,cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine,constraint-elimination,simplifycfg)",
+            "default<O3>,cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine,constraint-elimination,simplifycfg,dse)",
             machine, options);
         LLVMDisposePassBuilderOptions(options);
         if (e) {

@@ -523,11 +523,12 @@ impl<'context> Module<'context> {
 
     /// Ordinary O3 followed by promotion and local cleanup of arguments whose
     /// properties were inferred late. Revisit constraints after scalar cleanup
-    /// exposes checked end offsets. Keep this in sync with the lazy component;
+    /// exposes checked end offsets. Final DSE removes carrier clears/restores
+    /// after typed empty-drop elimination. Keep this in sync with the lazy component;
     /// object parity covers both entries. No retained count/ahead extensions.
     pub(crate) fn run_core_passes(&self, machine: &TargetMachine) -> Result<(), String> {
         let pipeline = c_string(
-            "default<O3>,cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine,constraint-elimination,simplifycfg)",
+            "default<O3>,cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine,constraint-elimination,simplifycfg,dse)",
         );
         // SAFETY: handles are live; these are per-invocation options, disposed
         // after LLVM consumes them. The default pipeline does not verify IR.

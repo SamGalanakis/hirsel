@@ -10,6 +10,53 @@ use std::sync::atomic::{AtomicU64, Ordering};
 mod host_memory;
 
 #[test]
+fn cleared_scalar_carriers_do_not_drop_saved_storage_but_keep_finalizers() {
+    let module = text::parse(include_str!(
+        "../../tests/core_runtime/cleared-carrier.core"
+    ))
+    .unwrap();
+    wf::module(&module).unwrap();
+    let mut cases = Vec::new();
+    for value in [0, 7, 255] {
+        for limit in [0, 8] {
+            cases.push(Case {
+                function: FuncId(1),
+                args: vec![value],
+                limit,
+                injection: None,
+            });
+        }
+    }
+    cases.push(Case {
+        function: FuncId(1),
+        args: vec![7],
+        limit: 8,
+        injection: Some((1, false)),
+    });
+    cases.push(Case {
+        function: FuncId(2),
+        args: vec![],
+        limit: 8,
+        injection: None,
+    });
+    for optimization in [Optimization::None, Optimization::Speed] {
+        let got = execute_optimized(&module, &cases, "", "", optimization);
+        for (case, actual) in cases.iter().zip(got) {
+            let expected = eval::run_injected(
+                &module,
+                case.function,
+                &case.args,
+                case.limit,
+                case.injection,
+            );
+            assert_eq!(actual.outcome, expected.outcome);
+            assert_eq!(actual.used, expected.used);
+            assert_eq!(actual.admissions, expected.admissions);
+        }
+    }
+}
+
+#[test]
 fn storage_roles_keep_moved_buffers_in_one_scope() {
     let module = text::parse(include_str!("../../tests/core_runtime/roles.core")).unwrap();
     wf::module(&module).unwrap();

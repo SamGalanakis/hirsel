@@ -1,11 +1,12 @@
 //! FORM storage roles are disjoint within one activation. Scope declarations
 //! let LLVM clone that activation's domains when it inlines the function.
 use super::*;
-use hirsel_core_ir::roles::{Role, roles};
+use hirsel_core_ir::roles::{Role, Root, roles};
 
 pub(super) struct Scopes {
     addresses: Vec<Option<usize>>,
     scopes: Vec<usize>,
+    whole_carriers: Vec<bool>,
 }
 
 impl Scopes {
@@ -17,6 +18,32 @@ impl Scopes {
         declarations: &mut BTreeSet<String>,
     ) -> Option<Self> {
         let addresses = roles(module, function);
+        let body = function.body.as_ref()?;
+        let signature = &module.signatures[function.signature.index()];
+        let params = body.blocks[0].params.get(&body.pools.values).unwrap();
+        // Select whole mutable parameter roots only. A byte projection does not
+        // authorize attaching the same scope to bytes beyond that projection.
+        let whole_carriers = addresses
+            .iter()
+            .enumerate()
+            .map(|(i, role)| {
+                let a = &body.addresses[i];
+                a.steps.len == 0
+                    && match (role, a.base) {
+                        (Some(Role::Carrier(Root::Param(i))), AddressBase::Value(value)) => {
+                            matches!(
+                                signature.params[*i as usize],
+                                Param::Address {
+                                    loan: Loan::Mut,
+                                    ..
+                                }
+                            ) && params[usize::from(signature.dest.is_some()) + *i as usize]
+                                == value
+                        }
+                        _ => false,
+                    }
+            })
+            .collect();
         let mut unique = Vec::<Role>::new();
         let addresses = addresses
             .into_iter()
@@ -47,7 +74,11 @@ impl Scopes {
             scopes.push(scope);
         }
         declarations.insert("declare void @llvm.experimental.noalias.scope.decl(metadata)".into());
-        Some(Self { addresses, scopes })
+        Some(Self {
+            addresses,
+            scopes,
+            whole_carriers,
+        })
     }
 
     pub fn declaration(&self) -> String {
@@ -89,6 +120,14 @@ impl Scopes {
             write!(result, ", !noalias !{{{}}}", list(excluded)).unwrap();
         }
         result
+    }
+
+    pub fn carrier(&self, address: AddressId) -> String {
+        if self.whole_carriers[address.index()] {
+            self.access(&[address])
+        } else {
+            String::new()
+        }
     }
 }
 

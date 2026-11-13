@@ -472,12 +472,41 @@ impl FunctionEmitter<'_> {
             }
             Inst::Drop { address, ty, fail } => {
                 let p = self.address(address);
+                // A scalar sequence has no element cleanup. With no finalizer,
+                // capacity zero makes its complete drop empty (FORM Compact
+                // data). Read it here so the caller's carrier role survives;
+                // generic drop glue has no activation-specific alias scope.
+                let metadata = self
+                    .aliases
+                    .as_ref()
+                    .map_or_else(String::new, |a| a.carrier(address));
+                let guard = if !metadata.is_empty()
+                    && hirsel_core_ir::roles::carrier(self.module, ty)
+                    && self.module.types[ty.index()].finalizer.is_none()
+                {
+                    let n = self.next;
+                    self.next += 1;
+                    let at = self.calc(format!("getelementptr i8, ptr {p}, i64 16"));
+                    let capacity = self.calc(format!("load i64, ptr {at}, align 1{metadata}"));
+                    let owned = self.calc(format!("icmp ne i64 {capacity}, 0"));
+                    self.line(format!(
+                        "br i1 {owned}, label %carrier_drop{n}, label %carrier_done{n}"
+                    ));
+                    writeln!(self.code, "carrier_drop{n}:").unwrap();
+                    Some(n)
+                } else {
+                    None
+                };
                 let failed = self.calc(format!(
                     "call i8 @core_drop_{}(ptr %context, ptr {p})",
                     ty.0
                 ));
                 let failed = self.calc(format!("icmp ne i8 {failed}, 0"));
                 self.branch_failure(&failed, fail, None);
+                if let Some(n) = guard {
+                    self.line(format!("br label %carrier_done{n}"));
+                    writeln!(self.code, "carrier_done{n}:").unwrap();
+                }
             }
             Inst::Share { node, kind } => {
                 let p = self.get(node);

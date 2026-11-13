@@ -392,6 +392,12 @@ fn cases(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 #[test]
+fn list_lookup() {
+    let failures = run_case(&root().join("cases/body/list-get.hirsel"));
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
 fn list_allocation() {
     let failures = run_case(&root().join("cases/body/list-with-capacity.hirsel"));
     assert!(failures.is_empty(), "{failures:?}");

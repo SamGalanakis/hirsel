@@ -268,6 +268,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Some(n),
         );
         self.start(yes);
+        let pointer = self.list_element(item, header, index, n)?;
+        self.replace_value(item, Some(pointer), value, n)
+    }
+
+    fn list_element(
+        &mut self,
+        item: TyId,
+        header: ValueId,
+        index: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
         let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
         let stride = self.layout_size(item, false, n)?;
         let (offset, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, index, stride, n);
@@ -282,7 +293,86 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let at = self.address(AddressBase::Value(data), &[Step::Byte(offset)], place, n);
         let pointer = self.pointer(at, n);
-        self.replace_value(item, Some(pointer), value, n)
+        Some(pointer)
+    }
+
+    pub(super) fn list_get(
+        &mut self,
+        item: TyId,
+        header: ValueId,
+        index: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let id = match self.rep(result) {
+            Ok(Rep::Place(id)) => id,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+            _ => return None,
+        };
+        let out = self.new_slot(PlaceTy::Declared(id), n);
+        let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        let present = self.value(Ty::Scalar(Scalar::Bool));
+        self.inst(
+            Inst::Compare {
+                result: present,
+                op: CompareOp::Lt,
+                left: index,
+                right: len,
+            },
+            n,
+        );
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        let join = self.new_block(&[]);
+        let ye = self.edge(yes, &[]);
+        let ne = self.edge(no, &[]);
+        self.end(
+            Terminator::Branch {
+                condition: present,
+                yes: ye,
+                no: ne,
+            },
+            Some(n),
+        );
+        self.start(no);
+        self.inst(
+            Inst::SetCase {
+                address: out,
+                case: 0,
+            },
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(yes);
+        let pointer = self.list_element(item, header, index, n)?;
+        self.inst(
+            Inst::SetCase {
+                address: out,
+                case: 1,
+            },
+            n,
+        );
+        let at = self.address(
+            AddressBase::Address(out),
+            &[Step::CaseField { case: 1, field: 0 }],
+            PlaceTy::Value(Ty::Ptr),
+            n,
+        );
+        self.inst(
+            Inst::Store {
+                address: at,
+                value: pointer,
+            },
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(join);
+        let value = self.pointer(out, n);
+        self.temp(result, Some(value));
+        Some(value)
     }
 
     fn list_allocated(

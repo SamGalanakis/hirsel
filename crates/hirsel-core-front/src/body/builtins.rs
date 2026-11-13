@@ -19,24 +19,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let module = g.path.0.modules.as_slice();
         let name = g.path.0.name.as_str();
         if module == ["list"] {
-            match name {
-                "new" => return Some(self.empty_list(result, n)),
-                "set" => return Some(self.list_set(types[0], vals[0]?, vals[1]?, vals[2], n)),
-                "with_capacity" => {
-                    return Some(self.list_with_capacity(types[0], vals[0]?, result, n));
-                }
-                "len" | "capacity" => {
-                    let value = vals[0]?;
-                    let offset = if name == "len" { 8 } else { 16 };
-                    return Some(Some(self.read_sequence_word(
-                        value,
-                        offset,
-                        Ty::Scalar(Scalar::U64),
-                        n,
-                    )));
-                }
-                _ => {}
-            }
+            return self.list_value(name, types[0], vals, result, n);
         }
         if module == ["core"] && name == "replace" {
             return Some(self.replace_value(types[0], vals[0], vals[1], n));
@@ -44,6 +27,37 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if (module == ["option"] || module == ["result"]) && name == "unwrap" {
             let input = subst(&mut self.t, g.params[0].ty, types);
             return Some(self.unwrap_value(input, result, vals[0], module == ["option"], n));
+        }
+        None
+    }
+
+    /// Shared class-A carrier lowering, also used by string rows at T = u8.
+    pub(super) fn list_value(
+        &mut self,
+        name: &str,
+        item: TyId,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<Option<ValueId>> {
+        match name {
+            "new" => return Some(self.empty_list(result, n)),
+            "get" => return Some(self.list_get(item, vals[0]?, vals[1]?, result, n)),
+            "set" => return Some(self.list_set(item, vals[0]?, vals[1]?, vals[2], n)),
+            "with_capacity" => {
+                return Some(self.list_with_capacity(item, vals[0]?, result, n));
+            }
+            "len" | "capacity" => {
+                let value = vals[0]?;
+                let offset = if name == "len" { 8 } else { 16 };
+                return Some(Some(self.read_sequence_word(
+                    value,
+                    offset,
+                    Ty::Scalar(Scalar::U64),
+                    n,
+                )));
+            }
+            _ => {}
         }
         None
     }

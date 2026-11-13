@@ -1,4 +1,4 @@
 // expect: refuse OWN-20 at 3:34
 // OWN-20: a take parameter cannot anchor a result; refuse at the result type.
 fn bad(take xs: List[String]) -> Option[View[String]] in xs { list.get(xs, 0) }
-// expect: gap this generic core operation is not built
+// List.get is now built; the rule and summary expectations still apply.

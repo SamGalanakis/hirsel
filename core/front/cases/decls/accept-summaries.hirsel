@@ -1,4 +1,4 @@
-// Every declaration is accepted; the one body is not built yet (gaps at the end).
+// Declarations and the borrowed List element result are accepted.
 // expect: kind Point plain
 // expect: size Point 16
 // expect: kind Mixed plain
@@ -34,4 +34,4 @@ type Ids = List[u64]
 type Rec: shareable { kids: List[Rc[Rec]] }
 fn first(xs: List[String]) -> Option[View[String]] in xs { list.get(xs, 0) }
 
-// expect: gap this generic core operation is not built
+// List.get is now built; the rule and summary expectations still apply.

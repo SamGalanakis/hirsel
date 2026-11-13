@@ -1,0 +1,36 @@
+// Regrow relocates owners; duplicate insertion drops the old value first;
+// removal returns its owner and a failed insert hands it back exactly once.
+// expect: run replaced() = 11 trace 7,11
+// expect: run removed() = 7 trace 7,11
+// expect: run grown() = 5 trace 1,2,3,4,5
+// expect: run handback() = 711 trace 11
+resource type Mark { id:u64 } drop(m) { let _ = m.id }
+fn replaced() -> u64 {
+  let mut m: Map[u64,Mark] = map.new()
+  result.unwrap(map.insert(mut m,1,result.unwrap(Mark(id:7))))
+  result.unwrap(map.insert(mut m,1,result.unwrap(Mark(id:11))))
+  match map.get(m,1) {Some(v)=>v.id,None=>0}
+}
+fn removed() -> u64 {
+  let mut m: Map[u64,Mark] = map.new()
+  result.unwrap(map.insert(mut m,1,result.unwrap(Mark(id:7))))
+  result.unwrap(map.insert(mut m,2,result.unwrap(Mark(id:11))))
+  let old = option.unwrap(map.remove(mut m,1))
+  old.id
+}
+fn grown() -> u64 {
+  let mut m: Map[u64,Mark] = map.new()
+  for i in 1u64..6u64 { result.unwrap(map.insert(mut m,i,result.unwrap(Mark(id:i)))) }
+  map.len(m)
+}
+fn handback() -> u64 {
+  let r: Result[u64,Capacity] = bound bytes 40 {
+    let mut m: Map[u64,Mark] = map.new()
+    let value = result.unwrap(Mark(id:11))
+    match map.insert(mut m,7,take value) {
+      Error((c,k,take v)) => if c.requested == 128 && c.available == 0 { k*100+v.id } else { 0 },
+      Ok(()) => 0
+    }
+  }
+  result.unwrap(r)
+}

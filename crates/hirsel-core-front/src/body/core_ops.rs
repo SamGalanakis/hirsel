@@ -141,6 +141,9 @@ operations! {
     ("list", "set", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "clear", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "append", Lane::PendingCode, "A", "core-check-calls-910", false),
+    ("map", "push_entry", Lane::Value, "A", "core-check-callables-913", true),
+    ("map", "regrow", Lane::Value, "A", "core-check-callables-913", true),
+    ("map", "install_index", Lane::PendingCode, "C", "core-check-callables-913", true),
     ("map", "swap_value", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "kill", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "hash", Lane::Value, "A", "core-check-callables-913", true),
@@ -464,7 +467,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     /// Both arms initialize an ordinary Result's tag and active payload. Its owner
     /// starts only after the join, so failure before the call commits cleans inputs.
-    fn runtime_result(
+    pub(super) fn runtime_result(
         &mut self,
         ty: TyId,
         ok: ValueId,
@@ -651,7 +654,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         logical
     }
 
-    fn runtime_capacity(
+    pub(super) fn runtime_capacity(
         &mut self,
         to: AddressId,
         requested: ValueId,

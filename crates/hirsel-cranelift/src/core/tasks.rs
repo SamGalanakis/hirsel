@@ -133,7 +133,7 @@ impl Function<'_, '_, '_> {
                 1
             }
             RtOp::HashBytes => {
-                outputs[0] = self.c_call("hirsel_core_hash_bytes", &[P, U], &[U], &args)?[0];
+                outputs[0] = self.c_call("hirsel_core_hash_bytes", &[P, U], &[U], &args[..2])?[0];
                 1
             }
             RtOp::CauseNext | RtOp::CauseValue => {

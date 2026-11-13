@@ -3,12 +3,12 @@ use super::*;
 use hirsel_core_ir::{ArithMode, ArithOp};
 
 #[derive(Clone, Copy)]
-struct ListPlan {
-    charge: ValueId,
-    overflow: ValueId,
-    size: ValueId,
-    logical: ValueId,
-    stride: ValueId,
+pub(super) struct ListPlan {
+    pub(super) charge: ValueId,
+    pub(super) overflow: ValueId,
+    pub(super) size: ValueId,
+    pub(super) logical: ValueId,
+    pub(super) stride: ValueId,
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
@@ -201,7 +201,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         result
     }
-    fn list_plan(
+    pub(super) fn list_plan(
         &mut self,
         item: TyId,
         count: ValueId,
@@ -281,7 +281,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             stride,
         })
     }
-    fn list_allocate(
+    pub(super) fn list_allocate(
         &mut self,
         plan: ListPlan,
         place: AllocPlace,

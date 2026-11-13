@@ -165,6 +165,25 @@ fn run_case(path: &Path) -> Vec<String> {
         .materialize_instances()
         .expect("materialize checked generic bodies");
     let module = &emitter.module;
+    if path
+        .file_stem()
+        .is_some_and(|name| name == "map-operations")
+    {
+        for function in &module.functions {
+            let key = &module.instances[function.instance.index()];
+            if key.definition.0.modules == ["map"]
+                && let Some(body) = &function.body
+            {
+                eprintln!(
+                    "Map instance {} {:?}: {} instructions, {} terminators",
+                    key.definition,
+                    key.types,
+                    body.insts.len(),
+                    body.terminators.len()
+                );
+            }
+        }
+    }
     let all_emitted = refusals.is_empty() && gaps.is_empty();
     let mut want_refusals = vec![];
     let mut want_gaps = vec![];

@@ -5,7 +5,32 @@ pub fn len[K: key, V](m: Map[K, V]) -> u64
 pub fn get[K: key, V](m: Map[K, V], k: K) -> Option[View[V]] in m {
   match find(m, k, hash(k)) { Some(i) => Some(slot_value(m, i)), None => None }
 }
-pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (Capacity, K, V)]
+pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (Capacity, K, V)] {
+  let h = hash(k)
+  if let Some(i) = find(m, k, h) {
+    let _ = swap_value(mut m, i, take v)
+    let _ = take k
+    return Ok(())
+  }
+  let cap = capacity(m)
+  if slots(m) == cap {
+    let new_cap: u64 = if cap == 0 { 4 } else { cap * 2 }
+    match regrow(mut m, new_cap) {
+      Error(c) => return Error((c, take k, take v)),
+      Ok(()) => {}
+    }
+    let mut i: u64 = 0
+    while i < slots(m) {
+      let stored_hash = slot_hash(m, i)
+      install_index(mut m, stored_hash, i + 1)
+      i += 1
+    }
+  }
+  let s = slots(m) + 1
+  push_entry(mut m, h, take k, take v)
+  install_index(mut m, h, s)
+  Ok(())
+}
 pub fn set[K: key, V](mut m: Map[K, V], k: K, take v: V) -> Result[V, V] {
   match find(m, k, hash(k)) { Some(i) => Ok(swap_value(mut m, i, take v)), None => Error(take v) }
 }
@@ -41,3 +66,13 @@ fn find[K: key, V](m: Map[K,V], k: K, h: u64) -> Option[u64] {
 
 fn swap_value[K: key, V](mut m: Map[K,V], i: u64, take v: V) -> V
 fn kill[K: key, V](mut m: Map[K,V], i: u64) -> V
+
+fn push_entry[K: key, V](mut m: Map[K,V], h: u64, take k: K, take v: V)
+fn regrow[K: key, V](mut m: Map[K,V], cap: u64) -> Result[(), Capacity]
+
+fn install_index[K: key, V](mut m: Map[K,V], h: u64, s: u64) {
+  let mask = index_len(m) - 1
+  let mut j = h & mask
+  while index_get(m, j) != 0 { j = int.wrapping_add(j, 1) & mask }
+  index_set(mut m, j, s)
+}

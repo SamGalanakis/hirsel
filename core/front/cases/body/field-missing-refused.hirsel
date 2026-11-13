@@ -1,0 +1,9 @@
+// LANG-9: an unknown field is not an implementation gap, for reads or writes.
+// expect: refuse LANG-9 at 6:33
+// expect: refuse LANG-9 at 7:26
+// expect: refuse LANG-9 at 8:28
+// expect: refuse LANG-9 at 9:28
+fn string_field(mut s:String) { s.len=1u64 }
+fn scalar_field(n:u64) { n.x }
+fn tuple_field(p:(u64,)) { p.1 }
+fn generic_field[T](x:T) { x.foo }

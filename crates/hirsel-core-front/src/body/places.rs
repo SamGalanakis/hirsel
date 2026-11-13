@@ -151,12 +151,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             self.acc[s as usize].merge = m;
             let v = self.var(s);
-            if v.born < born && self.descriptors.slots.get(&s).copied() != descriptor {
-                self.out.gaps.push(Gap::new(
-                    self.p.site_span(self.at, site),
-                    "loop-carried capture descriptors are not built",
-                ));
-                self.halt();
+            if v.born < born
+                && !self.broken
+                && !self
+                    .descriptors
+                    .same(self.descriptors.slots.get(&s).copied(), descriptor)
+            {
+                let name = self.slot_name(s);
+                self.refuse_at(
+                    "OWN-17",
+                    site,
+                    format!("`{name}` changes its captured places or modes when the loop repeats"),
+                );
             }
             if v.born < born && v.avail != entry {
                 let name = self.slot_name(s);
@@ -388,7 +394,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => None,
         };
         let Some((i, ft)) = found else {
-            self.gap(n, "this field access is not built");
+            if inner != ERROR {
+                self.refuse("LANG-9", n, format!("this type has no field `{name}`"));
+            }
             return Err(());
         };
         let ft = self.linked(ft);

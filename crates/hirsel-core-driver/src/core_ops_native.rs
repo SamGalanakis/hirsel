@@ -747,3 +747,39 @@ fn stable_key_map_cranelift() { stable_key_map(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
 fn stable_key_map_llvm() { stable_key_map(Backend::Llvm); }
+
+fn closed_collection_comparison(backend: Backend) {
+    let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir=tempfile::tempdir().unwrap();
+    let source=include_str!("../../../core/front/cases/body/compare-collections.hirsel");
+    let mut request=source_request(source,dir.path());
+    request.inputs.packages[1]=PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
+    let product=Driver::default().check(request,&mut Meter::new(false)).unwrap();
+    let entry=DefPath::from_full("app@1/main/main").unwrap();
+    let built=product.build(&entry,&native_options(backend,dir.path())).unwrap();
+    run_clean(&built.executable,0);
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn closed_collection_comparison_cranelift(){closed_collection_comparison(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn closed_collection_comparison_llvm(){closed_collection_comparison(Backend::Llvm);}
+
+fn loop_capture_entry(backend: Backend) {
+    let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir=tempfile::tempdir().unwrap();
+    let source=include_str!("../../../core/front/cases/body/loop-capture-entry.hirsel");
+    let mut request=source_request(source,dir.path());
+    request.inputs.packages[1]=PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
+    let product=Driver::default().check(request,&mut Meter::new(false)).unwrap();
+    let entry=DefPath::from_full("app@1/main/main").unwrap();
+    let built=product.build(&entry,&native_options(backend,dir.path())).unwrap();
+    run_clean(&built.executable,0);
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn loop_capture_entry_cranelift(){loop_capture_entry(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn loop_capture_entry_llvm(){loop_capture_entry(Backend::Llvm);}

@@ -22,7 +22,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             TyKind::View(x) => *x,
             _ => t,
         };
-        if has_param(&self.t, t) && matches!(op, CompareOp::Eq | CompareOp::Ne) {
+        // The inline closed walk handles common native records and strings.
+        // All other shapes share the same published recipe helpers as rigid types.
+        let derived = has_param(&self.t, t) || self.comparable(t, 0).is_err();
+        if derived && matches!(op, CompareOp::Eq | CompareOp::Ne) {
             let value = self.key_operation(key_glue::KeyOp::Equal, t, &[l, r], n);
             return Ok(if op == CompareOp::Ne {
                 value.map(|operand| {
@@ -42,10 +45,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 value
             });
         }
-        if has_param(&self.t, t) {
+        if derived {
             return Ok(self.key_operation(key_glue::KeyOp::Ordered(op), t, &[l, r], n));
         }
-        self.comparable(t, 0)?;
         let (Some(l), Some(r)) = (l, r) else {
             return Ok(None);
         };

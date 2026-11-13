@@ -1,0 +1,48 @@
+// OWN-17 / OWN-21: both callbacks borrow the same outer slot mutably.
+// expect: accept
+// expect: run f() = 5
+fn f()->u64 {
+ let mut n=0u64
+ let mut cb=scoped fn() { n+=1u64 }
+ let mut i=0u64
+ while i<2u64 {
+  cb()
+  cb=scoped fn() { n+=2u64 }
+  i+=1u64
+ }
+ cb()
+ n
+}
+
+// The spec's twice: rebinding the same set is admitted; each deliberately does nothing.
+fn each(xs:List[u64],cb:scoped fn(u64)) {}
+fn twice(xs:List[u64])->u64 {
+ let mut total:u64=0
+ let mut add=scoped fn(x:u64) { total+=x }
+ let mut i:u64=0
+ while i<2 {
+  each(xs,add)
+  add=scoped fn(x:u64) { total+=2*x }
+  i+=1
+ }
+ total
+}
+// Reversed first-naming order changes offsets, not the captured places and modes.
+// expect: run reordered() = 908
+fn reordered()->u64 {
+ let mut a=0u64
+ let mut b=0u64
+ let mut cb=scoped fn() { a+=1u64; b+=2u64 }
+ let mut i=0u64
+ while i<2u64 {
+  cb()
+  cb=scoped fn() { b+=3u64; a+=4u64 }
+  i+=1u64
+ }
+ cb()
+ a*100u64+b
+}
+pub fn main()->Result[(),Exit] {
+ let xs:List[u64]=list.new()
+ if f()==5u64 && twice(xs)==0u64 && reordered()==908u64 { Ok(()) } else { Error(Exit(status:1)) }
+}

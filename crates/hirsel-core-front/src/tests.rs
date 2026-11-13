@@ -2307,8 +2307,10 @@ fn refused_pattern_binders_do_not_add_implementation_gaps() {
 }
 
 #[test]
-fn loop_callback_rebinding_probe() {
-    let failures = run_case(&root().join("cases/body/loop-capture-entry-gap.hirsel"));
+fn loop_callbacks_preserve_places_and_modes() {
+    let failures = run_case(&root().join("cases/body/loop-capture-entry.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+    let failures = run_case(&root().join("cases/body/loop-capture-refused.hirsel"));
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
@@ -2328,4 +2330,10 @@ fn indexing_has_one_closed_operand_rule() {
         let failures = run_case(&root().join(format!("cases/body/{case}.hirsel")));
         assert!(failures.is_empty(), "{failures:#?}");
     }
+}
+
+#[test]
+fn closed_comparisons_derive_collection_payloads() {
+    let failures = run_case(&root().join("cases/body/compare-collections.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
 }

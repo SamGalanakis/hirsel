@@ -717,6 +717,22 @@ impl Descriptors {
         ));
         Some(id)
     }
+    /// Capture identity is a set of (place, mode), independent of closure code,
+    /// source site, first-naming order and environment offsets (OWN-17/OWN-21).
+    pub(super) fn same(&self, a: Option<u32>, b: Option<u32>) -> bool {
+        if a == b {
+            return true;
+        }
+        let captures = |id: Option<u32>| {
+            id.map_or(&[][..], |id| {
+                self.ranges[id as usize].get(&self.captures).unwrap()
+            })
+        };
+        let (a, b) = (captures(a), captures(b));
+        a.len() == b.len()
+            && a.iter()
+                .all(|x| b.iter().any(|y| x.slot == y.slot && x.mode == y.mode))
+    }
     pub(super) fn of(&self, value: Option<ValueId>) -> Option<u32> {
         self.values.get(&value?).copied()
     }

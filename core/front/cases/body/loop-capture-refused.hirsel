@@ -1,0 +1,25 @@
+// OWN-17: the spec's split changes the captured slot; the second program changes mode.
+// expect: refuse OWN-17 at 14:2
+// expect: refuse OWN-17 at 23:3
+fn each(xs:List[u64],cb:scoped fn(u64)) {}
+fn split(xs:List[u64])->u64 {
+ let mut a:u64=0
+ let mut b:u64=0
+ let mut add=scoped fn(x:u64) { a+=x }
+ let mut i:u64=0
+ while i<2 {
+  each(xs,add)
+  add=scoped fn(x:u64) { b+=x }
+  i+=1
+ }
+ a+b
+}
+fn mode() {
+ let mut n=0u64
+ let mut cb=scoped fn() { n+=1u64 }
+ loop {
+  cb()
+  cb=scoped fn() { let _=n }
+  continue
+ }
+}

@@ -659,7 +659,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(reserved)
     }
 
-    /// FORM #56: a range is a new non-owning carrier, copied through the result dest.
+    /// FORM #61: a range is a new non-owning carrier, copied through the result dest.
     pub(super) fn list_slice(
         &mut self,
         item: TyId,
@@ -708,12 +708,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         let data = self.pointer(at, n);
         let (count, _) = self.list_arith(ArithOp::Sub, ArithMode::Wrapping, hi, lo, n);
-        let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let to = self.new_slot(PlaceTy::Declared(id), n);
         let value = self.pointer(to, n);
         self.sequence_word(value, 0, Ty::Ptr, data, n);
         self.sequence_word(value, 8, Ty::Scalar(Scalar::U64), count, n);
-        self.sequence_word(value, 16, Ty::Scalar(Scalar::U64), zero, n);
+        self.sequence_word(value, 16, Ty::Scalar(Scalar::U64), count, n);
         // The view has no owner and never drops the source elements or storage.
         Some(value)
     }

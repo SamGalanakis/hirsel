@@ -186,7 +186,7 @@ fn list_slicing(backend: Backend) {
     let cases = include_str!("../../../core/front/cases/body/list-slice.hirsel");
     for (check, exit) in [
         (
-            "nested()==980200u64 && empty()==0u64 && sized_elements()==110200u64 && unit()==0u64 && resources()==711u64 && stored()==990200u64",
+            "nested()==980202u64 && empty()==0u64 && sized_elements()==110202u64 && unit()==0u64 && resources()==713u64 && stored()==990202u64",
             0,
         ),
         ("reversed()==0u64", 101),

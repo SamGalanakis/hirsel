@@ -1,8 +1,8 @@
-// A returned range survives two source call frames and has no spare capacity.
+// A returned range survives two source call frames and has exactly its length as capacity.
 // expect: accept
-// expect: run nested() = 980200
+// expect: run nested() = 980202
 // expect: run empty() = 0
-// expect: run sized_elements() = 110200
+// expect: run sized_elements() = 110202
 // expect: run unit() = 0
 // expect: run reversed() = fail Bounds
 // expect: run past() = fail Bounds
@@ -36,7 +36,7 @@ fn unit() -> u64 {
 fn reversed() -> u64 { let xs=result.unwrap(b"abc"); list.len(middle(xs,2,1)) }
 fn past() -> u64 { let xs=result.unwrap(b"abc"); list.len(middle(xs,0,4)) }
 fn max_index() -> u64 { let xs=result.unwrap(b"abc"); list.len(middle(xs,18446744073709551615u64,18446744073709551615u64)) }
-// expect: run resources() = 711 trace 7,11
+// expect: run resources() = 713 trace 7,11
 resource type Mark { id:u64 } drop(m) { let _ = m.id }
 fn resources() -> u64 {
     let mut xs:List[Mark] = list.new()
@@ -46,7 +46,7 @@ fn resources() -> u64 {
     r[0].id*100 + r[1].id + list.capacity(r)
 }
 // The carrier is stored by value in the returned scoped record, not a frame pointer.
-// expect: run stored() = 990200
+// expect: run stored() = 990202
 scoped type Cursor { input: View[Bytes] }
 fn cursor(xs: Bytes) -> Cursor in xs { Cursor(input: forwarded(xs,1,3)) }
 fn stored() -> u64 {

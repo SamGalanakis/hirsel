@@ -155,10 +155,10 @@ impl Types {
         }
     }
     fn find(&self, k: &TyKind) -> Option<TyId> {
-        self.base
-            .as_ref()
-            .and_then(|b| b.find(k))
-            .or_else(|| self.map.get(k).copied())
+        self.map
+            .get(k)
+            .copied()
+            .or_else(|| self.base.as_ref().and_then(|b| b.find(k)))
             .or_else(|| self.published_map.get(k).copied())
     }
     pub fn intern(&mut self, k: TyKind) -> TyId {
@@ -360,5 +360,49 @@ pub fn has_param(t: &impl TyRead, ty: TyId) -> bool {
         TyKind::View(x) | TyKind::Array(x, _) => has_param(t, *x),
         TyKind::Fn(ps, r, _, _) => ps.iter().any(|&(_, p)| has_param(t, p)) || has_param(t, *r),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod interner_tests {
+    use super::*;
+
+    #[test]
+    fn overlay_ids_do_not_grow_suffixes_or_escape_local_arenas() {
+        let mut base = Types::new();
+        let tuple = TyKind::Tuple(vec![scalar(Scalar::U64)]);
+        let id = base.intern(tuple.clone());
+        let base = std::sync::Arc::new(base);
+        let mut program = Types::overlay(base.clone());
+        let start = program.len();
+        for _ in 0..3 {
+            assert_eq!(program.intern(tuple.clone()), id);
+            assert_eq!(program.len(), start);
+            assert_eq!(program.kind(id), &tuple);
+        }
+        let pair = TyKind::Tuple(vec![id, id]);
+        let pair_id = program.intern(pair.clone());
+        assert_eq!(pair_id, TyId(start as u32));
+        assert_eq!(program.intern(pair), pair_id);
+        assert_eq!(program.len(), start + 1);
+        let mut first = Local::new(&program);
+        for _ in 0..3 {
+            assert_eq!(first.intern(tuple.clone()), id);
+            assert_eq!(first.len(), program.len());
+        }
+        let two = TyKind::Array(pair_id, 2);
+        let first_id = first.intern(two.clone());
+        assert_eq!(first_id, TyId(program.len() as u32));
+        assert_eq!(first.intern(two.clone()), first_id);
+        assert_eq!(first.len(), program.len() + 1);
+        let mut second = Local::new(&program);
+        assert_eq!(second.intern(tuple), id);
+        let three = TyKind::Array(pair_id, 3);
+        let second_id = second.intern(three.clone());
+        assert_eq!(first_id, second_id);
+        assert_eq!(first.kind(first_id), &two);
+        assert_eq!(second.kind(second_id), &three);
+        assert_eq!(program.find(&two), None);
+        assert_eq!(base.len(), start);
     }
 }

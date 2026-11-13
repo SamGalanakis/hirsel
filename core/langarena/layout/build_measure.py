@@ -6,6 +6,7 @@ canonical core/std source. A check refusal is reported without a check ratio.
 A retained Hirsel record hit is an absolute work count, not incremental rustc.
 """
 import argparse
+import fcntl
 import importlib.util
 import json
 import os
@@ -13,7 +14,7 @@ import re
 from pathlib import Path
 import subprocess
 import sys
-from run import manifest
+from run import manifest, toolchain_identity
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'core/tools'))
@@ -25,8 +26,15 @@ def main():
     parser.add_argument('--compiler', type=Path, required=True)
     parser.add_argument('--runtime', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--compiler-profile', choices=['release', 'checked', 'unknown'], default='unknown')
+    parser.add_argument('--hirsel-only', action='store_true', help='replace invalid Hirsel samples and retain prior Rust samples')
     args = parser.parse_args()
+    try:
+        identity = toolchain_identity(args.compiler, args.runtime, args.compiler_profile)
+    except ValueError as error:
+        parser.error(str(error))
     args.out.mkdir(parents=True, exist_ok=False)
+    (args.out / 'toolchain.json').write_text(json.dumps(identity, indent=2) + '\n')
     os.environ['HIRSEL_MEMORY_LIMIT'] = '2G'
     spec = importlib.util.spec_from_file_location('measurement', ROOT / 'core/tools/measure.py')
     measurement = importlib.util.module_from_spec(spec)
@@ -52,7 +60,7 @@ def main():
         if stage == 'edit':
             hirsel.write_text(graph.replace('let mut sum: u64 = 0', 'let mut sum: u64 = 1', 1))
             rust.write_text(re.sub(r'let mut sum\s*=\s*0\s*;', 'let mut sum = 1;', rust_source, count=1))
-        for side in ['hirsel', 'rust']:
+        for side in ['hirsel'] if args.hirsel_only else ['hirsel', 'rust']:
             binary = args.out / f'{stage}-{side}-program'
             if side == 'hirsel':
                 command = [str(args.compiler.resolve()), 'check' if stage == 'check' else 'build',
@@ -65,7 +73,9 @@ def main():
                 command = [str(rustc), *flags, str(rust.resolve()), '-o', str(binary.resolve())]
                 if stage == 'check': command += ['--emit=metadata']
             wait_load()
-            sample = measurement.sample(['taskset', '-c', '16', *command], args.out / f'{stage}-{side}')
+            with open('/tmp/hirsel-langarena-measure.lock', 'a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                sample = measurement.sample(['taskset', '-c', '16', *command], args.out / f'{stage}-{side}')
             if side == 'hirsel':
                 try:
                     product = json.loads((args.out / f'{stage}-{side}/stdout').read_text())

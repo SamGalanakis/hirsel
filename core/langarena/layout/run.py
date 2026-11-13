@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """LAYOUT correctness and one-sample measurements through the native product path."""
 import argparse
+import fcntl
 import importlib.util
 import json
 import os
@@ -11,6 +12,14 @@ import sys
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'core/tools'))
 from std_native import wait_load, first_stop
+
+
+def toolchain_identity(compiler, runtime, compiler_profile):
+    spec = importlib.util.spec_from_file_location('langarena_runner', ROOT / 'core/langarena/run.py')
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    return runner.toolchain_identity(compiler, runtime, compiler_profile)
+
 
 PHASES = {'ordinary': 'documents', 'sized': 'documents', 'streaming': 'documents',
           'exclusive': 'graph', 'churn': 'graph', 'rc': 'graph', 'arc': 'graph', 'json_parse': 'json', 'json_print': 'json', 'json_reject': 'json', 'json_capacity': 'json', 'charges': 'graph', 'lifetime': 'graph'}
@@ -38,12 +47,18 @@ def main():
     parser.add_argument('--phase', action='append', choices=PHASES)
     parser.add_argument('--backend', choices=['both', 'llvm', 'cranelift'], default='both')
     parser.add_argument('--measure', action='store_true')
+    parser.add_argument('--compiler-profile', choices=['release', 'checked', 'unknown'], default='unknown')
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     expected = json.loads(Path(__file__).with_name('inputs').joinpath('expected.json').read_text())['phases']
     rows = []
     measure = None
     if args.measure:
+        try:
+            identity = toolchain_identity(args.compiler, args.runtime, args.compiler_profile)
+        except ValueError as error:
+            parser.error(str(error))
+        (args.out / 'toolchain.json').write_text(json.dumps(identity, indent=2) + '\n')
         os.environ["HIRSEL_MEMORY_LIMIT"] = "2G"
         spec = importlib.util.spec_from_file_location('layout_measure', ROOT / 'core/tools/measure.py')
         measure = importlib.util.module_from_spec(spec)
@@ -77,7 +92,14 @@ def main():
                            output=run.stdout.decode(errors='replace'), stderr=run.stderr.decode(errors='replace'), exit=run.returncode)
                 if measure and row['status'] == 'pass':
                     wait_load()
-                    row['measurement'] = measure.sample(['taskset', '-c', '16', str(stem)], args.out / f'{phase}-{backend}-sample')
+                    with open('/tmp/hirsel-langarena-measure.lock', 'a') as lock:
+                        fcntl.flock(lock, fcntl.LOCK_EX)
+                        row['measurement'] = measure.sample(['taskset', '-c', '16', str(stem)], args.out / f'{phase}-{backend}-sample')
+                    sample = row['measurement']
+                    if (Path(sample['directory']) / 'stdout').read_bytes() != f'{expected[phase]}\n'.encode():
+                        sample['status'] = 'wrong-output'
+                    if sample['status'] != 'ok':
+                        row['status'] = 'measurement-failed'
             rows.append(row)
             (args.out / 'results.json').write_text(json.dumps(rows, indent=2, default=str) + '\n')
             print(json.dumps(row, default=str), flush=True)

@@ -33,7 +33,10 @@ fn streaming_runs_once() -> u64 {
 // expect: run sized_and_unknown_spans() = 3584
 fn sized_and_unknown_spans() -> u64 {
     region r {
-        let xs: List[u64] = [3, 5, 8]
+        let mut xs: List[u64] = list.new()
+        result.unwrap(list.push(mut xs, 3))
+        result.unwrap(list.push(mut xs, 5))
+        result.unwrap(list.push(mut xs, 8))
         let a = result.unwrap(arena.copy_span(r, xs))
         let mut at: u64 = 0
         let b = result.unwrap(arena.collect_span(r, fn() -> Option[u64] {

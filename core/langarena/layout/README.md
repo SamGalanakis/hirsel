@@ -18,7 +18,10 @@ phases in order and releases each phase before constructing the next. One task, 
 maps, no hidden thread, full u64 generations, u32 edges. Arc uses the default event mode.
 Record-mode instrumentation is not inferred from the default run.
 
-Build the compiler/runtime with Buck's release targets. Run named phases with:
+Build both artifacts with `--target-platforms //tools/buck2:release`, using
+`//:hirsel-core-driver-bin-hirsel-core` and `//:hirsel-core-rt-archives`. Pass the
+shipping view's `x86_64-unknown-linux-gnu/libhirsel_core_rt.a`, not the crate's
+staticlib output. Run named phases with:
 
 ```
 python3 core/langarena/layout/run.py --compiler COMPILER --runtime ARCHIVE \
@@ -56,3 +59,9 @@ twins do not model portable Capacity or the same malformed-input result. Snapsho
 budgets include both `(31 + 256 * 33) * 32` node bytes and `256 * 8` holder-list bytes,
 so the exact budget is 273376 and the one-byte-short budget is 273375. This uses logical
 charge-v1 sizes, independently of native Option niches.
+
+`run.py --measure --compiler-profile release` and `build_measure.py` reuse the
+LangArena runner's artifact-profile check and record both artifact hashes. Samples
+share its CPU16 lock. `build_measure.py --hirsel-only` replaces invalid Hirsel
+samples while preserving valid Rust samples. A release staticlib without the
+shipping fat-LTO configuration supplies diagnostic counters only.

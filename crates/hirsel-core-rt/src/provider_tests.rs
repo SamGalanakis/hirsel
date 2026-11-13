@@ -549,3 +549,29 @@ fn guarded_root_routes_real_os_calls_through_the_separate_host_stack() {
     assert!(stderr.is_empty());
     assert!(!fixture.root.join("from-main").exists());
 }
+#[test]
+fn literal_failure_messages_keep_static_backing_and_render_one_line_with_their_site() {
+    unsafe extern "C" fn main(
+        context: *mut crate::Context,
+        _: *const Config,
+        _: *mut MainResult,
+    ) -> u8 {
+        let message = b"static\nmessage";
+        // SAFETY: static String carrier has capacity zero and stays live forever.
+        unsafe {
+            hirsel_core_raise_string(
+                context,
+                17,
+                message.as_ptr().cast_mut(),
+                message.len() as u64,
+                0,
+            );
+        }
+        1
+    }
+    let mut stderr = vec![];
+    let config = config(std::ptr::null(), 0, &mut stderr);
+    // SAFETY: generated failure consumes only its prepaid primary and static carrier.
+    assert_eq!(unsafe { hirsel_core_run(&config, main) }, 101);
+    assert_eq!(stderr, b"Fail(\"static\\nmessage\") at 17\n");
+}

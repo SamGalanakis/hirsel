@@ -287,3 +287,95 @@ fn run_closes_grants_after_main_cleanup_and_before_reporting_status_without_admi
     state.events.push(3);
     assert_eq!(state.events, [1, 2, 3]);
 }
+#[test]
+#[ignore = "run only by broken_pipe_is_a_typed_write_error_from_native_process_entry"]
+fn broken_pipe_child() {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    unsafe extern "C" fn entry(
+        context: *mut Context,
+        config: *const Config,
+        result: *mut MainResult,
+    ) -> u8 {
+        // SAFETY: stdout operand is explicitly configured, and buffer is a static byte.
+        unsafe {
+            let cap = *(*config).grants;
+            let mut request = Request {
+                operation: crate::provider::STDOUT,
+                mode: 0,
+                handle: hirsel_core_capability_handle(context, cap),
+                path: ptr::null(),
+                path_len: 0,
+                buffer: Buffer {
+                    data: b"x".as_ptr().cast_mut(),
+                    len: 1,
+                    capacity: 1,
+                },
+                site: 1,
+            };
+            let out = hirsel_core_host(
+                context,
+                hirsel_core_capability_provider(context, cap),
+                &mut request,
+            );
+            assert_eq!(
+                (out.status, out.written, out.error.code),
+                (0, 0, libc::EPIPE as u32)
+            );
+            *result = MainResult { kind: 2, exit: 7 };
+        }
+        0
+    }
+    // SAFETY: this isolated child owns both pipe ends and restores the C process's
+    // default policy to prove Run supplies EPIPE rather than signal termination.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        let mut fds = [0; 2];
+        assert_eq!(libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC), 0);
+        let read = OwnedFd::from_raw_fd(fds[0]);
+        let write = OwnedFd::from_raw_fd(fds[1]);
+        drop(read);
+        let sink = File::options().write(true).open("/dev/null").unwrap();
+        let parameters = [Requirement {
+            kind: crate::entry::STDOUT,
+            index: 0,
+        }];
+        let config = OsConfig {
+            root_limit: 1024,
+            args: ptr::null(),
+            args_len: 0,
+            directories: ptr::null(),
+            directories_len: 0,
+            grant_mask: 1 << crate::entry::STDOUT,
+            stdout_fd: write.as_raw_fd(),
+            stderr_fd: sink.as_raw_fd(),
+            parameters: parameters.as_ptr(),
+            parameters_len: 1,
+        };
+        let owner = hirsel_core_os_process_new(&config);
+        assert_eq!(owner.error, IoError::OK);
+        assert_eq!(
+            hirsel_core_run(hirsel_core_os_process_config(owner.process), entry),
+            7
+        );
+        hirsel_core_os_process_free(owner.process);
+    }
+}
+#[test]
+fn broken_pipe_is_a_typed_write_error_from_native_process_entry() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "entry_tests::broken_pipe_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{:?}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.stderr.is_empty());
+}

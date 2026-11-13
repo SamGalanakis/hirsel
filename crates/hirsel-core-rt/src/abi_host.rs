@@ -32,3 +32,36 @@ pub use crate::entry::{
 
 pub use crate::process::{hirsel_core_args_get, hirsel_core_args_len, hirsel_core_run};
 pub use crate::provider::hirsel_core_host;
+
+/// # Safety
+/// The live cause owns/pins its message; a nonnull Fail message uses the FORM
+/// StringMessage carrier. String bytes are already UTF-8 by source typing.
+pub(crate) unsafe fn format_cause(cause: &crate::causes::Cause) -> String {
+    let name = [
+        "Overflow",
+        "Bounds",
+        "Division",
+        "Unwrap",
+        "Fail",
+        "Cancelled",
+        "Capacity",
+    ][cause.kind as usize];
+    // SAFETY: cause chain pins its canonical immutable String carrier and bytes.
+    unsafe {
+        if cause.kind == crate::causes::FAIL && !cause.message.is_null() {
+            let message = &*cause.message.cast::<crate::causes::StringMessage>();
+            let data = if message.len == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(message.data, message.len as usize)
+            };
+            format!(
+                "{name}({:?}) at {}",
+                std::str::from_utf8_unchecked(data),
+                cause.site
+            )
+        } else {
+            format!("{name} at {}", cause.site)
+        }
+    }
+}

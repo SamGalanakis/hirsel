@@ -21,6 +21,8 @@ pub struct ValueLayout {
     pub logical: u64,
     pub drop: unsafe extern "C" fn(*mut Context, *mut u8) -> u8,
 }
+/// A generated body cleans every local owner, including task handles, before
+/// returning. The runtime trusts that cleanup; it never scans for omitted drops.
 pub type Body = unsafe extern "C" fn(*mut Context, *mut u8, *mut u8) -> u8;
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -110,9 +112,6 @@ pub struct Task {
     context: *mut Context,
     owned_context: Option<Box<Context>>,
     run: *mut Scheduler,
-    parent: *mut Task,
-    child: *mut Task,
-    sibling: *mut Task,
     ready: *mut Task,
     all: *mut Task,
     state: State,
@@ -323,10 +322,7 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
             (*task).result.as_ptr(),
             (*task).input.as_ptr(),
         );
-        while !(*task).child.is_null() {
-            abandon((*task).context, (*task).child);
-        }
-        if !(*task).parent.is_null() {
+        if (*task).record.is_some() {
             abi::task_handover((*task).context);
         }
         event(END, (*task).id, (*task).failed as u64);
@@ -372,9 +368,6 @@ pub unsafe fn run_root(
         context,
         owned_context: None,
         run: &mut run,
-        parent: ptr::null_mut(),
-        child: ptr::null_mut(),
-        sibling: ptr::null_mut(),
         ready: ptr::null_mut(),
         all: ptr::null_mut(),
         state: State::Ready,
@@ -404,7 +397,10 @@ pub unsafe fn run_root(
         run.all = root_pointer;
         run.ready(root_pointer);
         let previous = CURRENT.get();
-        while root.state != State::Ended {
+        loop {
+            if root.state == State::Ended {
+                break;
+            }
             let task = run.pop();
             if task.is_null() {
                 std::thread::park();
@@ -461,9 +457,6 @@ pub unsafe extern "C" fn hirsel_core_spawn(
             context: &mut *child_context,
             owned_context: Some(child_context),
             run,
-            parent,
-            child: ptr::null_mut(),
-            sibling: (*parent).child,
             ready: ptr::null_mut(),
             all: (*run).all,
             state: State::Ready,
@@ -480,7 +473,6 @@ pub unsafe extern "C" fn hirsel_core_spawn(
         let task = Box::into_raw(task);
         ptr::copy_nonoverlapping(input, (*task).input.as_ptr(), layout.input.bytes);
         (*task).sp = (*task).stack.prepare(start, task.cast(), ptr::null_mut());
-        (*parent).child = task;
         (*run).all = task;
         (*run).ready(task);
         event(SPAWN, (*task).id, bytes);
@@ -502,11 +494,6 @@ unsafe fn retire(task: *mut Task) {
     // SAFETY: task ended, is not queued, and its sole handle is being consumed.
     unsafe {
         let run = (*task).run;
-        let mut link = &raw mut (*(*task).parent).child;
-        while *link != task {
-            link = &raw mut (**link).sibling;
-        }
-        *link = (*task).sibling;
         let mut link = &raw mut (*run).all;
         while *link != task {
             link = &raw mut (**link).all;
@@ -571,32 +558,36 @@ pub unsafe extern "C" fn hirsel_core_join(
 /// # Safety
 /// Transfer the sole live handle. This cleanup shields cancellation, cancels and
 /// waits, then cleans any result or drops its complete cause chain, without admission.
-pub unsafe fn abandon(context: *mut Context, task: *mut Task) {
+pub unsafe fn abandon(context: *mut Context, task: *mut Task) -> u8 {
     // SAFETY: the parent retains task while blocked; cancellation shielding is lexical.
     unsafe {
         (*context).cancel_shield += 1;
         hirsel_core_cancel(context, task);
-        while (*task).state != State::Ended {
+        loop {
+            if (*task).state == State::Ended {
+                break;
+            }
             checkpoint(true);
         }
         event(JOIN, (*task).id, 2);
-        if (*task).failed == 0 {
-            ((*task).layout.result.drop)(context, (*task).result.as_ptr());
-        }
+        let failed = if (*task).failed == 0 {
+            ((*task).layout.result.drop)(context, (*task).result.as_ptr())
+        } else {
+            0
+        };
         let causes: Causes = std::mem::take(&mut (*(*task).context).causes);
         drop(causes);
         retire(task);
         (*context).cancel_shield -= 1;
+        failed
     }
 }
 /// # Safety
 /// Same ownership contract as abandon.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_task_drop(context: *mut Context, task: *mut Task) {
+pub unsafe extern "C" fn hirsel_core_task_drop(context: *mut Context, task: *mut Task) -> u8 {
     // SAFETY: emitter transfers one unjoined handle for structured cleanup.
-    unsafe {
-        abandon(context, task);
-    }
+    unsafe { abandon(context, task) }
 }
 
 /// Run non-suspending OS code off the language fiber. Scripted provider issue and

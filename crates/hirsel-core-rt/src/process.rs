@@ -50,6 +50,7 @@ pub unsafe extern "C" fn hirsel_core_run(config: *const Config, entry: Entry) ->
     // SAFETY: the driver pins configuration and the generated entry thunk.
     unsafe {
         let config = &*config;
+        let _pipe_policy = PipePolicy::enter();
         let mut context = Context::new(config.root_limit);
         context.run = config;
         if causes::task_start(&mut context).is_err() {
@@ -99,16 +100,8 @@ pub unsafe extern "C" fn hirsel_core_run(config: *const Config, entry: Entry) ->
                     (config.diagnostic)(config.state, line.data, line.len);
                     diagnostic(config, b"\n");
                 } else {
-                    let name = [
-                        "Overflow",
-                        "Bounds",
-                        "Division",
-                        "Unwrap",
-                        "Fail",
-                        "Cancelled",
-                        "Capacity",
-                    ][cause.kind as usize];
-                    diagnostic(config, format!("{name} at {}\n", cause.site).as_bytes());
+                    diagnostic(config, crate::abi_host::format_cause(cause).as_bytes());
+                    diagnostic(config, b"\n");
                 }
             }
             101
@@ -180,5 +173,58 @@ pub fn stop(name: &[u8]) -> ! {
         libc::write(fd, name.as_ptr().cast(), name.len());
         libc::write(fd, b"\n".as_ptr().cast(), 1);
         libc::_exit(102)
+    }
+}
+
+// Rust std's Unix startup ignores SIGPIPE so write returns EPIPE. Generated C
+// entries do not run Rust startup. Hold that same policy while runs are active,
+// then restore the embedding host's action after the last run. No source signal
+// operations exist in v1. The counter permits concurrent independent runs.
+struct PipeState {
+    users: u64,
+    previous: Option<libc::sigaction>,
+}
+static PIPE_STATE: std::sync::Mutex<PipeState> = std::sync::Mutex::new(PipeState {
+    users: 0,
+    previous: None,
+});
+struct PipePolicy;
+impl PipePolicy {
+    fn enter() -> Self {
+        let mut state = PIPE_STATE.lock().unwrap();
+        if state.users == 0 {
+            // SAFETY: initialized actions, valid signal; kernel copies both structures.
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                let mut previous: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = libc::SIG_IGN;
+                libc::sigemptyset(&mut action.sa_mask);
+                if libc::sigaction(libc::SIGPIPE, &action, &mut previous) != 0 {
+                    stop(b"Signal");
+                }
+                state.previous = Some(previous);
+            }
+        }
+        state.users = state
+            .users
+            .checked_add(1)
+            .unwrap_or_else(|| stop(b"ActiveRuns"));
+        Self
+    }
+}
+impl Drop for PipePolicy {
+    fn drop(&mut self) {
+        let mut state = PIPE_STATE.lock().unwrap();
+        state.users -= 1;
+        if state.users == 0 {
+            // SAFETY: the final run restores exactly the host action saved at entry.
+            unsafe {
+                libc::sigaction(
+                    libc::SIGPIPE,
+                    &state.previous.take().unwrap(),
+                    std::ptr::null_mut(),
+                );
+            }
+        }
     }
 }

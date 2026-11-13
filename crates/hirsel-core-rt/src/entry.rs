@@ -299,38 +299,10 @@ unsafe extern "C" fn diagnostic(state: *mut u8, data: *const u8, len: usize) {
     }
 }
 unsafe extern "C" fn describe(state: *mut u8, cause: *const crate::causes::Cause) -> View {
-    // SAFETY: generated failures retain canonical StringMessage carriers. This
-    // host buffer remains fixed until the next describe call.
+    // SAFETY: run pins its cause and diagnostic buffer until the next describe.
     unsafe {
-        use std::io::Write;
         let process = &mut *state.cast::<OsProcess>();
-        let cause = &*cause;
-        process.diagnostic.clear();
-        let name = [
-            "Overflow",
-            "Bounds",
-            "Division",
-            "Unwrap",
-            "Fail",
-            "Cancelled",
-            "Capacity",
-        ][cause.kind as usize];
-        write!(&mut process.diagnostic, "{name}").unwrap();
-        if cause.kind == crate::causes::FAIL && !cause.message.is_null() {
-            let message = &*cause.message.cast::<crate::causes::StringMessage>();
-            let value = if message.len == 0 {
-                &[]
-            } else {
-                std::slice::from_raw_parts(message.data, message.len as usize)
-            };
-            write!(
-                &mut process.diagnostic,
-                "({:?})",
-                std::str::from_utf8_unchecked(value)
-            )
-            .unwrap();
-        }
-        write!(&mut process.diagnostic, " at {}", cause.site).unwrap();
+        process.diagnostic = crate::abi_host::format_cause(&*cause).into_bytes();
         View {
             data: process.diagnostic.as_ptr(),
             len: process.diagnostic.len(),

@@ -20,7 +20,8 @@ typedef struct { uint8_t kind; HirselCoreCauseCell *causes; uint8_t status; } Hi
 /* kind: 0 result, 1 Failed(chain), 2 Cancelled(chain).
    status 1 means the joiner failed, still owns the handle for cleanup. */
 HirselCoreJoin hirsel_core_join(HirselCoreContext *, HirselCoreTask *, void *result, uint64_t site);
-void hirsel_core_task_drop(HirselCoreContext *, HirselCoreTask *);
+/* Result finalizer failure belongs to the abandoning task: returns status 1. */
+uint8_t hirsel_core_task_drop(HirselCoreContext *, HirselCoreTask *);
 typedef struct HirselCoreChannel HirselCoreChannel;
 typedef struct { HirselCoreChannel *sender, *receiver; uint64_t available; uint8_t status; } HirselCoreChannelNew;
 HirselCoreChannelNew hirsel_core_channel_new(HirselCoreContext *, uint64_t capacity, HirselCoreValueLayout, uint64_t site);

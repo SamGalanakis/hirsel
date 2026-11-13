@@ -551,7 +551,10 @@ fn scripted_providers_suspend_at_issue_and_delivery_without_losing_issued_result
                 child,
                 descriptor::<*mut Script>(),
             );
-            while (*s).phase < (*s).hold {
+            loop {
+                if (*s).phase >= (*s).hold {
+                    break;
+                }
                 checkpoint(false);
             }
             hirsel_core_cancel(context, h.task);

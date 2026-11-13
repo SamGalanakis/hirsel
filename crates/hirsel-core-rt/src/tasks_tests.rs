@@ -563,9 +563,91 @@ fn cancelled_joiner_retains_handle_for_shielded_abandonment() {
                     .collect::<Vec<_>>(),
                 [(causes::CANCELLED, 51)]
             );
-            dest.cast::<u64>().write(1);
+        }
+        1
+    }
+    let mut context = Context::new(1024);
+    causes::task_start(&mut context).unwrap();
+    let before = context.available();
+    let mut unit = 0u8;
+    // SAFETY: failure leaves its result uninitialized; only the chain is consumed.
+    unsafe {
+        assert_eq!(
+            run_root(
+                &mut context,
+                root,
+                &mut unit,
+                &mut unit,
+                0,
+                0,
+                SchedulerProvider::default()
+            ),
+            1
+        );
+        let chain = causes::Causes::from_raw(hirsel_core_causes_take(&mut context));
+        assert_eq!(
+            chain.iter().map(|c| (c.kind, c.site)).collect::<Vec<_>>(),
+            [(causes::CANCELLED, 51)]
+        );
+        drop(chain);
+    }
+    assert_eq!(context.available(), before + 32);
+}
+#[test]
+fn abandoning_successful_resource_result_propagates_its_finalizer_failure() {
+    unsafe extern "C" fn create(context: *mut Context, destination: *mut u8, _: *mut u8) -> u8 {
+        // SAFETY: successful task result transfers its prepaid resource container.
+        unsafe {
+            let p = hirsel_core_resource_alloc(context, 1, 8, 0, 0).pointer;
+            assert!(!p.is_null());
+            destination.cast::<Resource>().write(Resource {
+                pointer: p,
+                site: 61,
+            });
         }
         0
     }
-    assert_eq!(run(root, ()).0, 1);
+    unsafe extern "C" fn root(context: *mut Context, _: *mut u8, _: *mut u8) -> u8 {
+        // SAFETY: sole child handle is consumed by cleanup. Its R cleanup can fail
+        // and must abandon this normal continuation, even though the child succeeded.
+        unsafe {
+            let mut unit = 0u8;
+            let descriptor = TaskLayout {
+                input: value::<()>(0),
+                result: ValueLayout {
+                    drop: drop_resource,
+                    ..value::<Resource>(16)
+                },
+            };
+            let child = hirsel_core_spawn(context, 32, &mut unit, create, descriptor);
+            assert!(!child.task.is_null());
+            hirsel_core_task_drop(context, child.task)
+        }
+    }
+    let mut context = Context::new(2048);
+    causes::task_start(&mut context).unwrap();
+    let before = context.available();
+    let mut unit = 0u8;
+    // SAFETY: root result is uninitialized on its failure status and never read.
+    unsafe {
+        assert_eq!(
+            run_root(
+                &mut context,
+                root,
+                &mut unit,
+                &mut unit,
+                0,
+                0,
+                SchedulerProvider::default()
+            ),
+            1
+        );
+        let chain = causes::Causes::from_raw(hirsel_core_causes_take(&mut context));
+        assert_eq!(
+            chain.iter().map(|c| (c.kind, c.site)).collect::<Vec<_>>(),
+            [(causes::FAIL, 61)]
+        );
+        drop(chain);
+    }
+    assert_eq!(context.available(), before);
 }

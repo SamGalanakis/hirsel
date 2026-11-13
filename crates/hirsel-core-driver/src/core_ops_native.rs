@@ -229,6 +229,53 @@ fn host_operations_cranelift() { host_operations(Backend::Cranelift); }
 #[ignore = "explicit native integration target"]
 fn host_operations_llvm() { host_operations(Backend::Llvm); }
 
+// MEM-17 through the package product: a core type's clone body is an item with its
+// own definition (`<module>/<Type>.$clone`), so reuse keys, scheduling and native
+// emission reach it. The body bumps `n`, so 522 (n 4 -> 5, both lists length 2) holds
+// only if the declared body ran rather than a structural copy, and the driver panicked
+// on the item before it had an identity.
+fn clone_body_operations(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let source = "pub fn main() -> Result[(),Exit] { if list.proof_clone_run()==522u64 { Ok(()) } else { Error(Exit(status:1)) } }\n";
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let module = request.inputs.packages[1].sources.iter_mut().find(|s| s.modules==["list"]).unwrap();
+    let mut text = std::fs::read_to_string(&module.file).unwrap();
+    text.push_str(r#"
+pub type ProofCopy[T] { xs: List[T], n: u64 }
+clone[T](p: ProofCopy[T]) { Ok(ProofCopy(xs: clone(p.xs)?, n: p.n + 1)) }
+pub fn proof_clone_run() -> u64 {
+    let made: Result[List[u64], Capacity] = with_capacity(2)
+    let mut xs: List[u64] = match take made { Ok(take l) => take l, Error(_) => return 0 }
+    match push(mut xs, 7) { Ok(()) => {}, Error(_) => return 0 }
+    match push(mut xs, 9) { Ok(()) => {}, Error(_) => return 0 }
+    let p = ProofCopy(xs: take xs, n: 4)
+    let c: Result[ProofCopy[u64], Capacity] = clone(p)
+    match take c { Ok(take q) => q.n * 100 + len(q.xs) * 10 + len(p.xs), Error(_) => 1 }
+}
+"#);
+    module.file = dir.path().join("list.hirsel");
+    std::fs::write(&module.file, text).unwrap();
+    let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let options = NativeOptions { backend, optimize:false, target:TARGET.into(),
+        runtime:root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
+        include:root.join("crates/hirsel-core-rt/include"),
+        cc:PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
+        store:dir.path().join("native"), output:dir.path().join("program"), root_limit:1_048_576,
+        instance_limit:64, directories:vec![], grant_mask:0, logical_charge_report: None };
+    let built = product.build(&entry, &options).unwrap();
+    let output = Command::new(built.executable).output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{:?}", String::from_utf8_lossy(&output.stderr));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn clone_body_cranelift() { clone_body_operations(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn clone_body_llvm() { clone_body_operations(Backend::Llvm); }
+
 fn string_carrier_operations(backend: Backend) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir = tempfile::tempdir().unwrap();

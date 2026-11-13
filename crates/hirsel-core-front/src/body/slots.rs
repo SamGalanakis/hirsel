@@ -493,17 +493,30 @@ fn clone_kernel_hook_law() -> u64 {
     /// `plain`, which `TestCopy[String]` lacks), is refused.
     #[test]
     fn clone_body_is_one_per_type_and_assumes_no_bound() {
-        for (extra, message) in [
+        // The duplicate sits in another module than the first body: two in one module
+        // are already one name declared twice in the index.
+        for (prelude, extra, message) in [
             (
                 "clone[T](t: TestCopy[T]) { Error(Capacity(requested: 1, available: 0)) }",
+                "",
                 "one clone body",
             ),
             (
+                "",
                 "type TestBound[T] { x: T }\nclone[T: plain](t: TestBound[T]) { Ok(TestBound(x: t.x)) }",
                 "no stronger bounds",
             ),
+            // No parameter names a type, yet the body is still an item to refuse.
+            (
+                "",
+                "clone() { Error(Capacity(requested: 1, available: 0)) }",
+                "one view of a core own type",
+            ),
         ] {
-            let (index, modules) = core_inputs(CLONE_PRELUDE, &format!("{CLONE_LAWS}\n{extra}\n"));
+            let (index, modules) = core_inputs(
+                &format!("{CLONE_PRELUDE}\n{prelude}\n"),
+                &format!("{CLONE_LAWS}\n{extra}\n"),
+            );
             let p = Program::declare(&index, &modules);
             assert!(
                 p.refusals

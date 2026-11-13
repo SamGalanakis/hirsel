@@ -69,6 +69,10 @@ pub enum DefinitionKind {
     Function,
     Constant,
     Type,
+    /// A core type's clone body (MEM-17): named by no path, so it is found by its
+    /// item ([`NameIndex::item_definition`]); its name is the type's, and its path
+    /// `<module>/<Type>.$clone`.
+    Clone,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Definition {
@@ -110,6 +114,8 @@ pub struct NameIndex {
     pub packages: Table<Package>,
     pub definitions: Table<Definition>,
     members: Map<(ModuleId, Symbol), DefinitionId>,
+    /// Clone bodies by (module, item ordinal); never in `members`, so no name finds one.
+    clone_items: Map<(ModuleId, u32), DefinitionId>,
     children: Map<(ModuleId, Symbol), ModuleId>,
     package_ids: Map<(Symbol, Symbol), PackageKey>,
     dependencies: Table<PackageKey>,
@@ -129,6 +135,7 @@ impl NameIndex {
         result.packages = writer.table(&self.packages)?;
         result.definitions = writer.table(&self.definitions)?;
         result.members = writer.map(&self.members)?;
+        result.clone_items = writer.map(&self.clone_items)?;
         result.children = writer.map(&self.children)?;
         result.package_ids = writer.map(&self.package_ids)?;
         result.dependencies = writer.table(&self.dependencies)?;
@@ -154,6 +161,7 @@ impl NameIndex {
             packages: Table::default(),
             definitions: Table::default(),
             members: Map::default(),
+            clone_items: Map::default(),
             children: Map::default(),
             package_ids: Map::default(),
             dependencies: Table::default(),
@@ -440,10 +448,17 @@ impl NameIndex {
             | NodeKind::StableType
             | NodeKind::ResourceType
             | NodeKind::ScopedType => DefinitionKind::Type,
+            NodeKind::CloneHook => DefinitionKind::Clone,
             _ => return,
         };
         let Some(t) = root.token else { return };
-        let name = item.symbol(t);
+        let name = if kind == DefinitionKind::Clone {
+            // The type the body copies: the last name of its parameter's type path. A
+            // body without one still gets an identity, so the checker refuses it.
+            clone_type_name(item).unwrap_or_else(|| item.symbol(t))
+        } else {
+            item.symbol(t)
+        };
         let site = Site {
             module,
             item: ordinal,
@@ -457,7 +472,15 @@ impl NameIndex {
             ));
             return;
         }
-        if let Some(&old) = self.members.get(&(module, name)) {
+        let old = if kind == DefinitionKind::Clone {
+            self.clone_items
+                .iter()
+                .map(|(_, &d)| d)
+                .find(|&d| self.get(d).site.module == module && self.get(d).name == name)
+        } else {
+            self.members.get(&(module, name)).copied()
+        };
+        if let Some(old) = old {
             let mut r = Refusal::new("LANG-7", site, "duplicate definition");
             r.causal.push(self.get(old).site);
             self.diagnostics.push(r);
@@ -502,8 +525,26 @@ impl NameIndex {
                 _ => {}
             }
         }
-        self.members.insert((module, name), id);
+        if kind == DefinitionKind::Clone {
+            self.clone_items.insert((module, ordinal), id);
+        } else {
+            self.members.insert((module, name), id);
+        }
         self.definitions.push(d);
+    }
+    /// The definition item `ordinal` of `module` declares: by its name, or for a
+    /// clone body by its position.
+    pub fn item_definition(
+        &self,
+        module: ModuleId,
+        ordinal: u32,
+        item: Item<'_>,
+    ) -> Option<DefinitionId> {
+        let root = item.tree.node(item.root);
+        if root.kind == NodeKind::CloneHook {
+            return self.clone_items.get(&(module, ordinal)).copied();
+        }
+        self.definition(module, item.symbol(root.token?))
     }
     /// Materialize neutral paths only at driver/checker/output boundaries.
     pub fn module_path(&self, module: ModuleId) -> ModulePath {
@@ -530,15 +571,37 @@ impl NameIndex {
     pub fn definition_path(&self, id: DefinitionId) -> DefPath {
         let d = self.get(id);
         let m = self.module_path(d.site.module);
+        let name = self.symbols.text(d.name);
         DefPath(ItemPath {
             package: m.package,
             modules: m.modules,
-            name: self.symbols.text(d.name).into(),
+            name: if d.kind == DefinitionKind::Clone {
+                format!("{name}.$clone")
+            } else {
+                name.into()
+            },
         })
     }
     pub fn definition(&self, module: ModuleId, name: Symbol) -> Option<DefinitionId> {
         self.members.get(&(module, name)).copied()
     }
+}
+/// The last name of a clone body's parameter type (`Map` in `x: core.Map[K, V]`).
+fn clone_type_name(item: Item<'_>) -> Option<Symbol> {
+    let params = item
+        .tree
+        .children(item.root)
+        .iter()
+        .copied()
+        .find(|&c| item.tree.node(c).kind == NodeKind::Parameters)?;
+    let param = *item.tree.children(params).first()?;
+    let ty = *item.tree.children(param).first()?;
+    let path = if item.tree.node(ty).kind == NodeKind::TypePath {
+        ty
+    } else {
+        *item.tree.children(ty).first()?
+    };
+    path_tokens(item, path).last().map(|t| item.symbol(t))
 }
 pub(crate) fn path_tokens(
     item: Item<'_>,

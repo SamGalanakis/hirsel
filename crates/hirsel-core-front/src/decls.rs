@@ -5,7 +5,7 @@ use crate::types::*;
 use crate::{Gap, ItemRef, Program, refusal};
 use hirsel_core_ids::DefPath;
 use hirsel_core_layout::{Recipe, Scalar, Width};
-use hirsel_core_resolve::{Site, Target};
+use hirsel_core_resolve::{DefinitionId, Site, Target};
 use hirsel_core_syntax::{NodeId, NodeKind};
 
 /// Bound bits (OWN-4).
@@ -422,7 +422,10 @@ impl Program<'_> {
                         item: i as u32,
                         span: name_span,
                     };
-                    self.register_clone_hook(at, site);
+                    if let Some(definition) = self.index.item_definition(module.id, i as u32, item)
+                    {
+                        self.register_clone_hook(at, site, definition);
+                    }
                     continue;
                 }
                 let Some(definition) = self.index.definition(module.id, item.symbol(name)) else {
@@ -638,13 +641,9 @@ impl Program<'_> {
     /// MEM-17: `clone[..](x: T[..]) { .. }` is a core item, so a core type's copy is
     /// written in the module holding its storage kernels. Its type is attached in
     /// `clone_hook`, once the parameter's type is lowered.
-    fn register_clone_hook(&mut self, at: ItemRef, site: Site) {
-        let m = self.index.module_path(site.module);
-        let path = DefPath(hirsel_core_ids::ItemPath {
-            package: m.package,
-            modules: m.modules,
-            name: "$clone".into(),
-        });
+    /// The body's identity is its index definition, `<module>/<Type>.$clone`.
+    fn register_clone_hook(&mut self, at: ItemRef, site: Site, definition: DefinitionId) {
+        let path = self.index.definition_path(definition);
         if !path.package_is("core", "1") {
             self.refusals.push(refusal(
                 "MEM-17",
@@ -681,6 +680,7 @@ impl Program<'_> {
             drop_of: None,
             clone_of: None,
         });
+        self.by_definition[definition.0 as usize] = Some(Def::Fn(self.fns.len() as u32 - 1));
     }
 
     /// MEM-17: the clone body takes one view of a core own type `T[P..]`, generic in
@@ -744,10 +744,7 @@ impl Program<'_> {
             false,
             Callable::Plain,
         ));
-        let mut path = self.decls[d.index()].path.clone();
-        path.0.name = format!("{}.$clone", path.0.name);
         let fd = &mut self.fns[f];
-        fd.path = path;
         fd.result = result;
         fd.callable = callable;
         fd.clone_of = Some(d);

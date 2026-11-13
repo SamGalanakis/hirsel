@@ -89,10 +89,9 @@ impl Keys {
         let mut source_definitions = Vec::new();
         for (m, rows) in modules.iter().zip(resolutions) {
             for (ordinal, (item, resolution)) in m.syntax.items().zip(rows).enumerate() {
-                let Some(t) = item.tree.node(item.root).token else {
+                let Some(definition) = index.item_definition(m.id, ordinal as u32, item) else {
                     continue;
                 };
-                let definition = index.definition(m.id, item.symbol(t)).unwrap();
                 source_definitions.push(definition.0 as usize);
                 let path = index.definition_path(definition);
                 let end = header_end(item);
@@ -113,9 +112,7 @@ impl Keys {
                         digest,
                         has_body: end < item.source_text().len(),
                         header_end: end as u32,
-                        site: index
-                            .get(index.definition(m.id, item.symbol(t)).unwrap())
-                            .site,
+                        site: index.get(definition).site,
                         body_reads: body_reads.into_iter().collect(),
                         reads: reads.into_iter().collect(),
                         anchor: (m.id, ordinal as u32),
@@ -230,9 +227,8 @@ impl Keys {
         resolution: &Resolution,
     ) -> io::Result<DefinitionKey> {
         hirsel_core_front::cost_scope!("phase", "driver keys/anchors");
-        let module = self.headers[path].anchor.0;
-        let token = item.tree.node(item.root).token.unwrap();
-        let own = index.definition(module, item.symbol(token)).unwrap();
+        let (module, ordinal) = self.headers[path].anchor;
+        let own = index.item_definition(module, ordinal, item).unwrap();
         let mut pending = vec![own.0 as usize];
         for name in &resolution.names {
             target_ids(index, module, name.target, &mut pending);

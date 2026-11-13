@@ -20,10 +20,23 @@ pub fn get[K: key, V](m: Map[K, V], k: K) -> Option[View[V]] in m {
 }
 pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (Capacity, K, V)] {
   let h = hash(k)
-  if let Some(i) = find(m, k, h) {
-    let _ = swap_value(mut m, i, take v)
-    let _ = take k
-    return Ok(())
+  // The first empty index word is the insertion position unless growth moves it.
+  let mut j: u64 = 0
+  let n = index_len(m)
+  if n != 0 {
+    let mask = n - 1
+    j = h & mask
+    loop {
+      let s = index_get(m, j)
+      if s == 0 { break }
+      let i = s - 1
+      if slot_hash(m, i) == h && slot_live(m, i) && slot_key(m, i) == k {
+        let _ = swap_value(mut m, i, take v)
+        let _ = take k
+        return Ok(())
+      }
+      j = int.wrapping_add(j, 1) & mask
+    }
   }
   let cap = capacity(m)
   if slots(m) == cap {
@@ -38,10 +51,13 @@ pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (
       install_index(mut m, stored_hash, i + 1)
       i += 1
     }
+    let mask = index_len(m) - 1
+    j = h & mask
+    while index_get(m, j) != 0 { j = int.wrapping_add(j, 1) & mask }
   }
   let s = slots(m) + 1
   push_entry(mut m, h, take k, take v)
-  install_index(mut m, h, s)
+  index_set(mut m, j, s)
   Ok(())
 }
 pub fn set[K: key, V](mut m: Map[K, V], k: K, take v: V) -> Result[V, V] {

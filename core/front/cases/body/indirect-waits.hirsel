@@ -1,0 +1,6 @@
+// LANG-13 permits a non-waiting function where a waiting callable is expected.
+// Both functions below call a waits row, so LANG-8 requires their waits mark.
+// expect: run f() = 7
+fn value() -> u64 { 7 }
+fn use(cb: fn() -> u64 waits) -> u64 waits { cb() }
+fn f() -> u64 waits { use(value) }

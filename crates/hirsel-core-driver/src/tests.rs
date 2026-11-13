@@ -924,3 +924,25 @@ fn reachable_census_retains_a_named_function_without_a_native_body() {
             .contains("external")
     );
 }
+
+#[test]
+fn indirect_instances_follow_the_values_function_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let product = Driver::default().check(request(
+        "fn leaf(x: u64) -> u64 { x + 1 }\nfn apply(cb: fn(u64) -> u64, x: u64) -> u64 { cb(x) }\nfn root() -> u64 { let cb: fn(u64) -> u64 = leaf; apply(cb, 41) }\n",
+        dir.path()), &mut Meter::new(false)).unwrap();
+    assert!(product.accepted());
+    let root = hirsel_core_ir::InstanceKey {
+        definition: DefPath::from_full("app@1/main/root").unwrap(),
+        types: vec![],
+        dictionaries: vec![],
+    };
+    let instances = product.instances([root], 8).unwrap();
+    assert_eq!(
+        instances
+            .iter()
+            .map(|i| i.definition.0.name.as_str())
+            .collect::<Vec<_>>(),
+        ["apply", "leaf", "root"]
+    );
+}

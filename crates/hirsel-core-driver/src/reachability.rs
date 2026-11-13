@@ -195,9 +195,6 @@ impl CheckProduct {
                 InstanceStop::MaterializationRequired(k) => {
                     (&k.definition, "generic instance materialization".to_owned())
                 }
-                InstanceStop::IndirectTarget(p) => {
-                    (p, "indirect call target is unavailable".to_owned())
-                }
                 InstanceStop::Input {
                     definition,
                     message,

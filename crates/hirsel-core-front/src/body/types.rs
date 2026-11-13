@@ -78,8 +78,12 @@ impl<'c, 'a> Cx<'c, 'a> {
                 }
                 let callable = match crate::decls::callable_kind(self.item, n) {
                     Ok(k) => k,
-                    Err(what) => {
-                        self.gap(n, what);
+                    Err(bound) => {
+                        self.refuse(
+                            "LANG-13",
+                            bound,
+                            "an owning callable bracket contains only send",
+                        );
                         return ERROR;
                     }
                 };

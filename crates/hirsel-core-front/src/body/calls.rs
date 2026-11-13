@@ -2,11 +2,14 @@ use super::*;
 
 #[derive(Default)]
 pub(super) struct CallScratch {
-    found: Vec<Option<TyId>>,
-    checked: Vec<bool>,
-    vals: Vec<Option<ValueId>>,
-    later: Vec<(usize, NodeId)>,
-    tys: Vec<TyId>,
+    pub(super) found: Vec<Option<TyId>>,
+    pub(super) checked: Vec<bool>,
+    pub(super) vals: Vec<Option<ValueId>>,
+    pub(super) later: Vec<(usize, NodeId)>,
+    pub(super) tys: Vec<TyId>,
+    pub(super) params: Vec<(Mode, TyId)>,
+    pub(super) ir_params: Vec<Param>,
+    pub(super) ir_results: Vec<Ty>,
 }
 
 impl<'c, 'a> Cx<'c, 'a> {
@@ -35,8 +38,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                     if u.projections.start != u.projections.end
                         && matches!(u.target, Target::Definition(_)) =>
                 {
-                    return self
-                        .gap_ty(callee, "function, constant and module values are not built");
+                    return self.call_value(n, callee, args, want, scratch);
                 }
                 other => other.map(|u| &u.target),
             },
@@ -48,14 +50,14 @@ impl<'c, 'a> Cx<'c, 'a> {
                 Some(Def::Type(d)) => return self.construct_record(n, *d, want),
                 None => return self.gap_ty(callee, "construction is not built"),
             },
-            Some(Target::Missing) | None if self.kind(callee) == NodeKind::Path => {
+            Some(Target::Missing) if self.kind(callee) == NodeKind::Path => {
                 self.halt();
                 return (ERROR, None);
             }
             Some(&Target::ContextualConstructor { name }) => {
                 return self.construct_variant(n, name, args, want);
             }
-            _ => return self.gap_ty(callee, "calls through values are not built"),
+            _ => return self.call_value(n, callee, args, want, scratch),
         };
         let g = &self.p.fns[f];
         if g.region_anchors.iter().any(|&r| {
@@ -104,6 +106,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             vals,
             later,
             tys,
+            ..
         } = scratch;
         found.clear();
         found.resize(g.generics.len(), None);
@@ -549,7 +552,11 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
     }
 
-    fn instance_row(&mut self, f: usize, types: &[TyId]) -> Result<(FuncId, SigId), &'static str> {
+    pub(super) fn instance_row(
+        &mut self,
+        f: usize,
+        types: &[TyId],
+    ) -> Result<(FuncId, SigId), &'static str> {
         use std::hash::{Hash, Hasher};
         if types.is_empty() {
             return self.e.row(self.p, f);

@@ -284,6 +284,12 @@ impl<'c, 'a> Cx<'c, 'a> {
                 (ERROR, None)
             }
             &Target::ContextualConstructor { name } => self.construct_variant(n, name, &[], want),
+            &Target::Definition(id) if u.projections.is_empty() => {
+                match self.p.by_definition[id.0 as usize] {
+                    Some(Def::Fn(f)) => self.function_value(f as usize, n, want),
+                    _ => self.gap_ty(n, "function, constant and module values are not built"),
+                }
+            }
             _ => self.gap_ty(n, "function, constant and module values are not built"),
         }
     }

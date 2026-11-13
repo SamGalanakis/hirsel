@@ -1,0 +1,13 @@
+// LANG-13: callable values preserve their signature, can be returned/stored, and call repeatedly.
+// Hand derivation: inc(4) + twice(4) = 13; pick(false)(5) = 10; updated field gives 8.
+// expect: run sum(4) = 13
+// expect: run chosen(5) = 10
+// expect: run field(7) = 8
+fn inc(x: u64) -> u64 { x + 1 }
+fn twice(x: u64) -> u64 { x * 2 }
+fn apply(f: fn(u64) -> u64, x: u64) -> u64 { f(x) }
+fn pick(c: bool) -> fn(u64) -> u64 { if c { inc } else { twice } }
+fn sum(x: u64) -> u64 { let f: fn(u64) -> u64 = inc; apply(f, x) + apply(twice, x) }
+fn chosen(x: u64) -> u64 { (pick(false))(x) }
+type Holder { cb: fn(u64) -> u64 }
+fn field(x: u64) -> u64 { let h = Holder(cb: inc); h.cb(x) }

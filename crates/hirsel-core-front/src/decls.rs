@@ -320,6 +320,8 @@ pub struct FnDecl {
     pub generics: Vec<Generic>,
     pub params: Vec<ParamDecl>,
     pub result: TyId,
+    /// The function item's declaration-only callable type, shared by all its uses.
+    pub callable: TyId,
     /// The written result type, where OWN-20 refuses a missing anchor.
     pub result_site: Site,
     /// Parameters the result is anchored to (OWN-20).
@@ -460,6 +462,7 @@ impl Program<'_> {
                             generics,
                             params: vec![],
                             result: UNIT,
+                            callable: ERROR,
                             anchors: vec![],
                             region_anchors: vec![],
                             outlives: vec![],
@@ -785,8 +788,12 @@ impl Program<'_> {
                 }
                 let callable = match callable_kind(item, n) {
                     Ok(k) => k,
-                    Err(what) => {
-                        self.gaps.push(Gap::new(self.site(at, n), what));
+                    Err(bound) => {
+                        self.refusals.push(refusal(
+                            "LANG-13",
+                            self.site(at, bound),
+                            "an owning callable bracket contains only send",
+                        ));
                         return ERROR;
                     }
                 };
@@ -1068,7 +1075,14 @@ impl Program<'_> {
         for &n in &anchor_nodes {
             written_roots.push(self.root_ty(at, n, &generics));
         }
+        let callable = self.types.intern(TyKind::Fn(
+            params.iter().map(|p| (p.mode, p.ty)).collect(),
+            result,
+            waits,
+            Callable::Plain,
+        ));
         let fd = &mut self.fns[f];
+        fd.callable = callable;
         fd.region_anchors = written_roots;
         fd.params = params;
         fd.result = result;
@@ -2376,11 +2390,11 @@ fn unrooted_stable(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId) -> 
     }
 }
 
-/// The parser has already checked the callable's written kind and bounds.
+/// Read the callable kind and enforce LANG-13's owning bracket at its bound name.
 pub(crate) fn callable_kind(
     item: hirsel_core_syntax::Item<'_>,
     n: NodeId,
-) -> Result<Callable, &'static str> {
+) -> Result<Callable, NodeId> {
     Ok(match item.tree.node(n).kind {
         NodeKind::ScopedCallableType => Callable::Scoped,
         NodeKind::OwnCallableType => {
@@ -2391,13 +2405,15 @@ pub(crate) fn callable_kind(
                 .find(|&&c| item.tree.node(c).kind == NodeKind::Bounds)
             {
                 let bs = item.tree.children(bounds);
-                if bs.len() != 1
-                    || item
-                        .tree
-                        .token_text(item.text, item.tree.node(bs[0]).token.unwrap())
-                        != "send"
-                {
-                    return Err("callable bounds other than send have no specified rule");
+                for (i, &bound) in bs.iter().enumerate() {
+                    if i != 0
+                        || item
+                            .tree
+                            .token_text(item.text, item.tree.node(bound).token.unwrap())
+                            != "send"
+                    {
+                        return Err(bound);
+                    }
                 }
                 Callable::OwnSend
             } else {

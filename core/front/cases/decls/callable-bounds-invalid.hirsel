@@ -1,0 +1,7 @@
+// LANG-13 (ANSWERS-913): refuse the first offending bound name.
+// expect: refuse LANG-13 at 5:21
+// expect: refuse LANG-13 at 6:28
+// expect: refuse LANG-13 at 7:28
+type Wrong { f: own[shareable] fn() -> u64 }
+type Extra { f: own[send + key] fn() }
+type Twice { f: own[send + send] fn() }

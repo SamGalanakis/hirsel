@@ -18,7 +18,6 @@ pub enum InstanceStop {
     /// Materialization of type/dictionary arguments belongs to the emitter. The
     /// current source checker emits only closed, non-generic function bodies.
     MaterializationRequired(InstanceKey),
-    IndirectTarget(DefPath),
 }
 /// The emitter supplies mechanical instance dependencies. In particular, a growing
 /// f[T] -> f[List[T]] family stops as a compiler resource outcome, not a language rule.
@@ -85,10 +84,9 @@ impl CheckProduct {
                                 .clone(),
                         );
                     }
-                    Callee::Runtime(_) => {}
-                    Callee::Indirect(_) => {
-                        return Err(InstanceStop::IndirectTarget(key.definition.clone()));
-                    }
+                    // Code pointers enter a program through FunctionRef rows below.
+                    // A call through one introduces no additional code identity.
+                    Callee::Runtime(_) | Callee::Indirect(_) => {}
                 }
             }
             for inst in &body.insts {

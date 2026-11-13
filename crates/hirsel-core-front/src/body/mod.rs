@@ -38,6 +38,7 @@ use std::collections::HashMap;
 
 mod calls;
 mod cleanup;
+mod closures;
 mod control;
 mod ops;
 mod patterns;
@@ -278,13 +279,14 @@ impl Emitter {
     fn rep(&mut self, p: &Program, t: &mut impl TyRead, ty: TyId) -> Result<Rep, &'static str> {
         match t.kind(ty) {
             TyKind::Scalar(s) => return Ok(Rep::Scalar(Ty::Scalar(*s))),
+            TyKind::Fn(_, _, _, Callable::Plain) => return Ok(Rep::Scalar(Ty::Ptr)),
             TyKind::Unit | TyKind::Never | TyKind::Error => return Ok(Rep::None),
             // A capability or `Args` is a provider handle, plain and never cleaned by
             // the program (FORM e68de117).
             TyKind::Adt(d, _) if crate::layout::handle(&p.decls[d.index()]) => {
                 return Ok(Rep::Scalar(Ty::Scalar(Scalar::U64)));
             }
-            TyKind::Tuple(_) | TyKind::Array(..) | TyKind::Adt(..) => {}
+            TyKind::Tuple(_) | TyKind::Array(..) | TyKind::Adt(..) | TyKind::Fn(..) => {}
             // A view is a pointer to a place of its type, never cleaned (OWN-8).
             TyKind::View(x) => {
                 let x = *x;
@@ -412,7 +414,7 @@ fn field_runs_code(t: &FieldTy, row: &mut impl FnMut(TypeId)) -> bool {
         FieldTy::Map(k, v) => field_runs_code(k, row) || field_runs_code(v, row),
         // An abandoned task or receiver cleans results or items whose type the handle
         // does not name, which may run finalizers (CONC-8).
-        FieldTy::OwnFn | FieldTy::Handle(Handle::Task | Handle::Receiver) => true,
+        FieldTy::Handle(Handle::Task | Handle::Receiver) => true,
         _ => false,
     }
 }
@@ -422,6 +424,7 @@ fn field_runs_code(t: &FieldTy, row: &mut impl FnMut(TypeId)) -> bool {
 fn value_ty(t: &impl TyRead, ty: TyId) -> Result<Option<Ty>, &'static str> {
     match t.kind(ty) {
         TyKind::Scalar(s) => Ok(Some(Ty::Scalar(*s))),
+        TyKind::Fn(_, _, _, Callable::Plain) => Ok(Some(Ty::Ptr)),
         TyKind::Unit | TyKind::Never | TyKind::Error => Ok(None),
         _ => Err("values of this type are not built"),
     }
@@ -852,6 +855,17 @@ impl<'c, 'a> Cx<'c, 'a> {
         let viewed = w.view
             && (matches!(self.t.kind(t), TyKind::View(x) if *x == w.ty)
                 || crate::decls::stable_parameter(&self.p.decls, &self.t, t, w.ty));
+        let callable = matches!((self.t.kind(t), self.t.kind(w.ty)),
+            (TyKind::Fn(a, ar, aw, ak), TyKind::Fn(b, br, bw, bk))
+                if a == b && ar == br && ak == bk && (!aw || *bw));
+        if matches!((self.t.kind(t), self.t.kind(w.ty)),
+            (TyKind::Fn(a, ar, aw, ak), TyKind::Fn(b, br, bw, bk))
+                if a == b && ar == br && (!aw || *bw) && ak != bk
+                    && matches!((ak,bk), (Callable::Plain, Callable::Own | Callable::OwnSend | Callable::Scoped) | (Callable::OwnSend, Callable::Own | Callable::Scoped) | (Callable::Own,Callable::Scoped)))
+        {
+            self.gap(n, "callable kind conversions are not built");
+            return;
+        }
         let sequence = matches!((self.t.kind(w.ty), self.t.kind(t)),
             (TyKind::Adt(d, a), TyKind::Adt(e, b))
                 if a == b && is_core_prelude(&self.p.decls[d.index()].path, &["SeqSpan"])
@@ -863,6 +877,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             && !viewed
             && !plain_view
             && !sequence
+            && !callable
             && !stable
             && t != NEVER
             && !mentions_error(&self.t, t)

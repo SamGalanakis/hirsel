@@ -1,4 +1,0 @@
-// LANG-5's bounds grammar allows this, but LANG-13 defines only own and own[send].
-// Keep the case incomplete until the spec chooses its refusal rule and site.
-// expect: gap callable bounds other than send have no specified rule
-type Unspecified { f: own[shareable] fn() }

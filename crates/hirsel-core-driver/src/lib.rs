@@ -545,7 +545,7 @@ fn encode<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
 
 fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
     bincode::DefaultOptions::new()
-        .with_varint_encoding()
+        .with_fixint_encoding()
         .with_limit(bytes.len() as u64)
         .reject_trailing_bytes()
         .deserialize(bytes)

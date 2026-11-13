@@ -11,6 +11,13 @@ pub fn push[T](mut xs: List[T], take x: T) -> Result[(), (Capacity, T)]
 pub fn pop[T](mut xs: List[T]) -> Option[T]
 pub fn set[T](mut xs: List[T], i: u64, take x: T) -> T
 pub fn clear[T](mut xs: List[T])
-pub fn fill[T: plain](mut xs: List[T], n: u64, x: T) -> Result[(), Capacity]
+pub fn fill[T: plain](mut xs: List[T], n: u64, x: T) -> Result[(), Capacity] {
+    list.reserve(mut xs, n)?
+    for _ in 0 .. n {
+        let _ = list.push(mut xs, x)
+    }
+    Ok(())
+}
+
 pub fn append[T: plain](mut xs: List[T], ys: List[T]) -> Result[(), Capacity]
 pub fn sum[T: integer](xs: List[T]) -> T

@@ -277,3 +277,225 @@ fn trim_all_space() -> u64 {
 fn trim_keeps_other_scalars() -> bool {
     same(string.trim_ascii(" É "), "É")
 }
+
+// Core operations with bodies (core/core/string.hirsel), against core.md and RFC 3629.
+fn utf8(take b: Bytes) -> u64 {
+    match string.from_utf8(take b) {
+        Ok(_) => 1,
+        Error(_) => 0,
+    }
+}
+
+// One digit per case, 1 for valid: a + é; overlong C0 80; overlong E0 80 80; E0 A0 80
+// (U+0800); surrogate ED A0 80; ED 9F BF (U+D7FF); overlong F0 80 80 80; F0 90 80 80
+// (U+10000); F4 90 80 80 (above U+10FFFF); F4 8F BF BF (U+10FFFF); truncated E2 82; a lone
+// continuation 80; F5 80 80 80.
+// expect: run from_utf8_boundaries() = 1001010101000
+fn from_utf8_boundaries() -> u64 {
+    let mut v: u64 = utf8(b"a\xC3\xA9")
+    v = v * 10 + utf8(b"\xC0\x80")
+    v = v * 10 + utf8(b"\xE0\x80\x80")
+    v = v * 10 + utf8(b"\xE0\xA0\x80")
+    v = v * 10 + utf8(b"\xED\xA0\x80")
+    v = v * 10 + utf8(b"\xED\x9F\xBF")
+    v = v * 10 + utf8(b"\xF0\x80\x80\x80")
+    v = v * 10 + utf8(b"\xF0\x90\x80\x80")
+    v = v * 10 + utf8(b"\xF4\x90\x80\x80")
+    v = v * 10 + utf8(b"\xF4\x8F\xBF\xBF")
+    v = v * 10 + utf8(b"a\xE2\x82")
+    v = v * 10 + utf8(b"\x80")
+    v * 10 + utf8(b"\xF5\x80\x80\x80")
+}
+
+// The argument comes back unchanged.
+// expect: run from_utf8_returns_argument() = 3
+fn from_utf8_returns_argument() -> u64 {
+    match string.from_utf8(b"ab\xFF") {
+        Ok(_) => 99,
+        Error(b) => list.len(b),
+    }
+}
+
+// A literal has capacity 0; its copy has capacity equal to its length, 6 bytes.
+// expect: run from_literal() = 60
+fn from_literal() -> u64 {
+    let t = result.unwrap(string.from("héllo"))
+    list.capacity(string.as_bytes(t)) * 10 + list.capacity(string.as_bytes("héllo"))
+}
+
+// An owned source with spare capacity: the copy's capacity is its length, 4.
+// expect: run from_owned() = 4
+fn from_owned() -> u64 {
+    let mut s = result.unwrap(string.from("abc"))
+    result.unwrap(string.push_char(mut s, 'd'))
+    let t = result.unwrap(string.from(s))
+    if t == "abcd" {
+        list.capacity(string.as_bytes(t))
+    } else {
+        99
+    }
+}
+
+// Under `bound bytes 0` the copy of "abc" (charge 8) returns Capacity; under 8 it fits.
+// expect: run from_under_bound() = 12
+fn from_under_bound() -> u64 {
+    let small = bound bytes 0 {
+        string.from("abc")
+    }
+    let refused: u64 = match small {
+        Ok(Error(_)) => 1,
+        _ => 0,
+    }
+    let enough = bound bytes 8 {
+        string.from("abc")
+    }
+    let admitted: u64 = match enough {
+        Ok(Ok(_)) => 2,
+        _ => 0,
+    }
+    refused * 10 + admitted
+}
+
+fn decimal(n: u64) -> String {
+    let mut s = string.new()
+    result.unwrap(string.push_u64(mut s, n))
+    s
+}
+
+// expect: run push_u64_digits() = true
+fn push_u64_digits() -> bool {
+    decimal(0) == "0" && decimal(9) == "9" && decimal(10) == "10" && decimal(18446744073709551615) == "18446744073709551615"
+}
+
+// Onto a literal: the static storage is copied out, never written.
+// expect: run push_u64_onto_literal() = true
+fn push_u64_onto_literal() -> bool {
+    let mut s = "x"
+    result.unwrap(string.push_u64(mut s, 42))
+    s == "x42"
+}
+
+// 1, 2, 3 and 4 UTF-8 bytes: 'a', 'é' (C3 A9), '€' (E2 82 AC), U+1F600 (F0 9F 98 80).
+// expect: run push_char_widths() = true
+fn push_char_widths() -> bool {
+    let mut s = string.new()
+    result.unwrap(string.push_char(mut s, 'a'))
+    result.unwrap(string.push_char(mut s, 'é'))
+    result.unwrap(string.push_char(mut s, '€'))
+    result.unwrap(string.push_char(mut s, '\u{1F600}'))
+    s == "aé€\u{1F600}" && string.byte_len(s) == 10
+}
+
+// "aé€" is 61 C3 A9 E2 82 AC: scalars start at 0, 1 and 3, and end at 6.
+// expect: run next_scalar_positions() = 1368364
+fn next_scalar_positions() -> u64 {
+    let s = "aé€"
+    let mut v: u64 = 0
+    let mut at: u64 = 0
+    let mut last: u32 = 0
+    while let Some((c, next)) = string.next_scalar(s, at) {
+        v = v * 10 + next
+        at = next
+        last = char.to_u32(c)
+    }
+    // '€' is U+20AC, 8364.
+    v * 10000 + int.widen(last)
+}
+
+// expect: run next_scalar_inside() = fail Bounds
+fn next_scalar_inside() -> u64 {
+    match string.next_scalar("aé", 2) {
+        Some((_, next)) => next,
+        None => 99,
+    }
+}
+
+// expect: run next_scalar_past_end() = fail Bounds
+fn next_scalar_past_end() -> u64 {
+    match string.next_scalar("aé", 4) {
+        Some((_, next)) => next,
+        None => 99,
+    }
+}
+
+// expect: run slice_whole_scalar() = 2
+fn slice_whole_scalar() -> u64 {
+    string.byte_len(string.slice("aé", 1, 3))
+}
+
+// expect: run slice_inside_scalar() = fail Bounds
+fn slice_inside_scalar() -> u64 {
+    string.byte_len(string.slice("aé", 0, 2))
+}
+
+// expect: run slice_reversed() = fail Bounds
+fn slice_reversed() -> u64 {
+    string.byte_len(string.slice("aé", 1, 0))
+}
+
+// An owned String keeps its storage: length 3, capacity 3.
+// expect: run into_bytes_owned() = 33
+fn into_bytes_owned() -> u64 {
+    let b = result.unwrap(string.into_bytes(result.unwrap(string.from("abc"))))
+    list.len(b) * 10 + list.capacity(b)
+}
+
+// A literal is copied into capacity equal to its length.
+// expect: run into_bytes_literal() = 44
+fn into_bytes_literal() -> u64 {
+    let b = result.unwrap(string.into_bytes("abcd"))
+    list.len(b) * 10 + list.capacity(b)
+}
+
+// Under `bound bytes 0` the copy is refused and the error returns the String.
+// expect: run into_bytes_under_bound() = 3
+fn into_bytes_under_bound() -> u64 {
+    let r: Result[u64, Capacity] = bound bytes 0 {
+        match string.into_bytes("abc") {
+            Ok(_) => 99,
+            Error((_, s)) => string.byte_len(s),
+        }
+    }
+    match r {
+        Ok(n) => n,
+        Error(_) => 98,
+    }
+}
+
+// "aé€" truncated to 3 bytes is "aé"; the capacity stays 6.
+// expect: run truncate_keeps_capacity() = 36
+fn truncate_keeps_capacity() -> u64 {
+    let mut s = result.unwrap(string.from("aé€"))
+    string.truncate(mut s, 3)
+    if s == "aé" {
+        string.byte_len(s) * 10 + list.capacity(string.as_bytes(s))
+    } else {
+        99
+    }
+}
+
+// expect: run truncate_inside_scalar() = fail Bounds
+fn truncate_inside_scalar() -> u64 {
+    let mut s = result.unwrap(string.from("aé"))
+    string.truncate(mut s, 2)
+    string.byte_len(s)
+}
+
+// expect: run truncate_past_end() = fail Bounds
+fn truncate_past_end() -> u64 {
+    let mut s = "aé"
+    string.truncate(mut s, 4)
+    string.byte_len(s)
+}
+
+// A literal shortens without being written; its capacity stays 0.
+// expect: run truncate_literal() = 10
+fn truncate_literal() -> u64 {
+    let mut s = "aé"
+    string.truncate(mut s, 1)
+    if s == "a" {
+        string.byte_len(s) * 10 + list.capacity(string.as_bytes(s))
+    } else {
+        99
+    }
+}

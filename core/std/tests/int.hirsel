@@ -126,3 +126,58 @@ fn int_plus() -> u64 {
 fn int_empty() -> u64 {
     signed_error(int.parse_int("", 10))
 }
+
+// Core int.parse (core/core/int.hirsel), against core.md "Integers": the grammar is checked
+// to the end before the range.
+fn parsed_u8(s: String) -> u64 {
+    let r: Result[u8, ParseError] = int.parse(s)
+    match r {
+        Ok(x) => int.widen(x),
+        Error(e) => 1000 + unsigned_error(Error(e)),
+    }
+}
+
+fn parsed_i8(s: String) -> i64 {
+    let r: Result[i8, ParseError] = int.parse(s)
+    match r {
+        Ok(x) => int.widen(x),
+        Error(e) => 1000 + int.narrow(unsigned_error(Error(e))),
+    }
+}
+
+// u8: "0255" (a leading zero) is 255; "256" is OutOfRange (3); "-5" and "+5" are
+// Invalid(0) (100), no sign for an unsigned T; "" is Empty (1); "1-" is Invalid(1) (101).
+// expect: run parse_u8_cases() = true
+fn parse_u8_cases() -> bool {
+    parsed_u8("0255") == 255 && parsed_u8("256") == 1003 && parsed_u8("-5") == 1100 && parsed_u8("+5") == 1100 && parsed_u8("") == 1001 && parsed_u8("1-") == 1101
+}
+
+// i8: "-128" and "127" are the limits; "128" and "-129" are OutOfRange; "-" alone is
+// Invalid(0); "--1" is Invalid(1); "-0" is 0; "-007" is -7.
+// expect: run parse_i8_cases() = true
+fn parse_i8_cases() -> bool {
+    parsed_i8("-128") == -128 && parsed_i8("127") == 127 && parsed_i8("128") == 1003 && parsed_i8("-129") == 1003 && parsed_i8("-") == 1100 && parsed_i8("--1") == 1101 && parsed_i8("-0") == 0 && parsed_i8("-007") == -7
+}
+
+// u64's maximum, then one past it.
+// expect: run parse_u64_limits() = 18446744073709551615
+fn parse_u64_limits() -> u64 {
+    let past: Result[u64, ParseError] = int.parse("18446744073709551616")
+    if unsigned_error(past) != 3 {
+        return 0
+    }
+    result.unwrap(int.parse("18446744073709551615"))
+}
+
+// i64's minimum.
+// expect: run parse_i64_min() = -9223372036854775808
+fn parse_i64_min() -> i64 {
+    result.unwrap(int.parse("-9223372036854775808"))
+}
+
+// A numeral that does not fit is still read to the end: the bad byte at 20 wins.
+// expect: run parse_grammar_before_range() = 120
+fn parse_grammar_before_range() -> u64 {
+    let r: Result[u64, ParseError] = int.parse("99999999999999999999x")
+    unsigned_error(r)
+}

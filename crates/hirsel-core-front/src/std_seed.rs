@@ -74,6 +74,17 @@ fn is_seed(p: &PackageId) -> bool {
     p.name == "std"
 }
 
+/// The report covers std's bodies and core's (core-form-883: class C operations).
+fn is_reported(p: &PackageId) -> bool {
+    is_seed(p) || p.name == "core"
+}
+
+/// A row's module: std's as written, core's prefixed, since std extends core's modules.
+fn label(p: &PackageId, modules: &[String]) -> String {
+    let m = modules.join(".");
+    if is_seed(p) { m } else { format!("core.{m}") }
+}
+
 fn is_test(s: &hirsel_core_resolve::CorpusSource) -> bool {
     s.module.modules.first().is_some_and(|m| m == "tests")
 }
@@ -132,13 +143,11 @@ fn std_seed_check_report() {
     for r in p
         .refusals
         .iter()
-        .filter(|r| is_seed(&index.module_path(r.primary.module).package))
+        .filter(|r| is_reported(&index.module_path(r.primary.module).package))
     {
+        let m = index.module_path(r.primary.module);
         by_item
-            .entry((
-                index.module_path(r.primary.module).modules.join("."),
-                r.primary.item,
-            ))
+            .entry((label(&m.package, &m.modules), r.primary.item))
             .or_default()
             .push(describe(r));
     }
@@ -147,10 +156,10 @@ fn std_seed_check_report() {
     let mut emitted: HashMap<String, HashMap<String, hirsel_core_ir::FuncId>> = HashMap::new();
     for (f, fd) in p.fns.iter().enumerate() {
         let m = &fd.path.0;
-        if !is_seed(&m.package) || fd.body.is_none() {
+        if !is_reported(&m.package) || fd.body.is_none() {
             continue;
         }
-        let module = m.modules.join(".");
+        let module = label(&m.package, &m.modules);
         let c = p.check_lower(f, &mut emitter);
         let mut why: Vec<String> = by_item
             .remove(&(module.clone(), fd.at.item))
@@ -159,7 +168,11 @@ fn std_seed_check_report() {
         let outcome = if !why.is_empty() {
             format!("refused: {}", why.join("; "))
         } else if !c.gaps.is_empty() {
-            let mut g: Vec<&str> = c.gaps.iter().map(|g| g.what).collect();
+            let mut g: Vec<String> = c
+                .gaps
+                .iter()
+                .map(|g| format!("{} at {}", g.what, line_col(&modules, &g.site)))
+                .collect();
             g.dedup();
             format!("gap: {}", g.join("; "))
         } else if let Some(id) = c.function {

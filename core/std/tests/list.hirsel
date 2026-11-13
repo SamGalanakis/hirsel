@@ -258,3 +258,63 @@ fn sum_bytes_wide() -> u64 {
     result.unwrap(list.fill(mut b, 300, 255))
     list.sum_bytes(b)
 }
+
+// Core operations with bodies (core/core/list.hirsel), against core.md.
+// fill appends n copies after the existing elements and grows once to at least len + n.
+// expect: run fill_appends() = 1777
+fn fill_appends() -> u64 {
+    let mut xs: List[u64] = list.new()
+    result.unwrap(list.push(mut xs, 1))
+    result.unwrap(list.fill(mut xs, 3, 7))
+    if list.capacity(xs) < 4 {
+        return 99
+    }
+    digits(xs)
+}
+
+// Under `bound bytes 0` the growth is refused and xs is unchanged.
+// expect: run fill_under_bound() = 0
+fn fill_under_bound() -> u64 {
+    let mut xs: List[u64] = list.new()
+    let r = bound bytes 0 {
+        list.fill(mut xs, 3, 7)
+    }
+    match r {
+        Ok(Error(_)) => list.len(xs),
+        _ => 99,
+    }
+}
+
+// expect: run sum_empty() = 0
+fn sum_empty() -> u64 {
+    let xs: List[u64] = list.new()
+    list.sum(xs)
+}
+
+// 250 + 5 is u8's maximum, 255.
+// expect: run sum_to_max() = 255
+fn sum_to_max() -> u8 {
+    let mut xs: List[u8] = list.new()
+    result.unwrap(list.push(mut xs, 250))
+    result.unwrap(list.push(mut xs, 5))
+    list.sum(xs)
+}
+
+// 250 + 6 does not fit u8.
+// expect: run sum_overflow() = fail Overflow
+fn sum_overflow() -> u8 {
+    let mut xs: List[u8] = list.new()
+    result.unwrap(list.push(mut xs, 250))
+    result.unwrap(list.push(mut xs, 6))
+    list.sum(xs)
+}
+
+// Signed: -128 + 127 + -1 = -2, every partial sum within i8.
+// expect: run sum_signed() = -2
+fn sum_signed() -> i8 {
+    let mut xs: List[i8] = list.new()
+    result.unwrap(list.push(mut xs, -128))
+    result.unwrap(list.push(mut xs, 127))
+    result.unwrap(list.push(mut xs, -1))
+    list.sum(xs)
+}

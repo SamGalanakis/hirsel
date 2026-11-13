@@ -219,6 +219,10 @@ impl Funding {
         f.fail = Some((n, later));
     }
     #[cfg(test)]
+    pub(crate) fn attempts(&self) -> usize {
+        self.forest.lock().unwrap().attempts
+    }
+    #[cfg(test)]
     pub(crate) fn records(&self) -> usize {
         self.forest
             .lock()

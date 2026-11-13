@@ -71,7 +71,84 @@ pub unsafe extern "C" fn hirsel_core_region_close(region: *mut crate::region::Re
         drop(Box::from_raw(region));
     }
 }
+use crate::counted::{self, Recipe, Worklist};
 use std::ptr::{self, NonNull};
+
+/// # Safety
+/// Node is fresh aligned storage for a FORM count word and payload at offset 8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_counted_init(node: NonNull<u8>, atomic: bool) {
+    // SAFETY: emitter supplies a fresh counted allocation.
+    unsafe {
+        counted::initialize(node, atomic);
+    }
+}
+/// # Safety
+/// A live holder pins node; Rc is task-local, Arc is provider-event-ordered.
+/// Count overflow is a FAIL-15 run stop, never Capacity.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_share(node: NonNull<u8>, atomic: bool) {
+    // SAFETY: the caller holds the live node under the count/event discipline.
+    unsafe {
+        counted::share(node, atomic);
+    }
+}
+/// # Safety
+/// A live holder pins node, under the same count/event discipline as share.
+/// True transfers exclusive payload custody for copy plus free; false preserves h.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_try_unwrap(node: NonNull<u8>, atomic: bool) -> bool {
+    // SAFETY: the caller owns a live holder in its provider event.
+    unsafe { counted::try_unwrap(node, atomic) }
+}
+/// # Safety
+/// Transfers one holder. Context is live; charge/recipe describe node. Generated
+/// glue enqueues descendants and neither recurses nor allocates nor runs user code.
+/// Arc release and its last refund execute within the caller's provider event.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_release(
+    context: *mut Context,
+    node: NonNull<u8>,
+    atomic: bool,
+    charge: u64,
+    recipe: Recipe,
+) {
+    // SAFETY: the emitter supplies the node's mechanical recipe and one holder.
+    unsafe {
+        counted::release(context, node, atomic, charge, recipe);
+    }
+}
+/// # Safety
+/// Called only by drop glue with its live worklist, transferring one descendant
+/// holder, its exact charge and its mechanical recipe.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_release_enqueue(
+    worklist: *mut Worklist,
+    node: NonNull<u8>,
+    atomic: bool,
+    charge: u64,
+    recipe: Recipe,
+) {
+    // SAFETY: drop glue holds the current worklist exclusively.
+    unsafe {
+        counted::enqueue(&mut *worklist, node, atomic, charge, recipe);
+    }
+}
+/// # Safety
+/// As for release_enqueue, transferring a uniquely owned raw block without a
+/// count word. Its recipe receives payload offset 0. No resources are reachable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_release_own_enqueue(
+    worklist: *mut Worklist,
+    node: NonNull<u8>,
+    charge: u64,
+    recipe: Recipe,
+) {
+    // SAFETY: the generated recipe transfers an exclusively owned descendant.
+    unsafe {
+        crate::block::push_dead(&mut *worklist, node, charge, recipe, 0);
+    }
+}
 
 #[repr(C)]
 pub struct Allocation {

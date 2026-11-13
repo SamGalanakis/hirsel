@@ -7,6 +7,51 @@ use std::ptr::{self, NonNull};
 struct Header {
     funding: Funding,
     layout: Layout,
+    dead: std::mem::MaybeUninit<Dead>,
+}
+
+pub(crate) struct Dead {
+    pub(crate) next: Option<NonNull<u8>>,
+    pub(crate) charge: u64,
+    pub(crate) recipe: crate::counted::Recipe,
+    pub(crate) payload_offset: usize,
+    pub(crate) cursor: u64,
+}
+
+unsafe fn header(payload: NonNull<u8>) -> *mut Header {
+    // SAFETY: caller pins a live block's initialized backpointer.
+    unsafe {
+        payload
+            .as_ptr()
+            .sub(size_of::<*mut Header>())
+            .cast::<*mut Header>()
+            .read()
+    }
+}
+
+pub(crate) unsafe fn push_dead(
+    list: &mut crate::counted::Worklist,
+    payload: NonNull<u8>,
+    charge: u64,
+    recipe: crate::counted::Recipe,
+    payload_offset: usize,
+) {
+    // SAFETY: the caller exclusively owns this dead allocation; its native
+    // prefix supplies worklist space without touching initialized payload bytes.
+    unsafe {
+        (*header(payload)).dead.write(Dead {
+            next: list.head,
+            charge,
+            recipe,
+            payload_offset,
+            cursor: 0,
+        });
+    }
+    list.head = Some(payload);
+}
+pub(crate) unsafe fn dead(payload: NonNull<u8>) -> *mut Dead {
+    // SAFETY: push_dead initialized the frame in this exclusively owned node.
+    unsafe { (*header(payload)).dead.as_mut_ptr() }
 }
 
 fn physical_layout(bytes: usize, align: usize) -> (Layout, usize) {
@@ -40,6 +85,7 @@ pub(crate) fn allocate(
             Header {
                 funding: payer,
                 layout,
+                dead: std::mem::MaybeUninit::uninit(),
             },
         );
         let payload = base.as_ptr().add(offset);
@@ -76,7 +122,9 @@ pub(crate) unsafe fn free(payload: NonNull<u8>, charge: u64) {
             .sub(size_of::<*mut Header>())
             .cast::<*mut Header>()
             .read();
-        let Header { funding, layout } = header.read();
+        let Header {
+            funding, layout, ..
+        } = header.read();
         funding.refund(charge);
         dealloc(header.cast(), layout);
     }

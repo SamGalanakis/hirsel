@@ -6,6 +6,7 @@ hirsel_guard::install!();
 
 pub mod abi;
 pub mod block;
+pub mod counted;
 pub mod limit;
 pub mod region;
 
@@ -69,6 +70,8 @@ impl Drop for Context {
     }
 }
 
+#[cfg(test)]
+mod counted_tests;
 #[cfg(test)]
 mod region_tests;
 #[cfg(test)]

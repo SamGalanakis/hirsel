@@ -19,4 +19,17 @@ HirselCoreAllocation hirsel_core_region_alloc(const HirselCoreContext *,
     HirselCoreRegion *, size_t bytes, size_t alignment, uint64_t charge, bool charge_overflow);
 void hirsel_core_region_lower_charge(void *, uint64_t retained_charge);
 void hirsel_core_region_close(HirselCoreRegion *);
+typedef struct HirselCoreWorklist HirselCoreWorklist;
+/* Resumable glue: cursor starts at 0. Advance it, enqueue at most one child,
+   return false; return true only after all children and fields are cleaned. */
+typedef bool (*HirselCoreDropRecipe)(HirselCoreContext *, void *payload, uint64_t *cursor, HirselCoreWorklist *);
+void hirsel_core_counted_init(void *node, bool atomic);
+void hirsel_core_share(void *node, bool atomic);
+bool hirsel_core_try_unwrap(void *node, bool atomic);
+void hirsel_core_release(HirselCoreContext *, void *node, bool atomic,
+    uint64_t charge, HirselCoreDropRecipe);
+void hirsel_core_release_enqueue(HirselCoreWorklist *, void *node, bool atomic,
+    uint64_t charge, HirselCoreDropRecipe);
+void hirsel_core_release_own_enqueue(HirselCoreWorklist *, void *block,
+    uint64_t charge, HirselCoreDropRecipe);
 #endif

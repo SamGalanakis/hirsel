@@ -207,7 +207,21 @@ code may rely on a failure ending its task: a later isolating scope (R8 in
 ### FAIL-15: Run stops
 
 Exhausting the stack, a counter that would pass its 64-bit range (a counted value's holders,
-[MEM-16](memory.md#mem-16-counting); a channel's senders, [CONC-4](tasks.md#conc-4-channels)),
-the engine failing to obtain memory, and termination by the host are run stops. A run stop
-ends every task without cleanup. It is reported as the run's outcome and is not a failure:
-no cause chain is formed and no joiner observes it.
+[MEM-16](memory.md#mem-16-counting); a channel's senders, [CONC-4](tasks.md#conc-4-channels);
+one the engine keeps itself), the host refusing memory or a service the engine needs, and
+termination by the host are run stops. A run stop ends every task without cleanup. It is
+reported as the run's outcome and is not a failure: no cause chain is formed, no cleanup or
+finalizer runs, and no joiner observes it. In a process it exits with status 102 and
+writes one line to stderr, `run stop: ` and the stop's name
+([PROG-3](programs.md#prog-3-entry)):
+
+| stop | name |
+|---|---|
+| the stack is exhausted | `Stack` |
+| a counted value's holders would pass `2^64 − 1` | `CountOverflow` |
+| a channel's senders would pass `2^64 − 1` | `ChannelSenders` |
+| an engine counter would pass `2^64 − 1`: task ids, host handles, temporary names, runs in the process | `TaskIds`, `HostHandles`, `HostNames`, `ActiveRuns` |
+| the host refuses memory the engine needs | `HostMemory` |
+| the host refuses the signal stack, a signal action or the clock | `SignalStack`, `Signal`, `Clock` |
+
+Termination by the host writes nothing and its status is the host's.

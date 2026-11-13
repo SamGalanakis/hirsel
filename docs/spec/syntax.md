@@ -164,7 +164,8 @@ parameter   = [ "take" | "mut" | "bytes" ], name, ":", type ;
 generics    = "[", nonempty(generic), "]" ;
 generic     = name, [ ":", bounds ] | "in", name ;
 bounds      = bound-name, { "+", bound-name } ;
-bound-name  = "plain" | "shareable" | "send" | "key" | "ordered" ;
+bound-name  = "plain" | "shareable" | "send" | "key" | "ordered" | "integer" | "float"
+            | "packed" | "streamable" ;
 outlives    = "where", name, ":", name, { ",", name, ":", name } ;
 type-def    = [ "stable" | "resource" | "scoped" ], "type", name, [ generics ],
               [ ":", bounds ], [ "grant", "bytes", integer ],

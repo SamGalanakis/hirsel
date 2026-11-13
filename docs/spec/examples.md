@@ -513,18 +513,26 @@ Refused edits:
 
 ## 8. A JSON document written in place
 
-A subset of JSON (null, booleans, unsigned integers, strings without escapes and arrays,
-with no spaces) is parsed straight into one blob. A first pass over the input, which can be
-read twice, checks it and computes the exact size; `build_stream_in` admits that size once,
-and a second pass writes each value at its final offset, with no staging copy. Arrays are
-`IndexedSpan`s, so `indexed.get` is one load, and `total` walks the document.
+A small subset of JSON is parsed straight into one blob. It is not a JSON parser: it
+accepts `null`, `true`, `false`, `u64` integers written as `0` or a nonzero digit and more
+digits, strings without escapes, and arrays, with no spaces. Objects, escapes, signs,
+fractions and exponents are refused, and so are a backslash or a byte below `0x20` in a
+string, a leading zero, a number above `2^64 − 1` and a comma before `]`. Number spellings
+are not kept. A first pass over the input, which can be read twice, checks all of this and
+computes the exact size, returning the first bad position; it compares keyword bytes
+without slicing, so a string may start with any scalar. `build_stream_in` admits that size
+once, and a second pass writes each value at its final offset, with no staging copy, each
+string in one write. Arrays are `IndexedSpan`s, so `indexed.get` is one load, and `total`
+walks the document. For `n` input bytes the size is at most `(13n + 5) / 2`, so `size`'s
+`+` cannot overflow for an input a run can hold.
 
 Charges, by hand, for `[12,"ab",[true,30],[]]` with `W = u32`: a tag is 1 byte, `Num` 1 + 8
 = 9, `Str("ab")` 1 + 4 + 2 = 7, `true` 1, and an array 1 + 4 (count) + 4 (byte length) + its
 elements + 4 per element for its table. So `[true,30]` is 9 + 1 + 9 + 8 = 27, `[]` is 9, and
 the root 9 + (9 + 7 + 27 + 9) + 16 = 77, the sum `size` computes. The region allocation
-charges 80, 77 rounded up to 8; the input is a static literal and the callbacks are scoped,
-so nothing else is charged. Inside `bound bytes 72` the admission is refused with
+charges 80, 77 rounded up to 8. The parse charges only that allocation: the input is a
+static literal and the callbacks are scoped. `main`'s task and `say`'s buffers have their
+usual separate charges. Inside `bound bytes 72` the admission is refused with
 `requested` 80 before the writer runs. With a guessed `bytes 4096` instead, `finish_trim`
 would refund 4016 at publication and keep 80.
 
@@ -554,8 +562,11 @@ fn at(s: String, i: u64) -> u8 {
 }
 
 fn is(s: String, i: u64, w: String) -> bool {
-  let n = string.byte_len(w)
-  i + n <= string.byte_len(s) && string.slice(s, i, i + n) == w
+  let a = string.as_bytes(s)
+  let b = string.as_bytes(w)
+  if i + list.len(b) > list.len(a) { return false }
+  for k in 0..list.len(b) { if a[i + k] != b[k] { return false } }
+  true
 }
 
 fn digit(c: u8) -> bool { c >= b'0' && c <= b'9' }
@@ -563,22 +574,33 @@ fn digit(c: u8) -> bool { c >= b'0' && c <= b'9' }
 fn size(s: String, mut i: u64) -> Result[u64, u64] {
   if is(s, i, "null") || is(s, i, "true") { i += 4; Ok(1) }
   else if is(s, i, "false") { i += 5; Ok(1) }
-  else if digit(at(s, i)) { while digit(at(s, i)) { i += 1 }; Ok(9) }
-  else if at(s, i) == b'"' {
+  else if at(s, i) == b'0' { i += 1; if digit(at(s, i)) { Error(i) } else { Ok(9) } }
+  else if digit(at(s, i)) {
+    let max: u64 = 18446744073709551615
+    let mut v: u64 = 0
+    while digit(at(s, i)) {
+      let d: u64 = int.widen(at(s, i) - b'0')
+      if v > (max - d) / 10 { return Error(i) }
+      v = v * 10 + d
+      i += 1
+    }
+    Ok(9)
+  } else if at(s, i) == b'"' {
     let start = i + 1
     i = start
-    while at(s, i) != b'"' { if i >= string.byte_len(s) { return Error(i) }; i += 1 }
+    while at(s, i) != b'"' { if at(s, i) == b'\\' || at(s, i) < 0x20 { return Error(i) }; i += 1 }
     i += 1
     Ok(5 + (i - 1 - start))
   } else if at(s, i) == b'[' {
     i += 1
     let mut n: u64 = 9
-    while at(s, i) != b']' {
+    if at(s, i) == b']' { i += 1; return Ok(n) }
+    loop {
       n += size(s, mut i)? + 4
-      if at(s, i) == b',' { i += 1 } else if at(s, i) != b']' { return Error(i) }
+      if at(s, i) == b']' { i += 1; return Ok(n) }
+      if at(s, i) != b',' { return Error(i) }
+      i += 1
     }
-    i += 1
-    Ok(n)
   } else { Error(i) }
 }
 
@@ -591,12 +613,11 @@ fn value[in r](s: String, mut i: u64, take w: Writer[Json, in r]) -> Result[Chil
     while digit(at(s, i)) { v = v * 10 + int.widen(at(s, i) - b'0'); i += 1 }
     emit(take w, Num(v))
   } else if at(s, i) == b'"' {
+    let start = i + 1
+    i = start
+    while at(s, i) != b'"' { i += 1 }
     i += 1
-    emit(take w, Str(emit(fn(take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
-      while let Some((c, next)) = string.next_scalar(s, i) { if c == '"' { break }; writer.scalar(mut t, c)?; i = next }
-      i += 1
-      writer.close(take t)
-    })))
+    emit(take w, Str(string.slice(s, start, i - 1)))
   } else {
     i += 1
     emit(take w, Arr(emit(fn(take xs: Writer[IndexedSpan[Json], in r]) -> Result[Child[IndexedSpan[Json]], BuildError] {
@@ -639,7 +660,10 @@ pub fn main(out: Stdout) -> Result[(), AppError] waits {
     match doc {
       Arr(xs) => {
         say(out, "items ", seq.len(xs))?
-        match indexed.get(xs, 1) { Some(Str(t)) => say(out, "item 1 bytes ", text.len(t))?, _ => {} }
+        match indexed.get(xs, 1) {
+          Some(Str(t)) => { put(out, "item 1 ")?; put(out, text.as_string(t))?; put(out, "\n")? },
+          _ => {},
+        }
       },
       _ => {},
     }
@@ -653,7 +677,7 @@ Output:
 ```text
 sum 42
 items 4
-item 1 bytes 2
+item 1 ab
 needs 80
 ```
 
@@ -662,6 +686,6 @@ Outcome: success.
 Refused edits:
 
 - Replace `writer.append(..)?` on line 73 with `let _ = writer.append(..)`: refused, MEM-4 at
-  73:17, a writer call's result is propagated or returned.
-- Add a variant `Ref(Link[Json])` to `Json`: refused, LANG-12 at 87:37, `Json` is no longer
+  86:17, a writer call's result is propagated or returned.
+- Add a variant `Ref(Link[Json])` to `Json`: refused, LANG-12 at 100:37, `Json` is no longer
   `streamable`.

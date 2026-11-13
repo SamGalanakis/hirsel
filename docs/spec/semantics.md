@@ -45,7 +45,9 @@ surrogates and values above `0x10FFFF`) convert it. `String` is an opaque own ty
 UTF-8 storage that is always valid; `Text` is its stable twin; `Bytes` is `List[u8]`.
 `string.from_utf8` validates a `Bytes` into a `String`, `string.into_bytes` gives its
 owned storage back, copying a static literal into new storage and so returning `Capacity`
-([core](core.md)), and `string.as_bytes` views it as bytes. Length is `byte_len`; scalars are
+([core](core.md)), and `string.as_bytes` views it as bytes. `text.as_string(t)` views a `Text` as a `String`
+anchored to `t`, with no copy, so every reading operation on strings, `==` and `<` against a
+`String` included, reads a `Text`. Length is `byte_len`; scalars are
 read with `string.next_scalar(s, at) -> Option[(char, u64)]`, which returns the scalar at
 byte position `at` and the next position. `string.slice` fails with `Bounds` at a position
 that would split a scalar. Equality, order and hashing are bytewise;
@@ -90,7 +92,7 @@ fn count(m: Map[String, u64], k: String) -> u64 { match map.get(m, k) { Some(v) 
 ### SEM-6: Iteration
 
 `for x in e` iterates a range, or a view of a `List`, an `Inline` array, a `FixedSpan`, a
-`SeqSpan` ([MEM-12](memory.md#mem-12-stable-sequences)) or a `Causes`
+`SeqSpan` or `IndexedSpan` ([MEM-12](memory.md#mem-12-stable-sequences)) or a `Causes`
 ([core](core.md)), binding a view of each element from the lowest index. Over a view of a
 `Map` it binds `(View[K], View[V])` for each entry in insertion order. `for take x in e` consumes an own `List`, moving each
 element out from the lowest index and cleaning the rest if the loop exits early. Nothing

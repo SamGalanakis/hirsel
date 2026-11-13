@@ -7,7 +7,7 @@ its summary is the one the table below gives it.
 
 | module | file | rules |
 |---|---|---|
-| `core` (the prelude: every core type, `fail`, `replace`, `clone`, `clone_in`, `copy_closed_in`, `build_in`, `build_stream_in`, `emit`, `finish`, `finish_trim`) | [core.hirsel](../../core/core/core.hirsel) | LANG-7, MEM-4, MEM-17, OWN-13, FAIL-2 |
+| `core` (the prelude: every core type, `fail`, `replace`, `clone`, `clone_in`, `build_in`, `build_stream_in`, `emit`, `finish`, `finish_trim`) | [core.hirsel](../../core/core/core.hirsel) | LANG-7, MEM-4, MEM-17, OWN-13, FAIL-2 |
 | `option`, `result` | [option](../../core/core/option.hirsel), [result](../../core/core/result.hirsel) | FAIL-2 |
 | `int`, `float`, `char` | [int](../../core/core/int.hirsel), [float](../../core/core/float.hirsel), [char](../../core/core/char.hirsel) | SEM-1 to SEM-3 |
 | `box`, `rc`, `arc`, `unique` | [box](../../core/core/box.hirsel), [rc](../../core/core/rc.hirsel), [arc](../../core/core/arc.hirsel), [unique](../../core/core/unique.hirsel) | MEM-13 to MEM-18 |
@@ -25,7 +25,9 @@ type that is built in: the builtin type names of [LANG-10](language.md#lang-10-b
 and the bodiless declarations of the core files. A bound column never lists `plain`:
 `plain` holds exactly for a type of plain kind ([OWN-4](ownership.md#own-4-bounds)), so
 `List[T]` and `Box[T]` are own and never `plain`, whatever `T` is. "When T" means the type
-has each of the listed bounds exactly when every type argument has that bound; a holds
+has each of the listed bounds exactly when every type argument has that bound; `packed`
+and `streamable` are never listed either, since MEM-12 says which types have them, nor
+`integer` and `float`, which hold exactly for the integer and the float types; a holds
 entry "T's" is the union of its type arguments' holds sets. Tuples, `Option` and `Result`
 take their kind and copyability from OWN-3 and their other bounds componentwise; `Inline`
 takes its kind from `T`. Sizes are logical ([MEM-24](budgets.md#mem-24-logical-charges)). A
@@ -36,11 +38,11 @@ an environment (OWN-19), so it has no heap size; a scoped type's own fields
 
 | type | kind | bounds | size | holds |
 |---|---|---|---|---|
-| integers, floats | plain | all; floats not `key` or `ordered` | width | nothing |
-| `bool`, `char`, `()` | plain | all | 1, 4, 0 | nothing |
+| integers, floats | plain | `shareable`, `send`; integers `key`, `ordered` | width | nothing |
+| `bool`, `char`, `()` | plain | `shareable`, `send`, `key`, `ordered` | 1, 4, 0 | nothing |
 | tuples, `Option[T]`, `Result[T, E]` | OWN-3 | `shareable`, `send`, `key`, `ordered` when T | tuple: sum; variant rule (MEM-24) | T's |
 | `Inline[T, n]` | T's kind (plain or own) | `shareable`, `send`, `key`, `ordered` when T | n × size(T) | T's |
-| `Never` | plain | all | 0 | nothing |
+| `Never` | plain | `shareable`, `send`, `key`, `ordered` | 0 | nothing |
 | `String` | own | `shareable`, `send`, `key`, `ordered` | 24 | nothing |
 | `List[T]` | own | `shareable`, `send`, `key`, `ordered` when T | 24 | T's |
 | `Map[K, V]` | own | `shareable`, `send` when K and V | 24 | K's and V's |
@@ -171,13 +173,19 @@ operations it names; nothing else about them may be inferred from an implementat
 - **Built-in forms.** `dest.put(mut d, L)` and `emit(take w, L)` accept only a construction
   literal `L` ([MEM-4](memory.md#mem-4-sized-destinations)). `clone` and `clone_in` are
   typing forms whose result type selects what is copied ([MEM-17](memory.md#mem-17-clone)).
-  `writer.scalar` takes a writer of `Text`; `writer.close` one of `Text`, `SeqSpan[T]` or
+  `emit`'s operand for each writer type is MEM-4's. `writer.scalar` and `writer.push` take a
+  writer of `Text`; `writer.close` one of `Text`, `SeqSpan[T]` or
   `IndexedSpan[T]`; the other `writer` operations one of `SeqSpan[T]` or `IndexedSpan[T]`,
   with `T` their element; any other writer is refused at the argument, MEM-4.
 - **Sequences.** `seq.nth` walks `i` elements and returns `None` past the count;
   `indexed.get` and `seq.get` return `None` past it after one test.
 
-*Not normative.* A key index over a JSON object is library code, not core: an opaque owner
-of the object's `IndexedSpan` and a `List[u32]` of member ordinals sorted by key, then
-ordinal. A lookup takes the last of equal keys, and rendering keeps each key at its first
-position with its last value; nothing in the document moves.
+*Not normative.* A key index over a JSON object is library code, not core. Its contract:
+for a `u32` document, an opaque owner holds the object's immutable `IndexedSpan[Member]`
+and a `List[u32]` of the `m` member ordinals, reserved exactly, so it admits
+`round8(4 × m)`; its own logical size is 40. The ordinals are sorted by key bytes, then by
+ordinal. A lookup finds the lower and upper bounds of the equal keys by binary search, so
+it makes `O(log m)` key comparisons however many keys are equal, and takes the greatest
+ordinal; rendering visits each key at its first ordinal with that last value. A wider
+document needs `u64` ordinals or a width error. No operation replaces the source alone or
+takes unchecked offsets, and nothing in the document moves.

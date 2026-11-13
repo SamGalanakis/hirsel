@@ -47,8 +47,8 @@ optimisation keeps declared shapes. *v1:* MEM-9 to MEM-12, MEM-28; `SeqSpan` and
 
 **R7.** Literals evaluate fields before admission; `build_in` and `build_stream_in` admit
 one stated size before their writer runs, and nothing infers a size, reruns a writer or
-grows a published prefix; `clone_in` copies a published blob whole and `copy_closed_in`
-exactly one complete value without links; only completed builders are public; `finish` and
+grows a published prefix; `clone_in` copies a value that may hold a link
+as its published blob whole, and a streamable value as exactly its complete bytes; only completed builders are public; `finish` and
 `finish_trim` cannot fail or allocate; failed prefixes stay charged until close, and only
 `finish_trim` refunds, the unused end of a completed builder. *v1:* MEM-3, MEM-4, MEM-12,
 MEM-17, FAIL-4, FAIL-6.
@@ -192,9 +192,7 @@ than `@compact`; methods, traits and implementation contracts; imports; list and
 literals (an `Inline` array literal is not one); format strings; `forget`; static brands;
 conversion of errors by `?`; code generic over the numeric types: the bounds `integer` and
 `float` are written only by core declarations ([OWN-4](ownership.md#own-4-bounds)), and a
-library writes one function per width; `text.as_string`, because `Text` and `String` have
-different representations (an author copies with `clone(t)` where `Result[String,
-Capacity]` is expected, or keeps a `String`); generics over an `Inline` length; persistent mutable views; derivation and codecs; contracts and
+library writes one function per width; generics over an `Inline` length; persistent mutable views; derivation and codecs; contracts and
 facts; `@varint` (R25); documents in segments (R26); the store, runners and places; recording formats. A later opt-in execution-budget
 scope may stop code at a loop back edge or a call while such a scope is present; no v1
 rule assumes that code cannot be stopped there.

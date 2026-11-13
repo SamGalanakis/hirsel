@@ -108,7 +108,6 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 | a `Text` or `FixedSpan` made outside a compact type | 8 (count) + payload bytes, rounded up to 8 |
 | a span builder's allocation | a region allocation of its current capacity × element size + 8 |
 | a `build_in` or `build_stream_in` allocation | `n`, rounded up to 8; after `finish_trim`, its used bytes, rounded up to 8 |
-| `copy_closed_in(r, x)` | `x`'s bytes, rounded up to 8 |
 | `seq.index_in` | 24 + count × 8, rounded up to 8 |
 | resource value | one block: its fields' sizes, plus 32 for its cause cell, plus its grant (MEM-27) |
 | task | 256 + its result's size + 32 for its primary cause cell + its reserved limit `n` |
@@ -119,7 +118,7 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 allocate nothing and charge 0; an explicit `span.with_capacity(r, 0)` and an empty
 `text.copy_in` still admit their count header ([core](core.md)). A `clone` or `clone_in`
 charges each copy at capacity equal to its length, and a compact `clone_in` charges the
-whole copied blob, not the selected value's size ([MEM-17](memory.md#mem-17-clone)). An allocation not in this table does not exist in v1.
+selected value's bytes when its type is streamable and the whole copied blob otherwise ([MEM-17](memory.md#mem-17-clone)). An allocation not in this table does not exist in v1.
 
 Creating a resource admits its cause cell, and can therefore fail with `Capacity`, unless
 it is **mechanical**: its cleanup can never add a cause. Exactly four resources are

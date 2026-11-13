@@ -138,8 +138,10 @@ expected type ([LANG-3](syntax.md#lang-3-literals)); operands follow
 [LANG-21](#lang-21-operators). There are no implicit conversions except these: `Never` to any type; a
 `View[T]` of a plain `T` to `T` ([OWN-8](ownership.md#own-8-views)); a stable value to its
 view ([OWN-25](ownership.md#own-25-stable-values-are-read-as-views)); `T in a` to `T in r`
-when `a` outlives `r` ([MEM-6](memory.md#mem-6-roots)); and a callable to a callable type it
-fits ([LANG-13](#lang-13-callables)).
+when `a` outlives `r` ([MEM-6](memory.md#mem-6-roots)); an `IndexedSpan[T]` to a
+`SeqSpan[T]`, for reading only, keeping its region, `W` and locator
+([MEM-12](memory.md#mem-12-stable-sequences)), never a `Writer`, a `Child` or a field's
+declared encoding; and a callable to a callable type it fits ([LANG-13](#lang-13-callables)).
 
 ```hirsel
 fn f() -> u64 { let x: u64 = 7; x }

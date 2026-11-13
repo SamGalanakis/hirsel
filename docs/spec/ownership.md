@@ -224,7 +224,9 @@ A parameter is a view for the call when unmarked, lent for the call when marked 
 and owned by the callee when marked `take`. An argument for a `mut` parameter is written
 `mut p`; an argument for a `take` parameter is written `take p` when it is a place of a
 moving type and bare otherwise; every other argument is bare. A bare place argument for
-an unmarked parameter is a view; a copyable value is copied. `mut p` is written nowhere
+an unmarked parameter is a view; a copyable value is copied. An unmarked parameter of type
+`T` also takes a `View[T]`, which passes as that same view: a view of a view is the view
+itself, so `list.len(string.as_bytes(s))` passes the `View[Bytes]` unchanged. `mut p` is written nowhere
 but as such an argument, and a view parameter of a moving type is never moved; either is
 refused here, at the `mut p` or at the move.
 
@@ -649,7 +651,7 @@ after a failure ([FAIL-7](failure.md#fail-7-one-owner-per-survivor)).
 | T1.7 | `finish(take b)` | stable value L | cannot fail | |
 | T1.8 | `build_in`, `build_stream_in` | width check, then `chg(n)` (commit), then the writer runs once | `Overflow` or `Capacity` before the writer runs; the writer's `Error` | nothing allocated before commit; after it the `n` bytes stay charged until close and nothing is published |
 | T1.9 | `finish_trim(take b)` | stable value L; `ref(round8(n) − round8(used))` at the allocation's record | cannot fail | |
-| T1.10 | `seq.index_in(r, s)`, `copy_closed_in(r, x)` | `chg` (commit), then the copy or table | `Capacity` | nothing allocated; the source unchanged |
+| T1.10 | `seq.index_in(r, s)` | `chg` (commit), then the table | `Capacity` | nothing allocated; the source unchanged |
 
 **T2 Bindings and views**
 

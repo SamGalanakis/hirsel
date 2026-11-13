@@ -5,7 +5,7 @@
 
 pub type Option[T] = None | Some(T)
 pub type Result[T, E] = Ok(T) | Error(E)
-pub type Order = Less | Equal | Greater
+pub type Order: key + ordered = Less | Equal | Greater
 pub opaque type Never
 
 pub opaque type String
@@ -71,7 +71,7 @@ pub fn build_in[T](r: Region, bytes n: u64, w: scoped fn(mut Dest[T]) -> Result[
 pub fn finish[T, in r](take b: Builder[T, in r]) -> T in r
 pub fn finish_trim[T, in r](take b: Builder[T, in r]) -> T in r
 pub fn build_stream_in[T: streamable](r: Region, bytes n: u64, w: scoped fn(take Writer[T, in r]) -> Result[Child[T], BuildError]) -> Result[Builder[T, in r], BuildError]
-// `emit` is a built-in form: x must be a construction literal of T, and a field's operand
-// in it may be `emit(f)` with f a scoped callback taking that field's writer (MEM-4).
+// `emit` is a built-in form: x is a construction literal of a compact T, a value of a scalar,
+// a plain literal, a view of a String for Text or of a List for FixedSpan, and a field's
+// operand in a literal may be `emit(f)` with f a scoped callback taking that field's writer (MEM-4).
 pub fn emit[T, in r](take w: Writer[T, in r], x: T) -> Result[Child[T], BuildError]
-pub fn copy_closed_in[T: streamable](r: Region, x: T) -> Result[T in r, Capacity]

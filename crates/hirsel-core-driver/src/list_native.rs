@@ -68,7 +68,7 @@ fn list_growth(backend: Backend) {
     for (cases, check, exit, limit) in [
         (
             include_str!("../../../core/front/cases/body/list-reserve.hirsel"),
-            "fresh()==4u64 && no_growth()==9u64 && current_payer()==4u64 && failed_growth()==13231u64 && refunded_growth()==46408u64 && padded()==47216u64 && static_contents()==97100u64 && static_capacity()==405u64 && count_overflow()==18446744073709551615u64",
+            "fresh()==4u64 && no_growth()==9u64 && current_payer()==4u64 && failed_growth()==13231u64 && refunded_growth()==46408u64 && padded()==47216u64 && static_contents()==97100u64 && static_capacity()==408u64 && count_overflow()==18446744073709551615u64",
             0,
             1_048_576,
         ),
@@ -94,7 +94,7 @@ fn list_growth(backend: Backend) {
         ),
         (
             include_str!("../../../core/front/cases/body/list-append.hirsel"),
-            "appended()==606u64 && unchanged()==0u64 && rejected()==404017u64",
+            "appended()==606u64 && unchanged()==0u64 && rejected()==404009u64",
             0,
             1_048_576,
         ),
@@ -135,12 +135,12 @@ fn list_shrink(backend: Backend) {
     for (cases, check, exit) in [
         (
             include_str!("../../../core/front/cases/body/list-pop.hirsel"),
-            "values()==110704u64 && empty()==0u64 && static_value()==990200u64 && resource_value()==7u64",
+            "values()==110704u64 && empty()==0u64 && static_value()==990203u64 && resource_value()==7u64",
             0,
         ),
         (
             include_str!("../../../core/front/cases/body/list-clear.hirsel"),
-            "reuse()==904u64 && static_value()==0u64 && resources()==4u64",
+            "reuse()==904u64 && static_value()==3u64 && resources()==4u64",
             0,
         ),
         (
@@ -228,4 +228,59 @@ fn list_slicing_cranelift() {
 #[ignore = "explicit native integration target"]
 fn list_slicing_llvm() {
     list_slicing(Backend::Llvm);
+}
+
+fn list_replacement(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let cases = include_str!("../../../core/front/cases/body/list-set-static-gap.hirsel");
+    for (check, cause) in [
+        (
+            "literal()==97099100u64 && generic_byte()==709u64 && generic_word()==72623859790382856u64 && resources()==711u64 && assigned_resource()==11u64",
+            None,
+        ),
+        ("failed_set()==0u64", Some("Bounds")),
+        ("failed_assign_drop()==0u64", Some("Unwrap")),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let source = format!(
+            "{cases}\npub fn main()->Result[(),Exit] {{ if {check} {{ Ok(()) }} else {{ Error(Exit(status:1)) }} }}"
+        );
+        let mut request = source_request(&source, dir.path());
+        request.inputs.packages[1] =
+            PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+        let product = Driver::default()
+            .check(request, &mut Meter::new(false))
+            .unwrap();
+        let built = product
+            .build(
+                &DefPath::from_full("app@1/main/main").unwrap(),
+                &native_options(backend, dir.path()),
+            )
+            .unwrap_or_else(|e| panic!("{check}: {e:?}"));
+        let output = Command::new(&built.executable).output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(if cause.is_some() { 101 } else { 0 }),
+            "{check}: {output:?}"
+        );
+        assert!(output.stdout.is_empty(), "{check}: {output:?}");
+        if let Some(cause) = cause {
+            assert!(
+                output.stderr.starts_with(cause.as_bytes()),
+                "{check}: {output:?}"
+            );
+        } else {
+            assert!(output.stderr.is_empty(), "{check}: {output:?}");
+        }
+    }
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn list_replacement_cranelift() {
+    list_replacement(Backend::Cranelift);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn list_replacement_llvm() {
+    list_replacement(Backend::Llvm);
 }

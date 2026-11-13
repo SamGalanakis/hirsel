@@ -822,16 +822,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         value: Option<ValueId>,
         n: NodeId,
     ) -> Option<ValueId> {
-        if matches!(
-            self.t.kind(item),
-            TyKind::Scalar(Scalar::U8) | TyKind::Param(_)
-        ) {
-            self.gap(
-                n,
-                "replacement through a potentially static List is not specified (FOR SPEC)",
-            );
-            return None;
-        }
         let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
         let in_bounds = self.value(Ty::Scalar(Scalar::Bool));
         self.inst(

@@ -82,3 +82,11 @@ pub fn config_s(config:String,name:String,key:String)->Result[String,Error] {
         match value {Str(t)=>mem(string.from(text.as_string(t))),_=>Error(Config)}
     }
 }
+
+/// Upstream checksum_str(format!("{:.7}",x)), using the shared exact fixed formatter.
+/// Fails: Capacity, propagated from formatting. No private formatting implementation.
+pub fn checksum_f64(x:f64)->Result[u32,Error] {
+    let mut s=string.new()
+    mem(float.push_fixed64(mut s,x,7))?
+    Ok(checksum_str(s))
+}

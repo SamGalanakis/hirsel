@@ -63,5 +63,12 @@ pub fn helper_laws()->bool {
     let cfg="{\"Probe\":{\"count\":-3,\"word\":\"hé\"}}"
     if result.unwrap(helper.config_i64(cfg,"Probe","count"))!=-3i64 {return false}
     if result.unwrap(helper.config_s(cfg,"Probe","word"))!="hé" {return false}
-    helper.checksum_str("")==5381u32 && helper.checksum_str("a")==177670u32 && helper.checksum_str("abc")==193485963u32
+    if helper.checksum_str("")!=5381u32 || helper.checksum_str("a")!=177670u32 || helper.checksum_str("abc")!=193485963u32 {return false}
+    // Hand-derived DJB2 of the exact seven-decimal strings, not formatter self-comparison.
+    if result.unwrap(helper.checksum_f64(0.0))!=531151507u32 {return false}
+    if result.unwrap(helper.checksum_f64(1.0))!=2485463956u32 {return false}
+    if result.unwrap(helper.checksum_f64(-1.0))!=2375156481u32 {return false}
+    if result.unwrap(helper.checksum_f64(1.25))!=969109563u32 {return false}
+    let refused=bound bytes 0 {helper.checksum_f64(1.25)}
+    match take refused {Ok(Error(Capacity(c)))=>c.available==0,_=>false}
 }

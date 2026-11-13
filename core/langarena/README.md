@@ -49,3 +49,9 @@ tests/bootstrap.hirsel is the initial Base64::Encode witness, not the owner of t
 full base64 port. Size30 encodes to40 bytes; 8192 iterations and1638 warmups add
 40*9830=393200 to its u32 result. DJB2 of
 "encode aaaa... to YWFh...: 393200" is3894061047, the upstream test checksum.
+
+Use `helper.checksum_f64(x)` for upstream `checksum_f64`: it formats exactly
+seven decimal places through `float.push_fixed64`, then applies `checksum_str`.
+It returns `Result[u32,helper.Error]` and propagates formatting Capacity. The
+bootstrap helper laws check independently derived hashes for zero, positive,
+negative and fractional values, plus Capacity under a zero-byte bound.

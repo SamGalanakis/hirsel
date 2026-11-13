@@ -771,6 +771,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let result = subst(&mut self.t, g.result, tys);
         match (module, name) {
             ("core", "clone") => self.clone_value(tys[0], tys[1], vals[0]?, result, n),
+            ("core", "clone_in") => {
+                let u = match self.t.kind(tys[1]) {
+                    TyKind::Anchored(u, _) => *u,
+                    _ => tys[1],
+                };
+                self.clone_in_value(tys[0], u, vals[0]?, vals[1]?, result, n)
+            }
             ("core", "build_in") => {
                 let fty = subst(&mut self.t, g.params[2].ty, tys);
                 self.build_in(tys[0], vals[0]?, vals[1]?, fty, vals[2]?, result, n)

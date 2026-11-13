@@ -12,6 +12,9 @@ pub enum KeyOp {
     Ordered(CompareOp),
     /// `$clone[T](from, to) -> (requested, available)`: MEM-17's own copy.
     Clone,
+    /// `$clone_in[T, U](from, r) -> (block, requested, available)`: MEM-17's copy of a
+    /// `T` into a new stable `U` in `r`; `U` is the row named here.
+    CloneIn(u32),
 }
 impl KeyOp {
     fn definition(self) -> DefPath {
@@ -26,6 +29,7 @@ impl KeyOp {
             Self::Ordered(CompareOp::Ge) => "order.$ge",
             Self::Ordered(_) => unreachable!("ordered predicates"),
             Self::Clone => "core.$clone",
+            Self::CloneIn(_) => "core.$clone_in",
         })
     }
     fn signature(self, ty: TypeId) -> Signature {
@@ -35,6 +39,15 @@ impl KeyOp {
             Self::Fold => params.push(Param::Value(Ty::Scalar(Scalar::U64))),
             Self::Equal | Self::Order | Self::Ordered(_) | Self::Clone => {
                 params.push(Param::Address(ty))
+            }
+            Self::CloneIn(_) => {
+                params.push(Param::Value(Ty::Ptr));
+                return Signature {
+                    params,
+                    results: vec![Ty::Ptr, Ty::Scalar(Scalar::U64), Ty::Scalar(Scalar::U64)],
+                    dest: None,
+                    never: false,
+                };
             }
         }
         if self == Self::Clone {
@@ -144,7 +157,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     op.signature(id),
                     // A clone writes through `to`, so both its places stay addresses.
                     match op {
-                        KeyOp::Clone => scalar_abi::SignatureAbi {
+                        KeyOp::Clone | KeyOp::CloneIn(_) => scalar_abi::SignatureAbi {
                             params: vec![false; 2],
                             result: false,
                         },
@@ -398,9 +411,13 @@ pub(super) struct Derive<'a> {
 }
 impl Derive<'_> {
     pub(super) fn function(&mut self, ty: TypeId, op: KeyOp) -> Result<FuncId, &'static str> {
+        let mut types = vec![self.module.types[ty.index()].name.clone()];
+        if let KeyOp::CloneIn(u) = op {
+            types.push(self.module.types[u as usize].name.clone());
+        }
         let key = InstanceKey {
             definition: op.definition(),
-            types: vec![self.module.types[ty.index()].name.clone()],
+            types,
             dictionaries: vec![],
         };
         let row = if let Some(i) = self
@@ -449,6 +466,13 @@ impl Derive<'_> {
             self.active.pop();
             return Ok(row);
         }
+        if let KeyOp::CloneIn(u) = op {
+            self.clone_in_function(&mut c, ty, TypeId(u), ps[0], ps[1])?;
+            order_instructions(&mut c.body);
+            self.module.functions[row.index()].body = Some(c.body);
+            self.active.pop();
+            return Ok(row);
+        }
         let result = match op {
             KeyOp::Hash => {
                 let zero = c.constant(0);
@@ -475,7 +499,7 @@ impl Derive<'_> {
                 let b = c.read(ps[1], Ty::Scalar(scalar));
                 c.compare(op, a, b)
             }
-            KeyOp::Clone => unreachable!("clone returns above"),
+            KeyOp::Clone | KeyOp::CloneIn(_) => unreachable!("clones return above"),
             KeyOp::Order | KeyOp::Ordered(_) => {
                 let different = c.block(&[Ty::Scalar(Scalar::I8)]);
                 self.order_type(&mut c, ty, ps[0], ps[1], different)?;

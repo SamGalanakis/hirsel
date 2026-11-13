@@ -429,6 +429,243 @@ impl Derive<'_> {
         c.jump(fail, &[requested, available]);
         c.start(yes);
     }
+    /// `$clone_in`: a new block of the stable row `dst` admitted in `region`, then its
+    /// fields from the `src` value at `from` in order (a twin's field k pairs with field
+    /// k). A refusal returns a null block; what was admitted stays charged to the region
+    /// until it closes (T1.5), so nothing is dropped.
+    pub(super) fn clone_in_function(
+        &mut self,
+        c: &mut Code,
+        src: TypeId,
+        dst: TypeId,
+        from: ValueId,
+        region: ValueId,
+    ) -> Result<(), &'static str> {
+        let fail = c.block(&[Ty::Scalar(Scalar::U64); 2]);
+        let block = self.clone_in_block(c, src, dst, from, region, fail)?;
+        let zero = c.constant(0);
+        ret(c, &[block, zero, zero]);
+        c.start(fail);
+        let [requested, available] = c.params(fail);
+        let null = c.value(Ty::Ptr);
+        c.inst(Inst::Const {
+            result: null,
+            bits: 0,
+        });
+        ret(c, &[null, requested, available]);
+        Ok(())
+    }
+    fn clone_in_block(
+        &mut self,
+        c: &mut Code,
+        src: TypeId,
+        dst: TypeId,
+        from: ValueId,
+        region: ValueId,
+        fail: BlockId,
+    ) -> Result<ValueId, &'static str> {
+        let (Layout::Fixed(f), Some(logical)) = (
+            &self.recipes[dst.index()].layout,
+            self.recipes[dst.index()].logical_size,
+        ) else {
+            return Err("a clone_in into a compact type is not built");
+        };
+        let size = f.size;
+        let charge = c.constant(round8(logical));
+        let size = c.constant(size);
+        let block = alloc_place(
+            c,
+            AllocKind::Plain,
+            AllocPlace::Region(region),
+            charge,
+            size,
+            fail,
+        );
+        let (xs, ys) = (self.offsets(src), self.offsets(dst));
+        match (
+            self.module.types[src.index()].body.clone(),
+            self.module.types[dst.index()].body.clone(),
+        ) {
+            (ShapeBody::Record(a), ShapeBody::Record(b)) if a.len() == b.len() => {
+                for (i, (fa, fb)) in a.iter().zip(&b).enumerate() {
+                    let (x, y) = (c.offset(from, xs[0][i]), c.offset(block, ys[0][i]));
+                    self.clone_in_field(c, &fa.ty, &fb.ty, x, y, region, fail)?;
+                }
+            }
+            (ShapeBody::Variant(a), ShapeBody::Variant(b)) if a.len() == b.len() => {
+                let at = c.address(from, PlaceTy::Declared(src));
+                let tag = c.value(Ty::Scalar(Scalar::U32));
+                c.inst(Inst::Case {
+                    result: tag,
+                    address: at,
+                });
+                let done = c.block(&[]);
+                let mut arms = vec![];
+                for i in 0..a.len() {
+                    let target = c.block(&[]);
+                    arms.push(hirsel_core_ir::SwitchArm {
+                        value: i as u64,
+                        edge: c.edge(target, &[]),
+                    });
+                }
+                let otherwise = arms.last().unwrap().edge;
+                let range = PoolRange::push(
+                    &mut c.body.pools.arms,
+                    arms[..arms.len() - 1].iter().copied(),
+                );
+                c.end(Terminator::Switch {
+                    value: tag,
+                    arms: range,
+                    otherwise,
+                });
+                for (i, (ca, cb)) in a.iter().zip(&b).enumerate() {
+                    c.start(c.body.edges[arms[i].edge.index()].target);
+                    let to = c.address(block, PlaceTy::Declared(dst));
+                    c.inst(Inst::SetCase {
+                        address: to,
+                        case: i as u32,
+                    });
+                    if ca.fields.len() != cb.fields.len() {
+                        return Err("these clone_in twins are not built");
+                    }
+                    for (k, (fa, fb)) in ca.fields.iter().zip(&cb.fields).enumerate() {
+                        let (x, y) = (c.offset(from, xs[i][k]), c.offset(block, ys[i][k]));
+                        self.clone_in_field(c, &fa.ty, &fb.ty, x, y, region, fail)?;
+                    }
+                    c.jump(done, &[]);
+                }
+                c.start(done);
+            }
+            _ => return Err("these clone_in twins are not built"),
+        }
+        Ok(block)
+    }
+    /// Whether `field` is bits alone: no own part and nothing that names a block.
+    fn bits(&self, field: &FieldTy, seen: &mut Vec<u32>) -> bool {
+        match field {
+            FieldTy::Scalar(_) | FieldTy::Fn => true,
+            FieldTy::Array(item, _) => self.bits(item, seen),
+            FieldTy::Inline(t) => {
+                if seen.contains(&t.0) {
+                    return true;
+                }
+                seen.push(t.0);
+                match self.module.types[t.0 as usize].body.clone() {
+                    ShapeBody::Record(fs) => fs.iter().all(|f| self.bits(&f.ty, seen)),
+                    ShapeBody::Variant(cs) => cs
+                        .iter()
+                        .all(|c| c.fields.iter().all(|f| self.bits(&f.ty, seen))),
+                }
+            }
+            _ => false,
+        }
+    }
+    /// One field of a `clone_in`: `from` holds the source field, `to` the new block's.
+    #[allow(clippy::too_many_arguments)]
+    fn clone_in_field(
+        &mut self,
+        c: &mut Code,
+        source: &FieldTy,
+        target: &FieldTy,
+        from: ValueId,
+        to: ValueId,
+        region: ValueId,
+        fail: BlockId,
+    ) -> Result<(), &'static str> {
+        match (source, target) {
+            // A stable field holds its value's block: copy the value into its own one.
+            (_, FieldTy::Stable(u)) => {
+                let (src, at) = match source {
+                    FieldTy::Inline(t) => (TypeId(t.0), from),
+                    FieldTy::Box(t) | FieldTy::Stable(t) => (TypeId(t.0), c.read(from, Ty::Ptr)),
+                    _ => return Err("this field of a clone_in is not built"),
+                };
+                let f = self.function(src, KeyOp::CloneIn(u.0))?;
+                let x = c.address(at, PlaceTy::Declared(src));
+                let signature = self.module.functions[f.index()].signature;
+                let block = c.value(Ty::Ptr);
+                let requested = c.value(Ty::Scalar(Scalar::U64));
+                let available = c.value(Ty::Scalar(Scalar::U64));
+                let args = PoolRange::push(
+                    &mut c.body.pools.args,
+                    [Arg::Address(x), Arg::Value(region)],
+                );
+                let results =
+                    PoolRange::push(&mut c.body.pools.values, [block, requested, available]);
+                let call = CallId(c.body.calls.len() as u32);
+                c.body.calls.push(CallSite {
+                    callee: Callee::Direct(f),
+                    signature,
+                    args,
+                    results,
+                    fail: None,
+                });
+                c.inst(Inst::Call { call });
+                let zero = c.constant(0);
+                let done = c.compare(CompareOp::Eq, requested, zero);
+                let (yes, no) = (c.block(&[]), c.block(&[]));
+                c.branch(done, yes, no);
+                c.start(no);
+                c.jump(fail, &[requested, available]);
+                c.start(yes);
+                store(c, to, block);
+            }
+            // A String becomes Text and a List a FixedSpan: a region blob `{_, W = 8 @8,
+            // count @16, items @24}` charged round8(8 + len × size), located at 16.
+            (FieldTy::Seq(item), FieldTy::Locator(span)) => {
+                match &**span {
+                    FieldTy::Text => {}
+                    FieldTy::FixedSpan(packed)
+                        if matches!(**item, FieldTy::Scalar(_)) && packed == item => {}
+                    _ => return Err("a clone_in of a list of non-scalar items is not built"),
+                }
+                let es = c.constant(self.size_of(item));
+                let len_at = c.offset(from, 8);
+                let len = c.read(len_at, Ty::Scalar(Scalar::U64));
+                let bytes = c.mul(len, es);
+                let eight = c.constant(8);
+                let counted = c.binary(BinaryOp::Add, bytes, eight);
+                let charge = round8_value(c, counted);
+                let head = c.constant(24);
+                let size = c.binary(BinaryOp::Add, bytes, head);
+                let blob = alloc_place(
+                    c,
+                    AllocKind::Plain,
+                    AllocPlace::Region(region),
+                    charge,
+                    size,
+                    fail,
+                );
+                let w = c.offset(blob, 8);
+                store(c, w, eight);
+                let count = c.offset(blob, 16);
+                store(c, count, len);
+                let zero = c.constant(0);
+                let some = c.compare(CompareOp::Ne, len, zero);
+                let (yes, done) = (c.block(&[]), c.block(&[]));
+                c.branch(some, yes, done);
+                c.start(yes);
+                let items = c.offset(blob, 24);
+                let old = c.read(from, Ty::Ptr);
+                copy_value(c, items, old, bytes);
+                c.jump(done, &[]);
+                c.start(done);
+                store(c, to, blob);
+                let at = c.offset(to, 8);
+                let sixteen = c.constant(16);
+                store(c, at, sixteen);
+            }
+            (FieldTy::Locator(_), FieldTy::Locator(_)) => {
+                return Err("a clone_in of stable Text or a span is not built");
+            }
+            (a, b) if a == b && self.bits(b, &mut vec![]) => {
+                let size = self.size_of(b);
+                copy(c, to, from, size);
+            }
+            _ => return Err("this field of a clone_in is not built"),
+        }
+        Ok(())
+    }
 }
 
 fn counted(field: &FieldTy) -> hirsel_core_ir::Counted {
@@ -479,10 +716,20 @@ fn alloc(c: &mut Code, kind: AllocKind, charge: u64, size: u64, fail: BlockId) -
 fn alloc_value(c: &mut Code, charge: ValueId, size: ValueId, fail: BlockId) -> ValueId {
     alloc_kind(c, AllocKind::Own, charge, size, fail)
 }
-/// Admit `charge` in the current limit; a refusal jumps to `fail(charge, available)`.
 fn alloc_kind(
     c: &mut Code,
     kind: AllocKind,
+    charge: ValueId,
+    size: ValueId,
+    fail: BlockId,
+) -> ValueId {
+    alloc_place(c, kind, AllocPlace::Current, charge, size, fail)
+}
+/// Admit `charge` at `place`; a refusal jumps to `fail(charge, available)`.
+fn alloc_place(
+    c: &mut Code,
+    kind: AllocKind,
+    place: AllocPlace,
     charge: ValueId,
     size: ValueId,
     fail: BlockId,
@@ -494,7 +741,7 @@ fn alloc_kind(
         available,
         region_entry: None,
         kind,
-        place: AllocPlace::Current,
+        place,
         charge,
         overflow: None,
         size,
@@ -519,16 +766,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// `clone(x)` expecting `u` (MEM-17): the part of `x` that is `u`, through `Box`,
     /// `Rc` and `Arc` payloads outermost first, copied by `$clone[u]` into the `Ok`
     /// payload of the result.
-    pub(super) fn clone_value(
+    /// MEM-17's selection: the part of `x` (held at `v`) that is `u` or, when `twin`,
+    /// `u`'s declared twin, through `Box`, `Rc` and `Arc` payloads outermost first. Its
+    /// type and a pointer to it.
+    fn clone_part(
         &mut self,
         x: TyId,
         u: TyId,
         v: ValueId,
-        result: TyId,
+        twin: bool,
         n: NodeId,
-    ) -> Option<ValueId> {
+    ) -> Option<(TyId, ValueId)> {
         let mut part = self.bare(x);
-        let u = self.bare(u);
+        let twin = match self.t.kind(u) {
+            TyKind::Adt(d, xs) if twin && xs.is_empty() => {
+                crate::decls::twin_of(&self.p.decls, &self.t, *d)
+            }
+            _ => None,
+        };
         let mut at = match self.rep(part).ok()? {
             Rep::Place(_) => v,
             _ => {
@@ -536,18 +791,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.pointer(slot, n)
             }
         };
-        while part != u {
+        loop {
+            if part == u {
+                return Some((part, at));
+            }
             let TyKind::Adt(d, xs) = self.t.kind(part).clone() else {
-                self.gap(n, "a clone into the twin type is not built");
-                return None;
+                break;
             };
+            if Some(d) == twin && xs.is_empty() {
+                return Some((part, at));
+            }
             let skip = match self.p.decls[d.index()].role {
                 Some(Role::Box) => 0,
                 Some(Role::Rc | Role::Arc) => 8,
-                _ => {
-                    self.gap(n, "a clone into the twin type is not built");
-                    return None;
-                }
+                _ => break,
             };
             let block = self.get_word(AddressBase::Value(at), 0, Ty::Ptr, n)?;
             at = if skip == 0 {
@@ -564,6 +821,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
             part = self.bare(xs[0]);
         }
+        self.gap(n, "a clone into the twin type is not built");
+        None
+    }
+    pub(super) fn clone_value(
+        &mut self,
+        x: TyId,
+        u: TyId,
+        v: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u = self.bare(u);
+        let (_, at) = self.clone_part(x, u, v, false, n)?;
         let (id, function, _) = self.key_function(KeyOp::Clone, u, n)?;
         let rid = self.declared(result)?;
         if !self.live() {
@@ -607,6 +877,114 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Inst::SetCase {
                 address: to,
                 case: 0,
+            },
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(no);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 1,
+            },
+            n,
+        );
+        self.capacity_at(
+            AddressBase::Address(to),
+            &[Step::CaseField { case: 1, field: 0 }],
+            requested,
+            available,
+            n,
+        )?;
+        self.jump(join, &[], n);
+        self.start(join);
+        Some(self.pointer(to, n))
+    }
+    /// `clone_in(r, x)` expecting a stable `u` in `r` (MEM-17): the part of `x` that is
+    /// `u` or its twin, copied by `$clone_in[part, u]` into a new block in `r` whose
+    /// pointer is the `Ok` payload.
+    pub(super) fn clone_in_value(
+        &mut self,
+        x: TyId,
+        u: TyId,
+        region: ValueId,
+        v: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u = self.bare(u);
+        let stable = matches!(self.t.kind(u), TyKind::Adt(d, _)
+            if self.p.decls[d.index()].repr == Repr::Stable && self.p.decls[d.index()].compact.is_none());
+        if !stable {
+            self.gap(n, "a clone_in into this type is not built");
+            return None;
+        }
+        let (part, at) = self.clone_part(x, u, v, true, n)?;
+        if has_param(&self.t, part) || has_param(&self.t, u) {
+            self.gap(n, "a generic clone_in is not built");
+            return None;
+        }
+        let Ok(Rep::Place(target)) = self.rep(u) else {
+            self.gap(n, "a clone_in into this type is not built");
+            return None;
+        };
+        let (id, function, _) = self.key_function(KeyOp::CloneIn(target.0), part, n)?;
+        let rid = self.declared(result)?;
+        if !self.live() {
+            return None;
+        }
+        // A stable source is held as its block's pointer (MEM-5).
+        let at = if self.e.by_block(id) {
+            self.get_word(AddressBase::Value(at), 0, Ty::Ptr, n)?
+        } else {
+            at
+        };
+        let to = self.new_slot(PlaceTy::Declared(rid), n);
+        let from = self.address(AddressBase::Value(at), &[], PlaceTy::Declared(id), n);
+        let signature = self.e.module.functions[function.index()].signature;
+        let block = self.value(Ty::Ptr);
+        let requested = self.value(Ty::Scalar(Scalar::U64));
+        let available = self.value(Ty::Scalar(Scalar::U64));
+        let args = PoolRange::push(
+            &mut self.b.pools.args,
+            [Arg::Address(from), Arg::Value(region)],
+        );
+        let results = PoolRange::push(&mut self.b.pools.values, [block, requested, available]);
+        let call = CallId(self.b.calls.len() as u32);
+        self.b.calls.push(CallSite {
+            callee: Callee::Direct(function),
+            signature,
+            args,
+            results,
+            fail: None,
+        });
+        self.inst(Inst::Call { call }, n);
+        let zero = self.u64k(0, n)?;
+        let done = self.test(CompareOp::Eq, requested, zero, n);
+        let (yes, no, join) = (
+            self.new_block(&[]),
+            self.new_block(&[]),
+            self.new_block(&[]),
+        );
+        self.branch(done, yes, no, n);
+        self.start(yes);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 0,
+            },
+            n,
+        );
+        let holder = self.address(
+            AddressBase::Address(to),
+            &[Step::CaseField { case: 0, field: 0 }],
+            PlaceTy::Value(Ty::Ptr),
+            n,
+        );
+        self.inst(
+            Inst::Store {
+                address: holder,
+                value: block,
             },
             n,
         );

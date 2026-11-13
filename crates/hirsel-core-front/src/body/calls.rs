@@ -330,6 +330,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             | "finish_trim"
                             | "fail"
                             | "clone"
+                            | "clone_in"
                     )));
         let v = if builtin {
             self.intrinsic(f, tys, vals, n)

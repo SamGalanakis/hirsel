@@ -839,6 +839,16 @@ fn clone_counted_cranelift() { clone_counted(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
 fn clone_counted_llvm() { clone_counted(Backend::Llvm); }
+/// MEM-17: clone_in makes stable twins in a region, on each engine.
+fn clone_in(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/body/clone-in.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn clone_in_cranelift() { clone_in(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn clone_in_llvm() { clone_in(Backend::Llvm); }
 
 fn uninitialized_take_names(backend: Backend) {
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

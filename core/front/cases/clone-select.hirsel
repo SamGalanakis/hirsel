@@ -2,10 +2,9 @@
 // its declared twin, else the payloads through `Box`, `Rc` and `Arc`, outermost first.
 // No match is refused at the form, and so is a value holding a resource, a scoped value
 // or an opaque owner (spec example: a builder). Plain values copy.
-// expect: refuse MEM-17 at 15:48
-// expect: refuse MEM-17 at 16:90
-// expect: refuse MEM-17 at 17:51
-// expect: gap this generic core operation is not built
+// expect: refuse MEM-17 at 14:48
+// expect: refuse MEM-17 at 15:90
+// expect: refuse MEM-17 at 16:51
 type Row { name: String, n: u64 }
 @twin(Row) stable type RowS { name: Text, n: u64 }
 type P: shareable { s: String }

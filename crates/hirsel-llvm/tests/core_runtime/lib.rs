@@ -113,7 +113,8 @@ pub unsafe extern "C" fn hirsel_core_test_run_events(
     }
 }
 
-/// Reset a process fixture's allowance after real task startup.
+/// Set a process fixture's allowance after real task startup, preserving the
+/// payer domain registered with the scheduler's refund notification flag.
 /// # Safety
 /// Context is live and exclusively owned by the fixture entry.
 #[unsafe(no_mangle)]
@@ -123,6 +124,15 @@ pub unsafe extern "C" fn hirsel_core_test_reset_limit(
 ) {
     // SAFETY: the process entry exclusively borrows this live context.
     unsafe {
-        (&mut *context).reset_test_limit(bytes);
+        let context = &mut *context;
+        let available = context
+            .limit_record()
+            .cast::<u8>()
+            .add(hirsel_core_rt::abi_layout::LIMIT_AVAILABLE)
+            .cast::<u64>();
+        *available = bytes;
+        // Admission indices in the sample exclude process startup. Index zero
+        // never fires, and an injected case replaces it before its first admit.
+        context.inject_admission(0, false);
     }
 }

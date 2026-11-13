@@ -862,6 +862,8 @@ _core_image = rule(
     attrs = {
         "compiler": attrs.exec_dep(providers = [RunInfo]),
         "srcs": attrs.list(attrs.source()),
+        # Producing a checked library is an explicit integration gate.
+        "labels": attrs.list(attrs.string(), default = ["gate"]),
     },
 )
 

@@ -409,7 +409,7 @@ fn fixture(scripted: bool, scenario: Scenario, args: &[&[u8]]) -> (u8, Box<State
     // A real EACCES, independent of path confinement.
     use std::os::unix::fs::PermissionsExt;
     std::fs::write(root.join("denied"), b"secret").unwrap();
-    std::fs::set_permissions(root.join("denied"), std::fs::Permissions::from_mode(0)).unwrap();
+    std::fs::set_permissions(root.join("denied"), std::fs::Permissions::from_mode(0o000)).unwrap();
     let mut state = Box::new(State {
         os: (!scripted).then_some(os),
         directory: if scripted { 7 } else { directory },

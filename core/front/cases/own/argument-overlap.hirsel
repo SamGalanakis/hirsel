@@ -1,9 +1,9 @@
 // OWN-9/OWN-11: within one call, a place lent mut is not viewed by a later argument, and a place an earlier argument views is not lent mut.
 // expect: refuse OWN-9 at 10:13
 // expect: refuse OWN-9 at 11:9
+// expect: gap cleanup of own values is not built
 // expect: gap mut arguments are not built
 // expect: gap mut parameters are not built
-// expect: gap values of this type are not built
 fn g(mut a: List[u8], b: List[u8]) {}
 fn h(a: List[u8], mut b: List[u8]) {}
 fn f(mut xs: List[u8]) {

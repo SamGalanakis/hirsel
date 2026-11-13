@@ -1,6 +1,5 @@
 // OWN-14, the spec's example and proto-872 `partial`: `take p.name` moves a part.
-// expect: refuse OWN-14 at 6:40
-// expect: gap field and index places are not built
-// expect: gap values of this type are not built
+// expect: refuse OWN-14 at 5:40
+// expect: gap cleanup of own values is not built
 type Person { name: String, age: u64 }
 fn name_of(take p: Person) -> String { take p.name }

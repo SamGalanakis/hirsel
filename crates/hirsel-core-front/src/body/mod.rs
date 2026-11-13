@@ -5,9 +5,12 @@
 //! Emitted so far: scalars and unit, blocks, `let` and `let mut`, assignment and compound
 //! assignment, the operators of LANG-21 (SEM-1, SEM-2, SEM-7), `if`, `loop`, `while`, labels,
 //! `break`, `continue`, `return`, direct calls of non-generic functions and the core
-//! integer operations. Checked but not yet emitted: values of own types, their places
-//! (fields, tuple components, `List` elements), `take`, `view`, `mut` arguments, and the
-//! ownership rules OWN-5 to OWN-17 over them. Anything else is a [`Gap`]: the body is
+//! integer operations; and plain values of declared types ([`Rep::Place`]): records,
+//! variants and tuples built in a new place, passed by address, returned through the
+//! caller's destination, copied into `let mut` slots and read field by field.
+//! Capabilities and `Args` are `u64` provider handles. Checked but not yet emitted:
+//! values that need cleanup (String, List, resources), `mut` arguments, index places, and
+//! the ownership rules OWN-5 to OWN-17 over them. Anything else is a [`Gap`]: the body is
 //! still checked, but no code is emitted for it. An operation that can fail names no
 //! failure successor, so the failure leaves the function with its cause (FORM v1a).
 //!
@@ -27,9 +30,9 @@ use hirsel_core_ir::{
     AddressBase, AddressId, AddressInfo, Anchor, Arg, ArithMode, ArithOp, BinaryOp, Block, BlockId,
     Body, CallId, CallSite, Callee, CompareOp, ConvertMode, Edge, EdgeId, FuncId, Function, Inst,
     InstanceId, InstanceKey, ItemId, Module, Param, PlaceTy, PoolRange, ReadMode, SigId, Signature,
-    Terminator, Ty, UnaryOp, ValueId,
+    SlotId, Step, Terminator, Ty, TypeId, UnaryOp, ValueId,
 };
-use hirsel_core_layout::Scalar;
+use hirsel_core_layout::{Layout, Recipe, Scalar, TypeRef};
 use hirsel_core_resolve::{Refusal, Target};
 use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, TokenKind, byte_value, character_value};
 use std::collections::HashMap;
@@ -90,6 +93,30 @@ pub struct Emitter {
     items: HashMap<DefPath, ItemId>,
     /// Per non-generic definition of the program, its function row once mentioned.
     rows: Vec<Option<(FuncId, SigId)>>,
+    /// `module.types` rows by canonical text.
+    types: HashMap<String, TypeRef>,
+    /// The recipes of `module.types`, recomputed when rows were added.
+    recipes: Vec<Recipe>,
+}
+
+/// How a value of a type is carried in a body (crate docs, "Values, slots and
+/// addresses"): a scalar, nothing (unit, Never), or a pointer to a place of a declared
+/// type, which a parameter takes by address and a result returns through `dest`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Rep {
+    None,
+    Scalar(Ty),
+    Place(TypeId),
+}
+impl Rep {
+    /// The CoreIR type of the value: a place travels as its pointer.
+    fn ty(self) -> Option<Ty> {
+        match self {
+            Rep::None => None,
+            Rep::Scalar(t) => Some(t),
+            Rep::Place(_) => Some(Ty::Ptr),
+        }
+    }
 }
 impl Emitter {
     pub fn new() -> Self {
@@ -118,7 +145,7 @@ impl Emitter {
         if let Some(Some(row)) = self.rows.get(f) {
             return Ok(*row);
         }
-        let sig = p.ir_signature(f)?;
+        let sig = self.signature(p, f)?;
         let func = self.function(&p.fns[f].path, sig);
         let row = (func, self.module.functions[func.index()].signature);
         if self.rows.len() <= f {
@@ -151,8 +178,109 @@ impl Emitter {
     }
 }
 
-/// The CoreIR type of a value of `ty`: a scalar, nothing for unit and Never, or the gap
-/// that keeps it from having one yet.
+impl Emitter {
+    /// The row of closed type `ty` in `module.types`, made with the rows it holds
+    /// inline; None when some part has no field type yet.
+    fn type_row(&mut self, p: &Program, t: &mut impl TyRead, ty: TyId) -> Option<TypeId> {
+        let mark = self.module.types.len();
+        let mut s = crate::layout::Shapes {
+            decls: &p.decls,
+            types: t,
+            shapes: &mut self.module.types,
+            of: &mut self.types,
+            module: true,
+        };
+        let r = s.shape(ty);
+        if r.is_none() {
+            s.truncate(mark);
+        }
+        Some(TypeId(r?.0))
+    }
+    /// The recipe of row `id`, or None when the table's layout is refused, in which case
+    /// the rows from `mark` on are taken back so the table stays computable.
+    fn recipe(&mut self, id: TypeId, mark: usize) -> Option<&Recipe> {
+        if self.recipes.len() != self.module.types.len() {
+            match hirsel_core_layout::compute(&self.module.types) {
+                Ok(r) => self.recipes = r,
+                Err(_) => {
+                    self.module.types.truncate(mark);
+                    self.types.retain(|_, r| (r.0 as usize) < mark);
+                    return None;
+                }
+            }
+        }
+        self.recipes.get(id.index())
+    }
+    /// How a value of `ty` is carried. A place value is built only for plain own data
+    /// for now: cleanup of the rest is not emitted yet.
+    fn rep(&mut self, p: &Program, t: &mut impl TyRead, ty: TyId) -> Result<Rep, &'static str> {
+        match t.kind(ty) {
+            TyKind::Scalar(s) => return Ok(Rep::Scalar(Ty::Scalar(*s))),
+            TyKind::Unit | TyKind::Never | TyKind::Error => return Ok(Rep::None),
+            // A capability or `Args` is a provider handle, plain and never cleaned by
+            // the program (FORM e68de117).
+            TyKind::Adt(d, _) if crate::layout::handle(&p.decls[d.index()]) => {
+                return Ok(Rep::Scalar(Ty::Scalar(Scalar::U64)));
+            }
+            TyKind::Tuple(_) | TyKind::Array(..) | TyKind::Adt(..) => {}
+            _ => return Err("values of this type are not built"),
+        }
+        let mark = self.module.types.len();
+        let id = self
+            .type_row(p, t, ty)
+            .ok_or("values of this type are not built")?;
+        match self.recipe(id, mark) {
+            Some(r) if matches!(r.layout, Layout::Fixed(_)) && r.plain => Ok(Rep::Place(id)),
+            Some(r) if matches!(r.layout, Layout::Fixed(_)) => {
+                Err("cleanup of own values is not built")
+            }
+            _ => Err("values of this type are not built"),
+        }
+    }
+    /// The byte size of a value of row `id`, whose recipe exists.
+    fn size(&self, id: TypeId) -> u64 {
+        match &self.recipes[id.index()].layout {
+            Layout::Fixed(f) => f.size,
+            Layout::Compact(_) => unreachable!("only fixed layouts are carried"),
+        }
+    }
+    /// The CoreIR signature of the program's function `f`, or the gap that keeps it
+    /// from having one: scalars by value, declared types by address, a declared result
+    /// through `dest`.
+    pub fn signature(&mut self, p: &Program, f: usize) -> Result<Signature, &'static str> {
+        let fd = &p.fns[f];
+        if !fd.generics.is_empty() {
+            return Err("generic definitions are not built");
+        }
+        let mut t = Local::new(&p.types);
+        let mut params = vec![];
+        for q in &fd.params {
+            if q.mode == Mode::Mut {
+                return Err("mut parameters are not built");
+            }
+            match self.rep(p, &mut t, q.ty)? {
+                Rep::None => {}
+                Rep::Scalar(s) => params.push(Param::Value(s)),
+                Rep::Place(id) => params.push(Param::Address(id)),
+            }
+        }
+        let never = matches!(p.types.kind(fd.result), TyKind::Never);
+        let (results, dest) = match self.rep(p, &mut t, fd.result)? {
+            Rep::None => (vec![], None),
+            Rep::Scalar(s) => (vec![s], None),
+            Rep::Place(id) => (vec![], Some(id)),
+        };
+        Ok(Signature {
+            params,
+            results,
+            dest,
+            never,
+        })
+    }
+}
+
+/// The CoreIR type of a scalar value of `ty`, nothing for unit and Never; an error for
+/// a type carried as a place or not built (see [`Rep`]).
 fn value_ty(t: &impl TyRead, ty: TyId) -> Result<Option<Ty>, &'static str> {
     match t.kind(ty) {
         TyKind::Scalar(s) => Ok(Some(Ty::Scalar(*s))),
@@ -173,27 +301,6 @@ fn is_float(t: &impl TyRead, ty: TyId) -> bool {
 }
 
 impl Program<'_> {
-    /// The CoreIR signature of function `f`, or the gap that keeps it from having one.
-    pub fn ir_signature(&self, f: usize) -> Result<Signature, &'static str> {
-        let fd = &self.fns[f];
-        if !fd.generics.is_empty() {
-            return Err("generic definitions are not built");
-        }
-        let mut params = vec![];
-        for p in &fd.params {
-            if p.mode == Mode::Mut {
-                return Err("mut parameters are not built");
-            }
-            params.extend(value_ty(&self.types, p.ty)?.map(Param::Value));
-        }
-        Ok(Signature {
-            params,
-            results: value_ty(&self.types, fd.result)?.into_iter().collect(),
-            dest: None,
-            never: matches!(self.types.kind(fd.result), TyKind::Never),
-        })
-    }
-
     /// Check function `f`'s body and emit it into `e` (LANG-8: one visit, reading only
     /// this body, signatures and summaries).
     pub fn check_lower(&self, f: usize, e: &mut Emitter) -> CoreCheck {
@@ -393,6 +500,11 @@ struct Cx<'c, 'a> {
     waited: bool,
     /// The program's entry, which is always `waits` (LANG-8, PROG-3).
     entry: bool,
+    /// The destination a declared result is written to: the entry block's first
+    /// parameter and its place.
+    dest: Option<(ValueId, TypeId)>,
+    /// How each type this body names is carried, found once per body.
+    reps: HashMap<TyId, Result<Rep, &'static str>>,
     out: CoreCheck,
 }
 
@@ -456,6 +568,8 @@ impl<'c, 'a> Cx<'c, 'a> {
             synth: vec![0; (item.range.nodes.end - item.range.nodes.start) as usize],
             waited: false,
             entry: p.entry.as_ref() == Some(&fd.path),
+            dest: None,
+            reps: HashMap::new(),
             out: CoreCheck::default(),
         }
     }
@@ -570,6 +684,85 @@ impl<'c, 'a> Cx<'c, 'a> {
         self.inst(Inst::Const { result, bits }, n);
         Some(result)
     }
+    /// How a value of `ty` is carried in this body.
+    fn rep(&mut self, ty: TyId) -> Result<Rep, &'static str> {
+        if let Some(&r) = self.reps.get(&ty) {
+            return r;
+        }
+        let r = self.e.rep(self.p, &mut self.t, ty);
+        self.reps.insert(ty, r);
+        r
+    }
+    /// The CoreIR type of a value of `ty`; None for unit, Never and types not built.
+    fn ir_ty(&mut self, ty: TyId) -> Option<Ty> {
+        self.rep(ty).ok().and_then(Rep::ty)
+    }
+    /// Evaluate a new address (`Inst::Address`).
+    fn address(&mut self, base: AddressBase, steps: &[Step], ty: PlaceTy, n: NodeId) -> AddressId {
+        let steps = PoolRange::push(&mut self.b.pools.steps, steps.iter().copied());
+        self.b.addresses.push(AddressInfo { base, steps, ty });
+        let address = AddressId(self.b.addresses.len() as u32 - 1);
+        self.inst(
+            Inst::Address {
+                address,
+                fail: None,
+            },
+            n,
+        );
+        address
+    }
+    /// A new slot of `ty`, begun here, and its address.
+    fn new_slot(&mut self, ty: PlaceTy, n: NodeId) -> AddressId {
+        self.out.counts.places += 1;
+        self.b.slots.push(ty);
+        let slot = SlotId(self.b.slots.len() as u32 - 1);
+        self.inst(Inst::StorageLive { slot }, n);
+        self.address(AddressBase::Slot(slot), &[], ty, n)
+    }
+    fn pointer(&mut self, address: AddressId, n: NodeId) -> ValueId {
+        let result = self.value(Ty::Ptr);
+        self.inst(Inst::Pointer { result, address }, n);
+        result
+    }
+    /// Copy the value of row `id` that `from` points at into place `to` (a move or a
+    /// copy of plain data: the source needs no cleanup afterwards).
+    fn copy_to(&mut self, to: AddressId, from: ValueId, id: TypeId, n: NodeId) {
+        let from = self.address(AddressBase::Value(from), &[], PlaceTy::Declared(id), n);
+        let size = self.e.size(id);
+        let bytes = self.value(Ty::Scalar(Scalar::U64));
+        self.inst(
+            Inst::Const {
+                result: bytes,
+                bits: size,
+            },
+            n,
+        );
+        self.inst(Inst::Copy { to, from, bytes }, n);
+    }
+    /// A fresh place holding a copy of the value `from` points at; its pointer.
+    fn snapshot(&mut self, from: ValueId, id: TypeId, n: NodeId) -> ValueId {
+        let to = self.new_slot(PlaceTy::Declared(id), n);
+        self.copy_to(to, from, id, n);
+        self.pointer(to, n)
+    }
+    /// Return `v`, a value of the body's result type: a declared result is written to
+    /// the destination first.
+    fn ret(&mut self, v: Option<ValueId>, n: NodeId) {
+        if !self.live() {
+            return;
+        }
+        let v = match (self.dest, v) {
+            (Some((dest, id)), Some(v)) => {
+                let to = self.address(AddressBase::Value(dest), &[], PlaceTy::Declared(id), n);
+                self.copy_to(to, v, id, n);
+                None
+            }
+            _ => v,
+        };
+        let r = PoolRange::push(&mut self.b.pools.values, v);
+        self.end(Terminator::Return(r), Some(n));
+    }
+
     fn new_block(&mut self, tys: &[Ty]) -> BlockId {
         let params: Vec<ValueId> = tys.iter().map(|&t| self.value(t)).collect();
         let params = PoolRange::push(&mut self.b.pools.values, params);
@@ -641,7 +834,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         let blk = match self.joins[j].block {
             Some(b) => b,
             None => {
-                let tys: Vec<Ty> = value_ty(&self.t, ty).ok().flatten().into_iter().collect();
+                let tys: Vec<Ty> = self.ir_ty(ty).into_iter().collect();
                 let b = self.new_block(&tys);
                 self.joins[j].block = Some(b);
                 b
@@ -662,16 +855,23 @@ impl<'c, 'a> Cx<'c, 'a> {
         match self.e.row(self.p, f) {
             Ok((func, sig)) => {
                 self.func = Some(func);
-                let tys: Vec<Ty> = self.e.module.signatures[sig.index()]
-                    .params
-                    .iter()
-                    .map(|p| match p {
+                let s = &self.e.module.signatures[sig.index()];
+                // The destination first, then the parameters; an address arrives as a
+                // pointer (Body: block 0's parameters).
+                let dest = s.dest;
+                let tys: Vec<Ty> = dest
+                    .map(|_| Ty::Ptr)
+                    .into_iter()
+                    .chain(s.params.iter().map(|p| match p {
                         Param::Value(t) => *t,
                         Param::Address(_) => Ty::Ptr,
-                    })
+                    }))
                     .collect();
                 let entry = self.new_block(&tys);
                 self.start(entry);
+                if let Some(id) = dest {
+                    self.dest = Some((self.block_params(entry)[0], id));
+                }
             }
             Err(what) => {
                 let site = self.fd.site;
@@ -684,14 +884,14 @@ impl<'c, 'a> Cx<'c, 'a> {
         } else {
             vec![]
         };
-        let mut k = 0;
+        let mut k = usize::from(self.dest.is_some());
         let p: &'c Program<'a> = self.p;
         let binders = &p.items[self.at.module as usize][self.at.item as usize]
             .resolution
             .binders;
         for pd in &self.fd.params {
-            let v = match value_ty(&self.t, pd.ty) {
-                Ok(Some(_)) if k < entry_params.len() => {
+            let v = match self.ir_ty(pd.ty) {
+                Some(_) if k < entry_params.len() => {
                     k += 1;
                     Some(entry_params[k - 1])
                 }
@@ -717,10 +917,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 view: false,
             }),
         );
-        if self.live() {
-            let r = PoolRange::push(&mut self.b.pools.values, v);
-            self.end(Terminator::Return(r), Some(body));
-        }
+        self.ret(v, body);
         // Only a body checked to its end shows that nothing it calls waits.
         if self.fd.waits && !self.waited && !self.entry && !self.broken {
             let root = self.item.root;
@@ -779,7 +976,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             NodeKind::Group => self.expr(c[0], want),
             NodeKind::Literal => self.literal(n, want, false),
             NodeKind::Unit => (UNIT, None),
-            NodeKind::Path => self.path(n),
+            NodeKind::Path => self.path(n, want),
             NodeKind::Block => self.block(n, want),
             NodeKind::If => self.if_(n, want),
             NodeKind::Loop => self.loop_(n, want, None),

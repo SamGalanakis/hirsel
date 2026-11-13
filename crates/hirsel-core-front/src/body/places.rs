@@ -408,22 +408,105 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
         }
     }
-    /// The value of a used place, for the places emitted so far: a whole local.
+    /// The address of field place `at` (a local and field steps) and how its value is
+    /// carried; a local held as a place is its base.
+    fn field_address(&mut self, at: At, n: NodeId) -> Option<(AddressId, Rep)> {
+        let var = self.var(at.place.slot);
+        let base = match (var.binding, self.rep(var.ty)) {
+            // A pointer names a typed place only through an address with no steps.
+            (Binding::Value(Some(v)), Ok(Rep::Place(id))) => {
+                let whole = PlaceTy::Declared(id);
+                AddressBase::Address(self.address(AddressBase::Value(v), &[], whole, n))
+            }
+            (Binding::Slot(Some(a)), _) => AddressBase::Address(a),
+            _ => return None,
+        };
+        let (s, l) = (at.place.start as usize, at.place.len as usize);
+        let mut steps = Vec::with_capacity(l);
+        for &st in &self.steps[s..s + l] {
+            match st {
+                PStep::Field(i) => steps.push(Step::Field(i)),
+                _ => {
+                    self.gap(n, "index places are not built");
+                    return None;
+                }
+            }
+        }
+        let r = match self.rep(at.ty) {
+            Ok(r) => r,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+        };
+        let ty = match r {
+            Rep::None => return None,
+            Rep::Scalar(t) => PlaceTy::Value(t),
+            Rep::Place(id) => PlaceTy::Declared(id),
+        };
+        Some((self.address(base, &steps, ty, n), r))
+    }
+    /// The address of a used place as a pointer, for an argument passed by address.
+    pub(super) fn place_ptr(&mut self, at: At, n: NodeId) -> Option<ValueId> {
+        if !self.live() {
+            return None;
+        }
+        if at.place.len > 0 {
+            let (a, _) = self.field_address(at, n)?;
+            return Some(self.pointer(a, n));
+        }
+        match self.var(at.place.slot).binding {
+            Binding::Value(v) => v,
+            Binding::Slot(a) => Some(self.pointer(a?, n)),
+        }
+    }
+    /// The value of a used place: a local, or a field of one read in place.
     pub(super) fn emit_place(&mut self, at: At, n: NodeId) -> Option<ValueId> {
         if at.place.len > 0 {
-            self.gap(n, "field and index places are not built");
-            return None;
+            if !self.live() {
+                return None;
+            }
+            return match self.field_address(at, n)? {
+                (address, Rep::Scalar(t)) => {
+                    let result = self.value(t);
+                    let mode = ReadMode::Bits;
+                    self.inst(
+                        Inst::Read {
+                            result,
+                            address,
+                            mode,
+                        },
+                        n,
+                    );
+                    Some(result)
+                }
+                (address, Rep::Place(id)) => {
+                    let p = self.pointer(address, n);
+                    Some(self.snapshot(p, id, n))
+                }
+                (_, Rep::None) => None,
+            };
         }
         let var = self.var(at.place.slot);
         match var.binding {
             Binding::Value(v) => v,
             Binding::Slot(a) => {
-                let (Some(address), Ok(Some(t))) = (a, value_ty(&self.t, var.ty)) else {
+                let (Some(address), Ok(r)) = (a, self.rep(var.ty)) else {
                     return None;
                 };
                 if !self.live() {
                     return None;
                 }
+                let t = match r {
+                    Rep::None => return None,
+                    Rep::Scalar(t) => t,
+                    // The slot may be written again while the value lives on: the
+                    // value is a copy (a move leaves the slot moved out, OWN-6).
+                    Rep::Place(id) => {
+                        let p = self.pointer(address, n);
+                        return Some(self.snapshot(p, id, n));
+                    }
+                };
                 let result = self.value(t);
                 self.inst(
                     Inst::Read {

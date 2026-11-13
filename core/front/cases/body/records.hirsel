@@ -1,0 +1,25 @@
+// Plain records are built in a new place (LANG-9, LANG-6), passed by address and
+// returned through the caller's destination (FORM calling convention), and their
+// scalar fields are read in place.
+// - y_of catches a field stored or read at another field's offset (u8 after u64).
+// - nested catches a field step that ignores the outer field's offset.
+// - snapshot catches a `let` reading a `let mut` slot by pointer instead of copying
+//   it: the slot is written again before q is read, so the aliased read gives 5.
+// expect: run y_of(300,7) = 7
+// expect: run x_of(300,7) = 300
+// expect: run nested(300,7) = 7
+// expect: run snapshot(300) = 300
+type P { x: u64, y: u8 }
+type Q { z: u64, p: P }
+fn make(a: u64, b: u8) -> P { P(x: a, y: b) }
+fn first(p: P) -> u64 { p.x }
+fn second(p: P) -> u8 { p.y }
+fn y_of(a: u64, b: u8) -> u8 { second(make(a, b)) }
+fn x_of(a: u64, b: u8) -> u64 { let p = make(a, b); first(p) }
+fn nested(a: u64, b: u8) -> u8 { let q = Q(z: 9, p: make(a, b)); q.p.y }
+fn snapshot(a: u64) -> u64 {
+    let mut p = make(a, 1)
+    let q = p
+    p = make(5, 2)
+    first(q)
+}

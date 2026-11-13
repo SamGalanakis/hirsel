@@ -1,0 +1,20 @@
+// Variants are written bare and selected by the expected type (LANG-7), built with
+// their case set and payload stored at the case's field (FORM v1b); `main`'s
+// `Result[(), Exit]` goes through its destination. Checked here as well formed; the
+// M1 runner runs the exit status natively.
+// expect: accept
+pub fn main() -> Result[(), Exit] { pick(false) }
+fn pick(c: bool) -> Result[(), Exit] {
+    if c {
+        Ok(())
+    } else {
+        Error(Exit(status: 7))
+    }
+}
+fn maybe(c: bool) -> Option[u64] {
+    if c {
+        Some(3)
+    } else {
+        None
+    }
+}

@@ -1,0 +1,12 @@
+// LANG-9: a record is constructed with every field labelled, in declaration order; a
+// variant with labels exactly when its payloads are labelled. LANG-7/LANG-11: a
+// variant is selected by the expected type, so one the type does not have is refused.
+// expect: refuse LANG-9 at 9:33
+// expect: refuse LANG-9 at 10:26
+// expect: refuse LANG-9 at 11:43
+// expect: refuse LANG-11 at 12:35
+type P { x: u64, y: u64 }
+fn order(a: u64) -> P { P(x: a, z: a) }
+fn bare(a: u64) -> P { P(a, a) }
+fn labelled(a: u64) -> Option[u64] { Some(x: a) }
+fn wrong(a: u64) -> Option[u64] { Ok(a) }

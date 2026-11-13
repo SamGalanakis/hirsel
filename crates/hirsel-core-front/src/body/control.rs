@@ -83,7 +83,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         match self.kind(pat) {
             NodeKind::Wildcard => {}
             NodeKind::BindPattern => {
-                if let Err(what) = value_ty(&self.t, ty) {
+                if let Err(what) = self.rep(ty) {
                     self.gap(pat, what);
                 }
                 let Some(b) = self.binder(pat) else {
@@ -112,7 +112,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.gap(pat, "patterns are not built");
             return false;
         }
-        if let Err(what) = value_ty(&self.t, ty) {
+        if let Err(what) = self.rep(ty) {
             self.gap(pat, what);
         }
         let Some(b) = self.binder(pat) else {
@@ -132,31 +132,26 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
     /// A `let mut` slot holding `v`; its address is evaluated once, where it begins.
     pub(super) fn slot(&mut self, ty: TyId, v: Option<ValueId>, n: NodeId) -> Option<AddressId> {
-        let t = value_ty(&self.t, ty).ok().flatten()?;
+        let r = self.rep(ty).ok()?;
         if !self.live() {
             return None;
         }
-        self.out.counts.places += 1;
-        self.b.slots.push(PlaceTy::Value(t));
-        let slot = hirsel_core_ir::SlotId(self.b.slots.len() as u32 - 1);
-        self.b.addresses.push(AddressInfo {
-            base: AddressBase::Slot(slot),
-            steps: PoolRange::EMPTY,
-            ty: PlaceTy::Value(t),
-        });
-        let address = AddressId(self.b.addresses.len() as u32 - 1);
-        self.inst(Inst::StorageLive { slot }, n);
-        self.inst(
-            Inst::Address {
-                address,
-                fail: None,
-            },
-            n,
-        );
-        if let Some(value) = v {
-            self.inst(Inst::Store { address, value }, n);
-        }
+        let address = match r {
+            Rep::None => return None,
+            Rep::Scalar(t) => self.new_slot(PlaceTy::Value(t), n),
+            Rep::Place(id) => self.new_slot(PlaceTy::Declared(id), n),
+        };
+        self.install(address, r, v, n);
         Some(address)
+    }
+    /// Write `v`, a value carried as `r`, into the place at `address`. The old value
+    /// needs no cleanup: every place value built so far is plain.
+    pub(super) fn install(&mut self, address: AddressId, r: Rep, v: Option<ValueId>, n: NodeId) {
+        match (r, v) {
+            (Rep::Scalar(_), Some(value)) => self.inst(Inst::Store { address, value }, n),
+            (Rep::Place(id), Some(from)) if self.live() => self.copy_to(address, from, id, n),
+            _ => {}
+        }
     }
 
     /// `q = e` and `q op= e` (OWN-12): `q` is writable (OWN-5), not frozen, and reserved
@@ -203,13 +198,13 @@ impl<'c, 'a> Cx<'c, 'a> {
             Binding::Slot(a) if at.place.len == 0 => (a, true),
             _ => (None, false),
         };
-        if !emitted && value_ty(&self.t, at.ty).is_ok_and(|t| t.is_some()) {
+        if !emitted && self.ir_ty(at.ty).is_some() {
             self.gap(place, "assignment to this place is not built");
         }
         let diverged = if !compound {
             let (t, v) = self.expr(value, expect(at.ty));
-            if let (Some(address), Some(value)) = (address, v) {
-                self.inst(Inst::Store { address, value }, s);
+            if let (Some(address), Ok(r)) = (address, self.rep(at.ty)) {
+                self.install(address, r, v, s);
             }
             t == NEVER
         } else {
@@ -552,10 +547,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 None
             }
         };
-        if self.live() {
-            let r = PoolRange::push(&mut self.b.pools.values, v);
-            self.end(Terminator::Return(r), Some(n));
-        }
+        self.ret(v, n);
         self.dead = true;
         (NEVER, None)
     }

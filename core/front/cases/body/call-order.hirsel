@@ -6,8 +6,8 @@
 // expect: refuse LANG-12 at 13:30
 // expect: refuse LANG-12 at 15:29
 // expect: gap calls to generic functions are not built
+// expect: gap cleanup of own values is not built
 // expect: gap generic definitions are not built
-// expect: gap values of this type are not built
 fn g[T](n: u64) -> Result[List[T], u8] { loop {} }
 fn f() -> List[u64] { result.unwrap(g(5)) }
 fn empty() -> u64 { list.len(list.new()) }

@@ -1,8 +1,8 @@
 // OWN-6, SEM-7: an operator reads its operands. A place of a moving type is moved only
 // where `take` is written, so `a == b` on view parameters is accepted, and `s == s`
 // leaves `s` live for the move after it.
+// expect: gap cleanup of own values is not built
 // expect: gap comparison of this type is not built
-// expect: gap values of this type are not built
 fn same(a: String, b: String) -> bool { a == b }
 fn eat(take s: String) {}
 fn both(take s: String) -> bool {

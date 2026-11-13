@@ -1,6 +1,8 @@
-//! Layout obligations of declarations with no parameters: their shapes go to
-//! `hirsel_core_layout::compute` once, with the closed types they hold inline. A
-//! generic declaration's layout is its instance's, made when the instance is.
+//! Shapes for `hirsel_core_layout::compute`. A declaration with no parameters gets its
+//! recipe once, with the closed types it holds inline; a body module's type table
+//! (`Module::types`) gets one row per closed type its signatures and values use,
+//! instances of generic declarations included (FORM v1b: `Option` and `Result` are
+//! ordinary variant rows, one per instantiation).
 
 use crate::Program;
 use crate::decls::{DeclBody, Repr, Role};
@@ -11,32 +13,37 @@ use hirsel_core_layout::{
 };
 use std::collections::HashMap;
 
-struct Shapes<'p> {
-    decls: &'p crate::Rows<crate::decls::TypeDecl>,
-    types: &'p mut Types,
-    shapes: Vec<Shape>,
-    of: HashMap<TyId, TypeRef>,
+/// A shape table being extended: rows are keyed by canonical text, which is also the
+/// row's name, so one closed type has one row whichever body names it.
+pub(crate) struct Shapes<'p, T: TyRead> {
+    pub decls: &'p crate::Rows<crate::decls::TypeDecl>,
+    pub types: &'p mut T,
+    pub shapes: &'p mut Vec<Shape>,
+    pub of: &'p mut HashMap<String, TypeRef>,
+    /// A body module's table: a finalizer names a function row this table cannot name
+    /// yet, so a type with one has no row here (resource types are not built).
+    pub module: bool,
 }
 
-impl Shapes<'_> {
+impl<T: TyRead> Shapes<'_, T> {
     /// The shape of a closed type held inline, or None when the layout crate has no
     /// field type for some part of it (recorded as a gap by the caller).
-    fn shape(&mut self, ty: TyId) -> Option<TypeRef> {
-        if let Some(&r) = self.of.get(&ty) {
+    pub fn shape(&mut self, ty: TyId) -> Option<TypeRef> {
+        let name = crate::decls::canonical(self.decls, &*self.types, ty);
+        if let Some(&r) = self.of.get(&name) {
             return Some(r);
         }
-        let name = crate::decls::canonical(self.decls, self.types, ty);
         // Reserve the index first: a field reaching this type through an indirection
         // (`List[Tree]` in `Tree`) names it before its body is known.
         let r = TypeRef(self.shapes.len() as u32);
         self.shapes.push(Shape {
-            name,
+            name: name.clone(),
             repr: LRepr::Own,
             body: Body::Record(vec![]),
             finalizer: None,
             grant: 0,
         });
-        self.of.insert(ty, r);
+        self.of.insert(name, r);
         let (repr, body, finalizer) = match self.types.kind(ty).clone() {
             TyKind::Scalar(s) => (
                 LRepr::Own,
@@ -68,7 +75,20 @@ impl Shapes<'_> {
             TyKind::Adt(d, args) => {
                 let decls = self.decls;
                 let decl = &decls[d.index()];
-                if decl.role.is_some() || decl.summary.cycle {
+                match decl.role {
+                    // The core collections' carriers (message.core: `own "String"`).
+                    Some(Role::String) => {
+                        let bytes = FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8)));
+                        return self.fill(r, LRepr::Own, record(vec![("bytes", bytes)]), None);
+                    }
+                    Some(Role::List) => {
+                        let items = FieldTy::Seq(Box::new(self.field(args[0])?));
+                        return self.fill(r, LRepr::Own, record(vec![("items", items)]), None);
+                    }
+                    Some(_) => return None,
+                    None => {}
+                }
+                if decl.summary.cycle || self.module && decl.finalizer {
                     return None;
                 }
                 let repr = match decl.repr {
@@ -106,11 +126,26 @@ impl Shapes<'_> {
             }
             _ => return None,
         };
+        self.fill(r, repr, body, finalizer)
+    }
+    fn fill(
+        &mut self,
+        r: TypeRef,
+        repr: LRepr,
+        body: Body,
+        finalizer: Option<FuncRef>,
+    ) -> Option<TypeRef> {
         let shape = &mut self.shapes[r.index()];
         shape.repr = repr;
         shape.body = body;
         shape.finalizer = finalizer;
         Some(r)
+    }
+    /// Forget the rows from `mark` on: a type whose parts do not all map leaves no
+    /// partial rows behind.
+    pub fn truncate(&mut self, mark: usize) {
+        self.shapes.truncate(mark);
+        self.of.retain(|_, r| (r.0 as usize) < mark);
     }
 
     fn field(&mut self, ty: TyId) -> Option<FieldTy> {
@@ -122,6 +157,7 @@ impl Shapes<'_> {
                 Some(Role::Arc) => FieldTy::Arc(self.shape(args[0])?),
                 Some(Role::List) => FieldTy::Seq(Box::new(self.field(args[0])?)),
                 Some(Role::String) => FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8))),
+                _ if handle(&self.decls[d.index()]) => FieldTy::Scalar(Scalar::U64),
                 Some(Role::Task) => FieldTy::Handle(Handle::Task),
                 Some(Role::Sender) => FieldTy::Handle(Handle::Sender),
                 Some(Role::Receiver) => FieldTy::Handle(Handle::Receiver),
@@ -144,14 +180,33 @@ impl Shapes<'_> {
     }
 }
 
+/// A capability or `Args`: a `u64` provider handle (FORM e68de117).
+pub(crate) fn handle(decl: &crate::decls::TypeDecl) -> bool {
+    decl.role == Some(Role::Capability) || crate::decls::is_core_prelude(&decl.path, &["Args"])
+}
+
+fn record(fields: Vec<(&str, FieldTy)>) -> Body {
+    Body::Record(
+        fields
+            .into_iter()
+            .map(|(name, ty)| Field {
+                name: name.into(),
+                ty,
+            })
+            .collect(),
+    )
+}
+
 /// Recipes for every declaration without parameters whose fields all map.
 pub(crate) fn recipes(p: &mut Program) {
     let Program { decls, types, .. } = p;
+    let (mut shapes, mut of) = (vec![], HashMap::new());
     let mut s = Shapes {
         decls,
         types,
-        shapes: vec![],
-        of: HashMap::new(),
+        shapes: &mut shapes,
+        of: &mut of,
+        module: false,
     };
     let mut roots = vec![];
     for (d, decl) in s.decls.iter().enumerate().skip(s.decls.base_len()) {
@@ -165,14 +220,10 @@ pub(crate) fn recipes(p: &mut Program) {
         let mark = s.shapes.len();
         match s.shape(ty) {
             Some(r) => roots.push((d, r)),
-            None => {
-                // A root whose fields do not all map leaves no partial shapes behind.
-                s.shapes.truncate(mark);
-                s.of.retain(|_, r| (r.0 as usize) < mark);
-            }
+            None => s.truncate(mark),
         }
     }
-    match compute(&s.shapes) {
+    match compute(s.shapes) {
         Ok(recipes) => {
             for (d, r) in roots {
                 p.decls[d].summary.recipe = Some(recipes[r.index()].clone());

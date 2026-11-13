@@ -21,6 +21,7 @@ pub opaque type Receiver[T: send]
 pub opaque type Dir
 
 pub type Capacity { requested: u64, available: u64 }
+pub type Exit: key { status: u8 }
 pub type Bytes = List[u8]
 
 pub fn fail(take msg: String) -> Never

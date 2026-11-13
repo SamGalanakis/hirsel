@@ -271,7 +271,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         (ERROR, None)
     }
 
-    pub(super) fn path(&mut self, n: NodeId) -> (TyId, Option<ValueId>) {
+    pub(super) fn path(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         self.out.counts.uses += 1;
         let Some(u) = self.p.resolved(self.at, n) else {
             self.halt();
@@ -283,8 +283,236 @@ impl<'c, 'a> Cx<'c, 'a> {
                 self.halt();
                 (ERROR, None)
             }
-            Target::ContextualConstructor { .. } => self.gap_ty(n, "variants are not built"),
+            &Target::ContextualConstructor { name } => self.construct_variant(n, name, &[], want),
             _ => self.gap_ty(n, "function, constant and module values are not built"),
         }
+    }
+
+    // ---- construction (LANG-6, LANG-7, LANG-9)
+    /// `P(x: 1, y: 2)`: a record of declaration `d`.
+    pub(super) fn construct_record(
+        &mut self,
+        n: NodeId,
+        d: DeclId,
+        want: Option<Want>,
+    ) -> (TyId, Option<ValueId>) {
+        let p: &'c Program<'a> = self.p;
+        match &p.decls[d.index()].body {
+            DeclBody::Record(fields) => {
+                let args = &self.kids(n)[1..];
+                self.construct(n, d, None, fields, true, args, want)
+            }
+            _ => self.gap_ty(n, "construction of this type is not built"),
+        }
+    }
+    /// A variant, written bare and selected by the expected type (LANG-7): `Ok(x)`,
+    /// `None`. `args` is empty for a bare name.
+    pub(super) fn construct_variant(
+        &mut self,
+        n: NodeId,
+        name: hirsel_core_syntax::Symbol,
+        args: &[NodeId],
+        want: Option<Want>,
+    ) -> (TyId, Option<ValueId>) {
+        let p: &'c Program<'a> = self.p;
+        let expected = want.and_then(|w| match self.t.kind(w.ty) {
+            TyKind::Adt(d, _) => Some(*d),
+            _ => None,
+        });
+        let Some(d) = expected else {
+            return match want {
+                Some(w) if w.ty != HOLE && w.ty != ERROR => {
+                    let (a, b) = (self.name(w.ty), p.index.symbols.text(name));
+                    self.refuse("LANG-11", n, format!("expected `{a}`, found variant `{b}`"));
+                    (ERROR, None)
+                }
+                Some(w) if w.ty == ERROR => {
+                    self.halt();
+                    (ERROR, None)
+                }
+                _ => self.gap_ty(n, "a variant without an expected type is not built"),
+            };
+        };
+        let from = p.modules[self.at.module as usize].id;
+        let visible = p
+            .index
+            .constructor_candidates(from, name)
+            .any(|id| matches!(p.by_definition[id.0 as usize], Some(Def::Type(x)) if x == d));
+        let text = p.index.symbols.text(name);
+        let decl = &p.decls[d.index()];
+        let found = match &decl.body {
+            DeclBody::Variant(cs) if visible => cs
+                .iter()
+                .position(|c| c.name == text)
+                .map(|i| (Some(i as u32), &cs[i].fields, cs[i].labelled)),
+            DeclBody::Record(fs) if visible && decl.path.0.name == text => Some((None, fs, true)),
+            _ => None,
+        };
+        let Some((case, fields, labelled)) = found else {
+            let a = self.name(want.map_or(ERROR, |w| w.ty));
+            self.refuse(
+                "LANG-11",
+                n,
+                format!("expected `{a}`, found variant `{text}`"),
+            );
+            return (ERROR, None);
+        };
+        self.construct(n, d, case, fields, labelled, args, want)
+    }
+    /// Check and build a value of declaration `d` (case `case` of a variant) from
+    /// `args`, one per field in declaration order, labelled exactly when `labelled`
+    /// (LANG-9). Type parameters are found as a call's are (LANG-11): the expected
+    /// type, then each field left to right, then the unsuffixed literals. Fields are
+    /// evaluated left to right (LANG-6) and the value is built in a new place.
+    #[allow(clippy::too_many_arguments)]
+    fn construct(
+        &mut self,
+        n: NodeId,
+        d: DeclId,
+        case: Option<u32>,
+        fields: &'c [crate::decls::FieldDecl],
+        labelled: bool,
+        args: &[NodeId],
+        want: Option<Want>,
+    ) -> (TyId, Option<ValueId>) {
+        self.out.counts.calls += 1;
+        let p: &'c Program<'a> = self.p;
+        let decl = &p.decls[d.index()];
+        // PROG-2: an opaque type is built only inside its own module.
+        if decl.opaque && decl.site.module != p.modules[self.at.module as usize].id {
+            let a = &decl.path.0.name;
+            self.refuse("PROG-2", n, format!("`{a}` is opaque outside its module"));
+            return (ERROR, None);
+        }
+        let k = fields.len();
+        if args.len() < k {
+            self.refuse_at(
+                "LANG-11",
+                self.close_brace(n),
+                format!("expected {k} arguments"),
+            );
+            return (ERROR, None);
+        }
+        if args.len() > k {
+            self.refuse("LANG-11", args[k], format!("expected {k} arguments"));
+            return (ERROR, None);
+        }
+        let mut found: Vec<Option<TyId>> = vec![None; decl.generics.len()];
+        let params: Vec<TyId> = (0..decl.generics.len() as u32)
+            .map(|i| self.t.mk(TyKind::Param(i)))
+            .collect();
+        let own = self.t.mk(TyKind::Adt(d, params));
+        if let Some(w) = want {
+            self.unify(own, w.ty, &mut found);
+        }
+        let mut vals: Vec<Option<ValueId>> = vec![None; k];
+        let mut later = vec![];
+        for (i, (&a, f)) in args.iter().zip(fields).enumerate() {
+            let e = match (self.kind(a), labelled) {
+                (NodeKind::LabelledArgument, true) if self.token_text(a) == f.name => {
+                    self.kids(a)[0]
+                }
+                (NodeKind::LabelledArgument, true) => {
+                    let name = &f.name;
+                    self.refuse("LANG-9", a, format!("expected the field `{name}` here"));
+                    return (ERROR, None);
+                }
+                (NodeKind::LabelledArgument, false) => {
+                    self.refuse("LANG-9", a, "this payload is not labelled");
+                    return (ERROR, None);
+                }
+                (NodeKind::BytesArgument, _) => {
+                    return self.gap_ty(a, "labelled and bytes arguments are not built");
+                }
+                (_, true) => {
+                    let name = &f.name;
+                    self.refuse("LANG-9", a, format!("the field `{name}` is labelled"));
+                    return (ERROR, None);
+                }
+                (_, false) => a,
+            };
+            if !self.synthesises(e) {
+                later.push((i, e));
+                continue;
+            }
+            vals[i] = match self.known(f.ty, &found) {
+                Some(t) => self.expr(e, expect(t)).1,
+                None => {
+                    let (at, v) = if self.kind(e) == NodeKind::Call {
+                        self.out.counts.nodes += 1;
+                        let w = self.partial(f.ty, &found);
+                        self.call(e, expect(w))
+                    } else {
+                        self.expr(e, None)
+                    };
+                    if !self.unify(f.ty, at, &mut found) {
+                        self.refuse(
+                            "LANG-11",
+                            e,
+                            "a type parameter is determined twice differently",
+                        );
+                    } else if let Some(t) = self.known(f.ty, &found) {
+                        self.coerce(at, Want { ty: t, view: false }, e);
+                    }
+                    v
+                }
+            };
+        }
+        for (i, e) in later {
+            match self.known(fields[i].ty, &found) {
+                Some(t) => vals[i] = self.expr(e, expect(t)).1,
+                None => {
+                    self.refuse("LANG-11", e, "an unsuffixed number needs an expected type");
+                }
+            }
+        }
+        if found.iter().any(Option::is_none) {
+            if !self.broken {
+                self.refuse("LANG-12", n, "a type parameter of the type is still open");
+            }
+            return (ERROR, None);
+        }
+        let tys: Vec<TyId> = found.into_iter().flatten().collect();
+        let ty = self.t.mk(TyKind::Adt(d, tys.clone()));
+        let id = match self.rep(ty) {
+            Ok(Rep::Place(id)) => id,
+            Ok(_) => return (ty, None),
+            Err(what) => {
+                self.gap(n, what);
+                return (ty, None);
+            }
+        };
+        if !self.live() {
+            return (ty, None);
+        }
+        let to = self.new_slot(PlaceTy::Declared(id), n);
+        if let Some(case) = case {
+            self.inst(Inst::SetCase { address: to, case }, n);
+        }
+        for (i, f) in fields.iter().enumerate() {
+            let fty = subst(&mut self.t, f.ty, &tys);
+            let r = match self.rep(fty) {
+                Ok(r) => r,
+                Err(what) => return self.gap_ty(n, what),
+            };
+            let step = match case {
+                Some(case) => Step::CaseField {
+                    case,
+                    field: i as u32,
+                },
+                None => Step::Field(i as u32),
+            };
+            let place = match r {
+                Rep::None => continue,
+                Rep::Scalar(t) => PlaceTy::Value(t),
+                Rep::Place(fid) => PlaceTy::Declared(fid),
+            };
+            if vals[i].is_none() {
+                return self.gap_ty(n, "this field value is not built");
+            }
+            let at = self.address(AddressBase::Address(to), &[step], place, n);
+            self.install(at, r, vals[i], n);
+        }
+        (ty, Some(self.pointer(to, n)))
     }
 }

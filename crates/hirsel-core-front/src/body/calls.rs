@@ -36,14 +36,15 @@ impl<'c, 'a> Cx<'c, 'a> {
         let f = match target {
             Some(Target::Definition(id)) => match p.by_definition[id.0 as usize].as_ref() {
                 Some(Def::Fn(f)) => *f as usize,
-                _ => return self.gap_ty(callee, "construction is not built"),
+                Some(Def::Type(d)) => return self.construct_record(n, *d, want),
+                None => return self.gap_ty(callee, "construction is not built"),
             },
             Some(Target::Missing) | None if self.kind(callee) == NodeKind::Path => {
                 self.halt();
                 return (ERROR, None);
             }
-            Some(Target::ContextualConstructor { .. }) => {
-                return self.gap_ty(callee, "construction is not built");
+            Some(&Target::ContextualConstructor { name }) => {
+                return self.construct_variant(n, name, args, want);
             }
             _ => return self.gap_ty(callee, "calls through values are not built"),
         };
@@ -288,6 +289,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 } else {
                     // A bare place for an unmarked parameter is a view for the call.
                     self.use_place(at, Use::View(Hold::CallView(call, i as u32)), e);
+                    *val = self.place_ptr(at, e);
                 }
                 let t = match self.t.kind(ty) {
                     TyKind::View(x) if !matches!(self.t.kind(pt), TyKind::View(_)) => *x,
@@ -452,25 +454,35 @@ impl<'c, 'a> Cx<'c, 'a> {
             return None;
         }
         let g = &self.p.fns[f];
-        let start = self.b.pools.args.len();
+        let sig = &self.e.module.signatures[signature.index()];
+        let (dest, result_ty) = (sig.dest, sig.results.first().copied());
+        // The destination is the first argument: a fresh place the result is written to.
+        let dest = dest.map(|id| self.new_slot(PlaceTy::Declared(id), n));
+        let mut out: Vec<Arg> = dest.into_iter().map(Arg::Address).collect();
         for (i, p) in g.params.iter().enumerate() {
-            if matches!(value_ty(&self.t, p.ty), Ok(Some(_))) {
-                let Some(v) = vals[i] else {
-                    self.b.pools.args.truncate(start);
+            let r = match self.rep(p.ty) {
+                Ok(Rep::None) => continue,
+                Ok(r) => r,
+                Err(what) => {
+                    self.gap(n, what);
                     return None;
-                };
-                self.b.pools.args.push(Arg::Value(v));
-            }
+                }
+            };
+            let Some(v) = vals[i] else {
+                self.gap(n, "this argument is not built");
+                return None;
+            };
+            out.push(match r {
+                Rep::Place(id) => {
+                    let a = self.address(AddressBase::Value(v), &[], PlaceTy::Declared(id), n);
+                    Arg::Address(a)
+                }
+                _ => Arg::Value(v),
+            });
         }
-        let args = PoolRange::new(start as u32, (self.b.pools.args.len() - start) as u32);
-        let start = self.b.pools.values.len();
-        for k in 0..self.e.module.signatures[signature.index()].results.len() {
-            let t = self.e.module.signatures[signature.index()].results[k];
-            let v = self.value(t);
-            self.b.pools.values.push(v);
-        }
-        let results = PoolRange::new(start as u32, (self.b.pools.values.len() - start) as u32);
-        let first = self.b.pools.values.get(start).copied();
+        let args = PoolRange::push(&mut self.b.pools.args, out);
+        let first = result_ty.map(|t| self.value(t));
+        let results = PoolRange::push(&mut self.b.pools.values, first);
         self.b.calls.push(CallSite {
             callee: Callee::Direct(func),
             signature,
@@ -483,8 +495,12 @@ impl<'c, 'a> Cx<'c, 'a> {
         if result == NEVER {
             // The callee never returns normally; nothing follows the call (FORM v1a).
             self.end(Terminator::Unreachable, Some(n));
+            return None;
         }
-        first
+        match dest {
+            Some(a) => Some(self.pointer(a, n)),
+            None => first,
+        }
     }
 
     /// The core integer operations built so far (SEM-1); T and U range over the

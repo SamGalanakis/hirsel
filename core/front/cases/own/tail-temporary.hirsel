@@ -3,6 +3,7 @@
 // value reaches it; the view `list.get` returns does not outlive `xs`, since the value is
 // a `u64`. (The value reaching it is the Q28 case, own/drop-frozen.)
 // expect: gap calls to generic functions are not built
+// expect: gap cleanup of own values is not built
 // expect: gap values of this type are not built
 fn present(o: Option[View[u64]]) -> u64 { 0 }
 fn f() -> u64 { let xs: List[u64] = list.new(); present(list.get(xs, 0)) }

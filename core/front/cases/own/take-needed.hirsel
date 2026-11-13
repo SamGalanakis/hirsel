@@ -1,7 +1,7 @@
 // OWN-7, the spec's pair: a moving place for a `take` parameter is written `take xs`.
 // expect: refuse OWN-7 at 7:32
 // expect: gap calls to generic functions are not built
-// expect: gap values of this type are not built
+// expect: gap cleanup of own values is not built
 fn eat(take xs: List[u64]) {}
 fn use_all(take xs: List[u64]) { let n = list.len(xs); eat(take xs) }
 fn f(take xs: List[u64]) { eat(xs) }

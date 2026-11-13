@@ -491,14 +491,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             if !p.fns[f].generics[i].region
                 && kind(&p.decls, &self.t, t, &self.params) == Kind::Scoped
             {
-                if p.fns[f].path.package_is("core", "1") {
-                    if !self.broken {
-                        self.gap(n, "scoped core type arguments are not built");
-                    }
-                } else {
+                // OWN-19: only a user-declared generic refuses a scoped type argument. A
+                // core operation takes one, unless its signature would make the scoped
+                // value an element of a collection or a field of a non-scoped type.
+                let g = &p.fns[f];
+                let core = g.path.package_is("core", "1");
+                if !core
+                    || g.params
+                        .iter()
+                        .map(|q| q.ty)
+                        .chain([g.result])
+                        .any(|ty| contained(&p.decls, &self.t, ty, i as u32, false))
+                {
                     self.refuse("OWN-19", n, "a type parameter cannot be a scoped type");
+                    return;
                 }
-                return;
             }
             let g = &p.fns[f].generics[i];
             let missing = g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params);
@@ -1337,5 +1344,28 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.jump(join, &[], n);
         self.start(join);
         Some(self.pointer(to, n))
+    }
+}
+
+/// Whether type parameter `i` occurs in `ty` as, or inside, a type argument of a generic
+/// other than Option and Result, or an array element (OWN-19). A callable's parameters
+/// and result are not containers.
+fn contained(
+    decls: &crate::Rows<crate::decls::TypeDecl>,
+    t: &impl TyRead,
+    ty: TyId,
+    i: u32,
+    inside: bool,
+) -> bool {
+    match t.kind(ty) {
+        TyKind::Param(j) => inside && *j == i,
+        TyKind::Adt(d, args) => {
+            let inside = inside || !decls[d.index()].structural;
+            args.iter().any(|&a| contained(decls, t, a, i, inside))
+        }
+        TyKind::Tuple(xs) => xs.iter().any(|&x| contained(decls, t, x, i, inside)),
+        TyKind::Array(x, _) => contained(decls, t, *x, i, true),
+        TyKind::View(x) | TyKind::Anchored(x, _) => contained(decls, t, *x, i, inside),
+        _ => false,
     }
 }

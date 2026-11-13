@@ -1,6 +1,5 @@
-// expect: refuse OWN-19 at 3:35
-// OWN-19's example: a scoped value is not an element of a collection.
+// expect: refuse OWN-19 at 4:35
+// OWN-19's example: a scoped value is not an element of a collection. The body's
+// `list.new()` would make one too (T = View[String] in List[T]), refused at the call.
 fn keep(xs: List[String]) -> List[View[String]] { list.new() }
-// The body is not built yet (bodies of these types come with slice c and e).
-
-// expect: gap scoped core type arguments are not built
+// expect: refuse OWN-19 at 4:51

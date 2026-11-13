@@ -113,6 +113,11 @@ void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
         LLVMPassBuilderOptionsSetLoopVectorization(options, 1);
         LLVMPassBuilderOptionsSetSLPVectorization(options, 1);
         LLVMPassBuilderOptionsSetMergeFunctions(options, 1);
+        unsigned hint = LLVMGetEnumAttributeKindForName("inlinehint", 10);
+        for (LLVMValueRef f = LLVMGetFirstFunction(module); f; f = LLVMGetNextFunction(f))
+            if (LLVMCountBasicBlocks(f))
+                LLVMAddAttributeAtIndex(f, LLVMAttributeFunctionIndex,
+                    LLVMCreateEnumAttribute(context, hint, 0));
         // The ordinary pipeline infers nonrecursive cleanup attributes after
         // argument promotion. Revisit those arguments, then expose their local
         // carrier values and fold checks implied by the caller's room test.

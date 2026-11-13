@@ -538,6 +538,18 @@ impl<'context> Module<'context> {
             LLVMPassBuilderOptionsSetLoopVectorization(options, 1);
             LLVMPassBuilderOptionsSetSLPVectorization(options, 1);
             LLVMPassBuilderOptionsSetMergeFunctions(options, 1);
+            let hint = LLVMGetEnumAttributeKindForName(b"inlinehint".as_ptr().cast(), 10);
+            let mut function = LLVMGetFirstFunction(self.raw);
+            while !function.is_null() {
+                if LLVMCountBasicBlocks(function) != 0 {
+                    LLVMAddAttributeAtIndex(
+                        function,
+                        llvm_sys::LLVMAttributeFunctionIndex,
+                        LLVMCreateEnumAttribute(self.context.raw, hint, 0),
+                    );
+                }
+                function = LLVMGetNextFunction(function);
+            }
             let error = LLVMRunPasses(self.raw, pipeline.as_ptr(), machine.raw, options);
             LLVMDisposePassBuilderOptions(options);
             if error.is_null() {

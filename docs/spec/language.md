@@ -288,8 +288,11 @@ The bracket of an owning callable type parses any bounds (LANG-5) but holds noth
 that is `send` and otherwise at the second. An owning closure is never `shareable`
 ([OWN-4](ownership.md#own-4-bounds)). A callable type also says whether it is `waits` (LANG-8). A callable fits a callable type
 when its parameter modes and types and its result are identical, its kind is admitted, and
-it is `waits` only if the type is. Calling a callable never consumes it and follows the
-modes of a direct call. Any call through a callable may allocate. Cleaning an owning closure
+it is `waits` only if the type is; one that does not fit is refused here, at the callable.
+A parameter's mode is unmarked, `mut`, `take` or `bytes`, so a function with a `bytes`
+parameter has a callable type such as `fn(bytes u64) -> u64`. Calling a callable never
+consumes it and follows the modes of a direct call, `bytes e` included
+([OWN-7](ownership.md#own-7-parameter-modes)). Any call through a callable may allocate. Cleaning an owning closure
 cleans its captures, which hold no resource (LANG-14), so it runs no finalizer and admits
 nothing ([FAIL-13](failure.md#fail-13-mechanical-release)).
 
@@ -299,6 +302,14 @@ fn main_like() -> u64 { apply(fn(x: u64) -> u64 { x + 1 }, 1) }
 ```
 ```hirsel
 fn run(take f: own[send] fn() -> u64) -> u64 { f() }
+```
+```hirsel
+fn sized(bytes n: u64) -> u64 { n }
+fn f() -> u64 { let h: fn(bytes u64) -> u64 = sized; h(bytes 7) }
+```
+```hirsel
+fn sized(bytes n: u64) -> u64 { n }
+fn f() -> u64 { let h: fn(u64) -> u64 = sized; h(7) }     // refused: LANG-13, at sized: bytes differs
 ```
 ```hirsel
 fn run(take f: own[shareable] fn() -> u64) -> u64 { f() }   // refused: LANG-13, at shareable

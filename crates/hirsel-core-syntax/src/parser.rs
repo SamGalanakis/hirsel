@@ -587,7 +587,7 @@ impl Parser<'_> {
         }
         let s = self.pos;
         self.expect(sym::LPAREN)?;
-        let ps = self.list(sym::RPAREN, |p| p.parameter(top, top))?;
+        let ps = self.list(sym::RPAREN, |p| p.parameter(top, true))?;
         c.push(self.node(s, NodeKind::Parameters, None, &ps));
         if self.eat(sym::ARROW) {
             let st = self.pos - 1;

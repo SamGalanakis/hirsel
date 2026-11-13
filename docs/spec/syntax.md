@@ -188,7 +188,7 @@ type-atom   = type-path, [ "[", nonempty(type-arg), "]" ]
             | [ "scoped" | "own", [ "[", bounds, "]" ] ], "fn", "(", list(fn-param), ")",
               [ "->", type ], [ "waits" ] ;
 type-arg    = type | "in", place | integer ;
-fn-param    = [ "take" | "mut" ], [ name, ":" ], type ;
+fn-param    = [ "take" | "mut" | "bytes" ], [ name, ":" ], type ;
 type-path   = name, { ".", name } ;
 
 (* statements and expressions *)

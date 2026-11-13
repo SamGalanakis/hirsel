@@ -121,7 +121,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         (ERROR, None)
     }
-    /// SEM-7's operand requirement is shared by operators and literal patterns.
+    /// LANG-21's key / ordered operand requirement, shared by operators and literal
+    /// patterns (SEM-7 defines what equality and order mean).
     pub(super) fn comparison_allowed(&self, ty: TyId, ordered: bool) -> bool {
         ty == ERROR
             || has_bounds(&self.p.decls, &self.t, ty, &self.params)
@@ -200,7 +201,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 if !self.comparison_allowed(t, need == ORDERED) {
                     let a = self.name(t);
                     let b = if need == KEY { "key" } else { "ordered" };
-                    self.refuse("SEM-7", n, format!("`{a}` is not {b}"));
+                    self.refuse("LANG-21", n, format!("`{a}` is not {b}"));
                     return (BOOL, None);
                 }
                 let cop = match op {

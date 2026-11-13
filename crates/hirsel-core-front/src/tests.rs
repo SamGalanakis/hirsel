@@ -482,8 +482,8 @@ fn callable_provider_and_identity_words() {
 
 /// OWN-4 (e9073564): `integer` and `float` imply every bound all their admitted types
 /// have, and a core body may rely on them. `T: integer` is plain and ordered, so `max`
-/// copies and compares; `T: float` is not key, so `same`'s `==` is refused (the spec
-/// names LANG-21 in OWN-4 and SEM-7 in MEM-18's example; QUESTIONS Q41).
+/// copies and compares; `T: float` is not key, so `same`'s `==` is refused under
+/// LANG-21 (7d90583a, Q41).
 /// These bounds are written only in core, so the bodies are a module of a copy of the
 /// core fixture.
 #[test]
@@ -510,11 +510,15 @@ fn integer_and_float_bounds_imply_their_types_bounds() {
     for (f, fd) in p.fns.iter().enumerate() {
         if fd.path.0.modules == ["bounds"] {
             let check = p.check_lower(f, &mut emitter);
-            rules.insert(fd.path.0.name.to_string(), check.refusals.len());
+            let refused: Vec<&str> = check.refusals.iter().map(|r| r.rule.as_str()).collect();
+            rules.insert(fd.path.0.name.to_string(), refused.join(","));
         }
     }
     // `max` is accepted; `same` is refused once, at its `==`.
-    assert_eq!((rules["max"], rules["same"]), (0, 1));
+    assert_eq!(
+        (rules["max"].as_str(), rules["same"].as_str()),
+        ("", "LANG-21")
+    );
 }
 
 #[test]

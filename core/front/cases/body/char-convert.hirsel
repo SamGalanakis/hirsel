@@ -1,0 +1,33 @@
+// FORM #57: `char.to_u32` is the code point, and `char.from_u32` is Some exactly for a
+// Unicode scalar value (below the surrogates, above them, at most 0x10FFFF). Both were
+// calls to bodyless core functions that no engine could run.
+// expect: run go(0) = 233
+// expect: run go(1) = 55295
+// expect: run go(2) = 0
+// expect: run go(3) = 0
+// expect: run go(4) = 57344
+// expect: run go(5) = 1114111
+// expect: run go(6) = 0
+fn round(n: u32) -> u32 {
+    match char.from_u32(n) {
+        Some(c) => char.to_u32(c),
+        None => 0,
+    }
+}
+fn go(k: u64) -> u32 {
+    if k == 0 {
+        char.to_u32('é')
+    } else if k == 1 {
+        round(55295)
+    } else if k == 2 {
+        round(55296)
+    } else if k == 3 {
+        round(57343)
+    } else if k == 4 {
+        round(57344)
+    } else if k == 5 {
+        round(1114111)
+    } else {
+        round(1114112)
+    }
+}

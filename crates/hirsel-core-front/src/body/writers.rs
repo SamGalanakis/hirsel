@@ -1025,19 +1025,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let state = self.get_word(AddressBase::Value(frame), 0, Ty::Ptr, n)?;
         let mut sinks = Sinks::default();
         let join = self.new_block(&[]);
-        // MEM-9 fixes a char's encoding as its scalar value in a u32; FORM has no
-        // conversion from `char`, so the value is read back through memory.
-        let slot = self.new_slot(PlaceTy::Value(Ty::Scalar(Scalar::Char)), n);
+        // MEM-9: a char's encoding is its scalar value; FORM widens it to that u32 (#57).
+        let u = self.value(u32t);
         self.inst(
-            Inst::Store {
-                address: slot,
-                value: c,
+            Inst::Convert {
+                result: u,
+                flag: None,
+                operand: c,
+                mode: ConvertMode::Widen,
             },
             n,
         );
-        let p = self.pointer(slot, n);
-        let as_u32 = self.address(AddressBase::Value(p), &[], PlaceTy::Value(u32t), n);
-        let u = self.read_bits(as_u32, u32t, n);
         let done = self.new_block(&[]);
         let limits = [(0x80u64, 1u64), (0x800, 2), (0x1_0000, 3)];
         for len in 1..=4u64 {

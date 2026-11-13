@@ -296,6 +296,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let builtin = g.path.package_is("core", "1")
             && g.body.is_none()
             && (g.path.0.modules == ["int"]
+                || g.path.0.modules == ["char"]
                 || g.path.0.modules == ["float"]
                 || g.path.0.modules == ["span"]
                 || g.path.0.modules == ["seq"]
@@ -823,6 +824,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
             return None;
         }
+        if g.path.0.modules == ["char"] {
+            return self.char_convert(g.path.0.name == "from_u32", g.result, vals[0]?, n);
+        }
         if matches!(g.path.0.modules[0].as_str(), "writer" | "text" | "core") {
             return self.writer_op(f, tys, vals, n);
         }
@@ -1023,6 +1027,35 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.require_numeric(ok, n);
         }
         Some(result)
+    }
+    /// `char.to_u32` widens a char to its code point; `char.from_u32` narrows a u32 to
+    /// a char, flagged exactly when it is a Unicode scalar value (FORM #57).
+    fn char_convert(
+        &mut self,
+        from_u32: bool,
+        result: TyId,
+        operand: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        if !from_u32 {
+            return self.numeric_convert(Ty::Scalar(Scalar::U32), ConvertMode::Widen, operand, n);
+        }
+        if !self.live() {
+            return None;
+        }
+        let value = self.value(Ty::Scalar(Scalar::Char));
+        let ok = self.value(Ty::Scalar(Scalar::Bool));
+        self.inst(
+            Inst::Convert {
+                result: value,
+                flag: Some(ok),
+                operand,
+                mode: ConvertMode::TryNarrow,
+            },
+            n,
+        );
+        let payload = self.t.mk(TyKind::Scalar(Scalar::Char));
+        self.numeric_option(result, payload, value, ok, n)
     }
     fn numeric_convert(
         &mut self,

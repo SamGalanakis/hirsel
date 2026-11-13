@@ -1045,8 +1045,8 @@ impl Program<'_> {
             direct[d] = h;
             self.decls[d].summary.holds_params = params;
         }
-        for d in 0..self.decls.base_len() {
-            direct[d] = self.decls[d].summary.holds;
+        for (d, slot) in direct.iter_mut().enumerate().take(self.decls.base_len()) {
+            *slot = self.decls[d].summary.holds;
         }
         let mut t = Tarjan {
             index: vec![u32::MAX; n],

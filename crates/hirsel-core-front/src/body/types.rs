@@ -1,0 +1,216 @@
+use super::*;
+
+impl<'c, 'a> Cx<'c, 'a> {
+    // ---- types written in bodies
+    pub(super) fn ty(&mut self, n: NodeId) -> TyId {
+        self.out.counts.types += 1;
+        let c = self.kids(n);
+        match self.kind(n) {
+            NodeKind::UnitType => UNIT,
+            NodeKind::GroupType => self.ty(c[0]),
+            NodeKind::TupleType => {
+                let xs = c.iter().map(|&x| self.ty(x)).collect();
+                self.t.mk(TyKind::Tuple(xs))
+            }
+            NodeKind::TypePath => self.named_ty(n, &[]),
+            NodeKind::TypeArguments => {
+                let mut args = vec![];
+                for &a in &c[1..] {
+                    if self.kind(a) == NodeKind::Anchor {
+                        self.gap(a, "anchor arguments are not built");
+                        return ERROR;
+                    }
+                    args.push((self.ty(a), a));
+                }
+                self.named_ty(c[0], &args)
+            }
+            _ => {
+                self.gap(n, "this type form is not built in bodies");
+                ERROR
+            }
+        }
+    }
+}
+
+impl<'c, 'a> Cx<'c, 'a> {
+    /// A named type written in a body, with its arguments: an alias names its right side
+    /// (LANG-9), `View[T]` is the view type, and each argument has the bounds its
+    /// parameter declares (LANG-12, OWN-4 for Rc and Arc) and, for a generic other than
+    /// Option and Result, is not scoped (OWN-19), as in the declaration pass.
+    pub(super) fn named_ty(&mut self, path: NodeId, args: &[(TyId, NodeId)]) -> TyId {
+        let p: &'c Program<'a> = self.p;
+        let d = match p.target(self.at, path).copied() {
+            Some(Target::Builtin(name)) => match Scalar::from_name(p.index.symbols.text(name)) {
+                Some(s) if args.is_empty() => return scalar(s),
+                Some(_) => {
+                    self.refuse("LANG-12", path, "this type takes no type arguments");
+                    return ERROR;
+                }
+                None => {
+                    self.gap(path, "inline array types are not built");
+                    return ERROR;
+                }
+            },
+            Some(Target::Definition(q)) if p.core_named(q, &["Never"]) => {
+                if !args.is_empty() {
+                    self.refuse("LANG-12", path, "this type takes no type arguments");
+                    return ERROR;
+                }
+                return NEVER;
+            }
+            Some(Target::Definition(q)) => match p.by_definition[q.0 as usize].as_ref() {
+                Some(Def::Type(d)) => *d,
+                _ => {
+                    self.refuse(
+                        "LANG-7",
+                        path,
+                        format!("`{}` is not a type", p.index.definition_path(q)),
+                    );
+                    return ERROR;
+                }
+            },
+            Some(Target::Binder(b)) => {
+                let name = &p.items[self.at.module as usize][self.at.item as usize]
+                    .resolution
+                    .binders[b as usize]
+                    .name;
+                return match self.fd.generics.iter().position(|g| &g.name == name) {
+                    Some(_) if !args.is_empty() => {
+                        self.refuse("LANG-12", path, "a type parameter takes no type arguments");
+                        ERROR
+                    }
+                    Some(i) => self.t.mk(TyKind::Param(i as u32)),
+                    None => {
+                        self.gap(path, "this type parameter is not built");
+                        ERROR
+                    }
+                };
+            }
+            _ => {
+                self.halt();
+                return ERROR;
+            }
+        };
+        let decl = &p.decls[d.index()];
+        if args.len() != decl.generics.len() {
+            let (name, want) = (&decl.path.0.name, decl.generics.len());
+            self.refuse(
+                "LANG-12",
+                path,
+                format!(
+                    "`{name}` takes {want} type arguments, {} written",
+                    args.len()
+                ),
+            );
+            return ERROR;
+        }
+        let counted = matches!(decl.role, Some(Role::Rc | Role::Arc));
+        for (g, &(t, at)) in decl.generics.iter().zip(args) {
+            if !decl.structural && kind(&p.decls, &self.t, t, &self.params) == Kind::Scoped {
+                self.refuse(
+                    "OWN-19",
+                    at,
+                    "a scoped type is not a type argument of a generic other than Option and Result",
+                );
+                return ERROR;
+            }
+            let missing = g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params);
+            if missing & ENCODED != 0 {
+                self.gap(at, "packed and streamable bounds are not built");
+                return ERROR;
+            }
+            if missing != 0 {
+                let rule = if counted { "OWN-4" } else { "LANG-12" };
+                let b = crate::decls::bound_names(missing);
+                self.refuse(rule, at, format!("type argument is not {b}"));
+                return ERROR;
+            }
+        }
+        let tys: Vec<TyId> = args.iter().map(|a| a.0).collect();
+        if decl.role == Some(Role::View) {
+            return self.t.mk(TyKind::View(tys[0]));
+        }
+        if let DeclBody::Alias(t) = decl.body {
+            return subst(&mut self.t, t, &tys);
+        }
+        self.t.mk(TyKind::Adt(d, tys))
+    }
+}
+
+pub(super) fn is_type_node(k: NodeKind) -> bool {
+    matches!(
+        k,
+        NodeKind::TypePath
+            | NodeKind::TypeArguments
+            | NodeKind::UnitType
+            | NodeKind::GroupType
+            | NodeKind::TupleType
+            | NodeKind::CallableType
+            | NodeKind::ScopedCallableType
+            | NodeKind::OwnCallableType
+            | NodeKind::Anchor
+    )
+}
+
+/// A literal operand's value while it is evaluated (LANG-21).
+#[derive(Clone, Copy)]
+pub(super) enum Num {
+    Int(i128),
+    Float(f64),
+}
+/// `v` cut to `w` bits, read signed or not.
+pub(super) fn wrap(v: i128, signed: bool, w: u32) -> i128 {
+    let m = v & ((1i128 << w) - 1);
+    if signed && m >> (w - 1) != 0 {
+        m - (1i128 << w)
+    } else {
+        m
+    }
+}
+pub(super) fn numeric(s: Scalar) -> bool {
+    !matches!(s, Scalar::Bool | Scalar::Char)
+}
+
+/// An integer token's digits (with prefix) and its suffix (LANG-3).
+pub(super) fn int_suffix(text: &str) -> (&str, Option<Scalar>) {
+    for s in [
+        Scalar::U8,
+        Scalar::U16,
+        Scalar::U32,
+        Scalar::U64,
+        Scalar::I8,
+        Scalar::I16,
+        Scalar::I32,
+        Scalar::I64,
+    ] {
+        if let Some(d) = text.strip_suffix(s.name()) {
+            return (d, Some(s));
+        }
+    }
+    (text, None)
+}
+pub(super) fn float_suffix(text: &str) -> (&str, Option<Scalar>) {
+    for s in [Scalar::F32, Scalar::F64] {
+        if let Some(d) = text.strip_suffix(s.name()) {
+            return (d, Some(s));
+        }
+    }
+    (text, None)
+}
+/// The magnitude an integer token's digits spell, or None past u128.
+pub(super) fn int_magnitude(digits: &str) -> Option<u128> {
+    let d: String = digits.chars().filter(|&c| c != '_').collect();
+    let (radix, body) = match d.get(..2) {
+        Some("0x") => (16, &d[2..]),
+        Some("0o") => (8, &d[2..]),
+        Some("0b") => (2, &d[2..]),
+        _ => (10, &d[..]),
+    };
+    u128::from_str_radix(body, radix).ok()
+}
+pub(super) fn float_bits(s: Scalar, x: f64) -> u64 {
+    match s {
+        Scalar::F32 => u64::from((x as f32).to_bits()),
+        _ => x.to_bits(),
+    }
+}

@@ -1702,7 +1702,11 @@ impl Program<'_> {
                 let missing = declared & !have;
                 if missing != 0 {
                     out.push(refusal(
-                        "OWN-4",
+                        if missing & SEND != 0 {
+                            "CONC-2"
+                        } else {
+                            "OWN-4"
+                        },
                         f.site,
                         format!("field `{}` is not {}", f.name, bound_names(missing)),
                     ));

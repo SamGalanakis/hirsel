@@ -1,0 +1,8 @@
+// LANG-8: nonwaiting callbacks fit spawn's waits type; cleanup never adds waits.
+// expect: accept
+fn child(take n:u64)->u64 { n }
+fn count(tasks:Tasks)->Result[Task[u64],(Capacity,u64)] { task.spawn(tasks,bytes 4096,7u64,child) }
+fn nonwaiting(tx:Sender[u64],mut h:Task[u64]) { let _=channel.try_send(tx,7u64); let _=channel.sender(tx); task.cancel(mut h); task.check_cancel() }
+fn waiting(tx:Sender[u64],rx:Receiver[u64],take h:Task[u64]) waits { let _=channel.send(tx,7u64);let _=channel.receive(rx);let _=task.join(take h) }
+resource type Shield { tx:Sender[u64] } drop(s) { let _=channel.send(s.tx,1u64) }
+resource type Indirect { f:fn()->u64 waits } drop(s) { let _=s.f() }

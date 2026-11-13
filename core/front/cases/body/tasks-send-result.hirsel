@@ -1,0 +1,5 @@
+// R as well as X must be send. Here inference determines R from the callback.
+// expect: refuse CONC-2 at 5:61
+type Node: shareable { label: String }
+fn child(take x:()) -> Rc[Node] { result.unwrap(rc.new(Node(label:"a"))) }
+fn parent(tasks:Tasks) { let _=task.spawn(tasks,bytes 64,(),child) }

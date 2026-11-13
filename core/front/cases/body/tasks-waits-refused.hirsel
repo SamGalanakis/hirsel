@@ -1,0 +1,11 @@
+// LANG-8's exact spurious waits example, followed by waiting calls that need the mark.
+// expect: refuse LANG-8 at 7:25
+// expect: refuse LANG-8 at 8:44
+// expect: refuse LANG-8 at 9:38
+// expect: refuse LANG-8 at 10:35
+// expect: refuse LANG-8 at 11:40
+fn twice(x: u64) -> u64 waits { x * 2 }
+fn send(tx:Sender[u64],take x:u64) { let _=channel.send(tx,x) }
+fn receive(rx:Receiver[u64]) { let _=channel.receive(rx) }
+fn join(take h:Task[u64]) { let _=task.join(take h) }
+fn indirect(f:fn()->u64 waits) { let _=f() }

@@ -63,3 +63,6 @@ pub type WriteError { written: u64, error: IoError }
 pub opaque type Site
 pub type Cause { kind: CauseKind, site: Site }
 pub type CauseKind = Overflow | Bounds | Division | Unwrap | Fail(String) | Cancelled | Capacity
+
+pub type Closed[T] = Closed(T)
+pub type SendError[T] = Full(T) | Closed(T)

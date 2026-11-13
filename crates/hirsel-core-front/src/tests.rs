@@ -2073,3 +2073,74 @@ fn borrowed_generic_order_selection() {
     let failures = run_case(&root().join("cases/body/ordered-cost.hirsel"));
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+#[test]
+fn task_send_and_waits_spec_examples() {
+    let mut all = vec![];
+    for name in [
+        "tasks-send-record",
+        "tasks-send-spawn",
+        "tasks-mutable-static",
+        "tasks-waits-refused",
+        "tasks-send-result",
+        "tasks-waits-accepted",
+    ] {
+        all.extend(
+            run_case(&root().join(format!("cases/body/{name}.hirsel")))
+                .into_iter()
+                .map(|f| format!("{name}: {f}")),
+        );
+    }
+    assert!(all.is_empty(), "{all:#?}");
+}
+
+#[test]
+fn core_bodies_check_waits_while_bodiless_rows_use_the_written_effect() {
+    let dir = std::env::temp_dir().join(format!("hirsel-waits-core-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for file in std::fs::read_dir(root().join("core")).unwrap() {
+        let file = file.unwrap();
+        if file.path().is_file() {
+            std::fs::copy(file.path(), dir.join(file.file_name())).unwrap();
+        }
+    }
+    std::fs::write(
+        dir.join("effects.hirsel"),
+        r#"
+pub fn waiting(rx:Receiver[u64]) waits { let _=channel.receive(rx) }
+pub fn hidden(rx:Receiver[u64]) { let _=channel.receive(rx) }
+pub fn extra()->u64 waits { 1u64 }
+pub fn written()->u64 waits
+"#,
+    )
+    .unwrap();
+    let (index, inputs) = inputs_with_core("", &dir);
+    std::fs::remove_dir_all(&dir).unwrap();
+    let p = Program::declare(&index, &inputs);
+    assert!(p.refusals.is_empty(), "{:?}", p.refusals);
+    let mut e = Emitter::new();
+    for (f, fd) in p
+        .fns
+        .iter()
+        .enumerate()
+        .filter(|(_, fd)| fd.path.0.modules == ["effects"])
+    {
+        if fd.body.is_none() {
+            assert_eq!(fd.path.0.name, "written");
+            continue;
+        }
+        let c = p.check_lower(f, &mut e);
+        assert!(c.gaps.is_empty(), "{}: {:?}", fd.path, c.gaps);
+        let rules = c
+            .refusals
+            .iter()
+            .map(|r| r.rule.as_str())
+            .collect::<Vec<_>>();
+        let want = if fd.path.0.name == "waiting" {
+            vec![]
+        } else {
+            vec!["LANG-8"]
+        };
+        assert_eq!(rules, want, "{}", fd.path);
+    }
+}

@@ -552,7 +552,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let missing = g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params);
             if missing != 0 {
                 let (a, b) = (self.name(t), crate::decls::bound_names(missing));
-                self.refuse("LANG-12", n, format!("`{a}` is not {b}"));
+                let transfer = p.fns[f].path.package_is("core", "1")
+                    && matches!(p.fns[f].path.0.modules.as_slice(), [module] if module == "task" || module == "channel");
+                let rule = if transfer && missing & crate::decls::SEND != 0 {
+                    "CONC-2"
+                } else {
+                    "LANG-12"
+                };
+                self.refuse(rule, n, format!("`{a}` is not {b}"));
                 return;
             }
         }

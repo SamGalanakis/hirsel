@@ -35,8 +35,8 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let command = args
         .next()
         .ok_or("usage: hirsel-core check <package-dir> | image --libraries <core-root>")?;
-    if !["check", "image", "build", "run"].contains(&command.as_str()) {
-        return Err("expected check, image, build or run".into());
+    if !["check", "image", "build", "run", "core-product"].contains(&command.as_str()) {
+        return Err("expected check, image, build, run or core-product".into());
     }
     let mut dir = None;
     let mut libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
@@ -124,6 +124,20 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             .unwrap_or(Path::new("."))
             .join(".hirsel-core")
     });
+    if command == "core-product" {
+        meter.finish("startup/discovery");
+        let package = hirsel_core_driver::PackageProduct::bundled(&store, &mut meter)?;
+        println!(
+            "{}",
+            serde_json::json!({"image": hex(package.image.identity), "rebuilt": package.rebuilt})
+        );
+        drop(package);
+        meter.finish("package handle teardown");
+        if let Some(path) = metrics {
+            std::fs::write(path, serde_json::to_vec_pretty(&meter.result)?)?;
+        }
+        return Ok(0);
+    }
     let image = if let Some(path) = image_path {
         Some(CoreImage::open(&path)?.ok_or("core image cache miss; rebuild the image")?)
     } else {

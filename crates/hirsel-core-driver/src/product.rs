@@ -99,7 +99,7 @@ impl PackageProduct {
         Self::produce(inputs, directory, meter)
     }
     fn produce(inputs: CorpusManifest, directory: PathBuf, meter: &mut Meter) -> io::Result<Self> {
-        let (checked, image) = Driver::default().produce_image(
+        let (checked, image) = Driver::default().produce_package(
             CheckRequest {
                 inputs,
                 store: directory,
@@ -107,6 +107,7 @@ impl PackageProduct {
                 entry: None,
             },
             meter,
+            false,
         )?;
         let image = image.ok_or_else(|| {
             io::Error::other(format!(
@@ -159,6 +160,9 @@ impl Driver {
             return self.check(request, meter);
         };
         let compiled = normalized(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core"));
+        // Buck embeds package-relative manifest paths; its tests run in the
+        // crate, while the command-line runner runs in the workspace root.
+        let workspace = normalized(Path::new("core/core"));
         let is_bundled = core.package == package("core")
             && core.dependencies.is_empty()
             && core.sources.len() == bundled::SOURCES.len()
@@ -169,7 +173,9 @@ impl Driver {
                 .all(|(s, (module, _))| {
                     s.signatures
                         && s.modules == [*module]
-                        && normalized(&s.file) == compiled.join(format!("{module}.hirsel"))
+                        && [&compiled, &workspace].iter().any(|root| {
+                            normalized(&s.file) == root.join(format!("{module}.hirsel"))
+                        })
                 });
         let product = if is_bundled {
             PackageProduct::bundled(root, meter)?
@@ -194,7 +200,12 @@ impl Driver {
 
 fn normalized(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
-    for component in path.components() {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir().unwrap().join(path)
+    };
+    for component in absolute.components() {
         match component {
             std::path::Component::ParentDir => {
                 result.pop();
@@ -224,6 +235,15 @@ mod tests {
                 }],
             }],
         }
+    }
+    #[test]
+    fn source_paths_normalize_relative_to_the_process_directory() {
+        let root = std::env::current_dir().unwrap();
+        assert_eq!(normalized(Path::new("core/core")), root.join("core/core"));
+        assert_eq!(
+            normalized(Path::new("core/../core/core")),
+            root.join("core/core")
+        );
     }
     #[test]
     fn package_product_keys_source_and_compiler_and_rebuilds_foreign_images() {

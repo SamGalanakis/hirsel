@@ -27,6 +27,8 @@ pub(crate) struct ImageDirectory {
     pub headers: Arc<BTreeMap<DefPath, reuse::Header>>,
     pub declarations: ContentHash,
     pub definitions: BTreeMap<DefPath, ContentHash>,
+    pub diagnostics: Vec<Refusal>,
+    pub incomplete: Vec<Incomplete>,
 }
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ImageRoot {
@@ -43,7 +45,6 @@ pub struct CoreImage {
     bodies: std::sync::Mutex<BTreeMap<DefPath, Arc<DefinitionProduct>>>,
 }
 impl CoreImage {
-    #[cfg(test)]
     pub(crate) fn store_root(&self) -> PathBuf {
         self.store
             .path(ContentHash::default())
@@ -145,8 +146,16 @@ impl Driver {
     /// Use the ordinary request path with an explicit image output product.
     pub fn produce_image(
         &mut self,
+        request: CheckRequest,
+        meter: &mut Meter,
+    ) -> io::Result<(Arc<CheckProduct>, Option<Arc<CoreImage>>)> {
+        self.produce_package(request, meter, true)
+    }
+    pub(crate) fn produce_package(
+        &mut self,
         mut request: CheckRequest,
         meter: &mut Meter,
+        require_complete: bool,
     ) -> io::Result<(Arc<CheckProduct>, Option<Arc<CoreImage>>)> {
         if request.entry.is_some() {
             return Err(io::Error::other(
@@ -164,7 +173,7 @@ impl Driver {
         }
         let store_path = request.store.clone();
         let product = self.check(request, meter)?;
-        if !product.accepted() {
+        if require_complete && !product.accepted() || product.records.is_none() {
             return Ok((product, None));
         }
         let store = Store::new(&store_path)?;
@@ -218,6 +227,8 @@ impl Driver {
             headers: Arc::clone(&product.headers),
             declarations,
             definitions,
+            diagnostics: product.diagnostics.clone(),
+            incomplete: product.incomplete.clone(),
         };
         let directory_hash = store.put(&encode(&directory)?)?;
         let identity = store.put(&encode(&ImageRoot {

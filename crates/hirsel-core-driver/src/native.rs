@@ -158,8 +158,18 @@ impl CheckProduct {
             [&read_input(&options.runtime)?[..]],
         );
         let store = Store::new(&options.store)?;
+        let library_store = self
+            .image
+            .as_ref()
+            .map(|i| Store::new(&i.store_root().join("native")))
+            .transpose()?;
         let mut objects = Vec::new();
         for instance in reached {
+            let store = if !self.definitions.contains_key(&instance.definition) {
+                library_store.as_ref().unwrap_or(&store)
+            } else {
+                &store
+            };
             let instance_body = materialized.get(instance);
             let body = &instance_body.product;
             let ir = instance_body.ir();
@@ -177,14 +187,14 @@ impl CheckProduct {
                 ),
             )?;
             let (identity, bytes, compiled) =
-                if let Some((hash, bytes)) = cached(&store, object_key)? {
+                if let Some((hash, bytes)) = cached(store, object_key)? {
                     (hash, bytes, false)
                 } else {
                     let bytes = emit_unit(ir, options).map_err(|message| NativeStop::Emit {
                         definition: instance.definition.clone(),
                         message,
                     })?;
-                    (publish(&store, object_key, &bytes)?, bytes, true)
+                    (publish(store, object_key, &bytes)?, bytes, true)
                 };
             objects.push(ObjectProduct {
                 instance: instance.clone(),
@@ -843,6 +853,59 @@ mod tests {
         (Process, 8, process_cranelift_entry, process_llvm_entry),
         (Tasks, 9, tasks_cranelift_entry, tasks_llvm_entry),
     );
+    fn product_entry(backend: Backend) {
+        let dir = tempfile::tempdir().unwrap();
+        let options = native_options(backend, dir.path());
+        let source =
+            "pub fn main() -> Result[(), Exit] { Error(Exit(status: identity(answer()))) }\n";
+        let mut request = source_request(source, dir.path());
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.path().join("core.hirsel"))
+            .unwrap()
+            .write_all(b"pub fn answer() -> u8 { 7u8 }\npub fn identity[T](take x: T) -> T { x }\n")
+            .unwrap();
+        let entry = DefPath::from_full("app@1/main/main").unwrap();
+        let checked = Driver::default()
+            .check(request.clone(), &mut Meter::new(false))
+            .unwrap();
+        let native = checked.build(&entry, &options).unwrap();
+        run_clean(&native.executable, 7);
+        request.store = dir.path().join("image-request");
+        let installed = Driver::default()
+            .check_with_product(
+                request,
+                &dir.path().join("products"),
+                &mut Meter::new(false),
+            )
+            .unwrap();
+        let native = installed.build(&entry, &options).unwrap();
+        run_clean(&native.executable, 7);
+        assert_eq!(installed.rechecked.len(), 1);
+        assert_eq!(installed.image.as_ref().unwrap().decoded_bodies(), 2);
+        // A second application's private native store still reuses core's objects.
+        let mut other_options = native_options(backend, dir.path());
+        other_options.store = dir.path().join("another-app-native");
+        let objects = installed.emit_reachable(&entry, &other_options).unwrap();
+        let core = objects
+            .iter()
+            .filter(|o| o.instance.definition.package_is("core", "1"))
+            .collect::<Vec<_>>();
+        assert_eq!(core.len(), 2);
+        assert!(core.iter().all(|o| !o.compiled));
+        assert_eq!(objects.iter().filter(|o| o.compiled).count(), 1);
+    }
+    #[test]
+    #[ignore = "explicit native integration target"]
+    fn published_core_entry_cranelift() {
+        product_entry(Backend::Cranelift);
+    }
+    #[test]
+    #[ignore = "explicit native integration target"]
+    fn published_core_entry_llvm() {
+        product_entry(Backend::Llvm);
+    }
     #[test]
     #[ignore = "explicit native integration target"]
     fn cranelift_source_entries_link_run_and_reuse() {

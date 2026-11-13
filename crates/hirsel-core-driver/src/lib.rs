@@ -483,6 +483,14 @@ impl Driver {
         let mut result = CheckProduct::empty(Arc::clone(&index));
         result.bytes = bytes_total;
         result.image = image.clone();
+        if let Some(directory) = &image_directory {
+            result
+                .diagnostics
+                .extend(directory.diagnostics.iter().cloned());
+            result
+                .incomplete
+                .extend(directory.incomplete.iter().cloned());
+        }
         result.snapshot = snapshot;
         for (path, d) in syntax_diagnostics {
             result
@@ -582,6 +590,7 @@ impl Driver {
                 message: g.what.into(),
             }));
             meter.finish("declarations/layout");
+            let declarations_accepted = result.accepted();
             for (f, fd) in p.fns.iter().enumerate() {
                 if f < p.fns.base_len() || fd.body.is_none() {
                     continue;
@@ -661,7 +670,7 @@ impl Driver {
                 .entry
                 .as_ref()
                 .map(|e| native::bind_entry(&p, e, result.definitions.get(e).map(Arc::as_ref)));
-            if produce && result.accepted() {
+            if produce && declarations_accepted {
                 result.library = Some(Arc::new(p.into_library()));
             } else {
                 drop(p);

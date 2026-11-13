@@ -2337,3 +2337,57 @@ fn closed_comparisons_derive_collection_payloads() {
     let failures = run_case(&root().join("cases/body/compare-collections.hirsel"));
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+#[test]
+fn word_load_and_bit_counts_follow_width_and_bounds() {
+    use hirsel_core_ir::{Inst, RaiseCause, Step, Terminator};
+    let failures = run_case(&root().join("cases/body/word-bit-counts.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+    let (index, inputs) = program_inputs("fn f(b:Bytes,at:u64)->u64 { list.word_le(b,at) }");
+    let p = Program::declare(&index, &inputs);
+    let f = p
+        .fns
+        .iter()
+        .position(|fd| fd.path.package_is("app", "1"))
+        .unwrap();
+    let mut emitter = Emitter::new();
+    let check = p.check_lower(f, &mut emitter);
+    assert!(
+        check.refusals.is_empty() && check.gaps.is_empty(),
+        "{check:?}"
+    );
+    let body = emitter.module.functions[check.function.unwrap().index()]
+        .body
+        .as_ref()
+        .unwrap();
+    let at = body.blocks[0].params.get(&body.pools.values).unwrap()[1];
+    assert_eq!(
+        body.terminators
+            .iter()
+            .filter(|t| matches!(
+                t,
+                Terminator::Raise {
+                    cause: RaiseCause::Bounds,
+                    ..
+                }
+            ))
+            .count(),
+        1,
+        "one explicit range check, no per-byte checks"
+    );
+    assert_eq!(
+        body.insts
+            .iter()
+            .filter(|i| matches!(i,
+                Inst::Read { address, .. } if body.addresses[address.index()].steps
+                    .get(&body.pools.steps).unwrap().contains(&Step::Byte(at))
+            ))
+            .count(),
+        1,
+        "one full-width unaligned read"
+    );
+    assert!(
+        !body.insts.iter().any(|i| matches!(i, Inst::Call { .. })),
+        "no kernel call"
+    );
+}

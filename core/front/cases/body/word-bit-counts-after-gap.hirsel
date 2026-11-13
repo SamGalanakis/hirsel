@@ -1,0 +1,8 @@
+// The new numeric and nongeneric List rows also emit nothing after a gap.
+// expect: gap function, constant and module values are not built
+fn f(b:Bytes,x:u64) {
+ let unsupported=int
+ let _=list.word_le(b,x)
+ let _=int.trailing_zeros(x)
+ let _=int.count_ones(x)
+}

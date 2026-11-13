@@ -131,6 +131,44 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(())
     }
 
+    /// SEM-4: an unaligned little-endian word, with Bounds even when `at + 8`
+    /// would overflow. Saturating remaining length needs one comparison and branch.
+    pub(super) fn list_word_le(
+        &mut self,
+        header: ValueId,
+        at: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        if !self.live() {
+            return None;
+        }
+        let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        let (remaining, _) = self.list_arith(ArithOp::Sub, ArithMode::Saturating, len, at, n);
+        let width = self.konst(Ty::Scalar(Scalar::U64), 8, n)?;
+        let valid = self.list_compare(CompareOp::Ge, remaining, width, n);
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        self.list_branch(valid, yes, no, n);
+        self.start(no);
+        let cleanup = self.fail_to(n);
+        self.end(
+            Terminator::Raise {
+                cause: hirsel_core_ir::RaiseCause::Bounds,
+                cleanup,
+            },
+            Some(n),
+        );
+        self.start(yes);
+        let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+        let address = self.address(
+            AddressBase::Value(data),
+            &[Step::Byte(at)],
+            PlaceTy::Value(Ty::Scalar(Scalar::U64)),
+            n,
+        );
+        Some(self.read_bits(address, Ty::Scalar(Scalar::U64), n))
+    }
+
     pub(super) fn list_arith(
         &mut self,
         op: ArithOp,

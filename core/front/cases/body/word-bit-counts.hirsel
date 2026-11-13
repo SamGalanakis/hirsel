@@ -1,0 +1,31 @@
+// Little-endian: byte j contributes its ASCII value times 256^j; all 8 bytes are read.
+// Trailing zeros of zero is width; signed inputs use exactly their two's-complement bits.
+// expect: accept
+// expect: run word(0) = 7523094288207667809
+// expect: run word(1) = 7595434461045744482
+// expect: run word(7) = 8029475498074204520
+// expect: run word(8) = fail Bounds
+// expect: run word(18446744073709551615) = fail Bounds
+// expect: run word(18446744073709551608) = fail Bounds
+// expect: run short() = fail Bounds
+// expect: run tz64(0) = 64
+// expect: run tz64(1) = 0
+// expect: run tz64(9223372036854775808) = 63
+// expect: run tz8(0) = 8
+// expect: run tz8(128) = 7
+// expect: run tz_signed(-128) = 7
+// expect: run ones64(0) = 0
+// expect: run ones64(18446744073709551615) = 64
+// expect: run ones8(165) = 4
+// expect: run ones_signed(-1) = 8
+fn word(at:u64)->u64 { list.word_le(string.as_bytes("abcdefghijklmno"),at) }
+fn short()->u64 { list.word_le(string.as_bytes("abcdefg"),0) }
+fn tz64(x:u64)->u32 { int.trailing_zeros(x) }
+fn tz8(x:u8)->u32 { int.trailing_zeros(x) }
+fn tz_signed(x:i8)->u32 { int.trailing_zeros(x) }
+fn ones64(x:u64)->u32 { int.count_ones(x) }
+fn ones8(x:u8)->u32 { int.count_ones(x) }
+fn ones_signed(x:i8)->u32 { int.count_ones(x) }
+fn positive()->bool {
+ word(0)==7523094288207667809u64 && word(1)==7595434461045744482u64 && word(7)==8029475498074204520u64 && tz64(0)==64u32 && tz64(1)==0u32 && tz64(9223372036854775808)==63u32 && tz8(0)==8u32 && tz8(128)==7u32 && tz_signed(-128)==7u32 && ones64(0)==0u32 && ones64(18446744073709551615)==64u32 && ones8(165)==4u32 && ones_signed(-1)==8u32
+}

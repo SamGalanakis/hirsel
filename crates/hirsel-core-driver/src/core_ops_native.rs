@@ -817,3 +817,28 @@ fn loop_capture_entry_cranelift(){loop_capture_entry(Backend::Cranelift);}
 #[test]
 #[ignore="explicit native integration target"]
 fn loop_capture_entry_llvm(){loop_capture_entry(Backend::Llvm);}
+
+fn word_load_bit_counts(backend: Backend) {
+    let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source=include_str!("../../../core/front/cases/body/word-bit-counts.hirsel");
+    for (check,exit) in [("positive()",0),("word(8)==0u64",101),("word(18446744073709551615)==0u64",101),("word(18446744073709551608)==0u64",101),("short()==0u64",101)] {
+        let dir=tempfile::tempdir().unwrap();
+        let main=format!("{source}\npub fn main()->Result[(),Exit] {{ if {check} {{ Ok(()) }} else {{ Error(Exit(status:1)) }} }}");
+        let mut request=source_request(&main,dir.path());
+        request.inputs.packages[1]=PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
+        let product=Driver::default().check(request,&mut Meter::new(false)).unwrap();
+        let entry=DefPath::from_full("app@1/main/main").unwrap();
+        let built=product.build(&entry,&native_options(backend,dir.path())).unwrap();
+        let output=Command::new(&built.executable).output().unwrap();
+        assert_eq!(output.status.code(),Some(exit),"{check}: {output:?}");
+        assert!(output.stdout.is_empty(),"{check}: {output:?}");
+        if exit==101 { assert!(output.stderr.starts_with(b"Bounds"),"{check}: {output:?}"); }
+        else { assert!(output.stderr.is_empty(),"{check}: {output:?}"); }
+    }
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn word_load_bit_counts_cranelift(){word_load_bit_counts(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn word_load_bit_counts_llvm(){word_load_bit_counts(Backend::Llvm);}

@@ -1005,7 +1005,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let count = self.numeric_convert(ty, mode, count, n)?;
             return self.numeric_binary(ty, BinaryOp::Shl, vals[0]?, count, n);
         }
-        if name == "leading_zeros" {
+        if matches!(name, "leading_zeros" | "trailing_zeros" | "count_ones") {
             let operand = vals[0]?;
             if !self.live() {
                 return None;
@@ -1014,7 +1014,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.inst(
                 Inst::ScalarUnary {
                     result,
-                    op: hirsel_core_ir::ScalarUnaryOp::LeadingZeros,
+                    op: match name {
+                        "leading_zeros" => hirsel_core_ir::ScalarUnaryOp::LeadingZeros,
+                        "trailing_zeros" => hirsel_core_ir::ScalarUnaryOp::TrailingZeros,
+                        _ => hirsel_core_ir::ScalarUnaryOp::CountOnes,
+                    },
                     operand,
                 },
                 n,

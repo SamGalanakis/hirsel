@@ -70,7 +70,12 @@ impl Function<'_, '_, '_> {
                 let done = self.b.create_block();
                 self.b.ins().brif(refused, check, &[], done, &[]);
                 self.b.switch_to_block(check);
-                let grant = self.c_call("hirsel_core_allocation_status", &[p, p], &[boolean], &[ctx, values[0]])?[0];
+                let grant = self.c_call(
+                    "hirsel_core_allocation_status",
+                    &[p, p],
+                    &[boolean],
+                    &[ctx, values[0]],
+                )?[0];
                 self.guard(grant, 6, fail)?;
                 self.b.ins().jump(done, &[]);
                 self.b.switch_to_block(done);

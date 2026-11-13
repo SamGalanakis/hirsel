@@ -211,14 +211,14 @@ fn sort_descending() -> u64 {
 // expect: run sort_permutation_of_twenty() = 20
 fn sort_permutation_of_twenty() -> u64 {
     let mut xs: List[u64] = list.new()
-    for i in 0 .. 20 {
+    for i in 0u64 .. 20 {
         result.unwrap(list.push(mut xs, (7 * i) % 20))
     }
     list.sort(mut xs, fn(a: u64, b: u64) -> Order {
         order.compare(a, b)
     })
     let mut placed: u64 = 0
-    for i in 0 .. 20 {
+    for i in 0u64 .. 20 {
         if xs[i] == i {
             placed += 1
         }
@@ -230,14 +230,14 @@ fn sort_permutation_of_twenty() -> u64 {
 // expect: run sort_many_equal() = 30
 fn sort_many_equal() -> u64 {
     let mut xs: List[u64] = list.new()
-    for i in 0 .. 30 {
+    for i in 0u64 .. 30 {
         result.unwrap(list.push(mut xs, i % 3))
     }
     list.sort(mut xs, fn(a: u64, b: u64) -> Order {
         order.compare(a, b)
     })
     let mut placed: u64 = 0
-    for i in 0 .. 30 {
+    for i in 0u64 .. 30 {
         if xs[i] == i / 10 {
             placed += 1
         }

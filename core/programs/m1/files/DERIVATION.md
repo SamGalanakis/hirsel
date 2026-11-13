@@ -64,7 +64,7 @@ String(24) and cause(32), totaling 64; its name block is separate.
 
 ## Source length
 
-Physical lines, including comments and blanks: 217 idiomatic and 4 matched;
+Physical lines, including comments and blanks: 222 idiomatic and 4 matched;
 Rust entry plus shared program.rs: 175 idiomatic and 175 matched. The matched
-entry calls the same 217-line implementation, so its effective total is 221.
+entry calls the same 222-line implementation, so its effective total is 226.
 Shared support is counted separately in REPORT.md.

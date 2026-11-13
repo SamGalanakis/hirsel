@@ -11,8 +11,10 @@ same C declarations and frozen 64-bit offsets. Success Capacity fields are zero.
 Each task has a paged limit table and a direct current-record pointer. Admission,
 refund and scope operations use ordinary task-local loads and stores. Outstanding
 bytes retain payer slots; only scope handles and union edges need structural
-pins. Reserved scopes hand survivors over without admission. Page growth is a
-cold table-refill operation; ordinary scope entry allocates no heap record.
+pins. A pointer free list owns each reusable record pin. Scope entry transfers
+that pin, reserves the bound once and sets current. A no-survivor exit returns
+unused room and the record without union bookkeeping. Survivor handover and
+page growth use cold paths; ordinary scope entry allocates no heap record.
 
 Plain blocks have one native payer word. Graph nodes additionally reserve an
 intrusive resumable destruction frame; resources reserve a state pointer. The
@@ -71,9 +73,9 @@ The common register switch lives in hirsel-stack and also serves hirsel-rt.
 
 The cross-task memory hooks live in abi_tasks.rs. Task end forwards surviving funding
 to the parent. Cross-task refunds update the effective payer, then publish one
-event. The current synchronized funding forest settles directly; a task-local
-representation drains its prepaid pending slots in task_resume before code can
-attempt another admission. Event callbacks cannot suspend or re-enter; provider
+event. Task-local accounting drains prepaid pending slots in task_resume before code
+can attempt another admission. Foreign growth and received grants still require
+the exclusive payer lease described above. Event callbacks cannot suspend or re-enter; provider
 issue/delivery callbacks can suspend on their task's own stack.
 
 FORM decision 44 fixes every capability and Args operand as a plain u64 provider

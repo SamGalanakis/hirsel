@@ -364,7 +364,13 @@ fn link_program(scratch: &Scratch, source: &str) -> PathBuf {
     }
     let link = Command::new("cc")
         .current_dir(&scratch.0)
-        .args(["caller.c", "input.o"])
+        .args(["caller.c", "input.o", "-I"])
+        .arg(
+            fs::canonicalize(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hirsel-core-rt/include"),
+            )
+            .expect("the runtime headers are explicit test data"),
+        )
         .arg(archive)
         .args([
             "-lm",

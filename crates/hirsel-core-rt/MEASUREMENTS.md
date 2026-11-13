@@ -1,5 +1,34 @@
 # Memory cost samples
 
+## Allocating bounds and emitted growth
+
+Scope source `d571858c`; growth source `6f939ec3`, unchanged by the later scope edits. Same Rust 1.99.0, CPU16/jobs1/2GiB, checked opt3/no LTO method as below. One first-run sample per configuration, one million iterations, verified checksums. Frozen offsets and C signatures are unchanged.
+
+| workload, instructions/op | system | mimalloc |
+|---|---:|---:|
+| Rust scope/query/exit | 51.434 | 51.571 |
+| query-only control | 10.434 | 10.571 |
+| C ABI scope/query/exit | 65.434 | 65.571 |
+| C ABI scope with allocating callback | 237.434 | 152.071 |
+| identical allocating callback without scope | 182.434 | 97.071 |
+| **C ABI enter+exit difference** | **55.001** | **55.000** |
+| Rust method enter+exit difference | 43.001 | 43.000 |
+| emitted growth push | 15.188 | 15.344 |
+| fresh Rust Vec push | 17.438 | 18.341 |
+| emitted / fresh Rust | 0.871x | 0.837x |
+| Option-wrapped runtime push control | 18.186 | 18.344 |
+| Rust allocate/copy/free push control | 20.181 | 20.340 |
+
+The scope difference surrounds the same out-of-line allocating callback on both sides. It includes real C calls, reservation and free-list operations; no statically empty-scope elision. It meets the under-60 target. The old direct-method scope loop measured 391.44 instructions; the matching new direct-method loop is 51.43. Callgrind reproduced the old loop at 391.328 and attributed 66 instructions to slot acquisition/init, 75 to generalized release/pins, 31 to admission, 39 to three Funding lookups, and 180 to inline bookkeeping/loop code. Page/slot address calculations contribute about 65 already included in those rows. Page allocation happens at startup, and no union runs in the warmed no-survivor case. A pointer free list, pin transfer and cold survivor/refill functions remove that common work.
+
+The emitted growth shim carries pointer/length/capacity and calls allocation, copy and free only at growth. The non-growing path compares length, stores and increments with no runtime call. Removing the measurement wrapper saves 3.00 instructions/push. Callgrind attributes 2,999,977 instructions per million pushes to the Option carrier. A diagnostic native perf-counter memcpy interposer records 26 calls/8,405,060 copied bytes/741,053 instructions for runtime versus six startup calls/97 bytes/262 instructions for Rust. Copies explain about 0.741 instructions/push of the original remaining gap; admission occurs only at 19 growth points. This is diagnostic attribution, not another benchmark baseline.
+
+The earlier system Rust Vec result was 14.44. Later isolated functions produce 17.44 under the same flags, so fresh ratios include code-generation differences. Against the earlier 14.44 baseline, emitted 15.19 is 1.052x. The absolute three-instruction wrapper removal and absence of calls on the non-growing path are the supported implementation claims.
+
+Evidence: `/workspace/code/hirsel-briefs/core-memory-900/{bound-cold-entry-score,bound-growth-qualified,bound-attribution}/`. Provider task cost, inline region cost and matched own-pair overhead remain pending.
+
+## Earlier representation rewrite samples
+
 Runtime source: `89d34d5d`. Rust 1.99.0, x86-64, CPU 16, one job, checked opt-level 3, one codegen unit, no LTO, debug or incremental state. Each process runs 1,000,000 pairs or builds 1,000,000 elements. The table divides whole-process retired user instructions by that count, including startup and cleanup. All 36 first-run samples produced the expected checksum; no repetitions or uncertainty estimate. These are isolated memory kernels, not end-to-end application measurements.
 
 | workload | system Rust instr/op | system runtime instr/op | ratio | mimalloc Rust instr/op | mimalloc runtime instr/op | ratio |

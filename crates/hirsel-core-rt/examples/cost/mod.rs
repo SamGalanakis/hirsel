@@ -112,7 +112,7 @@ fn rust_growth() -> u64 {
     for i in 0..COUNT {
         values.push(black_box(i));
     }
-    return black_box(values).iter().sum();
+    black_box(values).iter().sum()
 }
 
 #[inline(never)]
@@ -128,7 +128,7 @@ fn matched_growth() -> u64 {
         }
         values.push(black_box(i));
     }
-    return black_box(values).iter().sum();
+    black_box(values).iter().sum()
 }
 
 #[inline(never)]

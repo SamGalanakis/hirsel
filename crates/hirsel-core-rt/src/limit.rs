@@ -1,5 +1,6 @@
 //! Task-local paged limit table. Bytes retain payer slots; only scope handles
-//! and union edges use structural pins. Remote events never touch local fields.
+//! and union edges use structural pins. The free list retains each unused slot's
+//! pin for its next scope. Remote events never touch local fields.
 //! Native balance updates wrap because admission/refund invariants already prove
 //! their range; they do not add guards against incorrect generated bookkeeping.
 //! User-visible size arithmetic, Capacity and count-increment overflow stay checked.
@@ -561,6 +562,7 @@ impl Funding {
         let live = self.reserve_scope(bytes)?;
         // SAFETY: an active Funding handle is untagged and task-exclusive.
         let domain = unsafe { self.payer.0.as_ref().domain };
+        // SAFETY: that same execution custody owns this domain's local table.
         let forest = unsafe { &mut *domain.as_ref().forest.get() };
         self.payer = forest.take(domain, live);
         Ok(())
@@ -584,7 +586,6 @@ impl Funding {
     }
     #[inline(always)]
     pub(crate) fn exit(&mut self) {
-        let old = self.payer;
         // SAFETY: the active context pins its canonical record exclusively.
         let r = unsafe { &mut *self.raw_local() };
         if r.refs != 1 || r.available != r.live.capacity {

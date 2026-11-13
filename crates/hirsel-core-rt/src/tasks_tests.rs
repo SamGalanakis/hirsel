@@ -492,7 +492,7 @@ fn arc_unwrap_observes_release_order_and_foreign_last_refund() {
         // SAFETY: two exact holders, transferred independently; unwrap success owns the node.
         unsafe {
             let release_first = input.cast::<bool>().read();
-            let node = Block::new(&*context, Some(16), 16, 8).unwrap().into_raw();
+            let node = Block::graph(&*context, Some(16), 16, 8).unwrap().into_raw();
             hirsel_core_counted_init(node, true);
             node.as_ptr().add(8).cast::<u64>().write(41);
             hirsel_core_share(node, true);

@@ -6,16 +6,16 @@ hirsel_guard::install!();
 
 pub mod abi;
 pub mod abi_host;
-pub mod abi_tasks;
 pub mod abi_layout;
+pub mod abi_tasks;
 mod allocator;
 pub mod block;
 pub mod causes;
 pub mod channel;
 pub mod counted;
+mod destination;
 pub mod entry;
 mod fiber;
-mod destination;
 pub mod limit;
 pub mod os;
 pub mod process;

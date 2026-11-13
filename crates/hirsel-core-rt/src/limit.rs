@@ -444,7 +444,13 @@ impl Funding {
     }
     pub(crate) fn task_owner(&self, owner: u64) {
         let payer = self.payer.canonical();
-        payer.forest().record_mut(payer.slot().id).live.as_mut().unwrap().owner = owner;
+        payer
+            .forest()
+            .record_mut(payer.slot().id)
+            .live
+            .as_mut()
+            .unwrap()
+            .owner = owner;
     }
     pub fn end(&self) {
         self.end_id();

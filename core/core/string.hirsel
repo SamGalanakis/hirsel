@@ -136,6 +136,20 @@ pub fn push(mut s: String, t: String) -> Result[(), Capacity]
 
 pub fn push_char(mut s: String, c: char) -> Result[(), Capacity] {
     let v = char.to_u32(c)
+    // ASCII into room the String owns: one byte, no growth. A static String has capacity 0.
+    if v < 0x80 && string.byte_len(s) < list.capacity(string.as_bytes(s)) {
+        let owned = replace(mut s, string.new())
+        let mut b = to_bytes(take owned)
+        // There is room, so this admits nothing.
+        let _ = list.push(mut b, int.truncate(v))
+        s = of_bytes(take b)
+        return Ok(())
+    }
+    push_scalar(mut s, v)
+}
+
+// Any scalar value v, growing (or copying out of static storage) first.
+fn push_scalar(mut s: String, v: u32) -> Result[(), Capacity] {
     let w: u64 = if v < 0x80 {
         1
     } else if v < 0x800 {

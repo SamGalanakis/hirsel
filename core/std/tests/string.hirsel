@@ -497,6 +497,19 @@ fn push_u64_appends() -> bool {
     s == "ab1007"
 }
 
+// Into reserved room: ASCII lands after what is there, a wider scalar between ASCII pushes keeps
+// the order, and nothing grows: 1 + 2 + 1 bytes fit in the 8 reserved.
+// expect: run push_char_into_room() = true
+fn push_char_into_room() -> bool {
+    let mut s = string.new()
+    result.unwrap(string.reserve(mut s, 8))
+    let room = list.capacity(string.as_bytes(s))
+    result.unwrap(string.push_char(mut s, 'a'))
+    result.unwrap(string.push_char(mut s, 'é'))
+    result.unwrap(string.push_char(mut s, 'b'))
+    s == "aéb" && list.capacity(string.as_bytes(s)) == room
+}
+
 // 1, 2, 3 and 4 UTF-8 bytes: 'a', 'é' (C3 A9), '€' (E2 82 AC), U+1F600 (F0 9F 98 80).
 // expect: run push_char_widths() = true
 fn push_char_widths() -> bool {

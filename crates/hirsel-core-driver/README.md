@@ -31,10 +31,37 @@ incomplete source never produces an image. `//:hirsel-core-image` is the Buck ta
 it invokes this new producer, independently of old precompute. Its success depends
 on the canonical signatures being supported by the checker. Check an application
 with `--image <image-dir>` to bind shared declaration/type rows and a request overlay.
-Image open reads the directory only; the declaration section decodes on its first
-signature demand, and file/text/body rows decode on individual demand. Signature
+Image open reads only a fixed compiler/directory root. The directory and complete
+declaration section decode on their first respective demands, and file/text/body
+rows decode on individual demand. Signature
 imports neither read library sources nor decode callee bodies. Image byte damage
 is reported as a cache miss requiring an image rebuild.
+
+Native `build` and `run` use the published core package by default. The compiler
+build freezes `core/core` sources and their digest; the shared package cache is
+keyed by that digest and the compiler identity. A miss produces it once; later
+builds remove core's source inputs before parsing, resolution and checking. The
+cache is `$XDG_CACHE_HOME/hirsel/core-packages`, or `$HOME/.cache/hirsel/core-packages`.
+`core-product --store <cache>` explicitly produces/reopens it. `--core-product
+<cache>` selects that cache and also enables package consumption for `check`;
+`--source-core` checks the supplied source instead, for development/comparison.
+Explicit custom core manifests produce a package keyed by their source contents
+and dependencies. Toolchain-source edits require rebuilding the compiler to
+change its bundled digest. Custom manifests hash their source bytes on lookup.
+
+The package contains declarations, summaries/layout recipes, checked generic
+templates and nongeneric CoreIR. Reached generic instances use the ordinary
+materializer. Incomplete body outcomes are cached as diagnostics, so reachable
+incomplete bodies still refuse native assembly. This reusable package is not a
+claim that the strict canonical `image` has been accepted. The same producer and
+format support core+std; automatic std-package selection is not enabled yet.
+
+Package opening reads a fixed-size root without scanning the package. The first
+semantic demand still decodes its complete name index and declaration prefix.
+That remaining cost scales with package size. Individual syntax/body records are
+content-addressed separately, so demanding one body does not decode the others.
+`--metrics` exposes root load separately from package-index demand; declaration
+loading remains in the resolve stage. No constant semantic-load claim is made.
 
 `collect_instances` collects reachable distinct instances without source rechecking,
 with an explicit compiler-resource stop for growing instance families. The checked
@@ -60,7 +87,10 @@ native target is x86_64-unknown-linux-gnu. `--json` includes the executable,
 compiled-object count, link count and explicit stage stop.
 
 Object keys include compiler, checked-body/read identity, emitted module, target,
-backend, optimization and runtime bytes. Executables additionally key the entry
+backend, optimization and runtime bytes. Reached installed-package objects live
+in the package store and are shared across application stores. They compile on
+first demand, including nongeneric bodies; no eager monolithic core object is
+built. Executables additionally key the entry
 thunk, headers and linker version. A warm build reads integrity-checked products
 and compiles/links nothing; an implementation edit rebuilds its object and relinks.
 The real `hirsel_core_run` boundary maps PROG-3 outcomes after cleanup. Entry

@@ -561,12 +561,13 @@ impl Driver {
                     })
                 })
         });
+        meter.finish("resolve");
         let library = if reads_library {
             image.as_ref().map(|i| i.declarations()).transpose()?
         } else {
             None
         };
-        meter.finish("resolve");
+        meter.finish("package declarations demand");
         let mut keys = Keys::new(
             &index,
             &modules,

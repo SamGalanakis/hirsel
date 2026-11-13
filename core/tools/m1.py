@@ -54,6 +54,10 @@ CHECK_SLICES = ('A1', 'B', 'C', 'E', 'writers/sequences/regions/tasks', 'A2', 'D
 def checker_slice(message, expression=""):
     """Route reported implementation gaps; unknown constructs stay visible."""
     text = message.lower()
+    if 'aggregate constants' in text or 'unique runtime identity binding' in text:
+        return 'A1'
+    if 'provider extern rows' in text or 'string view of a text' in text:
+        return 'writers/sequences/regions/tasks'
     if text == 'this generic core operation is not built':
         head = re.match(r'\s*([A-Za-z_]\w*)', expression)
         if not head:

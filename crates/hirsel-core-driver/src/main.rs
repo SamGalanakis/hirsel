@@ -136,7 +136,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
         if let Some(path) = metrics {
             std::fs::write(path, serde_json::to_vec_pretty(&meter.result)?)?;
         }
-        return Ok(0);
+        std::process::exit(0);
     }
     let image = if let Some(path) = image_path {
         Some(CoreImage::open(&path)?.ok_or("core image cache miss; rebuild the image")?)

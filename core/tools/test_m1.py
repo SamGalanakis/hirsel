@@ -156,6 +156,13 @@ print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnos
             operation['primary']['span']['end'] = len(expression)
             sites = gap_sites([operation], {'example@1/main': expression.encode()})
             self.assertEqual(sites[0]['slice'], owner)
+        for message, owner in [
+            ('aggregate constants are not built', 'A1'),
+            ('Unique runtime identity binding is not specified (FOR FORM)', 'A1'),
+            ('provider extern rows are not built (FOR FORM)', 'writers/sequences/regions/tasks'),
+            ('a String view of a Text returned from its function is not built (Q38)', 'writers/sequences/regions/tasks'),
+        ]:
+            self.assertEqual(gap_sites([gap(message, 0)])[0]['slice'], owner)
         missing = dict(rule='instances', construct='native body is unavailable',
                        primary=dict(module='core@1/string', span=dict(start=410, end=418)))
         self.assertEqual(gap_sites([], first_stops=[missing])[0]['slice'], 'A1')

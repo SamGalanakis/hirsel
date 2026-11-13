@@ -54,7 +54,12 @@ impl PackageProduct {
         let sources = directory.join("sources");
         std::fs::create_dir_all(&sources)?;
         for (module, text) in bundled::SOURCES {
-            std::fs::write(sources.join(format!("{module}.hirsel")), text)?;
+            // Concurrent first users may produce the same package. A source
+            // reader must see an entire frozen file, never another writer's prefix.
+            use std::io::Write;
+            let mut file = tempfile::NamedTempFile::new_in(&sources)?;
+            file.write_all(text.as_bytes())?;
+            file.persist(sources.join(format!("{module}.hirsel")))?;
         }
         let inputs = CorpusManifest {
             core: package("core"),

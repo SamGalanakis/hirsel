@@ -179,7 +179,9 @@ checked once and uses only the bounds it declares
 ([OWN-23](ownership.md#own-23-generic-bodies)). Type arguments are never written at a
 call: they are found from that one call, as LANG-11 orders it, or the call is refused here.
 A type argument that lacks a bound its
-parameter declares is refused, at the argument or result that determined it. Each use of a generic type writes its
+parameter declares is refused when it is fixed, at what fixed it in LANG-11's order: at the
+call when the expected result fixed it, otherwise at the argument that did. An argument that
+later agrees with it is not a second site. Each use of a generic type writes its
 arguments.
 
 ```hirsel
@@ -192,7 +194,8 @@ fn same[T](a: T, b: T) -> bool { a == b }                 // refused: LANG-12, T
 fn empty() -> u64 { list.len(list.new()) }                // refused: LANG-12, at list.new(): T is open
 ```
 ```hirsel
-fn f(a: f64, b: f64) -> f64 { int.wrapping_add(a, b) }    // refused: LANG-12, at a: f64 is not integer
+fn f(a: f64, b: f64) -> f64 { int.wrapping_add(a, b) }    // refused: LANG-12, at the call: f64 is not integer
+fn g(a: f64, b: f64) -> bool { int.wrapping_add(a, b) == a }  // refused: LANG-12, at a: f64 is not integer
 ```
 
 ### LANG-13: Callables

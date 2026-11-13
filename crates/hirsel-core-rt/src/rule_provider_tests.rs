@@ -147,7 +147,7 @@ fn recorded_run(replay: Option<Vec<Recorded>>) -> (Tape, Vec<Recorded>, Vec<(u8,
     let chain = context
         .causes
         .iter()
-        .map(|cause| (cause.kind, cause.site))
+        .map(|cause| (cause.kind(), cause.site))
         .collect();
     (tape, results, chain)
 }

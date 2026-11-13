@@ -26,10 +26,10 @@ use crate::types::*;
 use crate::{Def, Gap, ItemRef, Program, refusal};
 use hirsel_core_ids::DefPath;
 use hirsel_core_ir::{
-    AddressBase, AddressId, AddressInfo, Anchor, Arg, ArithMode, ArithOp, BinaryOp, Block, BlockId,
-    Body, CallId, CallSite, Callee, CompareOp, ConvertMode, Edge, EdgeId, FuncId, Function, Inst,
-    InstanceId, InstanceKey, ItemId, Module, Param, PlaceTy, PoolRange, ReadMode, SigId, Signature,
-    SlotId, Step, Terminator, Ty, TypeId, UnaryOp, ValueId,
+    AddressBase, AddressId, AddressInfo, AllocKind, AllocPlace, Anchor, Arg, ArithMode, ArithOp,
+    BinaryOp, Block, BlockId, Body, CallId, CallSite, Callee, CompareOp, ConvertMode, Edge, EdgeId,
+    FuncId, Function, Inst, InstanceId, InstanceKey, ItemId, Module, Param, PlaceTy, PoolRange,
+    ReadMode, SigId, Signature, SlotId, Step, Terminator, Ty, TypeId, UnaryOp, ValueId,
 };
 use hirsel_core_layout::{FieldTy, Handle, Layout, Recipe, Repr as LRepr, Scalar, TypeRef};
 use hirsel_core_resolve::{Refusal, Target};
@@ -313,12 +313,24 @@ impl Emitter {
             _ => Err("values of this type are not built"),
         }
     }
+    /// Row `id` is a resource: a value of it is a pointer to its block, which holds
+    /// its fields, cause cell and grant (MEM-24, layout: a holder counts 8).
+    fn is_resource(&self, id: TypeId) -> bool {
+        self.module.types[id.index()].repr == LRepr::Resource
+    }
+    /// The admission of a resource of row `id`: its storage, cause cell and grant
+    /// (MEM-24, MEM-27).
+    fn resource_charge(&self, id: TypeId) -> Option<u64> {
+        let storage = self.recipes[id.index()].logical_size?;
+        hirsel_core_layout::charge::resource(storage, self.module.types[id.index()].grant)
+    }
     /// Cleaning a value of row `id` does something (FAIL-8).
     fn needs_drop(&self, id: TypeId) -> bool {
         self.recipes[id.index()].drop.is_some()
     }
-    /// Cleaning a value of row `id` may run a finalizer or free a resource block. Rows
-    /// reach themselves through sequences and maps, so each row is visited once.
+    /// Cleaning a value of row `id` may run a finalizer; a resource without one is
+    /// cleaned mechanically (FAIL-13). Rows reach themselves through sequences and
+    /// maps, so each row is visited once.
     fn runs_code(&self, id: TypeId) -> bool {
         let mut seen = vec![id];
         let mut work = vec![id];
@@ -326,7 +338,7 @@ impl Emitter {
             let Some(d) = &self.recipes[id.index()].drop else {
                 continue;
             };
-            if self.module.types[id.index()].repr == LRepr::Resource || d.finalizer.is_some() {
+            if d.finalizer.is_some() {
                 return true;
             }
             for f in d.fields.iter().flatten() {
@@ -342,10 +354,19 @@ impl Emitter {
         }
         false
     }
-    /// The byte size of a value of row `id`, whose recipe exists.
+    /// The byte size of a value of row `id`, whose recipe exists: a resource's
+    /// holder is its block pointer.
     fn size(&self, id: TypeId) -> u64 {
+        if self.is_resource(id) {
+            return hirsel_core_layout::POINTER;
+        }
+        self.block(id).0
+    }
+    /// The size and alignment of row `id`'s fields laid out together (a resource's
+    /// block).
+    fn block(&self, id: TypeId) -> (u64, u64) {
         match &self.recipes[id.index()].layout {
-            Layout::Fixed(f) => f.size,
+            Layout::Fixed(f) => (f.size, f.align),
             Layout::Compact(_) => unreachable!("only fixed layouts are carried"),
         }
     }
@@ -931,7 +952,9 @@ impl<'c, 'a> Cx<'c, 'a> {
     fn ir_ty(&mut self, ty: TyId) -> Option<Ty> {
         self.rep(ty).ok().and_then(Rep::ty)
     }
-    /// Evaluate a new address (`Inst::Address`).
+    /// An address. A resource row's place is the holder of its block pointer, except
+    /// that a pointer value typed by the row, with steps after it, is the block
+    /// (FORM): fields of a resource are reached only through [`Self::fields_of`].
     fn address(&mut self, base: AddressBase, steps: &[Step], ty: PlaceTy, n: NodeId) -> AddressId {
         let fail = if steps.iter().any(|s| matches!(s, Step::Element(_))) {
             self.fail_to(n)
@@ -943,6 +966,24 @@ impl<'c, 'a> Cx<'c, 'a> {
         let address = AddressId(self.b.addresses.len() as u32 - 1);
         self.inst(Inst::Address { address, fail }, n);
         address
+    }
+    /// The place of row `id`'s fields for the value at `base` (a place of row `id`):
+    /// the place itself, or for a resource the block its holder points at.
+    fn fields_of(&mut self, base: AddressBase, id: TypeId, n: NodeId) -> AddressId {
+        if !self.e.is_resource(id) {
+            return self.address(base, &[], PlaceTy::Declared(id), n);
+        }
+        let at = self.address(base, &[], PlaceTy::Value(Ty::Ptr), n);
+        let block = self.value(Ty::Ptr);
+        self.inst(
+            Inst::Read {
+                result: block,
+                address: at,
+                mode: ReadMode::Bits,
+            },
+            n,
+        );
+        self.address(AddressBase::Value(block), &[], PlaceTy::Declared(id), n)
     }
     /// A new slot of `ty`, begun here, and its address.
     fn new_slot(&mut self, ty: PlaceTy, n: NodeId) -> AddressId {

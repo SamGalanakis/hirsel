@@ -465,6 +465,12 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
             match self.steps[k as usize] {
                 PStep::Field(i) => {
+                    // A resource's fields are in the block its holder points at.
+                    if let Ok(Rep::Place(id)) = self.rep(ty)
+                        && self.e.is_resource(id)
+                    {
+                        address = self.fields_of(AddressBase::Address(address), id, n);
+                    }
                     ty = self.field_ty(ty, i)?;
                     let place = self.place_ty(ty, n)?;
                     address =
@@ -494,7 +500,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         let p = self.read_bits(address, Ty::Ptr, n);
         self.address(AddressBase::Value(p), &[], PlaceTy::Declared(id), n)
     }
-    fn read_bits(&mut self, address: AddressId, t: Ty, n: NodeId) -> ValueId {
+    pub(super) fn read_bits(&mut self, address: AddressId, t: Ty, n: NodeId) -> ValueId {
         let result = self.value(t);
         self.inst(
             Inst::Read {

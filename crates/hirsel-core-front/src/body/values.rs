@@ -25,6 +25,208 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
     }
 
+    /// T1.2: a resource literal admits the block (storage, cause cell, grant) and is
+    /// `Ok` of it with the fields written into the block, or on `Capacity` the error
+    /// `(Capacity, F)` owning the fields: F the one field or the tuple of them, or
+    /// bare `Capacity` with none (FAIL-11).
+    fn resource_literal(
+        &mut self,
+        ty: TyId,
+        own: TyId,
+        fields: &[crate::decls::FieldDecl],
+        tys: &[TyId],
+        vals: &[Option<ValueId>],
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let (rid, id) = match (self.rep(own), self.rep(ty)) {
+            (Ok(Rep::Place(rid)), Ok(Rep::Place(id))) => (rid, id),
+            (Err(what), _) | (_, Err(what)) => {
+                self.gap(n, what);
+                return None;
+            }
+            _ => return None,
+        };
+        let mut reps = vec![];
+        for f in fields {
+            let fty = subst(&mut self.t, f.ty, tys);
+            match self.rep(fty) {
+                Ok(r) => reps.push(r),
+                Err(what) => {
+                    self.gap(n, what);
+                    return None;
+                }
+            }
+        }
+        if reps
+            .iter()
+            .zip(vals)
+            .any(|(r, v)| r.stored().is_some() && v.is_none())
+        {
+            self.gap(n, "this field value is not built");
+            return None;
+        }
+        let Some(charge) = self.e.resource_charge(rid) else {
+            self.gap(n, "resource literals are not built");
+            return None;
+        };
+        if !self.live() {
+            return None;
+        }
+        let (size, align) = self.e.block(rid);
+        let grant = self.e.module.types[rid.index()].grant;
+        let to = self.new_slot(PlaceTy::Declared(id), n);
+        let c = self.konst(Ty::Scalar(Scalar::U64), charge, n)?;
+        let sz = self.konst(Ty::Scalar(Scalar::U64), size, n)?;
+        let block = self.value(Ty::Ptr);
+        let available = self.value(Ty::Scalar(Scalar::U64));
+        self.inst(
+            Inst::Alloc {
+                result: block,
+                available,
+                region_entry: None,
+                kind: AllocKind::Resource { grant },
+                place: AllocPlace::Current,
+                charge: c,
+                size: sz,
+                align,
+                fail: None,
+            },
+            n,
+        );
+        let null = self.konst(Ty::Ptr, 0, n)?;
+        let admitted = self.value(Ty::Scalar(Scalar::Bool));
+        self.inst(
+            Inst::Compare {
+                result: admitted,
+                op: CompareOp::Ne,
+                left: block,
+                right: null,
+            },
+            n,
+        );
+        let (yes, no, join) = (
+            self.new_block(&[]),
+            self.new_block(&[]),
+            self.new_block(&[]),
+        );
+        let (ye, ne) = (self.edge(yes, &[]), self.edge(no, &[]));
+        self.end(
+            Terminator::Branch {
+                condition: admitted,
+                yes: ye,
+                no: ne,
+            },
+            Some(n),
+        );
+        // Ok: the block holds the fields.
+        self.start(yes);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 0,
+            },
+            n,
+        );
+        let holder = self.address(
+            AddressBase::Address(to),
+            &[Step::CaseField { case: 0, field: 0 }],
+            PlaceTy::Value(Ty::Ptr),
+            n,
+        );
+        self.inst(
+            Inst::Store {
+                address: holder,
+                value: block,
+            },
+            n,
+        );
+        let fields_at = self.address(AddressBase::Value(block), &[], PlaceTy::Declared(rid), n);
+        for (i, r) in reps.iter().enumerate() {
+            if let Some(place) = r.stored() {
+                let at = self.address(
+                    AddressBase::Address(fields_at),
+                    &[Step::Field(i as u32)],
+                    place,
+                    n,
+                );
+                self.install(at, *r, vals[i], n);
+            }
+        }
+        self.jump(join, &[], n);
+        // Error: `Capacity` and the fields, moved back to the caller.
+        self.start(no);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 1,
+            },
+            n,
+        );
+        let decl_ty = |cx: &mut Self, t: TyId| match cx.rep(t) {
+            Ok(Rep::Place(id)) => Some(id),
+            _ => None,
+        };
+        let back = match self.t.kind(ty) {
+            TyKind::Adt(_, args) => args[1],
+            _ => unreachable!("a resource literal is a Result"),
+        };
+        let back_id = decl_ty(self, back)?;
+        let err = self.address(
+            AddressBase::Address(to),
+            &[Step::CaseField { case: 1, field: 0 }],
+            PlaceTy::Declared(back_id),
+            n,
+        );
+        let (cap_at, rest) = match self.t.kind(back).clone() {
+            TyKind::Tuple(parts) => {
+                let cap_id = decl_ty(self, parts[0])?;
+                let cap_at = self.address(
+                    AddressBase::Address(err),
+                    &[Step::Field(0)],
+                    PlaceTy::Declared(cap_id),
+                    n,
+                );
+                let rest = if reps.len() == 1 {
+                    None
+                } else {
+                    let f_id = decl_ty(self, parts[1])?;
+                    Some(self.address(
+                        AddressBase::Address(err),
+                        &[Step::Field(1)],
+                        PlaceTy::Declared(f_id),
+                        n,
+                    ))
+                };
+                (cap_at, rest)
+            }
+            _ => (err, None),
+        };
+        for (k, value) in [c, available].into_iter().enumerate() {
+            let at = self.address(
+                AddressBase::Address(cap_at),
+                &[Step::Field(k as u32)],
+                PlaceTy::Value(Ty::Scalar(Scalar::U64)),
+                n,
+            );
+            self.inst(Inst::Store { address: at, value }, n);
+        }
+        for (i, r) in reps.iter().enumerate() {
+            if let Some(place) = r.stored() {
+                let at = match rest {
+                    None => self.address(AddressBase::Address(err), &[Step::Field(1)], place, n),
+                    Some(f) => {
+                        self.address(AddressBase::Address(f), &[Step::Field(i as u32)], place, n)
+                    }
+                };
+                self.install(at, *r, vals[i], n);
+            }
+        }
+        self.jump(join, &[], n);
+        self.start(join);
+        let p = self.pointer(to, n);
+        self.temp(ty, Some(p));
+        Some(p)
+    }
     pub(super) fn literal(
         &mut self,
         n: NodeId,
@@ -560,8 +762,9 @@ impl<'c, 'a> Cx<'c, 'a> {
         let tys: Vec<TyId> = found.into_iter().flatten().collect();
         if let Some(lit) = lit {
             let ty = subst(&mut self.t, lit, &tys);
-            self.gap(n, "resource literals are not built");
-            return (ty, None);
+            let own = self.t.mk(TyKind::Adt(d, tys.clone()));
+            let v = self.resource_literal(ty, own, fields, &tys, &vals, n);
+            return (ty, v);
         }
         let ty = self.t.mk(TyKind::Adt(d, tys.clone()));
         let id = match self.rep(ty) {

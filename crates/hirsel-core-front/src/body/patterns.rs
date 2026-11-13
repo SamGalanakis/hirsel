@@ -527,13 +527,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 (Some(value), Ok(r)) => {
                     let base = match self.rep(subject.ty).map(Rep::pointee) {
                         Ok(Some(id)) => {
-                            let a = self.address(
-                                AddressBase::Value(value),
-                                &[],
-                                PlaceTy::Declared(id),
-                                n,
-                            );
-                            AddressBase::Address(a)
+                            AddressBase::Address(self.fields_of(AddressBase::Value(value), id, n))
                         }
                         _ => {
                             return Subject {
@@ -564,7 +558,15 @@ impl<'c, 'a> Cx<'c, 'a> {
                         }
                         Rep::Place(id) => {
                             let a = self.address(base, &[step], PlaceTy::Declared(id), n);
-                            Some(self.pointer(a, n))
+                            let p = self.pointer(a, n);
+                            // A resource's block is freed when it is taken apart (T3.7),
+                            // so its parts are copied out of it.
+                            match self.rep(subject.ty) {
+                                Ok(Rep::Place(r)) if self.e.is_resource(r) => {
+                                    Some(self.snapshot(p, id, n))
+                                }
+                                _ => Some(p),
+                            }
                         }
                     }
                 }
@@ -644,12 +646,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                         (subject.value, self.rep(subject.ty).map(Rep::pointee))
                     && self.live()
                 {
-                    let a = self.address(
-                        AddressBase::Value(value),
-                        &[],
-                        PlaceTy::Declared(ty),
-                        pat.site,
-                    );
+                    let a = self.fields_of(AddressBase::Value(value), ty, pat.site);
                     let tag = self.value(Ty::Scalar(Scalar::U32));
                     self.inst(
                         Inst::Case {
@@ -797,6 +794,25 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
         if subject.place.is_none() {
             self.consume(subject.value, pat.site);
+        }
+        // T3.7: the destructured resource's block (its storage, unused cell and grant)
+        // is freed and refunded; its fields went on with their blocks.
+        if let (Some(value), Ok(Rep::Place(id))) = (subject.value, self.rep(pat.ty))
+            && self.e.is_resource(id)
+            && self.live()
+        {
+            let holder = self.address(
+                AddressBase::Value(value),
+                &[],
+                PlaceTy::Value(Ty::Ptr),
+                pat.site,
+            );
+            let block = self.read_bits(holder, Ty::Ptr, pat.site);
+            if let Some(charge) = self.e.resource_charge(id)
+                && let Some(charge) = self.konst(Ty::Scalar(Scalar::U64), charge, pat.site)
+            {
+                self.inst(Inst::Free { block, charge }, pat.site);
+            }
         }
     }
     fn chosen_pattern(&mut self, id: u32, mut subject: Subject, n: NodeId) -> Subject {
@@ -1485,7 +1501,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         if let (Some(value), Ok(Rep::Place(id))) = (subject.value, self.rep(subject.ty))
             && self.live()
         {
-            let a = self.address(AddressBase::Value(value), &[], PlaceTy::Declared(id), n);
+            let a = self.fields_of(AddressBase::Value(value), id, n);
             let tag = self.value(Ty::Scalar(Scalar::U32));
             self.inst(
                 Inst::Case {

@@ -421,8 +421,29 @@ pub unsafe extern "C" fn hirsel_core_free(pointer: NonNull<u8>, charge: u64) {
 /// Context is live and exclusively used by its task.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_limit_enter(context: *mut Context, bytes: u64) -> Allocation {
-    // SAFETY: caller owns the task context during this call.
-    match unsafe { &mut *context }.limit_enter(bytes) {
+    // SAFETY: caller owns this context; no operation between selecting and
+    // consuming the free-list head can suspend or invoke a provider.
+    unsafe {
+        let task = &mut *context;
+        let Some(slot) = task.current.reusable_slot() else {
+            return limit_enter_refill(context, bytes);
+        };
+        let result = task.current.enter_reused(bytes, slot);
+        if result.is_ok() {
+            task.bound_depth = task.bound_depth.wrapping_add(1);
+        }
+        scope_allocation(context, result)
+    }
+}
+#[cold]
+unsafe extern "C" fn limit_enter_refill(context: *mut Context, bytes: u64) -> Allocation {
+    // SAFETY: this is the same task-exclusive entry with an empty record pool.
+    let result = unsafe { &mut *context }.limit_enter(bytes);
+    scope_allocation(context, result)
+}
+#[inline(always)]
+fn scope_allocation(context: *mut Context, result: Result<(), Capacity>) -> Allocation {
+    match result {
         Ok(()) => Allocation {
             pointer: context.cast(),
             capacity: Capacity {

@@ -41,7 +41,7 @@ pub struct LimitRecord {
     occupied: bool,
 }
 #[repr(C, align(32))]
-struct Slot {
+pub(crate) struct Slot {
     local: UnsafeCell<LimitRecord>,
     pending: AtomicU64,
     pending_zeros: AtomicUsize,
@@ -141,6 +141,10 @@ impl Forest {
         } else {
             self.fresh(domain)
         };
+        Self::initialize(slot, live)
+    }
+    #[inline(always)]
+    fn initialize(slot: NonNull<Slot>, live: Live) -> Payer {
         // SAFETY: the free list transfers its sole pin; charge and union rank are zero.
         let r = unsafe { &mut *slot.as_ref().local.get() };
         r.available = live.capacity;
@@ -524,7 +528,7 @@ impl Funding {
         self.payer.0.as_ptr().cast()
     }
     #[inline(always)]
-    pub(crate) fn enter(&mut self, bytes: u64) -> Result<(), Capacity> {
+    fn reserve_scope(&self, bytes: u64) -> Result<Live, Capacity> {
         // Active contexts always hold a canonical record. A reservation moves
         // available bytes, not outstanding charges, and transfers the parent's pin.
         let parent = self.payer;
@@ -546,15 +550,36 @@ impl Funding {
             });
         }
         r.available = r.available.wrapping_sub(bytes);
-        let live = Live {
+        Ok(Live {
             owner: r.live.owner,
             capacity: bytes,
             parent: Some(parent),
-        };
+        })
+    }
+    #[inline(always)]
+    pub(crate) fn enter(&mut self, bytes: u64) -> Result<(), Capacity> {
+        let live = self.reserve_scope(bytes)?;
         // SAFETY: an active Funding handle is untagged and task-exclusive.
-        let domain = unsafe { parent.0.as_ref().domain };
+        let domain = unsafe { self.payer.0.as_ref().domain };
         let forest = unsafe { &mut *domain.as_ref().forest.get() };
         self.payer = forest.take(domain, live);
+        Ok(())
+    }
+    #[inline(always)]
+    pub(crate) fn reusable_slot(&self) -> Option<NonNull<Slot>> {
+        // SAFETY: the scheduler gives the context exclusive local execution.
+        unsafe { (*self.payer.0.as_ref().domain.as_ref().forest.get()).free }
+    }
+    #[inline(always)]
+    pub(crate) fn enter_reused(&mut self, bytes: u64, slot: NonNull<Slot>) -> Result<(), Capacity> {
+        let live = self.reserve_scope(bytes)?;
+        // SAFETY: caller just selected this context's free-list head; reserve_scope
+        // changes no pool links and cannot suspend or call a provider.
+        unsafe {
+            let f = &mut *self.payer.0.as_ref().domain.as_ref().forest.get();
+            f.free = (*slot.as_ref().local.get()).next_free;
+        }
+        self.payer = Forest::initialize(slot, live);
         Ok(())
     }
     #[inline(always)]

@@ -65,3 +65,22 @@ LangArena runner's artifact-profile check and record both artifact hashes. Sampl
 share its CPU16 lock. `build_measure.py --hirsel-only` replaces invalid Hirsel
 samples while preserving valid Rust samples. A release staticlib without the
 shipping fat-LTO configuration supplies diagnostic counters only.
+
+`PEAKS.md` combines those retained shipping samples with separate diagnostic
+memory observations. Build `//:hirsel-core-rt-observed-archives`, then collect with:
+
+```
+python3 core/tools/measurement_artifacts.py > /absolute/evidence/artifacts.json
+python3 core/langarena/layout/peak.py --artifacts /absolute/evidence/artifacts.json \
+  --observed-runtime OBSERVED/x86_64-unknown-linux-gnu/libhirsel_core_rt.a \
+  --twins /absolute/release/twins --out /absolute/evidence/peaks
+```
+
+The default runs all 13 LAYOUT entries on LLVM, all arena contracts on both
+engines, and the available Rust twins under Massif. `--group layout|arena|rust`
+and repeated `--phase` select unfinished parts without repeating completed work.
+Hirsel's `peak_root_reserved_bytes` includes startup and unused reservations.
+Rust's zero-inaccuracy Massif peak counts requested live heap, with allocator
+administration and stacks excluded. The controls and arena laws have no Rust
+equivalent. The script checks each unchanged oracle and records no instructions
+or RSS, so diagnostic emission cannot replace a shipping performance sample.

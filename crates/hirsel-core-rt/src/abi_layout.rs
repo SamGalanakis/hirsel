@@ -76,6 +76,14 @@ pub const fn cause_kind(word: u64) -> u8 {
 // Native allocate then receives max(bytes,1)+prefix and alignment 8; the emitted
 // store at payload-OWN_PAYER_BACK records current|kind. No semantic tag layout
 // (including variants/niches) is involved.
+// hirsel_core_native_alloc_ordinary(native_bytes) is the fixed-alignment backend
+// when the producer knows alignment <=16: nonnull base or HostMemory run stop,
+// no admission/event/status and no dynamic alignment operand. A native payload
+// offset lies within that returned allocation, so LLVM may use nonnull/inbounds.
+// A producer may fold positive charge plus fitting room into unsigned
+// (charge - 1) < available, with wrapping subtraction: zero becomes MAX and
+// never fits, including available=MAX. Preserve the zero-pin/shortage cold entry
+// and probe only fitting positive admissions. Both choices use the same offsets.
 pub const OWN_ORDINARY_PLAIN_TAG: usize = 0;
 pub const OWN_ORDINARY_GRAPH_TAG: usize = 1;
 pub const OWN_ORDINARY_MAX_TAG: usize = OWN_ORDINARY_GRAPH_TAG;

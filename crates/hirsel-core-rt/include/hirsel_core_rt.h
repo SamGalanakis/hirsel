@@ -139,6 +139,9 @@ void hirsel_core_refund(HirselCoreLimitRecord *original_payer, uint64_t nonzero_
    otherwise use original-payer lookup. No status/admission/allocation. */
 void hirsel_core_refund_in(const HirselCoreContext *, HirselCoreLimitRecord *original_payer, uint64_t bytes);
 void *hirsel_core_native_alloc(size_t native_bytes, size_t native_alignment);
+/* Compile-time alignment <=16, positive valid size: nonnull base or HostMemory;
+   no admission, event or failure status. */
+void *hirsel_core_native_alloc_ordinary(size_t native_bytes);
 void hirsel_core_native_free(void *base);
 uint8_t hirsel_core_allocation_status(const HirselCoreContext *, void *);
 void hirsel_core_free_value(void *, uint64_t);

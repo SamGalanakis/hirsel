@@ -715,6 +715,18 @@ pub unsafe extern "C" fn hirsel_core_native_alloc(bytes: usize, align: usize) ->
     if align > 16 {
         return native_alloc_aligned(bytes, align);
     }
+    // SAFETY: this branch has the ordinary backend alignment contract.
+    unsafe { hirsel_core_native_alloc_ordinary(bytes) }
+}
+
+/// Physical backend for a compile-time native alignment at most 16. Returns a
+/// nonnull base or stops as HostMemory, with no admission, event or failure status.
+/// Emitters select this entry instead of passing a known ordinary alignment.
+/// # Safety
+/// Positive valid native size, already logically admitted, alignment at most 16.
+#[inline]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_native_alloc_ordinary(bytes: usize) -> *mut u8 {
     // SAFETY: malloc/mi_malloc provide at least 16-byte native alignment. The
     // emitter's valid nonzero size also forms a Layout at alignment 1, and the
     // backend's actual alignment satisfies its request. Alignment 1 avoids

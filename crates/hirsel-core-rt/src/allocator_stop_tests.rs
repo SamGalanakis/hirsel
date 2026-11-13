@@ -12,6 +12,7 @@ fn native_refusal_child() {
         }
     }
     let _cleanup = Cleanup;
+    let ordinary = std::env::var_os("HIRSEL_TEST_ORDINARY_NATIVE_ALLOC").is_some();
     let denied = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -20,28 +21,40 @@ fn native_refusal_child() {
     // request is below the guard budget and commits no memory: malloc returns null.
     assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_CORE, &denied) }, 0);
     assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_AS, &denied) }, 0);
-    std::hint::black_box(super::allocate(
-        std::alloc::Layout::from_size_align(64 << 20, 8).unwrap(),
-    ));
+    if ordinary {
+        // SAFETY: valid positive native size, ordinary alignment; this physical
+        // refusal ends the run, so there is no returned payload to publish.
+        std::hint::black_box(unsafe { crate::abi::hirsel_core_native_alloc_ordinary(64 << 20) });
+    } else {
+        std::hint::black_box(super::allocate(
+            std::alloc::Layout::from_size_align(64 << 20, 8).unwrap(),
+        ));
+    }
     panic!("allocator refusal returned");
 }
 #[test]
 fn fail15_native_allocator_refusal_is_a_reported_run_stop_without_cleanup() {
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
+    for ordinary in [false, true] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.args([
             "--ignored",
             "--exact",
             "allocator::stop_tests::native_refusal_child",
             "--test-threads=1",
-        ])
-        .output()
-        .unwrap();
-    assert_eq!(
-        output.status.code(),
-        Some(102),
-        "{}\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(output.stderr, b"run stop: HostMemory\n");
+        ]);
+        if ordinary {
+            child.env("HIRSEL_TEST_ORDINARY_NATIVE_ALLOC", "1");
+        } else {
+            child.env_remove("HIRSEL_TEST_ORDINARY_NATIVE_ALLOC");
+        }
+        let output = child.output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(102),
+            "{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stderr, b"run stop: HostMemory\n");
+    }
 }

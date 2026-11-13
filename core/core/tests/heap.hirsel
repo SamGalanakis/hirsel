@@ -129,3 +129,37 @@ fn rc_share_unwrap() -> u64 {
     let mut recovered = result.unwrap(rc.try_unwrap(take shared))
     option.unwrap(heap.pop(mut recovered)) * 100 + option.unwrap(heap.pop(mut recovered)) * 10 + option.unwrap(heap.pop(mut recovered))
 }
+
+// A24-byte tuple exercises every carried word and lexicographic ordered glue,
+// including equal first keys as Graph/Maze priorities use.
+// expect: run tuple_priority() = 12132124
+fn tuple_priority() -> u64 {
+    let mut h: Heap[(u64, u64, u64)] = heap.new()
+    result.unwrap(heap.push(mut h, (2, 4, 24)))
+    result.unwrap(heap.push(mut h, (1, 3, 13)))
+    result.unwrap(heap.push(mut h, (2, 1, 21)))
+    result.unwrap(heap.push(mut h, (1, 2, 12)))
+    let mut n: u64 = 0
+    while let Some(take x) = heap.pop(mut h) {
+        if x.0 * 10 + x.1 != x.2 { return 99 }
+        n = n * 100 + x.2
+    }
+    n
+}
+
+// A zero-sized heap and its clone admit nothing; clone capacity may be a
+// non-power-of-two length, and a subsequent push must still grow correctly.
+// expect: run zero_size_clone_grows() = 35
+fn zero_size_clone_grows() -> u64 {
+    let r = bound bytes 0 {
+        let mut h: Heap[()] = heap.new()
+        for _ in 0u64 .. 17 { result.unwrap(heap.push(mut h, ())) }
+        let mut copied: Heap[()] = result.unwrap(clone(h))
+        result.unwrap(heap.push(mut copied, ()))
+        let mut n: u64 = 0
+        while let Some(_) = heap.pop(mut h) { n += 1 }
+        while let Some(_) = heap.pop(mut copied) { n += 1 }
+        n
+    }
+    result.unwrap(r)
+}

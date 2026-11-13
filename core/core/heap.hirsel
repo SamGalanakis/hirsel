@@ -49,8 +49,8 @@ pub fn pop[T: ordered](mut h: Heap[T]) -> Option[T] {
     Some(take removed)
 }
 
-// These operate on List's allocation while its live set contains a hole. No
-// public List operation runs until the hole is filled and len is restored.
+// These operate on List's allocation while its live set contains a hole.
+// Views, clones and cleanup see an inhabited prefix at every public boundary.
 fn slots_put[T](mut xs: List[T], i: u64, take x: T)
 fn slots_take[T](mut xs: List[T], i: u64) -> T
 fn slots_view[T](xs: List[T], i: u64) -> View[T] in xs
@@ -61,7 +61,12 @@ fn slots_shift[T](mut xs: List[T], i: u64, j: u64)
 fn grow[T: ordered](mut h: Heap[T]) -> Result[(), Capacity] {
     let cap = list.capacity(h.items)
     let count = list.len(h.items)
-    let next: u64 = if cap == 0 { 4 } else { cap * 2 }
+    // At the count limit, reuse List's declined overflow admission. It cannot
+    // move storage because grow is called only for a full heap.
+    if cap == 18446744073709551615 { return list.reserve(mut h.items, 1) }
+    let next: u64 = if cap == 0 { 4 } else {
+        match int.checked_mul(cap, 2) { Some(n) => n, None => 18446744073709551615 }
+    }
     let mut items: List[T] = slots_new(next)?
     let mut i: u64 = 0
     while i < count {

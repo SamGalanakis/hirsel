@@ -61,6 +61,9 @@ fn grow[T](mut d: Deque[T]) -> Result[(), Capacity] {
     let cap = list.capacity(d.ring.raw)
     let count = list.len(d.ring.raw)
     if count < cap { return Ok(()) }
+    // The next power of two does not fit. List's counter-overflow admission
+    // returns Capacity with the current room and cannot move the full ring.
+    if cap > 9223372036854775807 { return list.reserve(mut d.ring.raw, cap) }
     let next: u64 = if cap == 0 { 1 } else { cap * 2 }
     let mut ring: Slots[T] = slots_new(next)?
     let mut i: u64 = 0

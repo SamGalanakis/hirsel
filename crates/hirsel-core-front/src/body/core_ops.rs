@@ -1021,7 +1021,7 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                     )
                     || entry.module == "map"
                     || entry.module == "list" && entry.name.starts_with("slots_")
-                    || entry.module == "deque"
+                    || matches!(entry.module, "deque" | "heap")
             );
         }
     }

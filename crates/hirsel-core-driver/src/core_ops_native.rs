@@ -770,11 +770,15 @@ fn stable_placement_llvm() { stable_placement(Backend::Llvm); }
 /// Run a front case natively: `main` checks each `// expect: run f(args) = v` line of the
 /// case, so both engines meet the case's own hand-derived values; exit status i + 1 names
 /// the first line that differs.
-/// The case's run lines on a native engine: the returning ones in one program, and each
+/// The case's run lines (and `// native: run` lines, for what the evaluator does not
+/// run) on a native engine: the returning ones in one program, and each
 /// `fail Bounds` in its own, which must stop with exit 101 and `Bounds` on stderr.
 fn run_lines_native(backend: Backend, case: &str) {
     let mut main = String::from("pub fn main() -> Result[(), Exit] {\n");
-    for (i, line) in case.lines().filter_map(|l| l.strip_prefix("// expect: run ")).enumerate() {
+    let runs = case.lines().filter_map(|l| {
+        l.strip_prefix("// expect: run ").or_else(|| l.strip_prefix("// native: run "))
+    });
+    for (i, line) in runs.enumerate() {
         let (call, want) = line.split_once(" = ").expect("a run line");
         if want == "fail Bounds" {
             let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -815,6 +819,26 @@ fn dest_put_cranelift() { dest_put(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
 fn dest_put_llvm() { dest_put(Backend::Llvm); }
+/// MEM-17, T1.5: own clone and its refusal's drop and refund, on each engine.
+fn clone_own(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/body/clone-own.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn clone_own_cranelift() { clone_own(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn clone_own_llvm() { clone_own(Backend::Llvm); }
+/// MEM-17: clone shares counted edges, on each engine.
+fn clone_counted(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/body/clone-counted.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn clone_counted_cranelift() { clone_counted(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn clone_counted_llvm() { clone_counted(Backend::Llvm); }
 
 fn uninitialized_take_names(backend: Backend) {
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

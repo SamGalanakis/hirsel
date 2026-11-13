@@ -10,6 +10,8 @@ pub enum KeyOp {
     Equal,
     Order,
     Ordered(CompareOp),
+    /// `$clone[T](from, to) -> (requested, available)`: MEM-17's own copy.
+    Clone,
 }
 impl KeyOp {
     fn definition(self) -> DefPath {
@@ -23,6 +25,7 @@ impl KeyOp {
             Self::Ordered(CompareOp::Gt) => "order.$gt",
             Self::Ordered(CompareOp::Ge) => "order.$ge",
             Self::Ordered(_) => unreachable!("ordered predicates"),
+            Self::Clone => "core.$clone",
         })
     }
     fn signature(self, ty: TypeId) -> Signature {
@@ -30,7 +33,17 @@ impl KeyOp {
         match self {
             Self::Hash => {}
             Self::Fold => params.push(Param::Value(Ty::Scalar(Scalar::U64))),
-            Self::Equal | Self::Order | Self::Ordered(_) => params.push(Param::Address(ty)),
+            Self::Equal | Self::Order | Self::Ordered(_) | Self::Clone => {
+                params.push(Param::Address(ty))
+            }
+        }
+        if self == Self::Clone {
+            return Signature {
+                params,
+                results: vec![Ty::Scalar(Scalar::U64); 2],
+                dest: None,
+                never: false,
+            };
         }
         Signature {
             params,
@@ -53,67 +66,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         values: &[Option<ValueId>],
         n: NodeId,
     ) -> Option<ValueId> {
-        let (id, function, rep) = if let Some(&abi) = self.key_functions.get(&(ty, op)) {
-            abi
-        } else {
-            #[cfg(test)]
-            {
-                self.key_metadata_builds += 1;
-            }
-            let rep = match self.rep(ty) {
-                Ok(rep) => rep,
-                Err(what) => {
-                    self.gap(n, what);
-                    return None;
-                }
-            };
-            let Some(id) = self.e.type_row(self.p, &mut self.t, ty) else {
-                self.gap(n, "key payload layout is not built");
-                return None;
-            };
-            let function = if has_param(&self.t, ty) {
-                let name = crate::decls::canonical(&self.p.decls, &self.t, ty);
-                let function = self.e.add_function_abi(
-                    InstanceKey {
-                        definition: op.definition(),
-                        types: vec![name],
-                        dictionaries: vec![],
-                    },
-                    op.signature(id),
-                    scalar_abi::SignatureAbi {
-                        params: vec![
-                            true;
-                            if matches!(op, KeyOp::Equal | KeyOp::Order | KeyOp::Ordered(_)) {
-                                2
-                            } else {
-                                1
-                            }
-                        ],
-                        result: true,
-                    },
-                );
-                self.e
-                    .generic_calls
-                    .entry(function)
-                    .or_insert_with(|| GenericCall {
-                        arguments: vec![NameRecipe::of(self.p, &self.t, ty)],
-                        dictionaries: vec![],
-                        operation: Some(op),
-                        numeric: None,
-                    });
-                function
-            } else {
-                match ensure(&mut self.e.module, id, op) {
-                    Ok(function) => function,
-                    Err(what) => {
-                        self.gap(n, what);
-                        return None;
-                    }
-                }
-            };
-            self.key_functions.insert((ty, op), (id, function, rep));
-            (id, function, rep)
-        };
+        let (id, function, rep) = self.key_function(op, ty, n)?;
         if !self.live() {
             return None;
         }
@@ -153,6 +106,82 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         });
         self.inst(Inst::Call { call }, n);
         Some(result)
+    }
+    /// The glue function of `op` at `ty`, its row and `ty`'s representation; a generic
+    /// `ty` gets an instance the materializer derives once it is closed.
+    pub(super) fn key_function(
+        &mut self,
+        op: KeyOp,
+        ty: TyId,
+        n: NodeId,
+    ) -> Option<(TypeId, FuncId, Rep)> {
+        Some(if let Some(&abi) = self.key_functions.get(&(ty, op)) {
+            abi
+        } else {
+            #[cfg(test)]
+            {
+                self.key_metadata_builds += 1;
+            }
+            let rep = match self.rep(ty) {
+                Ok(rep) => rep,
+                Err(what) => {
+                    self.gap(n, what);
+                    return None;
+                }
+            };
+            let Some(id) = self.e.type_row(self.p, &mut self.t, ty) else {
+                self.gap(n, "key payload layout is not built");
+                return None;
+            };
+            let function = if has_param(&self.t, ty) {
+                let name = crate::decls::canonical(&self.p.decls, &self.t, ty);
+                let function = self.e.add_function_abi(
+                    InstanceKey {
+                        definition: op.definition(),
+                        types: vec![name],
+                        dictionaries: vec![],
+                    },
+                    op.signature(id),
+                    // A clone writes through `to`, so both its places stay addresses.
+                    match op {
+                        KeyOp::Clone => scalar_abi::SignatureAbi {
+                            params: vec![false; 2],
+                            result: false,
+                        },
+                        KeyOp::Equal | KeyOp::Order | KeyOp::Ordered(_) => {
+                            scalar_abi::SignatureAbi {
+                                params: vec![true; 2],
+                                result: true,
+                            }
+                        }
+                        _ => scalar_abi::SignatureAbi {
+                            params: vec![true],
+                            result: true,
+                        },
+                    },
+                );
+                self.e
+                    .generic_calls
+                    .entry(function)
+                    .or_insert_with(|| GenericCall {
+                        arguments: vec![NameRecipe::of(self.p, &self.t, ty)],
+                        dictionaries: vec![],
+                        operation: Some(op),
+                        numeric: None,
+                    });
+                function
+            } else {
+                match ensure(&mut self.e.module, id, op) {
+                    Ok(function) => function,
+                    Err(what) => {
+                        self.gap(n, what);
+                        return None;
+                    }
+                }
+            };
+            self.key_functions.insert((ty, op), (id, function, rep));
+            (id, function, rep)
+        })
     }
 }
 
@@ -362,13 +391,13 @@ fn inline_word_hash(body: &mut Body, word: ValueId, result: ValueId) {
     });
 }
 
-struct Derive<'a> {
-    module: &'a mut Module,
-    recipes: Vec<Recipe>,
+pub(super) struct Derive<'a> {
+    pub(super) module: &'a mut Module,
+    pub(super) recipes: Vec<Recipe>,
     active: Vec<(TypeId, KeyOp)>,
 }
 impl Derive<'_> {
-    fn function(&mut self, ty: TypeId, op: KeyOp) -> Result<FuncId, &'static str> {
+    pub(super) fn function(&mut self, ty: TypeId, op: KeyOp) -> Result<FuncId, &'static str> {
         let key = InstanceKey {
             definition: op.definition(),
             types: vec![self.module.types[ty.index()].name.clone()],
@@ -413,6 +442,13 @@ impl Derive<'_> {
             &[Ty::Ptr, Ty::Ptr]
         });
         let ps = c.params(BlockId(0));
+        if op == KeyOp::Clone {
+            self.clone_function(&mut c, ty, ps[0], ps[1])?;
+            order_instructions(&mut c.body);
+            self.module.functions[row.index()].body = Some(c.body);
+            self.active.pop();
+            return Ok(row);
+        }
         let result = match op {
             KeyOp::Hash => {
                 let zero = c.constant(0);
@@ -439,6 +475,7 @@ impl Derive<'_> {
                 let b = c.read(ps[1], Ty::Scalar(scalar));
                 c.compare(op, a, b)
             }
+            KeyOp::Clone => unreachable!("clone returns above"),
             KeyOp::Order | KeyOp::Ordered(_) => {
                 let different = c.block(&[Ty::Scalar(Scalar::I8)]);
                 self.order_type(&mut c, ty, ps[0], ps[1], different)?;
@@ -494,7 +531,7 @@ impl Derive<'_> {
         self.active.pop();
         Ok(row)
     }
-    fn call(&self, c: &mut Code, f: FuncId, args: &[Arg]) -> ValueId {
+    pub(super) fn call(&self, c: &mut Code, f: FuncId, args: &[Arg]) -> ValueId {
         let signature = self.module.functions[f.index()].signature;
         let result = c.value(self.module.signatures[signature.index()].results[0]);
         let mut passed = [Arg::Value(ValueId(0)); 2];
@@ -1516,7 +1553,7 @@ impl Code {
         self.body.terminators.push(Terminator::Unreachable);
         id
     }
-    fn params(&self, b: BlockId) -> [ValueId; 2] {
+    pub(super) fn params(&self, b: BlockId) -> [ValueId; 2] {
         let ps = self.body.blocks[b.index()]
             .params
             .get(&self.body.pools.values)
@@ -1532,13 +1569,13 @@ impl Code {
         self.body.inst_anchors.resize(self.body.insts.len(), None);
         self.body.terminators[self.current.index()] = t;
     }
-    fn edge(&mut self, target: BlockId, args: &[ValueId]) -> EdgeId {
+    pub(super) fn edge(&mut self, target: BlockId, args: &[ValueId]) -> EdgeId {
         let args = PoolRange::push(&mut self.body.pools.values, args.iter().copied());
         let id = EdgeId(self.body.edges.len() as u32);
         self.body.edges.push(Edge { target, args });
         id
     }
-    fn jump(&mut self, target: BlockId, args: &[ValueId]) {
+    pub(super) fn jump(&mut self, target: BlockId, args: &[ValueId]) {
         let edge = self.edge(target, args);
         self.end(Terminator::Jump(edge));
     }
@@ -1551,22 +1588,22 @@ impl Code {
             no,
         });
     }
-    fn require(&mut self, on: ValueId, no: BlockId) {
+    pub(super) fn require(&mut self, on: ValueId, no: BlockId) {
         let yes = self.block(&[]);
         self.branch(on, yes, no);
         self.start(yes);
     }
-    fn typed_constant(&mut self, ty: Scalar, bits: u64) -> ValueId {
+    pub(super) fn typed_constant(&mut self, ty: Scalar, bits: u64) -> ValueId {
         let result = self.value(Ty::Scalar(ty));
         self.inst(Inst::Const { result, bits });
         result
     }
-    fn constant(&mut self, bits: u64) -> ValueId {
+    pub(super) fn constant(&mut self, bits: u64) -> ValueId {
         let result = self.value(Ty::Scalar(Scalar::U64));
         self.inst(Inst::Const { result, bits });
         result
     }
-    fn boolean(&mut self, value: bool) -> ValueId {
+    pub(super) fn boolean(&mut self, value: bool) -> ValueId {
         let result = self.value(Ty::Scalar(Scalar::Bool));
         self.inst(Inst::Const {
             result,
@@ -1574,7 +1611,7 @@ impl Code {
         });
         result
     }
-    fn binary(&mut self, op: BinaryOp, left: ValueId, right: ValueId) -> ValueId {
+    pub(super) fn binary(&mut self, op: BinaryOp, left: ValueId, right: ValueId) -> ValueId {
         let result = self.value(Ty::Scalar(Scalar::U64));
         self.inst(Inst::Binary {
             result,
@@ -1585,7 +1622,7 @@ impl Code {
         });
         result
     }
-    fn mul(&mut self, left: ValueId, right: ValueId) -> ValueId {
+    pub(super) fn mul(&mut self, left: ValueId, right: ValueId) -> ValueId {
         let result = self.value(Ty::Scalar(Scalar::U64));
         self.inst(Inst::IntArith {
             result,
@@ -1620,7 +1657,7 @@ impl Code {
         });
         id
     }
-    fn offset_value(&mut self, p: ValueId, offset: ValueId) -> ValueId {
+    pub(super) fn offset_value(&mut self, p: ValueId, offset: ValueId) -> ValueId {
         let steps = PoolRange::push(&mut self.body.pools.steps, [Step::Byte(offset)]);
         let id = AddressId(self.body.addresses.len() as u32);
         self.body.addresses.push(AddressInfo {
@@ -1639,7 +1676,7 @@ impl Code {
         });
         result
     }
-    fn offset(&mut self, p: ValueId, offset: u64) -> ValueId {
+    pub(super) fn offset(&mut self, p: ValueId, offset: u64) -> ValueId {
         if offset == 0 {
             p
         } else {
@@ -1682,7 +1719,7 @@ impl Code {
         });
         result
     }
-    fn widen(&mut self, operand: ValueId) -> ValueId {
+    pub(super) fn widen(&mut self, operand: ValueId) -> ValueId {
         if self.body.values[operand.index()] == Ty::Scalar(Scalar::U64) {
             operand
         } else {

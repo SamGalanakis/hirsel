@@ -43,6 +43,7 @@ mod builtins;
 mod callable_abi;
 mod calls;
 mod cleanup;
+mod clone_glue;
 mod closures;
 mod compact;
 mod compare;

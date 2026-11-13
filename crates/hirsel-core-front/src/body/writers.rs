@@ -74,7 +74,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             .failed
             .get_or_insert_with(|| self.new_block(&[Ty::Ptr]))
     }
-    fn u64k(&mut self, k: u64, n: NodeId) -> Option<ValueId> {
+    pub(super) fn u64k(&mut self, k: u64, n: NodeId) -> Option<ValueId> {
         self.konst(Ty::Scalar(Scalar::U64), k, n)
     }
     fn state_word(&mut self, state: ValueId, offset: u64, t: Ty, n: NodeId) -> Option<ValueId> {
@@ -770,6 +770,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let name = g.path.0.name.as_str();
         let result = subst(&mut self.t, g.result, tys);
         match (module, name) {
+            ("core", "clone") => self.clone_value(tys[0], tys[1], vals[0]?, result, n),
             ("core", "build_in") => {
                 let fty = subst(&mut self.t, g.params[2].ty, tys);
                 self.build_in(tys[0], vals[0]?, vals[1]?, fty, vals[2]?, result, n)

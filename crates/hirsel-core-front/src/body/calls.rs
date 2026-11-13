@@ -321,7 +321,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 || (g.path.0.modules == ["core"]
                     && matches!(
                         g.path.0.name.as_str(),
-                        "build_in" | "build_stream_in" | "finish" | "finish_trim" | "fail"
+                        "build_in"
+                            | "build_stream_in"
+                            | "finish"
+                            | "finish_trim"
+                            | "fail"
+                            | "clone"
                     )));
         let v = if builtin {
             self.intrinsic(f, tys, vals, n)

@@ -2731,7 +2731,7 @@
     {
       "from_revision": "4c6529942b9b",
       "to_revision": "core-collections-918-slot-sort",
-      "reason": "Core stable sort adds one completed public source body and private Hole cleanup; old std sort is removed from the same fixed manifest, so source-body count193->194. Slot aliases hold fixed headers; Hole restores every element and hands the inhabited prefix back with Unmark. Refresh deterministic body/line census only. Numeric ceilings, fixed60000, known residuals and product limits unchanged. No measurement repeated to refresh counts.",
+      "reason": "Core stable sort and private Hole cleanup replace the old std sort in the same fixed manifest: one net completed body, count193->194. Slot aliases hold fixed headers; Hole restores every element and hands the inhabited prefix back with Unmark. Refresh deterministic body/line census only. Numeric ceilings, fixed60000, known residuals and product limits unchanged. No measurement repeated to refresh counts.",
       "completed_bodies_before": {
         "m1": [
           371,

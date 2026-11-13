@@ -5,10 +5,14 @@ impl<'c, 'a> Cx<'c, 'a> {
     pub(super) fn block(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         self.depth += 1;
         let (scope, freezes) = (self.scope_slots.len(), self.freezes.len());
+        let owners = self.owner_mark();
         self.tail_ty = UNIT;
         let r = self.statements(n, want);
         let value = std::mem::replace(&mut self.tail_ty, UNIT);
         self.close_scope(scope, freezes, n, value);
+        // The tail's temporaries end at the block's exit, before its locals, unless
+        // the block's value is one (LANG-6).
+        self.end_owners(owners, r.1, false, n);
         self.depth -= 1;
         r
     }
@@ -19,6 +23,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.out.counts.nodes += 1;
             let last = i + 1 == stmts.len();
             let freezes = self.freezes.len();
+            let owners = self.owner_mark();
             match self.kind(s) {
                 // The tail's temporaries last to the end of the enclosing statement.
                 NodeKind::ExpressionStatement if last => {
@@ -43,8 +48,10 @@ impl<'c, 'a> Cx<'c, 'a> {
                 NodeKind::Error => self.halt(),
                 _ => self.gap(s, "statement form is not built"),
             }
-            // A temporary view ends with its statement (OWN-8).
+            // A temporary view ends with its statement (OWN-8), and so does every
+            // temporary nothing took (LANG-6).
             self.unfreeze(freezes, |h| (h != Hold::View(Extent::Temp)).then_some(h));
+            self.end_owners(owners, None, true, s);
         }
         let t = if diverged { NEVER } else { UNIT };
         match want {
@@ -104,9 +111,12 @@ impl<'c, 'a> Cx<'c, 'a> {
                 let (binding, origin) = if self.kind(s) == NodeKind::LetMut {
                     (Binding::Slot(self.slot(ty, v, pat)), Origin::LetMut)
                 } else {
+                    // The binding owns the temporary's place itself.
+                    self.consume(v, pat);
                     (Binding::Value(v), Origin::Let)
                 };
                 self.declare(b, ty, binding, origin, pat);
+                self.own(b, pat);
                 self.scope_slots.push(b);
             }
             _ => self.gap(pat, "patterns are not built"),
@@ -138,6 +148,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         let binding = Binding::Slot(self.slot(ty, None, pat));
         self.declare(b, ty, binding, origin, pat);
         self.set(b, Avail::Uninit, pat);
+        self.own(b, pat);
         self.scope_slots.push(b);
         false
     }
@@ -158,8 +169,8 @@ impl<'c, 'a> Cx<'c, 'a> {
         self.install(address, r, v, n);
         Some(address)
     }
-    /// Write `v`, a value carried as `r`, into the place at `address`. The old value
-    /// needs no cleanup: every place value built so far is plain.
+    /// Write `v`, a value carried as `r`, into the fresh place at `address`; an own
+    /// value is moved, so nothing cleans `v` afterwards.
     pub(super) fn install(&mut self, address: AddressId, r: Rep, v: Option<ValueId>, n: NodeId) {
         match (r, v) {
             (Rep::Scalar(_), Some(value)) => self.inst(Inst::Store { address, value }, n),
@@ -225,7 +236,20 @@ impl<'c, 'a> Cx<'c, 'a> {
         let diverged = if !compound {
             let (t, v) = self.expr(value, expect(at.ty));
             if let (Some(address), Ok(r)) = (address, self.rep(at.ty)) {
+                // OWN-12: the old value is cleaned when it is live, or maybe with its
+                // flag set; then the new one is installed and the flag set (T3.2-T3.4).
+                // A part is assigned only while its slot is live (OWN-5), so the old
+                // part is live and cleaned alone.
+                // A `mut` parameter owns no row here but is always live.
+                if at.place.len == 0 && self.var(q).own.is_some() {
+                    self.drop_old(q, s);
+                } else if var.avail == Avail::Live {
+                    self.drop_at(address, at.ty, s);
+                }
                 self.install(address, r, v, s);
+                if at.place.len == 0 {
+                    self.installed(q, s);
+                }
             }
             t == NEVER
         } else {
@@ -280,8 +304,10 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// An `if` or `while` condition; its temporaries end with it (OWN-8).
     pub(super) fn condition(&mut self, n: NodeId) -> Option<ValueId> {
         let freezes = self.freezes.len();
+        let owners = self.owner_mark();
         let (_, cv) = self.expr(n, expect(BOOL));
         self.unfreeze(freezes, |h| (h != Hold::View(Extent::Temp)).then_some(h));
+        self.end_owners(owners, None, true, n);
         cv
     }
     pub(super) fn if_(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
@@ -376,6 +402,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             born: self.born,
             exits: self.exits.len(),
             scopes: self.pattern_scope_mark(),
+            owners: self.owner_mark(),
         });
     }
     /// Pop the innermost frame, joining its exits (OWN-16).
@@ -533,7 +560,9 @@ impl<'c, 'a> Cx<'c, 'a> {
             f.ty = Some(t);
         }
         let (exit, ty) = (f.exit, f.ty.unwrap_or(t));
-        self.pattern_scope_exits(self.frames[i].scopes, n);
+        // The carried value goes to the exit's join; the rest is cleaned (FAIL-8, 9).
+        self.consume(v, n);
+        self.unwind(self.frames[i].owners, self.frames[i].scopes, n);
         self.goto(exit, ty, v, n);
         self.exit_edge(i);
         self.dead = true;
@@ -549,7 +578,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.halt();
             return (NEVER, None);
         }
-        self.pattern_scope_exits(self.frames[i].scopes, n);
+        self.unwind(self.frames[i].owners, self.frames[i].scopes, n);
         if let Some(h) = self.frames[i].header {
             self.jump(h, &[], n);
         }

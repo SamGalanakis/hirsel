@@ -573,6 +573,8 @@ impl<'c, 'a> Cx<'c, 'a> {
             let at = self.address(AddressBase::Address(to), &[step], place, n);
             self.install(at, r, vals[i], n);
         }
-        (ty, Some(self.pointer(to, n)))
+        let p = self.pointer(to, n);
+        self.temp(ty, Some(p));
+        (ty, Some(p))
     }
 }

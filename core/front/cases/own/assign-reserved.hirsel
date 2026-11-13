@@ -1,6 +1,6 @@
 // OWN-12, the spec's example: `xs[0]` is reserved while its right side runs, which assigns `xs`, a prefix; refused at that inner place.
 // expect: refuse OWN-12 at 6:37
 // expect: gap assignment to this place is not built
+// expect: gap list index emission is not built
 
-// expect: gap cleanup of own values is not built
 fn f(mut xs: List[u64]) { xs[0] = { xs = list.new(); 7 } }

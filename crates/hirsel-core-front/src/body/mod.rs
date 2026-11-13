@@ -31,12 +31,13 @@ use hirsel_core_ir::{
     InstanceId, InstanceKey, ItemId, Module, Param, PlaceTy, PoolRange, ReadMode, SigId, Signature,
     SlotId, Step, Terminator, Ty, TypeId, UnaryOp, ValueId,
 };
-use hirsel_core_layout::{Layout, Recipe, Scalar, TypeRef};
+use hirsel_core_layout::{FieldTy, Layout, Recipe, Repr as LRepr, Scalar, TypeRef};
 use hirsel_core_resolve::{Refusal, Target};
 use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, TokenKind, byte_value, character_value};
 use std::collections::HashMap;
 
 mod calls;
+mod cleanup;
 mod control;
 mod ops;
 mod patterns;
@@ -252,8 +253,8 @@ impl Emitter {
         }
         self.recipes.get(id.index())
     }
-    /// How a value of `ty` is carried. A place value is built only for plain own data
-    /// for now: cleanup of the rest is not emitted yet.
+    /// How a value of `ty` is carried: a scalar, or a place of a fixed layout. A value
+    /// whose cleanup may run a finalizer (a resource, or one held inside) is not built.
     fn rep(&mut self, p: &Program, t: &mut impl TyRead, ty: TyId) -> Result<Rep, &'static str> {
         match t.kind(ty) {
             TyKind::Scalar(s) => return Ok(Rep::Scalar(Ty::Scalar(*s))),
@@ -271,11 +272,39 @@ impl Emitter {
             .type_row(p, t, ty)
             .ok_or("values of this type are not built")?;
         match self.recipe(id, mark) {
-            Some(r) if matches!(r.layout, Layout::Fixed(_)) && r.plain => Ok(Rep::Place(id)),
             Some(r) if matches!(r.layout, Layout::Fixed(_)) => {
-                Err("cleanup of own values is not built")
+                if self.runs_code(id) {
+                    Err("cleanup of resources is not built")
+                } else {
+                    Ok(Rep::Place(id))
+                }
             }
             _ => Err("values of this type are not built"),
+        }
+    }
+    /// Cleaning a value of row `id` does something (FAIL-8).
+    fn needs_drop(&self, id: TypeId) -> bool {
+        self.recipes[id.index()].drop.is_some()
+    }
+    /// Cleaning a value of row `id` may run a finalizer or free a resource block.
+    fn runs_code(&self, id: TypeId) -> bool {
+        let Some(d) = &self.recipes[id.index()].drop else {
+            return false;
+        };
+        self.module.types[id.index()].repr == LRepr::Resource
+            || d.finalizer.is_some()
+            || d.fields
+                .iter()
+                .flatten()
+                .any(|f| self.field_runs_code(&f.ty))
+    }
+    fn field_runs_code(&self, t: &FieldTy) -> bool {
+        match t {
+            FieldTy::Inline(r) | FieldTy::Box(r) => self.runs_code(TypeId(r.0)),
+            FieldTy::Seq(e) | FieldTy::Array(e, _) => self.field_runs_code(e),
+            FieldTy::Map(k, v) => self.field_runs_code(k) || self.field_runs_code(v),
+            FieldTy::OwnFn => true,
+            _ => false,
         }
     }
     /// The byte size of a value of row `id`, whose recipe exists.
@@ -444,6 +473,8 @@ struct Var {
     flagged: bool,
     /// Freeze and reservation records naming it; with none, no record is searched.
     holds: u32,
+    /// How it is cleaned, when it owns a value that needs cleanup.
+    own: Option<cleanup::Own>,
 }
 
 /// A place and its type.
@@ -480,6 +511,8 @@ struct Acc {
 #[derive(Default)]
 struct Join {
     block: Option<BlockId>,
+    /// The row of the own value its edges carry, which is a temporary after it.
+    drop: Option<TypeId>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -504,6 +537,8 @@ struct Frame {
     /// Where its exit edges begin in `exits`.
     exits: usize,
     scopes: usize,
+    /// The owners begun before it.
+    owners: usize,
 }
 
 struct BodyInstance {
@@ -575,6 +610,13 @@ struct Cx<'c, 'a> {
     dest: Option<(ValueId, TypeId)>,
     /// How each type this body names is carried, found once per body.
     reps: HashMap<TyId, Result<Rep, &'static str>>,
+    /// The owners of the body, in the order they began (FAIL-8).
+    owners: Vec<cleanup::Owner>,
+    owner_buf: Vec<cleanup::Owner>,
+    /// Counts changes of owner and scope state; a failure successor made at one
+    /// state serves every failing instruction until it changes.
+    epoch: u64,
+    fail_cache: Option<((u64, usize, usize), BlockId)>,
     out: CoreCheck,
 }
 
@@ -644,6 +686,10 @@ impl<'c, 'a> Cx<'c, 'a> {
             entry: p.entry.as_ref() == Some(&fd.path),
             dest: None,
             reps: HashMap::new(),
+            owners: vec![],
+            owner_buf: vec![],
+            epoch: 0,
+            fail_cache: None,
             out: CoreCheck::default(),
         }
     }
@@ -815,6 +861,9 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// Copy the value of row `id` that `from` points at into place `to` (a move or a
     /// copy of plain data: the source needs no cleanup afterwards).
     fn copy_to(&mut self, to: AddressId, from: ValueId, id: TypeId, n: NodeId) {
+        if self.e.needs_drop(id) {
+            self.consume(Some(from), n);
+        }
         let from = self.address(AddressBase::Value(from), &[], PlaceTy::Declared(id), n);
         let size = self.e.size(id);
         let bytes = self.value(Ty::Scalar(Scalar::U64));
@@ -847,7 +896,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
             _ => v,
         };
-        self.pattern_scope_exits(0, n);
+        self.unwind(0, 0, n);
         let r = PoolRange::push(&mut self.b.pools.values, v);
         self.end(Terminator::Return(r), Some(n));
     }
@@ -929,6 +978,12 @@ impl<'c, 'a> Cx<'c, 'a> {
                 b
             }
         };
+        if let Some(id) = self.drop_id(ty)
+            && v.is_some()
+        {
+            self.consume(v, n);
+            self.joins[j].drop = Some(id);
+        }
         let args: Vec<ValueId> = v.into_iter().collect();
         self.jump(blk, &args, n);
     }
@@ -936,7 +991,17 @@ impl<'c, 'a> Cx<'c, 'a> {
     fn land(&mut self, j: usize) -> Option<ValueId> {
         let blk = self.joins[j].block?;
         self.start(blk);
-        self.block_params(blk).first().copied()
+        let v = self.block_params(blk).first().copied();
+        if let (Some(id), Some(value), true) = (self.joins[j].drop, v, self.live()) {
+            self.owners.push(cleanup::Owner::Temp(cleanup::Temp {
+                value,
+                id,
+                avail: Avail::Live,
+                flag: None,
+            }));
+            self.epoch += 1;
+        }
+        v
     }
 
     // ---- the definition
@@ -1018,6 +1083,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                     _ => Binding::Value(v),
                 };
                 self.declare(b.id, pd.ty, binding, origin, body);
+                self.own(b.id, body);
             }
         }
         let result = self.fd.result;
@@ -1144,7 +1210,11 @@ impl<'c, 'a> Cx<'c, 'a> {
         match self.place(n) {
             Ok(Some(at)) => {
                 self.use_place(at, Use::Value, n);
-                (at.ty, self.emit_place(at, n))
+                let v = self.emit_place(at, n);
+                if at.place.len == 0 && !self.copies(at.ty) {
+                    self.temp(at.ty, v);
+                }
+                (at.ty, v)
             }
             Ok(None) => self.gap_ty(n, "field and index places are not built"),
             Err(()) => (ERROR, None),

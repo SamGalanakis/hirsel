@@ -43,6 +43,8 @@ enum ScopeKind {
 struct Scope {
     kind: ScopeKind,
     frame: Option<usize>,
+    /// The owners begun before it opened.
+    owners: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -724,6 +726,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                     self.declare(b, ty, binding, origin, pat.site);
                     self.scope_slots.push(b);
                 }
+                self.own(b, pat.site);
             }
             Head::Product(case) => {
                 if subject.owned
@@ -759,8 +762,31 @@ impl<'c, 'a> Cx<'c, 'a> {
                     let field = self.pattern_at(subject, case, i, ty, pat.site);
                     self.bind_pattern(child, field, mutable);
                 }
+                if subject.owned && !subject.viewed {
+                    self.transfer(pat, case, subject);
+                }
             }
             _ => {}
+        }
+    }
+    /// The payload transfer of an owned destructure (OWN-14, OWN-15, T3.7): the bound
+    /// parts are owners now, so the source is consumed whole and the omitted fields
+    /// are dropped in declaration order.
+    fn transfer(&mut self, pat: Pat, case: Option<u32>, subject: Subject) {
+        for i in 0..pat.fields.len {
+            let child = self.patterns.fields[(pat.fields.start + i) as usize];
+            if child != 0 && self.pat_head(child) != Head::Any {
+                continue;
+            }
+            let ty = self.pattern_field_ty(pat.ty, case, i as usize);
+            if self.drop_id(ty).is_none() {
+                continue;
+            }
+            let field = self.pattern_at(subject, case, i, ty, pat.site);
+            self.drop_field(field.value, ty, pat.site);
+        }
+        if subject.place.is_none() {
+            self.consume(subject.value, pat.site);
         }
     }
     fn chosen_pattern(&mut self, id: u32, mut subject: Subject, n: NodeId) -> Subject {
@@ -819,6 +845,17 @@ impl<'c, 'a> Cx<'c, 'a> {
     pub(super) fn match_(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let c = self.kids(n);
         let subject = self.subject(c[0], false, None);
+        // A scrutinee temporary lives to the statement's end unless the chosen arm
+        // takes it; when only some arms do, its flag says which (OWN-15, OWN-18).
+        let temp = subject
+            .place
+            .is_none()
+            .then(|| self.temp_index(subject.value))
+            .flatten();
+        if let Some(i) = temp {
+            self.flag_temp(i, n);
+        }
+        let (mut took, mut kept) = (false, false);
         let mark = self.log.len();
         let was_dead = self.dead;
         let join = self.new_join();
@@ -832,8 +869,12 @@ impl<'c, 'a> Cx<'c, 'a> {
             let guarded = a.len() == 3;
             let no = (i + 2 < c.len() && self.live()).then(|| self.new_block(&[]));
             self.pattern_tests(id, subject, no);
+            if let Some(i) = temp {
+                self.set_temp(i, Avail::Live);
+            }
             self.depth += 1;
             let (scope, holds) = (self.scope_slots.len(), self.freezes.len());
+            let owners = self.owner_mark();
             if guarded {
                 self.bind_pattern(
                     id,
@@ -846,6 +887,8 @@ impl<'c, 'a> Cx<'c, 'a> {
                 let guard = std::mem::replace(&mut self.patterns.guard, true);
                 let (_, cv) = self.expr(a[1], expect(BOOL));
                 self.patterns.guard = guard;
+                // A guard is a condition: its temporaries end with it.
+                self.end_owners(owners, None, true, a[1]);
                 if let (Some(cv), Some(no)) = (cv, no)
                     && self.live()
                 {
@@ -868,12 +911,17 @@ impl<'c, 'a> Cx<'c, 'a> {
             let chosen = self.chosen_pattern(id, subject, a[0]);
             self.bind_pattern(id, chosen, false);
             self.patterns.rebind = false;
+            let taken = temp.is_some_and(|i| !self.temp_live(i));
             let body = *a.last().unwrap();
             let (at, v) = self.expr(body, ty.and_then(expect));
             if ty.is_none() && at != NEVER {
                 ty = Some(at);
             }
-            self.pattern_scope_end(scope, holds, body, at);
+            if !self.dead {
+                took |= taken;
+                kept |= !taken;
+            }
+            self.pattern_scope_end(scope, holds, owners, body, at, v);
             self.depth -= 1;
             if let Some(edge) = self.arm_edge(mark) {
                 self.patterns.edges.push(edge);
@@ -888,6 +936,14 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
         if let Some(missing) = self.pattern_missing(matrix, subject.ty) {
             self.refuse("LANG-17", n, format!("match is missing `{missing}`"));
+        }
+        if let Some(i) = temp {
+            let avail = match (took, kept) {
+                (true, true) => Avail::Maybe,
+                (true, false) => Avail::Moved,
+                _ => Avail::Live,
+            };
+            self.set_temp(i, avail);
         }
         let v = self.land(join);
         let mut edges = std::mem::take(&mut self.patterns.edges);
@@ -1070,7 +1126,16 @@ impl<'c, 'a> Cx<'c, 'a> {
             _ => "_".into(),
         }
     }
-    fn pattern_scope_end(&mut self, scope: usize, holds: usize, n: NodeId, ty: TyId) {
+    #[allow(clippy::too_many_arguments)]
+    fn pattern_scope_end(
+        &mut self,
+        scope: usize,
+        holds: usize,
+        owners: usize,
+        n: NodeId,
+        ty: TyId,
+        keep: Option<ValueId>,
+    ) {
         let scoped = kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped;
         if scoped {
             let depth = self.depth;
@@ -1083,6 +1148,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             });
         }
         self.close_scope(scope, holds, n, ty);
+        self.end_owners(owners, keep, false, n);
         if scoped {
             for &f in &self.freezes[holds..] {
                 self.patterns.escaping.push(f);
@@ -1132,6 +1198,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     pub(super) fn if_let(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let c = self.kids(n);
         let condition = self.kids(c[0]);
+        let cond = self.owner_mark();
         let subject = self.subject(condition[1], false, None);
         let id = self.pattern(condition[0], subject.ty);
         let mark = self.log.len();
@@ -1140,12 +1207,23 @@ impl<'c, 'a> Cx<'c, 'a> {
         let escape_mark = self.patterns.escaping.len();
         let join = self.new_join();
         self.pattern_tests(id, subject, no_block);
+        // The condition's temporaries, the scrutinee unless the pattern takes it,
+        // end before either branch runs (LANG-6).
+        let no_block = no_block.map(|no| {
+            let other = self.new_block(&[]);
+            self.side(no, |cx| {
+                cx.clean_temps(cond, n);
+                cx.jump(other, &[], n);
+            });
+            other
+        });
         self.depth += 1;
         let (scope, holds) = (self.scope_slots.len(), self.freezes.len());
         let chosen = self.chosen_pattern(id, subject, condition[0]);
         self.bind_pattern(id, chosen, false);
+        self.end_owners(cond, None, true, condition[0]);
         let (yt, yv) = self.expr(c[1], if c.len() == 2 { expect(UNIT) } else { want });
-        self.pattern_scope_end(scope, holds, c[1], yt);
+        self.pattern_scope_end(scope, holds, cond, c[1], yt, yv);
         self.depth -= 1;
         let yes = self.arm_edge(mark);
         self.goto(join, yt, yv, c[1]);
@@ -1195,6 +1273,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
         self.frames[fi].header = header;
         let freezes = self.freezes.len();
+        let cond = self.owner_mark();
         let subject = self.subject(condition[1], false, None);
         let id = self.pattern(condition[0], subject.ty);
         self.exit_edge(fi);
@@ -1203,13 +1282,24 @@ impl<'c, 'a> Cx<'c, 'a> {
         if let Some(out) = out {
             self.joins[exit].block = Some(out);
         }
-        self.pattern_tests(id, subject, out);
+        // The condition's temporaries end before the body runs or the loop exits.
+        let no = out.map(|out| {
+            let no = self.new_block(&[]);
+            self.side(no, |cx| {
+                cx.clean_temps(cond, n);
+                cx.jump(out, &[], n);
+            });
+            no
+        });
+        self.pattern_tests(id, subject, no);
         self.depth += 1;
         let scope = self.scope_slots.len();
         let chosen = self.chosen_pattern(id, subject, condition[0]);
         self.bind_pattern(id, chosen, false);
+        self.end_owners(cond, None, true, condition[0]);
         self.loop_body(c[1]);
         self.close_scope(scope, freezes, c[1], UNIT);
+        self.end_owners(cond, None, false, c[1]);
         self.depth -= 1;
         if let Some(h) = header {
             self.jump(h, &[], c[1]);
@@ -1290,7 +1380,9 @@ impl<'c, 'a> Cx<'c, 'a> {
             );
             self.install(at, rep, value, n);
         }
-        Some(self.pointer(to, n))
+        let p = self.pointer(to, n);
+        self.temp(ty, Some(p));
+        Some(p)
     }
     fn pattern_type_parameter(&self, ty: TyId, parameter: u32) -> bool {
         match self.t.kind(ty) {
@@ -1434,6 +1526,10 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
         }
         let (ok_case, err_case) = if error.is_some() { (0, 1) } else { (1, 0) };
+        // The operand is taken: its payload moves to the result or to the error.
+        if subject.place.is_none() {
+            self.consume(subject.value, n);
+        }
         let no = self.live().then(|| self.new_block(&[]));
         if let (Some(value), Ok(Rep::Place(id))) = (subject.value, self.rep(subject.ty))
             && self.live()
@@ -1468,8 +1564,9 @@ impl<'c, 'a> Cx<'c, 'a> {
             let ScopeKind::Bound { failed } = context.kind else {
                 unreachable!()
             };
-            self.pattern_scope_exits(scope, n);
-            self.exit_edge(context.frame.unwrap());
+            let fi = context.frame.unwrap();
+            self.unwind(self.frames[fi].owners, scope, n);
+            self.exit_edge(fi);
             self.goto(failed, error.unwrap(), error_value, n);
         } else {
             let value = self.wrap_case(
@@ -1485,21 +1582,38 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.start(no);
         }
         let value = self.pattern_at(subject, Some(ok_case), 0, success, n).value;
+        self.temp(success, value);
         (success, value)
     }
     pub(super) fn pattern_scope_mark(&self) -> usize {
         self.patterns.scopes.len()
     }
-    /// Lexically open region/limit exits. This emits no value cleanup: A1 owns that
-    /// cleanup, which must precede releasing the scopes those values live in.
+    /// Close the lexically open region and limit scopes from `mark` on, innermost
+    /// first; their owners are cleaned before (`unwind`).
     pub(super) fn pattern_scope_exits(&mut self, mark: usize, n: NodeId) {
         for i in (mark..self.patterns.scopes.len()).rev() {
-            match self.patterns.scopes[i].kind {
-                ScopeKind::Region(Some(region)) => self.inst(Inst::RegionClose { region }, n),
-                ScopeKind::Bound { .. } => self.inst(Inst::LimitExit, n),
-                _ => {}
-            }
+            self.pattern_scope_exits_one(i, n);
         }
+    }
+    pub(super) fn pattern_scope_exits_one(&mut self, i: usize, n: NodeId) {
+        match self.patterns.scopes[i].kind {
+            ScopeKind::Region(Some(region)) => self.inst(Inst::RegionClose { region }, n),
+            ScopeKind::Bound { .. } => self.inst(Inst::LimitExit, n),
+            _ => {}
+        }
+    }
+    pub(super) fn patterns_len(&self) -> usize {
+        self.patterns.scopes.len()
+    }
+    pub(super) fn scope_owners(&self, i: usize) -> usize {
+        self.patterns.scopes[i].owners
+    }
+    /// Some region or limit scope is open, so a failure must close it.
+    pub(super) fn open_scopes(&self) -> bool {
+        self.patterns
+            .scopes
+            .iter()
+            .any(|s| matches!(s.kind, ScopeKind::Region(Some(_)) | ScopeKind::Bound { .. }))
     }
     fn capacity_ty(&mut self, n: NodeId) -> TyId {
         match self.p.core_decl("Capacity") {
@@ -1549,10 +1663,13 @@ impl<'c, 'a> Cx<'c, 'a> {
             None
         };
         let mark = self.patterns.scopes.len();
+        let owners = self.owner_mark();
         self.patterns.scopes.push(Scope {
             kind: ScopeKind::Region(region),
             frame: None,
+            owners: self.owners.len(),
         });
+        self.epoch += 1;
         self.depth += 1;
         let (scope, holds) = (self.scope_slots.len(), self.freezes.len());
         if let Some(b) = self.binder(n) {
@@ -1571,9 +1688,11 @@ impl<'c, 'a> Cx<'c, 'a> {
             );
         }
         self.close_scope(scope, holds, body, t);
+        self.end_owners(owners, v, false, body);
         self.depth -= 1;
         self.pattern_scope_exits(mark, n);
         self.patterns.scopes.truncate(mark);
+        self.epoch += 1;
         (t, v)
     }
     fn contains_region_value(&self, ty: TyId) -> bool {
@@ -1641,10 +1760,13 @@ impl<'c, 'a> Cx<'c, 'a> {
         if let Some(yes) = yes {
             self.start(yes);
         }
+        let owners = self.owner_mark();
         self.patterns.scopes.push(Scope {
             kind: ScopeKind::Bound { failed },
             frame: Some(fi),
+            owners: self.owners.len(),
         });
+        self.epoch += 1;
         let (t, value) = self.expr(c[1], expected.and_then(expect));
         let result = match self.p.core_decl("Result") {
             Some(d) => self
@@ -1655,8 +1777,10 @@ impl<'c, 'a> Cx<'c, 'a> {
                 ERROR
             }
         };
+        self.end_owners(owners, value, false, n);
         self.pattern_scope_exits(mark, n);
         self.patterns.scopes.truncate(mark);
+        self.epoch += 1;
         let exit = self.frames[fi].exit;
         let good = self.wrap_case(result, 0, expected.unwrap_or(t), value, n);
         self.exit_edge(fi);

@@ -1,5 +1,4 @@
 // OWN-7: an argument for a `mut` parameter is `mut p`; a bare place is refused at it.
-// expect: refuse OWN-7 at 5:38
+// expect: refuse OWN-7 at 4:38
 
-// expect: gap cleanup of own values is not built
 fn f(mut xs: List[u64]) { list.clear(xs) }

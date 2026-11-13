@@ -60,7 +60,11 @@ impl<'c, 'a> Cx<'c, 'a> {
                 // OWN-6: `take` moves a place.
                 Ok(Some(at)) => {
                     self.use_place(at, Use::Take, n);
-                    (at.ty, self.emit_place(at, n))
+                    let v = self.emit_place(at, n);
+                    if !self.copies(at.ty) {
+                        self.temp(at.ty, v);
+                    }
+                    (at.ty, v)
                 }
                 Ok(None) => {
                     let _ = self.expr(e, None);
@@ -125,12 +129,13 @@ impl<'c, 'a> Cx<'c, 'a> {
             return None;
         }
         let result = self.value(ty);
+        let fail = self.fail_to(n);
         self.inst(
             Inst::Unary {
                 result,
                 op,
                 operand,
-                fail: None,
+                fail,
             },
             n,
         );
@@ -149,13 +154,14 @@ impl<'c, 'a> Cx<'c, 'a> {
             return None;
         }
         let result = self.value(ty);
+        let fail = self.fail_to(n);
         self.inst(
             Inst::Binary {
                 result,
                 op,
                 left,
                 right,
-                fail: None,
+                fail,
             },
             n,
         );
@@ -398,7 +404,10 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
         // The right side runs on one path only: its effects join with none (OWN-16).
         let (was_dead, mark) = (self.dead, self.log.len());
+        let owners = self.owner_mark();
         let (rt, rv) = self.expr(c[1], None);
+        // Its temporaries end with it, on the one path that ran it.
+        self.end_owners(owners, None, true, c[1]);
         let ran = self.arm_edge(mark);
         let skipped = Some((self.diffs.len() as u32, 0));
         self.merge_arms(mark, [ran, skipped], was_dead, n);

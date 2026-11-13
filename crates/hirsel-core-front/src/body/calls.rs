@@ -584,6 +584,10 @@ impl<'c, 'a> Cx<'c, 'a> {
         let start = self.b.pools.args.len();
         self.b.pools.args.extend(dest.map(Arg::Address));
         for (i, p) in g.params.iter().enumerate() {
+            if p.mode == Mode::Take {
+                // A1 cleanup: the callee owns a taken argument from entry (T2.3).
+                self.consume(vals[i], n);
+            }
             let ty = subst(&mut self.t, p.ty, types);
             let r = match self.rep(ty) {
                 Ok(Rep::None) if p.mode != Mode::Mut => continue,
@@ -614,12 +618,13 @@ impl<'c, 'a> Cx<'c, 'a> {
         let args = PoolRange::new(start as u32, (self.b.pools.args.len() - start) as u32);
         let first = result_ty.map(|t| self.value(t));
         let results = PoolRange::push(&mut self.b.pools.values, first);
+        let fail = self.fail_to(n);
         self.b.calls.push(CallSite {
             callee: Callee::Direct(func),
             signature,
             args,
             results,
-            fail: None,
+            fail,
         });
         let call = CallId(self.b.calls.len() as u32 - 1);
         self.inst(Inst::Call { call }, n);
@@ -629,7 +634,12 @@ impl<'c, 'a> Cx<'c, 'a> {
             return None;
         }
         match dest {
-            Some(a) => Some(self.pointer(a, n)),
+            Some(a) => {
+                // A1 cleanup: an own result is a temporary until something takes it.
+                let p = self.pointer(a, n);
+                self.temp(result, Some(p));
+                Some(p)
+            }
             None => first,
         }
     }

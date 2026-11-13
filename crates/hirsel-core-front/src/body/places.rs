@@ -31,6 +31,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             born: self.born,
             flagged: false,
             holds: 0,
+            own: None,
         });
         self.born += 1;
         self.set(b, Avail::Live, n);
@@ -38,6 +39,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     pub(super) fn set(&mut self, s: u32, a: Avail, n: NodeId) {
         let v = self.vars[s as usize].as_mut().expect("declared slot");
         if v.avail != a {
+            self.epoch += 1;
             self.log.push((s, v.avail, v.at));
             v.avail = a;
             v.at = n;
@@ -46,6 +48,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     pub(super) fn undo(&mut self, mark: usize) {
         while self.log.len() > mark {
             let (s, a, at) = self.log.pop().expect("logged");
+            self.epoch += 1;
             let v = self.vars[s as usize].as_mut().expect("declared slot");
             v.avail = a;
             v.at = at;
@@ -405,6 +408,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 self.need_live(s, n);
                 if self.check_holds(at.place, Act::Write, n) {
                     self.set(s, Avail::Moved, n);
+                    self.moved(s, n);
                 }
             }
             Use::View(hold) => {

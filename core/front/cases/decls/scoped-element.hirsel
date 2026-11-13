@@ -3,4 +3,4 @@
 fn keep(xs: List[String]) -> List[View[String]] { list.new() }
 // The body is not built yet (bodies of these types come with slice c and e).
 
-// expect: gap cleanup of own values is not built
+// expect: gap scoped core type arguments are not built

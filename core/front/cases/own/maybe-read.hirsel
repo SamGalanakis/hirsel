@@ -1,6 +1,5 @@
 // OWN-16, the spec's pair and proto-872 `maybe`: after an `if` that moves `s` on one arm, `s` is maybe; leaving it unread is accepted.
-// expect: refuse OWN-16 at 7:3
-// expect: gap cleanup of own values is not built
+// expect: refuse OWN-16 at 6:3
 fn ok(take s: String, c: bool) { if c { let _ = string.into_bytes(take s) } }
 fn bad(take s: String, c: bool) -> String {
   if c { let _ = string.into_bytes(take s) }

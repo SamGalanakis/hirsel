@@ -14,6 +14,11 @@ impl FunctionEmitter<'_> {
             let flag = self.calc(format!("icmp ult {} {value}, {a}", ty(t)));
             return (value, flag);
         }
+        if op == ArithOp::Sub && !t.int().unwrap().0 {
+            let value = self.calc(format!("sub {} {a}, {b}", ty(t)));
+            let flag = self.calc(format!("icmp ult {} {a}, {b}", ty(t)));
+            return (value, flag);
+        }
         let op = match op {
             ArithOp::Add => "add",
             ArithOp::Sub => "sub",

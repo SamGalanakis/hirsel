@@ -86,8 +86,8 @@ fn scalar_checked_add_keeps_wrapped_results_and_failure_edges() {
     for (i, t) in ["u8", "i8"].iter().enumerate() {
         writeln!(source, "sig g{i} = ({t}, {t}) -> ({t})").unwrap();
     }
-    source.push_str("sig g2 = (u8, u8) -> (u8, bool)\n");
-    for i in 0..7 {
+    source.push_str("sig g2 = (u8, u8) -> (u8, bool)\nsig g3 = (u8, u8) -> (u8, bool)\n");
+    for i in 0..8 {
         writeln!(source, "inst n{i} = llvm@1/checked/op{i} [] []").unwrap();
     }
     for (i, op) in ["add", "sub", "mul"].iter().cycle().take(6).enumerate() {
@@ -95,10 +95,11 @@ fn scalar_checked_add_keeps_wrapped_results_and_failure_edges() {
         writeln!(source, "fn f{i} = n{i} g{} {{\nb0(v0: {t}, v1: {t}):\n  v2: {t} = {op} v0, v1\n  return v2\n}}", i / 3).unwrap();
     }
     source.push_str("fn f6 = n6 g2 {\nb0(v0: u8, v1: u8):\n  v2: u8, v3: bool = checked_add v0, v1\n  return v2, v3\n}\n");
+    source.push_str("fn f7 = n7 g3 {\nb0(v0: u8, v1: u8):\n  v2: u8, v3: bool = checked_sub v0, v1\n  return v2, v3\n}\n");
     let module = text::parse(&source).unwrap();
     wf::module(&module).unwrap();
     let mut cases = Vec::new();
-    for function in 0..7 {
+    for function in 0..8 {
         for a in [0, 1, 127, 128, 255] {
             for b in [0, 1, 127, 128, 255] {
                 cases.push((FuncId(function), vec![a, b]));

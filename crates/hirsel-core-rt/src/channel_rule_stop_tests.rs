@@ -143,15 +143,15 @@ fn fail15_full_counters_stop_without_cleanup_cause_or_join_delivery() {
     for (child, message) in [
         (
             "channel::rule_stop_tests::rc_overflow_child",
-            b"CountOverflow\n".as_slice(),
+            b"run stop: CountOverflow\n".as_slice(),
         ),
         (
             "channel::rule_stop_tests::arc_overflow_child",
-            b"CountOverflow\n",
+            b"run stop: CountOverflow\n",
         ),
         (
             "channel::rule_stop_tests::sender_overflow_child",
-            b"ChannelSenders\n",
+            b"run stop: ChannelSenders\n",
         ),
     ] {
         expect_stop(child, message);

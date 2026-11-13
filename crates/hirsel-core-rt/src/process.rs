@@ -164,12 +164,14 @@ pub unsafe extern "C" fn hirsel_core_args_get(
     }
 }
 
-/// Run stops skip cleanup. Only async-signal-safe writes and _exit are used so
+/// FAIL-15/PROG-3: `run stop: <Name>\n`, status 102, skipping cleanup.
+/// Only async-signal-safe writes and _exit are used so
 /// the stack overflow handler can take the same path from its alternate stack.
 pub fn stop(name: &[u8]) -> ! {
     // SAFETY: static/borrowed bytes remain live until _exit, no Rust unwinding.
     unsafe {
         let fd = crate::fiber::stop_fd();
+        libc::write(fd, b"run stop: ".as_ptr().cast(), 10);
         libc::write(fd, name.as_ptr().cast(), name.len());
         libc::write(fd, b"\n".as_ptr().cast(), 1);
         libc::_exit(102)

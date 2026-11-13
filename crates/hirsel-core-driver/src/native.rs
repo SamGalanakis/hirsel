@@ -500,7 +500,7 @@ static const HirselCoreView directories[] = {{{directories}}};
 int main(int argc, char **argv) {{
     size_t n=(size_t)(argc-1);
     HirselCoreView *args=calloc(n ? n : 1,sizeof(*args));
-    if(!args) {{ fputs("host argument allocation failed\n",stderr); return 102; }}
+    if(!args) {{ fputs("run stop: HostMemory\n",stderr); return 102; }}
     for(size_t i=0;i<n;i++) {{ args[i].data=(const uint8_t *)argv[i+1]; args[i].len=strlen(argv[i+1]); }}
     HirselCoreOsConfig input={{0}};
     input.root_limit=UINT64_C({limit}); input.args=args; input.args_len=n;

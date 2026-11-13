@@ -17,6 +17,30 @@ mod front;
 #[path = "support/providers.rs"]
 mod providers;
 
+#[path = "../../hirsel-core-rt/testdata/host_memory.rs"]
+mod host_memory;
+
+#[test]
+fn native_allocator_refusals_are_reported_run_stops() {
+    host_memory::check(
+        |module| {
+            emit_object_with_layouts(
+                module,
+                &hirsel_core_layout::compute(&module.types).unwrap(),
+                &Options {
+                    target: "x86_64-unknown-linux-gnu",
+                    optimize: false,
+                },
+            )
+            .unwrap()
+            .bytes
+        },
+        |module, function| {
+            symbol(&module.instances[module.functions[function.index()].instance.index()])
+        },
+    );
+}
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Scratch(PathBuf);
 impl Scratch {
@@ -1696,7 +1720,7 @@ fn inlined_count_increment_overflow_is_the_runtime_stop() {
             .output()
             .unwrap();
         assert_eq!(run.status.code(), Some(102), "{kind}: {:?}", run.status);
-        assert!(String::from_utf8_lossy(&run.stderr).contains("CountOverflow"));
+        assert_eq!(run.stderr, b"run stop: CountOverflow\n", "{kind}");
     }
 }
 

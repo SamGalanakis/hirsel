@@ -31,6 +31,9 @@
 //! allocation's byte size is already a dynamic parameter. The producer writes
 //! the 16-byte blob header and data, checks Child identity/offset and width/fit,
 //! and emits writer/copy/index operations over these entries and byte accesses.
+//! Exhausted destination identities stop as `DestinationIds`; physical allocator
+//! refusal or an unrepresentable native layout stops as `HostMemory`. FAIL-15
+//! stops write `run stop: <Name>\n` and exit 102 without cleanup or failure status.
 //!
 //! Contexts are task-owned. Allocation pointers, sizes, alignment and remaining
 //! logical charges are trusted emitter operands. None may be stale. Provider

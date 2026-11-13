@@ -252,7 +252,10 @@ fn run_stop_skips_host_file_cleanup_and_kernel_releases_the_descriptor() {
     std::fs::create_dir(&root).unwrap();
     let out = child(&root, "stop");
     assert_eq!(out.status.code(), Some(102));
-    assert_eq!(out.stderr, b"open; cleanup skipped\nHostFileFixture\n");
+    assert_eq!(
+        out.stderr,
+        b"open; cleanup skipped\nrun stop: HostFileFixture\n"
+    );
     let file = File::open(root.join("file")).unwrap();
     // SAFETY: newly owned fd; lock success proves the exited child's locked file
     // description was closed by _exit without invoking any cleanup callback.

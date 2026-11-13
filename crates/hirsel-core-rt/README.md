@@ -3,6 +3,10 @@
 Memory operations for FORM v1, independent of the old runtime. Emitters supply
 portable `charge-v1` charges and native layout operands separately. Logical
 refusal returns `Capacity`; physical host exhaustion is a FAIL-15 run stop.
+The native malloc/mimalloc paths and unrepresentable physical layouts stop with
+status 102 and exactly `run stop: HostMemory\n`. Stops bypass cleanup, causes and
+join delivery. Destination identity exhaustion uses `run stop: DestinationIds\n`;
+all names share the same process stop path (FAIL-15, PROG-3).
 
 `src/abi.rs` is the emitter reference. `include/hirsel_core_rt.h` publishes the
 same C declarations and frozen 64-bit offsets. Success Capacity fields are zero.

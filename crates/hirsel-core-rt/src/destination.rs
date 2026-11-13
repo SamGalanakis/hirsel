@@ -9,7 +9,7 @@ fn take(counter: &AtomicU64) -> u64 {
     counter
         .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
         .map(|previous| previous + 1)
-        .unwrap_or_else(|_| std::process::abort())
+        .unwrap_or_else(|_| crate::process::stop(b"DestinationIds"))
 }
 
 pub(crate) fn next() -> u64 {
@@ -25,5 +25,28 @@ mod tests {
         let counter = AtomicU64::new(u64::MAX - 1);
         assert_eq!(take(&counter), u64::MAX);
         assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    #[ignore = "isolated run stop, invoked by the named parent"]
+    fn destination_overflow_child() {
+        let counter = AtomicU64::new(u64::MAX);
+        std::hint::black_box(take(&counter));
+        panic!("destination overflow returned");
+    }
+
+    #[test]
+    fn destination_overflow_is_a_named_run_stop() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "destination::tests::destination_overflow_child",
+                "--test-threads=1",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(102));
+        assert_eq!(output.stderr, b"run stop: DestinationIds\n");
     }
 }

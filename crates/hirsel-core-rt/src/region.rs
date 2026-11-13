@@ -103,7 +103,7 @@ impl Region {
     #[cold]
     pub(crate) fn refill(&mut self, bytes: usize, align: usize) -> NonNull<u8> {
         let layout = Layout::from_size_align(self.chunk_bytes.max(bytes.max(1)), align)
-            .unwrap_or_else(|_| std::process::abort());
+            .unwrap_or_else(|_| crate::process::stop(b"HostMemory"));
         // SAFETY: nonzero layout is retained for matching deallocation.
         let pointer = native_allocate(layout);
         self.chunks.push(Chunk { pointer, layout });

@@ -430,7 +430,7 @@ fn guarded_stacks_report_102() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(102));
-    assert_eq!(out.stderr, b"Stack\n");
+    assert_eq!(out.stderr, b"run stop: Stack\n");
 }
 #[test]
 fn child_results_keep_their_origin_funding_until_joiner_drop() {

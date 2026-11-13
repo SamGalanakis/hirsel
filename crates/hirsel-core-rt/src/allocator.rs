@@ -1,6 +1,6 @@
 //! Keep the allocator's native free-list path for ordinary alignments. The
 //! mimalloc backend bypasses the Rust wrapper's always-aligned entry point.
-use std::alloc::{Layout, handle_alloc_error};
+use std::alloc::Layout;
 use std::ptr::NonNull;
 #[inline]
 pub(crate) fn allocate(layout: Layout) -> NonNull<u8> {
@@ -28,7 +28,7 @@ pub(crate) fn allocate(layout: Layout) -> NonNull<u8> {
             }
         }
     };
-    NonNull::new(pointer).unwrap_or_else(|| handle_alloc_error(layout))
+    NonNull::new(pointer).unwrap_or_else(|| crate::process::stop(b"HostMemory"))
 }
 /// # Safety
 /// Matching live allocation and original Layout from this backend.
@@ -55,3 +55,7 @@ pub(crate) unsafe fn deallocate_raw(pointer: *mut u8) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "allocator_stop_tests.rs"]
+mod stop_tests;

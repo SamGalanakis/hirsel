@@ -6,6 +6,17 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "../../../hirsel-core-rt/testdata/host_memory.rs"]
+mod host_memory;
+
+#[test]
+fn native_allocator_refusals_are_reported_run_stops() {
+    host_memory::check(
+        |module| emit_object(module, Optimization::Speed).unwrap(),
+        symbol,
+    );
+}
+
 fn output(command: &mut Command) -> String {
     let out = command
         .output()

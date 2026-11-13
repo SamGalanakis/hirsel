@@ -39,10 +39,10 @@ fn physical_layout(bytes: usize, align: usize, kind: u8) -> (Layout, usize) {
     let layout = Layout::from_size_align(
         offset
             .checked_add(bytes.max(1))
-            .unwrap_or_else(|| std::process::abort()),
+            .unwrap_or_else(|| crate::process::stop(b"HostMemory")),
         alignment,
     )
-    .unwrap_or_else(|_| std::process::abort());
+    .unwrap_or_else(|_| crate::process::stop(b"HostMemory"));
     (layout, offset)
 }
 #[inline]

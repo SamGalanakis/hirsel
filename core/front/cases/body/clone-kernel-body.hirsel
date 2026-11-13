@@ -1,5 +1,10 @@
-// Cloning a wrapped partial ring must follow logical order and retain both owners.
-// A raw List prefix clone copies the empty slot and loses the power-of-two mask.
+// A core-declared clone owns the live-set walk, including a containing List.
+// expect: accept
+// Private Slots and hooks for clone_in/twin remain guarded in derivation tests.
+fn direct(d: Deque[u64]) -> Result[Deque[u64], Capacity] { clone(d) }
+fn containing(ds: List[Deque[u64]]) -> Result[List[Deque[u64]], Capacity] { clone(ds) }
+fn counted(d: Rc[Deque[u64]]) -> Result[Rc[Deque[u64]], Capacity] { clone(d) }
+
 // expect: run clone_wrapped_partial() = 123123
 fn clone_wrapped_partial() -> u64 {
     let mut d: Deque[u64] = deque.new()

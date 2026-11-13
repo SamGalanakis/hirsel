@@ -87,3 +87,37 @@ fn slots_take[T](mut s: Slots[T], i: u64) -> T
 fn slots_move[T](mut src: Slots[T], i: u64, mut dst: Slots[T], j: u64)
 fn slots_shift[T](mut s: Slots[T], i: u64, j: u64)
 fn slots_free[T](take s: Slots[T])
+
+// Copy the logical live range, independent of the source's holes and head.
+// A valid MEM-17 call guarantees the element's resource/scoped/opaque-free holds.
+clone[T](d: Deque[T]) {
+    let count = list.len(d.ring.raw)
+    if count == 0 { return Ok(Deque(ring: slots_empty(), head: 0)) }
+    // Least power-of-two capacity not below length, as ruled by the orchestrator.
+    let mut capacity: u64 = 1
+    while capacity < count { capacity *= 2 }
+    let mut built: Deque[T] = Deque(ring: slots_new(capacity)?, head: 0)
+    let mask = list.capacity(d.ring.raw) - 1
+    let mut i: u64 = 0
+    while i < count {
+        let index = int.wrapping_add(d.head, i) & mask
+        let attempt: Result[T, Capacity] = clone(slots_view(d.ring, index))
+        let x: T = match attempt {
+            Ok(take x) => take x,
+            Error(c) => {
+                // T1.5 is reverse construction order. Ordinary Deque cleanup
+                // is front-to-back, so explicitly drain backwards on refusal.
+                while list.len(built.ring.raw) != 0 {
+                    let back = list.len(built.ring.raw) - 1
+                    let _ = slots_take(mut built.ring, back)
+                }
+                return Error(c)
+            }
+        }
+        slots_put(mut built.ring, i, take x)
+        i += 1
+    }
+    Ok(take built)
+}
+
+fn slots_view[T](s: Slots[T], i: u64) -> View[T] in s

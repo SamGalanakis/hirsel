@@ -1,8 +1,11 @@
 // OWN-8, MEM-14, MEM-15: a field of a Box, Rc or Arc is the field of its payload, and
 // a field of a nested record continues from it. Hand-derived: a holds C(k, 7, I(40)),
-// so a + b + i.v = k + 47: boxed(2) = 49, counted(0) = 47, shared(5) = 52, run lines to
-// add when box.new, rc.new and arc.new are built (core-ops-914).
-// expect: gap this generic core operation is not built
+// so a + b + i.v = k + 47. A Piece over chunk "abc" at lo 4 reads 3 + 4 = 7; a Node of
+// key 10 whose left has key k reads 10 + k, and 10 alone with no left.
+// Expected boxed(2) = 49, counted(0) = 47, shared(5) = 52, piece(0) = 7, tree(5) = 15,
+// lone(0) = 10; the counted kernels are runtime rows the evaluator does not run, so
+// those values are checked natively.
+// expect: accept
 type I: shareable + send { v: u64 }
 type C: shareable + send { a: u64, b: u64, i: I }
 fn sum_box(c: Box[C]) -> u64 { c.a + c.b + c.i.v }
@@ -27,4 +30,16 @@ fn left_key(root: Option[Arc[Node]]) -> u64 {
   let Some(n) = view root else { return 0 }
   let Some(l) = view n.left else { return n.key }
   n.key + l.key
+}
+fn piece(x: u64) -> u64 {
+  match rc.new(Chunk(id: x, value: "abc")) { Ok(c) => chunk_len(Piece(chunk: take c, lo: 4)), Error(_) => 999 }
+}
+fn tree(k: u64) -> u64 {
+  let Ok(l) = arc.new(Node(key: k, left: None)) else { return 999 }
+  let Ok(r) = arc.new(Node(key: 10, left: Some(take l))) else { return 998 }
+  left_key(Some(take r))
+}
+fn lone(x: u64) -> u64 {
+  let Ok(r) = arc.new(Node(key: 10, left: None)) else { return 998 }
+  left_key(Some(take r))
 }

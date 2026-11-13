@@ -8,6 +8,7 @@ pub(crate) enum Kernel {
     Stream(HostOp),
     CarrierMove,
     CarrierView,
+    StringShorten,
     StringList(&'static str),
     Unique,
     Host(HostOp),
@@ -189,7 +190,7 @@ operations! {
     ("string", "of_bytes", Lane::Runtime(Kernel::CarrierMove), "A", "core-ops-914", true),
     ("string", "to_bytes", Lane::Runtime(Kernel::CarrierMove), "A", "core-ops-914", true),
     ("string", "view_string", Lane::Runtime(Kernel::CarrierView), "A", "core-ops-914", true),
-    ("string", "shorten", Lane::Value, "A", "core-ops-914", true),
+    ("string", "shorten", Lane::Runtime(Kernel::StringShorten), "A", "core-ops-914", true),
     ("task", "spawn", Lane::Runtime(Kernel::Spawn), "B", "core-ops-914", false),
     ("task", "join", Lane::Runtime(Kernel::Join), "B", "core-ops-914", false),
     ("task", "cancel", Lane::Runtime(Kernel::Cancel), "B", "core-ops-914", false),
@@ -250,6 +251,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::Unique => self
                 .runtime_row(RtOp::DestId, &[], n)
                 .map(|values| values[0]),
+            Kernel::StringShorten => {
+                if self.live() {
+                    self.sequence_word(vals[0]?, 8, Ty::Scalar(Scalar::U64), vals[1]?, n);
+                }
+                None
+            }
             Kernel::CarrierView => self.runtime_carrier_view(vals[0]?, result, n),
             Kernel::CarrierMove => {
                 self.consume(vals[0], n);

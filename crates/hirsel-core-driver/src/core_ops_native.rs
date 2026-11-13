@@ -554,3 +554,25 @@ fn string_growth_operations_cranelift(){string_growth_operations(Backend::Cranel
 #[test]
 #[ignore = "explicit native integration target"]
 fn string_growth_operations_llvm(){string_growth_operations(Backend::Llvm);}
+
+fn string_shorten_operations(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let source = std::fs::read_to_string(root.join("core/front/runtime/string-shorten.hirsel")).unwrap();
+    let mut request = source_request(&source, dir.path());
+    request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let mut options = native_options(backend, dir.path());
+    options.root_limit = 296;
+    let built = product.build(&entry, &options).unwrap();
+    let output = Command::new(built.executable).output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{:?}", String::from_utf8_lossy(&output.stderr));
+    assert!(output.stdout.is_empty() && output.stderr.is_empty());
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn string_shorten_operations_cranelift() { string_shorten_operations(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn string_shorten_operations_llvm() { string_shorten_operations(Backend::Llvm); }

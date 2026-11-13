@@ -1,0 +1,26 @@
+fn literal()->String { "éab" }
+// Main's 288 plus one rounded eight-byte block. Shortening allocates nothing.
+pub fn main()->Result[(),Exit] {
+    {
+        let mut owned=result.unwrap(string.from(literal()))
+        let capacity=list.capacity(string.as_bytes(owned))
+        string.truncate(mut owned,2)
+        if owned!="é" || string.byte_len(owned)!=2u64 || list.capacity(string.as_bytes(owned))!=capacity || capacity!=4u64 { return Error(Exit(status:1)) }
+        result.unwrap(string.push(mut owned,"xy"))
+        if owned!="éxy" || list.capacity(string.as_bytes(owned))!=capacity { return Error(Exit(status:2)) }
+        string.truncate(mut owned,0)
+        if string.byte_len(owned)!=0u64 || list.capacity(string.as_bytes(owned))!=capacity { return Error(Exit(status:3)) }
+    }
+    // No room to copy static data. A fresh call reads the same literal in full.
+    let r=bound bytes 0 {
+        let mut s=literal()
+        string.truncate(mut s,2)
+        if s!="é" || list.capacity(string.as_bytes(s))!=0u64 { return Error(Exit(status:4)) }
+        let full=literal()
+        if full!="éab" || string.byte_len(full)!=4u64 || list.capacity(string.as_bytes(full))!=0u64 { return Error(Exit(status:5)) }
+        string.truncate(mut s,0)
+        if string.byte_len(s)!=0u64 || list.capacity(string.as_bytes(s))!=0u64 { return Error(Exit(status:6)) }
+    }
+    result.unwrap(r)
+    Ok(())
+}

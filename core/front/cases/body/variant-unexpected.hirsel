@@ -1,0 +1,10 @@
+// LANG-7, LANG-12 (Q33): with no expected type a variant names the one visible type that
+// declares it, its type arguments fixed by its payloads alone; of two operands the left
+// gives the right its expected type (LANG-21), so `v == None` is typed and `None == v` not.
+// expect: refuse LANG-12 at 8:25
+// expect: refuse LANG-12 at 9:32
+// expect: gap comparison of this type is not built
+fn s() -> u64 { let a = Some(1u64); 0 }
+fn x() -> u64 { let a = None; 0 }
+fn h(v: Option[u64]) -> bool { None == v }
+fn g(v: Option[u64]) -> bool { v == None }

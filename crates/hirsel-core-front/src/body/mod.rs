@@ -1008,6 +1008,15 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
     }
 
+    /// `n` typed with `want` as its expected type but not coerced to it: the caller
+    /// compares the synthesised type itself (LANG-21's right operand).
+    fn expr_hinted(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        self.out.counts.nodes += 1;
+        let (t, v) = self.expr_inner(n, want);
+        self.synth_ty = t;
+        (t, v)
+    }
+
     fn expr_inner(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let c = self.kids(n);
         match self.kind(n) {

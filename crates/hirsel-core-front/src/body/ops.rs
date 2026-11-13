@@ -246,10 +246,10 @@ impl<'c, 'a> Cx<'c, 'a> {
         let c = self.kids(n);
         let (l, r) = (c[0], c[1]);
         if self.synthesises(l) {
-            let (lt, lv) = self.operand(l);
+            let (lt, lv) = self.operand(l, None);
             if lt == NEVER || lt == ERROR {
                 if self.synthesises(r) {
-                    self.operand(r);
+                    self.operand(r, None);
                 }
                 return (lt, None, None);
             }
@@ -257,7 +257,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             return (lt, lv, rv);
         }
         if self.synthesises(r) {
-            let (rt, rv) = self.operand(r);
+            let (rt, rv) = self.operand(r, None);
             if rt == NEVER || rt == ERROR {
                 return (rt, None, None);
             }
@@ -278,11 +278,11 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// a moving type is viewed for the statement, not moved, since `take` is written
     /// exactly where such a place is moved (OWN-6), and a view operand is its payload
     /// (SEM-7).
-    pub(super) fn operand(&mut self, e: NodeId) -> (TyId, Option<ValueId>) {
+    pub(super) fn operand(&mut self, e: NodeId, hint: Option<Want>) -> (TyId, Option<ValueId>) {
         let at = match self.place(e) {
             Ok(Some(at)) if !self.copies(at.ty) => at,
             Ok(_) => {
-                let (t, v) = self.expr(e, None);
+                let (t, v) = self.expr_hinted(e, hint);
                 return match self.t.kind(t) {
                     TyKind::View(x) if !self.copies(*x) => (*x, None),
                     _ => (t, v),
@@ -301,7 +301,9 @@ impl<'c, 'a> Cx<'c, 'a> {
         if !self.synthesises(r) {
             return self.expr(r, expect(t)).1;
         }
-        let (rt, rv) = self.operand(r);
+        // LANG-21: the left operand gives the right its expected type; a mismatch is
+        // still the operator's refusal, so the right is not coerced to it.
+        let (rt, rv) = self.operand(r, (t != ERROR).then(|| expect(t)).flatten());
         if rt != t && ![NEVER, ERROR].contains(&rt) && t != ERROR {
             let (op, a, b) = (self.token_text(n), self.name(t), self.name(rt));
             self.refuse_at("LANG-21", self.op_span(n), format!("`{a}` {op} `{b}`"));

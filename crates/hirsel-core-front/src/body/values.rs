@@ -330,7 +330,39 @@ impl<'c, 'a> Cx<'c, 'a> {
                     self.halt();
                     (ERROR, None)
                 }
-                _ => self.gap_ty(n, "a variant without an expected type is not built"),
+                // LANG-7: with no expected type a variant names the one visible type
+                // that declares it; its type arguments come from its payloads alone
+                // (LANG-12, Q33).
+                _ => {
+                    let from = p.modules[self.at.module as usize].id;
+                    let text = p.index.symbols.text(name);
+                    let mut found = None;
+                    for id in p.index.constructor_candidates(from, name) {
+                        let Some(Def::Type(d)) = p.by_definition[id.0 as usize] else {
+                            continue;
+                        };
+                        let DeclBody::Variant(cs) = &p.decls[d.index()].body else {
+                            continue;
+                        };
+                        let Some(i) = cs.iter().position(|c| c.name == text) else {
+                            continue;
+                        };
+                        if found.is_some_and(|(e, _, _)| e != d) {
+                            self.refuse(
+                                "LANG-7",
+                                n,
+                                format!("two visible types declare the variant `{text}`"),
+                            );
+                            return (ERROR, None);
+                        }
+                        found = Some((d, i, &cs[i]));
+                    }
+                    let Some((d, i, c)) = found else {
+                        self.refuse("LANG-7", n, format!("no visible type declares `{text}`"));
+                        return (ERROR, None);
+                    };
+                    self.construct(n, d, Some(i as u32), &c.fields, c.labelled, args, None)
+                }
             };
         };
         let from = p.modules[self.at.module as usize].id;

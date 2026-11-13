@@ -836,14 +836,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             return match (g.path.0.modules[0].as_str(), g.path.0.name.as_str()) {
                 ("seq", "len") => self.span_parts(vals[0]?, n).map(|p| p.3),
-                (module, "nth" | "get") if { self.is_locator(tys[0]) } => {
+                (module, "nth" | "get") => {
                     let result = subst(&mut self.t, g.result, tys);
-                    let indexed = module == "indexed";
-                    self.packed_get(vals[0]?, vals[1]?, tys[0], indexed, result, n)
-                }
-                ("seq", "nth") | ("indexed", "get") => {
-                    let result = subst(&mut self.t, g.result, tys);
-                    self.scalar_sequence_get(vals[0]?, vals[1]?, tys[0], result, n)
+                    self.packed_get(vals[0]?, vals[1]?, tys[0], module == "indexed", result, n)
                 }
                 _ => {
                     self.gap(n, "this sequence operation is not built");

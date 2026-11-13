@@ -11,6 +11,17 @@ impl Cx<'_, '_, '_> {
         match self.t.kind(ty).clone() {
             TyKind::Unit => Some(0),
             TyKind::Array(elem, count) => self.packed_plain_size(elem)?.checked_mul(count),
+            _ if self.private_variant_cases(ty).is_some() => {
+                let mut largest = 0u64;
+                for case in 0..self.private_variant_cases(ty)? as u32 {
+                    let mut size = 0u64;
+                    for field in self.compact_fields(ty, Some(case))? {
+                        size = size.checked_add(self.packed_plain_size(field)?)?;
+                    }
+                    largest = largest.max(size);
+                }
+                largest.checked_add(8)
+            }
             _ => {
                 let count = self.plain_fields(ty)?;
                 let mut size = 0u64;
@@ -20,6 +31,15 @@ impl Cx<'_, '_, '_> {
                 }
                 Some(size)
             }
+        }
+    }
+    /// FORM #58: plain variants have a private fixed-stride logical encoding.
+    pub(super) fn private_variant_cases(&self, ty: TyId) -> Option<usize> {
+        match self.t.kind(self.bare(ty)) {
+            TyKind::Adt(d, _) if self.p.decls[d.index()].repr == Repr::Own && self.copies(ty) => {
+                self.variant_cases(ty)
+            }
+            _ => None,
         }
     }
     pub(super) fn plain_fields(&self, ty: TyId) -> Option<u32> {
@@ -48,21 +68,6 @@ impl Cx<'_, '_, '_> {
                 op: BinaryOp::Add,
                 left,
                 right,
-                fail: None,
-            },
-            n,
-        );
-        Some(result)
-    }
-    fn offset_by(&mut self, at: ValueId, bytes: u64, n: NodeId) -> Option<ValueId> {
-        let bytes = self.konst(Ty::Scalar(Scalar::U64), bytes, n)?;
-        let result = self.value(Ty::Scalar(Scalar::U64));
-        self.inst(
-            Inst::Binary {
-                result,
-                op: BinaryOp::Add,
-                left: at,
-                right: bytes,
                 fail: None,
             },
             n,
@@ -178,6 +183,49 @@ impl Cx<'_, '_, '_> {
             }
             Rep::None => {}
             Rep::Place(_) => {
+                if let Some(cases) = self.private_variant_cases(ty) {
+                    let tag_at = self.byte_at(blob, at, PlaceTy::Value(Ty::Scalar(Scalar::U64)), n);
+                    let tag = self.read_bits(tag_at, Ty::Scalar(Scalar::U64), n);
+                    let done = self.new_block(&[]);
+                    for case in 0..cases as u32 {
+                        let next = if case + 1 < cases as u32 {
+                            let value = self.konst(Ty::Scalar(Scalar::U64), u64::from(case), n)?;
+                            let yes = self.test(CompareOp::Eq, tag, value, n);
+                            let body = self.new_block(&[]);
+                            let next = self.new_block(&[]);
+                            self.branch(yes, body, next, n);
+                            self.start(body);
+                            Some(next)
+                        } else {
+                            None
+                        };
+                        self.inst(Inst::SetCase { address: to, case }, n);
+                        let mut off = self.add_k(at, 8, n)?;
+                        for (i, field) in
+                            self.compact_fields(ty, Some(case))?.into_iter().enumerate()
+                        {
+                            let place = self.place_ty(field, n)?;
+                            let dest = self.address(
+                                AddressBase::Address(to),
+                                &[Step::CaseField {
+                                    case,
+                                    field: i as u32,
+                                }],
+                                place,
+                                n,
+                            );
+                            self.decode_plain(blob, off, w, field, dest, n)?;
+                            let size = self.packed_plain_size(field)?;
+                            off = self.add_k(off, size, n)?;
+                        }
+                        self.jump(done, &[], n);
+                        if let Some(next) = next {
+                            self.start(next);
+                        }
+                    }
+                    self.start(done);
+                    return Some(());
+                }
                 if let TyKind::Array(elem, count) = *self.t.kind(ty) {
                     let stride = self.packed_plain_size(elem)?;
                     let u64t = Ty::Scalar(Scalar::U64);
@@ -361,87 +409,6 @@ impl Cx<'_, '_, '_> {
                 _ => {}
             }
         }
-        self.jump(done, &[], n);
-        self.start(empty);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 0,
-            },
-            n,
-        );
-        self.jump(done, &[], n);
-        self.start(done);
-        Some(self.pointer(to, n))
-    }
-    pub(super) fn scalar_sequence_get(
-        &mut self,
-        header: ValueId,
-        index: ValueId,
-        elem: TyId,
-        result: TyId,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        let TyKind::Scalar(scalar) = self.t.kind(elem) else {
-            self.gap(
-                n,
-                "packed element views need the compact locator representation",
-            );
-            return None;
-        };
-        let scalar = *scalar;
-        let (blob, at, w, count) = self.span_parts(header, n)?;
-        let rep = self.rep(result).ok()?;
-        let to = self.new_slot(rep.stored()?, n);
-        let condition = self.value(Ty::Scalar(Scalar::Bool));
-        self.inst(
-            Inst::Compare {
-                result: condition,
-                op: CompareOp::Lt,
-                left: index,
-                right: count,
-            },
-            n,
-        );
-        let load = self.new_block(&[]);
-        let empty = self.new_block(&[]);
-        let done = self.new_block(&[]);
-        let yes = self.edge(load, &[]);
-        let no = self.edge(empty, &[]);
-        self.end(Terminator::Branch { condition, yes, no }, Some(n));
-        self.start(load);
-        let stride = self.konst(Ty::Scalar(Scalar::U64), scalar.size(), n)?;
-        let offset = self.value(Ty::Scalar(Scalar::U64));
-        self.inst(
-            Inst::Binary {
-                result: offset,
-                op: BinaryOp::Mul,
-                left: index,
-                right: stride,
-                fail: None,
-            },
-            n,
-        );
-        let headers = self.offset_sum(w, w, n)?;
-        let data = self.offset_sum(at, headers, n)?;
-        let offset = self.offset_sum(data, offset, n)?;
-        let address = self.byte_at(blob, offset, PlaceTy::Value(Ty::Scalar(scalar)), n);
-        let pointer = self.pointer(address, n);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 1,
-            },
-            n,
-        );
-        // The payload is the element's own bytes (FORM #56).
-        let dest = self.address(
-            AddressBase::Address(to),
-            &[Step::CaseField { case: 1, field: 0 }],
-            PlaceTy::Value(Ty::Scalar(scalar)),
-            n,
-        );
-        self.install_view(dest, elem, pointer, n)?;
         self.jump(done, &[], n);
         self.start(empty);
         self.inst(

@@ -951,6 +951,31 @@ fn list_index_iteration_and_failure_cleanup() {
     use hirsel_core_ir::{TypeId, text};
     let vectors = [
         (
+            "type Choice = Small(u8) | Large(u64)\nfn f(xs: FixedSpan[Choice]) -> u64 { let mut s:u64=0; for c in xs { s+=match c { Small(v)=>{let n:u64=int.widen(v); n}, Large(v)=>v*100u64 } }; s }",
+            false,
+            eval::Outcome::Returned(vec![1120]),
+        ),
+        (
+            "fn helper(xs: SeqSpan[(u8,u64)]) -> Option[View[(u8,u64)]] in xs { seq.nth(xs,1) }\nfn f(xs: SeqSpan[(u8,u64)]) -> u64 { match helper(xs) { Some(pair) => { let (_,v)=pair; v }, None=>0 } }",
+            false,
+            eval::Outcome::Returned(vec![11]),
+        ),
+        (
+            "fn helper(xs: IndexedSpan[(u8,u64)]) -> Option[View[(u8,u64)]] in xs { indexed.get(xs,2) }\nfn f(xs: IndexedSpan[(u8,u64)]) -> u64 { match helper(xs) { Some(pair) => { let (_,v)=pair; v }, None=>0 } }",
+            false,
+            eval::Outcome::Returned(vec![13]),
+        ),
+        (
+            "fn f(w32: IndexedSpan[u64]) -> u64 { match indexed.get(w32,2) { Some(v)=>v+0u64, None=>0 } }",
+            false,
+            eval::Outcome::Returned(vec![13]),
+        ),
+        (
+            "fn f(w64: IndexedSpan[u64]) -> u64 { match indexed.get(w64,3) { Some(v)=>v+0u64, None=>0 } }",
+            false,
+            eval::Outcome::Returned(vec![0]),
+        ),
+        (
             "fn f(xs: FixedSpan[Inline[(u8,u64),2]]) -> u64 { let mut s:u64=0; for row in xs { for (_, y) in row { s += y } }; s }",
             false,
             eval::Outcome::Returned(vec![341]),
@@ -1370,7 +1395,7 @@ fn f{entry} = n{instance} g{g} {{
             if sequence {
                 fields.push((
                     16 + width as usize,
-                    24,
+                    if tuple { 27 } else { 24 },
                     if width == 2 {
                         "u16"
                     } else if width == 4 {
@@ -1381,12 +1406,28 @@ fn f{entry} = n{instance} g{g} {{
                 ));
             }
             if source.contains("IndexedSpan[") {
-                fields.extend([(44, 0, "u16"), (46, 8, "u16"), (48, 16, "u16")]);
+                let stride = if tuple { 9 } else { 8 };
+                let table = 16 + 2 * width as usize + 3 * stride;
+                let word = if width == 2 {
+                    "u16"
+                } else if width == 4 {
+                    "u32"
+                } else {
+                    "u64"
+                };
+                for i in 0..3usize {
+                    fields.push((table + i * width as usize, (i * stride) as u64, word));
+                }
             }
+            let variant = source.contains("FixedSpan[Choice]");
             let array = source.contains("FixedSpan[Inline[");
             for (i, bits) in [7, 11, 13].into_iter().enumerate() {
                 let first = 16 + width as usize * if sequence { 2 } else { 1 };
-                if array {
+                if variant {
+                    let offset = first + i * 16;
+                    fields.push((offset, u64::from(i == 1), "u64"));
+                    fields.push((offset + 8, bits, if i == 1 { "u64" } else { "u8" }));
+                } else if array {
                     for (j, bits) in [bits, bits * 10].into_iter().enumerate() {
                         let offset = first + i * 18 + j * 9;
                         fields.push((offset, 1, "u8"));
@@ -1985,21 +2026,13 @@ fn aggregate_constant_errors_are_checked_before_use() {
 }
 
 #[test]
-fn unsupported_private_span_reads_record_a_gap_in_each_body() {
-    let (index, inputs) = program_inputs(include_str!(
-        "../../../core/front/cases/body/span-private-variant-gap.hirsel"
-    ));
-    let p = Program::declare(&index, &inputs);
-    for name in ["direct", "each"] {
-        let f = p.fns.iter().position(|f| f.path.0.name == name).unwrap();
-        let mut e = Emitter::new();
-        let c = p.check_lower(f, &mut e);
-        assert!(c.refusals.is_empty());
-        assert_eq!(c.gaps.len(), 1, "{name}: {:?}", c.gaps);
-        assert_eq!(
-            c.gaps[0].what,
-            "the private encoding of this FixedSpan element is not built"
-        );
-        assert!(c.function.is_none());
-    }
+fn private_variant_span_reads_follow_the_logical_encoding() {
+    let failures = run_case(&root().join("cases/body/span-private-variant.hirsel"));
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+fn packed_composite_views_escape_through_caller_destinations() {
+    let failures = run_case(&root().join("cases/body/packed-escaping.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
 }

@@ -385,3 +385,39 @@ fn packed_private_arrays_cranelift() { packed_private_arrays(Backend::Cranelift)
 #[test]
 #[ignore = "explicit native integration target"]
 fn packed_private_arrays_llvm() { packed_private_arrays(Backend::Llvm); }
+
+fn packed_escaping(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let source = include_str!("../../../core/front/cases/body/packed-escaping.hirsel");
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let built = product.build(&entry, &native_options(backend, dir.path())).unwrap();
+    run_clean(&built.executable,0);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn packed_escaping_cranelift() { packed_escaping(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn packed_escaping_llvm() { packed_escaping(Backend::Llvm); }
+
+fn packed_private_variants(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let source = include_str!("../../../core/front/cases/body/span-private-variant.hirsel");
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let built = product.build(&entry, &native_options(backend, dir.path())).unwrap();
+    run_clean(&built.executable,0);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn packed_private_variants_cranelift() { packed_private_variants(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn packed_private_variants_llvm() { packed_private_variants(Backend::Llvm); }

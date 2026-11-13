@@ -1,0 +1,31 @@
+// FORM #58: private variants use a u64 tag and zero padding to their logical stride.
+// 7 + 11*100 + 100000 = 101107; direct second adds1100, get first adds7.
+// expect: accept
+// expect: run values() = 102214
+// expect: run nested() = 302
+type Choice = Small(u8) | Large(u64) | Empty
+fn score(c:Choice)->u64 { match c { Small(x)=>int.widen(x), Large(x)=>x*100, Empty=>100000 } }
+fn direct(xs:FixedSpan[Choice]) -> Choice { xs[1] }
+fn each(xs:FixedSpan[Choice])->u64 { let mut s:u64=0; for x in xs { s+=score(x) }; s }
+fn values()->u64 {
+  region r {
+    let mut b:SpanBuilder[Choice,in r]=span.builder(r)
+    match span.push(mut b,Small(7u8)) { Ok(())=>{}, Error(_)=>return 999 }
+    match span.push(mut b,Large(11u64)) { Ok(())=>{}, Error(_)=>return 999 }
+    match span.push(mut b,Empty) { Ok(())=>{}, Error(_)=>return 999 }
+    let xs=span.finish(take b)
+    let first=match span.get(xs,0) { Some(x)=>score(x),None=>999u64 }
+    each(xs)+score(direct(xs))+first
+  }
+}
+fn nested()->u64 {
+  region r {
+    let mut b:SpanBuilder[Inline[Choice,2],in r]=span.builder(r)
+    match span.push(mut b,[Small(2u8),Large(3u64)]) { Ok(())=>{}, Error(_)=>return 999 }
+    let xs=span.finish(take b)
+    let mut s:u64=0
+    for row in xs { for c in row { s+=score(c) } }
+    s
+  }
+}
+pub fn main()->Result[(),Exit] { if values()==102214u64 && nested()==302u64 { Ok(()) } else { Error(Exit(status:1)) } }

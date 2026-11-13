@@ -1,0 +1,47 @@
+// Pair values 1/7,2/11,3/13. nth second=211; indexed third=313; sum=31.
+// expect: accept
+// expect: run run() = 211313031
+@compact(u16) stable type Bundle { sequential: SeqSpan[(u8,u64)], indexed: IndexedSpan[(u8,u64)] }
+fn write[in r](take w:Writer[Bundle,in r]) -> Result[Child[Bundle],BuildError] {
+  emit(take w, Bundle(
+    sequential: emit(fn(take s:Writer[SeqSpan[(u8,u64)],in r])->Result[Child[SeqSpan[(u8,u64)]],BuildError] {
+      writer.append(mut s, fn(take e:Writer[(u8,u64),in r])->Result[Child[(u8,u64)],BuildError] { emit(take e,(1u8,7u64)) })?
+      writer.append(mut s, fn(take e:Writer[(u8,u64),in r])->Result[Child[(u8,u64)],BuildError] { emit(take e,(2u8,11u64)) })?
+      writer.append(mut s, fn(take e:Writer[(u8,u64),in r])->Result[Child[(u8,u64)],BuildError] { emit(take e,(3u8,13u64)) })?
+      writer.close(take s)
+    }),
+    indexed: emit(fn(take s:Writer[IndexedSpan[(u8,u64)],in r])->Result[Child[IndexedSpan[(u8,u64)]],BuildError] {
+      writer.append(mut s, fn(take e:Writer[(u8,u64),in r])->Result[Child[(u8,u64)],BuildError] { emit(take e,(1u8,7u64)) })?
+      writer.append(mut s, fn(take e:Writer[(u8,u64),in r])->Result[Child[(u8,u64)],BuildError] { emit(take e,(2u8,11u64)) })?
+      writer.append(mut s, fn(take e:Writer[(u8,u64),in r])->Result[Child[(u8,u64)],BuildError] { emit(take e,(3u8,13u64)) })?
+      writer.close(take s)
+    })
+  ))
+}
+fn nth(s:SeqSpan[(u8,u64)])->Option[View[(u8,u64)]] in s { seq.nth(s,1) }
+fn nth_again(s:SeqSpan[(u8,u64)])->Option[View[(u8,u64)]] in s { nth(s) }
+fn get(s:IndexedSpan[(u8,u64)])->Option[View[(u8,u64)]] in s { indexed.get(s,2) }
+fn get_again(s:IndexedSpan[(u8,u64)])->Option[View[(u8,u64)]] in s { get(s) }
+fn noise(x:u64)->u64 { let a=[x;256]; a[255] }
+fn score(b:Bundle)->u64 {
+  let a=nth_again(b.sequential)
+  let z=get_again(b.indexed)
+  let _=noise(997)
+  let (ta,na)=match a { Some(pair)=>pair, None=>return 999 }
+  let (tz,nz)=match z { Some(pair)=>pair, None=>return 999 }
+  let wide_a:u64=int.widen(ta)
+  let wide_z:u64=int.widen(tz)
+  let mut total:u64=0
+  for (_,n) in b.sequential { total+=n }
+  match seq.nth(b.sequential,3) { Some(_)=>return 998, None=>{} }
+  (wide_a*100+na)*1000000+(wide_z*100+nz)*1000+total
+}
+fn make(r:Region,n:u64)->Result[Bundle in r,BuildError] {
+  match build_stream_in(r,bytes n,fn(take w:Writer[Bundle,in r])->Result[Child[Bundle],BuildError] { write(take w) }) {
+    Ok(take b)=>Ok(finish(take b)), Error(e)=>Error(e)
+  }
+}
+fn run()->u64 {
+  region r { match make(r,256) { Ok(b)=>score(b),Error(_)=>999 } }
+}
+pub fn main()->Result[(),Exit] { if run()==211313031u64 { Ok(()) } else { Error(Exit(status:1)) } }

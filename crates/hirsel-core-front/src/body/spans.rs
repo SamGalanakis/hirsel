@@ -451,6 +451,108 @@ impl Cx<'_, '_, '_> {
             }
             (_, Rep::Place(id)) => {
                 let whole = self.address(AddressBase::Value(x), &[], PlaceTy::Declared(id), n);
+                if let Some(cases) = self.private_variant_cases(ty) {
+                    let size = self.packed_plain_size(ty)?;
+                    let tag = self.value(Ty::Scalar(Scalar::U32));
+                    self.inst(
+                        Inst::Case {
+                            result: tag,
+                            address: whole,
+                        },
+                        n,
+                    );
+                    let done = self.new_block(&[]);
+                    for case in 0..cases as u32 {
+                        let next = if case + 1 < cases as u32 {
+                            let value = self.konst(Ty::Scalar(Scalar::U32), u64::from(case), n)?;
+                            let yes = self.test(CompareOp::Eq, tag, value, n);
+                            let body = self.new_block(&[]);
+                            let next = self.new_block(&[]);
+                            self.branch(yes, body, next, n);
+                            self.start(body);
+                            Some(next)
+                        } else {
+                            None
+                        };
+                        let stored_tag = self.konst(Ty::Scalar(Scalar::U64), u64::from(case), n)?;
+                        let dest = self.address(
+                            AddressBase::Value(blob),
+                            &[Step::Byte(at)],
+                            PlaceTy::Value(Ty::Scalar(Scalar::U64)),
+                            n,
+                        );
+                        self.inst(
+                            Inst::Store {
+                                address: dest,
+                                value: stored_tag,
+                            },
+                            n,
+                        );
+                        let mut offset = 8u64;
+                        for (i, field) in
+                            self.compact_fields(ty, Some(case))?.into_iter().enumerate()
+                        {
+                            let rep = self.rep(field).ok()?;
+                            if let Some(place) = rep.stored() {
+                                let from = self.address(
+                                    AddressBase::Address(whole),
+                                    &[Step::CaseField {
+                                        case,
+                                        field: i as u32,
+                                    }],
+                                    place,
+                                    n,
+                                );
+                                let value = match rep {
+                                    Rep::Scalar(t) => self.read_bits(from, t, n),
+                                    _ => self.pointer(from, n),
+                                };
+                                let off = self.add_k(at, offset, n)?;
+                                self.encode_plain(blob, off, field, rep, value, n)?;
+                            }
+                            offset += self.packed_plain_size(field)?;
+                        }
+                        // The unused tail is part of the private encoding, not a
+                        // value field. Zero it without count-sized emitted code.
+                        if offset < size {
+                            let u64t = Ty::Scalar(Scalar::U64);
+                            let start = self.add_k(at, offset, n)?;
+                            let end = self.add_k(at, size, n)?;
+                            let zero = self.konst(Ty::Scalar(Scalar::U8), 0, n)?;
+                            let head = self.new_block(&[u64t]);
+                            let body = self.new_block(&[]);
+                            let after = self.new_block(&[]);
+                            self.jump(head, &[start], n);
+                            self.start(head);
+                            let off = self.block_params(head)[0];
+                            let more = self.test(CompareOp::Lt, off, end, n);
+                            self.branch(more, body, after, n);
+                            self.start(body);
+                            let dest = self.address(
+                                AddressBase::Value(blob),
+                                &[Step::Byte(off)],
+                                PlaceTy::Value(Ty::Scalar(Scalar::U8)),
+                                n,
+                            );
+                            self.inst(
+                                Inst::Store {
+                                    address: dest,
+                                    value: zero,
+                                },
+                                n,
+                            );
+                            let next = self.add_k(off, 1, n)?;
+                            self.jump(head, &[next], n);
+                            self.start(after);
+                        }
+                        self.jump(done, &[], n);
+                        if let Some(next) = next {
+                            self.start(next);
+                        }
+                    }
+                    self.start(done);
+                    return Some(());
+                }
                 if let TyKind::Array(elem, count) = *self.t.kind(ty) {
                     let u64t = Ty::Scalar(Scalar::U64);
                     let stride = self.packed_plain_size(elem)?;

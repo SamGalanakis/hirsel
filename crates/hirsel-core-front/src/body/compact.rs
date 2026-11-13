@@ -395,6 +395,7 @@ impl Cx<'_, '_, '_> {
                     return self.new_locator(bare, blob, off, n);
                 }
                 if self.plain_fields(bare).is_some()
+                    || self.private_variant_cases(bare).is_some()
                     || matches!(self.t.kind(bare), TyKind::Array(..))
                 {
                     let to = self.new_slot(PlaceTy::Declared(id), n);

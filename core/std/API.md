@@ -55,7 +55,6 @@ the seed's, read through one name. No extension declares a core member's name.
 | dir |  | 3 | create_dir, remove_all, create_temp |
 | file |  | 10 | open, read_into, write_all, close, read, read_string, write, remove, try_lock, unlock |
 | float | yes | 7 | parse64, parse32, is_finite, push_f64, push_fixed64, shortest64, exp |
-| heap |  | 5 | new, len, push, peek, pop |
 | int | yes | 2 | parse_uint, parse_int |
 | io |  | 7 | lines, prefix, read_line, out, pending, flush, write |
 | json |  | 6 | size, parse, push_json, index, get, shown |
@@ -66,7 +65,7 @@ the seed's, read through one name. No extension declares a core member's name.
 | result | yes | 2 | map_err, capacity_only |
 | set |  | 6 | new, len, contains, insert, remove, entries |
 | string | yes | 15 | with_capacity, is_boundary, push_i64, push_uint, repeat, clear, find, starts_with, ends_with, split_once, next_split, next_line, strip_prefix, strip_suffix, trim_ascii |
-| **total** | **7 of 16** | **107** | |
+| **total** | **7 of 15** | **102** | |
 
 **Known cost.** float's push_fixed64 and its push_ascii helper build their digits as Bytes
 and pass them through `string.from_utf8`, revalidating about 20 ASCII bytes per number that

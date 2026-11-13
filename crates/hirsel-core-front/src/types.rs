@@ -40,6 +40,15 @@ pub enum Root {
     Enclosing,
 }
 
+/// Callable representation and the owning environment's send promise (LANG-13).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Callable {
+    Plain,
+    Own,
+    OwnSend,
+    Scoped,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TyKind {
     /// A type that already produced a refusal; it satisfies every check silently.
@@ -60,8 +69,8 @@ pub enum TyKind {
     View(TyId),
     /// The i-th type parameter of the definition being read.
     Param(u32),
-    /// A plain callable type `fn(..) -> R` (LANG-13).
-    Fn(Vec<(Mode, TyId)>, TyId, bool),
+    /// A callable signature; parameter and result types are not environment fields.
+    Fn(Vec<(Mode, TyId)>, TyId, bool, Callable),
     /// A part of a call's expected type not fixed yet; it constrains nothing (LANG-11).
     Hole,
 }
@@ -245,10 +254,10 @@ pub fn subst(t: &mut impl TyRead, ty: TyId, args: &[TyId]) -> TyId {
             let x = subst(t, x, args);
             t.mk(TyKind::View(x))
         }
-        TyKind::Fn(ps, r, w) => {
+        TyKind::Fn(ps, r, w, k) => {
             let ps = ps.iter().map(|&(m, p)| (m, subst(t, p, args))).collect();
             let r = subst(t, r, args);
-            t.mk(TyKind::Fn(ps, r, w))
+            t.mk(TyKind::Fn(ps, r, w, k))
         }
         _ => ty,
     }
@@ -261,7 +270,7 @@ pub fn has_hole(t: &impl TyRead, ty: TyId) -> bool {
         TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().any(|&x| has_hole(t, x)),
         TyKind::Anchored(x, root) => has_hole(t, *x) || has_hole(t, *root),
         TyKind::View(x) | TyKind::Array(x, _) => has_hole(t, *x),
-        TyKind::Fn(ps, r, _) => ps.iter().any(|&(_, p)| has_hole(t, p)) || has_hole(t, *r),
+        TyKind::Fn(ps, r, _, _) => ps.iter().any(|&(_, p)| has_hole(t, p)) || has_hole(t, *r),
         _ => false,
     }
 }
@@ -271,7 +280,7 @@ pub fn has_param(t: &impl TyRead, ty: TyId) -> bool {
         TyKind::Anchored(x, r) => has_param(t, *x) || has_param(t, *r),
         TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().any(|&x| has_param(t, x)),
         TyKind::View(x) | TyKind::Array(x, _) => has_param(t, *x),
-        TyKind::Fn(ps, r, _) => ps.iter().any(|&(_, p)| has_param(t, p)) || has_param(t, *r),
+        TyKind::Fn(ps, r, _, _) => ps.iter().any(|&(_, p)| has_param(t, p)) || has_param(t, *r),
         _ => false,
     }
 }

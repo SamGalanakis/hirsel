@@ -57,6 +57,15 @@ impl<T: TyRead> Shapes<'_, T> {
                 None,
             ),
             TyKind::Unit => (LRepr::Own, Body::Record(vec![]), None),
+            TyKind::Fn(_, _, _, callable) => (
+                if callable == Callable::Scoped {
+                    LRepr::Scoped
+                } else {
+                    LRepr::Own
+                },
+                record(vec![("callable", self.field(ty)?)]),
+                None,
+            ),
             TyKind::Array(x, n) => (
                 LRepr::Own,
                 Body::Record(vec![Field {
@@ -280,7 +289,11 @@ impl<T: TyRead> Shapes<'_, T> {
             }
             TyKind::Tuple(_) | TyKind::Unit => FieldTy::Inline(self.shape(ty)?),
             TyKind::View(_) => FieldTy::Borrow,
-            TyKind::Fn(..) => FieldTy::Fn,
+            TyKind::Fn(_, _, _, callable) => match callable {
+                Callable::Plain => FieldTy::Fn,
+                Callable::Own | Callable::OwnSend => FieldTy::OwnFn,
+                Callable::Scoped => FieldTy::Borrow,
+            },
             _ => return None,
         })
     }

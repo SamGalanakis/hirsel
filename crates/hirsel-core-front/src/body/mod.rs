@@ -1360,7 +1360,7 @@ fn mentions_error(t: &impl TyRead, ty: TyId) -> bool {
         TyKind::Error => true,
         TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().any(|&x| mentions_error(t, x)),
         TyKind::Array(x, _) | TyKind::View(x) => mentions_error(t, *x),
-        TyKind::Fn(ps, r, _) => {
+        TyKind::Fn(ps, r, _, _) => {
             mentions_error(t, *r) || ps.iter().any(|&(_, x)| mentions_error(t, x))
         }
         TyKind::Anchored(x, root) => mentions_error(t, *x) || mentions_error(t, *root),

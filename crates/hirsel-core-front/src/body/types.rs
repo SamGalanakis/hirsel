@@ -55,6 +55,36 @@ impl<'c, 'a> Cx<'c, 'a> {
         self.out.counts.types += 1;
         let c = self.kids(n);
         match self.kind(n) {
+            NodeKind::CallableType | NodeKind::OwnCallableType | NodeKind::ScopedCallableType => {
+                let mut params = vec![];
+                let mut result = UNIT;
+                let mut waits = false;
+                for &child in c {
+                    match self.kind(child) {
+                        NodeKind::Parameters => {
+                            for &param in self.kids(child) {
+                                let mode = crate::decls::mode_of(self.kind(param));
+                                let ty = self.ty(self.kids(param)[0]);
+                                params.push((mode, ty));
+                            }
+                        }
+                        NodeKind::ResultType => result = self.ty(self.kids(child)[0]),
+                        NodeKind::Waits => waits = true,
+                        NodeKind::Generics => {
+                            self.gap(child, "generic callable types are not built")
+                        }
+                        _ => {}
+                    }
+                }
+                let callable = match crate::decls::callable_kind(self.item, n) {
+                    Ok(k) => k,
+                    Err(what) => {
+                        self.gap(n, what);
+                        return ERROR;
+                    }
+                };
+                self.t.mk(TyKind::Fn(params, result, waits, callable))
+            }
             NodeKind::UnitType => UNIT,
             NodeKind::GroupType => self.ty(c[0]),
             NodeKind::TupleType => {

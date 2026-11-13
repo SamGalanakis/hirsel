@@ -1,0 +1,7 @@
+// LANG-13: own fn is not send unless written own[send], and never shareable/key.
+// expect: refuse OWN-4 at 5:21
+// expect: refuse OWN-4 at 6:26
+// expect: refuse OWN-4 at 7:19
+type Sender: send { f: own fn() }
+type Shared: shareable { f: own[send] fn() }
+type Keyed: key { f: fn() }

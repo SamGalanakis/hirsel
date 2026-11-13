@@ -113,6 +113,7 @@ fn holds_names(h: u8) -> String {
         (H_CAPABILITY, "capability"),
         (H_SCOPED, "scoped"),
         (H_STABLE, "stable"),
+        (H_OPAQUE, "opaque"),
     ];
     let v: Vec<_> = names
         .iter()

@@ -1,0 +1,23 @@
+// LANG-13 and MEM-24: code pointers are 8; owning and scoped carriers are 16.
+// Signatures mention String/HostFile without holding either in their environments.
+// expect: kind Plain plain
+// expect: holds Plain -
+// expect: size Plain 8
+// expect: kind Owned own
+// expect: holds Owned opaque
+// expect: size Owned 16
+// expect: kind Sending own
+// expect: size Sending 16
+// expect: kind Borrowed scoped
+// expect: holds Borrowed scoped
+// expect: size Borrowed 16
+// expect: kind Phantom plain
+// expect: holds Phantom -
+// expect: size Concrete 8
+// expect: holds Concrete -
+type Plain { f: fn(String) -> HostFile waits }
+type Owned { f: own fn(mut String, take String) -> u64 }
+type Sending: send { f: own[send] fn(u64) -> u64 }
+scoped type Borrowed { f: scoped fn(u64) -> u64 }
+type Phantom[T] { f: fn(T) -> T }
+type Concrete { p: Phantom[HostFile] }

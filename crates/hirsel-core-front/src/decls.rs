@@ -60,14 +60,16 @@ pub const H_RESOURCE: u8 = 1;
 pub const H_CAPABILITY: u8 = 2;
 pub const H_SCOPED: u8 = 4;
 pub const H_STABLE: u8 = 8;
+/// An owner without a copy contract (OWN-2).
+pub const H_OPAQUE: u8 = 16;
 
 /// What a rigid type parameter may hold (OWN-2): every category its bounds do not
 /// exclude. `plain` and `shareable` exclude resources, scoped values and stable
 /// references, and nothing excludes a capability.
 pub fn param_holds(bounds: u16) -> u8 {
-    let all = H_RESOURCE | H_CAPABILITY | H_SCOPED | H_STABLE;
+    let all = H_RESOURCE | H_CAPABILITY | H_SCOPED | H_STABLE | H_OPAQUE;
     if bounds & (PLAIN | SHAREABLE) != 0 {
-        all & !(H_RESOURCE | H_SCOPED | H_STABLE)
+        all & !(H_RESOURCE | H_SCOPED | H_STABLE | H_OPAQUE)
     } else {
         all
     }
@@ -757,7 +759,7 @@ impl Program<'_> {
                     self.types.intern(TyKind::Anchored(ty, root))
                 }
             }
-            NodeKind::CallableType => {
+            NodeKind::CallableType | NodeKind::OwnCallableType | NodeKind::ScopedCallableType => {
                 let mut params = vec![];
                 let mut result = UNIT;
                 let mut waits = false;
@@ -781,14 +783,15 @@ impl Program<'_> {
                         _ => {}
                     }
                 }
-                self.types.intern(TyKind::Fn(params, result, waits))
-            }
-            NodeKind::OwnCallableType | NodeKind::ScopedCallableType => {
-                self.gaps.push(Gap::new(
-                    self.site(at, n),
-                    "owning and scoped callable types are not built",
-                ));
-                ERROR
+                let callable = match callable_kind(item, n) {
+                    Ok(k) => k,
+                    Err(what) => {
+                        self.gaps.push(Gap::new(self.site(at, n), what));
+                        return ERROR;
+                    }
+                };
+                self.types
+                    .intern(TyKind::Fn(params, result, waits, callable))
             }
             _ => {
                 self.gaps
@@ -1296,6 +1299,7 @@ impl Program<'_> {
             }
             TyKind::Anchored(x, _) | TyKind::Array(x, _) => self.inline_ty(x, state, stack),
             TyKind::View(_) => (Kind::Scoped, 0),
+            TyKind::Fn(..) => (kind(&self.decls, &self.types, ty, &[]), 0),
             TyKind::Adt(e, args) => {
                 if let Some(r) = self.decls[e.index()].role {
                     // An indirection: fixed size, its payload is not read (OWN-2).
@@ -1710,6 +1714,8 @@ fn walk_holds(
             }
         }
         TyKind::Anchored(x, _) | TyKind::Array(x, _) => walk_holds(decls, t, *x, h, params, refs),
+        TyKind::Fn(_, _, _, Callable::Scoped) => *h |= H_SCOPED,
+        TyKind::Fn(_, _, _, Callable::Own | Callable::OwnSend) => *h |= H_OPAQUE,
         TyKind::View(x) => {
             *h |= H_SCOPED;
             walk_holds(decls, t, *x, h, params, refs);
@@ -1794,12 +1800,14 @@ fn join(a: Kind, b: Kind) -> Kind {
 /// type parameters.
 pub fn kind(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> Kind {
     match t.kind(ty) {
-        TyKind::Error
-        | TyKind::Hole
-        | TyKind::Never
-        | TyKind::Unit
-        | TyKind::Scalar(_)
-        | TyKind::Fn(..) => Kind::Plain,
+        TyKind::Error | TyKind::Hole | TyKind::Never | TyKind::Unit | TyKind::Scalar(_) => {
+            Kind::Plain
+        }
+        TyKind::Fn(_, _, _, callable) => match callable {
+            Callable::Plain => Kind::Plain,
+            Callable::Own | Callable::OwnSend => Kind::Own,
+            Callable::Scoped => Kind::Scoped,
+        },
         TyKind::Tuple(xs) => xs
             .iter()
             .fold(Kind::Plain, |k, &x| join(k, kind(decls, t, x, params))),
@@ -1896,7 +1904,11 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
                 all | INTEGER | ENCODED
             }
             TyKind::Scalar(_) => all | ENCODED,
-            TyKind::Fn(..) => PLAIN | SHAREABLE | SEND,
+            TyKind::Fn(_, _, _, callable) => match callable {
+                Callable::Plain => PLAIN | SHAREABLE | SEND,
+                Callable::OwnSend => SEND,
+                Callable::Own | Callable::Scoped => 0,
+            },
             TyKind::Tuple(xs) => meet(xs) | encoding_bounds(decls, t, ty, params) & ENCODED,
             TyKind::Region(_) => 0,
             TyKind::Anchored(x, _) => has_bounds(decls, t, *x, params),
@@ -2019,8 +2031,13 @@ fn write_canonical(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, s: 
         TyKind::Param(i) => {
             let _ = write!(s, "${i}");
         }
-        TyKind::Fn(ps, r, w) => {
-            s.push_str("fn(");
+        TyKind::Fn(ps, r, w, k) => {
+            s.push_str(match k {
+                Callable::Plain => "fn(",
+                Callable::Own => "own fn(",
+                Callable::OwnSend => "own[send] fn(",
+                Callable::Scoped => "scoped fn(",
+            });
             for (i, (m, p)) in ps.iter().enumerate() {
                 if i > 0 {
                     s.push_str(", ");
@@ -2160,7 +2177,7 @@ fn written_missing_anchor(p: &Program<'_>, at: ItemRef, n: NodeId) -> bool {
 
 pub(crate) fn scoped_payload(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId) -> bool {
     match t.kind(ty) {
-        TyKind::View(_) => true,
+        TyKind::View(_) | TyKind::Fn(_, _, _, Callable::Scoped) => true,
         TyKind::Tuple(xs) => xs.iter().any(|&x| scoped_payload(decls, t, x)),
         TyKind::Adt(d, xs) => {
             let decl = &decls[d.index()];
@@ -2357,4 +2374,36 @@ fn unrooted_stable(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId) -> 
         TyKind::Array(x, _) => unrooted_stable(decls, t, *x),
         _ => false,
     }
+}
+
+/// The parser has already checked the callable's written kind and bounds.
+pub(crate) fn callable_kind(
+    item: hirsel_core_syntax::Item<'_>,
+    n: NodeId,
+) -> Result<Callable, &'static str> {
+    Ok(match item.tree.node(n).kind {
+        NodeKind::ScopedCallableType => Callable::Scoped,
+        NodeKind::OwnCallableType => {
+            if let Some(&bounds) = item
+                .tree
+                .children(n)
+                .iter()
+                .find(|&&c| item.tree.node(c).kind == NodeKind::Bounds)
+            {
+                let bs = item.tree.children(bounds);
+                if bs.len() != 1
+                    || item
+                        .tree
+                        .token_text(item.text, item.tree.node(bs[0]).token.unwrap())
+                        != "send"
+                {
+                    return Err("callable bounds other than send have no specified rule");
+                }
+                Callable::OwnSend
+            } else {
+                Callable::Own
+            }
+        }
+        _ => Callable::Plain,
+    })
 }

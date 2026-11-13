@@ -421,13 +421,13 @@ impl<'c, 'a> Cx<'c, 'a> {
                     let x = fill(t, x, found);
                     t.mk(TyKind::View(x))
                 }
-                TyKind::Fn(ps, r, w) => {
+                TyKind::Fn(ps, r, w, k) => {
                     let ps = ps
                         .into_iter()
                         .map(|(m, p)| (m, fill(t, p, found)))
                         .collect();
                     let r = fill(t, r, found);
-                    t.mk(TyKind::Fn(ps, r, w))
+                    t.mk(TyKind::Fn(ps, r, w, k))
                 }
                 _ => ty,
             }
@@ -446,7 +446,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 TyKind::Array(x, _) => ready(t, *x, found),
                 TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().all(|&x| ready(t, x, found)),
                 TyKind::View(x) => ready(t, *x, found),
-                TyKind::Fn(ps, r, _) => {
+                TyKind::Fn(ps, r, _, _) => {
                     ps.iter().all(|&(_, p)| ready(t, p, found)) && ready(t, *r, found)
                 }
                 _ => true,
@@ -537,7 +537,9 @@ impl<'c, 'a> Cx<'c, 'a> {
             {
                 self.unify(pt, b, s)
             }
-            (TyKind::Fn(a, ar, aw), TyKind::Fn(b, br, bw)) if a.len() == b.len() && (!bw || aw) => {
+            (TyKind::Fn(a, ar, aw, ak), TyKind::Fn(b, br, bw, bk))
+                if ak == bk && a.len() == b.len() && (!bw || aw) =>
+            {
                 a.iter()
                     .zip(&b)
                     .all(|(&(am, at), &(bm, bt))| am == bm && self.unify(at, bt, s))

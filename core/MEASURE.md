@@ -17,6 +17,22 @@ assertions or LTO. Cargo manifests pin the same profile choices. Nothing is fetc
 build or measurement time. Record `rustc -vV`, host CPU/OS, source base and profile flags
 beside the table.
 
+## Artifacts
+
+Run `python3 core/tools/measurement_artifacts.py > /tmp/measurement-artifacts.json`.
+This builds or locates the release compiler and the shipping x86-64 runtime archive
+with fat LTO, one codegen unit and no debug assertions. Use the returned `compiler`
+and `runtime` paths. The ordinary release staticlib has different build settings
+and is refused, as is the checked archive. Supplied paths can be checked with
+`--compiler PATH --runtime PATH --compiler-profile release`; only `--diagnostic`
+permits other artifacts.
+
+Every measurement table row and JSON report carries `compiler_build_profile`,
+`compiler_sha256`, `runtime_archive_profile` and `runtime_archive_sha256`. A row
+missing any identity, or using other artifacts, is a diagnostic and cannot enter
+a result ratio or geomean. Reuse completed Rust samples when correcting the Hirsel
+artifacts; preserve the original observations as diagnostics.
+
 ## Twins
 
 Each workload has two Rust twins, measured and reported separately; no ratio, total or

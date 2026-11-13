@@ -38,7 +38,7 @@ and runs only the missing Hirsel side.
 Result measurements require a release compiler and the shipping fat-LTO runtime.
 Build them with:
 
-    .buck2/bin/buck2 build --target-platforms //tools/buck2:release //:hirsel-core-driver-bin-hirsel-core '//:hirsel-core-rt-archives' --show-json-output
+    python3 core/tools/measurement_artifacts.py > /tmp/measurement-artifacts.json
 
 Pass `--compiler-profile release` and the runtime archive reported by the
 configured shipping target, or its `hirsel-core-rt-archives/` view. The runner
@@ -47,5 +47,5 @@ explicitly permits other toolchains; use `--compiler-profile checked
 --runtime-profile checked` to label those observations. Every report records
 both profiles and SHA-256 identities. Diagnostic ratios are excluded from results.
 Changing either identity invalidates only the Hirsel side of `--resume`; correct
-Rust samples remain reusable. `python3 core/langarena/test_run.py` exercises the
+Rust samples remain reusable. `python3 core/tools/test_measurement_artifacts.py` exercises the
 profile refusal, shipping view, explicit diagnostic and archive-change controls.

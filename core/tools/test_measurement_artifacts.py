@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import run
+import measurement_artifacts as run
 
 
 class ToolchainProfileTests(unittest.TestCase):
@@ -17,6 +17,8 @@ class ToolchainProfileTests(unittest.TestCase):
         self.compiler.write_bytes(b'release compiler fixture')
         self.checked = self.root / 'checked.a'
         self.checked.write_bytes(b'checked runtime fixture')
+        self.ordinary = self.root / 'ordinary-release.a'
+        self.ordinary.write_bytes(b'ordinary release O3 sixteen CGUs fixture')
         self.shipping = self.root / 'shipping.a'
         self.shipping.write_bytes(b'shipping fat-LTO runtime fixture')
         view = self.root / 'buck-out/v2/art/root/profile/__hirsel-core-rt-archives__/hirsel-core-rt-archives/x86_64-unknown-linux-gnu/libhirsel_core_rt.a'
@@ -28,11 +30,15 @@ class ToolchainProfileTests(unittest.TestCase):
 
     def test_checked_archive_refused_even_with_release_compiler_label(self):
         with self.assertRaisesRegex(ValueError, 'shipping fat-LTO runtime'):
-            run.toolchain_identity(self.compiler, self.checked, 'release', 'checked')
+            run.identity(self.compiler, self.checked, 'release', 'checked')
+
+    def test_ordinary_release_staticlib_refused(self):
+        with self.assertRaisesRegex(ValueError, 'shipping fat-LTO runtime'):
+            run.identity(self.compiler, self.ordinary, 'release', 'ordinary-release')
 
     def test_shipping_view_and_resolved_archive_record_same_identity(self):
-        left = run.toolchain_identity(self.compiler, self.view, 'release')
-        right = run.toolchain_identity(self.compiler, self.shipping, 'release')
+        left = run.identity(self.compiler, self.view, 'release')
+        right = run.identity(self.compiler, self.shipping, 'release')
         self.assertEqual(left, right)
         self.assertEqual(left['runtime_archive_profile'], 'shipping-release-fat-lto')
         self.assertEqual(left['runtime_archive_sha256'], hashlib.sha256(self.shipping.read_bytes()).hexdigest())
@@ -40,19 +46,19 @@ class ToolchainProfileTests(unittest.TestCase):
 
     def test_checked_compiler_refused(self):
         with self.assertRaises(ValueError):
-            run.toolchain_identity(self.compiler, self.shipping, 'checked')
+            run.identity(self.compiler, self.shipping, 'checked')
 
     def test_explicit_diagnostic_retains_checked_identity(self):
-        value = run.toolchain_identity(self.compiler, self.checked, 'checked', 'checked', True)
+        value = run.identity(self.compiler, self.checked, 'checked', 'checked', True)
         self.assertTrue(value['diagnostic'])
         self.assertEqual(value['compiler_build_profile'], 'checked')
         self.assertEqual(value['runtime_archive_profile'], 'checked')
         self.assertEqual(value['runtime_archive_sha256'], hashlib.sha256(self.checked.read_bytes()).hexdigest())
 
     def test_replaced_archive_has_different_identity(self):
-        before = run.toolchain_identity(self.compiler, self.shipping, 'release')
+        before = run.identity(self.compiler, self.shipping, 'release')
         self.shipping.write_bytes(b'changed shipping archive')
-        after = run.toolchain_identity(self.compiler, self.shipping, 'release')
+        after = run.identity(self.compiler, self.shipping, 'release')
         self.assertNotEqual(before, after)
 
 

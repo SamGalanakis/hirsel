@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'core/tools'))
 from langarena import inputs
 from std_native import wait_load
+import measurement_artifacts
 
 _spec = importlib.util.spec_from_file_location('core_measure', ROOT / 'core/tools/measure.py')
 _measure = importlib.util.module_from_spec(_spec)
@@ -65,23 +66,8 @@ def vendor_check(rust):
                 raise ValueError(f'vendor file checksum mismatch: {key}/{relative}; run: {POPULATE}')
 
 
-def toolchain_identity(compiler, runtime, compiler_profile, runtime_profile=None, diagnostic=False):
-    """Only the configured shipping archive view admits a result measurement."""
-    roots = {ROOT, *(parent for parent in runtime.absolute().parents if (parent / 'buck-out/v2/art/root').is_dir())}
-    canonical = runtime.resolve()
-    is_shipping = any(path.is_file() and path.resolve() == canonical
-                      for root in roots
-                      for path in root.glob('buck-out/v2/art/root/*/__hirsel-core-rt-archives__/hirsel-core-rt-archives/x86_64-unknown-linux-gnu/libhirsel_core_rt.a'))
-    archive_profile = 'shipping-release-fat-lto' if is_shipping else runtime_profile or 'unknown'
-    if not diagnostic and (compiler_profile != 'release' or not is_shipping):
-        raise ValueError('ratios require --compiler-profile release and the shipping fat-LTO runtime: '
-                         'build //:hirsel-core-rt-archives and pass its archive; '
-                         'use --diagnostic explicitly for other toolchains')
-    return {'compiler_build_profile': compiler_profile,
-            'compiler_sha256': hashlib.sha256(compiler.read_bytes()).hexdigest(),
-            'runtime_archive_profile': archive_profile,
-            'runtime_archive_sha256': hashlib.sha256(runtime.read_bytes()).hexdigest(),
-            'diagnostic': diagnostic}
+# Shared by every measuring lane; target selection lives in core/tools.
+toolchain_identity = measurement_artifacts.identity
 
 
 def ratio(numerator, denominator):
@@ -189,6 +175,7 @@ def build_samples(args):
               'result_kind': 'diagnostic' if args.diagnostic else 'result',
               'scenarios': 'check/build fresh, build reuse, one semantically neutral body edit; Rust incremental off',
               'idiomatic_build': 'whole-suite only',
+              'library_mode': 'core product; explicit std sources retained when the driver reports them loaded',
               'rustc': subprocess.check_output([str(rustc), '-vV'], text=True)}
     def save():
         (out / 'build-report.json').write_text(json.dumps(report, indent=2) + '\n')
@@ -274,6 +261,9 @@ def build_samples(args):
             store = scratch / ('check-store' if operation == 'check' else 'build-store')
             command = [str(args.compiler.resolve()), operation, '--inputs', str(selected), '--entry',
                        f'langarena@1/{args.module}/main', '--store', str(store), '--json']
+            if operation == 'check':
+                cache_home = Path(os.environ.get('XDG_CACHE_HOME', str(Path.home() / '.cache')))
+                command += ['--core-product', str(cache_home / 'hirsel/core-packages')]
             if operation == 'build':
                 command += ['--backend', args.backend, '--runtime', str(args.runtime.resolve()),
                             '--dir', str(host), '--grant', 'Stdout', '--grant', 'Tasks', '-o', str(scratch / 'hirsel')]
@@ -320,7 +310,7 @@ def main():
     parser.add_argument('--compiler', type=Path, required=True)
     parser.add_argument('--runtime', type=Path, required=True)
     parser.add_argument('--compiler-profile', choices=['release', 'checked', 'unknown'], default='unknown')
-    parser.add_argument('--runtime-profile', choices=['checked', 'unknown'], help='label a non-shipping diagnostic archive')
+    parser.add_argument('--runtime-profile', choices=['ordinary-release', 'checked', 'unknown'], help='label a non-shipping diagnostic archive')
     parser.add_argument('--diagnostic', action='store_true', help='explicitly permit a non-release toolchain; never a result ratio')
     parser.add_argument('--module', required=True)
     parser.add_argument('--task', required=True)

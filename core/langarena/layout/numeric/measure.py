@@ -18,9 +18,18 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--compiler', type=Path, required=True)
     p.add_argument('--runtime', type=Path, required=True)
+    p.add_argument('--compiler-profile', choices=['release', 'checked', 'unknown'], default='unknown')
+    p.add_argument('--runtime-profile', choices=['ordinary-release', 'checked', 'unknown'])
+    p.add_argument('--diagnostic', action='store_true')
+    p.add_argument('--resume', type=Path, help='reuse complete Rust sides; Hirsel requires identical toolchain')
     p.add_argument('--rustc', type=Path, default=ROOT / 'tools/buck2/toolchains/rust-files/bin/rustc')
     p.add_argument('--out', type=Path, required=True)
     args = p.parse_args()
+    try:
+        toolchain = runner.toolchain_identity(args.compiler, args.runtime, args.compiler_profile, args.runtime_profile, args.diagnostic)
+    except (OSError, ValueError) as error:
+        p.error(str(error))
+    previous = json.loads(args.resume.read_text()) if args.resume else None
     out = args.out.resolve()
     if out.exists() or out.is_relative_to(ROOT):
         p.error('--out must be new and outside the repository')
@@ -38,10 +47,15 @@ def main():
     manifest.write_text(json.dumps(runner.inputs(ROOT, 'layout/numeric/pack')))
     report = {'source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
               'rustc': subprocess.check_output([str(args.rustc), '-vV'], text=True),
-              'cpu': 16, 'rows': [], 'sample_policy': 'one per configuration; shared serial lock; no timeout'}
+              'cpu': 16, 'rows': [], 'toolchain': toolchain,
+              'result_kind': 'diagnostic' if args.diagnostic else 'result', 'sample_policy': 'one per configuration; shared serial lock; no timeout'}
     def save():
         (out / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
+    configs = json.loads((family / 'run.json').read_text())
     for engine in ['llvm', 'cranelift']:
+        prior_rows = [row for row in previous['rows'] if row['engine'] == engine] if previous else []
+        covered = {row['layout'] for row in prior_rows} == {row['name'].rsplit('::', 1)[1] for row in configs}
+        reuse_hirsel = covered and previous.get('toolchain') == toolchain and all(row['samples'].get('hirsel', {}).get('status') == 'ok' for row in prior_rows)
         exe = out / ('hirsel-' + engine)
         command = [str(args.compiler.resolve()), 'build', '--inputs', str(manifest),
                    '--entry', 'langarena@1/layout/numeric/pack/main', '--backend', engine,
@@ -49,11 +63,16 @@ def main():
                    '--dir', str(host), '--grant', 'Stdout', '--grant', 'Tasks', '--json', '-o', str(exe)]
         if engine == 'llvm':
             command.append('--release')
-        runner.wait_load()
-        with (out / ('build-' + engine + '.log')).open('w') as log:
-            built = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
+        built = None
+        if not reuse_hirsel:
+            runner.wait_load()
+            with (out / ('build-' + engine + '.log')).open('w') as log:
+                built = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
         binaries = {}
         for variant in ['checked', 'wrapping']:
+            if covered and all(row['samples'].get(variant, {}).get('status') == 'ok' for row in prior_rows):
+                binaries[variant] = None
+                continue
             binary = out / ('rust-' + engine + '-' + variant)
             command = [str(args.rustc.resolve()), '--edition=2024', '--target', 'x86_64-unknown-linux-gnu',
                        '-C', 'target-cpu=x86-64', '-C', 'overflow-checks=on', '-C', 'codegen-units=1',
@@ -65,13 +84,18 @@ def main():
             with (out / ('build-rust-' + engine + '-' + variant + '.log')).open('w') as log:
                 rust = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
             binaries[variant] = binary if rust.returncode == 0 else None
-        for config in json.loads((family / 'run.json').read_text()):
+        for config in configs:
             task = config['name']
             layout = task.rsplit('::', 1)[1]
-            row = {'engine': engine, 'layout': layout, 'samples': {}, 'ratios': {}}
-            row['samples']['hirsel'] = runner.observe([str(exe), 'config.json', task],
+            row = {'engine': engine, 'layout': layout, 'samples': {}, 'ratios': {}, 'toolchain': toolchain}
+            prior = next((r for r in previous['rows'] if r['engine'] == engine and r['layout'] == layout), None) if previous else None
+            row['samples']['hirsel'] = prior['samples']['hirsel'] if reuse_hirsel else runner.observe([str(exe), 'config.json', task],
                 out / (engine + '-' + layout + '-hirsel'), task, config['checksum']) if built.returncode == 0 else {'status': 'build-failed'}
             for variant, binary in binaries.items():
+                if prior and prior['samples'].get(variant, {}).get('status') == 'ok':
+                    row['samples'][variant] = prior['samples'][variant]
+                    row['ratios'][variant] = runner.ratio(row['samples']['hirsel'], row['samples'][variant]) if runner.reviewed(family / 'numeric.rs', 'langs-numeric-920') else {'status': 'blocked: independent review pending'}
+                    continue
                 row['samples'][variant] = runner.observe(runner.matched_command(binary, task, config),
                     out / (engine + '-' + layout + '-' + variant), task, config['checksum']) if binary else {'status': 'build-failed'}
                 row['ratios'][variant] = runner.ratio(row['samples']['hirsel'], row['samples'][variant]) if runner.reviewed(family / 'numeric.rs', 'langs-numeric-920') else {'status': 'blocked: independent review pending'}

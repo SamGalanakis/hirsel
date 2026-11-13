@@ -52,7 +52,7 @@ fn item_text(item: &Item) -> String {
         let range = node.origin.tokens.start as usize..node.origin.tokens.end as usize;
         match node.kind {
             NodeKind::Block | NodeKind::Fields => {
-                braces(tree, &mut roles, range.start, range.end - 1);
+                braces(&mut roles, range.start, range.end - 1);
                 for &child in children {
                     roles[tree.node(child).origin.tokens.start as usize].line_before = true;
                 }
@@ -60,9 +60,9 @@ fn item_text(item: &Item) -> String {
             NodeKind::Match => {
                 let subject = tree.node(children[0]);
                 let open = (subject.origin.tokens.end as usize..range.end)
-                    .find(|&t| tree.tokens[t].kind == TokenKind::Punct(Punct::LBrace))
+                    .find(|&t| tree.tokens[t].kind == TokenKind::LBrace)
                     .unwrap();
-                braces(tree, &mut roles, open, range.end - 1);
+                braces(&mut roles, open, range.end - 1);
                 for &child in &children[1..] {
                     roles[tree.node(child).origin.tokens.start as usize].line_before = true;
                 }
@@ -72,7 +72,7 @@ fn item_text(item: &Item) -> String {
             NodeKind::RepeatArray => {
                 let end = tree.node(children[0]).origin.tokens.end as usize;
                 let semicolon = (end..range.end)
-                    .find(|&i| tree.tokens[i].kind == TokenKind::Punct(Punct::Semicolon))
+                    .find(|&i| tree.tokens[i].kind == TokenKind::Semicolon)
                     .unwrap();
                 roles[semicolon].inline_semicolon = true;
             }
@@ -84,7 +84,7 @@ fn item_text(item: &Item) -> String {
             NodeKind::Call | NodeKind::Index => {
                 let callee_end = tree.node(children[0]).origin.tokens.end as usize;
                 let open = (callee_end..range.end)
-                    .find(|&t| !matches!(tree.tokens[t].kind, TokenKind::Trivia(_)))
+                    .find(|&t| !tree.tokens[t].kind.is_trivia())
                     .unwrap();
                 roles[open].attach = true;
             }
@@ -98,18 +98,8 @@ fn item_text(item: &Item) -> String {
     )
 }
 
-fn whitespace(kind: TokenKind) -> bool {
-    matches!(
-        kind,
-        TokenKind::Trivia(TriviaKind::Space | TriviaKind::Newline)
-    )
-}
-
-fn braces(tree: &Tree, roles: &mut [Role], open: usize, close: usize) {
-    if tree.tokens[open + 1..close]
-        .iter()
-        .any(|t| !whitespace(t.kind))
-    {
+fn braces(roles: &mut [Role], open: usize, close: usize) {
+    if close > open + 1 {
         roles[open].open = true;
         roles[open].line_after = true;
         roles[close].close = true;
@@ -125,17 +115,14 @@ fn print(text: &str, tokens: &[Token], roles: &[Role]) -> String {
     let mut previous: Option<(TokenKind, Role)> = None;
     for (token, &role) in tokens.iter().zip(roles) {
         let raw = &text[token.span.start as usize..token.span.end as usize];
-        if whitespace(token.kind) {
-            original_newline |= raw.contains('\n');
-            continue;
-        }
+        original_newline |= token.line_before;
         if token.kind == TokenKind::Eof {
             continue;
         }
         if role.close {
             indent -= 1;
         }
-        let comment = matches!(token.kind, TokenKind::Trivia(_));
+        let comment = token.kind.is_trivia();
         let trailing = comment && !original_newline && previous.is_some();
         // A trailing comment belongs before the previous token's pending break.
         // A block opener always puts its contents on an indented line.
@@ -149,7 +136,7 @@ fn print(text: &str, tokens: &[Token], roles: &[Role]) -> String {
         if out.is_empty() || out.ends_with('\n') {
             out.push_str(&"    ".repeat(indent));
         } else if previous.is_some_and(|(kind, before)| {
-            comment || matches!(kind, TokenKind::Trivia(_)) || space(kind, before, token.kind, role)
+            comment || kind.is_trivia() || space(kind, before, token.kind, role)
         }) {
             out.push(' ');
         }
@@ -157,13 +144,10 @@ fn print(text: &str, tokens: &[Token], roles: &[Role]) -> String {
         if role.open {
             indent += 1;
         }
-        let line_comment = matches!(
-            token.kind,
-            TokenKind::Trivia(TriviaKind::LineComment | TriviaKind::DocLine)
-        );
+        let line_comment = matches!(token.kind, TokenKind::LineComment | TokenKind::DocLine);
         line = (trailing && line)
             || role.line_after
-            || (token.kind == TokenKind::Punct(Punct::Semicolon) && !role.inline_semicolon)
+            || (token.kind == TokenKind::Semicolon && !role.inline_semicolon)
             || line_comment
             || (comment && original_newline);
         previous = Some((token.kind, role));
@@ -176,35 +160,31 @@ fn print(text: &str, tokens: &[Token], roles: &[Role]) -> String {
 }
 
 fn space(a: TokenKind, before: Role, b: TokenKind, role: Role) -> bool {
-    use Punct::*;
-    use TokenKind::{Keyword as K, Punct as P};
+    use TokenKind::*;
     if role.attach {
         return false;
     }
-    if matches!(
-        b,
-        P(Comma | Colon | Semicolon | RParen | RBracket | Question)
-    ) {
+    if matches!(b, Comma | Colon | Semicolon | RParen | RBracket | Question) {
         return false;
     }
-    if b == P(Dot) {
+    if b == Dot {
         // Joining a numeric literal to a projection dot could form a float.
         return matches!(a, TokenKind::Integer | TokenKind::Float);
     }
-    if matches!(a, P(LParen | LBracket | Dot | At)) {
+    if matches!(a, LParen | LBracket | Dot | At) {
         return false;
     }
-    if a == P(LBrace) && b == P(RBrace) {
+    if a == LBrace && b == RBrace {
         return false;
     }
-    if b == P(LBracket) {
+    if b == LBracket {
         return false;
     }
-    if before.unary && matches!(a, P(_)) {
+    if before.unary && a.is_punctuation() {
         return false;
     }
-    if b == P(LParen) {
-        return !matches!(a, TokenKind::Ident | K(Keyword::Fn));
+    if b == LParen {
+        return !matches!(a, TokenKind::Ident | KwFn);
     }
     true
 }

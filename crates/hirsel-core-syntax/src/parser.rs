@@ -64,6 +64,7 @@ pub fn parse(text: &str, mode: ParseMode, symbols: &mut Symbols) -> ParseOutput 
     let output = lex(text, symbols);
     let lexical_diagnostics = output.diagnostics.len();
     let significant = output.significant;
+    let node_capacity = significant.len();
     let mut p = Parser {
         text,
         symbols,
@@ -75,8 +76,8 @@ pub fn parse(text: &str, mode: ParseMode, symbols: &mut Symbols) -> ParseOutput 
         pos: 0,
         tree: Tree {
             tokens: vec![],
-            nodes: Vec::with_capacity(text.len() / 8),
-            edges: Vec::with_capacity(text.len() / 8),
+            nodes: Vec::with_capacity(node_capacity),
+            edges: Vec::with_capacity(node_capacity),
         },
         base: 0,
         whitespace: 0,
@@ -87,13 +88,14 @@ pub fn parse(text: &str, mode: ParseMode, symbols: &mut Symbols) -> ParseOutput 
     };
     let mut syntax = SyntaxFile::default();
     let mut owned = 0;
+    let mut byte_owned = 0;
     while !p.eof() && p.resource.is_none() {
         if p.eat(sym::SEMICOLON) {
             continue;
         }
         let start = p.pos;
         let diagnostic_start = p.diagnostics.len();
-        p.base = p.tokens[owned].span.start;
+        p.base = byte_owned;
         let nodes_start = p.tree.nodes.len() as u32;
         p.resolution_size = ResolutionSize::default();
         let root = match p.item() {
@@ -109,25 +111,23 @@ pub fn parse(text: &str, mode: ParseMode, symbols: &mut Symbols) -> ParseOutput 
             }
         };
         let mut end = p.index();
-        // Own through the last item's line break; leading documentation belongs to the next item.
         let consumed = p
             .significant
             .get(p.pos.saturating_sub(1))
             .copied()
             .map_or(owned, |i| i + 1);
-        for i in consumed..end {
-            if matches!(p.tokens[i].kind, TokenKind::Trivia(TriviaKind::Newline)) {
-                end = i + 1;
+        let mut byte_end = p.tokens[end].span.start;
+        // Split the first line break after the item, retaining following documentation.
+        // Whitespace occupies source gaps instead of rows in the token table.
+        for i in consumed..=end {
+            let gap_start = if i == 0 { 0 } else { p.tokens[i - 1].span.end } as usize;
+            let next_start = p.tokens[i].span.start as usize;
+            if let Some(newline) = text[gap_start..next_start].find('\n') {
+                end = i;
+                byte_end = (gap_start + newline + 1) as u32;
                 break;
             }
         }
-        if end <= owned {
-            end = p.index();
-        }
-        let byte_end = p
-            .tokens
-            .get(end)
-            .map_or(text.len() as u32, |t| t.span.start);
         let has_errors = p.resource.is_some()
             || p.diagnostics.len() != diagnostic_start
             || p.diagnostics[..lexical_diagnostics].iter().any(|d| {
@@ -145,12 +145,9 @@ pub fn parse(text: &str, mode: ParseMode, symbols: &mut Symbols) -> ParseOutput 
             root,
         });
         owned = end;
+        byte_owned = byte_end;
     }
-    let trailing_start = p
-        .tokens
-        .get(owned)
-        .map_or(text.len() as u32, |t| t.span.start);
-    syntax.trailing_start = trailing_start;
+    syntax.trailing_start = byte_owned;
     syntax.source = text.to_owned();
     p.tree.tokens = p.tokens;
     syntax.tree = p.tree;
@@ -198,6 +195,7 @@ impl Parser<'_> {
     fn eof(&self) -> bool {
         self.token(0).kind == TokenKind::Eof
     }
+    #[inline(always)]
     fn bump(&mut self) -> TokenId {
         let id = TokenId(self.index() as u32);
         if !self.eof() {
@@ -207,6 +205,7 @@ impl Parser<'_> {
         }
         id
     }
+    #[inline(always)]
     fn eat(&mut self, word: Symbol) -> bool {
         if self.at(word) {
             self.bump();
@@ -215,24 +214,29 @@ impl Parser<'_> {
             false
         }
     }
+    #[inline]
     fn expect(&mut self, word: Symbol) -> Parsed<()> {
         if self.eat(word) {
             Ok(())
         } else {
-            self.fail("LANG-5", format!("expected `{}`", self.symbols.text(word)))
+            self.expected(word)
         }
+    }
+    fn expected(&mut self, word: Symbol) -> Parsed<()> {
+        self.fail("LANG-5", format!("expected `{}`", self.symbols.text(word)))
     }
     fn fail<T>(&mut self, rule: &str, message: impl Into<String>) -> Parsed<T> {
         self.diagnostics
             .push(Diagnostic::error(rule, self.token(0).span, message));
         Err(())
     }
+    #[inline]
     fn name(&mut self) -> Parsed<TokenId> {
         if self.token(0).kind == TokenKind::Ident && !self.at(sym::UNDERSCORE) {
             Ok(self.bump())
         } else {
             self.fail(
-                if matches!(self.token(0).kind, TokenKind::Keyword(_)) {
+                if self.token(0).kind.is_keyword() {
                     "LANG-2"
                 } else {
                     "LANG-5"
@@ -247,6 +251,7 @@ impl Parser<'_> {
     fn continuing(&self) -> bool {
         self.whitespace > 0 || !self.newline()
     }
+    #[inline(always)]
     fn node(
         &mut self,
         start: usize,
@@ -300,25 +305,30 @@ impl Parser<'_> {
     fn required<T>(&mut self, f: impl FnOnce(&mut Self) -> Parsed<T>) -> Parsed<T> {
         f(self)
     }
-    fn list(
+    fn list(&mut self, close: Symbol, f: impl FnMut(&mut Self) -> Parsed<NodeId>) -> Parsed<Nodes> {
+        let mut nodes = smallvec![];
+        self.list_into(close, &mut nodes, f)?;
+        Ok(nodes)
+    }
+    fn list_into(
         &mut self,
         close: Symbol,
+        nodes: &mut Nodes,
         mut f: impl FnMut(&mut Self) -> Parsed<NodeId>,
-    ) -> Parsed<Nodes> {
+    ) -> Parsed<()> {
         self.whitespace += 1;
         let result = (|p: &mut Self| {
-            let mut v: Nodes = smallvec![];
             while !p.eat(close) {
                 if p.eof() {
-                    return p.fail("LANG-5", format!("expected `{}`", p.symbols.text(close)));
+                    return p.expected(close);
                 }
-                v.push(f(p)?);
+                nodes.push(f(p)?);
                 if p.eat(close) {
                     break;
                 }
                 p.expect(sym::COMMA)?;
             }
-            Ok(v)
+            Ok(())
         })(self);
         self.whitespace -= 1;
         result
@@ -696,10 +706,12 @@ impl Parser<'_> {
             sym::NONE
         }
     }
+    #[inline(always)]
     fn path(&mut self, kind: NodeKind) -> Parsed<NodeId> {
         let s = self.pos;
         let n = self.name()?;
         while self.continuing() && self.at(sym::DOT) && self.token(1).kind == TokenKind::Ident {
+            self.resolution_size.path_extra += 1;
             self.bump();
             self.name()?;
         }
@@ -823,7 +835,7 @@ impl Parser<'_> {
                 Continuation::Call if minimum <= 12 && !placed => {
                     self.bump();
                     let mut c: Nodes = smallvec![left];
-                    c.extend(self.list(sym::RPAREN, |p| {
+                    self.list_into(sym::RPAREN, &mut c, |p| {
                         let st = p.pos;
                         let mut token = None;
                         let kind = if p.token(0).kind == TokenKind::Ident && p.word(1) == sym::COLON
@@ -838,7 +850,7 @@ impl Parser<'_> {
                         };
                         let v = p.expr(0)?;
                         Ok(p.node(st, kind, token, &[v]))
-                    })?);
+                    })?;
                     left = self.node(s, NodeKind::Call, None, &c);
                 }
                 Continuation::Index if minimum <= 12 && !placed => {
@@ -897,6 +909,7 @@ impl Parser<'_> {
         }
         Ok(left)
     }
+    #[inline(always)]
     fn primary(&mut self) -> Parsed<NodeId> {
         let s = self.pos;
         if matches!(
@@ -907,7 +920,8 @@ impl Parser<'_> {
                 | TokenKind::Byte
                 | TokenKind::String
                 | TokenKind::Bytes
-                | TokenKind::Keyword(Keyword::True | Keyword::False)
+                | TokenKind::KwTrue
+                | TokenKind::KwFalse
         ) {
             let t = self.bump();
             return Ok(self.node(s, NodeKind::Literal, Some(t), &[]));
@@ -916,6 +930,10 @@ impl Parser<'_> {
             return self.path(NodeKind::Path);
         }
 
+        self.compound_primary()
+    }
+    fn compound_primary(&mut self) -> Parsed<NodeId> {
+        let s = self.pos;
         if PREFIX.contains(&self.word(0)) {
             let op = self.bump();
             let e = self.required(|p| p.expr(11))?;
@@ -1187,7 +1205,8 @@ impl Parser<'_> {
                     | TokenKind::Byte
                     | TokenKind::String
                     | TokenKind::Bytes
-                    | TokenKind::Keyword(Keyword::True | Keyword::False)
+                    | TokenKind::KwTrue
+                    | TokenKind::KwFalse
             )
         {
             let t = self.bump();

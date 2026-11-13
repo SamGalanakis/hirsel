@@ -134,6 +134,11 @@ pub mod sym {
 pub struct Symbols {
     strings: Vec<Arc<str>>,
     index: FxHashMap<Arc<str>, Symbol>,
+    #[serde(skip, default = "empty_single")]
+    single: [Symbol; 128],
+}
+fn empty_single() -> [Symbol; 128] {
+    [sym::NONE; 128]
 }
 impl Default for Symbols {
     fn default() -> Self {
@@ -250,7 +255,16 @@ impl Default for Symbols {
         ];
         strings.push(Arc::from("packed"));
         strings.push(Arc::from("streamable"));
+        let mut single = empty_single();
+        for (i, s) in strings.iter().enumerate().skip(1) {
+            if let [b] = s.as_bytes() {
+                if b.is_ascii() {
+                    single[*b as usize] = Symbol(i as u32);
+                }
+            }
+        }
         Self {
+            single,
             index: strings
                 .iter()
                 .enumerate()
@@ -263,18 +277,32 @@ impl Default for Symbols {
 }
 impl Symbols {
     pub fn intern(&mut self, text: &str) -> Symbol {
-        if let Some(&id) = self.index.get(text) {
-            return id;
+        let single = match text.as_bytes() {
+            [b] if b.is_ascii() => Some(*b as usize),
+            _ => None,
+        };
+        if let Some(b) = single {
+            if self.single[b] != sym::NONE {
+                return self.single[b];
+            }
         }
-        let id = Symbol(
-            self.strings
-                .len()
-                .try_into()
-                .expect("symbol table exceeds address space"),
-        );
-        let text: Arc<str> = Arc::from(text);
-        self.strings.push(text.clone());
-        self.index.insert(text, id);
+        let id = if let Some(&id) = self.index.get(text) {
+            id
+        } else {
+            let id = Symbol(
+                self.strings
+                    .len()
+                    .try_into()
+                    .expect("symbol table exceeds address space"),
+            );
+            let text: Arc<str> = Arc::from(text);
+            self.strings.push(text.clone());
+            self.index.insert(text, id);
+            id
+        };
+        if let Some(b) = single {
+            self.single[b] = id;
+        }
         id
     }
     pub fn find(&self, text: &str) -> Option<Symbol> {

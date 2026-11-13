@@ -784,3 +784,6 @@ fn repeated_path_results_keep_dependency_reads_and_binding_versions() {
             && p.constructor == r.constructor));
     }
 }
+
+#[path = "spec_tests.rs"]
+mod spec_tests;

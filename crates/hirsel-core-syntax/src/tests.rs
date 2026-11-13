@@ -21,11 +21,7 @@ fn formatted(text: &str, mode: ParseMode) -> String {
             .tokens
             .into_iter()
             .filter_map(|t| {
-                (!matches!(
-                    t.kind,
-                    TokenKind::Trivia(TriviaKind::Space | TriviaKind::Newline) | TokenKind::Eof
-                ))
-                .then(|| {
+                (!matches!(t.kind, TokenKind::Eof)).then(|| {
                     (
                         t.kind,
                         text[t.span.start as usize..t.span.end as usize].to_owned(),
@@ -237,13 +233,20 @@ fn literals_are_lossless_and_decode_the_new_rules() {
     let text = "/* a\n /* nest */ */ 1..2 b\"a\\xff\" r##\"x\"#\n\"## 'a' 'scan: 0xff_ff 12f32";
     let l = lex(text);
     assert_eq!(l.diagnostics, vec![]);
-    assert_eq!(
-        l.tokens
-            .iter()
-            .map(|t| &text[t.span.start as usize..t.span.end as usize])
-            .collect::<String>(),
-        text
-    );
+    let mut cursor = 0;
+    let mut recovered = String::new();
+    for token in &l.tokens {
+        let start = token.span.start as usize;
+        let end = token.span.end as usize;
+        assert!(
+            text[cursor..start]
+                .bytes()
+                .all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+        );
+        recovered.push_str(&text[cursor..end]);
+        cursor = end;
+    }
+    assert_eq!(recovered, text);
     for (s, r) in [
         ("1u128", "LANG-3"),
         ("'ab'", "LANG-3"),
@@ -288,9 +291,9 @@ fn revised_callable_summaries_and_projection_tokenization() {
         l.tokens.iter().map(|t| t.kind).collect::<Vec<_>>(),
         [
             TokenKind::Ident,
-            TokenKind::Punct(Punct::Dot),
+            TokenKind::Dot,
             TokenKind::Integer,
-            TokenKind::Punct(Punct::Dot),
+            TokenKind::Dot,
             TokenKind::Integer,
             TokenKind::Eof
         ]
@@ -390,10 +393,7 @@ fn revision_four_inline_arrays_and_bytes_keyword() {
         .collect();
     assert!(kinds.contains(&NodeKind::Array));
     assert!(kinds.contains(&NodeKind::RepeatArray));
-    assert_eq!(
-        lex("bytes").tokens[0].kind,
-        TokenKind::Keyword(Keyword::Bytes)
-    );
+    assert_eq!(lex("bytes").tokens[0].kind, TokenKind::KwBytes);
     assert!(
         !parse("fn bytes() {}", ParseMode::Source)
             .diagnostics

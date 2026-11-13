@@ -179,6 +179,7 @@ RUNTIME_DATA = {
 # invalidate another binary's passing verdicts. A source change still reruns
 # every test whose harness it changes.
 TEST_DATA = {
+    "hirsel-core-resolve-unittest": ["docs/spec/**", "core/core/**"],
     "hirsel-core-front-unittest": ["core/front/**", "core/core/**", "core/std/**", "core/programs/m1/**"],
     "hirsel-cranelift-test-core_native": ["core/front/**"],
     "hirsel-cli-test-cli": ["tools/capped", "conformance/old-spec/core-library.md", "conformance/old-spec/std-library.md", "docs/dependency-card.schema.json"],

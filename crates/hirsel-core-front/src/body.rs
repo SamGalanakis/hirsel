@@ -30,9 +30,7 @@ use hirsel_core_ir::{
 };
 use hirsel_core_layout::Scalar;
 use hirsel_core_resolve::{Refusal, Target};
-use hirsel_core_syntax::{
-    Item, Keyword, NodeId, NodeKind, Span, TokenKind, byte_value, character_value,
-};
+use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, TokenKind, byte_value, character_value};
 use std::collections::HashMap;
 
 /// Work one body check did, for the cost measurements (core/MEASURE.md).
@@ -1291,8 +1289,8 @@ impl<'c, 'a> Cx<'c, 'a> {
             _ => None,
         });
         let (ty, bits) = match self.token_kind(n) {
-            Some(TokenKind::Keyword(Keyword::True)) => (Scalar::Bool, 1),
-            Some(TokenKind::Keyword(Keyword::False)) => (Scalar::Bool, 0),
+            Some(TokenKind::KwTrue) => (Scalar::Bool, 1),
+            Some(TokenKind::KwFalse) => (Scalar::Bool, 0),
             Some(TokenKind::Character) => match character_value(text) {
                 Some(c) => (Scalar::Char, u64::from(u32::from(c))),
                 None => return self.gap_ty(n, "character literal form is not built"),

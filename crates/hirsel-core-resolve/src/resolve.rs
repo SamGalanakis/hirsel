@@ -101,9 +101,18 @@ pub fn resolve(index: &NameIndex, module: ModuleId, ordinal: u32, item: Item<'_>
         return Resolution::default();
     }
     let size = item.range.resolution_size;
-    let queries = (size.names + size.binders + size.labels) as usize;
-    let read_capacity =
-        queries.min(index.symbols.len() * (size.scopes + size.binders + 1) as usize) * 6;
+    let queries = size.names as usize
+        + size.binders as usize
+        + size.labels as usize
+        + size.path_extra as usize
+        + size.exits as usize;
+    let read_capacity = queries * 6;
+    // Each name may be queried in lexical versions and in fixed index scopes.
+    // Use the smaller proven key bound for the dedup table, rather than one bucket
+    // per occurrence in a large body that repeats the same few names.
+    let versions = size.scopes as usize + size.binders as usize + 1;
+    let scope_keys = 5 * versions + 5 * index.modules.len() + index.packages.len() + 5;
+    let dedup_capacity = read_capacity.min(index.symbols.len().saturating_mul(scope_keys));
     let mut r = Resolver {
         index,
         module,
@@ -143,7 +152,7 @@ pub fn resolve(index: &NameIndex, module: ModuleId, ordinal: u32, item: Item<'_>
         next_scope: 1,
         depth: 0,
         paths: [None; 8],
-        seen: FxHashSet::with_capacity_and_hasher(read_capacity, Default::default()),
+        seen: FxHashSet::with_capacity_and_hasher(dedup_capacity, Default::default()),
         out: Resolution {
             names: Vec::with_capacity(size.names as usize),
             binders: Vec::with_capacity(size.binders as usize),

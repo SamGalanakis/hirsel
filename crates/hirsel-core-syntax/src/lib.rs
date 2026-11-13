@@ -191,6 +191,8 @@ impl Tree {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ResolutionSize {
     pub names: u32,
+    pub path_extra: u32,
+    pub exits: u32,
     pub binders: u32,
     pub scopes: u32,
     pub loops: u32,
@@ -200,6 +202,7 @@ impl ResolutionSize {
     pub(crate) fn add(&mut self, kind: NodeKind) {
         match kind {
             NodeKind::Path | NodeKind::TypePath => self.names += 1,
+            NodeKind::Break | NodeKind::Continue => self.exits += 1,
             NodeKind::BindPattern => {
                 self.names += 1;
                 self.binders += 1;
@@ -284,12 +287,16 @@ pub struct SyntaxFile {
     pub trailing_start: u32,
 }
 impl SyntaxFile {
+    /// Recover every source byte, including whitespace gaps between token spans.
     pub fn text(&self) -> String {
-        self.tree
-            .tokens
-            .iter()
-            .map(|t| &self.source[t.span.start as usize..t.span.end as usize])
-            .collect()
+        let mut out = String::with_capacity(self.source.len());
+        let mut start = 0;
+        for t in &self.tree.tokens {
+            out.push_str(&self.source[start..t.span.end as usize]);
+            start = t.span.end as usize;
+        }
+        out.push_str(&self.source[start..]);
+        out
     }
     pub fn trailing(&self) -> &str {
         &self.source[self.trailing_start as usize..]

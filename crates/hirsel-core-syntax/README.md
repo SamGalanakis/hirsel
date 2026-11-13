@@ -11,7 +11,7 @@ A `SyntaxFile` owns one source string and one arena of tokens, nodes and child e
 `Item` views. Token and node IDs address the file. Node byte spans remain relative to
 the containing item, while token byte spans and token/child indices address the file.
 `Item::token_span` converts a token's span to an item-relative anchor. `SyntaxFile::text`
-reconstructs the original bytes from the tape, including invalid and recovered source.
+reconstructs the original bytes from token spans and source gaps, including invalid and recovered source. Whitespace has no token rows; comments stay indexed. Lexical tags are one byte and fixed terminals share their symbol numbers.
 A compiler `ResourceRefusal` is separate from language diagnostics; incomplete syntax
 must not be published as a successful parse.
 

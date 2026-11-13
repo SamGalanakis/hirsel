@@ -191,7 +191,7 @@ impl Corpus {
             let mut out = String::new();
             let mut end = 0;
             for token in lex(&source.text, &mut Symbols::default()).tokens {
-                if matches!(token.kind, TokenKind::Trivia(_) | TokenKind::Eof) {
+                if (token.kind.is_trivia() || token.kind == TokenKind::Eof) {
                     continue;
                 }
                 let start = token.span.start as usize;
@@ -284,7 +284,7 @@ pub fn code_lines(text: &str) -> usize {
         let end = token.span.end as usize;
         line += text[cursor..start].bytes().filter(|b| *b == b'\n').count();
         let n = text[start..end].bytes().filter(|b| *b == b'\n').count();
-        if !matches!(token.kind, TokenKind::Trivia(_) | TokenKind::Eof) {
+        if !(token.kind.is_trivia() || token.kind == TokenKind::Eof) {
             for at in line..=line + n {
                 if last != Some(at) {
                     count += 1;

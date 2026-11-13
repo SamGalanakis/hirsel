@@ -29,8 +29,8 @@ impl<'a> Scanner<'a> {
             bytes,
             pos: 0,
             output: LexOutput {
-                tokens: Vec::with_capacity(bytes.len() / 3 + 1),
-                significant: Vec::with_capacity(bytes.len() / 4 + 1),
+                tokens: Vec::with_capacity(bytes.len() / 2 + 1),
+                significant: Vec::with_capacity(bytes.len() / 2 + 1),
                 diagnostics: vec![],
             },
             symbols,
@@ -50,7 +50,7 @@ impl<'a> Scanner<'a> {
     }
 
     fn emit(&mut self, start: usize, kind: TokenKind, symbol: Symbol) {
-        if !matches!(kind, TokenKind::Trivia(_)) {
+        if !kind.is_trivia() {
             self.output.significant.push(self.output.tokens.len());
         }
         self.output.tokens.push(Token {
@@ -60,11 +60,10 @@ impl<'a> Scanner<'a> {
             line_before: self.newline,
         });
         match kind {
-            TokenKind::Trivia(
-                TriviaKind::Space | TriviaKind::LineComment | TriviaKind::DocLine,
-            ) => {}
-            TokenKind::Trivia(TriviaKind::Newline) => self.newline = true,
-            TokenKind::Trivia(_) => self.newline |= self.bytes[start..self.pos].contains(&b'\n'),
+            TokenKind::LineComment | TokenKind::DocLine => {}
+            kind if kind.is_trivia() => {
+                self.newline |= self.bytes[start..self.pos].contains(&b'\n')
+            }
             _ => self.newline = false,
         }
     }
@@ -82,28 +81,27 @@ impl<'a> Scanner<'a> {
         self.bytes[self.pos..].starts_with(spelling)
     }
     fn next(&mut self) {
+        while let Some(&byte) = self.bytes.get(self.pos) {
+            match byte {
+                b' ' | b'\t' => self.pos += 1,
+                b'\n' => {
+                    self.pos += 1;
+                    self.newline = true;
+                }
+                b'\r' if self.bytes.get(self.pos + 1) == Some(&b'\n') => {
+                    self.pos += 2;
+                    self.newline = true;
+                }
+                _ => break,
+            }
+        }
+        if self.pos == self.bytes.len() {
+            return;
+        }
         let start = self.pos;
         let errors = self.output.diagnostics.len();
         let mut symbol = sym::NONE;
         let kind = match self.bytes[self.pos] {
-            b' ' | b'\t' => {
-                while self
-                    .bytes
-                    .get(self.pos)
-                    .is_some_and(|b| matches!(b, b' ' | b'\t'))
-                {
-                    self.pos += 1;
-                }
-                TokenKind::Trivia(TriviaKind::Space)
-            }
-            b'\n' => {
-                self.pos += 1;
-                TokenKind::Trivia(TriviaKind::Newline)
-            }
-            b'\r' if self.starts(b"\r\n") => {
-                self.pos += 2;
-                TokenKind::Trivia(TriviaKind::Newline)
-            }
             b'/' if self.starts(b"//") => self.line_comment(),
             b'/' if self.starts(b"/*") => self.block_comment(),
             b'r' if self.raw_start(false).is_some() => self.raw_string(false),
@@ -124,13 +122,13 @@ impl<'a> Scanner<'a> {
                     self.pos += 1;
                 }
                 symbol = self.symbols.intern(&self.text[start..self.pos]);
-                Keyword::from_symbol(symbol).map_or(TokenKind::Ident, TokenKind::Keyword)
+                TokenKind::identifier(symbol)
             }
             _ => {
                 if let Some((len, punct)) = punctuation(&self.bytes[self.pos..]) {
                     self.pos += len;
                     symbol = punct.symbol();
-                    TokenKind::Punct(punct)
+                    punct
                 } else {
                     let (_, len) = scalar(&self.bytes[self.pos..]);
                     self.pos += len;
@@ -240,11 +238,11 @@ impl<'a> Scanner<'a> {
         while self.pos < self.bytes.len() && !matches!(self.bytes[self.pos], b'\r' | b'\n') {
             self.comment_scalar();
         }
-        TokenKind::Trivia(if doc {
-            TriviaKind::DocLine
+        if doc {
+            TokenKind::DocLine
         } else {
-            TriviaKind::LineComment
-        })
+            TokenKind::LineComment
+        }
     }
     fn block_comment(&mut self) -> TokenKind {
         let start = self.pos;
@@ -269,11 +267,11 @@ impl<'a> Scanner<'a> {
         if depth != 0 {
             self.error("LANG-1", start, self.pos, "unterminated block comment");
         }
-        TokenKind::Trivia(if doc {
-            TriviaKind::DocBlock
+        if doc {
+            TokenKind::DocBlock
         } else {
-            TriviaKind::BlockComment
-        })
+            TokenKind::BlockComment
+        }
     }
     // Exponent and suffix validity is lexical (LANG-3).
     fn number(&mut self) -> TokenKind {
@@ -595,10 +593,10 @@ fn bidi(ch: char) -> bool {
     matches!(ch, '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }
 
-fn punctuation(bytes: &[u8]) -> Option<(usize, Punct)> {
+fn punctuation(bytes: &[u8]) -> Option<(usize, TokenKind)> {
     // Longest match on at most three bytes: bounded work per source position (#21).
     let at = |i: usize| bytes.get(i).copied();
-    let two = |second: u8, long: Punct, short: Punct| {
+    let two = |second: u8, long: TokenKind, short: TokenKind| {
         if at(1) == Some(second) {
             (2, long)
         } else {
@@ -606,61 +604,61 @@ fn punctuation(bytes: &[u8]) -> Option<(usize, Punct)> {
         }
     };
     Some(match at(0)? {
-        b'(' => (1, Punct::LParen),
-        b')' => (1, Punct::RParen),
-        b'[' => (1, Punct::LBracket),
-        b']' => (1, Punct::RBracket),
-        b'{' => (1, Punct::LBrace),
-        b'}' => (1, Punct::RBrace),
-        b',' => (1, Punct::Comma),
-        b':' => (1, Punct::Colon),
-        b';' => (1, Punct::Semicolon),
-        b'@' => (1, Punct::At),
-        b'?' => (1, Punct::Question),
-        b'~' => (1, Punct::Tilde),
+        b'(' => (1, TokenKind::LParen),
+        b')' => (1, TokenKind::RParen),
+        b'[' => (1, TokenKind::LBracket),
+        b']' => (1, TokenKind::RBracket),
+        b'{' => (1, TokenKind::LBrace),
+        b'}' => (1, TokenKind::RBrace),
+        b',' => (1, TokenKind::Comma),
+        b':' => (1, TokenKind::Colon),
+        b';' => (1, TokenKind::Semicolon),
+        b'@' => (1, TokenKind::At),
+        b'?' => (1, TokenKind::Question),
+        b'~' => (1, TokenKind::Tilde),
         b'.' => match (at(1), at(2)) {
-            (Some(b'.'), Some(b'=')) => (3, Punct::DotDotEq),
-            (Some(b'.'), _) => (2, Punct::DotDot),
-            _ => (1, Punct::Dot),
+            (Some(b'.'), Some(b'=')) => (3, TokenKind::DotDotEq),
+            (Some(b'.'), _) => (2, TokenKind::DotDot),
+            _ => (1, TokenKind::Dot),
         },
         b'<' => match (at(1), at(2)) {
-            (Some(b'<'), Some(b'=')) => (3, Punct::ShlEq),
-            (Some(b'<'), _) => (2, Punct::Shl),
-            (Some(b'='), _) => (2, Punct::Le),
-            _ => (1, Punct::Lt),
+            (Some(b'<'), Some(b'=')) => (3, TokenKind::ShlEq),
+            (Some(b'<'), _) => (2, TokenKind::Shl),
+            (Some(b'='), _) => (2, TokenKind::Le),
+            _ => (1, TokenKind::Lt),
         },
         b'>' => match (at(1), at(2)) {
-            (Some(b'>'), Some(b'=')) => (3, Punct::ShrEq),
-            (Some(b'>'), _) => (2, Punct::Shr),
-            (Some(b'='), _) => (2, Punct::Ge),
-            _ => (1, Punct::Gt),
+            (Some(b'>'), Some(b'=')) => (3, TokenKind::ShrEq),
+            (Some(b'>'), _) => (2, TokenKind::Shr),
+            (Some(b'='), _) => (2, TokenKind::Ge),
+            _ => (1, TokenKind::Gt),
         },
         b'-' => match at(1) {
-            Some(b'>') => (2, Punct::Arrow),
-            Some(b'=') => (2, Punct::MinusEq),
-            _ => (1, Punct::Minus),
+            Some(b'>') => (2, TokenKind::Arrow),
+            Some(b'=') => (2, TokenKind::MinusEq),
+            _ => (1, TokenKind::Minus),
         },
         b'=' => match at(1) {
-            Some(b'>') => (2, Punct::FatArrow),
-            Some(b'=') => (2, Punct::EqEq),
-            _ => (1, Punct::Eq),
+            Some(b'>') => (2, TokenKind::FatArrow),
+            Some(b'=') => (2, TokenKind::EqEq),
+            _ => (1, TokenKind::Eq),
         },
         b'&' => match at(1) {
-            Some(b'&') => (2, Punct::AndAnd),
-            Some(b'=') => (2, Punct::AmpEq),
-            _ => (1, Punct::Amp),
+            Some(b'&') => (2, TokenKind::AndAnd),
+            Some(b'=') => (2, TokenKind::AmpEq),
+            _ => (1, TokenKind::Amp),
         },
         b'|' => match at(1) {
-            Some(b'|') => (2, Punct::OrOr),
-            Some(b'=') => (2, Punct::PipeEq),
-            _ => (1, Punct::Pipe),
+            Some(b'|') => (2, TokenKind::OrOr),
+            Some(b'=') => (2, TokenKind::PipeEq),
+            _ => (1, TokenKind::Pipe),
         },
-        b'!' => two(b'=', Punct::Ne, Punct::Bang),
-        b'+' => two(b'=', Punct::PlusEq, Punct::Plus),
-        b'*' => two(b'=', Punct::StarEq, Punct::Star),
-        b'/' => two(b'=', Punct::SlashEq, Punct::Slash),
-        b'%' => two(b'=', Punct::PercentEq, Punct::Percent),
-        b'^' => two(b'=', Punct::CaretEq, Punct::Caret),
+        b'!' => two(b'=', TokenKind::Ne, TokenKind::Bang),
+        b'+' => two(b'=', TokenKind::PlusEq, TokenKind::Plus),
+        b'*' => two(b'=', TokenKind::StarEq, TokenKind::Star),
+        b'/' => two(b'=', TokenKind::SlashEq, TokenKind::Slash),
+        b'%' => two(b'=', TokenKind::PercentEq, TokenKind::Percent),
+        b'^' => two(b'=', TokenKind::CaretEq, TokenKind::Caret),
         _ => return None,
     })
 }

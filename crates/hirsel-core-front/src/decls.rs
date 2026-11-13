@@ -285,6 +285,8 @@ pub struct TypeDecl {
     pub structural: bool,
     /// The function row of its `drop` block (FAIL-11), a body of this item.
     pub finalizer: Option<u32>,
+    /// The function row of its `clone(x)` block (MEM-17), a body of this item.
+    pub clone_body: Option<u32>,
     /// `grant bytes n` (MEM-27): the limit its finalizer runs under; 0 if undeclared.
     pub grant: u64,
     pub compact: Option<Width>,
@@ -356,6 +358,12 @@ pub struct FnDecl {
     /// (FAIL-11, FORM).
     #[serde(default)]
     pub drop_of: Option<DeclId>,
+    /// A core own row's clone body: the `clone(x)` block of this type's item, under
+    /// the path `Type.$clone`. Its one parameter is the value, viewed; its result is
+    /// `Result[Self, Capacity]`, lowered to `(from, to) -> (requested, available)`
+    /// (MEM-17, `Shape::clone`).
+    #[serde(default)]
+    pub clone_of: Option<DeclId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -422,6 +430,7 @@ impl Program<'_> {
                 let mut generics = vec![];
                 let mut declared = 0;
                 let mut drop = None;
+                let mut clone_node = None;
                 let mut grant = 0;
                 let mut compact = None;
                 for &c in item.tree.children(item.root) {
@@ -445,6 +454,7 @@ impl Program<'_> {
                             }
                         }
                         NodeKind::Drop => drop = Some(c),
+                        NodeKind::CloneBody => clone_node = Some(c),
                         NodeKind::Literal
                             if matches!(
                                 root.kind,
@@ -515,6 +525,7 @@ impl Program<'_> {
                             waits: false,
                             body,
                             drop_of: None,
+                            clone_of: None,
                         });
                         self.by_path.entry(path).or_insert(Def::Fn(id));
                         self.by_definition[definition.0 as usize] = Some(Def::Fn(id));
@@ -548,6 +559,38 @@ impl Program<'_> {
                         waits: true,
                         body,
                         drop_of: Some(id),
+                        clone_of: None,
+                    });
+                    f
+                });
+                if clone_node.is_some() && !path.package_is("core", "1") {
+                    self.refusals.push(refusal(
+                        "MEM-17",
+                        site,
+                        "only core types may declare a clone body",
+                    ));
+                }
+                let clone_body = clone_node.map(|d| {
+                    let f = self.fns.len() as u32;
+                    let body = item.tree.children(d).last().copied();
+                    let mut hook = path.clone();
+                    hook.0.name = format!("{}.$clone", hook.0.name);
+                    self.fns.push(FnDecl {
+                        path: hook,
+                        result_site: site,
+                        site: self.site(at, d),
+                        at,
+                        generics: generics.clone(),
+                        params: vec![],
+                        result: UNIT,
+                        callable: ERROR,
+                        anchors: vec![],
+                        region_anchors: vec![],
+                        outlives: vec![],
+                        waits: false,
+                        body,
+                        drop_of: None,
+                        clone_of: Some(id),
                     });
                     f
                 });
@@ -566,6 +609,7 @@ impl Program<'_> {
                     role,
                     structural,
                     finalizer,
+                    clone_body,
                     grant,
                     compact,
                     twin: None,
@@ -1108,6 +1152,46 @@ impl Program<'_> {
                 vec![(Mode::Mut, ty)],
                 UNIT,
                 true,
+                Callable::Plain,
+            ));
+            return;
+        }
+        if let Some(d) = self.fns[f].clone_of {
+            // MEM-17: `clone(x)` views the value and returns its copy, or the refused
+            // request; lowered to the row's clone body (`Shape::clone`).
+            let args = (0..self.fns[f].generics.len())
+                .map(|i| self.types.intern(TyKind::Param(i as u32)))
+                .collect();
+            let ty = self.types.intern(TyKind::Adt(d, args));
+            let result = match (self.core_decl("Result"), self.core_decl("Capacity")) {
+                (Some(r), Some(c)) => {
+                    let cap = self.types.intern(TyKind::Adt(c, vec![]));
+                    self.types.intern(TyKind::Adt(r, vec![ty, cap]))
+                }
+                _ => ERROR,
+            };
+            let node = item
+                .tree
+                .children(item.root)
+                .iter()
+                .copied()
+                .find(|&c| item.tree.node(c).kind == NodeKind::CloneBody)
+                .unwrap();
+            let name = item.symbol(item.tree.node(node).token.unwrap());
+            let site = self.fns[f].site;
+            let fd = &mut self.fns[f];
+            fd.params = vec![ParamDecl {
+                bytes: false,
+                name,
+                mode: Mode::View,
+                ty,
+                site,
+            }];
+            fd.result = result;
+            fd.callable = self.types.intern(TyKind::Fn(
+                vec![(Mode::View, ty)],
+                result,
+                false,
                 Callable::Plain,
             ));
             return;

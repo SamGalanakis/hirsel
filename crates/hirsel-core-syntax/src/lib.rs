@@ -114,6 +114,8 @@ pub enum NodeKind {
     Variant,
     Payload,
     Drop,
+    /// `clone(x) { .. }`: a core type's own copy (MEM-17), next to `drop(m)`.
+    CloneBody,
     Block,
     Let,
     LetMut,
@@ -218,7 +220,7 @@ impl ResolutionSize {
             | NodeKind::TakeParameter
             | NodeKind::MutParameter
             | NodeKind::BytesParameter => self.binders += 1,
-            NodeKind::Region | NodeKind::Drop => {
+            NodeKind::Region | NodeKind::Drop | NodeKind::CloneBody => {
                 self.binders += 1;
                 self.scopes += 1;
             }

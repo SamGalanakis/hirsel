@@ -860,7 +860,7 @@ impl<'a> Resolver<'a> {
                     r.visit(child);
                 }
             }),
-            NodeKind::Region | NodeKind::Drop => self.scope(|r| {
+            NodeKind::Region | NodeKind::Drop | NodeKind::CloneBody => self.scope(|r| {
                 r.bind(
                     n,
                     token.unwrap(),

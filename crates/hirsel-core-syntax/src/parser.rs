@@ -535,6 +535,16 @@ impl Parser<'_> {
             let body = self.block()?;
             c.push(self.node(st, NodeKind::Drop, Some(n), &[body]));
         }
+        // `clone` is contextual: only `clone (` after a type's body opens a clone body.
+        if self.at(sym::CLONE) && self.word(1) == sym::LPAREN {
+            let st = self.pos;
+            self.bump();
+            self.expect(sym::LPAREN)?;
+            let n = self.name()?;
+            self.expect(sym::RPAREN)?;
+            let body = self.block()?;
+            c.push(self.node(st, NodeKind::CloneBody, Some(n), &[body]));
+        }
         Ok(self.node(s, kind, Some(name), &c))
     }
     fn variant(&mut self) -> Parsed<NodeId> {

@@ -20,12 +20,20 @@ pub(crate) struct Shapes<'p, T: TyRead> {
     pub types: &'p mut T,
     pub shapes: &'p mut Vec<Shape>,
     pub of: &'p mut HashMap<String, TypeRef>,
-    /// A body module's table: a finalizer names a function row this table cannot name
-    /// yet, so it is left to [`Self::finalizers`].
+    /// A body module's table: a finalizer or clone body names a function row this
+    /// table cannot name yet, so it is left to [`Self::hooks`].
     pub module: bool,
-    /// The rows whose finalizer is the program's function `.1` at the type's arguments
-    /// `.2` (its instance when the type is generic), for the caller to name.
-    pub finalizers: Vec<(TypeRef, u32, Vec<TyId>)>,
+    /// The rows whose hook `.1` is the program's function `.2` at the type's arguments
+    /// `.3` (its instance when the type is generic), for the caller to name.
+    pub hooks: Vec<(TypeRef, Hook, u32, Vec<TyId>)>,
+}
+
+/// A row's core-declared function: its finalizer (`Shape::finalizer`) or its clone
+/// body (`Shape::clone`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Hook {
+    Finalizer,
+    Clone,
 }
 
 impl<T: TyRead> Shapes<'_, T> {
@@ -50,6 +58,7 @@ impl<T: TyRead> Shapes<'_, T> {
             carried: carried(self.decls, &*self.types, ty).unwrap_or(Carried::Address),
             body: Body::Record(vec![]),
             finalizer: None,
+            clone: None,
             grant: 0,
         });
         self.of.insert(name, r);
@@ -222,15 +231,18 @@ impl<T: TyRead> Shapes<'_, T> {
                     Repr::Stable => LRepr::Stable,
                 };
                 let body = self.body(decl, &args, false)?;
-                let finalizer = match decl.finalizer {
-                    // A body module names the function row once the emitter has one.
+                // A body module names the function row once the emitter has one.
+                let mut hook = |kind, f: Option<u32>| match f {
                     Some(f) if self.module => {
-                        self.finalizers.push((r, f, args.clone()));
+                        self.hooks.push((r, kind, f, args.clone()));
                         Some(FuncRef(u32::MAX))
                     }
                     Some(_) => Some(FuncRef(d.0)),
                     None => None,
                 };
+                let finalizer = hook(Hook::Finalizer, decl.finalizer);
+                let clone = hook(Hook::Clone, decl.clone_body);
+                self.shapes[r.index()].clone = clone;
                 self.shapes[r.index()].grant = decl.grant;
                 (repr, body, finalizer)
             }
@@ -267,6 +279,7 @@ impl<T: TyRead> Shapes<'_, T> {
             carried: Carried::Address,
             body: Body::Record(vec![]),
             finalizer: None,
+            clone: None,
             grant: 0,
         });
         self.of.insert(name, r);
@@ -338,7 +351,7 @@ impl<T: TyRead> Shapes<'_, T> {
     pub fn truncate(&mut self, mark: usize) {
         self.shapes.truncate(mark);
         self.of.retain(|_, r| (r.0 as usize) < mark);
-        self.finalizers.retain(|(r, ..)| (r.0 as usize) < mark);
+        self.hooks.retain(|(r, ..)| (r.0 as usize) < mark);
     }
 
     fn map_field(&mut self, args: &[TyId]) -> Option<FieldTy> {
@@ -543,7 +556,7 @@ pub(crate) fn recipes(p: &mut Program) {
         shapes: &mut shapes,
         of: &mut of,
         module: false,
-        finalizers: vec![],
+        hooks: vec![],
     };
     let mut roots = vec![];
     for (d, decl) in s.decls.iter().enumerate().skip(s.decls.base_len()) {

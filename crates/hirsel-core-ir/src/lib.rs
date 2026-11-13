@@ -108,6 +108,13 @@
 //!   past a failed drop as it always does (FAIL-12). In counted cleanup such a
 //!   value is one step (its finalizer and then its fields, whole); a counted
 //!   payload holds no resource, so it cannot fail there.
+//! - **A clone body on an own row** (`type tN = own "Deque[T]" clone fM { .. }`,
+//!   `Shape::clone`, MEM-17) is `(ptr from, ptr to) -> (u64 requested, u64
+//!   available)`. A derived clone of any value holding the row copies its bytes and
+//!   then calls it instead of copying the row's fields: on `(0, 0)` `to` holds an
+//!   independent copy of `from`; otherwise `to` is as the byte copy left it, owns
+//!   nothing and is not cleaned, and the pair is the refused request. No engine
+//!   reads the field; the front derives the calls.
 //!
 //! # Compact data (FORM v1b, spec 6ef88514)
 //!

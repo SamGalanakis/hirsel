@@ -623,7 +623,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ..subject
         }
     }
-    fn pattern_compare(
+    pub(super) fn pattern_compare(
         &mut self,
         value: Option<ValueId>,
         ty: Ty,

@@ -163,6 +163,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         fd.params.clear();
         fd.result = result;
         fd.drop_of = None;
+        fd.clone_of = None;
         fd.body = None;
         let target =
             &child.e.module.instances[child.e.module.functions[raw.index()].instance.index()];

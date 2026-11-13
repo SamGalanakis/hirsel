@@ -209,6 +209,9 @@ fn shape(s: &Shape) -> String {
     if let Some(f) = s.finalizer {
         out += &format!(" drop f{}", f.0);
     }
+    if let Some(f) = s.clone {
+        out += &format!(" clone f{}", f.0);
+    }
     if s.grant != 0 {
         out += &format!(" grant {}", s.grant);
     }
@@ -946,6 +949,11 @@ impl<'a> Line<'a> {
         } else {
             None
         };
+        let clone = if self.eat("clone") {
+            Some(FuncRef(self.id('f')?))
+        } else {
+            None
+        };
         let grant = if self.eat("grant") { self.num()? } else { 0 };
         let body = if self.peek() == Some("|") {
             let mut cases = Vec::new();
@@ -966,6 +974,7 @@ impl<'a> Line<'a> {
             carried,
             body,
             finalizer,
+            clone,
             grant,
         })
     }

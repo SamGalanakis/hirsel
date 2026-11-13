@@ -9,6 +9,10 @@
 //! is 0 exactly when the copy is complete, since a refused admission is never of 0
 //! bytes. Until a part is replaced the copy's bytes still name the original's blocks,
 //! so nothing drops a part that was not replaced.
+//!
+//! A core row whose storage is not its structure (a `Deque`'s slots, a `Map`'s index)
+//! declares its own copy, `clone(x) { .. }` (`Shape::clone`): the row's `$clone` is its
+//! byte copy and then that body, at any depth, never a walk of its fields.
 use super::key_glue::{Code, Derive, KeyOp};
 use super::*;
 use hirsel_core_layout::{Body as ShapeBody, FieldTy};
@@ -23,6 +27,25 @@ impl Derive<'_> {
     ) -> Result<(), &'static str> {
         let size = self.row_size(ty);
         copy(c, to, from, size);
+        if let Some(f) = self.module.types[ty.index()].clone {
+            let requested = c.value(Ty::Scalar(Scalar::U64));
+            let available = c.value(Ty::Scalar(Scalar::U64));
+            let f = FuncId(f.0);
+            let signature = self.module.functions[f.index()].signature;
+            let args = PoolRange::push(&mut c.body.pools.args, [Arg::Value(from), Arg::Value(to)]);
+            let results = PoolRange::push(&mut c.body.pools.values, [requested, available]);
+            let call = CallId(c.body.calls.len() as u32);
+            c.body.calls.push(CallSite {
+                callee: Callee::Direct(f),
+                signature,
+                args,
+                results,
+                fail: None,
+            });
+            c.inst(Inst::Call { call });
+            ret(c, &[requested, available]);
+            return Ok(());
+        }
         let fail = c.block(&[Ty::Scalar(Scalar::U64); 2]);
         self.clone_parts(c, ty, from, to, fail)?;
         let zero = c.constant(0);
@@ -31,6 +54,16 @@ impl Derive<'_> {
         let [requested, available] = c.params(fail);
         ret(c, &[requested, available]);
         Ok(())
+    }
+    /// A row whose copy is its declared clone body cannot be walked field by field
+    /// into or out of a twin.
+    fn walkable(&self, ty: TypeId) -> Result<(), &'static str> {
+        match self.module.types[ty.index()].clone {
+            Some(_) => {
+                Err("a twin clone or clone_in of a core type with a clone body is not built")
+            }
+            None => Ok(()),
+        }
     }
     fn row_size(&self, ty: TypeId) -> u64 {
         hirsel_core_layout::field_size(
@@ -54,6 +87,9 @@ impl Derive<'_> {
             | FieldTy::OwnFn => true,
             FieldTy::Array(item, _) => self.owns(item, seen),
             FieldTy::Inline(t) => {
+                if self.module.types[t.0 as usize].clone.is_some() {
+                    return true;
+                }
                 if seen.contains(&t.0) {
                     return false;
                 }
@@ -441,6 +477,8 @@ impl Derive<'_> {
         from: ValueId,
         to: ValueId,
     ) -> Result<(), &'static str> {
+        self.walkable(src)?;
+        self.walkable(dst)?;
         let fail = c.block(&[Ty::Scalar(Scalar::U64); 2]);
         let (xs, ys) = (self.offsets(src), self.offsets(dst));
         match (
@@ -654,6 +692,8 @@ impl Derive<'_> {
         region: ValueId,
         fail: BlockId,
     ) -> Result<ValueId, &'static str> {
+        self.walkable(src)?;
+        self.walkable(dst)?;
         let (Layout::Fixed(f), Some(logical)) = (
             &self.recipes[dst.index()].layout,
             self.recipes[dst.index()].logical_size,

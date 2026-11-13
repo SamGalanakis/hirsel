@@ -57,6 +57,26 @@ pub fn module(m: &Module) -> R {
                 || format!("t{i}: only core declares a finalizer on a row that is not a resource"),
             )?;
         }
+        if let Some(f) = t.clone {
+            // A core own row's clone body: (from, to) -> (requested, available).
+            let sig = m
+                .functions
+                .get(f.0 as usize)
+                .and_then(|f| m.signatures.get(f.signature.index()));
+            let want = Signature {
+                params: vec![Param::Value(Ty::Ptr), Param::Value(Ty::Ptr)],
+                results: vec![Ty::Scalar(Scalar::U64), Ty::Scalar(Scalar::U64)],
+                dest: None,
+                never: false,
+            };
+            need(sig == Some(&want), || {
+                format!("t{i}: clone body is not (ptr, ptr) -> (u64, u64)")
+            })?;
+            need(
+                t.repr == hirsel_core_layout::Repr::Own && core_fn(m, f.0),
+                || format!("t{i}: only core declares a clone body, on an own row"),
+            )?;
+        }
     }
     hirsel_core_layout::compute(&m.types).map_err(|e| format!("layout: {e:?}"))?;
     for (i, s) in m.signatures.iter().enumerate() {

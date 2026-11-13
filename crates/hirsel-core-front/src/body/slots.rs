@@ -374,6 +374,57 @@ fn slots_cross_block_law() -> u64 {
         );
     }
 
+    /// MEM-17: a clone body replaces the structural copy, so outside core it would let
+    /// any type mint copies that bypass its own fields' clones.
+    #[test]
+    fn clone_bodies_are_core_only() {
+        let (index, modules) = crate::tests::program_inputs(
+            "type Hole { n: u64 } clone(h) { Ok(Hole(n: 1)) } fn go() {}",
+        );
+        let p = Program::declare(&index, &modules);
+        assert!(
+            p.refusals
+                .iter()
+                .any(|r| r.rule == "MEM-17" && r.message.contains("only core")),
+            "{:?}",
+            p.refusals
+        );
+    }
+
+    /// MEM-17 clone bodies (oracle: the body adds 100 to `n`, which no field walk does,
+    /// and refuses `n == 0` with (7, 3)). The derived clone calls each generic
+    /// instance's body at depth and inside a generic body, and on a refusal drops what it already copied (`used`
+    /// is 0: the first copy holds a block) and returns the body's request.
+    const CLONE_LAWS: &str = r#"
+type TestCopy[T] { xs: List[T], n: u64 } clone(t) {
+    match t.n {
+        0 => Error(Capacity(requested: 7, available: 3))
+        _ => Ok(TestCopy(xs: list.with_capacity(1)?, n: t.n + 100))
+    }
+}
+type TestPair { a: TestCopy[u64], b: TestCopy[String] }
+fn test_dup[T: plain](seed: T, n: u64) -> u64 {
+    let x: TestCopy[T] = TestCopy(xs: list.new(), n: n)
+    let y: TestCopy[T] = result.unwrap(clone(x))
+    y.n
+}
+
+// expect: run clone_body_law() = 105107109
+fn clone_body_law() -> u64 {
+    let p = TestPair(a: TestCopy(xs: list.new(), n: 5), b: TestCopy(xs: list.new(), n: 7))
+    let q: TestPair = result.unwrap(clone(p))
+    let seed: u8 = 0
+    q.a.n * 1000000 + q.b.n * 1000 + test_dup(seed, 9)
+}
+
+// expect: run clone_body_refusal_law() = 73
+fn clone_body_refusal_law() -> u64 {
+    let p = TestPair(a: TestCopy(xs: list.new(), n: 5), b: TestCopy(xs: list.new(), n: 0))
+    let q: Result[TestPair, Capacity] = clone(p)
+    match q { Ok(_) => 0, Error(c) => c.requested * 10 + c.available }
+}
+"#;
+
     #[test]
     fn private_slot_contracts_and_misuse() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -390,6 +441,7 @@ fn slots_cross_block_law() -> u64 {
         .load()
         .unwrap();
         let mut laws = SLOT_LAWS.to_string();
+        laws.push_str(CLONE_LAWS);
         laws.push_str("\ntype TestOwn { xs: List[u64] } drop(t) { list.swap(mut t.xs, 0, 1) }\n// expect: run slots_own_finalizer() = 9\nfn slots_own_finalizer() -> u64 { let mut xs: List[u64] = list.new(); result.unwrap(list.push(mut xs, 1)); result.unwrap(list.push(mut xs, 2)); let x = TestOwn(xs: take xs); let _ = take x; 9 }\n");
         corpus
             .sources
@@ -464,6 +516,6 @@ fn slots_cross_block_law() -> u64 {
                 faults += 1;
             }
         }
-        assert_eq!((passed, faults), (6, 5));
+        assert_eq!((passed, faults), (8, 5));
     }
 }

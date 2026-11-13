@@ -494,6 +494,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn closure(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let mut fd = self.fd.as_ref().clone();
         fd.drop_of = None;
+        fd.clone_of = None;
         fd.params.clear();
         fd.body = None;
         fd.result = UNIT;
@@ -1338,6 +1339,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         fd.result = UNIT;
         fd.generics.clear();
         fd.drop_of = None;
+        fd.clone_of = None;
         fd.waits = false;
         fd.body = None;
         fd.path.0.name = format!(

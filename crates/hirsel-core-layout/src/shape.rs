@@ -268,6 +268,12 @@ pub struct Shape {
     /// A resource's finalizer (FAIL-11), or a core slot kernel's on an own row
     /// (FORM v1c), called with the value's address before its fields are cleaned.
     pub finalizer: Option<FuncRef>,
+    /// A core own row's declared clone body (MEM-17, `clone(x) { .. }`), the
+    /// finalizer's counterpart: `(ptr from, ptr to) -> (u64 requested, u64 available)`.
+    /// The derived clone of any value holding this row calls it, after the byte copy,
+    /// instead of walking the row's fields; it writes the copy to `to` and returns
+    /// `(0, 0)`, or leaves `to` as it was and returns the refused request.
+    pub clone: Option<FuncRef>,
     /// `grant bytes n` (MEM-27).
     pub grant: u64,
 }

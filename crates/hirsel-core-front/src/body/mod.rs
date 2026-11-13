@@ -402,34 +402,44 @@ impl Emitter {
             shapes: &mut self.module.types,
             of: &mut self.types,
             module: true,
-            finalizers: vec![],
+            hooks: vec![],
         };
         let r = s.shape(ty);
         if r.is_none() {
             s.truncate(mark);
         }
-        let finalizers = std::mem::take(&mut s.finalizers);
-        for (row, f, arguments) in finalizers {
-            // A generic resource's finalizer is its template's instance at the row's
-            // arguments, materialized as any other generic callee.
+        let hooks = std::mem::take(&mut s.hooks);
+        for (row, hook, f, arguments) in hooks {
+            // A generic row's finalizer or clone body is its template's instance at the
+            // row's arguments, materialized as any other generic callee.
             let func = if arguments.is_empty() {
-                self.finalizer_row(p, f as usize)
+                self.hook_row(p, f as usize)
             } else {
                 self.instance(p, t, f as usize, &arguments).ok()?.0
             };
-            self.module.types[row.index()].finalizer = Some(hirsel_core_layout::FuncRef(func.0));
+            let func = Some(hirsel_core_layout::FuncRef(func.0));
+            let shape = &mut self.module.types[row.index()];
+            match hook {
+                crate::layout::Hook::Finalizer => shape.finalizer = func,
+                crate::layout::Hook::Clone => shape.clone = func,
+            }
         }
         let row = TypeId(r?.0);
         self.remember_generic_types(p, t, ty);
         Some(row)
     }
-    /// The function row of the program's finalizer `f`: it receives the resource
-    /// block's pointer and has no result (FAIL-11, FORM).
-    fn finalizer_row(&mut self, p: &Program, f: usize) -> FuncId {
+    /// The function row of the program's finalizer or clone body `f`, at its hook
+    /// signature (FAIL-11, MEM-17, FORM).
+    fn hook_row(&mut self, p: &Program, f: usize) -> FuncId {
         if let Some(Some((func, _))) = self.rows.get(f) {
             return *func;
         }
-        let func = self.function(&p.fns[f].path, finalizer_signature());
+        let sig = if p.fns[f].clone_of.is_some() {
+            clone_body_signature()
+        } else {
+            finalizer_signature()
+        };
+        let func = self.function(&p.fns[f].path, sig);
         let row = (func, self.module.functions[func.index()].signature);
         if self.rows.len() <= f {
             self.rows.resize(f + 1, None);
@@ -590,6 +600,9 @@ impl Emitter {
         if fd.drop_of.is_some() {
             return Ok((finalizer_signature(), scalar_abi::SignatureAbi::default()));
         }
+        if fd.clone_of.is_some() {
+            return Ok((clone_body_signature(), scalar_abi::SignatureAbi::default()));
+        }
         let mut params = vec![];
         let mut abi = scalar_abi::SignatureAbi {
             params: vec![],
@@ -635,6 +648,16 @@ impl Emitter {
             },
             abi,
         ))
+    }
+}
+
+/// A clone body's: `(ptr from, ptr to) -> (u64 requested, u64 available)` (MEM-17).
+fn clone_body_signature() -> Signature {
+    Signature {
+        params: vec![Param::Value(Ty::Ptr), Param::Value(Ty::Ptr)],
+        results: vec![Ty::Scalar(Scalar::U64), Ty::Scalar(Scalar::U64)],
+        dest: None,
+        never: false,
     }
 }
 
@@ -963,6 +986,9 @@ struct Cx<'c, 'a, 'e> {
     /// The destination a declared result is written to: the entry block's first
     /// parameter and its place.
     dest: Option<(ValueId, TypeId)>,
+    /// A clone body's `to` (MEM-17): its result is built in a local `dest` and moved
+    /// here on `Ok`.
+    clone_to: Option<ValueId>,
     /// How each type this body names is carried, found once per body.
     reps: HashMap<TyId, Result<Rep, &'static str>>,
     /// The owners of the body, in the order they began (FAIL-8).
@@ -1076,6 +1102,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             waited: false,
             entry: p.entry.as_ref() == Some(&fd.path),
             dest: None,
+            clone_to: None,
             reps: HashMap::default(),
             owners: vec![],
             owner_buf: vec![],
@@ -1463,7 +1490,83 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             _ => v,
         };
         self.unwind(0, 0, n);
+        if let Some(to) = self.clone_to {
+            self.clone_return(to, n);
+            return;
+        }
         let r = PoolRange::push(&mut self.b.pools.values, v);
+        self.end(Terminator::Return(r), Some(n));
+    }
+    /// A clone body's return (MEM-17): `Ok(copy)` moves the copy to `to` and returns
+    /// `(0, 0)`; `Error(Capacity)` leaves `to` alone and returns its request.
+    fn clone_return(&mut self, to: ValueId, n: NodeId) {
+        let Some((dest, rid)) = self.dest else {
+            return self.gap(n, "this clone body's result is not built");
+        };
+        let Some((_, this, Some(cap))) = self.result_parts(self.fd.result) else {
+            return self.gap(n, "this clone body's result is not built");
+        };
+        let (Ok(Rep::Place(this)), Ok(Rep::Place(cap))) = (self.rep(this), self.rep(cap)) else {
+            return self.gap(n, "this clone body's result is not built");
+        };
+        let whole = self.address(AddressBase::Value(dest), &[], PlaceTy::Declared(rid), n);
+        let tag = self.value(Ty::Scalar(Scalar::U32));
+        self.inst(
+            Inst::Case {
+                result: tag,
+                address: whole,
+            },
+            n,
+        );
+        let error = self.new_block(&[]);
+        self.pattern_compare(
+            Some(tag),
+            Ty::Scalar(Scalar::U32),
+            0,
+            CompareOp::Eq,
+            Some(error),
+            n,
+        );
+        let copy = self.address(
+            AddressBase::Address(whole),
+            &[Step::CaseField { case: 0, field: 0 }],
+            PlaceTy::Declared(this),
+            n,
+        );
+        let copy = self.pointer(copy, n);
+        let target = self.address(AddressBase::Value(to), &[], PlaceTy::Declared(this), n);
+        self.copy_to(target, copy, this, n);
+        let Some(zero) = self.konst(Ty::Scalar(Scalar::U64), 0, n) else {
+            return;
+        };
+        let r = PoolRange::push(&mut self.b.pools.values, [zero, zero]);
+        self.end(Terminator::Return(r), Some(n));
+        self.start(error);
+        let refused = self.address(
+            AddressBase::Address(whole),
+            &[Step::CaseField { case: 1, field: 0 }],
+            PlaceTy::Declared(cap),
+            n,
+        );
+        let mut pair = [zero; 2];
+        for (i, v) in pair.iter_mut().enumerate() {
+            let at = self.address(
+                AddressBase::Address(refused),
+                &[Step::Field(i as u32)],
+                PlaceTy::Value(Ty::Scalar(Scalar::U64)),
+                n,
+            );
+            *v = self.value(Ty::Scalar(Scalar::U64));
+            self.inst(
+                Inst::Read {
+                    result: *v,
+                    address: at,
+                    mode: ReadMode::Bits,
+                },
+                n,
+            );
+        }
+        let r = PoolRange::push(&mut self.b.pools.values, pair);
         self.end(Terminator::Return(r), Some(n));
     }
 
@@ -1705,6 +1808,15 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                     self.anchors.slots[b.id as usize] = fact;
                 }
                 self.own(b.id, body);
+            }
+        }
+        // A clone body builds its result in a local destination (`clone_return`).
+        if self.fd.clone_of.is_some() && self.live() {
+            self.clone_to = entry_params.get(k).copied();
+            if let Ok(Rep::Place(id)) = self.rep(self.fd.result) {
+                let slot = self.new_slot(PlaceTy::Declared(id), body);
+                let at = self.pointer(slot, body);
+                self.dest = Some((at, id));
             }
         }
         let result = self.fd.result;

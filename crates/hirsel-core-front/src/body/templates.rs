@@ -201,13 +201,20 @@ pub fn materialize(
     }
     retire(&mut module, function, template);
     // A shape at the template's rigid parameters (`$i`) is dead once substituted; its
-    // finalizer's rigid instance must not become a dependency of this unit.
-    for t in 0..module.types.len() {
-        if let Some(f) = module.types[t].finalizer {
+    // finalizer's or clone body's rigid instance must not become a dependency of this
+    // unit.
+    let rigid = |module: &Module, f: Option<FuncRef>| {
+        f.is_some_and(|f| {
             let key = &module.instances[module.functions[f.0 as usize].instance.index()];
-            if key.types.iter().any(|name| name.contains('$')) {
-                module.types[t].finalizer = None;
-            }
+            key.types.iter().any(|name| name.contains('$'))
+        })
+    };
+    for t in 0..module.types.len() {
+        if rigid(&module, module.types[t].finalizer) {
+            module.types[t].finalizer = None;
+        }
+        if rigid(&module, module.types[t].clone) {
+            module.types[t].clone = None;
         }
     }
     Ok((module, target))
@@ -235,6 +242,9 @@ fn import_type(
     });
     shape.finalizer = shape
         .finalizer
+        .map(|f| FuncRef(import_function(module, owner, FuncId(f.0)).0));
+    shape.clone = shape
+        .clone
         .map(|f| FuncRef(import_function(module, owner, FuncId(f.0)).0));
     module.types[row.index()] = shape;
     TypeId(row.0)
@@ -346,10 +356,12 @@ impl Substitution<'_> {
         self.types.insert(old, row);
         self.module.types.push(shape.clone());
         map_fields(&mut shape, &mut |id| TypeRef(self.ty(TypeId(id.0)).0));
-        // A generic row's finalizer is the instance at the substituted arguments.
+        // A generic row's finalizer and clone body are the instances at the
+        // substituted arguments.
         shape.finalizer = shape
             .finalizer
             .map(|f| FuncRef(self.function(FuncId(f.0)).0));
+        shape.clone = shape.clone.map(|f| FuncRef(self.function(FuncId(f.0)).0));
         self.module.types[row.index()] = shape;
         row
     }
@@ -870,6 +882,7 @@ mod tests {
                 },
             ]),
             finalizer: None,
+            clone: None,
             grant: 0,
         };
         // This template constant is the producer's size query, independent of any
@@ -906,6 +919,7 @@ mod tests {
             carried: hirsel_core_layout::Carried::Address,
             body: ShapeBody::Record(vec![]),
             finalizer: None,
+            clone: None,
             grant: 0,
         };
         template.copies = vec![CopySize {

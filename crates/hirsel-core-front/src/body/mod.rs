@@ -48,6 +48,7 @@ pub(crate) mod core_ops;
 mod ops;
 mod patterns;
 mod places;
+mod spans;
 mod stable;
 mod templates;
 mod types;
@@ -373,6 +374,11 @@ impl Emitter {
             TyKind::Scalar(s) => return Ok(Rep::Scalar(Ty::Scalar(*s))),
             TyKind::Fn(_, _, _, Callable::Plain) => return Ok(Rep::Scalar(Ty::Ptr)),
             TyKind::Unit | TyKind::Never | TyKind::Error => return Ok(Rep::None),
+            // A Region value is the region's pointer, scoped and never cleaned by its
+            // holder: the block that opened it closes it (MEM-5, MEM-7).
+            TyKind::Adt(d, _) if p.decls[d.index()].role == Some(Role::Region) => {
+                return Ok(Rep::Scalar(Ty::Ptr));
+            }
             // A capability or `Args` is a provider handle, plain and never cleaned by
             // the program (FORM e68de117); `Unique` and `Site` are one plain word
             // (core.md "Core types").
@@ -387,6 +393,12 @@ impl Emitter {
             | TyKind::Adt(..)
             | TyKind::Fn(..)
             | TyKind::Param(_) => {}
+            // A value anchored in a region is held like its type; the anchor only
+            // bounds where it may go (MEM-6).
+            TyKind::Anchored(x, _) => {
+                let x = *x;
+                return self.rep(p, t, x);
+            }
             // A view is a pointer to a place of its type, never cleaned (OWN-8).
             TyKind::View(x) => {
                 let x = *x;

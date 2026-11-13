@@ -3,7 +3,7 @@ use super::*;
 impl Cx<'_, '_, '_> {
     /// MEM-9/12 packs scalar fields without native padding. Decode plain elements
     /// into their ordinary native places; no view of a temporary escapes.
-    fn packed_plain_size(&mut self, ty: TyId) -> Option<u64> {
+    pub(super) fn packed_plain_size(&mut self, ty: TyId) -> Option<u64> {
         match self.t.kind(ty) {
             TyKind::Scalar(s) => Some(s.size()),
             TyKind::Unit => Some(0),
@@ -18,7 +18,7 @@ impl Cx<'_, '_, '_> {
             }
         }
     }
-    fn plain_fields(&self, ty: TyId) -> Option<u32> {
+    pub(super) fn plain_fields(&self, ty: TyId) -> Option<u32> {
         match self.t.kind(ty) {
             TyKind::Tuple(xs) => Some(xs.len() as u32),
             TyKind::Adt(d, _) if self.p.decls[d.index()].repr == Repr::Own && self.copies(ty) => {

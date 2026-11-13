@@ -266,6 +266,44 @@ pub fn subst(t: &mut impl TyRead, ty: TyId, args: &[TyId]) -> TyId {
     }
 }
 
+/// Replace the root `from` by the root type `to` (a call's Region parameter by the
+/// region its argument names, MEM-6).
+pub fn reroot(t: &mut impl TyRead, ty: TyId, from: Root, to: TyId) -> TyId {
+    match t.kind(ty).clone() {
+        TyKind::Region(r) if r == from => to,
+        TyKind::Anchored(x, root) => {
+            let x = reroot(t, x, from, to);
+            let root = reroot(t, root, from, to);
+            t.mk(TyKind::Anchored(x, root))
+        }
+        TyKind::Tuple(xs) => {
+            let xs = xs.iter().map(|&x| reroot(t, x, from, to)).collect();
+            t.mk(TyKind::Tuple(xs))
+        }
+        TyKind::Adt(d, xs) => {
+            let xs = xs.iter().map(|&x| reroot(t, x, from, to)).collect();
+            t.mk(TyKind::Adt(d, xs))
+        }
+        TyKind::Array(x, n) => {
+            let x = reroot(t, x, from, to);
+            t.mk(TyKind::Array(x, n))
+        }
+        TyKind::View(x) => {
+            let x = reroot(t, x, from, to);
+            t.mk(TyKind::View(x))
+        }
+        TyKind::Fn(ps, r, w, k) => {
+            let ps = ps
+                .iter()
+                .map(|&(m, p)| (m, reroot(t, p, from, to)))
+                .collect();
+            let r = reroot(t, r, from, to);
+            t.mk(TyKind::Fn(ps, r, w, k))
+        }
+        _ => ty,
+    }
+}
+
 /// Whether `ty` names a type parameter anywhere.
 pub fn has_hole(t: &impl TyRead, ty: TyId) -> bool {
     match t.kind(ty) {

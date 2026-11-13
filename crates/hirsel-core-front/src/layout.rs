@@ -134,6 +134,12 @@ impl<T: TyRead> Shapes<'_, T> {
                         let body = record(vec![("at", FieldTy::Locator)]);
                         return self.fill(r, LRepr::Own, body, None);
                     }
+                    // A span builder held as a value: its region blob and its region
+                    // (MEM-3); the blob lives in the region, so cleaning does nothing.
+                    Some(Role::SpanBuilder) => {
+                        let words = FieldTy::Array(Box::new(FieldTy::Scalar(Scalar::U64)), 2);
+                        return self.fill(r, LRepr::Own, record(vec![("words", words)]), None);
+                    }
                     // A box or counted reference held as a value: its one pointer field,
                     // cleaned by the recipe (freed, or released, MEM-15/16).
                     Some(role @ (Role::Box | Role::Rc | Role::Arc)) => {

@@ -1,7 +1,7 @@
 use super::*;
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
-    fn body_root(&mut self, n: NodeId, region_only: bool) -> TyId {
+    pub(super) fn body_root(&mut self, n: NodeId, region_only: bool) -> TyId {
         let Some(Target::Binder(b)) = self.p.target(self.at, n).copied() else {
             return ERROR;
         };

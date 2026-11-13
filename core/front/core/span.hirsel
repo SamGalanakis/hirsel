@@ -1,2 +1,6 @@
+pub fn builder[T: plain](r: Region) -> SpanBuilder[T, in r]
+pub fn with_capacity[T: plain](r: Region, n: u64) -> Result[SpanBuilder[T, in r], Capacity]
+pub fn push[T: plain, in r](mut b: SpanBuilder[T, in r], x: T) -> Result[(), (Capacity, T)]
+pub fn finish[T: plain, in r](take b: SpanBuilder[T, in r]) -> FixedSpan[T] in r
 pub fn len[T: plain](s: FixedSpan[T]) -> u64
 pub fn get[T: plain](s: FixedSpan[T], i: u64) -> Option[T]

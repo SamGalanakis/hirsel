@@ -34,6 +34,7 @@ pub opaque stable type SeqSpan[T: packed]
 pub opaque stable type IndexedSpan[T: packed]
 pub opaque type Writer[T, in r]
 pub opaque stable type FixedSpan[T: plain]
+pub opaque type SpanBuilder[T: plain, in r]
 pub opaque stable type SeqIndex[T: packed, in a]
 pub opaque type Link[T]
 

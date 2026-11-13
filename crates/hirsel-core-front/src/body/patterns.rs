@@ -1601,7 +1601,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             .iter()
             .any(|s| matches!(s.kind, ScopeKind::Region(Some(_)) | ScopeKind::Bound { .. }))
     }
-    fn capacity_ty(&mut self, n: NodeId) -> TyId {
+    pub(super) fn capacity_ty(&mut self, n: NodeId) -> TyId {
         match self.p.core_decl("Capacity") {
             Some(d) => self.t.mk(TyKind::Adt(d, vec![])),
             None => {

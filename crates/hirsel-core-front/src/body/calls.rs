@@ -61,11 +61,30 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => return self.call_value(n, callee, args, want, scratch),
         };
         let g = &self.p.fns[f];
-        if g.region_anchors.iter().any(|&r| {
-            matches!(self.t.kind(r), TyKind::Region(Root::Parameter(i))
-                if matches!(self.t.kind(g.params[*i as usize].ty), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Region)))
+        // A result rooted in a Region parameter is rooted in the region its argument
+        // names (MEM-6); `rooted` lists those parameters.
+        let rooted: Vec<usize> = g
+            .region_anchors
+            .iter()
+            .filter_map(|&r| match self.t.kind(r) {
+                TyKind::Region(Root::Parameter(i))
+                    if matches!(self.t.kind(g.params[*i as usize].ty), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Region)) =>
+                {
+                    Some(*i as usize)
+                }
+                _ => None,
+            })
+            .collect();
+        if rooted.iter().any(|&i| {
+            args.get(i).is_none_or(|&e| {
+                self.kind(e) != NodeKind::Path
+                    || !matches!(self.p.target(self.at, e), Some(Target::Binder(_)))
+            })
         }) {
-            return self.gap_ty(n, "call result region anchors are not built");
+            return self.gap_ty(
+                n,
+                "a call result rooted in a Region expression is not built",
+            );
         }
         if self.patterns.guard && g.params.iter().any(|p| p.mode != Mode::View) {
             self.refuse(
@@ -258,11 +277,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Hold::CallMut(c) if c == call => None,
             h => Some(h),
         });
-        let result = if undetermined {
+        let mut result = if undetermined {
             ERROR
         } else {
             subst(&mut self.t, g.result, tys)
         };
+        for &i in &rooted {
+            let to = self.body_root(args[i], true);
+            result = reroot(&mut self.t, result, Root::Parameter(i as u32), to);
+        }
         if result == NEVER {
             self.dead = true;
         }
@@ -788,16 +811,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             if tys.contains(&ERROR) || !self.live() {
                 return None;
             }
-            let header = vals[0]?;
             return match g.path.0.name.as_str() {
-                "len" => self.span_parts(header, n).map(|p| p.3),
+                "len" => self.span_parts(vals[0]?, n).map(|p| p.3),
                 "get" => {
                     let result = subst(&mut self.t, g.result, tys);
-                    self.fixed_span_get(header, vals[1]?, tys[0], result, n)
+                    self.fixed_span_get(vals[0]?, vals[1]?, tys[0], result, n)
                 }
-                _ => {
-                    self.gap(n, "this span construction operation is not built");
-                    None
+                name => {
+                    let result = subst(&mut self.t, g.result, tys);
+                    self.span_builder_op(name, tys[0], vals, result, n)
                 }
             };
         }

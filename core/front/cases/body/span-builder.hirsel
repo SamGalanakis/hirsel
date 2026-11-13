@@ -1,0 +1,44 @@
+// MEM-3: a region span builder grows past its capacity (2, then 4, then 8), keeps every
+// pushed element in order, and `finish` publishes a FixedSpan of them; a builder that
+// never pushed finishes to the empty span. Hand-derived: total(5) pushes P(i, 7) for i in 0..5, so the sum of
+// lo × 10 + hi is 100 + 35 = 135 and the length 5 adds 5000; total(0) is 0; second(3)
+// reads element 1 after growth, lo 1.
+// expect: run total(5) = 5135
+// expect: run total(0) = 0
+// expect: run second(3) = 1
+// expect: run empty(0) = 1
+type P { lo: u64, hi: u64 }
+fn make(r: Region, n: u64) -> Result[SpanBuilder[P, in r], Capacity] { span.with_capacity(r, n) }
+fn total(k: u64) -> u64 {
+  region r {
+    let mut b = match make(r, 2) { Ok(b) => b, Error(_) => return 999 }
+    let mut i: u64 = 0
+    while i < k {
+      match span.push(mut b, P(lo: i, hi: 7)) { Ok(()) => {}, Error(_) => return 998 }
+      i += 1
+    }
+    let s = span.finish(take b)
+    let mut t: u64 = 0
+    for p in s { t += p.lo * 10 + p.hi }
+    t + span.len(s) * 1000
+  }
+}
+fn second(k: u64) -> u64 {
+  region r {
+    let mut b: SpanBuilder[P, in r] = span.builder(r)
+    let mut i: u64 = 0
+    while i < k {
+      match span.push(mut b, P(lo: i, hi: 7)) { Ok(()) => {}, Error(_) => return 998 }
+      i += 1
+    }
+    let s = span.finish(take b)
+    match span.get(s, 1) { Some(p) => p.lo, None => 997 }
+  }
+}
+fn empty(x: u64) -> u64 {
+  region r {
+    let b: SpanBuilder[P, in r] = span.builder(r)
+    let s = span.finish(take b)
+    span.len(s) + 1
+  }
+}

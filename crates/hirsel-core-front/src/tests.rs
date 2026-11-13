@@ -1595,3 +1595,117 @@ fn causes_iteration_reads_complete_cells_and_preserves_order() {
         assert_eq!(report.used, 0, "{source}: fixture storage leaked");
     }
 }
+
+/// Independent packed bytes: (tag, nested sequence) lengths 1,0,2 give
+/// 101+200+302=603. Skipping the middle record must still advance its cursor.
+#[test]
+fn packed_iteration_uses_one_cursor_for_variable_records() {
+    use hirsel_core_ir::{Static, text};
+    for width in [2usize, 4, 8] {
+        for indexed in [false, true] {
+            for (body, expected) in [
+                (
+                    "let wide: u64 = int.widen(tag); s += wide * 100u64 + seq.len(ys)",
+                    603,
+                ),
+                (
+                    "if tag == 2u8 { continue }; let wide: u64 = int.widen(tag); s += wide * 100u64 + seq.len(ys)",
+                    403,
+                ),
+                (
+                    "if tag == 2u8 { break }; let wide: u64 = int.widen(tag); s += wide * 100u64 + seq.len(ys)",
+                    101,
+                ),
+            ] {
+                let span = if indexed { "IndexedSpan" } else { "SeqSpan" };
+                let source = format!(
+                    "@compact(u16) stable type Row {{ tag: u8, ys: SeqSpan[u64] }}\nfn f(xs: {span}[Row]) -> u64 {{ let mut s: u64 = 0; for row in xs {{ let tag = row.tag; let ys = row.ys; {body} }}; s }}"
+                );
+                let (index, inputs) = program_inputs(&source);
+                let p = Program::declare(&index, &inputs);
+                assert!(p.refusals.is_empty(), "{:?}", p.refusals);
+                let f = p.fns.iter().position(|f| f.path.0.name == "f").unwrap();
+                let mut emitter = Emitter::new();
+                let check = p.check_lower(f, &mut emitter);
+                assert!(
+                    check.refusals.is_empty() && check.gaps.is_empty(),
+                    "{:?} {:?}",
+                    check.refusals,
+                    check.gaps
+                );
+                let target = check.function.unwrap();
+                let sig = emitter.module.functions[target.index()].signature;
+                let Param::Address(ty) = emitter.module.signatures[sig.index()].params[0] else {
+                    panic!("span locator")
+                };
+                let mut elements = vec![];
+                let mut offsets = vec![];
+                for (tag, count) in [(1u8, 1u64), (2, 0), (3, 2)] {
+                    offsets.push(elements.len() as u64);
+                    elements.push(tag);
+                    elements.extend_from_slice(&count.to_le_bytes()[..width]);
+                    elements.extend_from_slice(&(count * 8).to_le_bytes()[..width]);
+                    for _ in 0..count {
+                        elements.extend_from_slice(&7u64.to_le_bytes());
+                    }
+                }
+                let mut blob = vec![0; 8];
+                blob.extend_from_slice(&(width as u64).to_le_bytes());
+                blob.extend_from_slice(&3u64.to_le_bytes()[..width]);
+                blob.extend_from_slice(&(elements.len() as u64).to_le_bytes()[..width]);
+                blob.extend(elements);
+                if indexed {
+                    for off in offsets {
+                        blob.extend_from_slice(&off.to_le_bytes()[..width]);
+                    }
+                }
+                let data = emitter.module.statics.len();
+                emitter.module.statics.push(Static {
+                    align: 8,
+                    bytes: blob,
+                });
+                let g = emitter.module.signatures.len();
+                let inst = emitter.module.instances.len();
+                let entry = emitter.module.functions.len();
+                let fixture = format!(
+                    r#"{}
+sig g{g} = () -> (u64)
+inst n{inst} = app@1/fixture/entry [] []
+fn f{entry} = n{inst} g{g} {{
+ slot s0 = t{ty}
+ addr a0 = s0 : t{ty}
+ addr a1 = a0 byte v1 : ptr
+ addr a2 = a0 byte v2 : u64
+ b0:
+  live s0
+  v0: ptr = static d{data}
+  v1: u64 = const 0
+  v2: u64 = const 8
+  v3: u64 = const 16
+  address a0
+  address a1
+  address a2
+  store a1, v0
+  store a2, v3
+  v4: u64 = call f{} g{} (&a0)
+  return v4
+}}
+"#,
+                    text::print(&emitter.module),
+                    target.0,
+                    sig.0,
+                    ty = ty.0
+                );
+                let module = text::parse(&fixture).unwrap();
+                wf::module(&module).unwrap();
+                let report = eval::run(&module, FuncId(entry as u32), &[], u64::MAX);
+                assert_eq!(
+                    report.outcome,
+                    eval::Outcome::Returned(vec![expected]),
+                    "{width} {indexed} {source}"
+                );
+                assert_eq!(report.used, 0);
+            }
+        }
+    }
+}

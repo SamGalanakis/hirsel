@@ -696,6 +696,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         } else {
             None
         };
+        let packed_cursor = match sequence {
+            Some((collection, Some(header))) if self.live() => match self.role_of(collection) {
+                Some((role @ (Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan), _)) => {
+                    self.locator(header, n).and_then(|(blob, at, w)| {
+                        let bytes = if role == Role::FixedSpan {
+                            w
+                        } else {
+                            self.add(w, w, n)
+                        };
+                        let first = self.add(at, bytes, n);
+                        self.slot(scalar(Scalar::U64), Some(first), n)
+                            .map(|slot| (blob, w, slot))
+                    })
+                }
+                _ => None,
+            },
+            _ => None,
+        };
         self.push_frame(label, FrameKind::While, expect(UNIT));
         let fi = self.frames.len() - 1;
         let mut flow = None;
@@ -756,22 +774,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.map_pair(pointer, collection, index, elem, advance, n)
                 } else if matches!(self.t.kind(collection), TyKind::Adt(d, _) if matches!(self.p.decls[d.index()].role, Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan)))
                 {
-                    let words = match self.t.kind(collection) {
-                        TyKind::Adt(d, _)
-                            if self.p.decls[d.index()].role == Some(Role::FixedSpan) =>
-                        {
-                            1
-                        }
-                        _ => 2,
-                    };
-                    let indexed = matches!(self.t.kind(collection), TyKind::Adt(d, _)
-                        if self.p.decls[d.index()].role == Some(Role::IndexedSpan));
-                    if words == 2 && self.packed_locator_elem(elem) {
-                        self.packed_element(pointer, elem, index, indexed, n)
-                    } else {
-                        self.fixed_span_element(pointer, elem, index, false, words, n)
-                    }
-                    .and_then(|at| self.iteration_value(at, elem, n))
+                    packed_cursor
+                        .and_then(|(blob, w, cursor)| {
+                            let off = self.read_bits(cursor, Ty::Scalar(Scalar::U64), n);
+                            let el = if elem == UNIT {
+                                let place = self.place_ty(elem, n)?;
+                                self.new_slot(place, n)
+                            } else {
+                                self.compact_value_at(blob, off, w, elem, n)?
+                            };
+                            let next = self.skip(blob, off, w, elem, n)?;
+                            self.inst(
+                                Inst::Store {
+                                    address: cursor,
+                                    value: next,
+                                },
+                                n,
+                            );
+                            Some(el)
+                        })
+                        .and_then(|at| self.iteration_value(at, elem, n))
                 } else {
                     let place = self.place_ty(collection, n);
                     let element = self.place_ty(elem, n);

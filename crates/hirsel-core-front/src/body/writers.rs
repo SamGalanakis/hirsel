@@ -1277,22 +1277,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(self.pointer(to, n))
     }
 
-    /// Whether `elem` is held in a packed sequence as a variable-width encoding read
-    /// through a locator: a compact type, a `Text` or a nested sequence.
-    pub(super) fn packed_locator_elem(&mut self, elem: TyId) -> bool {
-        self.compact_adt(elem).is_some() || self.shape(elem) != Shape::Other
-    }
-    /// A slot holding the locator of element `index` of the packed sequence `header`
+    /// Blob, offset and W of element `index` of the packed sequence `header`
     /// (MEM-4): an `IndexedSpan` reads its offset table, a `SeqSpan` walks from the
     /// first element. `index` is below the count.
-    pub(super) fn packed_element(
+    pub(super) fn packed_element_offset(
         &mut self,
         header: ValueId,
         elem: TyId,
         index: ValueId,
         indexed: bool,
         n: NodeId,
-    ) -> Option<AddressId> {
+    ) -> Option<(ValueId, ValueId, ValueId)> {
         let u64t = Ty::Scalar(Scalar::U64);
         let elem = self.bare(elem);
         let (blob, at, w) = self.locator(header, n)?;
@@ -1322,7 +1317,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.start(after);
             el
         };
-        self.new_locator(elem, blob, found, n)
+        Some((blob, found, w))
     }
     /// `seq.nth` and `indexed.get` of a locator element: `Some` of its locator below
     /// the count, else `None`.
@@ -1346,7 +1341,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         self.branch(more, load, empty, n);
         self.start(load);
-        let el = self.packed_element(header, elem, index, indexed, n)?;
+        let (blob, off, w) = self.packed_element_offset(header, elem, index, indexed, n)?;
+        let el = self.compact_value_at(blob, off, w, elem, n)?;
         self.inst(
             Inst::SetCase {
                 address: to,
@@ -1354,17 +1350,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             n,
         );
-        let Ok(Rep::Place(id)) = self.rep(self.bare(elem)) else {
-            return None;
-        };
-        let dest = self.address(
-            AddressBase::Address(to),
-            &[Step::CaseField { case: 1, field: 0 }],
-            PlaceTy::Declared(id),
-            n,
-        );
-        let p = self.pointer(el, n);
-        self.copy_to(dest, p, id, n);
+        let er = self.rep(elem).ok()?;
+        if let Some(place) = er.stored() {
+            let dest = self.address(
+                AddressBase::Address(to),
+                &[Step::CaseField { case: 1, field: 0 }],
+                place,
+                n,
+            );
+            let value = match er {
+                Rep::Scalar(t) => self.read_bits(el, t, n),
+                _ => self.pointer(el, n),
+            };
+            self.install(dest, er, Some(value), n);
+        }
         self.jump(done, &[], n);
         self.start(empty);
         self.inst(

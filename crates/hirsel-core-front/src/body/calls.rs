@@ -834,7 +834,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             return match (g.path.0.modules[0].as_str(), g.path.0.name.as_str()) {
                 ("seq", "len") => self.span_parts(vals[0]?, n).map(|p| p.3),
-                (module, "nth" | "get") if self.packed_locator_elem(tys[0]) => {
+                (module, "nth" | "get")
+                    if {
+                        let view = self.t.mk(TyKind::View(tys[0]));
+                        !matches!(self.rep(view), Ok(Rep::View(_)))
+                    } =>
+                {
                     let result = subst(&mut self.t, g.result, tys);
                     let indexed = module == "indexed";
                     self.packed_get(vals[0]?, vals[1]?, tys[0], indexed, result, n)

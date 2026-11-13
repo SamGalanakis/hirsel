@@ -396,7 +396,7 @@ impl Cx<'_, '_, '_> {
                 }
                 if self.plain_fields(bare).is_some() {
                     let to = self.new_slot(PlaceTy::Declared(id), n);
-                    self.decode_plain(blob, off, bare, to, n)?;
+                    self.decode_plain(blob, off, w, bare, to, n)?;
                     return Some(to);
                 }
                 self.gap(n, "this compact field is not built");

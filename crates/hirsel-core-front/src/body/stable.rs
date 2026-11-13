@@ -137,34 +137,54 @@ impl Cx<'_, '_, '_> {
         let count = self.packed_count(blob, at, w, n)?;
         Some((blob, at, w, count))
     }
+    /// Decode the one packed encoding into the value's native representation.
     pub(super) fn decode_plain(
         &mut self,
         blob: ValueId,
         at: ValueId,
+        w: ValueId,
         ty: TyId,
         to: AddressId,
         n: NodeId,
     ) -> Option<()> {
-        match self.t.kind(ty) {
-            TyKind::Scalar(s) => {
-                let ir = Ty::Scalar(*s);
-                let from = self.byte_at(blob, at, PlaceTy::Value(ir), n);
-                let value = self.read_bits(from, ir, n);
+        if self.is_locator(ty) {
+            for (off, value) in [(0, blob), (8, at)] {
+                let off = self.konst(Ty::Scalar(Scalar::U64), off, n)?;
+                let field = self.address(
+                    AddressBase::Address(to),
+                    &[Step::Byte(off)],
+                    PlaceTy::Value(self.b.values[value.index()]),
+                    n,
+                );
+                self.inst(
+                    Inst::Store {
+                        address: field,
+                        value,
+                    },
+                    n,
+                );
+            }
+            return Some(());
+        }
+        match self.rep(ty).ok()? {
+            Rep::Scalar(t) => {
+                let from = self.byte_at(blob, at, PlaceTy::Value(t), n);
+                let value = self.read_bits(from, t, n);
                 self.inst(Inst::Store { address: to, value }, n);
             }
-            TyKind::Unit => {}
-            _ => {
+            Rep::None => {}
+            Rep::Place(_) => {
                 let count = self.plain_fields(ty)?;
-                let mut offset = 0;
+                let mut from = at;
                 for i in 0..count {
                     let field = self.field_ty(ty, i)?;
                     let place = self.place_ty(field, n)?;
                     let dest = self.address(AddressBase::Address(to), &[Step::Field(i)], place, n);
-                    let from = self.offset_by(at, offset, n)?;
-                    self.decode_plain(blob, from, field, dest, n)?;
-                    offset += self.packed_plain_size(field)?;
+                    self.decode_plain(blob, from, w, field, dest, n)?;
+                    from = self.skip(blob, from, w, field, n)?;
                 }
             }
+            Rep::View(_) => return None,
         }
         Some(())
     }
@@ -178,13 +198,6 @@ impl Cx<'_, '_, '_> {
         header_words: u64,
         n: NodeId,
     ) -> Option<AddressId> {
-        let Some(stride) = self.packed_plain_size(elem) else {
-            self.gap(
-                n,
-                "the private encoding of this FixedSpan element is not built",
-            );
-            return None;
-        };
         let (blob, at, w, count) = self.span_parts(header, n)?;
         if checked {
             let condition = self.value(Ty::Scalar(Scalar::Bool));
@@ -213,18 +226,25 @@ impl Cx<'_, '_, '_> {
             );
             self.start(load);
         }
-        let stride = self.konst(Ty::Scalar(Scalar::U64), stride, n)?;
-        let offset = self.value(Ty::Scalar(Scalar::U64));
-        self.inst(
-            Inst::Binary {
-                result: offset,
-                op: BinaryOp::Mul,
-                left: index,
-                right: stride,
-                fail: None,
-            },
-            n,
-        );
+        let stride = if let Some(size) = self.packed_plain_size(elem) {
+            self.konst(Ty::Scalar(Scalar::U64), size, n)?
+        } else {
+            let first = self.add(at, w, n);
+            let end = self.skip(blob, first, w, elem, n)?;
+            let stride = self.value(Ty::Scalar(Scalar::U64));
+            self.inst(
+                Inst::Binary {
+                    result: stride,
+                    op: BinaryOp::Sub,
+                    left: end,
+                    right: first,
+                    fail: None,
+                },
+                n,
+            );
+            stride
+        };
+        let offset = self.mul(index, stride, n);
         let mut header_bytes = w;
         if header_words == 2 {
             header_bytes = self.offset_sum(w, w, n)?;
@@ -253,7 +273,7 @@ impl Cx<'_, '_, '_> {
         );
         let place = self.place_ty(elem, n)?;
         let to = self.new_slot(place, n);
-        self.decode_plain(blob, from, elem, to, n)?;
+        self.decode_plain(blob, from, w, elem, to, n)?;
         Some(to)
     }
     pub(super) fn fixed_span_get(

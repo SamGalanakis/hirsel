@@ -50,3 +50,22 @@ fn min_equal() -> i64 {
     let a: i64 = -4
     order.min(a, -4)
 }
+
+// All three reverse cases; identity or an Equal flip changes 210.
+// expect: run reverse_cases() = 210
+fn reverse_cases() -> u64 {
+    rank(order.reverse(Less)) * 100 + rank(order.reverse(Equal)) * 10 + rank(order.reverse(Greater))
+}
+
+// Covers all nine pairs. Taking b unconditionally changes the result.
+// expect: run then_cases() = 12222
+fn then_cases() -> u64 {
+    rank(order.then(Less, Less)) * 100000000 +
+    rank(order.then(Less, Equal)) * 10000000 +
+    rank(order.then(Less, Greater)) * 1000000 +
+    rank(order.then(Equal, Less)) * 100000 +
+    rank(order.then(Equal, Equal)) * 10000 +
+    rank(order.then(Equal, Greater)) * 1000 +
+    rank(order.then(Greater, Less)) * 100 +
+    rank(order.then(Greater, Equal)) * 10 + rank(order.then(Greater, Greater))
+}

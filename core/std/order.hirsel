@@ -31,3 +31,23 @@ pub fn max[T: ordered + plain](a: T, b: T) -> T {
         b
     }
 }
+
+/// Reverses Less and Greater; Equal stays Equal. Alloc: nothing. Cost: O(1).
+/// Ex: `std.order.reverse(std.order.compare(a, b))`
+pub fn reverse(o: Order) -> Order {
+    match o {
+        Less => Greater,
+        Equal => Equal,
+        Greater => Less,
+    }
+}
+
+/// Uses b only when a is Equal, for lexicographic comparisons. Both arguments are
+/// evaluated before the call. Alloc: nothing. Cost: O(1).
+/// Ex: `std.order.then(std.order.compare(a.key, b.key), std.order.compare(a.id, b.id))`
+pub fn then(a: Order, b: Order) -> Order {
+    match a {
+        Equal => b,
+        _ => a,
+    }
+}

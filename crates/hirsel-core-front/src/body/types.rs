@@ -70,8 +70,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     match self.kind(child) {
                         NodeKind::Parameters => {
                             for &param in self.kids(child) {
-                                let mode = crate::decls::mode_of(self.kind(param));
+                                let mode = crate::decls::callable_mode_of(self.kind(param));
                                 let ty = self.ty(self.kids(param)[0]);
+                                if mode == Mode::Bytes && ty != scalar(Scalar::U64) && ty != ERROR {
+                                    self.refuse(
+                                        "LANG-5",
+                                        param,
+                                        "a `bytes` parameter has type `u64`",
+                                    );
+                                }
                                 params.push((mode, ty));
                             }
                         }

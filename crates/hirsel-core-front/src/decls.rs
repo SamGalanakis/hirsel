@@ -854,8 +854,15 @@ impl Program<'_> {
                     match item.tree.node(c).kind {
                         NodeKind::Parameters => {
                             for &p in item.tree.children(c) {
-                                let mode = mode_of(item.tree.node(p).kind);
+                                let mode = callable_mode_of(item.tree.node(p).kind);
                                 let t = self.lower_ty(at, item.tree.children(p)[0], generics);
+                                if mode == Mode::Bytes && t != scalar(Scalar::U64) && t != ERROR {
+                                    self.refusals.push(refusal(
+                                        "LANG-5",
+                                        self.site(at, p),
+                                        "a `bytes` parameter has type `u64`",
+                                    ));
+                                }
                                 params.push((mode, t));
                             }
                         }
@@ -1192,7 +1199,10 @@ impl Program<'_> {
             written_roots.push(self.root_ty(at, n, &generics));
         }
         let callable = self.types.intern(TyKind::Fn(
-            params.iter().map(|p| (p.mode, p.ty)).collect(),
+            params
+                .iter()
+                .map(|p| (if p.bytes { Mode::Bytes } else { p.mode }, p.ty))
+                .collect(),
             result,
             waits,
             Callable::Plain,
@@ -2264,6 +2274,15 @@ pub(crate) fn mode_of(k: NodeKind) -> Mode {
     }
 }
 
+/// Callable types retain the bytes mark; a declaration's binding mode remains view.
+pub(crate) fn callable_mode_of(k: NodeKind) -> Mode {
+    if k == NodeKind::BytesParameter {
+        Mode::Bytes
+    } else {
+        mode_of(k)
+    }
+}
+
 pub(crate) fn path_text(item: hirsel_core_syntax::Item<'_>, n: NodeId) -> String {
     let r = &item.tree.node(n).origin.tokens;
     item.tree.tokens[r.start as usize..r.end as usize]
@@ -2346,6 +2365,7 @@ fn write_canonical(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, s: 
                     Mode::View => "",
                     Mode::Mut => "mut ",
                     Mode::Take => "take ",
+                    Mode::Bytes => "bytes ",
                 });
                 write_canonical(decls, t, *p, s);
             }

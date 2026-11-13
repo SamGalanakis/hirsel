@@ -114,6 +114,7 @@ impl NameRecipe {
                         Mode::View => "",
                         Mode::Mut => "mut ",
                         Mode::Take => "take ",
+                        Mode::Bytes => "bytes ",
                     });
                     self.ty(p, t, ty);
                 }

@@ -31,9 +31,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         scratch: &mut CallScratch,
     ) -> (TyId, Option<ValueId>) {
         let g = &self.p.fns[f];
-        if g.params.iter().any(|p| p.bytes) {
-            return self.gap_ty(n, "function values with bytes parameters are not built");
-        }
         let ty = g.callable;
         scratch.found.clear();
         scratch.found.resize(g.generics.len(), None);
@@ -126,7 +123,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
             return (ERROR, None);
         }
-        if self.patterns.guard && scratch.params.iter().any(|p| p.0 != Mode::View) {
+        if self.patterns.guard
+            && scratch
+                .params
+                .iter()
+                .any(|p| matches!(p.0, Mode::Take | Mode::Mut))
+        {
             self.refuse(
                 "LANG-17",
                 n,
@@ -175,14 +177,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }))
             }));
         for (i, &arg) in args.iter().enumerate() {
-            if matches!(
-                self.kind(arg),
-                NodeKind::LabelledArgument | NodeKind::BytesArgument
-            ) {
-                self.gap(arg, "marked arguments to callable values are not built");
-                continue;
-            }
             let (mode, pt) = scratch.params[i];
+            let bytes = mode == Mode::Bytes;
+            let arg = match (self.kind(arg), bytes) {
+                (NodeKind::LabelledArgument, _) => {
+                    // LANG-9 is reported by resolution, as on a direct call.
+                    self.halt();
+                    continue;
+                }
+                (NodeKind::BytesArgument, true) => self.kids(arg)[0],
+                (NodeKind::BytesArgument, false) => {
+                    self.refuse("OWN-7", arg, "this parameter takes no `bytes` mark");
+                    self.kids(arg)[0]
+                }
+                (_, true) => {
+                    self.refuse("OWN-7", arg, "this parameter needs a `bytes` argument");
+                    arg
+                }
+                _ => arg,
+            };
+            let mode = if bytes { Mode::View } else { mode };
             if !self.argument(
                 mode,
                 pt,
@@ -485,6 +499,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             );
                         };
                         let ty = self.ty(self.kids(param)[0]);
+                        if self.kind(param) == NodeKind::BytesParameter
+                            && ty != scalar(Scalar::U64)
+                            && ty != ERROR
+                        {
+                            self.refuse("LANG-5", param, "a `bytes` parameter has type `u64`");
+                        }
                         fd.params.push(crate::decls::ParamDecl {
                             bytes: self.kind(param) == NodeKind::BytesParameter,
                             name: self.item.symbol(token),
@@ -530,7 +550,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let environment =
             scoped || matches!(expected_kind, Some(Callable::Own | Callable::OwnSend));
         let ty = self.t.mk(TyKind::Fn(
-            fd.params.iter().map(|p| (p.mode, p.ty)).collect(),
+            fd.params
+                .iter()
+                .map(|p| (if p.bytes { Mode::Bytes } else { p.mode }, p.ty))
+                .collect(),
             fd.result,
             fd.waits,
             if scoped {

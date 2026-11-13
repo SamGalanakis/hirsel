@@ -1,0 +1,3 @@
+// LANG-9: ordinary calls have no labelled arguments.
+// expect: refuse LANG-9 at 3:28
+fn f(h:fn(u64)->u64)->u64 {h(n:1)}

@@ -1,0 +1,4 @@
+// LANG-13: a bytes mark is not added by callable fitting either.
+// expect: refuse LANG-13 at 4:34
+fn plain(n:u64)->u64 {n}
+fn f() {let h:fn(bytes u64)->u64=plain}

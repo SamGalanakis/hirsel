@@ -1,6 +1,6 @@
 // LANG-11/13: parameter modes and result types must match; waits is directional.
-// expect: refuse LANG-11 at 8:34
-// expect: refuse LANG-11 at 9:44
+// expect: refuse LANG-13 at 8:34
+// expect: refuse LANG-13 at 9:44
 // expect: refuse LANG-8 at 10:31
 fn value(x: u64) -> u64 { x }
 fn change(mut x: u64) { x += 1 }

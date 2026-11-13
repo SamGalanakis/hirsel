@@ -32,3 +32,12 @@ fn map_churn_cranelift(){map_churn(Backend::Cranelift);}
 #[test]
 #[ignore="explicit native integration target"]
 fn map_churn_llvm(){map_churn(Backend::Llvm);}
+fn bytes_callable(backend: Backend) {
+    ordered_case(backend, include_str!("../../../core/front/cases/body/callable-bytes.hirsel"));
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn bytes_callable_cranelift(){bytes_callable(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn bytes_callable_llvm(){bytes_callable(Backend::Llvm);}

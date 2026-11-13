@@ -1,0 +1,3 @@
+// LANG-5: callable bytes modes preserve the existing parameter rules.
+// expect: refuse LANG-5 at 3:18
+fn f() {let h=fn(bytes n:u32) {}}

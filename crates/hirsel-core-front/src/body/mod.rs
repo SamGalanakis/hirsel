@@ -1190,6 +1190,19 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             self.gap(n, "callable kind conversions are not built");
             return;
         }
+        if !callable
+            && matches!(
+                (self.t.kind(t), self.t.kind(w.ty)),
+                (TyKind::Fn(..), TyKind::Fn(..))
+            )
+        {
+            self.refuse(
+                "LANG-13",
+                n,
+                "the callable does not fit the written callable type",
+            );
+            return;
+        }
         let sequence = matches!((self.t.kind(w.ty), self.t.kind(t)),
             (TyKind::Adt(d, a), TyKind::Adt(e, b))
                 if a == b && is_core_prelude(&self.p.decls[d.index()].path, &["SeqSpan"])
@@ -1610,7 +1623,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                     && b.site.span.end <= pd.site.span.end
             }) {
                 let origin = match pd.mode {
-                    Mode::View => Origin::ViewParam,
+                    Mode::View | Mode::Bytes => Origin::ViewParam,
                     Mode::Mut => Origin::MutParam,
                     Mode::Take => Origin::TakeParam,
                 };

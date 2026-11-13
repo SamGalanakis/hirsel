@@ -31,6 +31,7 @@ pub enum Mode {
     View,
     Mut,
     Take,
+    Bytes,
 }
 
 /// A root in a published signature or a body. Identities are local to the definition.

@@ -31,10 +31,12 @@ module, a function of the prelude, a module of the current package, a dependency
 a core module. The prelude is the `core` module of the core library: every `pub`
 declaration in `core/core/core.hirsel` ([core](core.md)), and nothing else. The head `a`
 of a dotted path `a.b` resolves in this order: a local or parameter in scope, then a module
-of the current package, a dependency package or a core module, and nothing else. If `a` is a
-local, `.b` selects a field; if a module or package, `.b` selects a member. A function or
-constant of a module is never the head of a path and never shadows a module there: a head
-that names only such a definition, or nothing, is refused here, at the head. So a module may
+of the current package, a dependency package or a core module, then a constant of the
+current module, and nothing else. If `a` is a local or a constant, `.b` selects a field of
+its value; if a module or package, `.b` selects a member, so another module's constant is
+read as `m.ORIGIN.x`. A module wins over a constant of its name. A function is never the
+head of a path: a head that names only a function, or nothing, is refused here, at the
+head, and is never rebound. So a module may
 define a function with the name of a module, as an entry point `main` beside a module
 `main`, and in it `main.main(..)` calls the module's `main`. In a type position the last
 name of a path is a type (`path.Path`). So `fn f(c: char)` names the builtin type and `char.digit(c)` a module
@@ -62,6 +64,11 @@ path, never by spelling.
 ```hirsel
 fn digits(s: String) -> Result[u64, ParseError] { int.parse(s) }
 fn list(xs: List[u64]) -> u64 { list.len(xs) }            // list.len is the core module's
+```
+```hirsel
+type Point { x: i64, y: i64 }
+const ORIGIN: Point = Point(x: 0, y: 0)
+fn left() -> i64 { ORIGIN.x }
 ```
 ```hirsel
 fn width() -> u64 { 8 }

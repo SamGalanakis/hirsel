@@ -80,8 +80,17 @@
 //!   written at finish; W in bytes at 8) then the data, charged round8(n) and
 //!   never the header (MEM-24). Data offsets below are from the block pointer.
 //! - **Locator**: a view of, or stable reference to, compact data is
-//!   `{blob ptr, at}` (`FieldTy::Locator`, logically 16); `Stable` of a compact
-//!   type is refused. An `IndexedSpan` reads and iterates as a `SeqSpan` with the
+//!   `{blob ptr, at}` (`FieldTy::Locator(target)`, 16 bytes, align 8, logically
+//!   16, whatever the target); `Stable` of a compact type is refused. The row
+//!   names what it locates as a compact field type, `locator text`, `locator
+//!   fixed e`, `locator seqspan e`, `locator indexedspan e` or `locator tN` of a
+//!   compact `tN`, and layout refuses any other target. That target is the only
+//!   recipe hash, equality and order read; nothing is parsed from a name. A
+//!   standalone `Text` or span is `{at: locator X}`, a `SeqIndex` keeps its
+//!   sequence's `locator seqspan e` (MEM-12), and a compact stable type held in
+//!   a non-compact holder is `locator tN`. A template row `Locator($i)` or
+//!   `View($i)` is materialized by substitution alone; the layout never depends
+//!   on the target. An `IndexedSpan` reads and iterates as a `SeqSpan` with the
 //!   same locator and W; its trailer (count W-wide offsets from the first element
 //!   byte) follows the elements, outside its own length but inside the holder's
 //!   extent. It is never a writer, a `Child` or a field encoding.
@@ -112,7 +121,7 @@
 //!   value copies its whole blob. `copy_closed_in` does not exist.
 //!   `seq.index_in` allocates round8(24 + 8 count) (`charge::seq_index`).
 //! - `text.as_string(t)` is a `View[String]` (Views): the carrier
-//!   `{blob + at + W, count, 0}` written into the caller's `dest`; `emit` of a
+//!   `{blob + at + W, count, count}` written into the caller's `dest`; `emit` of a
 //!   `String` view or a `Text` into a `Text` is one fit check and one `copy`. An
 //!   unmarked `T` parameter of a compact `T` also takes a `View[T]` (OWN-7): the
 //!   producer passes the locator.
@@ -233,6 +242,24 @@
 //!   `lt r, 0`. Other sequences, tuples, records and variants compare by producer
 //!   code over their components, calling it for each text component. Comparison
 //!   admits nothing.
+//! - **Hash, equality and order of a located value** are the rows the helper for
+//!   its locator's target emits (sample `stable-keys.core`). Each reads W from
+//!   the blob header (at 8) and the value's count, W wide, at `blob + at`:
+//!   - `Text`: its bytes follow the count; order and equality are
+//!     `rt.compare_bytes`, the hash word `rt.hash_bytes(bytes, count)`, exactly
+//!     those of a `String` with the same bytes, at any W.
+//!   - `FixedSpan[e]`: elements follow the count at e's packed size;
+//!     `SeqSpan[e]` and `IndexedSpan[e]` (read as a `SeqSpan`, trailer ignored):
+//!     count, byte length, then elements, each advanced by its
+//!     `compact_extent` at the holder's W (`Text`: W + count). Each element is
+//!     decoded into a native place (a compact element to its locator) and its
+//!     own helper called. The hash folds the elements as `List[e]` does, with
+//!     no count mixed in; equality is equal counts, then element by element;
+//!     order is lexicographic over the shorter count, the first difference
+//!     deciding, then a proper prefix first (SEM-7).
+//!   - a compact record or variant: fields in declaration order (a variant's
+//!     declaration ordinal first, then its payload), as for its plain
+//!     counterpart.
 //!
 //! # Providers (FORM v1b)
 //!

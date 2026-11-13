@@ -189,10 +189,12 @@ pub enum FieldTy {
     IndexedSpan(Box<FieldTy>),
     Link(TypeRef),
     OptLink(TypeRef),
-    /// A reference to compact data held outside a blob (a compact value, `Text` or a
-    /// sequence in some region): the blob pointer, then the value's offset from it
-    /// (crate `hirsel-core-ir`, "Compact data"). Plain, logically 16 (MEM-24).
-    Locator,
+    /// A reference to compact data held outside a blob: the blob pointer, then the
+    /// value's offset from it (crate `hirsel-core-ir`, "Compact data"). Plain,
+    /// logically 16 (MEM-24). It names what it locates, as a compact field type:
+    /// `Text`, `FixedSpan(e)`, `SeqSpan(e)`, `IndexedSpan(e)`, or `Inline(c)` of a
+    /// compact `c`; that target is the recipe hash, equality and order read.
+    Locator(Box<FieldTy>),
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]

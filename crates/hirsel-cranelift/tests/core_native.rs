@@ -828,6 +828,7 @@ fn every_whole_v1a_sample_matches_evaluator() {
         include_str!("../../hirsel-core-ir/samples/counted.core"),
         include_str!("../../hirsel-core-ir/samples/failure.core"),
         include_str!("../../hirsel-core-ir/samples/variants.core"),
+        include_str!("../../hirsel-core-ir/samples/stable-keys.core"),
     ] {
         let module = text::parse(source).unwrap();
         let ordinary = sample_runs(&module, source);

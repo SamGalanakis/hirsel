@@ -24,6 +24,7 @@ const SAMPLES: &[(&str, &str)] = &[
     ("sequences", include_str!("../samples/sequences.core")),
     ("strings", include_str!("../samples/strings.core")),
     ("providers", include_str!("../samples/providers.core")),
+    ("stable-keys", include_str!("../samples/stable-keys.core")),
 ];
 
 fn load(name: &str, text: &str) -> Module {

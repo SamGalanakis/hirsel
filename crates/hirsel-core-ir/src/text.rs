@@ -169,7 +169,7 @@ fn field_ty(f: &FieldTy) -> String {
         FieldTy::IndexedSpan(e) => format!("indexed {}", field_ty(e)),
         FieldTy::Link(t) => format!("link t{}", t.0),
         FieldTy::OptLink(t) => format!("optlink t{}", t.0),
-        FieldTy::Locator => "locator".into(),
+        FieldTy::Locator(t) => format!("locator {}", field_ty(t)),
     }
 }
 fn fields(fs: &[hirsel_core_layout::Field]) -> String {
@@ -843,6 +843,10 @@ impl<'a> Line<'a> {
                 self.next()?;
                 FieldTy::View(boxed(self)?)
             }
+            "locator" => {
+                self.next()?;
+                FieldTy::Locator(boxed(self)?)
+            }
             "seq" | "fixed" | "seqspan" | "indexed" => {
                 let w = self.next()?;
                 let e = boxed(self)?;
@@ -875,7 +879,6 @@ impl<'a> Line<'a> {
                     "causes" => FieldTy::Handle(Handle::Causes),
                     "hostfile" => FieldTy::Handle(Handle::HostFile),
                     "text" => FieldTy::Text,
-                    "locator" => FieldTy::Locator,
                     w => match (Scalar::from_name(w), w.strip_prefix('t').map(str::parse)) {
                         (Some(s), _) => FieldTy::Scalar(s),
                         (None, Some(Ok(n))) => FieldTy::Inline(hirsel_core_layout::TypeRef(n)),

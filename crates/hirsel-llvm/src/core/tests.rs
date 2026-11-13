@@ -684,6 +684,7 @@ fn every_whole_v1_memory_sample_matches_the_evaluator() {
         include_str!("../../../hirsel-core-ir/samples/counted.core"),
         include_str!("../../../hirsel-core-ir/samples/failure.core"),
         include_str!("../../../hirsel-core-ir/samples/variants.core"),
+        include_str!("../../../hirsel-core-ir/samples/stable-keys.core"),
     ] {
         let module = text::parse(source).unwrap();
         wf::module(&module).unwrap();

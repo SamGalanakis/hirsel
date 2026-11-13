@@ -254,6 +254,8 @@ fn map_fields(shape: &mut Shape, f: &mut impl FnMut(TypeRef) -> TypeRef) {
             | FieldTy::OptLink(id) => *id = f(*id),
             FieldTy::Seq(ty)
             | FieldTy::Array(ty, _)
+            | FieldTy::View(ty)
+            | FieldTy::Locator(ty)
             | FieldTy::FixedSpan(ty)
             | FieldTy::SeqSpan(ty)
             | FieldTy::IndexedSpan(ty) => field(ty, f),

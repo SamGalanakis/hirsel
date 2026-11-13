@@ -557,7 +557,7 @@ impl Glue<'_, '_, '_> {
             | FieldTy::Fn
             | FieldTy::Borrow
             | FieldTy::View(_)
-            | FieldTy::Locator => {}
+            | FieldTy::Locator(_) => {}
             other => return Err(unsupported(format!("drop field {other:?}"))),
         }
         Ok(())

@@ -290,9 +290,23 @@ fn plain_elements_are_packed_and_only_packed_types_are_elements() {
         compute(&[blob.clone(), by_ptr]),
         Err(LayoutError::Field { .. })
     ));
-    let by_loc = record("H", Repr::Stable, vec![field("c", FieldTy::Locator)]);
-    let r = compute(&[blob, by_loc]).unwrap();
+    let located = |t: FieldTy| {
+        record(
+            "H",
+            Repr::Stable,
+            vec![field("c", FieldTy::Locator(Box::new(t)))],
+        )
+    };
+    let r = compute(&[blob.clone(), located(FieldTy::Inline(TypeRef(0)))]).unwrap();
     assert_eq!((fixed(&r[1]).size, r[1].logical_size), (16, Some(16)));
+    // A locator names compact data (#63): a scalar or a native own type is not that.
+    let own = record("O", Repr::Own, vec![field("n", u(Scalar::U8))]);
+    for target in [u(Scalar::U64), FieldTy::Inline(TypeRef(2))] {
+        assert!(matches!(
+            compute(&[blob.clone(), located(target), own.clone()]),
+            Err(LayoutError::Field { .. })
+        ));
+    }
 }
 
 /// Bug: compact variants occupying their largest case (MEM-11 says active size), or a

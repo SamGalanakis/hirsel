@@ -384,6 +384,17 @@ fn fixed(shapes: &[Shape], shape: &Shape, out: &Computed<'_>) -> Result<Recipe, 
     })
 }
 
+/// Whether `target` is compact data a [`FieldTy::Locator`] may name.
+fn locates(shapes: &[Shape], target: &FieldTy) -> bool {
+    match target {
+        FieldTy::Text | FieldTy::FixedSpan(_) | FieldTy::SeqSpan(_) | FieldTy::IndexedSpan(_) => {
+            true
+        }
+        FieldTy::Inline(c) => matches!(shapes[c.index()].repr, Repr::Compact(_)),
+        _ => false,
+    }
+}
+
 /// Native size, native alignment and logical size (MEM-24) of a field of type `ty`
 /// in a fixed layout whose holder has representation `holder`, or why the holder
 /// refuses it.
@@ -428,7 +439,10 @@ fn measure<'r>(
             return Err("a reference to compact data is a locator");
         }
         FieldTy::Stable(_) => (POINTER, POINTER, 16),
-        FieldTy::Locator => (2 * POINTER, POINTER, 16),
+        FieldTy::Locator(target) if locates(shapes, target) => (2 * POINTER, POINTER, 16),
+        FieldTy::Locator(_) => {
+            return Err("a locator names compact data: Text, a span or a compact type");
+        }
         FieldTy::Fn => (POINTER, POINTER, 8),
         FieldTy::Borrow if holder != Repr::Scoped => {
             return Err("views and scoped callables live only in scoped types");
@@ -441,7 +455,7 @@ fn measure<'r>(
         // template's `View[$i]` is right for every argument by substitution alone.
         FieldTy::View(t) => match **t {
             FieldTy::Inline(c) if matches!(shapes[c.index()].repr, Repr::Compact(_)) => {
-                measure(shapes, holder, &FieldTy::Locator, get)?
+                (2 * POINTER, POINTER, 16)
             }
             _ => measure(shapes, Repr::Own, t, get)?,
         },

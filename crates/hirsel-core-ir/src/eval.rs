@@ -654,7 +654,7 @@ impl Machine<'_> {
             FieldTy::Scalar(_)
             | FieldTy::Fn
             | FieldTy::Stable(_)
-            | FieldTy::Locator
+            | FieldTy::Locator(_)
             | FieldTy::Borrow
             | FieldTy::View(_)
             | FieldTy::Handle(Handle::Capability) => false,

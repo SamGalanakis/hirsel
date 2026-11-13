@@ -126,7 +126,8 @@ impl<T: TyRead> Shapes<'_, T> {
                         return self.fill(r, LRepr::Own, record(vec![("entries", entries)]), None);
                     }
                     // Compact text or a span held as a value: a stable reference to
-                    // compact data in its region (core.md), plain.
+                    // compact data in its region (core.md), plain. The locator names
+                    // what it locates (FORM #63), so key, equality and order read it.
                     Some(
                         Role::Text
                         | Role::FixedSpan
@@ -134,8 +135,8 @@ impl<T: TyRead> Shapes<'_, T> {
                         | Role::IndexedSpan
                         | Role::SeqIndex,
                     ) => {
-                        let body = record(vec![("at", FieldTy::Locator)]);
-                        return self.fill(r, LRepr::Own, body, None);
+                        let at = self.field(ty)?;
+                        return self.fill(r, LRepr::Own, record(vec![("at", at)]), None);
                     }
                     // A span builder held as a value: its region blob and its region
                     // (MEM-3); the blob lives in the region, so cleaning does nothing.
@@ -302,31 +303,37 @@ impl<T: TyRead> Shapes<'_, T> {
                     if compact {
                         FieldTy::Text
                     } else {
-                        FieldTy::Locator
+                        FieldTy::Locator(Box::new(FieldTy::Text))
                     }
                 }
                 Some(Role::FixedSpan) => {
+                    let span = FieldTy::FixedSpan(Box::new(self.field_in(args[0], true)?));
                     if compact {
-                        FieldTy::FixedSpan(Box::new(self.field_in(args[0], true)?))
+                        span
                     } else {
-                        FieldTy::Locator
+                        FieldTy::Locator(Box::new(span))
                     }
                 }
                 Some(Role::SeqSpan) => {
+                    let span = FieldTy::SeqSpan(Box::new(self.field_in(args[0], true)?));
                     if compact {
-                        FieldTy::SeqSpan(Box::new(self.field_in(args[0], true)?))
+                        span
                     } else {
-                        FieldTy::Locator
+                        FieldTy::Locator(Box::new(span))
                     }
                 }
                 Some(Role::IndexedSpan) => {
+                    let span = FieldTy::IndexedSpan(Box::new(self.field_in(args[0], true)?));
                     if compact {
-                        FieldTy::IndexedSpan(Box::new(self.field_in(args[0], true)?))
+                        span
                     } else {
-                        FieldTy::Locator
+                        FieldTy::Locator(Box::new(span))
                     }
                 }
-                Some(Role::SeqIndex) => FieldTy::Locator,
+                // A SeqIndex keeps its sequence's locator (MEM-12).
+                Some(Role::SeqIndex) => FieldTy::Locator(Box::new(FieldTy::SeqSpan(Box::new(
+                    self.field_in(args[0], true)?,
+                )))),
                 Some(Role::Link) if compact => FieldTy::Link(self.shape(args[0])?),
                 // A view field is the viewed type's own bytes, cleaned by nobody (FORM #56).
                 Some(Role::View) => view_field(self.field_in(args[0], compact)?),
@@ -352,7 +359,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 }
                 None if !compact && self.decls[d.index()].repr == Repr::Stable => {
                     if self.decls[d.index()].compact.is_some() {
-                        FieldTy::Locator
+                        FieldTy::Locator(Box::new(FieldTy::Inline(self.shape(ty)?)))
                     } else {
                         FieldTy::Stable(self.shape(ty)?)
                     }

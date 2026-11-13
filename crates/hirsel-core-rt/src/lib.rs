@@ -9,8 +9,6 @@ pub mod abi_host;
 pub mod abi_layout;
 pub mod abi_tasks;
 mod allocator;
-#[cfg(all(feature = "standalone", not(test)))]
-mod standalone_allocator;
 pub mod block;
 pub mod causes;
 pub mod channel;
@@ -27,6 +25,8 @@ pub mod peak;
 pub mod process;
 pub mod provider;
 pub mod region;
+#[cfg(all(feature = "standalone", not(test)))]
+mod standalone_allocator;
 pub mod tasks;
 
 use limit::Funding;

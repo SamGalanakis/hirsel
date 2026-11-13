@@ -128,7 +128,7 @@ pub struct Emitter {
     generic_rows: std::collections::BTreeSet<FuncId>,
     items: HashMap<DefPath, ItemId>,
     /// Per non-generic definition of the program, its function row once mentioned.
-    rows: Vec<Option<(FuncId, SigId)>>,
+    rows: HashMap<usize, (FuncId, SigId)>,
     /// `module.types` rows by canonical text.
     types: HashMap<String, TypeRef>,
     /// The recipes of `module.types`, recomputed when rows were added.
@@ -259,7 +259,7 @@ impl Emitter {
     }
     /// The function row and signature of the program's definition `f`.
     fn row(&mut self, p: &Program, f: usize) -> Result<(FuncId, SigId), &'static str> {
-        if let Some(Some(row)) = self.rows.get(f) {
+        if let Some(row) = self.rows.get(&f) {
             return Ok(*row);
         }
         let (sig, abi) = self.signature_recipe(p, f)?;
@@ -270,10 +270,7 @@ impl Emitter {
         };
         let func = self.add_function_abi(key, sig, abi);
         let row = (func, self.module.functions[func.index()].signature);
-        if self.rows.len() <= f {
-            self.rows.resize(f + 1, None);
-        }
-        self.rows[f] = Some(row);
+        self.rows.insert(f, row);
         Ok(row)
     }
     /// A closed generic call row. Source checking is definition-local; a row names
@@ -446,7 +443,7 @@ impl Emitter {
     /// The function row of the program's finalizer or clone body `f`, at its hook
     /// signature (FAIL-11, MEM-17, FORM).
     fn hook_row(&mut self, p: &Program, f: usize) -> FuncId {
-        if let Some(Some((func, _))) = self.rows.get(f) {
+        if let Some((func, _)) = self.rows.get(&f) {
             return *func;
         }
         let sig = if p.fns[f].clone_of.is_some() {
@@ -456,10 +453,7 @@ impl Emitter {
         };
         let func = self.function(&p.fns[f].path, sig);
         let row = (func, self.module.functions[func.index()].signature);
-        if self.rows.len() <= f {
-            self.rows.resize(f + 1, None);
-        }
-        self.rows[f] = Some(row);
+        self.rows.insert(f, row);
         func
     }
     /// The recipe of row `id`, or None when the table's layout is refused, in which case
@@ -2257,5 +2251,29 @@ fn mentions_error(t: &impl TyRead, ty: TyId) -> bool {
         | TyKind::Param(_)
         | TyKind::Hole
         | TyKind::Region(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod row_cache_tests {
+    use super::*;
+
+    #[test]
+    fn only_mentioned_function_rows_occupy_the_cache() {
+        let mut source = (0..64)
+            .map(|i| format!("fn unused{i}() -> u64 {{ 0 }}\n"))
+            .collect::<String>();
+        source.push_str("fn only() -> u64 { 42 }\n");
+        let (index, modules) = crate::tests::program_inputs(&source);
+        let p = Program::declare(&index, &modules);
+        assert!(p.refusals.is_empty(), "{:?}", p.refusals);
+        let f = p.fns.iter().position(|f| f.path.0.name == "only").unwrap();
+        assert!(f >= 64);
+        let mut e = Emitter::new();
+        let row = e.row(&p, f).unwrap();
+        assert_eq!(e.rows.len(), 1, "unmentioned definitions took cache slots");
+        assert_eq!(e.module.functions.len(), 1);
+        assert_eq!(e.row(&p, f).unwrap(), row);
+        assert_eq!(e.rows.len(), 1);
     }
 }

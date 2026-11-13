@@ -413,6 +413,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.gap(n, "this field access is not built");
             return Err(());
         };
+        let ft = self.linked(ft);
         self.steps.push(PStep::Field(i as u32));
         at.place.len += 1;
         at.shared |= view || stable;
@@ -526,6 +527,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 address = self.through_view(address, id, n);
             }
             match self.steps[k as usize] {
+                // A compact value's field is found in its blob (MEM-9).
+                PStep::Field(i) if self.compact_adt(ty).is_some() => {
+                    let header = self.pointer(address, n);
+                    (address, ty) = self.compact_field(header, ty, None, i, n)?;
+                }
                 PStep::Field(i) => {
                     // A resource's fields are in the block its holder points at.
                     if let Ok(Rep::Place(id)) = self.rep(ty)

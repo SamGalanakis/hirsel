@@ -1,4 +1,3 @@
-// expect: gap generic region parameters are not built
 // MEM-6: a declared edge may name Region parameters and generic region parameters.
 fn edges[in a](r: Region, s: Region) where a: r, r: s { }
 // expect: outlives edges a s

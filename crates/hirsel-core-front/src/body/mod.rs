@@ -42,6 +42,7 @@ mod callable_abi;
 mod calls;
 mod cleanup;
 mod closures;
+mod compact;
 mod compare;
 mod control;
 pub(crate) mod core_ops;
@@ -53,6 +54,7 @@ mod spans;
 mod stable;
 mod templates;
 mod types;
+mod writers;
 use templates::{CopySize, GenericCall, NameRecipe};
 pub use templates::{GenericTemplate, materialize};
 mod values;
@@ -165,6 +167,38 @@ impl Rep {
         }
     }
 }
+/// A value of `ty` is held as a locator into a blob (MEM-9..12): a compact value, a
+/// `Text` or a stable sequence.
+fn locator(p: &Program, t: &impl TyRead, mut ty: TyId) -> bool {
+    while let TyKind::View(x) | TyKind::Anchored(x, _) = t.kind(ty) {
+        ty = *x;
+    }
+    match t.kind(ty) {
+        TyKind::Adt(d, _) => {
+            let decl = &p.decls[d.index()];
+            (decl.repr == crate::decls::Repr::Stable && decl.compact.is_some())
+                || matches!(
+                    decl.role,
+                    Some(
+                        Role::Text
+                            | Role::FixedSpan
+                            | Role::SeqSpan
+                            | Role::IndexedSpan
+                            | Role::SeqIndex
+                    )
+                )
+        }
+        _ => false,
+    }
+}
+/// Generic `i` of `fd` as its own argument: a type parameter, or a region's root.
+fn generic_arg(fd: &crate::decls::FnDecl, i: usize) -> TyKind {
+    if fd.generics[i].region {
+        TyKind::Region(Root::Generic(i as u32))
+    } else {
+        TyKind::Param(i as u32)
+    }
+}
 impl Emitter {
     pub fn new() -> Self {
         Self::default()
@@ -227,6 +261,28 @@ impl Emitter {
             return self.row(p, f);
         }
         let fd = &p.fns[f];
+        // A region argument names no layout, so it is erased: every region
+        // instantiation shares one instance, its argument `()`, and the signature keeps
+        // the callee's own generic root (MEM-6).
+        let erased: Vec<_> = (0..arguments.len())
+            .map(|i| {
+                if fd.generics[i].region {
+                    crate::types::UNIT
+                } else {
+                    arguments[i]
+                }
+            })
+            .collect();
+        let rooted: Vec<_> = (0..arguments.len())
+            .map(|i| {
+                if fd.generics[i].region {
+                    t.mk(generic_arg(fd, i))
+                } else {
+                    arguments[i]
+                }
+            })
+            .collect();
+        let (arguments, signed) = (&erased[..], &rooted[..]);
         let types: Vec<_> = arguments
             .iter()
             .map(|&ty| crate::decls::canonical(&p.decls, t, ty))
@@ -251,7 +307,7 @@ impl Emitter {
             self.type_row(p, t, ty)
                 .ok_or("values of this type are not built")?;
         }
-        let signature = self.signature_inst(p, t, f, arguments)?;
+        let signature = self.signature_inst(p, t, f, signed)?;
         let function = self.add_function(key, signature);
         if arguments.iter().any(|&ty| has_param(t, ty)) {
             let names: Vec<_> = arguments
@@ -380,6 +436,11 @@ impl Emitter {
             TyKind::Adt(d, _) if p.decls[d.index()].role == Some(Role::Region) => {
                 return Ok(Rep::Scalar(Ty::Ptr));
             }
+            // A writer is the pointer to its frame in the build (MEM-4), scoped and
+            // never cleaned.
+            TyKind::Adt(d, _) if p.decls[d.index()].role == Some(Role::Writer) => {
+                return Ok(Rep::Scalar(Ty::Ptr));
+            }
             // A capability or `Args` is a provider handle, plain and never cleaned by
             // the program (FORM e68de117); `Unique` and `Site` are one plain word
             // (core.md "Core types").
@@ -388,6 +449,18 @@ impl Emitter {
                     || matches!(p.decls[d.index()].role, Some(Role::Unique | Role::Site)) =>
             {
                 return Ok(Rep::Scalar(Ty::Scalar(Scalar::U64)));
+            }
+            // A compact value is its locator, a view of its bytes in a blob (MEM-5, MEM-9):
+            // held as a `Text` is, `{blob, offset}`.
+            TyKind::Adt(d, _)
+                if p.decls[d.index()].repr == crate::decls::Repr::Stable
+                    && p.decls[d.index()].compact.is_some() =>
+            {
+                let text = p
+                    .core_decl("Text")
+                    .ok_or("values of this type are not built")?;
+                let ty = t.mk(TyKind::Adt(text, vec![]));
+                return self.rep(p, t, ty);
             }
             TyKind::Tuple(_)
             | TyKind::Array(..)
@@ -400,9 +473,13 @@ impl Emitter {
                 let x = *x;
                 return self.rep(p, t, x);
             }
-            // A view is a pointer to a place of its type, never cleaned (OWN-8).
+            // A view is a pointer to a place of its type, never cleaned (OWN-8). A
+            // locator is already a view of its blob (MEM-5): its view is the locator.
             TyKind::View(x) => {
                 let x = *x;
+                if locator(p, t, x) {
+                    return self.rep(p, t, x);
+                }
                 return match self.rep(p, t, x)? {
                     Rep::Place(id) => Ok(Rep::View(PlaceTy::Declared(id))),
                     Rep::Scalar(s) => Ok(Rep::View(PlaceTy::Value(s))),
@@ -490,12 +567,9 @@ impl Emitter {
     /// through `dest`.
     pub fn signature(&mut self, p: &Program, f: usize) -> Result<Signature, &'static str> {
         let fd = &p.fns[f];
-        if fd.generics.iter().any(|g| g.region) {
-            return Err("generic region parameters are not built");
-        }
         let mut t = Local::new(&p.types);
         let arguments: Vec<_> = (0..fd.generics.len())
-            .map(|i| t.mk(TyKind::Param(i as u32)))
+            .map(|i| t.mk(generic_arg(fd, i)))
             .collect();
         self.signature_inst(p, &mut t, f, &arguments)
     }

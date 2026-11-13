@@ -66,7 +66,7 @@ impl Cx<'_, '_, '_> {
         Some(result)
     }
     /// W is a property of our blob, so selecting its load width needs no validation.
-    fn packed_count(
+    pub(super) fn packed_count(
         &mut self,
         blob: ValueId,
         at: ValueId,
@@ -137,7 +137,7 @@ impl Cx<'_, '_, '_> {
         let count = self.packed_count(blob, at, w, n)?;
         Some((blob, at, w, count))
     }
-    fn decode_plain(
+    pub(super) fn decode_plain(
         &mut self,
         blob: ValueId,
         at: ValueId,

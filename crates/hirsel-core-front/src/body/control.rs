@@ -731,8 +731,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         }
                         _ => 2,
                     };
-                    self.fixed_span_element(pointer, elem, index, false, words, n)
-                        .and_then(|at| self.iteration_value(at, elem, n))
+                    let indexed = matches!(self.t.kind(collection), TyKind::Adt(d, _)
+                        if self.p.decls[d.index()].role == Some(Role::IndexedSpan));
+                    if words == 2 && self.packed_locator_elem(elem) {
+                        self.packed_element(pointer, elem, index, indexed, n)
+                    } else {
+                        self.fixed_span_element(pointer, elem, index, false, words, n)
+                    }
+                    .and_then(|at| self.iteration_value(at, elem, n))
                 } else {
                     let place = self.place_ty(collection, n);
                     let element = self.place_ty(elem, n);

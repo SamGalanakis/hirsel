@@ -42,13 +42,13 @@ impl Cx<'_, '_, '_> {
         }
     }
 
-    fn declared(&mut self, ty: TyId) -> Option<TypeId> {
+    pub(super) fn declared(&mut self, ty: TyId) -> Option<TypeId> {
         match self.rep(ty).ok()? {
             Rep::Place(id) => Some(id),
             _ => None,
         }
     }
-    fn word_at(
+    pub(super) fn word_at(
         &mut self,
         base: AddressBase,
         steps: &[Step],
@@ -61,7 +61,7 @@ impl Cx<'_, '_, '_> {
         all.push(Step::Byte(o));
         Some(self.address(base, &all, PlaceTy::Value(t), n))
     }
-    fn put_word(
+    pub(super) fn put_word(
         &mut self,
         base: AddressBase,
         steps: &[Step],
@@ -74,11 +74,23 @@ impl Cx<'_, '_, '_> {
         self.inst(Inst::Store { address: a, value }, n);
         Some(())
     }
-    fn get_word(&mut self, base: AddressBase, offset: u64, t: Ty, n: NodeId) -> Option<ValueId> {
+    pub(super) fn get_word(
+        &mut self,
+        base: AddressBase,
+        offset: u64,
+        t: Ty,
+        n: NodeId,
+    ) -> Option<ValueId> {
         let a = self.word_at(base, &[], offset, t, n)?;
         Some(self.read_bits(a, t, n))
     }
-    fn word_op(&mut self, op: BinaryOp, left: ValueId, right: ValueId, n: NodeId) -> ValueId {
+    pub(super) fn word_op(
+        &mut self,
+        op: BinaryOp,
+        left: ValueId,
+        right: ValueId,
+        n: NodeId,
+    ) -> ValueId {
         let result = self.value(Ty::Scalar(Scalar::U64));
         self.inst(
             Inst::Binary {
@@ -92,7 +104,13 @@ impl Cx<'_, '_, '_> {
         );
         result
     }
-    fn test(&mut self, op: CompareOp, left: ValueId, right: ValueId, n: NodeId) -> ValueId {
+    pub(super) fn test(
+        &mut self,
+        op: CompareOp,
+        left: ValueId,
+        right: ValueId,
+        n: NodeId,
+    ) -> ValueId {
         let result = self.value(Ty::Scalar(Scalar::Bool));
         self.inst(
             Inst::Compare {
@@ -105,7 +123,7 @@ impl Cx<'_, '_, '_> {
         );
         result
     }
-    fn branch(&mut self, condition: ValueId, yes: BlockId, no: BlockId, n: NodeId) {
+    pub(super) fn branch(&mut self, condition: ValueId, yes: BlockId, no: BlockId, n: NodeId) {
         let (ye, ne) = (self.edge(yes, &[]), self.edge(no, &[]));
         self.end(
             Terminator::Branch {
@@ -120,7 +138,12 @@ impl Cx<'_, '_, '_> {
     /// The charge and size of a blob of `capacity` elements of `es` bytes: the charge
     /// `capacity × es + 8` rounded up to 8 (MEM-24), the size `HEAD` more. A capacity
     /// no limit can hold saturates both, so the admission fails with `Capacity`.
-    fn blob_size(&mut self, capacity: ValueId, es: u64, n: NodeId) -> Option<(ValueId, ValueId)> {
+    pub(super) fn blob_size(
+        &mut self,
+        capacity: ValueId,
+        es: u64,
+        n: NodeId,
+    ) -> Option<(ValueId, ValueId)> {
         let u64t = Ty::Scalar(Scalar::U64);
         let done = self.new_block(&[u64t, u64t]);
         let limit = (u64::MAX - HEAD - 7) / es.max(1);
@@ -148,7 +171,7 @@ impl Cx<'_, '_, '_> {
 
     /// Admit a blob of `capacity` elements in `region`: the block (null when refused),
     /// the room left, and the charge asked.
-    fn region_blob(
+    pub(super) fn region_blob(
         &mut self,
         region: ValueId,
         capacity: ValueId,
@@ -178,7 +201,7 @@ impl Cx<'_, '_, '_> {
     }
 
     /// `Capacity { requested, available }` at `steps` from `base`.
-    fn capacity_at(
+    pub(super) fn capacity_at(
         &mut self,
         base: AddressBase,
         steps: &[Step],
@@ -399,7 +422,7 @@ impl Cx<'_, '_, '_> {
 
     /// Write plain `x` (a scalar, or a pointer to its place) packed at `blob + at`
     /// (MEM-9: fields in order, no padding, little-endian).
-    fn encode_plain(
+    pub(super) fn encode_plain(
         &mut self,
         blob: ValueId,
         at: ValueId,

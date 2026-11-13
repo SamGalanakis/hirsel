@@ -60,6 +60,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             _ => return self.call_value(n, callee, args, want, scratch),
         };
+        // MEM-4: `emit(take w, x)` writes the literal `x` in place; it is a form.
+        if self.is_emit(f) {
+            return self.emit_form(n, f, args, want);
+        }
         let g = &self.p.fns[f];
         // A result rooted in a Region parameter is rooted in the region its argument
         // names (MEM-6); `rooted` lists those parameters.
@@ -294,7 +298,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 || g.path.0.modules == ["float"]
                 || g.path.0.modules == ["span"]
                 || g.path.0.modules == ["seq"]
-                || g.path.0.modules == ["indexed"]);
+                || g.path.0.modules == ["indexed"]
+                || g.path.0.modules == ["writer"]
+                || g.path.0.modules == ["text"]
+                || (g.path.0.modules == ["core"]
+                    && matches!(
+                        g.path.0.name.as_str(),
+                        "build_stream_in" | "finish" | "finish_trim" | "fail"
+                    )));
         let v = if builtin {
             self.intrinsic(f, tys, vals, n)
         } else {
@@ -791,12 +802,42 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let g = &self.p.fns[f];
+        if g.path.0.modules == ["core"] && g.path.0.name == "fail" {
+            // `fail(msg)` raises with the message it takes (FORM `raise fail`).
+            let string = self.p.core_decl("String")?;
+            let string = self.t.mk(TyKind::Adt(string, vec![]));
+            let Ok(Rep::Place(id)) = self.rep(string) else {
+                return None;
+            };
+            let msg = vals[0]?;
+            if !self.live() {
+                return None;
+            }
+            let address = self.address(AddressBase::Value(msg), &[], PlaceTy::Declared(id), n);
+            let cleanup = self.fail_to(n);
+            self.end(
+                Terminator::Raise {
+                    cause: hirsel_core_ir::RaiseCause::Fail(address),
+                    cleanup,
+                },
+                Some(n),
+            );
+            return None;
+        }
+        if matches!(g.path.0.modules[0].as_str(), "writer" | "text" | "core") {
+            return self.writer_op(f, tys, vals, n);
+        }
         if g.path.0.modules == ["seq"] || g.path.0.modules == ["indexed"] {
             if tys.contains(&ERROR) || !self.live() {
                 return None;
             }
             return match (g.path.0.modules[0].as_str(), g.path.0.name.as_str()) {
                 ("seq", "len") => self.span_parts(vals[0]?, n).map(|p| p.3),
+                (module, "nth" | "get") if self.packed_locator_elem(tys[0]) => {
+                    let result = subst(&mut self.t, g.result, tys);
+                    let indexed = module == "indexed";
+                    self.packed_get(vals[0]?, vals[1]?, tys[0], indexed, result, n)
+                }
                 ("seq", "nth") | ("indexed", "get") => {
                     let result = subst(&mut self.t, g.result, tys);
                     self.scalar_sequence_get(vals[0]?, vals[1]?, tys[0], result, n)

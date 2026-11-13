@@ -232,6 +232,38 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         (result, v)
     }
 
+    /// Call the callable `value` of type `ty` from a built-in form with argument values
+    /// already lowered (MEM-4 writers); its result value.
+    pub(super) fn call_lowered(
+        &mut self,
+        ty: TyId,
+        value: ValueId,
+        vals: &[Option<ValueId>],
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let mut scratch = self.call_scratch.pop().unwrap_or_default();
+        let TyKind::Fn(params, result, _, callable) = self.t.kind(ty).clone() else {
+            self.call_scratch.push(scratch);
+            return None;
+        };
+        scratch.params.clear();
+        scratch.params.extend_from_slice(&params);
+        scratch.vals.clear();
+        scratch.vals.extend_from_slice(vals);
+        let abi = self.value_call_abi(ty, result, callable != Callable::Plain, n, &mut scratch);
+        let (code, environment) = if callable == Callable::Plain {
+            (Some(value), None)
+        } else {
+            (
+                self.callable_word(Some(value), 0, n),
+                self.callable_word(Some(value), 8, n),
+            )
+        };
+        let v = self.emit_value_call(code, environment, abi, result, n, &mut scratch);
+        self.call_scratch.push(scratch);
+        v
+    }
+
     fn callable_word(&mut self, value: Option<ValueId>, offset: u64, n: NodeId) -> Option<ValueId> {
         let base = value?;
         if !self.live() {
@@ -489,6 +521,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         ));
         fd.callable = ty;
         let body = fd.body.unwrap();
+        self.capture_nested(body);
         let mut child = Cx::new(self.p, self.definition, self.e);
         child.fd = std::borrow::Cow::Owned(fd);
         child.header = n;
@@ -688,6 +721,30 @@ impl Descriptors {
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    /// A closure nested in a closure reaches an outer slot through its enclosing
+    /// closure, which captures that slot before the nested one is built.
+    fn capture_nested(&mut self, body: NodeId) {
+        if self.capture_frame.is_none() {
+            return;
+        }
+        let p: &'c Program<'a> = self.p;
+        let mut stack = vec![body];
+        while let Some(n) = stack.pop() {
+            stack.extend(self.kids(n).iter().copied());
+            if self.kind(n) != NodeKind::Path {
+                continue;
+            }
+            let Some(u) = p.resolved(self.at, n) else {
+                continue;
+            };
+            let Target::Binder(b) = u.target else {
+                continue;
+            };
+            if self.vars.get(b as usize).is_some_and(Option::is_none) {
+                self.capture_slot(b, n);
+            }
+        }
+    }
     /// Discover an outer slot exactly when its first source use is visited.
     pub(super) fn capture_slot(&mut self, slot: u32, n: NodeId) {
         let Some(frame) = &self.capture_frame else {

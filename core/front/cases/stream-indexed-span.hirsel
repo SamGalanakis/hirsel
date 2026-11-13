@@ -1,0 +1,41 @@
+// expect: run go(35) = 3203302
+// expect: run go(34) = 99
+// MEM-4: an IndexedSpan of compact elements is written through append callbacks and
+// read through its offset table. With W = 2: tag 1, header 2+2, Num 1+8, Str 1+2+3,
+// Num 1+8, table 3*2 = 35 bytes, so 34 overflows on the table. Reading: 3 elements
+// (3000), nums 0 + 100*3 + 2 by iteration, element 1 by the table (10000*300) and
+// element 2 by walking the sequence (100000*2). The
+// append callback names the builder's `s` through its enclosing callback.
+@compact(u16) stable type J = Null | Num(u64) | Str(Text) | Arr(IndexedSpan[J])
+fn item[in r](take x: Writer[J, in r], k: u64, s: String) -> Result[Child[J], BuildError] {
+  if k == 1 { emit(take x, Str(s)) } else { emit(take x, Num(k)) }
+}
+fn w_val[in r](take w: Writer[J, in r], s: String) -> Result[Child[J], BuildError] {
+  emit(take w, Arr(emit(fn(take xs: Writer[IndexedSpan[J], in r]) -> Result[Child[IndexedSpan[J]], BuildError] {
+    let mut k: u64 = 0
+    while k < 3 {
+      writer.append(mut xs, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] { item(take x, k, s) })?
+      k += 1
+    }
+    writer.close(take xs)
+  })))
+}
+fn make(r: Region, n: u64, s: String) -> Result[J in r, BuildError] {
+  match build_stream_in(r, bytes n, fn(take w: Writer[J, in r]) -> Result[Child[J], BuildError] { w_val(take w, s) }) {
+    Ok(take b) => Ok(finish(take b)),
+    Error(e) => Error(e),
+  }
+}
+fn num(j: J) -> u64 { match j { Num(n) => n, Str(t) => 100 * text.len(t), _ => 0 } }
+fn sum(j: J) -> u64 {
+  match j {
+    Arr(xs) => {
+      let mut t: u64 = seq.len(xs) * 1000
+      for x in xs { t += num(x) }
+      match seq.nth(xs, 2) { Some(z) => { t += 100000 * num(z) }, None => { t += 1 } }
+      match indexed.get(xs, 1) { Some(y) => t + 10000 * num(y), None => t }
+    }
+    _ => 7,
+  }
+}
+fn go(n: u64) -> u64 { region r { match make(r, n, "abc") { Ok(j) => sum(j), Error(_) => 99 } } }

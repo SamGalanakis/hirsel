@@ -136,7 +136,15 @@ impl<T: TyRead> Shapes<'_, T> {
                     }
                     // A span builder held as a value: its region blob and its region
                     // (MEM-3); the blob lives in the region, so cleaning does nothing.
-                    Some(Role::SpanBuilder) => {
+                    // A stream builder (MEM-4) is its blob and the root's offset; a
+                    // child is its destination's identity and its offset. Plain words.
+                    // A writer held as a value: the pointer to its frame in the build
+                    // (MEM-4), scoped and never cleaned.
+                    Some(Role::Writer) => {
+                        let body = record(vec![("frame", FieldTy::Borrow)]);
+                        return self.fill(r, LRepr::Scoped, body, None);
+                    }
+                    Some(Role::SpanBuilder | Role::Builder | Role::Child) => {
                         let words = FieldTy::Array(Box::new(FieldTy::Scalar(Scalar::U64)), 2);
                         return self.fill(r, LRepr::Own, record(vec![("words", words)]), None);
                     }

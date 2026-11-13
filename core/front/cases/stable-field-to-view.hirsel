@@ -1,4 +1,4 @@
-// expect: gap values of this type are not built
+// expect: accept
 // OWN-25: reading a stable field yields a view while keeping the holder's region.
 @compact(u32) stable type Value { n: u8 }
 @compact(u32) stable type Member { value: Value }

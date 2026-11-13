@@ -337,7 +337,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let out = subst(&mut self.t, ft, &self.patterns.types[mark..]);
         self.patterns.types.truncate(mark);
-        out
+        self.linked(out)
     }
     fn pattern_type(&self, mut ty: TyId) -> TyId {
         while let TyKind::View(inner) | TyKind::Anchored(inner, _) = self.t.kind(ty) {
@@ -531,7 +531,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             at.ty = ty;
             at
         });
-        let value = if self.live() {
+        let compact = self.compact_adt(subject.ty).is_some();
+        let value = if self.live() && compact {
+            // A compact value's field is found in its blob (MEM-9, MEM-11).
+            subject.value.and_then(|header| {
+                let (a, _) = self.compact_field(header, subject.ty, case, field, n)?;
+                match self.rep(ty).ok()? {
+                    Rep::Scalar(t) => Some(self.read_bits(a, t, n)),
+                    Rep::Place(_) => Some(self.pointer(a, n)),
+                    _ => None,
+                }
+            })
+        } else if self.live() {
             match (subject.value, self.rep(ty)) {
                 (Some(value), Ok(r)) => {
                     let base = match self.rep(subject.ty).map(Rep::pointee) {
@@ -651,6 +662,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             Head::Product(case) => {
                 if let Some(case) = case
+                    && self.compact_adt(subject.ty).is_some()
+                    && let Some(value) = subject.value
+                    && self.live()
+                {
+                    let tag = self.compact_tag(value, subject.ty, pat.site);
+                    self.pattern_compare(
+                        tag,
+                        Ty::Scalar(Scalar::U32),
+                        u64::from(case),
+                        CompareOp::Eq,
+                        no,
+                        pat.site,
+                    );
+                } else if let Some(case) = case
                     && let (Some(value), Ok(Some(ty))) =
                         (subject.value, self.rep(subject.ty).map(Rep::pointee))
                     && self.live()
@@ -1043,7 +1068,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let ty = self.pattern_type(self.patterns.types[types]);
         let heads = self.patterns.heads.len();
-        if let Some((lo, hi)) = self.pattern_domain(ty) {
+        // A column of wildcards is not split: specializing it by any constructor is
+        // dropping it, and a type reaching itself through a link view would never end.
+        let wild = rows.len > 0
+            && (0..rows.len).step_by(width).all(|r| {
+                let id = self.patterns.matrix[(rows.start + r) as usize];
+                matches!(self.pat_head(id), Head::Any | Head::Bind(..))
+            });
+        if wild {
+            self.patterns.heads.push(Head::Any);
+        } else if let Some((lo, hi)) = self.pattern_domain(ty) {
             // Split intervals only where a pattern starts or ends, never enumerate
             // an integer domain. Char's surrogate hole has no inhabitants.
             let mut at = lo;

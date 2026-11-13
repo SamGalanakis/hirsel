@@ -37,6 +37,14 @@ pub opaque stable type FixedSpan[T: plain]
 pub opaque type SpanBuilder[T: plain, in r]
 pub opaque stable type SeqIndex[T: packed, in a]
 pub opaque type Link[T]
+pub opaque type Child[T]
+pub opaque type Builder[T, in r]
+pub type BuildError = Capacity(Capacity) | Overflow
+
+pub fn finish[T, in r](take b: Builder[T, in r]) -> T in r
+pub fn finish_trim[T, in r](take b: Builder[T, in r]) -> T in r
+pub fn build_stream_in[T: streamable](r: Region, bytes n: u64, w: scoped fn(take Writer[T, in r]) -> Result[Child[T], BuildError]) -> Result[Builder[T, in r], BuildError]
+pub fn emit[T, in r](take w: Writer[T, in r], x: T) -> Result[Child[T], BuildError]
 
 pub type Order: key + ordered = Less | Equal | Greater
 pub type FloatError = NaN | OutOfRange

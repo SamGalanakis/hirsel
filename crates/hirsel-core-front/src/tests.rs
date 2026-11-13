@@ -2890,3 +2890,13 @@ fn packed_scan_offsets_preserve_source_failures() {
     let failures = run_case(&root().join("cases/body/packed-scan-offsets.hirsel"));
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+#[test]
+fn closure_invocation_region_headers() {
+    let mut failures =
+        run_case(&root().join("cases/body/callable-closure-header-anchor-gap.hirsel"));
+    failures.extend(run_case(
+        &root().join("cases/body/callable-closure-header-region-refused.hirsel"),
+    ));
+    assert!(failures.is_empty(), "{failures:?}");
+}

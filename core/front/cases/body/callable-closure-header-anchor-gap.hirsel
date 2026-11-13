@@ -1,4 +1,27 @@
-// A closure's own header parameter is distinct from an enclosing captured root.
-// Its header currently lowers before that parameter context exists.
-// expect: gap closure header parameter anchors are not built
-fn f() {let g=fn(r:Region)->Option[u64 in r] {None}}
+// A closure's invocation Region roots belong to its header, not its enclosing function.
+// expect: run checked() = 68
+@compact(u16) stable type Doc {value:u64}
+fn make(r:Region,n:u64)->Result[Doc in r,Capacity] {
+ let b=result.unwrap(build_stream_in(r,bytes 64,fn(take w:Writer[Doc,in r])->Result[Child[Doc],BuildError] {
+  emit(take w,Doc(value:n))
+ }))
+ Ok(finish(take b))
+}
+fn first()->u64 {
+ let g=fn(r:Region)->Result[Doc in r,Capacity] {Error(Capacity(requested:7,available:0))}
+ region caller {match g(caller) {Error(c)=>c.requested,Ok(_)=>0}}
+}
+fn nonfirst(seed:u64)->u64 {
+ let g=fn(n:u64,r:Region)->Result[Doc in r,Capacity] {make(r,n)}
+ region caller {match g(seed,caller) {Error(_)=>0,Ok(d)=>d.value}}
+}
+fn allocated()->u64 {
+ let g=fn(r:Region)->Result[Doc in r,Capacity] {make(r,19u64)}
+ region caller {match g(caller) {Ok(d)=>d.value,Error(_)=>0}}
+}
+fn separate()->u64 {
+ let g=fn(a:Region,b:Region)->Result[Doc in b,Capacity] {make(b,13u64)}
+ region caller {region other {match g(caller,other) {Error(_)=>0,Ok(d)=>d.value}}}
+}
+fn checked()->u64 {first()+nonfirst(29u64)+allocated()+separate()}
+pub fn main()->Result[(),Exit] {if checked()==68u64 {Ok(())}else{Error(Exit(status:1))}}

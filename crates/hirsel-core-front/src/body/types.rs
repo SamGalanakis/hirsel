@@ -36,6 +36,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return self.t.mk(TyKind::Region(Root::Generic(i as u32)));
         }
         let parameter = binder.kind == hirsel_core_resolve::BinderKind::Parameter;
+        let header_parameter = self
+            .closure_header_params
+            .iter()
+            .enumerate()
+            .find(|(_, (slot, _))| *slot == b)
+            .map(|(i, (_, ty))| (i, *ty));
+        if let Some((i, ty)) = header_parameter {
+            if region_only && !self.region_handle(ty) {
+                self.refuse("MEM-6", n, "a region argument names a Region value");
+                return ERROR;
+            }
+            return self.t.mk(TyKind::Region(Root::Parameter(i as u32)));
+        }
         let parameter_index = if parameter {
             self.fd.params.iter().position(|p| {
                 p.name == binder.name

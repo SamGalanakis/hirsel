@@ -522,6 +522,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n.0 - self.item.range.nodes.start
         );
         fd.site = self.p.site(self.at, n);
+        self.closure_header_params.clear();
         let mut written_result = false;
         for &child in self.kids(n) {
             match self.kind(child) {
@@ -539,6 +540,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             && ty != ERROR
                         {
                             self.refuse("LANG-5", param, "a `bytes` parameter has type `u64`");
+                        }
+                        if let Some(slot) = self.binder(param) {
+                            self.closure_header_params.push((slot, ty));
                         }
                         fd.params.push(crate::decls::ParamDecl {
                             bytes: self.kind(param) == NodeKind::BytesParameter,
@@ -559,6 +563,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 _ => {}
             }
         }
+        self.closure_header_params.clear();
         let expected = want
             .filter(|w| w.payload == 0)
             .map(|w| w.ty)

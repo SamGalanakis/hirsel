@@ -119,3 +119,13 @@ fn map_clone_cranelift(){map_clone(Backend::Cranelift);}
 #[test]
 #[ignore="explicit native integration target"]
 fn map_clone_llvm(){map_clone(Backend::Llvm);}
+
+fn invocation_region_headers(backend:Backend) {
+ ordered_case(backend,include_str!("../../../core/front/cases/body/callable-closure-header-anchor-gap.hirsel"));
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn invocation_region_headers_cranelift(){invocation_region_headers(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn invocation_region_headers_llvm(){invocation_region_headers(Backend::Llvm);}

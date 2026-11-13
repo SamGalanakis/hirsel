@@ -1,0 +1,4 @@
+// The closure header's invocation parameter must have Region type to anchor stable data.
+// expect: refuse MEM-6 at 4:42
+@compact(u16) stable type Doc {value:u64}
+fn bad() {let g=fn(n:u64)->Result[Doc in n,Capacity] {Error(Capacity(requested:1,available:0))}}

@@ -1015,6 +1015,8 @@ struct Cx<'c, 'a, 'e> {
     callable_signatures: Vec<Option<closures::CallableAbi>>,
     callable_reps: Vec<Rep>,
     callable_regions: Vec<u32>,
+    /// Invocation parameters available while a closure header is being read.
+    closure_header_params: Vec<(u32, TyId)>,
     map_entries: HashMap<(TyId, TyId), maps::MapEntry>,
     key_functions: HashMap<(TyId, key_glue::KeyOp), (TypeId, FuncId, Rep)>,
     key_args: Vec<Arg>,
@@ -1142,6 +1144,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             callable_signatures: vec![],
             callable_reps: vec![],
             callable_regions: vec![],
+            closure_header_params: vec![],
             map_entries: HashMap::default(),
             key_functions: HashMap::default(),
             key_args: vec![],

@@ -3,16 +3,16 @@
   "basis": "List kernels and typed generic numeric helpers complete more source bodies; the FORM61 range capacity correction and byte literal ownership are included. Ordinary release observations plus 2 percent, rounded up to 100. The fixed 60000 process budget is unchanged. The parallel runtime/view observation is retained in history; the active observation completes more bodies. Std check ceiling refreshed after recorded completion136/139 to139/139 over59630bcf..a526a304; M1 completion314/317 to317/317. Only std check ceiling changes, using14946.00034602076 plus2percent rounded up to100; the reader process regression is repaired, and the fixed60000 budget is unchanged.",
   "corpora": {
     "m1": {
-      "code_lines": 6281,
-      "check_lower_per_line": 24900,
-      "whole_request_per_line": 46100,
-      "whole_process_per_line": 46200
+      "code_lines": 7059,
+      "check_lower_per_line": 25000,
+      "whole_request_per_line": 46300,
+      "whole_process_per_line": 46400
     },
     "std": {
-      "code_lines": 3120,
-      "check_lower_per_line": 15900,
-      "whole_request_per_line": 34600,
-      "whole_process_per_line": 34800
+      "code_lines": 3668,
+      "check_lower_per_line": 16600,
+      "whole_request_per_line": 35900,
+      "whole_process_per_line": 36100
     },
     "product": {
       "measurement": "One ordinary release check/lower request per M1 entry, core and exact supplied std subset preproduced; fresh private request stores; perf instructions:u including GNU time and process exit. Fixed is empty main with std or core only. Marginal is (process-fixed std)/own checked source lines, excluding prechecked library source lines. Instances are collected after this boundary and reported separately.",
@@ -94,25 +94,25 @@
       }
     }
   },
-  "margin": "m1: 2 percent over the ordinary release observation, rounded up to 100 instructions per code line (the nine stable programs are the regression detector). std: 5 percent over the observation, rounded up to 100, while M2 adds library source under six lanes (orchestrator ruling 2026-11-13); return to 2 percent when M2's library growth ends. Lower ceilings after savings. Re-baseline expected work growth only with reason, completed-body counts and commit range; do not change the fixed finished-process budget.",
+  "margin": "M1: 2 percent; std: 5 percent while library sources grow, rounded up to100. Active all-source observation is23365544 after supported source/body growth. The subsequent c98e8f58 anchor regression remains visible and owned by912; do not re-baseline it away. Lower after savings. Fixed60000 budget unchanged.",
   "finished_budget_per_line": 60000,
-  "forecast_revision": "1628f4f649c4ed447916cce9bd5e0712918fa984",
+  "forecast_revision": "c27382618656",
   "completion_forecast": {
     "m1": {
       "complete_bodies": 351,
       "bodies": 351,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
-      "measured_process_per_line": 45314.41388612807,
-      "finished_process_per_line": 45314.41388612807
+      "measured_process_per_line": 46585.3178920527,
+      "finished_process_per_line": 46585.3178920527
     },
     "std": {
       "complete_bodies": 173,
       "bodies": 173,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
-      "measured_process_per_line": 34221.07858707557,
-      "finished_process_per_line": 34221.07858707557
+      "measured_process_per_line": 35236.216466739366,
+      "finished_process_per_line": 35236.216466739366
     }
   },
   "forecast_method": "Current process instructions plus recorded missing checker/emission and publication per line. Live construct self costs project the written population and calibrate to native check/lower less driver keys. Completed IR/template bytes per completed definition line are charged for every unfinished line, retaining partial IR, at measured definition-encoding and archive write/hash rates. Refresh projection/counts when support changes.",
@@ -1248,6 +1248,82 @@
           "whole_request_per_line": 34000.71768893757,
           "whole_process_per_line": 34221.07858707557
         }
+      }
+    },
+    {
+      "from_revision": "a526a304a3383fb2c8e9d0bd494e553fcb571698",
+      "to_revision": "23365544c380",
+      "reason": "Expected older supported-source/body growth, separate from the23365544..c2738261 anchor bookkeeping regression. Native bisect identifies c98e8f58 +1080/+820instructions perline and7e1d47ce +55/+41; no new bodies or source in that narrow range. That overhead is NOT added to these observations. Orchestrator requested2%M1/5%std margin.60K budget unchanged.",
+      "completed_bodies_before": {
+        "m1": [
+          317,
+          317
+        ],
+        "std": [
+          139,
+          139
+        ]
+      },
+      "completed_bodies_after": {
+        "m1": [
+          351,
+          351
+        ],
+        "std": [
+          173,
+          173
+        ]
+      },
+      "actual_code_lines_before": {
+        "m1": 6281,
+        "std": 2890
+      },
+      "actual_code_lines_after": {
+        "m1": 7059,
+        "std": 3668
+      },
+      "previous_ceilings": {
+        "m1": {
+          "code_lines": 6281,
+          "check_lower_per_line": 24900,
+          "whole_request_per_line": 46100,
+          "whole_process_per_line": 46200
+        },
+        "std": {
+          "code_lines": 3120,
+          "check_lower_per_line": 15900,
+          "whole_request_per_line": 34600,
+          "whole_process_per_line": 34800
+        }
+      },
+      "measured_per_line": {
+        "m1": {
+          "check_lower_per_line": 24509.69570760731,
+          "whole_request_per_line": 45355.41847287151,
+          "whole_process_per_line": 45455.11828870945
+        },
+        "std": {
+          "check_lower_per_line": 15744.811886586696,
+          "whole_request_per_line": 34155.802617230096,
+          "whole_process_per_line": 34379.158942202834
+        }
+      },
+      "subsequent_unrebaselined_observation": {
+        "m1": {
+          "check_lower_per_line": 25634.6770080748,
+          "whole_request_per_line": 46485.35217452897,
+          "whole_process_per_line": 46585.3178920527
+        },
+        "std": {
+          "check_lower_per_line": 16600.753271537622,
+          "whole_request_per_line": 35012.61777535442,
+          "whole_process_per_line": 35236.216466739366
+        }
+      },
+      "regression_owner": "core-check-index-912",
+      "margin": {
+        "m1": 0.02,
+        "std": 0.05
       }
     }
   ],

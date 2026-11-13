@@ -90,7 +90,10 @@ operations it names; nothing else about them may be inferred from an implementat
 - **Errors.** An operation that fails with `Capacity` returns in its error every argument it
   would have taken and leaves its other arguments unchanged. Only the failures named here or
   by a rule occur: `Bounds`, `Overflow`, `Division` and `Unwrap` are failures
-  ([FAIL-2](failure.md#fail-2-causes)), every other error is a `Result`.
+  ([FAIL-2](failure.md#fail-2-causes)), every other error is a `Result`. `fail(take msg)`
+  takes custody of a message the program already holds and admits nothing, so raising `Fail`
+  cannot be refused ([FAIL-10](failure.md#fail-10-cause-chain)); a built message's
+  `Capacity` is an ordinary error at its own allocation, before `fail`.
 - **Unwrap.** `option.unwrap(take x)` returns the `Some` payload and fails with `Unwrap` on
   `None`. `result.unwrap(take x)` returns the `Ok` payload; on `Error(e)` it fails with
   `Unwrap`, and `e` is cleaned by the failure's cleanup as an ordinary owner.

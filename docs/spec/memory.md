@@ -393,7 +393,7 @@ Own types are capacity-based: a record holds its fields inline, a variant reserv
 its largest payload, `Box[T]` holds one block made by `box.new(take x)`, and `List`,
 `String` and `Map` hold a block with a length and a capacity. Growing a collection may move
 its block, which is safe because a view freezes it
-([OWN-10](ownership.md#own-10-freezes)). Field order, padding, alignment and the native
+([OWN-10](ownership.md#own-10-freezes)). Field order, padding, alignment, how a variant stores its tag and the native
 calling convention, including how several scalar results are returned, are private to the
 implementation and may differ between engines; nothing in a program can observe them. A
 type that contains itself inline is refused by
@@ -410,7 +410,7 @@ type Chain = End | Link(u64, Chain)                       // refused: OWN-2, use
 
 `rc.new(take x) -> Result[Rc[T], (Capacity, T)]` requires `T: shareable` and moves the
 complete owner `x` into a new counted node with count 1
-([T1.3](ownership.md#own-26-the-transition-table)). An `Rc[T]` is immutable and task-local:
+([T1.3](ownership.md#own-26-the-transition-table)). An `Rc[T]`'s payload is immutable, and an `Rc` is task-local:
 it is never `send`. A counted value is read where a view of its payload is expected.
 Because a node is made only from a complete owner, counted values form no cycles; a
 cyclic structure uses a library pool (MEM-18). Wrapping a value in `Rc` or `Arc` frees nothing it
@@ -430,7 +430,7 @@ fn wrap(take f: HostFile) -> Result[Rc[HostFile], (Capacity, HostFile)] { rc.new
 ### MEM-15: Arc
 
 `arc.new(take x) -> Result[Arc[T], (Capacity, T)]` requires `T: shareable + send`. An
-`Arc[T]` is immutable and `send`. Its creation, every share, every release and every
+`Arc[T]`'s payload is immutable, and an `Arc` is `send`. Its creation, every share, every release and every
 `try_unwrap` is an event in the run's event order ([CONC-10](tasks.md#conc-10-event-order)),
 so the count each operation observes is the count that order gives.
 

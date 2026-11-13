@@ -1061,3 +1061,35 @@ fn counted_maps_skip_removed_entries_and_destroy_deep_chains_with_constant_stack
 
 #[path = "fast_tests.rs"]
 mod fast_tests;
+
+#[test]
+fn static_capacity_zero_carriers_drop_and_grow_through_runtime_cleanup() {
+    let source = include_str!("../../../hirsel-core-ir/samples/strings.core");
+    let module = text::parse(source).unwrap();
+    wf::module(&module).unwrap();
+    agree_cases(&module, &sample_cases(&module, source), true);
+    let module = text::parse(include_str!(
+        "../../../hirsel-cranelift/tests/support/static-carriers.core"
+    ))
+    .unwrap();
+    wf::module(&module).unwrap();
+    let cases: Vec<_> = (0..4)
+        .flat_map(|f| {
+            [0, 5].map(move |n| Case {
+                function: FuncId(f),
+                args: vec![n],
+                limit: 1000,
+                injection: None,
+            })
+        })
+        .collect();
+    // Map cleanup is not implemented by the evaluator. These expected balances
+    // follow the literal and two declared container sizes directly from FORM #48.
+    let actual = execute(&module, &cases);
+    for (case, got) in cases.iter().zip(actual) {
+        assert_eq!(got.outcome, eval::Outcome::Returned(vec![]));
+        assert_eq!(got.used, 0);
+        assert!(got.trace.is_empty());
+        assert_eq!(got.admissions, [0, 1, 1, 2][case.function.index()]);
+    }
+}

@@ -120,7 +120,8 @@ impl Function<'_, '_, '_> {
             _ => None,
         };
         if let Some(like) = like {
-            // Empty owners use null to select the ambient payer on their first growth.
+            // This operand is an owned block, not a collection carrier. A producer
+            // with capacity zero selects Current even when data is a static pointer.
             let header = self.b.create_block();
             let empty = self.b.ins().icmp_imm_s(IntCC::Equal, like, 0);
             self.b.ins().brif(empty, fast, &[], header, &[]);

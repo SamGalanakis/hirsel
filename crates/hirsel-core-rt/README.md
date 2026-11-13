@@ -8,6 +8,11 @@ refusal returns `Capacity`; physical host exhaustion is a FAIL-15 run stop.
 same C declarations and frozen 64-bit offsets. Success Capacity fields are zero.
 `rt.dest_id` takes no context or status and returns a fresh u64 identity.
 
+List, String and Map carriers own storage exactly when capacity is nonzero.
+Capacity-zero data may point to read-only static bytes at any length. Cleanup
+skips that buffer; growth admits from current, copies length bytes and never
+frees it. Raw allocation/free/refund entries take owned blocks, not carriers.
+
 Each task has a paged limit table and a direct current-record pointer. Admission,
 refund and scope operations use ordinary task-local loads and stores. Outstanding
 bytes retain payer slots; only scope handles and union edges need structural

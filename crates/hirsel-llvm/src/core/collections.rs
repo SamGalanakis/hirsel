@@ -84,7 +84,10 @@ impl FunctionEmitter<'_> {
         self.line(format!("store i64 0, ptr {index}"));
         let n = self.next;
         self.next += 1;
-        self.line(format!("br label %collection_head{n}"));
+        let owned = self.calc(format!("icmp ne i64 {capacity}, 0"));
+        self.line(format!(
+            "br i1 {owned}, label %collection_head{n}, label %collection_done{n}"
+        ));
         writeln!(self.code, "collection_head{n}:").unwrap();
         let i = self.calc(format!("load i64, ptr {index}"));
         let more = self.calc(format!("icmp ult i64 {i}, {length}"));
@@ -114,7 +117,7 @@ impl FunctionEmitter<'_> {
         self.line(format!("store i64 {next}, ptr {index}"));
         self.line(format!("br label %collection_head{n}"));
         writeln!(self.code, "collection_settle{n}:").unwrap();
-        let allocated = self.calc(format!("icmp ne ptr {block}, null"));
+        let allocated = self.calc(format!("icmp ne i64 {capacity}, 0"));
         self.line(format!(
             "br i1 {allocated}, label %collection_free{n}, label %collection_done{n}"
         ));
@@ -131,14 +134,14 @@ impl FunctionEmitter<'_> {
     pub(super) fn enqueue_collection(&mut self, field: &FieldTy, carrier: &str) {
         let entries = Entries::new(self.module, self.recipes, field);
         let buffer = self.calc(format!("load ptr, ptr {carrier}, align 1"));
-        let allocated = self.calc(format!("icmp ne ptr {buffer}, null"));
+        let capacity = self.carrier_word(carrier, 16);
+        let allocated = self.calc(format!("icmp ne i64 {capacity}, 0"));
         let n = self.next;
         self.next += 1;
         self.line(format!(
             "br i1 {allocated}, label %buffer{n}, label %empty{n}"
         ));
         writeln!(self.code, "buffer{n}:").unwrap();
-        let capacity = self.carrier_word(carrier, 16);
         let charge = self.collection_charge(&capacity, entries.logical);
         self.runtime_void(
             "hirsel_core_release_buffer_enqueue",

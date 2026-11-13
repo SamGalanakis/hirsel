@@ -41,13 +41,15 @@ pub struct StringMessage {
 unsafe extern "C" fn drop_string(pointer: *mut u8) {
     // SAFETY: record_string points the callback at its cell-owned carrier.
     let message = unsafe { &*pointer.cast::<StringMessage>() };
-    // A literal is static and has capacity zero (core.md). It is not a block.
-    if message.capacity == 0 && message.len != 0 {
-        return;
-    }
-    if let Some(data) = std::ptr::NonNull::new(message.data) {
-        // SAFETY: the cell owns the live String buffer and its original charge.
-        unsafe { block::free(data, charge::seq(message.capacity, 1).unwrap()) };
+    // FORM #48: capacity alone says whether the moved carrier owns a block.
+    if message.capacity != 0 {
+        // SAFETY: positive capacity guarantees the transferred live owned buffer.
+        unsafe {
+            block::free(
+                std::ptr::NonNull::new_unchecked(message.data),
+                charge::seq(message.capacity, 1).unwrap(),
+            )
+        };
     }
 }
 
@@ -173,9 +175,9 @@ fn take_cell(context: &mut Context) -> Box<Cell> {
 /// Retain a moved String without allocating after failure or keeping a frame
 /// address. Taking the prepaid cell is the same operation as primitive raise.
 /// # Safety
-/// The caller transfers an owned buffer (including a reserved empty block), a
-/// nonempty static literal with capacity zero, or null for an unreserved empty
-/// String. It owns the current task/resource's unused cause cell.
+/// The caller transfers an owned buffer with positive capacity or a non-owning
+/// carrier with capacity zero. A non-owning data pointer may be static and nonnull
+/// at any length, including zero. It owns the current task/resource's unused cause cell.
 pub unsafe fn record_string(context: &mut Context, site: u64, message: StringMessage) {
     let mut cell = take_cell(context);
     let carrier = cell.string.write(message) as *mut StringMessage;

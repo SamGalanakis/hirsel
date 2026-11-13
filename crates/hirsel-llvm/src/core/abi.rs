@@ -178,6 +178,21 @@ impl FunctionEmitter<'_> {
             self.put(result, &value);
             return Ok(());
         }
+        if site.callee == Callee::Runtime(RtOp::CompareBytes) {
+            let operands = site.args.get(&self.body.pools.args).unwrap();
+            let args = operands
+                .iter()
+                .zip(["ptr", "i64", "ptr", "i64"])
+                .map(|(arg, t)| {
+                    let Arg::Value(v) = *arg else { unreachable!() };
+                    (t.into(), self.get(v))
+                })
+                .collect::<Vec<_>>();
+            let value = self.intrinsic("hirsel_core_compare_bytes", "i8", &args);
+            let result = site.results.get(&self.body.pools.values).unwrap()[0];
+            self.put(result, &value);
+            return Ok(());
+        }
         let sig = &self.module.signatures[site.signature.index()];
         let has_status = match site.callee {
             Callee::Direct(f) => self.failures.may_fail[f.index()],

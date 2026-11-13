@@ -1516,3 +1516,33 @@ fn inlined_count_increment_overflow_is_the_runtime_stop() {
         assert!(String::from_utf8_lossy(&run.stderr).contains("CountOverflow"));
     }
 }
+
+#[test]
+fn static_capacity_zero_carriers_drop_and_grow_through_runtime_cleanup() {
+    let source = include_str!("../../hirsel-core-ir/samples/strings.core");
+    let module = text::parse(source).unwrap();
+    execute(
+        &module,
+        &[
+            (FuncId(0), vec![0]),
+            (FuncId(0), vec![1]),
+            (FuncId(1), vec![]),
+        ],
+        false,
+    );
+    execute_limit(&module, &[(FuncId(0), vec![1])], false, 4);
+    let module = text::parse(include_str!("support/static-carriers.core")).unwrap();
+    let cases: Vec<_> = (0..4)
+        .flat_map(|f| [0, 5].map(move |n| (FuncId(f), vec![n])))
+        .collect();
+    let expected: Vec<_> = cases
+        .iter()
+        .map(|(f, _)| eval::Report {
+            outcome: Outcome::Returned(vec![]),
+            used: 0,
+            trace: vec![],
+            admissions: [0, 1, 1, 2][f.index()],
+        })
+        .collect();
+    execute_reports(&module, &cases, false, 1000, None, Some(&expected));
+}

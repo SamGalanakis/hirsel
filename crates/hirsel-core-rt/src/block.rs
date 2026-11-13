@@ -102,6 +102,7 @@ pub(crate) unsafe fn push_dead(
 /// # Safety
 /// The list is depth first. The parent frame owns the descriptor until this
 /// child finishes, and the buffer is exclusively owned and not already queued.
+/// The emitter has established capacity != 0; a static carrier is never enqueued.
 pub(crate) unsafe fn push_buffer(
     list: &mut crate::counted::Worklist,
     block: NonNull<u8>,

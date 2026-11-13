@@ -471,7 +471,9 @@ pub unsafe extern "C" fn hirsel_core_context_free(context: *mut Context) {
 /// # Safety
 /// Context is live and exclusively used by its task. `like` is null or a live
 /// own/counted/resource allocation. Caller has exclusive execution custody over
-/// its payer for growth. Size/alignment/kind are the emitter's native layout.
+/// its payer for growth. For a collection, the emitter selects null whenever
+/// capacity is zero, even if its data points at a static literal. Size/alignment/
+/// kind are the emitter's native layout.
 /// Overflow denotes an exact logical charge greater than u64::MAX. The caller
 /// owns a successful pointer and must free it once after cleaning its payload.
 #[unsafe(no_mangle)]
@@ -797,7 +799,8 @@ mod destination_tests {
 /// # Safety
 /// Buffer is exclusively owned. The borrowed payload is in the live parent
 /// worklist frame and remains alive through this child's depth-first cleanup.
-/// Recipe follows the ordinary resumable mechanical recipe contract.
+/// Recipe follows the ordinary resumable mechanical recipe contract. The
+/// carrier capacity is nonzero; a static capacity-zero pointer is not a block.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_release_buffer_enqueue(
     list: *mut Worklist,

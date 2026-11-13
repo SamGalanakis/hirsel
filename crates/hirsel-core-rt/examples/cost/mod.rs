@@ -183,7 +183,7 @@ fn emitted_growth() -> u64 {
     let mut len = 0usize;
     let mut capacity = 0usize;
     for i in 0..COUNT {
-        if len == capacity {
+        if len.checked_add(1).unwrap() > capacity {
             let next_capacity =
                 charge::grown_capacity(capacity as u64, len as u64 + 1).unwrap() as usize;
             // SAFETY: this is the emitted slow grow path. Each old carrier owns
@@ -191,7 +191,11 @@ fn emitted_growth() -> u64 {
             unsafe {
                 let next = hirsel_core_rt::abi::hirsel_core_alloc(
                     &ctx,
-                    data.cast(),
+                    if capacity == 0 {
+                        ptr::null_mut()
+                    } else {
+                        data.cast()
+                    },
                     next_capacity * 8,
                     8,
                     charge::seq(next_capacity as u64, 8).unwrap(),
@@ -271,7 +275,7 @@ fn wrapped_growth() -> u64 {
     let mut storage: Option<Block> = None;
     let mut capacity = 0;
     for i in 0..COUNT {
-        if i == capacity {
+        if i.checked_add(1).unwrap() > capacity {
             let next_capacity = charge::grown_capacity(capacity, i + 1).unwrap();
             let bytes = next_capacity as usize * 8;
             let next = match &storage {

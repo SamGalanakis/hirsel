@@ -484,7 +484,10 @@ impl Glue<'_, '_, '_> {
                 let p = self.load(at, 0);
                 let len = self.load(at, 8);
                 let cap = self.load(at, 16);
-                self.array(p, e, len)?;
+                let owned = self.b.ins().icmp_imm_s(IntCC::NotEqual, cap, 0);
+                let zero = self.icon(0);
+                let owned_len = self.b.ins().select(owned, len, zero);
+                self.array(p, e, owned_len)?;
                 let logical = field_size(&self.tables.input.types, self.tables.layouts, e).2;
                 self.free_buffer(p, cap, logical)?;
             }
@@ -492,7 +495,10 @@ impl Glue<'_, '_, '_> {
                 let p = self.load(at, 0);
                 let len = self.load(at, 8);
                 let cap = self.load(at, 16);
-                self.map(p, k, v, len)?;
+                let owned = self.b.ins().icmp_imm_s(IntCC::NotEqual, cap, 0);
+                let zero = self.icon(0);
+                let owned_len = self.b.ins().select(owned, len, zero);
+                self.map(p, k, v, owned_len)?;
                 let logical = field_size(&self.tables.input.types, self.tables.layouts, k).2
                     + field_size(&self.tables.input.types, self.tables.layouts, v).2
                     + 16;

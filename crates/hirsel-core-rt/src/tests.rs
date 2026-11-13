@@ -283,7 +283,7 @@ fn emitted_own_sequence_refunds_current_foreign_and_handed_over_payers() {
 
 #[test]
 fn owned_failure_string_outlives_its_frame_and_context_without_admission() {
-    for (capacity, reserved) in [(8, true), (0, true), (0, false)] {
+    for (capacity, len) in [(8, 3), (0, 3), (0, 0)] {
         // SAFETY: this fixture transfers each buffer/cell once and inspects the
         // carrier only while its delivered cause chain owns it.
         unsafe {
@@ -291,8 +291,7 @@ fn owned_failure_string_outlives_its_frame_and_context_without_admission() {
             assert!(!hirsel_core_task_start(&mut ctx).pointer.is_null());
             let root = ctx.current.clone();
             ctx.limit_enter(capacity).unwrap();
-            let len = if capacity == 0 { 0 } else { 3 };
-            let data = if reserved {
+            let data = if capacity != 0 {
                 let allocation = hirsel_core_alloc(
                     &ctx,
                     std::ptr::null_mut(),
@@ -305,7 +304,7 @@ fn owned_failure_string_outlives_its_frame_and_context_without_admission() {
                 std::ptr::copy_nonoverlapping(b"hey".as_ptr(), allocation.pointer, len);
                 allocation.pointer
             } else {
-                std::ptr::null_mut()
+                b"hey".as_ptr().cast_mut()
             };
             ctx.limit_exit();
             ctx.current.inject(1, true);
@@ -359,5 +358,58 @@ fn current_payer_free_refunds_without_a_header_lookup() {
     unsafe {
         let block = inline_own_alloc(&ctx, Some(0), 1, 8).unwrap();
         inline_own_free_current(&ctx, block, 0, 1, 8);
+    }
+}
+
+#[test]
+fn static_capacity_zero_carriers_drop_and_grow_through_runtime_cleanup() {
+    static LITERAL: [u8; 5] = *b"hello";
+    let mut ctx = Context::new(1000);
+    // SAFETY: static bytes are read only. The emitted growth sequence tests
+    // capacity, selects current rather than Like, and never frees static data.
+    unsafe {
+        let mut message = crate::causes::StringMessage {
+            data: LITERAL.as_ptr().cast_mut(),
+            len: 5,
+            capacity: 0,
+        };
+        assert_eq!(
+            hirsel_core_compare_bytes(message.data, message.len, b"hello".as_ptr(), 5),
+            0
+        );
+        let needed = message.len.checked_add(1).unwrap();
+        assert!(needed > message.capacity);
+        let before = ctx.available();
+        let next = hirsel_core_alloc(
+            &ctx,
+            std::ptr::null_mut(),
+            needed as usize,
+            1,
+            8,
+            false,
+            PLAIN,
+        );
+        assert!(!next.pointer.is_null());
+        std::ptr::copy_nonoverlapping(message.data, next.pointer, message.len as usize);
+        next.pointer.add(message.len as usize).write(b'X');
+        message = crate::causes::StringMessage {
+            data: next.pointer,
+            len: needed,
+            capacity: needed,
+        };
+        assert_eq!(
+            hirsel_core_compare_bytes(message.data, message.len, LITERAL.as_ptr(), 5),
+            1
+        );
+        assert_eq!(&LITERAL, b"hello");
+        hirsel_core_free(std::ptr::NonNull::new_unchecked(message.data), 8);
+        assert_eq!(ctx.available(), before);
+        // Empty static data must not be mistaken for a prepaid zero-charge block.
+        assert!(!hirsel_core_task_start(&mut ctx).pointer.is_null());
+        let before = ctx.available();
+        hirsel_core_raise_string(&mut ctx, 48, LITERAL.as_ptr().cast_mut(), 0, 0);
+        let chain = hirsel_core_causes_take(&mut ctx);
+        hirsel_core_causes_drop(chain);
+        assert_eq!(ctx.available(), before + 32);
     }
 }

@@ -1,0 +1,26 @@
+// Plain slots need no element cleanup. All live intervals at capacities1/2/4
+// are discarded, then the same budget is reused. The evaluator catches a
+// free of still-live or already-empty slots if the mark loop is wrong.
+// expect: run plain_drop_every_interval() = true
+fn plain_drop_every_interval() -> bool {
+    let r = bound bytes 48 {
+        let mut cap: u64 = 1
+        while cap <= 4 {
+            for head in 0u64 .. cap {
+                for count in 0u64 .. cap + 1 {
+                    let mut d: Deque[u64] = deque.new()
+                    for i in 0u64 .. cap { result.unwrap(deque.push_back(mut d, i)) }
+                    for _ in 0u64 .. head {
+                        let x = option.unwrap(deque.pop_front(mut d))
+                        result.unwrap(deque.push_back(mut d, x))
+                    }
+                    for _ in count .. cap { let _ = deque.pop_back(mut d) }
+                }
+            }
+            cap *= 2
+        }
+        let xs: List[u64] = result.unwrap(list.with_capacity(6))
+        list.capacity(xs) == 6
+    }
+    match r { Ok(v) => v, _ => false }
+}

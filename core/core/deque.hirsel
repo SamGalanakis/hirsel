@@ -6,6 +6,11 @@ pub opaque type Deque[T]: shareable + send {
     // Normalize the live interval before List's resumable element cleanup.
     // The finalizer itself moves only and cannot fail.
     if d.head == 0 { return }
+    if !slots_needs_drop(d.ring) {
+        let head = d.head
+        slots_forget_ring(mut d.ring, head)
+        return
+    }
     let count = list.len(d.ring.raw)
     let cap = list.capacity(d.ring.raw)
     let tail = cap - d.head
@@ -121,3 +126,5 @@ clone[T](d: Deque[T]) {
 }
 
 fn slots_view[T](s: Slots[T], i: u64) -> View[T] in s
+fn slots_needs_drop[T](s: Slots[T]) -> bool
+fn slots_forget_ring[T](mut s: Slots[T], head: u64)

@@ -118,7 +118,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     // Only the core finalizer's no-drop branch may discard live slots. Marks
     // preserve the evaluator's live-set accounting; native engines erase them.
-    fn slots_forget_ring(&mut self, item: TyId, header: ValueId, head: ValueId, n: NodeId) -> Option<()> {
+    fn slots_forget_ring(
+        &mut self,
+        item: TyId,
+        header: ValueId,
+        head: ValueId,
+        n: NodeId,
+    ) -> Option<()> {
         let count = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
         let capacity = self.read_sequence_word(header, 16, Ty::Scalar(Scalar::U64), n);
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
@@ -129,18 +135,51 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let done = self.new_block(&[]);
         self.jump(check, &[zero], n);
         self.start(check);
-        let index = self.b.blocks[check.index()].params.get(&self.b.pools.values)?[0];
+        let index = self.b.blocks[check.index()]
+            .params
+            .get(&self.b.pools.values)?[0];
         let more = self.value(Ty::Scalar(Scalar::Bool));
-        self.inst(Inst::Compare { result: more, op: CompareOp::Lt, left: index, right: count }, n);
+        self.inst(
+            Inst::Compare {
+                result: more,
+                op: CompareOp::Lt,
+                left: index,
+                right: count,
+            },
+            n,
+        );
         let yes = self.edge(body, &[]);
         let no = self.edge(done, &[]);
-        self.end(Terminator::Branch { condition: more, yes, no }, Some(n));
+        self.end(
+            Terminator::Branch {
+                condition: more,
+                yes,
+                no,
+            },
+            Some(n),
+        );
         self.start(body);
         let (at, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, head, index, n);
         let physical = self.value(Ty::Scalar(Scalar::U64));
-        self.inst(Inst::Binary { result: physical, op: BinaryOp::BitAnd, left: at, right: mask, fail: None }, n);
+        self.inst(
+            Inst::Binary {
+                result: physical,
+                op: BinaryOp::BitAnd,
+                left: at,
+                right: mask,
+                fail: None,
+            },
+            n,
+        );
         let (address, ty) = self.slots_at(item, header, physical, n)?;
-        self.inst(Inst::Mark { address, live: false, ty }, n);
+        self.inst(
+            Inst::Mark {
+                address,
+                live: false,
+                ty,
+            },
+            n,
+        );
         let (next, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, index, one, n);
         self.jump(check, &[next], n);
         self.start(done);

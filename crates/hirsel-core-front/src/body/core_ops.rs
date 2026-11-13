@@ -146,6 +146,8 @@ operations! {
     ("deque", "pop_back", Lane::PendingCode, "C", "core-collections-918", false),
     ("deque", "grow", Lane::PendingCode, "C", "core-collections-918", true),
     ("deque", "reverse", Lane::PendingCode, "C", "core-collections-918", true),
+    ("deque", "slots_needs_drop", Lane::Value, "A", "core-collections-918", true),
+    ("deque", "slots_forget_ring", Lane::Value, "A", "core-collections-918", true),
     ("deque", "slots_empty", Lane::Value, "A", "core-collections-918", true),
     ("deque", "slots_new", Lane::Value, "A", "core-collections-918", true),
     ("deque", "slots_put", Lane::Value, "A", "core-collections-918", true),

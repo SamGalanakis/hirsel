@@ -178,8 +178,8 @@ fn cell(
     root
 }
 
-pub(super) fn promote(module: &Module, body: &mut Body, dest: Option<SlotId>) {
-    scalar_copies(module, body);
+pub(super) fn promote(module: &Module, recipes: &[Recipe], body: &mut Body, dest: Option<SlotId>) {
+    scalar_copies(module, recipes, body);
     let mut aliases = (0..body.values.len())
         .map(|i| ValueId(i as u32))
         .collect::<Vec<_>>();
@@ -276,10 +276,16 @@ pub(super) fn promote(module: &Module, body: &mut Body, dest: Option<SlotId>) {
         }
     }
     let mut counts = vec![0; body.slots.len()];
+    let mut reads = vec![0; body.slots.len()];
     let mut written = vec![None; body.slots.len()];
     let mut end = vec![None; body.blocks.len()];
     for (bi, b) in body.blocks.iter().enumerate() {
         for inst in b.insts.get(&body.insts).unwrap() {
+            if let Inst::Read { address, .. } = inst
+                && let Some(s) = cells[address.index()]
+            {
+                reads[s.index()] += 1;
+            }
             if let Inst::Store { address, value } = inst
                 && let Some(s) = cells[address.index()]
             {
@@ -296,10 +302,11 @@ pub(super) fn promote(module: &Module, body: &mut Body, dest: Option<SlotId>) {
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            matches!(t, PlaceTy::Declared(_))
-                && place_scalar(module, *t).is_some()
+            place_scalar(module, *t).is_some()
                 && !escaped[i]
-                && (counts[i] <= 1 || dest == Some(SlotId(i as u32)))
+                && (reads[i] == 0
+                    || (matches!(t, PlaceTy::Declared(_))
+                        && (counts[i] <= 1 || dest == Some(SlotId(i as u32)))))
         })
         .collect::<Vec<_>>();
     let mut returns = dest.filter(|s| promoted[s.index()]).map(|s| {
@@ -378,5 +385,5 @@ pub(super) fn promote(module: &Module, body: &mut Body, dest: Option<SlotId>) {
             aliases[a.index()] = b
         }
     }
-    compact(body, &aliases, &dead, &promoted);
+    compact(module, body, &aliases, &dead, &promoted);
 }

@@ -161,6 +161,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             results: PoolRange::EMPTY,
             fail,
         });
+        self.numeric_sites.push(scalar_abi::NumericSite {
+            call,
+            next_block: self.b.blocks.len() as u32,
+        });
         self.inst(Inst::Call { call }, n);
         match self.rep(abi.result).ok()? {
             Rep::Scalar(ty) => {
@@ -272,12 +276,14 @@ pub(super) fn ensure(
                 right: operands[1],
             });
             flag.map(|flag| {
-                let no = c.value(Ty::Scalar(Scalar::Bool));
-                c.inst(Inst::Const {
-                    result: no,
-                    bits: 0,
+                let result = c.value(Ty::Scalar(Scalar::Bool));
+                c.inst(Inst::Unary {
+                    result,
+                    op: UnaryOp::Not,
+                    operand: flag,
+                    fail: None,
                 });
-                c.compare(CompareOp::Eq, flag, no)
+                result
             })
         }
         NumericOp::Narrow | NumericOp::TryNarrow => {

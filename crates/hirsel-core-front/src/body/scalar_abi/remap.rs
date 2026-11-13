@@ -196,12 +196,104 @@ pub(super) fn alias(aliases: &[ValueId], mut v: ValueId) -> ValueId {
     v
 }
 
+fn mark_values(body: &mut Body, aliases: &[ValueId], used: &mut [bool]) {
+    let mut use_value = |v: ValueId| used[alias(aliases, v).index()] = true;
+    for inst in &mut body.insts {
+        values(inst, false, &mut |v| use_value(*v))
+    }
+    for address in &body.addresses {
+        if let AddressBase::Value(v) = address.base {
+            use_value(v)
+        }
+        for s in address.steps.get(&body.pools.steps).unwrap() {
+            if let Step::Index(v) | Step::Element(v) | Step::Byte(v) = s {
+                use_value(*v)
+            }
+        }
+    }
+    for call in &body.calls {
+        if let Callee::Indirect(v) = call.callee {
+            use_value(v)
+        }
+        for arg in call.args.get(&body.pools.args).unwrap() {
+            if let Arg::Value(v) = arg {
+                use_value(*v)
+            }
+        }
+    }
+    for edge in &body.edges {
+        for &v in edge.args.get(&body.pools.values).unwrap() {
+            use_value(v)
+        }
+    }
+    for term in &body.terminators {
+        match term {
+            Terminator::Return(v) => {
+                for &v in v.get(&body.pools.values).unwrap() {
+                    use_value(v)
+                }
+            }
+            Terminator::Branch { condition, .. } => use_value(*condition),
+            Terminator::Switch { value, .. } => use_value(*value),
+            _ => {}
+        }
+    }
+}
+
 pub(super) fn compact(
+    module: &Module,
     body: &mut Body,
     aliases: &[ValueId],
     dead_values: &[bool],
     promoted: &[bool],
 ) {
+    calls(body);
+    // Rewriting a call appends its new operands to the arenas. Retire old ranges
+    // before a subsequent specialization scan sees their former IDs.
+    let old_values = std::mem::take(&mut body.pools.values);
+    let mut range = |r: &mut PoolRange<ValueId>| {
+        *r = PoolRange::push(
+            &mut body.pools.values,
+            r.get(&old_values).unwrap().iter().copied(),
+        );
+    };
+    for block in &mut body.blocks {
+        range(&mut block.params);
+    }
+    for call in &mut body.calls {
+        range(&mut call.results);
+    }
+    for edge in &mut body.edges {
+        range(&mut edge.args);
+    }
+    for term in &mut body.terminators {
+        if let Terminator::Return(r) = term {
+            range(r);
+        }
+    }
+    let mut used = vec![false; body.values.len()];
+    mark_values(body, aliases, &mut used);
+    let mut dead = dead_values.to_vec();
+    let old = std::mem::take(&mut body.insts);
+    let anchors = std::mem::take(&mut body.inst_anchors);
+    for block in &mut body.blocks {
+        let start = body.insts.len() as u32;
+        for i in block.insts.start as usize..(block.insts.start + block.insts.len) as usize {
+            if let Inst::Read {
+                result,
+                mode: ReadMode::Bits,
+                ..
+            } = old[i]
+                && !used[result.index()]
+            {
+                dead[result.index()] = true;
+                continue;
+            }
+            body.insts.push(old[i].clone());
+            body.inst_anchors.push(anchors[i]);
+        }
+        block.insts = PoolRange::new(start, body.insts.len() as u32 - start);
+    }
     let failing = body
         .insts
         .iter()
@@ -232,6 +324,49 @@ pub(super) fn compact(
             let steps = body.addresses[parent.index()].steps;
             body.addresses[i].base = base;
             body.addresses[i].steps = steps;
+        }
+    }
+    // A rigid scalar's slot acquires scalar-typed addresses at each former
+    // by-address use. Reuse the address established with its StorageLive, just
+    // as lowering a closed scalar local does. Other projections stay distinct.
+    let mut canonical = vec![None; body.slots.len()];
+    let mut address_alias = (0..body.addresses.len())
+        .map(|i| AddressId(i as u32))
+        .collect::<Vec<_>>();
+    for inst in &body.insts {
+        if let Inst::Address {
+            address,
+            fail: None,
+        } = inst
+        {
+            let info = &body.addresses[address.index()];
+            if info.steps.len == 0
+                && let AddressBase::Slot(slot) = info.base
+                && matches!(body.slots[slot.index()], PlaceTy::Declared(_))
+                && place_scalar(module, body.slots[slot.index()])
+                    .is_some_and(|ty| info.ty == PlaceTy::Value(ty))
+            {
+                if let Some(first) = canonical[slot.index()] {
+                    address_alias[address.index()] = first;
+                } else {
+                    canonical[slot.index()] = Some(*address);
+                }
+            }
+        }
+    }
+    for info in &mut body.addresses {
+        if let AddressBase::Address(parent) = &mut info.base {
+            *parent = address_alias[parent.index()];
+        }
+    }
+    for inst in &mut body.insts {
+        if !matches!(inst, Inst::Address { .. }) {
+            addresses(inst, &mut |a| *a = address_alias[a.index()]);
+        }
+    }
+    for arg in &mut body.pools.args {
+        if let Arg::Address(a) = arg {
+            *a = address_alias[a.index()];
         }
     }
     let mut live = vec![false; body.addresses.len()];
@@ -283,6 +418,13 @@ pub(super) fn compact(
         }
     }
     body.addresses = kept;
+    let old_steps = std::mem::take(&mut body.pools.steps);
+    for address in &mut body.addresses {
+        address.steps = PoolRange::push(
+            &mut body.pools.steps,
+            address.steps.get(&old_steps).unwrap().iter().copied(),
+        );
+    }
     for a in &mut body.addresses {
         if let AddressBase::Address(parent) = &mut a.base {
             *parent = address_map[parent.index()]
@@ -317,49 +459,8 @@ pub(super) fn compact(
             *a = address_map[a.index()]
         }
     }
-    let mut used = vec![false; body.values.len()];
-    let mut use_value = |v: ValueId| used[alias(aliases, v).index()] = true;
-    for inst in &mut body.insts {
-        values(inst, false, &mut |v| use_value(*v))
-    }
-    for address in &body.addresses {
-        if let AddressBase::Value(v) = address.base {
-            use_value(v)
-        }
-        for s in address.steps.get(&body.pools.steps).unwrap() {
-            if let Step::Index(v) | Step::Element(v) | Step::Byte(v) = s {
-                use_value(*v)
-            }
-        }
-    }
-    for call in &body.calls {
-        if let Callee::Indirect(v) = call.callee {
-            use_value(v)
-        }
-        for arg in call.args.get(&body.pools.args).unwrap() {
-            if let Arg::Value(v) = arg {
-                use_value(*v)
-            }
-        }
-    }
-    for edge in &body.edges {
-        for &v in edge.args.get(&body.pools.values).unwrap() {
-            use_value(v)
-        }
-    }
-    for term in &body.terminators {
-        match term {
-            Terminator::Return(v) => {
-                for &v in v.get(&body.pools.values).unwrap() {
-                    use_value(v)
-                }
-            }
-            Terminator::Branch { condition, .. } => use_value(*condition),
-            Terminator::Switch { value, .. } => use_value(*value),
-            _ => {}
-        }
-    }
-    let mut dead = dead_values.to_vec();
+    used.fill(false);
+    mark_values(body, aliases, &mut used);
     let old = std::mem::take(&mut body.insts);
     let anchors = std::mem::take(&mut body.inst_anchors);
     for bi in 0..body.blocks.len() {
@@ -437,6 +538,37 @@ pub(super) fn compact(
     for inst in &mut body.insts {
         if let Inst::StorageLive { slot } | Inst::StorageDead { slot } = inst {
             *slot = slot_map[slot.index()]
+        }
+    }
+}
+
+/// Remove call rows whose recipes have been expanded into the instruction stream.
+pub(super) fn calls(body: &mut Body) {
+    let mut live = vec![false; body.calls.len()];
+    for inst in &body.insts {
+        if let Inst::Call { call } = inst {
+            live[call.index()] = true;
+        }
+    }
+    let mut call_map = vec![CallId(0); body.calls.len()];
+    let mut kept = Vec::new();
+    for (i, c) in std::mem::take(&mut body.calls).into_iter().enumerate() {
+        if live[i] {
+            call_map[i] = CallId(kept.len() as u32);
+            kept.push(c);
+        }
+    }
+    body.calls = kept;
+    let old_args = std::mem::take(&mut body.pools.args);
+    for call in &mut body.calls {
+        call.args = PoolRange::push(
+            &mut body.pools.args,
+            call.args.get(&old_args).unwrap().iter().copied(),
+        );
+    }
+    for inst in &mut body.insts {
+        if let Inst::Call { call } = inst {
+            *call = call_map[call.index()];
         }
     }
 }

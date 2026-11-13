@@ -25,6 +25,7 @@ pub struct GenericTemplate {
     pub parameters: Vec<Option<TypeId>>,
     pub copies: Vec<CopySize>,
     pub allocations: Vec<AllocationLayout>,
+    pub numeric_sites: Vec<scalar_abi::NumericSite>,
     pub nested: BTreeMap<FuncId, GenericTemplate>,
     pub types: BTreeMap<TypeId, NameRecipe>,
     pub calls: BTreeMap<FuncId, GenericCall>,
@@ -447,7 +448,7 @@ impl Substitution<'_> {
             };
         }
         if let Some(op) = call.operation {
-            let signature = self.signature(function.signature);
+            self.signature(function.signature);
             let Param::Address(ty) = self.module.signatures[function.signature.index()].params[0]
             else {
                 unreachable!("symbolic key payload")
@@ -651,8 +652,16 @@ fn fill(
     if let Some(error) = s.error {
         return Err(error);
     }
-    scalar_abi::rewrite(s.module, &mut body, old_signature, &s.plans, &old_calls);
-    key_glue::inline_ordered(s.module, &mut body);
+    scalar_abi::rewrite(
+        s.module,
+        &recipes,
+        &mut body,
+        old_signature,
+        &s.plans,
+        &old_calls,
+        &template.numeric_sites,
+    );
+    scalar_abi::inline_keys(s.module, &mut body);
     s.module.functions[target.index()].body = Some(body);
     Ok(())
 }

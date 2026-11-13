@@ -129,16 +129,20 @@ impl Code<'_> {
 
 pub(super) fn rewrite(
     module: &Module,
+    recipes: &[Recipe],
     body: &mut Body,
     old_signature: SigId,
     plans: &HashMap<SigId, Plan>,
     old_calls: &[SigId],
+    numeric_sites: &[NumericSite],
 ) {
     let own = &plans[&old_signature];
     let changed = |p: &Plan| {
         !matches!(p.result, Change::Keep) || p.params.iter().any(|p| !matches!(p, Change::Keep))
     };
     if !changed(own) && old_calls.iter().all(|s| !changed(&plans[s])) {
+        numeric::inline(module, body, numeric_sites);
+        promote(module, recipes, body, None);
         return;
     }
     let old = std::mem::take(&mut body.insts);
@@ -264,7 +268,8 @@ pub(super) fn rewrite(
     );
     c.body.insts = c.insts;
     c.body.inst_anchors = c.anchors;
-    promote(module, body, dest);
+    numeric::inline(module, body, numeric_sites);
+    promote(module, recipes, body, dest);
 }
 
 fn place_scalar(module: &Module, place: PlaceTy) -> Option<Ty> {
@@ -287,5 +292,21 @@ mod places;
 mod remap;
 mod views;
 use places::promote;
-use remap::{addresses, alias, compact, values};
+use remap::{addresses, compact, values};
 use views::{scalar_copies, scalar_views};
+
+mod numeric;
+pub use numeric::Site as NumericSite;
+
+/// Key recipes use the same scalar instruction stream in closed and generic code.
+pub(super) fn inline_keys(module: &Module, body: &mut Body) {
+    if key_glue::inline_ordered(module, body) {
+        remap::calls(body);
+        let aliases = (0..body.values.len())
+            .map(|v| ValueId(v as u32))
+            .collect::<Vec<_>>();
+        let dead = vec![false; body.values.len()];
+        let promoted = vec![false; body.slots.len()];
+        compact(module, body, &aliases, &dead, &promoted);
+    }
+}

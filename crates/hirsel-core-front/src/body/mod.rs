@@ -932,6 +932,7 @@ struct Cx<'c, 'a, 'e> {
     scope_slots: Vec<u32>,
     copies: Vec<CopySize>,
     allocations: Vec<AllocationLayout>,
+    numeric_sites: Vec<scalar_abi::NumericSite>,
     nested: std::collections::BTreeMap<FuncId, GenericTemplate>,
     call_seq: u32,
     callable_signatures: Vec<Option<closures::CallableAbi>>,
@@ -1050,6 +1051,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             scope_slots: vec![],
             copies: vec![],
             allocations: vec![],
+            numeric_sites: vec![],
             nested: Default::default(),
             call_seq: 0,
             callable_signatures: vec![],
@@ -1759,6 +1761,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             && let Some(f) = self.func
         {
             self.block_order();
+            if self.fd.generics.is_empty() {
+                scalar_abi::inline_keys(&self.e.module, &mut self.b);
+            }
             self.e.module.functions[f.index()].body = Some(std::mem::take(&mut self.b));
             self.out.function = Some(f);
             if !self.fd.generics.is_empty() {
@@ -1788,6 +1793,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                     parameters,
                     copies: std::mem::take(&mut self.copies),
                     allocations: std::mem::take(&mut self.allocations),
+                    numeric_sites: std::mem::take(&mut self.numeric_sites),
                     nested: std::mem::take(&mut self.nested),
                     types: self.e.generic_names.clone(),
                     calls: self.e.generic_calls.clone(),

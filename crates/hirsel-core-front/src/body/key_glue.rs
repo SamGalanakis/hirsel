@@ -248,7 +248,17 @@ fn scalar_row(module: &Module, ty: TypeId) -> Option<Scalar> {
 
 /// Scalar key operations need no generated call after substitution. Predicates
 /// retain their typed loads and Compare; a u64 hash retains the fixed FORM mix.
-pub(super) fn inline_ordered(module: &Module, body: &mut Body) {
+pub(super) fn inline_ordered(module: &Module, body: &mut Body) -> bool {
+    if !body.calls.iter().any(|call| {
+        let Callee::Direct(f) = call.callee else { return false; };
+        let key = &module.instances[module.functions[f.index()].instance.index()];
+        key.definition.0.package.name == "core"
+            && matches!(key.definition.0.modules.as_slice(), [module] if module == "map" || module == "order")
+            && key.definition.0.name.starts_with('$')
+    }) {
+        return false;
+    }
+    let mut changed = false;
     let old = std::mem::take(&mut body.insts);
     let anchors = std::mem::take(&mut body.inst_anchors);
     body.insts = Vec::with_capacity(old.len());
@@ -306,6 +316,7 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) {
                 ))
             })();
             if let Some((op, scalar, args, result)) = scalar_call {
+                changed = true;
                 let mut values = [ValueId(0); 2];
                 for (i, arg) in args
                     .into_iter()
@@ -365,6 +376,7 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) {
         }
         body.blocks[block].insts = PoolRange::new(start, body.insts.len() as u32 - start);
     }
+    changed
 }
 
 /// The fixed FORM hash of one u64 key, in the caller's ordinary instruction stream.
@@ -598,7 +610,15 @@ impl Derive<'_> {
             );
         }
         plans.insert(old, plan);
-        scalar_abi::rewrite(self.module, &mut c.body, old, &plans, &old_calls);
+        scalar_abi::rewrite(
+            self.module,
+            &self.recipes,
+            &mut c.body,
+            old,
+            &plans,
+            &old_calls,
+            &[],
+        );
         self.module.functions[row.index()].signature = signature;
         self.module.functions[row.index()].body = Some(c.body);
         self.active.pop();

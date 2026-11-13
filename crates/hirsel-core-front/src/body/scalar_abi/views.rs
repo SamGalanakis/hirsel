@@ -2,7 +2,7 @@ use super::*;
 
 /// Rewrite scalar-sized copies before promoting places. Byte-run copies remain
 /// byte-run copies; their byte count need not be one element's size.
-pub(super) fn scalar_copies(module: &Module, body: &mut Body) {
+pub(super) fn scalar_copies(module: &Module, recipes: &[Recipe], body: &mut Body) {
     let constants: HashMap<_, _> = body
         .insts
         .iter()
@@ -37,8 +37,7 @@ pub(super) fn scalar_copies(module: &Module, body: &mut Body) {
                     let value = c.load(from, t);
                     c.store(to, value);
                 }
-                Inst::Drop { ty, .. }
-                    if !matches!(module.types[ty.index()].carried, Carried::Address) => {}
+                Inst::Drop { ty, .. } if recipes[ty.index()].drop.is_none() => {}
                 _ => c.emit(old[i].clone()),
             }
         }

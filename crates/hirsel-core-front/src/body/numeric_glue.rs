@@ -72,7 +72,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 params.push(Param::Address(rows[i]));
             }
             let definition = DefPath::core(&format!("int.${}", g.path.0.name));
-            let function = self.e.add_function(
+            let function = self.e.add_function_abi(
                 InstanceKey {
                     definition,
                     types: tys.iter().map(|&ty| self.name(ty)).collect(),
@@ -83,6 +83,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     results: vec![],
                     dest: Some(result_row),
                     never: false,
+                },
+                scalar_abi::SignatureAbi {
+                    params: vec![true; g.params.len()],
+                    result: true,
                 },
             );
             self.e
@@ -179,13 +183,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 }
 
 fn scalar(module: &Module, row: TypeId) -> Scalar {
-    if let ShapeBody::Record(fields) = &module.types[row.index()].body
-        && let [field] = fields.as_slice()
-        && let FieldTy::Scalar(s) = field.ty
-    {
-        return s;
+    match module.types[row.index()].carried {
+        Carried::Value(Ty::Scalar(s)) => s,
+        _ => unreachable!("a closed integer row carries its scalar"),
     }
-    unreachable!("a closed integer row contains its scalar field")
 }
 fn payload(module: &Module, row: TypeId) -> (Scalar, Vec<Step>) {
     let ShapeBody::Variant(cases) = &module.types[row.index()].body else {
@@ -217,25 +218,37 @@ pub(super) fn ensure(
         return Ok(FuncId(i as u32));
     }
     let sig = module.signatures[signature.index()].clone();
-    let out = sig.dest.unwrap();
+    let out = sig.dest;
     let (target, payload_steps) = if op.optional() {
-        payload(module, out)
+        payload(module, out.unwrap())
     } else {
-        (scalar(module, out), vec![])
+        (if let Some(out) = out { scalar(module,out) } else {
+            let Ty::Scalar(s) = sig.results[0] else {unreachable!()};s
+        }, vec![])
     };
-    let mut c = Code::new(&vec![Ty::Ptr; sig.params.len() + 1]);
+    let entry = sig
+        .dest
+        .map(|_| Ty::Ptr)
+        .into_iter()
+        .chain(sig.params.iter().map(|p| match p {
+            Param::Value(t) => *t,
+            Param::Address(_) => Ty::Ptr,
+        }))
+        .collect::<Vec<_>>();
+    let mut c = Code::new(&entry);
     let ps = c.body.blocks[0]
         .params
         .get(&c.body.pools.values)
         .unwrap()
         .to_vec();
-    let dest = ps[0];
+    let dest = out.map(|_| ps[0]);
     let mut operands = [ValueId(0); 2];
     for (i, param) in sig.params.iter().enumerate() {
-        let Param::Address(ty) = param else {
-            unreachable!()
+        let p = ps[i + usize::from(dest.is_some())];
+        operands[i] = match param {
+            Param::Value(_) => p,
+            Param::Address(ty) => c.read(p, Ty::Scalar(scalar(module, *ty))),
         };
-        operands[i] = c.read(ps[i + 1], Ty::Scalar(scalar(module, *ty)));
     }
     let result = c.value(Ty::Scalar(target));
     let flag =
@@ -269,7 +282,7 @@ pub(super) fn ensure(
             flag
         }
     };
-    let root = c.address(dest, PlaceTy::Declared(out));
+    let root = out.map(|out| c.address(dest.unwrap(), PlaceTy::Declared(out)));
     if let Some(success) = success {
         let yes = c.block(&[]);
         let no = c.block(&[]);
@@ -277,7 +290,7 @@ pub(super) fn ensure(
         c.start(no);
         if op.optional() {
             c.inst(Inst::SetCase {
-                address: root,
+                address: root.unwrap(),
                 case: 0,
             });
             c.end(Terminator::Return(PoolRange::EMPTY));
@@ -304,31 +317,37 @@ pub(super) fn ensure(
         }
         c.start(yes);
     }
-    let at = if op.optional() {
-        c.inst(Inst::SetCase {
-            address: root,
-            case: 1,
-        });
-        let steps = PoolRange::push(&mut c.body.pools.steps, payload_steps);
-        let at = AddressId(c.body.addresses.len() as u32);
-        c.body.addresses.push(AddressInfo {
-            base: AddressBase::Address(root),
-            steps,
-            ty: PlaceTy::Value(Ty::Scalar(target)),
-        });
-        c.inst(Inst::Address {
-            address: at,
-            fail: None,
-        });
-        at
+    if out.is_none() {
+        let values = PoolRange::push(&mut c.body.pools.values, [result]);
+        c.end(Terminator::Return(values));
     } else {
-        c.address(dest, PlaceTy::Value(Ty::Scalar(target)))
-    };
-    c.inst(Inst::Store {
-        address: at,
-        value: result,
-    });
-    c.end(Terminator::Return(PoolRange::EMPTY));
+        let root = root.unwrap();
+        let at = if op.optional() {
+            c.inst(Inst::SetCase {
+                address: root,
+                case: 1,
+            });
+            let steps = PoolRange::push(&mut c.body.pools.steps, payload_steps);
+            let at = AddressId(c.body.addresses.len() as u32);
+            c.body.addresses.push(AddressInfo {
+                base: AddressBase::Address(root),
+                steps,
+                ty: PlaceTy::Value(Ty::Scalar(target)),
+            });
+            c.inst(Inst::Address {
+                address: at,
+                fail: None,
+            });
+            at
+        } else {
+            c.address(dest.unwrap(), PlaceTy::Value(Ty::Scalar(target)))
+        };
+        c.inst(Inst::Store {
+            address: at,
+            value: result,
+        });
+        c.end(Terminator::Return(PoolRange::EMPTY));
+    }
     order_instructions(&mut c.body);
     let instance = InstanceId(module.instances.len() as u32);
     module.instances.push(key);

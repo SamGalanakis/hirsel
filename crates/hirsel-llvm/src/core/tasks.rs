@@ -7,10 +7,14 @@ const K: Ty = Ty::Scalar(Scalar::U8);
 const B: Ty = Ty::Scalar(Scalar::Bool);
 
 impl FunctionEmitter<'_> {
-    fn value_descriptors(&mut self, types: &[TypeId]) -> String {
+    fn value_descriptors(&mut self, types: &[TypeId], task_input: bool) -> String {
         let buffer = self.temp(&format!("[{} x i8]", 32 * types.len()));
         for (i, &t) in types.iter().enumerate() {
-            let (bytes, align) = self.place_layout(PlaceTy::Declared(t));
+            let (mut bytes, mut align) = self.place_layout(PlaceTy::Declared(t));
+            if task_input && i == 0 {
+                bytes += task_entry::input_offset(self.module, self.recipes, t);
+                align = align.max(8);
+            }
             let logical = hirsel_core_layout::field_size(
                 &self.module.types,
                 self.recipes,
@@ -28,7 +32,12 @@ impl FunctionEmitter<'_> {
                 "getelementptr i8, ptr {buffer}, i64 {}",
                 i * 32 + 24
             ));
-            self.line(format!("store ptr @core_drop_{}, ptr {at}, align 8", t.0));
+            let drop = if task_input && i == 0 {
+                format!("core_task_input_drop_{}", t.0)
+            } else {
+                format!("core_drop_{}", t.0)
+            };
+            self.line(format!("store ptr @{drop}, ptr {at}, align 8"));
         }
         buffer
     }
@@ -108,15 +117,31 @@ impl FunctionEmitter<'_> {
                 vec![self.compare_bytes(&[p(&args[0]), u(&args[1]), p(&args[2]), u(&args[3])])]
             }
             RtOp::Spawn { x, r } => {
-                let descriptor = self.value_descriptors(&[x, r]);
+                let (bytes, _) = self.place_layout(PlaceTy::Declared(x));
+                let offset = task_entry::input_offset(self.module, self.recipes, x);
+                let packed = self.temp(&format!("[{} x i8]", bytes + offset));
+                self.line(format!("store ptr {}, ptr {packed}, align 8", args[2]));
+                if bytes != 0 {
+                    let data = self.calc(format!("getelementptr i8, ptr {packed}, i64 {offset}"));
+                    self.runtime_void(
+                        "llvm.memcpy.p0.p0.i64",
+                        &[
+                            ("ptr".into(), data),
+                            ("ptr".into(), args[1].clone()),
+                            ("i64".into(), bytes.to_string()),
+                            ("i1".into(), "false".into()),
+                        ],
+                    );
+                }
+                let descriptor = self.value_descriptors(&[x, r], true);
                 self.native_call(
                     "hirsel_core_spawn",
                     &[P, U],
                     &[
                         p("%context"),
                         u(&args[0]),
-                        p(&args[1]),
-                        p(&args[2]),
+                        p(&packed),
+                        p(&format!("@core_task_entry_{}_{}", x.0, r.0)),
                         ("ptr byval([64 x i8]) align 8".into(), descriptor),
                     ],
                 )
@@ -133,7 +158,7 @@ impl FunctionEmitter<'_> {
                 self.native_call("hirsel_core_check_cancel", &[K], &[p("%context"), u("0")])
             }
             RtOp::ChannelNew { item } => {
-                let descriptor = self.value_descriptors(&[item]);
+                let descriptor = self.value_descriptors(&[item], false);
                 self.native_call(
                     "hirsel_core_channel_new",
                     &[P, P, U, K],

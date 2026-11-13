@@ -248,6 +248,45 @@ fn run_case(path: &Path) -> Vec<String> {
             }
         }
     }
+    if path.file_stem().is_some_and(|x| x == "ordered-cost") {
+        let find = |name: &str, generic: bool| {
+            module
+                .functions
+                .iter()
+                .find(|f| {
+                    let key = &module.instances[f.instance.index()];
+                    key.definition.0.name == name
+                        && if generic {
+                            key.types == ["u64"]
+                        } else {
+                            key.types.is_empty()
+                        }
+                })
+                .unwrap()
+        };
+        for (generic, closed) in [("less", "closed_less"), ("min", "closed_scalar")] {
+            let a = find(generic, true);
+            let b = find(closed, false);
+            assert_eq!(
+                module.signatures[a.signature.index()],
+                module.signatures[b.signature.index()]
+            );
+            let a = a.body.as_ref().unwrap();
+            let b = b.body.as_ref().unwrap();
+            assert_eq!(
+                a.insts
+                    .iter()
+                    .map(std::mem::discriminant)
+                    .collect::<Vec<_>>(),
+                b.insts
+                    .iter()
+                    .map(std::mem::discriminant)
+                    .collect::<Vec<_>>(),
+                "{generic}"
+            );
+            assert_eq!(a.slots.len(), b.slots.len(), "{generic}");
+        }
+    }
     let all_emitted = refusals.is_empty() && gaps.is_empty();
     let mut want_refusals = vec![];
     let mut want_gaps = vec![];
@@ -473,6 +512,78 @@ fn cases(dir: &Path, out: &mut Vec<PathBuf>) {
             cases(&e, out);
         } else if e.extension().is_some_and(|x| x == "hirsel") {
             out.push(e);
+        }
+    }
+}
+
+#[test]
+fn scalar_key_carriage() {
+    let failures = run_case(&root().join("cases/body/scalar-key-carriage.hirsel"));
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+fn scalar_task_entry_conventions() {
+    let failures = run_case(&root().join("cases/body/scalar-task-entry.hirsel"));
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+fn scalar_instances_use_closed_signatures() {
+    let (index, modules) = program_inputs(
+        "fn id[T](take x:T)->T { x }\n\
+         fn borrow[T](x:View[T])->View[T] in x { x }\n\
+         fn edit[T](mut x:T) {}\n\
+         type W { x:u64 }\n\
+         fn run()->u64 { let mut x=7u64;edit(mut x);let a=id(x);let _=id(W(x:8));let _=id((9u64,));let _=id(()); borrow(view a) }",
+    );
+    let p = Program::declare(&index, &modules);
+    let mut emitter = Emitter::new();
+    for (f, fd) in p.fns.iter().enumerate() {
+        if fd.body.is_none() || !fd.path.package_is("app", "1") {
+            continue;
+        }
+        let check = p.check_lower(f, &mut emitter);
+        assert!(
+            check.refusals.is_empty() && check.gaps.is_empty(),
+            "{check:?}"
+        );
+    }
+    emitter.materialize_instances().unwrap();
+    let module = &emitter.module;
+    wf::module(module).unwrap();
+    for f in &module.functions {
+        let key = &module.instances[f.instance.index()];
+        if !key.definition.package_is("app", "1") || key.types.is_empty() {
+            continue;
+        }
+        let sig = &module.signatures[f.signature.index()];
+        match key.definition.0.name.as_str() {
+            "edit" => assert!(matches!(sig.params.as_slice(), [Param::Address(_)])),
+            "id" | "borrow" => {
+                let row = module
+                    .types
+                    .iter()
+                    .find(|t| t.name == key.types[0])
+                    .unwrap();
+                match row.carried {
+                    hirsel_core_ir::Carried::Value(t) => {
+                        assert_eq!(sig.params, [Param::Value(t)], "{key:?}");
+                        assert_eq!(sig.results, [t], "{key:?}");
+                        assert_eq!(sig.dest, None, "{key:?}");
+                    }
+                    hirsel_core_ir::Carried::Nothing => {
+                        assert!(
+                            sig.params.is_empty() && sig.results.is_empty() && sig.dest.is_none(),
+                            "{key:?}"
+                        );
+                    }
+                    hirsel_core_ir::Carried::Address => {
+                        assert!(matches!(sig.params.as_slice(), [Param::Address(_)]))
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }

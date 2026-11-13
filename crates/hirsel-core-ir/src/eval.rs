@@ -897,7 +897,22 @@ impl Machine<'_> {
                     cells: Vec::new(),
                 };
                 let f = FuncId((a[2] - FN_BASE) as u32);
-                let ok = self.call(&mut child, f, &[rb, xb]).is_ok();
+                let xc = self.m.types[x.index()].carried;
+                let rc = self.m.types[r.index()].carried;
+                let mut args = Vec::with_capacity(2);
+                if matches!(rc, Carried::Address) {
+                    args.push(rb)
+                }
+                match xc {
+                    Carried::Address => args.push(xb),
+                    Carried::Value(t) => args.push(self.load(xb, bytes_of(t))),
+                    Carried::Nothing => {}
+                }
+                let returned = self.call(&mut child, f, &args);
+                if let (Ok(values), Carried::Value(t)) = (&returned, rc) {
+                    self.store(rb, bytes_of(t), values[0]);
+                }
+                let ok = returned.is_ok();
                 self.end_limit(lim);
                 let status = match child.chain.first().map(|c| c.kind) {
                     _ if ok => 0,

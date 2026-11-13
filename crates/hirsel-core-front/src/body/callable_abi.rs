@@ -15,41 +15,49 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.e.callable_signature_builds += 1;
         }
         buffer.clear();
-        let ps = &mut *buffer;
+        let mut abi = scalar_abi::SignatureAbi {
+            params: vec![],
+            result: true,
+        };
         if environment {
-            ps.push(Param::Value(Ty::Ptr));
+            buffer.push(Param::Value(Ty::Ptr));
+            abi.params.push(false);
         }
         for &(mode, ty) in params {
-            ps.push(if mode == Mode::View && self.region_handle(ty) {
-                Param::Value(Ty::Ptr)
-            } else {
+            let rep = self.rep(ty)?;
+            let p = if mode == Mode::Mut {
                 Param::Address(
                     self.e
                         .type_row(self.p, &mut self.t, ty)
                         .ok_or("callable payload layouts are not built")?,
                 )
-            });
+            } else {
+                match rep {
+                    Rep::None => continue,
+                    Rep::Scalar(t) => Param::Value(t),
+                    Rep::Place(id) => Param::Address(id),
+                }
+            };
+            abi.params
+                .push(mode != Mode::Mut && matches!(p, Param::Address(_)));
+            buffer.push(p);
         }
-        let dest = if result == NEVER {
-            None
-        } else {
-            Some(
-                self.e
-                    .type_row(self.p, &mut self.t, result)
-                    .ok_or("callable payload layouts are not built")?,
-            )
+        let (results, dest) = match self.rep(result)? {
+            Rep::None => (vec![], None),
+            Rep::Scalar(t) => (vec![t], None),
+            Rep::Place(id) => (vec![], Some(id)),
         };
         let signature = Signature {
             params: std::mem::take(buffer),
-            results: vec![],
+            results,
             dest,
             never: result == NEVER,
         };
-        if let Some(&row) = self.e.sigs.get(&signature) {
+        if let Some(&row) = self.e.sigs.get(&(signature.clone(), abi.clone())) {
             *buffer = signature.params;
             Ok(row)
         } else {
-            Ok(self.e.sig(signature))
+            Ok(self.e.sig_abi(signature, abi))
         }
     }
 
@@ -135,6 +143,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
         };
+        if self.e.module.signatures[self.e.module.functions[raw.index()].signature.index()]
+            == self.e.module.signatures[signature.index()]
+            && item.map_or(
+                self.e.module.functions[raw.index()].body.is_some()
+                    || self.nested.contains_key(&raw),
+                |(f, _)| self.p.fns[f].body.is_some(),
+            )
+        {
+            return Some(raw);
+        }
         if let Some(&row) = self.e.callable_adapters.get(&(raw, signature)) {
             return Some(row);
         }
@@ -162,16 +180,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             &child.fd.path,
             child.e.module.signatures[signature.index()].clone(),
         );
+        child.e.module.functions[row.index()].signature = signature;
         child.func = Some(row);
-        let block = child.new_block(&vec![
-            Ty::Ptr;
-            params.len()
-                + usize::from(environment)
-                + usize::from(result != NEVER)
-        ]);
+        let sig = &child.e.module.signatures[signature.index()];
+        let entry = sig
+            .dest
+            .map(|_| Ty::Ptr)
+            .into_iter()
+            .chain(sig.params.iter().map(|p| match p {
+                Param::Value(t) => *t,
+                Param::Address(_) => Ty::Ptr,
+            }))
+            .collect::<Vec<_>>();
+        let block = child.new_block(&entry);
         child.start(block);
         let incoming = child.block_params(block);
-        let mut k = usize::from(result != NEVER);
+        let has_dest = child.e.module.signatures[signature.index()].dest.is_some();
+        let mut k = usize::from(has_dest);
         let env = if environment {
             let env = incoming[k];
             k += 1;
@@ -180,23 +205,29 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             None
         };
         let mut values = Vec::with_capacity(params.len());
-        for (i, &(mode, ty)) in params.iter().enumerate() {
-            let value = if mode == Mode::Mut || child.region_handle(ty) {
-                Some(incoming[k + i])
-            } else {
-                let Param::Address(id) = child.e.module.signatures[signature.index()].params
-                    [i + usize::from(environment)]
-                else {
-                    unreachable!("non-Region callable payload has an address parameter")
-                };
-                let at = child.address(
-                    AddressBase::Value(incoming[k + i]),
-                    &[],
-                    PlaceTy::Declared(id),
-                    n,
-                );
-                child.read_carried(at, ty, n)
+        let mut parameter = usize::from(environment);
+        for &(mode, ty) in &params {
+            let rep = child.rep(ty).ok()?;
+            if mode != Mode::Mut && matches!(rep, Rep::None) {
+                values.push(None);
+                continue;
+            }
+            let param = child.e.module.signatures[signature.index()].params[parameter];
+            parameter += 1;
+            let value = match param {
+                Param::Value(_) => Some(incoming[k]),
+                Param::Address(_) if mode == Mode::Mut => Some(incoming[k]),
+                Param::Address(id) => {
+                    let at = child.address(
+                        AddressBase::Value(incoming[k]),
+                        &[],
+                        PlaceTy::Declared(id),
+                        n,
+                    );
+                    child.read_carried(at, ty, n)
+                }
             };
+            k += 1;
             values.push(value);
         }
         let value = if let Some((f, types)) = item {
@@ -213,20 +244,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             child.adapter_call(raw, env, &params, &values, result, n)
         };
         if child.live() {
-            if result != NEVER {
-                match child.rep(result) {
-                    Ok(rep) => {
-                        if let Some(place) = rep.stored() {
-                            let at = child.address(AddressBase::Value(incoming[0]), &[], place, n);
-                            child.install(at, rep, value, n);
-                        }
-                        child.consume(value, n);
-                        child.end(Terminator::Return(PoolRange::EMPTY), Some(n));
-                    }
-                    Err(what) => child.gap(n, what),
-                }
-            } else {
+            if result == NEVER {
                 child.end(Terminator::Unreachable, Some(n));
+            } else {
+                if has_dest
+                    && let Ok(rep) = child.rep(result)
+                    && let Some(place) = rep.stored()
+                {
+                    let at = child.address(AddressBase::Value(incoming[0]), &[], place, n);
+                    child.install(at, rep, value, n);
+                    child.consume(value, n);
+                }
+                let values = if has_dest {
+                    PoolRange::EMPTY
+                } else {
+                    PoolRange::push(&mut child.b.pools.values, value)
+                };
+                child.end(Terminator::Return(values), Some(n));
             }
         }
         std::mem::swap(&mut child.t, &mut self.t);

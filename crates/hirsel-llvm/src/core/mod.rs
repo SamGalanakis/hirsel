@@ -15,6 +15,7 @@ mod failure;
 mod fast;
 mod scalar;
 mod storage;
+mod task_entry;
 mod tasks;
 #[cfg(all(test, not(hirsel_lazy_core)))]
 mod tests;
@@ -180,6 +181,7 @@ pub fn emit_ir(module: &Module) -> Result<String> {
         }
     }
     cleanup::drop_glue(module, &recipes, &failures, &mut text, &mut intrinsics)?;
+    task_entry::emit(module, &recipes, &failures, &mut text, &mut intrinsics)?;
     for decl in intrinsics {
         writeln!(text, "{decl}").unwrap();
     }

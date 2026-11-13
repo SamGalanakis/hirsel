@@ -1,0 +1,45 @@
+// Concrete callable values cross the fixed runtime entry via their carried rows.
+// expect: run scalar(1) = 42
+// expect: run record_input(1) = 42
+// expect: run record_result(1) = 2021
+// expect: run empty_input(1) = 42
+// expect: run floating(1) = true
+// expect: run dynamic_yes(1) = 42
+// expect: run dynamic_no(1) = 43
+type Pair:send { a:u64, b:u64 }
+fn add_one(take x:u64)->u64 { x+1u64 }
+fn add_two(take x:u64)->u64 { x+2u64 }
+fn add_pair(take x:Pair)->u64 { x.a+x.b }
+fn pair(take x:u64)->Pair { Pair(a:x,b:x+1u64) }
+fn unit(take x:())->u64 { 42 }
+fn half(take x:f64)->f64 { x+0.5f64 }
+fn scalar(tasks:Tasks)->u64 waits {
+ let h=result.unwrap(task.spawn(tasks,bytes 64,41u64,add_one))
+ result.unwrap(task.join(take h))
+}
+fn record_input(tasks:Tasks)->u64 waits {
+ let h=result.unwrap(task.spawn(tasks,bytes 64,Pair(a:19,b:23),add_pair))
+ result.unwrap(task.join(take h))
+}
+fn record_result(tasks:Tasks)->u64 waits {
+ let h=result.unwrap(task.spawn(tasks,bytes 64,20u64,pair))
+ let p=result.unwrap(task.join(take h)); p.a*100u64+p.b
+}
+fn empty_input(tasks:Tasks)->u64 waits {
+ let h=result.unwrap(task.spawn(tasks,bytes 64,(),unit))
+ result.unwrap(task.join(take h))
+}
+fn floating(tasks:Tasks)->bool waits {
+ let h=result.unwrap(task.spawn(tasks,bytes 64,42f64,half))
+ float.to_bits64(result.unwrap(task.join(take h)))==4631178160564600832u64
+}
+fn dynamic(tasks:Tasks,c:bool)->u64 waits {
+ let f=if c {add_one}else{add_two}
+ let h=result.unwrap(task.spawn(tasks,bytes 64,41u64,f))
+ result.unwrap(task.join(take h))
+}
+fn dynamic_yes(tasks:Tasks)->u64 waits { dynamic(tasks,true) }
+fn dynamic_no(tasks:Tasks)->u64 waits { dynamic(tasks,false) }
+pub fn main(tasks:Tasks)->Result[(),Exit] waits {
+ if scalar(tasks)==42u64 && record_input(tasks)==42u64 && record_result(tasks)==2021u64 && empty_input(tasks)==42u64 && floating(tasks) && dynamic(tasks,true)==42u64 && dynamic(tasks,false)==43u64 {Ok(())}else{Error(Exit(status:1))}
+}

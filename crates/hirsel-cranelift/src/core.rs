@@ -26,6 +26,7 @@ mod memory;
 mod place;
 pub mod profile;
 mod scalar;
+mod task_entry;
 mod tasks;
 
 /// Why a CoreIR module could not be emitted.
@@ -99,6 +100,7 @@ pub(super) struct Tables<'a> {
     functions: &'a [cranelift_module::FuncId],
     statics: &'a [cranelift_module::DataId],
     glues: &'a drop::Glues,
+    task_entries: &'a task_entry::Glues,
     allocators: &'a [fast::Allocator],
     trace_drops: bool,
     runtimes: std::cell::RefCell<calls::Imports>,
@@ -244,6 +246,7 @@ fn emit(
         let _span = observer.enter("glue_declarations");
         drop::Glues::declare(&mut object, input, layouts)?
     };
+    let task_entries = task_entry::Glues::declare(&mut object, input)?;
     let allocators = fast::declare_allocators(&mut object, input)?;
     let tables = Tables {
         input,
@@ -252,6 +255,7 @@ fn emit(
         functions: &functions,
         statics: &statics,
         glues: &glues,
+        task_entries: &task_entries,
         allocators: &allocators,
         trace_drops,
         runtimes: Default::default(),
@@ -277,6 +281,7 @@ fn emit(
             .map_err(error)?;
     }
     glues.emit(&mut object, &tables, observer, &mut scratch)?;
+    task_entries.emit(&mut object, &tables, observer, &mut scratch)?;
     for allocator in &allocators {
         fast::emit_allocator(&mut object, &tables, allocator, observer, &mut scratch)?;
     }

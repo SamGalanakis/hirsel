@@ -73,13 +73,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
             let function = if has_param(&self.t, ty) {
                 let name = crate::decls::canonical(&self.p.decls, &self.t, ty);
-                let function = self.e.add_function(
+                let function = self.e.add_function_abi(
                     InstanceKey {
                         definition: op.definition(),
                         types: vec![name],
                         dictionaries: vec![],
                     },
                     op.signature(id),
+                    scalar_abi::SignatureAbi {
+                        params: vec![
+                            true;
+                            if matches!(op, KeyOp::Equal | KeyOp::Order | KeyOp::Ordered(_)) {
+                                2
+                            } else {
+                                1
+                            }
+                        ],
+                        result: true,
+                    },
                 );
                 self.e
                     .generic_calls
@@ -107,7 +118,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return None;
         }
         self.key_args.clear();
-        for &value in values {
+        for (i, &value) in values.iter().enumerate() {
+            if matches!(rep, Rep::None) {
+                continue;
+            }
+            let signature = self.e.module.functions[function.index()].signature;
+            if matches!(
+                self.e.module.signatures[signature.index()].params[i],
+                Param::Value(_)
+            ) {
+                self.key_args.push(Arg::Value(value?));
+                continue;
+            }
             let pointer = if matches!(rep, Rep::Place(_)) {
                 value?
             } else {
@@ -199,14 +221,15 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) {
                 } else {
                     return None;
                 };
-                let Param::Address(ty) = module.signatures[call.signature.index()].params[0] else {
-                    return None;
+                let scalar = match *module.signatures[call.signature.index()].params.first()? {
+                    Param::Value(Ty::Scalar(s)) => s,
+                    Param::Address(ty) => scalar_row(module, ty)?,
+                    _ => return None,
                 };
-                let scalar = scalar_row(module, ty)?;
                 let args = call.args.get(&body.pools.args).unwrap();
                 let addresses = match (op, args) {
-                    (Some(_), [Arg::Address(a), Arg::Address(b)]) => [*a, *b],
-                    (None, [Arg::Address(a)]) if scalar == Scalar::U64 => [*a, *a],
+                    (Some(_), [a,b]) => [*a,*b],
+                    (None, [a]) if scalar == Scalar::U64 => [*a,*a],
                     _ => return None,
                 };
                 Some((
@@ -218,11 +241,11 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) {
             })();
             if let Some((op, scalar, args, result)) = scalar_call {
                 let mut values = [ValueId(0); 2];
-                for (i, arg) in args
-                    .into_iter()
-                    .take(if op.is_some() { 2 } else { 1 })
-                    .enumerate()
-                {
+                for (i, arg) in args.into_iter().take(if op.is_some() {2} else {1}).enumerate() {
+                    let arg = match arg {
+                        Arg::Value(v) => {values[i]=v;continue;}
+                        Arg::Address(a) => a,
+                    };
                     let steps = PoolRange::push(&mut body.pools.steps, [Step::Field(0)]);
                     let address = AddressId(body.addresses.len() as u32);
                     body.addresses.push(AddressInfo {
@@ -427,6 +450,39 @@ impl Derive<'_> {
         let returns = PoolRange::push(&mut c.body.pools.values, [result]);
         c.end(Terminator::Return(returns));
         order_instructions(&mut c.body);
+        let old = self.module.functions[row.index()].signature;
+        let mut sig = self.module.signatures[old.index()].clone();
+        let abi = scalar_abi::SignatureAbi {
+            params: sig
+                .params
+                .iter()
+                .map(|p| matches!(p, Param::Address(_)))
+                .collect(),
+            result: true,
+        };
+        let plan = scalar_abi::Plan::signature(self.module, &mut sig, &abi);
+        let signature = if let Some(i) = self.module.signatures.iter().position(|s| *s == sig) {
+            SigId(i as u32)
+        } else {
+            let id = SigId(self.module.signatures.len() as u32);
+            self.module.signatures.push(sig);
+            id
+        };
+        let old_calls = c.body.calls.iter().map(|c| c.signature).collect::<Vec<_>>();
+        let mut plans = HashMap::default();
+        for &id in &old_calls {
+            let sig = &self.module.signatures[id.index()];
+            plans.insert(
+                id,
+                scalar_abi::Plan {
+                    params: vec![scalar_abi::Change::Keep; sig.params.len()],
+                    result: scalar_abi::Change::Keep,
+                },
+            );
+        }
+        plans.insert(old, plan);
+        scalar_abi::rewrite(self.module, &mut c.body, old, &plans, &old_calls);
+        self.module.functions[row.index()].signature = signature;
         self.module.functions[row.index()].body = Some(c.body);
         self.active.pop();
         Ok(row)
@@ -434,7 +490,25 @@ impl Derive<'_> {
     fn call(&self, c: &mut Code, f: FuncId, args: &[Arg]) -> ValueId {
         let signature = self.module.functions[f.index()].signature;
         let result = c.value(self.module.signatures[signature.index()].results[0]);
-        let args = PoolRange::push(&mut c.body.pools.args, args.iter().copied());
+        let mut passed = [Arg::Value(ValueId(0)); 2];
+        let mut count = 0;
+        for &arg in args {
+            let arg = if let Arg::Address(address) = arg {
+                match c.body.addresses[address.index()].ty {
+                    PlaceTy::Declared(row) => match self.module.types[row.index()].carried {
+                        Carried::Nothing => continue,
+                        Carried::Value(t) => Arg::Value(c.read_address(address, t)),
+                        Carried::Address => arg,
+                    },
+                    PlaceTy::Value(_) => arg,
+                }
+            } else {
+                arg
+            };
+            passed[count] = arg;
+            count += 1;
+        }
+        let args = PoolRange::push(&mut c.body.pools.args, passed[..count].iter().copied());
         let results = PoolRange::push(&mut c.body.pools.values, [result]);
         let call = CallId(c.body.calls.len() as u32);
         c.body.calls.push(CallSite {
@@ -967,7 +1041,7 @@ impl Derive<'_> {
     ) -> Result<ValueId, &'static str> {
         Ok(match field {
             FieldTy::Scalar(s) if !matches!(s, Scalar::F32 | Scalar::F64) => {
-                let word = c.word(p, s.size());
+                let word = c.scalar_word(p, *s);
                 c.mix(h, word)
             }
             FieldTy::Inline(t) => {
@@ -1285,8 +1359,8 @@ impl Derive<'_> {
     ) -> Result<(), &'static str> {
         match field {
             FieldTy::Scalar(s) if !matches!(s, Scalar::F32 | Scalar::F64) => {
-                let x = c.word(a, s.size());
-                let y = c.word(b, s.size());
+                let x = c.read(a, Ty::Scalar(*s));
+                let y = c.read(b, Ty::Scalar(*s));
                 let on = c.compare(CompareOp::Eq, x, y);
                 c.require(on, no);
             }
@@ -1566,6 +1640,31 @@ impl Code {
             self.offset_value(p, offset)
         }
     }
+    fn read_address(&mut self, address: AddressId, ty: Ty) -> ValueId {
+        let address = if self.body.addresses[address.index()].ty == PlaceTy::Value(ty) {
+            address
+        } else {
+            let steps = PoolRange::push(&mut self.body.pools.steps, []);
+            let at = AddressId(self.body.addresses.len() as u32);
+            self.body.addresses.push(AddressInfo {
+                base: AddressBase::Address(address),
+                steps,
+                ty: PlaceTy::Value(ty),
+            });
+            self.inst(Inst::Address {
+                address: at,
+                fail: None,
+            });
+            at
+        };
+        let result = self.value(ty);
+        self.inst(Inst::Read {
+            result,
+            address,
+            mode: ReadMode::Bits,
+        });
+        result
+    }
     pub(super) fn read(&mut self, p: ValueId, ty: Ty) -> ValueId {
         let address = self.address(p, PlaceTy::Value(ty));
         let result = self.value(ty);
@@ -1590,14 +1689,43 @@ impl Code {
             result
         }
     }
-    fn word(&mut self, p: ValueId, width: u64) -> ValueId {
-        let s = match width {
-            1 => Scalar::U8,
-            2 => Scalar::U16,
-            4 => Scalar::U32,
-            _ => Scalar::U64,
+    fn scalar_word(&mut self, p: ValueId, s: Scalar) -> ValueId {
+        let mut value = self.read(p, Ty::Scalar(s));
+        if s == Scalar::Bool {
+            let yes = self.block(&[]);
+            let no = self.block(&[]);
+            let done = self.block(&[Ty::Scalar(Scalar::U64)]);
+            self.branch(value, yes, no);
+            self.start(yes);
+            let one = self.constant(1);
+            self.jump(done, &[one]);
+            self.start(no);
+            let zero = self.constant(0);
+            self.jump(done, &[zero]);
+            self.start(done);
+            return self.params(done)[0];
+        }
+        let unsigned = match s {
+            Scalar::I8 => Some(Scalar::U8),
+            Scalar::I16 => Some(Scalar::U16),
+            Scalar::I32 | Scalar::Char => Some(Scalar::U32),
+            Scalar::I64 => Some(Scalar::U64),
+            _ => None,
         };
-        let value = self.read(p, Ty::Scalar(s));
+        if let Some(t) = unsigned {
+            let result = self.value(Ty::Scalar(t));
+            self.inst(Inst::Convert {
+                result,
+                flag: None,
+                operand: value,
+                mode: if s == Scalar::Char {
+                    ConvertMode::Widen
+                } else {
+                    ConvertMode::Truncate
+                },
+            });
+            value = result;
+        }
         self.widen(value)
     }
     fn mix(&mut self, h: ValueId, w: ValueId) -> ValueId {
@@ -1616,6 +1744,39 @@ impl Code {
 mod tests {
     use super::*;
     use hirsel_core_ir::{eval, text, wf};
+
+    #[test]
+    fn scalar_carriers_hash_their_logical_bits() {
+        for (name, ty, bits, want) in [
+            ("signed8", "i8", 255, 0x172cc663b949ce9cu64),
+            ("signed16", "i16", 65535, 0x43f32a0fec9d2219),
+            ("signed64", "i64", u64::MAX, 0x1a02d60fb785f416),
+            ("codepoint", "char", 955, 0xf76b7389ab88bfd2),
+            ("truth", "bool", 1, 0xe5fd29f0b385f416),
+            ("falsehood", "bool", 0, 0),
+        ] {
+            let mut m = text::parse(&format!(
+                "core v1\ntype t0 = own \"{name}\" value {ty} {{ n:{ty} }}\n"
+            ))
+            .unwrap();
+            let f = ensure(&mut m, TypeId(0), KeyOp::Hash).unwrap();
+            wf::module(&m).unwrap();
+            assert_eq!(
+                eval::run(&m, f, &[bits], u64::MAX).outcome,
+                eval::Outcome::Returned(vec![want]),
+                "{name}"
+            );
+            assert!(
+                m.functions[f.index()]
+                    .body
+                    .as_ref()
+                    .unwrap()
+                    .slots
+                    .is_empty(),
+                "{name}: scalar key spill"
+            );
+        }
+    }
 
     #[test]
     fn metadata_is_built_once_per_key_type() {

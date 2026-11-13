@@ -390,17 +390,22 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let dest = self.e.module.signatures[signature.index()]
             .dest
             .map(|id| self.new_slot(PlaceTy::Declared(id), n));
-        // Scalar arguments are spilled; rigid generic values already travel by address.
+        // Arguments follow their concrete signature; mutable places retain addresses.
         scratch.ir_args.clear();
         scratch.ir_args.extend(dest.map(Arg::Address));
         scratch.ir_args.extend(environment.map(Arg::Value));
+        let mut parameter = usize::from(environment.is_some());
         for (i, &(mode, _)) in scratch.params.iter().enumerate() {
             if mode == Mode::Take {
                 self.consume(scratch.vals[i], n);
             }
-            let id = match self.e.module.signatures[signature.index()].params
-                [i + usize::from(environment.is_some())]
-            {
+            let rep = self.callable_reps[abi.params.start as usize + i];
+            if mode != Mode::Mut && matches!(rep, Rep::None) {
+                continue;
+            }
+            let param = self.e.module.signatures[signature.index()].params[parameter];
+            parameter += 1;
+            let id = match param {
                 Param::Address(id) => id,
                 Param::Value(_) => {
                     scratch.ir_args.push(Arg::Value(scratch.vals[i]?));
@@ -409,8 +414,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
             let pointer = if mode == Mode::Mut {
                 scratch.vals[i]
+            } else if matches!(rep, Rep::Place(_)) {
+                scratch.vals[i]
             } else {
-                let rep = self.callable_reps[abi.params.start as usize + i];
                 let place = rep.stored().unwrap_or(PlaceTy::Declared(id));
                 let at = self.new_slot(place, n);
                 self.install(at, rep, scratch.vals[i], n);
@@ -421,12 +427,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let args = PoolRange::push(&mut self.b.pools.args, scratch.ir_args.iter().copied());
         let fail = self.fail_to(n);
+        let value = self.e.module.signatures[signature.index()]
+            .results
+            .first()
+            .copied()
+            .map(|t| self.value(t));
+        let results = PoolRange::push(&mut self.b.pools.values, value);
         let call = CallId(self.b.calls.len() as u32);
         self.b.calls.push(CallSite {
             callee: Callee::Indirect(code),
             signature,
             args,
-            results: PoolRange::EMPTY,
+            results,
             fail,
         });
         self.inst(Inst::Call { call }, n);
@@ -434,7 +446,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.end(Terminator::Unreachable, Some(n));
             return None;
         }
-        let value = self.read_carried_rep(dest?, abi.result, n);
+        let value = if let Some(dest) = dest {
+            self.read_carried_rep(dest, abi.result, n)
+        } else {
+            value
+        };
         self.temp(result, value);
         value
     }
@@ -544,11 +560,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         std::mem::swap(&mut child.t, &mut self.t);
         let signature = child.callable_signature(ty, environment);
         let row = signature.map(|signature| {
-            let signature = child.e.sig(signature);
             let f = child.e.function(
                 &child.fd.path,
                 child.e.module.signatures[signature.index()].clone(),
             );
+            child.e.module.functions[f.index()].signature = signature;
             (f, signature)
         });
         child.run_row(row, body);
@@ -630,50 +646,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.owning_value(callable, code, &frame, n)
     }
 
-    fn callable_signature(
-        &mut self,
-        ty: TyId,
-        environment: bool,
-    ) -> Result<Signature, &'static str> {
-        let TyKind::Fn(ps, r, _, _) = self.t.kind(ty) else {
+    fn callable_signature(&mut self, ty: TyId, environment: bool) -> Result<SigId, &'static str> {
+        let TyKind::Fn(ps, result, _, _) = self.t.kind(ty).clone() else {
             unreachable!()
         };
-        let (len, r) = (ps.len(), *r);
-        let mut params = vec![];
-        if environment {
-            params.push(Param::Value(Ty::Ptr));
-        }
-        for i in 0..len {
-            let TyKind::Fn(ps, _, _, _) = self.t.kind(ty) else {
-                unreachable!()
-            };
-            let (mode, t) = ps[i];
-            let rep = self.rep(t)?;
-            params.push(if mode == Mode::Mut {
-                Param::Address(
-                    self.e
-                        .type_row(self.p, &mut self.t, t)
-                        .ok_or("closure parameter layout is not built")?,
-                )
-            } else {
-                match rep {
-                    Rep::None => continue,
-                    Rep::Scalar(t) => Param::Value(t),
-                    Rep::Place(id) => Param::Address(id),
-                }
-            });
-        }
-        let (results, dest) = match self.rep(r)? {
-            Rep::None => (vec![], None),
-            Rep::Scalar(t) => (vec![t], None),
-            Rep::Place(id) => (vec![], Some(id)),
-        };
-        Ok(Signature {
-            params,
-            results,
-            dest,
-            never: r == NEVER,
-        })
+        self.indirect_signature(&ps, result, environment, &mut vec![])
     }
 }
 
@@ -821,7 +798,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 [self.e.module.functions[f.index()].signature.index()]
             .clone();
             signature.params.insert(0, Param::Value(Ty::Ptr));
-            self.e.module.functions[f.index()].signature = self.e.sig(signature);
+            let old = self.e.module.functions[f.index()].signature;
+            let mut abi = self.e.signature_abis.get(&old).cloned().unwrap_or_default();
+            abi.params.insert(0, false);
+            self.e.module.functions[f.index()].signature = self.e.sig_abi(signature, abi);
             let mut params = self.block_params(BlockId(0));
             params.insert(usize::from(self.dest.is_some()), environment);
             self.b.blocks[0].params = PoolRange::push(&mut self.b.pools.values, params);

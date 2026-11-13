@@ -9,11 +9,16 @@ const K: Ty = Ty::Scalar(Scalar::U8);
 const B: Ty = Ty::Scalar(Scalar::Bool);
 
 impl Function<'_, '_, '_> {
-    fn descriptor(&mut self, types: &[TypeId]) -> Result<Value> {
+    fn descriptor(&mut self, types: &[TypeId], task_input: bool) -> Result<Value> {
         let storage = self.calls.storage(&mut self.b, (types.len() * 32) as u32);
         for (i, &t) in types.iter().enumerate() {
-            let (bytes, alignment) =
+            let (mut bytes, mut alignment) =
                 place::storage(self.input, self.layouts, PlaceTy::Declared(t))?;
+            if task_input && i == 0 {
+                let offset = task_entry::input_offset(self.input, self.layouts, t)?;
+                bytes += offset;
+                alignment = alignment.max(8);
+            }
             let logical = hirsel_core_layout::field_size(
                 &self.input.types,
                 self.layouts,
@@ -32,7 +37,11 @@ impl Function<'_, '_, '_> {
             let function = self.calls.reference(
                 self.object,
                 &mut self.b,
-                self.glues.drops[t.index()].unwrap(),
+                if task_input && i == 0 {
+                    self.task_entries.inputs[&t]
+                } else {
+                    self.glues.drops[t.index()].unwrap()
+                },
             );
             let drop = self.b.ins().func_addr(types::I64, function);
             self.b
@@ -156,12 +165,38 @@ impl Function<'_, '_, '_> {
                 0
             }
             RtOp::Spawn { x, r } => {
-                let descriptor = self.descriptor(&[x, r])?;
+                let (bytes, align) =
+                    place::storage(self.input, self.layouts, PlaceTy::Declared(x))?;
+                let offset = task_entry::input_offset(self.input, self.layouts, x)?;
+                let size = (bytes + offset)
+                    .try_into()
+                    .map_err(|_| unsupported("native task input exceeds the stack-slot limit"))?;
+                let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
+                    ir::StackSlotKind::ExplicitSlot,
+                    size,
+                    align.max(8).trailing_zeros() as u8,
+                ));
+                let packed = self.b.ins().stack_addr(types::I64, slot, 0);
+                self.b
+                    .ins()
+                    .store(MemFlagsData::trusted(), args[2], packed, 0);
+                if bytes != 0 {
+                    let data = self.b.ins().iadd_imm(packed, offset as i64);
+                    let bytes = self.b.ins().iconst(types::I64, bytes as i64);
+                    self.c_call("memcpy", &[P, P, U], &[P], &[data, args[1], bytes])?;
+                }
+                let bridge = self.calls.reference(
+                    self.object,
+                    &mut self.b,
+                    self.task_entries.entries[&(x, r)],
+                );
+                let bridge = self.b.ins().func_addr(types::I64, bridge);
+                let descriptor = self.descriptor(&[x, r], true)?;
                 let values = self.c_call(
                     "hirsel_core_spawn",
                     &[P, U, P, P, P],
                     &[P, U],
-                    &[self.context, args[0], args[1], args[2], descriptor],
+                    &[self.context, args[0], packed, bridge, descriptor],
                 )?;
                 outputs[0] = values[0];
                 outputs[1] = values[1];
@@ -184,7 +219,7 @@ impl Function<'_, '_, '_> {
                 0
             }
             RtOp::ChannelNew { item } => {
-                let descriptor = self.descriptor(&[item])?;
+                let descriptor = self.descriptor(&[item], false)?;
                 let values = self.c_call(
                     "hirsel_core_channel_new",
                     &[P, U, P, U],

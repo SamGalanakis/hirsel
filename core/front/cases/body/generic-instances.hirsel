@@ -20,6 +20,6 @@ fn wrapped() -> u64 { let r = wrap(72623859790382856u64); r.value }
 fn pair() -> u64 { match dup(72623859790382856u64) { (a, b) => a + b } }
 fn swapped() -> u8 { let mut a: u8 = 3; let mut b: u8 = 9; swap(mut a, mut b); a }
 
-// Zero-sized type arguments still occupy their declared address parameter.
+// Unit arguments disappear from the concrete calling convention.
 // expect: run unit() = 3
 fn unit() -> u8 { id(()); 3 }

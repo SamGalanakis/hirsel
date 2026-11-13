@@ -1,0 +1,23 @@
+// Scalar key helpers read the declared scalar, retaining low bits when hashing.
+// expect: run signed() = 42
+// expect: run chars() = 43
+// expect: run bools() = 44
+fn signed()->u64 {
+ let mut m:Map[i8,u64]=map.new()
+ result.unwrap(map.insert(mut m,-1i8,42u64))
+ match map.get(m,-1i8) {Some(v)=>v,None=>0}
+}
+fn chars()->u64 {
+ let mut m:Map[char,u64]=map.new()
+ result.unwrap(map.insert(mut m,'λ',43u64))
+ match map.get(m,'λ') {Some(v)=>v,None=>0}
+}
+fn bools()->u64 {
+ let mut m:Map[bool,u64]=map.new()
+ result.unwrap(map.insert(mut m,true,44u64))
+ result.unwrap(map.insert(mut m,false,45u64))
+ match map.get(m,true) {Some(v)=>v,None=>0}
+}
+pub fn main()->Result[(),Exit] {
+ if signed()==42u64 && chars()==43u64 && bools()==44u64 {Ok(())}else{Error(Exit(status:1))}
+}

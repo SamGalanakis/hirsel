@@ -1,6 +1,7 @@
 //! Mechanical specialization of a body checked once with rigid type parameters.
-//! Generic values use places, including when their closed type is a scalar. Layout
-//! rows, storage-byte constants and logical-size constants are substituted; source is never opened here.
+//! Rigid values use places while checking; instances use their concrete convention.
+//! Layout rows and size constants are substituted, then scalar addresses become
+//! values. Source is never opened here.
 use super::*;
 use hirsel_core_layout::{Body as ShapeBody, FieldTy, FuncRef, Shape};
 use std::collections::BTreeMap;
@@ -14,6 +15,7 @@ pub struct CopySize {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GenericTemplate {
+    pub signatures: BTreeMap<SigId, scalar_abi::SignatureAbi>,
     pub parameters: Vec<Option<TypeId>>,
     pub copies: Vec<CopySize>,
     pub nested: BTreeMap<FuncId, GenericTemplate>,
@@ -309,6 +311,8 @@ struct Substitution<'a> {
     types: HashMap<TypeId, TypeId>,
     functions: HashMap<FuncId, FuncId>,
     signatures: HashMap<SigId, SigId>,
+    signature_abis: &'a BTreeMap<SigId, scalar_abi::SignatureAbi>,
+    plans: HashMap<SigId, scalar_abi::Plan>,
 }
 impl Substitution<'_> {
     fn ty(&mut self, old: TypeId) -> TypeId {
@@ -355,6 +359,9 @@ impl Substitution<'_> {
             }
         }
         sig.dest = sig.dest.map(|id| self.ty(id));
+        let abi = self.signature_abis.get(&old).cloned().unwrap_or_default();
+        let plan = scalar_abi::Plan::signature(self.module, &mut sig, &abi);
+        self.plans.insert(old, plan);
         if let Some(row) = self.module.signatures.iter().position(|old| *old == sig) {
             let id = SigId(row as u32);
             self.signatures.insert(old, id);
@@ -432,9 +439,11 @@ impl Substitution<'_> {
         }
         if let Some(op) = call.operation {
             let signature = self.signature(function.signature);
-            let Param::Address(ty) = self.module.signatures[signature.index()].params[0] else {
-                unreachable!("key glue receives its typed payload")
+            let Param::Address(ty) = self.module.signatures[function.signature.index()].params[0]
+            else {
+                unreachable!("symbolic key payload")
             };
+            let ty = self.ty(ty);
             return match key_glue::ensure(self.module, ty, op) {
                 Ok(row) => {
                     self.functions.insert(old, row);
@@ -521,8 +530,12 @@ fn fill(
         types: HashMap::default(),
         functions: [(source, target)].into_iter().collect(),
         signatures: HashMap::default(),
+        signature_abis: &template.signatures,
+        plans: HashMap::default(),
     };
-    let signature = s.signature(s.module.functions[source.index()].signature);
+    let old_signature = s.module.functions[source.index()].signature;
+    let old_calls = body.calls.iter().map(|c| c.signature).collect::<Vec<_>>();
+    let signature = s.signature(old_signature);
     s.module.functions[target.index()].signature = signature;
     for ty in &mut body.slots {
         s.place(ty);
@@ -575,6 +588,7 @@ fn fill(
     if let Some(error) = s.error {
         return Err(error);
     }
+    scalar_abi::rewrite(s.module, &mut body, old_signature, &s.plans, &old_calls);
     key_glue::inline_ordered(s.module, &mut body);
     s.module.functions[target.index()].body = Some(body);
     Ok(())

@@ -56,6 +56,7 @@ mod numeric_glue;
 mod ops;
 mod patterns;
 mod places;
+mod scalar_abi;
 mod spans;
 mod stable;
 mod templates;
@@ -116,7 +117,8 @@ pub struct Emitter {
     callable_adapters: HashMap<(FuncId, SigId), FuncId>,
     #[cfg(test)]
     pub(crate) callable_signature_builds: usize,
-    sigs: HashMap<Signature, SigId>,
+    sigs: HashMap<(Signature, scalar_abi::SignatureAbi), SigId>,
+    signature_abis: std::collections::BTreeMap<SigId, scalar_abi::SignatureAbi>,
     items: HashMap<DefPath, ItemId>,
     /// Per non-generic definition of the program, its function row once mentioned.
     rows: Vec<Option<(FuncId, SigId)>>,
@@ -178,9 +180,8 @@ impl Rep {
         }
     }
 }
-/// A generic signature's declared type `ty` holds its value in a place whatever the
-/// instance: a type parameter, or a view of one, which is carried as the parameter
-/// (FORM #56).
+/// A parameter remains rigid while checking its source body. Its instance follows
+/// the concrete row's carried representation, including a view of the parameter.
 fn rigid(t: &impl TyRead, ty: TyId) -> bool {
     match t.kind(ty) {
         TyKind::Param(_) => true,
@@ -201,12 +202,19 @@ impl Emitter {
         Self::default()
     }
     fn sig(&mut self, s: Signature) -> SigId {
-        if let Some(&id) = self.sigs.get(&s) {
+        self.sig_abi(s, scalar_abi::SignatureAbi::default())
+    }
+    fn sig_abi(&mut self, s: Signature, abi: scalar_abi::SignatureAbi) -> SigId {
+        let key = (s, abi);
+        if let Some(&id) = self.sigs.get(&key) {
             return id;
         }
         let id = SigId(self.module.signatures.len() as u32);
-        self.module.signatures.push(s.clone());
-        self.sigs.insert(s, id);
+        self.module.signatures.push(key.0.clone());
+        if key.1.result || key.1.params.iter().any(|x| *x) {
+            self.signature_abis.insert(id, key.1.clone());
+        }
+        self.sigs.insert(key, id);
         id
     }
     /// The read-only static row holding `bytes`, shared by equal literals.
@@ -236,8 +244,13 @@ impl Emitter {
         if let Some(Some(row)) = self.rows.get(f) {
             return Ok(*row);
         }
-        let sig = self.signature(p, f)?;
-        let func = self.function(&p.fns[f].path, sig);
+        let (sig, abi) = self.signature_recipe(p, f)?;
+        let key = InstanceKey {
+            definition: p.fns[f].path.clone(),
+            types: vec![],
+            dictionaries: vec![],
+        };
+        let func = self.add_function_abi(key, sig, abi);
         let row = (func, self.module.functions[func.index()].signature);
         if self.rows.len() <= f {
             self.rows.resize(f + 1, None);
@@ -307,8 +320,8 @@ impl Emitter {
         if let Some(&function) = self.funcs.get(&key) {
             return Ok((function, self.module.functions[function.index()].signature));
         }
-        let signature = self.signature_inst(p, t, f, signed)?;
-        let function = self.add_function(key, signature);
+        let (signature, abi) = self.signature_inst(p, t, f, signed)?;
+        let function = self.add_function_abi(key, signature, abi);
         if arguments.iter().any(|&ty| has_param(t, ty)) {
             let names: Vec<_> = arguments
                 .iter()
@@ -348,11 +361,19 @@ impl Emitter {
         self.add_function(key, sig)
     }
     fn add_function(&mut self, key: InstanceKey, sig: Signature) -> FuncId {
+        self.add_function_abi(key, sig, scalar_abi::SignatureAbi::default())
+    }
+    fn add_function_abi(
+        &mut self,
+        key: InstanceKey,
+        sig: Signature,
+        abi: scalar_abi::SignatureAbi,
+    ) -> FuncId {
         crate::cost_scope!("instance row request", format!("{key:?}"));
         if let Some(&f) = self.funcs.get(&key) {
             return f;
         }
-        let signature = self.sig(sig);
+        let signature = self.sig_abi(sig, abi);
         let instance = InstanceId(self.module.instances.len() as u32);
         self.module.instances.push(key.clone());
         let f = FuncId(self.module.functions.len() as u32);
@@ -540,6 +561,13 @@ impl Emitter {
     /// from having one: scalars by value, declared types by address, a declared result
     /// through `dest`.
     pub fn signature(&mut self, p: &Program, f: usize) -> Result<Signature, &'static str> {
+        self.signature_recipe(p, f).map(|x| x.0)
+    }
+    fn signature_recipe(
+        &mut self,
+        p: &Program,
+        f: usize,
+    ) -> Result<(Signature, scalar_abi::SignatureAbi), &'static str> {
         let fd = &p.fns[f];
         let mut t = Local::new(&p.types);
         let arguments: Vec<_> = (0..fd.generics.len())
@@ -553,51 +581,57 @@ impl Emitter {
         t: &mut impl TyRead,
         f: usize,
         arguments: &[TyId],
-    ) -> Result<Signature, &'static str> {
+    ) -> Result<(Signature, scalar_abi::SignatureAbi), &'static str> {
         crate::cost_scope!("phase", "layout/drop recipes");
         let fd = &p.fns[f];
         if fd.drop_of.is_some() {
-            return Ok(finalizer_signature());
+            return Ok((finalizer_signature(), scalar_abi::SignatureAbi::default()));
         }
         let mut params = vec![];
+        let mut abi = scalar_abi::SignatureAbi {
+            params: vec![],
+            result: true,
+        };
         for q in &fd.params {
             let ty = subst(t, q.ty, arguments);
             let rep = self.rep(p, t, ty)?;
-            if q.mode == Mode::Mut || rigid(t, q.ty) {
+            if q.mode == Mode::Mut {
                 let id = self
                     .type_row(p, t, ty)
                     .ok_or("values of this type are not built")?;
                 params.push(Param::Address(id));
+                abi.params.push(false);
                 continue;
             }
             match rep {
                 Rep::None => {}
-                Rep::Scalar(s) => params.push(Param::Value(s)),
-                Rep::Place(id) => params.push(Param::Address(id)),
+                Rep::Scalar(s) => {
+                    params.push(Param::Value(s));
+                    abi.params.push(false);
+                }
+                Rep::Place(id) => {
+                    params.push(Param::Address(id));
+                    abi.params.push(true);
+                }
             }
         }
         let result = subst(t, fd.result, arguments);
         let never = matches!(t.kind(result), TyKind::Never);
         let result_rep = self.rep(p, t, result)?;
-        let result_rep = if rigid(t, fd.result) {
-            Rep::Place(
-                self.type_row(p, t, result)
-                    .ok_or("values of this type are not built")?,
-            )
-        } else {
-            result_rep
-        };
         let (results, dest) = match result_rep {
             Rep::None => (vec![], None),
             Rep::Scalar(s) => (vec![s], None),
             Rep::Place(id) => (vec![], Some(id)),
         };
-        Ok(Signature {
-            params,
-            results,
-            dest,
-            never,
-        })
+        Ok((
+            Signature {
+                params,
+                results,
+                dest,
+                never,
+            },
+            abi,
+        ))
     }
 }
 
@@ -1685,7 +1719,24 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                     let ty = self.t.mk(TyKind::Param(i as u32));
                     parameters.push(self.e.type_row(self.p, &mut self.t, ty));
                 }
+                let body = self.e.module.functions[f.index()].body.as_ref().unwrap();
+                let mut signatures = std::collections::BTreeMap::new();
+                let ids = std::iter::once(self.e.module.functions[f.index()].signature)
+                    .chain(body.calls.iter().map(|c| c.signature))
+                    .chain(body.insts.iter().filter_map(|i| {
+                        if let Inst::FunctionRef { function, .. } = i {
+                            Some(self.e.module.functions[function.index()].signature)
+                        } else {
+                            None
+                        }
+                    }));
+                for id in ids {
+                    if let Some(abi) = self.e.signature_abis.get(&id) {
+                        signatures.entry(id).or_insert_with(|| abi.clone());
+                    }
+                }
                 let template = GenericTemplate {
+                    signatures,
                     parameters,
                     copies: std::mem::take(&mut self.copies),
                     nested: std::mem::take(&mut self.nested),

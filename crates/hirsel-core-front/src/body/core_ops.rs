@@ -941,8 +941,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        // Plain callable values already use typed address inputs and a destination
-        // result (callable_abi), exactly the runtime's child-entry convention.
+        // Native task-entry glue follows x/r.carried. The fixed runtime C entry
+        // still owns input and result buffers by address.
         let logical = self.layout_size(r, true, n)?;
         let xrep = self.rep(x).ok()?;
         let rid = self.runtime_type(r, n)?;

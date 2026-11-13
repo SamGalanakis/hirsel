@@ -513,6 +513,55 @@ impl<'c, 'a> Cx<'c, 'a> {
             _ => self.gap_ty(n, "construction of this type is not built"),
         }
     }
+    /// Tuples use the same place representation as records. Retain their argument
+    /// workspace with the other call workspaces across expressions.
+    pub(super) fn tuple(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        let mut scratch = self.call_scratch.pop().unwrap_or_default();
+        scratch.vals.clear();
+        scratch.tys.clear();
+        let fields = self.kids(n);
+        for (i, &field) in fields.iter().enumerate() {
+            let expected = want.and_then(|w| match self.t.kind(w.ty) {
+                TyKind::Tuple(xs) if w.payload == 0 => xs.get(i).copied(),
+                _ => None,
+            });
+            let (ty, value) = self.expr(field, expected.and_then(expect));
+            scratch.tys.push(ty);
+            scratch.vals.push(value);
+        }
+        let ty = self.t.mk(TyKind::Tuple(scratch.tys.clone()));
+        let value = match self.rep(ty) {
+            Ok(Rep::Place(id)) if self.live() => {
+                let slot = self.new_slot(PlaceTy::Declared(id), n);
+                for (i, (&ty, &value)) in scratch.tys.iter().zip(&scratch.vals).enumerate() {
+                    match self.rep(ty) {
+                        Ok(Rep::None) => {}
+                        Ok(rep) => {
+                            let place = rep.stored().unwrap();
+                            let address = self.address(
+                                AddressBase::Address(slot),
+                                &[Step::Field(i as u32)],
+                                place,
+                                n,
+                            );
+                            self.install(address, rep, value, n);
+                        }
+                        Err(what) => self.gap(n, what),
+                    }
+                }
+                let value = self.pointer(slot, n);
+                self.temp(ty, Some(value));
+                Some(value)
+            }
+            Err(what) => {
+                self.gap(n, what);
+                None
+            }
+            _ => None,
+        };
+        self.call_scratch.push(scratch);
+        (ty, value)
+    }
     /// A variant, written bare and selected by the expected type (LANG-7): `Ok(x)`,
     /// `None`. `args` is empty for a bare name.
     pub(super) fn construct_variant(

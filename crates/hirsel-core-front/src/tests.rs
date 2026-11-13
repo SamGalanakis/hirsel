@@ -154,6 +154,9 @@ fn run_case(path: &Path) -> Vec<String> {
             functions.insert(fd.path.0.name.clone(), id);
         }
     }
+    emitter
+        .materialize_instances()
+        .expect("materialize checked generic bodies");
     let module = &emitter.module;
     let all_emitted = refusals.is_empty() && gaps.is_empty();
     let mut want_refusals = vec![];

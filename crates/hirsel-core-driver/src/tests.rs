@@ -946,3 +946,116 @@ fn indirect_instances_follow_the_values_function_references() {
         ["apply", "leaf", "root"]
     );
 }
+
+#[test]
+fn generic_templates_survive_disk_reuse_and_materialize_the_call_closure() {
+    use hirsel_core_ir::InstanceKey;
+    let dir = tempfile::tempdir().unwrap();
+    let source = "fn id[T](take x: T) -> T { x }\nfn forward[T](take x: T) -> T { id(take x) }\nfn discard[T](take x: T) {}\nfn byte() -> u8 { forward(7u8) }\nfn root() -> u64 { forward(72623859790382856u64) }\n";
+    let fresh = Driver::default()
+        .check(request(source, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        fresh.accepted(),
+        "{:?} {:?}",
+        fresh.diagnostics,
+        fresh.incomplete
+    );
+    let cached = Driver::default()
+        .check(request(source, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    assert!(cached.rechecked.is_empty());
+    let root = DefPath::from_full("app@1/main/root").unwrap();
+    let reached = cached.reachable(&root, 16).unwrap();
+    assert!(reached.accepted(), "{:?}", reached.instances);
+    let keys = reached.instances.as_ref().unwrap();
+    assert_eq!(keys.len(), 3);
+    for name in ["id", "forward"] {
+        let path = DefPath::from_full(&format!("app@1/main/{name}")).unwrap();
+        let key = InstanceKey {
+            definition: path.clone(),
+            types: vec!["u64".into()],
+            dictionaries: vec![],
+        };
+        assert!(keys.contains(&key));
+        let source = cached.demand(&path).unwrap();
+        let template = source.check.template.as_ref().unwrap();
+        assert!(!template.copies.is_empty());
+        let ir = reached.materialized.get(&key).ir();
+        let layouts = hirsel_core_layout::compute(&ir.types).unwrap();
+        let object = hirsel_cranelift::core::emit_object_with_layouts(
+            ir,
+            &layouts,
+            &hirsel_cranelift::core::Options {
+                target: native::TARGET,
+                optimize: false,
+            },
+        )
+        .unwrap();
+        assert!(!object.bytes.is_empty());
+    }
+    // T remains potentially owned in the once-checked body. Its placeholder
+    // must retain cleanup even when no particular instantiation has been requested.
+    let discard = cached
+        .demand(&DefPath::from_full("app@1/main/discard").unwrap())
+        .unwrap();
+    assert!(
+        discard.ir.functions[discard.check.function.unwrap().index()]
+            .body
+            .as_ref()
+            .unwrap()
+            .insts
+            .iter()
+            .any(|i| matches!(i, hirsel_core_ir::Inst::Drop { .. }))
+    );
+    let byte = InstanceKey {
+        definition: DefPath::from_full("app@1/main/byte").unwrap(),
+        types: vec![],
+        dictionaries: vec![],
+    };
+    let roots = InstanceKey {
+        definition: root,
+        types: vec![],
+        dictionaries: vec![],
+    };
+    assert_eq!(cached.instances([byte, roots], 16).unwrap().len(), 6);
+}
+
+#[test]
+fn installed_generic_template_needs_no_source_or_body_recheck() {
+    let lib = tempfile::tempdir().unwrap();
+    let (_, image) = Driver::default()
+        .produce_image(
+            library_request(
+                "pub fn identity[T](take value: T) -> T { value }\n",
+                lib.path(),
+            ),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    assert!(image.is_some());
+    let image = CoreImage::open(&lib.path().join("store")).unwrap().unwrap();
+    std::fs::remove_file(lib.path().join("main.hirsel")).unwrap();
+    let app = tempfile::tempdir().unwrap();
+    let mut req = request(
+        "fn root() -> u64 { lib.identity(72623859790382856u64) }\n",
+        app.path(),
+    );
+    req.library = LibraryInput::Image(Arc::clone(&image));
+    let product = Driver::default()
+        .check(req, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    assert_eq!(image.decoded_bodies(), 0);
+    let reached = product
+        .reachable(&DefPath::from_full("app@1/main/root").unwrap(), 16)
+        .unwrap();
+    assert!(reached.accepted(), "{:?}", reached.instances);
+    assert_eq!(reached.instances.as_ref().unwrap().len(), 2);
+    assert_eq!(image.decoded_bodies(), 1);
+}

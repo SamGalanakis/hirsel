@@ -140,11 +140,12 @@ impl CheckProduct {
         options: &NativeOptions,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         let reached = self.reachable(entry, options.instance_limit)?;
-        self.emit_instances(reached.require()?, options)
+        self.emit_instances(reached.require()?, &reached.materialized, options)
     }
     fn emit_instances(
         &self,
         reached: &[InstanceKey],
+        materialized: &crate::instances::InstanceSet,
         options: &NativeOptions,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         if options.target != TARGET {
@@ -159,7 +160,9 @@ impl CheckProduct {
         let store = Store::new(&options.store)?;
         let mut objects = Vec::new();
         for instance in reached {
-            let body = self.demand_body(&instance.definition)?;
+            let instance_body = materialized.get(instance);
+            let body = &instance_body.product;
+            let ir = instance_body.ir();
             let object_key = key(
                 "hirsel.core-object.v1",
                 &(
@@ -170,20 +173,19 @@ impl CheckProduct {
                     runtime,
                     &instance,
                     &body.key,
-                    &body.ir,
+                    ir,
                 ),
             )?;
-            let (identity, bytes, compiled) = if let Some((hash, bytes)) =
-                cached(&store, object_key)?
-            {
-                (hash, bytes, false)
-            } else {
-                let bytes = emit_unit(&body.ir, options).map_err(|message| NativeStop::Emit {
-                    definition: instance.definition.clone(),
-                    message,
-                })?;
-                (publish(&store, object_key, &bytes)?, bytes, true)
-            };
+            let (identity, bytes, compiled) =
+                if let Some((hash, bytes)) = cached(&store, object_key)? {
+                    (hash, bytes, false)
+                } else {
+                    let bytes = emit_unit(ir, options).map_err(|message| NativeStop::Emit {
+                        definition: instance.definition.clone(),
+                        message,
+                    })?;
+                    (publish(&store, object_key, &bytes)?, bytes, true)
+                };
             objects.push(ObjectProduct {
                 instance: instance.clone(),
                 identity,
@@ -211,7 +213,7 @@ impl CheckProduct {
     ) -> Result<BuildProduct, NativeStop> {
         let instances = reached.require()?;
         let source = self.process_entry(entry, options)?;
-        let objects = self.emit_instances(instances, options)?;
+        let objects = self.emit_instances(instances, &reached.materialized, options)?;
         link(&source, &objects, options)
     }
     fn process_entry(

@@ -624,13 +624,39 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
             let ty = subst(&mut self.t, p.ty, types);
             let r = match self.rep(ty) {
-                Ok(Rep::None) if p.mode != Mode::Mut => continue,
+                Ok(Rep::None)
+                    if p.mode != Mode::Mut && !matches!(self.t.kind(p.ty), TyKind::Param(_)) =>
+                {
+                    continue;
+                }
                 Ok(r) => r,
                 Err(what) => {
                     self.gap(n, what);
                     return None;
                 }
             };
+            let generic_value = matches!(self.t.kind(p.ty), TyKind::Param(_));
+            if generic_value && p.mode != Mode::Mut && matches!(r, Rep::Scalar(_) | Rep::None) {
+                let id = self.e.type_row(self.p, &mut self.t, ty)?;
+                let slot = self.new_slot(PlaceTy::Declared(id), n);
+                if let (Rep::Scalar(t), Some(value)) = (r, vals[i]) {
+                    let field = self.address(
+                        AddressBase::Address(slot),
+                        &[Step::Field(0)],
+                        PlaceTy::Value(t),
+                        n,
+                    );
+                    self.inst(
+                        Inst::Store {
+                            address: field,
+                            value,
+                        },
+                        n,
+                    );
+                }
+                self.b.pools.args.push(Arg::Address(slot));
+                continue;
+            }
             let Some(v) = vals[i] else {
                 self.gap(n, "this argument is not built");
                 return None;
@@ -669,6 +695,30 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
         match dest {
             Some(a) => {
+                if matches!(self.t.kind(g.result), TyKind::Param(_)) {
+                    match self.rep(result) {
+                        Ok(Rep::None) => return None,
+                        Ok(Rep::Scalar(t)) => {
+                            let address = self.address(
+                                AddressBase::Address(a),
+                                &[Step::Field(0)],
+                                PlaceTy::Value(t),
+                                n,
+                            );
+                            let value = self.value(t);
+                            self.inst(
+                                Inst::Read {
+                                    result: value,
+                                    address,
+                                    mode: ReadMode::Bits,
+                                },
+                                n,
+                            );
+                            return Some(value);
+                        }
+                        _ => {}
+                    }
+                }
                 // A1 cleanup: an own result is a temporary until something takes it.
                 let p = self.pointer(a, n);
                 self.temp(result, Some(p));

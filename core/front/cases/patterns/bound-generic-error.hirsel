@@ -1,7 +1,7 @@
 // The argument determines E=Capacity; the outer function's u8 is not a conversion.
 // Generic code emission is B's gap; checking this valid program must not refuse.
-// expect: gap generic definitions are not built
-// expect: gap values of this type are not built
+// expect: accept
+// The result and its tuple payload now have concrete layouts.
 fn receipt[E: plain](e: E) -> Result[u64, E] { Error(e) }
 fn f() -> Result[u64, u8] {
   let r: Result[u64, Capacity] = bound bytes 0 {

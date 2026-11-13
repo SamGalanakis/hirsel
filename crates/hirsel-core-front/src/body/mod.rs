@@ -43,7 +43,10 @@ mod control;
 mod ops;
 mod patterns;
 mod places;
+mod templates;
 mod types;
+use templates::{CopySize, GenericCall, NameRecipe};
+pub use templates::{GenericTemplate, materialize};
 mod values;
 use types::*;
 
@@ -83,6 +86,8 @@ pub struct CoreCheck {
     /// The function row whose body was emitted; None when the body was refused, reached
     /// a gap, or the definition has no body.
     pub function: Option<FuncId>,
+    /// Layout/type relocations for a rigid generic body, checked once.
+    pub template: Option<GenericTemplate>,
 }
 
 /// The module being emitted: one row per instance, made on first mention, so a call
@@ -99,6 +104,10 @@ pub struct Emitter {
     types: HashMap<String, TypeRef>,
     /// The recipes of `module.types`, recomputed when rows were added.
     recipes: Vec<Recipe>,
+    generic_names: std::collections::BTreeMap<TypeId, NameRecipe>,
+    generic_calls: std::collections::BTreeMap<FuncId, GenericCall>,
+    #[cfg(test)]
+    templates: HashMap<DefPath, (FuncId, GenericTemplate)>,
 }
 
 /// How a value of a type is carried in a body (crate docs, "Values, slots and
@@ -195,7 +204,7 @@ impl Emitter {
             .collect();
         let mut dictionaries = vec![];
         for (generic, ty) in fd.generics.iter().zip(&types) {
-            for bit in 0..8 {
+            for bit in 0..u16::BITS {
                 if generic.bounds & (1 << bit) != 0 {
                     dictionaries.push(format!("{}[{ty}]", crate::decls::bound_names(1 << bit)));
                 }
@@ -209,8 +218,36 @@ impl Emitter {
         if let Some(&function) = self.funcs.get(&key) {
             return Ok((function, self.module.functions[function.index()].signature));
         }
+        for &ty in arguments {
+            self.type_row(p, t, ty)
+                .ok_or("values of this type are not built")?;
+        }
         let signature = self.signature_inst(p, t, f, arguments)?;
         let function = self.add_function(key, signature);
+        if arguments.iter().any(|&ty| has_param(t, ty)) {
+            let names: Vec<_> = arguments
+                .iter()
+                .map(|&ty| NameRecipe::of(p, t, ty))
+                .collect();
+            let mut dictionaries = vec![];
+            for (generic, name) in fd.generics.iter().zip(&names) {
+                for bit in 0..u16::BITS {
+                    if generic.bounds & (1 << bit) != 0 {
+                        dictionaries.push(NameRecipe::dictionary(
+                            &crate::decls::bound_names(1 << bit),
+                            name,
+                        ));
+                    }
+                }
+            }
+            self.generic_calls.insert(
+                function,
+                GenericCall {
+                    arguments: names,
+                    dictionaries,
+                },
+            );
+        }
         Ok((function, self.module.functions[function.index()].signature))
     }
 
@@ -257,7 +294,9 @@ impl Emitter {
         if r.is_none() {
             s.truncate(mark);
         }
-        Some(TypeId(r?.0))
+        let row = TypeId(r?.0);
+        self.remember_generic_types(p, t, ty);
+        Some(row)
     }
     /// The recipe of row `id`, or None when the table's layout is refused, in which case
     /// the rows from `mark` on are taken back so the table stays computable.
@@ -268,6 +307,7 @@ impl Emitter {
                 Err(_) => {
                     self.module.types.truncate(mark);
                     self.types.retain(|_, r| (r.0 as usize) < mark);
+                    self.generic_names.retain(|id, _| id.index() < mark);
                     return None;
                 }
             }
@@ -286,7 +326,11 @@ impl Emitter {
             TyKind::Adt(d, _) if crate::layout::handle(&p.decls[d.index()]) => {
                 return Ok(Rep::Scalar(Ty::Scalar(Scalar::U64)));
             }
-            TyKind::Tuple(_) | TyKind::Array(..) | TyKind::Adt(..) | TyKind::Fn(..) => {}
+            TyKind::Tuple(_)
+            | TyKind::Array(..)
+            | TyKind::Adt(..)
+            | TyKind::Fn(..)
+            | TyKind::Param(_) => {}
             // A view is a pointer to a place of its type, never cleaned (OWN-8).
             TyKind::View(x) => {
                 let x = *x;
@@ -375,11 +419,14 @@ impl Emitter {
     /// through `dest`.
     pub fn signature(&mut self, p: &Program, f: usize) -> Result<Signature, &'static str> {
         let fd = &p.fns[f];
-        if !fd.generics.is_empty() {
-            return Err("generic definitions are not built");
+        if fd.generics.iter().any(|g| g.region) {
+            return Err("generic region parameters are not built");
         }
         let mut t = Local::new(&p.types);
-        self.signature_inst(p, &mut t, f, &[])
+        let arguments: Vec<_> = (0..fd.generics.len())
+            .map(|i| t.mk(TyKind::Param(i as u32)))
+            .collect();
+        self.signature_inst(p, &mut t, f, &arguments)
     }
     fn signature_inst(
         &mut self,
@@ -393,7 +440,7 @@ impl Emitter {
         for q in &fd.params {
             let ty = subst(t, q.ty, arguments);
             let rep = self.rep(p, t, ty)?;
-            if q.mode == Mode::Mut {
+            if q.mode == Mode::Mut || matches!(t.kind(q.ty), TyKind::Param(_)) {
                 let id = self
                     .type_row(p, t, ty)
                     .ok_or("values of this type are not built")?;
@@ -409,7 +456,16 @@ impl Emitter {
         }
         let result = subst(t, fd.result, arguments);
         let never = matches!(t.kind(result), TyKind::Never);
-        let (results, dest) = match self.rep(p, t, result)? {
+        let result_rep = self.rep(p, t, result)?;
+        let result_rep = if matches!(t.kind(fd.result), TyKind::Param(_)) {
+            Rep::Place(
+                self.type_row(p, t, result)
+                    .ok_or("values of this type are not built")?,
+            )
+        } else {
+            result_rep
+        };
+        let (results, dest) = match result_rep {
             Rep::None => (vec![], None),
             Rep::Scalar(s) => (vec![s], None),
             Rep::View(_) => (vec![Ty::Ptr], None),
@@ -674,6 +730,7 @@ struct Cx<'c, 'a> {
     /// The synthesised type of the tail of the block being closed; unit without one.
     tail_ty: TyId,
     scope_slots: Vec<u32>,
+    copies: Vec<CopySize>,
     call_seq: u32,
     patterns: patterns::Patterns,
     /// Reused call workspaces, one for each active nesting level.
@@ -758,6 +815,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             synth_ty: UNIT,
             tail_ty: UNIT,
             scope_slots: vec![],
+            copies: vec![],
             call_seq: 0,
             patterns: patterns::Patterns::default(),
             call_scratch: vec![],
@@ -1007,6 +1065,12 @@ impl<'c, 'a> Cx<'c, 'a> {
         let from = self.address(AddressBase::Value(from), &[], PlaceTy::Declared(id), n);
         let size = self.e.size(id);
         let bytes = self.value(Ty::Scalar(Scalar::U64));
+        if self.e.generic_names.contains_key(&id) {
+            self.copies.push(CopySize {
+                value: bytes,
+                ty: id,
+            });
+        }
         self.inst(
             Inst::Const {
                 result: bytes,
@@ -1267,6 +1331,24 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.block_order();
             self.e.module.functions[f.index()].body = Some(std::mem::take(&mut self.b));
             self.out.function = Some(f);
+            if !self.fd.generics.is_empty() {
+                let mut parameters = vec![];
+                for i in 0..self.fd.generics.len() {
+                    let ty = self.t.mk(TyKind::Param(i as u32));
+                    parameters.push(self.e.type_row(self.p, &mut self.t, ty));
+                }
+                let template = GenericTemplate {
+                    parameters,
+                    copies: std::mem::take(&mut self.copies),
+                    types: self.e.generic_names.clone(),
+                    calls: self.e.generic_calls.clone(),
+                };
+                #[cfg(test)]
+                self.e
+                    .templates
+                    .insert(self.fd.path.clone(), (f, template.clone()));
+                self.out.template = Some(template);
+            }
         }
         self.out
     }
@@ -1354,7 +1436,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 (ERROR, None)
             }
             NodeKind::Array | NodeKind::RepeatArray => self.array(n, want),
-            NodeKind::Tuple => self.gap_ty(n, "tuples are not built"),
+            NodeKind::Tuple => self.tuple(n, want),
             NodeKind::Index | NodeKind::Projection => self.place_value(n),
             NodeKind::Try => self.try_(n, want),
             NodeKind::Match => self.match_(n, want),

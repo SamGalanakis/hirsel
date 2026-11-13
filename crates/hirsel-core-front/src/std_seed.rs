@@ -173,6 +173,9 @@ fn std_seed_check_report() {
         };
         rows.push((module, m.name.clone(), outcome));
     }
+    emitter
+        .materialize_instances()
+        .expect("materialize seed instances");
     // Contract tests: `// expect: run f() = R` before a test function, run when emitted.
     let mut runs = vec![];
     for s in corpus

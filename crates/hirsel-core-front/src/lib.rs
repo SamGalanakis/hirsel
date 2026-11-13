@@ -18,7 +18,7 @@ pub use library::{Library, Rows};
 mod own;
 mod types;
 
-pub use body::{CoreCheck, Counts, Emitter};
+pub use body::{CoreCheck, Counts, Emitter, GenericTemplate, materialize};
 pub use decls::*;
 pub use types::*;
 

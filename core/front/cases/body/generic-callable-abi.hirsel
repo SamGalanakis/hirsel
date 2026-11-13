@@ -1,0 +1,7 @@
+// A rigid T travels by address. A scalar callable needs an adapter rather than
+// using that address convention as an ordinary scalar function pointer.
+// expect: gap generic function-value ABI adapters are not built
+// expect: gap indirect calls with opaque generic values are not built
+fn id[T: plain](x: T) -> T { copy x }
+fn apply[T: plain](cb: fn(T) -> T, x: T) -> T { cb(x) }
+fn f() -> u8 { let cb: fn(u8) -> u8 = id; apply(cb, 7) }

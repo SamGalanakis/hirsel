@@ -1,5 +1,5 @@
 // LANG-12: structural inference descends into Inline's element, keeping its length.
 // Before the fix T stayed open because the new array form was skipped by call inference.
-// expect: gap generic definitions are not built
+// expect: accept
 fn first[T: plain, U](xs: Inline[T, 2], y: U) -> u8 { 0 }
 fn f(xs: Inline[u8, 2]) -> u8 { first(xs, false) }

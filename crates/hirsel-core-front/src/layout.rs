@@ -56,6 +56,17 @@ impl<T: TyRead> Shapes<'_, T> {
                 }]),
                 None,
             ),
+            // A rigid parameter is an opaque owned place until materialization.
+            // A non-plain placeholder keeps every potential owner/drop edge alive;
+            // the concrete shape replaces it before any execution.
+            TyKind::Param(_) if self.module => (
+                LRepr::Own,
+                record(vec![(
+                    "opaque",
+                    FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8))),
+                )]),
+                None,
+            ),
             TyKind::Unit => (LRepr::Own, Body::Record(vec![]), None),
             TyKind::Fn(_, _, _, callable) => (
                 if callable == Callable::Scoped {
@@ -312,6 +323,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 FieldTy::Array(Box::new(self.field(x)?), n)
             }
             TyKind::Tuple(_) | TyKind::Unit => FieldTy::Inline(self.shape(ty)?),
+            TyKind::Param(_) if self.module => FieldTy::Inline(self.shape(ty)?),
             TyKind::View(_) => FieldTy::Borrow,
             TyKind::Fn(_, _, _, callable) => match callable {
                 Callable::Plain => FieldTy::Fn,

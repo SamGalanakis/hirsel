@@ -61,6 +61,16 @@ impl<'c, 'a> Cx<'c, 'a> {
             .tys
             .extend(scratch.found.iter().map(|t| t.unwrap_or(ERROR)));
         let ty = subst(&mut self.t, ty, &scratch.tys);
+        // A direct rigid T uses an address ABI. Exposing its scalar/unit closed
+        // instance as a normal callable requires an adapter, which is not emitted.
+        let direct_result = matches!(self.t.kind(g.result), TyKind::Param(_));
+        let direct_params = g
+            .params
+            .iter()
+            .any(|p| p.mode != Mode::Mut && matches!(self.t.kind(p.ty), TyKind::Param(_)));
+        if direct_result || direct_params {
+            return self.gap_ty(n, "generic function-value ABI adapters are not built");
+        }
         let (function, _) = match self.instance_row(f, &scratch.tys) {
             Ok(row) => row,
             Err(what) => return self.gap_ty(n, what),
@@ -106,6 +116,13 @@ impl<'c, 'a> Cx<'c, 'a> {
                 return (ERROR, None);
             }
         };
+        if matches!(self.t.kind(result), TyKind::Param(_))
+            || scratch.params.iter().any(|(mode, ty)| {
+                *mode != Mode::Mut && matches!(self.t.kind(*ty), TyKind::Param(_))
+            })
+        {
+            return self.gap_ty(n, "indirect calls with opaque generic values are not built");
+        }
         if args.len() < scratch.params.len() {
             self.refuse_at(
                 "LANG-11",

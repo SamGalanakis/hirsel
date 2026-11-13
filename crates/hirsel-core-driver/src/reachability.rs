@@ -20,6 +20,7 @@ pub struct Reachable<'a> {
     pub incomplete: Vec<&'a Incomplete>,
     pub first_stops: Vec<GapStop>,
     pub instances: Result<Vec<InstanceKey>, InstanceStop>,
+    pub(crate) materialized: crate::instances::InstanceSet,
 }
 impl Reachable<'_> {
     pub fn accepted(&self) -> bool {
@@ -47,13 +48,15 @@ impl Reachable<'_> {
 }
 impl CheckProduct {
     pub fn reachable(&self, entry: &DefPath, limit: usize) -> io::Result<Reachable<'_>> {
-        let instances = self.instances(
+        let mut materialized = crate::instances::InstanceSet::default();
+        let instances = self.instances_into(
             [InstanceKey {
                 definition: entry.clone(),
                 types: vec![],
                 dictionaries: vec![],
             }],
             limit,
+            &mut materialized,
         );
         let mut bodies = BTreeSet::new();
         let mut unavailable = BTreeSet::new();
@@ -223,6 +226,7 @@ impl CheckProduct {
             incomplete,
             first_stops: first_stops.into_values().collect(),
             instances,
+            materialized,
         })
     }
 }

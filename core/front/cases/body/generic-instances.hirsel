@@ -1,0 +1,25 @@
+// Source bodies are checked once with rigid T. Mechanical instances replace
+// layout rows and copy sizes; the u64 oracle detects a truncated placeholder copy.
+// expect: accept
+// expect: run width() = 72623859790382856
+// expect: run wrapped() = 72623859790382856
+// expect: run pair() = 145247719580765712
+// expect: run swapped() = 9
+type Wrap[T] { value: T }
+fn id[T](take x: T) -> T { x }
+fn forward[T](take x: T) -> T { id(take x) }
+fn wrap[T](take x: T) -> Wrap[T] { Wrap(value: take x) }
+fn dup[T: plain](x: T) -> (T, T) { (copy x, copy x) }
+fn swap[T: plain](mut a: T, mut b: T) {
+  let old = copy a
+  a = copy b
+  b = take old
+}
+fn width() -> u64 { forward(72623859790382856u64) }
+fn wrapped() -> u64 { let r = wrap(72623859790382856u64); r.value }
+fn pair() -> u64 { match dup(72623859790382856u64) { (a, b) => a + b } }
+fn swapped() -> u8 { let mut a: u8 = 3; let mut b: u8 = 9; swap(mut a, mut b); a }
+
+// Zero-sized type arguments still occupy their declared address parameter.
+// expect: run unit() = 3
+fn unit() -> u8 { id(()); 3 }

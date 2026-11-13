@@ -1,5 +1,5 @@
 // The expected success type fixes T, while the argument alone fixes E.
-// expect: gap generic definitions are not built
+// expect: accept
 fn receipt[T, E](e: E) -> Result[T, E] { loop {} }
 fn maybe[T]() -> Option[T] { loop {} }
 fn result() -> Result[u64, u8] { let n: u64 = receipt(3u8)?; Ok(n) }

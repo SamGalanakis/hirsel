@@ -1,6 +1,6 @@
 // LANG-18/12: neither a bound nor the function result determines receipt's E.
 // The open argument is refused at the operand call.
-// expect: gap generic definitions are not built
+// expect: accept
 // expect: refuse LANG-12 at 7:63
 fn receipt[E]() -> Result[u64, E] { loop {} }
 fn f() -> Result[u64, u8] {

@@ -7,6 +7,8 @@
 ;   i3  fn to_i32(x: f64) -> i32 { match float.to_i32(x) { Ok(v) => v, Err(_) => -1 } }
 ;   i4  fn widen(x: i16) -> i64 { int.widen(x) }
 ;   i5  fn approx(x: u64) -> f32 { float.from_int(x) }
+;   i6  fn code(n: u32) -> u32 { match char.from_u32(n) { Some(c) => char.to_u32(c), None => 0xFFFFFFFF } }
+;   i7  (no source: try_narrow's char value without its flag, which FORM fixes at 0)
 ;
 ; Behaviour, derived by hand:
 ; run: f0(7) -> 7
@@ -31,6 +33,17 @@
 ; run: f4(32767) -> 32767
 ; run: f5(16777217) -> 16777216      ; 2^24+1 lies halfway; ties to even mantissa 2^24
 ; run: f5(16777219) -> 16777220      ; halfway between 2^24+2 and 2^24+4; 2^24+4 is even
+; A char is a Unicode scalar value: 0..=0xD7FF or 0xE000..=0x10FFFF.
+; run: f6(65) -> 65
+; run: f6(55295) -> 55295            ; 0xD7FF, the last before the surrogates
+; run: f6(55296) -> 4294967295       ; 0xD800, a surrogate: None
+; run: f6(57343) -> 4294967295       ; 0xDFFF, the last surrogate
+; run: f6(57344) -> 57344            ; 0xE000
+; run: f6(1114111) -> 1114111        ; 0x10FFFF, the largest
+; run: f6(1114112) -> 4294967295     ; past 0x10FFFF
+; run: f7(66) -> 66
+; run: f7(55296) -> 0                ; not a char: the value is 0, never the bits
+; run: f7(4294967295) -> 0
 core v0
 item i0 = samples@0/convert/to_u8
 item i1 = samples@0/convert/sign
@@ -38,17 +51,22 @@ item i2 = samples@0/convert/bits
 item i3 = samples@0/convert/to_i32
 item i4 = samples@0/convert/widen
 item i5 = samples@0/convert/approx
+item i6 = samples@0/convert/code
+item i7 = samples@0/convert/raw
 sig g0 = (i64) -> (u8)
 sig g1 = (f64) -> (i32)
 sig g2 = (f32) -> (u32)
 sig g3 = (i16) -> (i64)
 sig g4 = (u64) -> (f32)
+sig g5 = (u32) -> (u32)
 inst n0 = samples@0/convert/to_u8 [] []
 inst n1 = samples@0/convert/sign [] []
 inst n2 = samples@0/convert/bits [] []
 inst n3 = samples@0/convert/to_i32 [] []
 inst n4 = samples@0/convert/widen [] []
 inst n5 = samples@0/convert/approx [] []
+inst n6 = samples@0/convert/code [] []
+inst n7 = samples@0/convert/raw [] []
 fn f0 = n0 g0 {
 b0(v0: i64):
   v1: u8, v2: bool = try_narrow v0     ; v1 is meaningful only when v2
@@ -101,4 +119,21 @@ fn f5 = n5 g4 {
 b0(v0: u64):
   v1: f32 = int_to_float v0
   return v1
+}
+fn f6 = n6 g5 {
+b0(v0: u32):
+  v1: char, v2: bool = try_narrow v0   ; char.from_u32
+  branch v2, b1, b2
+b1:
+  v3: u32 = widen v1                   ; char.to_u32
+  return v3
+b2:
+  v4: u32 = const 4294967295
+  return v4
+}
+fn f7 = n7 g5 {
+b0(v0: u32):
+  v1: char, v2: bool = try_narrow v0
+  v3: u32 = widen v1
+  return v3
 }

@@ -495,7 +495,16 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             }
             let (from, to) = (c.ty(operand)?, c.ty(result)?);
             let flag_ty = flag.map(|f| c.ty(f)).transpose()?;
+            let (char_ty, u32_ty) = (Ty::Scalar(Scalar::Char), Ty::Scalar(Scalar::U32));
             let ok = match mode {
+                // A char converts to and from u32 only (`char.to_u32`, `char.from_u32`).
+                _ if from == char_ty || to == char_ty => match mode {
+                    ConvertMode::Widen => (from, to, flag_ty) == (char_ty, u32_ty, None),
+                    ConvertMode::TryNarrow => {
+                        (from, to, flag_ty) == (u32_ty, char_ty, Some(bool_ty))
+                    }
+                    _ => false,
+                },
                 ConvertMode::Widen | ConvertMode::Truncate => match (from.int(), to.int(), flag_ty)
                 {
                     (Some((fs, a)), Some((ts, b)), None) if mode == ConvertMode::Widen => {

@@ -363,7 +363,7 @@ fn compare_convert_sample_matches_evaluator() {
             .collect();
         cases.push((f, args));
     }
-    assert_eq!(cases.len(), 22);
+    assert_eq!(cases.len(), 32);
     agree(&module, &cases);
 }
 

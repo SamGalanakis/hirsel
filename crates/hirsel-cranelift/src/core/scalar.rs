@@ -216,7 +216,26 @@ impl Function<'_, '_, '_> {
         v: Value,
     ) -> (Value, Option<Value>) {
         let target = ty(to);
+        let char_ty = Ty::Scalar(Scalar::Char);
         match mode {
+            // char -> u32 keeps the 32-bit value; u32 -> char checks the scalar value
+            // and yields 0 when it is not one, so no invalid char exists.
+            ConvertMode::Widen if from == char_ty => (v, None),
+            ConvertMode::TryNarrow if to == char_ty => {
+                let low = self.b.ins().icmp_imm(IntCC::UnsignedLessThan, v, 0xD800);
+                let above = self
+                    .b
+                    .ins()
+                    .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, v, 0xE000);
+                let max = self
+                    .b
+                    .ins()
+                    .icmp_imm(IntCC::UnsignedLessThanOrEqual, v, 0x10FFFF);
+                let high = self.b.ins().band(above, max);
+                let ok = self.b.ins().bor(low, high);
+                let zero = self.b.ins().iconst(types::I32, 0);
+                (self.b.ins().select(ok, v, zero), Some(ok))
+            }
             ConvertMode::Widen | ConvertMode::Truncate | ConvertMode::TryNarrow => {
                 let (si, wi) = from.int().unwrap();
                 let (sj, wj) = to.int().unwrap();

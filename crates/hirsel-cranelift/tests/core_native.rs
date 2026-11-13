@@ -462,7 +462,7 @@ fn compare_convert_sample_speed_matches_evaluator_through_c_abi() {
     let text = include_str!("../../hirsel-core-ir/samples/compare-convert.core");
     let module = text::parse(text).unwrap();
     let runs = sample_runs(&module, text);
-    assert_eq!(runs.len(), 22);
+    assert_eq!(runs.len(), 32);
     execute(&module, &runs, true);
 }
 

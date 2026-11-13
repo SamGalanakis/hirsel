@@ -233,12 +233,18 @@ pub enum CompareOp {
     Ge,
 }
 
-/// LIR `ConvertMode`, unchanged; see its documentation for each mode's exact result.
+/// LIR `ConvertMode`; see its documentation for each mode's exact result. A `char`
+/// converts to and from `u32` only (`char.to_u32`, `char.from_u32`), by `Widen` and
+/// `TryNarrow`; no other mode takes a `char`.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum ConvertMode {
+    /// The same value at a type that holds every value of the operand; `char` to
+    /// `u32` is its code point.
     Widen,
     Truncate,
-    /// `flag` (bool) is true exactly when the operand is representable.
+    /// `flag` (bool) is true exactly when the operand is representable. `u32` to
+    /// `char`: true exactly for a Unicode scalar value (0..=0xD7FF, 0xE000..=0x10FFFF),
+    /// and the value is then the operand, else 0, so no invalid `char` exists.
     TryNarrow,
     /// `float.to_<int>` (SEM-2) to any integer type: the value truncated toward
     /// zero, and `flag` (u8): 0 in range, 1 NaN, 2 out of range (infinities

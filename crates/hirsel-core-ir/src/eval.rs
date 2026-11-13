@@ -1278,7 +1278,13 @@ impl Machine<'_> {
                 mode,
             } => {
                 let (from, to, x) = (ty(operand), ty(result), vals[operand.index()]);
+                let char_ty = Ty::Scalar(Scalar::Char);
                 let (r, fl) = match mode {
+                    ConvertMode::Widen if from == char_ty => (x, 0),
+                    ConvertMode::TryNarrow if to == char_ty => {
+                        let ok = (x < 0xD800) || (0xE000..=0x10FFFF).contains(&x);
+                        (if ok { x } else { 0 }, u64::from(ok))
+                    }
                     ConvertMode::Widen => (fit(to, int(from, x)).expect("widen fits"), 0),
                     ConvertMode::Truncate => (mask(to, x), 0),
                     ConvertMode::TryNarrow => {

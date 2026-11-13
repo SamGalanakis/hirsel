@@ -281,6 +281,17 @@ impl FunctionEmitter<'_> {
                     }))
                 }
             }
+            ConvertMode::TryNarrow if to == Ty::Scalar(Scalar::Char) => {
+                // A Unicode scalar value, else 0: no invalid char exists.
+                let a = self.calc(format!("icmp ult i32 {x}, 55296"));
+                let b = self.calc(format!("icmp uge i32 {x}, 57344"));
+                let c = self.calc(format!("icmp ule i32 {x}, 1114111"));
+                let high = self.calc(format!("and i1 {b}, {c}"));
+                let ok = self.calc(format!("or i1 {a}, {high}"));
+                let status = self.calc(format!("zext i1 {ok} to i8"));
+                self.put(flag.unwrap(), &status);
+                self.calc(format!("select i1 {ok}, i32 {x}, i32 0"))
+            }
             ConvertMode::TryNarrow => {
                 // Extend to i128 before range comparisons, preserving signedness.
                 let wide = self.calc(format!(

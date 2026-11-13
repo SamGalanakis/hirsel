@@ -1750,6 +1750,44 @@ fn joined_cause_views_use_core_layout() {
 }
 
 #[test]
+fn release_imports_keep_transitive_bodies_in_either_unit_order() {
+    let leaf = "define i64 @leaf(i64 %x) { %y = mul i64 %x, 3\n ret i64 %y }";
+    let middle = "declare i64 @leaf(i64)\ndefine i64 @middle(i64 %x) { %a = call i64 @leaf(i64 %x)\n %y = add i64 %a, 1\n ret i64 %y }";
+    let entry = "declare i64 @middle(i64)\ndefine i64 @entry(i64 %x) { %y = call i64 @middle(i64 %x)\n ret i64 %y }";
+    let dir = std::env::temp_dir().join(format!("hirsel-core-imports-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let prefix = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    std::fs::write(dir.join("probe.c"), "#include <stdint.h>\nextern uint64_t entry(uint64_t);\nint main(void) {uint64_t xs[]={0,1,UINT64_MAX,UINT64_MAX/3}; for(unsigned i=0;i<4;i++) if(entry(xs[i])!=xs[i]*3+1) return 1; return 0;}\n").unwrap();
+    for order in [
+        [(leaf, true), (middle, true), (entry, false)],
+        [(entry, false), (middle, true), (leaf, true)],
+    ] {
+        let units = order.map(|(ir, imported)| hirsel_llvm_lazy::Unit { ir, imported });
+        let object = hirsel_llvm_lazy::emit_program(&units, &["entry".into()]).unwrap();
+        std::fs::write(dir.join("unit.o"), object).unwrap();
+        let undefined = output(
+            Command::new(prefix.join("bin/llvm-nm"))
+                .arg("--undefined-only")
+                .arg(dir.join("unit.o")),
+        );
+        assert!(
+            undefined.trim().is_empty(),
+            "small supplied bodies must inline: {undefined}"
+        );
+        output(
+            Command::new(prefix.join("bin/clang"))
+                .arg(format!("--ld-path={}", prefix.join("bin/ld.lld").display()))
+                .arg(dir.join("probe.c"))
+                .arg(dir.join("unit.o"))
+                .arg("-o")
+                .arg(dir.join("probe")),
+        );
+        output(&mut Command::new(dir.join("probe")));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn lazy_component_preserves_exact_core_objects() {
     for source in [
         include_str!("../../../hirsel-core-ir/samples/arith.core"),

@@ -57,6 +57,8 @@ void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
     LLVMModuleRef module = standalone ? NULL : LLVMModuleCreateWithNameInContext("hirsel-core", context);
     LLVMMemoryBufferRef buffer = NULL;
     int failed;
+    char **imports = NULL;
+    size_t imports_len = 0, imports_capacity = 0;
     for (size_t i = 0; i < count; ++i) {
         LLVMModuleRef unit = NULL;
         buffer = LLVMCreateMemoryBufferWithMemoryRangeCopy((const char*)units[i].data, units[i].len, "hirsel-core");
@@ -65,8 +67,19 @@ void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
         if (failed || !unit) { error(out, message); LLVMDisposeMessage(message); goto done; }
         if (units[i].imported) {
             for (LLVMValueRef f = LLVMGetFirstFunction(unit); f; f = LLVMGetNextFunction(f)) {
-                if (LLVMCountBasicBlocks(f) && LLVMGetLinkage(f) == LLVMExternalLinkage)
-                    LLVMSetLinkage(f, LLVMAvailableExternallyLinkage);
+                if (LLVMCountBasicBlocks(f) && LLVMGetLinkage(f) == LLVMExternalLinkage) {
+                    size_t len;
+                    const char *name = LLVMGetValueName2(f, &len);
+                    if (imports_len == imports_capacity) {
+                        imports_capacity = imports_capacity ? imports_capacity * 2 : 8;
+                        imports = realloc(imports, imports_capacity * sizeof(*imports));
+                        if (!imports) abort();
+                    }
+                    imports[imports_len] = malloc(len + 1);
+                    if (!imports[imports_len]) abort();
+                    memcpy(imports[imports_len], name, len);
+                    imports[imports_len++][len] = 0;
+                }
             }
         }
         // The linker resolves each unit's instance-named declarations and
@@ -74,6 +87,11 @@ void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
         if (standalone) module = unit;
         else if (LLVMLinkModules2(module, unit)) { error(out, "LLVM module composition failed"); goto done; }
     }
+    // IRLinker may discard an unreferenced available_externally definition
+    // before a later unit supplies its callers. Keep definitions until every
+    // unit is linked, then restore their non-emitting inline-import linkage.
+    for (size_t i = 0; i < imports_len; ++i)
+        LLVMSetLinkage(LLVMGetNamedFunction(module, imports[i]), LLVMAvailableExternallyLinkage);
     if (export_count) {
         for (LLVMValueRef f = LLVMGetFirstFunction(module); f; f = LLVMGetNextFunction(f)) {
             if (!LLVMCountBasicBlocks(f) || LLVMGetLinkage(f) != LLVMExternalLinkage) continue;
@@ -122,6 +140,8 @@ void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
     else { copy(out, LLVMGetBufferStart(buffer), LLVMGetBufferSize(buffer), 0); LLVMDisposeMemoryBuffer(buffer); }
     if (message) LLVMDisposeMessage(message);
 done:
+    for (size_t i = 0; i < imports_len; ++i) free(imports[i]);
+    free(imports);
     if (module) LLVMDisposeModule(module);
     LLVMContextDispose(context); LLVMDisposeTargetMachine(machine);
 }

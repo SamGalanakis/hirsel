@@ -25,3 +25,19 @@ glue through the ABI module.
 them with `python3 crates/hirsel-core-rt/measure.py --out <new-directory>` from
 the repo root. `--abi-only` instead compiles and runs `tests/abi.c` against the
 published header and a static archive. Ordinary Rust tests run through Buck.
+
+`include/hirsel_core_process.h` declares process entry and the host provider ABI.
+The driver pins a Config with immutable argv, explicit grants, the provider and
+source-bound diagnostic callbacks. The generated entry thunk calls main,
+cleans its returned error and live owners, and then writes MainResult. Only
+hirsel_core_run maps that completed outcome to PROG-3's process status.
+
+Provider callbacks receive a Request at issue and an Outcome at delivery. A
+replay adapter supplies the result at issue without calling the OS adapter.
+Read and mkdtemp append into the caller's Buffer capacity and update its len;
+write reports committed bytes even on error. No operation admits language
+storage. IoError tags and operation numbers are fixed in the process header.
+The OS adapter pins configured directory grants and uses Linux openat2 with
+RESOLVE_BENEATH for every path traversal. Unsupported kernels report ENOSYS.
+It permits links that stay beneath a grant and never follows links during
+remove_tree. Host descriptor tables belong to the run, outside task limits.

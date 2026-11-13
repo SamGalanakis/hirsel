@@ -9,7 +9,11 @@ pub mod block;
 pub mod causes;
 pub mod counted;
 pub mod limit;
+pub mod os;
+pub mod process;
+pub mod provider;
 pub mod region;
+pub mod tasks;
 
 use limit::Funding;
 
@@ -24,6 +28,7 @@ pub struct Capacity {
 /// The hidden first argument of native functions. A task owns its context;
 /// custody can carry funding records beyond this context's lifetime.
 pub struct Context {
+    pub(crate) cancel_requested: bool,
     pub(crate) current: Funding,
     stack: Vec<Funding>,
     pub(crate) finalizing: usize,
@@ -37,6 +42,7 @@ impl Context {
     /// The task provider admits its task record and primary cell separately.
     pub fn new(bytes: u64) -> Self {
         Self {
+            cancel_requested: false,
             current: Funding::root(bytes),
             stack: Vec::new(),
             finalizing: 0,
@@ -102,3 +108,6 @@ mod counted_tests;
 mod region_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod provider_tests;

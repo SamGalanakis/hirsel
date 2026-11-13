@@ -1138,7 +1138,7 @@ def first_party(meta: dict) -> str:
     archive_consumers = set()
     out = [
         HEADER,
-        'load("//tools/buck2:defs.bzl", "hirsel_binary", "hirsel_build_script", "hirsel_command_test", "hirsel_core_llvm_native_test", "hirsel_core_image", "hirsel_products", "hirsel_library", "hirsel_link_hosts_test", "hirsel_runtime_archives", "hirsel_core_runtime_archives", "hirsel_tsan_runtime_archives", "hirsel_script_test", "hirsel_source_audit", "hirsel_test", "hirsel_toolchain_bundle")\n',
+        'load("//tools/buck2:defs.bzl", "hirsel_binary", "hirsel_build_script", "hirsel_command_test", "hirsel_core_llvm_native_test", "hirsel_core_driver_native_test", "hirsel_core_image", "hirsel_products", "hirsel_library", "hirsel_link_hosts_test", "hirsel_runtime_archives", "hirsel_core_runtime_archives", "hirsel_tsan_runtime_archives", "hirsel_script_test", "hirsel_source_audit", "hirsel_test", "hirsel_toolchain_bundle")\n',
         'load("//tools/buck2:native_selection.bzl", "hirsel_native_selection")\n',
     ]
 
@@ -1287,6 +1287,7 @@ def first_party(meta: dict) -> str:
                 out.append("\n" + call("hirsel_test", name=f"{name}-test-{target['name']}", deps=own + test_deps, bin_exes=binaries,
                                          shards=count if count > 1 or case_shards else None, case_shards=case_shards or None, costs=costs,
                                          **test_attrs(f"{name}-test-{target['name']}", src), **attrs))
+    out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-native", data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml"])')))
     out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-native", data=Raw('glob(["core/front/**", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-ir/samples/**", "crates/hirsel-llvm/Cargo.toml"])')))
     out.append("\n" + call("hirsel_library", name="hirsel-core-rt-native-fixture", crate="hirsel_core_rt", crate_root="crates/hirsel-core-rt/src/lib.rs",
         srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["testing"], deps=declared_deps(next(p for p in packages.values() if p["name"] == "hirsel-core-rt"), packages),

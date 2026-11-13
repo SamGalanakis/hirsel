@@ -3,6 +3,8 @@
 mod diagnostics;
 mod image;
 mod instances;
+mod native;
+pub use native::{Backend, BuildProduct, NativeOptions, NativeStop, ObjectProduct};
 mod meter;
 pub use diagnostics::{Diagnostic, IncompleteDiagnostic, SourceSite};
 pub use image::{CoreImage, LibraryInput};
@@ -141,6 +143,7 @@ pub struct CheckProduct {
     pub snapshot: ContentHash,
     pub image: Option<Arc<CoreImage>>,
     pub(crate) library: Option<Arc<hirsel_core_front::Library>>,
+    native_entry: Option<native::EntryBinding>,
     records: Option<Root>,
 }
 impl CheckProduct {
@@ -157,6 +160,7 @@ impl CheckProduct {
             snapshot: ContentHash::default(),
             image: None,
             library: None,
+            native_entry: None,
             records: None,
         }
     }
@@ -228,6 +232,7 @@ struct Root {
     definitions: BTreeMap<DefPath, Record>,
     diagnostics: Vec<Refusal>,
     incomplete: Vec<Incomplete>,
+    native_entry: Option<native::EntryBinding>,
 }
 struct Cache {
     bytes: Vec<u8>,
@@ -259,6 +264,7 @@ impl Cache {
     }
     fn product(&self, hash: ContentHash) -> Option<CheckProduct> {
         let mut result = CheckProduct {
+            native_entry: self.root.native_entry.clone(),
             diagnostics: self.root.diagnostics.clone(),
             incomplete: self.root.incomplete.clone(),
             root: hash,
@@ -528,6 +534,7 @@ impl Driver {
                 library.as_deref(),
             );
             p.entry = request.entry.clone();
+            result.native_entry = request.entry.as_ref().map(|e| native::bind_entry(&p, e));
             result.diagnostics.extend(p.refusals.iter().cloned());
             result.incomplete.extend(p.gaps.iter().map(|g| Incomplete {
                 primary: g.site,
@@ -676,6 +683,7 @@ impl Driver {
                 &definitions,
                 &result.diagnostics,
                 &result.incomplete,
+                &result.native_entry,
             );
             let record = writer.record(&footer)?;
             use std::io::Write;
@@ -691,6 +699,7 @@ impl Driver {
                     definitions,
                     diagnostics: vec![],
                     incomplete: vec![],
+                    native_entry: result.native_entry.clone(),
                 });
             }
             meter.finish("publish/footer");

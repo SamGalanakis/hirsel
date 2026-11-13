@@ -48,3 +48,25 @@ gaps and tool/resource errors exit 2; an accepted check exits 0.
 `--metrics <file>` records exclusive user-instruction stages or a counter refusal.
 Their sum is the independently read counter interval. External process-tree perf
 also counts startup and reporting outside that interval; report that residual.
+
+`hirsel-core build <package-dir> --runtime <libhirsel_core_rt.a> -o program`
+uses the same checked request, collects reachable instances, emits one object per
+checked body and links the independently built core runtime. `run` builds and
+executes it, forwarding arguments after `--` and returning its process status.
+`--backend cranelift|llvm` selects an engine. Development builds and runs default
+to Cranelift; `--release` defaults to LLVM with optimization. `--cc`, `--target`
+and `--limit` name the C linker driver, target and root logical limit. The current
+native target is x86_64-unknown-linux-gnu. `--json` includes the executable,
+compiled-object count, link count and explicit stage stop.
+
+Object keys include compiler, checked-body/read identity, emitted module, target,
+backend, optimization and runtime bytes. Executables additionally key the entry
+thunk, headers and linker version. A warm build reads integrity-checked products
+and compiles/links nothing; an implementation edit rebuilds its object and relinks.
+The real `hirsel_core_run` boundary maps PROG-3 outcomes after cleanup. There is no
+temporary process runtime or scalar-main product path. Entry destination/layout,
+capability bindings and owned error cleanup currently stop explicitly where the
+checker has not supplied the necessary products. `//:core-driver-native` exercises
+scalar calls, Exit mapping and checked failure on both engines with a C fixture
+that supplies the still-missing Result carrier. This is partial native proof,
+not acceptance of source-language main or M1.

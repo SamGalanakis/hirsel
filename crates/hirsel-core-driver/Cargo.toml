@@ -15,12 +15,16 @@ hirsel-core-syntax = { path = "../hirsel-core-syntax" }
 hirsel-core-resolve = { path = "../hirsel-core-resolve" }
 hirsel-core-front = { path = "../hirsel-core-front" }
 hirsel-core-ir = { path = "../hirsel-core-ir" }
+hirsel-core-layout = { path = "../hirsel-core-layout" }
+hirsel-cranelift = { path = "../hirsel-cranelift" }
+hirsel-llvm = { path = "../hirsel-llvm" }
 hirsel-intern = { path = "../hirsel-intern" }
 hirsel-guard = { path = "../hirsel-guard" }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 bincode = "1.3.3"
 sha2 = "0.10"
+tempfile = "3"
 
 [dev-dependencies]
 tempfile = "3"

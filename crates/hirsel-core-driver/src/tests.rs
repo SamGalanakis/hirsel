@@ -1,7 +1,7 @@
 use super::*;
 use hirsel_core_ir::{FuncId, eval};
 
-fn request(source: &str, dir: &Path) -> CheckRequest {
+pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
     let source_file = dir.join("main.hirsel");
     std::fs::write(&source_file, source).unwrap();
     CheckRequest {
@@ -606,7 +606,10 @@ fn entry_waits_policy_is_an_explicit_cached_request_input() {
     let mut req = request(source, dir.path());
     req.entry = Some(DefPath::from_full("app@1/main/main").unwrap());
     let entry = driver.check(req, &mut Meter::new(false)).unwrap();
-    assert!(entry.accepted(), "{:?}", entry.diagnostics);
+    // PROG-3 now refuses unit main. Entry still suppresses the unused-waits
+    // refusal; checking this same body as an ordinary function must restore it.
+    assert!(entry.diagnostics.iter().any(|d| d.rule == "PROG-3"));
+    assert!(!entry.diagnostics.iter().any(|d| d.rule == "LANG-8"));
     let library = driver
         .check(request(source, dir.path()), &mut Meter::new(false))
         .unwrap();

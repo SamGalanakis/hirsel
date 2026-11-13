@@ -1222,6 +1222,23 @@ _runtime_archives = rule(
     },
 )
 
+def hirsel_core_driver_native_test(name, data):
+    _rust_test(
+        name = name,
+        harness = "//:hirsel-core-driver-unittest-harness",
+        data = data,
+        files_env = {"HIRSEL_CORE_RT_ARCHIVE": "//:hirsel-core-rt[staticlib]"},
+        args = ["native::tests::", "--ignored"],
+        cwd = "crates/hirsel-core-driver",
+        test_binary = "hirsel-core-driver-native",
+        llvm = "root//tools/buck2/native-toolchain:llvm",
+        llvm_libraries = "toolchains//:llvm-libraries",
+        request = _request("hirsel-core-driver-unittest"),
+        exec_compatible_with = _test_platform("hirsel-core-driver-unittest"),
+        pool = not TESTS_ON_HOST,
+        visibility = ["PUBLIC"],
+    )
+
 def hirsel_core_llvm_native_test(name, data):
     """CoreIR executable agreement uses the core runtime, with no old std products."""
     _rust_test(

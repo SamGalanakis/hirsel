@@ -211,6 +211,8 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
                 | "hirsel-intern"
                 | "hirsel-guard"
                 | "hirsel-graph"
+                | "hirsel-cranelift"
+                | "hirsel-llvm"
         ),
         _ if from == "hirsel-core-resolve" => matches!(
             to,

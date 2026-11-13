@@ -1,0 +1,6 @@
+// LANG-14: resources cannot enter an owning environment at any depth.
+// expect: refuse LANG-14 at 5:25
+resource type R { value: u64 }
+fn bad(take r: R) {
+  let _ = fn() -> u64 { r.value }
+}

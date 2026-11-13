@@ -1,0 +1,5 @@
+// LANG-14: plain capability captures are forbidden, at first use in the body.
+// expect: refuse LANG-14 at 4:25
+fn bad(d: Dir) {
+  let _ = fn() -> Dir { d }
+}

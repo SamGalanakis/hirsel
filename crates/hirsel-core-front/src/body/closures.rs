@@ -419,17 +419,31 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 _ => {}
             }
         }
-        if !written_result && let Some(w) = want.filter(|w| w.payload == 0) {
-            if let TyKind::Fn(_, result, _, _) = self.t.kind(w.ty)
-                && *result != HOLE
-            {
-                fd.result = *result;
-            }
-        }
-        let scoped = self.kind(n) == NodeKind::ScopedClosure
-            || want.is_some_and(|w| {
-                matches!(self.t.kind(w.ty), TyKind::Fn(_, _, _, Callable::Scoped))
+        let expected = want
+            .filter(|w| w.payload == 0)
+            .map(|w| w.ty)
+            .and_then(|ty| {
+                if matches!(self.t.kind(ty), TyKind::Fn(..)) {
+                    Some(ty)
+                } else {
+                    self.result_parts(ty).map(|(_, ok, _)| ok)
+                }
             });
+        if !written_result
+            && let Some(ty) = expected
+            && let TyKind::Fn(_, result, _, _) = self.t.kind(ty)
+            && *result != HOLE
+        {
+            fd.result = *result;
+        }
+        let expected_kind = expected.and_then(|ty| match self.t.kind(ty) {
+            TyKind::Fn(_, _, _, k) => Some(*k),
+            _ => None,
+        });
+        let scoped =
+            self.kind(n) == NodeKind::ScopedClosure || expected_kind == Some(Callable::Scoped);
+        let environment =
+            scoped || matches!(expected_kind, Some(Callable::Own | Callable::OwnSend));
         let ty = self.t.mk(TyKind::Fn(
             fd.params.iter().map(|p| (p.mode, p.ty)).collect(),
             fd.result,
@@ -451,10 +465,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             by_slot: vec![None; self.vars.len()],
             captures: vec![],
             environment: None,
-            has_environment: scoped,
+            has_environment: environment,
+            owning: !scoped,
+            physical: 8,
+            logical: 0,
+            send: true,
         });
         std::mem::swap(&mut child.t, &mut self.t);
-        let signature = child.callable_signature(ty, scoped);
+        let signature = child.callable_signature(ty, environment);
         let row = signature.map(|signature| {
             let signature = child.e.sig(signature);
             let f = child.e.function(
@@ -465,37 +483,75 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         });
         child.run_row(row, body);
         std::mem::swap(&mut child.t, &mut self.t);
-        let captures = child.capture_frame.take().unwrap().captures;
+        let frame = child.capture_frame.take().unwrap();
         let out = child.finish();
         let function = out.function;
+        let refused = !out.refusals.is_empty();
         self.out.refusals.extend(out.refusals);
         self.out.gaps.extend(out.gaps);
         self.out.counts += out.counts;
         if function.is_none() {
             self.halt();
         }
-        if !scoped && !captures.is_empty() {
-            if want
-                .is_some_and(|w| matches!(self.t.kind(w.ty), TyKind::Fn(_, _, _, Callable::Plain)))
-            {
-                self.refuse("LANG-13", n, "a plain callable captures nothing");
-                return (ERROR, None);
-            }
-            return self.gap_ty(n, "owning closure admission is not built");
+        if function.is_none() {
+            return (if refused { ERROR } else { ty }, None);
         }
-        let value = if self.live() {
-            let function = function.unwrap();
-            let result = self.value(Ty::Ptr);
-            self.inst(Inst::FunctionRef { result, function }, n);
-            if scoped {
-                self.scoped_value(result, &captures, n)
-            } else {
-                Some(result)
-            }
+        let function = function.unwrap();
+        let code = if self.live() {
+            let v = self.value(Ty::Ptr);
+            self.inst(
+                Inst::FunctionRef {
+                    result: v,
+                    function,
+                },
+                n,
+            );
+            Some(v)
         } else {
             None
         };
-        (ty, value)
+        if scoped {
+            return (
+                ty,
+                code.and_then(|code| self.scoped_value(code, &frame.captures, n)),
+            );
+        }
+        if frame.captures.is_empty() {
+            if environment {
+                let kind = expected_kind.unwrap_or(Callable::OwnSend);
+                let TyKind::Fn(ps, r, w, _) = self.t.kind(ty).clone() else {
+                    unreachable!()
+                };
+                let ty = self.t.mk(TyKind::Fn(ps, r, w, kind));
+                let v = code.and_then(|code| self.empty_own_callable(code, n));
+                self.temp(ty, v);
+                return (ty, v);
+            }
+            return (ty, code);
+        }
+        if expected_kind == Some(Callable::Plain) {
+            self.refuse("LANG-13", n, "a plain callable captures nothing");
+            return (ERROR, None);
+        }
+        let kind = if frame.send {
+            Callable::OwnSend
+        } else {
+            Callable::Own
+        };
+        if expected_kind == Some(Callable::OwnSend) && !frame.send {
+            self.refuse("LANG-13", n, "own[send] requires send captures");
+            return (ERROR, None);
+        }
+        let kind = if expected_kind == Some(Callable::Own) {
+            Callable::Own
+        } else {
+            kind
+        };
+        let TyKind::Fn(ps, r, w, _) = self.t.kind(ty).clone() else {
+            unreachable!()
+        };
+        let callable = self.t.mk(TyKind::Fn(ps, r, w, kind));
+        self.owning_value(callable, code, &frame, n)
     }
 
     fn callable_signature(
@@ -552,6 +608,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 pub(super) struct Capture {
     slot: u32,
     mode: Mode,
+    offset: u64,
+    site: NodeId,
 }
 
 pub(super) struct CaptureFrame {
@@ -560,6 +618,10 @@ pub(super) struct CaptureFrame {
     captures: Vec<Capture>,
     pub(super) environment: Option<ValueId>,
     pub(super) has_environment: bool,
+    owning: bool,
+    physical: u64,
+    logical: u64,
+    send: bool,
 }
 
 #[derive(Default)]
@@ -589,7 +651,7 @@ impl Descriptors {
 impl<'c, 'a> Cx<'c, 'a, '_> {
     /// Discover an outer slot exactly when its first source use is visited.
     pub(super) fn capture_slot(&mut self, slot: u32, n: NodeId) {
-        let Some(frame) = &mut self.capture_frame else {
+        let Some(frame) = &self.capture_frame else {
             return;
         };
         let Some(original) = frame.outer[slot as usize] else {
@@ -598,57 +660,132 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if frame.by_slot[slot as usize].is_some() {
             return;
         }
-        if matches!(
-            self.t.kind(original.ty),
-            TyKind::Fn(_, _, _, Callable::Scoped)
-        ) {
-            self.gap(n, "captured callback descriptor substitution is not built");
-            return;
-        }
+        let owning = frame.owning;
+        let index = frame.captures.len();
         if matches!(self.t.kind(original.ty),TyKind::Adt(d,_) if self.p.decls[d.index()].role==Some(Role::Writer))
         {
             self.refuse("MEM-4", n, "a Writer is never captured");
-            return;
+        } else if !owning
+            && matches!(
+                self.t.kind(original.ty),
+                TyKind::Fn(_, _, _, Callable::Scoped)
+            )
+        {
+            self.gap(n, "captured callback descriptor substitution is not built");
+        } else if owning {
+            if self.capture_holds(original.ty)
+                & (crate::H_RESOURCE | crate::H_CAPABILITY | crate::H_SCOPED | crate::H_STABLE)
+                != 0
+            {
+                self.refuse("LANG-14",n,"an owning closure capture holds a resource, capability, scoped value or stable reference");
+            } else if !self.copies(original.ty)
+                && matches!(
+                    original.origin,
+                    Origin::ViewParam | Origin::MutParam | Origin::PatternView
+                )
+            {
+                self.refuse(
+                    "LANG-14",
+                    n,
+                    "an owning closure cannot move a borrowed capture",
+                );
+            }
         }
+        if owning && !self.capture_frame.as_ref().unwrap().has_environment && self.live() {
+            let environment = self.value(Ty::Ptr);
+            let f = self.func.unwrap();
+            let mut signature = self.e.module.signatures
+                [self.e.module.functions[f.index()].signature.index()]
+            .clone();
+            signature.params.insert(0, Param::Value(Ty::Ptr));
+            self.e.module.functions[f.index()].signature = self.e.sig(signature);
+            let mut params = self.block_params(BlockId(0));
+            params.insert(usize::from(self.dest.is_some()), environment);
+            self.b.blocks[0].params = PoolRange::push(&mut self.b.pools.values, params);
+            let frame = self.capture_frame.as_mut().unwrap();
+            frame.environment = Some(environment);
+            frame.has_environment = true;
+        }
+        let (size, align, logical) = match self.rep(original.ty) {
+            Ok(Rep::None) => (0, 1, 0),
+            Ok(Rep::Scalar(ty)) => {
+                let size = match ty {
+                    Ty::Ptr => 8,
+                    Ty::Scalar(s) => s.size(),
+                };
+                (size, size, size)
+            }
+            Ok(Rep::Place(id)) => {
+                let Layout::Fixed(layout) = &self.e.recipes[id.index()].layout else {
+                    unreachable!()
+                };
+                (
+                    layout.size,
+                    layout.align,
+                    self.e.recipes[id.index()]
+                        .logical_size
+                        .unwrap_or(layout.size),
+                )
+            }
+            _ => (0, 1, 0),
+        };
+        let send = has_bounds(&self.p.decls, &self.t, original.ty, &self.params) & crate::SEND != 0;
         let frame = self.capture_frame.as_mut().unwrap();
-        let index = frame.captures.len();
+        let offset = if owning {
+            (frame.physical + align - 1) & !(align - 1)
+        } else {
+            index as u64 * 8
+        };
+        frame.physical = offset + size;
+        frame.logical += logical;
+        frame.send &= send;
         frame.by_slot[slot as usize] = Some(index);
         frame.captures.push(Capture {
             slot,
             mode: Mode::View,
+            offset,
+            site: n,
         });
         let environment = frame.environment;
         let binding = if let Some(environment) = environment.filter(|_| self.live()) {
-            let offset = self
-                .konst(Ty::Scalar(Scalar::U64), index as u64 * 8, n)
-                .unwrap();
-            let address = self.address(
-                AddressBase::Value(environment),
-                &[Step::Byte(offset)],
-                PlaceTy::Value(Ty::Ptr),
-                n,
-            );
-            let pointer = self.value(Ty::Ptr);
-            self.inst(
-                Inst::Read {
-                    result: pointer,
-                    address,
-                    mode: ReadMode::Bits,
-                },
-                n,
-            );
-            let address = self
-                .rep(original.ty)
-                .ok()
-                .and_then(Rep::stored)
-                .map(|ty| self.address(AddressBase::Value(pointer), &[], ty, n));
+            let offset = self.konst(Ty::Scalar(Scalar::U64), offset, n).unwrap();
+            let address = if owning {
+                self.rep(original.ty).ok().and_then(Rep::stored).map(|ty| {
+                    self.address(
+                        AddressBase::Value(environment),
+                        &[Step::Byte(offset)],
+                        ty,
+                        n,
+                    )
+                })
+            } else {
+                let address = self.address(
+                    AddressBase::Value(environment),
+                    &[Step::Byte(offset)],
+                    PlaceTy::Value(Ty::Ptr),
+                    n,
+                );
+                let pointer = self.value(Ty::Ptr);
+                self.inst(
+                    Inst::Read {
+                        result: pointer,
+                        address,
+                        mode: ReadMode::Bits,
+                    },
+                    n,
+                );
+                self.rep(original.ty)
+                    .ok()
+                    .and_then(Rep::stored)
+                    .map(|ty| self.address(AddressBase::Value(pointer), &[], ty, n))
+            };
             Binding::Slot(address)
         } else {
             Binding::Value(None)
         };
         self.vars[slot as usize] = Some(Var {
             binding,
-            origin: if original.origin.writable() {
+            origin: if !owning && original.origin.writable() {
                 Origin::MutParam
             } else {
                 Origin::ViewParam
@@ -659,11 +796,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ..original
         });
     }
-    pub(super) fn capture_write(&mut self, slot: u32) {
+    pub(super) fn capture_write(&mut self, slot: u32, site: Span) {
         if let Some(frame) = &mut self.capture_frame
             && let Some(i) = frame.by_slot[slot as usize]
         {
             frame.captures[i].mode = Mode::Mut;
+            if frame.owning && !self.broken {
+                self.refuse_at("LANG-14", site, "an owning closure never mutates a capture");
+            }
         }
     }
     pub(super) fn capture_move(&mut self, slot: u32, how: Use, ty: TyId, n: NodeId) -> bool {
@@ -674,10 +814,36 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             && matches!(how, Use::Take | Use::Value)
             && !self.copies(ty)
         {
-            self.refuse("LANG-14", n, "a scoped closure never moves a capture");
+            if !self.broken {
+                self.refuse(
+                    "LANG-14",
+                    n,
+                    "a closure never moves a capture during invocation",
+                );
+            }
             return false;
         }
         true
+    }
+    fn capture_holds(&self, ty: TyId) -> u8 {
+        match self.t.kind(ty) {
+            TyKind::Param(i) => crate::param_holds(self.params[*i as usize]),
+            TyKind::View(_) => crate::H_SCOPED,
+            TyKind::Region(_) => crate::H_SCOPED,
+            TyKind::Anchored(x, _) => self.capture_holds(*x) | crate::H_STABLE,
+            TyKind::Tuple(xs) => xs.iter().fold(0, |h, &x| h | self.capture_holds(x)),
+            TyKind::Array(x, _) => self.capture_holds(*x),
+            TyKind::Adt(d, args) => {
+                let summary = &self.p.decls[d.index()].summary;
+                args.iter()
+                    .enumerate()
+                    .filter(|(i, _)| summary.holds_params & (1 << i) != 0)
+                    .fold(summary.holds, |h, (_, &x)| h | self.capture_holds(x))
+            }
+            TyKind::Fn(_, _, _, Callable::Scoped) => crate::H_SCOPED,
+            TyKind::Fn(_, _, _, Callable::Own | Callable::OwnSend) => crate::H_OPAQUE,
+            _ => 0,
+        }
     }
     fn capture_address(&mut self, slot: u32, n: NodeId) -> Option<ValueId> {
         self.capture_slot(slot, n);
@@ -876,5 +1042,195 @@ impl Descriptors {
         } else {
             self.slots.remove(&slot);
         }
+    }
+}
+
+impl<'c, 'a> Cx<'c, 'a, '_> {
+    fn empty_own_callable(&mut self, code: ValueId, n: NodeId) -> Option<ValueId> {
+        let carrier = self.raw_frame(2, n)?;
+        let null = self.konst(Ty::Ptr, 0, n)?;
+        self.store_word(carrier, 0, code, n);
+        self.store_word(carrier, 8, null, n);
+        Some(carrier)
+    }
+    fn owning_value(
+        &mut self,
+        callable: TyId,
+        code: Option<ValueId>,
+        frame: &CaptureFrame,
+        n: NodeId,
+    ) -> (TyId, Option<ValueId>) {
+        let (Some(result), Some(cap)) = (self.p.core_decl("Result"), self.p.core_decl("Capacity"))
+        else {
+            return self.gap_ty(n, "owning closures need Result and Capacity declarations");
+        };
+        let cap = self.t.mk(TyKind::Adt(cap, vec![]));
+        let types = frame
+            .captures
+            .iter()
+            .map(|c| self.var(c.slot).ty)
+            .collect::<Vec<_>>();
+        let fields = if types.len() == 1 {
+            types[0]
+        } else {
+            self.t.mk(TyKind::Tuple(types.clone()))
+        };
+        let back = self.t.mk(TyKind::Tuple(vec![cap, fields]));
+        let result = self.t.mk(TyKind::Adt(result, vec![callable, back]));
+        let mut values = vec![];
+        let mut reps = vec![];
+        for (capture, &ty) in frame.captures.iter().zip(&types) {
+            let at = At {
+                place: Place::whole(capture.slot),
+                ty,
+                shared: false,
+            };
+            self.use_place(at, Use::Value, capture.site);
+            let value = self.emit_place(at, capture.site);
+            self.temp(ty, value);
+            values.push(value);
+            match self.rep(ty) {
+                Ok(rep) => reps.push(rep),
+                Err(what) => {
+                    self.gap(n, what);
+                    return (result, None);
+                }
+            }
+        }
+        let Some(charge) = hirsel_core_layout::charge::closure_env(frame.logical) else {
+            self.refuse("OWN-2", n, "closure charge exceeds u64");
+            return (ERROR, None);
+        };
+        if !self.live() {
+            return (result, None);
+        }
+        let code = code.unwrap();
+        let Some(glue) = self.environment_drop(frame, &types, charge, n) else {
+            return (result, None);
+        };
+        let glue_value = self.value(Ty::Ptr);
+        self.inst(
+            Inst::FunctionRef {
+                result: glue_value,
+                function: glue,
+            },
+            n,
+        );
+        let id = match self.rep(callable) {
+            Ok(Rep::Place(id)) => id,
+            _ => return (result, None),
+        };
+        let allocation = admission::OwnedAllocation {
+            kind: AllocKind::Own,
+            charge,
+            size: (frame.physical + 7) & !7,
+            align: 8,
+        };
+        let value =
+            self.admit_with_handback(result, allocation, &reps, &values, n, |cx, to, block| {
+                cx.store_word(block, 0, glue_value, n);
+                for (i, capture) in frame.captures.iter().enumerate() {
+                    if let Some(place) = reps[i].stored() {
+                        let offset = cx
+                            .konst(Ty::Scalar(Scalar::U64), capture.offset, n)
+                            .unwrap();
+                        let at =
+                            cx.address(AddressBase::Value(block), &[Step::Byte(offset)], place, n);
+                        cx.install(at, reps[i], values[i], n);
+                    }
+                }
+                let ok = cx.address(
+                    AddressBase::Address(to),
+                    &[Step::CaseField { case: 0, field: 0 }],
+                    PlaceTy::Declared(id),
+                    n,
+                );
+                let carrier = cx.pointer(ok, n);
+                cx.store_word(carrier, 0, code, n);
+                cx.store_word(carrier, 8, block, n);
+            });
+        (result, value)
+    }
+    fn environment_drop(
+        &mut self,
+        frame: &CaptureFrame,
+        types: &[TyId],
+        charge: u64,
+        n: NodeId,
+    ) -> Option<FuncId> {
+        let mut child = Cx::new(self.p, self.definition, self.e);
+        let mut fd = self.fd.as_ref().clone();
+        fd.params.clear();
+        fd.result = UNIT;
+        fd.generics.clear();
+        fd.drop_of = None;
+        fd.waits = false;
+        fd.body = None;
+        fd.path.0.name = format!(
+            "{}$environment{}",
+            fd.path.0.name,
+            n.0 - self.item.range.nodes.start
+        );
+        child.fd = std::borrow::Cow::Owned(fd);
+        child.entry = false;
+        std::mem::swap(&mut child.t, &mut self.t);
+        let function = child.e.function(
+            &child.fd.path,
+            Signature {
+                params: vec![Param::Value(Ty::Ptr)],
+                results: vec![],
+                dest: None,
+                never: false,
+            },
+        );
+        child.func = Some(function);
+        let entry = child.new_block(&[Ty::Ptr]);
+        child.start(entry);
+        let environment = child.block_params(entry)[0];
+        for (capture, &ty) in frame.captures.iter().zip(types).rev() {
+            if let Some(place) = child.rep(ty).ok().and_then(Rep::stored) {
+                let offset = child
+                    .konst(Ty::Scalar(Scalar::U64), capture.offset, n)
+                    .unwrap();
+                let at = child.address(
+                    AddressBase::Value(environment),
+                    &[Step::Byte(offset)],
+                    place,
+                    n,
+                );
+                child.drop_at(at, ty, n);
+            }
+        }
+        let charge = child.konst(Ty::Scalar(Scalar::U64), charge, n).unwrap();
+        child.inst(
+            Inst::Free {
+                block: environment,
+                charge,
+            },
+            n,
+        );
+        child.end(Terminator::Return(PoolRange::EMPTY), Some(n));
+        std::mem::swap(&mut child.t, &mut self.t);
+        let out = child.finish();
+        self.out.refusals.extend(out.refusals);
+        self.out.gaps.extend(out.gaps);
+        self.out.counts += out.counts;
+        out.function
+    }
+}
+
+impl<'c, 'a> Cx<'c, 'a, '_> {
+    pub(super) fn capture_assignment(&mut self, slot: u32, n: NodeId) -> bool {
+        if self
+            .capture_frame
+            .as_ref()
+            .is_some_and(|f| f.owning && f.by_slot[slot as usize].is_some())
+        {
+            if !self.broken {
+                self.refuse("LANG-14", n, "an owning closure never mutates a capture");
+            }
+            return false;
+        }
+        true
     }
 }

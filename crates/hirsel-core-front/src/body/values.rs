@@ -38,8 +38,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         vals: &[Option<ValueId>],
         n: NodeId,
     ) -> Option<ValueId> {
-        let (rid, id) = match (self.rep(own), self.rep(ty)) {
-            (Ok(Rep::Place(rid)), Ok(Rep::Place(id))) => (rid, id),
+        let rid = match (self.rep(own), self.rep(ty)) {
+            (Ok(Rep::Place(rid)), Ok(Rep::Place(_))) => rid,
             (Err(what), _) | (_, Err(what)) => {
                 self.gap(n, what);
                 return None;
@@ -74,158 +74,46 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let (size, align) = self.e.block(rid);
         let grant = self.e.module.types[rid.index()].grant;
-        let to = self.new_slot(PlaceTy::Declared(id), n);
-        let c = self.konst(Ty::Scalar(Scalar::U64), charge, n)?;
-        let sz = self.konst(Ty::Scalar(Scalar::U64), size, n)?;
-        let block = self.value(Ty::Ptr);
-        let available = self.value(Ty::Scalar(Scalar::U64));
-        self.inst(
-            Inst::Alloc {
-                result: block,
-                available,
-                region_entry: None,
+        self.admit_with_handback(
+            ty,
+            admission::OwnedAllocation {
                 kind: AllocKind::Resource { grant },
-                place: AllocPlace::Current,
-                charge: c,
-                size: sz,
+                charge,
+                size,
                 align,
-                fail: None,
             },
+            &reps,
+            vals,
             n,
-        );
-        let null = self.konst(Ty::Ptr, 0, n)?;
-        let admitted = self.value(Ty::Scalar(Scalar::Bool));
-        self.inst(
-            Inst::Compare {
-                result: admitted,
-                op: CompareOp::Ne,
-                left: block,
-                right: null,
-            },
-            n,
-        );
-        let (yes, no, join) = (
-            self.new_block(&[]),
-            self.new_block(&[]),
-            self.new_block(&[]),
-        );
-        let (ye, ne) = (self.edge(yes, &[]), self.edge(no, &[]));
-        self.end(
-            Terminator::Branch {
-                condition: admitted,
-                yes: ye,
-                no: ne,
-            },
-            Some(n),
-        );
-        // Ok: the block holds the fields.
-        self.start(yes);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 0,
-            },
-            n,
-        );
-        let holder = self.address(
-            AddressBase::Address(to),
-            &[Step::CaseField { case: 0, field: 0 }],
-            PlaceTy::Value(Ty::Ptr),
-            n,
-        );
-        self.inst(
-            Inst::Store {
-                address: holder,
-                value: block,
-            },
-            n,
-        );
-        let fields_at = self.address(AddressBase::Value(block), &[], PlaceTy::Declared(rid), n);
-        for (i, r) in reps.iter().enumerate() {
-            if let Some(place) = r.stored() {
-                let at = self.address(
-                    AddressBase::Address(fields_at),
-                    &[Step::Field(i as u32)],
-                    place,
+            |cx, to, block| {
+                let holder = cx.address(
+                    AddressBase::Address(to),
+                    &[Step::CaseField { case: 0, field: 0 }],
+                    PlaceTy::Value(Ty::Ptr),
                     n,
                 );
-                self.install(at, *r, vals[i], n);
-            }
-        }
-        self.jump(join, &[], n);
-        // Error: `Capacity` and the fields, moved back to the caller.
-        self.start(no);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 1,
-            },
-            n,
-        );
-        let decl_ty = |cx: &mut Self, t: TyId| match cx.rep(t) {
-            Ok(Rep::Place(id)) => Some(id),
-            _ => None,
-        };
-        let back = match self.t.kind(ty) {
-            TyKind::Adt(_, args) => args[1],
-            _ => unreachable!("a resource literal is a Result"),
-        };
-        let back_id = decl_ty(self, back)?;
-        let err = self.address(
-            AddressBase::Address(to),
-            &[Step::CaseField { case: 1, field: 0 }],
-            PlaceTy::Declared(back_id),
-            n,
-        );
-        let (cap_at, rest) = match self.t.kind(back).clone() {
-            TyKind::Tuple(parts) => {
-                let cap_id = decl_ty(self, parts[0])?;
-                let cap_at = self.address(
-                    AddressBase::Address(err),
-                    &[Step::Field(0)],
-                    PlaceTy::Declared(cap_id),
+                cx.inst(
+                    Inst::Store {
+                        address: holder,
+                        value: block,
+                    },
                     n,
                 );
-                let rest = if reps.len() == 1 {
-                    None
-                } else {
-                    let f_id = decl_ty(self, parts[1])?;
-                    Some(self.address(
-                        AddressBase::Address(err),
-                        &[Step::Field(1)],
-                        PlaceTy::Declared(f_id),
-                        n,
-                    ))
-                };
-                (cap_at, rest)
-            }
-            _ => (err, None),
-        };
-        for (k, value) in [c, available].into_iter().enumerate() {
-            let at = self.address(
-                AddressBase::Address(cap_at),
-                &[Step::Field(k as u32)],
-                PlaceTy::Value(Ty::Scalar(Scalar::U64)),
-                n,
-            );
-            self.inst(Inst::Store { address: at, value }, n);
-        }
-        for (i, r) in reps.iter().enumerate() {
-            if let Some(place) = r.stored() {
-                let at = match rest {
-                    None => self.address(AddressBase::Address(err), &[Step::Field(1)], place, n),
-                    Some(f) => {
-                        self.address(AddressBase::Address(f), &[Step::Field(i as u32)], place, n)
+                let fields_at =
+                    cx.address(AddressBase::Value(block), &[], PlaceTy::Declared(rid), n);
+                for (i, r) in reps.iter().enumerate() {
+                    if let Some(place) = r.stored() {
+                        let at = cx.address(
+                            AddressBase::Address(fields_at),
+                            &[Step::Field(i as u32)],
+                            place,
+                            n,
+                        );
+                        cx.install(at, *r, vals[i], n);
                     }
-                };
-                self.install(at, *r, vals[i], n);
-            }
-        }
-        self.jump(join, &[], n);
-        self.start(join);
-        let p = self.pointer(to, n);
-        self.temp(ty, Some(p));
-        Some(p)
+                }
+            },
+        )
     }
     /// A byte-string literal is not static: it has type `Result[Bytes, Capacity]`,
     /// admits its length as `List[u8]` storage and copies its bytes (core.md,

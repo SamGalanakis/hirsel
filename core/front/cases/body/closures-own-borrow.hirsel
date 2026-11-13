@@ -1,0 +1,5 @@
+// LANG-14: owning closure creation cannot take custody through a view parameter.
+// expect: refuse LANG-14 at 4:34
+fn bad(xs: List[u64]) {
+  let _ = fn() -> u64 { list.len(xs) }
+}

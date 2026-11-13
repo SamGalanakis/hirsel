@@ -1,0 +1,17 @@
+// Captured List custody moves into the result on success or admission refusal.
+// The empty list's own charge is zero, its carrier capture costs 24.
+// expect: run refused() = 24
+// expect: run success() = 0
+fn refused() -> u64 {
+  let xs: List[u64] = list.new()
+  let outer: Result[u64, Capacity] = bound bytes 0 {
+    let result: Result[own[send] fn() -> u64, (Capacity, List[u64])] = fn() -> u64 { list.len(xs) }
+    match result { Error((c, take back)) => c.requested + list.len(back), Ok(take cb) => cb() }
+  }
+  match outer { Ok(n) => n, Error(_) => 0 }
+}
+fn success() -> u64 {
+  let xs: List[u64] = list.new()
+  let result: Result[own[send] fn() -> u64, (Capacity, List[u64])] = fn() -> u64 { list.len(xs) }
+  match result { Ok(take cb) => cb(), Error(_) => 1 }
+}

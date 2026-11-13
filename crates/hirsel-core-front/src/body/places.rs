@@ -209,7 +209,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     pub(super) fn check_holds_at(&mut self, p: Place, act: Act, site: Span) -> bool {
         if matches!(act, Act::Write) {
-            self.capture_write(p.slot);
+            self.capture_write(p.slot, site);
         }
         if self.var(p.slot).holds == 0 {
             return true;

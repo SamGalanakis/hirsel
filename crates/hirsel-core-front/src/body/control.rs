@@ -202,6 +202,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Err(()) => return false,
         };
         let q = at.place.slot;
+        if !self.capture_assignment(q, place) {
+            return false;
+        }
         let var = self.var(q);
         // OWN-12: a writable place, or a `let` declared without a value while uninit.
         let fresh = var.origin == Origin::Let && var.avail == Avail::Uninit && at.place.len == 0;

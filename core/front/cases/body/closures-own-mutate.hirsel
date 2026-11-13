@@ -1,0 +1,6 @@
+// LANG-14: an owning closure's invocation only reads its captures.
+// expect: refuse LANG-14 at 5:25
+fn bad() {
+  let mut n: u64 = 1
+  let _ = fn() -> u64 { n += 1; n }
+}

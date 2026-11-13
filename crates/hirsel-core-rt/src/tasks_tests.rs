@@ -468,6 +468,7 @@ unsafe extern "C" fn empty_recipe(
 ) -> bool {
     true
 }
+// CONC-11: both unwrap orders and the foreign last refund retain the origin payer.
 #[test]
 fn arc_unwrap_observes_release_order_and_foreign_last_refund() {
     unsafe extern "C" fn child(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {

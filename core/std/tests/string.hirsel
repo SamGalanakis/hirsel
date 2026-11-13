@@ -141,6 +141,33 @@ fn clear_static() -> u64 {
     string.byte_len(s)
 }
 
+// The neighbours of A-Z: '@' (0x40) and '[' (0x5B) stay, as do '`' and '{'; É's bytes
+// C3 89 are not shifted.
+// expect: run lower_range_edges() = true
+fn lower_range_edges() -> bool {
+    let mut s = result.unwrap(string.from("@AZ[`az{É"))
+    result.unwrap(string.make_ascii_lower(mut s))
+    s == "@az[`az{É"
+}
+
+// expect: run repeat_three() = true
+fn repeat_three() -> bool {
+    let r = result.unwrap(string.repeat("aé", 3))
+    r == "aéaéaé" && string.byte_len(r) == 9 && list.capacity(string.as_bytes(r)) >= 9
+}
+
+// Zero copies and the empty string both give "".
+// expect: run repeat_empty() = 0
+fn repeat_empty() -> u64 {
+    string.byte_len(result.unwrap(string.repeat("abc", 0))) + string.byte_len(result.unwrap(string.repeat("", 1000)))
+}
+
+// 2 x 2^63 = 2^64 does not fit in u64.
+// expect: run repeat_overflow() = fail Fail
+fn repeat_overflow() -> u64 {
+    string.byte_len(result.unwrap(string.repeat("ab", 9223372036854775808)))
+}
+
 // expect: run find_first() = 2
 fn find_first() -> u64 {
     found(string.find("abcabc", 0, "ca"))

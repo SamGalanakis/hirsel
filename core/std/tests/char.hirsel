@@ -44,6 +44,67 @@ fn upper_borders() -> bool {
     char.to_u32(char.to_ascii_upper('`')) == 96 && char.to_u32(char.to_ascii_upper('{')) == 123 && char.to_u32(char.to_ascii_upper('é')) == 233
 }
 
+// 'a' is 97.
+// expect: run lower_letter() = 97
+fn lower_letter() -> u32 {
+    char.to_u32(char.to_ascii_lower('A'))
+}
+
+// '@' (64) and '[' (91) border A-Z and stay; É (201) is not ASCII and stays.
+// expect: run lower_borders() = true
+fn lower_borders() -> bool {
+    char.to_u32(char.to_ascii_lower('@')) == 64 && char.to_u32(char.to_ascii_lower('[')) == 91 && char.to_u32(char.to_ascii_lower('É')) == 201
+}
+
+// The 22 probes, in order: tab, LF, VT, FF, CR, space, / 0 9 : @ A Z [ ` a z {, U+0085,
+// U+00A0, U+FF10 (fullwidth zero), é. Each predicate test writes 1 or 0 per probe.
+fn probes() -> String {
+    "\t\n\u{B}\u{C}\r /09:@AZ[`az{\u{85}\u{A0}\u{FF10}é"
+}
+
+fn mark(mut out: String, yes: bool) {
+    result.unwrap(string.push(mut out, if yes { "1" } else { "0" }))
+}
+
+// Only '0' and '9' (probes 8 and 9).
+// expect: run digit_probes() = true
+fn digit_probes() -> bool {
+    let p = probes()
+    let mut out = string.new()
+    let mut at: u64 = 0
+    while let Some((c, next)) = string.next_scalar(p, at) {
+        mark(mut out, char.is_ascii_digit(c))
+        at = next
+    }
+    out == "0000000110000000000000"
+}
+
+// Only A, Z, a, z (probes 12, 13, 16, 17).
+// expect: run alpha_probes() = true
+fn alpha_probes() -> bool {
+    let p = probes()
+    let mut out = string.new()
+    let mut at: u64 = 0
+    while let Some((c, next)) = string.next_scalar(p, at) {
+        mark(mut out, char.is_ascii_alpha(c))
+        at = next
+    }
+    out == "0000000000011001100000"
+}
+
+// Tab, LF, FF, CR, space (probes 1, 2, 4, 5, 6); not VT, U+0085 or U+00A0.
+// expect: run whitespace_probes() = true
+fn whitespace_probes() -> bool {
+    let p = probes()
+    let mut out = string.new()
+    let mut at: u64 = 0
+    while let Some((c, next)) = string.next_scalar(p, at) {
+        mark(mut out, char.is_ascii_whitespace(c))
+        at = next
+    }
+    out == "1101110000000000000000"
+}
+
 // expect: run digit_hex_lower() = 15
 fn digit_hex_lower() -> u32 {
     value(char.digit('f', 16))

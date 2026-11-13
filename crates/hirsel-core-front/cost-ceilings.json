@@ -9,13 +9,13 @@
       "whole_process_per_line": 46900
     },
     "std": {
-      "code_lines": 2890,
-      "check_lower_per_line": 15300,
-      "whole_request_per_line": 34400,
-      "whole_process_per_line": 34600
+      "code_lines": 3120,
+      "check_lower_per_line": 16200,
+      "whole_request_per_line": 35600,
+      "whole_process_per_line": 35800
     }
   },
-  "margin": "2 percent over the ordinary release observation, rounded up to 100 instructions per code line. Lower ceilings after savings. Re-baseline expected work growth only with reason, completed-body counts and commit range; do not change the fixed finished-process budget.",
+  "margin": "m1: 2 percent over the ordinary release observation, rounded up to 100 instructions per code line (the nine stable programs are the regression detector). std: 5 percent over the observation, rounded up to 100, while M2 adds library source under six lanes (orchestrator ruling 2026-11-13); return to 2 percent when M2's library growth ends. Lower ceilings after savings. Re-baseline expected work growth only with reason, completed-body counts and commit range; do not change the fixed finished-process budget.",
   "finished_budget_per_line": 60000,
   "forecast_revision": "a526a304a3383fb2c8e9d0bd494e553fcb571698",
   "completion_forecast": {
@@ -361,6 +361,67 @@
           "check_per_line": 14946.00034602076,
           "request_per_line": 33339.36816608997,
           "process_per_line": 33609.523875432526
+        }
+      }
+    },
+    {
+      "from_revision": "a526a304a3383fb2c8e9d0bd494e553fcb571698",
+      "to_revision": "std-seed-api-889 land of string.make_ascii_lower/repeat and char.to_ascii_lower/is_ascii_* (parent 8e21ed0fec65)",
+      "reason": "M2 library growth: six lanes add std source (deque, list algorithms, string/char surface, find/from_utf8/parse/push_u64 first steps); std grew 2890 to 3120 code lines and check/lower crossed the 2 percent ceiling at 15310 then flickered to 15296. Orchestrator ruling: std margin becomes 5 percent over observation, rounded up to 100, while M2 adds library source; m1 keeps 2 percent; 60000 budget unchanged. Only the three std ceilings change.",
+      "completed_bodies_before": {
+        "m1": [
+          317,
+          317
+        ],
+        "std": [
+          139,
+          139
+        ]
+      },
+      "completed_bodies_after": {
+        "m1": [
+          317,
+          317
+        ],
+        "std": [
+          139,
+          139
+        ]
+      },
+      "checked_bodies_note": "Recorded forecast completion is unchanged (all bodies complete); std_seed check report at this land: 504 bodies accepted, 0 refused, 0 gaps.",
+      "previous_ceilings": {
+        "m1": {
+          "code_lines": 6281,
+          "check_lower_per_line": 24900,
+          "whole_request_per_line": 46800,
+          "whole_process_per_line": 46900
+        },
+        "std": {
+          "code_lines": 2890,
+          "check_lower_per_line": 15300,
+          "whole_request_per_line": 34400,
+          "whole_process_per_line": 34600
+        }
+      },
+      "new_ceilings": {
+        "m1": {
+          "code_lines": 6281,
+          "check_lower_per_line": 24900,
+          "whole_request_per_line": 46800,
+          "whole_process_per_line": 46900
+        },
+        "std": {
+          "code_lines": 3120,
+          "check_lower_per_line": 16200,
+          "whole_request_per_line": 35600,
+          "whole_process_per_line": 35800
+        }
+      },
+      "observations": {
+        "std": {
+          "check_per_line": 15355.39,
+          "request_per_line": 33839.21,
+          "process_per_line": 34092.26
         }
       }
     }

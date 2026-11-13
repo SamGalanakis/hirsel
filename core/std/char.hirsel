@@ -26,6 +26,33 @@ pub fn to_ascii_upper(c: char) -> char {
     }
 }
 
+/// 'A'..='Z' mapped to 'a'..='z'; every other scalar unchanged. Cost: O(1).
+/// Ex: `string.push_char(mut out, char.to_ascii_lower(c))?`
+pub fn to_ascii_lower(c: char) -> char {
+    if c >= 'A' && c <= 'Z' {
+        option.unwrap(char.from_u32(char.to_u32(c) + 32))
+    } else {
+        c
+    }
+}
+
+/// Whether c is '0'..='9' (Rust is_ascii_digit). Cost: O(1). Ex: `char.is_ascii_digit('7')` is true
+pub fn is_ascii_digit(c: char) -> bool {
+    c >= '0' && c <= '9'
+}
+
+/// Whether c is 'A'..='Z' or 'a'..='z' (Rust is_ascii_alphabetic). Cost: O(1).
+/// Ex: `char.is_ascii_alpha('é')` is false
+pub fn is_ascii_alpha(c: char) -> bool {
+    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+/// Whether c is space, tab, line feed, form feed or carriage return; U+000B is not
+/// (Rust is_ascii_whitespace, the WhatWG set). Cost: O(1). Ex: `char.is_ascii_whitespace('\t')` is true
+pub fn is_ascii_whitespace(c: char) -> bool {
+    c == ' ' || c == '\t' || c == '\n' || c == '\r' || char.to_u32(c) == 0x0C
+}
+
 /// The value of an ASCII digit in `base` (2 to 36), or None: '0'..'9', then 'a'..'z' or
 /// 'A'..'Z' for 10 to 35 (Rust char::to_digit). Fails: Fail when base is outside 2..=36.
 /// Cost: O(1).

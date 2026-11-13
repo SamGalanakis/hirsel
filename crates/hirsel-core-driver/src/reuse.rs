@@ -90,7 +90,30 @@ impl Keys {
         for (m, rows) in modules.iter().zip(resolutions) {
             for (ordinal, (item, resolution)) in m.syntax.items().zip(rows).enumerate() {
                 let Some(definition) = index.item_definition(m.id, ordinal as u32, item) else {
-                    continue;
+                    let root = item.tree.node(item.root);
+                    if root.token.is_none()
+                        || item.range.has_errors
+                        || !matches!(
+                            root.kind,
+                            NodeKind::Function
+                                | NodeKind::Constant
+                                | NodeKind::TypeDecl
+                                | NodeKind::StableType
+                                | NodeKind::ResourceType
+                                | NodeKind::ScopedType
+                                | NodeKind::CloneHook
+                        )
+                        || index
+                            .diagnostics
+                            .iter()
+                            .any(|r| r.primary.module == m.id && r.primary.item == ordinal as u32)
+                    {
+                        continue;
+                    }
+                    return Err(io::Error::other(format!(
+                        "internal error: core reuse header has no indexed definition in {:?}, item {ordinal}",
+                        index.module_path(m.id)
+                    )));
                 };
                 source_definitions.push(definition.0 as usize);
                 let path = index.definition_path(definition);
@@ -227,8 +250,19 @@ impl Keys {
         resolution: &Resolution,
     ) -> io::Result<DefinitionKey> {
         hirsel_core_front::cost_scope!("phase", "driver keys/anchors");
-        let (module, ordinal) = self.headers[path].anchor;
-        let own = index.item_definition(module, ordinal, item).unwrap();
+        let header = self.headers.get(path).ok_or_else(|| {
+            io::Error::other(format!(
+                "internal error: core reuse body `{path}` has no header"
+            ))
+        })?;
+        let (module, ordinal) = header.anchor;
+        let own = index
+            .item_definition(module, ordinal, item)
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "internal error: core reuse body `{path}` has no indexed definition"
+                ))
+            })?;
         let mut pending = vec![own.0 as usize];
         for name in &resolution.names {
             target_ids(index, module, name.target, &mut pending);
@@ -369,7 +403,10 @@ fn targets(index: &NameIndex, module: ModuleId, target: Target, out: &mut BTreeS
     }
 }
 fn header_end(item: Item<'_>) -> usize {
-    if item.tree.node(item.root).kind != NodeKind::Function {
+    if !matches!(
+        item.tree.node(item.root).kind,
+        NodeKind::Function | NodeKind::CloneHook
+    ) {
         return item.source_text().len();
     }
     item.tree

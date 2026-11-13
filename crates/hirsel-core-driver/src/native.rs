@@ -794,6 +794,7 @@ b0:
     include!("startup_native.rs");
     include!("test_rules_native.rs");
     include!("test_run_native.rs");
+    include!("clone_native.rs");
 
     fn run_clean(binary: &Path, exit: i32) {
         let result = Command::new(binary).output().unwrap();

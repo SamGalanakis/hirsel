@@ -1,5 +1,30 @@
 # Memory cost samples
 
+## Frozen inline regions and matched own pairs
+
+Own source `448174a3`; region source806ecb3f plus the measurement-only frozen-offset shim, unchanged by the later own edits. Same CPU16/jobs1/2GiB/Rust1.99 checked opt3/no LTO method. One million operations per first-run sample, all checksums correct. The own Rust baseline calls the identical backend malloc(N+8)/free, aligns to8 and zeroes the same N payload bytes at offset8. This controls allocator, native size class, alignment and zeroing. Runtime adds admission, the payer prefix and refund. The ordinary Rust Box rows remain historical API comparisons, not accounting overhead estimates.
+
+| payload | system matched Rust | system proven current | extra / ratio | mimalloc matched Rust | mimalloc proven current | extra / ratio |
+|---|---:|---:|---:|---:|---:|---:|
+| 16 | 151.434 | 163.434 | 12.000 / 1.079x | 66.571 | 78.571 | 12.000 / 1.180x |
+| 64 | 154.434 | 166.434 | 12.001 / 1.078x | 71.211 | 83.211 | 11.999 / 1.169x |
+| 256 | 166.434 | 178.434 | 12.001 / 1.072x | 152.572 | 164.573 | 12.001 / 1.079x |
+| 4096 | 377.434 | 389.435 | 12.001 / 1.032x | 272.074 | 284.074 | 12.000 / 1.044x |
+
+The proven-current sequence uses the payer that lowering proves remains current between allocation and free; inline_own_free_current skips the header load and payer comparison. This is a specialized compiler fact, not a second accounting path or a runtime validation. It still admits, stores the prefix and refunds. Zero-charge blocks retain/release their structural pin through the ordinary helper. The x86-64 steady loop adds exactly12 instructions/pair; whole-process differences span11.9994..12.0009 because initialization/cleanup/code shape contribute under0.001 per pair. Thus the steady target is met, while raw process averages are reported to three decimals. A redundant tag mask on the already untagged plain/align8 payer was removed.
+
+When lowering cannot prove the payer remains current, generic inline_own_free reads the block prefix and compares its original payer to the current record, using the slow refund only for a foreign/forwarded payer. These matched fallback rows remain18.000 extra instructions/pair, an explicit miss of the12 target. Their full costs are system169.434/172.434/184.433/395.434 and mimalloc84.570/89.210/170.572/290.074 for16/64/256/4096, ratios1.119/1.117/1.108/1.048 and1.270/1.253/1.118/1.066. All complete pair ratios meet1.3. MEM-20/MEM-26 require original-payer refunds/growth; they do not require18 instructions. Six of the measured18 are removed when lowering has the current-payer proof. No intrinsic18-instruction spec floor is claimed, and no allocator effect is credited as admission savings.
+
+| region u64 allocation + close | system instructions/op | mimalloc instructions/op |
+|---|---:|---:|
+| bumpalo inline | 20.441 | 20.590 |
+| emitted frozen-offset shim | 25.508 | 25.643 |
+| ratio | 1.248x | 1.245x |
+
+The region kernel directly reads/writes abi_layout.rs offsets: compare payer/current, admit once, add the per-run charge, compare cursor/end and bump, then store. It calls region_alloc only for a payer transition and region_refill only for an exhausted chunk. There is no call on the usual bump path. Both allocate one million u64 values and bulk close. Region chunks retain8,060,928 bytes versus bumpalo8,387,200,0.961x, including chunk slack but excluding fixed region/table and vector metadata. Both inline instruction and retained-byte targets pass. This row supersedes the earlier38.51 generic-entry cost as the emitter fast-path measurement.
+
+Evidence: `/workspace/code/hirsel-briefs/core-memory-900/{own-twelve-score,inline-matched-final}/`, including raw instructions, disassembly, stderr byte counters and environment. Reproduce with measure.py --workloads region alloc16 alloc64 alloc256 alloc4096 --modes rust matched inline current. `inline` on own means the general payer check, `current` means the lowering proof; region `inline` is the frozen-offset shim. These are runtime instruction shims, not end-to-end native source benchmarks.
+
 ## Task-local custody integration
 
 Candidate `480f33c6`, same provider harness/toolchain/CPU16/jobs1/2GiB method. One Core sample for each named workload; reuse the provider lane's unchanged Tokio references. All checksums pass.

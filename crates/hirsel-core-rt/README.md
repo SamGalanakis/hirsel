@@ -99,3 +99,10 @@ last-release glue. The hook returns no status and admits/allocates nothing.
 The scheduler holds its event turn across the count operation and hook.
 Acceptance builds enable memcheck to register alternate stacks; Rust tests do so
 automatically. Normal archives carry no Valgrind stack-registration work.
+
+Own fast paths can retain the current payer as a compiler fact. If no operation
+can change that record between allocation and free, the emitter refunds it
+directly and skips prefix lookup/comparison, as inline_own_free_current shows.
+Otherwise inline_own_free compares the original payer and follows its forwarding
+record through the slow refund when needed. Both preserve MEM-20/MEM-26.
+Canonical admission and the plain/align8 prefix store need no tag mask.

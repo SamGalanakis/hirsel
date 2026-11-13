@@ -39,6 +39,9 @@
 //! bits 0..1; bits 2..4 encode log2(max(alignment,8))-3. Index 7 stores the
 //! alignment in one extra word before the prefix. Generic free takes pointer
 //! and charge; it decodes this word and calls the native allocator's free.
+//! If lowering proves the current payer stays unchanged from admission to free,
+//! it may refund that record directly, skipping the native payer lookup. Otherwise
+//! compare the stored payer to current and use refund for a foreign/merged payer.
 //!
 //! Region fast allocation compares its payer with current_limit, admits once,
 //! adds charge, aligns/bumps cursor and checks end. On payer change call the full

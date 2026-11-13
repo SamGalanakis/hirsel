@@ -179,7 +179,7 @@ fn cell(
 }
 
 pub(super) fn promote(module: &Module, recipes: &[Recipe], body: &mut Body, dest: Option<SlotId>) {
-    scalar_copies(module, recipes, body);
+    let prune_reads = scalar_copies(module, recipes, body);
     let mut aliases = (0..body.values.len())
         .map(|i| ValueId(i as u32))
         .collect::<Vec<_>>();
@@ -385,5 +385,5 @@ pub(super) fn promote(module: &Module, recipes: &[Recipe], body: &mut Body, dest
             aliases[a.index()] = b
         }
     }
-    compact(module, body, &aliases, &dead, &promoted);
+    compact(module, body, &aliases, &dead, &promoted, prune_reads);
 }

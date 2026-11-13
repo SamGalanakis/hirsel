@@ -143,7 +143,6 @@ impl NameRecipe {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GenericCall {
     pub operation: Option<key_glue::KeyOp>,
-    pub numeric: Option<numeric_glue::NumericOp>,
     pub arguments: Vec<NameRecipe>,
     pub dictionaries: Vec<NameRecipe>,
 }
@@ -446,19 +445,6 @@ impl Substitution<'_> {
                 .map(|name| name.render(&self.names))
                 .collect(),
         };
-        if let Some(op) = call.numeric {
-            let signature = self.signature(function.signature);
-            return match numeric_glue::ensure(self.module, key, signature, op) {
-                Ok(row) => {
-                    self.functions.insert(old, row);
-                    row
-                }
-                Err(error) => {
-                    self.error = Some(error.into());
-                    old
-                }
-            };
-        }
         if let Some(op) = call.operation {
             self.signature(function.signature);
             let Param::Address { ty, .. } =
@@ -467,16 +453,18 @@ impl Substitution<'_> {
                 unreachable!("symbolic key payload")
             };
             let ty = self.ty(ty);
-            return match key_glue::ensure(self.module, ty, op) {
-                Ok(row) => {
-                    self.functions.insert(old, row);
-                    row
-                }
-                Err(error) => {
-                    self.error = Some(error.into());
-                    old
-                }
-            };
+            if !key_glue::inline_scalar(self.module, ty, op) {
+                return match key_glue::ensure(self.module, ty, op) {
+                    Ok(row) => {
+                        self.functions.insert(old, row);
+                        row
+                    }
+                    Err(error) => {
+                        self.error = Some(error.into());
+                        old
+                    }
+                };
+            }
         }
         if let Some(id) = self
             .module
@@ -674,7 +662,6 @@ fn fill(
         &old_calls,
         &template.numeric_sites,
     );
-    scalar_abi::inline_keys(s.module, &mut body);
     s.module.functions[target.index()].body = Some(body);
     Ok(())
 }

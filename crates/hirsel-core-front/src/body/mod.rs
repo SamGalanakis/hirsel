@@ -135,7 +135,7 @@ pub struct Emitter {
     #[cfg(any(test, feature = "test-assembly"))]
     templates: HashMap<DefPath, (FuncId, GenericTemplate)>,
     /// Per row, whether cleaning it may run code (memoised [`Self::runs_code`]).
-    runs: HashMap<TypeId, bool>,
+    runs: HashMap<(TypeId, bool), bool>,
     /// `module.statics` rows by their bytes.
     statics: HashMap<Vec<u8>, hirsel_core_ir::StaticId>,
     constant_statics: HashMap<crate::ConstValue, hirsel_core_ir::StaticId>,
@@ -348,7 +348,6 @@ impl Emitter {
                     arguments: names,
                     dictionaries,
                     operation: None,
-                    numeric: None,
                 },
             );
         }
@@ -459,7 +458,7 @@ impl Emitter {
                     self.module.types.truncate(mark);
                     self.types.retain(|_, r| (r.0 as usize) < mark);
                     self.generic_names.retain(|id, _| id.index() < mark);
-                    self.runs.retain(|r, _| r.index() < mark);
+                    self.runs.retain(|(r, _), _| r.index() < mark);
                     return None;
                 }
             }
@@ -520,20 +519,27 @@ impl Emitter {
     /// cleaned mechanically (FAIL-13). Rows reach themselves through sequences and
     /// maps, so each row is visited once.
     fn runs_code(&mut self, id: TypeId) -> bool {
-        if let Some(&r) = self.runs.get(&id) {
+        self.cleanup_code(id, true)
+    }
+    fn runs_known_code(&mut self, id: TypeId) -> bool {
+        self.cleanup_code(id, false)
+    }
+    fn cleanup_code(&mut self, id: TypeId, rigid_may_run: bool) -> bool {
+        let key = (id, rigid_may_run);
+        if let Some(&r) = self.runs.get(&key) {
             return r;
         }
-        let r = self.runs_code_walk(id);
-        self.runs.insert(id, r);
+        let r = self.runs_code_walk(id, rigid_may_run);
+        self.runs.insert(key, r);
         r
     }
-    fn runs_code_walk(&self, id: TypeId) -> bool {
+    fn runs_code_walk(&self, id: TypeId, rigid_may_run: bool) -> bool {
         let mut seen = vec![id];
         let mut work = vec![id];
         while let Some(id) = work.pop() {
             // A rigid row may acquire a finalizer at materialization. Keep its
             // failure successor in the once-checked template.
-            if self.generic_names.contains_key(&id) {
+            if rigid_may_run && self.generic_names.contains_key(&id) {
                 return true;
             }
             let Some(d) = &self.recipes[id.index()].drop else {

@@ -2,7 +2,8 @@ use super::*;
 
 /// Rewrite scalar-sized copies before promoting places. Byte-run copies remain
 /// byte-run copies; their byte count need not be one element's size.
-pub(super) fn scalar_copies(module: &Module, recipes: &[Recipe], body: &mut Body) {
+pub(super) fn scalar_copies(module: &Module, recipes: &[Recipe], body: &mut Body) -> bool {
+    let mut removed_drop = false;
     let constants: HashMap<_, _> = body
         .insts
         .iter()
@@ -37,7 +38,7 @@ pub(super) fn scalar_copies(module: &Module, recipes: &[Recipe], body: &mut Body
                     let value = c.load(from, t);
                     c.store(to, value);
                 }
-                Inst::Drop { ty, .. } if recipes[ty.index()].drop.is_none() => {}
+                Inst::Drop { ty, .. } if recipes[ty.index()].drop.is_none() => removed_drop = true,
                 _ => c.emit(old[i].clone()),
             }
         }
@@ -45,6 +46,7 @@ pub(super) fn scalar_copies(module: &Module, recipes: &[Recipe], body: &mut Body
     }
     c.body.insts = c.insts;
     c.body.inst_anchors = c.anchors;
+    removed_drop
 }
 
 struct Groups {

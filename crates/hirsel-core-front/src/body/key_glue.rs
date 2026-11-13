@@ -212,7 +212,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         arguments: vec![NameRecipe::of(self.p, &self.t, ty)],
                         dictionaries: vec![],
                         operation: Some(op),
-                        numeric: None,
                     });
                 function
             } else {
@@ -254,6 +253,15 @@ fn scalar_row(module: &Module, ty: TypeId) -> Option<Scalar> {
     }
 }
 
+/// These typed recipes expand in the caller and need no intermediate helper body.
+pub(super) fn inline_scalar(module: &Module, ty: TypeId, op: KeyOp) -> bool {
+    scalar_row(module, ty).is_some_and(|scalar| match op {
+        KeyOp::Hash => scalar == Scalar::U64,
+        KeyOp::Equal | KeyOp::Ordered(_) => true,
+        _ => false,
+    })
+}
+
 /// Scalar key operations need no generated call after substitution. Predicates
 /// retain their typed loads and Compare; a u64 hash retains the fixed FORM mix.
 pub(super) fn inline_ordered(module: &Module, body: &mut Body) -> bool {
@@ -269,8 +277,9 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) -> bool {
     let mut changed = false;
     let old = std::mem::take(&mut body.insts);
     let anchors = std::mem::take(&mut body.inst_anchors);
-    body.insts = Vec::with_capacity(old.len());
-    body.inst_anchors = Vec::with_capacity(anchors.len());
+    let capacity = old.len() + body.calls.len() * 10;
+    body.insts = Vec::with_capacity(capacity);
+    body.inst_anchors = Vec::with_capacity(capacity);
     for block in 0..body.blocks.len() {
         let range = body.blocks[block].insts;
         let start = body.insts.len() as u32;

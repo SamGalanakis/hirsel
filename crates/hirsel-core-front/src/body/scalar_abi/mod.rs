@@ -142,6 +142,25 @@ pub(super) fn rewrite(
     };
     if !changed(own) && old_calls.iter().all(|s| !changed(&plans[s])) {
         numeric::inline(module, body, numeric_sites);
+        key_glue::inline_ordered(module, body);
+        // A carrier-only body, such as Map's index installation, has no rigid
+        // scalar places to rewrite. Substituting its rows/constants is complete.
+        let scalar_place =
+            |p| matches!(p, PlaceTy::Declared(_)) && place_scalar(module, p).is_some();
+        let needs_places = body.slots.iter().any(|&p| scalar_place(p))
+            || body.insts.iter().any(|inst| match inst {
+                Inst::Drop { ty, .. } => recipes[ty.index()].drop.is_none(),
+                Inst::Copy { to, from, .. } => {
+                    scalar_place(body.addresses[to.index()].ty)
+                        || scalar_place(body.addresses[from.index()].ty)
+                }
+                Inst::Pointer { address, .. } => scalar_place(body.addresses[address.index()].ty),
+                _ => false,
+            });
+        if !needs_places {
+            remap::calls(body);
+            return;
+        }
         promote(module, recipes, body, None);
         return;
     }
@@ -269,6 +288,7 @@ pub(super) fn rewrite(
     c.body.insts = c.insts;
     c.body.inst_anchors = c.anchors;
     numeric::inline(module, body, numeric_sites);
+    key_glue::inline_ordered(module, body);
     promote(module, recipes, body, dest);
 }
 
@@ -301,12 +321,11 @@ pub use numeric::Site as NumericSite;
 /// Key recipes use the same scalar instruction stream in closed and generic code.
 pub(super) fn inline_keys(module: &Module, body: &mut Body) {
     if key_glue::inline_ordered(module, body) {
-        remap::calls(body);
         let aliases = (0..body.values.len())
             .map(|v| ValueId(v as u32))
             .collect::<Vec<_>>();
         let dead = vec![false; body.values.len()];
         let promoted = vec![false; body.slots.len()];
-        compact(module, body, &aliases, &dead, &promoted);
+        compact(module, body, &aliases, &dead, &promoted, false);
     }
 }

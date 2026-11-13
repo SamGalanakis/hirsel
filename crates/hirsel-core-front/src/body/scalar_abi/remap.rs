@@ -246,11 +246,13 @@ pub(super) fn compact(
     aliases: &[ValueId],
     dead_values: &[bool],
     promoted: &[bool],
+    prune_reads: bool,
 ) {
     calls(body);
     // Rewriting a call appends its new operands to the arenas. Retire old ranges
     // before a subsequent specialization scan sees their former IDs.
     let old_values = std::mem::take(&mut body.pools.values);
+    body.pools.values.reserve_exact(old_values.len());
     let mut range = |r: &mut PoolRange<ValueId>| {
         *r = PoolRange::push(
             &mut body.pools.values,
@@ -272,47 +274,35 @@ pub(super) fn compact(
         }
     }
     let mut used = vec![false; body.values.len()];
-    mark_values(body, aliases, &mut used);
     let mut dead = dead_values.to_vec();
-    let old = std::mem::take(&mut body.insts);
-    let anchors = std::mem::take(&mut body.inst_anchors);
-    for block in &mut body.blocks {
-        let start = body.insts.len() as u32;
-        for i in block.insts.start as usize..(block.insts.start + block.insts.len) as usize {
+    if prune_reads {
+        mark_values(body, aliases, &mut used);
+        for inst in &body.insts {
             if let Inst::Read {
                 result,
                 mode: ReadMode::Bits,
                 ..
-            } = old[i]
+            } = inst
                 && !used[result.index()]
             {
                 dead[result.index()] = true;
-                continue;
             }
-            body.insts.push(old[i].clone());
-            body.inst_anchors.push(anchors[i]);
         }
-        block.insts = PoolRange::new(start, body.insts.len() as u32 - start);
     }
-    let failing = body
-        .insts
-        .iter()
-        .filter_map(|i| {
-            if let Inst::Address {
-                address,
-                fail: Some(_),
-            } = i
-            {
-                Some(*address)
-            } else {
-                None
-            }
-        })
-        .collect::<std::collections::HashSet<_>>();
+    let mut failing = vec![false; body.addresses.len()];
+    for inst in &body.insts {
+        if let Inst::Address {
+            address,
+            fail: Some(_),
+        } = inst
+        {
+            failing[address.index()] = true;
+        }
+    }
     for i in 0..body.addresses.len() {
         if body.addresses[i].steps.len == 0
             && let AddressBase::Address(parent) = body.addresses[i].base
-            && !failing.contains(&parent)
+            && !failing[parent.index()]
             && !body.addresses[parent.index()]
                 .steps
                 .get(&body.pools.steps)
@@ -329,49 +319,45 @@ pub(super) fn compact(
     // A rigid scalar's slot acquires scalar-typed addresses at each former
     // by-address use. Reuse the address established with its StorageLive, just
     // as lowering a closed scalar local does. Other projections stay distinct.
-    let mut canonical = vec![None; body.slots.len()];
-    let mut address_alias = (0..body.addresses.len())
-        .map(|i| AddressId(i as u32))
-        .collect::<Vec<_>>();
-    for inst in &body.insts {
-        if let Inst::Address {
-            address,
-            fail: None,
-        } = inst
-        {
-            let info = &body.addresses[address.index()];
-            if info.steps.len == 0
-                && let AddressBase::Slot(slot) = info.base
-                && matches!(body.slots[slot.index()], PlaceTy::Declared(_))
-                && place_scalar(module, body.slots[slot.index()])
-                    .is_some_and(|ty| info.ty == PlaceTy::Value(ty))
+    let mut address_alias = Vec::new();
+    if body.slots.iter().enumerate().any(|(i, t)| {
+        !promoted[i] && matches!(t, PlaceTy::Declared(_)) && place_scalar(module, *t).is_some()
+    }) {
+        let mut canonical = vec![None; body.slots.len()];
+        address_alias = (0..body.addresses.len())
+            .map(|i| AddressId(i as u32))
+            .collect::<Vec<_>>();
+        for inst in &body.insts {
+            if let Inst::Address {
+                address,
+                fail: None,
+            } = inst
             {
-                if let Some(first) = canonical[slot.index()] {
-                    address_alias[address.index()] = first;
-                } else {
-                    canonical[slot.index()] = Some(*address);
+                let info = &body.addresses[address.index()];
+                if info.steps.len == 0
+                    && let AddressBase::Slot(slot) = info.base
+                    && matches!(body.slots[slot.index()], PlaceTy::Declared(_))
+                    && place_scalar(module, body.slots[slot.index()])
+                        .is_some_and(|ty| info.ty == PlaceTy::Value(ty))
+                {
+                    if let Some(first) = canonical[slot.index()] {
+                        address_alias[address.index()] = first;
+                    } else {
+                        canonical[slot.index()] = Some(*address);
+                    }
                 }
             }
         }
-    }
-    for info in &mut body.addresses {
-        if let AddressBase::Address(parent) = &mut info.base {
-            *parent = address_alias[parent.index()];
-        }
-    }
-    for inst in &mut body.insts {
-        if !matches!(inst, Inst::Address { .. }) {
-            addresses(inst, &mut |a| *a = address_alias[a.index()]);
-        }
-    }
-    for arg in &mut body.pools.args {
-        if let Arg::Address(a) = arg {
-            *a = address_alias[a.index()];
+        for info in &mut body.addresses {
+            if let AddressBase::Address(parent) = &mut info.base {
+                *parent = address_alias[parent.index()];
+            }
         }
     }
     let mut live = vec![false; body.addresses.len()];
     let mut work = Vec::new();
     let mut root = |a: AddressId| {
+        let a = address_alias.get(a.index()).copied().unwrap_or(a);
         if !std::mem::replace(&mut live[a.index()], true) {
             work.push(a)
         }
@@ -383,6 +369,11 @@ pub(super) fn compact(
                 fail: Some(_),
             } => root(*address),
             Inst::Address { .. } => {}
+            Inst::Read {
+                result,
+                mode: ReadMode::Bits,
+                ..
+            } if dead[result.index()] => {}
             _ => addresses(inst, &mut |a| root(*a)),
         }
     }
@@ -418,7 +409,11 @@ pub(super) fn compact(
         }
     }
     body.addresses = kept;
+    for (i, &a) in address_alias.iter().enumerate() {
+        address_map[i] = address_map[a.index()];
+    }
     let old_steps = std::mem::take(&mut body.pools.steps);
+    body.pools.steps.reserve_exact(old_steps.len());
     for address in &mut body.addresses {
         address.steps = PoolRange::push(
             &mut body.pools.steps,
@@ -429,21 +424,6 @@ pub(super) fn compact(
         if let AddressBase::Address(parent) = &mut a.base {
             *parent = address_map[parent.index()]
         }
-    }
-    let old = std::mem::take(&mut body.insts);
-    let anchors = std::mem::take(&mut body.inst_anchors);
-    for bi in 0..body.blocks.len() {
-        let range = body.blocks[bi].insts;
-        let start = body.insts.len() as u32;
-        for i in range.start as usize..(range.start + range.len) as usize {
-            if !matches!(old[i],Inst::Address{address,..}if !live[address.index()]) {
-                let mut inst = old[i].clone();
-                addresses(&mut inst, &mut |a| *a = address_map[a.index()]);
-                body.insts.push(inst);
-                body.inst_anchors.push(anchors[i])
-            }
-        }
-        body.blocks[bi].insts = PoolRange::new(start, body.insts.len() as u32 - start);
     }
     for a in &mut body.pools.args {
         if let Arg::Address(a) = a {
@@ -461,22 +441,12 @@ pub(super) fn compact(
     }
     used.fill(false);
     mark_values(body, aliases, &mut used);
-    let old = std::mem::take(&mut body.insts);
-    let anchors = std::mem::take(&mut body.inst_anchors);
-    for bi in 0..body.blocks.len() {
-        let range = body.blocks[bi].insts;
-        let start = body.insts.len() as u32;
-        for i in range.start as usize..(range.start + range.len) as usize {
-            if let Inst::Const { result, .. } = old[i]
-                && !used[result.index()]
-            {
-                dead[result.index()] = true;
-                continue;
-            }
-            body.insts.push(old[i].clone());
-            body.inst_anchors.push(anchors[i]);
+    for inst in &body.insts {
+        if let Inst::Const { result, .. } = inst
+            && !used[result.index()]
+        {
+            dead[result.index()] = true;
         }
-        body.blocks[bi].insts = PoolRange::new(start, body.insts.len() as u32 - start);
     }
     let mut value_map = vec![ValueId(0); body.values.len()];
     let mut kept = Vec::with_capacity(body.values.len());
@@ -487,9 +457,28 @@ pub(super) fn compact(
         }
     }
     body.values = kept;
-    let map = |v: &mut ValueId| *v = value_map[alias(aliases, *v).index()];
-    for inst in &mut body.insts {
-        values(inst, true, &mut |v| map(v))
+    for i in 0..value_map.len() {
+        value_map[i] = value_map[alias(aliases, ValueId(i as u32)).index()];
+    }
+    let map = |v: &mut ValueId| *v = value_map[v.index()];
+    let len = body.insts.len();
+    let old = std::mem::replace(&mut body.insts, Vec::with_capacity(len));
+    let anchors = std::mem::replace(&mut body.inst_anchors, Vec::with_capacity(len));
+    for block in &mut body.blocks {
+        let start = body.insts.len() as u32;
+        for i in block.insts.start as usize..(block.insts.start + block.insts.len) as usize {
+            if matches!(old[i], Inst::Address {address,..} if !live[address.index()])
+                || matches!(old[i], Inst::Const {result,..} | Inst::Read {result,mode:ReadMode::Bits,..} if dead[result.index()])
+            {
+                continue;
+            }
+            let mut inst = old[i].clone();
+            addresses(&mut inst, &mut |a| *a = address_map[a.index()]);
+            values(&mut inst, true, &mut |v| map(v));
+            body.insts.push(inst);
+            body.inst_anchors.push(anchors[i]);
+        }
+        block.insts = PoolRange::new(start, body.insts.len() as u32 - start);
     }
     for v in &mut body.pools.values {
         map(v)
@@ -544,6 +533,10 @@ pub(super) fn compact(
 
 /// Remove call rows whose recipes have been expanded into the instruction stream.
 pub(super) fn calls(body: &mut Body) {
+    if body.calls.is_empty() {
+        body.pools.args.clear();
+        return;
+    }
     let mut live = vec![false; body.calls.len()];
     for inst in &body.insts {
         if let Inst::Call { call } = inst {
@@ -560,6 +553,7 @@ pub(super) fn calls(body: &mut Body) {
     }
     body.calls = kept;
     let old_args = std::mem::take(&mut body.pools.args);
+    body.pools.args.reserve_exact(old_args.len());
     for call in &mut body.calls {
         call.args = PoolRange::push(
             &mut body.pools.args,

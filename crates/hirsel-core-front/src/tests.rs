@@ -585,6 +585,44 @@ fn scalar_task_entry_conventions() {
     assert!(failures.is_empty(), "{failures:?}");
 }
 
+/// OWN-4 plain bounds need no destructor state even in the stored rigid body.
+/// This checks publication, before instance cleanup could hide the extra carriers.
+#[test]
+fn plain_generic_body_needs_no_cleanup_carriers() {
+    let (index, modules) = program_inputs("fn identity[T:plain](take x:T)->T {x}");
+    let p = Program::declare(&index, &modules);
+    let f = p
+        .fns
+        .iter()
+        .position(|f| f.path.package_is("app", "1"))
+        .unwrap();
+    let mut emitter = Emitter::new();
+    let checked = p.check_lower(f, &mut emitter);
+    assert!(
+        checked.refusals.is_empty() && checked.gaps.is_empty(),
+        "{checked:?}"
+    );
+    let body = emitter.module.functions[checked.function.unwrap().index()]
+        .body
+        .as_ref()
+        .unwrap();
+    assert!(
+        !body
+            .insts
+            .iter()
+            .any(|i| matches!(i, hirsel_core_ir::Inst::Drop { .. })),
+        "plain values have no cleanup"
+    );
+    assert!(
+        !body
+            .slots
+            .contains(&hirsel_core_ir::PlaceTy::Value(Ty::Scalar(
+                hirsel_core_layout::Scalar::Bool
+            ))),
+        "plain values need no drop flag"
+    );
+}
+
 #[test]
 fn scalar_instances_use_closed_signatures() {
     let (index, modules) = program_inputs(

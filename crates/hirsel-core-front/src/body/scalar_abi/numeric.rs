@@ -5,6 +5,7 @@ use super::*;
 pub struct Site {
     pub call: CallId,
     pub next_block: u32,
+    pub op: numeric_glue::NumericOp,
 }
 
 // Instructions share one arena; each block owns a chain of arena indices.
@@ -19,14 +20,14 @@ struct Tape {
     addresses: Vec<Option<usize>>,
 }
 impl Tape {
-    fn new(body: &Body) -> Self {
+    fn new(body: &Body, capacity: usize) -> Self {
         Self {
-            insts: Vec::new(),
-            anchors: Vec::new(),
-            next: Vec::new(),
+            insts: Vec::with_capacity(capacity),
+            anchors: Vec::with_capacity(capacity),
+            next: Vec::with_capacity(capacity),
             first: vec![None; body.blocks.len()],
             last: vec![None; body.blocks.len()],
-            skipped: Vec::new(),
+            skipped: Vec::with_capacity(capacity),
             lives: vec![None; body.slots.len()],
             addresses: vec![None; body.addresses.len()],
         }
@@ -76,7 +77,32 @@ fn fail_operand(inst: &mut Inst) -> Option<&mut Option<BlockId>> {
     }
 }
 
+fn value(body: &mut Body, ty: Ty) -> ValueId {
+    let v = ValueId(body.values.len() as u32);
+    body.values.push(ty);
+    v
+}
+fn block(body: &mut Body, anchor: Option<Anchor>) -> BlockId {
+    let b = BlockId(body.blocks.len() as u32);
+    body.blocks.push(Block {
+        params: PoolRange::EMPTY,
+        insts: PoolRange::EMPTY,
+        anchor,
+    });
+    body.terminators.push(Terminator::Unreachable);
+    b
+}
+fn edge(body: &mut Body, target: BlockId) -> EdgeId {
+    let e = EdgeId(body.edges.len() as u32);
+    body.edges.push(Edge {
+        target,
+        args: PoolRange::EMPTY,
+    });
+    e
+}
+
 pub(super) fn inline(module: &Module, body: &mut Body, sites: &[Site]) {
+    use numeric_glue::NumericOp;
     if sites.is_empty() {
         return;
     }
@@ -84,209 +110,205 @@ pub(super) fn inline(module: &Module, body: &mut Body, sites: &[Site]) {
     let original_terms = body.terminators.clone();
     let old = std::mem::take(&mut body.insts);
     let anchors = std::mem::take(&mut body.inst_anchors);
-    let selected: HashMap<_, _> = sites.iter().map(|s| (s.call, s.next_block)).collect();
+    let mut selected = vec![None; body.calls.len()];
+    for site in sites {
+        selected[site.call.index()] = Some(site.op);
+    }
     let mut inserted = vec![None; body.calls.len()];
-    let mut tape = Tape::new(body);
-    let mut map = Vec::new();
-    let mut returned = Vec::new();
-    let mut address_map = Vec::new();
-    let mut blocks = Vec::new();
-    let mut edges = Vec::new();
-    for (bi, block) in original_blocks.iter().enumerate() {
+    let mut tape = Tape::new(body, old.len() + sites.len() * 12);
+    for (bi, source_block) in original_blocks.iter().enumerate() {
         let mut current = BlockId(bi as u32);
-        for i in block.insts.start as usize..(block.insts.start + block.insts.len) as usize {
+        for i in source_block.insts.start as usize
+            ..(source_block.insts.start + source_block.insts.len) as usize
+        {
             let Inst::Call { call } = old[i] else {
                 tape.emit(current, old[i].clone(), anchors[i]);
                 continue;
             };
-            if !selected.contains_key(&call) {
+            let Some(op) = selected[call.index()] else {
                 tape.emit(current, old[i].clone(), anchors[i]);
                 continue;
-            }
-            let site = body.calls[call.index()].clone();
-            let Callee::Direct(function) = site.callee else {
-                unreachable!("numeric recipes are direct")
             };
-            let function = &module.functions[function.index()];
-            let helper = function.body.as_ref().unwrap();
-            let signature = &module.signatures[function.signature.index()];
-            let entry = helper.blocks[0].params.get(&helper.pools.values).unwrap();
+            let site = &body.calls[call.index()];
+            let fail = site.fail;
+            let signature = &module.signatures[site.signature.index()];
             let args = site.args.get(&body.pools.args).unwrap();
             let dest = signature.dest.map(|_| match args[0] {
                 Arg::Address(a) => a,
                 _ => unreachable!(),
             });
-            map.clear();
-            map.resize(helper.values.len(), None);
-            for (&param, arg) in entry.iter().zip(args) {
-                if let Arg::Value(v) = arg {
-                    map[param.index()] = Some(*v);
-                }
-            }
-            returned.clear();
-            returned.extend(helper.terminators.iter().enumerate().filter_map(|(bi, t)| {
-                if let Terminator::Return(v) = t {
-                    Some((bi, *v))
-                } else {
-                    None
-                }
-            }));
-            if dest.is_none() {
-                let values = returned[0].1.get(&helper.pools.values).unwrap();
-                for (&from, &to) in values
-                    .iter()
-                    .zip(site.results.get(&body.pools.values).unwrap())
-                {
-                    map[from.index()] = Some(to);
-                }
-            }
-            for (v, t) in helper.values.iter().enumerate() {
-                if map[v].is_none() && !(dest.is_some() && v == entry[0].index()) {
-                    map[v] = Some(ValueId(body.values.len() as u32));
-                    body.values.push(*t);
-                }
-            }
-            let value = |v: ValueId| map[v.index()].unwrap();
-            address_map.clear();
-            let mut root = None;
-            for (ai, address) in helper.addresses.iter().enumerate() {
-                if dest.is_some()
-                    && address.base == AddressBase::Value(entry[0])
-                    && address.steps.len == 0
-                {
-                    address_map.push(dest.unwrap());
-                    root = Some(AddressId(ai as u32));
-                    continue;
-                }
-                let mut address = address.clone();
-                address.base = match address.base {
-                    AddressBase::Value(v) => AddressBase::Value(value(v)),
-                    AddressBase::Address(a) => AddressBase::Address(address_map[a.index()]),
-                    AddressBase::Slot(_) => unreachable!("numeric recipes have no local storage"),
+            let mut operands = [ValueId(0); 2];
+            for (i, arg) in args[usize::from(dest.is_some())..].iter().enumerate() {
+                let Arg::Value(v) = arg else {
+                    unreachable!("closed numeric operands are scalars")
                 };
-                let steps =
-                    address
-                        .steps
-                        .get(&helper.pools.steps)
-                        .unwrap()
-                        .iter()
-                        .map(|s| match *s {
-                            Step::Index(v) => Step::Index(value(v)),
-                            Step::Element(v) => Step::Element(value(v)),
-                            Step::Byte(v) => Step::Byte(value(v)),
-                            other => other,
-                        });
-                address.steps = PoolRange::push(&mut body.pools.steps, steps);
-                address_map.push(AddressId(body.addresses.len() as u32));
-                body.addresses.push(address);
+                operands[i] = *v;
             }
-            let mut deferred = [None, None];
-            if let Some(dest) = dest {
-                if let AddressBase::Slot(slot) = body.addresses[dest.index()].base {
-                    deferred[0] = tape.defer(tape.lives[slot.index()]);
-                    deferred[1] = tape.defer(tape.addresses[dest.index()]);
+            let (target, payload_steps) = if let Some(row) = signature.dest {
+                numeric_glue::payload(module, row)
+            } else {
+                let Ty::Scalar(s) = signature.results[0] else {
+                    unreachable!()
+                };
+                (s, Vec::new())
+            };
+            let result = if dest.is_none() {
+                site.results.get(&body.pools.values).unwrap()[0]
+            } else {
+                value(body, Ty::Scalar(target))
+            };
+            let flag = (op.optional() || op == NumericOp::Narrow)
+                .then(|| value(body, Ty::Scalar(Scalar::Bool)));
+            let success = match op {
+                NumericOp::Arithmetic(mode, op) => {
+                    tape.emit(
+                        current,
+                        Inst::IntArith {
+                            result,
+                            flag,
+                            mode,
+                            op,
+                            left: operands[0],
+                            right: operands[1],
+                        },
+                        anchors[i],
+                    );
+                    flag.map(|flag| {
+                        let result = value(body, Ty::Scalar(Scalar::Bool));
+                        tape.emit(
+                            current,
+                            Inst::Unary {
+                                result,
+                                op: UnaryOp::Not,
+                                operand: flag,
+                                fail: None,
+                            },
+                            anchors[i],
+                        );
+                        result
+                    })
+                }
+                NumericOp::Narrow | NumericOp::TryNarrow => {
+                    tape.emit(
+                        current,
+                        Inst::Convert {
+                            result,
+                            flag,
+                            operand: operands[0],
+                            mode: ConvertMode::TryNarrow,
+                        },
+                        anchors[i],
+                    );
+                    flag
+                }
+            };
+            if let Some(dest) = dest
+                && let AddressBase::Slot(slot) = body.addresses[dest.index()].base
+            {
+                let deferred = [
+                    tape.defer(tape.lives[slot.index()]),
+                    tape.defer(tape.addresses[dest.index()]),
+                ];
+                for (inst, anchor) in deferred.into_iter().flatten() {
+                    tape.emit(current, inst, anchor);
                 }
             }
             let start = body.blocks.len() as u32;
-            blocks.clear();
-            blocks.push(current);
-            for block in helper.blocks.iter().skip(1) {
-                blocks.push(BlockId(body.blocks.len() as u32));
-                body.blocks.push(Block {
-                    params: PoolRange::push(
-                        &mut body.pools.values,
-                        block
-                            .params
-                            .get(&helper.pools.values)
-                            .unwrap()
-                            .iter()
-                            .map(|&v| value(v)),
-                    ),
-                    insts: PoolRange::EMPTY,
-                    anchor: anchors[i],
-                });
-                body.terminators.push(Terminator::Unreachable);
-            }
-            let continuation = if dest.is_some() {
-                let b = BlockId(body.blocks.len() as u32);
-                body.blocks.push(Block {
-                    params: PoolRange::EMPTY,
-                    insts: PoolRange::EMPTY,
-                    anchor: anchors[i],
-                });
-                body.terminators.push(Terminator::Unreachable);
-                b
-            } else {
-                blocks[returned[0].0]
-            };
-            inserted[call.index()] = Some((start, body.blocks.len() as u32));
-            edges.clear();
-            for edge in &helper.edges {
-                let values = edge
-                    .args
-                    .get(&helper.pools.values)
-                    .unwrap()
-                    .iter()
-                    .map(|&v| value(v));
-                let args = PoolRange::push(&mut body.pools.values, values);
-                edges.push(EdgeId(body.edges.len() as u32));
-                body.edges.push(Edge {
-                    target: blocks[edge.target.index()],
-                    args,
-                });
-            }
-            for (hi, helper_block) in helper.blocks.iter().enumerate() {
-                for inst in helper_block.insts.get(&helper.insts).unwrap() {
-                    if matches!(inst,Inst::Address{address,..}if Some(*address)==root) {
-                        for item in &mut deferred {
-                            if let Some((inst, anchor)) = item.take() {
-                                tape.emit(blocks[hi], inst, anchor);
-                            }
-                        }
-                        continue;
-                    }
-                    let can_fail = inst.can_fail(helper);
-                    let mut inst = inst.clone();
-                    values(&mut inst, true, &mut |v| *v = value(*v));
-                    addresses(&mut inst, &mut |a| *a = address_map[a.index()]);
-                    if can_fail && let Some(fail) = fail_operand(&mut inst) {
-                        *fail = fail.map(|b| blocks[b.index()]).or(site.fail);
-                    }
-                    tape.emit(blocks[hi], inst, anchors[i]);
-                }
-                let term = match helper.terminators[hi].clone() {
-                    Terminator::Jump(e) => Terminator::Jump(edges[e.index()]),
-                    Terminator::Branch { condition, yes, no } => Terminator::Branch {
-                        condition: value(condition),
-                        yes: edges[yes.index()],
-                        no: edges[no.index()],
-                    },
-                    Terminator::Return(_) if dest.is_none() => continue,
-                    Terminator::Return(_) => {
-                        let e = EdgeId(body.edges.len() as u32);
-                        body.edges.push(Edge {
-                            target: continuation,
-                            args: PoolRange::EMPTY,
-                        });
-                        Terminator::Jump(e)
-                    }
-                    Terminator::Propagate => {
-                        if let Some(target) = site.fail {
-                            let e = EdgeId(body.edges.len() as u32);
-                            body.edges.push(Edge {
-                                target,
-                                args: PoolRange::EMPTY,
-                            });
-                            Terminator::Jump(e)
-                        } else {
-                            Terminator::Propagate
-                        }
-                    }
-                    _ => unreachable!("numeric recipe control flow"),
+            if let Some(success) = success {
+                let yes = block(body, anchors[i]);
+                let no = block(body, anchors[i]);
+                let continuation = if dest.is_some() {
+                    block(body, anchors[i])
+                } else {
+                    yes
                 };
-                body.terminators[blocks[hi].index()] = term;
+                let yes_edge = edge(body, yes);
+                let no_edge = edge(body, no);
+                body.terminators[current.index()] = Terminator::Branch {
+                    condition: success,
+                    yes: yes_edge,
+                    no: no_edge,
+                };
+                if let Some(dest) = dest {
+                    tape.emit(
+                        yes,
+                        Inst::SetCase {
+                            address: dest,
+                            case: 1,
+                        },
+                        anchors[i],
+                    );
+                    let address = AddressId(body.addresses.len() as u32);
+                    let steps = PoolRange::push(&mut body.pools.steps, payload_steps);
+                    body.addresses.push(AddressInfo {
+                        base: AddressBase::Address(dest),
+                        steps,
+                        ty: PlaceTy::Value(Ty::Scalar(target)),
+                    });
+                    tape.emit(
+                        yes,
+                        Inst::Address {
+                            address,
+                            fail: None,
+                        },
+                        anchors[i],
+                    );
+                    tape.emit(
+                        yes,
+                        Inst::Store {
+                            address,
+                            value: result,
+                        },
+                        anchors[i],
+                    );
+                    let done = edge(body, continuation);
+                    body.terminators[yes.index()] = Terminator::Jump(done);
+                    tape.emit(
+                        no,
+                        Inst::SetCase {
+                            address: dest,
+                            case: 0,
+                        },
+                        anchors[i],
+                    );
+                    let done = edge(body, continuation);
+                    body.terminators[no.index()] = Terminator::Jump(done);
+                } else {
+                    let max = value(body, Ty::Scalar(Scalar::U8));
+                    let one = value(body, Ty::Scalar(Scalar::U8));
+                    let unused = value(body, Ty::Scalar(Scalar::U8));
+                    tape.emit(
+                        no,
+                        Inst::Const {
+                            result: max,
+                            bits: 255,
+                        },
+                        anchors[i],
+                    );
+                    tape.emit(
+                        no,
+                        Inst::Const {
+                            result: one,
+                            bits: 1,
+                        },
+                        anchors[i],
+                    );
+                    tape.emit(
+                        no,
+                        Inst::Binary {
+                            result: unused,
+                            op: BinaryOp::Add,
+                            left: max,
+                            right: one,
+                            fail,
+                        },
+                        anchors[i],
+                    );
+                    body.terminators[no.index()] = Terminator::Propagate;
+                }
+                current = continuation;
             }
-            current = continuation;
+            inserted[call.index()] = Some((start, body.blocks.len() as u32));
         }
         body.terminators[current.index()] = original_terms[bi].clone();
     }

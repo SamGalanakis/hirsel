@@ -19,6 +19,7 @@ pub opaque type Sender[T: send]
 pub opaque type Receiver[T: send]
 
 pub opaque type Dir
+pub opaque type Unique: key
 
 pub type Capacity { requested: u64, available: u64 }
 pub type Exit: key { status: u8 }

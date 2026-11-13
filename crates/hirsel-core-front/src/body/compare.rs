@@ -75,7 +75,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             TyKind::View(x) => self.comparable(x, depth + 1),
             TyKind::Adt(d, args) => {
                 let decl = &self.p.decls[d.index()];
-                if self.text_like(t) {
+                if self.text_like(t) || self.word_like(t) {
                     return Ok(());
                 }
                 if decl.role.is_some() {
@@ -148,6 +148,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             }
             TyKind::Adt(..) if self.text_like(t) => self.bytes(a, b, join, n),
+            TyKind::Adt(..) if self.word_like(t) => {
+                let u64t = Ty::Scalar(Scalar::U64);
+                let (x, y) = (self.read_bits(a, u64t, n), self.read_bits(b, u64t, n));
+                self.scalars(x, y, join, eq_only, n);
+            }
             TyKind::Adt(d, args) => match self.p.decls[d.index()].body.clone() {
                 DeclBody::Record(fs) => {
                     for (i, f) in fs.iter().enumerate() {
@@ -237,6 +242,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             _ => false,
         }
+    }
+
+    /// `Unique` and `Site`: `key` values of one u64 word (core.md "Core types"), equal
+    /// exactly when their words are.
+    fn word_like(&self, t: TyId) -> bool {
+        matches!(self.t.kind(t), TyKind::Adt(d, _)
+            if matches!(self.p.decls[d.index()].role, Some(Role::Unique | Role::Site)))
     }
 
     /// Two byte carriers: `rt.compare_bytes` over their data and lengths; a nonzero

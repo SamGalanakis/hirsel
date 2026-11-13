@@ -367,8 +367,12 @@ impl Emitter {
             TyKind::Fn(_, _, _, Callable::Plain) => return Ok(Rep::Scalar(Ty::Ptr)),
             TyKind::Unit | TyKind::Never | TyKind::Error => return Ok(Rep::None),
             // A capability or `Args` is a provider handle, plain and never cleaned by
-            // the program (FORM e68de117).
-            TyKind::Adt(d, _) if crate::layout::handle(&p.decls[d.index()]) => {
+            // the program (FORM e68de117); `Unique` and `Site` are one plain word
+            // (core.md "Core types").
+            TyKind::Adt(d, _)
+                if crate::layout::handle(&p.decls[d.index()])
+                    || matches!(p.decls[d.index()].role, Some(Role::Unique | Role::Site)) =>
+            {
                 return Ok(Rep::Scalar(Ty::Scalar(Scalar::U64)));
             }
             TyKind::Tuple(_)

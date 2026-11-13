@@ -9,7 +9,9 @@ pub mod memory_layout {
 mod abi;
 mod cleanup;
 mod collections;
+mod empty;
 mod failure;
+mod fast;
 mod scalar;
 mod storage;
 #[cfg(test)]
@@ -113,6 +115,7 @@ pub fn emit_ir(module: &Module) -> Result<String> {
             has_status,
             failures: &failures,
             constants: &failures.constants[i],
+            empty_bounds: empty::EmptyBounds::new(body, &failures.constants[i]),
             code: String::new(),
             allocations: String::new(),
             next: 0,
@@ -149,8 +152,8 @@ pub fn emit_ir(module: &Module) -> Result<String> {
         e.line("br label %b0");
         for (i, b) in body.blocks.iter().enumerate() {
             writeln!(e.code, "b{i}:").unwrap();
-            for inst in b.insts.get(&body.insts).unwrap() {
-                e.inst(inst)?;
+            for (offset, inst) in b.insts.get(&body.insts).unwrap().iter().enumerate() {
+                e.inst(inst, b.insts.start as usize + offset)?;
             }
             e.term(&body.terminators[i])?;
         }
@@ -265,6 +268,7 @@ struct FunctionEmitter<'a> {
     has_status: bool,
     failures: &'a failure::Failures,
     constants: &'a [Option<u64>],
+    empty_bounds: empty::EmptyBounds,
     code: String,
     allocations: String,
     next: usize,
@@ -370,7 +374,7 @@ impl FunctionEmitter<'_> {
         self.line(format!("store i8 {kind}, ptr {cause}, align 8"));
         self.line(format!("call void @hirsel_core_raise(ptr %context, ptr byval({{ i8, i64, ptr, ptr }}) align 8 {cause})"));
     }
-    fn inst(&mut self, inst: &Inst) -> Result<()> {
+    fn inst(&mut self, inst: &Inst, index: usize) -> Result<()> {
         match *inst {
             Inst::Const { result, bits } => {
                 let t = self.vty(result);
@@ -547,7 +551,7 @@ impl FunctionEmitter<'_> {
                 self.put(result, &x);
             }
             Inst::Call { call } => self.call(&self.body.calls[call.index()])?,
-            _ => self.storage(inst)?,
+            _ => self.storage(inst, index)?,
         }
         Ok(())
     }

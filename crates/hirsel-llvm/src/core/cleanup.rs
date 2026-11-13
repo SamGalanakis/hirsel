@@ -61,6 +61,7 @@ pub(super) fn drop_glue(
             has_status: true,
             failures,
             constants: &[],
+            empty_bounds: empty::EmptyBounds::default(),
             code: String::new(),
             allocations: String::new(),
             next: 0,
@@ -254,16 +255,20 @@ impl FunctionEmitter<'_> {
     pub(super) fn release_node(&mut self, node: &str, t: TypeRef, atomic: bool) -> Result<()> {
         let logical = self.recipes[t.index()].logical_size.unwrap();
         let charge = hirsel_core_layout::charge::counted(logical).unwrap();
-        self.runtime_void(
-            "hirsel_core_release",
-            &[
-                ("ptr".into(), "%context".into()),
-                ("ptr".into(), node.into()),
-                ("i1 zeroext".into(), atomic.to_string()),
-                ("i64".into(), charge.to_string()),
-                ("ptr".into(), format!("@core_counted_drop_{}", t.0)),
-            ],
-        );
+        if atomic {
+            self.runtime_void(
+                "hirsel_core_release",
+                &[
+                    ("ptr".into(), "%context".into()),
+                    ("ptr".into(), node.into()),
+                    ("i1 zeroext".into(), "true".into()),
+                    ("i64".into(), charge.to_string()),
+                    ("ptr".into(), format!("@core_counted_drop_{}", t.0)),
+                ],
+            );
+        } else {
+            self.release_fast(node, charge, &format!("@core_counted_drop_{}", t.0), false);
+        }
         Ok(())
     }
 }
@@ -414,6 +419,7 @@ fn counted_glue(
             has_status: false,
             failures,
             constants: &[],
+            empty_bounds: empty::EmptyBounds::default(),
             code: String::new(),
             allocations: String::new(),
             next: 0,

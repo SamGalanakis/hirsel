@@ -984,3 +984,6 @@ fn counted_maps_skip_removed_entries_and_destroy_deep_chains_with_constant_stack
         assert_eq!(got.admissions, 1 + 2 * case.args[0] as usize);
     }
 }
+
+#[path = "fast_tests.rs"]
+mod fast_tests;

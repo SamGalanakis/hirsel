@@ -205,13 +205,28 @@ impl FunctionEmitter<'_> {
         ));
     }
     fn allocation(&mut self, name: &str, args: &[(String, String)]) -> (String, String) {
+        self.allocation_call(name, args, "")
+    }
+    pub(super) fn allocation_cold(
+        &mut self,
+        name: &str,
+        args: &[(String, String)],
+    ) -> (String, String) {
+        self.allocation_call(name, args, " cold")
+    }
+    fn allocation_call(
+        &mut self,
+        name: &str,
+        args: &[(String, String)],
+        attributes: &str,
+    ) -> (String, String) {
         let p = self.temp("{ ptr, i64, i64 }");
         let mut types = vec!["ptr sret({ ptr, i64, i64 })".to_string()];
         types.extend(args.iter().map(|(t, _)| t.clone()));
         self.intrinsics
             .insert(format!("declare void @{name}({})", types.join(", ")));
         self.line(format!(
-            "call void @{name}(ptr sret({{ ptr, i64, i64 }}) {p}, {})",
+            "call void @{name}(ptr sret({{ ptr, i64, i64 }}) {p}, {}){attributes}",
             args.iter()
                 .map(|(t, v)| format!("{t} {v}"))
                 .collect::<Vec<_>>()
@@ -222,7 +237,7 @@ impl FunctionEmitter<'_> {
         let available = self.calc(format!("load i64, ptr {available}, align 8"));
         (pointer, available)
     }
-    pub(super) fn storage(&mut self, inst: &Inst) -> Result<()> {
+    pub(super) fn storage(&mut self, inst: &Inst, index: usize) -> Result<()> {
         let ptr = |s: &str| ("ptr".into(), s.to_string());
         let word = |s: String| ("i64".into(), s);
         match *inst {
@@ -239,63 +254,68 @@ impl FunctionEmitter<'_> {
             } => {
                 let charge = self.get(charge);
                 let size = self.get(size);
-                let (name, mut args) = match (kind, place) {
-                    (AllocKind::Resource { grant }, _) => {
-                        let without_grant = self.calc(format!("sub i64 {charge}, {grant}"));
-                        let storage = self.calc(format!("sub i64 {without_grant}, 32"));
-                        (
-                            "hirsel_core_resource_alloc",
-                            vec![
-                                ptr("%context"),
-                                word(size.to_string()),
-                                word(align.to_string()),
-                                word(storage),
-                                word(grant.to_string()),
-                            ],
-                        )
-                    }
-                    (_, AllocPlace::Region(r)) => {
-                        let r = self.get(r);
-                        (
-                            "hirsel_core_region_alloc",
-                            vec![
-                                ptr("%context"),
-                                ptr(&r),
-                                word(size.to_string()),
-                                word(align.to_string()),
-                                word(charge),
-                            ],
-                        )
-                    }
-                    (_, place) => {
-                        let like = match place {
-                            AllocPlace::Like(v) => self.get(v),
-                            _ => "null".into(),
+                let (block, room) =
+                    if let Some(fast) = self.fast_allocate(kind, place, &charge, &size, align) {
+                        fast
+                    } else {
+                        let (name, mut args) = match (kind, place) {
+                            (AllocKind::Resource { grant }, _) => {
+                                let without_grant = self.calc(format!("sub i64 {charge}, {grant}"));
+                                let storage = self.calc(format!("sub i64 {without_grant}, 32"));
+                                (
+                                    "hirsel_core_resource_alloc",
+                                    vec![
+                                        ptr("%context"),
+                                        word(size.to_string()),
+                                        word(align.to_string()),
+                                        word(storage),
+                                        word(grant.to_string()),
+                                    ],
+                                )
+                            }
+                            (_, AllocPlace::Region(r)) => {
+                                let r = self.get(r);
+                                (
+                                    "hirsel_core_region_alloc",
+                                    vec![
+                                        ptr("%context"),
+                                        ptr(&r),
+                                        word(size.to_string()),
+                                        word(align.to_string()),
+                                        word(charge),
+                                    ],
+                                )
+                            }
+                            (_, place) => {
+                                let like = match place {
+                                    AllocPlace::Like(v) => self.get(v),
+                                    _ => "null".into(),
+                                };
+                                (
+                                    "hirsel_core_alloc",
+                                    vec![
+                                        ptr("%context"),
+                                        ptr(&like),
+                                        word(size.to_string()),
+                                        word(align.to_string()),
+                                        word(charge),
+                                    ],
+                                )
+                            }
                         };
-                        (
-                            "hirsel_core_alloc",
-                            vec![
-                                ptr("%context"),
-                                ptr(&like),
-                                word(size.to_string()),
-                                word(align.to_string()),
-                                word(charge),
-                            ],
-                        )
-                    }
-                };
-                if !matches!(kind, AllocKind::Resource { .. }) {
-                    args.push(("i1 zeroext".into(), "false".into()));
-                }
-                if !matches!(kind, AllocKind::Resource { .. })
-                    && !matches!(place, AllocPlace::Region(_))
-                {
-                    args.push((
-                        "i8 zeroext".into(),
-                        u8::from(kind != AllocKind::Plain).to_string(),
-                    ));
-                }
-                let (block, room) = self.allocation(name, &args);
+                        if !matches!(kind, AllocKind::Resource { .. }) {
+                            args.push(("i1 zeroext".into(), "false".into()));
+                        }
+                        if !matches!(kind, AllocKind::Resource { .. })
+                            && !matches!(place, AllocPlace::Region(_))
+                        {
+                            args.push((
+                                "i8 zeroext".into(),
+                                u8::from(kind != AllocKind::Plain).to_string(),
+                            ));
+                        }
+                        self.allocation(name, &args)
+                    };
                 if let Some(token) = region_entry {
                     let AllocPlace::Region(region) = place else {
                         unreachable!()
@@ -308,15 +328,25 @@ impl FunctionEmitter<'_> {
                     let value = self.calc(format!("load i64, ptr {at}, align 8"));
                     self.put(token, &value);
                 }
-                // Null is an ordinary Capacity value outside a finalizer. The runtime
-                // reports whether this context is executing a finalizer grant.
+                // Only refusal needs the runtime's active-finalizer decision.
+                let present = self.calc(format!("icmp ne ptr {block}, null"));
+                let n = self.next;
+                self.next += 1;
+                self.likely(
+                    &present,
+                    &format!("allocation_success{n}"),
+                    &format!("allocation_status{n}"),
+                );
+                writeln!(self.code, "allocation_status{n}:").unwrap();
                 self.intrinsics
                     .insert("declare i8 @hirsel_core_allocation_status(ptr, ptr)".into());
                 let status = self.calc(format!(
-                    "call i8 @hirsel_core_allocation_status(ptr %context, ptr {block})"
+                    "call i8 @hirsel_core_allocation_status(ptr %context, ptr {block}) cold"
                 ));
                 let failed = self.calc(format!("icmp ne i8 {status}, 0"));
                 self.branch_failure(&failed, fail, Some(6));
+                self.line(format!("br label %allocation_success{n}"));
+                writeln!(self.code, "allocation_success{n}:").unwrap();
                 self.put(result, &block);
                 self.put(available, &room);
                 if kind == AllocKind::Counted {
@@ -329,10 +359,7 @@ impl FunctionEmitter<'_> {
                         "br i1 {missing}, label %allocated{n}, label %counted{n}"
                     ));
                     writeln!(self.code, "counted{n}:").unwrap();
-                    self.runtime_void(
-                        "hirsel_core_counted_init",
-                        &[ptr(&block), ("i1 zeroext".into(), "false".into())],
-                    );
+                    self.line(format!("store i64 1, ptr {block}, align 8"));
                     self.line(format!("br label %allocated{n}"));
                     writeln!(self.code, "allocated{n}:").unwrap();
                 }
@@ -360,7 +387,7 @@ impl FunctionEmitter<'_> {
             Inst::Free { block, charge } => {
                 let p = self.get(block);
                 let n = self.get(charge);
-                self.runtime_void("hirsel_core_free_value", &[ptr(&p), word(n)]);
+                self.free_block(&p, &n);
             }
             Inst::Copy { to, from, bytes } => {
                 let to = self.address(to);
@@ -377,14 +404,22 @@ impl FunctionEmitter<'_> {
                 bytes,
             } => {
                 let n = self.get(bytes);
-                let (p, room) =
-                    self.allocation("hirsel_core_limit_enter", &[ptr("%context"), word(n)]);
-                let yes = self.calc(format!("icmp ne ptr {p}, null"));
-                let yes = self.calc(format!("zext i1 {yes} to i8"));
+                let (yes, room) = if self.empty_bounds.enters.contains(&admitted) {
+                    self.empty_bound(&n)
+                } else {
+                    let (p, room) =
+                        self.allocation("hirsel_core_limit_enter", &[ptr("%context"), word(n)]);
+                    let yes = self.calc(format!("icmp ne ptr {p}, null"));
+                    (self.calc(format!("zext i1 {yes} to i8")), room)
+                };
                 self.put(admitted, &yes);
                 self.put(available, &room);
             }
-            Inst::LimitExit => self.runtime_void("hirsel_core_limit_exit", &[ptr("%context")]),
+            Inst::LimitExit => {
+                if !self.empty_bounds.exits.contains(&index) {
+                    self.runtime_void("hirsel_core_limit_exit", &[ptr("%context")]);
+                }
+            }
             Inst::RegionOpen { result } => {
                 let p = self.intrinsic("hirsel_core_region_open", "ptr", &[word("65536".into())]);
                 self.put(result, &p);
@@ -426,13 +461,15 @@ impl FunctionEmitter<'_> {
             }
             Inst::Share { node, kind } => {
                 let p = self.get(node);
-                self.runtime_void(
-                    "hirsel_core_share",
-                    &[
-                        ptr(&p),
-                        ("i1 zeroext".into(), (kind == Counted::Arc).to_string()),
-                    ],
-                );
+                if kind == Counted::Arc {
+                    // The provider currently records Arc events inside this entry.
+                    self.runtime_void(
+                        "hirsel_core_share",
+                        &[ptr(&p), ("i1 zeroext".into(), "true".into())],
+                    );
+                } else {
+                    self.share_node(&p, false);
+                }
             }
             Inst::TryUnwrap { result, node, kind } => {
                 let p = self.get(node);

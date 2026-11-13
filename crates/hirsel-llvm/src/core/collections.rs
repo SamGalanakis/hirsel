@@ -175,6 +175,7 @@ pub(super) fn glue(
             has_status: false,
             failures,
             constants: &[],
+            empty_bounds: empty::EmptyBounds::default(),
             code: String::new(),
             allocations: String::new(),
             next: 0,

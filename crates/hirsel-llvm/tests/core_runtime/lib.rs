@@ -40,3 +40,21 @@ pub unsafe extern "C" fn hirsel_core_test_attempts(
     // SAFETY: fixture exclusively owns its live context.
     unsafe { (&*context).admission_attempts() }
 }
+
+/// Advance the real test injector once, restoring the empty reservation before
+/// emitted admission mutates the balances itself.
+/// # Safety
+/// The fixture exclusively borrows its live context.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_test_probe_admission(
+    context: *mut hirsel_core_rt::Context,
+    charge: u64,
+) -> bool {
+    // SAFETY: fixture owns this live context for the duration of the call.
+    let context = unsafe { &mut *context };
+    if context.limit_enter(charge).is_err() {
+        return false;
+    }
+    context.limit_exit();
+    true
+}

@@ -785,9 +785,21 @@ fn generic_call_keys_separate_widths_and_reuse_equal_instances() {
 fn list_index_iteration_and_failure_cleanup() {
     use hirsel_core_ir::{TypeId, text};
     let vectors = [
-        ("fn f(xs: Map[u64,u64]) -> u64 { let mut s: u64 = 0; for (k,v) in xs { s += k + v }; s }", false, eval::Outcome::Returned(vec![220])),
-        ("fn f(xs: Map[u64,u64]) -> u64 { let mut s: u64 = 0; for (k,v) in xs { s = s * 100 + k }; s }", false, eval::Outcome::Returned(vec![713])),
-        ("fn add(x: u64) -> u64 { x + 1 }\nfn f(xs: Map[u64,u64]) -> u64 { let mut s: u64 = 0; for (k,v) in xs { s += add(v) }; s }", false, eval::Outcome::Returned(vec![202])),
+        (
+            "fn f(xs: Map[u64,u64]) -> u64 { let mut s: u64 = 0; for (k,v) in xs { s += k + v }; s }",
+            false,
+            eval::Outcome::Returned(vec![220]),
+        ),
+        (
+            "fn f(xs: Map[u64,u64]) -> u64 { let mut s: u64 = 0; for (k,v) in xs { s = s * 100 + k }; s }",
+            false,
+            eval::Outcome::Returned(vec![713]),
+        ),
+        (
+            "fn add(x: u64) -> u64 { x + 1 }\nfn f(xs: Map[u64,u64]) -> u64 { let mut s: u64 = 0; for (k,v) in xs { s += add(v) }; s }",
+            false,
+            eval::Outcome::Returned(vec![202]),
+        ),
         (
             "fn f(xs: List[u64]) -> u64 { let v = view xs; v[1] }",
             false,
@@ -886,7 +898,9 @@ fn list_index_iteration_and_failure_cleanup() {
         let f = p.fns.iter().position(|f| f.path.0.name == "f").unwrap();
         let mut emitter = Emitter::new();
         for (other, fd) in p.fns.iter().enumerate() {
-            if other != f && fd.body.is_some() { let _ = p.check_lower(other, &mut emitter); }
+            if other != f && fd.body.is_some() {
+                let _ = p.check_lower(other, &mut emitter);
+            }
         }
         let check = p.check_lower(f, &mut emitter);
         assert!(
@@ -964,13 +978,27 @@ fn f{entry} = n{instance} g{g} {{
         let fixture = if source.contains("Map[u64,u64]") {
             let mut addresses = String::new();
             let mut build = String::new();
-            for (i, (offset, bits)) in [(8,1),(16,7),(24,70),(40,0),(48,11),(56,110),(72,1),(80,13),(88,130)].into_iter().enumerate() {
-                let a = 7+i;
-                let v = 11+2*i;
+            for (i, (offset, bits)) in [
+                (8, 1),
+                (16, 7),
+                (24, 70),
+                (40, 0),
+                (48, 11),
+                (56, 110),
+                (72, 1),
+                (80, 13),
+                (88, 130),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let a = 7 + i;
+                let v = 11 + 2 * i;
                 addresses.push_str(&format!("addr a{a} = v4 byte v{v} : u64\n"));
                 build.push_str(&format!("v{v}: u64 = const {offset}\nv{}: u64 = const {bits}\naddress a{a}\nstore a{a}, v{}\n",v+1,v+1));
             }
-            fixture.replace("v0: u64 = const 24", "v0: u64 = const 96")
+            fixture
+                .replace("v0: u64 = const 24", "v0: u64 = const 96")
                 .replace(" b0:", &format!("{addresses} b0:"))
                 .replace("store a4, v6\n  store a5, v7\n  store a6, v8", &build)
                 .replace(&format!("drop a0 t{list}"), "free v4 charge v0")

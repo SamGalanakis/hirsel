@@ -606,7 +606,9 @@ impl<'c, 'a> Cx<'c, 'a> {
             let start = self.konst(Ty::Scalar(Scalar::U64), 0, n);
             let limit = match count {
                 Some(count) => self.konst(Ty::Scalar(Scalar::U64), count, n),
-                None => value.map(|v| self.read_sequence_word(v, 8, Ty::Scalar(Scalar::U64), n)),
+                None => value
+                    .filter(|_| self.live())
+                    .map(|v| self.read_sequence_word(v, 8, Ty::Scalar(Scalar::U64), n)),
             };
             (elem, start, limit, false, Some((inner, value)))
         };
@@ -690,29 +692,30 @@ impl<'c, 'a> Cx<'c, 'a> {
         self.depth += 1;
         let value = match (flow, sequence) {
             (Some((_, _, _, index, _, _, _)), Some((collection, Some(pointer)))) => {
-                if matches!(self.t.kind(collection), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Map)) {
+                if matches!(self.t.kind(collection), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Map))
+                {
                     let advance = flow.unwrap().1;
                     self.map_pair(pointer, collection, index, elem, advance, n)
                 } else {
-                let place = self.place_ty(collection, n);
-                let element = self.place_ty(elem, n);
-                match (place, element) {
-                    (Some(place), Some(element)) => {
-                        let base = self.address(AddressBase::Value(pointer), &[], place, n);
-                        let at = if let Some(data) = drain_data {
-                            Some(self.address(
-                                AddressBase::Value(data),
-                                &[Step::Index(index)],
-                                element,
-                                n,
-                            ))
-                        } else {
-                            self.index_address(base, collection, index, element, n)
-                        };
-                        at.and_then(|at| self.iteration_value(at, elem, n))
+                    let place = self.place_ty(collection, n);
+                    let element = self.place_ty(elem, n);
+                    match (place, element) {
+                        (Some(place), Some(element)) => {
+                            let base = self.address(AddressBase::Value(pointer), &[], place, n);
+                            let at = if let Some(data) = drain_data {
+                                Some(self.address(
+                                    AddressBase::Value(data),
+                                    &[Step::Index(index)],
+                                    element,
+                                    n,
+                                ))
+                            } else {
+                                self.index_address(base, collection, index, element, n)
+                            };
+                            at.and_then(|at| self.iteration_value(at, elem, n))
+                        }
+                        _ => None,
                     }
-                    _ => None,
-                }
                 }
             }
             (Some((_, _, _, index, _, _, _)), None) => Some(index),

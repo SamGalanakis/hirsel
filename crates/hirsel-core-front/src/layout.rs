@@ -93,9 +93,15 @@ impl<T: TyRead> Shapes<'_, T> {
                         ty: self.field(x)?,
                     });
                 }
-                (if crate::decls::kind(self.decls, self.types, ty, &[]) == crate::Kind::Scoped {
-                    LRepr::Scoped
-                } else { LRepr::Own }, Body::Record(fields), None)
+                (
+                    if crate::decls::kind(self.decls, self.types, ty, &[]) == crate::Kind::Scoped {
+                        LRepr::Scoped
+                    } else {
+                        LRepr::Own
+                    },
+                    Body::Record(fields),
+                    None,
+                )
             }
             TyKind::Adt(d, args) => {
                 let decls = self.decls;

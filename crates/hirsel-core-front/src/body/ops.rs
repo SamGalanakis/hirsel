@@ -326,8 +326,15 @@ impl<'c, 'a> Cx<'c, 'a> {
                 return match self.t.kind(at.ty) {
                     TyKind::View(x) => {
                         let x = *x;
-                        (x, if self.copies(x) { self.read_plain_view(x, value, e) } else { None })
-                    },
+                        (
+                            x,
+                            if self.copies(x) {
+                                self.read_plain_view(x, value, e)
+                            } else {
+                                None
+                            },
+                        )
+                    }
                     _ => (at.ty, value),
                 };
             }
@@ -336,8 +343,15 @@ impl<'c, 'a> Cx<'c, 'a> {
                 return match self.t.kind(t) {
                     TyKind::View(x) => {
                         let x = *x;
-                        (x, if self.copies(x) { self.read_plain_view(x, v, e) } else { None })
-                    },
+                        (
+                            x,
+                            if self.copies(x) {
+                                self.read_plain_view(x, v, e)
+                            } else {
+                                None
+                            },
+                        )
+                    }
                     _ => (t, v),
                 };
             }

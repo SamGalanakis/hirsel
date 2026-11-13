@@ -1,0 +1,5 @@
+// expect: refuse LANG-16 at 4:17
+fn f() {
+  let xs = [7u64, 11u64]
+  for take x in xs { }
+}

@@ -775,7 +775,10 @@ fn incomplete_source_is_not_an_emittable_instance() {
     let dir = tempfile::tempdir().unwrap();
     let product = Driver::default()
         .check(
-            request("fn root() -> u64 { for n in [1u64] {}; 42 }\n", dir.path()),
+            request(
+                "fn root() -> u64 { let f = fn() { 42u64 }; 42 }\n",
+                dir.path(),
+            ),
             &mut Meter::new(false),
         )
         .unwrap();

@@ -424,7 +424,10 @@ impl<'c, 'a> Cx<'c, 'a> {
         if let Some(at) = at {
             self.out.counts.nodes += 1;
             self.out.counts.uses += 1;
-            if consume {
+            let borrowed_index = self.borrowed_index(at);
+            if borrowed_index {
+                self.use_place(at, Use::View(Hold::View(Extent::Temp)), n);
+            } else if consume {
                 self.use_place(at, Use::Value, n);
             } else {
                 self.need_live(at.place.slot, n);
@@ -436,9 +439,14 @@ impl<'c, 'a> Cx<'c, 'a> {
                 self.emit_place(at, n)
             };
             if let Some(w) = want {
-                self.coerce(at.ty, w, n);
+                let actual = if borrowed_index {
+                    self.t.mk(TyKind::View(at.ty))
+                } else {
+                    at.ty
+                };
+                self.coerce(actual, w, n);
             }
-            let viewed = matches!(self.t.kind(at.ty), TyKind::View(_));
+            let viewed = borrowed_index || matches!(self.t.kind(at.ty), TyKind::View(_));
             let mut ty = match self.t.kind(at.ty) {
                 TyKind::View(t) => *t,
                 _ => at.ty,
@@ -801,6 +809,39 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
         }
         subject
+    }
+
+    pub(super) fn for_pattern(
+        &mut self,
+        pat: NodeId,
+        ty: TyId,
+        value: Option<ValueId>,
+        owned: bool,
+    ) {
+        let id = self.pattern(pat, ty);
+        let matrix = self.patterns.matrix.len();
+        self.patterns.matrix.push(id);
+        if let Some(missing) = self.pattern_missing(matrix, ty) {
+            self.refuse(
+                "LANG-16",
+                pat,
+                format!("for pattern is refutable; missing `{missing}`"),
+            );
+        }
+        self.patterns.matrix.truncate(matrix);
+        // The whole source is already frozen for the loop. Iteration bindings end
+        // before the next element, so no additional source-place freeze is needed.
+        self.bind_pattern(
+            id,
+            Subject {
+                ty,
+                value,
+                place: None,
+                owned,
+                viewed: !owned,
+            },
+            false,
+        );
     }
 
     pub(super) fn destructure_let(

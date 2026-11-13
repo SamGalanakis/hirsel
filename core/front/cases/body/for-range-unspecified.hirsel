@@ -1,0 +1,4 @@
+// expect: gap the type of an unsuffixed range is unspecified
+// expect: gap iteration of a non-integer range is unspecified
+fn unsuffixed() { for _ in 0..3 { } }
+fn characters() { for _ in 'a'..='c' { } }

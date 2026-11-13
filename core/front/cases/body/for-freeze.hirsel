@@ -1,0 +1,7 @@
+// expect: refuse OWN-10 at 5:5
+fn f() {
+  let mut xs = [7u64, 11u64]
+  for _ in xs {
+    xs[0] = 9
+  }
+}

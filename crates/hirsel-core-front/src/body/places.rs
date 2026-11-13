@@ -281,14 +281,24 @@ impl<'c, 'a> Cx<'c, 'a> {
                 let Some(mut at) = self.place(c[0])? else {
                     return Ok(None);
                 };
-                let (collection, viewed) = match self.t.kind(at.ty) {
-                    TyKind::View(x) => (*x, true),
-                    _ => (at.ty, false),
-                };
+                let (collection, viewed) = self.indexed_type(at.ty);
                 let elem = match self.t.kind(collection) {
                     TyKind::Array(elem, _) => *elem,
                     TyKind::Adt(d, args) if self.p.decls[d.index()].role == Some(Role::List) => {
                         args[0]
+                    }
+                    TyKind::Adt(d, _)
+                        if matches!(
+                            self.p.decls[d.index()].role,
+                            Some(Role::SeqSpan | Role::IndexedSpan)
+                        ) =>
+                    {
+                        self.refuse(
+                            "MEM-12",
+                            n,
+                            "a variable-sized sequence is read with seq.nth or indexed.get",
+                        );
+                        return Err(());
                     }
                     _ => {
                         self.gap(n, "indexing this type is not built");
@@ -468,18 +478,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                         _ => unreachable!(),
                     };
                     let place = self.place_ty(ty, n)?;
-                    address = match self.t.kind(collection) {
-                        TyKind::Array(..) => self.address(
-                            AddressBase::Address(address),
-                            &[Step::Field(0), Step::Element(value)],
-                            place,
-                            n,
-                        ),
-                        _ => {
-                            self.gap(n, "list index emission is not built");
-                            return None;
-                        }
-                    };
+                    address = self.index_address(address, collection, value, place, n)?;
                 }
                 PStep::Any => unreachable!("payload overlap marker is not an emitted place"),
             }
@@ -497,6 +496,101 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
     fn read_bits(&mut self, address: AddressId, t: Ty, n: NodeId) -> ValueId {
         let result = self.value(t);
+        self.inst(
+            Inst::Read {
+                result,
+                address,
+                mode: ReadMode::Bits,
+            },
+            n,
+        );
+        result
+    }
+    pub(super) fn borrowed_index(&self, at: At) -> bool {
+        !self.copies(at.ty)
+            && self.steps[at.place.start as usize..(at.place.start + at.place.len) as usize]
+                .iter()
+                .any(|s| matches!(s, PStep::Index { .. }))
+    }
+    pub(super) fn indexed_type(&self, mut ty: TyId) -> (TyId, bool) {
+        let mut viewed = false;
+        while let TyKind::View(inner) | TyKind::Anchored(inner, _) = self.t.kind(ty) {
+            ty = *inner;
+            viewed = true;
+        }
+        (ty, viewed)
+    }
+    pub(super) fn index_address(
+        &mut self,
+        base: AddressId,
+        collection: TyId,
+        index: ValueId,
+        element: PlaceTy,
+        n: NodeId,
+    ) -> Option<AddressId> {
+        match self.t.kind(collection) {
+            TyKind::Array(..) => Some(self.address(
+                AddressBase::Address(base),
+                &[Step::Field(0), Step::Element(index)],
+                element,
+                n,
+            )),
+            TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::List) => {
+                let header = self.pointer(base, n);
+                let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+                let condition = self.value(Ty::Scalar(Scalar::Bool));
+                self.inst(
+                    Inst::Compare {
+                        result: condition,
+                        op: CompareOp::Lt,
+                        left: index,
+                        right: len,
+                    },
+                    n,
+                );
+                let yes = self.new_block(&[]);
+                let no = self.new_block(&[]);
+                let ye = self.edge(yes, &[]);
+                let ne = self.edge(no, &[]);
+                self.end(
+                    Terminator::Branch {
+                        condition,
+                        yes: ye,
+                        no: ne,
+                    },
+                    Some(n),
+                );
+                self.start(no);
+                self.end(
+                    Terminator::Raise {
+                        cause: hirsel_core_ir::RaiseCause::Bounds,
+                        cleanup: None,
+                    },
+                    Some(n),
+                );
+                self.start(yes);
+                let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+                Some(self.address(AddressBase::Value(data), &[Step::Index(index)], element, n))
+            }
+            _ => None,
+        }
+    }
+    /// FORM's Seq carrier is data/length/capacity; a word read does not copy storage.
+    pub(super) fn read_sequence_word(
+        &mut self,
+        header: ValueId,
+        offset: u64,
+        ty: Ty,
+        n: NodeId,
+    ) -> ValueId {
+        let offset = self.konst(Ty::Scalar(Scalar::U64), offset, n).unwrap();
+        let address = self.address(
+            AddressBase::Value(header),
+            &[Step::Byte(offset)],
+            PlaceTy::Value(ty),
+            n,
+        );
+        let result = self.value(ty);
         self.inst(
             Inst::Read {
                 result,

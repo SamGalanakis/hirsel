@@ -1300,7 +1300,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             NodeKind::Index | NodeKind::Projection => self.place_value(n),
             NodeKind::Try => self.try_(n, want),
             NodeKind::Match => self.match_(n, want),
-            NodeKind::For | NodeKind::ForTake => self.gap_ty(n, "for loops are not built"),
+            NodeKind::For | NodeKind::ForTake => self.for_(n, None),
             NodeKind::Region => self.region_(n, want),
             NodeKind::Bound => self.bound_(n, want),
             NodeKind::Placement => self.gap_ty(n, "stable placement is not built"),
@@ -1312,6 +1312,11 @@ impl<'c, 'a> Cx<'c, 'a> {
     fn place_value(&mut self, n: NodeId) -> (TyId, Option<ValueId>) {
         match self.place(n) {
             Ok(Some(at)) => {
+                if self.borrowed_index(at) {
+                    self.use_place(at, Use::View(Hold::View(Extent::Temp)), n);
+                    let ty = self.t.mk(TyKind::View(at.ty));
+                    return (ty, self.place_ptr(at, n));
+                }
                 self.use_place(at, Use::Value, n);
                 let v = self.emit_place(at, n);
                 if at.place.len == 0 && !self.copies(at.ty) {

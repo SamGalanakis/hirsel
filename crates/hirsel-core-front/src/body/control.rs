@@ -498,12 +498,247 @@ impl<'c, 'a> Cx<'c, 'a> {
         (UNIT, None)
     }
 
+    /// SEM-6 / OWN-17: evaluate and freeze the source once. The forward body check
+    /// uses the entry state at its head and checks each back edge without a fixpoint.
+    pub(super) fn for_(&mut self, n: NodeId, label: Option<String>) -> (TyId, Option<ValueId>) {
+        let c = self.kids(n);
+        let source = c[1];
+        let mut ungrouped = source;
+        while self.kind(ungrouped) == NodeKind::Group {
+            ungrouped = self.kids(ungrouped)[0];
+        }
+        let range = self.kind(ungrouped) == NodeKind::Binary
+            && matches!(self.token_text(ungrouped), ".." | "..=");
+        let freezes = self.freezes.len();
+        let (elem, start, limit, inclusive, sequence) = if range {
+            if self.kind(n) == NodeKind::ForTake {
+                self.refuse(
+                    "LANG-16",
+                    source,
+                    "only an own List is consumed by iteration",
+                );
+                return (ERROR, None);
+            }
+            let bounds = self.kids(ungrouped);
+            if !self.synthesises(bounds[0]) && !self.synthesises(bounds[1]) {
+                return self.gap_ty(source, "the type of an unsuffixed range is unspecified");
+            }
+            let (ty, lo, hi) = self.operands(ungrouped, None);
+            if ty != ERROR && int_of(&self.t, ty).is_none() {
+                return self.gap_ty(source, "iteration of a non-integer range is unspecified");
+            }
+            (ty, lo, hi, self.token_text(ungrouped) == "..=", None)
+        } else {
+            let at = match self.place(source) {
+                Ok(at) => at,
+                Err(()) => return (ERROR, None),
+            };
+            let (ty, value) = if let Some(at) = at {
+                self.out.counts.nodes += 1;
+                self.need_live(at.place.slot, source);
+                self.check_holds(at.place, Act::Read, source);
+                (at.ty, self.place_ptr(at, source))
+            } else {
+                self.expr(source, None)
+            };
+            let (inner, _) = self.indexed_type(ty);
+            let (elem, count) = match self.t.kind(inner) {
+                TyKind::Array(elem, count) => (*elem, Some(*count)),
+                TyKind::Adt(d, args) if self.p.decls[d.index()].role == Some(Role::List) => {
+                    (args[0], None)
+                }
+                TyKind::Error => return (ERROR, None),
+                TyKind::Adt(d, _)
+                    if is_core_prelude(
+                        &self.p.decls[d.index()].path,
+                        &["FixedSpan", "SeqSpan", "IndexedSpan", "Map", "Causes"],
+                    ) =>
+                {
+                    return self.gap_ty(
+                        source,
+                        "iteration of this stable or map representation is not built",
+                    );
+                }
+                _ => {
+                    self.refuse("LANG-16", source, "this source is not iterable");
+                    return (ERROR, None);
+                }
+            };
+            if self.kind(n) == NodeKind::ForTake {
+                if matches!(self.t.kind(inner), TyKind::Array(..)) {
+                    self.refuse(
+                        "LANG-16",
+                        source,
+                        "only an own List is consumed by iteration",
+                    );
+                    return (ERROR, None);
+                }
+                return self.gap_ty(n, "consuming List iteration cleanup is not built");
+            }
+            if let Some(at) = at {
+                self.freeze(at.place, Hold::View(Extent::Block(self.depth + 1)));
+            }
+            let start = self.konst(Ty::Scalar(Scalar::U64), 0, n);
+            let limit = match count {
+                Some(count) => self.konst(Ty::Scalar(Scalar::U64), count, n),
+                None => value.map(|v| self.read_sequence_word(v, 8, Ty::Scalar(Scalar::U64), n)),
+            };
+            (elem, start, limit, false, Some((inner, value)))
+        };
+        let index_ty = if range { elem } else { scalar(Scalar::U64) };
+        let index_ir = self.ir_ty(index_ty);
+        let index_slot = self.slot(index_ty, start, n);
+        self.push_frame(label, FrameKind::While, Some(UNIT));
+        let fi = self.frames.len() - 1;
+        let mut flow = None;
+        if let (true, Some(_), Some(limit), Some(index_ir), Some(index_slot)) =
+            (self.live(), start, limit, index_ir, index_slot)
+        {
+            let head = self.new_block(&[]);
+            let body = self.new_block(&[]);
+            let advance = self.new_block(&[]);
+            let out = self.new_block(&[]);
+            self.joins[self.frames[fi].exit].block = Some(out);
+            self.frames[fi].header = Some(advance);
+            self.jump(head, &[], n);
+            self.start(head);
+            let index = self.value(index_ir);
+            self.inst(
+                Inst::Read {
+                    result: index,
+                    address: index_slot,
+                    mode: ReadMode::Bits,
+                },
+                n,
+            );
+            let condition = self.value(Ty::Scalar(Scalar::Bool));
+            self.inst(
+                Inst::Compare {
+                    result: condition,
+                    op: if inclusive {
+                        CompareOp::Le
+                    } else {
+                        CompareOp::Lt
+                    },
+                    left: index,
+                    right: limit,
+                },
+                n,
+            );
+            let yes = self.edge(body, &[]);
+            let no = self.edge(out, &[]);
+            self.end(Terminator::Branch { condition, yes, no }, Some(n));
+            self.start(body);
+            flow = Some((head, advance, out, index, limit, index_ir, index_slot));
+        }
+        // The empty source reaches the exit without changing any outer slot.
+        self.exit_edge(fi);
+        let scope = self.scope_slots.len();
+        let iteration_holds = self.freezes.len();
+        self.depth += 1;
+        let value = match (flow, sequence) {
+            (Some((_, _, _, index, _, _, _)), Some((collection, Some(pointer)))) => {
+                let place = self.place_ty(collection, n);
+                let element = self.place_ty(elem, n);
+                match (place, element) {
+                    (Some(place), Some(element)) => {
+                        let base = self.address(AddressBase::Value(pointer), &[], place, n);
+                        let at = self.index_address(base, collection, index, element, n);
+                        at.and_then(|at| self.iteration_value(at, elem, n))
+                    }
+                    _ => None,
+                }
+            }
+            (Some((_, _, _, index, _, _, _)), None) => Some(index),
+            _ => None,
+        };
+        self.for_pattern(c[0], elem, value, range);
+        self.loop_body(c[2]);
+        self.close_scope(scope, iteration_holds, c[2], UNIT);
+        self.depth -= 1;
+        self.back_edge(fi, self.close_brace(c[2]));
+        if let Some((head, advance, out, index, limit, index_ir, index_slot)) = flow
+            && !self.broken
+        {
+            self.jump(advance, &[], c[2]);
+            self.start(advance);
+            if inclusive {
+                // Test the inclusive end before incrementing, so MAX never overflows.
+                let increment = self.new_block(&[]);
+                let finished = self.value(Ty::Scalar(Scalar::Bool));
+                self.inst(
+                    Inst::Compare {
+                        result: finished,
+                        op: CompareOp::Eq,
+                        left: index,
+                        right: limit,
+                    },
+                    n,
+                );
+                let yes = self.edge(out, &[]);
+                let no = self.edge(increment, &[]);
+                self.end(
+                    Terminator::Branch {
+                        condition: finished,
+                        yes,
+                        no,
+                    },
+                    Some(n),
+                );
+                self.start(increment);
+            }
+            let one = self.konst(index_ir, 1, n).unwrap();
+            let next = self.value(index_ir);
+            self.inst(
+                Inst::Binary {
+                    result: next,
+                    op: BinaryOp::Add,
+                    left: index,
+                    right: one,
+                    fail: None,
+                },
+                n,
+            );
+            self.inst(
+                Inst::Store {
+                    address: index_slot,
+                    value: next,
+                },
+                n,
+            );
+            self.jump(head, &[], n);
+        }
+        let frame = self.pop_frame(n);
+        self.land(frame.exit);
+        self.unfreeze(freezes, |_| None);
+        (UNIT, None)
+    }
+    fn iteration_value(&mut self, address: AddressId, ty: TyId, n: NodeId) -> Option<ValueId> {
+        match self.rep(ty).ok()? {
+            Rep::None => None,
+            Rep::Scalar(t) => {
+                let result = self.value(t);
+                self.inst(
+                    Inst::Read {
+                        result,
+                        address,
+                        mode: ReadMode::Bits,
+                    },
+                    n,
+                );
+                Some(result)
+            }
+            Rep::Place(_) => Some(self.pointer(address, n)),
+        }
+    }
+
     pub(super) fn labelled(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let label = Some(self.token_text(n).to_owned());
         let e = self.kids(n)[0];
         match self.kind(e) {
             NodeKind::Loop => self.loop_(e, want, label),
             NodeKind::While => self.while_(e, label),
+            NodeKind::For | NodeKind::ForTake => self.for_(e, label),
             NodeKind::Block => {
                 self.push_frame(label, FrameKind::Block, want);
                 let (t, v) = self.block(e, want);

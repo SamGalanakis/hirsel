@@ -315,12 +315,14 @@ impl<'c, 'a> Cx<'c, 'a> {
         want: Option<Want>,
     ) -> (TyId, Option<ValueId>) {
         let p: &'c Program<'a> = self.p;
-        let expected = want.and_then(|w| match self.t.kind(w.ty) {
-            TyKind::Adt(d, _) => Some(*d),
-            _ => None,
-        });
+        let expected = want
+            .filter(|w| w.payload == 0)
+            .and_then(|w| match self.t.kind(w.ty) {
+                TyKind::Adt(d, _) => Some(*d),
+                _ => None,
+            });
         let Some(d) = expected else {
-            return match want {
+            return match want.filter(|w| w.payload == 0) {
                 Some(w) if w.ty != HOLE && w.ty != ERROR => {
                     let (a, b) = (self.name(w.ty), p.index.symbols.text(name));
                     self.refuse("LANG-11", n, format!("expected `{a}`, found variant `{b}`"));
@@ -361,7 +363,15 @@ impl<'c, 'a> Cx<'c, 'a> {
                         self.refuse("LANG-7", n, format!("no visible type declares `{text}`"));
                         return (ERROR, None);
                     };
-                    self.construct(n, d, Some(i as u32), &c.fields, c.labelled, args, None)
+                    self.construct(
+                        n,
+                        d,
+                        Some(i as u32),
+                        &c.fields,
+                        c.labelled,
+                        args,
+                        want.filter(|w| w.payload != 0),
+                    )
                 }
             };
         };
@@ -458,7 +468,9 @@ impl<'c, 'a> Cx<'c, 'a> {
             None
         };
         if let Some(w) = want {
-            self.unify(lit.unwrap_or(own), w.ty, &mut found);
+            if let Some(result) = self.expected_part(lit.unwrap_or(own), w) {
+                self.unify(result, w.ty, &mut found);
+            }
         }
         let mut vals: Vec<Option<ValueId>> = vec![None; k];
         let mut later = vec![];
@@ -493,7 +505,11 @@ impl<'c, 'a> Cx<'c, 'a> {
             vals[i] = match self.known(f.ty, &found) {
                 Some(t) => self.expr(e, expect(t)).1,
                 None => {
-                    let (at, v) = if self.kind(e) == NodeKind::Call {
+                    let (at, v) = if let Some(hint) =
+                        want.and_then(|w| self.payload_argument(lit.unwrap_or(own), f.ty, w))
+                    {
+                        self.expr_hinted(e, Some(hint))
+                    } else if self.kind(e) == NodeKind::Call {
                         self.out.counts.nodes += 1;
                         let w = self.partial(f.ty, &found);
                         self.call(e, expect(w))
@@ -507,7 +523,15 @@ impl<'c, 'a> Cx<'c, 'a> {
                             "a type parameter is determined twice differently",
                         );
                     } else if let Some(t) = self.known(f.ty, &found) {
-                        self.coerce(at, Want { ty: t, view: false }, e);
+                        self.coerce(
+                            at,
+                            Want {
+                                ty: t,
+                                view: false,
+                                payload: 0,
+                            },
+                            e,
+                        );
                     }
                     v
                 }

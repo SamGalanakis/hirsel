@@ -563,6 +563,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                     Want {
                         ty: elem,
                         view: false,
+                        payload: 0,
                     },
                     child,
                 );

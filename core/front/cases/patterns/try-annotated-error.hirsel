@@ -1,0 +1,10 @@
+// LANG-18: the binding fixes E before ? chooses its propagation target.
+// expect: gap generic definitions are not built
+fn receipt[E]() -> Result[u64, E] { loop {} }
+fn f() -> Result[u64, Capacity] {
+  bound bytes 0 {
+    let r: Result[u64, Capacity] = receipt()
+    let n = r?
+    n
+  }
+}

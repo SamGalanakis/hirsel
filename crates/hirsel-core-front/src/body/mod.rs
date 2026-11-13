@@ -447,9 +447,16 @@ struct Want {
     ty: TyId,
     /// An argument for a view parameter: a view of `ty` is also accepted (OWN-7).
     view: bool,
+    /// Number of success payloads expected by enclosing `?` operators. This
+    /// constrains neither Result/Option shape nor any propagated error type.
+    payload: u32,
 }
 fn expect(ty: TyId) -> Option<Want> {
-    Some(Want { ty, view: false })
+    Some(Want {
+        ty,
+        view: false,
+        payload: 0,
+    })
 }
 
 /// A local's value: an immutable binding holds its value, a `let mut` binding a slot.
@@ -529,6 +536,8 @@ struct Frame {
     exit: usize,
     /// The value type its exits carry, once one fixes it.
     ty: Option<TyId>,
+    /// Expected payload constraints survive until the first exit fixes its type.
+    hint: Option<Want>,
     /// Whether any exit names it, reachable or not.
     left: bool,
     /// The undo log's length and the declaration count at its start.
@@ -761,7 +770,29 @@ impl<'c, 'a> Cx<'c, 'a> {
         self.cur = None;
     }
     /// `t` where `w` is expected: equal, or Never, or an already refused type.
-    fn coerce(&mut self, t: TyId, w: Want, n: NodeId) {
+    fn expected_part(&self, mut ty: TyId, want: Want) -> Option<TyId> {
+        for _ in 0..want.payload {
+            ty = self.result_parts(ty)?.1;
+        }
+        Some(ty)
+    }
+    /// A success projection that reaches a still-rigid parameter follows that
+    /// parameter into its argument, without inventing its Result/Option shape.
+    fn payload_argument(&self, mut result: TyId, argument: TyId, mut want: Want) -> Option<Want> {
+        for depth in 0..want.payload {
+            if result == argument && matches!(self.t.kind(result), TyKind::Param(_)) {
+                want.payload -= depth;
+                return Some(want);
+            }
+            result = self.result_parts(result)?.1;
+        }
+        None
+    }
+    fn coerce(&mut self, t: TyId, mut w: Want, n: NodeId) {
+        let Some(t) = self.expected_part(t, w) else {
+            return;
+        };
+        w.payload = 0;
         self.out.counts.types += 1;
         let plain_view = self.plain_view(t, w.ty);
         let viewed = w.view
@@ -1092,6 +1123,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             Some(Want {
                 ty: result,
                 view: false,
+                payload: 0,
             }),
         );
         self.ret(v, body);
@@ -1139,6 +1171,10 @@ impl<'c, 'a> Cx<'c, 'a> {
         let (t, v) = self.expr_inner(n, want);
         self.synth_ty = t;
         match want {
+            Some(w) if t != NEVER && w.payload != 0 => {
+                self.coerce(t, w, n);
+                (t, v)
+            }
             Some(w) if t != NEVER => {
                 self.coerce(t, w, n);
                 let v = if self.plain_view(t, w.ty) {
@@ -1163,6 +1199,23 @@ impl<'c, 'a> Cx<'c, 'a> {
 
     fn expr_inner(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let c = self.kids(n);
+        let want = want.filter(|w| {
+            w.payload == 0
+                || matches!(
+                    self.kind(n),
+                    NodeKind::Group
+                        | NodeKind::Path
+                        | NodeKind::Block
+                        | NodeKind::If
+                        | NodeKind::Loop
+                        | NodeKind::Labelled
+                        | NodeKind::Call
+                        | NodeKind::Try
+                        | NodeKind::Match
+                        | NodeKind::Region
+                        | NodeKind::Bound
+                )
+        });
         match self.kind(n) {
             NodeKind::Group => self.expr(c[0], want),
             NodeKind::Literal => self.literal(n, want, false),

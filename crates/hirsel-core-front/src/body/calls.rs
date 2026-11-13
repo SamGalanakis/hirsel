@@ -119,7 +119,9 @@ impl<'c, 'a> Cx<'c, 'a> {
         // One forward visit (LANG-11): the expected result fixes what it can, then each
         // argument left to right, then the unsuffixed literal arguments.
         if let Some(w) = want {
-            self.unify(g.result, w.ty, found);
+            if let Some(result) = self.expected_part(g.result, w) {
+                self.unify(result, w.ty, found);
+            }
             self.determined(f, found, checked, n);
         }
         for (i, &a) in args.iter().enumerate() {
@@ -161,16 +163,25 @@ impl<'c, 'a> Cx<'c, 'a> {
                 Some(t) => {
                     let view = g.params[i].mode == Mode::View
                         && !matches!(self.t.kind(t), TyKind::View(_));
-                    let w = Want { ty: t, view };
+                    let w = Want {
+                        ty: t,
+                        view,
+                        payload: 0,
+                    };
                     self.expr(e, Some(w)).1
                 }
                 None => {
                     // A call takes the partly known parameter type as its expected type.
-                    let (at, v) = if self.kind(e) == NodeKind::Call {
+                    let (at, v) = if let Some(hint) =
+                        want.and_then(|w| self.payload_argument(g.result, pt, w))
+                    {
+                        self.expr_hinted(e, Some(hint))
+                    } else if self.kind(e) == NodeKind::Call {
                         self.out.counts.nodes += 1;
                         let w = Want {
                             ty: self.partial(pt, found),
                             view: false,
+                            payload: 0,
                         };
                         self.call(e, Some(w))
                     } else {
@@ -194,7 +205,15 @@ impl<'c, 'a> Cx<'c, 'a> {
                     } else if let Some(t) = self.known(pt, found) {
                         let view = g.params[i].mode == Mode::View
                             && !matches!(self.t.kind(t), TyKind::View(_));
-                        self.coerce(at, Want { ty: t, view }, e);
+                        self.coerce(
+                            at,
+                            Want {
+                                ty: t,
+                                view,
+                                payload: 0,
+                            },
+                            e,
+                        );
                     }
                     self.determined(f, found, checked, e);
                     v
@@ -353,6 +372,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 Want {
                     ty: t,
                     view: kind(&self.p.decls, &self.t, t, &self.params) == Kind::Stable,
+                    payload: 0,
                 },
                 e,
             ),

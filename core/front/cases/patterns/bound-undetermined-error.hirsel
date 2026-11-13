@@ -1,7 +1,7 @@
-// No argument fixes E: inside bound the error could target Capacity or the
-// function's u8. The spec has not selected one as the expected error type.
+// LANG-18/12: neither a bound nor the function result determines receipt's E.
+// The open argument is refused at the operand call.
 // expect: gap generic definitions are not built
-// expect: gap an undetermined generic error target inside bound is not built (rule unspecified)
+// expect: refuse LANG-12 at 7:63
 fn receipt[E]() -> Result[u64, E] { loop {} }
 fn f() -> Result[u64, u8] {
   let r: Result[u64, Capacity] = bound bytes 0 { let n: u64 = receipt()?; n }

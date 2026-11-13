@@ -862,7 +862,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         let matrix = self.patterns.matrix.len();
         let edge_mark = self.patterns.edges.len();
         let escape_mark = self.patterns.escaping.len();
-        let mut ty = want.map(|w| w.ty);
+        let mut ty = want.filter(|w| w.payload == 0).map(|w| w.ty);
         for (i, &arm) in c[1..].iter().enumerate() {
             let a = self.kids(arm);
             let id = self.pattern(a[0], subject.ty);
@@ -913,7 +913,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.patterns.rebind = false;
             let taken = temp.is_some_and(|i| !self.temp_live(i));
             let body = *a.last().unwrap();
-            let (at, v) = self.expr(body, ty.and_then(expect));
+            let (at, v) = self.expr(body, ty.and_then(expect).or(want));
             if ty.is_none() && at != NEVER {
                 ty = Some(at);
             }
@@ -1233,12 +1233,15 @@ impl<'c, 'a> Cx<'c, 'a> {
         let (ot, ov) = if let Some(&other) = c.get(2) {
             self.expr(
                 other,
-                want.or_else(|| {
-                    (yt != NEVER).then_some(Want {
-                        ty: yt,
-                        view: false,
+                want.filter(|w| w.payload == 0)
+                    .or_else(|| {
+                        (yt != NEVER).then_some(Want {
+                            ty: yt,
+                            view: false,
+                            payload: 0,
+                        })
                     })
-                }),
+                    .or(want),
             )
         } else {
             (UNIT, None)
@@ -1264,7 +1267,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     ) -> (TyId, Option<ValueId>) {
         let c = self.kids(n);
         let condition = self.kids(c[0]);
-        self.push_frame(label, FrameKind::While, Some(UNIT));
+        self.push_frame(label, FrameKind::While, expect(UNIT));
         let fi = self.frames.len() - 1;
         let header = self.live().then(|| self.new_block(&[]));
         if let Some(h) = header {
@@ -1384,109 +1387,17 @@ impl<'c, 'a> Cx<'c, 'a> {
         self.temp(ty, Some(p));
         Some(p)
     }
-    fn pattern_type_parameter(&self, ty: TyId, parameter: u32) -> bool {
-        match self.t.kind(ty) {
-            TyKind::Param(i) => *i == parameter,
-            TyKind::Adt(_, ts) | TyKind::Tuple(ts) => ts
-                .iter()
-                .any(|&t| self.pattern_type_parameter(t, parameter)),
-            TyKind::View(t) | TyKind::Array(t, _) | TyKind::Anchored(t, _) => {
-                self.pattern_type_parameter(*t, parameter)
-            }
-            TyKind::Fn(ps, r, _) => {
-                self.pattern_type_parameter(*r, parameter)
-                    || ps
-                        .iter()
-                        .any(|&(_, t)| self.pattern_type_parameter(t, parameter))
-            }
-            _ => false,
-        }
-    }
     pub(super) fn try_(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let outer = self.result_parts(self.fd.result);
         let operand = self.kids(n)[0];
-        let bounded = self
-            .patterns
-            .scopes
-            .iter()
-            .any(|s| matches!(s.kind, ScopeKind::Bound { .. }));
-        let mut context = outer;
-        let mut partial_error = false;
-        if bounded {
-            // A published concrete Capacity error selects the bound's target even
-            // when the enclosing function propagates another error type.
-            let callee = match self.kind(operand) {
-                NodeKind::Call => self.kids(operand).first().copied(),
-                _ => None,
-            };
-            if let Some(callee) = callee
-                && let Some(Target::Definition(id)) = self.p.target(self.at, callee)
-                && let Some(Def::Fn(f)) = self.p.by_definition[id.0 as usize]
-                && let Some(parts @ (_, _, Some(error))) =
-                    self.result_parts(self.p.fns[f as usize].result)
-                && matches!(self.t.kind(error), TyKind::Adt(d, _) if is_core_prelude(&self.p.decls[d.index()].path, &["Capacity"]))
-            {
-                context = Some(parts);
-            }
-            if want.is_some()
-                && let Some(callee) = callee
-                && let Some(Target::Definition(id)) = self.p.target(self.at, callee)
-                && let Some(Def::Fn(f)) = self.p.by_definition[id.0 as usize]
-                && let Some((d, success, Some(error))) =
-                    self.result_parts(self.p.fns[f as usize].result)
-                && let TyKind::Param(parameter) = *self.t.kind(error)
-                && let Some((_, _, Some(function_error))) = outer
-                && !matches!(self.t.kind(function_error), TyKind::Adt(d, _) if is_core_prelude(&self.p.decls[d.index()].path, &["Capacity"]))
-            {
-                let g = &self.p.fns[f as usize];
-                let args = &self.kids(operand)[1..];
-                let mut determines = false;
-                for (q, &arg) in g.params.iter().zip(args) {
-                    if self.pattern_type_parameter(q.ty, parameter) && self.synthesises(arg) {
-                        determines = true;
-                    }
-                }
-                if !determines {
-                    self.gap(n, "an undetermined generic error target inside bound is not built (rule unspecified)");
-                    return (ERROR, None);
-                }
-                context = Some((d, success, Some(HOLE)));
-                partial_error = true;
-            }
-            if context.is_none() {
-                let capacity = self.capacity_ty(n);
-                if let Some(d) = self.p.core_decl("Result") {
-                    context = Some((d, HOLE, Some(capacity)));
-                }
-            }
-        }
-        let hint = context
-            .and_then(|(d, _, error)| {
-                want.map(|w| {
-                    let args = if let Some(e) = error {
-                        vec![w.ty, e]
-                    } else {
-                        vec![w.ty]
-                    };
-                    self.t.mk(TyKind::Adt(d, args))
-                })
-            })
-            .and_then(expect);
-        let subject = if partial_error {
-            // A partial expected type fixes success only. The call's one visit
-            // determines E from its arguments before choosing an error target.
-            self.out.counts.nodes += 1;
-            let (ty, value) = self.call(operand, hint);
-            Subject {
-                ty,
-                value,
-                place: None,
-                owned: true,
-                viewed: false,
-            }
-        } else {
-            self.subject(operand, true, hint)
-        };
+        // LANG-18: only the payload expectation reaches the operand. Its own
+        // expression determines the Result/Option shape and every error type.
+        let hint = want.map(|mut w| {
+            w.payload += 1;
+            w.view = false;
+            w
+        });
+        let subject = self.subject(operand, true, hint);
         if subject.ty == ERROR || subject.ty == NEVER {
             return (subject.ty, None);
         }
@@ -1715,9 +1626,17 @@ impl<'c, 'a> Cx<'c, 'a> {
             return (NEVER, None);
         }
         let capacity = self.capacity_ty(n);
-        let expected = want
-            .and_then(|w| self.result_parts(w.ty))
-            .and_then(|(_, t, e)| (e == Some(capacity)).then_some(t));
+        let body_want = want.and_then(|mut w| {
+            if w.payload != 0 {
+                w.payload -= 1;
+                Some(w)
+            } else {
+                self.result_parts(w.ty)
+                    .and_then(|(_, t, e)| (e == Some(capacity)).then_some(t))
+                    .and_then(expect)
+            }
+        });
+        let expected = body_want.filter(|w| w.payload == 0).map(|w| w.ty);
         let mark = self.patterns.scopes.len();
         self.push_frame(None, FrameKind::Block, None);
         let fi = self.frames.len() - 1;
@@ -1767,7 +1686,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             owners: self.owners.len(),
         });
         self.epoch += 1;
-        let (t, value) = self.expr(c[1], expected.and_then(expect));
+        let (t, value) = self.expr(c[1], body_want);
         let result = match self.p.core_decl("Result") {
             Some(d) => self
                 .t

@@ -1,0 +1,7 @@
+// LANG-18/12: a bound and the function result cannot determine receipt's E.
+// expect: gap generic definitions are not built
+// expect: refuse LANG-12 at 6:32
+fn receipt[E]() -> Result[u64, E] { loop {} }
+fn f() -> Result[u64, Capacity] {
+  bound bytes 0 { let n: u64 = receipt()?; n }
+}

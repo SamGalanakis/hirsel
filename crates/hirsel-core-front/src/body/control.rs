@@ -57,7 +57,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         match want {
             Some(w) if t != NEVER => {
                 self.coerce(t, w, n);
-                (w.ty, None)
+                (if w.payload == 0 { w.ty } else { t }, None)
             }
             _ => (t, None),
         }
@@ -358,7 +358,10 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.start(no);
         }
         // An arm of type Never constrains nothing (LANG-11).
-        let other_want = want.or(if yt == NEVER { None } else { expect(yt) });
+        let other_want = want
+            .filter(|w| w.payload == 0)
+            .or(if yt == NEVER { None } else { expect(yt) })
+            .or(want);
         let (ot, ov) = self.expr(other, other_want);
         let no = self.arm_edge(mark);
         let ty = if yt == NEVER { ot } else { yt };
@@ -389,14 +392,20 @@ impl<'c, 'a> Cx<'c, 'a> {
         self.dead |= was_dead;
     }
 
-    pub(super) fn push_frame(&mut self, label: Option<String>, kind: FrameKind, ty: Option<TyId>) {
+    pub(super) fn push_frame(
+        &mut self,
+        label: Option<String>,
+        kind: FrameKind,
+        hint: Option<Want>,
+    ) {
         let exit = self.new_join();
         self.frames.push(Frame {
             label,
             kind,
             header: None,
             exit,
-            ty,
+            ty: hint.filter(|w| w.payload == 0).map(|w| w.ty),
+            hint,
             left: false,
             mark: self.log.len(),
             born: self.born,
@@ -419,7 +428,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         label: Option<String>,
     ) -> (TyId, Option<ValueId>) {
         let body = self.kids(n)[0];
-        self.push_frame(label, FrameKind::Loop, want.map(|w| w.ty));
+        self.push_frame(label, FrameKind::Loop, want);
         if self.live() {
             let header = self.new_block(&[]);
             self.jump(header, &[], n);
@@ -448,7 +457,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         if self.kind(c[0]) == NodeKind::ConditionLet {
             return self.while_let(n, label);
         }
-        self.push_frame(label, FrameKind::While, Some(UNIT));
+        self.push_frame(label, FrameKind::While, expect(UNIT));
         let mut header = None;
         if self.live() {
             let h = self.new_block(&[]);
@@ -495,13 +504,21 @@ impl<'c, 'a> Cx<'c, 'a> {
             NodeKind::Loop => self.loop_(e, want, label),
             NodeKind::While => self.while_(e, label),
             NodeKind::Block => {
-                self.push_frame(label, FrameKind::Block, want.map(|w| w.ty));
+                self.push_frame(label, FrameKind::Block, want);
                 let (t, v) = self.block(e, want);
                 let exit = self.frames.last().unwrap().exit;
                 let fixed = self.frames.last().unwrap().ty;
                 let ty = match fixed {
                     Some(f) if t != NEVER => {
-                        self.coerce(t, Want { ty: f, view: false }, e);
+                        self.coerce(
+                            t,
+                            Want {
+                                ty: f,
+                                view: false,
+                                payload: 0,
+                            },
+                            e,
+                        );
                         f
                     }
                     Some(f) => f,
@@ -546,10 +563,18 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
         let fixed = self.frames[i].ty;
         let (t, v) = match value {
-            Some(e) => self.expr(e, fixed.and_then(expect)),
+            Some(e) => self.expr(e, fixed.and_then(expect).or(self.frames[i].hint)),
             None => {
                 if let Some(f) = fixed {
-                    self.coerce(UNIT, Want { ty: f, view: false }, n);
+                    self.coerce(
+                        UNIT,
+                        Want {
+                            ty: f,
+                            view: false,
+                            payload: 0,
+                        },
+                        n,
+                    );
                 }
                 (UNIT, None)
             }
@@ -592,6 +617,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         let w = Want {
             ty: self.fd.result,
             view: false,
+            payload: 0,
         };
         let v = match self.kids(n).first() {
             Some(&e) => self.expr(e, Some(w)).1,

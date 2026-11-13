@@ -1,9 +1,54 @@
 //! Calls to the landed core memory C ABI. Native layout is not a logical charge.
 use super::function::Function;
 use super::*;
-use cranelift_codegen::ir::{Value, condcodes::IntCC};
+use cranelift_codegen::ir::{
+    InstructionData, MemFlagsData, Opcode, Value, ValueDef, condcodes::IntCC,
+};
 
 impl Function<'_, '_, '_> {
+    fn small_copy(&mut self, to: Value, from: Value, bytes: Value) -> bool {
+        let ValueDef::Result(inst, _) = self.b.func.dfg.value_def(bytes) else {
+            return false;
+        };
+        let InstructionData::UnaryImm {
+            opcode: Opcode::Iconst,
+            imm,
+        } = self.b.func.dfg.insts[inst]
+        else {
+            return false;
+        };
+        let size = imm.bits();
+        if !(0..=16).contains(&size) {
+            return false;
+        }
+        // Unaligned, exact-width accesses. Keep all source bytes in registers
+        // before storing, including the odd tails of 9, 13 and 15-byte copies.
+        let mut loaded = [None; 4];
+        let mut offset = 0;
+        for chunk in &mut loaded {
+            let remaining = size - i64::from(offset);
+            if remaining == 0 {
+                break;
+            }
+            let (width, ty) = if remaining >= 8 {
+                (8, types::I64)
+            } else if remaining >= 4 {
+                (4, types::I32)
+            } else if remaining >= 2 {
+                (2, types::I16)
+            } else {
+                (1, types::I8)
+            };
+            let value = self.b.ins().load(ty, MemFlagsData::new(), from, offset);
+            *chunk = Some((value, offset));
+            offset += width;
+        }
+        for (value, offset) in loaded.into_iter().flatten() {
+            self.b.ins().store(MemFlagsData::new(), value, to, offset);
+        }
+        true
+    }
+
     pub fn c_call(
         &mut self,
         name: &'static str,
@@ -246,7 +291,9 @@ impl Function<'_, '_, '_> {
                 let to = self.addr(to);
                 let from = self.addr(from);
                 let bytes = self.get(bytes);
-                self.c_call("memcpy", &[p, p, u], &[p], &[to, from, bytes])?;
+                if !self.small_copy(to, from, bytes) {
+                    self.c_call("memcpy", &[p, p, u], &[p], &[to, from, bytes])?;
+                }
             }
             Inst::LimitEnter {
                 admitted,

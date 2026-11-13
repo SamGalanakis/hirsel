@@ -561,7 +561,7 @@ fn fill(
         match inst {
             Inst::FunctionRef { function, .. } => *function = s.function(*function),
             Inst::Drop { ty, .. } | Inst::Release { ty, .. } => *ty = s.ty(*ty),
-            Inst::Mark { ty, .. } => s.place(ty),
+            Inst::Mark { ty, .. } | Inst::Unmark { ty, .. } => s.place(ty),
             _ => {}
         }
     }

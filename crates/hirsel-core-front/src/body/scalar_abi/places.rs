@@ -257,6 +257,7 @@ pub(super) fn promote(module: &Module, recipes: &[Recipe], body: &mut Body, dest
             }
             Inst::Drop { address, .. }
             | Inst::Mark { address, .. }
+            | Inst::Unmark { address, .. }
             | Inst::Case { address, .. }
             | Inst::SetCase { address, .. } => {
                 if let Some(s) = cells[address.index()] {

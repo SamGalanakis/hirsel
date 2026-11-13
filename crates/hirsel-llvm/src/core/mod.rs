@@ -606,7 +606,10 @@ impl FunctionEmitter<'_> {
                 ));
             }
             // FORM v1c: a mark is the evaluator's alone; no code.
-            Inst::StorageLive { .. } | Inst::StorageDead { .. } | Inst::Mark { .. } => {}
+            Inst::StorageLive { .. }
+            | Inst::StorageDead { .. }
+            | Inst::Mark { .. }
+            | Inst::Unmark { .. } => {}
             Inst::UpdateMask {
                 result,
                 mask,

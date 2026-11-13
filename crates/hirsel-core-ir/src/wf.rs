@@ -100,8 +100,12 @@ pub fn module(m: &Module) -> R {
         if let Some(b) = &f.body {
             body(m, &m.signatures[f.signature.index()], b).map_err(|e| format!("f{i}: {e}"))?;
             need(
-                core_fn(m, i as u32) || !b.insts.iter().any(|x| matches!(x, Inst::Mark { .. })),
-                || format!("f{i}: only core's slot kernels emit `mark`"),
+                core_fn(m, i as u32)
+                    || !b
+                        .insts
+                        .iter()
+                        .any(|x| matches!(x, Inst::Mark { .. } | Inst::Unmark { .. })),
+                || format!("f{i}: only core's slot kernels emit `mark` and `unmark`"),
             )?;
         }
     }
@@ -853,6 +857,11 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             address,
             live: _,
             ty,
+        }
+        | Inst::Unmark {
+            address,
+            live: _,
+            ty,
         } => {
             if let PlaceTy::Declared(t) = ty {
                 c.tid(t)?;
@@ -961,8 +970,8 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
     }
 }
 
-/// `m` with every `mark` removed (FORM v1c). A mark has no run-time effect, so an
-/// engine must emit the same code for both; engines' tests compare them.
+/// `m` with every `mark` and `unmark` removed (FORM v1c). Neither has a run-time
+/// effect, so an engine must emit the same code for both; engines' tests compare them.
 pub fn without_marks(m: &Module) -> Module {
     let mut m = m.clone();
     for b in m.functions.iter_mut().filter_map(|f| f.body.as_mut()) {
@@ -970,7 +979,7 @@ pub fn without_marks(m: &Module) -> Module {
         for block in &mut b.blocks {
             let start = insts.len() as u32;
             for i in block.insts.start..block.insts.start + block.insts.len {
-                if !matches!(b.insts[i as usize], Inst::Mark { .. }) {
+                if !matches!(b.insts[i as usize], Inst::Mark { .. } | Inst::Unmark { .. }) {
                     insts.push(b.insts[i as usize].clone());
                     anchors.push(b.inst_anchors[i as usize]);
                 }

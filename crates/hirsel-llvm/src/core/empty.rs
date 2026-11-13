@@ -48,6 +48,7 @@ fn pure(body: &Body, constants: &[Option<u64>], inst: &Inst) -> bool {
         | Inst::StorageLive { .. }
         | Inst::StorageDead { .. }
         | Inst::Mark { .. }
+        | Inst::Unmark { .. }
         | Inst::UpdateMask { .. }
         | Inst::Pointer { .. } => !inst.can_fail(body),
         _ => false,

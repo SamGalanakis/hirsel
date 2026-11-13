@@ -81,8 +81,8 @@
 //!
 //! core's collections that hold uninhabited slots (`Deque`, a heap's sift, a
 //! stable sort's merge) are core code over one private carrier, `Slots[T]`
-//! `{raw: List[T]}`, whose `List` length word is the count of live slots. Two
-//! rows exist only for them; well-formedness refuses either outside a function
+//! `{raw: List[T]}`, whose `List` length word is the count of live slots. Three
+//! rows exist only for them; well-formedness refuses each outside a function
 //! that is an instance of a core@1 definition.
 //! - **`mark a, live|empty : t`** says the slot at `a`, a place of `t`, now holds
 //!   a value (`live`, after a put) or none (`empty`, after a take). A move is a
@@ -98,6 +98,14 @@
 //!   either (storage a `List` hands over is all live and unmarked; a new block
 //!   needs no registration). A zero-size slot has no storage to identify it and is
 //!   not shadowed.
+//! - **`unmark a, live|empty : t`** is the inverse: the slot leaves the shadow and
+//!   is ordinary storage again, in the state the kernel names. A kernel that hands
+//!   its storage back as an ordinary `List` (a sort's scratch returned to its
+//!   owner) unmarks each slot it marked, `live` over the prefix `0..len` and
+//!   `empty` past it, so later `List` operations see plain storage. The evaluator
+//!   stops the run on `unmark live` of a slot marked empty (a hole handed back as
+//!   a value) and `unmark empty` of one marked live (a value left behind); a slot
+//!   never marked passes. Engines emit nothing for it, as for `mark`.
 //! - **A finalizer on an own row** (`type tN = own "Deque[T]" drop fM { .. }`,
 //!   `DropRecipe::finalizer`) is called with the value's address, as `(ptr) ->
 //!   ()`, before its fields are cleaned (FAIL-8), under the current limit with no

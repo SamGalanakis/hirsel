@@ -577,6 +577,24 @@ impl Machine<'_> {
             _ => {}
         }
     }
+    /// The slot at `p` leaves the shadow in the state the kernel claims; a slot never
+    /// marked may be either, so it passes.
+    fn unmark(&mut self, p: u64, live: bool, size: usize) {
+        if size == 0 {
+            return;
+        }
+        let (b, o) = split(p);
+        assert!(self.mem[b].live, "unmark of a freed block");
+        match (self.mem[b].marks.remove(&o).map(|m| m.0), live) {
+            (Some(false), true) => {
+                panic!("unmark live of the empty slot at +{o}: a hole handed back as a value")
+            }
+            (Some(true), false) => {
+                panic!("unmark empty of the live slot at +{o}: a value left behind")
+            }
+            _ => {}
+        }
+    }
     /// A `drop` of a value, or cleanup of a `List` element, at a marked slot is a
     /// take: the slot must be marked live, and is then marked empty. Cleanup that
     /// reaches a slot a kernel emptied is the bug this catches.
@@ -1853,6 +1871,13 @@ impl Machine<'_> {
             }
             Inst::Mark { address, live, ty } => {
                 self.mark(
+                    places[address.index()].0,
+                    live,
+                    self.place_size(ty) as usize,
+                );
+            }
+            Inst::Unmark { address, live, ty } => {
+                self.unmark(
                     places[address.index()].0,
                     live,
                     self.place_size(ty) as usize,

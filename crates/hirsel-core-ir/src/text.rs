@@ -97,6 +97,7 @@ pub fn uses_v1(m: &Module) -> bool {
                                 | Inst::Release { .. }
                                 | Inst::TryUnwrap { .. }
                                 | Inst::Mark { .. }
+                                | Inst::Unmark { .. }
                                 | Inst::Case { .. }
                                 | Inst::SetCase { .. }
                                 | Inst::Pointer { .. }
@@ -612,12 +613,19 @@ impl Printer {
                     Inst::TryUnwrap { result, node, kind } => {
                         format!("{} = try_unwrap {} {}", def(*result), v(node), kind.name())
                     }
-                    Inst::Mark { address, live, ty } => format!(
-                        "mark a{}, {} : {}",
-                        address.0,
-                        if *live { "live" } else { "empty" },
-                        place(*ty)
-                    ),
+                    Inst::Mark { address, live, ty } | Inst::Unmark { address, live, ty } => {
+                        format!(
+                            "{} a{}, {} : {}",
+                            if matches!(inst, Inst::Mark { .. }) {
+                                "mark"
+                            } else {
+                                "unmark"
+                            },
+                            address.0,
+                            if *live { "live" } else { "empty" },
+                            place(*ty)
+                        )
+                    }
                 };
                 self.line(&format!("  {text}{}", anchor(b.inst_anchors[start + k])));
             }
@@ -1196,20 +1204,21 @@ impl BodyParser {
                 l.next()?;
                 return Ok(Inst::LimitExit);
             }
-            Some("mark") => {
+            Some(word @ ("mark" | "unmark")) => {
                 l.next()?;
                 let address = AddressId(l.id('a')?);
                 l.expect(",")?;
                 let live = match l.next()? {
                     "live" => true,
                     "empty" => false,
-                    other => return Err(format!("`mark` takes live or empty, not `{other}`")),
+                    other => return Err(format!("`{word}` takes live or empty, not `{other}`")),
                 };
                 l.expect(":")?;
-                return Ok(Inst::Mark {
-                    address,
-                    live,
-                    ty: l.place()?,
+                let ty = l.place()?;
+                return Ok(if word == "mark" {
+                    Inst::Mark { address, live, ty }
+                } else {
+                    Inst::Unmark { address, live, ty }
                 });
             }
             Some("drop") => {

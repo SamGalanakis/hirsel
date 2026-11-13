@@ -524,6 +524,16 @@ pub enum Inst {
         live: bool,
         ty: PlaceTy,
     },
+    /// `unmark a, live|empty : ty`: the inverse of `mark`. The slot at `address`
+    /// leaves the liveness shadow and is ordinary storage again, and the kernel
+    /// states which way it leaves: `live` (a value the storage now holds) or `empty`.
+    /// Like `mark` it has no run-time effect; the evaluator stops the run when the
+    /// shadow shows the other state, and a slot never marked passes.
+    Unmark {
+        address: AddressId,
+        live: bool,
+        ty: PlaceTy,
+    },
 }
 
 /// What an `Alloc` makes. The block's bookkeeping (its limit record,

@@ -194,6 +194,7 @@ pub(super) fn scalar_views(module: &Module, body: &mut Body, aliases: &mut Vec<V
             | Inst::Case { address, .. }
             | Inst::SetCase { address, .. }
             | Inst::Mark { address, .. }
+            | Inst::Unmark { address, .. }
             | Inst::Drop { address, .. } => {
                 if let Some(v) = of_address[address.index()] {
                     escape(v)

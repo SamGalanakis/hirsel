@@ -397,7 +397,10 @@ impl Function<'_, '_, '_> {
                 self.set(result, v);
             }
             // FORM v1c: a mark is the evaluator's alone; no code.
-            Inst::StorageLive { .. } | Inst::StorageDead { .. } | Inst::Mark { .. } => {}
+            Inst::StorageLive { .. }
+            | Inst::StorageDead { .. }
+            | Inst::Mark { .. }
+            | Inst::Unmark { .. } => {}
             Inst::Address { address, fail } => {
                 let v = self.address(address, fail)?;
                 match self.addresses[address.index()] {

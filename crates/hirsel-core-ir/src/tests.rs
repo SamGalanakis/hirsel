@@ -373,10 +373,38 @@ fn slot_marks_stop_kernel_mistakes() {
             "  mark a0, live : u64\n",
             "free of a block whose slot at +0 is live",
         ),
+        // A kernel hands a hole back to ordinary storage as a value.
+        (
+            "  mark a0, live : u64\n  mark a0, empty : u64\n  unmark a0, live : u64\n",
+            "unmark live of the empty slot",
+        ),
+        // A kernel hands storage back with a value it claims it took.
+        (
+            "  store a0, v0\n  mark a0, live : u64\n  unmark a0, empty : u64\n",
+            "unmark empty of the live slot",
+        ),
     ] {
         let got = run(body).unwrap_or_else(|| panic!("`{stop}` ran to its end"));
         assert!(got.contains(stop), "expected `{stop}`, got `{got}`");
     }
+    // Bug: `unmark` leaves the shadow behind, so ordinary use of handed-back storage
+    // stops: a free of a slot handed back live, a read of one handed back empty and
+    // refilled. A slot never marked passes either way.
+    for body in [
+        "  store a0, v0\n  mark a0, live : u64\n  unmark a0, live : u64\n",
+        "  mark a0, live : u64\n  mark a0, empty : u64\n  unmark a0, empty : u64\n  store a0, v0\n  v3: u64 = read a0\n",
+        "  store a0, v0\n  unmark a0, live : u64\n  unmark a0, empty : u64\n",
+    ] {
+        assert_eq!(run(body), None, "{body}");
+    }
+    // Bug: a body outside core's kernels unmarks a slot.
+    let user = head.replace("core@1/m/k", "p@0/m/k");
+    let m = parse(&format!(
+        "{user}  unmark a0, live : u64\n  free v1 charge v0\n  return\n}}\n"
+    ))
+    .unwrap();
+    let err = wf::module(&m).expect_err("a user body unmarks");
+    assert!(err.contains("only core's slot kernels"), "{err}");
     // Bug: zero-size slots share one address, so shadowing them by address calls
     // a put into slot 1 a put over slot 0. They have no storage and no shadow.
     let unit = parse(

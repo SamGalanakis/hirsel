@@ -14,14 +14,22 @@ pub fn from_utf8(take b: Bytes) -> Result[String, Bytes] {
     let n = list.len(b)
     let mut i: u64 = 0
     while i < n {
-        // A run of ASCII: one comparison per byte.
-        while i < n && b[i] < 0x80 {
-            i += 1
-        }
-        if i == n {
-            break
-        }
         let x = b[i]
+        if x < 0x80 {
+            // ASCII. From a word boundary, two words at a time while neither has a high bit.
+            if i & 7 == 0 {
+                while i + 16 <= n && (list.word_le(b, i) | list.word_le(b, i + 8)) & 0x8080808080808080 == 0 {
+                    i += 16
+                }
+                // The block that stopped the loop (or the short tail) goes one byte at a time.
+                if i < n && b[i] < 0x80 {
+                    i += 1
+                }
+            } else {
+                i += 1
+            }
+            continue
+        }
         // x >= 0x80: the scalar's width and the range of its second byte (RFC 3629, section 4).
         let mut w: u64 = 1
         let mut lo: u8 = 0x80

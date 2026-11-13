@@ -375,6 +375,76 @@ fn from_utf8_ascii_runs() -> u64 {
     v * 10 + utf8(b"\xC3\xA9\xC3\xA9abc")
 }
 
+fn valid(take b: Bytes) -> u64 {
+    match string.from_utf8(take b) {
+        Ok(_) => 1,
+        Error(_) => 0,
+    }
+}
+
+// n bytes of 'a', then the bytes of tail.
+fn a_run(n: u64, take tail: Result[Bytes, Capacity]) -> Bytes {
+    let mut out: Bytes = list.new()
+    result.unwrap(list.fill(mut out, n, 0x61))
+    result.unwrap(list.append(mut out, result.unwrap(take tail)))
+    out
+}
+
+// 37 bytes of 'a' (two 16-byte blocks and a 5-byte tail) with FF at offset q, and with é at
+// offset p when p < 37.
+fn probe(p: u64, q: u64) -> Bytes {
+    let mut out = a_run(37, b"")
+    if p < 37 {
+        let _ = list.set(mut out, p, 0xC3)
+        let _ = list.set(mut out, p + 1, 0xA9)
+    }
+    if q < 37 {
+        let _ = list.set(mut out, q, 0xFF)
+    }
+    out
+}
+
+// FF at each of the 37 offsets, inside either block or the tail: all 37 refused; é at each
+// offset 0 to 35, after which the ASCII run crosses words to the end: all 36 accepted; é at
+// 0 to 7 then FF at each later offset, so the run that stops at FF starts off a word boundary:
+// all (35 + 34 + ... + 28) = 252 refused. Reported as refused * 1000 + accepted.
+// expect: run from_utf8_block_offsets() = 289036
+fn from_utf8_block_offsets() -> u64 {
+    let mut refused: u64 = 0
+    let mut accepted: u64 = 0
+    for q in 0u64 .. 37 {
+        refused += 1 - valid(probe(37, q))
+    }
+    for p in 0u64 .. 36 {
+        accepted += valid(probe(p, 37))
+    }
+    for p in 0u64 .. 8 {
+        for q in p + 2 .. 37 {
+            refused += 1 - valid(probe(p, q))
+        }
+    }
+    refused * 1000 + accepted
+}
+
+// The rows of from_utf8_boundaries after 16 bytes of ASCII, so each is met where a block
+// stops: the same digits.
+// expect: run from_utf8_rows_after_a_block() = 1001010101000
+fn from_utf8_rows_after_a_block() -> u64 {
+    let mut v: u64 = valid(a_run(16, b"a\xC3\xA9"))
+    v = v * 10 + valid(a_run(16, b"\xC0\x80"))
+    v = v * 10 + valid(a_run(16, b"\xE0\x80\x80"))
+    v = v * 10 + valid(a_run(16, b"\xE0\xA0\x80"))
+    v = v * 10 + valid(a_run(16, b"\xED\xA0\x80"))
+    v = v * 10 + valid(a_run(16, b"\xED\x9F\xBF"))
+    v = v * 10 + valid(a_run(16, b"\xF0\x80\x80\x80"))
+    v = v * 10 + valid(a_run(16, b"\xF0\x90\x80\x80"))
+    v = v * 10 + valid(a_run(16, b"\xF4\x90\x80\x80"))
+    v = v * 10 + valid(a_run(16, b"\xF4\x8F\xBF\xBF"))
+    v = v * 10 + valid(a_run(16, b"a\xE2\x82"))
+    v = v * 10 + valid(a_run(16, b"\x80"))
+    v * 10 + valid(a_run(16, b"\xF5\x80\x80\x80"))
+}
+
 // The argument comes back unchanged.
 // expect: run from_utf8_returns_argument() = 3
 fn from_utf8_returns_argument() -> u64 {

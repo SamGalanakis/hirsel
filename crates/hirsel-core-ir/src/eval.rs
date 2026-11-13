@@ -44,6 +44,9 @@ pub struct Checked {
     /// Lent places: each `view` and `take` place frozen for its call, each `mut`
     /// place and destination checked against the call's other places.
     pub loans: u64,
+    /// Accesses through an address with a storage role, each checked against the
+    /// bytes the activation's other roles touched (crate docs, "Roles").
+    pub roles: u64,
 }
 
 /// The modelled provider (CAP-5), deterministic so runs can be derived by hand:
@@ -212,6 +215,17 @@ struct Machine<'m> {
     /// The `view` places of the calls running now, as (block, offset, size).
     frozen: Vec<(usize, usize, usize)>,
     loans: u64,
+    /// Each function's derived roles, filled on its first call.
+    roles: Vec<Option<std::rc::Rc<[Option<roles::Role>]>>>,
+    /// Per running activation: its roles, and by block the byte spans each role
+    /// touched (`lo -> (hi, role)`, disjoint, a role's adjacent spans merged).
+    footprints: Vec<Footprint>,
+    role_checks: u64,
+}
+
+struct Footprint {
+    roles: std::rc::Rc<[Option<roles::Role>]>,
+    spans: HashMap<usize, BTreeMap<usize, (usize, roles::Role)>>,
 }
 
 fn collect_arrays(ty: &FieldTy, out: &mut Vec<(FieldTy, u64)>) {
@@ -276,6 +290,9 @@ fn run_world(
         world: World::default(),
         frozen: Vec::new(),
         loans: 0,
+        roles: vec![None; m.functions.len()],
+        footprints: Vec::new(),
+        role_checks: 0,
     };
     for s in &m.statics {
         let p = mach.block(s.bytes.len() as u64, None, 0, None);
@@ -310,7 +327,10 @@ fn run_world(
         Ok(r) => Outcome::Returned(r),
         Err(_) => Outcome::Failed(task.chain.iter().map(|c| c.kind.into()).collect()),
     };
-    let checked = Checked { loans: mach.loans };
+    let checked = Checked {
+        loans: mach.loans,
+        roles: mach.role_checks,
+    };
     let report = Report {
         outcome,
         used: mach.limits[0].used,
@@ -1282,6 +1302,59 @@ impl Machine<'_> {
     }
     fn call(&mut self, t: &mut Task, f: FuncId, args: &[u64]) -> X<Vec<u64>> {
         let m = self.m;
+        let roles = self.roles[f.index()]
+            .get_or_insert_with(|| roles::roles(m, &m.functions[f.index()]).into())
+            .clone();
+        self.footprints.push(Footprint {
+            roles,
+            spans: HashMap::new(),
+        });
+        let r = self.activation(t, f, args);
+        self.footprints.pop();
+        r
+    }
+
+    /// Note that an access through `a` touched `n` bytes at `p`, and stop the run
+    /// when another role of this activation touched any of them (crate docs, "Roles").
+    fn touch(&mut self, a: AddressId, p: u64, n: usize) {
+        let Some(frame) = self.footprints.last_mut() else {
+            return;
+        };
+        let Some(role) = frame.roles.get(a.index()).copied().flatten() else {
+            return;
+        };
+        if n == 0 {
+            return;
+        }
+        self.role_checks += 1;
+        let (b, lo) = split(p);
+        let hi = lo + n;
+        let spans = frame.spans.entry(b).or_default();
+        let near: Vec<(usize, usize, roles::Role)> = spans
+            .range(..=hi)
+            .rev()
+            .take_while(|(_, (h, _))| *h >= lo)
+            .map(|(&l, &(h, r))| (l, h, r))
+            .collect();
+        let (mut start, mut end) = (lo, hi);
+        for (l, h, r) in near {
+            if r == role {
+                spans.remove(&l);
+                (start, end) = (start.min(l), end.max(h));
+            } else {
+                assert!(
+                    h <= lo || hi <= l,
+                    "{role:?} touches +{}..+{} of a block that {r:?} touched",
+                    lo.max(l),
+                    hi.min(h)
+                );
+            }
+        }
+        spans.insert(start, (end, role));
+    }
+
+    fn activation(&mut self, t: &mut Task, f: FuncId, args: &[u64]) -> X<Vec<u64>> {
+        let m = self.m;
         let b = m.functions[f.index()]
             .body
             .as_ref()
@@ -1671,11 +1744,13 @@ impl Machine<'_> {
                 result, address, ..
             } => {
                 let n = bytes_of(ty(result));
+                self.touch(address, places[address.index()].0, n);
                 self.read_marked(places[address.index()].0, n);
                 vals[result.index()] = self.load(places[address.index()].0, n);
             }
             Inst::Store { address, value } => {
                 let n = bytes_of(ty(value));
+                self.touch(address, places[address.index()].0, n);
                 self.store(places[address.index()].0, n, vals[value.index()]);
             }
             Inst::StorageLive { .. } | Inst::StorageDead { .. } => {}
@@ -1855,6 +1930,8 @@ impl Machine<'_> {
                     // a valid operand (SEM-4).
                     return Ok(());
                 }
+                self.touch(from, places[from.index()].0, n);
+                self.touch(to, places[to.index()].0, n);
                 self.read_marked(places[from.index()].0, n);
                 let src = self.get(places[from.index()].0, n).to_vec();
                 self.put(places[to.index()].0, &src);

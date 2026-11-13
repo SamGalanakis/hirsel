@@ -570,6 +570,35 @@
 //! running each program with an emitter's loan-derived facts on and off and
 //! comparing the outputs is the safety net.
 //!
+//! # Roles
+//!
+//! [`roles::roles`] gives some addresses of a body a storage role. It derives
+//! them from the form itself; nothing stores them. Two accesses (`read`, `store`,
+//! either side of a `copy`) through addresses of different roles touch disjoint
+//! bytes, throughout one activation. An emitter may rely on that, and may ignore
+//! it. An address without a role makes no claim.
+//! - A **carrier type** is an own record whose one field is a `seq` of a scalar:
+//!   `String`, `Bytes`, `List` of a scalar. Its buffer holds scalars, never a
+//!   carrier.
+//! - `Carrier(root)`: bytes of the carrier held in a slot of a carrier type, or
+//!   lent by a `mut` or `take` parameter of one (Loans). The address reaches it
+//!   through `pointer` values, `field 0` and constant `byte` steps, and stays
+//!   within its 24 bytes. A parameter's entry value has its role only while no
+//!   edge targets the entry block. `view` parameters get none, because two views
+//!   of one place may be passed together.
+//! - `Buffer`: storage reached through a pointer read from a carrier role's data
+//!   word, then `index` or `byte` steps. Every buffer of a body has this one
+//!   role, because a move hands a buffer from one carrier to another.
+//!
+//! This is what the language already guarantees. Slots are distinct. A `mut` or
+//! `take` place overlaps no other argument (Loans) and lies outside the callee's
+//! frame. A buffer is separately owned storage (OWN-3), static bytes or a view of
+//! either, and it holds scalars. Counted headers, map storage, queues, region
+//! records and provider handles have no role. LLVM can take one alias domain per
+//! function and one scope per role; its inliner clones them. The test evaluator
+//! derives the same roles on every call, and it stops the run when two roles of
+//! one activation touch the same byte.
+//!
 //! # Instances
 //!
 //! A function row names an instance: a definition plus the canonical text of each
@@ -617,6 +646,7 @@ hirsel_guard::install!();
 #[cfg(any(test, feature = "eval"))]
 pub mod eval;
 mod ir;
+pub mod roles;
 pub mod text;
 #[cfg(any(test, feature = "wf"))]
 pub mod wf;

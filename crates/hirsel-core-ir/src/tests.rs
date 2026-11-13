@@ -550,3 +550,60 @@ fn loans_stop_producer_aliasing() {
         assert!(err.contains("writes a view parameter's place"), "got `{err}`");
     }
 }
+/// Storage roles (crate docs, "Roles"): the evaluator stops a run whose accesses
+/// break a role's claim, and the derivation claims nothing a valid body breaks.
+#[test]
+fn roles_hold_or_stop_the_run() {
+    let list = "core v1\ntype t0 = own \"List[u8]\" { items: seq u8 }\n";
+    let run = |text: &str, f: u32, args: &[u64]| {
+        let m = parse(&format!("{list}{text}")).unwrap();
+        wf::module(&m).unwrap_or_else(|e| panic!("{e}"));
+        std::panic::catch_unwind(|| eval::run(&m, FuncId(f), args, u64::MAX))
+            .map(|r| r.outcome)
+            .map_err(|e| {
+                e.downcast::<String>()
+                    .map_or_else(|_| String::new(), |s| *s)
+            })
+    };
+    // Bug: a kernel points one carrier's data word at another carrier's place, so a
+    // buffer store rewrites that carrier's length behind LLVM's alias scopes. The
+    // store lands at s0 + 8, the bytes s0's length store touched first.
+    let aliased = run(
+        "sig g0 = () -> ()\ninst n0 = core@1/m/k [] []\nfn f0 = n0 g0 {\n  slot s0 = t0\n  slot s1 = t0\n  addr a0 = s0 byte v0 : u64\n  addr a1 = s0 : t0\n  addr a2 = s1 byte v1 : ptr\n  addr a3 = v3 index v0 : u8\nb0:\n  live s0\n  live s1\n  v0: u64 = const 8\n  v1: u64 = const 0\n  address a0\n  store a0, v0\n  address a1\n  v2: ptr = pointer a1\n  address a2\n  store a2, v2\n  v3: ptr = read a2\n  v4: u8 = const 1\n  address a3\n  store a3, v4\n  dead s1\n  dead s0\n  return\n}\n",
+        0,
+        &[],
+    );
+    let stop = aliased.expect_err("a buffer store over a carrier ran to its end");
+    assert!(stop.contains("Buffer touches +8..+9"), "{stop}");
+    // A caller with one carrier of length 3 in s0, lent as `&a0` to f0.
+    let caller = |sig: &str, call: &str| {
+        format!(
+            "sig g0 = {sig} -> (u64)\nsig g1 = () -> (u64)\ninst n0 = core@1/m/f [] []\ninst n1 = core@1/m/main [] []\n{{f0}}fn f1 = n1 g1 {{\n  slot s0 = t0\n  addr a0 = s0 : t0\n  addr a1 = s0 byte v0 : ptr\n  addr a2 = s0 byte v1 : u64\n  addr a3 = s0 byte v2 : u64\nb0:\n  live s0\n  v0: u64 = const 0\n  v1: u64 = const 8\n  v2: u64 = const 16\n  v3: ptr = const 0x0\n  v4: u64 = const 3\n  address a0\n  address a1\n  address a2\n  address a3\n  store a1, v3\n  store a2, v4\n  store a3, v0\n  v5: u64 = {call}\n  dead s0\n  return v5\n}}\n"
+        )
+    };
+    // Bug: a `view` parameter gets a carrier role. Two views of one place may be
+    // passed together (OWN-8), so reading both is valid: 3 + 3.
+    let views = caller("(&view t0, &view t0)", "call f0 g0 (&a0, &a0)").replace(
+        "{f0}",
+        "fn f0 = n0 g0 {\n  addr a0 = v0 byte v2 : u64\n  addr a1 = v1 byte v2 : u64\nb0(v0: ptr, v1: ptr):\n  v2: u64 = const 8\n  address a0\n  address a1\n  v3: u64 = read a0\n  v4: u64 = read a1\n  v5: u64 = add v3, v4\n  return v5\n}\n",
+    );
+    assert_eq!(run(&views, 1, &[]), Ok(eval::Outcome::Returned(vec![6])));
+    // Bug: the entry block's parameter keeps its parameter's role after an edge
+    // rebinds it. f0 reads the length through its parameter (3), sets its own
+    // slot's length to 7, re-enters with that slot, and reads 7 through the same
+    // address: the parameter role would name the slot's bytes.
+    let reentry = caller("(&mut t0)", "call f0 g0 (&a0)").replace(
+        "{f0}",
+        "fn f0 = n0 g0 {\n  slot s0 = t0\n  addr a0 = v0 byte v1 : u64\n  addr a1 = s0 byte v1 : u64\n  addr a2 = s0 : t0\nb0(v0: ptr):\n  v1: u64 = const 8\n  v3: u64 = const 7\n  address a0\n  v2: u64 = read a0\n  v4: bool = eq v2, v3\n  branch v4, b2, b1\nb1:\n  live s0\n  address a1\n  store a1, v3\n  address a2\n  v5: ptr = pointer a2\n  jump b0(v5)\nb2:\n  return v2\n}\n",
+    );
+    assert_eq!(run(&reentry, 1, &[]), Ok(eval::Outcome::Returned(vec![7])));
+    // Bug: each carrier's buffer gets its own role. A move hands the buffer to
+    // another carrier: element 0 is written through s0's data and read back (5)
+    // through s1's, the same bytes under two carriers.
+    let moved = run(
+        "sig g0 = () -> (u8)\ninst n0 = core@1/m/k [] []\nfn f0 = n0 g0 {\n  slot s0 = t0\n  slot s1 = t0\n  addr a0 = s0 byte v0 : ptr\n  addr a1 = s0 byte v1 : u64\n  addr a2 = s0 byte v2 : u64\n  addr a3 = v6 index v0 : u8\n  addr a4 = s1 : t0\n  addr a5 = s0 : t0\n  addr a6 = s1 byte v0 : ptr\n  addr a7 = v9 index v0 : u8\nb0:\n  live s0\n  live s1\n  v0: u64 = const 0\n  v1: u64 = const 8\n  v2: u64 = const 16\n  v3: u64 = const 1\n  v4: ptr, v5: u64 = alloc own v1 align 8 charge v1\n  address a0\n  address a1\n  address a2\n  store a0, v4\n  store a1, v3\n  store a2, v1\n  v6: ptr = read a0\n  v7: u8 = const 5\n  address a3\n  store a3, v7\n  v8: u64 = const 24\n  address a4\n  address a5\n  copy a4, a5, v8\n  address a6\n  v9: ptr = read a6\n  address a7\n  v10: u8 = read a7\n  free v4 charge v1\n  dead s1\n  dead s0\n  return v10\n}\n",
+        0,
+        &[],
+    );
+    assert_eq!(moved, Ok(eval::Outcome::Returned(vec![5])));
+}

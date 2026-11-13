@@ -1948,7 +1948,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let id = self.declared(result)?;
         let to = self.new_slot(PlaceTy::Declared(id), n);
         let len = self.get_word(AddressBase::Value(s), 8, u64t, n)?;
-        let (blob, available, charge) = self.region_blob(region, len, 1, n)?;
+        let (blob, available, charge) =
+            self.region_blob(region, len, super::spans::ElemSize::Known(1), n)?;
         let null = self.konst(Ty::Ptr, 0, n)?;
         let admitted = self.test(CompareOp::Ne, blob, null, n);
         let (yes, no, join) = (

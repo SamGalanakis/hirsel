@@ -124,10 +124,12 @@ impl NameRecipe {
                     self.text(" waits");
                 }
             }
-            // Rooted/scoped values do not yet have a template representation.
-            TyKind::Anchored(_, _) | TyKind::Region(_) => {
-                self.text(crate::decls::canonical(&p.decls, t, ty))
+            TyKind::Anchored(x, r) => {
+                self.ty(p, t, *x);
+                self.text(" ");
+                self.ty(p, t, *r);
             }
+            TyKind::Region(_) => self.text(crate::decls::canonical(&p.decls, t, ty)),
             _ => unreachable!("has_param identifies a structural type or a parameter"),
         }
     }

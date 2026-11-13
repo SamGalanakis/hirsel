@@ -2336,9 +2336,9 @@ fn write_canonical(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, s: 
                 s.push(']');
             }
         }
-        TyKind::Region(root) => {
-            let _ = write!(s, "in {root:?}");
-        }
+        // A root is a checker fact: every root of a type shares its layout row and its
+        // instances, so a caller's local region and a callee's parameter name one row.
+        TyKind::Region(_) => s.push_str("in r"),
         TyKind::Anchored(x, r) => {
             write_canonical(decls, t, *x, s);
             s.push(' ');

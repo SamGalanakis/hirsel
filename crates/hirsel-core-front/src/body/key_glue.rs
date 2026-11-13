@@ -18,6 +18,9 @@ pub enum KeyOp {
     /// `$clone_twin[S, U](from, to) -> (requested, available)`: MEM-17's own copy of a
     /// stable `S` as its declared twin `U`, the row named here.
     CloneTwin(u32),
+    /// `$encode[T](from, blob, at)`: MEM-9's packed encoding of a plain `T` written at
+    /// byte `at` of `blob` (a span builder's push in a rigid body, MEM-12).
+    Encode,
 }
 impl KeyOp {
     fn definition(self) -> DefPath {
@@ -34,6 +37,7 @@ impl KeyOp {
             Self::Clone => "core.$clone",
             Self::CloneIn(_) => "core.$clone_in",
             Self::CloneTwin(_) => "core.$clone_twin",
+            Self::Encode => "span.$encode",
         })
     }
     fn signature(self, ty: TypeId) -> Signature {
@@ -45,6 +49,15 @@ impl KeyOp {
                 params.push(Param::Address(ty))
             }
             Self::CloneTwin(u) => params.push(Param::Address(TypeId(u))),
+            Self::Encode => {
+                params.extend([Param::Value(Ty::Ptr), Param::Value(Ty::Scalar(Scalar::U64))]);
+                return Signature {
+                    params,
+                    results: vec![],
+                    dest: None,
+                    never: false,
+                };
+            }
             Self::CloneIn(_) => {
                 params.push(Param::Value(Ty::Ptr));
                 return Signature {
@@ -168,6 +181,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                                 result: false,
                             }
                         }
+                        KeyOp::Encode => scalar_abi::SignatureAbi {
+                            params: vec![false; 3],
+                            result: false,
+                        },
                         KeyOp::Equal | KeyOp::Order | KeyOp::Ordered(_) => {
                             scalar_abi::SignatureAbi {
                                 params: vec![true; 2],
@@ -462,6 +479,8 @@ impl Derive<'_> {
             &[Ty::Ptr]
         } else if op == KeyOp::Fold {
             &[Ty::Ptr, Ty::Scalar(Scalar::U64)]
+        } else if op == KeyOp::Encode {
+            &[Ty::Ptr, Ty::Ptr, Ty::Scalar(Scalar::U64)]
         } else {
             &[Ty::Ptr, Ty::Ptr]
         });
@@ -475,6 +494,20 @@ impl Derive<'_> {
         }
         if let KeyOp::CloneTwin(u) = op {
             self.clone_twin_function(&mut c, ty, TypeId(u), ps[0], ps[1])?;
+            order_instructions(&mut c.body);
+            self.module.functions[row.index()].body = Some(c.body);
+            self.active.pop();
+            return Ok(row);
+        }
+        if op == KeyOp::Encode {
+            let all = c.body.blocks[0]
+                .params
+                .get(&c.body.pools.values)
+                .unwrap()
+                .to_vec();
+            self.encode_type(&mut c, ty, all[0], all[1], all[2])?;
+            let returns = PoolRange::push(&mut c.body.pools.values, []);
+            c.end(Terminator::Return(returns));
             order_instructions(&mut c.body);
             self.module.functions[row.index()].body = Some(c.body);
             self.active.pop();
@@ -513,8 +546,8 @@ impl Derive<'_> {
                 let b = c.read(ps[1], Ty::Scalar(scalar));
                 c.compare(op, a, b)
             }
-            KeyOp::Clone | KeyOp::CloneIn(_) | KeyOp::CloneTwin(_) => {
-                unreachable!("clones return above")
+            KeyOp::Clone | KeyOp::CloneIn(_) | KeyOp::CloneTwin(_) | KeyOp::Encode => {
+                unreachable!("clones and encodings return above")
             }
             KeyOp::Order | KeyOp::Ordered(_) => {
                 let different = c.block(&[Ty::Scalar(Scalar::I8)]);
@@ -1396,6 +1429,165 @@ impl Derive<'_> {
         c.jump(head, &[next, h]);
         c.start(done);
         Ok(ps[1])
+    }
+    /// Write the plain row `ty` at native `p` packed at byte `at` of `blob` (MEM-9:
+    /// fields in order, no padding; a variant is its u64 case and then its fields,
+    /// zero-filled to its logical stride, FORM #58).
+    fn encode_type(
+        &mut self,
+        c: &mut Code,
+        ty: TypeId,
+        p: ValueId,
+        blob: ValueId,
+        at: ValueId,
+    ) -> Result<(), &'static str> {
+        let Layout::Fixed(layout) = self.recipes[ty.index()].layout.clone() else {
+            return Err("the packed encoding of this span element is not built");
+        };
+        match self.module.types[ty.index()].body.clone() {
+            ShapeBody::Record(fs) => {
+                let mut off = 0;
+                for (i, f) in fs.iter().enumerate() {
+                    let x = c.offset(p, layout.offsets[0][i]);
+                    let k = c.constant(off);
+                    let to = c.binary(BinaryOp::Add, at, k);
+                    self.encode_field(c, &f.ty, x, blob, to)?;
+                    off +=
+                        hirsel_core_layout::field_size(&self.module.types, &self.recipes, &f.ty).2;
+                }
+            }
+            ShapeBody::Variant(cs) => {
+                let stride = self.recipes[ty.index()]
+                    .logical_size
+                    .ok_or("plain variant logical size is not built")?;
+                let whole = c.address(p, PlaceTy::Declared(ty));
+                let tag = c.value(Ty::Scalar(Scalar::U32));
+                c.inst(Inst::Case {
+                    result: tag,
+                    address: whole,
+                });
+                let done = c.block(&[]);
+                let mut arms = vec![];
+                for i in 0..cs.len() {
+                    let target = c.block(&[]);
+                    arms.push(hirsel_core_ir::SwitchArm {
+                        value: i as u64,
+                        edge: c.edge(target, &[]),
+                    });
+                }
+                let otherwise = arms.last().unwrap().edge;
+                let range = PoolRange::push(
+                    &mut c.body.pools.arms,
+                    arms[..arms.len() - 1].iter().copied(),
+                );
+                c.end(Terminator::Switch {
+                    value: tag,
+                    arms: range,
+                    otherwise,
+                });
+                for (i, case) in cs.iter().enumerate() {
+                    c.start(c.body.edges[arms[i].edge.index()].target);
+                    let k = c.constant(i as u64);
+                    Self::store_packed(c, blob, at, k, Scalar::U64);
+                    let mut off = 8;
+                    for (j, f) in case.fields.iter().enumerate() {
+                        let x = c.offset(p, layout.offsets[i][j]);
+                        let k = c.constant(off);
+                        let to = c.binary(BinaryOp::Add, at, k);
+                        self.encode_field(c, &f.ty, x, blob, to)?;
+                        off += hirsel_core_layout::field_size(
+                            &self.module.types,
+                            &self.recipes,
+                            &f.ty,
+                        )
+                        .2;
+                    }
+                    // The unused tail belongs to the private encoding: zero it, without
+                    // emitting code sized by the tail.
+                    if off < stride {
+                        let zero = c.typed_constant(Scalar::U8, 0);
+                        let k = c.constant(off);
+                        let start = c.binary(BinaryOp::Add, at, k);
+                        let k = c.constant(stride);
+                        let end = c.binary(BinaryOp::Add, at, k);
+                        let head = c.block(&[Ty::Scalar(Scalar::U64)]);
+                        let body = c.block(&[]);
+                        c.jump(head, &[start]);
+                        c.start(head);
+                        let to = c.params(head)[0];
+                        let more = c.compare(CompareOp::Lt, to, end);
+                        c.branch(more, body, done);
+                        c.start(body);
+                        Self::store_packed(c, blob, to, zero, Scalar::U8);
+                        let one = c.constant(1);
+                        let next = c.binary(BinaryOp::Add, to, one);
+                        c.jump(head, &[next]);
+                    } else {
+                        c.jump(done, &[]);
+                    }
+                }
+                c.start(done);
+            }
+        }
+        Ok(())
+    }
+    fn encode_field(
+        &mut self,
+        c: &mut Code,
+        field: &FieldTy,
+        x: ValueId,
+        blob: ValueId,
+        at: ValueId,
+    ) -> Result<(), &'static str> {
+        match field {
+            FieldTy::Scalar(s) => {
+                let v = c.read(x, Ty::Scalar(*s));
+                Self::store_packed(c, blob, at, v, *s);
+            }
+            FieldTy::Inline(t) => self.encode_type(c, TypeId(t.0), x, blob, at)?,
+            FieldTy::Array(item, len) => {
+                let (native, _, logical) =
+                    hirsel_core_layout::field_size(&self.module.types, &self.recipes, item);
+                let zero = c.constant(0);
+                let head = c.block(&[Ty::Scalar(Scalar::U64)]);
+                let body = c.block(&[]);
+                let done = c.block(&[]);
+                c.jump(head, &[zero]);
+                c.start(head);
+                let i = c.params(head)[0];
+                let limit = c.constant(*len);
+                let on = c.compare(CompareOp::Lt, i, limit);
+                c.branch(on, body, done);
+                c.start(body);
+                let n = c.constant(native);
+                let n = c.mul(i, n);
+                let from = c.offset_value(x, n);
+                let l = c.constant(logical);
+                let l = c.mul(i, l);
+                let to = c.binary(BinaryOp::Add, at, l);
+                self.encode_field(c, item, from, blob, to)?;
+                let one = c.constant(1);
+                let next = c.binary(BinaryOp::Add, i, one);
+                c.jump(head, &[next]);
+                c.start(done);
+            }
+            _ => return Err("the packed encoding of this span element is not built"),
+        }
+        Ok(())
+    }
+    fn store_packed(c: &mut Code, blob: ValueId, at: ValueId, value: ValueId, s: Scalar) {
+        let steps = PoolRange::push(&mut c.body.pools.steps, [Step::Byte(at)]);
+        let address = AddressId(c.body.addresses.len() as u32);
+        c.body.addresses.push(AddressInfo {
+            base: AddressBase::Value(blob),
+            steps,
+            ty: PlaceTy::Value(Ty::Scalar(s)),
+        });
+        c.inst(Inst::Address {
+            address,
+            fail: None,
+        });
+        c.inst(Inst::Store { address, value });
     }
     fn equal_type(
         &mut self,

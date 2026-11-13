@@ -910,6 +910,16 @@ fn stream_finish_trim_cranelift() { stream_finish_trim(Backend::Cranelift); }
 #[ignore = "explicit native integration target"]
 fn stream_finish_trim_llvm() { stream_finish_trim(Backend::Llvm); }
 
+fn span_rigid(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/body/span-rigid.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn span_rigid_cranelift() { span_rigid(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn span_rigid_llvm() { span_rigid(Backend::Llvm); }
+
 fn uninitialized_take_names(backend: Backend) {
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir=tempfile::tempdir().unwrap();

@@ -1,0 +1,58 @@
+// MEM-12, MEM-9: a span builder in a generic body packs a rigid T through its instance.
+// fill starts at capacity 1, so the third push grows 1 -> 4 and copies count x size bytes.
+// Q is u8 + u64: 9 bytes packed (16 native), so the three Qs score (10+2)+(30+4)+(50+6)
+// = 102 and length 3 adds 3000. Choice is a private variant (u64 tag, stride 16): 7 + 1100
+// + 100000 = 101107. u64 elements: 5 + 6 + 9 = 20, length 3 adds 3000.
+// expect: run records() = 3102
+// expect: run variants() = 101107
+// expect: run words() = 3020
+type Q { a: u8, b: u64 }
+type Choice = Small(u8) | Large(u64) | Empty
+fn fill[T: plain](r: Region, xs: List[T]) -> Result[FixedSpan[T] in r, Capacity] {
+  let mut b: SpanBuilder[T, in r] = span.with_capacity(r, 1)?
+  for x in xs {
+    match span.push(mut b, x) { Ok(()) => {}, Error((c, _)) => return Error(c) }
+  }
+  Ok(span.finish(take b))
+}
+fn score(c: Choice) -> u64 { match c { Small(x) => int.widen(x), Large(x) => x * 100, Empty => 100000 } }
+fn records() -> u64 {
+  let mut xs: List[Q] = list.new()
+  let _ = list.push(mut xs, Q(a: 1, b: 2))
+  let _ = list.push(mut xs, Q(a: 3, b: 4))
+  let _ = list.push(mut xs, Q(a: 5, b: 6))
+  region r {
+    match fill(r, xs) {
+      Ok(s) => {
+        let mut t: u64 = span.len(s) * 1000
+        for q in s { let a: u64 = int.widen(q.a); t += a * 10 + q.b }
+        t
+      },
+      Error(_) => 99,
+    }
+  }
+}
+fn variants() -> u64 {
+  let mut xs: List[Choice] = list.new()
+  let _ = list.push(mut xs, Small(7u8))
+  let _ = list.push(mut xs, Large(11u64))
+  let _ = list.push(mut xs, Empty)
+  region r {
+    match fill(r, xs) {
+      Ok(s) => { let mut t: u64 = 0; for c in s { t += score(c) }; t },
+      Error(_) => 99,
+    }
+  }
+}
+fn words() -> u64 {
+  let mut xs: List[u64] = list.new()
+  let _ = list.push(mut xs, 5u64)
+  let _ = list.push(mut xs, 6u64)
+  let _ = list.push(mut xs, 9u64)
+  region r {
+    match fill(r, xs) {
+      Ok(s) => { let mut t: u64 = span.len(s) * 1000; for x in s { t += x }; t },
+      Error(_) => 99,
+    }
+  }
+}

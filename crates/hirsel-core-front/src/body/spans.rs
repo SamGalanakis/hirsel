@@ -8,6 +8,15 @@ use super::*;
 /// The blob's words before its elements.
 const HEAD: u64 = 24;
 
+/// A span element's packed size: a constant, or a rigid parameter's logical size
+/// (MEM-9 packs a plain value at exactly its MEM-24 logical size) that the generic
+/// instance substitutes.
+#[derive(Clone, Copy)]
+pub(super) enum ElemSize {
+    Known(u64),
+    Rigid(ValueId),
+}
+
 impl Cx<'_, '_, '_> {
     /// `span.builder`, `span.with_capacity`, `span.push` and `span.finish`; `result` is
     /// the call's result type.
@@ -19,9 +28,18 @@ impl Cx<'_, '_, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let Some(es) = self.packed_plain_size(elem) else {
+        let known = self.packed_plain_size(elem);
+        if known.is_none() && !has_param(&self.t, elem) {
             self.gap(n, "span elements of this type are not built");
             return None;
+        }
+        // Only sizing operations read the element size.
+        let es = match known {
+            Some(k) => ElemSize::Known(k),
+            None if matches!(name, "with_capacity" | "push") => {
+                ElemSize::Rigid(self.layout_size(elem, true, n)?)
+            }
+            None => ElemSize::Known(0),
         };
         match name {
             "builder" => {
@@ -141,13 +159,21 @@ impl Cx<'_, '_, '_> {
     pub(super) fn blob_size(
         &mut self,
         capacity: ValueId,
-        es: u64,
+        es: ElemSize,
         n: NodeId,
     ) -> Option<(ValueId, ValueId)> {
         let u64t = Ty::Scalar(Scalar::U64);
         let done = self.new_block(&[u64t, u64t]);
-        let limit = (u64::MAX - HEAD - 7) / es.max(1);
-        let lim = self.konst(u64t, limit, n)?;
+        let room = u64::MAX - HEAD - 7;
+        let lim = match es {
+            ElemSize::Known(k) => self.konst(u64t, room / k.max(1), n)?,
+            ElemSize::Rigid(v) => {
+                let one = self.konst(u64t, 1, n)?;
+                let k = self.word_op(BinaryOp::Max, v, one, n);
+                let room = self.konst(u64t, room, n)?;
+                self.word_op(BinaryOp::Div, room, k, n)
+            }
+        };
         let over = self.test(CompareOp::Gt, capacity, lim, n);
         let (big, fits) = (self.new_block(&[]), self.new_block(&[]));
         self.branch(over, big, fits, n);
@@ -155,7 +181,7 @@ impl Cx<'_, '_, '_> {
         let max = self.konst(u64t, u64::MAX, n)?;
         self.jump(done, &[max, max], n);
         self.start(fits);
-        let size = self.konst(u64t, es, n)?;
+        let size = self.elem_size(es, n)?;
         let bytes = self.word_op(BinaryOp::Mul, capacity, size, n);
         let fifteen = self.konst(u64t, 15, n)?;
         let up = self.word_op(BinaryOp::Add, bytes, fifteen, n);
@@ -175,7 +201,7 @@ impl Cx<'_, '_, '_> {
         &mut self,
         region: ValueId,
         capacity: ValueId,
-        es: u64,
+        es: ElemSize,
         n: NodeId,
     ) -> Option<(ValueId, ValueId, ValueId)> {
         let (charge, size) = self.blob_size(capacity, es, n)?;
@@ -234,7 +260,7 @@ impl Cx<'_, '_, '_> {
         &mut self,
         region: ValueId,
         count: ValueId,
-        es: u64,
+        es: ElemSize,
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
@@ -294,7 +320,7 @@ impl Cx<'_, '_, '_> {
         b: ValueId,
         x: Option<ValueId>,
         elem: TyId,
-        es: u64,
+        es: ElemSize,
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
@@ -347,7 +373,7 @@ impl Cx<'_, '_, '_> {
         let (copy, after) = (self.new_block(&[]), self.new_block(&[]));
         self.branch(has, copy, after, n);
         self.start(copy);
-        let size = self.konst(u64t, es, n)?;
+        let size = self.elem_size(es, n)?;
         let bytes = self.word_op(BinaryOp::Mul, count, size, n);
         let from = self.word_at(
             AddressBase::Value(blob),
@@ -400,11 +426,14 @@ impl Cx<'_, '_, '_> {
         self.start(put);
         let blob = self.block_params(put)[0];
         let count = self.get_word(AddressBase::Value(blob), 16, u64t, n)?;
-        let size = self.konst(u64t, es, n)?;
+        let size = self.elem_size(es, n)?;
         let bytes = self.word_op(BinaryOp::Mul, count, size, n);
         let head = self.konst(u64t, HEAD, n)?;
         let at = self.word_op(BinaryOp::Add, bytes, head, n);
-        self.encode_plain(blob, at, elem, r, x?, n)?;
+        match es {
+            ElemSize::Known(_) => self.encode_plain(blob, at, elem, r, x?, n)?,
+            ElemSize::Rigid(_) => self.encode_rigid(blob, at, elem, x?, n)?,
+        }
         let one = self.konst(u64t, 1, n)?;
         let next = self.word_op(BinaryOp::Add, count, one, n);
         self.put_word(AddressBase::Value(blob), &[], 16, next, n)?;
@@ -418,6 +447,42 @@ impl Cx<'_, '_, '_> {
         self.jump(end, &[], n);
         self.start(end);
         Some(self.pointer(to, n))
+    }
+
+    fn elem_size(&mut self, es: ElemSize, n: NodeId) -> Option<ValueId> {
+        match es {
+            ElemSize::Known(k) => self.konst(Ty::Scalar(Scalar::U64), k, n),
+            ElemSize::Rigid(v) => Some(v),
+        }
+    }
+    /// A rigid element is encoded by its instance's `$encode` glue: the body cannot
+    /// see the fields (MEM-12 in a generic body).
+    fn encode_rigid(
+        &mut self,
+        blob: ValueId,
+        at: ValueId,
+        elem: TyId,
+        x: ValueId,
+        n: NodeId,
+    ) -> Option<()> {
+        let (id, function, _) = self.key_function(key_glue::KeyOp::Encode, elem, n)?;
+        let from = self.address(AddressBase::Value(x), &[], PlaceTy::Declared(id), n);
+        let signature = self.e.module.functions[function.index()].signature;
+        let args = PoolRange::push(
+            &mut self.b.pools.args,
+            [Arg::Address(from), Arg::Value(blob), Arg::Value(at)],
+        );
+        let results = PoolRange::push(&mut self.b.pools.values, []);
+        let call = CallId(self.b.calls.len() as u32);
+        self.b.calls.push(CallSite {
+            callee: Callee::Direct(function),
+            signature,
+            args,
+            results,
+            fail: None,
+        });
+        self.inst(Inst::Call { call }, n);
+        Some(())
     }
 
     /// Write plain `x` (a scalar, or a pointer to its place) packed at `blob + at`

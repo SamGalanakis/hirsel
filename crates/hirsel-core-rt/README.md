@@ -154,3 +154,12 @@ choice among eligible peers. This is not a loop-backedge yield or a time quantum
 MEM-20 foreign refunds stay in prepaid mailboxes until the owning task's event.
 Resuming only binds/normalizes custody. Draining a shared domain at an event
 applies only the current task's pending slots; other owners retain theirs.
+
+Empty event paths inspect the Task's direct atomic refund_pending flag, with
+no Context/payer/domain traversal. The mailbox's registered notification flags
+are set only by foreign refund publication or payer forwarding. A set flag
+enters cold drain_refunds; clearing it and unregistering share the mailbox
+mutex with notification, so neither a wake nor a flag lifetime can be lost.
+The subscription ends before the task Context can release its domain. Binding
+and successful admission remain unchanged. The no-request cancellation branch
+is inline; observing an actual request, draining and changing turns are cold.

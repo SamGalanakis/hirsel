@@ -209,6 +209,37 @@ impl Forest {
 }
 struct Remote {
     retired: bool,
+    signals: Vec<RefundSignal>,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RefundSignal(NonNull<AtomicBool>);
+// SAFETY: signal pointers name pinned atomic task flags. The mailbox mutex
+// serializes every notification with unregistering before a task is destroyed.
+unsafe impl Send for RefundSignal {}
+impl Remote {
+    fn notify(&self) {
+        for signal in &self.signals {
+            // SAFETY: registration pins the task flag through this mutex turn.
+            unsafe { signal.0.as_ref().store(true, Ordering::Release) };
+        }
+    }
+}
+/// Task-owned registration; remove it before releasing the task's Context.
+pub(crate) struct RefundSubscription {
+    domain: NonNull<Domain>,
+    signal: RefundSignal,
+}
+impl Drop for RefundSubscription {
+    fn drop(&mut self) {
+        // SAFETY: the task still owns its Context, which pins this domain.
+        let domain = unsafe { self.domain.as_ref() };
+        domain
+            .remote
+            .lock()
+            .unwrap()
+            .signals
+            .retain(|s| *s != self.signal);
+    }
 }
 struct Domain {
     forest: UnsafeCell<Forest>,
@@ -344,6 +375,7 @@ impl Payer {
                 crate::abi_tasks::cross_task_refund(owner, bytes);
                 self.slot().pending.fetch_add(bytes, Ordering::Relaxed);
                 d.pending.store(true, Ordering::Release);
+                d.remote.lock().unwrap().notify();
                 return;
             }
         }
@@ -380,9 +412,11 @@ impl Payer {
         } else if bytes != 0 {
             self.slot().pending.fetch_add(bytes, Ordering::Relaxed);
             d.pending.store(true, Ordering::Release);
+            remote.notify();
         } else {
             self.slot().pending_zeros.fetch_add(1, Ordering::Relaxed);
             d.pending.store(true, Ordering::Release);
+            remote.notify();
         }
     }
     /// Called under the scheduler's exclusive lease, including an orphan block.
@@ -444,7 +478,10 @@ impl Funding {
             }),
             handles: Cell::new(1),
             owner: Some(thread()),
-            remote: Mutex::new(Remote { retired: false }),
+            remote: Mutex::new(Remote {
+                retired: false,
+                signals: Vec::new(),
+            }),
             pending: AtomicBool::new(false),
         });
         let domain = NonNull::from(Box::leak(domain));
@@ -487,11 +524,39 @@ impl Funding {
             self.drain_pending();
         }
     }
+    /// # Safety
+    /// The task flag is pinned until the subscription is dropped; the task's
+    /// Context retains this domain until after unregistering.
+    pub(crate) unsafe fn subscribe_refunds(
+        &self,
+        signal: NonNull<AtomicBool>,
+    ) -> RefundSubscription {
+        let domain = self.payer.slot().domain;
+        // SAFETY: the live Context pins the domain and the task pins its flag.
+        let d = unsafe { domain.as_ref() };
+        let mut remote = d.remote.lock().unwrap();
+        // SAFETY: exclusively registering this task's flag under the mailbox lock.
+        unsafe {
+            signal
+                .as_ref()
+                .store(d.pending.load(Ordering::Acquire), Ordering::Release)
+        };
+        let signal = RefundSignal(signal);
+        remote.signals.push(signal);
+        RefundSubscription { domain, signal }
+    }
+    /// Called only after the direct task flag's hot test. Notifications and flag
+    /// reset share the mailbox mutex, so a concurrent refund cannot be lost.
     #[cold]
-    fn drain_pending(&self) {
+    pub(crate) fn drain_notified(&self, signal: &AtomicBool) {
         let domain = self.payer.domain();
         let _remote = domain.remote.lock().unwrap();
+        signal.store(false, Ordering::Relaxed);
         self.drain_locked(false);
+        self.update_pending();
+    }
+    fn update_pending(&self) {
+        let domain = self.payer.domain();
         let f = self.payer.forest();
         domain.pending.store(
             (0..f.length).any(|id| {
@@ -500,6 +565,13 @@ impl Funding {
             }),
             Ordering::Release,
         );
+    }
+    #[cold]
+    fn drain_pending(&self) {
+        let domain = self.payer.domain();
+        let _remote = domain.remote.lock().unwrap();
+        self.drain_locked(false);
+        self.update_pending();
     }
     fn drain_locked(&self, retired: bool) {
         let f = self.payer.forest();
@@ -593,6 +665,12 @@ impl Funding {
         f.retain(winner);
         f.record_mut(loser).parent = Some(winner);
         f.release(original_parent);
+        // Forwarding can change which task owns a pending slot. Re-notify the
+        // domain's tasks, including an owner whose earlier event skipped it.
+        let domain = self.payer.domain();
+        if domain.pending.load(Ordering::Acquire) {
+            domain.remote.lock().unwrap().notify();
+        }
         winner
     }
     /// Move a retained forwarding handle to its canonical record at a context switch.

@@ -11,6 +11,7 @@ use std::{
     alloc::{Layout, alloc, dealloc},
     cell::Cell as Local,
     ptr::{self, NonNull},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 #[repr(C)]
@@ -120,6 +121,8 @@ enum State {
     Ended,
 }
 pub struct Task {
+    refunds: Option<crate::limit::RefundSubscription>,
+    refund_pending: AtomicBool,
     polls_left: u32,
     context: *mut Context,
     owned_context: Option<Context>,
@@ -226,26 +229,29 @@ impl Scheduler {
 /// by their event stream; zero denotes the operation's implicit current object.
 #[inline(always)]
 pub(crate) fn event(kind: u8, object: u64, value: u64) {
-    let task = CURRENT.get();
-    if task.is_null() {
+    let task_pointer = CURRENT.get();
+    if task_pointer.is_null() {
         return;
     }
     // SAFETY: current pins its scheduler; callback cannot suspend or re-enter.
     unsafe {
-        (*(*task).context).current.drain();
-        let run = &*(*task).run;
+        let task = NonNull::new_unchecked(task_pointer).as_ref();
+        if task.refund_pending.load(Ordering::Acquire) {
+            drain_refunds(task_pointer);
+        }
+        let run = NonNull::new_unchecked(task.run).as_ref();
         if let Some(event) = run.provider.event {
             event(
                 run.provider.state,
                 Event {
                     kind,
-                    task: (*task).id,
+                    task: task.id,
                     object,
                     value,
                 },
             );
         }
-        poll_event(task, kind, value);
+        poll_event(task_pointer, kind, value);
     }
 }
 /// Complete a recorded inline operation without consulting task TLS.
@@ -255,26 +261,43 @@ pub(crate) fn event(kind: u8, object: u64, value: u64) {
 pub(crate) unsafe fn event_in(context: *const Context, kind: u8, object: u64, value: u64) {
     // SAFETY: the emitted gate proves the run has this immutable event sink.
     unsafe {
-        let task = (*context).events as *const Task;
-        (*context).current.drain();
-        let run = &*(*task).run;
+        let context = NonNull::new_unchecked(context.cast_mut()).as_ref();
+        let task_pointer = context.events as *mut Task;
+        let task = NonNull::new_unchecked(task_pointer).as_ref();
+        if task.refund_pending.load(Ordering::Acquire) {
+            drain_refunds(task_pointer);
+        }
+        let run = NonNull::new_unchecked(task.run).as_ref();
         if let Some(sink) = run.provider.event {
             sink(
                 run.provider.state,
                 Event {
                     kind,
-                    task: (*task).id,
+                    task: task.id,
                     object,
                     value,
                 },
             );
         }
-        poll_event(task.cast_mut(), kind, value);
+        poll_event(task_pointer, kind, value);
+    }
+}
+/// Empty event paths read only the pinned task flag; all mailbox traversal,
+/// locking and flag reset belong to this cold, non-suspending path.
+#[cold]
+#[inline(never)]
+unsafe fn drain_refunds(task: *mut Task) {
+    // SAFETY: this task owns execution; subscription keeps its atomic flag
+    // registered until before its Context can release the payer domain.
+    unsafe {
+        (*(*task).context)
+            .current
+            .drain_notified(&(*task).refund_pending);
     }
 }
 /// The one trigger for the spec's no-effect poll family. Record the result
 /// before scheduling; never observe cancellation or change that result here.
-#[inline]
+#[inline(always)]
 unsafe fn poll_event(task: *mut Task, kind: u8, value: u64) {
     if (kind == TRY_SEND && value == 1)
         || ((kind == ARC_UNWRAP || kind == CHECK_CANCEL) && value == 0)
@@ -282,22 +305,34 @@ unsafe fn poll_event(task: *mut Task, kind: u8, value: u64) {
     {
         // SAFETY: the active task exclusively owns its counter and event turn.
         unsafe {
-            (*task).polls_left -= 1;
-            if (*task).polls_left == 0 {
-                (*task).polls_left = POLLS_PER_TURN;
-                let run = (*task).run;
-                if !(*run).head.is_null() || !(*run).deferred.is_null() {
-                    (*task).state = State::Ready;
-                    (*task).ready = ptr::null_mut();
-                    if (*run).deferred_tail.is_null() {
-                        (*run).deferred = task;
-                    } else {
-                        (*(*run).deferred_tail).ready = task;
-                    }
-                    (*run).deferred_tail = task;
-                    hirsel_stack::switch(&raw mut (*task).sp, (*run).idle);
-                }
+            let state = NonNull::new_unchecked(task).as_mut();
+            // The scheduler initializes/reset this private counter to 64 and
+            // reaches this operation only while it is nonzero.
+            state.polls_left = state.polls_left.wrapping_sub(1);
+            if state.polls_left == 0 {
+                poll_turn(task);
             }
+        }
+    }
+}
+#[cold]
+#[inline(never)]
+unsafe fn poll_turn(task: *mut Task) {
+    // SAFETY: the active task owns the queue until switching to idle. Reset the
+    // allowance even without a peer; effectful events never reach this path.
+    unsafe {
+        (*task).polls_left = POLLS_PER_TURN;
+        let run = (*task).run;
+        if !(*run).head.is_null() || !(*run).deferred.is_null() {
+            (*task).state = State::Ready;
+            (*task).ready = ptr::null_mut();
+            if (*run).deferred_tail.is_null() {
+                (*run).deferred = task;
+            } else {
+                (*(*run).deferred_tail).ready = task;
+            }
+            (*run).deferred_tail = task;
+            hirsel_stack::switch(&raw mut (*task).sp, (*run).idle);
         }
     }
 }
@@ -359,27 +394,34 @@ pub(crate) fn wake() {
 }
 /// # Safety
 /// Context belongs to this task; primary is available on a normal path.
+#[inline(always)]
 pub unsafe fn check_cancel(context: *mut Context, site: u64) -> u8 {
+    // SAFETY: the operation pins its exclusive, aligned task context. Pending
+    // cancellation is the common false condition; shield/grant checks are cold.
+    let current = unsafe { NonNull::new_unchecked(context).as_ref() };
+    if current.cancel_requested && current.finalizing == 0 && current.cancel_shield == 0 {
+        // SAFETY: this task exclusively owns the observed request and primary.
+        unsafe { observe_cancel(context, site) };
+        1
+    } else {
+        0
+    }
+}
+#[cold]
+#[inline(never)]
+unsafe fn observe_cancel(context: *mut Context, site: u64) {
     // SAFETY: the operation entry exclusively owns this task context.
     unsafe {
-        if (*context).finalizing == 0
-            && (*context).cancel_shield == 0
-            && (*context).cancel_requested
-        {
-            (*context).cancel_requested = false;
-            causes::record(
-                &mut *context,
-                Cause {
-                    kind: causes::CANCELLED,
-                    site,
-                    message: Default::default(),
-                },
-            );
-            event(CANCELLED, 0, site);
-            1
-        } else {
-            0
-        }
+        (*context).cancel_requested = false;
+        causes::record(
+            &mut *context,
+            Cause {
+                kind: causes::CANCELLED,
+                site,
+                message: Default::default(),
+            },
+        );
+        event(CANCELLED, 0, site);
     }
 }
 /// # Safety
@@ -454,6 +496,8 @@ pub unsafe fn run_root(
         drop: no_drop,
     };
     let mut root = Box::new(Task {
+        refund_pending: AtomicBool::new(false),
+        refunds: None,
         polls_left: POLLS_PER_TURN,
         context,
         owned_context: None,
@@ -481,6 +525,11 @@ pub unsafe fn run_root(
     unsafe {
         ptr::copy_nonoverlapping(argument, root.input.as_ptr(), input_bytes);
         let root_pointer: *mut Task = &mut *root;
+        root.refunds = Some(
+            (*context)
+                .current
+                .subscribe_refunds(NonNull::from(&root.refund_pending)),
+        );
         (*context).events = root_pointer.expose_provenance();
         root.sp = root
             .stack
@@ -546,6 +595,8 @@ pub unsafe extern "C" fn hirsel_core_spawn(
         let id = (*run).id();
         let child_context = abi::task_child(context, &mut record, bytes, id);
         let task = Box::new(Task {
+            refund_pending: AtomicBool::new(false),
+            refunds: None,
             polls_left: POLLS_PER_TURN,
             context: ptr::null_mut(),
             owned_context: Some(child_context),
@@ -565,6 +616,11 @@ pub unsafe extern "C" fn hirsel_core_spawn(
         });
         let task = Box::into_raw(task);
         (*task).context = (*task).owned_context.as_mut().unwrap();
+        (*task).refunds = Some(
+            (*(*task).context)
+                .current
+                .subscribe_refunds(NonNull::from(&(*task).refund_pending)),
+        );
         (*(*task).context).events = if (*(*task).context).events != 0 {
             task.expose_provenance()
         } else {
@@ -599,6 +655,8 @@ unsafe fn retire(task: *mut Task) {
         }
         *link = (*task).all;
         let mut owner = Box::from_raw(task);
+        // Unregister under the mailbox mutex before either flag or Context dies.
+        drop(owner.refunds.take());
         // Ended context returns unused primary before record/result refunds.
         drop(owner.owned_context.take());
         drop(owner.record.take());

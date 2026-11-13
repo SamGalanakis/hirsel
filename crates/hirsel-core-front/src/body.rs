@@ -16,7 +16,8 @@
 //! copying the table), and the freeze and reservation records (crate::own).
 
 use crate::decls::{
-    DeclBody, ENCODED, FnDecl, KEY, Kind, ORDERED, Repr, Role, copyable, has_bounds, kind,
+    DeclBody, ENCODED, FnDecl, KEY, Kind, ORDERED, Repr, Role, copyable, has_bounds,
+    is_core_prelude, kind,
 };
 use crate::own::{Act, Avail, Extent, Freeze, Hold, Origin, PStep, Place, breaks, join, overlap};
 use crate::types::*;
@@ -197,7 +198,43 @@ impl Program<'_> {
         };
         let mut cx = Cx::new(self, f, e);
         cx.run(f, body);
-        cx.finish()
+        let mut out = cx.finish();
+        if self.entry.as_ref() == Some(&fd.path) {
+            self.check_entry(fd, &mut out.refusals);
+        }
+        out
+    }
+
+    /// PROG-3: the entry's parameters are unmarked capability types or `Args`, and its
+    /// result is `Result[(), E]`.
+    fn check_entry(&self, fd: &FnDecl, refusals: &mut Vec<crate::Refusal>) {
+        let core = |t: TyId, names: &[&str]| match self.types.kind(t) {
+            TyKind::Adt(d, args) => {
+                is_core_prelude(&self.decls[d.0 as usize].path, names).then_some(args.as_slice())
+            }
+            _ => None,
+        };
+        const GRANTS: [&str; 11] = [
+            "Args", "Dir", "Net", "Clock", "Random", "Stdout", "Stderr", "Stdin", "Env", "Process",
+            "Tasks",
+        ];
+        for param in &fd.params {
+            if param.ty != ERROR && (param.mode != Mode::View || core(param.ty, &GRANTS).is_none())
+            {
+                refusals.push(refusal(
+                    "PROG-3",
+                    param.site,
+                    "an entry parameter is an unmarked capability or `Args`",
+                ));
+            }
+        }
+        if fd.result != ERROR && core(fd.result, &["Result"]).is_none_or(|a| a[0] != UNIT) {
+            refusals.push(refusal(
+                "PROG-3",
+                fd.result_site,
+                "the entry returns `Result[(), E]`",
+            ));
+        }
     }
 }
 
@@ -1796,12 +1833,19 @@ impl<'c, 'a> Cx<'c, 'a> {
         diverged
     }
 
+    /// An `if` or `while` condition; its temporaries end with it (OWN-8).
+    fn condition(&mut self, n: NodeId) -> Option<ValueId> {
+        let freezes = self.freezes.len();
+        let (_, cv) = self.expr(n, expect(BOOL));
+        self.unfreeze(freezes, |h| (h != Hold::View(Extent::Temp)).then_some(h));
+        cv
+    }
     fn if_(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let c = self.kids(n);
         if self.kind(c[0]) == NodeKind::ConditionLet {
             return self.gap_ty(c[0], "match and patterns are not built");
         }
-        let (_, cv) = self.expr(c[0], expect(BOOL));
+        let cv = self.condition(c[0]);
         let join = self.new_join();
         let mut no_block = None;
         if self.live()
@@ -1941,7 +1985,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             header = Some(h);
             self.frames.last_mut().unwrap().header = header;
         }
-        let (_, cv) = self.expr(c[0], expect(BOOL));
+        let cv = self.condition(c[0]);
         // The condition's false edge leaves for the exit (OWN-17).
         self.exit_edge(self.frames.len() - 1);
         let exit = self.frames.last().unwrap().exit;

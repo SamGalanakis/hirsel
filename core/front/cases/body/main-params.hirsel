@@ -1,0 +1,6 @@
+// PROG-3, the spec's refused example: an entry parameter is unmarked, and is a capability
+// or `Args`.
+// expect: refuse PROG-3 at 6:13
+// expect: gap construction is not built
+// expect: gap values of this type are not built
+pub fn main(take xs: List[u64]) -> Result[(), ()] { Ok(()) }

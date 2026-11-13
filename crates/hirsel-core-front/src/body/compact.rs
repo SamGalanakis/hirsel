@@ -431,7 +431,14 @@ impl Cx<'_, '_, '_> {
     /// once and read in place. Through a view, or in a stable value, a field that is
     /// not plain reads as a view.
     pub(super) fn temporary_field(&mut self, n: NodeId) -> (TyId, Option<ValueId>) {
-        let (base, value) = self.expr(self.kids(n)[0], None);
+        let (mut base, mut value) = self.expr(self.kids(n)[0], None);
+        while let Some(payload) = self.holder_payload(base) {
+            let (next, next_value) = self
+                .payload_view_value(base, value, payload, n)
+                .expect("a holder reads its payload");
+            base = next;
+            value = next_value;
+        }
         if base == ERROR {
             return (ERROR, None);
         }
@@ -483,7 +490,7 @@ impl Cx<'_, '_, '_> {
             } else {
                 let id = held?;
                 let place = self.place_ty(ft, n)?;
-                let at = self.address(AddressBase::Value(v), &[], PlaceTy::Declared(id), n);
+                let at = self.fields_of(AddressBase::Value(v), id, n);
                 self.address(AddressBase::Address(at), &[Step::Field(i as u32)], place, n)
             };
             match self.rep(ft).ok()? {

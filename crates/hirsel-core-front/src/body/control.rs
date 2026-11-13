@@ -212,7 +212,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 // LANG-21 operand rule also owns invalid index assignments.
                 if self.kind(place) == NodeKind::Index {
                     let base = self.kids(place)[0];
-                    let (ty, _) = self.expr(base, None);
+                    let (mut ty, _) = self.expr(base, None);
+                    while let Some(payload) = self.holder_payload(ty) {
+                        ty = payload;
+                    }
                     let (collection, _) = self.indexed_type(ty);
                     if self.index_element(collection, place).is_err() {
                         return false;

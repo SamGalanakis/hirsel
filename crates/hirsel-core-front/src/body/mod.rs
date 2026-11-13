@@ -1760,7 +1760,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn expr(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         self.out.counts.nodes += 1;
         let (mut t, mut v) = self.checked(n, want);
-        if let Some(w) = want.filter(|w| w.payload == 0 && (w.view || self.is_view(w.ty)))
+        if let Some(w) = want.filter(|w| w.payload == 0)
             && let Some((payload, value)) = self.payload_view_value(t, v, w.ty, n)
         {
             t = payload;
@@ -1882,7 +1882,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn place_value(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         match self.place(n) {
             Ok(Some(at)) => {
-                if let Some(w) = want.filter(|w| w.payload == 0 && (w.view || self.is_view(w.ty)))
+                if let Some(w) = want.filter(|w| w.payload == 0)
                     && let Some(payload) = self.payload_view_at(at, w.ty)
                 {
                     let copies = self.copies(payload.ty) && !self.is_view(w.ty);
@@ -1908,6 +1908,15 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                         self.t.mk(TyKind::View(payload.ty))
                     };
                     return (ty, value);
+                }
+                if at.place.len > 0 && self.is_view(at.ty) {
+                    self.use_place(at, Use::View(Hold::View(Extent::Temp)), n);
+                    let value = if matches!(self.rep(at.ty), Ok(Rep::Place(_))) {
+                        self.place_ptr(at, n)
+                    } else {
+                        self.emit_place(at, n)
+                    };
+                    return (at.ty, value);
                 }
                 if self.borrowed_index(at) {
                     self.use_place(at, Use::View(Hold::View(Extent::Temp)), n);

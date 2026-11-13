@@ -241,7 +241,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         self.refuse(
                             "LANG-11",
                             e,
-                            "a type parameter is determined twice differently",
+                            if self.holder_payload(inferred).is_some()
+                                || self.result_parts(inferred).is_some_and(|(_,ok,_)|self.holder_payload(ok).is_some()) {
+                                "a type parameter is determined twice differently; bind the holder with `let` first"
+                            } else { "a type parameter is determined twice differently" },
                         );
                     } else if let Some(t) = self.known(pt, found) {
                         let view = g.params[i].mode == Mode::View
@@ -363,7 +366,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 let p = self.kids(e)[0];
                 match self.place(p) {
-                    Ok(Some(at)) => {
+                    Ok(Some(mut at)) => {
+                        if let Some(payload) = self.payload_argument_at(at, pt, found, true) {
+                            at = payload;
+                        }
                         if at.shared {
                             self.refuse("OWN-8", e, "nothing is written through a view");
                             return true;
@@ -412,16 +418,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 };
                 let projected = mode == Mode::View
                     && self
-                        .known(pt, found)
-                        .and_then(|expected| self.payload_view_at(at, expected))
+                        .payload_argument_at(at, pt, found, false)
                         .map(|payload| {
                             at = payload;
                         })
                         .is_some();
                 let ty = at.ty;
-                if projected && (self.is_view(ty) || !self.copies(ty)) {
+                if (projected && (self.is_view(ty) || !self.copies(ty)))
+                    || (at.place.len > 0 && self.is_view(ty))
+                {
                     self.use_place(at, Use::View(Hold::CallView(call, i as u32)), e);
-                    *val = self.place_ptr(at, e);
+                    *val = if matches!(self.rep(ty), Ok(Rep::Place(_))) {
+                        self.place_ptr(at, e)
+                    } else {
+                        self.emit_place(at, e)
+                    };
                 } else if self.copies(ty) {
                     // A copyable value is copied (OWN-7).
                     self.use_place(at, Use::Value, e);

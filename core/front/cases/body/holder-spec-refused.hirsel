@@ -1,0 +1,26 @@
+// OWN-15 forbids take through a holder for plain and own payloads alike.
+// LANG-11: a view conversion never retries the nested call's type inference.
+
+fn plain(take b:Box[Option[u64]])->u64 { match b {Some(take x)=>x,None=>0} }
+fn k(take b:Box[Option[String]])->String { match b {Some(take s)=>s,None=>string.new()} }
+type N = Lit(i64)
+fn ev(n:N)->i64 { match n {Lit(x)=>x} }
+fn nested()->i64 { ev(result.unwrap(box.new(Lit(6i64)))) }
+type P:shareable { n:u64 }
+fn bump(mut b:Box[Rc[P]]) { b.n=1u64 }
+fn rc_write(mut r:Rc[List[u64]]) { let _=list.push(mut r,1u64) }
+// expect: refuse OWN-15 at 4:56
+// expect: refuse OWN-15 at 5:58
+// expect: refuse LANG-11 at 8:37
+// expect: refuse OWN-12 at 10:29
+// expect: refuse OWN-8 at 11:52
+
+type TextP:shareable { s:String }
+fn held_field() {
+ let p=TextP(s:"abc")
+ let r=result.unwrap(rc.new(take p))
+ let v=r.s
+ let _=rc.try_unwrap(take r)
+ let _=v
+}
+// expect: refuse OWN-10 at 23:22

@@ -730,7 +730,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         match pat.head {
             Head::Bind(b, take) => {
                 if take && subject.viewed {
-                    self.refuse("OWN-15", pat.site, "a pattern cannot take through a view");
+                    if self.vars[b as usize].is_none_or(|v| v.ty != ERROR) {
+                        self.refuse("OWN-15", pat.site, "a pattern cannot take through a view");
+                    }
+                    // The refused take declares an error binder, so using it does
+                    // not manufacture a second type error or emission gap.
+                    if self.patterns.rebind {
+                        let var = self.vars[b as usize].as_mut().expect("guard binding");
+                        var.ty = ERROR;
+                        var.binding = Binding::Value(None);
+                    } else {
+                        self.declare(b, ERROR, Binding::Value(None), Origin::Let, pat.site);
+                        self.scope_slots.push(b);
+                    }
+                    return;
                 }
                 let borrowed = !subject.owned && !self.copies(pat.ty);
                 let ty = if borrowed && !matches!(self.t.kind(pat.ty), TyKind::View(_)) {
@@ -945,60 +958,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// A structural pattern supplies the expected payload shape of a holder read.
     /// A bare binding/wildcard supplies no expected type and keeps the holder.
     fn pattern_holder_payload(&self, pattern: NodeId, original: TyId) -> Option<TyId> {
-        let mut ty = original;
-        loop {
-            let TyKind::Adt(d, args) = self.t.kind(self.bare(ty)) else {
-                return None;
-            };
-            if !matches!(
-                self.p.decls[d.index()].role,
-                Some(Role::Box | Role::Rc | Role::Arc)
-            ) {
-                return None;
-            }
-            ty = args[0];
-            let inner = self.bare(ty);
-            let fits = match self.kind(pattern) {
-                NodeKind::TuplePattern => matches!(self.t.kind(inner), TyKind::Tuple(_)),
-                NodeKind::UnitPattern => inner == UNIT,
-                NodeKind::LiteralPattern | NodeKind::RangePattern => {
-                    matches!(self.t.kind(inner), TyKind::Scalar(_))
-                }
-                NodeKind::ConstructorPattern | NodeKind::BindPattern
-                    if self.binder(pattern).is_none() =>
-                {
-                    let path = if self.kind(pattern) == NodeKind::ConstructorPattern {
-                        self.kids(pattern)[0]
-                    } else {
-                        pattern
-                    };
-                    if let TyKind::Adt(d, _) = self.t.kind(inner) {
-                        match self.p.target(self.at, path) {
-                            Some(Target::Definition(id)) => {
-                                self.p.by_definition[id.0 as usize] == Some(Def::Type(*d))
-                            }
-                            Some(Target::ContextualConstructor { name }) => self
-                                .p
-                                .index
-                                .constructor_candidates(
-                                    self.p.modules[self.at.module as usize].id,
-                                    *name,
-                                )
-                                .any(|id| {
-                                    self.p.by_definition[id.0 as usize] == Some(Def::Type(*d))
-                                }),
-                            _ => false,
-                        }
-                    } else {
-                        false
-                    }
-                }
-                _ => false,
-            };
-            if fits {
-                return Some(ty);
-            }
+        if !matches!(
+            self.kind(pattern),
+            NodeKind::ConstructorPattern
+                | NodeKind::TuplePattern
+                | NodeKind::UnitPattern
+                | NodeKind::LiteralPattern
+                | NodeKind::RangePattern
+        ) && !(self.kind(pattern) == NodeKind::BindPattern && self.binder(pattern).is_none())
+        {
+            return None;
         }
+        let mut ty = original;
+        let mut projected = false;
+        while let Some(payload) = self.holder_payload(ty) {
+            ty = payload;
+            projected = true;
+        }
+        projected.then_some(ty)
     }
     fn holder_subject(&mut self, mut subject: Subject, expected: TyId, n: NodeId) -> Subject {
         if let Some(at) = subject.place {

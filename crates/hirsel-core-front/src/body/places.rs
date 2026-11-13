@@ -328,6 +328,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let Some(mut at) = self.place(c[0])? else {
                     return Ok(None);
                 };
+                while let Some(payload) = self.holder_payload(at.ty) {
+                    at = self
+                        .payload_place_at(at, payload, true)
+                        .expect("a holder has its immediate payload");
+                }
                 let (collection, viewed) = self.indexed_type(at.ty);
                 let elem = self.index_element(collection, n)?;
                 // Index operands are evaluated once, before places are compared (OWN-9).
@@ -590,7 +595,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// surrounding expression ends. Plain results are copied before that cleanup.
     pub(super) fn temporary_index(&mut self, n: NodeId) -> (TyId, Option<ValueId>) {
         let c = self.kids(n);
-        let (ty, value) = self.expr(c[0], None);
+        let (mut ty, mut value) = self.expr(c[0], None);
+        while let Some(payload) = self.holder_payload(ty) {
+            let (next, next_value) = self
+                .payload_view_value(ty, value, payload, n)
+                .expect("a holder reads its payload");
+            ty = next;
+            value = next_value;
+        }
         let (collection, _) = self.indexed_type(ty);
         let Ok(elem) = self.index_element(collection, n) else {
             return (ERROR, None);
@@ -1104,6 +1116,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 impl<'c, 'a> Cx<'c, 'a, '_> {
     /// A typed borrow can follow Box/Rc/Arc payloads, keeping the holder as its
     /// place root. A generic parameter without a selected type keeps its holder.
+    pub(super) fn holder_payload(&self, ty: TyId) -> Option<TyId> {
+        match self.t.kind(self.bare(ty)) {
+            TyKind::Adt(d, args)
+                if matches!(
+                    self.p.decls[d.index()].role,
+                    Some(Role::Box | Role::Rc | Role::Arc)
+                ) =>
+            {
+                Some(args[0])
+            }
+            _ => None,
+        }
+    }
     fn payload_read_matches(&self, actual: TyId, expected: TyId) -> bool {
         let expected = match self.t.kind(expected) {
             TyKind::View(t) => *t,
@@ -1112,7 +1137,62 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         actual == expected
             || crate::decls::stable_parameter(&self.p.decls, &self.t, actual, expected)
     }
-    pub(super) fn payload_view_at(&mut self, mut at: At, expected: TyId) -> Option<At> {
+    pub(super) fn payload_argument_at(
+        &mut self,
+        at: At,
+        parameter: TyId,
+        found: &[Option<TyId>],
+        mutable: bool,
+    ) -> Option<At> {
+        if let Some(expected) = self.known(parameter, found) {
+            return if mutable {
+                self.payload_mut_at(at, expected)
+            } else {
+                self.payload_view_at(at, expected)
+            };
+        }
+        if mutable && self.is_view(parameter) {
+            return None;
+        }
+        let expected = self.bare(parameter);
+        // A selected structural head (List[T], for example) can read its payload;
+        // an open T or an expected holder never chooses a conversion for inference.
+        if matches!(self.t.kind(expected), TyKind::Param(_) | TyKind::Hole)
+            || self.holder_payload(expected).is_some()
+        {
+            return None;
+        }
+        let mut payload = at.ty;
+        loop {
+            payload = self.holder_payload(payload)?;
+            let fits = match (self.t.kind(self.bare(payload)), self.t.kind(expected)) {
+                (TyKind::Adt(a, _), TyKind::Adt(b, _)) => a == b,
+                (TyKind::Tuple(a), TyKind::Tuple(b)) => a.len() == b.len(),
+                (TyKind::Array(_, a), TyKind::Array(_, b)) => a == b,
+                (TyKind::Scalar(a), TyKind::Scalar(b)) => a == b,
+                (TyKind::Unit, TyKind::Unit) => true,
+                _ => false,
+            };
+            if fits {
+                break;
+            }
+        }
+        let mut at = self.payload_place_at(at, payload, mutable)?;
+        if self.is_view(parameter) {
+            at.ty = self.t.mk(TyKind::View(payload));
+        }
+        Some(at)
+    }
+    pub(super) fn payload_view_at(&mut self, at: At, expected: TyId) -> Option<At> {
+        self.payload_place_at(at, expected, false)
+    }
+    pub(super) fn payload_mut_at(&mut self, at: At, expected: TyId) -> Option<At> {
+        if self.is_view(expected) {
+            return None;
+        }
+        self.payload_place_at(at, expected, true)
+    }
+    fn payload_place_at(&mut self, mut at: At, expected: TyId, mutable: bool) -> Option<At> {
         if self.payload_read_matches(at.ty, expected) {
             return None;
         }
@@ -1135,7 +1215,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let payload = args[0];
             self.steps.push(PStep::Payload);
             at.place.len += 1;
-            at.shared = true;
+            at.shared |=
+                !mutable || self.is_view(at.ty) || self.p.decls[d.index()].role != Some(Role::Box);
             at.ty = payload;
             if self.payload_read_matches(payload, expected) {
                 if self.is_view(expected) {
@@ -1208,7 +1289,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             if self.is_view(expected) {
                 expected
             } else {
-                current
+                if self.copies(current) {
+                    current
+                } else {
+                    self.t.mk(TyKind::View(current))
+                }
             },
             result,
         ))

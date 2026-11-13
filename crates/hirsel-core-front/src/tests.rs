@@ -2560,6 +2560,8 @@ fn holder_payloads_are_read_where_a_view_is_expected() {
     assert!(failures.is_empty(), "{failures:#?}");
     let failures = run_case(&root().join("cases/body/holder-payload-root-refused.hirsel"));
     assert!(failures.is_empty(), "{failures:#?}");
+    let failures = run_case(&root().join("cases/body/holder-spec-refused.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
     let failures = run_case(&root().join("cases/body/holder-payload-refused.hirsel"));
     assert!(failures.is_empty(), "{failures:#?}");
 }

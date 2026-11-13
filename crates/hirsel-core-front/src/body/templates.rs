@@ -141,6 +141,7 @@ pub fn materialize(
     key: &InstanceKey,
     arguments: &[(&[Shape], TypeRef)],
 ) -> Result<(Module, FuncId), String> {
+    crate::cost_scope!("instance", format!("{key:?}"));
     if arguments.len() != template.parameters.len() {
         return Err("the entry has undetermined generic type arguments".into());
     }

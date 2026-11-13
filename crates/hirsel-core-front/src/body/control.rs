@@ -21,6 +21,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let stmts = self.kids(n);
         let mut diverged = false;
         for (i, &s) in stmts.iter().enumerate() {
+            crate::cost_scope!("construct", format!("{:?}", self.kind(s)));
+            crate::cost_scope!(
+                "construct-state",
+                format!(
+                    "{:?}/{}",
+                    self.kind(s),
+                    if self.broken { "gap" } else { "live" }
+                )
+            );
             self.out.counts.nodes += 1;
             let last = i + 1 == stmts.len();
             let freezes = self.freezes.len();

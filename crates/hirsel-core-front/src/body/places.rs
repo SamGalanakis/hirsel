@@ -22,6 +22,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         origin: Origin,
         n: NodeId,
     ) {
+        crate::cost_scope!("phase", "ownership state");
         self.vars[b as usize] = Some(Var {
             ty,
             binding,
@@ -38,6 +39,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.set(b, Avail::Live, n);
     }
     pub(super) fn set(&mut self, s: u32, a: Avail, n: NodeId) {
+        crate::cost_scope!("phase", "ownership state");
         let v = self.vars[s as usize].as_mut().expect("declared slot");
         if v.avail != a {
             self.epoch += 1;
@@ -48,6 +50,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
     pub(super) fn undo(&mut self, mark: usize) {
+        crate::cost_scope!("phase", "ownership state");
         while self.log.len() > mark {
             let (s, a, at, descriptor) = self.log.pop().expect("logged");
             self.epoch += 1;
@@ -71,6 +74,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// Join `edges` (OWN-16) into the state at `mark`; a slot no edge changed keeps its
     /// state there. With no edge, nothing reaches the join.
     pub(super) fn merge(&mut self, mark: usize, edges: &[(u32, u32)], n: NodeId) {
+        crate::cost_scope!("phase", "ownership state");
         self.undo(mark);
         self.dead = edges.is_empty();
         self.merges += 1;
@@ -208,6 +212,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.check_holds_at(p, act, self.span(n))
     }
     pub(super) fn check_holds_at(&mut self, p: Place, act: Act, site: Span) -> bool {
+        crate::cost_scope!("phase", "ownership state");
         if matches!(act, Act::Write) {
             self.capture_write(p.slot, site);
         }
@@ -237,12 +242,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.vars[x.place.slot as usize].as_mut().unwrap().holds -= 1;
     }
     pub(super) fn freeze(&mut self, place: Place, hold: Hold) {
+        crate::cost_scope!("phase", "ownership state");
         self.vars[place.slot as usize].as_mut().unwrap().holds += 1;
         self.freezes.push(Freeze { place, hold });
     }
     /// Rewrite or end the records from `from` on: `f` gives a record's new hold, or
     /// None when it ends.
     pub(super) fn unfreeze(&mut self, from: usize, f: impl Fn(Hold) -> Option<Hold>) {
+        crate::cost_scope!("phase", "ownership state");
         let mut w = from;
         for r in from..self.freezes.len() {
             let mut x = self.freezes[r];
@@ -405,6 +412,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     /// Use place `at` at `n` (OWN-5 to OWN-14); its type.
     pub(super) fn use_place(&mut self, at: At, how: Use, n: NodeId) {
+        crate::cost_scope!("phase", "ownership state");
         let s = at.place.slot;
         if !self.capture_move(s, how, at.ty, n) {
             return;

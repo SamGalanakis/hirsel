@@ -1184,3 +1184,29 @@ fn lowered_runtime_operation_needs_no_outside_body() {
         eval::Outcome::Returned(vec![42])
     );
 }
+
+#[test]
+fn nested_cost_views_exclude_bookkeeping_without_double_counting() {
+    use hirsel_core_front::cost::{Scope, finish, start};
+    let clock = std::cell::Cell::new(0);
+    start(move || {
+        clock.set(clock.get() + 10);
+        Ok(clock.get())
+    })
+    .unwrap();
+    {
+        let _outer = Scope::enter("phase", || "body".into());
+        let _construct = Scope::enter("construct", || "call".into());
+        let _inner = Scope::enter("phase", || "layout".into());
+    }
+    let profile = finish();
+    let row = |name: &str| profile.rows.iter().find(|r| r.name == name).unwrap();
+    // Six event boundaries, each with ten instructions of bookkeeping and ten
+    // of compiler work. Only same-view descendants reduce self cost.
+    assert_eq!((row("body").inclusive, row("body").exclusive), (50, 40));
+    assert_eq!((row("layout").inclusive, row("layout").exclusive), (10, 10));
+    assert_eq!((row("call").inclusive, row("call").exclusive), (30, 30));
+    assert_eq!(profile.excluded_instrumentation, 60);
+    assert_eq!(row("body").occurrences, 1);
+    assert!(profile.counter_refusal.is_none());
+}

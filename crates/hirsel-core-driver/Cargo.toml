@@ -27,5 +27,6 @@ sha2 = "0.10"
 tempfile = "3"
 
 [dev-dependencies]
+hirsel-core-front = { path = "../hirsel-core-front", features = ["cost-profile"] }
 tempfile = "3"
 hirsel-core-ir = { path = "../hirsel-core-ir", features = ["eval"] }

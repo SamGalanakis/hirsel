@@ -93,6 +93,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         id
     }
     fn pattern_inner(&mut self, n: NodeId, ty: TyId) -> u32 {
+        crate::cost_scope!("construct", format!("{:?}", self.kind(n)));
+        crate::cost_scope!(
+            "construct-state",
+            format!(
+                "{:?}/{}",
+                self.kind(n),
+                if self.broken { "gap" } else { "live" }
+            )
+        );
         self.out.counts.nodes += 1;
         let declared = ty;
         let ty = self.pattern_type(ty);

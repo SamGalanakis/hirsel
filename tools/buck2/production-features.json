@@ -2,6 +2,7 @@
   "scope": "First-party features in generated production roots across checked, release and dist, installed toolchains, std production and both runtime architectures. Cargo compilation units also enforce exact external and host-context feature resolution. Explicit diagnostic and sanitizer runtime selections remain intentional.",
   "baseline": "Production and package-test compilation units resolve independently; no production exceptions.",
   "features": {
+    "hirsel-core-front/cost-profile": "test-only",
     "hirsel-artifact-store/test-support": "test-only",
     "hirsel-authority/testing": "test-only",
     "hirsel-cli/native-tsan": "test-only",

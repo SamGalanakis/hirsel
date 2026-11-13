@@ -288,6 +288,7 @@ impl Emitter {
         self.add_function(key, sig)
     }
     fn add_function(&mut self, key: InstanceKey, sig: Signature) -> FuncId {
+        crate::cost_scope!("instance row request", format!("{key:?}"));
         if let Some(&f) = self.funcs.get(&key) {
             return f;
         }
@@ -309,6 +310,7 @@ impl Emitter {
     /// The row of closed type `ty` in `module.types`, made with the rows it holds
     /// inline; None when some part has no field type yet.
     fn type_row(&mut self, p: &Program, t: &mut impl TyRead, ty: TyId) -> Option<TypeId> {
+        crate::cost_scope!("phase", "layout/drop recipes");
         let mark = self.module.types.len();
         let mut s = crate::layout::Shapes {
             decls: &p.decls,
@@ -348,6 +350,7 @@ impl Emitter {
     /// The recipe of row `id`, or None when the table's layout is refused, in which case
     /// the rows from `mark` on are taken back so the table stays computable.
     fn recipe(&mut self, id: TypeId, mark: usize) -> Option<&Recipe> {
+        crate::cost_scope!("phase", "layout/drop recipes");
         if self.recipes.len() != self.module.types.len() {
             match hirsel_core_layout::compute(&self.module.types) {
                 Ok(r) => self.recipes = r,
@@ -365,6 +368,7 @@ impl Emitter {
     /// How a value of `ty` is carried: a scalar, or a place of a fixed layout. A value
     /// whose cleanup may run a finalizer (a resource, or one held inside) is not built.
     fn rep(&mut self, p: &Program, t: &mut impl TyRead, ty: TyId) -> Result<Rep, &'static str> {
+        crate::cost_scope!("phase", "layout/drop recipes");
         match t.kind(ty) {
             TyKind::Scalar(s) => return Ok(Rep::Scalar(Ty::Scalar(*s))),
             TyKind::Fn(_, _, _, Callable::Plain) => return Ok(Rep::Scalar(Ty::Ptr)),
@@ -489,6 +493,7 @@ impl Emitter {
         f: usize,
         arguments: &[TyId],
     ) -> Result<Signature, &'static str> {
+        crate::cost_scope!("phase", "layout/drop recipes");
         let fd = &p.fns[f];
         if fd.drop_of.is_some() {
             return Ok(finalizer_signature());
@@ -588,6 +593,7 @@ impl Program<'_> {
     /// Check function `f`'s body and emit it into `e` (LANG-8: one visit, reading only
     /// this body, signatures and summaries).
     pub fn check_lower(&self, f: usize, e: &mut Emitter) -> CoreCheck {
+        crate::cost_scope!("body", self.fns[f].path.to_string());
         let fd = &self.fns[f];
         if self.item(fd.at).range.has_errors {
             return CoreCheck::default();
@@ -595,6 +601,7 @@ impl Program<'_> {
         let Some(body) = fd.body else {
             return CoreCheck::default();
         };
+        crate::cost_scope!("phase", "body typing");
         let mut cx = Cx::new(self, f, e);
         cx.run(f, body);
         let mut out = cx.finish();
@@ -848,6 +855,7 @@ struct Cx<'c, 'a, 'e> {
 
 impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn new(p: &'c Program<'a>, f: usize, e: &'e mut Emitter) -> Self {
+        crate::cost_scope!("phase", "body setup");
         let fd = &p.fns[f];
         let item = p.item(fd.at);
         let info = &p.items[fd.at.module as usize][fd.at.item as usize];
@@ -965,6 +973,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         self.refuse_at(rule, self.span(n), message);
     }
     fn refuse_at(&mut self, rule: &str, span: Span, message: impl Into<String>) {
+        crate::cost_scope!("phase", "diagnostics/gaps");
         let site = self.p.site_span(self.at, span);
         self.out.refusals.push(refusal(rule, site, message));
         self.halt();
@@ -989,6 +998,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     }
     /// A construct not built yet; each one is reported once per body.
     fn gap(&mut self, n: NodeId, what: &'static str) {
+        crate::cost_scope!("phase", "diagnostics/gaps");
         if !self.out.gaps.iter().any(|g| g.what == what) {
             let site = self.p.site(self.at, n);
             self.out.gaps.push(Gap::new(site, what));
@@ -1078,6 +1088,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         ValueId(self.b.values.len() as u32 - 1)
     }
     fn inst(&mut self, i: Inst, n: NodeId) {
+        crate::cost_scope!("phase", "CoreIR emission");
         if self.live() {
             self.open.push(i);
             self.open_anchors.push(Some(self.anchor(n)));
@@ -1108,6 +1119,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     /// that a pointer value typed by the row, with steps after it, is the block
     /// (FORM): fields of a resource are reached only through [`Self::fields_of`].
     fn address(&mut self, base: AddressBase, steps: &[Step], ty: PlaceTy, n: NodeId) -> AddressId {
+        crate::cost_scope!("phase", "CoreIR emission");
         let fail = if steps.iter().any(|s| matches!(s, Step::Element(_))) {
             self.fail_to(n)
         } else {
@@ -1218,6 +1230,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     }
 
     fn new_block(&mut self, tys: &[Ty]) -> BlockId {
+        crate::cost_scope!("phase", "CoreIR emission");
         let params: Vec<ValueId> = tys.iter().map(|&t| self.value(t)).collect();
         let params = PoolRange::push(&mut self.b.pools.values, params);
         self.b.blocks.push(Block {
@@ -1236,6 +1249,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         }
     }
     fn end(&mut self, term: Terminator, n: Option<NodeId>) {
+        crate::cost_scope!("phase", "CoreIR emission");
         let Some(c) = self.cur.take() else { return };
         let insts = PoolRange::push(&mut self.b.insts, self.open.drain(..));
         self.b.inst_anchors.append(&mut self.open_anchors);
@@ -1467,6 +1481,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         }
     }
     fn finish(mut self) -> CoreCheck {
+        crate::cost_scope!("phase", "body finish");
         let b = &self.b;
         let size = |n: usize, s: usize| (n * s) as u64;
         self.out.counts.bytes = size(b.values.len(), size_of::<Ty>())
@@ -1544,6 +1559,15 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     }
 
     fn expr_inner(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        crate::cost_scope!("construct", format!("{:?}", self.kind(n)));
+        crate::cost_scope!(
+            "construct-state",
+            format!(
+                "{:?}/{}",
+                self.kind(n),
+                if self.broken { "gap" } else { "live" }
+            )
+        );
         let c = self.kids(n);
         let want = want.filter(|w| {
             w.payload == 0

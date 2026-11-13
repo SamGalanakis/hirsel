@@ -130,6 +130,7 @@ impl Types {
             .or_else(|| self.map.get(k).copied())
     }
     pub fn intern(&mut self, k: TyKind) -> TyId {
+        crate::cost_scope!("phase", "type interning/hashing");
         if let Some(id) = self.find(&k) {
             return id;
         }
@@ -178,6 +179,7 @@ impl<'a> Local<'a> {
         }
     }
     pub fn intern(&mut self, k: TyKind) -> TyId {
+        crate::cost_scope!("phase", "type interning/hashing");
         if let Some(id) = self.base.find(&k) {
             return id;
         }
@@ -226,6 +228,7 @@ impl TyRead for Local<'_> {
 
 /// Replace `Param(i)` by `args[i]`.
 pub fn subst(t: &mut impl TyRead, ty: TyId, args: &[TyId]) -> TyId {
+    crate::cost_scope!("phase", "type substitution");
     if args.is_empty() {
         return ty;
     }

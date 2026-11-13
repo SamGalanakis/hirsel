@@ -2,7 +2,7 @@
 use super::*;
 use hirsel_core_resolve::{LookupResult, LookupScope, Target};
 use hirsel_core_syntax::{Item, NodeKind};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DefinitionKey {
@@ -27,6 +27,12 @@ pub(crate) struct Keys {
     paths: Vec<DefPath>,
     modules: Vec<ModulePath>,
     packages: Vec<PackageId>,
+    dependencies: Vec<Option<HeaderRow>>,
+    anchors: BTreeMap<(ModuleId, u32), DefPath>,
+}
+struct HeaderRow {
+    digest: ContentHash,
+    reads: Vec<Result<usize, DefPath>>,
 }
 impl Keys {
     pub fn new(
@@ -87,7 +93,24 @@ impl Keys {
                 );
             }
         }
+        let ids: BTreeMap<_, _> = paths.iter().enumerate().map(|(i, p)| (p, i)).collect();
+        let dependencies = paths
+            .iter()
+            .map(|path| {
+                headers.get(path).map(|h| HeaderRow {
+                    digest: h.digest,
+                    reads: h
+                        .reads
+                        .iter()
+                        .map(|p| ids.get(p).copied().ok_or_else(|| p.clone()))
+                        .collect(),
+                })
+            })
+            .collect();
+        let anchors = headers.iter().map(|(p, h)| (h.anchor, p.clone())).collect();
         Ok(Self {
+            dependencies,
+            anchors,
             headers,
             environment,
             paths,
@@ -109,10 +132,11 @@ impl Keys {
         check: &CoreCheck,
         incomplete: &[Incomplete],
     ) -> BTreeMap<(ModuleId, u32), DefPath> {
+        hirsel_core_front::cost_scope!("phase", "driver keys/anchors");
         let mut anchors = BTreeMap::new();
         let mut capture = |site: &Site| {
             let at = (site.module, site.item);
-            if let Some((path, _)) = self.headers.iter().find(|(_, h)| h.anchor == at) {
+            if let Some(path) = self.anchors.get(&at) {
                 anchors.insert(at, path.clone());
             }
         };
@@ -142,38 +166,49 @@ impl Keys {
         item: Item<'_>,
         resolution: &Resolution,
     ) -> io::Result<DefinitionKey> {
+        hirsel_core_front::cost_scope!("phase", "driver keys/anchors");
         let module = self.headers[path].anchor.0;
-        let mut pending = BTreeSet::from([path.clone()]);
+        let token = item.tree.node(item.root).token.unwrap();
+        let own = index.definition(module, item.symbol(token)).unwrap();
+        let mut pending = vec![own.0 as usize];
         for name in &resolution.names {
-            targets(index, &self.paths, module, name.target, &mut pending);
+            target_ids(index, module, name.target, &mut pending);
         }
-        // Lookup results retain negative, ambiguous and shadowed dependencies, even if
-        // no corresponding call was emitted. Header closure supplies transitive aliases.
+        // Negative, ambiguous and shadowed lookup dependencies remain unchanged.
         for read in &resolution.reads {
             match &read.result {
                 LookupResult::Found(t) | LookupResult::Shadowed(t) => {
-                    targets(index, &self.paths, module, *t, &mut pending)
+                    target_ids(index, module, *t, &mut pending);
                 }
                 LookupResult::Private(p) | LookupResult::Opaque(p) => {
-                    pending.insert(self.paths[p.0 as usize].clone());
+                    pending.push(p.0 as usize);
                 }
-                LookupResult::Ambiguous => {}
-                LookupResult::Missing => {}
+                LookupResult::Ambiguous | LookupResult::Missing => {}
             }
         }
         let mut signatures = BTreeMap::new();
-        let mut seen = HashSet::new();
-        while let Some(p) = pending.pop_first() {
-            if !seen.insert(p.clone()) {
+        let mut seen = vec![false; self.paths.len()];
+        while let Some(id) = pending.pop() {
+            if std::mem::replace(&mut seen[id], true) {
                 continue;
             }
-            let h = self.headers.get(&p).ok_or_else(|| {
+            let h = self.dependencies[id].as_ref().ok_or_else(|| {
                 io::Error::other(format!(
-                    "core signature demand outside reached definitions: {p}"
+                    "core signature demand outside reached definitions: {}",
+                    self.paths[id]
                 ))
             })?;
-            signatures.insert(p, h.digest);
-            pending.extend(h.reads.iter().cloned());
+            signatures.insert(self.paths[id].clone(), h.digest);
+            for read in &h.reads {
+                match read {
+                    Ok(id) => pending.push(*id),
+                    Err(path) => {
+                        return Err(io::Error::other(format!(
+                            "core signature demand outside reached definitions: {path}"
+                        )));
+                    }
+                }
+            }
         }
         let lookups: Vec<_> = resolution
             .reads
@@ -253,6 +288,19 @@ impl Keys {
             ),
             Target::Missing => TargetKey::Missing,
         }
+    }
+}
+fn target_ids(index: &NameIndex, module: ModuleId, target: Target, out: &mut Vec<usize>) {
+    match target {
+        Target::Definition(d) => out.push(d.0 as usize),
+        Target::ContextualConstructor { name } => {
+            out.extend(
+                index
+                    .constructor_candidates(module, name)
+                    .map(|d| d.0 as usize),
+            );
+        }
+        _ => {}
     }
 }
 fn targets(

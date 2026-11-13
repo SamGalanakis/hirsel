@@ -62,6 +62,7 @@ pub(super) struct Own {
 impl<'c, 'a> Cx<'c, 'a, '_> {
     /// The row of a value of `ty` that needs cleanup.
     pub(super) fn drop_id(&mut self, ty: TyId) -> Option<TypeId> {
+        crate::cost_scope!("phase", "cleanup emission");
         match self.rep(ty) {
             Ok(Rep::Place(id)) if self.e.needs_drop(id) => Some(id),
             _ => None,
@@ -97,6 +98,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     /// A consumer takes `v`: when it is a temporary, nothing cleans it any more.
     pub(super) fn consume(&mut self, v: Option<ValueId>, n: NodeId) {
+        crate::cost_scope!("phase", "cleanup emission");
         if let Some(i) = self.temp_index(v) {
             self.take_temp(i, n);
         }
@@ -129,6 +131,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// Slot `b`, just declared or bound, owns its value when its origin does and its
     /// type needs cleanup: it is cleaned at its scope's exit, under a drop flag.
     pub(super) fn own(&mut self, b: u32, n: NodeId) {
+        crate::cost_scope!("phase", "cleanup emission");
         let v = self.var(b);
         if v.own.is_some()
             || !matches!(v.origin, Origin::Let | Origin::LetMut | Origin::TakeParam)
@@ -155,12 +158,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     /// Slot `s` is moved out or taken apart: clear its flag.
     pub(super) fn moved(&mut self, s: u32, n: NodeId) {
+        crate::cost_scope!("phase", "cleanup emission");
         if let Some(own) = self.var(s).own {
             self.store_flag(own.flag, false, n);
         }
     }
     /// Slot `s` was installed whole: set its flag.
     pub(super) fn installed(&mut self, s: u32, n: NodeId) {
+        crate::cost_scope!("phase", "cleanup emission");
         if let Some(own) = self.var(s).own {
             self.store_flag(own.flag, true, n);
         }
@@ -268,6 +273,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// Clean one owner by its state: live is cleaned, maybe is cleaned when its flag
     /// is set, moved or uninit is not touched (FAIL-8, OWN-18).
     fn clean(&mut self, o: Owner, n: NodeId) {
+        crate::cost_scope!("phase", "cleanup emission");
         if !self.live() {
             return;
         }
@@ -402,6 +408,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(out);
     }
     fn emit_drop(&mut self, base: AddressBase, id: TypeId, n: NodeId) {
+        crate::cost_scope!("phase", "cleanup emission");
         let address = match base {
             AddressBase::Address(a) => a,
             base => self.address(base, &[], PlaceTy::Declared(id), n),
@@ -513,6 +520,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         temps: bool,
         n: NodeId,
     ) {
+        crate::cost_scope!("phase", "cleanup emission");
         if self.owners.len() == mark {
             return;
         }
@@ -552,6 +560,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// `owners` and the region and limit scopes opened since `scopes`, innermost
     /// first, each scope closing after its owners are cleaned (FAIL-8, T5.3).
     pub(super) fn unwind(&mut self, owners: usize, scopes: usize, n: NodeId) {
+        crate::cost_scope!("phase", "cleanup emission");
         if !self.live() {
             return;
         }
@@ -589,6 +598,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// owner and scope of the body, then propagates; none when there is nothing to
     /// clean (FORM v1a: without one the failure leaves at once).
     pub(super) fn fail_to(&mut self, n: NodeId) -> Option<BlockId> {
+        crate::cost_scope!("phase", "cleanup emission");
         if !self.live() {
             return None;
         }

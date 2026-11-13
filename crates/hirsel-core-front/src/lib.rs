@@ -142,6 +142,7 @@ impl<'a> Program<'a> {
         resolutions: Vec<Vec<std::sync::Arc<Resolution>>>,
         library: Option<&Library>,
     ) -> Self {
+        crate::cost_scope!("phase", "declaration summaries");
         let mut refusals = index.diagnostics.clone();
         let items = modules
             .iter()
@@ -270,3 +271,20 @@ impl<'a> Program<'a> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "cost-profile")]
+pub mod cost;
+
+/// A diagnostic scope compiled out of production compiler units.
+#[cfg(feature = "cost-profile")]
+#[macro_export]
+macro_rules! cost_scope {
+    ($view:expr, $name:expr) => {
+        let _cost_scope = $crate::cost::Scope::enter($view, || ($name).into());
+    };
+}
+#[cfg(not(feature = "cost-profile"))]
+#[macro_export]
+macro_rules! cost_scope {
+    ($view:expr, $name:expr) => {};
+}

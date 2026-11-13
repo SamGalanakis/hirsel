@@ -21,3 +21,26 @@ The front-end input uses one compilation symbol table and one arena per source f
 emission and public query identities. Use and synthesis tables cover only an item's node
 range, so many definitions in one file do not allocate file-sized tables per definition.
 Generic and parameter names are symbols; the index renders their spelling when needed.
+
+## Cost attribution and regression ceiling
+
+`//:core-check-cost` runs the ordinary release driver on the fixed M1 closure and
+core/std, on CPU 16 with one job and a fresh private store. It fails on a missing
+counter, a changed code-line denominator, or a check/lower or whole-request cost
+above [cost-ceilings.json](cost-ceilings.json). The whole-request ceiling includes
+loading, publication and output teardown. GAPs stay visible while the checker is
+unfinished. This guard records today's work; it does not certify completion.
+
+For local evidence, run `./crates/hirsel-core-front/check-cost.py --compiler <release-hirsel-core>
+--out <new-directory>`. When the corpus or supported constructs change, measure
+once with the same release platform, CPU and jobs, explain the change and update
+the recorded denominator and ceiling together. Do not raise the 60,000 whole-request
+target to make a regression pass.
+
+The driver's `check_cost` example enables this crate's `cost-profile` feature only
+through a dev dependency. `check_cost <inputs.json> <new-store> <output.json>
+--profile` reports independent nested phase, construct, body and instance views.
+It pauses instruction accounting around event bookkeeping; counter wrappers and
+changed inlining remain diagnostic overhead. Use the ordinary driver for savings.
+Omit `--profile` to export CoreIR, outcomes and definition keys for comparison.
+The feature and all scopes are absent from production compiler units.

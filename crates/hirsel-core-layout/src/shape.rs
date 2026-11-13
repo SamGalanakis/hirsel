@@ -264,7 +264,8 @@ pub struct Shape {
     /// How a signature carries a value of this row (see [`Carried`]).
     pub carried: Carried,
     pub body: Body,
-    /// A resource's finalizer (FAIL-11), called with the value's address.
+    /// A resource's finalizer (FAIL-11), or a core slot kernel's on an own row
+    /// (FORM v1c), called with the value's address before its fields are cleaned.
     pub finalizer: Option<FuncRef>,
     /// `grant bytes n` (MEM-27).
     pub grant: u64,

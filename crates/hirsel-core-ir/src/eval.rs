@@ -15,7 +15,7 @@ use hirsel_core_layout::{
     Body as Shaped, FieldTy, Handle, Layout, Recipe, Repr, TypeRef, charge, compute, field_size,
     map_entry,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 #[derive(Debug, PartialEq)]
 pub enum Outcome {
@@ -121,6 +121,9 @@ struct Blk {
     counted: Option<Counted>,
     /// Static data (`static dN`): read, never written or freed.
     fixed: bool,
+    /// The liveness shadow of `mark` (crate docs, "Slot kernels"): each marked
+    /// slot's offset, whether it holds a value, and its size.
+    marks: BTreeMap<usize, (bool, usize)>,
 }
 struct Res {
     grant: u64,
@@ -481,6 +484,7 @@ impl Machine<'_> {
             res,
             counted: None,
             fixed: false,
+            marks: BTreeMap::new(),
         });
         ptr(self.mem.len() - 1, 0)
     }
@@ -503,14 +507,66 @@ impl Machine<'_> {
     fn store(&mut self, p: u64, n: usize, v: u64) {
         self.put(p, &v.to_le_bytes()[..n]);
     }
+    /// A producer's read of `n` bytes at `p` (`read`, or `copy` from `p`) must not
+    /// touch a slot marked empty. Marked slots do not overlap, so walking back from
+    /// the read's end stops at the first slot that ends at or before its start.
+    fn read_marked(&self, p: u64, n: usize) {
+        let (b, o) = split(p);
+        for (&at, &(live, size)) in self.mem[b].marks.range(..o + n).rev() {
+            if at + size <= o {
+                break;
+            }
+            assert!(
+                live,
+                "read of the empty slot at +{at}: a slot kernel read a slot it took"
+            );
+        }
+    }
+    /// `mark`: a put (`live`) needs a slot not marked live, a take (`empty`) one not
+    /// marked empty. An unmarked slot may be either (storage a `List` handed over).
+    /// A zero-size slot has no storage to tell it from its neighbours, so it is not
+    /// shadowed.
+    fn mark(&mut self, p: u64, live: bool, size: usize) {
+        if size == 0 {
+            return;
+        }
+        let (b, o) = split(p);
+        assert!(self.mem[b].live, "mark of a freed block");
+        let was = self.mem[b].marks.insert(o, (live, size)).map(|m| m.0);
+        match (was, live) {
+            (Some(true), true) => panic!("put over the live slot at +{o}"),
+            (Some(false), false) => panic!("take of the empty slot at +{o}"),
+            _ => {}
+        }
+    }
+    /// A `drop` of a value, or cleanup of a `List` element, at a marked slot is a
+    /// take: the slot must be marked live, and is then marked empty. Cleanup that
+    /// reaches a slot a kernel emptied is the bug this catches.
+    fn drop_marked(&mut self, p: u64, size: usize) {
+        if size == 0 {
+            return;
+        }
+        let (b, o) = split(p);
+        if let Some(m) = self.mem[b].marks.get_mut(&o) {
+            assert!(
+                m.0,
+                "drop of the empty slot at +{o}: cleanup reached a slot a kernel took"
+            );
+            m.0 = false;
+        }
+    }
     /// Free a block and refund its charge, less a settled grant and a used cause
     /// cell, which left with the finalizer's hand-over and with the chain.
     fn free(&mut self, p: u64) {
         let (b, o) = split(p);
         assert!(o == 0 && self.mem[b].live, "free of a non-block");
         assert!(!self.mem[b].fixed, "a free of static data");
+        if let Some((at, _)) = self.mem[b].marks.iter().find(|(_, m)| m.0) {
+            panic!("free of a block whose slot at +{at} is live: a slot kernel left a value in it");
+        }
         let blk = &mut self.mem[b];
         blk.live = false;
+        blk.marks.clear();
         let mut n = blk.charge;
         if let Some(r) = &blk.res {
             n -= if r.settled { r.grant } else { 0 };
@@ -643,6 +699,15 @@ impl Machine<'_> {
             let blk = self.load(at, 8);
             return self.drop_resource(t, blk, ty);
         }
+        // An own row's core finalizer (crate docs, "Slot kernels") gets the value's
+        // address first, with no grant and no cause cell. It only moves slots, so it
+        // must not fail; the fields' cleanup does the dropping.
+        if let Some(f) = self.shape(ty).finalizer {
+            assert!(
+                self.call(t, FuncId(f.0), &[at]).is_ok(),
+                "an own row's finalizer failed: it must only move slots"
+            );
+        }
         self.drop_fields(t, at, ty)
     }
     fn drop_fields(&mut self, t: &mut Task, base: u64, ty: TypeRef) -> bool {
@@ -725,6 +790,7 @@ impl Machine<'_> {
                 }
                 let mut failed = false;
                 for i in 0..length {
+                    self.drop_marked(block + i * stride, stride as usize);
                     failed |= self.drop_field(t, block + i * stride, element);
                 }
                 // Capacity 0 has no storage: empty, or static data the carrier does
@@ -1440,6 +1506,7 @@ impl Machine<'_> {
                 result, address, ..
             } => {
                 let n = bytes_of(ty(result));
+                self.read_marked(places[address.index()].0, n);
                 vals[result.index()] = self.load(places[address.index()].0, n);
             }
             Inst::Store { address, value } => {
@@ -1606,7 +1673,9 @@ impl Machine<'_> {
                 self.end_limit(l);
             }
             Inst::Drop { address, ty, .. } => {
-                if self.drop_value(t, places[address.index()].0, TypeRef(ty.0)) {
+                let at = places[address.index()].0;
+                self.drop_marked(at, self.held(TypeRef(ty.0)) as usize);
+                if self.drop_value(t, at, TypeRef(ty.0)) {
                     return Err(Stop::Chained);
                 }
             }
@@ -1617,6 +1686,7 @@ impl Machine<'_> {
                     // a valid operand (SEM-4).
                     return Ok(());
                 }
+                self.read_marked(places[from.index()].0, n);
                 let src = self.get(places[from.index()].0, n).to_vec();
                 self.put(places[to.index()].0, &src);
             }
@@ -1629,6 +1699,13 @@ impl Machine<'_> {
             Inst::Release { node, ty, kind } => {
                 self.kind(vals[node.index()], kind);
                 self.release(vals[node.index()], TypeRef(ty.0))
+            }
+            Inst::Mark { address, live, ty } => {
+                self.mark(
+                    places[address.index()].0,
+                    live,
+                    self.place_size(ty) as usize,
+                );
             }
             Inst::TryUnwrap { result, node, kind } => {
                 self.kind(vals[node.index()], kind);

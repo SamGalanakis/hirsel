@@ -104,12 +104,23 @@ impl Glues {
         for t in needed.clone() {
             normal(t, layouts, &mut needed, &mut roots, &mut normal_seen);
         }
+        // A row with a finalizer is one counted step, cleaned whole by its
+        // ordinary glue (FORM v1c), so its fields are not descendants.
         fn descendants(
             t: usize,
             layouts: &[Recipe],
             roots: &mut BTreeSet<usize>,
             visited: &mut BTreeSet<usize>,
+            whole: &mut BTreeSet<usize>,
         ) {
+            if layouts[t]
+                .drop
+                .as_ref()
+                .is_some_and(|d| d.finalizer.is_some())
+            {
+                whole.insert(t);
+                return;
+            }
             if !visited.insert(t) {
                 return;
             }
@@ -118,30 +129,44 @@ impl Glues {
                 layouts: &[Recipe],
                 roots: &mut BTreeSet<usize>,
                 visited: &mut BTreeSet<usize>,
+                whole: &mut BTreeSet<usize>,
             ) {
                 match f {
-                    FieldTy::Inline(t) => descendants(t.index(), layouts, roots, visited),
+                    FieldTy::Inline(t) => descendants(t.index(), layouts, roots, visited, whole),
                     FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
                         roots.insert(t.index());
-                        descendants(t.index(), layouts, roots, visited);
+                        descendants(t.index(), layouts, roots, visited, whole);
                     }
-                    FieldTy::Array(e, _) | FieldTy::Seq(e) => field(e, layouts, roots, visited),
+                    FieldTy::Array(e, _) | FieldTy::Seq(e) => {
+                        field(e, layouts, roots, visited, whole)
+                    }
                     FieldTy::Map(k, v) => {
-                        field(k, layouts, roots, visited);
-                        field(v, layouts, roots, visited);
+                        field(k, layouts, roots, visited, whole);
+                        field(v, layouts, roots, visited, whole);
                     }
                     _ => {}
                 }
             }
             if let Some(d) = &layouts[t].drop {
                 for f in d.fields.iter().flatten() {
-                    field(&f.ty, layouts, roots, visited);
+                    field(&f.ty, layouts, roots, visited, whole);
                 }
             }
         }
         let mut visited = BTreeSet::new();
-        for root in roots.clone() {
-            descendants(root, layouts, &mut roots, &mut visited);
+        let mut whole = BTreeSet::new();
+        loop {
+            for root in roots.clone() {
+                descendants(root, layouts, &mut roots, &mut visited, &mut whole);
+            }
+            let fresh: Vec<usize> = whole.difference(&needed).copied().collect();
+            if fresh.is_empty() {
+                break;
+            }
+            for t in fresh {
+                needed.insert(t);
+                normal(t, layouts, &mut needed, &mut roots, &mut normal_seen);
+            }
         }
         let mut drops = vec![None; layouts.len()];
         let mut resumes = vec![None; layouts.len()];
@@ -333,11 +358,17 @@ impl Glues {
                 .as_ref()
                 .and_then(|d| d.finalizer)
             {
-                g.call("hirsel_core_finalizer_begin", &[P, P], &[], &[g.ctx, base])?;
+                // A resource's finalizer runs under its grant; a core slot kernel's on
+                // an own row runs under the current limit (FORM v1c).
+                if resource {
+                    g.call("hirsel_core_finalizer_begin", &[P, P], &[], &[g.ctx, base])?;
+                }
                 let f = tables.functions[finalizer.0 as usize];
                 let status = g.direct(f, &[g.ctx, base]);
                 g.merge(status);
-                g.call("hirsel_core_finalizer_end", &[P, P], &[], &[g.ctx, base])?;
+                if resource {
+                    g.call("hirsel_core_finalizer_end", &[P, P], &[], &[g.ctx, base])?;
+                }
             }
             g.fields(base, index)?;
             if resource {

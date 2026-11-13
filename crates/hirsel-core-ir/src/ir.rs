@@ -510,6 +510,18 @@ pub enum Inst {
         node: ValueId,
         kind: Counted,
     },
+    // ---- FORM v1c ----
+    /// `mark a, live|empty : ty`: the slot at `address`, a place of `ty`, now holds
+    /// a value (`live`, after a put) or none (`empty`, after a take). Only core's
+    /// slot kernels emit it. It has no run-time effect: engines emit nothing for
+    /// it, and the evaluator keeps it as a liveness shadow that stops the run on a
+    /// take of an empty slot, a put over a live one, a read of an empty one and a
+    /// free of a block with a live one (crate docs, "Slot kernels").
+    Mark {
+        address: AddressId,
+        live: bool,
+        ty: PlaceTy,
+    },
 }
 
 /// What an `Alloc` makes. The block's bookkeeping (its limit record,

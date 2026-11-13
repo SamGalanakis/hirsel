@@ -168,6 +168,7 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
         | Inst::Call { .. }
         | Inst::SetCase { .. }
         | Inst::LimitExit
+        | Inst::Mark { .. }
         | Inst::Drop { .. } => {}
     }
 }
@@ -179,6 +180,7 @@ pub(super) fn addresses(inst: &mut Inst, f: &mut impl FnMut(&mut AddressId)) {
         | Inst::Pointer { address, .. }
         | Inst::Case { address, .. }
         | Inst::SetCase { address, .. }
+        | Inst::Mark { address, .. }
         | Inst::Drop { address, .. } => f(address),
         Inst::Copy { to, from, .. } => {
             f(to);

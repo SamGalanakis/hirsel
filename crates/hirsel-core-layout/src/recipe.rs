@@ -142,8 +142,9 @@ pub struct FieldDrop {
 /// slot i's steps at `i × c` within it and the last step freeing the storage;
 /// `slots` is its length, read from the carrier, which cleanup does not change
 /// until that last step; a `Seq` of plain elements, `String` included, is so one
-/// step. Any other field that needs cleanup (a `Causes`, an `own fn`, a handle)
-/// is cleaned whole as one step. So a cursor names the same point whichever
+/// step. A value whose recipe has a finalizer (a core slot kernel's own row:
+/// a counted payload holds no resource) and any other field that needs cleanup
+/// (a `Causes`, an `own fn`, a handle) is cleaned whole as one step. So a cursor names the same point whichever
 /// engine built the glue.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DropRecipe {

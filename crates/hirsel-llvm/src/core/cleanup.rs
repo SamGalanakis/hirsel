@@ -56,6 +56,12 @@ pub(super) fn drop_glue(
             continue;
         }
         if let Some(drop) = &recipes[t].drop {
+            // FORM v1c: counted cleanup runs a row with a finalizer whole, by its
+            // ordinary glue.
+            if mechanical && drop.finalizer.is_some() {
+                pending.push((t, false));
+                continue;
+            }
             for field in drop.fields.iter().flatten() {
                 cleanup_dependencies(&field.ty, mechanical, &mut pending);
             }
@@ -85,13 +91,15 @@ pub(super) fn drop_glue(
         } else {
             "%payload".into()
         };
-        if resource {
-            #[cfg(test)]
-            if e.fixed(TypeId(t as u32)).size >= 8 {
-                let id = e.calc(format!("load i64, ptr {base}, align 1"));
-                e.runtime_void("hirsel_core_test_drop_trace", &[("i64".into(), id)]);
-            }
-            if let Some(f) = module.types[t].finalizer {
+        #[cfg(test)]
+        if resource && e.fixed(TypeId(t as u32)).size >= 8 {
+            let id = e.calc(format!("load i64, ptr {base}, align 1"));
+            e.runtime_void("hirsel_core_test_drop_trace", &[("i64".into(), id)]);
+        }
+        // A resource's finalizer runs under its grant; a core slot kernel's on an
+        // own row runs under the current limit (FORM v1c).
+        if let Some(f) = module.types[t].finalizer {
+            if resource {
                 e.runtime_void(
                     "hirsel_core_finalizer_begin",
                     &[
@@ -99,18 +107,20 @@ pub(super) fn drop_glue(
                         ("ptr".into(), base.clone()),
                     ],
                 );
-                if failures.may_fail[f.0 as usize] {
-                    let failed = e.calc(format!(
-                        "call i8 @{}(ptr %context, ptr {base})",
-                        symbol(module, FuncId(f.0))
-                    ));
-                    e.line(format!("store i8 {failed}, ptr {status}"));
-                } else {
-                    e.line(format!(
-                        "call void @{}.infallible(ptr %context, ptr {base})",
-                        symbol(module, FuncId(f.0))
-                    ));
-                }
+            }
+            if failures.may_fail[f.0 as usize] {
+                let failed = e.calc(format!(
+                    "call i8 @{}(ptr %context, ptr {base})",
+                    symbol(module, FuncId(f.0))
+                ));
+                e.line(format!("store i8 {failed}, ptr {status}"));
+            } else {
+                e.line(format!(
+                    "call void @{}.infallible(ptr %context, ptr {base})",
+                    symbol(module, FuncId(f.0))
+                ));
+            }
+            if resource {
                 e.runtime_void(
                     "hirsel_core_finalizer_end",
                     &[
@@ -319,6 +329,10 @@ pub(super) fn mechanical_count(
             let Some(drop) = &recipes[t.index()].drop else {
                 return Ok(0);
             };
+            // FORM v1c: a row with a finalizer is one step, cleaned whole.
+            if drop.finalizer.is_some() {
+                return Ok(1);
+            }
             let mut max = 0;
             for row in &drop.fields {
                 let mut n = 0;
@@ -357,6 +371,17 @@ impl FunctionEmitter<'_> {
         self.line(format!("br i1 {here}, label %clean{n}, label %skip{n}"));
         writeln!(self.code, "clean{n}:").unwrap();
         match field {
+            // Its ordinary glue: the finalizer, then the fields. A counted payload
+            // holds no resource, so this cannot fail.
+            FieldTy::Inline(t)
+                if self.recipes[t.index()]
+                    .drop
+                    .as_ref()
+                    .is_some_and(|d| d.finalizer.is_some()) =>
+            {
+                self.line(format!("call i8 @core_drop_{}(ptr %context, ptr {p})", t.0));
+                self.line("ret i1 false");
+            }
             FieldTy::Inline(t) => {
                 let drop = self.recipes[t.index()].drop.as_ref().unwrap();
                 let tag = self.fixed(TypeId(t.0)).tag;

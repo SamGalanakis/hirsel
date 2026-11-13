@@ -336,7 +336,7 @@ impl Substitution<'_> {
         self.types.insert(old, row);
         self.module.types.push(shape.clone());
         map_fields(&mut shape, &mut |id| TypeRef(self.ty(TypeId(id.0)).0));
-        // A generic resource's finalizer is the instance at the substituted arguments.
+        // A generic row's finalizer is the instance at the substituted arguments.
         shape.finalizer = shape
             .finalizer
             .map(|f| FuncRef(self.function(FuncId(f.0)).0));
@@ -555,6 +555,7 @@ fn fill(
         match inst {
             Inst::FunctionRef { function, .. } => *function = s.function(*function),
             Inst::Drop { ty, .. } | Inst::Release { ty, .. } => *ty = s.ty(*ty),
+            Inst::Mark { ty, .. } => s.place(ty),
             _ => {}
         }
     }

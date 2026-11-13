@@ -26,6 +26,7 @@ const SAMPLES: &[(&str, &str)] = &[
     ("providers", include_str!("../samples/providers.core")),
     ("stable-keys", include_str!("../samples/stable-keys.core")),
     ("scalar-rows", include_str!("../samples/scalar-rows.core")),
+    ("kernel", include_str!("../samples/kernel.core")),
 ];
 
 fn load(name: &str, text: &str) -> Module {
@@ -333,5 +334,91 @@ fn allocation_overflow_refuses_at_maximum_limit() {
     ] {
         let report = eval::run(&module, FuncId(0), &args, u64::MAX);
         assert_eq!(report.outcome, eval::Outcome::Returned(expected));
+    }
+}
+
+/// Bug: the evaluator lets a slot kernel's mistake through (a double take, a put
+/// that overwrites a live value, a read of a slot already taken, storage freed with
+/// a value still in it), so a kernel that leaks or double-drops passes every run.
+/// Each case is a one-line change to a correct body, with the stop it must cause.
+#[test]
+fn slot_marks_stop_kernel_mistakes() {
+    let head = "core v1\nsig g0 = () -> ()\ninst n0 = core@1/m/k [] []\nfn f0 = n0 g0 {\n  addr a0 = v1 : u64\nb0:\n  v0: u64 = const 8\n  v1: ptr, v2: u64 = alloc own v0 align 8 charge v0\n  address a0\n";
+    let run = |body: &str| {
+        let m = parse(&format!("{head}{body}  free v1 charge v0\n  return\n}}\n")).unwrap();
+        wf::module(&m).unwrap();
+        std::panic::catch_unwind(|| eval::run(&m, FuncId(0), &[], u64::MAX))
+            .err()
+            .map(|e| {
+                e.downcast::<String>()
+                    .map_or_else(|_| String::new(), |s| *s)
+            })
+    };
+    let ok = "  store a0, v0\n  mark a0, live : u64\n  v3: u64 = read a0\n  mark a0, empty : u64\n";
+    assert_eq!(run(ok), None, "the base case runs");
+    for (body, stop) in [
+        (
+            "  mark a0, live : u64\n  mark a0, empty : u64\n  mark a0, empty : u64\n",
+            "take of the empty slot",
+        ),
+        (
+            "  mark a0, live : u64\n  mark a0, live : u64\n  mark a0, empty : u64\n",
+            "put over the live slot",
+        ),
+        (
+            "  mark a0, live : u64\n  mark a0, empty : u64\n  v3: u64 = read a0\n",
+            "read of the empty slot",
+        ),
+        (
+            "  mark a0, live : u64\n",
+            "free of a block whose slot at +0 is live",
+        ),
+    ] {
+        let got = run(body).unwrap_or_else(|| panic!("`{stop}` ran to its end"));
+        assert!(got.contains(stop), "expected `{stop}`, got `{got}`");
+    }
+    // Bug: zero-size slots share one address, so shadowing them by address calls
+    // a put into slot 1 a put over slot 0. They have no storage and no shadow.
+    let unit = parse(
+        "core v1\ntype t0 = own \"Unit\" { }\nsig g0 = () -> ()\ninst n0 = core@1/m/k [] []\nfn f0 = n0 g0 {\n  addr a0 = v1 index v3 : t0\n  addr a1 = v1 index v4 : t0\nb0:\n  v0: u64 = const 8\n  v1: ptr, v2: u64 = alloc own v0 align 8 charge v0\n  v3: u64 = const 0\n  v4: u64 = const 1\n  address a0\n  address a1\n  mark a0, live : t0\n  mark a1, live : t0\n  mark a0, empty : t0\n  mark a1, empty : t0\n  free v1 charge v0\n  return\n}\n",
+    )
+    .unwrap();
+    wf::module(&unit).unwrap();
+    eval::run(&unit, FuncId(0), &[], u64::MAX);
+}
+
+/// Bug: a producer other than core's kernels emits `mark` or gives an own row a
+/// finalizer, so a user type gets cleanup that bypasses its recipe.
+#[test]
+fn only_core_marks_slots_and_finalizes_own_rows() {
+    let kernel = include_str!("../samples/kernel.core");
+    let m = load("kernel", kernel);
+    wf::module(&m).expect("core's kernels are well formed");
+    for (edits, why) in [
+        (
+            &[(
+                "inst n2 = core@1/deque/push_back",
+                "inst n2 = samples@0/deque/push_back",
+            )][..],
+            "only core's slot kernels emit `mark`",
+        ),
+        (
+            &[
+                ("own \"Deque[Res]\" drop f1", "own \"Deque[Res]\" drop f3"),
+                (
+                    "inst n3 = core@1/deque/pop_front",
+                    "inst n3 = samples@0/deque/pop_front",
+                ),
+            ][..],
+            "only core declares a finalizer",
+        ),
+    ] {
+        let mut text = kernel.to_string();
+        for (from, to) in edits {
+            assert!(text.contains(from));
+            text = text.replace(from, to);
+        }
+        let err = wf::module(&load("kernel", &text)).expect_err(why);
+        assert!(err.contains(why), "expected `{why}`, got `{err}`");
     }
 }

@@ -64,8 +64,44 @@
 //!   step order a counted release resumes by, dynamic sequences and maps
 //!   included, are stated in `hirsel-core-layout` (`DropRecipe`, `map_entry`).
 //!
+//! **FORM v1c (slot kernels; header `core v1`):** `mark` and a core finalizer on
+//! an own row, below ("Slot kernels"). Nothing else changes, and no v1a or v1b row
+//! changes meaning.
+//!
 //! Brands, `SlotOwner` and `uses` lists are not in FORM v1 at all: a pool handle
 //! is plain data checked at run time.
+//!
+//! # Slot kernels (FORM v1c)
+//!
+//! core's collections that hold uninhabited slots (`Deque`, a heap's sift, a
+//! stable sort's merge) are core code over one private carrier, `Slots[T]`
+//! `{raw: List[T]}`, whose `List` length word is the count of live slots. Two
+//! rows exist only for them; well-formedness refuses either outside a function
+//! that is an instance of a core@1 definition.
+//! - **`mark a, live|empty : t`** says the slot at `a`, a place of `t`, now holds
+//!   a value (`live`, after a put) or none (`empty`, after a take). A move is a
+//!   `copy` with its source marked `empty` and its destination `live`; the blocks
+//!   may differ. It has no run-time effect: engines emit nothing for it, so a
+//!   body's code is the same with its marks removed. The evaluator keeps it as a
+//!   liveness shadow and stops the run on a take (`empty`) of a slot marked empty,
+//!   a put (`live`) over a slot marked live, a `read` of, or `copy` from, bytes of
+//!   a slot marked empty, and a `free` (or cleanup's free) of a block with a slot
+//!   marked live. A `drop` of a marked slot, and `List` cleanup of one, is a take
+//!   too: the slot must be marked live and is then marked empty, so cleanup that
+//!   reaches a slot a kernel emptied stops the run. A slot never marked may be
+//!   either (storage a `List` hands over is all live and unmarked; a new block
+//!   needs no registration). A zero-size slot has no storage to identify it and is
+//!   not shadowed.
+//! - **A finalizer on an own row** (`type tN = own "Deque[T]" drop fM { .. }`,
+//!   `DropRecipe::finalizer`) is called with the value's address, as `(ptr) ->
+//!   ()`, before its fields are cleaned (FAIL-8), under the current limit with no
+//!   grant and no cause cell. It only moves slots, to restore its fields' own
+//!   invariant (a `Deque` moves its live slots into the prefix `0..len` of its
+//!   `List`, front first), and must not fail: the evaluator stops a run whose
+//!   own-row finalizer fails. The fields' cleanup then drops the values, resuming
+//!   past a failed drop as it always does (FAIL-12). In counted cleanup such a
+//!   value is one step (its finalizer and then its fields, whole); a counted
+//!   payload holds no resource, so it cannot fail there.
 //!
 //! # Compact data (FORM v1b, spec 6ef88514)
 //!

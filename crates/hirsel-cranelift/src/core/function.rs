@@ -394,7 +394,8 @@ impl Function<'_, '_, '_> {
                 let v = self.scalar_unary(op, v)?;
                 self.set(result, v);
             }
-            Inst::StorageLive { .. } | Inst::StorageDead { .. } => {}
+            // FORM v1c: a mark is the evaluator's alone; no code.
+            Inst::StorageLive { .. } | Inst::StorageDead { .. } | Inst::Mark { .. } => {}
             Inst::Address { address, fail } => {
                 let v = self.address(address, fail)?;
                 match self.addresses[address.index()] {

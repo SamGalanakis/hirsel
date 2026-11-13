@@ -27,6 +27,10 @@ pub(super) fn plan_type(tables: &Tables<'_>, t: TypeRef) -> Result<Plan> {
     let Layout::Fixed(f) = &tables.layouts[t.index()].layout else {
         return Ok(Plan::Empty);
     };
+    // FORM v1c: a row with a finalizer is one step, cleaned whole.
+    if d.finalizer.is_some() {
+        return Ok(Plan::Leaf(FieldTy::Inline(t)));
+    }
     let rows = d
         .fields
         .iter()
@@ -206,6 +210,9 @@ impl Glue<'_, '_, '_> {
                 self.b.ins().store(MemFlagsData::trusted(), next, slot, 0);
                 let node = self.load(base, 0);
                 match field {
+                    // Its ordinary glue: the finalizer, then the fields. A counted
+                    // payload holds no resource, so this cannot fail.
+                    FieldTy::Inline(t) => self.drop_type(base, *t),
                     FieldTy::Box(t) => {
                         let charge = self.icon(
                             charge::boxed(

@@ -55,6 +55,11 @@ pub fn module(m: &Module) -> R {
             need(sig == Some(&want), || {
                 format!("t{i}: finalizer is not (ptr) -> ()")
             })?;
+            // An own row's finalizer is a core slot kernel's (crate docs, "Slot kernels").
+            need(
+                t.repr == hirsel_core_layout::Repr::Resource || core_fn(m, f.0),
+                || format!("t{i}: only core declares a finalizer on a row that is not a resource"),
+            )?;
         }
     }
     hirsel_core_layout::compute(&m.types).map_err(|e| format!("layout: {e:?}"))?;
@@ -78,9 +83,21 @@ pub fn module(m: &Module) -> R {
         })?;
         if let Some(b) = &f.body {
             body(m, &m.signatures[f.signature.index()], b).map_err(|e| format!("f{i}: {e}"))?;
+            need(
+                core_fn(m, i as u32) || !b.insts.iter().any(|x| matches!(x, Inst::Mark { .. })),
+                || format!("f{i}: only core's slot kernels emit `mark`"),
+            )?;
         }
     }
     Ok(())
+}
+
+/// Whether function `f` is an instance of a core@1 definition.
+fn core_fn(m: &Module, f: u32) -> bool {
+    m.functions
+        .get(f as usize)
+        .and_then(|f| m.instances.get(f.instance.index()))
+        .is_some_and(|k| k.definition.package_is("core", "1"))
 }
 
 /// The value types a signature's entry block receives.
@@ -717,6 +734,18 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             c.is(bytes, Ty::Scalar(Scalar::U64))
         }
         Inst::LimitExit => Ok(()),
+        Inst::Mark {
+            address,
+            live: _,
+            ty,
+        } => {
+            if let PlaceTy::Declared(t) = ty {
+                c.tid(t)?;
+            }
+            need(c.place(address)? == ty, || {
+                "mark of a place of another type".into()
+            })
+        }
         Inst::Drop { address, ty, fail } => {
             c.tid(ty)?;
             need(c.place(address)? == PlaceTy::Declared(ty), || {
@@ -795,4 +824,25 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             })
         }
     }
+}
+
+/// `m` with every `mark` removed (FORM v1c). A mark has no run-time effect, so an
+/// engine must emit the same code for both; engines' tests compare them.
+pub fn without_marks(m: &Module) -> Module {
+    let mut m = m.clone();
+    for b in m.functions.iter_mut().filter_map(|f| f.body.as_mut()) {
+        let (mut insts, mut anchors) = (Vec::new(), Vec::new());
+        for block in &mut b.blocks {
+            let start = insts.len() as u32;
+            for i in block.insts.start..block.insts.start + block.insts.len {
+                if !matches!(b.insts[i as usize], Inst::Mark { .. }) {
+                    insts.push(b.insts[i as usize].clone());
+                    anchors.push(b.inst_anchors[i as usize]);
+                }
+            }
+            block.insts = PoolRange::new(start, insts.len() as u32 - start);
+        }
+        (b.insts, b.inst_anchors) = (insts, anchors);
+    }
+    m
 }

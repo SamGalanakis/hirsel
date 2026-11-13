@@ -685,6 +685,7 @@ fn every_whole_v1_memory_sample_matches_the_evaluator() {
         include_str!("../../../hirsel-core-ir/samples/failure.core"),
         include_str!("../../../hirsel-core-ir/samples/variants.core"),
         include_str!("../../../hirsel-core-ir/samples/stable-keys.core"),
+        include_str!("../../../hirsel-core-ir/samples/kernel.core"),
     ] {
         let module = text::parse(source).unwrap();
         wf::module(&module).unwrap();
@@ -694,6 +695,22 @@ fn every_whole_v1_memory_sample_matches_the_evaluator() {
         agree_cases(&module, &cases, true);
     }
     println!("whole-v1 memory sample executions: {count}");
+}
+
+/// Bug: LLVM emits code for a `mark` (FORM v1c), which has no run-time effect, or
+/// lets one change what the rest of the body becomes (an empty bound scope it
+/// breaks up, a value numbering it shifts).
+#[test]
+fn marks_emit_nothing() {
+    let module = text::parse(include_str!("../../../hirsel-core-ir/samples/kernel.core")).unwrap();
+    let stripped = wf::without_marks(&module);
+    assert_ne!(stripped, module, "the sample has marks");
+    for opt in [Optimization::None, Optimization::Speed] {
+        assert!(
+            emitted_ir(&module, opt).unwrap() == emitted_ir(&stripped, opt).unwrap(),
+            "a mark changed the IR at {opt:?}"
+        );
+    }
 }
 
 #[test]

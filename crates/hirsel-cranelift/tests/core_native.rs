@@ -871,6 +871,37 @@ fn every_whole_v1a_sample_matches_evaluator() {
     }
 }
 
+/// Bug: Cranelift skips an own row's core finalizer (FORM v1c) in ordinary or
+/// counted cleanup, or brackets it with a resource's grant switch, so a Deque drops
+/// the wrong slots or leaks; or it emits code for a `mark`, which has no effect.
+#[test]
+fn slot_kernels_match_evaluator_and_marks_emit_nothing() {
+    let source = include_str!("../../hirsel-core-ir/samples/kernel.core");
+    let module = text::parse(source).unwrap();
+    for optimize in [false, true] {
+        execute(&module, &sample_runs(&module, source), optimize);
+        let layouts = hirsel_core_layout::compute(&module.types).unwrap();
+        let emit = |m: &c::Module| {
+            emit_object_with_layouts(
+                m,
+                &layouts,
+                &Options {
+                    target: "x86_64-unknown-linux-gnu",
+                    optimize,
+                },
+            )
+            .unwrap()
+            .bytes
+        };
+        let stripped = c::wf::without_marks(&module);
+        assert_ne!(stripped, module, "the sample has marks");
+        assert!(
+            emit(&module) == emit(&stripped),
+            "a mark changed the object"
+        );
+    }
+}
+
 #[test]
 fn capacity_at_each_admission_preserves_cleanup_chain_and_balance() {
     let module = text::parse(include_str!("support/admissions.core")).unwrap();

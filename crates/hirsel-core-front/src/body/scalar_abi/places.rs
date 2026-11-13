@@ -256,6 +256,7 @@ pub(super) fn promote(module: &Module, body: &mut Body, dest: Option<SlotId>) {
                 }
             }
             Inst::Drop { address, .. }
+            | Inst::Mark { address, .. }
             | Inst::Case { address, .. }
             | Inst::SetCase { address, .. } => {
                 if let Some(s) = cells[address.index()] {

@@ -72,6 +72,27 @@ fn execute_reports(
     injection: Option<(usize, bool)>,
     reports: Option<&[eval::Report]>,
 ) {
+    let scheduled = module
+        .functions
+        .iter()
+        .filter_map(|f| f.body.as_ref())
+        .any(|body| {
+            body.calls.iter().any(|call| {
+                matches!(
+                    call.callee,
+                    Callee::Runtime(
+                        RtOp::Spawn { .. }
+                            | RtOp::Join { .. }
+                            | RtOp::Cancel
+                            | RtOp::ChannelNew { .. }
+                            | RtOp::ChannelSender
+                            | RtOp::Send { .. }
+                            | RtOp::TrySend { .. }
+                            | RtOp::Receive { .. }
+                    )
+                )
+            })
+        });
     let scratch = Scratch::new();
     let layouts = hirsel_core_layout::compute(&module.types).unwrap();
     let artifact = emit_object_for_test(
@@ -121,6 +142,37 @@ fn execute_reports(
             write!(source, ", {c}").unwrap();
         }
         source.push_str(");\n");
+    }
+    if scheduled {
+        source.push_str("extern uint8_t hirsel_core_test_run(HirselCoreContext *,uint8_t (*)(HirselCoreContext*,void*,void*),void*,void*,size_t,size_t);\n");
+        let mut wrappers = std::collections::BTreeSet::new();
+        for (f, _) in runs {
+            if !wrappers.insert(f.0) {
+                continue;
+            }
+            let function = &module.functions[f.index()];
+            let signature = &module.signatures[function.signature.index()];
+            write!(source, "struct input{} {{", f.0).unwrap();
+            if signature.params.is_empty() {
+                source.push_str("uint8_t empty;");
+            }
+            for (i, param) in signature.params.iter().enumerate() {
+                let Param::Value(t) = param else {
+                    panic!("scalar test input");
+                };
+                write!(source, "{} a{i};", ctype(*t)).unwrap();
+            }
+            let result = if signature.results.is_empty() {
+                "uint64_t".into()
+            } else {
+                format!("struct r{}", function.signature.0)
+            };
+            write!(source, "}}; static uint8_t run{}(HirselCoreContext *ctx,void *destination,void *input) {{ struct input{} *args=input; *({result}*)destination={} (ctx", f.0, f.0, symbol(&module.instances[function.instance.index()])).unwrap();
+            for i in 0..signature.params.len() {
+                write!(source, ",args->a{i}").unwrap();
+            }
+            source.push_str("); return 0; }\n");
+        }
     }
     source.push_str("#include <sys/resource.h>\nint main(void) {\n");
     if reports.is_some() {
@@ -198,16 +250,42 @@ fn execute_reports(
         } else {
             format!("struct r{} value = ", function.signature.0)
         };
-        write!(
-            source,
-            "{result}{}(ctx",
-            symbol(&module.instances[function.instance.index()])
-        )
-        .unwrap();
-        for j in 0..args.len() {
-            write!(source, ", a{j}").unwrap();
+        if scheduled {
+            let result_type = if s.results.is_empty() {
+                "uint64_t".into()
+            } else {
+                format!("struct r{}", function.signature.0)
+            };
+            let variable = if s.results.is_empty() {
+                "status"
+            } else {
+                "value"
+            };
+            writeln!(
+                source,
+                "{result_type} {variable}; struct input{} args = {{",
+                f.0
+            )
+            .unwrap();
+            if args.is_empty() {
+                source.push_str("0");
+            }
+            for j in 0..args.len() {
+                write!(source, "{}a{j}", if j == 0 { "" } else { "," }).unwrap();
+            }
+            writeln!(source, "}}; if(hirsel_core_test_run(ctx,run{},&args,&{variable},sizeof args,sizeof {variable})) return 10;", f.0).unwrap();
+        } else {
+            write!(
+                source,
+                "{result}{}(ctx",
+                symbol(&module.instances[function.instance.index()])
+            )
+            .unwrap();
+            for j in 0..args.len() {
+                write!(source, ", a{j}").unwrap();
+            }
+            source.push_str(");\n");
         }
-        source.push_str(");\n");
         if !s.results.is_empty() {
             source.push_str("uint64_t status = value.status;\n");
         }
@@ -266,8 +344,10 @@ fn link_run(scratch: &Scratch, source: &str) -> Vec<u64> {
             .join(archive)
     };
     let archive = fs::canonicalize(archive).expect("the declared core runtime archive exists");
+    let include = fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hirsel-core-rt/include")).unwrap();
     let link = Command::new("cc")
         .current_dir(&scratch.0)
+        .arg("-I").arg(include)
         .args(["caller.c", "input.o"])
         .arg(archive)
         .args([
@@ -1041,4 +1121,40 @@ int main(void) {{
         propagate = symbol(&module.instances[1])
     );
     assert!(link_run(&scratch, &source).is_empty());
+}
+
+#[test]
+fn every_custody_sample_and_injected_admission_matches_evaluator() {
+    let source = include_str!("../../hirsel-core-ir/samples/custody.core");
+    let module = text::parse(source).unwrap();
+    let mut cases: Vec<_> = sample_runs(&module, source)
+        .into_iter()
+        .map(|run| (run, 1_000_000))
+        .collect();
+    for line in source
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("; run limit "))
+    {
+        let (limit, call) = line.split_once(": ").unwrap();
+        cases.extend(
+            sample_runs(&module, &format!("; run: {call}"))
+                .into_iter()
+                .map(|run| (run, limit.parse().unwrap())),
+        );
+    }
+    for (run, limit) in cases {
+        execute_limit(&module, std::slice::from_ref(&run), false, limit);
+        let baseline = eval::run(&module, run.0, &run.1, limit);
+        for n in 1..=baseline.admissions {
+            for later in [false, true] {
+                execute_injected(
+                    &module,
+                    std::slice::from_ref(&run),
+                    false,
+                    limit,
+                    Some((n, later)),
+                );
+            }
+        }
+    }
 }

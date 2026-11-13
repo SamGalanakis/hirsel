@@ -25,6 +25,7 @@ mod memory;
 mod place;
 pub mod profile;
 mod scalar;
+mod tasks;
 
 /// Why a CoreIR module could not be emitted.
 #[derive(Debug)]

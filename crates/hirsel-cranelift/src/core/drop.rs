@@ -37,6 +37,7 @@ impl Glues {
             }
         }
         let mut needed = BTreeSet::new();
+        let mut descriptors = BTreeSet::new();
         for body in input.functions.iter().filter_map(|f| f.body.as_ref()) {
             for inst in &body.insts {
                 match inst {
@@ -46,6 +47,17 @@ impl Glues {
                     Inst::Release { ty, .. } => {
                         roots.insert(ty.index());
                     }
+                    Inst::Call { call } => match body.calls[call.index()].callee {
+                        Callee::Runtime(RtOp::Spawn { x, r }) => {
+                            descriptors.extend([x.index(), r.index()]);
+                            needed.extend([x.index(), r.index()]);
+                        }
+                        Callee::Runtime(RtOp::ChannelNew { item }) => {
+                            descriptors.insert(item.index());
+                            needed.insert(item.index());
+                        }
+                        _ => {}
+                    },
                     _ => {}
                 }
             }
@@ -134,7 +146,7 @@ impl Glues {
         let mut drops = vec![None; layouts.len()];
         let mut resumes = vec![None; layouts.len()];
         for (i, recipe) in layouts.iter().enumerate() {
-            if recipe.drop.is_some() && needed.contains(&i) {
+            if (recipe.drop.is_some() || descriptors.contains(&i)) && needed.contains(&i) {
                 drops[i] = Some(
                     object
                         .declare_function(
@@ -489,6 +501,26 @@ impl Glue<'_, '_, '_> {
             FieldTy::Handle(hirsel_core_layout::Handle::Causes) => {
                 let p = self.load(at, 0);
                 self.call("hirsel_core_causes_drop", &[P], &[], &[p])?;
+            }
+            FieldTy::Handle(hirsel_core_layout::Handle::Task) => {
+                let handle = self.load(at, 0);
+                let status =
+                    self.call("hirsel_core_task_drop", &[P, P], &[B], &[self.ctx, handle])?[0];
+                self.merge(status);
+            }
+            FieldTy::Handle(hirsel_core_layout::Handle::Sender) => {
+                let handle = self.load(at, 0);
+                self.call("hirsel_core_sender_drop", &[P], &[], &[handle])?;
+            }
+            FieldTy::Handle(hirsel_core_layout::Handle::Receiver) => {
+                let handle = self.load(at, 0);
+                let status = self.call(
+                    "hirsel_core_receiver_drop",
+                    &[P, P],
+                    &[B],
+                    &[self.ctx, handle],
+                )?[0];
+                self.merge(status);
             }
             FieldTy::OwnFn => {
                 let env = self.load(at, 8);

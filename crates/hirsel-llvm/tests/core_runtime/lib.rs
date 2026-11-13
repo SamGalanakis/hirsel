@@ -58,3 +58,29 @@ pub unsafe extern "C" fn hirsel_core_test_probe_admission(
     context.limit_exit();
     true
 }
+
+/// Execute native fixtures on the real cooperative root and child stacks.
+/// # Safety
+/// The context, body, argument and result storage stay pinned through completion.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_test_run(
+    context: *mut hirsel_core_rt::Context,
+    body: hirsel_core_rt::tasks::Body,
+    input: *mut u8,
+    output: *mut u8,
+    input_bytes: usize,
+    output_bytes: usize,
+) -> u8 {
+    // SAFETY: the fixture supplies the exact initialized input/result carriers.
+    unsafe {
+        hirsel_core_rt::tasks::run_root(
+            context,
+            body,
+            input,
+            output,
+            input_bytes,
+            output_bytes,
+            Default::default(),
+        )
+    }
+}

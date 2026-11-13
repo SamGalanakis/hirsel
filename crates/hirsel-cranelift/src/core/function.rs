@@ -431,32 +431,7 @@ impl Function<'_, '_, '_> {
             Inst::Call { call } => {
                 let call = &self.body.calls[call.index()];
                 if let Callee::Runtime(op) = call.callee {
-                    match op {
-                        RtOp::DestId => {
-                            let result = self.c_call(
-                                "hirsel_core_dest_id",
-                                &[],
-                                &[Ty::Scalar(Scalar::U64)],
-                                &[],
-                            )?[0];
-                            let values = call.results.get(&self.body.pools.values).unwrap();
-                            self.set(values[0], result);
-                        }
-                        RtOp::CheckCancel => {
-                            // The running task is implicit in CoreIR. The C row
-                            // returns only the frozen trailing failure status.
-                            let site = self.b.ins().iconst(types::I64, 0);
-                            let status = self.c_call(
-                                "hirsel_core_check_cancel",
-                                &[Ty::Ptr, Ty::Scalar(Scalar::U64)],
-                                &[Ty::Scalar(Scalar::U8)],
-                                &[self.context, site],
-                            )?[0];
-                            self.call_failure(status, call.fail)?;
-                        }
-                        _ => return Err(unsupported("task runtime call")),
-                    }
-                    return Ok(());
+                    return self.runtime_call(op, call);
                 }
                 let signature = &self.signatures[call.signature.index()];
                 let storage = signature

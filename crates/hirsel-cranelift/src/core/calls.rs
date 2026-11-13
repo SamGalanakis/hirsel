@@ -106,7 +106,18 @@ impl<'a> Calls<'a> {
         let imports = self.imports;
         let mut imports = imports.borrow_mut();
         if !imports.functions.contains_key(name) {
-            let signature = abi::Signature::c(params, results);
+            let mut signature = abi::Signature::c(params, results);
+            // These C rows take their closed layout descriptor by value. System V
+            // passes the memory-class aggregate on the outgoing argument stack.
+            let structure = match name {
+                "hirsel_core_spawn" => Some((4, 64)),
+                "hirsel_core_channel_new" => Some((2, 32)),
+                _ => None,
+            };
+            if let Some((index, bytes)) = structure {
+                signature.clif.params[index + usize::from(signature.indirect)] =
+                    AbiParam::special(types::I64, ArgumentPurpose::StructArgument(bytes));
+            }
             let function = object
                 .declare_function(name, Linkage::Import, &signature.clif)
                 .map_err(error)?;

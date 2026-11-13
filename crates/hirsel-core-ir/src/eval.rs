@@ -555,6 +555,31 @@ impl Machine<'_> {
             m.0 = false;
         }
     }
+    /// Cleanup glue's free: native glue refunds the charge it computes from the
+    /// recipe, not the one the block was admitted with, so a block allocated with
+    /// another charge (or, given `size`, another native size) than the recipe's is a
+    /// fault here, where the evaluator would otherwise refund what was admitted and
+    /// hide the difference.
+    fn free_as(&mut self, p: u64, charge: Option<u64>, size: Option<u64>, what: &str) {
+        let blk = &self.mem[split(p).0];
+        let charge = charge.expect("a cleanup charge in range");
+        assert_eq!(
+            blk.charge, charge,
+            "cleanup of {what} refunds {charge}, but its block was charged {}: \
+             the allocation and the recipe disagree",
+            blk.charge
+        );
+        if let Some(size) = size {
+            assert_eq!(
+                blk.bytes.len() as u64,
+                size,
+                "cleanup of {what} frees a block of the recipe's {size} bytes, but it was \
+                 allocated with {}",
+                blk.bytes.len()
+            );
+        }
+        self.free(p);
+    }
     /// Free a block and refund its charge, less a settled grant and a used cause
     /// cell, which left with the finalizer's hand-over and with the chain.
     fn free(&mut self, p: u64) {
@@ -757,7 +782,8 @@ impl Machine<'_> {
             FieldTy::Box(x) => {
                 let p = self.load(at, 8);
                 let failed = self.drop_value(t, p, *x);
-                self.free(p);
+                let size = (!self.is_resource(*x)).then(|| self.held(*x));
+                self.free_as(p, charge::boxed(self.logical(*x)), size, "a box");
                 failed
             }
             FieldTy::Handle(Handle::Task) => {
@@ -796,7 +822,8 @@ impl Machine<'_> {
                 // Capacity 0 has no storage: empty, or static data the carrier does
                 // not own (core.md "Literals").
                 if capacity != 0 {
-                    self.free(block);
+                    let element = field_size(&self.m.types, &self.recipes, element).2;
+                    self.free_as(block, charge::seq(capacity, element), None, "list storage");
                 }
                 failed
             }
@@ -817,7 +844,14 @@ impl Machine<'_> {
                     }
                 }
                 if capacity != 0 {
-                    self.free(block);
+                    let key = field_size(&self.m.types, &self.recipes, k).2;
+                    let value = field_size(&self.m.types, &self.recipes, v).2;
+                    self.free_as(
+                        block,
+                        charge::map(capacity, key, value),
+                        None,
+                        "map storage",
+                    );
                 }
                 failed
             }
@@ -898,7 +932,11 @@ impl Machine<'_> {
             }
         }
         failed |= self.drop_fields(t, blk, ty);
-        self.free(blk);
+        let storage = self.recipes[ty.index()]
+            .logical_size
+            .expect("resource storage");
+        let charge = charge::resource(storage, self.shape(ty).grant);
+        self.free_as(blk, charge, None, "a resource");
         failed
     }
     /// Refund a joined or abandoned task's record, result slot and primary cell; the
@@ -929,7 +967,8 @@ impl Machine<'_> {
                 !self.drop_value(&mut scratch, node + 8, ty),
                 "a counted payload failed"
             );
-            self.free(node);
+            let charge = charge::counted(self.recipes[ty.index()].logical_size.expect("fixed"));
+            self.free_as(node, charge, None, "a counted node");
         }
     }
     fn chan_freed(&mut self, i: usize) {
@@ -1003,7 +1042,13 @@ impl Machine<'_> {
                 vec![TASK_BASE + self.children.len() as u64 - 1, 0]
             }
             RtOp::Join { r } => {
-                let i = (a[0] - TASK_BASE) as usize;
+                let i = a[0].checked_sub(TASK_BASE).unwrap_or_else(|| {
+                    panic!(
+                        "join of a task handle that was never spawned ({:#x}): a refused \
+                         spawn's null handle reached Join",
+                        a[0]
+                    )
+                }) as usize;
                 let status = self.children[i].status;
                 if status == 0 {
                     let n = self.held(TypeRef(r.0)) as usize;

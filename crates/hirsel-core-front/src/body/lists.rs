@@ -132,7 +132,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
 
     /// SEM-4: an unaligned little-endian word, with Bounds even when `at + 8`
-    /// would overflow. Saturating remaining length needs one comparison and branch.
+    /// would overflow. Keep the checked end and unsigned bound in one predicate so
+    /// native optimizers can combine it with the caller's checked offsets.
     pub(super) fn list_word_le(
         &mut self,
         header: ValueId,
@@ -143,9 +144,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return None;
         }
         let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
-        let (remaining, _) = self.list_arith(ArithOp::Sub, ArithMode::Saturating, len, at, n);
         let width = self.konst(Ty::Scalar(Scalar::U64), 8, n)?;
-        let valid = self.list_compare(CompareOp::Ge, remaining, width, n);
+        let (end, overflow) = self.list_arith(ArithOp::Add, ArithMode::Checked, at, width, n);
+        let no_overflow = self.emit_unary(UnaryOp::Not, BOOL, overflow, n)?;
+        let within = self.list_compare(CompareOp::Le, end, len, n);
+        let valid = self.list_bool(BinaryOp::BitAnd, no_overflow, within, n);
         let yes = self.new_block(&[]);
         let no = self.new_block(&[]);
         self.list_branch(valid, yes, no, n);

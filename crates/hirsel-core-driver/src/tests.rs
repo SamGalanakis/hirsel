@@ -1143,3 +1143,44 @@ fn unused_failed_constants_block_entry_build_acceptance_after_disk_reuse() {
         assert!(reached.diagnostics.iter().any(|d| d.rule == "LANG-20"));
     }
 }
+
+#[test]
+fn lowered_runtime_operation_needs_no_outside_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut req = request(
+        "fn answer() -> u64 { task.check_cancel(); 42u64 }",
+        dir.path(),
+    );
+    let core = dir.path().join("task.hirsel");
+    std::fs::write(&core, "pub fn check_cancel()\n").unwrap();
+    req.inputs.packages[0].dependencies.push(package("core"));
+    req.inputs.packages.push(PackageManifest {
+        package: package("core"),
+        sources: vec![hirsel_core_resolve::ModuleSource {
+            file: core,
+            modules: vec!["task".into()],
+            signatures: true,
+        }],
+        dependencies: vec![],
+    });
+    let product = Driver::default()
+        .check(req, &mut Meter::new(false))
+        .unwrap();
+    let entry = DefPath::from_full("app@1/main/answer").unwrap();
+    let reachable = product.reachable(&entry, 64).unwrap();
+    assert!(reachable.accepted(), "{:?}", reachable.instances);
+    let instances = reachable.instances.unwrap();
+    assert_eq!(instances.len(), 1);
+    assert_eq!(instances[0].definition, entry);
+    let definition = &product.definitions[&entry];
+    assert_eq!(
+        eval::run(
+            &definition.ir,
+            definition.check.function.unwrap(),
+            &[],
+            1024
+        )
+        .outcome,
+        eval::Outcome::Returned(vec![42])
+    );
+}

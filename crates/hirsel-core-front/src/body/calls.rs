@@ -620,6 +620,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return None;
         }
+        if let Some(value) = self.core_operation(f, types, vals, result, n) {
+            return value;
+        }
         if let Some(value) = self.core_value(f, types, vals, result, n) {
             return value;
         }

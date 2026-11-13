@@ -44,6 +44,7 @@ mod cleanup;
 mod closures;
 mod compare;
 mod control;
+pub(crate) mod core_ops;
 mod ops;
 mod patterns;
 mod places;

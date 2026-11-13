@@ -87,6 +87,7 @@ pub struct Program<'a> {
     pub(crate) constant_ids: Vec<Option<u32>>,
     pub by_path: HashMap<DefPath, Def>,
     pub by_definition: Vec<Option<Def>>,
+    pub(crate) core_operations: Vec<Option<body::core_ops::Kernel>>,
     /// Refusals of declarations and signatures, and the resolver's.
     pub refusals: Vec<Refusal>,
     pub gaps: Vec<Gap>,
@@ -195,6 +196,7 @@ impl<'a> Program<'a> {
                 rows.resize(index.definitions.len(), None);
                 rows
             },
+            core_operations: vec![],
             refusals,
             gaps: vec![],
             entry: None,
@@ -208,6 +210,8 @@ impl<'a> Program<'a> {
         p.register_constants();
         p.summarize();
         p.evaluate_constants();
+
+        p.core_operations = body::core_ops::bind(&p.fns);
         p
     }
 

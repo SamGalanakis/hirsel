@@ -23,8 +23,12 @@ fn package(name: &str) -> PackageId {
 /// The core fixture and one application module, indexed with the core fixture as the
 /// core package (its `core` module is the prelude).
 fn program_inputs(source: &str) -> (NameIndex, Vec<ModuleInput>) {
+    inputs_with_core(source, &root().join("core"))
+}
+
+fn inputs_with_core(source: &str, core_dir: &Path) -> (NameIndex, Vec<ModuleInput>) {
     let mut symbols = Symbols::default();
-    let core = PackageManifest::directory(&root().join("core"), package("core"), true).unwrap();
+    let core = PackageManifest::directory(core_dir, package("core"), true).unwrap();
     let app = PackageManifest {
         package: package("app"),
         sources: vec![ModuleSource {
@@ -1266,3 +1270,6 @@ fn emission_halts_but_typing_continues() {
     );
     assert!(check.function.is_none());
 }
+
+#[path = "core_ops_tests.rs"]
+mod core_ops_tests;

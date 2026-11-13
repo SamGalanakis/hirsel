@@ -605,6 +605,8 @@ mod tests {
         request.entry = Some(DefPath::from_full("app@1/main/main").unwrap());
         request
     }
+    include!("core_ops_native.rs");
+
     fn run_clean(binary: &Path, exit: i32) {
         let result = Command::new(binary).output().unwrap();
         assert_eq!(result.status.code(), Some(exit));

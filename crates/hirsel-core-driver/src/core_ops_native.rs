@@ -1,0 +1,54 @@
+// Source-level regressions for the missing core-operation bodies. Each source
+// must traverse checking, instance collection, native emission, linking and the
+// actual process runtime. Result values are hand-derived in the source tests.
+fn core_operations(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let cases = [
+        ("channel FIFO and sender clone", "fn end(take tx: Sender[u64]) {}\nfn run() -> u64 waits { let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(2); let (tx,rx) = result.unwrap(take c); let other = channel.sender(tx); result.unwrap(channel.send(tx,7u64)); result.unwrap(channel.send(other,11u64)); let a = result.unwrap(channel.receive(rx)); let b = result.unwrap(channel.receive(rx)); end(take tx); end(take other); match channel.receive(rx) { Ok(_) => 0u64, Error(Closed(())) => a*100u64+b } }\npub fn main() -> Result[(), Exit] { task.check_cancel(); if run()==711u64 { Ok(()) } else { Error(Exit(status:1)) } }", 1_048_576, 0),
+        ("channel Full and Closed keep input", "fn end(take rx: Receiver[u64]) {}\nfn run() -> u64 waits { let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1); let (tx,rx) = result.unwrap(take c); result.unwrap(channel.try_send(tx,7u64)); let a = match channel.try_send(tx,11u64) { Ok(()) => 0u64, Error(Full(x)) => x, Error(Closed(_)) => 1u64 }; end(take rx); let b = match channel.try_send(tx,13u64) { Ok(()) => 0u64, Error(Full(_)) => 1u64, Error(Closed(x)) => x }; let z = match channel.send(tx,17u64) { Ok(()) => 0u64, Error(Closed(x)) => x }; a*10000u64+b*100u64+z }\npub fn main() -> Result[(), Exit] { if run()==111317u64 { Ok(()) } else { Error(Exit(status:1)) } }", 1_048_576, 0),
+        // Main's 288 startup bytes leave 60. A two-u64 channel needs 80.
+        ("channel Capacity", "pub fn main() -> Result[(), Exit] { let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(2); match take c { Ok(_) => Error(Exit(status:1)), Error(e) => if e.requested==80u64 && e.available==60u64 { Ok(()) } else { Error(Exit(status:2)) } } }", 348, 0),
+        ("channel zero Bounds", "pub fn main() -> Result[(), Exit] { let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(0); let _ = take c; Ok(()) }", 1_048_576, 101),
+        ("spawn scalar ABI", "fn child(take x:u64) -> u64 { x+1u64 }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let h = result.unwrap(task.spawn(tasks,bytes 64,41u64,child)); if result.unwrap(task.join(take h))==42u64 { Ok(()) } else { Error(Exit(status:1)) } }", 1_048_576, 0),
+        ("spawn unit ABI", "fn child(take x:()) {}\npub fn main(tasks:Tasks) -> Result[(), Exit] { let h = result.unwrap(task.spawn(tasks,bytes 0,(),child)); result.unwrap(task.join(take h)); Ok(()) }", 1_048_576, 0),
+        ("spawn aggregate ABI", "type Pair: send { a:u64,b:u64 }\nfn child(take x:Pair) -> Pair { Pair(a:x.b,b:x.a) }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let h = result.unwrap(task.spawn(tasks,bytes 64,Pair(a:7u64,b:11u64),child)); let p = result.unwrap(task.join(take h)); if p.a==11u64 && p.b==7u64 { Ok(()) } else { Error(Exit(status:1)) } }", 1_048_576, 0),
+        // Main's 288 leaves 359. 256+32+8+64 = 360, input 41 comes back.
+        ("spawn Capacity returns X", "fn child(take x:u64) -> u64 { x }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let c = task.spawn(tasks,bytes 64,41u64,child); match take c { Ok(_) => Error(Exit(status:1)), Error((e,x)) => if e.requested==360u64 && e.available==359u64 && x==41u64 { Ok(()) } else { Error(Exit(status:2)) } } }", 647, 0),
+        ("join Failed owns causes", "fn child(take x:u64) -> u64 { x+1u64 }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let h = result.unwrap(task.spawn(tasks,bytes 64,18446744073709551615u64,child)); match task.join(take h) { Ok(_) => Error(Exit(status:1)), Error(Failed(take causes)) => { let _ = take causes; Ok(()) }, Error(Cancelled(_)) => Error(Exit(status:2)) } }", 1_048_576, 0),
+        ("cancel observed at explicit check", "fn child(take x:u64) -> u64 { task.check_cancel(); x }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let mut h = result.unwrap(task.spawn(tasks,bytes 64,41u64,child)); task.cancel(mut h); match task.join(take h) { Ok(_) => Error(Exit(status:1)), Error(Cancelled(take causes)) => { let _ = take causes; Ok(()) }, Error(Failed(_)) => Error(Exit(status:2)) } }", 1_048_576, 0),
+    ];
+    let mut failures = vec![];
+    for (name, source, limit, exit) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = source_request(source, dir.path());
+        request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+        let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+        let entry = DefPath::from_full("app@1/main/main").unwrap();
+        let options = NativeOptions {
+            backend, optimize:false, target:TARGET.into(),
+            runtime:root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
+            include:root.join("crates/hirsel-core-rt/include"),
+            cc:PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
+            store:dir.path().join("native"), output:dir.path().join("program"), root_limit:limit,
+            instance_limit:64, directories:vec![], grant_mask:1<<9,
+        };
+        let built = match product.build(&entry, &options) {
+            Ok(built) => built,
+            Err(e) => { failures.push(format!("{name}: {e}")); continue; }
+        };
+        let outcome = Command::new(&built.executable).output().unwrap();
+        if outcome.status.code() != Some(exit) || !outcome.stdout.is_empty()
+            || (exit==0 && !outcome.stderr.is_empty())
+            || (exit==101 && !outcome.stderr.starts_with(b"Bounds")) {
+            failures.push(format!("{name}: expected exit {exit}, got {:?}, stdout {:?}, stderr {:?}", outcome.status.code(), outcome.stdout, String::from_utf8_lossy(&outcome.stderr)));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+#[ignore = "explicit native integration target"]
+fn core_operations_cranelift() { core_operations(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn core_operations_llvm() { core_operations(Backend::Llvm); }

@@ -69,7 +69,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if self.is_put(f) {
             return self.put_form(n, f, args, want);
         }
-        let g = &self.p.fns[f];
+        let g = &p.fns[f];
         // A result rooted in a Region parameter is rooted in the region its argument
         // names (MEM-6); `rooted` lists those parameters.
         let rooted: Vec<usize> = g
@@ -146,11 +146,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 );
             }
         }
-        scratch.params.clear();
-        scratch
-            .params
-            .extend(g.params.iter().map(|p| (p.mode, p.ty)));
-        self.call_region_roots(&scratch.params, args, &mut scratch.roots);
+        if g.has_region_parameters {
+            self.call_region_roots(g.params.iter().map(|p| p.ty), args, &mut scratch.roots);
+        } else {
+            scratch.roots.clear();
+        }
         let CallScratch {
             roots,
             found,
@@ -386,12 +386,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     pub(super) fn call_region_roots(
         &mut self,
-        params: &[(Mode, TyId)],
+        params: impl IntoIterator<Item = TyId>,
         args: &[NodeId],
         roots: &mut Vec<Option<TyId>>,
     ) {
         roots.clear();
-        for (i, &(_, ty)) in params.iter().enumerate() {
+        for (i, ty) in params.into_iter().enumerate() {
             if matches!(self.t.kind(ty), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Region))
                 && let Some(&arg) = args.get(i)
                 && self.binder_path(arg).is_some()

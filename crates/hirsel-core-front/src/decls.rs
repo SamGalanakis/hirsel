@@ -342,6 +342,8 @@ pub struct FnDecl {
     pub at: ItemRef,
     pub generics: Vec<Generic>,
     pub params: Vec<ParamDecl>,
+    /// A value parameter is core Region; root substitution can be skipped otherwise.
+    pub has_region_parameters: bool,
     pub result: TyId,
     /// The function item's declaration-only callable type, shared by all its uses.
     pub callable: TyId,
@@ -540,6 +542,7 @@ impl Program<'_> {
                             at,
                             generics,
                             params: vec![],
+                            has_region_parameters: false,
                             result: UNIT,
                             callable: ERROR,
                             anchors: vec![],
@@ -575,6 +578,7 @@ impl Program<'_> {
                         at,
                         generics: generics.clone(),
                         params: vec![],
+                        has_region_parameters: false,
                         result: UNIT,
                         callable: ERROR,
                         anchors: vec![],
@@ -685,6 +689,7 @@ impl Program<'_> {
             at,
             generics,
             params: vec![],
+            has_region_parameters: false,
             result: UNIT,
             callable: ERROR,
             anchors: vec![],
@@ -1386,7 +1391,11 @@ impl Program<'_> {
             waits,
             Callable::Plain,
         ));
+        let has_region_parameters = params.iter().any(|p| {
+            matches!(self.types.kind(p.ty), TyKind::Adt(d, _) if self.decls[d.index()].role == Some(Role::Region))
+        });
         let fd = &mut self.fns[f];
+        fd.has_region_parameters = has_region_parameters;
         fd.callable = callable;
         fd.region_anchors = written_roots;
         fd.params = params;

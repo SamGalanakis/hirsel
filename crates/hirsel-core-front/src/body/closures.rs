@@ -201,7 +201,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             }
         }
-        self.call_region_roots(&scratch.params, args, &mut scratch.roots);
+        self.call_region_roots(scratch.params.iter().map(|p| p.1), args, &mut scratch.roots);
         self.activate(value, call, n);
         scratch.vals.clear();
         scratch.vals.resize(args.len(), None);

@@ -828,7 +828,7 @@ impl Derive<'_> {
         mut h: ValueId,
     ) -> Result<ValueId, &'static str> {
         let Layout::Fixed(layout) = self.recipes[ty.index()].layout.clone() else {
-            return Err("compact key recipe glue is not built");
+            unreachable!("key glue takes value rows; compact payloads are reached through Locator");
         };
         match self.module.types[ty.index()].body.clone() {
             ShapeBody::Record(fs) => {
@@ -923,6 +923,13 @@ impl Derive<'_> {
                 let at = c.address(data, PlaceTy::Declared(TypeId(t.0)));
                 self.call(c, f, &[Arg::Address(at), Arg::Value(h)])
             }
+            FieldTy::Stable(t) => {
+                let data = c.read(p, Ty::Ptr);
+                let f = self.function(TypeId(t.0), KeyOp::Fold)?;
+                let at = c.address(data, PlaceTy::Declared(TypeId(t.0)));
+                self.call(c, f, &[Arg::Address(at), Arg::Value(h)])
+            }
+            FieldTy::View(inner) => self.fold_field(c, inner, p, h)?,
             // A located value hashes its packed encoding's values, as order and
             // equality read them (FORM #63, #65), never the locator.
             FieldTy::Locator(target) => {
@@ -980,8 +987,16 @@ impl Derive<'_> {
                 if !matches!(field, FieldTy::FixedSpan(_)) {
                     at = c.binary(BinaryOp::Add, at, width);
                 }
-                h = c.mix(h, len);
-                (h, at) = self.fold_packed_sequence(c, item, blob, at, width, len, h)?;
+                // Match List[e], including its Bytes specialization for e = u8.
+                // Counts and index trailers describe the encoding, not key components.
+                if **item == FieldTy::Scalar(Scalar::U8) {
+                    let bytes = c.offset_value(blob, at);
+                    let word = self.runtime(c, hirsel_core_ir::RtOp::HashBytes, &[bytes, len]);
+                    h = c.mix(h, word);
+                    at = c.binary(BinaryOp::Add, at, len);
+                } else {
+                    (h, at) = self.fold_packed_sequence(c, item, blob, at, width, len, h)?;
+                }
                 if matches!(field, FieldTy::IndexedSpan(_)) {
                     let trailer = c.mul(len, width);
                     at = c.binary(BinaryOp::Add, at, trailer);
@@ -1126,7 +1141,7 @@ impl Derive<'_> {
         no: BlockId,
     ) -> Result<(), &'static str> {
         let Layout::Fixed(layout) = self.recipes[ty.index()].layout.clone() else {
-            return Err("compact key recipe equality is not built");
+            unreachable!("key glue takes value rows; compact payloads are reached through Locator");
         };
         match self.module.types[ty.index()].body.clone() {
             ShapeBody::Record(fs) => {
@@ -1248,6 +1263,12 @@ impl Derive<'_> {
                 let on = self.call(c, f, &[Arg::Address(x), Arg::Address(y)]);
                 c.require(on, no);
             }
+            FieldTy::Stable(t) => {
+                let x = c.read(a, Ty::Ptr);
+                let y = c.read(b, Ty::Ptr);
+                self.equal_type(c, TypeId(t.0), x, y, no)?;
+            }
+            FieldTy::View(inner) => self.equal_field(c, inner, a, b, no)?,
             // Two located values are equal when their packed encodings order equal
             // (FORM #63, #65); the locators' addresses never matter.
             FieldTy::Locator(target) => {
@@ -1551,6 +1572,9 @@ mod tests {
         // Constants derived from wrapping multiplication by 9e3779b97f4a7c15,
         // a left rotation by26 per word, and one final h^(h>>32). A nested
         // record streams its fields into h, rather than finishing a child hash.
+        // Located Text matches String. Spans at W2/4/8 match List[7,9],
+        // without count/trailer components; a trailing i8(-1) pins cursor advance.
+        // Native stable references stream their payload, never their address.
         let vectors = [
             (
                 "type t0 = own \"word\" { n:u64 }",
@@ -1612,6 +1636,146 @@ mod tests {
                 ],
                 None,
                 0xbd4a22218871e85e,
+            ),
+            (
+                "type t0 = own \"located\" { at:locator text }",
+                "static d0 = align 8 hex 050000000000000002000000000000000300616263",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
+                None,
+                0xfcfedf8da784a013,
+            ),
+            (
+                "type t0 = own \"located\" { at:locator fixed u64 }",
+                "static d0 = align 8 hex 12000000000000000200000000000000020007000000000000000900000000000000",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
+                None,
+                0xbd4a22218871e85e,
+            ),
+            (
+                "type t0 = own \"located\" { at:locator seqspan u64 }",
+                "static d0 = align 8 hex 140000000000000002000000000000000200100007000000000000000900000000000000",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
+                None,
+                0xbd4a22218871e85e,
+            ),
+            (
+                "type t0 = own \"located\" { at:locator indexed u64 }",
+                "static d0 = align 8 hex 18000000000000000200000000000000020010000700000000000000090000000000000000000800",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
+                None,
+                0xbd4a22218871e85e,
+            ),
+            (
+                "type t0 = own \"located\" { at:locator t1 }\ntype t1 = compact u16 \"Native\" { a:indexed u64, tail:i8 }",
+                "static d0 = align 8 hex 19000000000000000200000000000000020010000700000000000000090000000000000000000800ff",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
+                None,
+                0x173f672017fdd65,
+            ),
+            (
+                "type t0 = own \"located\" { at:locator text }",
+                "static d0 = align 8 hex 0700000000000000040000000000000003000000616263",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
+                None,
+                0xfcfedf8da784a013,
+            ),
+            (
+                "type t0 = own \"located\" { at:locator fixed u64 }",
+                "static d0 = align 8 hex 140000000000000004000000000000000200000007000000000000000900000000000000",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
+                None,
+                0xbd4a22218871e85e,
+            ),
+            (
+                "type t0 = own \"located\" { at:locator seqspan u64 }",
+                "static d0 = align 8 hex 18000000000000000400000000000000020000001000000007000000000000000900000000000000",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
+                None,
+                0xbd4a22218871e85e,
+            ),
+            (
+                "type t0 = own \"located\" { at:locator indexed u64 }",
+                "static d0 = align 8 hex 200000000000000004000000000000000200000010000000070000000000000009000000000000000000000008000000",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
+                None,
+                0xbd4a22218871e85e,
+            ),
+            (
+                "type t0 = own \"located\" { at:locator t1 }\ntype t1 = compact u16 \"Native\" { a:indexed u64, tail:i8 }",
+                "static d0 = align 8 hex 210000000000000004000000000000000200000010000000070000000000000009000000000000000000000008000000ff",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
+                None,
+                0x173f672017fdd65,
+            ),
+            (
+                "type t0 = own \"located\" { at:locator text }",
+                "static d0 = align 8 hex 0b0000000000000008000000000000000300000000000000616263",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
+                None,
+                0xfcfedf8da784a013,
+            ),
+            (
+                "type t0 = own \"located\" { at:locator fixed u64 }",
+                "static d0 = align 8 hex 18000000000000000800000000000000020000000000000007000000000000000900000000000000",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
+                None,
+                0xbd4a22218871e85e,
+            ),
+            (
+                "type t0 = own \"located\" { at:locator seqspan u64 }",
+                "static d0 = align 8 hex 200000000000000008000000000000000200000000000000100000000000000007000000000000000900000000000000",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
+                None,
+                0xbd4a22218871e85e,
+            ),
+            (
+                "type t0 = own \"located\" { at:locator indexed u64 }",
+                "static d0 = align 8 hex 30000000000000000800000000000000020000000000000010000000000000000700000000000000090000000000000000000000000000000800000000000000",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
+                None,
+                0xbd4a22218871e85e,
+            ),
+            (
+                "type t0 = own \"located\" { at:locator t1 }\ntype t1 = compact u16 \"Native\" { a:indexed u64, tail:i8 }",
+                "static d0 = align 8 hex 31000000000000000800000000000000020000000000000010000000000000000700000000000000090000000000000000000000000000000800000000000000ff",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
+                None,
+                0x173f672017fdd65,
+            ),
+            (
+                "type t0 = own \"reference\" { at:stable t1 }\ntype t1 = stable \"Native\" { a:u64, b:u64 }",
+                "static d0 = align 8 hex 07000000000000000900000000000000",
+                vec![(0, "ptr", "static d0")],
+                None,
+                0xbd4a22218871e85e,
+            ),
+            (
+                "type t0 = own \"located\" { at:locator fixed u8 }",
+                "static d0 = align 8 hex 050000000000000002000000000000000300616263",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
+                None,
+                0xfcfedf8da784a013,
+            ),
+            (
+                "type t0 = own \"located\" { at:locator seqspan u8 }",
+                "static d0 = align 8 hex 0700000000000000020000000000000003000300616263",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
+                None,
+                0xfcfedf8da784a013,
+            ),
+            (
+                "type t0 = own \"located\" { at:locator indexed u8 }",
+                "static d0 = align 8 hex 0d00000000000000020000000000000003000300616263000001000200",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
+                None,
+                0xfcfedf8da784a013,
+            ),
+            (
+                "type t0 = own \"located\" { at:locator t1 }\ntype t1 = compact u16 \"Tag\" | Empty { } | Value { n:u64 }",
+                "static d0 = align 8 hex 09000000000000000200000000000000010700000000000000",
+                vec![(0, "ptr", "static d0"), (8, "u64", "const 16")],
+                None,
+                0xd595b4bd0195bebd,
             ),
         ];
         for (types, statics, fields, case, want) in vectors {
@@ -1900,6 +2064,16 @@ mod located_order_tests {
         let mut b = vec![1];
         b.extend(text_bytes(2, "v"));
         vectors.push(("locator t1".into(), types.into(), 4, a, 2, b, 0));
+        let native = [7u64.to_le_bytes(), 9u64.to_le_bytes()].concat();
+        vectors.push((
+            "stable t1".into(),
+            "type t1 = stable \"NativeStable\" { first:u64, next:u64 }".into(),
+            2,
+            native.clone(),
+            8,
+            native,
+            0,
+        ));
         for (field, types, aw, a, bw, b, want) in vectors {
             let native_reference = field == "stable t1";
             let hex = |width, value: &[u8]| {
@@ -1943,9 +2117,6 @@ mod located_order_tests {
                 want,
                 "{field}: {types}"
             );
-            if native_reference {
-                continue;
-            }
             let equal = check(KeyOp::Equal, "bool", "&a0,&a1");
             assert_eq!(equal, u64::from(want == 0), "equal {field}: {types}");
             let hashes = (

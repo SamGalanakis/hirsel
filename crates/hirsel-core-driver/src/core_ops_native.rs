@@ -736,3 +736,14 @@ fn uninitialized_take_names_cranelift(){uninitialized_take_names(Backend::Cranel
 #[test]
 #[ignore="explicit native integration target"]
 fn uninitialized_take_names_llvm(){uninitialized_take_names(Backend::Llvm);}
+// SEM-5 / FORM #65: insertion and lookup derive compact key helpers from its
+// value row's typed locator. Equal values in separate blobs hit; prefixes miss.
+fn stable_key_map(backend: Backend) {
+    ordered_case(backend, include_str!("../../../core/front/cases/body/key-stable-map.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn stable_key_map_cranelift() { stable_key_map(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn stable_key_map_llvm() { stable_key_map(Backend::Llvm); }

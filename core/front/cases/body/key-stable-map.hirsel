@@ -1,0 +1,30 @@
+// SEM-5 / FORM #63, #65: equal stable keys in different blobs hit the same entry.
+// The closed helper keeps Map's instance row independent of the caller's root.
+// Text, native stable fields and compact fields compare values, never addresses.
+// expect: accept
+// Native main checks17; evaluator key fixtures pin the hashes independently.
+@compact(u16) stable type Doc:key { text:Text }
+fn write[in r](take w:Writer[Doc,in r],s:String)->Result[Child[Doc],BuildError] {
+ emit(take w,Doc(text:emit(fn(take t:Writer[Text,in r])->Result[Child[Text],BuildError] {
+  writer.push(mut t,s)?
+  writer.close(take t)
+ })))
+}
+fn make(r:Region,s:String)->Doc in r {
+ let b=result.unwrap(build_stream_in(r,bytes 128,fn(take w:Writer[Doc,in r])->Result[Child[Doc],BuildError] {write(take w,s)}))
+ finish(take b)
+}
+fn exercise(a:Doc,b:Doc,other:Doc)->u64 {
+ let mut m:Map[Doc,u64]=map.new()
+ let _=result.unwrap(map.insert(mut m,a,7u64))
+ let hit:u64=match map.get(m,b) { Some(v)=>v, None=>1000u64 }
+ let miss:u64=match map.get(m,other) { None=>10u64, Some(_)=>1000u64 }
+ hit+miss
+}
+fn checked()->u64 { region r {
+ let a=make(r,"same")
+ let b=make(r,"same")
+ let c=make(r,"sam")
+ exercise(a,b,c)
+} }
+pub fn main()->Result[(),Exit] { if checked()==17u64 { Ok(()) } else { Error(Exit(status:1)) } }

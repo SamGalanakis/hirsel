@@ -1,5 +1,7 @@
 //! One core-only request path from an immutable source snapshot to published products.
 //! Sources and signatures are explicit inputs; no old compiler or std image is loaded.
+mod image;
+pub use image::{CoreImage, LibraryInput};
 mod meter;
 mod reuse;
 mod store;
@@ -41,8 +43,44 @@ pub fn package(name: &str) -> PackageId {
 pub struct CheckRequest {
     pub inputs: CorpusManifest,
     pub store: PathBuf,
+    pub library: LibraryInput,
+    pub entry: Option<DefPath>,
 }
 impl CheckRequest {
+    pub fn libraries(libraries: &Path, store: &Path) -> io::Result<Self> {
+        let core = PackageManifest::directory(&libraries.join("core"), package("core"), true)?;
+        let mut std = PackageManifest::directory(&libraries.join("std"), package("std"), true)?;
+        std.dependencies.push(package("core"));
+        Ok(Self {
+            inputs: CorpusManifest {
+                core: package("core"),
+                packages: vec![core, std],
+            },
+            store: store.to_owned(),
+            library: LibraryInput::Sources,
+            entry: None,
+        })
+    }
+    pub fn with_image(dir: &Path, store: &Path, image: Arc<CoreImage>) -> io::Result<Self> {
+        let mut app = PackageManifest::directory(dir, package("app"), false)?;
+        app.dependencies.extend(
+            image
+                .directory
+                .inputs
+                .packages
+                .iter()
+                .map(|p| p.package.clone()),
+        );
+        Ok(Self {
+            inputs: CorpusManifest {
+                core: image.directory.inputs.core.clone(),
+                packages: vec![app],
+            },
+            store: store.to_owned(),
+            library: LibraryInput::Image(image),
+            entry: Some(DefPath::from_full("app@1/main/main").unwrap()),
+        })
+    }
     pub fn directory(dir: &Path, libraries: &Path, store: &Path) -> io::Result<Self> {
         let core = PackageManifest::directory(&libraries.join("core"), package("core"), true)?;
         let mut std = PackageManifest::directory(&libraries.join("std"), package("std"), true)?;
@@ -55,6 +93,8 @@ impl CheckRequest {
                 packages: vec![core, std, app],
             },
             store: store.to_owned(),
+            library: LibraryInput::Sources,
+            entry: Some(DefPath::from_full("app@1/main/main").unwrap()),
         })
     }
 }
@@ -95,6 +135,9 @@ pub struct CheckProduct {
     pub rechecked: Vec<DefPath>,
     pub root: ContentHash,
     pub snapshot: ContentHash,
+    pub image: Option<Arc<CoreImage>>,
+    pub(crate) library: Option<Arc<hirsel_core_front::Library>>,
+    records: Option<Root>,
 }
 impl CheckProduct {
     fn empty(index: Arc<NameIndex>) -> Self {
@@ -108,10 +151,24 @@ impl CheckProduct {
             rechecked: vec![],
             root: ContentHash::default(),
             snapshot: ContentHash::default(),
+            image: None,
+            library: None,
+            records: None,
         }
     }
     pub fn accepted(&self) -> bool {
         self.diagnostics.is_empty() && self.incomplete.is_empty()
+    }
+    pub fn demand_body(&self, definition: &DefPath) -> io::Result<Arc<DefinitionProduct>> {
+        if let Some(body) = self.definitions.get(definition) {
+            return Ok(Arc::clone(body));
+        }
+        if let Some(image) = &self.image {
+            return image.demand(definition);
+        }
+        Err(io::Error::other(format!(
+            "core body demand outside reached definitions: {definition}"
+        )))
     }
     pub fn demand(&self, definition: &DefPath) -> io::Result<&DefinitionProduct> {
         self.definitions
@@ -156,11 +213,13 @@ struct DiskCheck {
     ir: Module,
     resolved: bool,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Root {
     snapshot: ContentHash,
     bytes: usize,
     identities: Record,
+    headers: BTreeMap<DefPath, reuse::Header>,
+    declarations: Option<Record>,
     files: Vec<Record>,
     definitions: BTreeMap<DefPath, Record>,
     diagnostics: Vec<Refusal>,
@@ -201,6 +260,7 @@ impl Cache {
             root: hash,
             snapshot: self.root.snapshot,
             bytes: self.root.bytes,
+            records: self.root.declarations.map(|_| self.root.clone()),
             ..CheckProduct::empty(Arc::new(decode(self.root.identities.bytes(&self.bytes)?)?))
         };
         for &record in &self.root.files {
@@ -254,11 +314,19 @@ impl Driver {
                 ));
             }
         }
+        let image = match &request.library {
+            LibraryInput::Image(i) => Some(Arc::clone(i)),
+            _ => None,
+        };
+        let produce = matches!(request.library, LibraryInput::Produce);
         let source_stamps: Vec<_> = sources.iter().map(|s| s.4).collect();
         let snapshot = ContentHash::of_bytes(&encode(&(
             compiler_identity()?,
             &request.inputs,
             source_stamps,
+            image.as_ref().map(|i| i.identity),
+            produce,
+            &request.entry,
         ))?);
         let store = Store::new(&request.store)?;
         meter.finish("load/hash");
@@ -284,13 +352,32 @@ impl Driver {
             && prior.root.snapshot == snapshot
             && let Some(cached) = prior.product(prior_hash.unwrap())
         {
+            let mut cached = cached;
+            cached.image = image.clone();
             let cached = Arc::new(cached);
             self.published = Some(Arc::clone(&cached));
             self.store = Some(request.store.clone());
             meter.finish("snapshot reuse");
             return Ok(cached);
         }
-        let mut symbols = Symbols::default();
+        let library_modules = image.as_ref().map_or(0, |i| i.directory.files.len());
+        let mut resolution_inputs = request.inputs.clone();
+        if let Some(image) = &image {
+            for package in &image.directory.inputs.packages {
+                if !resolution_inputs
+                    .packages
+                    .iter()
+                    .any(|p| p.package == package.package)
+                {
+                    let mut package = package.clone();
+                    package.sources.clear();
+                    resolution_inputs.packages.push(package);
+                }
+            }
+        }
+        let mut symbols = image.as_ref().map_or_else(Symbols::default, |i| {
+            i.directory.index.symbols.as_ref().clone()
+        });
         for p in &request.inputs.packages {
             p.intern(&mut symbols);
         }
@@ -314,15 +401,33 @@ impl Driver {
             modules.push((path, output.syntax));
         }
         meter.finish("parse");
-        let mut index = NameIndex::new(Arc::new(symbols));
-        index.add_manifests(&request.inputs.packages);
-        let modules: Vec<_> = modules
+        let symbols = Arc::new(symbols);
+        let mut index = image.as_ref().map_or_else(
+            || NameIndex::new(Arc::clone(&symbols)),
+            |i| i.directory.index.as_ref().clone(),
+        );
+        index.symbols = symbols;
+        index.add_manifests(&resolution_inputs.packages);
+        let mut modules: Vec<_> = modules
             .into_iter()
             .map(|(path, syntax)| ModuleInput {
                 id: index.module(path).unwrap(),
                 syntax,
             })
             .collect();
+        if let Some(image) = &image {
+            let mut all: Vec<_> = image
+                .directory
+                .files
+                .iter()
+                .map(|f| ModuleInput {
+                    id: f.module,
+                    syntax: SyntaxFile::default(),
+                })
+                .collect();
+            all.append(&mut modules);
+            modules = all;
+        }
         for m in &modules {
             for (i, item) in m.syntax.items().enumerate() {
                 index.index_item(m.id, i as u32, item);
@@ -339,6 +444,7 @@ impl Driver {
         let index = Arc::new(index);
         let mut result = CheckProduct::empty(Arc::clone(&index));
         result.bytes = bytes_total;
+        result.image = image.clone();
         result.snapshot = snapshot;
         for (path, d) in syntax_diagnostics {
             result
@@ -376,16 +482,48 @@ impl Driver {
                 }
             }
         }
+        let reads_library = image.as_ref().is_some_and(|image| {
+            modules
+                .iter()
+                .zip(&resolutions)
+                .skip(library_modules)
+                .any(|(m, rows)| {
+                    rows.iter().any(|r| {
+                        r.names.iter().any(|n| match n.target {
+                            hirsel_core_resolve::Target::Definition(d) => {
+                                (d.0 as usize) < image.directory.index.definitions.len()
+                            }
+                            hirsel_core_resolve::Target::ContextualConstructor { name } => index
+                                .constructor_candidates(m.id, name)
+                                .any(|d| (d.0 as usize) < image.directory.index.definitions.len()),
+                            _ => false,
+                        })
+                    })
+                })
+        });
+        let library = if reads_library {
+            image.as_ref().map(|i| i.declarations()).transpose()?
+        } else {
+            None
+        };
         meter.finish("resolve");
-        let keys = Keys::new(
+        let mut keys = Keys::new(
             &index,
             &modules,
             &resolutions,
-            &request.inputs,
+            &resolution_inputs,
             compiler_identity()?,
+            image.as_ref().map(|i| &i.directory.headers),
+            request.entry.as_ref(),
         )?;
         {
-            let p = Program::declare_resolved(&index, &modules, resolutions.clone());
+            let mut p = Program::declare_with_library(
+                &index,
+                &modules,
+                resolutions.clone(),
+                library.as_deref(),
+            );
+            p.entry = request.entry.clone();
             result.diagnostics.extend(p.refusals.iter().cloned());
             result.incomplete.extend(p.gaps.iter().map(|g| Incomplete {
                 primary: g.site,
@@ -393,7 +531,7 @@ impl Driver {
             }));
             meter.finish("declarations/layout");
             for (f, fd) in p.fns.iter().enumerate() {
-                if fd.body.is_none() {
+                if f < p.fns.base_len() || fd.body.is_none() {
                     continue;
                 }
                 let resolution =
@@ -467,14 +605,18 @@ impl Driver {
                 }
                 result.definitions.insert(fd.path.clone(), product);
             }
-            drop(p);
+            if produce && result.accepted() {
+                result.library = Some(Arc::new(p.into_library()));
+            } else {
+                drop(p);
+            }
         }
         meter.finish("check/lower");
         let mut names: BTreeMap<ModuleId, Vec<Definition>> = BTreeMap::new();
         for (_, d) in index.definitions() {
             names.entry(d.site.module).or_default().push(*d);
         }
-        for (m, (_, path, _, _, source)) in modules.into_iter().zip(sources) {
+        for (m, (_, path, _, _, source)) in modules.into_iter().skip(library_modules).zip(sources) {
             let module_names = names.remove(&m.id).unwrap_or_default();
             result.files.push(Arc::new(FileProduct {
                 module: m.id,
@@ -487,6 +629,16 @@ impl Driver {
         meter.finish("publish/assemble products");
         result.root = store.archive(|writer| {
             let identities = writer.record(index.as_ref())?;
+            let declarations = result
+                .library
+                .as_ref()
+                .map(|l| writer.record(l.as_ref()))
+                .transpose()?;
+            let headers = if declarations.is_some() {
+                std::mem::take(&mut keys.headers)
+            } else {
+                BTreeMap::new()
+            };
             let mut files = Vec::with_capacity(result.files.len());
             for file in &result.files {
                 files.push(writer.record(file.as_ref())?);
@@ -514,14 +666,29 @@ impl Driver {
                 result.snapshot,
                 result.bytes,
                 identities,
-                files,
-                definitions,
+                &headers,
+                declarations,
+                &files,
+                &definitions,
                 &result.diagnostics,
                 &result.incomplete,
             );
             let record = writer.record(&footer)?;
             use std::io::Write;
             writer.write_all(&record.start.to_le_bytes())?;
+            if declarations.is_some() {
+                result.records = Some(Root {
+                    snapshot: result.snapshot,
+                    bytes: result.bytes,
+                    identities,
+                    headers,
+                    declarations,
+                    files,
+                    definitions,
+                    diagnostics: vec![],
+                    incomplete: vec![],
+                });
+            }
             meter.finish("publish/footer");
             Ok(())
         })?;

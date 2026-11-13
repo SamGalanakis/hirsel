@@ -846,6 +846,32 @@ def hirsel_products(name, hirsel, **kwargs):
     native.configured_alias(name = compiler, actual = hirsel, platform = "root//tools/buck2:checked")
     _hirsel_products(name = name, hirsel = ":" + compiler, exec_compatible_with = [budget_constraint(pool_budget_name(*PRECHECK_REQUEST))], **kwargs)
 
+def _core_image_impl(ctx):
+    sources = ctx.actions.symlinked_dir("sources", {f.short_path: f for f in ctx.attrs.srcs})
+    image = ctx.actions.declare_output("core-image", dir = True)
+    ctx.actions.run(
+        cmd_args(ctx.attrs.compiler[RunInfo], "image", "--libraries",
+                 cmd_args(sources, format = "{}/core"), "--store", image.as_output(), "--json"),
+        env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1"},
+        category = "core_image",
+    )
+    return [DefaultInfo(default_output = image)]
+
+_core_image = rule(
+    impl = _core_image_impl,
+    attrs = {
+        "compiler": attrs.exec_dep(providers = [RunInfo]),
+        "srcs": attrs.list(attrs.source()),
+    },
+)
+
+def hirsel_core_image(name, **kwargs):
+    compiler = name + "-compiler"
+    native.configured_alias(name = compiler, actual = "//:hirsel-core-driver-bin-hirsel-core", platform = "root//tools/buck2:checked")
+    _core_image(name = name, compiler = ":" + compiler,
+                exec_compatible_with = [budget_constraint(pool_budget_name(*PRECHECK_REQUEST))],
+                visibility = ["PUBLIC"], **kwargs)
+
 def _toolchain_bundle_impl(ctx):
     # Copy the executable: a symlink would make current_exe resolve outside the
     # bundle, away from the sibling ordinary products it discovers automatically.

@@ -6,11 +6,15 @@
 use hirsel_core_layout::Scalar;
 use std::collections::HashMap;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub struct TyId(pub u32);
 
 /// Index of a type declaration in [`crate::Program::decls`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub struct DeclId(pub u32);
 impl DeclId {
     pub const fn index(self) -> usize {
@@ -19,14 +23,14 @@ impl DeclId {
 }
 
 /// A parameter mode (OWN-7).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Mode {
     View,
     Mut,
     Take,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TyKind {
     /// A type that already produced a refusal; it satisfies every check silently.
     Error,
@@ -46,10 +50,34 @@ pub enum TyKind {
     Hole,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Types {
+    base: Option<std::sync::Arc<Types>>,
     kinds: Vec<TyKind>,
+    #[serde(skip)]
     map: HashMap<TyKind, TyId>,
+}
+impl<'de> serde::Deserialize<'de> for Types {
+    fn deserialize<D: serde::Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Wire {
+            base: Option<std::sync::Arc<Types>>,
+            kinds: Vec<TyKind>,
+        }
+        let wire: Wire = serde::Deserialize::deserialize(decoder)?;
+        let offset = wire.base.as_ref().map_or(0, |b| b.len());
+        let map = wire
+            .kinds
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k.clone(), TyId((offset + i) as u32)))
+            .collect();
+        Ok(Self {
+            base: wire.base,
+            kinds: wire.kinds,
+            map,
+        })
+    }
 }
 impl Types {
     pub fn new() -> Self {
@@ -63,23 +91,41 @@ impl Types {
         t.intern(TyKind::Hole);
         t
     }
+    pub fn overlay(base: std::sync::Arc<Types>) -> Self {
+        Self {
+            base: Some(base),
+            kinds: vec![],
+            map: HashMap::new(),
+        }
+    }
+    fn find(&self, k: &TyKind) -> Option<TyId> {
+        self.base
+            .as_ref()
+            .and_then(|b| b.find(k))
+            .or_else(|| self.map.get(k).copied())
+    }
     pub fn intern(&mut self, k: TyKind) -> TyId {
-        if let Some(&id) = self.map.get(&k) {
+        if let Some(id) = self.find(&k) {
             return id;
         }
-        let id = TyId(self.kinds.len() as u32);
+        let id = TyId(self.len() as u32);
         self.kinds.push(k.clone());
         self.map.insert(k, id);
         id
     }
     pub fn kind(&self, t: TyId) -> &TyKind {
-        &self.kinds[t.0 as usize]
+        let base_len = self.base.as_ref().map_or(0, |b| b.len());
+        if (t.0 as usize) < base_len {
+            self.base.as_ref().unwrap().kind(t)
+        } else {
+            &self.kinds[t.0 as usize - base_len]
+        }
     }
     pub fn len(&self) -> usize {
-        self.kinds.len()
+        self.base.as_ref().map_or(0, |b| b.len()) + self.kinds.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.kinds.is_empty()
+        self.len() == 0
     }
 }
 
@@ -107,7 +153,7 @@ impl<'a> Local<'a> {
         }
     }
     pub fn intern(&mut self, k: TyKind) -> TyId {
-        if let Some(&id) = self.base.map.get(&k) {
+        if let Some(id) = self.base.find(&k) {
             return id;
         }
         if let Some(&id) = self.map.get(&k) {

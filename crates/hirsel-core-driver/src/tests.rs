@@ -18,6 +18,8 @@ fn request(source: &str, dir: &Path) -> CheckRequest {
             }],
         },
         store: dir.join("store"),
+        library: LibraryInput::Sources,
+        entry: None,
     }
 }
 #[test]
@@ -392,5 +394,203 @@ fn native_ir_tables_round_trip_without_text_reconstruction() {
     assert_eq!(
         eval::run(&b.ir, b.check.function.unwrap(), &[17], 1_000_000).outcome,
         eval::Outcome::Returned(vec![17])
+    );
+}
+
+fn library_request(source: &str, dir: &Path) -> CheckRequest {
+    let mut req = request(source, dir);
+    req.inputs.packages[0].package = package("core");
+    req.inputs.packages[0].sources[0].modules = vec!["lib".into()];
+    req
+}
+#[test]
+fn image_signature_use_skips_source_and_body_decoding() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, image) = Driver::default()
+        .produce_image(
+            library_request(
+                "pub type Number = u64\npub fn answer() -> Number { 42 }\n",
+                dir.path(),
+            ),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    let produced = image.unwrap();
+    let opened = CoreImage::open(&dir.path().join("store")).unwrap().unwrap();
+    assert_eq!(opened.identity, produced.identity);
+    assert_eq!((opened.decoded_files(), opened.decoded_bodies()), (0, 0));
+    std::fs::remove_file(dir.path().join("main.hirsel")).unwrap();
+    let app = tempfile::tempdir().unwrap();
+    let mut req = request(
+        "fn caller(x: lib.Number) -> u64 { x + lib.answer() }\n",
+        app.path(),
+    );
+    req.library = LibraryInput::Image(Arc::clone(&opened));
+    let checked = Driver::default()
+        .check(req, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        checked.accepted(),
+        "{:?} {:?}",
+        checked.diagnostics,
+        checked.incomplete
+    );
+    assert_eq!(names(&checked), ["caller"]);
+    assert_eq!((opened.decoded_files(), opened.decoded_bodies()), (0, 0));
+    let answer = DefPath::from_full("core@1/lib/answer").unwrap();
+    let body = checked.demand_body(&answer).unwrap();
+    assert_eq!(
+        eval::run(&body.ir, body.check.function.unwrap(), &[], 1_000_000).outcome,
+        eval::Outcome::Returned(vec![42])
+    );
+    assert_eq!((opened.decoded_files(), opened.decoded_bodies()), (0, 1));
+    assert!(
+        opened
+            .file(0)
+            .unwrap()
+            .syntax
+            .text()
+            .contains("pub type Number = u64")
+    );
+    assert_eq!(opened.decoded_files(), 1);
+}
+#[test]
+fn corrupt_unused_image_body_is_a_miss_on_demand_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, image) = Driver::default()
+        .produce_image(
+            library_request("pub fn answer() -> u64 { 42 }\n", dir.path()),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    let image = image.unwrap();
+    let answer = DefPath::from_full("core@1/lib/answer").unwrap();
+    let hash = image.directory.archive;
+    let store = Store::new(&dir.path().join("store")).unwrap();
+    std::fs::write(store.path(hash), b"damaged").unwrap();
+    let opened = CoreImage::open(&dir.path().join("store")).unwrap().unwrap();
+    let app = tempfile::tempdir().unwrap();
+    let mut req = request("fn caller() -> u64 { 42 }\n", app.path());
+    req.library = LibraryInput::Image(Arc::clone(&opened));
+    let checked = Driver::default()
+        .check(req, &mut Meter::new(false))
+        .unwrap();
+    assert!(checked.accepted(), "{:?}", checked.diagnostics);
+    assert!(
+        opened
+            .demand(&answer)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("cache miss")
+    );
+    let missing = DefPath::from_full("core@1/absent/absent").unwrap();
+    assert!(
+        opened
+            .demand(&missing)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("outside reached")
+    );
+}
+#[test]
+fn refused_library_never_publishes_an_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let (product, image) = Driver::default()
+        .produce_image(
+            library_request("pub fn bad() -> u64 { true }\n", dir.path()),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    assert!(!product.diagnostics.is_empty());
+    assert!(image.is_none());
+    assert!(
+        CoreImage::open(&dir.path().join("store"))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn entry_waits_policy_is_an_explicit_cached_request_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "pub fn main() waits {}\n";
+    let mut driver = Driver::default();
+    let mut req = request(source, dir.path());
+    req.entry = Some(DefPath::from_full("app@1/main/main").unwrap());
+    let entry = driver.check(req, &mut Meter::new(false)).unwrap();
+    assert!(entry.accepted(), "{:?}", entry.diagnostics);
+    let library = driver
+        .check(request(source, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    assert!(!library.accepted());
+    assert_eq!(names(&library), ["main"]);
+    assert!(library.diagnostics.iter().any(|d| d.rule == "LANG-8"));
+}
+
+#[test]
+fn an_unused_image_declaration_section_is_not_decoded() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, image) = Driver::default()
+        .produce_image(
+            library_request("pub fn answer() -> u64 { 42 }\n", dir.path()),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    let image = image.unwrap();
+    let store = Store::new(&dir.path().join("store")).unwrap();
+    std::fs::write(store.path(image.directory.archive), b"damaged").unwrap();
+    let opened = CoreImage::open(&dir.path().join("store")).unwrap().unwrap();
+    let app = tempfile::tempdir().unwrap();
+    let mut req = request("fn scalar() -> u64 { 42 }\n", app.path());
+    req.library = LibraryInput::Image(Arc::clone(&opened));
+    assert!(
+        Driver::default()
+            .check(req, &mut Meter::new(false))
+            .unwrap()
+            .accepted()
+    );
+    let mut req = request("fn caller() -> u64 { lib.answer() }\n", app.path());
+    req.library = LibraryInput::Image(opened);
+    assert!(
+        Driver::default()
+            .check(req, &mut Meter::new(false))
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("cache miss")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_source_file_symlinks_are_checked_instead_of_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let package_dir = dir.path().join("package");
+    std::fs::create_dir(&package_dir).unwrap();
+    let source = dir.path().join("source.hirsel");
+    std::fs::write(&source, "fn answer() -> u64 { 6 * 7 }\n").unwrap();
+    std::os::unix::fs::symlink(source, package_dir.join("main.hirsel")).unwrap();
+    let inputs = CorpusManifest {
+        core: package("core"),
+        packages: vec![PackageManifest::directory(&package_dir, package("app"), false).unwrap()],
+    };
+    let product = Driver::default()
+        .check(
+            CheckRequest {
+                inputs,
+                store: dir.path().join("store"),
+                library: LibraryInput::Sources,
+                entry: None,
+            },
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    assert_eq!(names(&product), ["answer"]);
+    let body = product.definitions.values().next().unwrap();
+    assert_eq!(
+        eval::run(&body.ir, body.check.function.unwrap(), &[], 1_000_000).outcome,
+        eval::Outcome::Returned(vec![42])
     );
 }

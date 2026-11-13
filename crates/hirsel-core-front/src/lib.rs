@@ -13,6 +13,8 @@ hirsel_guard::install!();
 mod body;
 mod decls;
 mod layout;
+mod library;
+pub use library::{Library, Rows};
 mod own;
 mod types;
 
@@ -34,7 +36,7 @@ pub struct ModuleInput {
 }
 
 /// An item of a module.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ItemRef {
     pub module: u32,
     pub item: u32,
@@ -76,8 +78,8 @@ pub struct Program<'a> {
     pub modules: &'a [ModuleInput],
     pub(crate) items: Vec<Vec<ItemInfo>>,
     pub types: Types,
-    pub decls: Vec<TypeDecl>,
-    pub fns: Vec<FnDecl>,
+    pub decls: Rows<TypeDecl>,
+    pub fns: Rows<FnDecl>,
     pub by_path: HashMap<DefPath, Def>,
     pub by_definition: Vec<Option<Def>>,
     /// Refusals of declarations and signatures, and the resolver's.
@@ -86,6 +88,7 @@ pub struct Program<'a> {
     /// The program's entry, as its manifest names it (PROG-3); `main` is always `waits`
     /// (LANG-8).
     pub entry: Option<DefPath>,
+    pub(crate) library_modules: usize,
     pub(crate) pending: Vec<decls::Pending>,
     pub(crate) alias_state: Vec<u8>,
     /// Aliases being lowered, each with its reference continuing the chain.
@@ -115,6 +118,16 @@ impl<'a> Program<'a> {
         modules: &'a [ModuleInput],
         resolutions: Vec<Vec<std::sync::Arc<Resolution>>>,
     ) -> Self {
+        Self::declare_with_library(index, modules, resolutions, None)
+    }
+
+    /// Append only the request's declarations to a source-checked immutable library.
+    pub fn declare_with_library(
+        index: &'a NameIndex,
+        modules: &'a [ModuleInput],
+        resolutions: Vec<Vec<std::sync::Arc<Resolution>>>,
+        library: Option<&Library>,
+    ) -> Self {
         let mut refusals = index.diagnostics.clone();
         let items = modules
             .iter()
@@ -141,14 +154,27 @@ impl<'a> Program<'a> {
             index,
             modules,
             items,
-            types: Types::new(),
-            decls: vec![],
-            fns: vec![],
-            by_path: HashMap::new(),
-            by_definition: vec![None; index.definitions.len()],
+            types: library.map_or_else(Types::new, |l| {
+                Types::overlay(std::sync::Arc::clone(&l.types))
+            }),
+            decls: library.map_or_else(Rows::default, |l| {
+                Rows::overlay(std::sync::Arc::clone(&l.decls))
+            }),
+            fns: library.map_or_else(Rows::default, |l| {
+                Rows::overlay(std::sync::Arc::clone(&l.fns))
+            }),
+            by_path: library.map_or_else(HashMap::new, |l| {
+                l.paths.iter().map(|(p, d)| (p.clone(), *d)).collect()
+            }),
+            by_definition: {
+                let mut rows = library.map_or_else(Vec::new, |l| l.definitions.to_vec());
+                rows.resize(index.definitions.len(), None);
+                rows
+            },
             refusals,
             gaps: vec![],
             entry: None,
+            library_modules: library.map_or(0, |l| l.modules),
             pending: vec![],
             alias_state: vec![],
             alias_stack: vec![],

@@ -70,7 +70,7 @@ pub fn param_holds(bounds: u8) -> u8 {
 }
 
 /// A kind (OWN-3). `Generic` is a rigid type parameter without the `plain` bound.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Plain,
     Own,
@@ -82,7 +82,7 @@ pub enum Kind {
 }
 
 /// What a declaration's keyword says (OWN-1).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Repr {
     Own,
     Stable,
@@ -99,7 +99,7 @@ pub(crate) fn is_core_prelude(path: &DefPath, names: &[&str]) -> bool {
 }
 
 /// A core type whose kind and layout are fixed by its definition path (LANG-7, OWN-3).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Role {
     View,
     Box,
@@ -150,25 +150,25 @@ impl Role {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Generic {
     pub name: hirsel_core_syntax::Symbol,
     pub bounds: u8,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FieldDecl {
     pub name: String,
     pub ty: TyId,
     pub site: Site,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CaseDecl {
     pub name: String,
     pub labelled: bool,
     pub fields: Vec<FieldDecl>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum DeclBody {
     Record(Vec<FieldDecl>),
     Variant(Vec<CaseDecl>),
@@ -177,7 +177,7 @@ pub enum DeclBody {
 
 /// The published summary (OWN-2). For a generic declaration, kind is stated in terms of
 /// the parameters: the declaration's own kind joined with its arguments' at `inline_params`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Summary {
     /// The kind with every parameter taken as plain.
     pub kind_fixed: Option<Kind>,
@@ -193,7 +193,7 @@ pub struct Summary {
     pub cycle: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TypeDecl {
     pub path: DefPath,
     pub site: Site,
@@ -240,7 +240,7 @@ impl TypeDecl {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ParamDecl {
     pub name: hirsel_core_syntax::Symbol,
     pub mode: Mode,
@@ -248,7 +248,7 @@ pub struct ParamDecl {
     pub site: Site,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FnDecl {
     pub path: DefPath,
     pub site: Site,
@@ -264,7 +264,7 @@ pub struct FnDecl {
     pub body: Option<NodeId>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Def {
     Type(DeclId),
     Fn(u32),
@@ -294,7 +294,7 @@ enum Visit {
 impl Program<'_> {
     /// Pass 1: register every type and function definition with its header names.
     pub(crate) fn register(&mut self) {
-        for (m, module) in self.modules.iter().enumerate() {
+        for (m, module) in self.modules.iter().enumerate().skip(self.library_modules) {
             for (i, item) in module.syntax.items().enumerate() {
                 let root = item.tree.node(item.root);
                 let Some(name) = root.token else { continue };
@@ -404,6 +404,7 @@ impl Program<'_> {
             }
         }
         self.alias_state = vec![Visit::Todo as u8; self.decls.len()];
+        self.alias_state[..self.decls.base_len()].fill(Visit::Done as u8);
     }
 
     fn generics(&mut self, at: ItemRef, n: NodeId) -> Vec<Generic> {
@@ -433,10 +434,10 @@ impl Program<'_> {
 
     /// Pass 2: lower every declaration's fields, alias right sides and signatures.
     pub(crate) fn lower_headers(&mut self) {
-        for d in 0..self.decls.len() {
+        for d in self.decls.base_len()..self.decls.len() {
             self.lower_decl(DeclId(d as u32));
         }
-        for f in 0..self.fns.len() {
+        for f in self.fns.base_len()..self.fns.len() {
             self.lower_signature(f);
         }
     }
@@ -704,6 +705,9 @@ impl Program<'_> {
 
     /// Whether a declaration is an alias, read from its syntax (LANG-9).
     fn is_alias(&self, d: DeclId) -> bool {
+        if self.alias_state[d.index()] == Visit::Done as u8 {
+            return matches!(self.decls[d.index()].body, DeclBody::Alias(_));
+        }
         let item = self.item(self.decls[d.index()].at);
         item.tree.children(item.root).iter().any(|&c| {
             matches!(
@@ -798,6 +802,7 @@ impl Program<'_> {
     pub(crate) fn summarize(&mut self) {
         let n = self.decls.len();
         let mut state = vec![Visit::Todo; n];
+        state[..self.decls.base_len()].fill(Visit::Done);
         let mut stack: Vec<(DeclId, usize)> = vec![];
         let order: Vec<usize> = (0..n).collect();
         for d in order {
@@ -1016,7 +1021,7 @@ impl Program<'_> {
         let n = self.decls.len();
         let mut direct = vec![0u8; n];
         let mut refs: Vec<Vec<usize>> = vec![vec![]; n];
-        for d in 0..n {
+        for d in self.decls.base_len()..n {
             let decl = &self.decls[d];
             let mut params = 0u64;
             let mut h = match decl.role {
@@ -1040,6 +1045,9 @@ impl Program<'_> {
             direct[d] = h;
             self.decls[d].summary.holds_params = params;
         }
+        for d in 0..self.decls.base_len() {
+            direct[d] = self.decls[d].summary.holds;
+        }
         let mut t = Tarjan {
             index: vec![u32::MAX; n],
             low: vec![0; n],
@@ -1055,7 +1063,7 @@ impl Program<'_> {
                 t.visit(d);
             }
         }
-        for d in 0..n {
+        for d in self.decls.base_len()..n {
             self.decls[d].summary.holds = t.out[d];
         }
     }
@@ -1063,7 +1071,7 @@ impl Program<'_> {
     /// Declared bounds are checked once against the fields, reading each field type's
     /// declared bounds (OWN-4). Scoped fields of non-scoped types are OWN-19.
     fn check_declared_bounds(&mut self) {
-        for d in 0..self.decls.len() {
+        for d in self.decls.base_len()..self.decls.len() {
             let decl = &self.decls[d];
             if decl.role.is_some() {
                 continue;
@@ -1103,7 +1111,7 @@ impl Program<'_> {
     }
 
     fn check_signatures(&mut self) {
-        for f in 0..self.fns.len() {
+        for f in self.fns.base_len()..self.fns.len() {
             let fd = &self.fns[f];
             let params: Vec<u8> = fd.generics.iter().map(|g| g.bounds).collect();
             if kind(&self.decls, &self.types, fd.result, &params) == Kind::Scoped
@@ -1199,7 +1207,7 @@ fn join(a: Kind, b: Kind) -> Kind {
 
 /// The kind of a type (OWN-3). `params` are the bounds of the enclosing definition's
 /// type parameters.
-pub fn kind(decls: &[TypeDecl], t: &impl TyRead, ty: TyId, params: &[u8]) -> Kind {
+pub fn kind(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u8]) -> Kind {
     match t.kind(ty) {
         TyKind::Error
         | TyKind::Hole
@@ -1246,7 +1254,7 @@ pub fn kind(decls: &[TypeDecl], t: &impl TyRead, ty: TyId, params: &[u8]) -> Kin
 }
 
 /// Whether `let` copies a value of this type (OWN-3).
-pub fn copyable(decls: &[TypeDecl], t: &impl TyRead, ty: TyId, params: &[u8]) -> bool {
+pub fn copyable(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u8]) -> bool {
     match kind(decls, t, ty, params) {
         Kind::Plain | Kind::Stable => true,
         Kind::Scoped => match t.kind(ty) {
@@ -1276,7 +1284,7 @@ pub fn copyable(decls: &[TypeDecl], t: &impl TyRead, ty: TyId, params: &[u8]) ->
 }
 
 /// The bounds a type has (OWN-4, SEM-7).
-pub fn has_bounds(decls: &[TypeDecl], t: &impl TyRead, ty: TyId, params: &[u8]) -> u8 {
+pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u8]) -> u8 {
     let all = PLAIN | SHAREABLE | SEND | KEY | ORDERED;
     let plain_extra = if kind(decls, t, ty, params) == Kind::Plain {
         PLAIN | SHAREABLE | SEND
@@ -1338,12 +1346,12 @@ pub(crate) fn path_text(item: hirsel_core_syntax::Item<'_>, n: NodeId) -> String
 
 /// The canonical text of a type: definition paths and scalar names, as instance keys and
 /// `Module::types` spell them (DECISIONS-883 decision 9).
-pub fn canonical(decls: &[TypeDecl], t: &impl TyRead, ty: TyId) -> String {
+pub fn canonical(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId) -> String {
     let mut s = String::new();
     write_canonical(decls, t, ty, &mut s);
     s
 }
-fn write_canonical(decls: &[TypeDecl], t: &impl TyRead, ty: TyId, s: &mut String) {
+fn write_canonical(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, s: &mut String) {
     use std::fmt::Write;
     let list = |xs: &[TyId], s: &mut String| {
         for (i, &x) in xs.iter().enumerate() {

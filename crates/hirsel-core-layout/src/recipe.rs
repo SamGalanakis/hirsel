@@ -15,7 +15,7 @@ pub const SEQ_CARRIER: u64 = 24;
 /// `own fn` and `scoped fn` carrier: code pointer, environment pointer.
 pub const CLOSURE_CARRIER: u64 = 16;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Recipe {
     pub layout: Layout,
     /// charge-v1 logical size (MEM-24): no padding; an own variant is 8 plus its
@@ -28,7 +28,7 @@ pub struct Recipe {
     pub drop: Option<DropRecipe>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Layout {
     Fixed(Fixed),
     Compact(CompactSet),
@@ -36,7 +36,7 @@ pub enum Layout {
 
 /// A compact type's encodings. A compact value held inline or as a link target is
 /// encoded with its holder's width (MEM-9), so a type has one encoding per width.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CompactSet {
     pub declared: Width,
     /// Indexed by `Width::index`.
@@ -52,14 +52,14 @@ impl CompactSet {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Tag {
     pub offset: u64,
     /// 1, 2 or 4 bytes: the smallest that holds the case count.
     pub width: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Fixed {
     pub size: u64,
     pub align: u64,
@@ -69,7 +69,7 @@ pub struct Fixed {
 }
 
 /// Where a compact field starts.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Pos {
     /// A constant byte offset from the value's start.
     At(u64),
@@ -78,7 +78,7 @@ pub enum Pos {
 }
 
 /// How many bytes a compact field occupies.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Size {
     Fixed(u64),
     /// `W` count, then `count * stride` bytes: a `FixedSpan`, or a `Text` (stride 1).
@@ -96,13 +96,13 @@ pub enum Size {
     Inline(TypeRef),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CField {
     pub pos: Pos,
     pub size: Size,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Compact {
     pub width: Width,
     pub tag: Option<Tag>,
@@ -113,7 +113,7 @@ pub struct Compact {
 }
 
 /// One owned field a value's cleanup visits, in cleanup order.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FieldDrop {
     pub field: u32,
     pub offset: u64,
@@ -126,7 +126,7 @@ pub struct FieldDrop {
 /// elements from index 0 up (SEM-9, core.md); a `Map` cleans entry by entry in
 /// insertion order, each key before its value. Those loops are in the glue built
 /// from this recipe.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DropRecipe {
     pub finalizer: Option<FuncRef>,
     /// One list for a record, one per case.

@@ -154,6 +154,9 @@ impl Store {
             Err(e) => Err(e),
         }
     }
+    pub(crate) fn select(&self, name: &str, key: ContentHash) -> io::Result<()> {
+        self.atomic(&self.root.join(name), &key.0)
+    }
     pub fn publish_root(&self, key: ContentHash) -> io::Result<()> {
         self.atomic(&self.root.join("check-root"), &key.0)
     }

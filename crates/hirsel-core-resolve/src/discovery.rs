@@ -38,7 +38,9 @@ impl PackageManifest {
                 let kind = e.file_type()?;
                 if kind.is_dir() {
                     walk(root, &path, out, signatures)?;
-                } else if kind.is_file() && path.extension().is_some_and(|x| x == "hirsel") {
+                } else if path.extension().is_some_and(|x| x == "hirsel")
+                    && (kind.is_file() || (kind.is_symlink() && path.metadata()?.is_file()))
+                {
                     let relative = path
                         .strip_prefix(root)
                         .expect("walk stays under root")

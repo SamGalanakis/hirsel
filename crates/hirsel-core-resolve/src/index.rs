@@ -103,7 +103,7 @@ pub struct Package {
     dependencies: Rows,
 }
 /// One compilation's flat header index. No body or owning path is stored here.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NameIndex {
     pub symbols: Arc<Symbols>,
     pub modules: Vec<Module>,

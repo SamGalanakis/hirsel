@@ -11,13 +11,14 @@ pub struct DefinitionKey {
     pub lookups: ContentHash,
     pub environment: ContentHash,
 }
-struct Header {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct Header {
     digest: ContentHash,
     reads: Vec<DefPath>,
     anchor: (ModuleId, u32),
 }
 pub(crate) struct Keys {
-    headers: BTreeMap<DefPath, Header>,
+    pub(crate) headers: BTreeMap<DefPath, Header>,
     environment: ContentHash,
     paths: Vec<DefPath>,
     modules: Vec<ModulePath>,
@@ -30,12 +31,14 @@ impl Keys {
         resolutions: &[Vec<Arc<Resolution>>],
         inputs: &CorpusManifest,
         compiler: ContentHash,
+        image_headers: Option<&BTreeMap<DefPath, Header>>,
+        entry: Option<&DefPath>,
     ) -> io::Result<Self> {
         let paths: Vec<_> = index
             .definitions()
             .map(|(id, _)| index.definition_path(id))
             .collect();
-        let mut headers = BTreeMap::new();
+        let mut headers = image_headers.cloned().unwrap_or_default();
         let mut namespaces: Vec<_> = inputs
             .packages
             .iter()
@@ -44,7 +47,7 @@ impl Keys {
         namespaces.sort_by_key(|p| p.0);
         let environment = ContentHash::of_parts(
             "hirsel.core-environment.v1",
-            [&encode(&(compiler, &inputs.core, namespaces))?[..]],
+            [&encode(&(compiler, &inputs.core, namespaces, entry))?[..]],
         );
         for (m, rows) in modules.iter().zip(resolutions) {
             for (ordinal, (item, resolution)) in m.syntax.items().zip(rows).enumerate() {

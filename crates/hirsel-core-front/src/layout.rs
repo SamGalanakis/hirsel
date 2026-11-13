@@ -11,7 +11,7 @@ use hirsel_core_layout::{
 use std::collections::HashMap;
 
 struct Shapes<'p> {
-    decls: &'p [crate::decls::TypeDecl],
+    decls: &'p crate::Rows<crate::decls::TypeDecl>,
     types: &'p mut Types,
     shapes: Vec<Shape>,
     of: HashMap<TyId, TypeRef>,
@@ -135,7 +135,7 @@ pub(crate) fn recipes(p: &mut Program) {
         of: HashMap::new(),
     };
     let mut roots = vec![];
-    for (d, decl) in s.decls.iter().enumerate() {
+    for (d, decl) in s.decls.iter().enumerate().skip(s.decls.base_len()) {
         if !decl.generics.is_empty()
             || decl.role.is_some()
             || matches!(decl.body, DeclBody::Alias(_))

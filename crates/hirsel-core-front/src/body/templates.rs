@@ -151,7 +151,7 @@ pub fn materialize(
     let mut module = source.clone();
     let roots = arguments
         .iter()
-        .map(|&(owner, root)| import_type(&mut module, owner, root, &mut HashMap::new()))
+        .map(|&(owner, root)| import_type(&mut module, owner, root, &mut HashMap::default()))
         .collect::<Vec<_>>();
     let target = FuncId(module.functions.len() as u32);
     let instance = InstanceId(module.instances.len() as u32);
@@ -455,9 +455,9 @@ fn fill(
         call_names: &template.calls,
         nested: &template.nested,
         error: None,
-        types: HashMap::new(),
-        functions: HashMap::from([(source, target)]),
-        signatures: HashMap::new(),
+        types: HashMap::default(),
+        functions: [(source, target)].into_iter().collect(),
+        signatures: HashMap::default(),
     };
     let signature = s.signature(s.module.functions[source.index()].signature);
     s.module.functions[target.index()].signature = signature;

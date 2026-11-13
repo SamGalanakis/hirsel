@@ -1,16 +1,18 @@
 {
-  "measurement": "Buck release, CPU 16, jobs 1, instructions:u, fresh private store, complete driver interval including publication and teardown",
-  "basis": "aa160086 plus shared signature paths and FxHashMap for private structural type interning: 6208/2817 lines. Paired ordinary check/lower 26873.88 -> 26436.00 /15068.21 -> 14822.50; whole 46687.85 -> 46005.68 /32533.38 -> 32011.03. Finished-work forecasts 49669.56/33296.70 meet the 50000 goal. All four previous ceilings are stricter than new observations plus 2 percent, so retain them without raising a ceiling.",
+  "measurement": "Buck release, CPU 16, jobs 1, instructions:u, fresh private store, complete driver interval including publication and teardown; separate perf stat instructions:u covers process startup, dynamic loader, output and exit",
+  "basis": "df3b587c plus structural type hashing and private body/IR-builder/layout Fx maps. Process-wide forecasts 50428.08/39969.80 still exceed M1 goal 50000. Process ceilings use native whole-process observations plus 2 percent rounded upward to 100. Older driver/check ceilings stay stricter when sibling emission has increased cost.",
   "corpora": {
     "m1": {
       "code_lines": 6208,
-      "check_lower_per_line": 25800,
-      "whole_request_per_line": 46300
+      "check_lower_per_line": 24600,
+      "whole_request_per_line": 44600,
+      "whole_process_per_line": 48200
     },
     "std": {
       "code_lines": 2817,
       "check_lower_per_line": 13500,
-      "whole_request_per_line": 31300
+      "whole_request_per_line": 31300,
+      "whole_process_per_line": 39700
     }
   },
   "margin": "2 percent over the last ordinary release observation, rounded up to 100 instructions per code line; lower both ceilings after every saving."

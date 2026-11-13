@@ -27,8 +27,10 @@ Generic and parameter names are symbols; the index renders their spelling when n
 `//:core-check-cost` runs the ordinary release driver on the fixed M1 closure and
 core/std, on CPU 16 with one job and a fresh private store. It fails on a missing
 counter, a changed code-line denominator, or a check/lower or whole-request cost
-above [cost-ceilings.json](cost-ceilings.json). The whole-request ceiling includes
-loading, publication and output teardown. GAPs stay visible while the checker is
+above [cost-ceilings.json](cost-ceilings.json). The driver-request ceiling includes
+loading, publication and output. A separate whole-process ceiling uses process-tree
+`perf stat -e instructions:u`, including dynamic loading before Rust main, reporting
+and exit. Both boundaries are printed so startup dependencies remain visible. GAPs stay visible while the checker is
 unfinished. This guard records today's work; it does not certify completion.
 
 For local evidence, run `./crates/hirsel-core-front/check-cost.py --compiler <release-hirsel-core>

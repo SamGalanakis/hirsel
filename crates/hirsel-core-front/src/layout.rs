@@ -11,7 +11,7 @@ use hirsel_core_layout::{
     Body, Case, Field, FieldTy, FuncRef, Handle, LayoutError, Repr as LRepr, Scalar, Shape,
     TypeRef, compute,
 };
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 /// A shape table being extended: rows are keyed by canonical text, which is also the
 /// row's name, so one closed type has one row whichever body names it.
@@ -396,7 +396,7 @@ fn record(fields: Vec<(&str, FieldTy)>) -> Body {
 /// Recipes for every declaration without parameters whose fields all map.
 pub(crate) fn recipes(p: &mut Program) {
     let Program { decls, types, .. } = p;
-    let (mut shapes, mut of) = (vec![], HashMap::new());
+    let (mut shapes, mut of) = (vec![], HashMap::default());
     let mut s = Shapes {
         decls,
         types,

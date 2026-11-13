@@ -34,7 +34,7 @@ use hirsel_core_ir::{
 use hirsel_core_layout::{FieldTy, Handle, Layout, Recipe, Repr as LRepr, Scalar, TypeRef};
 use hirsel_core_resolve::{Refusal, Target};
 use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, TokenKind, byte_value, character_value};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 mod admission;
 mod builtins;
@@ -1005,11 +1005,11 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             callable_signatures: vec![],
             callable_reps: vec![],
             callable_regions: vec![],
-            map_entries: HashMap::new(),
+            map_entries: HashMap::default(),
             patterns: patterns::Patterns::default(),
             call_scratch: vec![],
             array_parts: vec![],
-            instance_heads: HashMap::new(),
+            instance_heads: HashMap::default(),
             instance_rows: vec![],
             instance_args: vec![],
             binder_at,
@@ -1019,7 +1019,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             waited: false,
             entry: p.entry.as_ref() == Some(&fd.path),
             dest: None,
-            reps: HashMap::new(),
+            reps: HashMap::default(),
             owners: vec![],
             owner_buf: vec![],
             epoch: 0,

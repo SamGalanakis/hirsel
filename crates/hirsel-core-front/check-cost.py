@@ -14,7 +14,15 @@ sys.path.insert(0, str(ROOT / 'core/tools'))
 from measure import source_lines
 
 
-def check_ceiling(metrics, lines, ceiling):
+def process_instructions(path):
+    rows = [line.split(';') for line in path.read_text().splitlines() if not line.startswith('#')]
+    values = [row[0].strip() for row in rows if len(row) > 2 and row[2].strip() == 'instructions:u']
+    if len(values) != 1 or not values[0].isdigit() or int(values[0]) <= 0:
+        raise ValueError('process instruction counter produced no complete sample')
+    return int(values[0])
+
+
+def check_ceiling(metrics, lines, ceiling, process):
     if metrics.get('counter_refusal'):
         raise ValueError(metrics['counter_refusal'])
     stages = {s['name']: s['instructions'] for s in metrics['stages']}
@@ -24,10 +32,13 @@ def check_ceiling(metrics, lines, ceiling):
         raise ValueError('instruction counter produced no complete sample')
     if lines != ceiling['code_lines']:
         raise ValueError(f"corpus changed: {lines} code lines, recorded {ceiling['code_lines']}")
+    if process < total:
+        raise ValueError('process counter does not cover the driver interval')
     failures = []
     for name, instructions, maximum in [
         ('check/lower', lower, ceiling['check_lower_per_line']),
-        ('whole fresh request', total, ceiling['whole_request_per_line']),
+        ('driver request', total, ceiling['whole_request_per_line']),
+        ('whole process', process, ceiling['whole_process_per_line']),
     ]:
         if instructions > maximum * lines:
             failures.append(f'{name}: {instructions / lines:.2f} instructions/line exceeds {maximum}')
@@ -51,7 +62,9 @@ def run(compiler, output, ceilings):
         files = {Path(s['file']) for p in inputs['packages'] for s in p['sources']}
         lines = sum(source_lines(p) for p in sorted(files))
         env = os.environ | {'HIRSEL_MEMORY_LIMIT': '2G', 'HIRSEL_JOBS': '1'}
-        command = ['taskset', '-c', '16', str(ROOT / 'tools/capped'), str(compiler), 'check',
+        command = ['taskset', '-c', '16', str(ROOT / 'tools/capped'),
+                   'perf', 'stat', '--no-big-num', '-x', ';', '-e', 'instructions:u',
+                   '-o', str(directory / 'process-perf.txt'), '--', str(compiler), 'check',
                    '--inputs', str(directory / 'inputs.json'), '--store', str(directory / 'store'),
                    '--metrics', str(directory / 'metrics.json'), '--json']
         with (directory / 'result.json').open('w') as stdout, (directory / 'stderr.log').open('w') as stderr:
@@ -64,8 +77,9 @@ def run(compiler, output, ceilings):
         if 'incomplete' not in product or 'diagnostics' not in product:
             raise ValueError(f'{name}: driver did not return a check result')
         metrics = json.loads((directory / 'metrics.json').read_text())
-        lower, total, errors = check_ceiling(metrics, lines, ceilings['corpora'][name])
-        print(f'{name}: {lines} code lines; check/lower {lower:.2f}; whole fresh request {total:.2f} instructions/line')
+        process = process_instructions(directory / 'process-perf.txt')
+        lower, total, errors = check_ceiling(metrics, lines, ceilings['corpora'][name], process)
+        print(f'{name}: {lines} code lines; check/lower {lower:.2f}; driver request {total:.2f}; whole process {process / lines:.2f} instructions/line')
         failures.extend(f'{name}: {e}' for e in errors)
     if failures:
         raise ValueError('\n'.join(failures))

@@ -30,6 +30,16 @@ pub enum Mode {
     Take,
 }
 
+/// A root in a published signature or a body. Identities are local to the definition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Root {
+    Generic(u32),
+    Parameter(u32),
+    Local(u32),
+    /// The enclosing stable declaration's region (MEM-6).
+    Enclosing,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TyKind {
     /// A type that already produced a refusal; it satisfies every check silently.
@@ -40,6 +50,10 @@ pub enum TyKind {
     Tuple(Vec<TyId>),
     /// An inline array with a literal length (SEM-9).
     Array(TyId, u64),
+    /// A region argument, which is never an ordinary value type.
+    Region(Root),
+    /// A stable or scoped type with its explicit root (MEM-6, OWN-20).
+    Anchored(TyId, TyId),
     /// A nominal type: a declaration and its arguments.
     Adt(DeclId, Vec<TyId>),
     /// `View[T]` (OWN-8).
@@ -207,7 +221,14 @@ pub fn subst(t: &mut impl TyRead, ty: TyId, args: &[TyId]) -> TyId {
         return ty;
     }
     match t.kind(ty).clone() {
-        TyKind::Param(i) => args.get(i as usize).copied().unwrap_or(ERROR),
+        TyKind::Param(i) | TyKind::Region(Root::Generic(i)) => {
+            args.get(i as usize).copied().unwrap_or(ERROR)
+        }
+        TyKind::Anchored(x, root) => {
+            let x = subst(t, x, args);
+            let root = subst(t, root, args);
+            t.mk(TyKind::Anchored(x, root))
+        }
         TyKind::Tuple(xs) => {
             let xs = xs.iter().map(|&x| subst(t, x, args)).collect();
             t.mk(TyKind::Tuple(xs))
@@ -238,14 +259,15 @@ pub fn has_hole(t: &impl TyRead, ty: TyId) -> bool {
     match t.kind(ty) {
         TyKind::Hole => true,
         TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().any(|&x| has_hole(t, x)),
-        TyKind::View(x) | TyKind::Array(x, _) => has_hole(t, *x),
+        TyKind::Anchored(x, _) | TyKind::View(x) | TyKind::Array(x, _) => has_hole(t, *x),
         TyKind::Fn(ps, r, _) => ps.iter().any(|&(_, p)| has_hole(t, p)) || has_hole(t, *r),
         _ => false,
     }
 }
 pub fn has_param(t: &impl TyRead, ty: TyId) -> bool {
     match t.kind(ty) {
-        TyKind::Param(_) => true,
+        TyKind::Param(_) | TyKind::Region(Root::Generic(_)) => true,
+        TyKind::Anchored(x, r) => has_param(t, *x) || has_param(t, *r),
         TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().any(|&x| has_param(t, x)),
         TyKind::View(x) | TyKind::Array(x, _) => has_param(t, *x),
         TyKind::Fn(ps, r, _) => ps.iter().any(|&(_, p)| has_param(t, p)) || has_param(t, *r),

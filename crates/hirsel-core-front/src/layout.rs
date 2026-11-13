@@ -33,6 +33,9 @@ impl<T: TyRead> Shapes<'_, T> {
         if let Some(&r) = self.of.get(&name) {
             return Some(r);
         }
+        if let TyKind::Anchored(x, _) = *self.types.kind(ty) {
+            return self.shape(x);
+        }
         // Reserve the index first: a field reaching this type through an indirection
         // (`List[Tree]` in `Tree`) names it before its body is known.
         let r = TypeRef(self.shapes.len() as u32);
@@ -151,6 +154,7 @@ impl<T: TyRead> Shapes<'_, T> {
     fn field(&mut self, ty: TyId) -> Option<FieldTy> {
         Some(match self.types.kind(ty).clone() {
             TyKind::Scalar(s) => FieldTy::Scalar(s),
+            TyKind::Anchored(x, _) => self.field(x)?,
             TyKind::Adt(d, args) => match self.decls[d.index()].role {
                 Some(Role::Box) => FieldTy::Box(self.shape(args[0])?),
                 Some(Role::Rc) => FieldTy::Rc(self.shape(args[0])?),

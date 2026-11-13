@@ -115,6 +115,20 @@ pub enum Role {
     Sender,
     Receiver,
     HostFile,
+    FixedSpan,
+    SeqSpan,
+    IndexedSpan,
+    SeqIndex,
+    Link,
+    Dest,
+    Writer,
+    Child,
+    SpanBuilder,
+    Builder,
+    Args,
+    Unique,
+    Site,
+    Causes,
 }
 impl Role {
     fn of(path: &DefPath) -> Option<Role> {
@@ -135,6 +149,21 @@ impl Role {
             "Sender" => Role::Sender,
             "Receiver" => Role::Receiver,
             "HostFile" => Role::HostFile,
+            "FixedSpan" => Role::FixedSpan,
+            "SeqSpan" => Role::SeqSpan,
+            "IndexedSpan" => Role::IndexedSpan,
+            "SeqIndex" => Role::SeqIndex,
+            "Link" => Role::Link,
+            "Dest" => Role::Dest,
+            "Writer" => Role::Writer,
+            "Child" => Role::Child,
+            "SpanBuilder" => Role::SpanBuilder,
+            "Builder" => Role::Builder,
+            "Args" => Role::Args,
+            "Unique" => Role::Unique,
+            "Site" => Role::Site,
+            "Causes" => Role::Causes,
+
             "Dir" | "Net" | "Clock" | "Random" | "Stdout" | "Stderr" | "Stdin" | "Env"
             | "Process" | "Tasks" => Role::Capability,
             _ => return None,
@@ -142,11 +171,24 @@ impl Role {
     }
     pub fn kind(self) -> Kind {
         match self {
-            Role::Box | Role::List | Role::String | Role::Map => Kind::Own,
+            Role::Box
+            | Role::List
+            | Role::String
+            | Role::Map
+            | Role::SpanBuilder
+            | Role::Builder
+            | Role::Causes => Kind::Own,
             Role::Rc | Role::Arc => Kind::Counted,
-            Role::View | Role::Region => Kind::Scoped,
-            Role::Text => Kind::Stable,
-            Role::Capability => Kind::Plain,
+            Role::View | Role::Region | Role::Dest | Role::Writer => Kind::Scoped,
+            Role::Text | Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan | Role::SeqIndex => {
+                Kind::Stable
+            }
+            Role::Capability
+            | Role::Args
+            | Role::Unique
+            | Role::Site
+            | Role::Child
+            | Role::Link => Kind::Plain,
             Role::Task | Role::Sender | Role::Receiver | Role::HostFile => Kind::Resource,
         }
     }
@@ -156,6 +198,7 @@ impl Role {
 pub struct Generic {
     pub name: hirsel_core_syntax::Symbol,
     pub bounds: u8,
+    pub region: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -267,6 +310,10 @@ pub struct FnDecl {
     pub result_site: Site,
     /// Parameters the result is anchored to (OWN-20).
     pub anchors: Vec<u32>,
+    /// Region roots named anywhere in the result, including nested type arguments.
+    pub region_anchors: Vec<TyId>,
+    /// Declared outlives edges; queries take their reflexive transitive closure.
+    pub outlives: Vec<(TyId, TyId)>,
     pub waits: bool,
     pub body: Option<NodeId>,
 }
@@ -289,6 +336,12 @@ pub(crate) enum Pending {
     },
     /// A type argument of a generic other than Option and Result is not scoped (OWN-19).
     NotScoped { ty: TyId, site: Site },
+    Root {
+        base: TyId,
+        root: TyId,
+        at: ItemRef,
+        site: Site,
+    },
     Array {
         ty: TyId,
         params: Vec<u8>,
@@ -384,6 +437,8 @@ impl Program<'_> {
                             params: vec![],
                             result: UNIT,
                             anchors: vec![],
+                            region_anchors: vec![],
+                            outlives: vec![],
                             waits: false,
                             body,
                         });
@@ -424,13 +479,6 @@ impl Program<'_> {
         let mut out = vec![];
         for &g in item.tree.children(n) {
             let gn = item.tree.node(g);
-            if gn.kind != NodeKind::Generic {
-                self.gaps.push(Gap::new(
-                    self.site(at, g),
-                    "region parameters are not built",
-                ));
-                continue;
-            }
             let name = item.symbol(gn.token.unwrap());
             let mut bounds = 0;
             for &b in item.tree.children(g) {
@@ -439,7 +487,11 @@ impl Program<'_> {
                     bounds |= bound_bit(item.tree.token_text(item.text, t));
                 }
             }
-            out.push(Generic { name, bounds });
+            out.push(Generic {
+                name,
+                bounds,
+                region: gn.kind == NodeKind::RegionGeneric,
+            });
         }
         out
     }
@@ -524,7 +576,8 @@ impl Program<'_> {
                 | NodeKind::TupleType
                 | NodeKind::CallableType
                 | NodeKind::OwnCallableType
-                | NodeKind::ScopedCallableType => {
+                | NodeKind::ScopedCallableType
+                | NodeKind::Anchor => {
                     let ty = self.lower_ty(at, c, &generics);
                     body = DeclBody::Alias(ty);
                 }
@@ -582,18 +635,36 @@ impl Program<'_> {
             NodeKind::TypeArguments => {
                 let mut args = vec![];
                 for &c in &children[1..] {
-                    if item.tree.node(c).kind == NodeKind::Anchor {
-                        // Not built, so the type is not built: no argument count to check.
-                        self.gaps
-                            .push(Gap::new(self.site(at, c), "anchor arguments are not built"));
-                        return ERROR;
-                    }
                     let t = self.lower_ty(at, c, generics);
                     args.push((t, self.site(at, c)));
                 }
                 self.named_ty(at, children[0], &args, generics)
             }
-            NodeKind::Anchor => self.lower_ty(at, children[0], generics),
+            NodeKind::Anchor if children.len() == 1 => {
+                let root = self.root_ty(at, children[0], generics);
+                self.pending.push(Pending::Root {
+                    base: ERROR,
+                    root,
+                    at,
+                    site: self.site(at, children[0]),
+                });
+                root
+            }
+            NodeKind::Anchor => {
+                let ty = self.lower_ty(at, children[0], generics);
+                let root = self.root_ty(at, children[1], generics);
+                self.pending.push(Pending::Root {
+                    base: ty,
+                    root,
+                    at,
+                    site: self.site(at, children[1]),
+                });
+                if scoped_payload(&self.decls, &self.types, ty) {
+                    ty
+                } else {
+                    self.types.intern(TyKind::Anchored(ty, root))
+                }
+            }
             NodeKind::CallableType => {
                 let mut params = vec![];
                 let mut result = UNIT;
@@ -708,6 +779,25 @@ impl Program<'_> {
         if !d.structural {
             for (i, (t, s)) in args.iter().enumerate() {
                 self.pending.push(Pending::NotScoped { ty: *t, site: *s });
+                if d.generics[i].region {
+                    self.pending.pop();
+                    if !matches!(self.types.kind(*t), TyKind::Region(_)) && *t != ERROR {
+                        self.refusals.push(refusal(
+                            "MEM-6",
+                            *s,
+                            "a region parameter takes an `in r` argument",
+                        ));
+                    }
+                    continue;
+                }
+                if matches!(self.types.kind(*t), TyKind::Region(_)) {
+                    self.refusals.push(refusal(
+                        "LANG-12",
+                        *s,
+                        "a type parameter takes a type, not a region",
+                    ));
+                    continue;
+                }
                 let need = d.generics[i].bounds;
                 if need != 0 {
                     let counted = matches!(role, Some(Role::Rc | Role::Arc));
@@ -759,6 +849,7 @@ impl Program<'_> {
                     | NodeKind::CallableType
                     | NodeKind::OwnCallableType
                     | NodeKind::ScopedCallableType
+                    | NodeKind::Anchor
             )
         })
     }
@@ -779,6 +870,7 @@ impl Program<'_> {
         let mut params = vec![];
         let mut result = UNIT;
         let mut anchor_nodes = vec![];
+        let mut written_roots = vec![];
         let mut waits = false;
         for &c in item.tree.children(item.root) {
             match item.tree.node(c).kind {
@@ -807,27 +899,57 @@ impl Program<'_> {
                 }
                 NodeKind::ResultType => {
                     let t = item.tree.children(c)[0];
-                    if item.tree.node(t).kind == NodeKind::Anchor {
-                        anchor_nodes.push(item.tree.children(t)[1]);
+                    fn anchors(
+                        item: hirsel_core_syntax::Item<'_>,
+                        n: NodeId,
+                        out: &mut Vec<NodeId>,
+                    ) {
+                        let kids = item.tree.children(n);
+                        if item.tree.node(n).kind == NodeKind::Anchor {
+                            out.push(*kids.last().unwrap());
+                        }
+                        for &c in kids {
+                            anchors(item, c, out);
+                        }
                     }
+                    anchors(item, t, &mut anchor_nodes);
                     result = self.lower_ty(at, t, &generics);
                     self.fns[f].result_site = self.site(at, t);
                 }
                 NodeKind::Waits => waits = true,
-                NodeKind::Outlives => self
-                    .gaps
-                    .push(Gap::new(self.site(at, c), "outlives clauses are not built")),
+                NodeKind::Outlives => {
+                    for pair in item.tree.children(c).chunks_exact(2) {
+                        let a = self.root_ty(at, pair[0], &generics);
+                        let b = self.root_ty(at, pair[1], &generics);
+                        for (&node, root) in pair.iter().zip([a, b]) {
+                            if let TyKind::Region(Root::Parameter(i)) = self.types.kind(root) {
+                                if !matches!(self.types.kind(params[*i as usize].ty), TyKind::Adt(d, _) if self.decls[d.index()].role == Some(Role::Region))
+                                {
+                                    self.refusals.push(refusal(
+                                        "MEM-6",
+                                        self.site(at, node),
+                                        "an outlives clause names only region parameters",
+                                    ));
+                                }
+                            }
+                        }
+                        self.fns[f].outlives.push((a, b));
+                    }
+                }
                 _ => {}
             }
         }
         let mut anchors = vec![];
-        for a in anchor_nodes {
+        for &a in &anchor_nodes {
             let parts = path_text(item, a);
             match params
                 .iter()
                 .position(|p| self.index.symbols.text(p.name) == parts)
             {
                 Some(i) if params[i].mode == Mode::View => anchors.push(i as u32),
+                _ if generics
+                    .iter()
+                    .any(|g| g.region && self.index.symbols.text(g.name) == parts) => {}
                 _ => self.refusals.push(refusal(
                     "OWN-20",
                     self.site(at, a),
@@ -835,11 +957,83 @@ impl Program<'_> {
                 )),
             }
         }
+        for &n in &anchor_nodes {
+            written_roots.push(self.root_ty(at, n, &generics));
+        }
         let fd = &mut self.fns[f];
+        fd.region_anchors = written_roots;
         fd.params = params;
         fd.result = result;
         fd.anchors = anchors;
         fd.waits = waits;
+        let edges = std::mem::take(&mut fd.outlives);
+        let mut pending = vec![];
+        let mut seen = vec![];
+        for &(source, _) in &edges {
+            if fd.outlives.iter().any(|&(a, _)| a == source) {
+                continue;
+            }
+            pending.clear();
+            seen.clear();
+            pending.push(source);
+            while let Some(root) = pending.pop() {
+                if seen.contains(&root) {
+                    continue;
+                }
+                seen.push(root);
+                fd.outlives.push((source, root));
+                pending.extend(
+                    edges
+                        .iter()
+                        .filter(|&&(from, _)| from == root)
+                        .map(|&(_, to)| to),
+                );
+            }
+        }
+        collect_roots(&self.types, result, &mut fd.region_anchors);
+        for &root in &fd.region_anchors {
+            if let TyKind::Region(Root::Parameter(i)) = self.types.kind(root) {
+                if !fd.anchors.contains(i) {
+                    fd.anchors.push(*i);
+                }
+            }
+        }
+    }
+
+    /// A root names a region generic, a Region parameter, or a view parameter.
+    fn root_ty(&mut self, at: ItemRef, n: NodeId, generics: &[Generic]) -> TyId {
+        let item = self.item(at);
+        let Some(Target::Binder(b)) = self.target(at, n).copied() else {
+            return ERROR;
+        };
+        let binder = &self.items[at.module as usize][at.item as usize]
+            .resolution
+            .binders[b as usize];
+        if let Some(i) = generics
+            .iter()
+            .position(|g| g.region && g.name == binder.name)
+        {
+            return self.types.intern(TyKind::Region(Root::Generic(i as u32)));
+        }
+        let parameters = item
+            .tree
+            .children(item.root)
+            .iter()
+            .copied()
+            .find(|&c| item.tree.node(c).kind == NodeKind::Parameters);
+        if let Some(parameters) = parameters {
+            for (i, &p) in item.tree.children(parameters).iter().enumerate() {
+                if item.symbol(item.tree.node(p).token.unwrap()) == binder.name {
+                    return self.types.intern(TyKind::Region(Root::Parameter(i as u32)));
+                }
+            }
+        }
+        self.refusals.push(refusal(
+            "MEM-6",
+            self.site(at, n),
+            "a root names a region or view parameter",
+        ));
+        ERROR
     }
 
     /// Pass 3: summaries in dependency order, then the deferred checks.
@@ -877,6 +1071,37 @@ impl Program<'_> {
                             site,
                             format!("type argument is not {}", bound_names(bounds & !have)),
                         ));
+                    }
+                }
+                Pending::Root {
+                    base,
+                    root,
+                    at,
+                    site,
+                } => {
+                    if let TyKind::Region(Root::Parameter(i)) = self.types.kind(root) {
+                        let fd = self
+                            .fns
+                            .iter()
+                            .find(|f| f.at == at)
+                            .expect("parameter root belongs to a function");
+                        let p = &fd.params[*i as usize];
+                        let scoped = kind(&self.decls, &self.types, base, &[]) == Kind::Scoped;
+                        let region = matches!(self.types.kind(p.ty), TyKind::Adt(d, _) if self.decls[d.index()].role == Some(Role::Region));
+                        if !region && !scoped && !matches!(self.types.kind(base), TyKind::Param(_))
+                        {
+                            self.refusals.push(refusal(
+                                "MEM-6",
+                                site,
+                                "a stable root must name a Region parameter",
+                            ));
+                        } else if scoped && p.mode != Mode::View {
+                            self.refusals.push(refusal(
+                                "OWN-20",
+                                site,
+                                "a scoped anchor names a view or Region parameter",
+                            ));
+                        }
                     }
                 }
                 Pending::Array { ty, params, site } => {
@@ -966,7 +1191,7 @@ impl Program<'_> {
                 }
                 (k, p)
             }
-            TyKind::Array(x, _) => self.inline_ty(x, state, stack),
+            TyKind::Anchored(x, _) | TyKind::Array(x, _) => self.inline_ty(x, state, stack),
             TyKind::View(_) => (Kind::Scoped, 0),
             TyKind::Adt(e, args) => {
                 if let Some(r) = self.decls[e.index()].role {
@@ -1105,8 +1330,16 @@ impl Program<'_> {
             let mut h = match decl.role {
                 Some(Role::Capability) => H_CAPABILITY,
                 Some(Role::Task | Role::Sender | Role::Receiver | Role::HostFile) => H_RESOURCE,
-                Some(Role::View | Role::Region) => H_SCOPED,
-                Some(Role::Text) => H_STABLE,
+                Some(Role::View | Role::Region | Role::Dest | Role::Writer) => H_SCOPED,
+                Some(
+                    Role::Text
+                    | Role::FixedSpan
+                    | Role::SeqSpan
+                    | Role::IndexedSpan
+                    | Role::SeqIndex
+                    | Role::SpanBuilder
+                    | Role::Builder,
+                ) => H_STABLE,
                 Some(_) => 0,
                 None => match decl.repr {
                     Repr::Resource => H_RESOURCE,
@@ -1199,8 +1432,26 @@ impl Program<'_> {
         for f in self.fns.base_len()..self.fns.len() {
             let fd = &self.fns[f];
             let params: Vec<u8> = fd.generics.iter().map(|g| g.bounds).collect();
+            for p in &fd.params {
+                if p.mode == Mode::Mut
+                    && kind(&self.decls, &self.types, p.ty, &params) == Kind::Stable
+                {
+                    self.refusals
+                        .push(refusal("MEM-5", p.site, "stable data cannot be mutated"));
+                }
+            }
             if kind(&self.decls, &self.types, fd.result, &params) == Kind::Scoped
-                && fd.anchors.is_empty()
+                && {
+                    let item = self.item(fd.at);
+                    let result = item
+                        .tree
+                        .children(item.root)
+                        .iter()
+                        .copied()
+                        .find(|&c| item.tree.node(c).kind == NodeKind::ResultType)
+                        .unwrap();
+                    written_missing_anchor(self, fd.at, item.tree.children(result)[0])
+                }
                 && !matches!(self.types.kind(fd.result), TyKind::Error)
             {
                 self.refusals.push(refusal(
@@ -1273,7 +1524,7 @@ fn walk_holds(
                 walk_holds(decls, t, x, h, params, refs);
             }
         }
-        TyKind::Array(x, _) => walk_holds(decls, t, *x, h, params, refs),
+        TyKind::Anchored(x, _) | TyKind::Array(x, _) => walk_holds(decls, t, *x, h, params, refs),
         TyKind::View(x) => {
             *h |= H_SCOPED;
             walk_holds(decls, t, *x, h, params, refs);
@@ -1303,7 +1554,17 @@ fn mentions(
     if let Some(role) = decl.role {
         return matches!(
             role,
-            Role::View | Role::Box | Role::Rc | Role::Arc | Role::List | Role::Map | Role::Task
+            Role::View
+                | Role::Box
+                | Role::Rc
+                | Role::Arc
+                | Role::List
+                | Role::Map
+                | Role::Task
+                | Role::FixedSpan
+                | Role::SeqSpan
+                | Role::IndexedSpan
+                | Role::SeqIndex
         );
     }
     fn ty_mentions(
@@ -1316,7 +1577,9 @@ fn mentions(
         match t.kind(ty) {
             TyKind::Param(p) => *p == i,
             TyKind::Tuple(xs) => xs.iter().any(|&x| ty_mentions(decls, t, x, i, seen)),
-            TyKind::View(x) | TyKind::Array(x, _) => ty_mentions(decls, t, *x, i, seen),
+            TyKind::Anchored(x, _) | TyKind::View(x) | TyKind::Array(x, _) => {
+                ty_mentions(decls, t, *x, i, seen)
+            }
             TyKind::Adt(d, xs) => xs.iter().enumerate().any(|(p, &x)| {
                 ty_mentions(decls, t, x, i, seen)
                     && mentions(decls, t, *d, p as u32, &mut seen.clone())
@@ -1355,7 +1618,8 @@ pub fn kind(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[
         TyKind::Tuple(xs) => xs
             .iter()
             .fold(Kind::Plain, |k, &x| join(k, kind(decls, t, x, params))),
-        TyKind::Array(x, _) => kind(decls, t, *x, params),
+        TyKind::Region(_) => Kind::Scoped,
+        TyKind::Anchored(x, _) | TyKind::Array(x, _) => kind(decls, t, *x, params),
         TyKind::View(_) => Kind::Scoped,
         TyKind::Param(i) => {
             if params.get(*i as usize).is_some_and(|b| b & PLAIN != 0) {
@@ -1396,6 +1660,7 @@ pub fn copyable(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params
     match kind(decls, t, ty, params) {
         Kind::Plain | Kind::Stable => true,
         Kind::Scoped => match t.kind(ty) {
+            TyKind::Anchored(x, _) => copyable(decls, t, *x, params),
             TyKind::View(_) => true,
             TyKind::Tuple(xs) => xs.iter().all(|&x| copyable(decls, t, x, params)),
             TyKind::Adt(d, args) => {
@@ -1442,6 +1707,8 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
             TyKind::Scalar(_) => all,
             TyKind::Fn(..) => PLAIN | SHAREABLE | SEND,
             TyKind::Tuple(xs) => meet(xs),
+            TyKind::Region(_) => 0,
+            TyKind::Anchored(x, _) => has_bounds(decls, t, *x, params),
             TyKind::Array(x, _) => has_bounds(decls, t, *x, params) & all,
             TyKind::View(x) => has_bounds(decls, t, *x, params) & (KEY | ORDERED),
             TyKind::Param(i) => params.get(*i as usize).copied().unwrap_or(0),
@@ -1451,6 +1718,12 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
                     Some(Role::List) => meet(args) & (KEY | ORDERED | SHAREABLE | SEND),
                     Some(Role::String) => KEY | ORDERED | SHAREABLE | SEND,
                     Some(Role::Text) => KEY | ORDERED,
+                    Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan) => {
+                        meet(args) & (KEY | ORDERED)
+                    }
+                    Some(Role::Child | Role::Unique | Role::Site) => PLAIN | SHAREABLE | SEND | KEY,
+                    Some(Role::Args) => PLAIN | SHAREABLE | SEND,
+                    Some(Role::Causes) => SEND,
                     Some(Role::Rc) => SHAREABLE | (meet(args) & (KEY | ORDERED)),
                     Some(Role::Arc) => SHAREABLE | SEND | (meet(args) & (KEY | ORDERED)),
                     Some(Role::Box) => meet(args) & (SHAREABLE | SEND | KEY | ORDERED),
@@ -1525,6 +1798,14 @@ fn write_canonical(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, s: 
                 s.push(']');
             }
         }
+        TyKind::Region(root) => {
+            let _ = write!(s, "in {root:?}");
+        }
+        TyKind::Anchored(x, r) => {
+            write_canonical(decls, t, *x, s);
+            s.push(' ');
+            write_canonical(decls, t, *r, s);
+        }
         TyKind::Array(x, n) => {
             s.push_str("Inline[");
             write_canonical(decls, t, *x, s);
@@ -1581,4 +1862,86 @@ pub(crate) fn literal_length(item: hirsel_core_syntax::Item<'_>, n: NodeId) -> O
         (10, digits)
     };
     u64::from_str_radix(digits, radix).ok()
+}
+
+/// Region roots of a type. The caller supplies and reuses the output arena.
+pub fn collect_roots(t: &impl TyRead, ty: TyId, out: &mut Vec<TyId>) {
+    match t.kind(ty) {
+        TyKind::Region(_) => {
+            if !out.contains(&ty) {
+                out.push(ty);
+            }
+        }
+        TyKind::Anchored(x, r) => {
+            collect_roots(t, *x, out);
+            collect_roots(t, *r, out);
+        }
+        TyKind::Tuple(xs) | TyKind::Adt(_, xs) => {
+            for &x in xs {
+                collect_roots(t, x, out);
+            }
+        }
+        TyKind::View(x) | TyKind::Array(x, _) => collect_roots(t, *x, out),
+        _ => {}
+    }
+}
+impl FnDecl {
+    pub fn outlives(&self, a: TyId, b: TyId) -> bool {
+        a == b || self.outlives.contains(&(a, b))
+    }
+}
+
+fn written_missing_anchor(p: &Program<'_>, at: ItemRef, n: NodeId) -> bool {
+    let item = p.item(at);
+    let kids = item.tree.children(n);
+    match item.tree.node(n).kind {
+        NodeKind::Anchor => false,
+        NodeKind::TupleType | NodeKind::GroupType => {
+            kids.iter().any(|&c| written_missing_anchor(p, at, c))
+        }
+        NodeKind::TypeArguments => {
+            if let Some(Target::Definition(d)) = p.target(at, kids[0]) {
+                if let Some(Def::Type(d)) = p.by_definition[d.0 as usize] {
+                    let decl = &p.decls[d.index()];
+                    if decl.structural {
+                        return kids[1..].iter().any(|&c| written_missing_anchor(p, at, c));
+                    }
+                    if decl.repr == Repr::Scoped
+                        || decl.role.is_some_and(|r| r.kind() == Kind::Scoped)
+                    {
+                        return !kids[1..].iter().any(|&c| {
+                            item.tree.node(c).kind == NodeKind::Anchor
+                                && item.tree.children(c).len() == 1
+                        });
+                    }
+                }
+            }
+            false
+        }
+        NodeKind::TypePath => match p.target(at, n) {
+            Some(Target::Definition(d)) => match p.by_definition[d.0 as usize] {
+                Some(Def::Type(d)) => {
+                    let decl = &p.decls[d.index()];
+                    decl.repr == Repr::Scoped || decl.role.is_some_and(|r| r.kind() == Kind::Scoped)
+                }
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+pub(crate) fn scoped_payload(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId) -> bool {
+    match t.kind(ty) {
+        TyKind::View(_) => true,
+        TyKind::Tuple(xs) => xs.iter().any(|&x| scoped_payload(decls, t, x)),
+        TyKind::Adt(d, xs) => {
+            let decl = &decls[d.index()];
+            decl.repr == Repr::Scoped
+                || decl.role.is_some_and(|r| r.kind() == Kind::Scoped)
+                || decl.structural && xs.iter().any(|&x| scoped_payload(decls, t, x))
+        }
+        _ => false,
+    }
 }

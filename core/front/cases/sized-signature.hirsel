@@ -1,0 +1,4 @@
+// expect: accept
+// MEM-4: bytes marks a u64 parameter; the declaration records its index.
+fn sized(bytes n: u64) -> u64 { n }
+// expect: run sized(7) = 7

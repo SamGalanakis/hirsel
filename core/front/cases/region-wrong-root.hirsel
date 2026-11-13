@@ -1,0 +1,4 @@
+// expect: refuse MEM-6 at 4:30
+// expect: gap values of this type are not built
+stable type Token { n: u64 }
+fn wrong(n: u64, t: Token in n) { }

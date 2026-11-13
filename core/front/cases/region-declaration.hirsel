@@ -1,0 +1,7 @@
+// expect: accept
+// MEM-6: a region generic anchors the stable field, and is retained in its type.
+stable type Token { n: u64 }
+type Holder[in r] { value: Token in r }
+type Nested[in r] { value: Option[Token in r] }
+// expect: kind Holder own
+// expect: holds Holder stable

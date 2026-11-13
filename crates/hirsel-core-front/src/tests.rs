@@ -199,6 +199,34 @@ fn run_case(path: &Path) -> Vec<String> {
                     failures.push(format!("{} {ty}: want {k}, got {got}", words[0]));
                 }
             }
+            ["outlives", function, source, target] => {
+                let fd = p
+                    .fns
+                    .iter()
+                    .find(|fd| fd.path.0.name == *function)
+                    .expect("named function");
+                let mut root = |name: &str| {
+                    let r = if let Some(i) = fd
+                        .generics
+                        .iter()
+                        .position(|g| g.region && index.symbols.text(g.name) == name)
+                    {
+                        Root::Generic(i as u32)
+                    } else {
+                        Root::Parameter(
+                            fd.params
+                                .iter()
+                                .position(|p| index.symbols.text(p.name) == name)
+                                .expect("named region") as u32,
+                        )
+                    };
+                    p.types.intern(TyKind::Region(r))
+                };
+                let (a, b) = (root(source), root(target));
+                if !fd.outlives(a, b) {
+                    failures.push(format!("{source} does not outlive {target}"));
+                }
+            }
             ["run", call, "=", want @ ..] => {
                 failures.extend(run_expect(module, &functions, call, want));
             }

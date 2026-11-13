@@ -1,6 +1,28 @@
 use super::*;
 
 impl<'c, 'a> Cx<'c, 'a> {
+    fn body_root(&mut self, n: NodeId) -> TyId {
+        let Some(Target::Binder(b)) = self.p.target(self.at, n).copied() else {
+            return ERROR;
+        };
+        let binder = &self.p.items[self.at.module as usize][self.at.item as usize]
+            .resolution
+            .binders[b as usize];
+        if let Some(i) = self
+            .fd
+            .generics
+            .iter()
+            .position(|g| g.region && g.name == binder.name)
+        {
+            return self.t.mk(TyKind::Region(Root::Generic(i as u32)));
+        }
+        if let Some(i) = self.fd.params.iter().position(|p| p.name == binder.name) {
+            return self.t.mk(TyKind::Region(Root::Parameter(i as u32)));
+        }
+        // Local roots are indexed by resolver identity, like body places.
+        self.t.mk(TyKind::Region(Root::Local(b)))
+    }
+
     // ---- types written in bodies
     pub(super) fn ty(&mut self, n: NodeId) -> TyId {
         self.out.counts.types += 1;
@@ -44,13 +66,19 @@ impl<'c, 'a> Cx<'c, 'a> {
             NodeKind::TypeArguments => {
                 let mut args = vec![];
                 for &a in &c[1..] {
-                    if self.kind(a) == NodeKind::Anchor {
-                        self.gap(a, "anchor arguments are not built");
-                        return ERROR;
-                    }
                     args.push((self.ty(a), a));
                 }
                 self.named_ty(c[0], &args)
+            }
+            NodeKind::Anchor if c.len() == 1 => self.body_root(c[0]),
+            NodeKind::Anchor => {
+                let ty = self.ty(c[0]);
+                let root = self.body_root(c[1]);
+                if crate::decls::scoped_payload(&self.p.decls, &self.t, ty) {
+                    ty
+                } else {
+                    self.t.mk(TyKind::Anchored(ty, root))
+                }
             }
             _ => {
                 self.gap(n, "this type form is not built in bodies");
@@ -134,6 +162,17 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
         let counted = matches!(decl.role, Some(Role::Rc | Role::Arc));
         for (g, &(t, at)) in decl.generics.iter().zip(args) {
+            if g.region {
+                if !matches!(self.t.kind(t), TyKind::Region(_)) && t != ERROR {
+                    self.refuse("MEM-6", at, "a region parameter takes an `in r` argument");
+                    return ERROR;
+                }
+                continue;
+            }
+            if matches!(self.t.kind(t), TyKind::Region(_)) {
+                self.refuse("LANG-12", at, "a type parameter takes a type, not a region");
+                return ERROR;
+            }
             if !decl.structural && kind(&p.decls, &self.t, t, &self.params) == Kind::Scoped {
                 self.refuse(
                     "OWN-19",

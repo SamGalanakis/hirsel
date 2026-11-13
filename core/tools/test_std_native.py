@@ -137,6 +137,43 @@ class Walker(unittest.TestCase):
         self.assertEqual(owner(cause, [{'row': 'M2', 'message': 'Dest values are not built', 'owner': '895'}]), 'M2 core-check-895')
         self.assertEqual(first_stop({'stopped': 'link: missing symbol'}), 'link: missing symbol')
 
+    def test_ordinary_evaluator_laws_and_native_only_accounting(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tests = root / 'core/std/tests'
+            tests.mkdir(parents=True)
+            (root / 'core/core').mkdir()
+            (tests / 'plain.hirsel').write_text('// expect: run good() = true\nfn good()->bool {true}\n// expect: run host(out) = true\nfn host(out:Stdout)->bool {true}')
+            evaluator = root / 'eval'
+            evaluator.write_text('#!/usr/bin/env python3\nprint(\'{"outcome":{"kind":"returned","values":[1]},"used":0}\')\n')
+            evaluator.chmod(0o755)
+            cases = discover(root, [])
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                rows = run(root, None, None, cases, ['evaluator'], None, [], evaluator=evaluator)
+            self.assertEqual([(r['ran'], r['passed'], r['native_only']) for r in rows],
+                             [(True, True, False), (False, None, True)])
+            self.assertIn('2 selected, 1 ran, 1 passed', printed.getvalue())
+            self.assertIn('1 native-only', printed.getvalue())
+            self.assertIn('->u64', wrapper(cases[0], evaluator=True))
+            self.assertEqual(len(manifest(root, cases[0], root / 'adapted', native=False)['packages']), 2)
+
+    def test_evaluator_disagreement_is_a_finding_not_an_inapplicable_law(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tests = root / 'core/std/tests'
+            tests.mkdir(parents=True)
+            (root / 'core/core').mkdir()
+            (tests / 'bad.hirsel').write_text('// expect: run law() = 7\nfn law()->u64 {7}')
+            evaluator = root / 'eval'
+            evaluator.write_text('#!/usr/bin/env python3\nprint(\'{"outcome":{"kind":"fault","message":"write to lent place"}}\')\n')
+            evaluator.chmod(0o755)
+            with contextlib.redirect_stdout(io.StringIO()):
+                rows = run(root, None, None, discover(root, []), ['evaluator'], None, [], evaluator=evaluator)
+            self.assertTrue(rows[0]['ran'])
+            self.assertTrue(rows[0]['applicable'])
+            self.assertFalse(rows[0]['passed'])
+            self.assertEqual(rows[0]['owner'], 'core-form-883')
+
 
 if __name__ == '__main__':
     unittest.main()

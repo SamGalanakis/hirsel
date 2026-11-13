@@ -1,0 +1,19 @@
+// A core finalizer has a type identity, not a function identity.
+// Its helper must be demanded too; omitting either body is not Division.
+resource type Finalized[T] { value: T, divisor: u64 } drop(t) {
+    let _ = divide_for_drop(t.divisor)
+}
+
+fn divide_for_drop(divisor: u64) -> u64 { 10 / divisor }
+
+// expect: run finalizer_ok() = 7
+fn finalizer_ok() -> u64 {
+    let x = result.unwrap(Finalized(value: 11u64, divisor: 2))
+    7
+}
+
+// expect: run finalizer_failure() = fail Division
+fn finalizer_failure() -> u64 {
+    let x = result.unwrap(Finalized(value: 11u64, divisor: 0))
+    7
+}

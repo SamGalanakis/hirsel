@@ -68,11 +68,16 @@ fn evaluate() -> Result<Value, String> {
         emitter.materialize_instances()?;
         for row in &emitter.module.functions {
             let key = &emitter.module.instances[row.instance.index()];
-            if let Some(Def::Fn(f)) = program.by_path.get(&key.definition)
-                && !checked.contains(f)
-                && program.fns[*f as usize].body.is_some()
+            let demanded = match program.by_path.get(&key.definition) {
+                Some(Def::Fn(f)) => Some(*f),
+                Some(Def::Type(d)) => program.decls[d.index()].finalizer,
+                None => None,
+            };
+            if let Some(f) = demanded
+                && !checked.contains(&f)
+                && program.fns[f as usize].body.is_some()
             {
-                pending.push(*f);
+                pending.push(f);
             }
         }
         if pending.is_empty() {

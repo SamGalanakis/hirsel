@@ -1,4 +1,4 @@
-# Native standard library contracts
+# Core and standard library contracts
 
 Each hand-derived oracle is a comment before its private function:
 
@@ -6,14 +6,15 @@ Each hand-derived oracle is a comment before its private function:
     fn example()->u64 { ... }
 
 The walker uses the real driver product path, Cranelift dev and LLVM release.
-It prints every selected case as PASS, FAIL or NOT RUN with its first cause and
+It prints every selected case as PASS, FAIL, NOT RUN or NOT APPLICABLE with its first cause and
 owner. Zero matches fail; a missing native run never counts as passing.
 
     python3 core/tools/std_native.py --compiler <hirsel-core> --runtime <core-rt.a>         --filter file --backend both --report /tmp/file-native.json
 
 The same walker discovers core/core/tests and core/std/tests. A filter is a module/function prefix (file, file:read, core.list, core.list:law) or source path prefix. Existing std filters retain their spelling; std.file also works.
 Repeat --filter for several prefixes. The compiler and runtime are Buck targets
-hirsel-core-driver-bin-hirsel-core and hirsel-core-rt[staticlib].
+hirsel-core-driver-bin-hirsel-core and the shipping hirsel-core-rt-archives.
+Use core/tools/measurement_artifacts.py to locate the release compiler and archive.
 
 No-argument scalar tests, f(dir), f(out) and f(err) are supported. Dir tests receive
 a fresh empty confined host directory and run locally on a host with openat2,
@@ -92,3 +93,23 @@ each selected native engine, with the reason. Those rows have `passed: null`,
 `applicable: false`, and count as neither passing nor unavailable native tests.
 A missing evaluator backend or empty filter is an error. There is no native skip
 marker and no retry.
+
+For every ordinary law with no host-capability argument, select the evaluator
+as a third backend. `all` runs evaluator, Cranelift dev and LLVM release; `both`
+continues to mean the two native engines. Evaluator-only selection needs neither
+a compiler nor a runtime archive:
+
+    python3 core/tools/std_native.py --backend evaluator --evaluator <hirsel-core-contract-eval> --report /tmp/evaluator-laws.json
+    python3 core/tools/std_native.py --backend all --compiler <hirsel-core> --runtime <shipping-core-rt.a> --evaluator <hirsel-core-contract-eval> --filter core.walker_finalizer
+
+The evaluator uses the same source adapter and exact return/output/failure oracle,
+including private same-module laws. Its demand walk includes type finalizers and
+their callees. It runs the form's checked evaluator, including loan modes. A
+backend crash or checking refusal is NOT RUN, never an expected model fault.
+Every capability-taking law has an explicit evaluator NOT APPLICABLE row with
+`native_only: true`, `ran: false`, and `passed: null`. Each backend prints selected,
+ran, passed, not-run, not-applicable, native-only counts and elapsed seconds.
+Evaluator disagreements remain failing findings, routed to core-form-883 for
+evaluation or core-check-895 for checking/assembly. Do not exclude them. The
+existing evaluator-only fault marker and automatic execution on native selections
+are unchanged. Filters that match nothing fail on every backend.

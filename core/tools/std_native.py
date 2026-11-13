@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run core and std source contract oracles through the published native product path.
+"""Run core and std source contract oracles on native engines and the evaluator.
 
 Example: std_native.py --compiler PATH --runtime PATH --filter file --backend both
 Confined filesystem cases run on the host, which needs openat2 (Linux >= 5.6).
@@ -276,25 +276,48 @@ def save_row(rows, row, output):
 
 def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None):
     rows = []
-    if any(c.evaluator_only for c in contracts) and evaluator is None:
-        raise ValueError('evaluator-only laws require --evaluator <hirsel-core-contract-eval>')
+    requested_engines = set(engines)
+    engines = list(engines)
+    if any(c.evaluator_only for c in contracts) and 'evaluator' not in engines:
+        engines.insert(0, 'evaluator')
+    if 'evaluator' in engines and evaluator is None:
+        raise ValueError('evaluator laws require --evaluator <hirsel-core-contract-eval>')
     # Private stores are shared across cases only for immutable checked/native products.
     # Each case's host state is fresh and its executable is removed after observation.
     with tempfile.TemporaryDirectory(prefix='hirsel-std-native-') as temporary:
         work = Path(temporary)
         for engine in engines:
+            started = time.monotonic()
             for index, case in enumerate(contracts):
+                # Preserve the historical automatic evaluator-only runs for native
+                # selections; ordinary laws run here only when explicitly selected.
+                if engine == 'evaluator' and 'evaluator' not in requested_engines and not case.evaluator_only:
+                    continue
+                row = dict(test=case.name, file=str(case.file.relative_to(root)), line=case.line,
+                           engine=engine, profile=None if engine == 'evaluator' else 'release' if engine == 'llvm' else 'dev',
+                           call=case.call, expected=case.expected, ran=False, passed=False, applicable=True,
+                           cause=None, owner=None, native_only=False)
+                if engine == 'evaluator' and host_parameter(case)[0]:
+                    row.update(applicable=False, passed=None, native_only=True,
+                               cause='native-only: entry takes a host capability')
+                    save_row(rows, row, output)
+                    continue
+                if engine != 'evaluator' and case.evaluator_only:
+                    row.update(applicable=False, passed=None, cause=case.evaluator_only)
+                    save_row(rows, row, output)
+                    continue
+                evaluating = engine == 'evaluator'
                 scratch = work / f'{engine}-{index}'
                 scratch.mkdir()
                 host = scratch / 'host'
                 host.mkdir()  # Script: every contract receives one fresh, empty confined Dir.
                 adapted = scratch / case.file.name
                 original = (root / 'core' / case.package / (case.test_of + '.hirsel')).read_text() + '\n' if case.test_of else ''
-                adapted.write_text(original + case.file.read_text() + wrapper(case, evaluator=bool(case.evaluator_only)))
+                adapted.write_text(original + case.file.read_text() + wrapper(case, evaluator=evaluating))
                 inputs = scratch / 'inputs.json'
-                inputs.write_text(json.dumps(manifest(root, case, adapted, native=not case.evaluator_only)))
+                inputs.write_text(json.dumps(manifest(root, case, adapted, native=not evaluating)))
                 entry = f'{case.package}@1/{case.test_of or ("tests/" + case.file.stem)}/native_contract'
-                if case.package == 'core' and not case.evaluator_only:
+                if case.package == 'core' and not evaluating:
                     parameter, argument = host_parameter(case)
                     effect = ' waits' if case.waits else ''
                     module = case.test_of or 'tests.' + case.file.stem
@@ -305,24 +328,18 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                            entry, '--backend', engine,
                            '--runtime', str(runtime), '--store', str(work / 'store'), '--json',
                            '--dir', str(host), '-o', str(binary)]
-                if case.evaluator_only:
-                    row = dict(test=case.name, file=str(case.file.relative_to(root)), line=case.line,
-                               engine=engine, profile=None, call=case.call, expected=case.expected,
-                               ran=False, passed=None, applicable=False, cause=case.evaluator_only, owner=None)
-                    if engine == engines[0]:
-                        evaluated = row | dict(engine='evaluator', applicable=True, passed=False, cause=None)
-                        try:
-                            wait_load()
-                            result = subprocess.run([str(evaluator), str(inputs), command[command.index('--entry') + 1]],
-                                                    capture_output=True, timeout=timeout)
-                            evaluated['ran'], evaluated['cause'] = evaluator_observation(case, result)
-                        except subprocess.TimeoutExpired:
-                            evaluated['ran'] = True
-                            evaluated['cause'] = f'evaluator execution timed out after {timeout}s'
-                        evaluated['passed'] = evaluated['cause'] is None
-                        if evaluated['cause']:
-                            evaluated['owner'] = owner(evaluated['cause'], owners)
-                        save_row(rows, evaluated, output)
+                if evaluating:
+                    try:
+                        wait_load()
+                        result = subprocess.run([str(evaluator), str(inputs), entry],
+                                                capture_output=True, timeout=timeout)
+                        row['ran'], row['cause'] = evaluator_observation(case, result)
+                    except subprocess.TimeoutExpired:
+                        row['ran'] = True
+                        row['cause'] = f'evaluator execution timed out after {timeout}s'
+                    row['passed'] = row['cause'] is None
+                    if row['cause']:
+                        row['owner'] = 'core-form-883' if row['ran'] else 'core-check-895'
                     save_row(rows, row, output)
                     continue
                 if engine == 'llvm':
@@ -343,10 +360,6 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     command.extend(['--cc', str(linker)])
                 wait_load()
                 build = subprocess.run(command, capture_output=True)
-                row = dict(test=case.name, file=str(case.file.relative_to(root)), line=case.line,
-                           engine=engine, profile='release' if engine == 'llvm' else 'dev',
-                           call=case.call, expected=case.expected, ran=False, passed=False, applicable=True,
-                           cause=None, owner=None)
                 try:
                     product = json.loads(build.stdout)
                 except ValueError:
@@ -368,19 +381,18 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 save_row(rows, row, output)
                 if binary.exists():
                     binary.unlink()
-    for engine in [*engines, *(['evaluator'] if any(c.evaluator_only for c in contracts) else [])]:
-        selected = [r for r in rows if r['engine'] == engine]
-        print(f"{engine}: {len(selected)} selected, {sum(r['ran'] for r in selected)} ran, {sum(bool(r['passed']) for r in selected)} passed, {sum(r['applicable'] and not r['ran'] for r in selected)} not run, {sum(not r['applicable'] for r in selected)} not applicable", flush=True)
+            selected = [r for r in rows if r['engine'] == engine]
+            print(f"{engine}: {len(selected)} selected, {sum(r['ran'] for r in selected)} ran, {sum(bool(r['passed']) for r in selected)} passed, {sum(r['applicable'] and not r['ran'] for r in selected)} not run, {sum(not r['applicable'] for r in selected)} not applicable, {sum(r['native_only'] for r in selected)} native-only; {time.monotonic() - started:.3f}s", flush=True)
     return rows
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--compiler', type=Path, required=True)
-    parser.add_argument('--runtime', type=Path, required=True)
+    parser.add_argument('--compiler', type=Path)
+    parser.add_argument('--runtime', type=Path)
     parser.add_argument('--evaluator', type=Path, help='test-only hirsel-core-contract-eval backend')
     parser.add_argument('--root', type=Path, default=ROOT)
-    parser.add_argument('--backend', choices=['both', 'cranelift', 'llvm'], default='both')
+    parser.add_argument('--backend', choices=['all', 'evaluator', 'both', 'cranelift', 'llvm'], default='both')
     parser.add_argument('--filter', action='append', default=[])
     parser.add_argument('--report', type=Path)
     parser.add_argument('--cc', type=Path)
@@ -389,8 +401,10 @@ def main():
     root = args.root.resolve()
     contracts = discover(root, args.filter)
     owners = json.loads(Path(__file__).with_name('std_native_owners.json').read_text())
-    engines = ['cranelift', 'llvm'] if args.backend == 'both' else [args.backend]
-    rows = run(root, args.compiler.resolve(), args.runtime.resolve(), contracts, engines,
+    engines = ['evaluator', 'cranelift', 'llvm'] if args.backend == 'all' else ['cranelift', 'llvm'] if args.backend == 'both' else [args.backend]
+    if args.backend != 'evaluator' and (args.compiler is None or args.runtime is None):
+        parser.error('native backends require --compiler and --runtime')
+    rows = run(root, args.compiler.resolve() if args.compiler else None, args.runtime.resolve() if args.runtime else None, contracts, engines,
                args.report, owners, args.cc.resolve() if args.cc else None, args.timeout, args.evaluator.resolve() if args.evaluator else None)
     return int(any(r['applicable'] and not r['passed'] for r in rows))
 

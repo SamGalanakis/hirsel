@@ -147,8 +147,7 @@ impl FunctionEmitter<'_> {
                     } else {
                         i
                     };
-                    let off = self.calc(format!("mul i64 {i}, {stride}"));
-                    p = self.calc(format!("getelementptr i8, ptr {p}, i64 {off}"));
+                    p = self.calc(format!("getelementptr [{stride} x i8], ptr {p}, i64 {i}"));
                     at = match info.ty {
                         PlaceTy::Declared(t) => self.kind_of(t),
                         _ => At::Other,
@@ -167,8 +166,7 @@ impl FunctionEmitter<'_> {
                         i
                     };
                     let stride = field_size(&self.module.types, self.recipes, &e).0;
-                    let off = self.calc(format!("mul i64 {i}, {stride}"));
-                    p = self.calc(format!("getelementptr i8, ptr {p}, i64 {off}"));
+                    p = self.calc(format!("getelementptr [{stride} x i8], ptr {p}, i64 {i}"));
                     at = self.field_kind(&e);
                 }
                 Step::Field(field) | Step::CaseField { case: _, field } => {

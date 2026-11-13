@@ -500,13 +500,20 @@ types is identical, a built-in pair (`String` and `Text`; `List[T]` and `FixedSp
 when their arms have the same names in the same order and each pair of arm payloads pairs
 by the same rule. While a declaration's
 fields are checked, its own pair is assumed, so recursive twins check. A stable target
-cannot hold counted fields. Each copied `List`, `String` or `Map` gets capacity equal to its
-length. The copy is depth-first: a record's fields in declaration order, a variant's active
+cannot hold counted fields. Each copied `List`, `String`, `Map` or `Heap` gets capacity
+equal to its length, and each copied `Deque` the least power of two not below its length, 0
+when it is empty. The copy is depth-first: a record's fields in declaration order, a variant's active
 payload, a list's elements in index order and a map's entries in insertion order (key, then
 value), and each block is admitted when the walk reaches it, before what it holds. A value
 whose type summary holds a resource, a scoped value or an opaque owner
 ([OWN-2](ownership.md#own-2-type-summaries)) is never cloned and is refused here, at the
-form; plain callables and capabilities copy as plain values. Failure is
+form; plain callables and capabilities copy as plain values. A core type may instead have a
+**clone body**, a core item `clone[P..](x: T[P..]) { .. }` in any core module and refused
+anywhere else: one per type, taking one view of the type, generic in exactly the type's
+parameters with no stronger bounds, and writing no result type; it makes the copy that
+`clone` returns, `Result[T[P..], Capacity]`. It is checked assuming its parameters hold no
+resource, scoped value or opaque owner, which is sound because a clone reaches it only
+after this rule's check has passed at the form. Failure is
 [T1.5](ownership.md#own-26-the-transition-table).
 
 ```hirsel

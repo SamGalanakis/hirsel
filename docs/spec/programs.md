@@ -84,14 +84,20 @@ configuration does for `main` ([CAP-4](capabilities.md#cap-4-entry-grants),
 passes the test; `Error(e)` fails it, `e` cleaned as its run ends whatever `E` is, an `Exit`
 included; a failure fails it; a run stop fails the test it stops and ends no other test's
 run. A test function can be named, called or taken as a value only by another test
-function; otherwise it is an ordinary function of its module (PROG-2), so it may call that
-module's private functions.
+function, and a value so taken may be passed on and called anywhere, as any function value;
+otherwise it is an ordinary function of its module (PROG-2), so it may call that module's
+private functions.
 
 ```hirsel
 @test
 fn adds() -> Result[(), ()] { if 1u64 + 1 == 2 { Ok(()) } else { fail("arithmetic") } }
 @test
 fn greets(out: Stdout) -> Result[(), WriteError] waits { stdout.write(out, "hi\n") }
+fn invoke(f: fn() -> Result[(), ()]) -> Result[(), ()] { f() }
+@test
+fn leaf() -> Result[(), ()] { Ok(()) }
+@test
+fn outer() -> Result[(), ()] { invoke(leaf) }
 ```
 ```hirsel
 @test

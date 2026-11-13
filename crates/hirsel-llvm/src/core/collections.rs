@@ -127,10 +127,7 @@ impl FunctionEmitter<'_> {
         ));
         writeln!(self.code, "collection_free{n}:").unwrap();
         let charge = self.collection_charge(&capacity, entries.logical);
-        self.runtime_void(
-            "hirsel_core_free",
-            &[("ptr".into(), block), ("i64".into(), charge)],
-        );
+        self.free_block(&block, &charge);
         self.line(format!("br label %collection_done{n}"));
         writeln!(self.code, "collection_done{n}:").unwrap();
         Ok(())

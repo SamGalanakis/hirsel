@@ -193,10 +193,7 @@ impl FunctionEmitter<'_> {
                     self.recipes[t.index()].logical_size.unwrap()
                 };
                 let charge = hirsel_core_layout::charge::boxed(logical).unwrap();
-                self.runtime_void(
-                    "hirsel_core_free",
-                    &[ptr(&block), ("i64".into(), charge.to_string())],
-                );
+                self.free_block(&block, &charge.to_string());
                 Some(failed)
             }
             FieldTy::Array(e, n) => {
@@ -251,7 +248,8 @@ impl FunctionEmitter<'_> {
             | FieldTy::Stable(_)
             | FieldTy::Fn
             | FieldTy::Borrow
-            | FieldTy::View(_) => None,
+            | FieldTy::View(_)
+            | FieldTy::Locator(_) => None,
             FieldTy::Handle(hirsel_core_layout::Handle::HostFile) => {
                 let handle = self.calc(format!("load i64, ptr {p}, align 1"));
                 self.runtime_void(

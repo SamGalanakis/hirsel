@@ -1,0 +1,57 @@
+// A returned range survives two source call frames and has no spare capacity.
+// expect: accept
+// expect: run nested() = 980200
+// expect: run empty() = 0
+// expect: run sized_elements() = 110200
+// expect: run unit() = 0
+// expect: run reversed() = fail Bounds
+// expect: run past() = fail Bounds
+// expect: run max_index() = fail Bounds
+fn middle[T](xs:List[T], lo:u64, hi:u64) -> View[List[T]] in xs { list.slice(xs,lo,hi) }
+fn forwarded[T](xs:List[T], lo:u64, hi:u64) -> View[List[T]] in xs { middle(xs,lo,hi) }
+fn nested() -> u64 {
+    let xs = b"abcd"
+    let r = forwarded(xs,1,3)
+    let b:u64 = int.widen(r[0])
+    b*10000 + list.len(r)*100 + list.capacity(r)
+}
+fn empty() -> u64 {
+    let xs = b"abc"
+    let r = forwarded(xs,3,3)
+    list.len(r) + list.capacity(r)
+}
+fn sized_elements() -> u64 {
+    let mut xs:List[u64] = list.new()
+    result.unwrap(list.push(mut xs,7u64))
+    result.unwrap(list.push(mut xs,11u64))
+    result.unwrap(list.push(mut xs,13u64))
+    let r = forwarded(xs,1,3)
+    r[0]*10000 + list.len(r)*100 + list.capacity(r)
+}
+fn unit() -> u64 {
+    let xs:List[()] = list.new()
+    let r = forwarded(xs,0,0)
+    list.len(r)+list.capacity(r)
+}
+fn reversed() -> u64 { let xs=b"abc"; list.len(middle(xs,2,1)) }
+fn past() -> u64 { let xs=b"abc"; list.len(middle(xs,0,4)) }
+fn max_index() -> u64 { let xs=b"abc"; list.len(middle(xs,18446744073709551615u64,18446744073709551615u64)) }
+// expect: run resources() = 711 trace 7,11
+resource type Mark { id:u64 } drop(m) { let _ = m.id }
+fn resources() -> u64 {
+    let mut xs:List[Mark] = list.new()
+    result.unwrap(list.push(mut xs,result.unwrap(Mark(id:7))))
+    result.unwrap(list.push(mut xs,result.unwrap(Mark(id:11))))
+    let r = forwarded(xs,0,2)
+    r[0].id*100 + r[1].id + list.capacity(r)
+}
+// The carrier is stored by value in the returned scoped record, not a frame pointer.
+// expect: run stored() = 990200
+scoped type Cursor { input: View[Bytes] }
+fn cursor(xs: Bytes) -> Cursor in xs { Cursor(input: forwarded(xs,1,3)) }
+fn stored() -> u64 {
+    let xs = b"abcd"
+    let c = cursor(xs)
+    let b:u64 = int.widen(c.input[1])
+    b*10000 + list.len(c.input)*100 + list.capacity(c.input)
+}

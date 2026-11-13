@@ -395,6 +395,12 @@ fn cases(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 #[test]
+fn list_slicing() {
+    let failures = run_case(&root().join("cases/body/list-slice.hirsel"));
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
 fn list_shrink() {
     for case in ["list-pop.hirsel", "list-clear.hirsel"] {
         let failures = run_case(&root().join("cases/body").join(case));

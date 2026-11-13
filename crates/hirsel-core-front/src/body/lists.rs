@@ -659,6 +659,65 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(reserved)
     }
 
+    /// FORM #56: a range is a new non-owning carrier, copied through the result dest.
+    pub(super) fn list_slice(
+        &mut self,
+        item: TyId,
+        header: ValueId,
+        lo: ValueId,
+        hi: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let id = match self.rep(result) {
+            Ok(Rep::Place(id)) => id,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+            _ => {
+                self.gap(n, "List slice result layout is not built");
+                return None;
+            }
+        };
+        let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        let ordered = self.list_compare(CompareOp::Le, lo, hi, n);
+        let contained = self.list_compare(CompareOp::Le, hi, len, n);
+        let valid = self.list_bool(BinaryOp::BitAnd, ordered, contained, n);
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        self.list_branch(valid, yes, no, n);
+        self.start(no);
+        let cleanup = self.fail_to(n);
+        self.end(
+            Terminator::Raise {
+                cause: hirsel_core_ir::RaiseCause::Bounds,
+                cleanup,
+            },
+            Some(n),
+        );
+        self.start(yes);
+        let stride = self.layout_size(item, false, n)?;
+        let (offset, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, lo, stride, n);
+        let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+        let at = self.address(
+            AddressBase::Value(data),
+            &[Step::Byte(offset)],
+            PlaceTy::Value(Ty::Scalar(Scalar::U8)),
+            n,
+        );
+        let data = self.pointer(at, n);
+        let (count, _) = self.list_arith(ArithOp::Sub, ArithMode::Wrapping, hi, lo, n);
+        let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
+        let to = self.new_slot(PlaceTy::Declared(id), n);
+        let value = self.pointer(to, n);
+        self.sequence_word(value, 0, Ty::Ptr, data, n);
+        self.sequence_word(value, 8, Ty::Scalar(Scalar::U64), count, n);
+        self.sequence_word(value, 16, Ty::Scalar(Scalar::U64), zero, n);
+        // The view has no owner and never drops the source elements or storage.
+        Some(value)
+    }
+
     pub(super) fn list_pop(
         &mut self,
         item: TyId,

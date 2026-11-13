@@ -45,6 +45,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<Option<ValueId>> {
         match name {
             "new" => return Some(self.empty_list(result, n)),
+            "slice" => return Some(self.list_slice(item, vals[0]?, vals[1]?, vals[2]?, result, n)),
             "pop" => return Some(self.list_pop(item, vals[0]?, result, n)),
             "clear" => {
                 self.list_clear(item, vals[0]?, n);

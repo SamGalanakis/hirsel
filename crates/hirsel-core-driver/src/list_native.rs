@@ -180,3 +180,52 @@ fn list_shrink_cranelift() {
 fn list_shrink_llvm() {
     list_shrink(Backend::Llvm);
 }
+
+fn list_slicing(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let cases = include_str!("../../../core/front/cases/body/list-slice.hirsel");
+    for (check, exit) in [
+        (
+            "nested()==980200u64 && empty()==0u64 && sized_elements()==110200u64 && unit()==0u64 && resources()==711u64 && stored()==990200u64",
+            0,
+        ),
+        ("reversed()==0u64", 101),
+        ("past()==0u64", 101),
+        ("max_index()==0u64", 101),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let source = format!(
+            "{cases}\npub fn main() -> Result[(), Exit] {{ if {check} {{ Ok(()) }} else {{ Error(Exit(status:1)) }} }}"
+        );
+        let mut request = source_request(&source, dir.path());
+        request.inputs.packages[1] =
+            PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+        let product = Driver::default()
+            .check(request, &mut Meter::new(false))
+            .unwrap();
+        let built = product
+            .build(
+                &DefPath::from_full("app@1/main/main").unwrap(),
+                &native_options(backend, dir.path()),
+            )
+            .unwrap_or_else(|e| panic!("{check}: {e:?}"));
+        let output = Command::new(&built.executable).output().unwrap();
+        assert_eq!(output.status.code(), Some(exit), "{check}: {output:?}");
+        assert!(output.stdout.is_empty(), "{check}: {output:?}");
+        if exit == 101 {
+            assert!(output.stderr.starts_with(b"Bounds"), "{check}: {output:?}");
+        } else {
+            assert!(output.stderr.is_empty(), "{check}: {output:?}");
+        }
+    }
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn list_slicing_cranelift() {
+    list_slicing(Backend::Cranelift);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn list_slicing_llvm() {
+    list_slicing(Backend::Llvm);
+}

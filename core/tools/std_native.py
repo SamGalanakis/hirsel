@@ -10,6 +10,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
+import shutil
 import subprocess
 import tempfile
 import time
@@ -26,17 +28,73 @@ class Contract:
     call: str
     expected: str
     waits: bool
+    stdout: bytes = b""
+    stderr: bytes = b""
+    first_write: int | None = None
+    test_of: str | None = None
 
     @property
     def name(self):
         return self.file.stem + ':' + self.call.split('(')[0]
 
 
+def declared_names(source):
+    # Mask comments/literals, then inspect only module-level declarations.
+    masked = re.sub(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
+                    lambda m: ' ' * len(m[0]), source, flags=re.S)
+    depth = 0
+    names = []
+    tokens = list(re.finditer(r'[A-Za-z_]\w*|[{}]', masked))
+    for i, token in enumerate(tokens):
+        text = token[0]
+        if text == '{':
+            depth += 1
+        elif text == '}':
+            depth -= 1
+        elif depth == 0 and text in ('fn', 'type', 'const') and i + 1 < len(tokens):
+            names.append((text, tokens[i + 1][0]))
+    return names
+
+
+def test_module(root, file, source):
+    first = source.splitlines()[0] if source.splitlines() else ''
+    if not first.startswith('// test-of:'):
+        return None
+    match = re.fullmatch(r'// test-of: std\.([a-z][a-z0-9_]*)', first)
+    if not match:
+        raise ValueError(f'{file}: invalid first-line test-of marker')
+    module = match[1]
+    library = root / 'core/std' / (module + '.hirsel')
+    if not library.is_file():
+        raise ValueError(f'{file}: test-of module does not exist')
+    if not re.search(r'^// test-reason: \S.+', source, re.M):
+        raise ValueError(f'{file}: marked test needs // test-reason: why public API cannot express it')
+    names = declared_names(source)
+    if any(kind != 'fn' for kind, _ in names) or re.search(r'^\s*pub\b', source, re.M):
+        raise ValueError(f'{file}: marked test may add only private test/helper functions')
+    original = {name for _, name in declared_names(library.read_text())}
+    additions = [name for _, name in names]
+    if len(additions) != len(set(additions)) or original.intersection(additions):
+        raise ValueError(f'{file}: test-of declaration name collision')
+    if 'native_contract' in original or 'native_contract' in additions:
+        raise ValueError(f'{file}: reserved adapter name collision')
+    return module
+
+
 def discover(root, filters):
     contracts = []
     for file in sorted((root / 'core/std/tests').glob('*.hirsel')):
         source = file.read_text()
+        test_of = test_module(root, file, source)
+        stdout = stderr = b""
+        first_write = None
         for line, text in enumerate(source.splitlines(), 1):
+            if text.startswith("// expect: stdout "):
+                stdout = json.loads(text.removeprefix("// expect: stdout ")).encode()
+            if text.startswith("// expect: stderr "):
+                stderr = json.loads(text.removeprefix("// expect: stderr ")).encode()
+            if text.startswith("// host: first_write "):
+                first_write = int(text.removeprefix("// host: first_write "))
             match = re.fullmatch(r'\s*// expect: run (.*?) = (.*?)\s*', text)
             if not match:
                 if text.strip().startswith('// expect: run '):
@@ -47,7 +105,9 @@ def discover(root, filters):
             header = re.search(r'\bfn\s+' + re.escape(name) + r'\s*\([^)]*\)([^\{]*)\{', source)
             if header is None:
                 raise ValueError(f'{file}:{line}: no function for {call}')
-            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])))
+            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of)
+            stdout = stderr = b""
+            first_write = None
             if not filters or any(case.name.startswith(f) or str(file.relative_to(root)).startswith(f) for f in filters):
                 contracts.append(case)
     if not contracts:
@@ -57,8 +117,8 @@ def discover(root, filters):
 
 def wrapper(case):
     # The adapter lives in the original module, so private helpers remain private.
-    call = case.call.replace('(dir)', '(native_dir)')
-    parameters = 'native_dir:Dir' if '(dir)' in case.call else ''
+    call = case.call.replace('(dir)', '(native_dir)').replace('(out)', '(native_out)').replace('(err)', '(native_err)')
+    parameters = 'native_dir:Dir' if '(dir)' in case.call else 'native_out:Stdout' if '(out)' in case.call else 'native_err:Stderr' if '(err)' in case.call else ''
     effect = ' waits' if case.waits else ''
     if case.expected.startswith('fail '):
         body = f'let _ = {call}\nOk(())'
@@ -74,7 +134,10 @@ def manifest(root, case, adapted):
         return [{'file': str(p.resolve()), 'modules': [p.stem], 'signatures': signatures}
                 for p in sorted(directory.glob('*.hirsel'))]
     files = sources(root / 'core/std', False)
-    files.append({'file': str(adapted), 'modules': ['tests', case.file.stem], 'signatures': False})
+    if case.test_of:
+        next(f for f in files if f['modules'] == [case.test_of])['file'] = str(adapted)
+    else:
+        files.append({'file': str(adapted), 'modules': ['tests', case.file.stem], 'signatures': False})
     return {'core': core, 'packages': [
         {'package': core, 'sources': sources(root / 'core/core', True), 'dependencies': []},
         {'package': std, 'sources': files, 'dependencies': [core]}]}
@@ -115,9 +178,9 @@ def wait_load():
 def observation(case, result):
     if case.expected.startswith('fail '):
         kind = case.expected.removeprefix('fail ').encode()
-        good = result.returncode == 101 and not result.stdout and re.match(re.escape(kind) + rb'(?:\s|$|:|\()', result.stderr)
+        good = result.returncode == 101 and result.stdout == case.stdout and re.match(re.escape(kind) + rb'(?:\s|$|:|\()', result.stderr)
     else:
-        good = result.returncode == 0 and not result.stdout and not result.stderr
+        good = result.returncode == 0 and result.stdout == case.stdout and result.stderr == case.stderr
     if good:
         return None
     return f'exit {result.returncode}, stdout {result.stdout!r}, stderr {result.stderr!r}; expected {case.expected}'
@@ -136,18 +199,31 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 host = scratch / 'host'
                 host.mkdir()  # Script: every contract receives one fresh, empty confined Dir.
                 adapted = scratch / case.file.name
-                adapted.write_text(case.file.read_text() + wrapper(case))
+                original = (root / 'core/std' / (case.test_of + '.hirsel')).read_text() + '\n' if case.test_of else ''
+                adapted.write_text(original + case.file.read_text() + wrapper(case))
                 inputs = scratch / 'inputs.json'
                 inputs.write_text(json.dumps(manifest(root, case, adapted)))
                 binary = scratch / 'program'
                 command = [str(compiler), 'build', '--inputs', str(inputs), '--entry',
-                           f'std@1/tests/{case.file.stem}/native_contract', '--backend', engine,
+                           f'std@1/{case.test_of or ("tests/" + case.file.stem)}/native_contract', '--backend', engine,
                            '--runtime', str(runtime), '--store', str(work / 'store'), '--json',
                            '--dir', str(host), '-o', str(binary)]
                 if engine == 'llvm':
                     command.append('--release')
-                if cc:
-                    command.extend(['--cc', str(cc)])
+                if '(out)' in case.call:
+                    command.extend(['--grant', 'Stdout'])
+                if '(err)' in case.call:
+                    command.extend(['--grant', 'Stderr'])
+                linker = cc
+                if case.first_write is not None:
+                    linker = scratch / 'scripted-cc'
+                    actual = str(cc or Path(shutil.which('cc')))
+                    source = root / 'core/tools/std_host.c'
+                    include = root / 'crates/hirsel-core-rt/include'
+                    linker.write_text('#!/bin/sh\nexec ' + shlex.quote(actual) + ' \"$@\" ' + shlex.quote(str(source)) + ' -I' + shlex.quote(str(include)) + f' -DFIRST={case.first_write} -Wl,--wrap=hirsel_core_host_op\n')
+                    linker.chmod(0o755)
+                if linker:
+                    command.extend(['--cc', str(linker)])
                 wait_load()
                 build = subprocess.run(command, capture_output=True)
                 row = dict(test=case.name, file=str(case.file.relative_to(root)), line=case.line,

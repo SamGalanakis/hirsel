@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from std_native import Contract, discover, first_stop, observation, owner, wrapper
+from std_native import Contract, discover, first_stop, observation, owner, wrapper, test_module, manifest
 
 
 class Walker(unittest.TestCase):
@@ -33,6 +33,44 @@ class Walker(unittest.TestCase):
         case = Contract(case.file, 1, 'f()', '7', False)
         self.assertIsNotNone(observation(case, subprocess.CompletedProcess([], 1, b'', b'')))
         self.assertIsNotNone(observation(case, subprocess.CompletedProcess([], 0, b'wrong', b'')))
+
+    def test_scripted_partial_write_annotation_and_output_are_exact(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tests = root / 'core/std/tests'
+            tests.mkdir(parents=True)
+            (tests / 'io.hirsel').write_text('// host: first_write 1\n// expect: stdout "éx"\n// expect: run f(out) = true\nfn f(o:Stdout)->bool waits {true}')
+            case = discover(root, ['io'])[0]
+            self.assertEqual(case.first_write, 1)
+            self.assertEqual(case.stdout, 'éx'.encode())
+            self.assertIn('native_out:Stdout', wrapper(case))
+            self.assertIsNone(observation(case, subprocess.CompletedProcess([], 0, 'éx'.encode(), b'')))
+            self.assertIsNotNone(observation(case, subprocess.CompletedProcess([], 0, 'ééx'.encode(), b'')))
+
+    def test_marked_module_is_test_only_and_rejects_collision(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            library = root / 'core/std'
+            tests = library / 'tests'
+            tests.mkdir(parents=True)
+            (root / 'core/core').mkdir()
+            (library / 'pool.hirsel').write_text('const SECRET:u64=7\nfn original()->u64 {SECRET}')
+            source = '// test-of: std.pool\n// test-reason: private state cannot be reached publicly\n// expect: run probe() = 7\nfn probe()->u64 {SECRET}'
+            file = tests / 'private.hirsel'
+            file.write_text(source)
+            case = discover(root, ['private'])[0]
+            self.assertEqual(case.test_of, 'pool')
+            built = manifest(root, case, Path('/tmp/combined.hirsel'))
+            sources = built['packages'][1]['sources']
+            self.assertEqual(sources, [{'file': '/tmp/combined.hirsel', 'modules': ['pool'], 'signatures': False}])
+            with self.assertRaisesRegex(ValueError, 'collision'):
+                test_module(root, file, source.replace('probe', 'original'))
+            with self.assertRaisesRegex(ValueError, 'test-reason'):
+                test_module(root, file, source.replace('// test-reason:', '// note:'))
+            with self.assertRaisesRegex(ValueError, 'only private'):
+                test_module(root, file, source + '\npub fn exported() {}')
+            ordinary = Contract(file, 1, 'probe()', '7', False)
+            self.assertEqual(manifest(root, ordinary, Path('/tmp/test.hirsel'))['packages'][1]['sources'][-1]['modules'], ['tests', 'private'])
 
     def test_unavailable_reachable_body_names_its_first_cause_and_owner(self):
         product = {'reachable': {'first_stops': [{'primary': {'module': 'std@1/x', 'span': {'start': 2, 'end': 4}}, 'rule': 'GAP', 'construct': 'Dest values are not built'}]}}

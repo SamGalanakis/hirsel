@@ -9,6 +9,7 @@ use std::{
     path::Path,
     time::Instant,
 };
+pub(crate) const TEMP_ATTEMPTS: usize = 128;
 
 pub struct OsProvider {
     directories: BTreeMap<u64, OwnedFd>,
@@ -153,13 +154,27 @@ impl OsProvider {
             }
             MKDTEMP => {
                 let fd = self.directories[&request.handle].as_raw_fd();
-                loop {
+                // Caller bytes are a basename prefix, not a parent path. Match
+                // parent()'s Denied outcome for an invalid component. CString
+                // below rejects NUL with the same mapping as other host paths.
+                let prefix = if request.buffer.len == 0 {
+                    &[]
+                } else {
+                    // SAFETY: issue borrows the carrier's existing initialized bytes.
+                    unsafe { std::slice::from_raw_parts(request.buffer.data, request.buffer.len) }
+                };
+                if prefix.contains(&b'/') || prefix == b"." || prefix == b".." {
+                    return Err(io::Error::from_raw_os_error(libc::EACCES));
+                }
+                for _ in 0..TEMP_ATTEMPTS {
                     let sequence = self.temporary;
                     self.temporary = sequence
                         .checked_add(1)
                         .unwrap_or_else(|| crate::process::stop(b"HostNames"));
-                    let name = format!("h{:x}-{:x}", std::process::id(), sequence);
-                    let name_c = CString::new(name.as_bytes()).unwrap();
+                    let suffix = format!("h{:x}-{:x}", std::process::id(), sequence);
+                    let mut name = prefix.to_vec();
+                    name.extend_from_slice(suffix.as_bytes());
+                    let name_c = CString::new(name)?;
                     // SAFETY: new single-component name in the granted directory.
                     let result = unsafe { libc::mkdirat(fd, name_c.as_ptr(), 0o700) };
                     if result < 0 {
@@ -171,7 +186,7 @@ impl OsProvider {
                     }
                     let opened = beneath(
                         fd,
-                        name.as_bytes(),
+                        name_c.as_bytes(),
                         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
                     );
                     let directory = match opened {
@@ -184,20 +199,24 @@ impl OsProvider {
                             return Err(error);
                         }
                     };
-                    // SAFETY: entry checked 32 spare bytes before issue; name <= 27.
+                    // SAFETY: entry checked 32 spare bytes before issue; suffix
+                    // is at most 27 ASCII bytes. Prefix bytes are never rewritten.
                     unsafe {
                         std::ptr::copy_nonoverlapping(
-                            name.as_ptr(),
+                            suffix.as_ptr(),
                             request.buffer.data.add(request.buffer.len),
-                            name.len(),
+                            suffix.len(),
                         );
                     }
-                    request.buffer.len += name.len();
+                    request.buffer.len += suffix.len();
                     let id = self.id();
                     self.directories.insert(id, directory);
                     out.value = id;
-                    break;
+                    return Ok(out);
                 }
+                // Host namespace contention is recoverable. All attempts were
+                // collisions, so no directory or carrier bytes were changed.
+                return Err(io::Error::from_raw_os_error(libc::EAGAIN));
             }
             WALL_MS => {
                 let mut now = libc::timespec {

@@ -171,11 +171,11 @@ fn paths_cannot_escape_grants_and_tree_drop_never_follows_links() {
     assert_eq!(&name[..7], b"prefix:");
     assert!(
         f.root
-            .join(std::str::from_utf8(&name[7..n]).unwrap())
+            .join(std::str::from_utf8(&name[..n]).unwrap())
             .is_dir()
     );
     assert_eq!(
-        f.simple(REMOVE_TREE, f.dir, &name[7..n], 0).error,
+        f.simple(REMOVE_TREE, f.dir, &name[..n], 0).error,
         IoError::OK
     );
 }
@@ -204,6 +204,89 @@ fn clocks_and_argv_are_borrowed_inputs() {
         assert_eq!(std::slice::from_raw_parts((*v).data, (*v).len), bytes);
         assert!(hirsel_core_args_get(f.context, 1, u64::MAX).is_null());
     }
+}
+#[test]
+fn temp_basename_matches_the_completed_carrier_and_invalid_prefixes_do_not_create() {
+    for prefix in [b"t-".as_slice(), b"", b"prefix--"] {
+        let mut f = Fixture::new();
+        let mut name = vec![0xa5; prefix.len() + 32];
+        name[..prefix.len()].copy_from_slice(prefix);
+        let (out, len) = f.call(MKDTEMP, f.dir, b"", 0, &mut name, prefix.len());
+        assert_eq!(out.error, IoError::OK);
+        assert!(len > prefix.len() && len <= name.len());
+        assert_eq!(&name[..prefix.len()], prefix);
+        assert!(name[prefix.len()..len].is_ascii());
+        let basename = std::str::from_utf8(&name[..len]).unwrap();
+        let file = f.simple(OPEN, out.value, b"x", 3);
+        assert_eq!(file.error, IoError::OK);
+        assert_eq!(
+            f.call(WRITE, file.value, b"", 0, &mut [b'1'], 1).0.error,
+            IoError::OK
+        );
+        assert_eq!(f.simple(CLOSE, file.value, b"", 0).error, IoError::OK);
+        assert_eq!(
+            std::fs::read(f.root.join(basename).join("x")).unwrap(),
+            b"1"
+        );
+        assert_eq!(
+            f.simple(REMOVE_TREE, f.dir, &name[..len], 0).error,
+            IoError::OK
+        );
+        assert!(!f.root.join(basename).exists());
+    }
+    for prefix in [b"a/b".as_slice(), b"/", b".", b"..", b"nul\0byte"] {
+        let mut f = Fixture::new();
+        let mut name = vec![0xa5; prefix.len() + 32];
+        name[..prefix.len()].copy_from_slice(prefix);
+        let before = name.clone();
+        let before_entries = std::fs::read_dir(&f.root).unwrap().count();
+        let (out, len) = f.call(MKDTEMP, f.dir, b"", 0, &mut name, prefix.len());
+        assert_eq!(
+            out.error,
+            if prefix.contains(&0) {
+                IoError::from_errno(libc::EIO)
+            } else {
+                IoError::from_errno(libc::EACCES)
+            }
+        );
+        assert_eq!((name, len), (before, prefix.len()));
+        assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), before_entries);
+    }
+}
+#[test]
+fn temp_collisions_retry_inside_issue_and_exhaustion_preserves_the_carrier() {
+    let mut f = Fixture::new();
+    // Host fixture occupies the provider's deterministic first candidate. The
+    // oracle is freshness/preservation, not which suffix the next attempt uses.
+    let occupied = format!("retry-h{:x}-0", std::process::id());
+    std::fs::create_dir(f.root.join(&occupied)).unwrap();
+    let mut name = [0xa5; 40];
+    name[..6].copy_from_slice(b"retry-");
+    let (out, len) = f.call(MKDTEMP, f.dir, b"", 0, &mut name, 6);
+    assert_eq!(out.error, IoError::OK);
+    assert_ne!(&name[..len], occupied.as_bytes());
+    assert!(f.root.join(&occupied).is_dir());
+    assert_eq!(
+        f.simple(REMOVE_TREE, f.dir, &name[..len], 0).error,
+        IoError::OK
+    );
+
+    let mut f = Fixture::new();
+    for sequence in 0..crate::os::TEMP_ATTEMPTS {
+        std::fs::create_dir(
+            f.root
+                .join(format!("retry-h{:x}-{sequence:x}", std::process::id())),
+        )
+        .unwrap();
+    }
+    let mut name = [0xa5; 40];
+    name[..6].copy_from_slice(b"retry-");
+    let before = name;
+    let before_entries = std::fs::read_dir(&f.root).unwrap().count();
+    let (out, len) = f.call(MKDTEMP, f.dir, b"", 0, &mut name, 6);
+    assert_eq!(out.error, IoError::from_errno(libc::EAGAIN));
+    assert_eq!((name, len), (before, 6));
+    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), before_entries);
 }
 unsafe extern "C" fn diagnostic(state: *mut u8, p: *const u8, n: usize) {
     // SAFETY: test config owns a Vec sink and callback borrows exactly n bytes.
@@ -322,7 +405,9 @@ fn mkdtemp_bounds_and_pending_cancellation_happen_before_issue() {
     };
     for cancel in [false, true] {
         let f = Fixture::new();
-        let mut bytes = [0; 31];
+        let mut bytes = [0xa5; 39];
+        bytes[..8].copy_from_slice(b"prefix--");
+        let before = bytes;
         let mut request = Request {
             operation: MKDTEMP,
             mode: 0,
@@ -331,8 +416,8 @@ fn mkdtemp_bounds_and_pending_cancellation_happen_before_issue() {
             path_len: 0,
             buffer: Buffer {
                 data: bytes.as_mut_ptr(),
-                len: 0,
-                capacity: 31,
+                len: 8,
+                capacity: 39,
             },
             site: 88,
         };
@@ -353,6 +438,8 @@ fn mkdtemp_bounds_and_pending_cancellation_happen_before_issue() {
                 }
             );
             hirsel_core_causes_drop(chain);
+            assert_eq!(request.buffer.len, 8);
+            assert_eq!(bytes, before);
         }
     }
 }

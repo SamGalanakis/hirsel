@@ -1,0 +1,44 @@
+// Native provider boundary cases; run with crates/hirsel-core-rt/test-mkdtemp.py.
+fn round_trip(d: Dir, prefix: String, capacity: u64) -> bool waits {
+    let mut name = result.unwrap(string.with_capacity(capacity))
+    result.unwrap(string.push(mut name, prefix))
+    let tmp = result.unwrap(dir.create_temp(d, mut name))
+    result.unwrap(file.write(tmp, "x", string.as_bytes("1")))
+    let valid = string.starts_with(name, prefix) && string.byte_len(name) > string.byte_len(prefix)
+    result.unwrap(dir.remove_all(d, name))
+    valid
+}
+// expect: run prefix_present(dir) = true
+fn prefix_present(d: Dir) -> bool waits { round_trip(d, "t-", 40) }
+// expect: run prefix_empty(dir) = true
+fn prefix_empty(d: Dir) -> bool waits { round_trip(d, "", 32) }
+// Exactly the required 32 suffix bytes remain after the eight prefix bytes.
+// expect: run prefix_exact_room(dir) = true
+fn prefix_exact_room(d: Dir) -> bool waits { round_trip(d, "prefix--", 40) }
+// expect: run prefix_one_byte_short(dir) = fail Bounds
+fn prefix_one_byte_short(d: Dir) -> bool waits { round_trip(d, "prefix--", 39) }
+// Refuse even when treating the slash as a parent path could create something.
+// expect: run prefix_slash(dir) = true
+fn prefix_slash(d: Dir) -> bool waits {
+    result.unwrap(dir.create_dir(d, "p"))
+    let mut name = result.unwrap(string.with_capacity(40))
+    result.unwrap(string.push(mut name, "p/"))
+    let denied = match dir.create_temp(d, mut name) { Error(Denied) => true, _ => false }
+    let untouched = name == "p/"
+    let empty_parent = match host.remove(d, "p") { Ok(()) => true, _ => false }
+    denied && untouched && empty_parent
+}
+// expect: run prefix_parent(dir) = true
+fn prefix_parent(d: Dir) -> bool waits {
+    let mut name = result.unwrap(string.with_capacity(40))
+    result.unwrap(string.push(mut name, ".."))
+    let denied = match dir.create_temp(d, mut name) { Error(Denied) => true, _ => false }
+    denied && name == ".."
+}
+// expect: run prefix_dot(dir) = true
+fn prefix_dot(d: Dir) -> bool waits {
+    let mut name = result.unwrap(string.with_capacity(40))
+    result.unwrap(string.push(mut name, "."))
+    let denied = match dir.create_temp(d, mut name) { Error(Denied) => true, _ => false }
+    denied && name == "."
+}

@@ -437,7 +437,14 @@ fn measure<'r>(
         FieldTy::View(_) if holder != Repr::Scoped => {
             return Err("views and scoped callables live only in scoped types");
         }
-        FieldTy::View(t) => measure(shapes, Repr::Own, t, get)?,
+        // A compact value has no native field form; its view is its locator. So a
+        // template's `View[$i]` is right for every argument by substitution alone.
+        FieldTy::View(t) => match **t {
+            FieldTy::Inline(c) if matches!(shapes[c.index()].repr, Repr::Compact(_)) => {
+                measure(shapes, holder, &FieldTy::Locator, get)?
+            }
+            _ => measure(shapes, Repr::Own, t, get)?,
+        },
         _ if stable => return Err("a stable type's fields are plain or stable (MEM-2)"),
         FieldTy::Box(_)
         | FieldTy::Rc(_)

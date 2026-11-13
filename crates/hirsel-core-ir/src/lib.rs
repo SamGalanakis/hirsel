@@ -154,7 +154,15 @@
 //!   size, alignment and logical size, cleaned by nobody, refused outside scoped
 //!   holders (core.md: scoped values are never stored in own, stable or resource
 //!   fields or collections). A view of a view-typed field is those same bytes
-//!   again. A view of compact data is its locator (Compact data).
+//!   again. A view of compact data is its locator (Compact data), so
+//!   `FieldTy::View(Inline(C))` of a compact `C` is laid out as a `Locator`.
+//! - **Inside a generic template** the rule is the same: a view of `$i` is a row
+//!   `View[$i]` that materialization lays out by substitution alone, as the
+//!   argument's own row with no cleanup (a `Locator` for a compact argument). At
+//!   `T = String`, `View[T]` and `View[List[u8]]` are the 24-byte carrier,
+//!   identical to the concrete row, so a template and concrete code agree on every
+//!   `Option[View[T]]` that crosses between them. No per-instance kind flag is
+//!   needed: a view is never a pointer word.
 //!
 //! # Strings and literals (FORM v1b)
 //!

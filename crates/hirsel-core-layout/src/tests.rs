@@ -664,3 +664,27 @@ fn a_view_field_is_its_types_bytes_and_is_never_cleaned() {
     let own = record("Keep", Repr::Own, vec![field("s", view())]);
     assert!(compute(&[own]).is_err());
 }
+
+/// Bug: a template's `View[$i]` instantiated at a compact type is refused or laid out
+/// as an inline value, though a compact value lives only in a blob and its view is its
+/// locator `{blob, at}` (16 bytes, align 8). `scoped R {v: View[C], n: u8}` with a
+/// compact `C`: v@0, n@16, size 24.
+#[test]
+fn a_view_of_a_compact_type_is_its_locator() {
+    let c = record(
+        "C",
+        Repr::Compact(Width::U32),
+        vec![field("t", FieldTy::Text)],
+    );
+    let r = record(
+        "R",
+        Repr::Scoped,
+        vec![
+            field("v", FieldTy::View(Box::new(FieldTy::Inline(TypeRef(0))))),
+            field("n", u(Scalar::U8)),
+        ],
+    );
+    let out = compute(&[c, r]).unwrap();
+    let f = fixed(&out[1]);
+    assert_eq!((f.size, f.align, &f.offsets[0][..]), (24, 8, &[0, 16][..]));
+}

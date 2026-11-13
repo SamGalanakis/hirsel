@@ -104,3 +104,18 @@ fn bad_comparator_permutation() -> bool {
     }
     mask == 31 && list.len(xs) == 5
 }
+
+// Returning from the slot kernel must restore ordinary mutable List behavior,
+// including reused tail slots and a later allocation move.
+// expect: run ordinary_list_after_sort() = 597
+fn ordinary_list_after_sort() -> u64 {
+    let mut xs = five(5, 4, 3, 2, 1)
+    result.unwrap(list.sort_stable(mut xs, fn(a:u64,b:u64)->Order { compare(a,b) }))
+    let a = option.unwrap(list.pop(mut xs))
+    result.unwrap(list.push(mut xs, 9))
+    let b = option.unwrap(list.pop(mut xs))
+    result.unwrap(list.reserve(mut xs, 10))
+    list.clear(mut xs)
+    result.unwrap(list.push(mut xs, 7))
+    a * 100 + b * 10 + option.unwrap(list.pop(mut xs))
+}

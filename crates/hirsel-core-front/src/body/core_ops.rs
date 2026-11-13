@@ -521,17 +521,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let id = self.runtime_type(item, n)?;
-        // Charge-v1 uses logical size, never the carrier's native stride.
-        if has_param(&self.t, item) {
-            self.gap(
-                n,
-                "generic runtime logical-charge substitution is not built",
-            );
-            return None;
-        }
-        let logical = self.runtime_logical(item, n)?;
+        // Charge-v1 uses logical size, relocated with the generic instance.
+        let size = self.layout_size(item, true, n)?;
         let u = Ty::Scalar(Scalar::U64);
-        let size = self.konst(u, logical, n)?;
         let base = self.konst(u, hirsel_core_layout::charge::CHANNEL_BASE, n)?;
         let requested = self.runtime_charge(cap, size, base, n)?;
         let [sender, receiver, available, ..] =
@@ -574,6 +566,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         base: ValueId,
         n: NodeId,
     ) -> Option<ValueId> {
+        self.runtime_charge_parts(count, size, base, false, n)
+            .map(|p| p.0)
+    }
+
+    fn runtime_charge_parts(
+        &mut self,
+        count: ValueId,
+        size: ValueId,
+        base: ValueId,
+        round: bool,
+        n: NodeId,
+    ) -> Option<(ValueId, ValueId)> {
         let u = Ty::Scalar(Scalar::U64);
         let product = self.value(u);
         let mul_overflow = self.value(Ty::Scalar(Scalar::Bool));
@@ -612,6 +616,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             n,
         );
+        let total = if round {
+            let mask = self.konst(u, !7, n)?;
+            let aligned = self.value(u);
+            self.inst(
+                Inst::Binary {
+                    result: aligned,
+                    op: BinaryOp::BitAnd,
+                    left: total,
+                    right: mask,
+                    fail: None,
+                },
+                n,
+            );
+            aligned
+        } else {
+            total
+        };
         let max = self.konst(u, u64::MAX, n)?;
         let yes = self.new_block(&[]);
         let no = self.new_block(&[]);
@@ -622,36 +643,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(no);
         self.jump(join, &[total], n);
         self.start(join);
-        Some(
+        Some((
             self.b.blocks[join.index()]
                 .params
                 .get(&self.b.pools.values)?[0],
-        )
-    }
-
-    fn runtime_logical(&mut self, ty: TyId, n: NodeId) -> Option<u64> {
-        if has_param(&self.t, ty) {
-            self.gap(
-                n,
-                "generic runtime logical-charge substitution is not built",
-            );
-            return None;
-        }
-        let mark = self.e.module.types.len();
-        let id = self.runtime_type(ty, n)?;
-        let logical = self
-            .e
-            .recipe(id, mark)
-            .and_then(|recipe| recipe.logical_size);
-        let logical = if self.e.is_resource(id) {
-            Some(8)
-        } else {
-            logical
-        };
-        if logical.is_none() {
-            self.gap(n, "runtime logical size is not built");
-        }
-        logical
+            overflow,
+        ))
     }
 
     pub(super) fn runtime_capacity(
@@ -925,17 +922,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<ValueId> {
         // Plain callable values already use typed address inputs and a destination
         // result (callable_abi), exactly the runtime's child-entry convention.
-        let logical = self.runtime_logical(r, n)?;
+        let logical = self.layout_size(r, true, n)?;
         let xrep = self.rep(x).ok()?;
         let rid = self.runtime_type(r, n)?;
         let (xid, input) = self.runtime_place(x, value, n)?;
         let u = Ty::Scalar(Scalar::U64);
         let one = self.konst(u, 1, n)?;
-        let base = self.konst(
+        let overhead = self.konst(
             u,
-            hirsel_core_layout::charge::task(logical, 0).unwrap_or(u64::MAX),
+            hirsel_core_layout::charge::TASK_RECORD + hirsel_core_layout::charge::CAUSE_CELL,
             n,
         )?;
+        let base = self.runtime_charge(logical, one, overhead, n)?;
         let requested = self.runtime_charge(bytes, one, base, n)?;
         let [task, available, ..] = self.runtime_row(
             RtOp::Spawn { x: xid, r: rid },
@@ -975,17 +973,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
-    fn owner_charge(&mut self, ty: TyId, kind: Option<Counted>, n: NodeId) -> Option<u64> {
-        let logical = self.runtime_logical(ty, n)?;
-        let charge = if kind.is_some() {
-            hirsel_core_layout::charge::counted(logical)
-        } else {
-            hirsel_core_layout::charge::boxed(logical)
-        };
-        if charge.is_none() {
-            self.gap(n, "allocation charge overflow flag is not built (FOR FORM)");
-        }
-        charge
+    fn owner_charge(
+        &mut self,
+        ty: TyId,
+        kind: Option<Counted>,
+        n: NodeId,
+    ) -> Option<(ValueId, ValueId)> {
+        let logical = self.layout_size(ty, true, n)?;
+        let u = Ty::Scalar(Scalar::U64);
+        let one = self.konst(u, 1, n)?;
+        // round8(payload + counted header); overflow remains Capacity, not Overflow.
+        let extra = self.konst(u, if kind.is_some() { 15 } else { 7 }, n)?;
+        self.runtime_charge_parts(logical, one, extra, true, n)
     }
 
     fn runtime_new_owner(
@@ -996,23 +995,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let logical_charge = self.owner_charge(item, kind, n)?;
+        let (charge, overflow) = self.owner_charge(item, kind, n)?;
         let rep = self.rep(item).ok()?;
         let id = self.runtime_type(item, n)?;
-        let payload = self.e.size(id);
-        let align = if self.e.is_resource(id) {
-            hirsel_core_layout::POINTER
-        } else {
-            self.e.block(id).1
-        };
-        let header = if kind.is_some() { 8 } else { 0 };
-        let Some(size) = payload.checked_add(header) else {
-            self.gap(n, "owner native storage size exceeds the engine's range");
-            return None;
-        };
+        let payload = self.layout_size(item, false, n)?;
         let u = Ty::Scalar(Scalar::U64);
-        let charge = self.konst(u, logical_charge, n)?;
-        let size = self.konst(u, size, n)?;
+        let size = if kind.is_some() {
+            let one = self.konst(u, 1, n)?;
+            let header = self.konst(u, 8, n)?;
+            // Physical exhaustion is a host stop after logical admission.
+            self.runtime_charge(payload, one, header, n)?
+        } else {
+            payload
+        };
         let node = self.value(Ty::Ptr);
         let available = self.value(u);
         let fail = self.fail_to(n);
@@ -1024,9 +1019,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 kind: kind.map_or(AllocKind::Own, AllocKind::Counted),
                 place: AllocPlace::Current,
                 charge,
-                overflow: None,
+                overflow: Some(overflow),
                 size,
-                align: align.max(if kind.is_some() { 8 } else { 1 }),
+                align: 8,
                 fail,
             },
             n,
@@ -1116,7 +1111,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         // A failed unwrap returns this holder unchanged, without sharing it.
-        let charge = self.owner_charge(item, Some(kind), n)?;
+        let (charge, _) = self.owner_charge(item, Some(kind), n)?;
         let id = self.runtime_type(item, n)?;
         let node = self.runtime_handle(value, n);
         let ok = self.value(Ty::Scalar(Scalar::Bool));
@@ -1137,15 +1132,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 if let Some(payload) = cx.owner_payload(node, id, true, n) {
                     let value = cx.runtime_read(payload, ty, n);
                     cx.runtime_case_payload(to, 0, ty, value, n);
-                    if let Some(charge) = cx.konst(Ty::Scalar(Scalar::U64), charge, n) {
-                        cx.inst(
-                            Inst::Free {
-                                block: node,
-                                charge,
-                            },
-                            n,
-                        );
-                    }
+                    cx.inst(
+                        Inst::Free {
+                            block: node,
+                            charge,
+                        },
+                        n,
+                    );
                 }
             },
             |cx, to, ty| {
@@ -1155,7 +1148,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
 
     fn runtime_unbox(&mut self, item: TyId, value: ValueId, n: NodeId) -> Option<ValueId> {
-        let charge = self.owner_charge(item, None, n)?;
+        let (charge, _) = self.owner_charge(item, None, n)?;
         let rep = self.rep(item).ok()?;
         let id = self.runtime_type(item, n)?;
         let node = self.runtime_handle(value, n);
@@ -1172,7 +1165,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             _ => value,
         };
-        let charge = self.konst(Ty::Scalar(Scalar::U64), charge, n)?;
         self.inst(
             Inst::Free {
                 block: node,

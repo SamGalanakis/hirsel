@@ -421,3 +421,82 @@ fn packed_private_variants_cranelift() { packed_private_variants(Backend::Cranel
 #[test]
 #[ignore = "explicit native integration target"]
 fn packed_private_variants_llvm() { packed_private_variants(Backend::Llvm); }
+fn generic_runtime_operations(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let make = "fn make[T:send](n:u64) -> Result[(Sender[T],Receiver[T]),Capacity] { channel.new(n) }";
+    let launch = "fn launch[X:send,R:send](tasks:Tasks,bytes n:u64,take x:X,f:fn(take X)->R) -> Result[Task[R],(Capacity,X)] { task.spawn(tasks,bytes n,take x,f) }";
+    let vectors = [
+        (format!("{make}\npub fn main()->Result[(),Exit] {{ let c:Result[(Sender[()],Receiver[()]),Capacity]=make(1); let _=result.unwrap(take c); Ok(()) }}"),64,0),
+        // P is logically 9 bytes and physically 16.
+        (format!("{make}\ntype P:send {{a:u8,b:u64}}\npub fn main()->Result[(),Exit] {{ let c:Result[(Sender[P],Receiver[P]),Capacity]=make(2); match take c {{ Ok(_) => Error(Exit(status:1)), Error(e) => if e.requested==82u64 && e.available==81u64 {{ Ok(()) }} else {{ Error(Exit(status:2)) }} }} }}"),81,0),
+        // A resource holder is 8, independent of its 16-byte resource block.
+        (format!("{make}\nresource type R:send {{a:u64,b:u64}}\npub fn main()->Result[(),Exit] {{ let c:Result[(Sender[R],Receiver[R]),Capacity]=make(1); match take c {{ Ok(_) => Error(Exit(status:1)), Error(e) => if e.requested==72u64 && e.available==71u64 {{ Ok(()) }} else {{ Error(Exit(status:2)) }} }} }}"),71,0),
+        (format!("{make}\npub fn main()->Result[(),Exit] {{ let c:Result[(Sender[u64],Receiver[u64]),Capacity]=make(18446744073709551615u64); match take c {{ Ok(_) => Error(Exit(status:1)), Error(e) => if e.requested==18446744073709551615u64 && e.available==1000u64 {{ Ok(()) }} else {{ Error(Exit(status:2)) }} }} }}"),1000,0),
+        ("type P:send {a:u8,b:u64}\nfn transfer[T:send](take x:T)->T waits { let c:Result[(Sender[T],Receiver[T]),Capacity]=channel.new(1); let (tx,rx)=result.unwrap(take c); result.unwrap(channel.send(tx,take x)); result.unwrap(channel.receive(rx)) }\npub fn main()->Result[(),Exit] { let p=transfer(P(a:7u8,b:11u64)); if p.a==7u8 && p.b==11u64 { Ok(()) } else { Error(Exit(status:1)) } }".to_owned(),1000,0),
+        ("resource type R:send {a:u64,b:u64}\nfn transfer[T:send](take x:T)->T waits { let c:Result[(Sender[T],Receiver[T]),Capacity]=channel.new(1); let (tx,rx)=result.unwrap(take c); result.unwrap(channel.send(tx,take x)); result.unwrap(channel.receive(rx)) }\npub fn main()->Result[(),Exit] { let r=result.unwrap(R(a:7u64,b:11u64)); let p=transfer(take r); if p.a==7u64 && p.b==11u64 { Ok(()) } else { Error(Exit(status:1)) } }".to_owned(),1000,0),
+        (format!("{launch}\ntype P:send {{a:u8,b:u64}}\nfn child(take x:u64)->P {{P(a:7u8,b:x)}}\npub fn main(tasks:Tasks)->Result[(),Exit] {{ let c=launch(tasks,bytes 64,41u64,child); match take c {{ Ok(_) => Error(Exit(status:1)), Error((e,x)) => if e.requested==361u64 && e.available==360u64 && x==41u64 {{ Ok(()) }} else {{ Error(Exit(status:2)) }} }} }}"),360,1<<9),
+        (format!("{launch}\ntype P:send {{a:u8,b:u64}}\nfn child(take x:u64)->P {{P(a:7u8,b:x)}}\npub fn main(tasks:Tasks)->Result[(),Exit] {{ let h=result.unwrap(launch(tasks,bytes 64,41u64,child)); let p=result.unwrap(task.join(take h)); if p.a==7u8 && p.b==41u64 {{ Ok(()) }} else {{ Error(Exit(status:1)) }} }}"),1000,1<<9),
+    ];
+    let mut failures=vec![];
+    for (source,room,grants) in vectors {
+        let dir=tempfile::tempdir().unwrap();
+        let mut request=source_request(&source,dir.path());
+        request.inputs.packages[1]=PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
+        let product=Driver::default().check(request,&mut Meter::new(false)).unwrap();
+        let entry=DefPath::from_full("app@1/main/main").unwrap();
+        let mut options=native_options(backend,dir.path());
+        options.root_limit=288+room;
+        options.grant_mask=grants;
+        let built=match product.build(&entry,&options) { Ok(built)=>built, Err(error)=>{failures.push(format!("{source}: {error}"));continue;} };
+        let output=Command::new(built.executable).output().unwrap();
+        if output.status.code()!=Some(0) || !output.stdout.is_empty() || !output.stderr.is_empty() {
+            failures.push(format!("{source}: exit {:?}, stderr {:?}",output.status.code(),String::from_utf8_lossy(&output.stderr)));
+        }
+    }
+    assert!(failures.is_empty(),"{}",failures.join("\n"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn generic_runtime_operations_cranelift() { generic_runtime_operations(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn generic_runtime_operations_llvm() { generic_runtime_operations(Backend::Llvm); }
+
+fn generic_counted_operations(backend: Backend) {
+    let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let boxing="fn boxed[T](take x:T)->Result[Box[T],(Capacity,T)] {box.new(take x)}\nfn unboxed[T](take x:Box[T])->T {box.unbox(take x)}";
+    let mut vectors=vec![
+        (format!("{boxing}\nfn run()->u64 {{unboxed(result.unwrap(boxed(())));7u64}}"),0,7),
+        (format!("{boxing}\nfn run()->u64 {{let s=unboxed(result.unwrap(boxed(\"abc\")));string.byte_len(s)}}"),24,3),
+        (format!("{boxing}\ntype P {{a:u8,b:u32,c:u8}}\nfn run()->u64 {{ let c=boxed(P(a:7u8,b:11u32,c:13u8));match take c {{Ok(_) => 0u64,Error((e,p)) => e.requested*10000u64+e.available*100u64+int.widen(p.a)+int.widen(p.b)+int.widen(p.c)}} }}"),7,80731),
+        (format!("{boxing}\nresource type R:send {{a:u64,b:u64}}\nfn run()->u64 {{ let r=result.unwrap(R(a:7u64,b:11u64));let c=boxed(take r);match take c {{Ok(_) => 0u64,Error((e,take back)) => e.requested*10000u64+e.available*100u64+back.a+back.b}} }}"),55,80718),
+    ];
+    for (module,ty,bounds) in [("rc","Rc","shareable"),("arc","Arc","shareable+send")] {
+        let helpers=format!("fn new_owner[T:{bounds}](take x:T)->Result[{ty}[T],(Capacity,T)] {{{module}.new(take x)}}\nfn share_owner[T:{bounds}](x:{ty}[T])->{ty}[T] {{{module}.share(x)}}\nfn unwrap_owner[T:{bounds}](take x:{ty}[T])->Result[T,{ty}[T]] {{{module}.try_unwrap(take x)}}\nfn end[T:{bounds}](take x:{ty}[T]) {{}}");
+        vectors.push((format!("{helpers}\ntype P:shareable+send {{a:u8,b:u32,c:u8}}\nfn run()->u64 {{ let h=result.unwrap(new_owner(P(a:7u8,b:11u32,c:13u8)));let other=share_owner(h);let h2=match unwrap_owner(take h) {{Ok(_) => return 0u64,Error(take back) => back}};end(take other);let p=result.unwrap(unwrap_owner(take h2));let va:u64=int.widen(p.a);let vb:u64=int.widen(p.b);let vc:u64=int.widen(p.c);va+vb+vc }}"),16,31));
+        vectors.push((format!("{helpers}\ntype P:shareable+send {{a:u8,b:Box[u64]}}\nfn run()->u64 {{ let b=result.unwrap(box.new(41u64));let c=new_owner(P(a:7u8,b:take b));match take c {{Ok(_) => 0u64,Error((e,take back)) => {{let P(a:_,b:take b2)=take back;e.requested*10000u64+e.available*100u64+box.unbox(take b2)}}}} }}"),31,242341));
+    }
+    let mut failures=vec![];
+    for (body,room,expected) in vectors {
+        let source=format!("{body}\npub fn main()->Result[(),Exit] {{if run()=={expected}u64 {{Ok(())}} else {{Error(Exit(status:1))}}}}");
+        let dir=tempfile::tempdir().unwrap();
+        let mut request=source_request(&source,dir.path());
+        request.inputs.packages[1]=PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
+        let product=Driver::default().check(request,&mut Meter::new(false)).unwrap();
+        let entry=DefPath::from_full("app@1/main/main").unwrap();
+        let mut options=native_options(backend,dir.path());
+        options.root_limit=288+room;
+        let built=match product.build(&entry,&options) {Ok(built)=>built,Err(error)=>{failures.push(format!("{source}: {error}"));continue;}};
+        let output=Command::new(built.executable).output().unwrap();
+        if output.status.code()!=Some(0) || !output.stdout.is_empty() || !output.stderr.is_empty() {
+            failures.push(format!("{source}: exit {:?}, stderr {:?}",output.status.code(),String::from_utf8_lossy(&output.stderr)));
+        }
+    }
+    assert!(failures.is_empty(),"{}",failures.join("\n"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn generic_counted_operations_cranelift() {generic_counted_operations(Backend::Cranelift);}
+#[test]
+#[ignore = "explicit native integration target"]
+fn generic_counted_operations_llvm() {generic_counted_operations(Backend::Llvm);}

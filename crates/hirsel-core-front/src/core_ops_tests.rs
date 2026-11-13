@@ -61,7 +61,7 @@ fn channel_rows_preserve_values_charges_and_closed_errors() {
         ),
         // After an earlier gap the runtime adapter must not emit or panic.
         (
-            "fn f[T:send]() { let c: Result[(Sender[T],Receiver[T]),Capacity] = channel.new(1); let _ = take c; task.check_cancel() }",
+            "fn f[T:send]() { let unsupported = int; let c: Result[(Sender[T],Receiver[T]),Capacity] = channel.new(1); let _ = take c; task.check_cancel() }",
             1000,
             eval::Outcome::Returned(vec![]),
         ),
@@ -355,5 +355,43 @@ fn string_views_empty_carriers_and_unique_ids_admit_nothing() {
     wf::module(&emitter.module).unwrap();
     let run = eval::run(&emitter.module, check.function.unwrap(), &[], 0);
     assert_eq!(run.outcome, eval::Outcome::Returned(vec![7]));
+    assert_eq!(run.used, 0);
+}
+
+#[test]
+fn generic_box_resource_moves_use_held_width_and_refund_both_nodes() {
+    let source = r#"resource type R:send {a:u64,b:u64}
+fn boxed[T](take x:T)->Box[T] {result.unwrap(box.new(take x))}
+fn unboxed[T](take x:Box[T])->T {box.unbox(take x)}
+fn f()->u64 {
+    let r=result.unwrap(R(a:7u64,b:11u64))
+    let boxed_r=boxed(take r)
+    let back=unboxed(take boxed_r)
+    back.a+back.b
+}"#;
+    let (index, modules) = canonical(source);
+    let p = Program::declare(&index, &modules);
+    let mut emitter = Emitter::new();
+    let mut entry = None;
+    for (f, fd) in p
+        .fns
+        .iter()
+        .enumerate()
+        .filter(|(_, fd)| fd.path.0.package.name == "app")
+    {
+        let check = p.check_lower(f, &mut emitter);
+        assert!(
+            check.refusals.is_empty() && check.gaps.is_empty(),
+            "{check:?}"
+        );
+        if fd.path.0.name == "f" {
+            entry = check.function;
+        }
+    }
+    emitter.materialize_instances().unwrap();
+    wf::module(&emitter.module).unwrap();
+    // Resource block: 32+16=48. Box owns only its eight-byte holder.
+    let run = eval::run(&emitter.module, entry.unwrap(), &[], 56);
+    assert_eq!(run.outcome, eval::Outcome::Returned(vec![18]));
     assert_eq!(run.used, 0);
 }

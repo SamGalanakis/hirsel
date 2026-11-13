@@ -813,55 +813,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        // The runtime's child always has an address input and destination result.
-        // A plain source callable can take/return scalars instead. Carry its code
-        // pointer beside X and adapt it in a generated child entry, with no charge
-        // or allocation beyond the runtime's whole spawn admission.
-        if has_param(&self.t, x) || has_param(&self.t, r) {
-            self.gap(n, "generic spawn callable adaptation is not built");
-            return None;
-        }
+        // Plain callable values already use typed address inputs and a destination
+        // result (callable_abi), exactly the runtime's child-entry convention.
         let logical = self.runtime_logical(r, n)?;
         let xrep = self.rep(x).ok()?;
-        let rrep = self.rep(r).ok()?;
         let rid = self.runtime_type(r, n)?;
-        let callable = self
-            .t
-            .mk(TyKind::Fn(vec![(Mode::Take, x)], r, true, Callable::Plain));
-        let envelope = self.t.mk(TyKind::Tuple(vec![x, callable]));
-        let eid = self.runtime_type(envelope, n)?;
-        let input = self.new_slot(PlaceTy::Declared(eid), n);
-        if let Some(at) = self.runtime_field(input, &[Step::Field(0)], x, n) {
-            // This staging copy is not an owner. X remains live until spawn
-            // returns normally, then either the child or the Capacity error owns it.
-            match xrep {
-                Rep::Place(id) => {
-                    let from =
-                        self.address(AddressBase::Value(value?), &[], PlaceTy::Declared(id), n);
-                    let size = self.e.size(id);
-                    let bytes = self.konst(Ty::Scalar(Scalar::U64), size, n)?;
-                    self.inst(
-                        Inst::Copy {
-                            to: at,
-                            from,
-                            bytes,
-                        },
-                        n,
-                    );
-                }
-                _ => self.install(at, xrep, value, n),
-            }
-        }
-        self.runtime_store(input, &[Step::Field(1)], Ty::Ptr, function, n);
-        let thunk = self.spawn_thunk(eid, rid, xrep, rrep, n);
-        let entry = self.value(Ty::Ptr);
-        self.inst(
-            Inst::FunctionRef {
-                result: entry,
-                function: thunk,
-            },
-            n,
-        );
+        let (xid, input) = self.runtime_place(x, value, n)?;
         let u = Ty::Scalar(Scalar::U64);
         let one = self.konst(u, 1, n)?;
         let base = self.konst(
@@ -871,8 +828,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         )?;
         let requested = self.runtime_charge(bytes, one, base, n)?;
         let [task, available, ..] = self.runtime_row(
-            RtOp::Spawn { x: eid, r: rid },
-            &[Arg::Value(bytes), Arg::Address(input), Arg::Value(entry)],
+            RtOp::Spawn { x: xid, r: rid },
+            &[Arg::Value(bytes), Arg::Address(input), Arg::Value(function)],
             n,
         )?;
         self.consume(value, n);
@@ -905,154 +862,5 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             },
         )
-    }
-
-    fn spawn_thunk(
-        &mut self,
-        envelope: TypeId,
-        output: TypeId,
-        x: Rep,
-        r: Rep,
-        n: NodeId,
-    ) -> FuncId {
-        let mut path = self.fd.path.clone();
-        path.0.name = format!("{}__spawn_{}", path.0.name, n.0);
-        let mut source = Signature {
-            params: vec![],
-            results: vec![],
-            dest: None,
-            never: false,
-        };
-        if let Some(ty) = x.ty() {
-            source.params.push(match x {
-                Rep::Place(id) => Param::Address(id),
-                _ => Param::Value(ty),
-            });
-        }
-        match r {
-            Rep::Place(id) => source.dest = Some(id),
-            _ => source.results.extend(r.ty()),
-        }
-        let source_sig = self.e.sig(source);
-        let signature = Signature {
-            params: vec![Param::Address(envelope)],
-            results: vec![],
-            dest: Some(output),
-            never: false,
-        };
-        let function = self.e.function(&path, signature);
-        let mut thunk = SpawnThunk::new();
-        let dest = thunk.address(
-            AddressBase::Value(ValueId(0)),
-            &[],
-            PlaceTy::Declared(output),
-        );
-        let env = thunk.address(
-            AddressBase::Value(ValueId(1)),
-            &[],
-            PlaceTy::Declared(envelope),
-        );
-        let code = thunk.address(
-            AddressBase::Address(env),
-            &[Step::Field(1)],
-            PlaceTy::Value(Ty::Ptr),
-        );
-        let code = thunk.read(code, Ty::Ptr);
-        let mut args = Vec::with_capacity(2);
-        if matches!(r, Rep::Place(_)) {
-            args.push(Arg::Address(dest));
-        }
-        if let Some(place) = x.stored() {
-            let input = thunk.address(AddressBase::Address(env), &[Step::Field(0)], place);
-            args.push(match x {
-                Rep::Place(_) => Arg::Address(input),
-                _ => Arg::Value(thunk.read(input, x.ty().unwrap())),
-            });
-        }
-        let value = if matches!(r, Rep::Place(_) | Rep::None) {
-            None
-        } else {
-            r.ty().map(|t| thunk.value(t))
-        };
-        let args = PoolRange::push(&mut thunk.body.pools.args, args);
-        let results = PoolRange::push(&mut thunk.body.pools.values, value);
-        thunk.body.calls.push(CallSite {
-            callee: Callee::Indirect(code),
-            signature: source_sig,
-            args,
-            results,
-            fail: None,
-        });
-        thunk.inst(Inst::Call { call: CallId(0) });
-        if let Some(value) = value {
-            let field = thunk.address(
-                AddressBase::Address(dest),
-                &[Step::Field(0)],
-                r.stored().unwrap(),
-            );
-            thunk.inst(Inst::Store {
-                address: field,
-                value,
-            });
-        }
-        self.e.module.functions[function.index()].body = Some(thunk.finish());
-        function
-    }
-}
-
-/// A generated adapter is one block with no independently owned temporaries. The
-/// called source function takes X at entry and cleans it on every exit, so the
-/// adapter propagates failure directly without an additional drop of its envelope.
-struct SpawnThunk {
-    body: Body,
-}
-impl SpawnThunk {
-    fn new() -> Self {
-        Self {
-            body: Body {
-                values: vec![Ty::Ptr, Ty::Ptr],
-                ..Body::default()
-            },
-        }
-    }
-    fn value(&mut self, ty: Ty) -> ValueId {
-        let value = ValueId(self.body.values.len() as u32);
-        self.body.values.push(ty);
-        value
-    }
-    fn inst(&mut self, inst: Inst) {
-        self.body.insts.push(inst);
-        self.body.inst_anchors.push(None);
-    }
-    fn address(&mut self, base: AddressBase, steps: &[Step], ty: PlaceTy) -> AddressId {
-        let steps = PoolRange::push(&mut self.body.pools.steps, steps.iter().copied());
-        let address = AddressId(self.body.addresses.len() as u32);
-        self.body.addresses.push(AddressInfo { base, steps, ty });
-        self.inst(Inst::Address {
-            address,
-            fail: None,
-        });
-        address
-    }
-    fn read(&mut self, address: AddressId, ty: Ty) -> ValueId {
-        let result = self.value(ty);
-        self.inst(Inst::Read {
-            result,
-            address,
-            mode: ReadMode::Bits,
-        });
-        result
-    }
-    fn finish(mut self) -> Body {
-        let params = PoolRange::push(&mut self.body.pools.values, [ValueId(0), ValueId(1)]);
-        self.body.blocks.push(Block {
-            params,
-            insts: PoolRange::new(0, self.body.insts.len() as u32),
-            anchor: None,
-        });
-        self.body
-            .terminators
-            .push(Terminator::Return(PoolRange::EMPTY));
-        self.body
     }
 }

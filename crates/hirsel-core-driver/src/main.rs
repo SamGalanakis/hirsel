@@ -30,7 +30,7 @@ struct ReachableOutput<'a> {
 fn hex(hash: hirsel_core_ids::ContentHash) -> String {
     hash.0.iter().map(|b| format!("{b:02x}")).collect()
 }
-fn run() -> Result<i32, Box<dyn std::error::Error>> {
+fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let command = args
         .next()
@@ -305,21 +305,17 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     } else {
         i32::from(output.stopped.is_some()) * 2
     };
-    drop(output);
     meter.finish("output/render");
-    drop(reach);
-    drop(product);
-    meter.finish("output/drop returned Arc");
-    drop(driver);
-    meter.finish("output/drop resident products");
     if let Some(path) = metrics {
         std::fs::write(path, serde_json::to_vec_pretty(&meter.result)?)?;
     }
-    Ok(exit)
+    // Publication and output are complete. The OS reclaims these in-memory
+    // graphs at exit; the reusable library Driver retains ordinary destruction.
+    std::process::exit(exit)
 }
 fn main() {
     match run() {
-        Ok(code) => std::process::exit(code),
+        Ok(never) => match never {},
         Err(e) => {
             eprintln!("hirsel-core: {e}");
             std::process::exit(2);

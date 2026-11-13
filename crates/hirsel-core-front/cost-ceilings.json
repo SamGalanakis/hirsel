@@ -1,16 +1,16 @@
 {
   "measurement": "Buck release, CPU 16, jobs 1, instructions:u, fresh private store, complete driver interval including publication and teardown",
-  "basis": "0236fc9e plus linker build-ID identity; measured check/lower 25286.71/13220.37 and whole request 46652.29/32177.71 for M1/std. Finished-checker forecast is separately reported against the 50000 target.",
+  "basis": "2e8792ee plus linked identity and terminal CLI exit: the one-shot CLI does not free resident products before exiting. Paired ordinary-driver results in NON-CHECK.md. Existing lower ceilings are retained when newer sibling work exceeds them; this change does not raise either ceiling.",
   "corpora": {
     "m1": {
       "code_lines": 5963,
       "check_lower_per_line": 25800,
-      "whole_request_per_line": 47600
+      "whole_request_per_line": 46300
     },
     "std": {
       "code_lines": 2572,
       "check_lower_per_line": 13500,
-      "whole_request_per_line": 32900
+      "whole_request_per_line": 31300
     }
   },
   "margin": "2 percent over the last ordinary release observation, rounded up to 100 instructions per code line; lower both ceilings after every saving."

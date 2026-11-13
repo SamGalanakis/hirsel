@@ -318,3 +318,116 @@ fn sum_signed() -> i8 {
     result.unwrap(list.push(mut xs, -1))
     list.sum(xs)
 }
+
+// expect: run contains_cases() = true
+fn contains_cases() -> bool {
+    let xs = five(1, 2, 3, 2, 1)
+    let empty: List[u64] = list.new()
+    list.contains(xs, 2) && !list.contains(xs, 4) && !list.contains(empty, 1)
+}
+
+// Search returns the first equal and exact insertion positions.
+// expect: run search_positions() = 1305
+fn search_positions() -> u64 {
+    let xs = five(1, 2, 2, 4, 5)
+    let a = result.unwrap(list.binary_search(xs, 2))
+    let b = match list.binary_search(xs, 3) { Error(i) => i, _ => 99 }
+    let c = match list.binary_search(xs, 0) { Error(i) => i, _ => 99 }
+    let d = match list.binary_search(xs, 6) { Error(i) => i, _ => 99 }
+    a * 1000 + b * 100 + c * 10 + d
+}
+
+// [1,1,2,2,1] -> [1,2,1], not globally unique and not reordered.
+// expect: run dedup_runs() = 121
+fn dedup_runs() -> u64 {
+    let mut xs = five(1, 1, 2, 2, 1)
+    list.dedup(mut xs)
+    digits(xs)
+}
+
+// expect: run dedup_empty_singleton() = 7
+fn dedup_empty_singleton() -> u64 {
+    let mut xs: List[u64] = list.new()
+    list.dedup(mut xs)
+    result.unwrap(list.push(mut xs, 7))
+    list.dedup(mut xs)
+    digits(xs)
+}
+
+// expect: run extend_copies() = 12345
+fn extend_copies() -> u64 {
+    let mut xs: List[u64] = list.new()
+    let ys = five(1, 2, 3, 4, 5)
+    result.unwrap(list.extend(mut xs, ys))
+    if digits(ys) != 12345 { return 99 }
+    digits(xs)
+}
+
+// expect: run extend_capacity() = 0
+fn extend_capacity() -> u64 {
+    let mut xs: List[u64] = list.new()
+    let ys = five(6, 7, 8, 9, 0)
+    let r = bound bytes 0 { list.extend(mut xs, ys) }
+    match r { Ok(Error(_)) => list.len(xs), _ => 99 }
+}
+
+fn by_tens(a: u64, b: u64) -> Order { order.compare(a / 10, b / 10) }
+
+// Original equal-key groups: 2 -> [21,22,23], 1 -> [11,12].
+// Taking the right run on Equal changes [11,12,21,22,23].
+// expect: run stable_equal_keys() = true
+fn stable_equal_keys() -> bool {
+    let mut xs = five(21, 11, 22, 12, 23)
+    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { order.compare(a / 10, b / 10) }))
+    xs[0] == 11 && xs[1] == 12 && xs[2] == 21 && xs[3] == 22 && xs[4] == 23
+}
+
+// expect: run stable_empty_singleton() = 7
+fn stable_empty_singleton() -> u64 {
+    let mut xs: List[u64] = list.new()
+    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { order.compare(a / 10, b / 10) }))
+    result.unwrap(list.push(mut xs, 7))
+    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { order.compare(a / 10, b / 10) }))
+    digits(xs)
+}
+
+// expect: run stable_capacity_unchanged() = 54321
+fn stable_capacity_unchanged() -> u64 {
+    let mut xs = five(5, 4, 3, 2, 1)
+    let r = bound bytes 0 { list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { order.compare(a, b) }) }
+    match r { Ok(Error(_)) => digits(xs), _ => 99 }
+}
+
+// Four accumulators and all tail lengths. 0 + 1 + ... + 6 = 21.
+// expect: run sum_bytes_tails() = 21
+fn sum_bytes_tails() -> u64 {
+    let mut xs: Bytes = list.new()
+    for i in 0u8 .. 7 { result.unwrap(list.push(mut xs, i)) }
+    list.sum_bytes(list.slice(xs, 0, 4)) + list.sum_bytes(list.slice(xs, 4, 7))
+}
+
+// Owned elements remain a permutation and ties keep their original order.
+// expect: run stable_owned_strings() = true
+fn stable_owned_strings() -> bool {
+    let mut xs: List[String] = list.new()
+    result.unwrap(list.push(mut xs, result.unwrap(string.from("bb"))))
+    result.unwrap(list.push(mut xs, result.unwrap(string.from("a"))))
+    result.unwrap(list.push(mut xs, result.unwrap(string.from("cc"))))
+    result.unwrap(list.sort_stable(mut xs, fn(a: String, b: String) -> Order {
+        order.compare(list.len(string.as_bytes(a)), list.len(string.as_bytes(b)))
+    }))
+    xs[0] == "a" && xs[1] == "bb" && xs[2] == "cc"
+}
+
+// All four accumulator tails, including empty input.
+// expect: run sum_bytes_tail_lengths() = true
+fn sum_bytes_tail_lengths() -> bool {
+    let mut xs: Bytes = list.new()
+    result.unwrap(list.fill(mut xs, 7, 255))
+    let mut n: u64 = 0
+    while n <= 7 {
+        if list.sum_bytes(list.slice(xs, 0, n)) != 255 * n { return false }
+        n += 1
+    }
+    true
+}

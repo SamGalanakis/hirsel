@@ -146,12 +146,31 @@ pub fn sort[T](mut xs: List[T], before: scoped fn(T, T) -> Order) {
 /// overflow below 2^56 bytes. Alloc: nothing. Cost: O(len).
 /// Ex: `let s = list.sum_bytes(string.as_bytes(out))`
 pub fn sum_bytes(b: Bytes) -> u64 {
-    let mut total: u64 = 0
-    for x in b {
-        let v: u64 = int.widen(x)
-        total += v
+    let n = list.len(b)
+    if n < 72057594037927936 {
+        let mut a: u64 = 0
+        let mut c: u64 = 0
+        let mut d: u64 = 0
+        let mut e: u64 = 0
+        let mut i: u64 = 0
+        while n - i >= 4 {
+            a = int.wrapping_add(a, int.widen(b[i]))
+            c = int.wrapping_add(c, int.widen(b[i + 1]))
+            d = int.wrapping_add(d, int.widen(b[i + 2]))
+            e = int.wrapping_add(e, int.widen(b[i + 3]))
+            i += 4
+        }
+        let mut total = int.wrapping_add(int.wrapping_add(a, c), int.wrapping_add(d, e))
+        while i < n {
+            total = int.wrapping_add(total, int.widen(b[i]))
+            i += 1
+        }
+        total
+    } else {
+        let mut total: u64 = 0
+        for x in b { total += int.widen(x) }
+        total
     }
-    total
 }
 
 // Private helpers. Moving elements uses only `list.pop`, `list.set` and `list.push`:
@@ -271,4 +290,95 @@ fn sift_down[T](mut xs: List[T], base: u64, root: u64, n: u64, before: scoped fn
         swap(mut xs, base + r, base + child)
         r = child
     }
+}
+
+/// Whether x occurs, using structural equality. Alloc: nothing. Cost: O(len).
+pub fn contains[T: key](xs: List[T], x: T) -> bool {
+    for y in xs { if y == x { return true } }
+    false
+}
+
+/// First equal index, or Error(insertion index), in an ascending sorted list.
+/// Alloc: nothing. Cost: O(log len) comparisons. Ex: `list.binary_search(ids, id)`
+pub fn binary_search[T: ordered](xs: List[T], x: T) -> Result[u64, u64] {
+    let mut lo: u64 = 0
+    let mut hi = list.len(xs)
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        if xs[mid] < x { lo = mid + 1 } else { hi = mid }
+    }
+    if lo < list.len(xs) && !(x < xs[lo]) { Ok(lo) } else { Error(lo) }
+}
+
+/// Keeps the first of each consecutive run of equal elements, preserving order.
+/// Alloc: nothing. Cost: O(len) comparisons and moves; removed values are cleaned.
+pub fn dedup[T: key](mut xs: List[T]) {
+    let n = list.len(xs)
+    if n < 2 { return }
+    let mut write: u64 = 1
+    let mut read: u64 = 1
+    while read < n {
+        if !(xs[read] == xs[write - 1]) {
+            swap(mut xs, read, write)
+            write += 1
+        }
+        read += 1
+    }
+    truncate(mut xs, write)
+}
+
+/// Appends copies of ys. Fails: Capacity leaves xs unchanged.
+/// Alloc: one list GROWTH. Cost: O(len ys), plus growth copies.
+pub fn extend[T: plain](mut xs: List[T], ys: List[T]) -> Result[(), Capacity] {
+    list.append(mut xs, ys)
+}
+
+/// Stable ascending-by-comparator merge sort: equal elements retain their order.
+/// Fails: Capacity leaves xs unchanged. A comparator failure leaves xs unchanged too.
+/// Alloc: two u64 index lists, 16 bytes per element before GROWTH rounding.
+/// Cost: O(n log n) comparisons and O(n) element swaps. The comparator is scoped
+/// and never stored. Indirect sorting keeps every owned element in xs throughout.
+pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Result[(), Capacity] {
+    let n = list.len(xs)
+    if n < 2 { return Ok(()) }
+    let mut indices: List[u64] = list.with_capacity(n)?
+    let mut scratch: List[u64] = list.with_capacity(n)?
+    for i in 0u64 .. n {
+        let _ = list.push(mut indices, i)
+        let _ = list.push(mut scratch, 0)
+    }
+    let mut width: u64 = 1
+    while width < n {
+        let mut lo: u64 = 0
+        while lo < n {
+            let mid = lo + order.min(width, n - lo)
+            let end = mid + order.min(width, n - mid)
+            let mut a = lo
+            let mut b = mid
+            let mut out = lo
+            while out < end {
+                let right = if b == end { false } else if a == mid { true } else {
+                    match before(xs[indices[b]], xs[indices[a]]) { Less => true, _ => false }
+                }
+                let selected = if right { let k = indices[b]; b += 1; k } else { let k = indices[a]; a += 1; k }
+                let _ = list.set(mut scratch, out, selected)
+                out += 1
+            }
+            lo = end
+        }
+        let old = replace(mut indices, take scratch)
+        scratch = take old
+        if width > n / 2 { break }
+        width *= 2
+    }
+    // Convert output->input permutation to input->output in the spare index list.
+    for i in 0u64 .. n { let _ = list.set(mut scratch, indices[i], i) }
+    for i in 0u64 .. n {
+        while scratch[i] != i {
+            let to = scratch[i]
+            swap(mut xs, i, to)
+            swap(mut scratch, i, to)
+        }
+    }
+    Ok(())
 }

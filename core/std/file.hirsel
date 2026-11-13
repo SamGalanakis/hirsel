@@ -120,7 +120,8 @@ pub fn remove(d: Dir, p: String) -> Result[(), IoError] waits {
 // error) and then cleans the file field, whose finalizer closes the handle. Making a Lock
 // admits 32 bytes for its cause cell (budgets.md, "resource value"); try_lock makes it
 // before asking the host, so a refused admission leaves the host untouched. A refused
-// resource literal drops its fields (T1.2), so on Capacity the file is closed, not returned.
+// resource literal hands its one field back (`Result[Lock, (Capacity, HostFile)]`), so on
+// Capacity the file comes back open and unlocked.
 pub opaque resource type Lock: send {
     f: HostFile
 } drop(l) {
@@ -128,19 +129,19 @@ pub opaque resource type Lock: send {
 }
 
 /// Held(f): another handle holds the lock; f comes back unlocked. Io(e, f): the host
-/// refused for another reason; f comes back unlocked. Capacity(c): the Lock's cause cell
-/// was refused before the host was asked, and f was closed with the refused literal.
-pub type LockError = Held(HostFile) | Io(IoError, HostFile) | Capacity(Capacity)
+/// refused for another reason; f comes back unlocked. Capacity(c, f): the Lock's cause cell
+/// was refused before the host was asked; f comes back untouched.
+pub type LockError = Held(HostFile) | Io(IoError, HostFile) | Capacity(Capacity, HostFile)
 
 /// Takes the lock on f without blocking. `host.try_lock`.
 /// Fails: Error(Held(f)) or Error(Io(e, f)), f unlocked and the Lock's cell refunded;
-/// Error(Capacity(c)), f closed. Alloc: 32, current limit. Prefix: on failure the lock is
+/// Error(Capacity(c, f)), f untouched and the host not asked. Alloc: 32, current limit. Prefix: on failure the lock is
 /// not held. Cost: one host call.
 /// Ex: `let l = match std.file.try_lock(take lf) { Ok(take l) => l, Error(Held(take lf)) => .. }`
 pub fn try_lock(take f: HostFile) -> Result[Lock, LockError] waits {
     let mut l = match Lock(f: take f) {
         Ok(take made) => take made,
-        Error(c) => return Error(Capacity(c)),
+        Error((c, take back)) => return Error(Capacity(c, take back)),
     }
     match host.try_lock(mut l.f) {
         Ok(true) => Ok(take l),

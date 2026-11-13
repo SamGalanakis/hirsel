@@ -165,7 +165,7 @@ fn lock_held_then_free(d: Dir) -> bool waits {
         Ok(_) => return false,
         Error(Held(f)) => f,
         Error(Io(_, _)) => return false,
-        Error(Capacity(_)) => return false,
+        Error(Capacity(_, _)) => return false,
     }
     let back = match std.file.unlock(take held) {
         Ok(f) => f,

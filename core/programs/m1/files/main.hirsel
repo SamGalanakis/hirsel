@@ -78,7 +78,7 @@ fn copy_files(d: Dir, variant: String, tx: Sender[Event]) -> Result[(), m1.suppo
     let lf = io(std.file.open(d, "lock.txt", Append), "Lock@acquire")?
     let locked = match std.file.try_lock(take lf) {
         Ok(take l) => l,
-        Error(Capacity(c)) => return m1.support.mem(Error(c)),
+        Error(Capacity(c, _)) => return m1.support.mem(Error(c)),
         Error(_) => return Error(m1.support.error("Lock@acquire"))
     }
     let lock_owner = acquired(None, Some(take locked), "lock", variant, tx)?

@@ -1159,3 +1159,13 @@ fn constructor_temporaries_cranelift() { constructor_temporaries(Backend::Cranel
 #[test]
 #[ignore = "explicit native integration target"]
 fn constructor_temporaries_llvm() { constructor_temporaries(Backend::Llvm); }
+
+fn packed_writer_reservation(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/body/packed-writer-reservation.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn packed_writer_reservation_cranelift() { packed_writer_reservation(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn packed_writer_reservation_llvm() { packed_writer_reservation(Backend::Llvm); }

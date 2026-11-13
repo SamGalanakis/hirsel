@@ -1,0 +1,51 @@
+// MEM-4: W16 Packet takes one bool byte plus two count bytes plus three UTF8
+// bytes. Exact six-byte admission succeeds; every earlier reservation boundary
+// returns BuildError.Overflow. Empty text needs three bytes; a failed write poisons
+// the builder even if its Result is ignored and a later empty write would fit.
+// expect: run packet(0) = 91
+// expect: run packet(1) = 91
+// expect: run packet(2) = 91
+// expect: run packet(3) = 91
+// expect: run packet(5) = 91
+// expect: run packet(6) = 31
+// expect: run packet(7) = 31
+// expect: run empty(2) = 91
+// expect: run empty(3) = 1
+// expect: run poisoned(9) = 91
+// expect: run poisoned(10) = 2
+@compact(u16) stable type Packet { flag: bool, text: Text }
+fn packet(n: u64) -> u64 {
+    region r {
+        match build_stream_in(r, bytes n, fn(take w: Writer[Packet, in r]) -> Result[Child[Packet], BuildError] {
+            emit(take w, Packet(flag: true, text: "abc"))
+        }) {
+            Ok(take b) => { let p = finish(take b); text.len(p.text) * 10 + if p.flag { 1 } else { 0 } },
+            Error(Overflow) => 91,
+            Error(_) => 92,
+        }
+    }
+}
+fn empty(n: u64) -> u64 {
+    region r {
+        match build_stream_in(r, bytes n, fn(take w: Writer[Packet, in r]) -> Result[Child[Packet], BuildError] {
+            emit(take w, Packet(flag: true, text: ""))
+        }) {
+            Ok(take b) => { let p = finish(take b); text.len(p.text) + if p.flag { 1 } else { 0 } },
+            Error(Overflow) => 91,
+            Error(_) => 92,
+        }
+    }
+}
+fn poisoned(n: u64) -> u64 {
+    region r {
+        match build_stream_in(r, bytes n, fn(take w: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+            let _ = writer.push(mut w, "ab")
+            let _ = writer.push(mut w, "")
+            writer.close(take w)
+        }) {
+            Ok(take b) => text.len(finish(take b)),
+            Error(Overflow) => 91,
+            Error(_) => 92,
+        }
+    }
+}

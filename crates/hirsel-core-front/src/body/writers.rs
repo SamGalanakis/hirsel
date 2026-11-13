@@ -18,7 +18,7 @@
 //! not fit returns `Error(Overflow)` and leaves the state as it was. Its `Child[U]` is
 //! `{id, at}`.
 use super::*;
-use hirsel_core_ir::{RaiseCause, RtOp};
+use hirsel_core_ir::{ArithMode, ArithOp, RaiseCause, RtOp};
 
 const HEAD: u64 = 16;
 
@@ -133,12 +133,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(go);
         let used = self.state_word(state, 8, u64t, n)?;
         let end = self.state_word(state, 16, u64t, n)?;
-        let room = self.word_op(BinaryOp::Sub, end, used, n);
-        let big = self.test(CompareOp::Gt, k, room, n);
+        // `used <= end` is maintained by every reservation. Test the new
+        // cursor directly, sharing the sum with the store on the success edge.
+        // The flag is observed here as BuildError.Overflow, never raised.
+        let (next, overflow) = self.list_arith(ArithOp::Add, ArithMode::Checked, used, k, n);
+        let no_overflow = self.emit_unary(UnaryOp::Not, BOOL, overflow, n)?;
+        let within = self.test(CompareOp::Le, next, end, n);
+        let valid = self.value(Ty::Scalar(Scalar::Bool));
+        self.inst(
+            Inst::Binary {
+                result: valid,
+                op: BinaryOp::BitAnd,
+                left: no_overflow,
+                right: within,
+                fail: None,
+            },
+            n,
+        );
         let fits = self.new_block(&[]);
-        self.branch(big, over, fits, n);
+        self.branch(valid, fits, over, n);
         self.start(fits);
-        let next = self.add(used, k, n);
         self.put_word(AddressBase::Value(state), &[], 8, next, n)?;
         Some(used)
     }

@@ -2878,3 +2878,9 @@ fn map_clone_cases() {
     let failures = run_case(&root().join("cases/body/map-clone.hirsel"));
     assert!(failures.is_empty(), "{failures:?}");
 }
+
+#[test]
+fn packed_writer_reservation_boundaries() {
+    let failures = run_case(&root().join("cases/body/packed-writer-reservation.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+}

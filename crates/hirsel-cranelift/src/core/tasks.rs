@@ -1,5 +1,5 @@
-//! Closed task/channel rows bind the runtime's C layout descriptors by value.
-//! Bodies and drop callbacks already use the frozen context/destination ABI.
+//! Closed runtime rows bind the published task and provider C ABI. Provider
+//! carriers stay run-owned; only waiting host operations observe failure status.
 use super::function::Function;
 use super::*;
 use cranelift_codegen::ir::{MemFlagsData, Value};
@@ -55,7 +55,7 @@ impl Function<'_, '_, '_> {
                 Arg::Address(a) => self.addr(a),
             };
         }
-        let mut outputs = [Value::from_u32(0); 3];
+        let mut outputs = [Value::from_u32(0); 4];
         let site = self.b.ins().iconst(types::I64, 0);
         let n = match op {
             RtOp::DestId => {
@@ -71,10 +71,57 @@ impl Function<'_, '_, '_> {
                 )?[0];
                 1
             }
-            // The run time's carrier-returning `args_get` and its `host_op` entry
-            // (FORM decision 50) are not built yet.
-            RtOp::ArgsGet | RtOp::Host(_) => {
-                return Err(unsupported(format!("provider row {op:?}")));
+            RtOp::ArgsGet => {
+                outputs[0] = self.c_call(
+                    "hirsel_core_args_get",
+                    &[P, U, U],
+                    &[P],
+                    &[self.context, args[0], args[1]],
+                )?[0];
+                1
+            }
+            RtOp::Host(op) => {
+                let code = self.b.ins().iconst(types::I8, i64::from(op.code()));
+                let null = self.b.ins().iconst(types::I64, 0);
+                let no_mode = self.b.ins().iconst(types::I8, 0);
+                let (operand, mode) = match op {
+                    HostOp::Open => (args[1], args[2]),
+                    HostOp::Read
+                    | HostOp::Write
+                    | HostOp::Mkdir
+                    | HostOp::Mkdtemp
+                    | HostOp::Remove
+                    | HostOp::RemoveTree
+                    | HostOp::Stdout
+                    | HostOp::Stderr => (args[1], no_mode),
+                    HostOp::Close
+                    | HostOp::TryLock
+                    | HostOp::Unlock
+                    | HostOp::WallMs
+                    | HostOp::MonoNs => (null, no_mode),
+                };
+                // The C outcome is always 32 bytes: value at 0, error.tag at 8,
+                // error.code at 12, written at 16, status at 24. Even clocks
+                // return that C struct; their FORM row exposes only value and
+                // has no failure status. Reuse the ordinary scalar-struct ABI.
+                let values = self.c_call(
+                    "hirsel_core_host_op",
+                    &[P, K, U, P, K, U],
+                    &[U, K, Ty::Scalar(Scalar::U32), U, K],
+                    &[self.context, code, args[0], operand, mode, site],
+                )?;
+                if op.waits() {
+                    self.call_failure(values[4], call.fail)?;
+                }
+                let n = if matches!(op, HostOp::WallMs | HostOp::MonoNs) {
+                    1
+                } else {
+                    4
+                };
+                for i in 0..n {
+                    outputs[i] = values[i];
+                }
+                n
             }
             RtOp::CompareBytes => {
                 outputs[0] = self.c_call(

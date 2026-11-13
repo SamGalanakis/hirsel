@@ -1,0 +1,49 @@
+// Module `arena`: explicit region construction, with no ambient region or hidden sizing
+// pass. Goose's receiving destination and Rust's Vec::with_capacity supply the shape;
+// MEM-4 adds recoverable admission and preserves every admitted region prefix.
+
+/// Streams a batch whose element is streamable, using at most n bytes. Unlike a bare
+/// type parameter, SeqSpan[T] is a stable root under MEM-4. The producer runs once;
+/// finish_trim publishes and refunds the unused rounded tail without moving bytes.
+/// Fails: Error(BuildError), no batch published. Prefix: the full reservation stays in r
+/// on error; success retains round8(used). Alloc: round8(n) in r. Cost: f plus publication.
+/// Ex: `std.arena.batch(r, 1024, fn(take w: Writer[SeqSpan[u64], in r]) -> Result[Child[SeqSpan[u64]], BuildError] { writer.close(take w) })`
+pub fn batch[T: streamable](r: Region, n: u64, f: scoped fn(take Writer[SeqSpan[T], in r]) -> Result[Child[SeqSpan[T]], BuildError]) -> Result[SeqSpan[T] in r, BuildError] {
+    let b = build_stream_in(r, bytes n, f)?
+    Ok(finish_trim(take b))
+}
+
+// Sized documents use core's build_in + finish at the caller's concrete compact type;
+// a generic T cannot be a compact or streaming root (MEM-4, OWN-23).
+
+/// Copies a known-size plain sequence into one span allocation. No growth or abandoned
+/// backing blocks. Fails: Error(Capacity), no span published. Prefix: the reservation,
+/// if admitted, stays in r. Alloc: round8(8 + len(xs) * size(T)); none for an empty list.
+/// Cost: O(len(xs)). Ex: `std.arena.copy_span(r, numbers)?`
+pub fn copy_span[T: plain](r: Region, xs: List[T]) -> Result[FixedSpan[T] in r, Capacity] {
+    if list.len(xs) == 0 {
+        let empty: SpanBuilder[T, in r] = span.builder(r)
+        return Ok(span.finish(take empty))
+    }
+    let mut b: SpanBuilder[T, in r] = span.with_capacity(r, list.len(xs))?
+    for x in xs {
+        let _ = span.push(mut b, x)
+    }
+    Ok(span.finish(take b))
+}
+
+/// Collects a sequence without knowing its length. next_item is called once per item
+/// and once for None; growth may abandon earlier blocks, which stay charged in r.
+/// Fails: Error((Capacity, refused item)); earlier items stay in the unpublished prefix,
+/// and next_item is not called again. Alloc: span-builder GROWTH. Cost: O(items).
+/// Ex: `std.arena.collect_span(r, fn() -> Option[u64] { .. })`
+pub fn collect_span[T: plain](r: Region, next_item: scoped fn() -> Option[T]) -> Result[FixedSpan[T] in r, (Capacity, T)] {
+    let mut b: SpanBuilder[T, in r] = span.builder(r)
+    loop {
+        match next_item() {
+            Some(x) => { span.push(mut b, x)? }
+            None => break,
+        }
+    }
+    Ok(span.finish(take b))
+}

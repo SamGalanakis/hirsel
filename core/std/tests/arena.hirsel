@@ -1,0 +1,202 @@
+@compact(u32)
+stable type Note { id: u64, body: Text }
+
+// Sized encoding is 8 + 4 + 2 = 14 bytes; physical admission rounds to 16.
+// expect: run sized_document() = true
+fn sized_document() -> bool {
+    region r {
+        let b = result.unwrap(build_in(r, bytes 14, fn(mut d: Dest[Note]) -> Result[Child[Note], BuildError] {
+            dest.put(mut d, Note(id: 7, body: "hi"))
+        }))
+        let n: Note in r = finish(take b)
+        n.id == 7 && text.as_string(n.body) == "hi"
+    }
+}
+
+// An unknown-length producer runs once and writes directly, with no sizing replay.
+// expect: run streaming_runs_once() = 312
+fn streaming_runs_once() -> u64 {
+    region r {
+        let mut calls: u64 = 0
+        let b = result.unwrap(build_stream_in(r, bytes 64, fn(take w: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+            calls += 1
+            writer.push(mut w, "é")?
+            writer.scalar(mut w, '!')?
+            writer.close(take w)
+        }))
+        let t: Text in r = finish_trim(take b)
+        text.len(t) * 100 + calls * 10 + if text.as_string(t) == "é!" { 2 } else { 0 }
+    }
+}
+
+// Both paths yield [3,5,8]. Unknown-size generation calls next exactly four times.
+// expect: run sized_and_unknown_spans() = 3584
+fn sized_and_unknown_spans() -> u64 {
+    region r {
+        let xs: List[u64] = [3, 5, 8]
+        let a = result.unwrap(arena.copy_span(r, xs))
+        let mut at: u64 = 0
+        let b = result.unwrap(arena.collect_span(r, fn() -> Option[u64] {
+            at += 1
+            if at == 1 { Some(3) } else if at == 2 { Some(5) } else if at == 3 { Some(8) } else { None }
+        }))
+        if span.len(a) != 3 || span.len(b) != 3 { return 0 }
+        a[0] * 1000 + b[1] * 100 + a[2] * 10 + at
+    }
+}
+
+// Refusal at each of three admissions. A Text "x" is 8+1 rounded to16;
+// no earlier text is refunded when a later admission fails. Returned available is0.
+fn prefix_at(limit: u64) -> bool {
+    result.unwrap(bound bytes limit {
+        region r {
+            let mut admitted: u64 = 0
+            for i in 0u64 .. 3 {
+                match text.copy_in(r, "x") {
+                    Ok(t) => {
+                        if text.as_string(t) != "x" { return false }
+                        admitted += 1
+                    }
+                    Error(c) => return admitted == limit / 16 && c.requested == 16 && c.available == 0,
+                }
+            }
+            admitted == 3
+        }
+    })
+}
+// expect: run admission_prefixes() = true
+fn admission_prefixes() -> bool { prefix_at(0) && prefix_at(16) && prefix_at(32) && prefix_at(48) }
+
+// Failed destination consumes its reservation; the second admission sees zero available.
+// A rollback/refund mutant admits the second document and returns false.
+// expect: run failed_document_retains_reservation() = true
+fn failed_document_retains_reservation() -> bool {
+    result.unwrap(bound bytes 16 {
+        region r {
+            let first: Result[Builder[Note, in r], BuildError] = build_in(r, bytes 16, fn(mut d: Dest[Note]) -> Result[Child[Note], BuildError] {
+                let _ = dest.put(mut d, Note(id: 1, body: "hi"))?
+                Error(Overflow)
+            })
+            let failed = match first { Error(Overflow) => true, _ => false }
+            let second: Result[Builder[Note, in r], BuildError] = build_in(r, bytes 16, fn(mut d: Dest[Note]) -> Result[Child[Note], BuildError] {
+                dest.put(mut d, Note(id: 2, body: "hi"))
+            })
+            failed && match second { Error(Capacity(c)) => c.requested == 16 && c.available == 0, _ => false }
+        }
+    })
+}
+
+// A 64-byte stream writes Text's 8-byte header +2 bytes, rounded16; trim refunds48.
+// A following 48-byte admission fits exactly. Without trim it is refused.
+// expect: run streaming_refunds_only_unused_tail() = true
+fn streaming_refunds_only_unused_tail() -> bool {
+    result.unwrap(bound bytes 64 {
+        region r {
+            let b = result.unwrap(build_stream_in(r, bytes 64, fn(take w: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+                emit(take w, "hi")
+            }))
+            let first: Text in r = finish_trim(take b)
+            let second = text.copy_in(r, "1234567890123456789012345678901234567890")
+            text.as_string(first) == "hi" && match second { Ok(t) => text.len(t) == 40, Error(_) => false }
+        }
+    })
+}
+
+// GROWTH: capacities4,8,16 cost40,72,136 including the eight-byte header.
+// Abandoned region storage is not refunded: cumulative charges40,112,248.
+fn collect_prefix(limit: u64, refused: u64, charge: u64) -> bool {
+    result.unwrap(bound bytes limit {
+        region r {
+            let mut called: u64 = 0
+            let result: Result[FixedSpan[u64] in r, (Capacity, u64)] = arena.collect_span(r, fn() -> Option[u64] {
+                called += 1
+                if called <= 10 { Some(called) } else { None }
+            })
+            match result {
+                Error((c, x)) => {
+                    let prefix_held = match text.copy_in(r, "x") { Error(more) => more.available == 0, _ => false }
+                    called == refused && x == refused && c.requested == charge && c.available == 0 && prefix_held
+                }
+                Ok(xs) => called == 11 && span.len(xs) == 10 && xs[0] == 1 && xs[9] == 10 && refused == 0,
+            }
+        }
+    })
+}
+// A mutant refunding abandoned span blocks admits the ninth element under112.
+// expect: run collect_failure_prefixes() = true
+fn collect_failure_prefixes() -> bool {
+    collect_prefix(0, 1, 40) && collect_prefix(40, 5, 72) && collect_prefix(112, 9, 136) && collect_prefix(248, 0, 0)
+}
+
+// Empty collection needs no admission, whether its size was known or discovered.
+// expect: run empty_builders_admit_nothing() = true
+fn empty_builders_admit_nothing() -> bool {
+    let xs: List[u64] = list.new()
+    result.unwrap(bound bytes 0 {
+        region r {
+            let a = result.unwrap(arena.copy_span(r, xs))
+            let b = result.unwrap(arena.collect_span(r, fn() -> Option[u64] { None }))
+            span.len(a) == 0 && span.len(b) == 0
+        }
+    })
+}
+
+// A failed stream does not invoke trim: its whole16-byte reservation stays charged.
+// expect: run failed_stream_retains_reservation() = true
+fn failed_stream_retains_reservation() -> bool {
+    result.unwrap(bound bytes 16 {
+        region r {
+            let mut called: u64 = 0
+            let first: Result[Builder[Text, in r], BuildError] = build_stream_in(r, bytes 16, fn(take w: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+                called += 1
+                writer.push(mut w, "hi")?
+                writer.push(mut w, "too-long")?
+                writer.close(take w)
+            })
+            let failed = match first { Error(Overflow) => true, _ => false }
+            let retained = match text.copy_in(r, "x") { Error(c) => c.requested == 16 && c.available == 0, _ => false }
+            failed && retained && called == 1
+        }
+    })
+}
+
+// SeqSpan[u64] has a16-byte header plus two eight-byte scalars:32 used bytes.
+// The batch producer runs once, and the span can be scanned after publication.
+// expect: run streaming_batch_runs_once() = 193
+fn streaming_batch_runs_once() -> u64 {
+    region r {
+        let mut calls: u64 = 0
+        let xs: SeqSpan[u64] in r = result.unwrap(arena.batch(r, 64, fn(take w: Writer[SeqSpan[u64], in r]) -> Result[Child[SeqSpan[u64]], BuildError] {
+            calls += 1
+            writer.append(mut w, fn(take e: Writer[u64, in r]) -> Result[Child[u64], BuildError] { emit(take e, 7u64) })?
+            writer.append(mut w, fn(take e: Writer[u64, in r]) -> Result[Child[u64], BuildError] { emit(take e, 9u64) })?
+            writer.close(take w)
+        }))
+        let a: u64 = match seq.nth(xs, 0) { Some(x) => x, None => 0 }
+        let b: u64 = match seq.nth(xs, 1) { Some(x) => x, None => 0 }
+        calls * 100 + a * 10 + b + seq.len(xs) * 7
+    }
+}
+
+// SeqSpan's16-byte header plus two u64 elements fills32 bytes. The third append
+// overflows. The view saved after the first append must still read7 after the build
+// fails, and its whole reservation stays charged. Discarding a failed blob breaks it.
+// expect: run completed_view_survives_failed_stream() = true
+fn completed_view_survives_failed_stream() -> bool {
+    result.unwrap(bound bytes 32 {
+        region r {
+            let mut saved: Option[View[u64]] = None
+            let built: Result[Builder[SeqSpan[u64], in r], BuildError] = build_stream_in(r, bytes 32, fn(take w: Writer[SeqSpan[u64], in r]) -> Result[Child[SeqSpan[u64]], BuildError] {
+                writer.append(mut w, fn(take e: Writer[u64, in r]) -> Result[Child[u64], BuildError] { emit(take e, 7u64) })?
+                saved = writer.last_completed(w)
+                writer.append(mut w, fn(take e: Writer[u64, in r]) -> Result[Child[u64], BuildError] { emit(take e, 9u64) })?
+                writer.append(mut w, fn(take e: Writer[u64, in r]) -> Result[Child[u64], BuildError] { emit(take e, 11u64) })?
+                writer.close(take w)
+            })
+            let failed = match built { Error(Overflow) => true, _ => false }
+            let value = match saved { Some(x) => x == 7, None => false }
+            let retained = match text.copy_in(r, "x") { Error(c) => c.requested == 16 && c.available == 0, _ => false }
+            failed && value && retained
+        }
+    })
+}

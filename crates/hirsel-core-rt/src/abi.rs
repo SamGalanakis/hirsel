@@ -71,7 +71,134 @@ pub unsafe extern "C" fn hirsel_core_region_close(region: *mut crate::region::Re
         drop(Box::from_raw(region));
     }
 }
+use crate::causes::{self, Cause, Cell};
 use crate::counted::{self, Recipe, Worklist};
+
+/// Admit main's task record and primary cell (288) once, before running its body.
+/// Child providers pre-admit the spawn as a whole and attach that storage; they
+/// must not charge child startup again through this root-start entry point.
+/// # Safety
+/// Context is exclusively owned and has not started a task yet.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_task_start(context: *mut Context) -> Allocation {
+    // SAFETY: the caller starts this fresh task context exactly once.
+    match causes::task_start(unsafe { &mut *context }) {
+        Ok(()) => Allocation {
+            pointer: context.cast(),
+            capacity: Capacity {
+                requested: 0,
+                available: 0,
+            },
+        },
+        Err(capacity) => Allocation {
+            pointer: ptr::null_mut(),
+            capacity,
+        },
+    }
+}
+/// Admit storage + cause cell + grant before the emitter installs prepared fields.
+/// # Safety
+/// Context is live; caller owns successful resource and must finalize or wholly
+/// destructure it, then resource_free once. Native layout is compiler-produced.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_resource_alloc(
+    context: *const Context,
+    bytes: usize,
+    align: usize,
+    storage: u64,
+    grant: u64,
+) -> Allocation {
+    // SAFETY: emitter owns the resource returned from this constructor.
+    match unsafe { causes::resource_new(&*context, storage, grant, bytes, align) } {
+        Ok(pointer) => Allocation {
+            pointer: pointer.as_ptr(),
+            capacity: Capacity {
+                requested: 0,
+                available: 0,
+            },
+        },
+        Err(capacity) => Allocation {
+            pointer: ptr::null_mut(),
+            capacity,
+        },
+    }
+}
+/// Enter the resource's prepaid grant. Infallible and allocation-free.
+/// # Safety
+/// Resource and exclusive task context are live; its finalizer has not run.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_finalizer_begin(context: *mut Context, resource: NonNull<u8>) {
+    // SAFETY: caller begins exactly this live resource's finalizer.
+    unsafe {
+        causes::finalizer_begin(&mut *context, resource);
+    }
+}
+/// Settle the grant and restore the previous current limit and finalizer.
+/// # Safety
+/// Matches the active finalizer_begin, after its inner scope cleanup, even when
+/// it failed. The emitter next cleans fields in spec order, then resource_free.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_finalizer_end(context: *mut Context, resource: NonNull<u8>) {
+    // SAFETY: the current resource's body has ended and its scopes are cleaned.
+    unsafe {
+        causes::finalizer_end(&mut *context, resource);
+    }
+}
+/// Refund all remaining container storage and any unused cell/grant.
+/// # Safety
+/// Sole owner transfers an inactive resource with cleaned or moved fields.
+/// Pass only field storage, excluding the 32-byte cell and grant. Whole
+/// destructure calls this directly, without a finalizer (W5).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_resource_free(resource: NonNull<u8>, storage: u64) {
+    // SAFETY: all container ownership is transferred exactly once.
+    unsafe {
+        causes::resource_free(resource, storage);
+    }
+}
+/// Record one cause in the current prepaid task/resource cell. Admits nothing.
+/// # Safety
+/// Transfers the cause's owned message. The obligation has an unused cell;
+/// the emitter immediately abandons this body and propagates after cleanup.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_raise(context: *mut Context, cause: Cause) {
+    // SAFETY: compiler failure paths use their obligation cell exactly once.
+    unsafe {
+        causes::record(&mut *context, cause);
+    }
+}
+/// Deliver the current chain by ownership transfer, without admission/allocation.
+/// # Safety
+/// Context is live and exclusively used by its task after cleanup.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_causes_take(context: *mut Context) -> *mut Cell {
+    // SAFETY: the caller owns the completed task's chain during this transfer.
+    std::mem::take(unsafe { &mut (*context).causes }).into_raw()
+}
+/// # Safety
+/// Transfer the entire exclusively owned chain, or null, exactly once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_causes_drop(causes: *mut Cell) {
+    // SAFETY: consumes all transferred cells and their owned messages.
+    unsafe {
+        drop(causes::Causes::from_raw(causes));
+    }
+}
+/// # Safety
+/// Cell is a live borrowed cell of an unmodified Causes owner.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_cause_next(cell: *const Cell) -> *const Cell {
+    // SAFETY: chain owner keeps this borrowed cell live.
+    unsafe { causes::next(cell) }
+}
+/// # Safety
+/// Cell is a live borrowed cell of an unmodified Causes owner. Returned data is
+/// borrowed and immutable; neither the message nor cell ownership transfers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_cause_value(cell: *const Cell) -> *const Cause {
+    // SAFETY: a delivered cell contains a cause, pinned by its chain owner.
+    unsafe { causes::value(cell) }
+}
 use std::ptr::{self, NonNull};
 
 /// # Safety

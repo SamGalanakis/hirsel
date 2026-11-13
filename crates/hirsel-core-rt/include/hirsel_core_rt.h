@@ -32,4 +32,24 @@ void hirsel_core_release_enqueue(HirselCoreWorklist *, void *node, bool atomic,
     uint64_t charge, HirselCoreDropRecipe);
 void hirsel_core_release_own_enqueue(HirselCoreWorklist *, void *block,
     uint64_t charge, HirselCoreDropRecipe);
+HirselCoreAllocation hirsel_core_task_start(HirselCoreContext *);
+HirselCoreAllocation hirsel_core_resource_alloc(const HirselCoreContext *,
+    size_t bytes, size_t alignment, uint64_t logical_field_storage, uint64_t grant);
+void hirsel_core_finalizer_begin(HirselCoreContext *, void *resource);
+void hirsel_core_finalizer_end(HirselCoreContext *, void *resource);
+void hirsel_core_resource_free(void *resource, uint64_t logical_field_storage);
+/* Cause tags: 0 Overflow, 1 Bounds, 2 Division, 3 Unwrap, 4 Fail,
+   5 Cancelled, 6 Capacity. Message ownership transfers to raise. */
+typedef struct {
+    uint8_t kind;
+    uint64_t site;
+    void *message;
+    void (*drop_message)(void *);
+} HirselCoreCause;
+typedef struct HirselCoreCauseCell HirselCoreCauseCell;
+void hirsel_core_raise(HirselCoreContext *, HirselCoreCause);
+HirselCoreCauseCell *hirsel_core_causes_take(HirselCoreContext *);
+void hirsel_core_causes_drop(HirselCoreCauseCell *);
+const HirselCoreCauseCell *hirsel_core_cause_next(const HirselCoreCauseCell *);
+const HirselCoreCause *hirsel_core_cause_value(const HirselCoreCauseCell *);
 #endif

@@ -6,6 +6,7 @@ hirsel_guard::install!();
 
 pub mod abi;
 pub mod block;
+pub mod causes;
 pub mod counted;
 pub mod limit;
 pub mod region;
@@ -26,6 +27,10 @@ pub struct Context {
     pub(crate) current: Funding,
     stack: Vec<Funding>,
     pub(crate) finalizing: usize,
+    pub(crate) primary: Option<Box<causes::Cell>>,
+    pub(crate) causes: causes::Causes,
+    pub(crate) task_record: Option<block::Block>,
+    pub(crate) active_resource: *mut causes::Resource,
 }
 
 impl Context {
@@ -35,6 +40,10 @@ impl Context {
             current: Funding::root(bytes),
             stack: Vec::new(),
             finalizing: 0,
+            primary: None,
+            causes: causes::Causes::default(),
+            task_record: None,
+            active_resource: std::ptr::null_mut(),
         }
     }
 
@@ -70,6 +79,8 @@ impl Drop for Context {
     }
 }
 
+#[cfg(test)]
+mod causes_tests;
 #[cfg(test)]
 mod counted_tests;
 #[cfg(test)]

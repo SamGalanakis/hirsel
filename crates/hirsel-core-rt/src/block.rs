@@ -8,6 +8,7 @@ struct Header {
     funding: Funding,
     layout: Layout,
     dead: std::mem::MaybeUninit<Dead>,
+    resource: *mut crate::causes::Resource,
 }
 
 pub(crate) struct Dead {
@@ -27,6 +28,17 @@ unsafe fn header(payload: NonNull<u8>) -> *mut Header {
             .cast::<*mut Header>()
             .read()
     }
+}
+
+pub(crate) unsafe fn set_resource(payload: NonNull<u8>, resource: *mut crate::causes::Resource) {
+    // SAFETY: caller exclusively initializes a fresh resource block's native state.
+    unsafe {
+        (*header(payload)).resource = resource;
+    }
+}
+pub(crate) unsafe fn resource(payload: NonNull<u8>) -> *mut crate::causes::Resource {
+    // SAFETY: caller pins a live resource whose metadata was installed once.
+    unsafe { (*header(payload)).resource }
 }
 
 pub(crate) unsafe fn push_dead(
@@ -86,6 +98,7 @@ pub(crate) fn allocate(
                 funding: payer,
                 layout,
                 dead: std::mem::MaybeUninit::uninit(),
+                resource: ptr::null_mut(),
             },
         );
         let payload = base.as_ptr().add(offset);
@@ -161,6 +174,11 @@ impl Block {
     }
     pub fn charge(&self) -> u64 {
         self.charge
+    }
+    /// Transfer an admitted subcharge to a separately owned prepaid cell.
+    pub(crate) fn partition(&mut self, bytes: u64) -> Funding {
+        self.charge -= bytes;
+        self.payer().clone()
     }
     pub(crate) fn payer(&self) -> &Funding {
         // SAFETY: self owns the live block for this borrow.

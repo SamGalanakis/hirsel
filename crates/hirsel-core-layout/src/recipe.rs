@@ -175,6 +175,10 @@ pub fn tag_width(cases: usize) -> u64 {
     }
 }
 
+fn checked_align_up(n: u64, a: u64) -> Option<u64> {
+    n.div_ceil(a).checked_mul(a)
+}
+
 fn align_up(n: u64, a: u64) -> u64 {
     n.div_ceil(a) * a
 }
@@ -182,9 +186,13 @@ fn align_up(n: u64, a: u64) -> u64 {
 /// Recipes for every shape of a module, indexed like `shapes`.
 pub fn compute(shapes: &[Shape]) -> Result<Vec<Recipe>, LayoutError> {
     let mut state = vec![State::Todo; shapes.len()];
-    let mut out: Vec<Option<Recipe>> = vec![None; shapes.len()];
+    let mut order = Vec::with_capacity(shapes.len());
     for i in 0..shapes.len() {
-        visit(shapes, TypeRef(i as u32), &mut state, &mut out)?;
+        visit(shapes, TypeRef(i as u32), &mut state, &mut order)?;
+    }
+    let mut out: Vec<Option<Recipe>> = vec![None; shapes.len()];
+    for t in order {
+        out[t.index()] = Some(recipe(shapes, &shapes[t.index()], &out)?);
     }
     Ok(out.into_iter().map(|r| r.expect("visited")).collect())
 }
@@ -202,7 +210,7 @@ fn visit(
     shapes: &[Shape],
     root: TypeRef,
     state: &mut [State],
-    out: &mut [Option<Recipe>],
+    order: &mut Vec<TypeRef>,
 ) -> Result<(), LayoutError> {
     let mut stack = vec![root];
     while let Some(&t) = stack.last() {
@@ -224,7 +232,7 @@ fn visit(
                     stack.push(d);
                     continue;
                 }
-                out[t.index()] = Some(recipe(shapes, &shapes[t.index()], out)?);
+                order.push(t);
                 state[t.index()] = State::Done;
                 stack.pop();
             }
@@ -245,7 +253,7 @@ fn inline_target(ty: &FieldTy) -> Option<TypeRef> {
     match ty {
         FieldTy::Inline(t) => Some(*t),
         FieldTy::Array(e, _) => inline_target(e),
-        FieldTy::FixedSpan(e) | FieldTy::SeqSpan(e) | FieldTy::IndexedSpan(e) => inline_target(e),
+        FieldTy::FixedSpan(e) => inline_target(e),
         _ => None,
     }
 }
@@ -302,21 +310,36 @@ fn fixed(shapes: &[Shape], shape: &Shape, out: &[Option<Recipe>]) -> Result<Reci
     let mut offsets = Vec::with_capacity(rows.len());
     let mut end = start;
     let mut logical = 0;
-    for m in &measured {
+    for (m, fields) in measured.iter().zip(&rows) {
+        let mut row_logical = if tag.is_some() { 8u64 } else { 0 };
+        for (&(_, _, bytes), f) in m.iter().zip(fields.iter()) {
+            row_logical = row_logical
+                .checked_add(bytes)
+                .ok_or_else(|| err(shape, f, "logical size exceeds 2^64 - 1 bytes"))?;
+        }
+        logical = logical.max(row_logical);
         let mut off = start;
         let mut row = Vec::with_capacity(m.len());
-        for &(size, a, _) in m {
-            off = align_up(off, a);
+        for (&(size, a, _), f) in m.iter().zip(fields.iter()) {
+            off = checked_align_up(off, a)
+                .ok_or_else(|| err(shape, f, "native layout exceeds the engine's size range"))?;
             row.push(off);
-            off += size;
+            off = off
+                .checked_add(size)
+                .ok_or_else(|| err(shape, f, "native layout exceeds the engine's size range"))?;
         }
         end = end.max(off);
-        logical = logical.max(m.iter().map(|&(_, _, l)| l).sum::<u64>());
         offsets.push(row);
     }
-    let size = align_up(end, align);
-    // MEM-24: an own variant is 8 plus its largest payload, whatever its tag width.
-    let logical = logical + if tag.is_some() { 8 } else { 0 };
+    let size = checked_align_up(end, align).ok_or_else(|| LayoutError::Field {
+        ty: shape.name.clone(),
+        field: rows
+            .iter()
+            .flat_map(|r| r.iter())
+            .last()
+            .map_or_else(String::new, |f| f.name.clone()),
+        why: "native layout exceeds the engine's size range",
+    })?;
     let drop = drop_recipe(shapes, shape, &rows, &offsets, out);
     Ok(Recipe {
         plain: drop.is_none() && shape.repr != Repr::Resource,
@@ -524,10 +547,15 @@ fn compact(
             for (i, f) in row.iter().enumerate() {
                 let size = compact_size(shapes, shape, f, &f.ty, w, false, out)?;
                 let next = match (&size, pos) {
-                    (Size::Fixed(n), Pos::At(o)) => Pos::At(o + n),
+                    (Size::Fixed(n), Pos::At(o)) => Pos::At(
+                        o.checked_add(*n)
+                            .ok_or_else(|| err(shape, f, "logical size exceeds 2^64 - 1 bytes"))?,
+                    ),
                     (Size::Fixed(n), Pos::After { field, plus }) => Pos::After {
                         field,
-                        plus: plus + n,
+                        plus: plus
+                            .checked_add(*n)
+                            .ok_or_else(|| err(shape, f, "logical size exceeds 2^64 - 1 bytes"))?,
                     },
                     (_, _) => Pos::After {
                         field: i as u32,
@@ -601,9 +629,32 @@ fn compact_size(
             }
             Size::Fixed(w.bytes())
         }
+        FieldTy::Inline(t) if element && shapes[t.index()].repr == Repr::Own => {
+            match packed_plain(shapes, *t)
+                .map_err(|()| err(shape, f, "logical size exceeds 2^64 - 1 bytes"))?
+            {
+                Some(n) => Size::Fixed(n),
+                None => {
+                    return Err(err(
+                        shape,
+                        f,
+                        "a sequence element must have a packed encoding",
+                    ));
+                }
+            }
+        }
+        FieldTy::Inline(t)
+            if element
+                && matches!(shapes[t.index()].repr, Repr::Compact(_))
+                && out[t.index()].is_none() =>
+        {
+            Size::Inline(*t)
+        }
         FieldTy::Inline(t) => match &done(out, *t).layout {
             Layout::Compact(set) => set.at(w).fixed_extent.map_or(Size::Inline(*t), Size::Fixed),
-            Layout::Fixed(_) => match packed_plain(shapes, *t) {
+            Layout::Fixed(_) => match packed_plain(shapes, *t)
+                .map_err(|()| err(shape, f, "logical size exceeds 2^64 - 1 bytes"))?
+            {
                 Some(n) if element => Size::Fixed(n),
                 _ => {
                     return Err(err(
@@ -646,18 +697,27 @@ fn compact_size(
 
 /// MEM-12: the packed encoding of a plain record or tuple with at least one field,
 /// each a scalar or such a record, as its fields back to back (MEM-9); its size.
-fn packed_plain(shapes: &[Shape], t: TypeRef) -> Option<u64> {
-    let s = &shapes[t.index()];
-    match &s.body {
-        Body::Record(fs) if s.repr == Repr::Own && !fs.is_empty() => {
-            fs.iter().try_fold(0, |n, f| match &f.ty {
-                FieldTy::Scalar(x) => Some(n + x.size()),
-                FieldTy::Inline(u) => packed_plain(shapes, *u).map(|m| n + m),
-                _ => None,
-            })
-        }
-        _ => None,
+fn packed_plain(shapes: &[Shape], t: TypeRef) -> Result<Option<u64>, ()> {
+    let shape = &shapes[t.index()];
+    let Body::Record(fields) = &shape.body else {
+        return Ok(None);
+    };
+    if shape.repr != Repr::Own || fields.is_empty() {
+        return Ok(None);
     }
+    let mut size = 0u64;
+    for field in fields {
+        let bytes = match &field.ty {
+            FieldTy::Scalar(x) => Some(x.size()),
+            FieldTy::Inline(t) => packed_plain(shapes, *t)?,
+            _ => None,
+        };
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        size = size.checked_add(bytes).ok_or(())?;
+    }
+    Ok(Some(size))
 }
 
 /// Bytes a compact value occupies, read from its blob: the walk the recipe

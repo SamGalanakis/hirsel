@@ -532,3 +532,50 @@ fn map_entries_place_key_then_value_after_hash_and_state() {
     assert_eq!(e(s(), u(Scalar::U16)), want(48, 16, 40));
     assert_eq!(e(u(Scalar::U16), u(Scalar::U8)), want(24, 16, 18));
 }
+
+/// MEM-12: sequence headers terminate inline containment. J = Null | Arr(Seq[J])
+/// contains [Null, Arr([Null])]. With W bytes, the sequential encoding occupies
+/// 4 + 4W bytes; indexing adds the inner one-entry and outer two-entry trailers,
+/// giving 4 + 7W. Neither recipe may depend on J's already having been computed.
+#[test]
+fn recursive_sequences_end_layout_dependencies() {
+    for indexed in [false, true] {
+        let elements = Box::new(FieldTy::Inline(TypeRef(0)));
+        let sequence = if indexed {
+            FieldTy::IndexedSpan(elements)
+        } else {
+            FieldTy::SeqSpan(elements)
+        };
+        let recipes = compute(&[variant(
+            "J",
+            Repr::Compact(Width::U32),
+            vec![("Null", vec![]), ("Arr", vec![field("items", sequence)])],
+        )])
+        .unwrap();
+        for (width, word, sequential, indexed_size) in [
+            (Width::U16, 2, 12, 18),
+            (Width::U32, 4, 20, 32),
+            (Width::U64, 8, 36, 60),
+        ] {
+            let bytes = if indexed { 3 + 3 * word } else { 3 + 2 * word };
+            let read = |offset| match offset {
+                1 => 2,
+                n if n == 1 + word => bytes,
+                _ => panic!("unexpected header offset {offset}"),
+            };
+            let extent = compact_extent(&recipes, TypeRef(0), width, 0, &read, &|_, _| 1);
+            assert_eq!(extent, if indexed { indexed_size } else { sequential });
+            assert_eq!(
+                compact_extent(
+                    &recipes,
+                    TypeRef(0),
+                    width,
+                    0,
+                    &|_| panic!("Null has no header"),
+                    &|_, _| 0
+                ),
+                1
+            );
+        }
+    }
+}

@@ -1,0 +1,6 @@
+// expect: refuse MEM-6 at 5:37
+// MEM-6: an integer local is not a region, even for a phantom region parameter.
+type Tag[in r] {}
+fn bad() {
+    let n: u64 = 0; let tag: Tag[in n] = Tag()
+}

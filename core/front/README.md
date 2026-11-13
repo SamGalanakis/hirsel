@@ -7,6 +7,8 @@
 - `// expect: refuse RULE at LINE:COL`: one line per refusal; the set must match exactly.
 - `// expect: kind TYPE KIND`, `// expect: holds TYPE a,b`, `// expect: size TYPE N`: a
   published summary (OWN-2, OWN-3, MEM-24), hand-derived.
+- `// expect: field-root TYPE FIELD enclosing` or a named region: the field's published root (MEM-6).
+- `// expect: outlives FUNCTION A B`: the published reflexive/transitive region relation.
 - `// expect: gap WHAT`: one line per kind of construct this implementation does not build
   yet, however many times the case reaches it.
 - `// expect: run f(A,B) = R` or `= fail Cause`: every application body is checked and

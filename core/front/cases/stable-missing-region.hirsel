@@ -1,0 +1,4 @@
+// expect: refuse MEM-6 at 4:15
+// MEM-6: a stable field in own storage names its region.
+stable type Token { n: u64 }
+type Hidden { value: Token }

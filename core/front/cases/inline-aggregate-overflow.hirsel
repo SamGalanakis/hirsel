@@ -1,0 +1,3 @@
+// expect: refuse OWN-2 at 3:52
+// OWN-2: u64::MAX bytes plus one byte exceeds the portable logical size.
+type TooBig { a: Inline[u8, 18446744073709551615], b: u8 }

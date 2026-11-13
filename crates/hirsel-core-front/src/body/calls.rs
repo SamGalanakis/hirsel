@@ -425,10 +425,6 @@ impl<'c, 'a> Cx<'c, 'a> {
             checked[i] = true;
             let g = &p.fns[f].generics[i];
             let missing = g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params);
-            if missing & ENCODED != 0 {
-                self.gap(n, "packed and streamable bounds are not built");
-                return;
-            }
             if missing != 0 {
                 let (a, b) = (self.name(t), crate::decls::bound_names(missing));
                 self.refuse("LANG-12", n, format!("`{a}` is not {b}"));

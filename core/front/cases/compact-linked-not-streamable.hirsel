@@ -1,0 +1,5 @@
+// expect: refuse LANG-12 at 5:37
+// MEM-12: a link behind a sequence header still prevents streaming.
+@compact(u32) stable type Linked = Leaf(u8) | Next(Link[Linked])
+type Stream[T: streamable] {}
+type Rejected[in r] { value: Stream[SeqSpan[Linked] in r] }

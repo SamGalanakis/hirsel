@@ -1,22 +1,49 @@
 use super::*;
 
 impl<'c, 'a> Cx<'c, 'a> {
-    fn body_root(&mut self, n: NodeId) -> TyId {
+    fn body_root(&mut self, n: NodeId, region_only: bool) -> TyId {
         let Some(Target::Binder(b)) = self.p.target(self.at, n).copied() else {
             return ERROR;
         };
         let binder = &self.p.items[self.at.module as usize][self.at.item as usize]
             .resolution
             .binders[b as usize];
+        let in_generics = self.item.tree.children(self.item.root).iter().any(|&c| {
+            let node = self.item.tree.node(c);
+            node.kind == NodeKind::Generics
+                && node.origin.span.start <= binder.site.span.start
+                && binder.site.span.end <= node.origin.span.end
+        });
         if let Some(i) = self
             .fd
             .generics
             .iter()
-            .position(|g| g.region && g.name == binder.name)
+            .position(|g| in_generics && g.region && g.name == binder.name)
         {
             return self.t.mk(TyKind::Region(Root::Generic(i as u32)));
         }
-        if let Some(i) = self.fd.params.iter().position(|p| p.name == binder.name) {
+        let parameter = binder.kind == hirsel_core_resolve::BinderKind::Parameter;
+        let ty = if parameter {
+            self.fd
+                .params
+                .iter()
+                .find(|p| p.name == binder.name)
+                .map(|p| p.ty)
+        } else {
+            self.vars[b as usize].map(|v| v.ty)
+        };
+        if region_only && binder.kind != hirsel_core_resolve::BinderKind::Region
+            && !ty.is_some_and(|ty| matches!(self.t.kind(ty), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Region))) {
+            self.refuse("MEM-6", n, "a region argument names a Region value");
+            return ERROR;
+        }
+        if parameter {
+            let i = self
+                .fd
+                .params
+                .iter()
+                .position(|p| p.name == binder.name)
+                .unwrap();
             return self.t.mk(TyKind::Region(Root::Parameter(i as u32)));
         }
         // Local roots are indexed by resolver identity, like body places.
@@ -47,7 +74,15 @@ impl<'c, 'a> Cx<'c, 'a> {
                 }
                 let element = self.ty(c[1]);
                 let Some(count) = crate::decls::literal_length(self.p.item(self.at), c[2]) else {
-                    self.refuse("SEM-9", c[2], "Inline length is a u64 integer literal");
+                    self.refuse(
+                        if self.kind(c[2]) == NodeKind::Literal {
+                            "LANG-3"
+                        } else {
+                            "SEM-9"
+                        },
+                        c[2],
+                        "Inline length is a literal fitting its integer type and u64",
+                    );
                     return ERROR;
                 };
                 if !matches!(
@@ -70,10 +105,13 @@ impl<'c, 'a> Cx<'c, 'a> {
                 }
                 self.named_ty(c[0], &args)
             }
-            NodeKind::Anchor if c.len() == 1 => self.body_root(c[0]),
+            NodeKind::Anchor if c.len() == 1 => self.body_root(c[0], true),
             NodeKind::Anchor => {
                 let ty = self.ty(c[0]);
-                let root = self.body_root(c[1]);
+                let root = self.body_root(
+                    c[1],
+                    !crate::decls::scoped_payload(&self.p.decls, &self.t, ty),
+                );
                 if crate::decls::scoped_payload(&self.p.decls, &self.t, ty) {
                     ty
                 } else {
@@ -182,12 +220,17 @@ impl<'c, 'a> Cx<'c, 'a> {
                 return ERROR;
             }
             let missing = g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params);
-            if missing & ENCODED != 0 {
-                self.gap(at, "packed and streamable bounds are not built");
-                return ERROR;
-            }
             if missing != 0 {
-                let rule = if counted { "OWN-4" } else { "LANG-12" };
+                let rule = if counted {
+                    "OWN-4"
+                } else if matches!(
+                    decl.role,
+                    Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan | Role::SeqIndex)
+                ) {
+                    "MEM-12"
+                } else {
+                    "LANG-12"
+                };
                 let b = crate::decls::bound_names(missing);
                 self.refuse(rule, at, format!("type argument is not {b}"));
                 return ERROR;

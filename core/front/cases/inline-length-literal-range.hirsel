@@ -1,0 +1,5 @@
+// expect: refuse LANG-3 at 4:34
+// expect: refuse LANG-3 at 5:32
+// LANG-3/SEM-9: the suffix does not affect type identity, but its literal must fit.
+type Unsigned { data: Inline[u8, 256u8] }
+type Signed { data: Inline[u8, 128i8] }

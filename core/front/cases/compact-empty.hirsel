@@ -1,0 +1,3 @@
+// expect: refuse MEM-9 at 3:27
+// MEM-9: every compact encoding occupies at least one byte.
+@compact(u16) stable type Empty {}

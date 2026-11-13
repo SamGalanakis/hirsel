@@ -98,7 +98,7 @@ impl<T: TyRead> Shapes<'_, T> {
                     Repr::Own => LRepr::Own,
                     Repr::Resource => LRepr::Resource,
                     Repr::Scoped => LRepr::Scoped,
-                    Repr::Stable => return None,
+                    Repr::Stable => decl.compact.map_or(LRepr::Stable, LRepr::Compact),
                 };
                 let map = |fs: &[crate::decls::FieldDecl], s: &mut Self| {
                     let mut out = vec![];
@@ -106,7 +106,7 @@ impl<T: TyRead> Shapes<'_, T> {
                         let fty = subst(s.types, f.ty, &args);
                         out.push(Field {
                             name: f.name.clone(),
-                            ty: s.field(fty)?,
+                            ty: s.field_in(fty, decl.compact.is_some())?,
                         });
                     }
                     Some(out)
@@ -152,9 +152,13 @@ impl<T: TyRead> Shapes<'_, T> {
     }
 
     fn field(&mut self, ty: TyId) -> Option<FieldTy> {
+        self.field_in(ty, false)
+    }
+
+    fn field_in(&mut self, ty: TyId, compact: bool) -> Option<FieldTy> {
         Some(match self.types.kind(ty).clone() {
             TyKind::Scalar(s) => FieldTy::Scalar(s),
-            TyKind::Anchored(x, _) => self.field(x)?,
+            TyKind::Anchored(x, _) => self.field_in(x, compact)?,
             TyKind::Adt(d, args) => match self.decls[d.index()].role {
                 Some(Role::Box) => FieldTy::Box(self.shape(args[0])?),
                 Some(Role::Rc) => FieldTy::Rc(self.shape(args[0])?),
@@ -166,7 +170,64 @@ impl<T: TyRead> Shapes<'_, T> {
                 Some(Role::Sender) => FieldTy::Handle(Handle::Sender),
                 Some(Role::Receiver) => FieldTy::Handle(Handle::Receiver),
                 Some(Role::HostFile) => FieldTy::Handle(Handle::HostFile),
+                Some(Role::Causes) => FieldTy::Handle(Handle::Causes),
+                Some(Role::Text) => {
+                    if compact {
+                        FieldTy::Text
+                    } else {
+                        FieldTy::Locator
+                    }
+                }
+                Some(Role::FixedSpan) => {
+                    if compact {
+                        FieldTy::FixedSpan(Box::new(self.field_in(args[0], true)?))
+                    } else {
+                        FieldTy::Locator
+                    }
+                }
+                Some(Role::SeqSpan) => {
+                    if compact {
+                        FieldTy::SeqSpan(Box::new(self.field_in(args[0], true)?))
+                    } else {
+                        FieldTy::Locator
+                    }
+                }
+                Some(Role::IndexedSpan) => {
+                    if compact {
+                        FieldTy::IndexedSpan(Box::new(self.field_in(args[0], true)?))
+                    } else {
+                        FieldTy::Locator
+                    }
+                }
+                Some(Role::SeqIndex) => FieldTy::Locator,
+                Some(Role::Link) if compact => FieldTy::Link(self.shape(args[0])?),
+                Some(Role::Dest | Role::Writer | Role::View) => FieldTy::Borrow,
+                Some(Role::Child | Role::SpanBuilder | Role::Builder) => {
+                    FieldTy::Array(Box::new(FieldTy::Scalar(Scalar::U64)), 2)
+                }
+                Some(Role::Unique | Role::Site) => FieldTy::Scalar(Scalar::U64),
                 Some(_) => return None,
+                None if compact
+                    && self.decls[d.index()].structural
+                    && crate::decls::is_core_prelude(&self.decls[d.index()].path, &["Option"]) =>
+                {
+                    if let TyKind::Adt(link, payload) = self.types.kind(args[0]).clone() {
+                        if self.decls[link.index()].role == Some(Role::Link) {
+                            FieldTy::OptLink(self.shape(payload[0])?)
+                        } else {
+                            FieldTy::Inline(self.shape(ty)?)
+                        }
+                    } else {
+                        FieldTy::Inline(self.shape(ty)?)
+                    }
+                }
+                None if !compact && self.decls[d.index()].repr == Repr::Stable => {
+                    if self.decls[d.index()].compact.is_some() {
+                        FieldTy::Locator
+                    } else {
+                        FieldTy::Stable(self.shape(ty)?)
+                    }
+                }
                 None => FieldTy::Inline(self.shape(ty)?),
             },
             TyKind::Array(x, n) => {
@@ -179,6 +240,8 @@ impl<T: TyRead> Shapes<'_, T> {
                 FieldTy::Array(Box::new(self.field(x)?), n)
             }
             TyKind::Tuple(_) | TyKind::Unit => FieldTy::Inline(self.shape(ty)?),
+            TyKind::View(_) => FieldTy::Borrow,
+            TyKind::Fn(..) => FieldTy::Fn,
             _ => return None,
         })
     }
@@ -245,8 +308,15 @@ pub(crate) fn recipes(p: &mut Program) {
                 let site = field
                     .and_then(|name| decl.all_fields().find(|f| f.name == name))
                     .map_or(decl.site, |f| f.site);
-                let rule = if why.contains("overflow") || why.contains("2^64") {
+                if p.refusals.iter().any(|r| r.primary == site) {
+                    return;
+                }
+                let rule = if why.contains("engine's size range") {
+                    "PROG-6"
+                } else if why.contains("overflow") || why.contains("2^64") {
                     "OWN-2"
+                } else if decl.compact.is_some() {
+                    "MEM-9"
                 } else if decl.repr == Repr::Stable {
                     "MEM-2"
                 } else if matches!(error, LayoutError::Cycle { .. }) {

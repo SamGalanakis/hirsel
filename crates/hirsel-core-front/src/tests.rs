@@ -199,6 +199,31 @@ fn run_case(path: &Path) -> Vec<String> {
                     failures.push(format!("{} {ty}: want {k}, got {got}", words[0]));
                 }
             }
+            ["field-root", name, field, want] => {
+                let decl = p
+                    .decls
+                    .iter()
+                    .find(|d| d.path.0.name == *name)
+                    .expect("named type");
+                let ty = decl
+                    .all_fields()
+                    .find(|f| f.name == *field)
+                    .expect("named field")
+                    .ty;
+                let got = match p.types.kind(ty) {
+                    TyKind::Anchored(_, r) => match p.types.kind(*r) {
+                        TyKind::Region(Root::Enclosing) => "enclosing",
+                        TyKind::Region(Root::Generic(i)) => {
+                            index.symbols.text(decl.generics[*i as usize].name)
+                        }
+                        _ => "other",
+                    },
+                    _ => "none",
+                };
+                if got != *want {
+                    failures.push(format!("field root: want {want}, got {got}"));
+                }
+            }
             ["outlives", function, source, target] => {
                 let fd = p
                     .fns

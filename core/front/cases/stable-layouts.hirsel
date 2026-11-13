@@ -1,0 +1,12 @@
+// expect: accept
+// MEM-24 gives 1+4 logical bytes. MEM-9 packs 8+1, without padding.
+stable type Point { x: u8, y: u32 }
+@compact(u16) stable type Small { n: u64, flag: bool }
+@compact(u32) stable type Active = Small(u8) | Big(u64)
+// expect: size Point 5
+// expect: size Small 9
+// expect: size Active -
+
+stable type Words { text: Text }
+// expect: field-root Words text enclosing
+// expect: size Words 16

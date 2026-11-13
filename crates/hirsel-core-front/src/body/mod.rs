@@ -19,8 +19,7 @@
 //! copying the table), and the freeze and reservation records (crate::own).
 
 use crate::decls::{
-    DeclBody, ENCODED, FnDecl, KEY, Kind, ORDERED, Repr, Role, copyable, has_bounds,
-    is_core_prelude, kind,
+    DeclBody, FnDecl, KEY, Kind, ORDERED, Repr, Role, copyable, has_bounds, is_core_prelude, kind,
 };
 use crate::own::{Act, Avail, Extent, Freeze, Hold, Origin, PStep, Place, breaks, join, overlap};
 use crate::types::*;
@@ -458,7 +457,7 @@ struct Cx<'c, 'a> {
     at: ItemRef,
     item: Item<'a>,
     fd: &'c FnDecl,
-    params: Vec<u8>,
+    params: Vec<u16>,
     t: Local<'c>,
     e: &'c mut Emitter,
     b: Body,
@@ -660,9 +659,8 @@ impl<'c, 'a> Cx<'c, 'a> {
                 if a == b && is_core_prelude(&self.p.decls[d.index()].path, &["SeqSpan"])
                     && is_core_prelude(&self.p.decls[e.index()].path, &["IndexedSpan"]));
         // OWN-25: a stable value is read where a view of its type is expected.
-        let stable = matches!((self.t.kind(w.ty), self.t.kind(t)),
-            (TyKind::View(x), TyKind::Adt(d, _))
-                if *x == t && matches!(self.p.decls[d.index()].repr, Repr::Stable));
+        let stable = matches!(self.t.kind(w.ty), TyKind::View(x)
+            if crate::decls::stable_parameter(&self.p.decls, &self.t, t, *x));
         if t != w.ty
             && !viewed
             && !plain_view

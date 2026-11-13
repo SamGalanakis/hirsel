@@ -1,0 +1,5 @@
+// expect: refuse OWN-4 at 4:13
+// expect: refuse OWN-4 at 5:13
+// OWN-4/CONC-2: stable and scoped values cannot promise send, even with plain fields.
+stable type Stable: send { n: u64 }
+scoped type Scoped: send { n: u64 }

@@ -1,0 +1,4 @@
+// expect: refuse MEM-12 at 4:41
+// MEM-12: a plain record that holds a callable is not packed.
+type Plain { callback: fn() -> u64 }
+type Rejected[in r] { elements: SeqSpan[Plain] in r }

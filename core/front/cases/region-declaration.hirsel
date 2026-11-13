@@ -5,3 +5,4 @@ type Holder[in r] { value: Token in r }
 type Nested[in r] { value: Option[Token in r] }
 // expect: kind Holder own
 // expect: holds Holder stable
+// expect: field-root Holder value r

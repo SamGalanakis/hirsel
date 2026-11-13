@@ -4,24 +4,26 @@
 use crate::types::*;
 use crate::{Gap, ItemRef, Program, refusal};
 use hirsel_core_ids::DefPath;
-use hirsel_core_layout::{Recipe, Scalar};
+use hirsel_core_layout::{Recipe, Scalar, Width};
 use hirsel_core_resolve::{Site, Target};
 use hirsel_core_syntax::{NodeId, NodeKind};
 
 /// Bound bits (OWN-4).
-pub const PLAIN: u8 = 1;
-pub const SHAREABLE: u8 = 2;
-pub const SEND: u8 = 4;
-pub const KEY: u8 = 8;
-pub const ORDERED: u8 = 16;
+pub const PLAIN: u16 = 1;
+pub const SHAREABLE: u16 = 2;
+pub const SEND: u16 = 4;
+pub const KEY: u16 = 8;
+pub const ORDERED: u16 = 16;
 /// Exactly the integer types, and exactly f32 and f64: written only on type parameters of
 /// bodiless core declarations (OWN-4; the resolver refuses them elsewhere).
-pub const INTEGER: u8 = 32;
-pub const FLOAT: u8 = 64;
-/// `packed` or `streamable` (MEM-12): compact encodings, not built. A type argument that
-/// needs one is a gap, never a refusal, until stable types are built.
-pub const ENCODED: u8 = 128;
-pub fn bound_bit(name: &str) -> u8 {
+pub const INTEGER: u16 = 32;
+pub const FLOAT: u16 = 64;
+/// Independently computed encoding bounds (MEM-12).
+pub const PACKED: u16 = 128;
+pub const STREAMABLE: u16 = 256;
+pub const ENCODED: u16 = PACKED | STREAMABLE;
+const FIXED_ENCODING: u16 = 512;
+pub fn bound_bit(name: &str) -> u16 {
     match name {
         "plain" => PLAIN,
         "shareable" => SHAREABLE,
@@ -29,11 +31,12 @@ pub fn bound_bit(name: &str) -> u8 {
         "key" => KEY,
         "integer" => INTEGER,
         "float" => FLOAT,
-        "packed" | "streamable" => ENCODED,
+        "packed" => PACKED,
+        "streamable" => STREAMABLE,
         _ => ORDERED,
     }
 }
-pub fn bound_names(b: u8) -> String {
+pub fn bound_names(b: u16) -> String {
     let names = [
         "plain",
         "shareable",
@@ -42,9 +45,10 @@ pub fn bound_names(b: u8) -> String {
         "ordered",
         "integer",
         "float",
-        "packed or streamable",
+        "packed",
+        "streamable",
     ];
-    (0..8)
+    (0..9)
         .filter(|i| b & (1 << i) != 0)
         .map(|i| names[i])
         .collect::<Vec<_>>()
@@ -60,7 +64,7 @@ pub const H_STABLE: u8 = 8;
 /// What a rigid type parameter may hold (OWN-2): every category its bounds do not
 /// exclude. `plain` and `shareable` exclude resources, scoped values and stable
 /// references, and nothing excludes a capability.
-pub fn param_holds(bounds: u8) -> u8 {
+pub fn param_holds(bounds: u16) -> u8 {
     let all = H_RESOURCE | H_CAPABILITY | H_SCOPED | H_STABLE;
     if bounds & (PLAIN | SHAREABLE) != 0 {
         all & !(H_RESOURCE | H_SCOPED | H_STABLE)
@@ -197,7 +201,7 @@ impl Role {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Generic {
     pub name: hirsel_core_syntax::Symbol,
-    pub bounds: u8,
+    pub bounds: u16,
     pub region: bool,
 }
 
@@ -231,6 +235,13 @@ pub struct Summary {
     /// Argument positions that condition declared bounds (OWN-4). Phantom parameters
     /// condition nothing, including when hidden behind another phantom type.
     pub bound_params: Vec<u32>,
+    /// Encoding properties with rigid parameters satisfying every encoding condition.
+    pub encoding: u16,
+    /// Parameter positions that condition packed, streamable, and fixed encoding.
+    pub encoding_params: [Vec<u32>; 3],
+    /// Region arguments held by the value. For a stable declaration these must
+    /// outlive the enclosing region (MEM-6).
+    pub region_params: Vec<u32>,
     pub holds: u8,
     /// Parameters named anywhere in the fields: an argument there adds its holds.
     pub holds_params: u64,
@@ -250,13 +261,14 @@ pub struct TypeDecl {
     pub public: bool,
     pub opaque: bool,
     pub generics: Vec<Generic>,
-    pub declared: u8,
+    pub declared: u16,
     pub body: DeclBody,
     pub role: Option<Role>,
     /// Core `Option` or `Result`: kind, bounds and copying follow the arguments
     /// (OWN-3, SEM-7), and a scoped argument is allowed (OWN-19).
     pub structural: bool,
     pub finalizer: bool,
+    pub compact: Option<Width>,
     pub summary: Summary,
 }
 impl TypeDecl {
@@ -329,8 +341,8 @@ pub(crate) enum Pending {
     /// `ty` must have `bounds` (LANG-12, OWN-4 for counted payloads).
     Bound {
         ty: TyId,
-        bounds: u8,
-        params: Vec<u8>,
+        bounds: u16,
+        params: Vec<u16>,
         site: Site,
         rule: &'static str,
     },
@@ -344,7 +356,7 @@ pub(crate) enum Pending {
     },
     Array {
         ty: TyId,
-        params: Vec<u8>,
+        params: Vec<u16>,
         site: Site,
     },
 }
@@ -382,6 +394,7 @@ impl Program<'_> {
                 let mut generics = vec![];
                 let mut declared = 0;
                 let mut finalizer = false;
+                let mut compact = None;
                 for &c in item.tree.children(item.root) {
                     let n = item.tree.node(c);
                     match n.kind {
@@ -392,11 +405,11 @@ impl Program<'_> {
                             for &b in item.tree.children(c) {
                                 let t = item.tree.node(b).token.unwrap();
                                 let bit = bound_bit(item.tree.token_text(item.text, t));
-                                if bit == PLAIN {
+                                if bit & (PLAIN | ENCODED) != 0 {
                                     self.refusals.push(refusal(
                                         "OWN-4",
                                         self.site(at, b),
-                                        "`plain` is never declared",
+                                        "plain, packed and streamable are computed, never declared",
                                     ));
                                 }
                                 declared |= bit;
@@ -406,10 +419,19 @@ impl Program<'_> {
                         NodeKind::Attribute => {
                             let t = n.token.unwrap();
                             if item.tree.token_text(item.text, t) == "compact" {
-                                self.gaps.push(Gap::new(
-                                    self.site(at, c),
-                                    "compact stable layout is not built",
-                                ))
+                                let tokens = n.origin.tokens.clone();
+                                compact = item.tree.tokens
+                                    [tokens.start as usize..tokens.end as usize]
+                                    .iter()
+                                    .find_map(|t| {
+                                        match &item.text[t.span.start as usize..t.span.end as usize]
+                                        {
+                                            "u16" => Some(Width::U16),
+                                            "u32" => Some(Width::U32),
+                                            "u64" => Some(Width::U64),
+                                            _ => None,
+                                        }
+                                    });
                             }
                         }
                         _ => {}
@@ -464,6 +486,7 @@ impl Program<'_> {
                     role,
                     structural,
                     finalizer,
+                    compact,
                     summary: Summary::default(),
                 });
                 self.by_path.entry(path).or_insert(Def::Type(id));
@@ -514,7 +537,12 @@ impl Program<'_> {
         self.alias_stack.push((d, None));
         let at = self.decls[d.index()].at;
         let item = self.item(at);
-        let generics = self.decls[d.index()].generics.clone();
+        let mut generics = self.decls[d.index()].generics.clone();
+        for g in &mut generics {
+            if !g.region {
+                g.bounds |= self.decls[d.index()].declared;
+            }
+        }
         let mut body = DeclBody::Record(vec![]);
         for &c in item.tree.children(item.root) {
             let n = item.tree.node(c);
@@ -529,6 +557,11 @@ impl Program<'_> {
                             .to_owned();
                         let tnode = item.tree.children(f)[0];
                         let ty = self.lower_ty(at, tnode, &generics);
+                        let ty = if self.decls[d.index()].repr == Repr::Stable {
+                            self.default_field_root(ty, &generics)
+                        } else {
+                            ty
+                        };
                         fields.push(FieldDecl {
                             name,
                             ty,
@@ -555,6 +588,11 @@ impl Program<'_> {
                             labelled = label.is_some();
                             let tnode = item.tree.children(p)[0];
                             let ty = self.lower_ty(at, tnode, &generics);
+                            let ty = if self.decls[d.index()].repr == Repr::Stable {
+                                self.default_field_root(ty, &generics)
+                            } else {
+                                ty
+                            };
                             fields.push(FieldDecl {
                                 name: label.unwrap_or_else(|| k.to_string()),
                                 ty,
@@ -585,8 +623,58 @@ impl Program<'_> {
             }
         }
         self.decls[d.index()].body = body;
+        let mut roots = vec![];
+        match self.decls[d.index()].body {
+            DeclBody::Alias(ty) => collect_roots(&self.types, ty, &mut roots),
+            _ => {
+                for f in self.decls[d.index()].all_fields() {
+                    collect_roots(&self.types, f.ty, &mut roots);
+                }
+            }
+        }
+        self.decls[d.index()].summary.region_params = roots
+            .into_iter()
+            .filter_map(|r| match self.types.kind(r) {
+                TyKind::Region(Root::Generic(i)) => Some(*i),
+                _ => None,
+            })
+            .collect();
         self.alias_state[d.index()] = Visit::Done as u8;
         self.alias_stack.pop();
+    }
+
+    fn default_field_root(&mut self, ty: TyId, generics: &[Generic]) -> TyId {
+        let stable = match self.types.kind(ty) {
+            TyKind::Adt(d, _) => {
+                self.decls[d.index()].repr == Repr::Stable
+                    || self.decls[d.index()]
+                        .role
+                        .is_some_and(|r| r.kind() == Kind::Stable)
+            }
+            TyKind::Param(i) => generics[*i as usize].bounds & ENCODED != 0,
+            _ => false,
+        };
+        if stable {
+            let root = self.types.intern(TyKind::Region(Root::Enclosing));
+            return self.types.intern(TyKind::Anchored(ty, root));
+        }
+        match self.types.kind(ty).clone() {
+            TyKind::Tuple(xs) => {
+                let xs = xs
+                    .into_iter()
+                    .map(|x| self.default_field_root(x, generics))
+                    .collect();
+                self.types.intern(TyKind::Tuple(xs))
+            }
+            TyKind::Adt(d, xs) if self.decls[d.index()].structural => {
+                let xs = xs
+                    .into_iter()
+                    .map(|x| self.default_field_root(x, generics))
+                    .collect();
+                self.types.intern(TyKind::Adt(d, xs))
+            }
+            _ => ty,
+        }
     }
 
     /// Lower a written type. `generics` are the enclosing definition's parameters.
@@ -619,9 +707,13 @@ impl Program<'_> {
                 let count = literal_length(item, children[2]);
                 let Some(count) = count else {
                     self.refusals.push(refusal(
-                        "SEM-9",
+                        if item.tree.node(children[2]).kind == NodeKind::Literal {
+                            "LANG-3"
+                        } else {
+                            "SEM-9"
+                        },
                         self.site(at, children[2]),
-                        "Inline length is a u64 integer literal",
+                        "Inline length is a literal fitting its integer type and u64",
                     ));
                     return ERROR;
                 };
@@ -773,7 +865,7 @@ impl Program<'_> {
             return ERROR;
         }
         let arg_tys: Vec<TyId> = args.iter().map(|a| a.0).collect();
-        let params: Vec<u8> = generics.iter().map(|g| g.bounds).collect();
+        let params: Vec<u16> = generics.iter().map(|g| g.bounds).collect();
         let d = &self.decls[decl.index()];
         let role = d.role;
         if !d.structural {
@@ -806,7 +898,21 @@ impl Program<'_> {
                         bounds: need,
                         params: params.clone(),
                         site: *s,
-                        rule: if counted { "OWN-4" } else { "LANG-12" },
+                        rule: if counted {
+                            "OWN-4"
+                        } else if matches!(
+                            role,
+                            Some(
+                                Role::FixedSpan
+                                    | Role::SeqSpan
+                                    | Role::IndexedSpan
+                                    | Role::SeqIndex
+                            )
+                        ) {
+                            "MEM-12"
+                        } else {
+                            "LANG-12"
+                        },
                     });
                 }
             }
@@ -1048,6 +1154,7 @@ impl Program<'_> {
             }
         }
         self.bound_conditions();
+        self.encodings();
         self.holds();
         self.check_declared_bounds();
         let pending = std::mem::take(&mut self.pending);
@@ -1061,10 +1168,7 @@ impl Program<'_> {
                     rule,
                 } => {
                     let have = has_bounds(&self.decls, &self.types, ty, &params);
-                    if bounds & ENCODED != 0 {
-                        self.gaps
-                            .push(Gap::new(site, "packed and streamable bounds are not built"));
-                    } else if have & bounds != bounds {
+                    if have & bounds != bounds {
                         self.refusals.push(refusal(
                             rule,
                             site,
@@ -1297,6 +1401,46 @@ impl Program<'_> {
         )
     }
 
+    /// Compute encoding summaries from each declaration graph, assuming a recursive
+    /// group's own encoding while visiting every field. No iterative approximation.
+    fn encodings(&mut self) {
+        for d in self.decls.base_len()..self.decls.len() {
+            let args: Vec<_> = (0..self.decls[d].generics.len())
+                .map(|i| self.types.intern(TyKind::Param(i as u32)))
+                .collect();
+            let ty = self.types.intern(TyKind::Adt(DeclId(d as u32), args));
+            let mut params = vec![PLAIN | ENCODED | FIXED_ENCODING; self.decls[d].generics.len()];
+            let encoding = derive_encoding(
+                &self.decls,
+                &mut self.types,
+                ty,
+                &params,
+                &mut vec![],
+                false,
+            );
+            let mut conditions: [Vec<u32>; 3] = Default::default();
+            for i in 0..params.len() {
+                params[i] = 0;
+                let without = derive_encoding(
+                    &self.decls,
+                    &mut self.types,
+                    ty,
+                    &params,
+                    &mut vec![],
+                    false,
+                );
+                for (k, bit) in [PACKED, STREAMABLE, FIXED_ENCODING].into_iter().enumerate() {
+                    if encoding & bit != 0 && without & bit == 0 {
+                        conditions[k].push(i as u32);
+                    }
+                }
+                params[i] = PLAIN | ENCODED | FIXED_ENCODING;
+            }
+            self.decls[d].summary.encoding = encoding;
+            self.decls[d].summary.encoding_params = conditions;
+        }
+    }
+
     /// Parameter dependency reachability, from declarations alone. Each edge follows a
     /// field's type-argument position; a phantom position has no path to a field.
     fn bound_conditions(&mut self) {
@@ -1394,23 +1538,58 @@ impl Program<'_> {
                 continue;
             }
             let declared = decl.declared & !PLAIN;
-            let params: Vec<u8> = decl.generics.iter().map(|g| g.bounds | declared).collect();
+            let params: Vec<u16> = decl.generics.iter().map(|g| g.bounds | declared).collect();
             let mut out = vec![];
-            if declared & SHAREABLE != 0 && decl.repr != Repr::Own {
+            let forbidden = if decl.repr != Repr::Own { SHAREABLE } else { 0 }
+                | if matches!(decl.repr, Repr::Stable | Repr::Scoped) {
+                    SEND
+                } else {
+                    0
+                };
+            if declared & forbidden != 0 {
                 out.push(refusal(
                     "OWN-4",
                     decl.site,
-                    "resources, scoped and stable types are never shareable",
+                    format!(
+                        "this representation cannot be {}",
+                        bound_names(declared & forbidden)
+                    ),
+                ));
+            }
+            if decl.compact.is_some() && decl.repr != Repr::Stable {
+                out.push(refusal(
+                    "MEM-9",
+                    decl.site,
+                    "compact layout requires a stable declaration",
                 ));
             }
             for f in decl.all_fields() {
-                if decl.repr != Repr::Scoped
+                if decl.repr == Repr::Stable
+                    && !stable_field(&self.decls, &self.types, f.ty, &params)
+                {
+                    out.push(refusal(
+                        if decl.compact.is_some() {
+                            "MEM-9"
+                        } else {
+                            "MEM-2"
+                        },
+                        f.site,
+                        "a stable field is plain or stable",
+                    ));
+                } else if decl.repr != Repr::Scoped
                     && kind(&self.decls, &self.types, f.ty, &params) == Kind::Scoped
                 {
                     out.push(refusal(
                         "OWN-19",
                         f.site,
                         format!("field `{}` of a non-scoped type is scoped", f.name),
+                    ));
+                }
+                if decl.repr != Repr::Stable && unrooted_stable(&self.decls, &self.types, f.ty) {
+                    out.push(refusal(
+                        "MEM-6",
+                        f.site,
+                        "a stored stable field names its region",
                     ));
                 }
                 let have = has_bounds(&self.decls, &self.types, f.ty, &params);
@@ -1430,7 +1609,14 @@ impl Program<'_> {
     fn check_signatures(&mut self) {
         for f in self.fns.base_len()..self.fns.len() {
             let fd = &self.fns[f];
-            let params: Vec<u8> = fd.generics.iter().map(|g| g.bounds).collect();
+            let params: Vec<u16> = fd.generics.iter().map(|g| g.bounds).collect();
+            if unrooted_stable(&self.decls, &self.types, fd.result) {
+                self.refusals.push(refusal(
+                    "MEM-6",
+                    fd.result_site,
+                    "a stable result names its region",
+                ));
+            }
             for p in &fd.params {
                 if p.mode == Mode::Mut
                     && kind(&self.decls, &self.types, p.ty, &params) == Kind::Stable
@@ -1606,7 +1792,7 @@ fn join(a: Kind, b: Kind) -> Kind {
 
 /// The kind of a type (OWN-3). `params` are the bounds of the enclosing definition's
 /// type parameters.
-pub fn kind(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u8]) -> Kind {
+pub fn kind(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> Kind {
     match t.kind(ty) {
         TyKind::Error
         | TyKind::Hole
@@ -1618,7 +1804,11 @@ pub fn kind(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[
             .iter()
             .fold(Kind::Plain, |k, &x| join(k, kind(decls, t, x, params))),
         TyKind::Region(_) => Kind::Scoped,
-        TyKind::Anchored(x, _) | TyKind::Array(x, _) => kind(decls, t, *x, params),
+        TyKind::Anchored(x, _) => {
+            let k = kind(decls, t, *x, params);
+            if k == Kind::Generic { Kind::Stable } else { k }
+        }
+        TyKind::Array(x, _) => kind(decls, t, *x, params),
         TyKind::View(_) => Kind::Scoped,
         TyKind::Param(i) => {
             if params.get(*i as usize).is_some_and(|b| b & PLAIN != 0) {
@@ -1655,7 +1845,7 @@ pub fn kind(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[
 }
 
 /// Whether `let` copies a value of this type (OWN-3).
-pub fn copyable(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u8]) -> bool {
+pub fn copyable(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> bool {
     match kind(decls, t, ty, params) {
         Kind::Plain | Kind::Stable => true,
         Kind::Scoped => match t.kind(ty) {
@@ -1686,7 +1876,7 @@ pub fn copyable(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params
 }
 
 /// The bounds a type has (OWN-4, SEM-7).
-pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u8]) -> u8 {
+pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> u16 {
     let all = PLAIN | SHAREABLE | SEND | KEY | ORDERED;
     let plain_extra = if kind(decls, t, ty, params) == Kind::Plain {
         PLAIN | SHAREABLE | SEND
@@ -1699,21 +1889,26 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
     };
     plain_extra
         | match t.kind(ty) {
-            TyKind::Error | TyKind::Hole | TyKind::Never => all | INTEGER | FLOAT | ENCODED,
-            TyKind::Unit => all,
-            TyKind::Scalar(Scalar::F32 | Scalar::F64) => PLAIN | SHAREABLE | SEND | FLOAT,
-            TyKind::Scalar(s) if hirsel_core_ir::Ty::Scalar(*s).int().is_some() => all | INTEGER,
-            TyKind::Scalar(_) => all,
+            TyKind::Error | TyKind::Hole => all | INTEGER | FLOAT | ENCODED,
+            TyKind::Never | TyKind::Unit => all,
+            TyKind::Scalar(Scalar::F32 | Scalar::F64) => PLAIN | SHAREABLE | SEND | FLOAT | ENCODED,
+            TyKind::Scalar(s) if hirsel_core_ir::Ty::Scalar(*s).int().is_some() => {
+                all | INTEGER | ENCODED
+            }
+            TyKind::Scalar(_) => all | ENCODED,
             TyKind::Fn(..) => PLAIN | SHAREABLE | SEND,
-            TyKind::Tuple(xs) => meet(xs),
+            TyKind::Tuple(xs) => meet(xs) | encoding_bounds(decls, t, ty, params) & ENCODED,
             TyKind::Region(_) => 0,
             TyKind::Anchored(x, _) => has_bounds(decls, t, *x, params),
             TyKind::Array(x, _) => has_bounds(decls, t, *x, params) & all,
             TyKind::View(x) => has_bounds(decls, t, *x, params) & (KEY | ORDERED),
-            TyKind::Param(i) => params.get(*i as usize).copied().unwrap_or(0),
+            TyKind::Param(i) => {
+                let b = params.get(*i as usize).copied().unwrap_or(0);
+                b | if b & STREAMABLE != 0 { PACKED } else { 0 }
+            }
             TyKind::Adt(d, args) => {
                 let decl = &decls[d.index()];
-                match decl.role {
+                let declared = match decl.role {
                     Some(Role::List) => meet(args) & (KEY | ORDERED | SHAREABLE | SEND),
                     Some(Role::String) => KEY | ORDERED | SHAREABLE | SEND,
                     Some(Role::Text) => KEY | ORDERED,
@@ -1738,7 +1933,13 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
                         }
                         bounds
                     }
-                }
+                };
+                let declared = if matches!(decl.repr, Repr::Stable | Repr::Scoped) {
+                    declared & !(SEND | SHAREABLE)
+                } else {
+                    declared
+                };
+                declared | encoding_bounds(decls, t, ty, params) & ENCODED
             }
         }
 }
@@ -1846,13 +2047,15 @@ pub(crate) fn literal_length(item: hirsel_core_syntax::Item<'_>, n: NodeId) -> O
         return None;
     }
     let token = item.tree.node(n).token?;
-    let text = item.tree.token_text(item.text, token).replace('_', "");
-    let digits = ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64"]
-        .iter()
-        .find_map(|suffix| text.strip_suffix(suffix))
-        .unwrap_or(&text);
+    let text = item.tree.token_text(item.text, token);
+    let suffix = Scalar::ALL
+        .into_iter()
+        .find(|&s| hirsel_core_ir::Ty::Scalar(s).int().is_some() && text.ends_with(s.name()));
+    let digits = suffix
+        .and_then(|s| text.strip_suffix(s.name()))
+        .unwrap_or(text);
     let (radix, digits) = if let Some(d) = digits.strip_prefix("0x") {
-        (16, d)
+        (16u64, d)
     } else if let Some(d) = digits.strip_prefix("0o") {
         (8, d)
     } else if let Some(d) = digits.strip_prefix("0b") {
@@ -1860,7 +2063,31 @@ pub(crate) fn literal_length(item: hirsel_core_syntax::Item<'_>, n: NodeId) -> O
     } else {
         (10, digits)
     };
-    u64::from_str_radix(digits, radix).ok()
+    let mut seen = false;
+    let value = digits
+        .chars()
+        .filter(|&c| c != '_')
+        .try_fold(0u64, |n, c| {
+            seen = true;
+            n.checked_mul(radix)?
+                .checked_add(u64::from(c.to_digit(radix as u32)?))
+        })?;
+    if !seen {
+        return None;
+    }
+    if let Some(suffix) = suffix {
+        let (signed, width) = hirsel_core_ir::Ty::Scalar(suffix).int().unwrap();
+        let bits = width - u32::from(signed);
+        let max = if bits == 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
+        if value > max {
+            return None;
+        }
+    }
+    Some(value)
 }
 
 /// Region roots of a type. The caller supplies and reuses the output arena.
@@ -1944,6 +2171,7 @@ pub(crate) fn scoped_payload(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty:
         _ => false,
     }
 }
+
 /// A bare stable parameter reads the caller's value in its original region (MEM-6).
 /// This conversion is only for parameter reads, never for storing or returning it.
 pub(crate) fn stable_parameter(
@@ -1967,6 +2195,166 @@ pub(crate) fn stable_parameter(
                     || decls[a.index()].role == Some(Role::IndexedSpan)
                         && decls[b.index()].role == Some(Role::SeqSpan))
         }
+
+        _ => false,
+    }
+}
+
+/// Read a published encoding summary and its conditions. No field is reread here.
+fn encoding_bounds(
+    decls: &crate::Rows<TypeDecl>,
+    t: &impl TyRead,
+    ty: TyId,
+    params: &[u16],
+) -> u16 {
+    let all = ENCODED | FIXED_ENCODING;
+    match t.kind(ty) {
+        TyKind::Scalar(_) | TyKind::Error | TyKind::Hole => all,
+        TyKind::Anchored(x, _) => encoding_bounds(decls, t, *x, params),
+        TyKind::Param(i) => {
+            let b = params.get(*i as usize).copied().unwrap_or(0);
+            (b & all) | if b & STREAMABLE != 0 { PACKED } else { 0 }
+        }
+        TyKind::Tuple(xs) if !xs.is_empty() && kind(decls, t, ty, params) == Kind::Plain => xs
+            .iter()
+            .fold(all, |b, &x| b & encoding_bounds(decls, t, x, params)),
+        TyKind::Adt(d, args) => {
+            let decl = &decls[d.index()];
+            match decl.role {
+                Some(Role::Text) => ENCODED,
+                Some(Role::FixedSpan) => {
+                    if encoding_bounds(decls, t, args[0], params) & FIXED_ENCODING != 0 {
+                        ENCODED
+                    } else {
+                        0
+                    }
+                }
+                Some(Role::SeqSpan | Role::IndexedSpan) => {
+                    encoding_bounds(decls, t, args[0], params) & ENCODED
+                }
+                Some(_) => 0,
+                None => {
+                    if decl.compact.is_none() && kind(decls, t, ty, params) != Kind::Plain {
+                        return 0;
+                    }
+                    let mut bits = decl.summary.encoding;
+                    for (i, bit) in [PACKED, STREAMABLE, FIXED_ENCODING].into_iter().enumerate() {
+                        if decl.summary.encoding_params[i].iter().any(|&p| {
+                            encoding_bounds(decls, t, args[p as usize], params) & bit == 0
+                        }) {
+                            bits &= !bit;
+                        }
+                    }
+                    bits
+                }
+            }
+        }
+        _ => 0,
+    }
+}
+
+fn derive_encoding(
+    decls: &crate::Rows<TypeDecl>,
+    t: &mut Types,
+    ty: TyId,
+    params: &[u16],
+    stack: &mut Vec<(DeclId, Vec<TyId>)>,
+    compact_field: bool,
+) -> u16 {
+    let all = ENCODED | FIXED_ENCODING;
+    match t.kind(ty).clone() {
+        TyKind::Scalar(_) | TyKind::Error => all,
+        TyKind::Anchored(x, _) => derive_encoding(decls, t, x, params, stack, compact_field),
+        TyKind::Param(i) => params.get(i as usize).copied().unwrap_or(0) & all,
+        TyKind::Tuple(xs) if !xs.is_empty() && kind(decls, t, ty, params) == Kind::Plain => {
+            xs.into_iter().fold(all, |b, x| {
+                b & derive_encoding(decls, t, x, params, stack, false)
+            })
+        }
+        TyKind::Adt(d, args) => {
+            let decl = &decls[d.index()];
+            match decl.role {
+                Some(Role::Text) => ENCODED,
+                Some(Role::Link) if compact_field => PACKED | FIXED_ENCODING,
+                Some(Role::FixedSpan) => {
+                    if derive_encoding(decls, t, args[0], params, stack, false) & FIXED_ENCODING
+                        != 0
+                    {
+                        ENCODED
+                    } else {
+                        0
+                    }
+                }
+                Some(Role::SeqSpan | Role::IndexedSpan) => {
+                    derive_encoding(decls, t, args[0], params, stack, false) & ENCODED
+                }
+                Some(_) => 0,
+                None if decl.structural
+                    && compact_field
+                    && is_core_prelude(&decl.path, &["Option"])
+                    && matches!(t.kind(args[0]), TyKind::Adt(link, _) if decls[link.index()].role == Some(Role::Link)) =>
+                {
+                    PACKED | FIXED_ENCODING
+                }
+                None => {
+                    let compact = decl.compact.is_some();
+                    if compact && matches!(&decl.body, DeclBody::Record(fs) if fs.is_empty()) {
+                        return 0;
+                    }
+                    if !compact
+                        && (decl.repr != Repr::Own
+                            || !matches!(decl.body, DeclBody::Record(_))
+                            || kind(decls, t, ty, params) != Kind::Plain
+                            || decl.all_fields().next().is_none())
+                    {
+                        return 0;
+                    }
+                    if let Some((_, previous)) = stack.iter().find(|(id, _)| *id == d) {
+                        return if previous == &args { all } else { 0 };
+                    }
+                    stack.push((d, args.clone()));
+                    let mut bits = all;
+                    for f in decl.all_fields() {
+                        let ft = subst(t, f.ty, &args);
+                        bits &= derive_encoding(decls, t, ft, params, stack, compact);
+                    }
+                    stack.pop();
+                    if compact {
+                        bits &= !FIXED_ENCODING;
+                    }
+                    bits
+                }
+            }
+        }
+        _ => 0,
+    }
+}
+
+fn stable_field(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> bool {
+    match t.kind(ty) {
+        TyKind::Tuple(xs) => xs.iter().all(|&x| stable_field(decls, t, x, params)),
+        TyKind::Adt(d, xs) if is_core_prelude(&decls[d.index()].path, &["Option"]) => {
+            xs.iter().all(|&x| stable_field(decls, t, x, params))
+        }
+        _ => matches!(kind(decls, t, ty, params), Kind::Plain | Kind::Stable),
+    }
+}
+fn unrooted_stable(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId) -> bool {
+    match t.kind(ty) {
+        TyKind::Anchored(_, _) => false,
+        TyKind::Tuple(xs) => xs.iter().any(|&x| unrooted_stable(decls, t, x)),
+        TyKind::Adt(d, xs) => {
+            decls[d.index()].repr == Repr::Stable
+                || decls[d.index()]
+                    .role
+                    .is_some_and(|r| r.kind() == Kind::Stable)
+                || decls[d.index()]
+                    .summary
+                    .bound_params
+                    .iter()
+                    .any(|&i| unrooted_stable(decls, t, xs[i as usize]))
+        }
+        TyKind::Array(x, _) => unrooted_stable(decls, t, *x),
         _ => false,
     }
 }

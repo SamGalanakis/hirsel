@@ -1,0 +1,3 @@
+// expect: refuse MEM-2 at 3:19
+// MEM-2: own storage is forbidden in a stable declaration.
+stable type Bad { value: String }

@@ -247,6 +247,8 @@ impl TypeDecl {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ParamDecl {
+    /// A byte-count parameter, whose argument keeps the `bytes` mark (LANG-5).
+    pub bytes: bool,
     pub name: hirsel_core_syntax::Symbol,
     pub mode: Mode,
     pub ty: TyId,
@@ -783,14 +785,19 @@ impl Program<'_> {
                 NodeKind::Parameters => {
                     for &p in item.tree.children(c) {
                         let pn = item.tree.node(p);
-                        if pn.kind == NodeKind::BytesParameter {
-                            self.gaps
-                                .push(Gap::new(self.site(at, p), "sized parameters are not built"));
-                        }
                         let name = item.symbol(pn.token.unwrap());
                         let tnode = item.tree.children(p)[0];
                         let ty = self.lower_ty(at, tnode, &generics);
+                        let bytes = pn.kind == NodeKind::BytesParameter;
+                        if bytes && ty != scalar(Scalar::U64) && ty != ERROR {
+                            self.refusals.push(refusal(
+                                "LANG-5",
+                                self.site(at, p),
+                                "a `bytes` parameter has type `u64`",
+                            ));
+                        }
                         params.push(ParamDecl {
+                            bytes,
                             name,
                             mode: mode_of(pn.kind),
                             ty,

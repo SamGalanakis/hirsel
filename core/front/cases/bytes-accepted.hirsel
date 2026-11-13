@@ -1,0 +1,7 @@
+// LANG-5: bytes is a u64 signature mark, preserved through forwarding and literal checking.
+// Without the fix the signature and both calls stop at gaps instead of returning 9.
+// expect: accept
+// expect: run f() = 9
+fn sized(bytes n: u64) -> u64 { n + 1 }
+fn relay(bytes n: u64) -> u64 { sized(bytes n) }
+fn f() -> u64 { relay(bytes 3 + 5) }

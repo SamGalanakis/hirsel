@@ -1,0 +1,3 @@
+// LANG-5: a bytes parameter is a u64 byte count, never a u8 parameter.
+// expect: refuse LANG-5 at 3:10
+fn sized(bytes n: u8) -> u8 { n }

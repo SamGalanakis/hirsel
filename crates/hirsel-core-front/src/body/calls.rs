@@ -5,7 +5,7 @@ pub(super) struct CallScratch {
     found: Vec<Option<TyId>>,
     checked: Vec<bool>,
     vals: Vec<Option<ValueId>>,
-    later: Vec<usize>,
+    later: Vec<(usize, NodeId)>,
     tys: Vec<TyId>,
 }
 
@@ -100,14 +100,22 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.determined(f, found, checked, n);
         }
         for (i, &a) in args.iter().enumerate() {
-            if matches!(
-                self.kind(a),
-                NodeKind::LabelledArgument | NodeKind::BytesArgument
-            ) {
-                self.gap(a, "labelled and bytes arguments are not built");
-                continue;
-            }
-            let e = a;
+            let e = match (self.kind(a), g.params[i].bytes) {
+                (NodeKind::LabelledArgument, _) => {
+                    // The resolver already refuses labels on ordinary calls (LANG-9).
+                    self.halt();
+                    continue;
+                }
+                (NodeKind::BytesArgument, true) => self.kids(a)[0],
+                (NodeKind::BytesArgument, false) | (_, true) => {
+                    self.gap(
+                        a,
+                        "bytes argument mark does not match its parameter (rule unspecified)",
+                    );
+                    continue;
+                }
+                _ => a,
+            };
             if self.argument(
                 g.params[i].mode,
                 g.params[i].ty,
@@ -122,7 +130,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
             // A literal operand waits for the other arguments and the result (LANG-21).
             if !self.synthesises(e) {
-                later.push(i);
+                later.push((i, e));
                 continue;
             }
             let pt = g.params[i].ty;
@@ -170,8 +178,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 }
             };
         }
-        for &i in later.iter() {
-            let e = args[i];
+        for &(i, e) in later.iter() {
             match self.known(g.params[i].ty, found) {
                 Some(t) => vals[i] = self.expr(e, expect(t)).1,
                 None => {

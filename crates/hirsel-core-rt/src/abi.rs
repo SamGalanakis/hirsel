@@ -19,6 +19,9 @@
 //! entries return unit, except dest_id (u64), compare_bytes (i8) and native_alloc/region_refill
 //! (nonnull native base/payload). Count overflow and physical host exhaustion are run
 //! stops. A drop recipe's boolean means completion, with false requesting resume.
+//! Shipping standalone archives also stop as HostMemory when Rust bookkeeping
+//! allocation fails. Embeddable/test rlibs retain their host's global allocator.
+//! Startup page-query refusal stops as PageSize; missing prior signal state as Signal.
 //!
 //! These C signatures are complete. The FORM function-row u8 failure status is
 //! handled by the emitter. FORM decision 39 fixes successful admission's

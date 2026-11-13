@@ -9,6 +9,8 @@ rust-version.workspace = true
 crate-type = ["rlib", "staticlib"]
 
 [features]
+# Only a standalone program owns the process allocator. Rust embeddings keep theirs.
+standalone = []
 testing = []
 memcheck = []
 charge-observation = []

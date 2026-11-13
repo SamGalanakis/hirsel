@@ -1084,6 +1084,15 @@ def static_archive_rule(package: dict, packages: dict, attrs: dict) -> str:
     """Only the old runtime uses its feature matrix and startup training."""
     name = package['name']
     if name != 'hirsel-rt':
+        if name == 'hirsel-core-rt':
+            # A language executable owns its process allocator. The ordinary
+            # rlib remains embeddable beside a host's allocator or hirsel_guard.
+            return (call('hirsel_library', name=f'{name}-standalone',
+                         deps=declared_deps(package, packages),
+                         **{**attrs, 'features': ['standalone']})
+                    + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-archives',
+                                  library=f'//:{name}-standalone',
+                                  archive_name=f"lib{attrs['crate']}.a"))
         return call('hirsel_core_runtime_archives', name=f'{name}-archives',
                     library=f'//:{name}', archive_name=f"lib{attrs['crate']}.a")
     return call('hirsel_runtime_archives', name=f'{name}-archives',
@@ -1308,9 +1317,12 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-native", data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml", "core/core/**", "core/std/**", "core/front/runtime/**"])')))
     out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-native", data=Raw('glob(["core/core/**", "core/front/**", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-ir/samples/**", "crates/hirsel-llvm/Cargo.toml"])')))
     out.append("\n" + call("hirsel_library", name="hirsel-core-rt-observed", crate="hirsel_core_rt", crate_root="crates/hirsel-core-rt/src/lib.rs",
-        srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["charge-observation"], deps=declared_deps(next(p for p in packages.values() if p["name"] == "hirsel-core-rt"), packages),
+        srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["standalone", "charge-observation"], deps=declared_deps(next(p for p in packages.values() if p["name"] == "hirsel-core-rt"), packages),
         manifest_dir="crates/hirsel-core-rt", package_name="hirsel-core-rt", version="0.1.0", edition="2024"))
     out.append("\n" + call("hirsel_core_runtime_archives", name="hirsel-core-rt-observed-archives", library=":hirsel-core-rt-observed", archive_name="libhirsel_core_rt.a"))
+    out.append("\n" + call("hirsel_script_test", name="core-bookkeeping-stop", script="tools/tests/core_bookkeeping_stop.py", full=False,
+        files_env={"HIRSEL_CORE_RT_ARCHIVES": "//:hirsel-core-rt-archives"},
+        data=Raw('glob(["crates/hirsel-core-rt/include/**"]) + ["crates/hirsel-core-rt/testdata/bookkeeping_stop.c"]')))
     out.append("\n" + call("hirsel_library", name="hirsel-core-rt-native-fixture", crate="hirsel_core_rt", crate_root="crates/hirsel-core-rt/src/lib.rs",
         srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["testing", "memcheck", "charge-observation"], deps=declared_deps(next(p for p in packages.values() if p["name"] == "hirsel-core-rt"), packages),
         manifest_dir="crates/hirsel-core-rt", package_name="hirsel-core-rt", version="0.1.0", edition="2024"))

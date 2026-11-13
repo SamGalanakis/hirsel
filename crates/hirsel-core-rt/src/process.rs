@@ -223,7 +223,7 @@ impl Drop for PipePolicy {
             unsafe {
                 libc::sigaction(
                     libc::SIGPIPE,
-                    &state.previous.take().unwrap(),
+                    &state.previous.take().unwrap_or_else(|| stop(b"Signal")),
                     std::ptr::null_mut(),
                 );
             }

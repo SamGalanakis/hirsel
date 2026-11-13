@@ -9,6 +9,9 @@ thread_local! {
     static ALTERNATE: Alternate = Alternate::new();
 }
 static PREVIOUS: OnceLock<libc::sigaction> = OnceLock::new();
+#[cfg(test)]
+#[path = "fiber_stop_tests.rs"]
+mod stop_tests;
 pub(crate) fn stop_fd() -> i32 {
     STOP_FD.get()
 }
@@ -37,7 +40,13 @@ pub(crate) fn arm() {
 }
 fn page() -> usize {
     // SAFETY: sysconf reads the kernel's immutable page size.
-    usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap()
+    page_bytes(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })
+}
+fn page_bytes(value: libc::c_long) -> usize {
+    match usize::try_from(value) {
+        Ok(bytes) if bytes != 0 => bytes,
+        _ => crate::process::stop(b"PageSize"),
+    }
 }
 pub(crate) struct Stack {
     base: NonNull<u8>,
@@ -157,7 +166,9 @@ unsafe extern "C" fn fault(signal: i32, info: *mut libc::siginfo_t, context: *mu
     // SAFETY: chain to the process handler saved before installation; it has the
     // corresponding POSIX signature. Unrelated memory faults remain fatal.
     unsafe {
-        let previous = PREVIOUS.get().unwrap();
+        let previous = PREVIOUS
+            .get()
+            .unwrap_or_else(|| crate::process::stop(b"Signal"));
         if previous.sa_sigaction == libc::SIG_DFL || previous.sa_sigaction == libc::SIG_IGN {
             libc::sigaction(signal, previous, std::ptr::null_mut());
         } else if previous.sa_flags & libc::SA_SIGINFO != 0 {

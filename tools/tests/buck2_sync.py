@@ -138,6 +138,19 @@ class CargoUnits(unittest.TestCase):
         self.assertEqual(ast.literal_eval(archive['archive_name']), 'libcore.a')
         self.assertNotIn('target_deps', archive)
 
+    def test_standalone_runtime_owns_allocator_only_in_shipping_archive(self):
+        from cargo_units import calls, literal
+        source = sync.static_archive_rule({'name': 'hirsel-core-rt', 'dependencies': []}, {},
+                                         {'crate': 'hirsel_core_rt', 'crate_root': 'src/lib.rs',
+                                          'features': []})
+        targets = {literal(call, 'name'): (call.func.id, attrs)
+                   for _, call, attrs in calls(source)}
+        kind, standalone = targets['hirsel-core-rt-standalone']
+        self.assertEqual(kind, 'hirsel_library')
+        self.assertEqual(ast.literal_eval(standalone['features']), ['standalone'])
+        _, archive = targets['hirsel-core-rt-archives']
+        self.assertEqual(ast.literal_eval(archive['library']), '//:hirsel-core-rt-standalone')
+
     def test_dev_features_fork_transitive_users_but_share_unchanged_leaves(self):
         from cargo_units import Resolution, calls, literal
         r = Resolution.__new__(Resolution)

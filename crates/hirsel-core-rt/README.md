@@ -8,6 +8,17 @@ status 102 and exactly `run stop: HostMemory\n`. Stops bypass cleanup, causes an
 join delivery. Destination identity exhaustion uses `run stop: DestinationIds\n`;
 all names share the same process stop path (FAIL-15, PROG-3).
 
+The shipping standalone archives select `standalone`: Rust bookkeeping
+Box/Vec/maps/String use a System allocator wrapper that stops on a null
+allocation, zeroed allocation or reallocation. Payload malloc/mi_malloc does
+not pass through it. The embeddable rlib, unit/native fixtures, hirsel_guard
+and mimalloc comparison executables keep their host allocator and are outside
+this standalone bookkeeping-OOM claim. Cargo standalone archive builds must
+select `--features standalone`; never enable it when another Rust crate owns
+the global allocator. Both shipping and optional observed Buck archives select
+it explicitly. Failed page-size queries stop as PageSize; missing installed
+signal state stops as Signal. Implementation-invariant panics remain bugs.
+
 `src/abi.rs` is the emitter reference. `include/hirsel_core_rt.h` publishes the
 same C declarations and frozen 64-bit offsets. Success Capacity fields are zero.
 `rt.dest_id` takes no context or status and returns a fresh u64 identity.

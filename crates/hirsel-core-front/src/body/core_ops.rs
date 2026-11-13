@@ -172,8 +172,6 @@ operations! {
     ("list", "Hole", Lane::PendingCode, "C", "core-collections-918", true),
     ("list", "slots_finish_list", Lane::Value, "A", "core-collections-918", true),
     ("list", "sort_stable", Lane::PendingCode, "C", "core-collections-918", false),
-    ("list", "sort_view", Lane::PendingCode, "C", "core-collections-918", true),
-    ("list", "sort_move", Lane::PendingCode, "C", "core-collections-918", true),
     ("list", "slots_list_view", Lane::Value, "A", "core-collections-918", true),
     ("list", "slots_from_list", Lane::Value, "A", "core-collections-918", true),
     ("list", "slots_to_list", Lane::Value, "A", "core-collections-918", true),
@@ -1029,8 +1027,7 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                     )
                     || entry.module == "map"
                     || entry.module == "list"
-                        && (entry.name.starts_with("slots_")
-                            || matches!(entry.name, "Hole" | "sort_view" | "sort_move"))
+                        && (entry.name.starts_with("slots_") || matches!(entry.name, "Hole"))
                     || matches!(entry.module, "deque" | "heap")
             );
         }

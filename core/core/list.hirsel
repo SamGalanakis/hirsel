@@ -43,6 +43,7 @@ pub fn sum[T: integer](xs: List[T]) -> T {
 
 // Private uninhabited storage. len is the number of live slots, not a prefix.
 // Callers must empty it before free or normalize it before ordinary cleanup.
+// Sort aliases keep len0 on scratch; Hole alone tracks and restores its live set.
 type Slots[T] { raw: List[T] }
 fn slots_empty[T]() -> Slots[T]
 fn slots_new[T](n: u64) -> Result[Slots[T], Capacity]
@@ -76,19 +77,20 @@ pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Resu
             // out is a prefix across the whole pass, not just this pair.
             while g.out < g.end {
                 let right = if g.b == g.end { false } else if g.a == g.mid { true } else {
-                    match before(sort_view(g, g.b), sort_view(g, g.a)) { Less => true, _ => false }
+                    if g.source_is_xs {
+                        match before(slots_list_view(g.xs, g.b), slots_list_view(g.xs, g.a)) { Less => true, _ => false }
+                    } else {
+                        match before(slots_view(g.scratch, g.b), slots_view(g.scratch, g.a)) { Less => true, _ => false }
+                    }
                 }
-                if right {
-                    let from = g.b
-                    let to = g.out
-                    sort_move(mut g, from, to)
-                    g.b += 1
+                let from = if right { g.b } else { g.a }
+                let to = g.out
+                if g.source_is_xs {
+                    slots_from_list(g.xs, from, mut g.scratch, to)
                 } else {
-                    let from = g.a
-                    let to = g.out
-                    sort_move(mut g, from, to)
-                    g.a += 1
+                    slots_to_list(mut g.scratch, from, g.xs, to)
                 }
+                if right { g.b += 1 } else { g.a += 1 }
                 g.out += 1
             }
             lo = g.end
@@ -150,18 +152,9 @@ scoped type Hole[T] {
     }
     slots_finish_list(g.xs)
 }
-fn sort_view[T](g: Hole[T], i: u64) -> View[T] in g {
-    if g.source_is_xs { slots_list_view(g.xs, i) } else { slots_view(g.scratch, i) }
-}
-fn sort_move[T](mut g: Hole[T], from: u64, to: u64) {
-    if g.source_is_xs {
-        slots_from_list(g.xs, from, mut g.scratch, to)
-    } else {
-        slots_to_list(mut g.scratch, from, g.xs, to)
-    }
-}
 // Header access is trusted and private. xs stays frozen by Hole's view while
-// these transfer operations temporarily change its live count and live set.
+// its live set is temporarily holed. Both headers stay fixed: xs retains n,
+// scratch retains0, and Hole restores every original slot before field cleanup.
 fn slots_list_view[T](xs: View[List[T]], i: u64) -> View[T] in xs
 fn slots_from_list[T](src: View[List[T]], i: u64, mut dst: Slots[T], j: u64)
 fn slots_to_list[T](mut src: Slots[T], i: u64, dst: View[List[T]], j: u64)

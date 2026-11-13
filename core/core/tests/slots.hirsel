@@ -80,6 +80,7 @@ fn slots_list_handoff_law() -> u64 {
     for i in 1u64 .. 4 { result.unwrap(list.push(mut xs, i)) }
     let mut scratch: Slots[u64] = result.unwrap(slots_new(1))
     slots_from_list(view xs, 1, mut scratch, 0)
+    let fixed_header = list.len(xs) == 3 && list.len(scratch.raw) == 0
     slots_to_list(mut scratch, 0, view xs, 1)
     slots_finish_list(view xs)
     slots_free(take scratch)
@@ -88,5 +89,5 @@ fn slots_list_handoff_law() -> u64 {
     result.unwrap(list.reserve(mut xs, 8))
     let b = option.unwrap(list.pop(mut xs))
     list.clear(mut xs)
-    a * 10 + b
+    if fixed_header { a * 10 + b } else { 99 }
 }

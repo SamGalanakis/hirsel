@@ -1,5 +1,6 @@
 // Reviewed-by: langs-text-921 2026-11-13; Quick/Merge and source introsort Self match pivots, cutoffs, heap fallback, scratch arrays, retained LCG resets; compile with overflow checks.
 // Conversion parity delta reviewed by langs-text-921 2026-11-13: truncate then half-open float bounds, unsigned Fannkuch/matching checked index sites, u32 Mandelbrot counter; approval scoped to this delta.
+// Sort::Self scoped comparator carrier delta pending independent review.
 // Matches sort.hirsel, including std.list introsort for Sort::Self.
 #[allow(dead_code)]
 mod support;
@@ -63,21 +64,36 @@ fn merge(a: &mut [i32], temp: &mut [i32], lo: usize, hi: usize) {
         k += 1;
     }
 }
-fn partition(a: &mut [i32], lo: usize, hi: usize) -> usize {
+// The Hirsel scoped comparator is a code pointer and a borrowed environment.
+// Keep both words and the Order result in the matched source; devirtualization is allowed.
+#[derive(Clone, Copy)]
+struct Compare {
+    call: fn(&(), i32, i32) -> std::cmp::Ordering,
+    environment: &'static (),
+}
+impl Compare {
+    fn less(self, a: i32, b: i32) -> bool {
+        (self.call)(self.environment, a, b).is_lt()
+    }
+}
+fn compare_i32(_: &(), a: i32, b: i32) -> std::cmp::Ordering {
+    a.cmp(&b)
+}
+fn partition(a: &mut [i32], lo: usize, hi: usize, before: Compare) -> usize {
     let mid = lo + (hi - lo) / 2;
     let last = hi - 1;
-    if a[mid] < a[lo] {
+    if before.less(a[mid], a[lo]) {
         a.swap(mid, lo);
     }
-    if a[last] < a[lo] {
+    if before.less(a[last], a[lo]) {
         a.swap(last, lo);
     }
-    if a[mid] < a[last] {
+    if before.less(a[mid], a[last]) {
         a.swap(mid, last);
     }
     let mut store = lo;
     for i in lo..last {
-        if a[i] < a[last] {
+        if before.less(a[i], a[last]) {
             a.swap(i, store);
             store += 1;
         }
@@ -85,50 +101,50 @@ fn partition(a: &mut [i32], lo: usize, hi: usize) -> usize {
     a.swap(store, last);
     store
 }
-fn sift_down(a: &mut [i32], base: usize, start: usize, n: usize) {
+fn sift_down(a: &mut [i32], base: usize, start: usize, n: usize, before: Compare) {
     let mut root = start;
     while root * 2 + 1 < n {
         let mut child = root * 2 + 1;
-        if child + 1 < n && a[base + child] < a[base + child + 1] {
+        if child + 1 < n && before.less(a[base + child], a[base + child + 1]) {
             child += 1;
         }
-        if a[base + root] >= a[base + child] {
+        if !before.less(a[base + root], a[base + child]) {
             return;
         }
         a.swap(base + root, base + child);
         root = child;
     }
 }
-fn heapsort(a: &mut [i32], lo: usize, hi: usize) {
+fn heapsort(a: &mut [i32], lo: usize, hi: usize, before: Compare) {
     let n = hi - lo;
     let mut i = n / 2;
     while i > 0 {
         i -= 1;
-        sift_down(a, lo, i, n);
+        sift_down(a, lo, i, n, before);
     }
     let mut end = n;
     while end > 1 {
         end -= 1;
         a.swap(lo, lo + end);
-        sift_down(a, lo, 0, end);
+        sift_down(a, lo, 0, end, before);
     }
 }
-fn sort_range(a: &mut [i32], start: usize, end: usize, limit: usize) {
+fn sort_range(a: &mut [i32], start: usize, end: usize, limit: usize, before: Compare) {
     let mut lo = start;
     let mut hi = end;
     let mut depth = limit;
     while hi - lo > 16 {
         if depth == 0 {
-            heapsort(a, lo, hi);
+            heapsort(a, lo, hi, before);
             return;
         }
         depth -= 1;
-        let p = partition(a, lo, hi);
+        let p = partition(a, lo, hi, before);
         if p - lo < hi - p {
-            sort_range(a, lo, p, depth);
+            sort_range(a, lo, p, depth, before);
             lo = p + 1;
         } else {
-            sort_range(a, p + 1, hi, depth);
+            sort_range(a, p + 1, hi, depth, before);
             hi = p;
         }
     }
@@ -137,20 +153,20 @@ fn sort_range(a: &mut [i32], start: usize, end: usize, limit: usize) {
     }
     for i in lo + 1..hi {
         let mut j = i;
-        while j > lo && a[j] < a[j - 1] {
+        while j > lo && before.less(a[j], a[j - 1]) {
             a.swap(j, j - 1);
             j -= 1;
         }
     }
 }
-fn library_sort(a: &mut [i32]) {
+fn library_sort(a: &mut [i32], before: Compare) {
     let mut limit = 0;
     let mut m = a.len();
     while m > 1 {
         limit += 2;
         m /= 2;
     }
-    sort_range(a, 0, a.len(), limit);
+    sort_range(a, 0, a.len(), limit, before);
 }
 fn run(c: &support::Config) -> u32 {
     assert!(matches!(
@@ -180,7 +196,7 @@ fn run(c: &support::Config) -> u32 {
                     let mut temp = vec![0; n];
                     merge(&mut t, &mut temp, 0, n);
                 }
-                _ => library_sort(&mut t),
+                _ => library_sort(&mut t, Compare { call: compare_i32, environment: &() }),
             }
             let at = usize::try_from(g.integer(i32::try_from(n).unwrap())).unwrap();
             total = total.wrapping_add(u32::try_from(t[at]).unwrap());

@@ -1,192 +1,333 @@
-// Matched twin of json.hirsel. Review pending langs-numeric-920 and922 layout review.
+// Matched twin of json.hirsel. Re-review pending langs-numeric-920/core-regions-pools-922.
 // Same two-pass JSON parse into one compact u32 blob, indexed containers, text numbers.
 // Compact tags/layout: core/std/json.hirsel Json/Member and docs/spec/memory.md MEM-9.
+// Parser/trailer walk adapted from reviewed layout/json_matched.rs. Numeric scan and
+// Clinger conversion follow std.float for the frozen small-mantissa fixtures only.
 mod text_support;
 struct Doc {
     data: Vec<u8>,
 }
+// std.float.scan/significant and parse64's exact Clinger branch. Every number in
+// the generated test/run documents fits this branch: coordinates have at most
+// eight decimal places, and opts contains the integer 1. This is not a general
+// replacement for std.float's Eisel-Lemire/big-decimal fallback.
+fn decimal_small(s: &[u8]) -> f64 {
+    const POW10: [f64; 23] = [
+        1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+        1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+    ];
+    struct Scanned {
+        mantissa: u64,
+        exponent: i64,
+        taken: u64,
+        many: bool,
+    }
+    impl Scanned {
+        fn digit(&mut self, x: u8, fraction: bool) {
+            if self.mantissa == 0 && x == 0 {
+                if fraction {
+                    self.exponent -= 1;
+                }
+            } else if self.taken < 19 {
+                self.mantissa = self.mantissa * 10 + u64::from(x);
+                if fraction {
+                    self.exponent -= 1;
+                }
+                self.taken += 1;
+            } else {
+                self.many |= x != 0;
+                if !fraction {
+                    self.exponent += 1;
+                }
+            }
+        }
+    }
+    let negative = s.first() == Some(&b'-');
+    let mut at = usize::from(negative);
+    assert!(s.get(at).is_some_and(u8::is_ascii_digit), "number grammar");
+    let mut n = Scanned {
+        mantissa: 0,
+        exponent: 0,
+        taken: 0,
+        many: false,
+    };
+    if s[at] == b'0' {
+        at += 1;
+    } else {
+        while s.get(at).is_some_and(u8::is_ascii_digit) {
+            n.digit(s[at] - b'0', false);
+            at += 1;
+        }
+    }
+    if s.get(at) == Some(&b'.') {
+        at += 1;
+        assert!(
+            s.get(at).is_some_and(u8::is_ascii_digit),
+            "fraction grammar"
+        );
+        while s.get(at).is_some_and(u8::is_ascii_digit) {
+            n.digit(s[at] - b'0', true);
+            at += 1;
+        }
+    }
+    if s.get(at).is_some_and(|&b| b == b'e' || b == b'E') {
+        at += 1;
+        let minus = s.get(at) == Some(&b'-');
+        if s.get(at).is_some_and(|&b| b == b'-' || b == b'+') {
+            at += 1;
+        }
+        assert!(
+            s.get(at).is_some_and(u8::is_ascii_digit),
+            "exponent grammar"
+        );
+        let mut written = 0i64;
+        while s.get(at).is_some_and(u8::is_ascii_digit) {
+            if written < 65536 {
+                written = 10 * written + i64::from(s[at] - b'0');
+            }
+            at += 1;
+        }
+        n.exponent += if minus { -written } else { written };
+    }
+    assert_eq!(at, s.len(), "number grammar");
+    assert!(
+        !n.many && (-22..=22).contains(&n.exponent) && n.mantissa <= 9007199254740992,
+        "number outside the frozen fixtures' exact Clinger domain"
+    );
+    let mut value = n.mantissa as f64;
+    if n.exponent < 0 {
+        value /= POW10[usize::try_from(-n.exponent).unwrap()];
+    } else {
+        value *= POW10[usize::try_from(n.exponent).unwrap()];
+    }
+    if negative { -value } else { value }
+}
 struct Parser<'a> {
-    source: &'a [u8],
-    pos: usize,
-    data: Option<Vec<u8>>,
-    size: usize,
+    s: &'a [u8],
+    at: usize,
+    used: usize,
+    bytes: Option<Vec<u8>>,
 }
 impl Parser<'_> {
-    fn byte(&mut self, b: u8) {
-        self.size = self.size.checked_add(1).unwrap();
-        if let Some(d) = &mut self.data {
-            d.push(b);
+    fn put(&mut self, x: &[u8]) {
+        self.used += x.len();
+        if let Some(v) = &mut self.bytes {
+            v.extend_from_slice(x);
         }
     }
-    fn word(&mut self, n: u32) {
-        for b in n.to_le_bytes() {
-            self.byte(b);
+    fn word(&mut self, n: usize) {
+        self.put(&u32::try_from(n).unwrap().to_le_bytes());
+    }
+    fn patch(&mut self, at: usize, n: usize) {
+        if let Some(v) = &mut self.bytes {
+            v[at..at + 4].copy_from_slice(&u32::try_from(n).unwrap().to_le_bytes());
         }
     }
-    fn patch(&mut self, at: usize, n: u32) {
-        if let Some(d) = &mut self.data {
-            d[at..at + 4].copy_from_slice(&n.to_le_bytes());
+    fn peek(&self) -> u8 {
+        self.s.get(self.at).copied().unwrap_or(0)
+    }
+    fn ws(&mut self) {
+        while matches!(self.peek(), b' ' | b'\t' | b'\r' | b'\n') {
+            self.at += 1;
         }
     }
-    fn whitespace(&mut self) {
-        while self.pos < self.source.len() && b" \n\r\t".contains(&self.source[self.pos]) {
-            self.pos += 1;
-        }
-    }
-    fn scalar(&mut self, c: char) {
-        let mut b = [0u8; 4];
-        for &x in c.encode_utf8(&mut b).as_bytes() {
-            self.byte(x);
-        }
-    }
-    fn hex4(&mut self) -> u32 {
-        let mut n = 0u32;
+    fn hex(&mut self) -> u32 {
+        let mut cp = 0;
         for _ in 0..4 {
-            let c = self.source[self.pos];
-            self.pos += 1;
-            n = n * 16 + char::from(c).to_digit(16).unwrap();
+            let x = self.peek();
+            self.at += 1;
+            cp = cp * 16
+                + match x {
+                    b'0'..=b'9' => u32::from(x - b'0'),
+                    b'a'..=b'f' => u32::from(x - b'a' + 10),
+                    b'A'..=b'F' => u32::from(x - b'A' + 10),
+                    _ => panic!("hex"),
+                };
         }
-        n
+        cp
     }
     fn text(&mut self) {
-        assert_eq!(self.source[self.pos], b'"');
-        self.pos += 1;
-        let start = self.size;
+        if self.bytes.is_none() {
+            assert_eq!(self.peek(), b'"');
+        }
+        self.at += 1;
+        let header = self.used;
         self.word(0);
+        let start = self.used;
         loop {
-            let b = self.source[self.pos];
-            self.pos += 1;
-            if b == b'"' {
+            let c = self.peek();
+            if self.bytes.is_none() {
+                assert!(c >= 32, "unterminated or control");
+            }
+            if c == b'"' {
+                self.at += 1;
                 break;
             }
-            if b == b'\\' {
-                let e = self.source[self.pos];
-                self.pos += 1;
-                match e {
-                    b'"' | b'\\' | b'/' => self.byte(e),
-                    b'b' => self.byte(8),
-                    b'f' => self.byte(12),
-                    b'n' => self.byte(10),
-                    b'r' => self.byte(13),
-                    b't' => self.byte(9),
-                    b'u' => {
-                        let a = self.hex4();
-                        let c = if (0xd800..=0xdbff).contains(&a) {
-                            assert_eq!(&self.source[self.pos..self.pos + 2], b"\\u");
-                            self.pos += 2;
-                            let b = self.hex4();
-                            assert!((0xdc00..=0xdfff).contains(&b));
-                            0x10000 + (a - 0xd800) * 1024 + (b - 0xdc00)
-                        } else {
-                            a
-                        };
-                        self.scalar(char::from_u32(c).unwrap());
+            if c != b'\\' {
+                let from = self.at;
+                while self.peek() != b'"' && self.peek() != b'\\' {
+                    if self.bytes.is_none() {
+                        assert!(self.peek() >= 32);
                     }
-                    _ => panic!("invalid escape"),
+                    self.at += 1;
                 }
-            } else {
-                assert!(b >= 0x20);
-                self.byte(b);
+                self.put(&self.s[from..self.at]);
+                continue;
             }
+            self.at += 1;
+            let esc = self.peek();
+            self.at += 1;
+            let ch = match esc {
+                b'"' => '"',
+                b'\\' => '\\',
+                b'/' => '/',
+                b'b' => '\u{8}',
+                b'f' => '\u{c}',
+                b'n' => '\n',
+                b'r' => '\r',
+                b't' => '\t',
+                b'u' => {
+                    let hi = self.hex();
+                    let cp = if (0xd800..=0xdbff).contains(&hi) {
+                        if self.bytes.is_none() {
+                            assert_eq!(&self.s[self.at..self.at + 2], b"\\u");
+                        }
+                        self.at += 2;
+                        let lo = self.hex();
+                        if self.bytes.is_none() {
+                            assert!((0xdc00..=0xdfff).contains(&lo));
+                        }
+                        0x10000 + ((hi - 0xd800) << 10) + (lo - 0xdc00)
+                    } else {
+                        hi
+                    };
+                    char::from_u32(cp).expect("scalar")
+                }
+                _ => panic!("escape"),
+            };
+            let mut buf = [0u8; 4];
+            self.put(ch.encode_utf8(&mut buf).as_bytes());
         }
-        self.patch(start, u32::try_from(self.size - start - 4).unwrap());
+        self.patch(header, self.used - start);
     }
     fn value(&mut self) {
-        self.whitespace();
-        match self.source[self.pos] {
-            b'n' => {
-                assert_eq!(&self.source[self.pos..self.pos + 4], b"null");
-                self.pos += 4;
-                self.byte(0);
+        self.ws();
+        let c = self.peek();
+        if c == b'n' || c == b't' || c == b'f' {
+            let (word, tag): (&[u8], u8) = match c {
+                b'n' => (b"null", 0),
+                b't' => (b"true", 2),
+                _ => (b"false", 1),
+            };
+            if self.bytes.is_none() {
+                assert_eq!(&self.s[self.at..self.at + word.len()], word);
             }
-            b'f' => {
-                assert_eq!(&self.source[self.pos..self.pos + 5], b"false");
-                self.pos += 5;
-                self.byte(1);
-            }
-            b't' => {
-                assert_eq!(&self.source[self.pos..self.pos + 4], b"true");
-                self.pos += 4;
-                self.byte(2);
-            }
-            b'"' => {
-                self.byte(4);
-                self.text();
-            }
-            b'[' | b'{' => {
-                let object = self.source[self.pos] == b'{';
-                self.pos += 1;
-                self.byte(if object { 6 } else { 5 });
-                let count_at = self.size;
-                self.word(0);
-                let length_at = self.size;
-                self.word(0);
-                let payload = self.size;
-                let mut offsets = Vec::new();
-                self.whitespace();
-                let close = if object { b'}' } else { b']' };
-                if self.source[self.pos] != close {
-                    loop {
-                        offsets.push(u32::try_from(self.size - payload).unwrap());
-                        if object {
-                            self.whitespace();
-                            self.text();
-                            self.whitespace();
-                            assert_eq!(self.source[self.pos], b':');
-                            self.pos += 1;
+            self.at += word.len();
+            self.put(&[tag]);
+        } else if c == b'"' {
+            self.put(&[4]);
+            self.text();
+        } else if c == b'[' || c == b'{' {
+            let object = c == b'{';
+            let end = if object { b'}' } else { b']' };
+            self.at += 1;
+            self.put(&[if object { 6 } else { 5 }]);
+            let header = self.used;
+            self.word(0);
+            self.word(0);
+            let data = self.used;
+            let mut count = 0;
+            self.ws();
+            if self.peek() != end {
+                loop {
+                    if object {
+                        self.ws();
+                        self.text();
+                        self.ws();
+                        if self.bytes.is_none() {
+                            assert_eq!(self.peek(), b':');
                         }
-                        self.value();
-                        self.whitespace();
-                        if self.source[self.pos] != b',' {
-                            break;
-                        }
-                        self.pos += 1;
+                        self.at += 1;
                     }
-                }
-                assert_eq!(self.source[self.pos], close);
-                self.pos += 1;
-                self.patch(count_at, u32::try_from(offsets.len()).unwrap());
-                self.patch(length_at, u32::try_from(self.size - payload).unwrap());
-                for offset in offsets {
-                    self.word(offset);
-                }
-            }
-            _ => {
-                let start = self.pos;
-                while self.pos < self.source.len()
-                    && b"-+0123456789.eE".contains(&self.source[self.pos])
-                {
-                    self.pos += 1;
-                }
-                assert!(self.pos > start);
-                self.byte(3);
-                self.word(u32::try_from(self.pos - start).unwrap());
-                for i in start..self.pos {
-                    self.byte(self.source[i]);
+                    self.value();
+                    count += 1;
+                    self.ws();
+                    if self.peek() == end {
+                        break;
+                    }
+                    if self.bytes.is_none() {
+                        assert_eq!(self.peek(), b',');
+                    }
+                    self.at += 1;
                 }
             }
+            self.at += 1;
+            let len = self.used - data;
+            self.patch(header, count);
+            self.patch(header + 4, len);
+            if let Some(v) = &mut self.bytes {
+                let mut at = data;
+                for _ in 0..count {
+                    let offset = at - data;
+                    let next = if object {
+                        let key = read32(v, at);
+                        skip(v, at + 4 + key)
+                    } else {
+                        skip(v, at)
+                    };
+                    v.extend_from_slice(&u32::try_from(offset).unwrap().to_le_bytes());
+                    at = next;
+                }
+                self.used += 4 * count;
+            } else {
+                self.used += 4 * count;
+            }
+        } else {
+            let start = self.at;
+            while matches!(self.peek(), b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E') {
+                self.at += 1;
+            }
+            let raw = &self.s[start..self.at];
+            // Only sizing validates grammar/range. Writing consumes the accepted input.
+            if self.bytes.is_none() {
+                let _ = decimal_small(raw);
+            }
+            self.put(&[3]);
+            self.word(raw.len());
+            self.put(raw);
         }
+    }
+}
+fn read32(v: &[u8], at: usize) -> usize {
+    u32::from_le_bytes(v[at..at + 4].try_into().unwrap()) as usize
+}
+fn skip(v: &[u8], at: usize) -> usize {
+    match v[at] {
+        0..=2 => at + 1,
+        3 | 4 => at + 5 + read32(v, at + 1),
+        5 | 6 => at + 9 + read32(v, at + 5) + 4 * read32(v, at + 1),
+        _ => unreachable!(),
     }
 }
 fn parse(source: &str) -> Doc {
     let mut sizing = Parser {
-        source: source.as_bytes(),
-        pos: 0,
-        data: None,
-        size: 0,
+        s: source.as_bytes(),
+        at: 0,
+        used: 0,
+        bytes: None,
     };
     sizing.value();
-    sizing.whitespace();
-    assert_eq!(sizing.pos, source.len());
+    sizing.ws();
+    assert_eq!(sizing.at, source.len());
     let mut writer = Parser {
-        source: source.as_bytes(),
-        pos: 0,
-        data: Some(Vec::with_capacity(sizing.size)),
-        size: 0,
+        s: source.as_bytes(),
+        at: 0,
+        used: 0,
+        bytes: Some(Vec::with_capacity(sizing.used)),
     };
     writer.value();
     Doc {
-        data: writer.data.unwrap(),
+        data: writer.bytes.unwrap(),
     }
 }
 impl Doc {
@@ -207,21 +348,17 @@ impl Doc {
     }
     fn field(&self, at: usize, key: &str) -> usize {
         assert_eq!(self.data[at], 6);
-        let mut found = None;
         for i in 0..self.count(at) {
             let (k, value) = self.text(self.child(at, i));
             if k == key.as_bytes() {
-                found = Some(value);
+                return value;
             }
         }
-        found.unwrap()
+        panic!("missing field")
     }
     fn number(&self, at: usize) -> f64 {
         assert_eq!(self.data[at], 3);
-        std::str::from_utf8(self.text(at + 1).0)
-            .unwrap()
-            .parse()
-            .unwrap()
+        decimal_small(self.text(at + 1).0)
     }
     fn write(&self, at: usize, out: &mut Vec<u8>) {
         match self.data[at] {

@@ -1,5 +1,5 @@
-// Module `host`: the provider operations (CAP-5), with `stdout.write` and
-// `stderr.write`, exactly these.
+// Module `host`: the provider operations (CAP-5), with `stdout.write`,
+// `stdout.write_bytes`, `stderr.write` and `stderr.write_bytes`, exactly these.
 
 pub fn open(d: Dir, p: String, mode: OpenMode) -> Result[HostFile, IoError] waits
 pub fn read(mut f: HostFile, mut buf: Bytes) -> Result[u64, IoError] waits

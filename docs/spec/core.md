@@ -165,7 +165,11 @@ operations it names; nothing else about them may be inferred from an implementat
   correctly rounded on every target, or not one IEEE operation, and are library code over
   these.
 - **Host.** A path is resolved relative to its `Dir` and may not leave it, through every
-  traversal, symbolic links included. `OpenMode`:
+  traversal, symbolic links included. A **valid path** is one or more components joined by
+  `/`, where no component is empty, `.` or `..`, and no byte is NUL; so it is never absolute
+  and never names the `Dir` itself. Every Host operation that takes a path returns `Denied`
+  for one that is not valid, or that leaves its `Dir`, and then has no host effect.
+  `OpenMode`:
   `Read` opens an existing file for reading (`NotFound` when absent); `Write` opens for
   writing, creating the file when absent and emptying it otherwise; `Append` opens for
   writing at the end, creating it when absent; `CreateNew` creates a file for writing and
@@ -173,7 +177,12 @@ operations it names; nothing else about them may be inferred from an implementat
   capacity, advances the file's cursor by the count and returns it, `Ok(0)` at end of file
   or when `buf` has no spare capacity; a read that returns an error has appended nothing
   and moved no cursor, so a partial read is delivered as `Ok`. A successful `host.write`
-  committed all of `b`; a `WriteError`'s `written` bytes stay written. `host.try_lock` tries
+  committed all of `b`; a `WriteError`'s `written` bytes stay written. Streams take bytes
+  the same way: `stdout.write_bytes(out, b)` and `stderr.write_bytes` commit a prefix of
+  `b`, all of it on `Ok`, and `written` counts the bytes of `b` committed, at any byte
+  boundary; `stdout.write(out, s)` and `stderr.write` are those operations on
+  `string.as_bytes(s)`. So the rest of a partial write is `list.slice(b, written, len)`,
+  a view of bytes, and no caller has to form a `String` from a part of a scalar. `host.try_lock` tries
   an exclusive advisory lock without waiting: `Ok(true)` when the handle holds it (also when
   it already did), `Ok(false)` when another holder has it, and on an error it acquires
   nothing. `host.unlock` of an unlocked handle returns `Ok(())`; a failed unlock leaves the
@@ -181,9 +190,12 @@ operations it names; nothing else about them may be inferred from an implementat
   an error reports the host's close outcome. `host.mkdir` creates one directory, `Exists`
   when present; `host.remove` removes one file or empty directory. `host.mkdtemp(d, mut
   name)` checks before issue that `name` has at least 32 bytes of spare capacity, failing
-  with `Bounds` otherwise; it creates a new empty directory in `d`, appends its name (at
-  most 32 ASCII bytes) to `name` and returns a `Dir` rooted at it, and on an error creates
-  nothing and appends nothing. `host.remove_tree(d, name)` removes such a directory without
+  with `Bounds` otherwise and changing nothing. The bytes already in `name`, possibly none,
+  are a prefix: `mkdtemp` creates a new empty directory in `d` named the prefix followed by
+  a fresh suffix of 1 to 32 ASCII letters and digits, appends only the suffix, so `name` is
+  then exactly the new directory's name, and returns a `Dir` rooted at it. A prefix with
+  which that name is not a valid path of one component (it holds a `/` or a NUL) gives
+  `Denied`. On an error it creates nothing and appends nothing. `host.remove_tree(d, name)` removes such a directory without
   following symbolic links; on an error it may have removed part of the tree, and nothing
   removed is restored. `host.wall_ms` is milliseconds since 1970 and
   `host.mono_ns` never decreases in a run. No host operation admits; every byte it returns

@@ -70,6 +70,37 @@ their allocation in their result types as every operation does
 channel and `Arc` operations are not provider operations; their choices are events
 ([CONC-10](tasks.md#conc-10-event-order)).
 
+A write that commits part of its bytes returns how many ([core](core.md)), and the rest is
+sent from there. When `stdout` takes only `C3` of `C3 A9 78` and returns `written` 1, the
+next call sends `A9 78`, each byte exactly once:
+
+```hirsel
+fn write_all(out: Stdout, b: Bytes) -> Result[(), WriteError] waits {
+  let mut done: u64 = 0
+  while done < list.len(b) {
+    match stdout.write_bytes(out, list.slice(b, done, list.len(b))) {
+      Ok(()) => { done = list.len(b) },
+      Error(e) => { if e.written == 0 { return Error(e) }; done += e.written },
+    }
+  }
+  Ok(())
+}
+```
+
+A temporary directory's name starts with the bytes already in `name`. Here it is `t-`
+followed by the suffix, and `name` ends as that whole name; a prefix holding `/` or a NUL
+gives `Denied` and creates nothing:
+
+```hirsel
+fn scratch(d: Dir) -> Result[(Dir, String), IoError] waits {
+  let mut name = string.new()
+  match string.reserve(mut name, 34) { Ok(()) => {}, Error(_) => return Error(Other(0)) }
+  match string.push(mut name, "t-") { Ok(()) => {}, Error(_) => return Error(Other(0)) }
+  let dir = host.mkdtemp(d, mut name)?
+  Ok((dir, take name))
+}
+```
+
 ### CAP-6: No ambient input
 
 No operation without a capability argument observes anything outside its arguments: there

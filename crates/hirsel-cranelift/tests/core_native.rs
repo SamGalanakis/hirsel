@@ -138,6 +138,31 @@ fn execute_reports(
     injection: Option<(usize, bool)>,
     reports: Option<&[eval::Report]>,
 ) {
+    let cases: Vec<_> = runs
+        .iter()
+        .enumerate()
+        .map(|(i, (function, args))| NativeCase {
+            function: *function,
+            args,
+            limit,
+            injection,
+            report: reports.map(|reports| &reports[i]),
+        })
+        .collect();
+    execute_cases(module, optimize, &cases);
+}
+
+struct NativeCase<'a> {
+    function: FuncId,
+    args: &'a [u64],
+    limit: u64,
+    injection: Option<(usize, bool)>,
+    report: Option<&'a eval::Report>,
+}
+
+fn execute_cases(module: &c::Module, optimize: bool, cases: &[NativeCase<'_>]) {
+    assert!(!cases.is_empty(), "native fixture must execute cases");
+    println!("native cases: {} (optimize={optimize})", cases.len());
     fn has_hostfile(field: &hirsel_core_layout::FieldTy) -> bool {
         use hirsel_core_layout::{FieldTy, Handle};
         match field {
@@ -199,7 +224,8 @@ fn execute_reports(
     if scheduled {
         source.push_str("extern uint8_t hirsel_core_test_run(HirselCoreContext *,uint8_t (*)(HirselCoreContext*,void*,void*),void*,void*,size_t,size_t);\n");
         let mut wrappers = std::collections::BTreeSet::new();
-        for (f, _) in runs {
+        for case in cases {
+            let f = &case.function;
             if !wrappers.insert(f.0) {
                 continue;
             }
@@ -262,18 +288,22 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
     } else {
         source.push_str("#include <sys/resource.h>\nint main(void) {\n");
     }
-    if reports.is_some() {
+    if cases.iter().any(|case| case.report.is_some()) {
         source.push_str(
             "struct rlimit stack = {65536,65536}; if(setrlimit(RLIMIT_STACK,&stack)) return 7;\n",
         );
     }
     let mut expected = Vec::new();
-    for (i, (f, args)) in runs.iter().enumerate() {
+    for (i, case) in cases.iter().enumerate() {
+        let f = &case.function;
+        let args = case.args;
+        let limit = case.limit;
+        let injection = case.injection;
         let function = &module.functions[f.index()];
         let s = &module.signatures[function.signature.index()];
         let computed;
-        let report = if let Some(reports) = reports {
-            &reports[i]
+        let report = if let Some(report) = case.report {
+            report
         } else {
             computed = eval::run_injected(module, *f, args, limit, injection);
             &computed
@@ -405,7 +435,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
             source.push_str("uint64_t status = value.status;\n");
         }
         if observing {
-            let check = if !scheduled && !host_files && reports.is_none() {
+            let check = if !scheduled && !host_files && case.report.is_none() {
                 format!(
                     "if(peak!=UINT64_C({})) {{ fprintf(stderr,\"peak mismatch: %llu expected {}\\n\",(unsigned long long)peak); return 17; }}",
                     report.peak_reserved, report.peak_reserved
@@ -487,14 +517,16 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
     }
     let (mut actual, mut expected) = (actual.as_slice(), expected.as_slice());
     let mut failures = Vec::new();
-    for (function, args) in runs {
+    for case in cases {
+        let function = &case.function;
+        let args = case.args;
         let got = take_report(&mut actual);
         let want = take_report(&mut expected).expect("the authored report is complete");
         if got != Some(want) {
             let name = &module.instances[module.functions[function.index()].instance.index()];
             failures.push(format!(
-                "case {}({args:?}): expected {want:?}, got {got:?}",
-                name.definition
+                "case {}({args:?}) limit {} injection {:?}: expected {want:?}, got {got:?}",
+                name.definition, case.limit, case.injection
             ));
         }
     }
@@ -983,7 +1015,6 @@ fn every_whole_v1a_sample_matches_evaluator() {
     ] {
         let module = text::parse(source).unwrap();
         let ordinary = sample_runs(&module, source);
-        execute(&module, &ordinary, false);
         let mut cases: Vec<_> = ordinary.into_iter().map(|run| (run, 1_000_000)).collect();
         for line in source
             .lines()
@@ -997,23 +1028,33 @@ fn every_whole_v1a_sample_matches_evaluator() {
                 .unwrap();
             let runs = sample_runs(&module, &format!("; run: {call}"));
             let limit = n.parse().unwrap();
-            execute_limit(&module, &runs, false, limit);
             cases.extend(runs.into_iter().map(|run| (run, limit)));
         }
-        for (run, limit) in cases {
-            let baseline = eval::run(&module, run.0, &run.1, limit);
+        let mut native: Vec<_> = cases
+            .iter()
+            .map(|(run, limit)| NativeCase {
+                function: run.0,
+                args: &run.1,
+                limit: *limit,
+                injection: None,
+                report: None,
+            })
+            .collect();
+        for (run, limit) in &cases {
+            let baseline = eval::run(&module, run.0, &run.1, *limit);
             for n in 1..=baseline.admissions {
                 for later in [false, true] {
-                    execute_injected(
-                        &module,
-                        std::slice::from_ref(&run),
-                        false,
-                        limit,
-                        Some((n, later)),
-                    );
+                    native.push(NativeCase {
+                        function: run.0,
+                        args: &run.1,
+                        limit: *limit,
+                        injection: Some((n, later)),
+                        report: None,
+                    });
                 }
             }
         }
+        execute_cases(&module, false, &native);
     }
 }
 
@@ -1228,7 +1269,6 @@ fn every_compact_sequence_sample_matches_evaluator() {
     let source = include_str!("../../hirsel-core-ir/samples/sequences.core");
     let module = text::parse(source).unwrap();
     let ordinary = sample_runs(&module, source);
-    execute(&module, &ordinary, false);
     let mut cases: Vec<_> = ordinary.into_iter().map(|run| (run, 1_000_000)).collect();
     let mut count = 0;
     for line in source
@@ -1243,25 +1283,35 @@ fn every_compact_sequence_sample_matches_evaluator() {
             .unwrap();
         let runs = sample_runs(&module, &format!("; run: {call}"));
         let limit = n.parse().unwrap();
-        execute_limit(&module, &runs, false, limit);
         count += runs.len();
         cases.extend(runs.into_iter().map(|run| (run, limit)));
     }
     assert_eq!(count, 7);
-    for (run, limit) in cases {
-        let baseline = eval::run(&module, run.0, &run.1, limit);
+    let mut native: Vec<_> = cases
+        .iter()
+        .map(|(run, limit)| NativeCase {
+            function: run.0,
+            args: &run.1,
+            limit: *limit,
+            injection: None,
+            report: None,
+        })
+        .collect();
+    for (run, limit) in &cases {
+        let baseline = eval::run(&module, run.0, &run.1, *limit);
         for n in 1..=baseline.admissions {
             for later in [false, true] {
-                execute_injected(
-                    &module,
-                    std::slice::from_ref(&run),
-                    false,
-                    limit,
-                    Some((n, later)),
-                );
+                native.push(NativeCase {
+                    function: run.0,
+                    args: &run.1,
+                    limit: *limit,
+                    injection: Some((n, later)),
+                    report: None,
+                });
             }
         }
     }
+    execute_cases(&module, false, &native);
 }
 
 #[test]
@@ -1554,21 +1604,29 @@ fn every_custody_sample_and_injected_admission_matches_evaluator() {
                 .map(|run| (run, limit.parse().unwrap())),
         );
     }
-    for (run, limit) in cases {
-        execute_limit(&module, std::slice::from_ref(&run), false, limit);
-        let baseline = eval::run(&module, run.0, &run.1, limit);
+    let mut native = Vec::new();
+    for (run, limit) in &cases {
+        native.push(NativeCase {
+            function: run.0,
+            args: &run.1,
+            limit: *limit,
+            injection: None,
+            report: None,
+        });
+        let baseline = eval::run(&module, run.0, &run.1, *limit);
         for n in 1..=baseline.admissions {
             for later in [false, true] {
-                execute_injected(
-                    &module,
-                    std::slice::from_ref(&run),
-                    false,
-                    limit,
-                    Some((n, later)),
-                );
+                native.push(NativeCase {
+                    function: run.0,
+                    args: &run.1,
+                    limit: *limit,
+                    injection: Some((n, later)),
+                    report: None,
+                });
             }
         }
     }
+    execute_cases(&module, false, &native);
 }
 
 #[test]
@@ -1782,26 +1840,39 @@ fn joined_cause_views_use_core_layout() {
 #[test]
 fn dynamic_overflow_and_local_like_admissions_keep_exact_refusal_counts() {
     let module = text::parse(include_str!("support/inline-admission.core")).unwrap();
-    for function in 0..3 {
-        for charge in [0, 8, 40, 72, u64::MAX] {
-            for overflow in [0, 1] {
-                let run = (FuncId(function), vec![charge, overflow]);
-                execute_limit(&module, std::slice::from_ref(&run), false, 64);
-                let baseline = eval::run(&module, run.0, &run.1, 64);
-                for nth in 1..=baseline.admissions {
-                    for later in [false, true] {
-                        execute_injected(
-                            &module,
-                            std::slice::from_ref(&run),
-                            false,
-                            64,
-                            Some((nth, later)),
-                        );
-                    }
-                }
+    let runs: Vec<_> = (0..3)
+        .flat_map(|function| {
+            [0, 8, 40, 72, u64::MAX]
+                .into_iter()
+                .flat_map(move |charge| {
+                    [0, 1].map(move |overflow| (FuncId(function), vec![charge, overflow]))
+                })
+        })
+        .collect();
+    let mut cases = Vec::new();
+    for (function, args) in &runs {
+        cases.push(NativeCase {
+            function: *function,
+            args,
+            limit: 64,
+            injection: None,
+            report: None,
+        });
+        let baseline = eval::run(&module, *function, args, 64);
+        for nth in 1..=baseline.admissions {
+            for later in [false, true] {
+                cases.push(NativeCase {
+                    function: *function,
+                    args,
+                    limit: 64,
+                    injection: Some((nth, later)),
+                    report: None,
+                });
             }
         }
     }
+    execute_cases(&module, false, &cases);
+    let mut raw = Vec::new();
     // The evaluator requires a real block for Like; the native ABI also accepts
     // null as Current. Derive this plain null-Like case directly from its budget.
     for charge in [0, 8, 40, 72, u64::MAX] {
@@ -1820,17 +1891,21 @@ fn dynamic_overflow_and_local_like_admissions_keep_exact_refusal_counts() {
                     stdout: vec![],
                     stderr: vec![],
                 };
-                execute_reports(
-                    &module,
-                    &[(FuncId(3), vec![charge, overflow])],
-                    false,
-                    64,
-                    injection,
-                    Some(&[expected]),
-                );
+                raw.push((vec![charge, overflow], injection, expected));
             }
         }
     }
+    let cases: Vec<_> = raw
+        .iter()
+        .map(|(args, injection, report)| NativeCase {
+            function: FuncId(3),
+            args,
+            limit: 64,
+            injection: *injection,
+            report: Some(report),
+        })
+        .collect();
+    execute_cases(&module, false, &cases);
 }
 
 #[test]

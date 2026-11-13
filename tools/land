@@ -564,7 +564,7 @@ def full(tree, screened=False):
             report = (check('workspace build', [PY, 'tools/buck2/event_logs.py', 'build', *CONFIG,
                                                 '--materializations', 'none', *targets])
                       or check('Clippy', [PY, 'tools/buck2/clippy.py'])
-                      or check('Core suites', [BUCK2, 'test', *CONFIG, '-c', 'hirsel.full=true', *CORE_ACCEPTANCE,
+                      or check('Core suites', [PY, 'tools/buck2/event_logs.py', 'test', *CONFIG, '-c', 'hirsel.full=true', *CORE_ACCEPTANCE,
                                                    '--', '--test-arg=--test-threads=1']))
     # fast(tree) checked this exact tree's formatting (now or when screened);
     # fmt checks Rust plus the changed cases against the candidate formatter; no rerun.

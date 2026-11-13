@@ -89,7 +89,7 @@ FAKES = {
     'tools/buck2/prepare.py': "from pathlib import Path\np = Path('.buck2/bin/buck2')\np.parent.mkdir(parents=True, exist_ok=True)\np.write_text(" + repr(FAKE_BUCK) + ")\np.chmod(0o755)\n",
     'tools/buck2/sync.py': '',
     'tools/check-hot-files': '',
-    'tools/buck2/event_logs.py': "PASS, SKIP, OMITTED = 'PASS', 'SKIP', 'OMITTED'\n",
+    'tools/buck2/event_logs.py': "PASS, SKIP, OMITTED = 'PASS', 'SKIP', 'OMITTED'\nif __name__ == '__main__':\n import subprocess, sys\n if sys.argv[1] == 'test':\n  sys.exit(subprocess.call(['.buck2/bin/buck2', *sys.argv[1:]]))\n",
     # The first Clippy run lands another lane's commit on origin, as a lane landing meanwhile would.
     'tools/buck2/clippy.py': '''import os, subprocess, sys
 if os.environ.get('FAKE_CLIPPY_RED'):
@@ -1427,6 +1427,9 @@ class Units(unittest.TestCase):
             self.assertIsNone(full('tree', screened=True))
         self.assertEqual(calls[0], ('check', [sys.executable, 'tools/buck2/sync.py', '--if-stale']))
         self.assertEqual([kind for kind, _ in calls[:3]], ['check', 'query', 'query'])
+        core = calls[-1][1]
+        self.assertEqual(core[:3], [sys.executable, 'tools/buck2/event_logs.py', 'test'])
+        self.assertIn('//:hirsel-cranelift-test-core_native', core)
 
     def test_empty_build_query_refuses_the_aggregate(self):
         full = runpy.run_path(str(ROOT / 'tools/land'))['full']

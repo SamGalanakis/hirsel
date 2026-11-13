@@ -1,0 +1,3 @@
+// A scoped result cannot borrow an undeclared owner.
+// expect: refuse OWN-20 at 3:50
+fn wrong(a:own fn(u64)->u64,b:own fn(u64)->u64)->(scoped fn(u64)->u64) in a {b}

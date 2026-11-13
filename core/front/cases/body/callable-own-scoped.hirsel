@@ -1,0 +1,44 @@
+// LANG-13 / OWN-21: a scoped view reuses an owning callable's environment.
+// The owner remains live, is borrowed for the scoped value, and cleans it once.
+// expect: run checked() = 27
+// expect: run aggregate() = 34
+// expect: run temporary() = 11
+// expect: run passed_temporary() = 6
+// expect: run block_temporary() = 11
+fn make(take s:String)->own fn(u64)->u64 {
+ result.unwrap(fn(x:u64)->u64 {string.byte_len(s)+x})
+}
+fn apply(f:scoped fn(u64)->u64)->u64 {f(2)}
+fn borrow(f:own fn(u64)->u64)->(scoped fn(u64)->u64) in f {f}
+fn checked()->u64 {
+ let f=make("abc")
+ let r:Result[u64,Capacity]=bound bytes 0 {
+  let g:scoped fn(u64)->u64=f
+  let h:scoped fn(u64)->u64=view f
+  let returned=borrow(f)
+  g(1)+h(2)+returned(3)+apply(f)+f(4)
+ }
+ result.unwrap(r)
+}
+type Pair {value:u64}
+fn make_pair(n:u64)->own fn(Pair)->Pair {
+ result.unwrap(fn(x:Pair)->Pair {Pair(value:x.value+n)})
+}
+fn apply_pair(f:scoped fn(Pair)->Pair)->Pair {f(Pair(value:10))}
+fn aggregate()->u64 {
+ let f=make_pair(7)
+ let g:scoped fn(Pair)->Pair=f
+ let a=g(Pair(value:10))
+ let b=apply_pair(f)
+ a.value+b.value
+}
+fn temporary()->u64 {
+ let cb:scoped fn(u64)->u64=make("abc")
+ cb(8)
+}
+fn passed_temporary()->u64 {apply(make("abcd"))}
+fn block_temporary()->u64 {
+ let cb:scoped fn(u64)->u64={make("abc")}
+ cb(8)
+}
+pub fn main()->Result[(),Exit] {if checked()==27u64 && aggregate()==34u64 && temporary()==11u64 && passed_temporary()==6u64 && block_temporary()==11u64 {Ok(())}else{Error(Exit(status:1))}}

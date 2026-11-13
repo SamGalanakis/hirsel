@@ -1,0 +1,6 @@
+// C12 / FOR FORM: a stored dynamic code pointer needs an env-taking convention.
+// A view of the same plain callable needs that same conversion, not a refusal.
+// expect: gap callable kind conversions are not built
+fn owning(code:fn(u64)->u64)->u64 {let f:own fn(u64)->u64=code;f(1)}
+fn scoped_fit(code:fn(u64)->u64)->u64 {let f:scoped fn(u64)->u64=code;f(1)}
+fn viewed(code:fn(u64)->u64)->u64 {let f:scoped fn(u64)->u64=view code;f(1)}

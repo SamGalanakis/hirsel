@@ -379,6 +379,67 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
 
+    pub(super) fn result_place_anchors(&mut self, scope: usize, n: NodeId, ty: TyId) {
+        if self.anchors.last == 0 || !self.live() || !self.contains_callback(ty) {
+            return;
+        }
+        let mut roots = std::mem::take(&mut self.anchors.left);
+        roots.clear();
+        self.anchors.collect(self.anchors.last, &mut roots);
+        let escapes = roots.iter().any(|root| {
+            matches!(root,
+            Root::Place(place) if self.scope_slots[scope..].contains(&place.slot))
+        });
+        self.anchors.left = roots;
+        if escapes {
+            self.refuse_at(
+                "OWN-19",
+                self.close_brace(n),
+                "a scoped value cannot leave its local place anchor",
+            );
+        }
+    }
+
+    pub(super) fn return_place_anchors(&mut self) {
+        if self.anchors.last == 0 || !self.contains_callback(self.fd.result) {
+            return;
+        }
+        let mut roots = std::mem::take(&mut self.anchors.left);
+        roots.clear();
+        self.anchors.collect(self.anchors.last, &mut roots);
+        let binders = &self.p.items[self.at.module as usize][self.at.item as usize]
+            .resolution
+            .binders;
+        let escapes = roots.iter().any(|root| match root {
+            Root::Owner(_) | Root::Temporary(_) => true,
+            Root::Place(place) => {
+                let b = &binders[place.slot as usize];
+                !self.fd.anchors.iter().any(|&i| {
+                    let p = &self.fd.params[i as usize];
+                    b.name == p.name
+                        && p.site.span.start <= b.site.span.start
+                        && b.site.span.end <= p.site.span.end
+                })
+            }
+            Root::Region(_) => false,
+        });
+        self.anchors.left = roots;
+        if escapes
+            && !self
+                .p
+                .refusals
+                .iter()
+                .any(|r| r.rule == "OWN-20" && r.primary == self.fd.result_site)
+        {
+            self.out.refusals.push(refusal(
+                "OWN-20",
+                self.fd.result_site,
+                "a scoped result may read only its declared anchors",
+            ));
+            self.halt();
+        }
+    }
+
     pub(super) fn parameter_anchors(&mut self, slot: u32, ty: TyId, mode: Mode, index: u32) {
         let tracked = self.anchor_tracked(ty);
         if !tracked && mode != Mode::Mut {

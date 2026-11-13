@@ -1,0 +1,11 @@
+// The viewed environment belongs to the inner owner and cannot leave its scope.
+// expect: refuse OWN-19 at 9:2
+fn plus(x:u64)->u64 {x+1}
+fn f()->u64 {
+ let cb={
+  let owner:own fn(u64)->u64=plus
+  let g:scoped fn(u64)->u64=owner
+  g
+ }
+ cb(1)
+}

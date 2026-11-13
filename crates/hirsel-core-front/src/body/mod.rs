@@ -1282,17 +1282,21 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         };
         w.payload = 0;
         self.out.counts.types += 1;
+        if t == w.ty {
+            return;
+        }
         let plain_view = self.plain_view(t, w.ty);
         let viewed = w.view
             && (matches!(self.t.kind(t), TyKind::View(x) if *x == w.ty)
                 || crate::decls::stable_parameter(&self.p.decls, &self.t, t, w.ty));
+        let scoped_callable = self.scoped_callable_view(t, w.ty);
         let callable = matches!((self.t.kind(t), self.t.kind(w.ty)),
             (TyKind::Fn(a, ar, aw, ak), TyKind::Fn(b, br, bw, bk))
-                if a == b && ar == br && (ak == bk || matches!((ak,bk), (Callable::OwnSend, Callable::Own))) && (!aw || *bw));
-        if matches!((self.t.kind(t), self.t.kind(w.ty)),
-            (TyKind::Fn(a, ar, aw, ak), TyKind::Fn(b, br, bw, bk))
-                if a == b && ar == br && (!aw || *bw) && ak != bk
-                    && matches!((ak,bk), (Callable::Plain, Callable::Own | Callable::OwnSend | Callable::Scoped) | (Callable::OwnSend, Callable::Scoped) | (Callable::Own,Callable::Scoped)))
+                if a == b && ar == br && (ak == bk || matches!((ak,bk), (Callable::OwnSend, Callable::Own))) && (!aw || *bw))
+            || scoped_callable;
+        if matches!((self.t.kind(self.bare(t)), self.t.kind(self.bare(w.ty))),
+            (TyKind::Fn(a, ar, aw, Callable::Plain), TyKind::Fn(b, br, bw, Callable::Own | Callable::OwnSend | Callable::Scoped))
+                if a == b && ar == br && (!aw || *bw))
         {
             self.gap(n, "callable kind conversions are not built");
             return;
@@ -1530,6 +1534,10 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     /// Return `v`, a value of the body's result type: a declared result is written to
     /// the destination first.
     fn ret(&mut self, v: Option<ValueId>, n: NodeId) {
+        if !self.live() {
+            return;
+        }
+        self.return_place_anchors();
         if !self.live() {
             return;
         }
@@ -1993,6 +2001,26 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             v = value;
             self.anchor_payload(n, t, v);
         }
+        if let Some(w) = want.filter(|w| w.payload == 0)
+            && self.scoped_callable_view(t, w.ty)
+        {
+            // The owning code/environment pair is already a scoped carrier. Its
+            // owner, including a reached temporary, stays frozen while it is viewed.
+            self.anchor_payload(n, w.ty, v);
+            if let Some(from) = v {
+                match self.rep(w.ty) {
+                    Ok(Rep::Place(id)) => {
+                        let borrowed = self.snapshot(from, id, n);
+                        self.anchor_payload(n, w.ty, Some(borrowed));
+                        v = Some(borrowed);
+                    }
+                    Err(what) => self.gap(n, what),
+                    _ => unreachable!("a scoped callable has a carrier"),
+                }
+            }
+            t = w.ty;
+            self.synth_ty = t;
+        }
         match want {
             Some(w) if t != NEVER && w.payload != 0 => {
                 self.coerce(t, w, n);
@@ -2114,6 +2142,12 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn place_value(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         match self.place(n) {
             Ok(Some(at)) => {
+                if let Some(w) = want.filter(|w| w.payload == 0)
+                    && self.scoped_callable_view(at.ty, w.ty)
+                {
+                    self.use_place(at, Use::View(Hold::View(Extent::Temp)), n);
+                    return (w.ty, self.place_ptr(at, n));
+                }
                 if let Some(w) = want.filter(|w| w.payload == 0)
                     && let Some(payload) = self.payload_view_at(at, w.ty)
                 {

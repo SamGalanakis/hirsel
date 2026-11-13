@@ -1,0 +1,4 @@
+// A returned temporary owns the viewed environment only in the callee.
+// expect: refuse OWN-20 at 4:18
+fn make(n:u64)->own fn(u64)->u64 {result.unwrap(fn(x:u64)->u64 {n+x})}
+fn wrong(a:u64)->(scoped fn(u64)->u64) in a {make(a)}

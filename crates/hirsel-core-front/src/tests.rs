@@ -2829,6 +2829,23 @@ fn captured_callback_cases() {
 }
 
 #[test]
+fn owning_callable_scoped_views() {
+    let mut failures = vec![];
+    for case in [
+        "callable-own-scoped.hirsel",
+        "callable-own-scoped-freeze.hirsel",
+        "callable-own-scoped-lifetime.hirsel",
+        "callable-own-scoped-return-refused.hirsel",
+        "callable-own-scoped-temporary-return-refused.hirsel",
+        "callable-dynamic-plain-fit-gap.hirsel",
+        "callable-own-scoped-mut-gap.hirsel",
+    ] {
+        failures.extend(run_case(&root().join("cases/body").join(case)));
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
 fn mut_scoped_parameters_keep_the_callers_anchors() {
     let mut failures = vec![];
     for case in [

@@ -12,6 +12,25 @@ pub(super) struct CallableAbi {
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    #[inline(always)]
+    pub(super) fn scoped_callable_view(&self, from: TyId, to: TyId) -> bool {
+        if from.0 <= HOLE.0 || to.0 <= HOLE.0 {
+            return false;
+        }
+        if !matches!(
+            self.t.kind(to),
+            TyKind::Fn(..) | TyKind::View(_) | TyKind::Anchored(..)
+        ) {
+            return false;
+        }
+        let TyKind::Fn(b, br, bw, Callable::Scoped) = self.t.kind(self.bare(to)) else {
+            return false;
+        };
+        matches!(self.t.kind(self.bare(from)),
+            TyKind::Fn(a, ar, aw, Callable::Own | Callable::OwnSend)
+                if a == b && ar == br && (!aw || *bw))
+    }
+
     pub(super) fn function_value(
         &mut self,
         f: usize,

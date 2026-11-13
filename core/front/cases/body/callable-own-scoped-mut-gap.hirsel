@@ -1,0 +1,8 @@
+// A mut scoped formal still needs C8's post-state relation after a kind fit.
+// expect: gap capture descriptor updates through mut arguments are not built
+fn plus(x:u64)->u64 {x+1}
+fn inspect(mut cb:scoped fn(u64)->u64)->u64 {cb(1)}
+fn f()->u64 {
+ let mut owner:own fn(u64)->u64=plus
+ inspect(mut owner)
+}

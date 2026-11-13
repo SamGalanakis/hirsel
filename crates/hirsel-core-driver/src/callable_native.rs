@@ -96,6 +96,16 @@ fn aggregate_owned_projection_cranelift(){aggregate_owned_projection(Backend::Cr
 #[ignore="explicit native integration target"]
 fn aggregate_owned_projection_llvm(){aggregate_owned_projection(Backend::Llvm);}
 
+fn owning_callable_scoped_views(backend: Backend) {
+    ordered_case(backend, include_str!("../../../core/front/cases/body/callable-own-scoped.hirsel"));
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn owning_callable_scoped_views_cranelift(){owning_callable_scoped_views(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn owning_callable_scoped_views_llvm(){owning_callable_scoped_views(Backend::Llvm);}
+
 fn slots_needs_drop(backend: Backend) {
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir=tempfile::tempdir().unwrap();

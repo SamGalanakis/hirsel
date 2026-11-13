@@ -220,7 +220,7 @@ writes one line to stderr, `run stop: ` and the stop's name
 | the stack is exhausted | `Stack` |
 | a counted value's holders would pass `2^64 − 1` | `CountOverflow` |
 | a channel's senders would pass `2^64 − 1` | `ChannelSenders` |
-| an engine counter would pass `2^64 − 1`: task ids, host handles, temporary names, runs in the process | `TaskIds`, `HostHandles`, `HostNames`, `ActiveRuns` |
+| an engine counter would pass `2^64 − 1`: task ids, host handles, temporary names, runs in the process, destination identities ([MEM-4](memory.md#mem-4-sized-destinations)) | `TaskIds`, `HostHandles`, `HostNames`, `ActiveRuns`, `DestinationIds` |
 | the host refuses memory the engine needs | `HostMemory` |
 | the host refuses the signal stack, a signal action or the clock | `SignalStack`, `Signal`, `Clock` |
 

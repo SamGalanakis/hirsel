@@ -1,8 +1,10 @@
 // Reviewed-by: langs-numeric-920 2026-11-13; same13 hand byte matchers, non-overlap scanning, owned tally keys/u64 counts and generated input. Overflow checks required.
+// Literal alternatives use borrowed Cow carriers with owned-form cleanup, matching zero-capacity Hirsel String literals; delta approved by langs-numeric-920 2026-11-13; borrowed literals retain the owned-form carrier and cleanup.
 // Matched twin of log_parser.hirsel. Reviewed below.
 // kostya/LangArena3c9f84d benchmarks/log_parser.rs:12-149.
 // Same 13 byte matchers and leftmost non-overlapping scans, owned tally keys.
 mod text_support;
+use std::borrow::Cow;
 use std::collections::HashMap;
 fn lower(b: u8) -> u8 {
     if b.is_ascii_uppercase() { b + 32 } else { b }
@@ -59,15 +61,15 @@ fn matched(b: &[u8], i: usize, pattern: usize) -> Option<usize> {
         }
     } else if pattern == 1 {
         for s in [
-            "bot", "crawler", "scanner", "spider", "indexing", "crawl", "robot",
+            Cow::Borrowed("bot"), Cow::Borrowed("crawler"), Cow::Borrowed("scanner"), Cow::Borrowed("spider"), Cow::Borrowed("indexing"), Cow::Borrowed("crawl"), Cow::Borrowed("robot"),
         ] {
-            if prefix(b, i, s, true) {
+            if prefix(b, i, &s, true) {
                 return Some(i + s.len());
             }
         }
     } else if pattern == 2 {
-        for s in ["etc/passwd", "wp-admin", "../"] {
-            if prefix(b, i, s, true) {
+        for s in [Cow::Borrowed("etc/passwd"), Cow::Borrowed("wp-admin"), Cow::Borrowed("../")] {
+            if prefix(b, i, &s, true) {
                 return Some(i + s.len());
             }
         }
@@ -111,8 +113,8 @@ fn matched(b: &[u8], i: usize, pattern: usize) -> Option<usize> {
             return Some(i + 7);
         }
     } else if pattern == 7 {
-        for s in ["get", "post", "put"] {
-            if prefix(b, i, s, true) {
+        for s in [Cow::Borrowed("get"), Cow::Borrowed("post"), Cow::Borrowed("put")] {
+            if prefix(b, i, &s, true) {
                 return Some(i + s.len());
             }
         }
@@ -150,8 +152,8 @@ fn matched(b: &[u8], i: usize, pattern: usize) -> Option<usize> {
             }
         }
     } else if pattern == 10 {
-        for s in ["token=", "apikey=", "api_key=", "api-key="] {
-            if prefix(b, i, s, false) {
+        for s in [Cow::Borrowed("token="), Cow::Borrowed("apikey="), Cow::Borrowed("api_key="), Cow::Borrowed("api-key=")] {
+            if prefix(b, i, &s, false) {
                 let start = i + s.len();
                 let end = value_end(b, start);
                 if end > start {
@@ -160,8 +162,8 @@ fn matched(b: &[u8], i: usize, pattern: usize) -> Option<usize> {
             }
         }
     } else if pattern == 11 {
-        for s in ["sessionid=", "session_id=", "session-id="] {
-            if prefix(b, i, s, false) {
+        for s in [Cow::Borrowed("sessionid="), Cow::Borrowed("session_id="), Cow::Borrowed("session-id=")] {
+            if prefix(b, i, &s, false) {
                 let start = i + s.len();
                 let end = value_end(b, start);
                 if end > start {

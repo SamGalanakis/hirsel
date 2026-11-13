@@ -1,5 +1,6 @@
 // Reviewed-by: langs-numeric-920 2026-11-13; all eight generated-input variants including HuffEncode/HuffDecode/LZWDecode; matching stable merge, boxed trees, first-equal insertion, arithmetic tables and byte dictionaries; overflow checks required.
-// ArithEncode checked signed-frequency conversions now mirror int.narrow; delta re-review pending langs-numeric-920.
+// ArithEncode checked signed-frequency conversions now mirror int.narrow; delta approved by langs-numeric-920 2026-11-13 at b67a67e0; scoped to changed conversion/copy sites.
+// Remaining BWT/LZW/Huff/ArithDecode checked-narrowing parity approved by langs-numeric-920 2026-11-13; remaining as sites are lossless widening or checksum truncation.
 // Matched twin of compress.hirsel. All eight generated-input variants reviewed.
 // Additional review langs-numeric-920: HuffEncode/HuffDecode/LZWDecode use matching boxed trees, first-equal insertion, i32 bit/frequency vectors, deep byte copies and owned dictionaries.
 // kostya/LangArena3c9f84d benchmarks/compress.rs. Same prefix-doubling BWT,
@@ -137,8 +138,8 @@ impl BitOutputStream {
         }
     }
 
-    fn write_bit(&mut self, bit: i32) {
-        self.buffer = (self.buffer << 1) | (bit as u8 & 1);
+    fn write_bit(&mut self, bit: u8) {
+        self.buffer = (self.buffer << 1) | (bit & 1);
         self.bit_pos += 1;
         self.bits_written += 1;
 
@@ -171,10 +172,10 @@ impl LZWResult {
 fn generate_test_data(size: i64) -> Vec<u8> {
     let pattern = b"ABRACADABRA";
     let pattern_len = pattern.len();
-    let mut data = Vec::with_capacity(size as usize);
+    let mut data = Vec::with_capacity(usize::try_from(size).unwrap());
 
     for i in 0..size {
-        data.push(pattern[(i as usize) % pattern_len]);
+        data.push(pattern[usize::try_from(i).unwrap() % pattern_len]);
     }
 
     data
@@ -258,7 +259,7 @@ fn bwt_transform(input: &[u8]) -> BWTResult {
     for (i, &suffix) in sa.iter().enumerate() {
         if suffix == 0 {
             transformed[i] = input[n - 1];
-            original_idx = i as i32;
+            original_idx = i32::try_from(i).unwrap();
         } else {
             transformed[i] = input[suffix - 1];
         }
@@ -291,13 +292,13 @@ fn bwt_inverse(bwt_result: &BWTResult) -> Vec<u8> {
 
     for (i, &byte) in bwt.iter().enumerate() {
         let byte_idx = byte as usize;
-        let pos = (positions[byte_idx] + temp_counts[byte_idx]) as usize;
+        let pos = usize::try_from(positions[byte_idx] + temp_counts[byte_idx]).unwrap();
         next[pos] = i;
         temp_counts[byte_idx] += 1;
     }
 
     let mut result = vec![0u8; n];
-    let mut idx = bwt_result.original_idx as usize;
+    let mut idx = usize::try_from(bwt_result.original_idx).unwrap();
 
     for i in 0..n {
         idx = next[idx];
@@ -378,7 +379,7 @@ fn arith_encode(data: &[u8]) -> ArithEncodedResult {
 
 fn arith_decode(encoded: &ArithEncodedResult) -> Vec<u8> {
     let table = ArithFreqTable::new(&encoded.frequencies);
-    let total = table.total;
+    let total = u64::try_from(table.total).unwrap();
     let data_size = usize::try_from(total).unwrap();
     let low_table = &table.low;
     let high_table = &table.high;
@@ -395,7 +396,7 @@ fn arith_decode(encoded: &ArithEncodedResult) -> Vec<u8> {
 
     for j in 0..data_size {
         let range = high - low + 1;
-        let scaled = ((value - low + 1) * total as u64 - 1) / range;
+        let scaled = ((value - low + 1) * total - 1) / range;
 
         let mut left = 0usize;
         let mut right = 256usize;
@@ -410,8 +411,8 @@ fn arith_decode(encoded: &ArithEncodedResult) -> Vec<u8> {
         let symbol = left;
         result[j] = u8::try_from(symbol).unwrap();
 
-        high = low + (range * high_table[symbol as usize] as u64 / total as u64) - 1;
-        low = low + (range * low_table[symbol as usize] as u64 / total as u64);
+        high = low + (range * u64::try_from(high_table[symbol]).unwrap() / total) - 1;
+        low = low + (range * u64::try_from(low_table[symbol]).unwrap() / total);
 
         loop {
             if high >= 0x80000000 && low < 0x80000000 && (low < 0x40000000 || high >= 0xC0000000) {
@@ -447,7 +448,7 @@ fn lzw_decode(encoded: &LZWResult) -> Vec<u8> {
 
     let mut dict: Vec<Vec<u8>> = Vec::with_capacity(4096);
     for i in 0..256 {
-        dict.push(vec![i as u8]);
+        dict.push(vec![u8::try_from(i).unwrap()]);
     }
 
     let mut result = Vec::with_capacity(encoded.data.len() * 2);
@@ -483,7 +484,7 @@ fn lzw_encode(input: &[u8]) -> LZWResult {
 
     let mut dict: HashMap<Vec<u8>, u32> = HashMap::new();
     for i in 0u32..256u32 {
-        dict.insert(vec![i as u8], i);
+        dict.insert(vec![u8::try_from(i).unwrap()], i);
     }
     let mut next_code = 256u32;
     let mut result = Vec::with_capacity(input.len() * 2);
@@ -493,8 +494,8 @@ fn lzw_encode(input: &[u8]) -> LZWResult {
         current.push(byte);
         if !dict.contains_key(&current) {
             let code = dict[&current[..current.len() - 1]];
-            result.push(((code >> 8) & 0xFF) as u8);
-            result.push((code & 0xFF) as u8);
+            result.push(u8::try_from((code >> 8) & 0xFF).unwrap());
+            result.push(u8::try_from(code & 0xFF).unwrap());
 
             dict.insert(current, next_code);
             next_code += 1;
@@ -503,8 +504,8 @@ fn lzw_encode(input: &[u8]) -> LZWResult {
     }
 
     let code = dict[&current];
-    result.push(((code >> 8) & 0xFF) as u8);
-    result.push((code & 0xFF) as u8);
+    result.push(u8::try_from((code >> 8) & 0xFF).unwrap());
+    result.push(u8::try_from(code & 0xFF).unwrap());
     LZWResult { data: result }
 }
 fn read_bit(data: &[u8], position: &mut u64) -> u64 {
@@ -569,7 +570,7 @@ fn build_huffman_tree(frequencies: &[i32]) -> Option<Box<HuffmanNode>> {
         .iter()
         .enumerate()
         .filter(|&(_, &freq)| freq > 0)
-        .map(|(i, &freq)| Box::new(HuffmanNode::new(freq, i as u8, true)))
+        .map(|(i, &freq)| Box::new(HuffmanNode::new(freq, u8::try_from(i).unwrap(), true)))
         .collect();
 
     sort_stable(&mut nodes, |a, b| a.frequency.cmp(&b.frequency));
@@ -643,7 +644,7 @@ fn huffman_encode(data: &[u8], codes: &HuffmanCodes, frequencies: Vec<i32>) -> E
     for &byte in data {
         let idx = byte as usize;
         let code = codes.codes[idx];
-        let length = codes.code_lengths[idx] as usize;
+        let length = usize::try_from(codes.code_lengths[idx]).unwrap();
 
         for i in (0..length).rev() {
             if (code & (1 << i)) != 0 {
@@ -668,7 +669,7 @@ fn huffman_encode(data: &[u8], codes: &HuffmanCodes, frequencies: Vec<i32>) -> E
 }
 
 fn huffman_decode(encoded: &[u8], root: &HuffmanNode, bit_count: i32) -> Vec<u8> {
-    let mut result = vec![0u8; bit_count as usize];
+    let mut result = vec![0u8; usize::try_from(bit_count).unwrap()];
     let mut result_size = 0;
 
     let mut current_node = root;

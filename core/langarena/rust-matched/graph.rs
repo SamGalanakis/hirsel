@@ -1,5 +1,6 @@
 // Reviewed-by: langs-numeric-920 2026-11-13; BFS/DFS/AStar preserve nested i32 adjacency, byte bool marks, FIFO/LIFO/min-heap priorities, LCG and checked arithmetic; overflow checks required.
-// BFS/DFS checked index conversions now mirror int.narrow; delta re-review pending langs-numeric-920.
+// BFS/DFS checked index conversions now mirror int.narrow; delta approved by langs-numeric-920 2026-11-13 at b67a67e0; scoped to changed conversion/copy sites.
+// Remaining preparation/AStar checked-index and LCG conversion parity approved by langs-numeric-920 2026-11-13; remaining as sites are lossless widening or checksum truncation.
 // Matched twin of graph.hirsel. Reviewed below.
 // kostya/LangArena3c9f84d benchmarks/graph_path.rs:11-316.
 // Adjacency vectors, FIFO/LIFO searches, minimum (f,vertex) heap and explicit LCG.
@@ -15,7 +16,7 @@ pub struct Graph {
 
 impl Graph {
     pub fn new(vertices: i32, jumps: i32, jump_len: i32) -> Self {
-        let mut adj = Vec::with_capacity(vertices as usize);
+        let mut adj = Vec::with_capacity(usize::try_from(vertices).unwrap());
         for _ in 0..vertices {
             adj.push(Vec::new());
         }
@@ -29,8 +30,8 @@ impl Graph {
     }
 
     pub fn add_edge(&mut self, u: i32, v: i32) {
-        let u_idx = u as usize;
-        let v_idx = v as usize;
+        let u_idx = usize::try_from(u).unwrap();
+        let v_idx = usize::try_from(v).unwrap();
 
         if u_idx < self.adj.len() && v_idx < self.adj.len() {
             self.adj[u_idx].push(v);
@@ -44,7 +45,7 @@ impl Graph {
         }
 
         for v in 0..self.vertices {
-            let num_jumps = next(g, self.jumps as i32) as i32;
+            let num_jumps = next(g, self.jumps);
             for _ in 0..num_jumps {
                 let offset = next(g, self.jump_len as i32) - self.jump_len / 2;
                 let u = v + offset;
@@ -145,14 +146,14 @@ fn a_star_shortest_path(graph: &Graph, start: i32, target: i32) -> i64 {
         return 0;
     }
 
-    let vertices = graph.vertices as usize;
+    let vertices = usize::try_from(graph.vertices).unwrap();
 
     let mut g_score = vec![i32::MAX; vertices];
     let mut best_f = vec![i32::MAX; vertices];
 
-    g_score[start as usize] = 0;
+    g_score[usize::try_from(start).unwrap()] = 0;
     let f_start = target - start;
-    best_f[start as usize] = f_start;
+    best_f[usize::try_from(start).unwrap()] = f_start;
 
     let mut open_set = BinaryHeap::new();
     open_set.push(Reverse(Node {
@@ -162,18 +163,18 @@ fn a_star_shortest_path(graph: &Graph, start: i32, target: i32) -> i64 {
 
     while let Some(Reverse(current)) = open_set.pop() {
         if current.vertex == target {
-            return g_score[current.vertex as usize] as i64;
+            return g_score[usize::try_from(current.vertex).unwrap()] as i64;
         }
 
-        for &neighbor in &graph.adj[current.vertex as usize] {
-            let tentative_g = g_score[current.vertex as usize] + 1;
+        for &neighbor in &graph.adj[usize::try_from(current.vertex).unwrap()] {
+            let tentative_g = g_score[usize::try_from(current.vertex).unwrap()] + 1;
 
-            if tentative_g < g_score[neighbor as usize] {
-                g_score[neighbor as usize] = tentative_g;
+            if tentative_g < g_score[usize::try_from(neighbor).unwrap()] {
+                g_score[usize::try_from(neighbor).unwrap()] = tentative_g;
                 let f_new = tentative_g + (target - neighbor);
 
-                if f_new < best_f[neighbor as usize] {
-                    best_f[neighbor as usize] = f_new;
+                if f_new < best_f[usize::try_from(neighbor).unwrap()] {
+                    best_f[usize::try_from(neighbor).unwrap()] = f_new;
                     open_set.push(Reverse(Node {
                         f_score: f_new,
                         vertex: neighbor,
@@ -187,7 +188,9 @@ fn a_star_shortest_path(graph: &Graph, start: i32, target: i32) -> i64 {
 }
 fn next(g: &mut i32, max: i32) -> i32 {
     *g = g.wrapping_mul(3877).wrapping_add(29573) % 139968;
-    (*g as f64 / 139968.0 * f64::from(max)) as i32
+    let t = (f64::from(*g) / 139968.0 * f64::from(max)).trunc();
+    assert!(t >= -2147483648.0 && t < 2147483648.0, "float.to_int i32");
+    t as i32
 }
 fn main() {
     let a: Vec<String> = text_support::arguments(&["vertices", "jumps", "jump_len"], true);

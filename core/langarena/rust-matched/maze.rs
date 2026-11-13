@@ -1,5 +1,6 @@
 // Reviewed-by: langs-numeric-920 2026-11-13; Generator/BFS/AStar: same nested cells, shuffled inline neighbors, flat BFS marks, i32 path/scores, min priorities and LCG. Overflow checks required.
-// BFS/AStar checked path conversions and inline neighbor copies now mirror Hirsel; delta re-review pending langs-numeric-920.
+// BFS/AStar checked path conversions and inline neighbor copies now mirror Hirsel; delta approved by langs-numeric-920 2026-11-13 at b67a67e0; scoped to changed conversion/copy sites.
+// Remaining shuffle and LCG conversion parity approved by langs-numeric-920 2026-11-13; remaining as sites are lossless widening or checksum truncation.
 // Matched twin of maze.hirsel. Reviewed below.
 // kostya/LangArena3c9f84d benchmarks/maze.rs:8-468.
 // Nested cell vectors, four ordered neighbors, u32 kinds, same path arrays and LCG.
@@ -11,7 +12,9 @@ fn walkable(k: u32) -> bool {
 }
 fn next(g: &mut i32, max: i32) -> i32 {
     *g = g.wrapping_mul(3877).wrapping_add(29573) % 139968;
-    (*g as f64 / 139968.0 * f64::from(max)) as i32
+    let t = (f64::from(*g) / 139968.0 * f64::from(max)).trunc();
+    assert!(t >= -2147483648.0 && t < 2147483648.0, "float.to_int i32");
+    t as i32
 }
 fn heuristic(a: (usize, usize), b: (usize, usize)) -> i32 {
     i32::try_from(a.0.abs_diff(b.0) + a.1.abs_diff(b.1)).unwrap()
@@ -79,8 +82,8 @@ impl Maze {
                     let mut neighbors = [(y - 1, x), (y + 1, x), (y, x + 1), (y, x - 1)];
 
                     for _ in 0..4 {
-                        let i = next(g, 4) as usize;
-                        let j = next(g, 4) as usize;
+                        let i = usize::try_from(next(g, 4)).unwrap();
+                        let j = usize::try_from(next(g, 4)).unwrap();
                         if i != j {
                             neighbors.swap(i, j);
                         }

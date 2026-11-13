@@ -529,7 +529,10 @@ def full(tree, screened=False):
     """The gate on the checked-out tree: None or the first red check's report."""
     if not unchanged(tree):
         raise Refusal('the worktree changed before checks; refusing to push')
-    report = None if screened else fast(tree)
+    # Bisection may have generated inputs for another tree since this tree's
+    # screen passed. Reuse the checks, but synchronize its ignored build files.
+    report = (check('sync.py --if-stale', [PY, 'tools/buck2/sync.py', '--if-stale'])
+              if screened else fast(tree))
     if report is None:
         # Buck2 serves one command at a time when another holds a different
         # state (a running `buck2 test` refuses even a same-config query), so

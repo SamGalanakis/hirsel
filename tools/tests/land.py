@@ -1367,6 +1367,19 @@ class Units(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         resolve('HEAD')
 
+    def test_screened_tree_resynchronizes_inputs_before_its_build_queries(self):
+        full = runpy.run_path(str(ROOT / 'tools/land'))['full']
+        calls = []
+        def check(name, command):
+            calls.append(('check', command))
+        def run(command):
+            calls.append(('query', command))
+            return SimpleNamespace(returncode=0, stdout='root//:a', stderr='')
+        with patch.dict(full.__globals__, check=check, run=run, unchanged=lambda tree: True):
+            self.assertIsNone(full('tree', screened=True))
+        self.assertEqual(calls[0], ('check', [sys.executable, 'tools/buck2/sync.py', '--if-stale']))
+        self.assertEqual([kind for kind, _ in calls[:3]], ['check', 'query', 'query'])
+
     def test_empty_build_query_refuses_the_aggregate(self):
         full = runpy.run_path(str(ROOT / 'tools/land'))['full']
         with patch.dict(full.__globals__, check=lambda *args: None, unchanged=lambda tree: True,

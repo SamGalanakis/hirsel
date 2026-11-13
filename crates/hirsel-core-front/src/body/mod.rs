@@ -140,9 +140,6 @@ pub(crate) enum Rep {
     None,
     Scalar(Ty),
     Place(TypeId),
-    /// A view of a place of this type: its pointer, stored and passed as a pointer
-    /// value and never cleaned (OWN-8).
-    View(PlaceTy),
 }
 impl Rep {
     /// The CoreIR type of the value: a place travels as its pointer.
@@ -150,48 +147,32 @@ impl Rep {
         match self {
             Rep::None => None,
             Rep::Scalar(t) => Some(t),
-            Rep::Place(_) | Rep::View(_) => Some(Ty::Ptr),
+            Rep::Place(_) => Some(Ty::Ptr),
         }
     }
-    /// The place a value of this representation is stored in: a view stores its
-    /// pointer.
+    /// The place a value of this representation is stored in.
     fn stored(self) -> Option<PlaceTy> {
         match self {
             Rep::None => None,
             Rep::Scalar(t) => Some(PlaceTy::Value(t)),
             Rep::Place(id) => Some(PlaceTy::Declared(id)),
-            Rep::View(_) => Some(PlaceTy::Value(Ty::Ptr)),
         }
     }
     /// The row of the place a value of this representation points at.
     fn pointee(self) -> Option<TypeId> {
         match self {
-            Rep::Place(id) | Rep::View(PlaceTy::Declared(id)) => Some(id),
+            Rep::Place(id) => Some(id),
             _ => None,
         }
     }
 }
-/// A value of `ty` is held as a locator into a blob (MEM-9..12): a compact value, a
-/// `Text` or a stable sequence.
-fn locator(p: &Program, t: &impl TyRead, mut ty: TyId) -> bool {
-    while let TyKind::View(x) | TyKind::Anchored(x, _) = t.kind(ty) {
-        ty = *x;
-    }
+/// A generic signature's declared type `ty` holds its value in a place whatever the
+/// instance: a type parameter, or a view of one, which is carried as the parameter
+/// (FORM #56).
+fn rigid(t: &impl TyRead, ty: TyId) -> bool {
     match t.kind(ty) {
-        TyKind::Adt(d, _) => {
-            let decl = &p.decls[d.index()];
-            (decl.repr == crate::decls::Repr::Stable && decl.compact.is_some())
-                || matches!(
-                    decl.role,
-                    Some(
-                        Role::Text
-                            | Role::FixedSpan
-                            | Role::SeqSpan
-                            | Role::IndexedSpan
-                            | Role::SeqIndex
-                    )
-                )
-        }
+        TyKind::Param(_) => true,
+        TyKind::View(x) => matches!(t.kind(*x), TyKind::Param(_)),
         _ => false,
     }
 }
@@ -478,18 +459,12 @@ impl Emitter {
                 let x = *x;
                 return self.rep(p, t, x);
             }
-            // A view is a pointer to a place of its type, never cleaned (OWN-8). A
-            // locator is already a view of its blob (MEM-5): its view is the locator.
+            // A view is carried exactly as its type: the type's own bytes, a scalar or
+            // a place, a copy nobody cleans (FORM #56, OWN-8). A locator is already a
+            // view of its blob (MEM-5).
             TyKind::View(x) => {
                 let x = *x;
-                if locator(p, t, x) {
-                    return self.rep(p, t, x);
-                }
-                return match self.rep(p, t, x)? {
-                    Rep::Place(id) => Ok(Rep::View(PlaceTy::Declared(id))),
-                    Rep::Scalar(s) => Ok(Rep::View(PlaceTy::Value(s))),
-                    _ => Err("views of this type are not built"),
-                };
+                return self.rep(p, t, x);
             }
             _ => return Err("values of this type are not built"),
         }
@@ -599,7 +574,7 @@ impl Emitter {
         for q in &fd.params {
             let ty = subst(t, q.ty, arguments);
             let rep = self.rep(p, t, ty)?;
-            if q.mode == Mode::Mut || matches!(t.kind(q.ty), TyKind::Param(_)) {
+            if q.mode == Mode::Mut || rigid(t, q.ty) {
                 let id = self
                     .type_row(p, t, ty)
                     .ok_or("values of this type are not built")?;
@@ -609,14 +584,13 @@ impl Emitter {
             match rep {
                 Rep::None => {}
                 Rep::Scalar(s) => params.push(Param::Value(s)),
-                Rep::View(_) => params.push(Param::Value(Ty::Ptr)),
                 Rep::Place(id) => params.push(Param::Address(id)),
             }
         }
         let result = subst(t, fd.result, arguments);
         let never = matches!(t.kind(result), TyKind::Never);
         let result_rep = self.rep(p, t, result)?;
-        let result_rep = if matches!(t.kind(fd.result), TyKind::Param(_)) {
+        let result_rep = if rigid(t, fd.result) {
             Rep::Place(
                 self.type_row(p, t, result)
                     .ok_or("values of this type are not built")?,
@@ -627,7 +601,6 @@ impl Emitter {
         let (results, dest) = match result_rep {
             Rep::None => (vec![], None),
             Rep::Scalar(s) => (vec![s], None),
-            Rep::View(_) => (vec![Ty::Ptr], None),
             Rep::Place(id) => (vec![], Some(id)),
         };
         Ok(Signature {
@@ -1303,7 +1276,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     ) -> Option<ValueId> {
         let (id, bits) = match self.rep(ty) {
             Ok(Rep::Scalar(Ty::Scalar(s))) => (None, s.size()),
-            Ok(Rep::Scalar(Ty::Ptr) | Rep::View(_)) => (None, hirsel_core_layout::POINTER),
+            Ok(Rep::Scalar(Ty::Ptr)) => (None, hirsel_core_layout::POINTER),
             Ok(Rep::None) => (None, 0),
             Ok(Rep::Place(id)) => {
                 let bits = if self.e.is_resource(id) {
@@ -1373,6 +1346,33 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         self.inst(Inst::Copy { to, from, bytes }, n);
     }
     /// A fresh place holding a copy of the value `from` points at; its pointer.
+    /// Install at `to` the view of the `elem` value at `pointer`: its own bytes, a
+    /// copy nobody cleans (FORM #56).
+    pub(super) fn install_view(
+        &mut self,
+        to: AddressId,
+        elem: TyId,
+        pointer: ValueId,
+        n: NodeId,
+    ) -> Option<()> {
+        let r = match self.rep(elem) {
+            Ok(r) => r,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+        };
+        let value = match r {
+            Rep::None => return Some(()),
+            Rep::Scalar(t) => {
+                let at = self.address(AddressBase::Value(pointer), &[], PlaceTy::Value(t), n);
+                self.read_bits(at, t, n)
+            }
+            Rep::Place(_) => pointer,
+        };
+        self.install(to, r, Some(value), n);
+        Some(())
+    }
     fn snapshot(&mut self, from: ValueId, id: TypeId, n: NodeId) -> ValueId {
         let to = self.new_slot(PlaceTy::Declared(id), n);
         self.copy_to(to, from, id, n);
@@ -1395,7 +1395,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             (Some((dest, id)), Some(v)) => {
                 let to = self.address(AddressBase::Value(dest), &[], PlaceTy::Declared(id), n);
                 self.copy_to(to, v, id, n);
-                if self.e.runs_code(id) {
+                if self.e.runs_code(id) && !self.is_view(self.fd.result) {
                     self.pending = Some((AddressBase::Address(to), id));
                 }
                 None

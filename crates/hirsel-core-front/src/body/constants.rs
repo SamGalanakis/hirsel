@@ -85,7 +85,6 @@ impl Cx<'_, '_, '_> {
                             Layout::Fixed(f) => f.size,
                             _ => unreachable!(),
                         },
-                        Rep::View(_) => unreachable!(),
                     })
                 } else {
                     None

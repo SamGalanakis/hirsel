@@ -218,7 +218,6 @@ impl Cx<'_, '_, '_> {
                     from = self.skip(blob, from, w, field, n)?;
                 }
             }
-            Rep::View(_) => return None,
         }
         Some(())
     }
@@ -435,19 +434,14 @@ impl Cx<'_, '_, '_> {
             },
             n,
         );
+        // The payload is the element's own bytes (FORM #56).
         let dest = self.address(
             AddressBase::Address(to),
             &[Step::CaseField { case: 1, field: 0 }],
-            PlaceTy::Value(Ty::Ptr),
+            PlaceTy::Value(Ty::Scalar(scalar)),
             n,
         );
-        self.inst(
-            Inst::Store {
-                address: dest,
-                value: pointer,
-            },
-            n,
-        );
+        self.install_view(dest, elem, pointer, n)?;
         self.jump(done, &[], n);
         self.start(empty);
         self.inst(

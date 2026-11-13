@@ -499,7 +499,6 @@ impl Cx<'_, '_, '_> {
                         Rep::None => continue,
                         Rep::Scalar(t) => self.read_bits(from, t, n),
                         Rep::Place(_) => self.pointer(from, n),
-                        Rep::View(_) => return None,
                     };
                     let k = self.konst(Ty::Scalar(Scalar::U64), offset, n)?;
                     let fat = self.word_op(BinaryOp::Add, at, k, n);

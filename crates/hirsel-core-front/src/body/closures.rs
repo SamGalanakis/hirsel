@@ -659,7 +659,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 match rep {
                     Rep::None => continue,
                     Rep::Scalar(t) => Param::Value(t),
-                    Rep::View(_) => Param::Value(Ty::Ptr),
                     Rep::Place(id) => Param::Address(id),
                 }
             });
@@ -667,7 +666,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let (results, dest) = match self.rep(r)? {
             Rep::None => (vec![], None),
             Rep::Scalar(t) => (vec![t], None),
-            Rep::View(_) => (vec![Ty::Ptr], None),
             Rep::Place(id) => (vec![], Some(id)),
         };
         Ok(Signature {
@@ -827,7 +825,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         .unwrap_or(layout.size),
                 )
             }
-            Ok(Rep::View(_)) => (0, 1, 0),
             Err(what) => {
                 self.gap(n, what);
                 (0, 1, 0)

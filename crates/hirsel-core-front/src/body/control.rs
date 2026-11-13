@@ -183,9 +183,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// value is moved, so nothing cleans `v` afterwards.
     pub(super) fn install(&mut self, address: AddressId, r: Rep, v: Option<ValueId>, n: NodeId) {
         match (r, v) {
-            (Rep::Scalar(_) | Rep::View(_), Some(value)) => {
-                self.inst(Inst::Store { address, value }, n)
-            }
+            (Rep::Scalar(_), Some(value)) => self.inst(Inst::Store { address, value }, n),
             (Rep::Place(id), Some(from)) if self.live() => self.copy_to(address, from, id, n),
             _ => {}
         }
@@ -950,18 +948,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 );
                 Some(result)
             }
-            Rep::View(_) => {
-                let result = self.value(Ty::Ptr);
-                self.inst(
-                    Inst::Read {
-                        result,
-                        address,
-                        mode: ReadMode::Bits,
-                    },
-                    n,
-                );
-                Some(result)
-            }
             Rep::Place(_) => Some(self.pointer(address, n)),
         }
     }
@@ -1058,6 +1044,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // The carried value goes to the exit's join; the rest is cleaned (FAIL-8, 9).
         self.consume(v, n);
         if let (Some(v), Ok(Rep::Place(id))) = (v, self.rep(ty))
+            && !self.is_view(ty)
             && self.e.runs_code(id)
         {
             self.pending = Some((AddressBase::Value(v), id));

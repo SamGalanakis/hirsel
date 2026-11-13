@@ -565,7 +565,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         case.map_or(Step::Field(field), |case| Step::CaseField { case, field });
                     match r {
                         Rep::None => None,
-                        Rep::Scalar(_) | Rep::View(_) => {
+                        Rep::Scalar(_) => {
                             let t = r.ty().unwrap();
                             let a = self.address(base, &[step], PlaceTy::Value(t), n);
                             let result = self.value(t);
@@ -1285,20 +1285,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         match self.rep(ty).ok()? {
             Rep::None => None,
             Rep::Place(id) => Some(self.snapshot(value, id, n)),
-            r @ (Rep::Scalar(_) | Rep::View(_)) => {
-                let t = r.ty().unwrap();
-                let address = self.address(AddressBase::Value(value), &[], PlaceTy::Value(t), n);
-                let result = self.value(t);
-                self.inst(
-                    Inst::Read {
-                        result,
-                        address,
-                        mode: ReadMode::Bits,
-                    },
-                    n,
-                );
-                Some(result)
-            }
+            // A view of a scalar is the scalar (FORM #56).
+            Rep::Scalar(_) => Some(value),
         }
     }
     pub(super) fn if_let(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {

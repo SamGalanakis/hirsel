@@ -35,7 +35,9 @@ impl<T: TyRead> Shapes<'_, T> {
         if let Some(&r) = self.of.get(&name) {
             return Some(r);
         }
-        if let TyKind::Anchored(x, _) = *self.types.kind(ty) {
+        // A view is held as its type's own bytes (FORM #56); an anchor only bounds where
+        // a value may go.
+        if let TyKind::Anchored(x, _) | TyKind::View(x) = *self.types.kind(ty) {
             return self.shape(x);
         }
         // Reserve the index first: a field reaching this type through an indirection
@@ -325,7 +327,9 @@ impl<T: TyRead> Shapes<'_, T> {
                 }
                 Some(Role::SeqIndex) => FieldTy::Locator,
                 Some(Role::Link) if compact => FieldTy::Link(self.shape(args[0])?),
-                Some(Role::Dest | Role::Writer | Role::View) => FieldTy::Borrow,
+                // A view field is the viewed type's own bytes, cleaned by nobody (FORM #56).
+                Some(Role::View) => view_field(self.field_in(args[0], compact)?),
+                Some(Role::Dest | Role::Writer) => FieldTy::Borrow,
                 Some(Role::Child | Role::SpanBuilder | Role::Builder) => {
                     FieldTy::Array(Box::new(FieldTy::Scalar(Scalar::U64)), 2)
                 }
@@ -365,7 +369,7 @@ impl<T: TyRead> Shapes<'_, T> {
             }
             TyKind::Tuple(_) | TyKind::Unit => FieldTy::Inline(self.shape(ty)?),
             TyKind::Param(_) if self.module => FieldTy::Inline(self.shape(ty)?),
-            TyKind::View(_) => FieldTy::Borrow,
+            TyKind::View(x) => view_field(self.field_in(x, compact)?),
             TyKind::Fn(_, _, _, callable) => match callable {
                 Callable::Plain => FieldTy::Fn,
                 Callable::Own | Callable::OwnSend => FieldTy::OwnFn,
@@ -373,6 +377,15 @@ impl<T: TyRead> Shapes<'_, T> {
             },
             _ => return None,
         })
+    }
+}
+
+/// The field holding a view of a value held as `inner`: its bytes again when `inner`
+/// already is a view.
+fn view_field(inner: FieldTy) -> FieldTy {
+    match inner {
+        FieldTy::View(_) => inner,
+        _ => FieldTy::View(Box::new(inner)),
     }
 }
 

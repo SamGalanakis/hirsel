@@ -81,10 +81,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let at = self.address(AddressBase::Address(at), &[], PlaceTy::Value(t), n);
                 Some(self.read_bits(at, t, n))
             }
-            Rep::View(_) => {
-                let at = self.address(AddressBase::Address(at), &[], PlaceTy::Value(Ty::Ptr), n);
-                Some(self.read_bits(at, Ty::Ptr, n))
-            }
         }
     }
     pub(super) fn item_adapter(

@@ -793,15 +793,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 Some(self.read_bits(field, t, n))
             }
             Ok(Rep::None) => None,
-            Ok(Rep::View(_)) => {
-                let field = self.address(
-                    AddressBase::Address(from),
-                    &[Step::Field(0)],
-                    PlaceTy::Value(Ty::Ptr),
-                    n,
-                );
-                Some(self.read_bits(field, Ty::Ptr, n))
-            }
             Err(what) => {
                 self.gap(n, what);
                 None
@@ -1047,7 +1038,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     let at = cx.owner_payload(node, id, kind.is_some(), n);
                     if let Some(at) = at {
                         let at = match rep {
-                            Rep::Scalar(_) | Rep::View(_) => cx.address(
+                            Rep::Scalar(_) => cx.address(
                                 AddressBase::Address(at),
                                 &[Step::Field(0)],
                                 rep.stored().unwrap(),

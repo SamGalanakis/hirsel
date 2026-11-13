@@ -93,27 +93,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         }
     }
-    /// The pointer `view p` gives: the place of `p`, or the pointer `p` already holds
-    /// when it is a view. A plain local held as a value is spilled to a slot; the
-    /// view freezes it, so the copy reads the same (OWN-10).
+    /// The value `view p` gives, carried as `p`'s type (FORM #56): a scalar is read,
+    /// anything else is the address of `p`'s place, frozen while the view lives
+    /// (OWN-8), or `p` itself when it already is a view.
     fn view_of(&mut self, at: At, t: TyId, n: NodeId) -> Option<ValueId> {
-        if let Err(what) = self.rep(t) {
-            self.gap(n, what);
-            return None;
-        }
-        if t == at.ty {
-            return self.emit_place(at, n);
-        }
-        let held =
-            at.place.len == 0 && matches!(self.var(at.place.slot).binding, Binding::Value(_));
-        match self.rep(at.ty) {
-            Ok(Rep::Scalar(s)) if held => {
-                let value = self.emit_place(at, n)?;
-                let to = self.new_slot(PlaceTy::Value(s), n);
-                self.inst(Inst::Store { address: to, value }, n);
-                Some(self.pointer(to, n))
+        match self.rep(t) {
+            Err(what) => {
+                self.gap(n, what);
+                None
             }
-            _ => self.place_ptr(at, n),
+            _ if t == at.ty => self.emit_place(at, n),
+            Ok(Rep::Scalar(_) | Rep::None) => self.emit_place(at, n),
+            Ok(Rep::Place(_)) => self.place_ptr(at, n),
         }
     }
     /// LANG-21: an operator applies only to the operand types its table lists; anything

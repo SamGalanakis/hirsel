@@ -126,7 +126,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Rep::None => None,
             Rep::Scalar(s) => Some(PlaceTy::Value(s)),
             Rep::Place(id) => Some(PlaceTy::Declared(id)),
-            Rep::View(_) => Some(PlaceTy::Value(Ty::Ptr)),
         }
     }
 
@@ -155,17 +154,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             // An anchored value is held like its type (MEM-6).
             TyKind::Anchored(x, _) => self.walk(a, b, x, join, eq_only, n),
-            // A view of a locator is the locator (MEM-5).
-            TyKind::View(x) if self.is_text(x) => self.walk(a, b, x, join, eq_only, n),
-            TyKind::View(x) => {
-                let (pa, pb) = (self.read_bits(a, Ty::Ptr, n), self.read_bits(b, Ty::Ptr, n));
-                let Some(place) = self.place_of(x) else {
-                    return;
-                };
-                let a = self.address(AddressBase::Value(pa), &[], place, n);
-                let b = self.address(AddressBase::Value(pb), &[], place, n);
-                self.walk(a, b, x, join, eq_only, n);
-            }
+            // A view is its type's own bytes (FORM #56).
+            TyKind::View(x) => self.walk(a, b, x, join, eq_only, n),
             TyKind::Tuple(xs) => {
                 for (i, x) in xs.into_iter().enumerate() {
                     self.component(a, b, Step::Field(i as u32), x, join, eq_only, n);

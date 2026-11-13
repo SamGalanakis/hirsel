@@ -1,0 +1,26 @@
+// FORM #56 (Q38): `text.as_string` is the View[String] carrier {blob + at + W, count, 0}.
+// It points into the text's blob, not the frame, so it may be returned: the caller's
+// dest receives the carrier. Hand-derived: the field `a` of P(a: "abc", b: "xy") is
+// "abc", which orders after "abb" and before "abd".
+// expect: accept
+// expect: run go(0) = 2
+// expect: run go(1) = 1
+@compact(u32) stable type P { a: Text, b: Text }
+fn pair[in r](take w: Writer[P, in r], x: String, y: String) -> Result[Child[P], BuildError] {
+  emit(take w, P(a: x, b: y))
+}
+fn make(r: Region, x: String, y: String) -> Result[P in r, BuildError] {
+  match build_stream_in(r, bytes 64, fn(take w: Writer[P, in r]) -> Result[Child[P], BuildError] { pair(take w, x, y) }) {
+    Ok(take b) => Ok(finish(take b)),
+    Error(e) => Error(e),
+  }
+}
+fn first(p: P) -> View[String] in p { text.as_string(p.a) }
+fn go(k: u64) -> u64 {
+  region r {
+    match make(r, "abc", "xy") {
+      Ok(p) => if k == 0 { if first(p) > "abb" && first(p) < "abd" { 2 } else { 0 } } else { if first(p) == "abc" { 1 } else { 0 } },
+      Error(_) => 99,
+    }
+  }
+}

@@ -1172,17 +1172,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(self.pointer(to, n))
     }
 
-    /// `text.as_string`: a `String` header viewing the text's bytes, which owns
-    /// nothing (capacity 0). It lives in this frame, so a function whose result could
-    /// carry it out is not built (Q38).
+    /// `text.as_string`: the `View[String]` carrier `{blob + at + W, count, 0}`
+    /// (FORM #56). It points into the text's blob and owns nothing, so it may be
+    /// returned: the carrier is copied into the caller's dest like any view.
     fn as_string(&mut self, header: ValueId, n: NodeId) -> Option<ValueId> {
-        if self.view_of_string_escapes() {
-            self.gap(
-                n,
-                "a String view of a Text returned from its function is not built (Q38)",
-            );
-            return None;
-        }
         let (blob, at, w) = self.locator(header, n)?;
         let len = self.word_in(blob, at, w, n)?;
         let data = self.add(at, w, n);
@@ -1203,26 +1196,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.put_word(AddressBase::Address(to), &[], 16, zero, n)?;
         Some(self.pointer(to, n))
     }
-    fn view_of_string_escapes(&mut self) -> bool {
-        let Some(string) = self.p.core_decl("String") else {
-            return true;
-        };
-        let string = self.t.mk(TyKind::Adt(string, vec![]));
-        let view = self.t.mk(TyKind::View(string));
-        self.mentions(self.fd.result, view)
-    }
-    /// Whether `ty` holds `x` anywhere.
-    fn mentions(&self, ty: TyId, x: TyId) -> bool {
-        if ty == x {
-            return true;
-        }
-        match self.t.kind(ty) {
-            TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().any(|&y| self.mentions(y, x)),
-            TyKind::Array(y, _) | TyKind::View(y) | TyKind::Anchored(y, _) => self.mentions(*y, x),
-            _ => false,
-        }
-    }
-
     /// `text.copy_in(r, s)`: `{_, W = 8 @8, count @16, bytes @24}`, charged
     /// `round8(8 + len)` (MEM-24), located at 16.
     fn copy_in(&mut self, region: ValueId, s: ValueId, result: TyId, n: NodeId) -> Option<ValueId> {

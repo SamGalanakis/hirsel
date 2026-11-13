@@ -893,19 +893,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             n,
         );
+        let place = self.rep(item).ok()?.stored()?;
         let at = self.address(
             AddressBase::Address(out),
             &[Step::CaseField { case: 1, field: 0 }],
-            PlaceTy::Value(Ty::Ptr),
+            place,
             n,
         );
-        self.inst(
-            Inst::Store {
-                address: at,
-                value: pointer,
-            },
-            n,
-        );
+        self.install_view(at, item, pointer, n)?;
         self.jump(join, &[], n);
         self.start(join);
         let value = self.pointer(out, n);

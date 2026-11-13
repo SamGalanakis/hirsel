@@ -129,7 +129,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let address = self.address(AddressBase::Value(pointer?), &[], place, n);
         let old = match rep {
             Rep::Scalar(t) => Some(self.read_bits(address, t, n)),
-            Rep::View(_) => Some(self.read_bits(address, Ty::Ptr, n)),
             Rep::Place(_) => Some(self.pointer(address, n)),
             Rep::None => None,
         };
@@ -137,7 +136,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.install(address, rep, value, n);
         match rep {
             Rep::Scalar(t) => Some(self.read_bits(saved, t, n)),
-            Rep::View(_) => Some(self.read_bits(saved, Ty::Ptr, n)),
             Rep::Place(_) => {
                 let value = self.pointer(saved, n);
                 self.temp(ty, Some(value));
@@ -226,7 +224,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         match rep {
             Rep::Scalar(t) => Some(self.read_bits(payload, t, n)),
-            Rep::View(_) => Some(self.read_bits(payload, Ty::Ptr, n)),
             Rep::Place(id) => {
                 let source = self.pointer(payload, n);
                 let slot = self.new_slot(PlaceTy::Declared(id), n);

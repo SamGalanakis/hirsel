@@ -404,7 +404,6 @@ impl Cx<'_, '_, '_> {
                 self.gap(n, "this compact field is not built");
                 None
             }
-            Ok(Rep::View(_)) => None,
             Err(what) => {
                 self.gap(n, what);
                 None
@@ -487,7 +486,7 @@ impl Cx<'_, '_, '_> {
                 self.address(AddressBase::Address(at), &[Step::Field(i as u32)], place, n)
             };
             match self.rep(ft).ok()? {
-                r @ (Rep::Scalar(_) | Rep::View(_)) => Some(self.read_bits(address, r.ty()?, n)),
+                r @ Rep::Scalar(_) => Some(self.read_bits(address, r.ty()?, n)),
                 Rep::Place(_) if ty != ft => Some(self.pointer(address, n)),
                 Rep::Place(id) => {
                     let p = self.pointer(address, n);

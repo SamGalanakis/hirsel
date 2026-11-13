@@ -1,0 +1,10 @@
+// A view is carried exactly as its type (FORM #56), so a callable over `View[u64]`
+// carries the u64 itself in its argument place. The unbuilt-payload gap stays
+// covered by callable-region-mut-gap.
+// expect: accept
+// expect: run call(9) = 10
+fn next(v: View[u64]) -> u64 { v + 1 }
+fn call(x: u64) -> u64 {
+    let f: fn(View[u64]) -> u64 = next
+    f(view x)
+}

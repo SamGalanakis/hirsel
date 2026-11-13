@@ -689,9 +689,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             let ty = subst(&mut self.t, p.ty, types);
             let r = match self.rep(ty) {
-                Ok(Rep::None)
-                    if p.mode != Mode::Mut && !matches!(self.t.kind(p.ty), TyKind::Param(_)) =>
-                {
+                Ok(Rep::None) if p.mode != Mode::Mut && !rigid(&self.t, p.ty) => {
                     continue;
                 }
                 Ok(r) => r,
@@ -700,7 +698,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     return None;
                 }
             };
-            let generic_value = matches!(self.t.kind(p.ty), TyKind::Param(_));
+            let generic_value = rigid(&self.t, p.ty);
             if generic_value && p.mode != Mode::Mut && matches!(r, Rep::Scalar(_) | Rep::None) {
                 let id = self.e.type_row(self.p, &mut self.t, ty)?;
                 let slot = self.new_slot(PlaceTy::Declared(id), n);
@@ -760,7 +758,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         match dest {
             Some(a) => {
-                if matches!(self.t.kind(g.result), TyKind::Param(_)) {
+                if rigid(&self.t, g.result) {
                     match self.rep(result) {
                         Ok(Rep::None) => return None,
                         Ok(Rep::Scalar(t)) => {
@@ -834,12 +832,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             return match (g.path.0.modules[0].as_str(), g.path.0.name.as_str()) {
                 ("seq", "len") => self.span_parts(vals[0]?, n).map(|p| p.3),
-                (module, "nth" | "get")
-                    if {
-                        let view = self.t.mk(TyKind::View(tys[0]));
-                        !matches!(self.rep(view), Ok(Rep::View(_)))
-                    } =>
-                {
+                (module, "nth" | "get") if { self.is_locator(tys[0]) } => {
                     let result = subst(&mut self.t, g.result, tys);
                     let indexed = module == "indexed";
                     self.packed_get(vals[0]?, vals[1]?, tys[0], indexed, result, n)

@@ -503,8 +503,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
     /// The address of field place `at` (a local and field steps) and how the value
-    /// stored there is carried; a local held as a place is its base, and a view on the
-    /// way is read to reach the place it points at.
+    /// stored there is carried; a local held as a place is its base. A view on the way
+    /// holds its type's own bytes (FORM #56), so its fields are found as the type's.
     pub(super) fn field_address(&mut self, at: At, n: NodeId) -> Option<(AddressId, Rep)> {
         let var = self.var(at.place.slot);
         let mut address = match (var.binding, self.rep(var.ty)) {
@@ -512,20 +512,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let id = r.pointee()?;
                 self.address(AddressBase::Value(v), &[], PlaceTy::Declared(id), n)
             }
-            (Binding::Slot(Some(a)), Ok(Rep::View(PlaceTy::Declared(id)))) => {
-                self.through_view(a, id, n)
-            }
             (Binding::Slot(Some(a)), _) => a,
             _ => return None,
         };
         let mut ty = var.ty;
         for k in at.place.start..at.place.start + at.place.len {
-            // A view stored in the field just reached is followed to its place.
-            if k > at.place.start
-                && let Ok(Rep::View(PlaceTy::Declared(id))) = self.rep(ty)
-            {
-                address = self.through_view(address, id, n);
-            }
             match self.steps[k as usize] {
                 // A compact value's field is found in its blob (MEM-9).
                 PStep::Field(i) if self.compact_adt(ty).is_some() => {
@@ -581,10 +572,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some((address, self.rep(ty).ok()?))
     }
     /// The place of row `id` that the view stored at `address` points at.
-    fn through_view(&mut self, address: AddressId, id: TypeId, n: NodeId) -> AddressId {
-        let p = self.read_bits(address, Ty::Ptr, n);
-        self.address(AddressBase::Value(p), &[], PlaceTy::Declared(id), n)
-    }
     pub(super) fn read_bits(&mut self, address: AddressId, t: Ty, n: NodeId) -> ValueId {
         let result = self.value(t);
         self.inst(
@@ -653,7 +640,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     let pointer = self.pointer(at, n);
                     Some(self.snapshot(pointer, id, n))
                 }
-                Rep::View(_) => Some(self.read_bits(at, Ty::Ptr, n)),
             }
         })();
         (elem, result)
@@ -769,7 +755,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(live);
         let place = self.place_ty(pair, n)?;
         let to = self.new_slot(place, n);
+        let TyKind::Tuple(views) = self.t.kind(pair).clone() else {
+            return None;
+        };
+        // Each half of the pair is a view: the entry's own bytes (FORM #56).
         for (i, field) in [2, 3].into_iter().enumerate() {
+            let elem = match self.t.kind(views[i]) {
+                TyKind::View(x) => *x,
+                _ => views[i],
+            };
             let address = self.address(
                 AddressBase::Address(entry),
                 &[Step::Field(field)],
@@ -777,19 +771,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 n,
             );
             let pointer = self.pointer(address, n);
+            let stored = self.rep(elem).ok()?.stored();
+            let Some(stored) = stored else {
+                continue;
+            };
             let field = self.address(
                 AddressBase::Address(to),
                 &[Step::Field(i as u32)],
-                PlaceTy::Value(Ty::Ptr),
+                stored,
                 n,
             );
-            self.inst(
-                Inst::Store {
-                    address: field,
-                    value: pointer,
-                },
-                n,
-            );
+            self.install_view(field, elem, pointer, n)?;
         }
         Some(self.pointer(to, n))
     }
@@ -1028,20 +1020,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return None;
         }
-        let (a, r) = if at.place.len > 0 {
-            self.field_address(at, n)?
+        let a = if at.place.len > 0 {
+            self.field_address(at, n)?.0
         } else {
-            let var = self.var(at.place.slot);
-            match var.binding {
+            match self.var(at.place.slot).binding {
                 Binding::Value(v) => return v,
-                Binding::Slot(a) => (a?, self.rep(var.ty).ok()?),
+                Binding::Slot(a) => a?,
             }
         };
-        // A stored view is passed as the pointer it holds.
-        Some(match r {
-            Rep::View(_) => self.read_bits(a, Ty::Ptr, n),
-            _ => self.pointer(a, n),
-        })
+        Some(self.pointer(a, n))
     }
     /// The value of a used place: a local, or a field of one read in place.
     pub(super) fn emit_place(&mut self, at: At, n: NodeId) -> Option<ValueId> {
@@ -1055,9 +1042,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
             return match self.field_address(at, n)? {
-                (address, r @ (Rep::Scalar(_) | Rep::View(_))) => {
-                    Some(self.read_bits(address, r.ty().unwrap(), n))
-                }
+                (address, r @ Rep::Scalar(_)) => Some(self.read_bits(address, r.ty().unwrap(), n)),
                 // A part reached through a view is read in place, frozen while the
                 // view lives (OWN-10).
                 (address, Rep::Place(_)) if matches!(self.t.kind(at.ty), TyKind::View(_)) => {
@@ -1083,7 +1068,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let t = match r {
                     Rep::None => return None,
                     Rep::Scalar(t) => t,
-                    Rep::View(_) => Ty::Ptr,
                     // The slot may be written again while the value lives on: the
                     // value is a copy (a move leaves the slot moved out, OWN-6).
                     Rep::Place(id) => {

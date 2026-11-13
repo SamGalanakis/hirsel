@@ -63,10 +63,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// The row of a value of `ty` that needs cleanup.
     pub(super) fn drop_id(&mut self, ty: TyId) -> Option<TypeId> {
         crate::cost_scope!("phase", "cleanup emission");
+        // A view is its type's bytes, a copy that nobody cleans (OWN-8).
+        if self.is_view(ty) {
+            return None;
+        }
         match self.rep(ty) {
             Ok(Rep::Place(id)) if self.e.needs_drop(id) => Some(id),
             _ => None,
         }
+    }
+    /// A value of `ty` is a view: carried as its type, never cleaned (FORM #56).
+    pub(super) fn is_view(&self, mut ty: TyId) -> bool {
+        while let TyKind::Anchored(x, _) = self.t.kind(ty) {
+            ty = *x;
+        }
+        matches!(self.t.kind(ty), TyKind::View(_))
     }
     pub(super) fn owner_mark(&self) -> usize {
         self.owners.len()

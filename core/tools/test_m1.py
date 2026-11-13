@@ -82,6 +82,37 @@ print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnos
         (self.corpus / 'EXPECTED/first.files/result').write_bytes(b'wrong')
         self.assertIn('files differ', self.rows()[0]['stopped'])
 
+    def test_refused_contract_tests_are_excluded_but_library_refusals_fail(self):
+        core = self.root / 'core/core'
+        std = self.root / 'core/std'
+        core.mkdir()
+        (std / 'tests').mkdir(parents=True)
+        (core / 'core.hirsel').write_text('pub fn identity(x: u64) -> u64 { x }')
+        source = std / 'values.hirsel'
+        source.write_text('pub fn value() -> u64 { 7u64 }')
+        # The fake compiler's refusal is input driven, so including this fixture
+        # would make the standing library row red, as the real OWN-9 test did.
+        (std / 'tests/refused.hirsel').write_text('// expected refusal OWN-9')
+        original = self.compiler.read_text()
+        image = """    inputs=json.loads(pathlib.Path(args[args.index('--inputs')+1]).read_text())
+    sources=[s for p in inputs['packages'] for s in p['sources']]
+    for source in sources:
+        if 'expected refusal' in pathlib.Path(source['file']).read_text():
+            print(json.dumps({'accepted':False,'diagnostics':[{'rule':'OWN-9','message':'refused source','primary':{'module':'std@1/values','span':{'start':0,'end':1}}}]}))
+            raise SystemExit(2)
+    assert sorted(pathlib.Path(s['file']).name for s in sources)==['core.hirsel','values.hirsel']
+    print(json.dumps({'accepted':True, 'image':'canonical'}))"""
+        self.compiler.write_text(original.replace("    print(json.dumps({'accepted':True, 'image':'canonical'}))", image))
+        row = self.rows()[1]
+        self.assertTrue(row['checked'])
+        self.assertTrue(row['built'])
+        # The same refusal in a published source must still fail the image row.
+        source.write_text('// expected refusal OWN-9')
+        row = self.rows()[1]
+        self.assertFalse(row['checked'])
+        self.assertFalse(row['built'])
+        self.assertIn('OWN-9', row['stopped'])
+
     def test_empty_output_and_wrapper_only_closures_are_not_built(self):
         original = self.compiler.read_text()
         # Even exact output cannot qualify a wrapper-only closure as the workload.

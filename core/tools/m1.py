@@ -35,6 +35,18 @@ def inputs_for(manifest, entry, root):
     return inputs
 
 
+
+def library_inputs(root, core):
+    """Canonical images contain installed root sources, excluding contract tests."""
+    packages = []
+    for name in ['core', 'std']:
+        packages.append({'package': core if name == 'core' else {'name': 'std', 'version': '1'},
+            'dependencies': [] if name == 'core' else [core],
+            'sources': [{'file': str(path.resolve()), 'modules': [path.stem], 'signatures': True}
+                        for path in sorted((root / 'core' / name).glob('*.hirsel'))]})
+    return {'core': core, 'packages': packages}
+
+
 def first_stop(product, entry):
     prefix = f"{entry['package']['name']}@{entry['package']['version']}/"
     rows = [(d, d['rule']) for d in product.get('diagnostics', [])]
@@ -263,8 +275,11 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                             row['stopped'] = f'run {failure}'
                     else:
                         row['passed'] += 1
+        if include_libraries:
+            library_manifest = temp / 'library-inputs.json'
+            library_manifest.write_text(json.dumps(library_inputs(root, manifest['core'])))
         for engine in engines if include_libraries else ():
-            command = [str(compiler), 'image', '--libraries', str(root / 'core'), '--store',
+            command = [str(compiler), 'image', '--inputs', str(library_manifest), '--store',
                        str(store / 'canonical-image'), '--json']
             result = subprocess.run(command, cwd=root, capture_output=True)
             row = dict(program='core + std fully checked; canonical image accepted', variant='libraries', engine=engine,

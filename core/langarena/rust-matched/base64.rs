@@ -1,4 +1,4 @@
-// Review pending: langs-text-921. No matched ratio before independent review.
+// Reviewed-by: langs-text-921 2026-11-13; Encode/Decode match scalar loops, capacities, byte truncation, owned String/Bytes and retained warmup state; compile with overflow checks.
 // Matches core/langarena/base64.hirsel: scalar loops, String/Vec<u8>, checked sizes.
 #[allow(dead_code)]
 mod support;

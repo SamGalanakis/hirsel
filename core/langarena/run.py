@@ -6,6 +6,7 @@ TASK WARMUP ITERATIONS EXPECTED key=value..., using rust-matched/support.rs.
 Examples and build flags are in rust/README.md. No command is timed out or retried.
 """
 import argparse
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -82,14 +83,19 @@ def expected_line(task, expected):
     return f'{task} checksum={expected} expected={expected} status=OK\n'
 
 
-def observe(command, directory, task, expected, idiomatic=False):
-    wait_load()
-    sample = _measure.sample(command, directory)
+def observe(command, directory, task, expected, idiomatic=False, numeric=False):
+    # Serialize process-tree samples even when several lane runners are active.
+    with open("/tmp/hirsel-langarena-measure.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        wait_load()
+        sample = _measure.sample(command, directory)
     # /usr/bin/time records RSS; capped diagnostics live in stderr, not stdout.
     stdout = (directory / 'stdout').read_text()
     if idiomatic:
         valid = (re.search(r'^' + re.escape(task) + r': OK in [0-9.]+s$', stdout, re.M)
                  and re.search(r'^Summary: [0-9.]+s, 1, 1, 0$', stdout, re.M))
+    elif numeric:
+        valid = stdout == str(expected) + '\n'
     else:
         valid = stdout == expected_line(task, expected)
     if not valid:
@@ -106,10 +112,12 @@ def matched_command(binary, task, row):
     return [str(binary.resolve()), task, str(warmup), str(iterations), str(row['checksum']), *fields]
 
 
-def reviewed(source):
+def reviewed(source, author):
     # The other lane owns this line after reviewing the final matching source.
-    return source.is_file() and re.search(r'^// Reviewed-by: (?!langs-numeric-920\b)\S+.*$',
-                                         source.read_text(), re.M) is not None
+    if not source.is_file():
+        return False
+    match = re.search(r'^// Reviewed-by: (\S+)', source.read_text(), re.M)
+    return bool(match and match[1] in {'langs-numeric-920', 'langs-text-921'} and match[1] != author)
 
 
 def main():
@@ -123,6 +131,11 @@ def main():
     parser.add_argument('--idiomatic', type=Path, required=True)
     parser.add_argument('--matched', type=Path)
     parser.add_argument('--matched-source', type=Path)
+    parser.add_argument('--matched-author', choices=['langs-numeric-920', 'langs-text-921'], default='langs-numeric-920')
+    parser.add_argument('--matched-args', nargs='*', help='argument templates, e.g. {count} {warmup} {iterations}')
+    parser.add_argument('--matched-numeric-output', action='store_true', help='twin prints only the computed checksum')
+    parser.add_argument('--resume', type=Path, help='previous report; reuse its complete samples and run missing sides only')
+    parser.add_argument('--profile', action='store_true', help='profile instructions at period 50003 when an instruction ratio exceeds 2')
     parser.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
     try:
@@ -135,6 +148,7 @@ def main():
         parser.error('CPU 16 is required by core/MEASURE.md')
     config = json.loads(args.config.read_text())
     row = next(c for c in config if c['name'] == args.task) if isinstance(config, list) else config[args.task]
+    args.out = args.out.resolve()
     args.out.mkdir(parents=True)
     os.sched_setaffinity(0, {16})
     os.environ['HIRSEL_MEMORY_LIMIT'] = '2G'
@@ -142,7 +156,13 @@ def main():
     report = {'task': args.task, 'backend': args.backend, 'config': str(args.config.resolve()),
               'source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
               'cpu': 16, 'sample_policy': 'one sample per side; no retry; no system page-cache flush',
-              'samples': {}, 'ratios': {}}
+              'configuration': row, 'samples': {}, 'ratios': {}}
+    if args.resume:
+        previous = json.loads(args.resume.read_text())
+        if previous['task'] != args.task or previous['backend'] != args.backend or previous.get('configuration') != row:
+            parser.error('--resume must name the same task, backend and config')
+        report['resumed_from'] = str(args.resume.resolve())
+        report['samples'] = {key: value for key, value in previous['samples'].items() if value.get('status') == 'ok'}
     try:
         with tempfile.TemporaryDirectory(prefix='langarena-host-', dir=args.out) as tmp:
             host = Path(tmp)
@@ -157,27 +177,49 @@ def main():
                      '--dir', str(host), '--grant', 'Stdout', '--grant', 'Tasks', '--json', '-o', str(binary)]
             if args.backend == 'llvm':
                 build.append('--release')
-            wait_load()
-            built = subprocess.run(build, capture_output=True)
-            (args.out / 'build.stdout').write_bytes(built.stdout)
-            (args.out / 'build.stderr').write_bytes(built.stderr)
-            if built.returncode:
-                report['samples']['hirsel'] = {'status': f'build-exit:{built.returncode}'}
-            else:
-                report['samples']['hirsel'] = observe([str(binary), 'config.json', args.task],
-                    args.out / 'hirsel-run', args.task, row['checksum'])
-            if args.idiomatic.is_file():
+            if 'hirsel' not in report['samples']:
+                wait_load()
+                built = subprocess.run(build, capture_output=True)
+                (args.out / 'build.stdout').write_bytes(built.stdout)
+                (args.out / 'build.stderr').write_bytes(built.stderr)
+                if built.returncode:
+                    report['samples']['hirsel'] = {'status': f'build-exit:{built.returncode}'}
+                else:
+                    report['samples']['hirsel'] = observe([str(binary), 'config.json', args.task],
+                        args.out / 'hirsel-run', args.task, row['checksum'])
+            if 'idiomatic' in report['samples']:
+                pass
+            elif args.idiomatic.is_file():
                 report['samples']['idiomatic'] = observe([str(args.idiomatic.resolve()), str(config_file), args.task],
                     args.out / 'idiomatic-run', args.task, row['checksum'], idiomatic=True)
             else:
                 report['samples']['idiomatic'] = {'status': 'missing-binary'}
-            if args.matched and args.matched.is_file() and args.matched_source and reviewed(args.matched_source):
-                report['samples']['matched'] = observe(matched_command(args.matched, args.task, row),
-                    args.out / 'matched-run', args.task, row['checksum'])
+            if 'matched' in report['samples']:
+                pass
+            elif args.matched and args.matched.is_file() and args.matched_source and reviewed(args.matched_source, args.matched_author):
+                command = matched_command(args.matched, args.task, row)
+                if args.matched_args is not None:
+                    fields = dict(row, warmup=row.get('warmup_iterations', max(int(row['iterations'] * 0.2), 1)))
+                    command = [str(args.matched.resolve()), *[arg.format_map(fields) for arg in args.matched_args]]
+                report['samples']['matched'] = observe(command, args.out / 'matched-run', args.task, row['checksum'], numeric=args.matched_numeric_output)
             else:
                 report['samples']['matched'] = {'status': 'blocked: missing binary or independent review'}
             for twin in ['idiomatic', 'matched']:
                 report['ratios'][twin] = ratio(report['samples']['hirsel'], report['samples'][twin])
+            if args.profile and binary.is_file() and any(r.get('instructions', 0) > 2 for r in report['ratios'].values()):
+                data = args.out / 'perf.data'
+                with open('/tmp/hirsel-langarena-measure.lock', 'a') as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    wait_load()
+                    with (args.out / 'profile.log').open('w') as log:
+                        profiled = subprocess.run([str(ROOT / 'tools/capped'), 'perf', 'record', '-e', 'instructions:u', '-c', '50003', '-o', str(data), '--', str(binary), 'config.json', args.task], stdout=log, stderr=subprocess.STDOUT)
+                report['profile_status'] = profiled.returncode
+                if profiled.returncode == 0:
+                    with (args.out / 'hot-symbols.txt').open('w') as output:
+                        subprocess.run(['perf', 'report', '--stdio', '--no-children', '-i', str(data)], stdout=output, stderr=subprocess.STDOUT, check=True)
+                if data.exists():
+                    data.unlink()
+
     except (OSError, subprocess.SubprocessError) as error:
         report['stop'] = str(error)
     (args.out / 'report.json').write_text(json.dumps(report, indent=2) + '\n')

@@ -1,0 +1,66 @@
+// kostya/LangArena 3c9f84d benchmarks/sort_{benchmark,quick,merge,self}.rs.
+fn quick(mut a:List[i32],lo:u64,hi:u64) {
+    if hi-lo<=1 {return}
+    let pivot=a[lo+(hi-lo)/2]
+    let mut i=lo
+    let mut j=hi-1
+    while i<=j {
+        while a[i]<pivot {i+=1}
+        while a[j]>pivot {j-=1}
+        if i<=j {
+            list.swap(mut a,i,j)
+            i+=1
+            if j>lo {j-=1} else {break}
+        }
+    }
+    if j>lo {quick(mut a,lo,j+1)}
+    if i<hi {quick(mut a,i,hi)}
+}
+fn merge(mut a:List[i32],mut temp:List[i32],lo:u64,hi:u64) {
+    if hi-lo<=1 {return}
+    let mid=lo+(hi-lo)/2
+    merge(mut a,mut temp,lo,mid)
+    merge(mut a,mut temp,mid,hi)
+    for k in lo .. hi {temp[k]=a[k]}
+    let mut i=lo
+    let mut j=mid
+    let mut k=lo
+    while i<mid && j<hi {
+        if temp[i]<=temp[j] {a[k]=temp[i];i+=1} else {a[k]=temp[j];j+=1}
+        k+=1
+    }
+    while i<mid {a[k]=temp[i];i+=1;k+=1}
+}
+pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
+    if name!="Sort::Quick" && name!="Sort::Merge" && name!="Sort::Self" {return Error(UnknownTask)}
+    let size=helper.config_i64(config,name,"size")?
+    if size<=0 {return Error(Config)}
+    let n:u64=int.narrow(size)
+    let mut data:List[i32]=list.new()
+    helper.mem(list.fill(mut data,n,0))?
+    let mut g=helper.lcg()
+    for i in 0 .. n {data[i]=helper.next_int(mut g,1000000)}
+    let mut total:u32=0
+    for phase in 0u64 .. 2u64 {
+        if phase==1 {helper.reset(mut g)}
+        let count=if phase==0 {warmup} else {iterations}
+        for _ in 0 .. count {
+            let at:u64=int.narrow(helper.next_int(mut g,int.narrow(size)))
+            total=int.wrapping_add(total,int.narrow(data[at]))
+            let mut t:List[i32]=list.new()
+            helper.mem(list.append(mut t,data))?
+            if name=="Sort::Quick" {quick(mut t,0,n)}
+            else if name=="Sort::Merge" {
+                let mut temp:List[i32]=list.new()
+                helper.mem(list.fill(mut temp,n,0))?
+                merge(mut t,mut temp,0,n)
+            } else {list.sort(mut t,fn(a:i32,b:i32)->Order {std.order.compare(a,b)})}
+            let sorted_at:u64=int.narrow(helper.next_int(mut g,int.narrow(size)))
+            total=int.wrapping_add(total,int.narrow(t[sorted_at]))
+        }
+    }
+    Ok(total)
+}
+pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
+    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+}

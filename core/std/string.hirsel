@@ -149,14 +149,22 @@ pub fn find(s: String, start: u64, pat: String) -> Option[u64] {
     if m > rest {
         return None
     }
+    if m == 0 {
+        return Some(start)
+    }
+    // Scan for the first byte alone; compare the rest only at a candidate.
+    let first = needle[0]
+    let last = rest - m
     let mut i: u64 = 0
-    while i + m <= rest {
-        let mut k: u64 = 0
-        while k < m && hay[i + k] == needle[k] {
-            k += 1
-        }
-        if k == m {
-            return Some(start + i)
+    while i <= last {
+        if hay[i] == first {
+            let mut k: u64 = 1
+            while k < m && hay[i + k] == needle[k] {
+                k += 1
+            }
+            if k == m {
+                return Some(start + i)
+            }
         }
         i += 1
     }

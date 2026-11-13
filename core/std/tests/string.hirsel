@@ -177,6 +177,24 @@ fn find_empty_at_end() -> u64 {
     found(string.find("abc", 3, ""))
 }
 
+// k x's, then "éy" (3 bytes), then 15 - k x's: 18 bytes, the match at every offset k of
+// two 8-byte words up to the tail (k = 15). Found at k each time, and "éz" (same first two
+// bytes) never, so the sum is 0 + 1 + ... + 15 = 120.
+// expect: run find_every_offset() = 120
+fn find_every_offset() -> u64 {
+    let mut total: u64 = 0
+    for k in 0u64 .. 16 {
+        let mut s = string.new()
+        for i in 0u64 .. 16 {
+            if i == k { result.unwrap(string.push(mut s, "éy")) }
+            if i < 15 { result.unwrap(string.push(mut s, "x")) }
+        }
+        match string.find(s, 0, "éz") { Some(_) => { return 999 }, None => {} }
+        total += found(string.find(s, 0, "éy"))
+    }
+    total
+}
+
 // expect: run find_start_past_end() = fail Bounds
 fn find_start_past_end() -> u64 {
     found(string.find("abc", 4, "a"))

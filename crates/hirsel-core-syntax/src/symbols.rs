@@ -152,18 +152,20 @@ impl<'de> serde::Deserialize<'de> for Symbols {
         }
         let wire = Wire::deserialize(decoder)?;
         let base = wire.strings.base_len();
-        let index = wire
-            .strings
-            .own_iter()
-            .enumerate()
-            .filter(|(i, _)| base + *i != 0)
-            .map(|(i, s)| (s.clone(), Symbol((base + i) as u32)))
-            .collect();
+        let known = Self::default();
+        let mut index = known.index;
+        index.extend(
+            wire.strings
+                .own_iter()
+                .enumerate()
+                .filter(|(i, _)| base + *i != 0)
+                .map(|(i, s)| (s.clone(), Symbol((base + i) as u32))),
+        );
         Ok(Self {
             strings: wire.strings,
             index,
             published_index: wire.published_index,
-            single: Self::default().single,
+            single: known.single,
         })
     }
 }
@@ -316,11 +318,12 @@ impl Symbols {
             .enumerate()
             .map(|(i, s)| (Arc::clone(s), Symbol(i as u32)))
             .collect();
+        let known = Self::default();
         Ok(Self {
             strings: writer.table(&self.strings)?,
-            index: FxHashMap::default(),
+            index: known.index,
             published_index: writer.map(&names)?,
-            single: Self::default().single,
+            single: known.single,
         })
     }
     pub fn intern(&mut self, text: &str) -> Symbol {
@@ -333,7 +336,10 @@ impl Symbols {
                 return self.single[b];
             }
         }
-        let id = if let Some(id) = self.find(text) {
+        let id = if let Some(&id) = self.index.get(text) {
+            id
+        } else if let Some(id) = self.published_index.get(text).copied() {
+            self.index.insert(Arc::from(text), id);
             id
         } else {
             let id = Symbol(
@@ -403,4 +409,99 @@ pub fn keyword_symbol(s: Symbol) -> bool {
             | sym::FALSE
             | sym::BYTES
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hirsel_core_ids::{
+        ContentHash,
+        published::{self, Descriptor, Provider},
+    };
+    use std::{
+        io,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    struct Names {
+        rows: Vec<(Arc<str>, Symbol)>,
+        lookups: AtomicUsize,
+    }
+    impl Provider<(Arc<str>, Symbol)> for Names {
+        fn row(&self, index: u32) -> io::Result<(Arc<str>, Symbol)> {
+            Ok(self.rows[index as usize].clone())
+        }
+        fn find(&self, key: &[u8]) -> io::Result<Option<u32>> {
+            self.lookups.fetch_add(1, Ordering::Relaxed);
+            Ok(self
+                .rows
+                .iter()
+                .position(|(name, _)| key.len() == 8 + name.len() && key.ends_with(name.as_bytes()))
+                .map(|i| i as u32))
+        }
+    }
+    struct Strings(Vec<Arc<str>>);
+    impl Provider<Arc<str>> for Strings {
+        fn row(&self, index: u32) -> io::Result<Arc<str>> {
+            Ok(self.0[index as usize].clone())
+        }
+    }
+
+    #[test]
+    fn reopened_symbols_keep_reserved_names_without_product_lookups() {
+        let mut original = Symbols::default();
+        let library = original.intern("library_name");
+        let names = Arc::new(Names {
+            rows: original
+                .strings
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.clone(), Symbol(i as u32)))
+                .collect(),
+            lookups: AtomicUsize::new(0),
+        });
+        let descriptor = Descriptor {
+            namespace: ContentHash([173; 32]),
+            table: 0,
+            len: original.len() as u32,
+            rows: ContentHash([174; 32]),
+            lookup: ContentHash([175; 32]),
+        };
+        let mut published = Symbols {
+            strings: published::Table::published(published::bind(
+                descriptor,
+                Arc::new(Strings(original.strings.iter().cloned().collect())),
+            )),
+            published_index: published::Map::published(published::bind(
+                Descriptor {
+                    table: 1,
+                    ..descriptor
+                },
+                names.clone(),
+            )),
+            index: FxHashMap::default(),
+            single: original.single,
+        };
+        let own = published.intern("own_name");
+        let mut reopened: Symbols =
+            serde_json::from_value(serde_json::to_value(&published).unwrap()).unwrap();
+        names.lookups.store(0, Ordering::Relaxed);
+        for (name, id) in &original.index {
+            if *id != library {
+                assert_eq!(reopened.intern(name), *id);
+            }
+        }
+        assert_eq!(names.lookups.load(Ordering::Relaxed), 0);
+        assert_eq!(reopened.intern("own_name"), own);
+        assert_eq!(reopened.intern("library_name"), library);
+        assert_eq!(reopened.text(library), "library_name");
+        assert_eq!(reopened.index.get("library_name"), Some(&library));
+        assert_eq!(reopened.intern("library_name"), library);
+        assert_eq!(names.lookups.load(Ordering::Relaxed), 1);
+        let fresh = reopened.intern("fresh_name");
+        assert_eq!(fresh, Symbol(own.0 + 1));
+        assert_eq!(reopened.intern("fresh_name"), fresh);
+        assert_eq!(reopened.text(fresh), "fresh_name");
+        assert_eq!(names.lookups.load(Ordering::Relaxed), 2);
+    }
 }

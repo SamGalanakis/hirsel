@@ -10,3 +10,20 @@ pub unsafe extern "C" fn hirsel_core_test_available(
 #[used]
 static CONTEXT: extern "C" fn(u64) -> *mut hirsel_core_rt::Context =
     hirsel_core_rt::abi::hirsel_core_context_new;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn hirsel_core_test_context_new(bytes: u64) -> *mut hirsel_core_rt::Context {
+    let mut context=hirsel_core_rt::Context::new(288);
+    hirsel_core_rt::causes::task_start(&mut context).expect("fixture startup allowance");
+    context.reset_test_limit(bytes);Box::into_raw(Box::new(context))
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_test_inject(context:*mut hirsel_core_rt::Context,n:usize,later:bool) {
+    // SAFETY: fixture exclusively owns its live context.
+    unsafe {(&mut *context).inject_admission(n,later)}
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_test_attempts(context:*const hirsel_core_rt::Context)->usize {
+    // SAFETY: fixture exclusively owns its live context.
+    unsafe {(&*context).admission_attempts()}
+}

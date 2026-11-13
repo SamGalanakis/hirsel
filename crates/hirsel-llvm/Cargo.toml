@@ -22,7 +22,7 @@ llvm-sys = { version = "=231.0.1", default-features = false, features = ["strict
 
 [dev-dependencies]
 hirsel-intern = { path = "../hirsel-intern" }
-hirsel-core-rt = { path = "../hirsel-core-rt" }
+hirsel-core-rt = { path = "../hirsel-core-rt", features = ["testing"] }
 hirsel-core-front = { path = "../hirsel-core-front" }
 hirsel-core-resolve = { path = "../hirsel-core-resolve" }
 hirsel-core-syntax = { path = "../hirsel-core-syntax" }

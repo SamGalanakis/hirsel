@@ -47,6 +47,15 @@ impl Context {
         }
     }
 
+    /// Give a fixture's program its exact allowance after prepaying task startup.
+    #[cfg(feature = "testing")]
+    pub fn reset_test_limit(&mut self, bytes: u64) { self.current = Funding::root(bytes); }
+    /// Refuse the nth admission, optionally also every later admission.
+    #[cfg(feature = "testing")]
+    pub fn inject_admission(&mut self, n: usize, later: bool) { self.current.inject(n, later); }
+    #[cfg(feature = "testing")]
+    pub fn admission_attempts(&self) -> usize { self.current.attempts() }
+
     pub fn available(&self) -> u64 {
         self.current.available()
     }

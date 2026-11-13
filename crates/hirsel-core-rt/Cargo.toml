@@ -8,6 +8,10 @@ rust-version.workspace = true
 [lib]
 crate-type = ["rlib", "staticlib"]
 
+[features]
+# Deterministic native compiler fixtures; absent from shipped archives.
+testing = []
+
 [dependencies]
 hirsel-core-layout = { path = "../hirsel-core-layout" }
 

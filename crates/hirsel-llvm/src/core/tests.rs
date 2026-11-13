@@ -251,8 +251,7 @@ fn compare_convert_sample_matches_evaluator() {
 
 #[test]
 fn infallible_arithmetic_sample_matches_evaluator() {
-    let module =
-        text::parse(include_str!("../../../hirsel-core-ir/samples/arith.core")).unwrap();
+    let module = text::parse(include_str!("../../../hirsel-core-ir/samples/arith.core")).unwrap();
 
     let cases = vec![
         (FuncId(0), vec![3f64.to_bits(), 4f64.to_bits()]),

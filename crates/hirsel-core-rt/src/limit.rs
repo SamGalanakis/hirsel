@@ -23,9 +23,9 @@ enum Slot {
 struct Forest {
     slots: Vec<Slot>,
     free: Option<usize>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) attempts: usize,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fail: Option<(usize, bool)>,
 }
 
@@ -108,13 +108,13 @@ impl Forest {
     }
     fn admit(&mut self, id: usize, bytes: Option<u64>) -> Result<(), Capacity> {
         let root = self.find(id);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "testing"))]
         let injected = {
             self.attempts += 1;
             self.fail
                 .is_some_and(|(n, later)| self.attempts == n || later && self.attempts >= n)
         };
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "testing")))]
         let injected = false;
         let live = self.record_mut(root).live.as_mut().unwrap();
         let available = live.capacity - live.used;
@@ -146,9 +146,9 @@ impl Funding {
         let mut forest = Forest {
             slots: Vec::new(),
             free: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "testing"))]
             attempts: 0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "testing"))]
             fail: None,
         };
         let id = forest.insert(Live {
@@ -212,17 +212,15 @@ impl Funding {
         f.record_mut(loser).parent = Some(winner);
         f.release(original_parent);
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn inject(&self, n: usize, later: bool) {
         let mut f = self.forest.lock().unwrap();
         f.attempts = 0;
         f.fail = Some((n, later));
     }
-    #[cfg(test)]
-    pub(crate) fn attempts(&self) -> usize {
-        self.forest.lock().unwrap().attempts
-    }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn attempts(&self) -> usize { self.forest.lock().unwrap().attempts }
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn records(&self) -> usize {
         self.forest
             .lock()

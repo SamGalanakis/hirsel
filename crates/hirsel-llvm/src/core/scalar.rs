@@ -146,13 +146,21 @@ impl FunctionEmitter<'_> {
                 x
             }
             BinaryOp::Rem => {
-                let zero=self.calc(format!("icmp eq {tt} {b}, 0"));self.fail_if(&zero,fail,2)?;
-                let safe=if signed {let minus_one=self.calc(format!("icmp eq {tt} {b}, -1"));self.calc(format!("select i1 {minus_one}, {tt} 1, {tt} {b}"))}else{b.into()};
+                let zero = self.calc(format!("icmp eq {tt} {b}, 0"));
+                self.fail_if(&zero, fail, 2)?;
+                let safe = if signed {
+                    let minus_one = self.calc(format!("icmp eq {tt} {b}, -1"));
+                    self.calc(format!("select i1 {minus_one}, {tt} 1, {tt} {b}"))
+                } else {
+                    b.into()
+                };
                 self.calc(format!("{sign}rem {tt} {a}, {safe}"))
             }
             BinaryOp::Div => {
-                let zero=self.calc(format!("icmp eq {tt} {b}, 0"));self.fail_if(&zero,fail,2)?;
-                let over=self.div_overflow(t,a,b);self.fail_if(&over,fail,0)?;
+                let zero = self.calc(format!("icmp eq {tt} {b}, 0"));
+                self.fail_if(&zero, fail, 2)?;
+                let over = self.div_overflow(t, a, b);
+                self.fail_if(&over, fail, 0)?;
                 self.calc(format!("{sign}div {tt} {a}, {b}"))
             }
             BinaryOp::Shl | BinaryOp::Shr => {

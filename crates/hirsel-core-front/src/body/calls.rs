@@ -927,8 +927,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return if g.path.0.modules == ["int"] {
                 self.generic_numeric(f, tys, vals, n)
             } else {
-                self.gap(n, "generic scalar operations are not built");
-                None
+                if !self.live() {
+                    return None;
+                }
+                unreachable!("canonical core has no rigid float operation body")
             };
         }
         if g.path.0.modules == ["float"] {
@@ -1058,8 +1060,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             "narrow" | "try_narrow" => ConvertMode::TryNarrow,
             _ => {
-                self.gap(n, "this core integer operation is not built");
-                return None;
+                unreachable!("every canonical core integer intrinsic has a lowering");
             }
         };
         let operand = vals[0]?;
@@ -1352,8 +1353,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             "to_int" => return self.float_to_int(result_ty, tys[1], operand, n),
             "total_order" => return self.float_total_order(result_ty, operand, vals[1]?, n),
             _ => {
-                self.gap(n, "this core float operation is not built");
-                return None;
+                unreachable!("every canonical core float intrinsic has a lowering");
             }
         };
         self.numeric_convert(result_ir?, mode, operand, n)

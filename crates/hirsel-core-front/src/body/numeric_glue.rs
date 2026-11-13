@@ -53,8 +53,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<ValueId> {
         let g = &self.p.fns[f];
         let Some(op) = NumericOp::named(&g.path.0.name) else {
-            self.gap(n, "generic scalar operations are not built");
-            return None;
+            if !self.live() {
+                return None;
+            }
+            unreachable!("canonical rigid integer bodies use the published numeric operations");
         };
         let key = (f, tys[0], tys.get(1).copied().unwrap_or(ERROR));
         let abi = if let Some(&abi) = self.numeric_functions.get(&key) {
@@ -176,29 +178,29 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
 }
 
-fn scalar(module: &Module, row: TypeId) -> Result<Scalar, &'static str> {
+fn scalar(module: &Module, row: TypeId) -> Scalar {
     if let ShapeBody::Record(fields) = &module.types[row.index()].body
         && let [field] = fields.as_slice()
         && let FieldTy::Scalar(s) = field.ty
     {
-        return Ok(s);
+        return s;
     }
-    Err("numeric argument scalar row is not built")
+    unreachable!("a closed integer row contains its scalar field")
 }
-fn payload(module: &Module, row: TypeId) -> Result<(Scalar, Vec<Step>), &'static str> {
+fn payload(module: &Module, row: TypeId) -> (Scalar, Vec<Step>) {
     let ShapeBody::Variant(cases) = &module.types[row.index()].body else {
-        return Err("numeric Option row is not built");
+        unreachable!("an optional numeric result is the core Option variant");
     };
     let mut steps = vec![Step::CaseField { case: 1, field: 0 }];
     let s = match cases[1].fields[0].ty {
         FieldTy::Scalar(s) => s,
         FieldTy::Inline(ty) => {
             steps.push(Step::Field(0));
-            scalar(module, TypeId(ty.0))?
+            scalar(module, TypeId(ty.0))
         }
-        _ => return Err("numeric Option scalar payload is not built"),
+        _ => unreachable!("a numeric Option payload is a scalar or its inline row"),
     };
-    Ok((s, steps))
+    (s, steps)
 }
 
 pub(super) fn ensure(
@@ -217,9 +219,9 @@ pub(super) fn ensure(
     let sig = module.signatures[signature.index()].clone();
     let out = sig.dest.unwrap();
     let (target, payload_steps) = if op.optional() {
-        payload(module, out)?
+        payload(module, out)
     } else {
-        (scalar(module, out)?, vec![])
+        (scalar(module, out), vec![])
     };
     let mut c = Code::new(&vec![Ty::Ptr; sig.params.len() + 1]);
     let ps = c.body.blocks[0]
@@ -233,7 +235,7 @@ pub(super) fn ensure(
         let Param::Address(ty) = param else {
             unreachable!()
         };
-        operands[i] = c.read(ps[i + 1], Ty::Scalar(scalar(module, *ty)?));
+        operands[i] = c.read(ps[i + 1], Ty::Scalar(scalar(module, *ty)));
     }
     let result = c.value(Ty::Scalar(target));
     let flag =

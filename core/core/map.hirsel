@@ -25,12 +25,12 @@ pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (
   let mut j: u64 = 0
   let n = index_len(m)
   if n != 0 {
-    let mask = n - 1
+    let mask = int.wrapping_sub(n, 1)
     j = h & mask
     loop {
       let s = index_get(m, j)
       if s == 0 { break }
-      let i = s - 1
+      let i = int.wrapping_sub(s, 1)
       if slot_hash(m, i) == h && slot_live(m, i) && slot_key(m, i) == k {
         let _ = swap_value(mut m, i, take v)
         let _ = take k
@@ -45,11 +45,14 @@ pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (
       Error(c) => return Error((c, take k, take v)),
       Ok(()) => {}
     }
-    let mask = index_len(m) - 1
+    let mask = int.wrapping_sub(index_len(m), 1)
     j = h & mask
     while index_get(m, j) != 0 { j = int.wrapping_add(j, 1) & mask }
   }
-  let s = slots(m) + 1
+  // Slots fit the admitted entry capacity (at least16 logical bytes each), so
+  // adding the one-based index cannot overflow. Nonzero index words and lengths
+  // similarly justify the wrapping subtractions above.
+  let s = int.wrapping_add(slots(m), 1)
   push_entry(mut m, h, take k, take v)
   index_set(mut m, j, s)
   Ok(())

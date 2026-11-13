@@ -511,6 +511,18 @@ impl Funding {
     pub fn end(&self) {
         self.end_id();
     }
+    /// The ending task/grant consumes its active handle, so an empty record can
+    /// transfer its pin directly to the parent instead of creating a union edge.
+    pub(crate) fn handover(&mut self) {
+        // SAFETY: scheduler owns the canonical active task or finalizer record.
+        let r = unsafe { &*self.raw_local() };
+        if r.refs == 1 && r.available == r.live.capacity {
+            let parent = r.live.parent.unwrap().canonical();
+            let owner = parent.forest().record(parent.slot().id).live.owner;
+            crate::abi_tasks::cross_task_refund(owner, r.available);
+        }
+        self.exit();
+    }
     fn end_id(&self) -> usize {
         let f = self.payer.forest();
         let child = f.find(self.payer.slot().id);

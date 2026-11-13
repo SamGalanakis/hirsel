@@ -17,3 +17,10 @@ pub const OWN_ALIGNMENT_SHIFT: usize = 2;
 pub const PLAIN_PREFIX_BYTES: usize = 8;
 pub const GRAPH_PREFIX_BYTES: usize = 48;
 pub const RESOURCE_PREFIX_BYTES: usize = 16;
+
+// Arc count mutations are inline under the scheduler's event turn. Call
+// hirsel_core_arc_event after the mutation/test and before last-release glue.
+pub const ARC_EVENT_NEW: u8 = 10;
+pub const ARC_EVENT_SHARE: u8 = 11;
+pub const ARC_EVENT_RELEASE: u8 = 12;
+pub const ARC_EVENT_UNWRAP: u8 = 13;

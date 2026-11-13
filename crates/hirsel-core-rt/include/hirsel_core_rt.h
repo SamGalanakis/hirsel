@@ -48,6 +48,12 @@ typedef struct HirselCoreWorklist HirselCoreWorklist;
 /* Resumable glue: cursor starts at 0. Advance it, enqueue at most one child,
    return false; return true only after all children and fields are cleaned. */
 typedef bool (*HirselCoreDropRecipe)(HirselCoreContext *, void *payload, uint64_t *cursor, HirselCoreWorklist *);
+/* Inline Arc completion, no status/admission/suspension/count mutation.
+   new=1, share=new count, release=last (0/1), unwrap=unique (0/1).
+   Scheduler owns the event turn across mutation and hook; release precedes glue. */
+enum { HIRSEL_CORE_ARC_EVENT_NEW=10, HIRSEL_CORE_ARC_EVENT_SHARE=11,
+       HIRSEL_CORE_ARC_EVENT_RELEASE=12, HIRSEL_CORE_ARC_EVENT_UNWRAP=13 };
+void hirsel_core_arc_event(uint8_t operation, uint64_t value);
 void hirsel_core_counted_init(void *node, bool atomic);
 void hirsel_core_share(void *node, bool atomic);
 bool hirsel_core_try_unwrap(void *node, bool atomic);

@@ -259,7 +259,7 @@ pub unsafe fn finalizer_begin(context: &mut Context, pointer: std::ptr::NonNull<
 pub unsafe fn finalizer_end(context: &mut Context, pointer: std::ptr::NonNull<u8>) {
     // SAFETY: this is the state installed by the matching finalizer_begin.
     let resource = unsafe { &mut *block::resource(pointer) };
-    context.current.end();
+    context.current.handover();
     context.current = resource.previous.take().unwrap();
     context.active_resource = resource.previous_resource;
     context.grant_depth = resource.previous_grant_depth;

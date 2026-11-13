@@ -712,8 +712,14 @@ fn foreign_growth_and_received_grant_observe_refunds_before_reusing_room() {
     }
     let (result, events) = run(root, ());
     assert_eq!(result, 3);
-    let refund = events.iter().position(|e| e.kind == REFUND && e.value == 8).unwrap();
-    let charge = events.iter().position(|e| e.kind == CHARGE && e.value == 16).unwrap();
+    let refund = events
+        .iter()
+        .position(|e| e.kind == REFUND && e.value == 8)
+        .unwrap();
+    let charge = events
+        .iter()
+        .position(|e| e.kind == CHARGE && e.value == 16)
+        .unwrap();
     assert!(refund < charge);
     // SAFETY: native context binding has the same logical task ownership as Rust.
     unsafe {
@@ -721,9 +727,68 @@ fn foreign_growth_and_received_grant_observe_refunds_before_reusing_room() {
         assert!(!hirsel_core_task_start(context).pointer.is_null());
         let before = (*context).available();
         let mut result = 0u64;
-        assert_eq!(run_root(context, root, ptr::null_mut(), (&mut result as *mut u64).cast(), 0, 8, SchedulerProvider::default()), 0);
+        assert_eq!(
+            run_root(
+                context,
+                root,
+                ptr::null_mut(),
+                (&mut result as *mut u64).cast(),
+                0,
+                8,
+                SchedulerProvider::default()
+            ),
+            0
+        );
         assert_eq!(result, 3);
         assert_eq!((*context).available(), before);
         hirsel_core_context_free(context);
     }
+}
+
+#[test]
+fn inline_arc_count_operations_publish_the_same_events_as_runtime_entries() {
+    unsafe extern "C" fn root(context: *mut Context, out: *mut u8, _: *mut u8) -> u8 {
+        use std::sync::atomic::{AtomicU64, Ordering, fence};
+        // SAFETY: this fixture owns an aligned node and performs the emitted
+        // sequence while its cooperative scheduler holds the event turn.
+        unsafe {
+            let node = Block::graph(&*context, Some(16), 16, 8).unwrap().into_raw();
+            node.cast::<AtomicU64>().as_ptr().write(AtomicU64::new(1));
+            hirsel_core_arc_event(ARC_EVENT_NEW, 1);
+            let count = node.cast::<AtomicU64>().as_ref();
+            let old = count
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
+                .unwrap();
+            hirsel_core_arc_event(ARC_EVENT_SHARE, old + 1);
+            let last = count.fetch_sub(1, Ordering::Release) == 1;
+            hirsel_core_arc_event(ARC_EVENT_RELEASE, u64::from(last));
+            let unique = count.load(Ordering::Acquire) == 1;
+            hirsel_core_arc_event(ARC_EVENT_UNWRAP, u64::from(unique));
+            let last = count.fetch_sub(1, Ordering::Release) == 1;
+            if last {
+                fence(Ordering::Acquire);
+            }
+            hirsel_core_arc_event(ARC_EVENT_RELEASE, u64::from(last));
+            crate::block::free_graph(node, 16);
+            out.cast::<u64>().write(u64::from(unique && last));
+        }
+        0
+    }
+    let (result, events) = run(root, ());
+    assert_eq!(result, 1);
+    let arc: Vec<_> = events
+        .iter()
+        .filter(|e| (ARC_NEW..=ARC_UNWRAP).contains(&e.kind))
+        .map(|e| (e.kind, e.value))
+        .collect();
+    assert_eq!(
+        arc,
+        [
+            (ARC_NEW, 1),
+            (ARC_SHARE, 2),
+            (ARC_RELEASE, 0),
+            (ARC_UNWRAP, 1),
+            (ARC_RELEASE, 1)
+        ]
+    );
 }

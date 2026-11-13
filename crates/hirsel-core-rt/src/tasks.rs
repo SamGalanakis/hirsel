@@ -38,11 +38,15 @@ pub(crate) struct Storage {
 }
 impl Storage {
     pub(crate) fn new(bytes: usize, align: usize) -> Self {
-        let layout = Layout::from_size_align(bytes.max(1), align)
+        let layout = Layout::from_size_align(bytes, align)
             .unwrap_or_else(|_| crate::process::stop(b"HostMemory"));
         // SAFETY: nonzero compiler-produced layout, uniquely owned until Drop.
         let pointer = unsafe {
-            NonNull::new(alloc(layout)).unwrap_or_else(|| crate::process::stop(b"HostMemory"))
+            if bytes == 0 {
+                NonNull::new_unchecked(align as *mut u8)
+            } else {
+                NonNull::new(alloc(layout)).unwrap_or_else(|| crate::process::stop(b"HostMemory"))
+            }
         };
         Self { pointer, layout }
     }
@@ -54,7 +58,9 @@ impl Drop for Storage {
     fn drop(&mut self) {
         // SAFETY: sole owner of this host storage; payload is already moved/cleaned.
         unsafe {
-            dealloc(self.pointer.as_ptr(), self.layout);
+            if self.layout.size() != 0 {
+                dealloc(self.pointer.as_ptr(), self.layout);
+            }
         }
     }
 }
@@ -69,10 +75,10 @@ pub const RECEIVE: u8 = 6;
 pub const TRY_SEND: u8 = 7;
 pub const SENDERS: u8 = 8;
 pub const CLOSE: u8 = 9;
-pub const ARC_NEW: u8 = 10;
-pub const ARC_SHARE: u8 = 11;
-pub const ARC_RELEASE: u8 = 12;
-pub const ARC_UNWRAP: u8 = 13;
+pub const ARC_NEW: u8 = crate::abi_layout::ARC_EVENT_NEW;
+pub const ARC_SHARE: u8 = crate::abi_layout::ARC_EVENT_SHARE;
+pub const ARC_RELEASE: u8 = crate::abi_layout::ARC_EVENT_RELEASE;
+pub const ARC_UNWRAP: u8 = crate::abi_layout::ARC_EVENT_UNWRAP;
 pub const REFUND: u8 = 14;
 pub const CHARGE: u8 = 15;
 #[repr(C)]
@@ -111,7 +117,7 @@ enum State {
 }
 pub struct Task {
     context: *mut Context,
-    owned_context: Option<Box<Context>>,
+    owned_context: Option<Context>,
     run: *mut Scheduler,
     ready: *mut Task,
     all: *mut Task,
@@ -453,9 +459,9 @@ pub unsafe extern "C" fn hirsel_core_spawn(
         let parent = CURRENT.get();
         let run = (*parent).run;
         let id = (*run).id();
-        let mut child_context = Box::new(abi::task_child(context, &mut record, bytes, id));
+        let child_context = abi::task_child(context, &mut record, bytes, id);
         let task = Box::new(Task {
-            context: &mut *child_context,
+            context: ptr::null_mut(),
             owned_context: Some(child_context),
             run,
             ready: ptr::null_mut(),
@@ -472,6 +478,7 @@ pub unsafe extern "C" fn hirsel_core_spawn(
             record: Some(record),
         });
         let task = Box::into_raw(task);
+        (*task).context = (*task).owned_context.as_mut().unwrap();
         ptr::copy_nonoverlapping(input, (*task).input.as_ptr(), layout.input.bytes);
         (*task).sp = (*task).stack.prepare(start, task.cast(), ptr::null_mut());
         (*run).all = task;

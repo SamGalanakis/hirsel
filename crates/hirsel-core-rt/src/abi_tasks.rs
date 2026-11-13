@@ -26,7 +26,7 @@ pub(crate) fn task_child(
 pub(crate) unsafe fn task_handover(context: *mut Context) {
     // SAFETY: child's remaining funding forwards to its live spawner without a value walk.
     unsafe {
-        (*context).current.end();
+        (*context).current.handover();
     }
 }
 /// Drain completed remote refunds before this task resumes pure code.

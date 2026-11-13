@@ -49,7 +49,10 @@
 //! Rc uses checked u64 increment and decrement/test at count offset zero; only
 //! the zero result calls release_last. Arc uses relaxed increment and release
 //! decrement plus an acquire fence before release_last. Provider event ordering
-//! still surrounds every Arc operation. A statically empty bound can emit the
+//! still surrounds every Arc operation. Arc initialization stores an aligned
+//! atomic u64 value 1 before publication; Rc initialization stores ordinary u64 1.
+//! Inline Arc calls arc_event after each mutation/test, before last-release glue.
+//! A statically empty bound can emit the
 //! checked reservation and refund without materializing a payer table identity.
 //!
 //! Scheduler binds native execution on resume and unbinds before transferring
@@ -265,6 +268,17 @@ use std::ptr::{self, NonNull};
 #[unsafe(no_mangle)]
 pub extern "C" fn hirsel_core_dest_id() -> u64 {
     crate::destination::next()
+}
+
+/// Publish a completed inline Arc operation in CONC-10 order. No status,
+/// admission, allocation, suspension or count mutation. Operation is one of
+/// ARC_EVENT_{NEW,SHARE,RELEASE,UNWRAP}; value is respectively 1, the new count,
+/// whether this was the last release (0/1), or uniqueness (0/1).
+/// The scheduler owns the event turn throughout the inline atomic sequence and
+/// this call. Release publishes before last-release glue or any refund.
+#[unsafe(no_mangle)]
+pub extern "C" fn hirsel_core_arc_event(operation: u8, value: u64) {
+    crate::tasks::event(operation, 0, value);
 }
 
 /// # Safety

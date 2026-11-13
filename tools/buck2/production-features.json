@@ -7,6 +7,7 @@
     "hirsel-cli/native-tsan": "test-only",
     "hirsel-core-ir/eval": "test-only",
     "hirsel-core-rt/testing": "test-only",
+    "hirsel-core-rt/memcheck": "test-only",
     "hirsel-core-ir/wf": "test-only",
     "hirsel-core-rt/mimalloc": "runtime-option",
     "hirsel-cranelift/native-tsan": "test-only",

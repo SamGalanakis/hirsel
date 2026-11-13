@@ -432,18 +432,23 @@ impl ConstCx<'_, '_> {
                     return self.fail(n, "a constant expression cannot call a function");
                 };
                 let ty = match want {
-                    Some(ty) if matches!(self.p.types.kind(ty), TyKind::Adt(e, _) if *e == d) => ty,
-                    _ if self.p.decls[d.index()].generics.is_empty() => {
-                        self.p.types.mk(TyKind::Adt(d, vec![]))
+                    Some(ty) if matches!(self.p.types.kind(ty), TyKind::Adt(e, _) if *e == d) => {
+                        Some(ty)
                     }
-                    _ => return self.gap(n, "constant constructor inference is not built"),
+                    _ if self.p.decls[d.index()].generics.is_empty() => {
+                        Some(self.p.types.mk(TyKind::Adt(d, vec![])))
+                    }
+                    _ => None,
                 };
                 (d, None, ty)
             }
             Target::ContextualConstructor { name } => {
                 let text = self.p.index.symbols.text(name);
-                let ty = if let Some(ty) = want {
-                    ty
+                let (d, ty) = if let Some(ty) = want {
+                    let TyKind::Adt(d, _) = *self.p.types.kind(ty) else {
+                        return self.fail(n, "constant constructor has another type");
+                    };
+                    (d, Some(ty))
                 } else {
                     let from = self.p.modules[self.at.module as usize].id;
                     let mut found = None;
@@ -457,13 +462,11 @@ impl ConstCx<'_, '_> {
                         found = Some(d);
                     }
                     let d = found?;
-                    if !self.p.decls[d.index()].generics.is_empty() {
-                        return self.gap(n, "constant constructor inference is not built");
-                    }
-                    self.p.types.mk(TyKind::Adt(d, vec![]))
-                };
-                let TyKind::Adt(d, _) = *self.p.types.kind(ty) else {
-                    return self.fail(n, "constant constructor has another type");
+                    let ty = self.p.decls[d.index()]
+                        .generics
+                        .is_empty()
+                        .then(|| self.p.types.mk(TyKind::Adt(d, vec![])));
+                    (d, ty)
                 };
                 let from = self.p.modules[self.at.module as usize].id;
                 if !self.p.index.constructor_candidates(from, name).any(|id| matches!(self.p.by_definition[id.0 as usize], Some(Def::Type(e)) if e == d)) {
@@ -492,9 +495,6 @@ impl ConstCx<'_, '_> {
             ));
             return None;
         }
-        if self.p.kind(ty) != Kind::Plain {
-            return self.fail(n, "a constant constructor must be plain");
-        }
         let (fields, labelled) = match (&decl.body, case) {
             (DeclBody::Record(fs), None) => (fs.clone(), true),
             (DeclBody::Variant(cs), Some(c)) => {
@@ -505,11 +505,13 @@ impl ConstCx<'_, '_> {
         if fields.len() != args.len() {
             return self.fail(n, "constant constructor argument count differs");
         }
-        let TyKind::Adt(_, type_args) = self.p.types.kind(ty) else {
-            unreachable!()
+        // LANG-12: without an expected type, the payloads fix the type arguments in
+        // order; each payload whose field type is already closed is checked against it.
+        let mut type_args: Vec<Option<TyId>> = match ty.map(|ty| self.p.types.kind(ty)) {
+            Some(TyKind::Adt(_, xs)) => xs.iter().copied().map(Some).collect(),
+            _ => vec![None; decl.generics.len()],
         };
-        let type_args = type_args.clone();
-        let value = self.fields(ty, fields.len(), case);
+        let value = self.fields(UNIT, fields.len(), case);
         for (i, (&arg, field)) in args.iter().zip(&fields).enumerate() {
             let node = item.tree.node(arg);
             let child = if labelled {
@@ -535,11 +537,29 @@ impl ConstCx<'_, '_> {
                 }
                 arg
             };
-            let hint = subst(&mut self.p.types, field.ty, &type_args);
-            let child = self.expr(child, Some(hint), active)?;
+            let hint = closed(&self.p.types, field.ty, &type_args).then(|| {
+                let args: Vec<TyId> = type_args.iter().map(|x| x.unwrap_or(ERROR)).collect();
+                subst(&mut self.p.types, field.ty, &args)
+            });
+            let child = self.expr(child, hint, active)?;
+            if hint.is_none() && !bind(&self.p.types, field.ty, child.ty, &mut type_args) {
+                return self.fail(arg, "constant payload has another type");
+            }
             self.set_field(value, i, child);
         }
-        Some(value)
+        let Some(args) = type_args.into_iter().collect::<Option<Vec<_>>>() else {
+            self.p.refusals.push(refusal(
+                "LANG-12",
+                self.p.site(self.at, n),
+                "a type argument of this constructor is still open",
+            ));
+            return None;
+        };
+        let ty = ty.unwrap_or_else(|| self.p.types.mk(TyKind::Adt(d, args)));
+        if self.p.kind(ty) != Kind::Plain {
+            return self.fail(n, "a constant constructor must be plain");
+        }
+        Some(ConstValue { ty, ..value })
     }
     fn gap(&mut self, n: NodeId, what: &'static str) -> Option<ConstValue> {
         self.p.gaps.push(Gap::new(self.p.site(self.at, n), what));
@@ -695,14 +715,8 @@ impl ConstCx<'_, '_> {
             let b = self.expr(right, Some(a.ty), rhs_active)?;
             (a, b)
         };
-        let (TyKind::Scalar(s), ConstData::Bits(a), ConstData::Bits(b)) =
-            (self.p.types.kind(a.ty), a.data, b.data)
-        else {
-            return self.gap(n, "aggregate constant comparisons are not built");
-        };
-        let s = *s;
         if compare {
-            if crate::decls::has_bounds(&self.p.decls, &self.p.types, scalar(s), &[])
+            if crate::decls::has_bounds(&self.p.decls, &self.p.types, a.ty, &[])
                 & if matches!(op, "==" | "!=") {
                     crate::KEY
                 } else {
@@ -712,11 +726,7 @@ impl ConstCx<'_, '_> {
             {
                 return self.fail(n, "this constant type does not support comparison");
             }
-            let order = if Ty::Scalar(s).int().is_some() {
-                integer(s, a).cmp(&integer(s, b))
-            } else {
-                a.cmp(&b)
-            };
+            let order = order(&self.p.constant_parts, &self.p.types, a, b);
             let yes = match op {
                 "==" => order.is_eq(),
                 "!=" => !order.is_eq(),
@@ -727,6 +737,12 @@ impl ConstCx<'_, '_> {
             };
             return Some(self.bits(Scalar::Bool, u64::from(yes)));
         }
+        let (TyKind::Scalar(s), ConstData::Bits(a), ConstData::Bits(b)) =
+            (self.p.types.kind(a.ty), a.data, b.data)
+        else {
+            return self.fail(n, "this operator does not apply to aggregate constants");
+        };
+        let s = *s;
         if logical && s == Scalar::Bool {
             return Some(self.bits(
                 s,
@@ -792,6 +808,72 @@ impl ConstCx<'_, '_> {
         } else {
             Some(self.bits(s, 0))
         }
+    }
+}
+/// Whether every type parameter `ty` names is already fixed in `args`.
+fn closed(t: &impl TyRead, ty: TyId, args: &[Option<TyId>]) -> bool {
+    match t.kind(ty) {
+        TyKind::Param(i) => args.get(*i as usize).is_some_and(Option::is_some),
+        TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().all(|&x| closed(t, x, args)),
+        TyKind::View(x) | TyKind::Array(x, _) => closed(t, *x, args),
+        _ => !has_param(t, ty),
+    }
+}
+/// Fix the type parameters of the field type `pattern` from a payload of type `actual`.
+fn bind(t: &impl TyRead, pattern: TyId, actual: TyId, args: &mut [Option<TyId>]) -> bool {
+    match (t.kind(pattern), t.kind(actual)) {
+        (TyKind::Param(i), _) => match args.get_mut(*i as usize) {
+            Some(slot @ None) => {
+                *slot = Some(actual);
+                true
+            }
+            Some(Some(fixed)) => *fixed == actual,
+            None => false,
+        },
+        (TyKind::Tuple(xs), TyKind::Tuple(ys)) => {
+            xs.len() == ys.len() && xs.iter().zip(ys).all(|(&x, &y)| bind(t, x, y, args))
+        }
+        (TyKind::Adt(d, xs), TyKind::Adt(e, ys)) => {
+            d == e && xs.iter().zip(ys).all(|(&x, &y)| bind(t, x, y, args))
+        }
+        (TyKind::Array(x, n), TyKind::Array(y, m)) => n == m && bind(t, *x, *y, args),
+        (TyKind::View(x), TyKind::View(y)) => bind(t, *x, *y, args),
+        _ => pattern == actual,
+    }
+}
+/// SEM-7 order of two constants of one type: integers numerically, `false` before
+/// `true`, tuples and records field by field, variants by ordinal then payload.
+fn order(
+    parts: &Rows<ConstValue>,
+    types: &impl TyRead,
+    a: ConstValue,
+    b: ConstValue,
+) -> std::cmp::Ordering {
+    match (a.data, b.data) {
+        (ConstData::Bits(x), ConstData::Bits(y)) => match types.kind(a.ty) {
+            TyKind::Scalar(s) if Ty::Scalar(*s).int().is_some() => {
+                integer(*s, x).cmp(&integer(*s, y))
+            }
+            _ => x.cmp(&y),
+        },
+        (
+            ConstData::Fields {
+                start: i,
+                len: m,
+                case: c,
+            },
+            ConstData::Fields {
+                start: j,
+                len: k,
+                case: d,
+            },
+        ) => c.cmp(&d).then_with(|| {
+            (0..m.min(k) as usize)
+                .map(|f| order(parts, types, parts[i as usize + f], parts[j as usize + f]))
+                .find(|o| o.is_ne())
+                .unwrap_or(m.cmp(&k))
+        }),
+        _ => std::cmp::Ordering::Equal,
     }
 }
 fn mask(s: Scalar, x: u64) -> u64 {

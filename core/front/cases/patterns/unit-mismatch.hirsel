@@ -1,0 +1,3 @@
+// LANG-17: a pattern has the scrutinee's type; `()` matches only the unit value.
+// expect: refuse LANG-17 at 3:33
+fn f(x: u64) -> u64 { match x { () => 1, _ => 2 } }

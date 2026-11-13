@@ -121,6 +121,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             NodeKind::UnitPattern if ty == UNIT || ty == ERROR => {
                 self.pat_push(n, ty, Head::Product(None), PoolRange::EMPTY)
             }
+            NodeKind::UnitPattern => {
+                self.refuse("LANG-17", n, "a unit pattern needs a `()` scrutinee");
+                self.pat_push(n, ERROR, Head::Any, PoolRange::EMPTY)
+            }
             NodeKind::TuplePattern => {
                 let len = match self.t.kind(ty) {
                     TyKind::Tuple(ts) => ts.len(),

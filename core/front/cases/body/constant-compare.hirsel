@@ -1,0 +1,32 @@
+// LANG-20 constants compare aggregates by SEM-7: tuples and records field by field with
+// signed integers numerically, variants by declaration ordinal then payload. A generic
+// constructor with no expected type takes its type arguments from its payloads (LANG-12).
+// expect: accept
+// expect: run signed() = true
+// expect: run record() = true
+// expect: run ordinal() = true
+// expect: run payload() = true
+// expect: run equal() = true
+// expect: run different() = false
+// expect: run optional() = true
+// expect: run wrapped() = 7
+
+type Point: key + ordered { x: u8, y: u64 }
+type W[T] { x: T }
+type Choice: key + ordered = Empty | Pair(u8, u64)
+const SIGNED: bool = (-1i64, 0u8) < (0i64, 0u8)
+const RECORD: bool = Point(x: 1, y: 9) < Point(x: 2, y: 0)
+const ORDINAL: bool = Pair(0, 0) > Empty
+const PAYLOAD: bool = Pair(1, 9) < Pair(2, 0)
+const EQUAL: bool = Pair(2, 7) == Pair(2, 7)
+const DIFFERENT: bool = (1u64, 2u64) == (1u64, 3u64)
+fn signed() -> bool { SIGNED }
+fn record() -> bool { RECORD }
+fn ordinal() -> bool { ORDINAL }
+fn payload() -> bool { PAYLOAD }
+fn equal() -> bool { EQUAL }
+fn different() -> bool { DIFFERENT }
+const OPTIONAL: bool = Some(1u64) != None
+const WRAPPED: u64 = W(x: 7u64).x
+fn optional() -> bool { OPTIONAL }
+fn wrapped() -> u64 { WRAPPED }

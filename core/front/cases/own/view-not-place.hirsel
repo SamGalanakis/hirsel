@@ -1,0 +1,4 @@
+// OWN-8: `view p` views a live place; an arithmetic result is not one.
+// expect: refuse OWN-8 at 3:31
+fn f(a: u64) -> u64 { let v = view (a + 1)
+  0 }

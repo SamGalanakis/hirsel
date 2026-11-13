@@ -84,7 +84,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     let v = self.view_of(at, t, n);
                     (t, v)
                 }
-                Ok(None) => self.gap_ty(n, "`view` of a value that is not a place"),
+                Ok(None) => {
+                    let _ = self.expr(e, None);
+                    self.refuse("OWN-8", n, "`view` of an expression that is not a place");
+                    (ERROR, None)
+                }
                 Err(()) => (ERROR, None),
             },
             _ => {

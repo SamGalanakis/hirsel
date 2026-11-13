@@ -1,0 +1,4 @@
+// LANG-12: a constructor's type arguments are fixed by its expected type and its own
+// payloads; `None` on the left of `==` has neither, so it is refused at `None`.
+// expect: refuse LANG-12 at 4:17
+const N: bool = None == Some(1u64)

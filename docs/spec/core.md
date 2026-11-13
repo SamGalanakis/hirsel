@@ -230,7 +230,8 @@ operations it names; nothing else about them may be inferred from an implementat
   outcome. `Net`, `Random`, `Stdin`, `Env` and `Process` have no operations in v1.
 - **Other results.** `box.unbox` returns the payload and refunds the node. `ParseError`'s
   `Invalid` holds a byte position. `Causes` is iterated by `for`, primary cause first. A
-  `Box`, `Rc` or `Arc` is read where a view of its payload is expected.
+  `Box`, `Rc` or `Arc` is read through its payload where its own type does not fit
+  ([OWN-8](ownership.md#own-8-views)).
   `task.check_cancel()` fails with `Cancelled` when a request is pending, and
   `channel.new(0)` fails with `Bounds`.
 - **Built-in forms.** `dest.put(mut d, L)` and `emit(take w, L)` accept only a construction

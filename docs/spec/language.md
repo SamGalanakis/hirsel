@@ -209,12 +209,17 @@ open when its call has been visited is refused by
 later use or between definitions. An unsuffixed number needs an
 expected type ([LANG-3](syntax.md#lang-3-literals)); operands follow
 [LANG-21](#lang-21-operators). There are no implicit conversions except these: `Never` to any type; a
-`View[T]` of a plain `T` to `T` ([OWN-8](ownership.md#own-8-views)); a stable value to its
+`View[T]` of a plain `T` to `T` ([OWN-8](ownership.md#own-8-views)); a `Box`, `Rc` or `Arc`
+to its payload where its own type does not fit (OWN-8); a stable value to its
 view ([OWN-25](ownership.md#own-25-stable-values-are-read-as-views)); `T in a` to `T in r`
 when `a` outlives `r` ([MEM-6](memory.md#mem-6-roots)); an `IndexedSpan[T]` to a
 `SeqSpan[T]`, for reading only, keeping its region, `W` and locator
 ([MEM-12](memory.md#mem-12-stable-sequences)), never a `Writer`, a `Child` or a field's
 declared encoding; and a callable to a callable type it fits ([LANG-13](#lang-13-callables)).
+A conversion applies to an expression whose type is already synthesised, against its
+expected type; it never settles a type parameter, which the steps above fix as written. So
+a holder nested in a generic call whose result type was fixed from outside is refused, at
+the argument that fixes the parameter second: bind the holder with `let` first.
 
 ```hirsel
 fn f() -> u64 { let x: u64 = 7; x }
@@ -230,6 +235,11 @@ fn pick(c: bool) -> u64 { let o = if c { Some(1u64) } else { None }; option.unwr
 ```hirsel
 fn pick(c: bool) -> u64 { let o = if c { None } else { Some(1u64) }; option.unwrap(take o) }
                                                           // refused: LANG-12, at None: T is open
+```
+```hirsel
+type N = Lit(i64)
+fn ev(n: N) -> i64 { match n { Lit(x) => x } }
+fn f() -> i64 { ev(result.unwrap(box.new(Lit(6i64)))) }  // refused: LANG-11, at box.new: T is N
 ```
 ```hirsel
 fn f(c: bool, x: u8) -> u16 { if c { x } else { 0 } }     // refused: LANG-11, at x: u8 is not u16

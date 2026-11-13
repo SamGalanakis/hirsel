@@ -300,7 +300,15 @@ for a lexical **extent**:
 - a parameter view: for the call.
 
 A view of a record reads its fields as views, and a view of a `Box`, `Rc` or `Arc` reads as
-a view of its payload, with the same anchors. A core operation may return a view of part
+a view of its payload, with the same anchors. Such a **holder** is used as itself wherever
+its own type fits, and through its payload, one level, wherever it does not: a field or
+index step on it, an argument or value whose expected type is fixed and is not a holder
+([LANG-11](language.md#lang-11-typing-is-local)), and a match arm whose pattern is a
+constructor, literal or tuple pattern, which can only be the payload's, all read the
+payload; a bare name or `_` binds the holder itself. A match has no expected type, so its
+patterns decide. Ownership stays with the holder, which is viewed for the binding's extent
+(OWN-15), and a `Box`'s payload is a writable place where the `Box` is (OWN-12), so `mut b`
+lends it where `mut T` is expected. A core operation may return a view of part
 of an argument's storage that its signature names (a sub-range, `string.slice`; the same
 bytes at another type, `string.as_bytes`): such a **sub-view** is a view with the anchors
 and freezes of a view of the whole argument (OWN-20). There is no last-use end and no
@@ -324,6 +332,14 @@ fn f(mut m: Inbox) {
   let items = view m.items
   list.clear(mut m.items)                       // refused: OWN-10, items lasts to block end
 }
+```
+```hirsel
+type N = Lit(i64)
+fn ev(n: N) -> i64 { match n { Lit(x) => x } }
+fn f() -> i64 { let b = result.unwrap(box.new(Lit(6i64))); ev(b) }
+fn g(b: Box[Option[u64]]) -> u64 { match b { Some(x) => x, None => 0 } }   // Some reads the payload
+fn h(b: Box[u64]) -> u64 { match b { x => x } }                            // x is the Box, read as u64
+fn grow(mut b: Box[List[u64]]) -> Result[(), (Capacity, u64)] { list.push(mut b, 1) }
 ```
 ```hirsel
 fn total(mut xs: List[String]) -> u64 {
@@ -428,7 +444,7 @@ fn steal(mut xs: List[u64]) -> List[u64] { take xs }       // refused: OWN-11
 ### OWN-12: Assignment
 
 A **writable place** is a slot that is writable ([OWN-5](#own-5-availability)), or a
-field, tuple component, `List` element or `Inline` element of a writable place; nothing
+field, tuple component, `List` element, `Inline` element or `Box` payload of a writable place; nothing
 reached through a view, a counted value or a stable value is one. `q` must be a writable
 place, except that a `let` slot declared without an initializer is assigned while it is
 uninit. Any other assignment is refused here, at `q`.
@@ -485,11 +501,18 @@ guard sees only views. An arm whose pattern binds with `take` (`Some(take x)`) m
 when that arm is chosen, and only then: every part the arm binds becomes an owner of the
 arm, and the rest is dropped as in a whole destructure (OWN-14). Other arms bind views for
 the arm. `let p = e` with an owning `e` is a whole destructure; with a view, its bindings
-are views, and `take` under a view is refused.
+are views, and `take` under a view is refused. An arm that reads through a holder (OWN-8)
+binds views of the payload, plain or own, and `take` in it is refused here, at the `take`:
+`box.unbox(take b)` moves a payload out.
 
 ```hirsel
 fn unwrap_or_empty(take o: Option[String]) -> String {
   match o { Some(take s) => s, None => string.new() }
+}
+```
+```hirsel
+fn k(take b: Box[Option[String]]) -> String {
+  match b { Some(take s) => s, None => string.new() }  // refused: OWN-15, take through a Box
 }
 ```
 ```hirsel

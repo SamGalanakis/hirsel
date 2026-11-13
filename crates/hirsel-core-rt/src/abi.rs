@@ -41,7 +41,12 @@
 //! and charge; it decodes this word and calls the native allocator's free.
 //! If lowering proves the current payer stays unchanged from admission to free,
 //! it may refund that record directly, skipping the native payer lookup. Otherwise
-//! compare the stored payer to current and use refund for a foreign/merged payer.
+//! compare the RAW payer word to current before stripping tags or resolving
+//! forwarding records. On equality and nonzero charge, refund current directly;
+//! on mismatch use refund(original_payer, charge). Native tags can only cause a
+//! false negative. refund_in(context, original_payer, charge) exposes the same
+//! context-aware path to C. Outstanding bytes prevent a slot from being reused,
+//! and current is canonical, including after scope handover or grant completion.
 //!
 //! Region fast allocation compares its payer with current_limit, admits once,
 //! adds charge, aligns/bumps cursor and checks end. On payer change call the full

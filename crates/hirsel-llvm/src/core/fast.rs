@@ -1,5 +1,9 @@
 //! Frozen runtime-prefix fast paths. Only allocation/refill, nonlocal payers,
 //! compound resource construction and last-holder cleanup cross the C ABI.
+// The shared abi_layout.rs documents the runtime raw-payer equality sequence:
+// refund current directly on exact word equality, otherwise resolve the original
+// payer. Outstanding bytes pin the original slot across exit/re-entry. Native
+// tag bits may cause a safe slow-path false negative. No offset changes.
 use super::memory_layout::*;
 use super::*;
 

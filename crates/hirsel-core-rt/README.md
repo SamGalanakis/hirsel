@@ -36,7 +36,10 @@ provider's payer_lease hook drains earlier refunds before foreign growth; receiv
 grants execute as the finalizing task until handover. One OS worker supplies the
 exclusive lease. With multiple workers, the scheduler must quiesce every task
 sharing the payer table for growth and for the entire received finalizer, including
-suspension. An empty mailbox bypasses locking and scanning at task_resume.
+suspension. An empty mailbox uses one acquire load at task_resume, without exchange,
+locking, scanning or a call. A pending mailbox takes the cold mutex/drain path.
+Guard bounds cache the immutable page extent when each stack is mapped, so a
+normal scheduler switch performs no sysconf page-size query.
 
 System allocation is the default. The optional `mimalloc` backend uses native
 malloc/free for ordinary alignment and aligned allocation above 16 bytes. The
@@ -109,6 +112,10 @@ automatically. Normal archives carry no Valgrind stack-registration work.
 Own fast paths can retain the current payer as a compiler fact. If no operation
 can change that record between allocation and free, the emitter refunds it
 directly and skips prefix lookup/comparison, as inline_own_free_current shows.
-Otherwise inline_own_free compares the original payer and follows its forwarding
-record through the slow refund when needed. Both preserve MEM-20/MEM-26.
+Otherwise inline_own_free compares the raw payer word with current before
+masking tags or following a record. Equal words refund current directly. On a
+mismatch, original-payer lookup strips tags and follows forwarding records.
+Tags can cause only a false negative. Outstanding bytes prevent reuse of the
+stored slot through exit/re-entry, and current is canonical. The C entry
+hirsel_core_refund_in(context,payer,bytes) uses the same fast path. Both preserve MEM-20/MEM-26.
 Canonical admission and the plain/align8 prefix store need no tag mask.

@@ -1,5 +1,9 @@
 //! Frozen runtime prefixes supply the common path. Calls own identity changes,
 //! physical exhaustion and last-release traversal. No compiler output is checked.
+// The shared abi_layout.rs documents the runtime raw-payer equality sequence:
+// refund current directly on exact word equality, otherwise resolve the original
+// payer. Outstanding bytes pin the original slot across exit/re-entry. Native
+// tag bits may cause a safe slow-path false negative. No offset changes.
 use super::function::Function;
 use super::*;
 use cranelift_codegen::ir::{MemFlagsData as Flags, Value, condcodes::IntCC};

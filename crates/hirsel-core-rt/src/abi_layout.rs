@@ -19,8 +19,8 @@ pub const PLAIN_PREFIX_BYTES: usize = 8;
 pub const GRAPH_PREFIX_BYTES: usize = 48;
 pub const RESOURCE_PREFIX_BYTES: usize = 16;
 
-// Arc count mutations are inline under the scheduler's event turn. Call
-// if context[CONTEXT_EVENTS] != 0, call the context-first cold hook
+// Arc count mutations are inline under the scheduler's event turn.
+// If context[CONTEXT_EVENTS] != 0, call the context-first cold hook
 // hirsel_core_arc_initialized/shared/released/unwrapped after the operation,
 // with released before last-release glue. These constants identify trace events.
 pub const ARC_EVENT_NEW: u8 = 10;

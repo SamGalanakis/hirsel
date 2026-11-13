@@ -1,5 +1,31 @@
 # Memory cost samples
 
+## Bounded channel and general-own follow-up
+
+One candidate, source c5d520e7 after the Arc gate landed. Same provider kernels, workload counts, CPU16/jobs1/2GiB/Rust1.99 checked opt3/no LTO; one native sample/configuration, all checksums pass. Callgrind uses100,000 items on each side for diagnostic attribution; native pipeline retains1,000,000.
+
+| instructions/item | original provider | pre-fix task-local | after this attempt |
+|---|---:|---:|---:|
+| round trip |847.72|910.87|748.75|
+| three-stage pipeline |1278.09|1405.88|1081.48|
+
+Callgrind reproduced original/current at847.708/911.721 for roundtrip and1284.786/1412.780 for the shorter pipeline. Added work is exactly64/128 instructions per item in the steady scheduler path: empty Funding::drain42/84, and inlined resume binding/normalization22/44. No mailbox had pending data in either message loop, so actual drain locking/scanning contributed0; payer leases contributed0, and record handover occurred only at task completion. The residual below0.02/item is setup/teardown/native memcpy startup variation, not message-path accounting.
+
+The single attempt replaces empty pending.swap with an inline acquire load, with exchange/locking/drain work only on the pending cold side. Normalization still runs because another task's handover can forward the current record. Immutable guard end is cached when the stack is mapped, removing repeated page-size sysconf queries. Original/current sysconf/getpagesize work is116.006/232.009 instructions/item, common to both; removing it is allowed by the guard/custody contract and supplies most of the win. After Callgrind totals are747.719/1084.778. run_root including new inline resume is94.002/219.002 versus current100.002/231.002; out-of-line drain42/84 and repeated page queries116/232 disappear. Native after costs beat the original figures, so no second attempt was made. Cancellation, scheduling choices, event order and guard extents are unchanged.
+
+The general own shim already compared a masked original payer with current. The proposed raw-word equality proof is sound and cheaper by2 instructions. On exact equality and nonzero charge it updates current available/outstanding directly, before tag removal or union lookup. Tagged words safely fall back. Original outstanding bytes prevent slot reuse across exit/re-entry; current always names a canonical active record, including after forwarded-parent normalization and survivor handover. Equality can therefore never identify a new incarnation of a still-charged original slot. Zero-charge blocks use the structural-pin path. `hirsel_core_refund_in(context,original_payer,bytes)` is the C entry for this sequence; abi_layout.rs and both emitters' sequence comments publish it. Existing generic no-context free/refund symbols remain.
+
+| bytes | system matched | equal | different | mimalloc matched | equal | different |
+|---|---:|---:|---:|---:|---:|---:|
+| 16 | 151.437 | 167.437 | 227.437 | 66.582 | 82.581 | 142.584 |
+| 64 | 154.437 | 170.437 | 230.437 | 71.214 | 87.214 | 147.216 |
+| 256 | 166.438 | 182.437 | 242.437 | 152.574 | 168.574 | 228.576 |
+| 4096 | 377.437 | 393.437 | 453.437 | 272.077 | 288.077 | 348.077 |
+
+Both backends' extra instructions/pair are16.000 when equal and76.000..76.002 when different, against the identical allocator/size/alignment/zeroing baseline. Different means another canonical same-task payer, with no recorder; actual cross-task event/mailbox work is not folded into that number. The equal case improves the old18, but still misses12 by4. Those four instructions are the dynamic payer-word load/current comparison/branch work that the static unchanged-current proof can omit. No MEM rule mandates16 or76 machine instructions; original-payer lookup remains semantically necessary on mismatch. Per the bounded request, no second optimization attempt followed the miss. Tests extend the existing own sequence with exit/re-entry survivors and the context-first C refund hook, without changing the independent balance oracle.
+
+Evidence `/workspace/code/hirsel-briefs/core-memory-900/bounded-followup/`: provider/current/final Callgrind annotations, native-current/final rows, own-final rows, exact first-party baseline96283fdf, build/source environments. Profile helper uses the same production charge.rs and runtime source, not a second implementation. Raw traces and compiled pilots are removed at lane end; source/samples/annotations remain.
+
 ## Optional Arc recording gate
 
 Source314d049a plus C boolean-extension repair. Same LLVM lane arc-v1 function/seed, Rust1.99 checked opt3/x86-64/no LTO, CPU16/jobs1/2GiB; one sample/configuration. Allocation, initialization, final release and startup stay outside the per-thread instructions:u window. Each of one million iterations shares/releases a retained Arc, reads its runtime payload and mixes the same checksum. Both paths run on the real cooperative scheduler.

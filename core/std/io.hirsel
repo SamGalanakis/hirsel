@@ -79,7 +79,7 @@ pub fn read_line(mut l:Lines,mut line:String)->Result[bool,Error] waits {
         let remaining=l.cap-list.len(l.pending)
         let buffered=list.len(l.buffer)-start
         let count=if remaining<buffered {remaining} else {buffered}
-        let end=scan_newline(l.buffer,start,start+count)
+        let end=start+scan_newline(list.slice(l.buffer,start,start+count))
         let _=list.append(mut l.pending,list.slice(l.buffer,start,end))
         l.at=end
         if end<list.len(l.buffer) {
@@ -102,23 +102,27 @@ pub fn read_line(mut l:Lines,mut line:String)->Result[bool,Error] waits {
 
 // Raw input may be invalid UTF-8, so String's search is not applicable here.
 // As in string.find, the lowest zero-byte mark is exact even if subtraction's
-// borrow sets a later mark. Only the admitted prefix is scanned; the next byte
-// remains for the existing LF/Capacity decision in read_line.
-fn scan_newline(b:Bytes,start:u64,limit:u64)->u64 {
-    let mut at=start
-    while limit-at>=16 {
-        let low=list.word_le(b,at)^0x0A0A0A0A0A0A0A0A
-        let high=list.word_le(b,at+8)^0x0A0A0A0A0A0A0A0A
-        let z0=int.wrapping_sub(low,0x0101010101010101)&~low&0x8080808080808080
-        let z1=int.wrapping_sub(high,0x0101010101010101)&~high&0x8080808080808080
-        if z0|z1!=0 {
-            let first:u64=int.widen(int.trailing_zeros(z0))
-            let second:u64=int.widen(int.trailing_zeros(z1))
-            return if z0!=0 {at+(first>>3)} else {at+8+(second>>3)}
+// borrow sets a later mark. b is only the admitted prefix; the next byte remains
+// for read_line's LF/Capacity decision. Relative offsets use that carrier's bound.
+fn scan_newline(b:Bytes)->u64 {
+    let n=list.len(b)
+    let mut at:u64=0
+    if n>=16 {
+        let last=n-16
+        while at<=last {
+            let low=list.word_le(b,at)^0x0A0A0A0A0A0A0A0A
+            let high=list.word_le(b,at+8)^0x0A0A0A0A0A0A0A0A
+            let z0=int.wrapping_sub(low,0x0101010101010101)&~low&0x8080808080808080
+            let z1=int.wrapping_sub(high,0x0101010101010101)&~high&0x8080808080808080
+            if z0|z1!=0 {
+                let first:u64=int.widen(int.trailing_zeros(z0))
+                let second:u64=int.widen(int.trailing_zeros(z1))
+                return if z0!=0 {at+(first>>3)} else {at+8+(second>>3)}
+            }
+            at+=16
         }
-        at+=16
     }
-    if limit-at>=8 {
+    if n-at>=8 {
         let word=list.word_le(b,at)^0x0A0A0A0A0A0A0A0A
         let found=int.wrapping_sub(word,0x0101010101010101)&~word&0x8080808080808080
         if found!=0 {
@@ -127,7 +131,7 @@ fn scan_newline(b:Bytes,start:u64,limit:u64)->u64 {
         }
         at+=8
     }
-    while at<limit && b[at]!=10 {at+=1}
+    while at<n && b[at]!=10 {at+=1}
     at
 }
 

@@ -48,6 +48,9 @@ impl Reachable<'_> {
 }
 impl CheckProduct {
     pub fn reachable(&self, entry: &DefPath, limit: usize) -> io::Result<Reachable<'_>> {
+        hirsel_core_ids::published::catch_io(|| self.reachable_inner(entry, limit))
+    }
+    fn reachable_inner(&self, entry: &DefPath, limit: usize) -> io::Result<Reachable<'_>> {
         let mut materialized = crate::instances::InstanceSet::default();
         let instances = self.instances_into(
             [InstanceKey {
@@ -65,7 +68,13 @@ impl CheckProduct {
         let mut pending = BTreeSet::from([(entry.clone(), true)]);
         // LANG-20 evaluates every source constant before a body, including unused
         // ones. Installed constants already carry their published value.
-        for (id, definition) in self.index.definitions.iter().enumerate() {
+        for (id, definition) in self
+            .index
+            .definitions
+            .iter()
+            .enumerate()
+            .skip(self.index.definitions.base_len())
+        {
             if definition.kind == hirsel_core_resolve::DefinitionKind::Constant {
                 let path = self
                     .index
@@ -131,7 +140,8 @@ impl CheckProduct {
         }
         let owners: BTreeMap<_, _> = self
             .headers
-            .iter()
+            .available()
+            .into_iter()
             .map(|(p, h)| (h.anchor, (p, h)))
             .collect();
         let needed = |site: &Site| -> bool {
@@ -147,14 +157,37 @@ impl CheckProduct {
                     })
             }
         };
+        let mut library_diagnostics = vec![];
+        let mut library_incomplete = vec![];
+        if let Some(image) = &self.image {
+            for path in &bodies {
+                if !self.definitions.contains_key(path) && image.has_body(path)? {
+                    let body = image.demand_ref(path)?;
+                    library_diagnostics.extend(
+                        body.check
+                            .refusals
+                            .iter()
+                            .filter(|d| !self.diagnostics.contains(d)),
+                    );
+                    library_incomplete.extend(body.incomplete.iter().filter(|d| {
+                        !self
+                            .incomplete
+                            .iter()
+                            .any(|other| other.primary == d.primary && other.message == d.message)
+                    }));
+                }
+            }
+        }
         let diagnostics: Vec<_> = self
             .diagnostics
             .iter()
+            .chain(library_diagnostics)
             .filter(|d| needed(&d.primary))
             .collect();
         let incomplete: Vec<_> = self
             .incomplete
             .iter()
+            .chain(library_incomplete)
             .filter(|d| needed(&d.primary))
             .collect();
         let mut first_stops = BTreeMap::new();

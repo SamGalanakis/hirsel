@@ -21,7 +21,9 @@ pub struct FuncRef(pub u32);
 
 /// A scalar as the language sees it (SEM-1, SEM-2): its logical width is its
 /// written width; `bool` is 1 byte and `char` 4 (MEM-24).
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(
+    serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash,
+)]
 pub enum Scalar {
     Bool,
     Char,

@@ -554,8 +554,7 @@ impl Program<'_> {
                 self.by_definition[definition.0 as usize] = Some(Def::Type(id));
             }
         }
-        self.alias_state = vec![Visit::Todo as u8; self.decls.len()];
-        self.alias_state[..self.decls.base_len()].fill(Visit::Done as u8);
+        self.alias_state = vec![Visit::Todo as u8; self.decls.len() - self.decls.base_len()];
     }
 
     fn generics(&mut self, at: ItemRef, n: NodeId) -> Vec<Generic> {
@@ -590,11 +589,18 @@ impl Program<'_> {
         }
     }
 
+    fn alias_visit(&self, d: DeclId) -> u8 {
+        if d.index() < self.decls.base_len() {
+            Visit::Done as u8
+        } else {
+            self.alias_state[d.index() - self.decls.base_len()]
+        }
+    }
     fn lower_decl(&mut self, d: DeclId) {
-        if self.alias_state[d.index()] != Visit::Todo as u8 {
+        if self.alias_visit(d) != Visit::Todo as u8 {
             return;
         }
-        self.alias_state[d.index()] = Visit::Open as u8;
+        self.alias_state[d.index() - self.decls.base_len()] = Visit::Open as u8;
         self.alias_stack.push((d, None));
         let at = self.decls[d.index()].at;
         let item = self.item(at);
@@ -700,7 +706,7 @@ impl Program<'_> {
                 _ => None,
             })
             .collect();
-        self.alias_state[d.index()] = Visit::Done as u8;
+        self.alias_state[d.index() - self.decls.base_len()] = Visit::Done as u8;
         self.alias_stack.pop();
     }
 
@@ -990,7 +996,7 @@ impl Program<'_> {
         if alias && let Some(top) = self.alias_stack.last_mut() {
             top.1 = Some(site);
         }
-        if alias && self.alias_state[decl.index()] == Visit::Open as u8 {
+        if alias && self.alias_visit(decl) == Visit::Open as u8 {
             self.alias_cycle(decl);
             return ERROR;
         }
@@ -1006,7 +1012,7 @@ impl Program<'_> {
 
     /// Whether a declaration is an alias, read from its syntax (LANG-9).
     fn is_alias(&self, d: DeclId) -> bool {
-        if self.alias_state[d.index()] == Visit::Done as u8 {
+        if self.alias_visit(d) == Visit::Done as u8 {
             return matches!(self.decls[d.index()].body, DeclBody::Alias(_));
         }
         let item = self.item(self.decls[d.index()].at);
@@ -1249,12 +1255,12 @@ impl Program<'_> {
     /// Pass 3: summaries in dependency order, then the deferred checks.
     pub(crate) fn summarize(&mut self) {
         let n = self.decls.len();
-        let mut state = vec![Visit::Todo; n];
-        state[..self.decls.base_len()].fill(Visit::Done);
+        let base = self.decls.base_len();
+        let mut state = vec![Visit::Todo; n - base];
         let mut stack: Vec<(DeclId, usize)> = vec![];
-        let order: Vec<usize> = (0..n).collect();
+        let order = base..n;
         for d in order {
-            if state[d] == Visit::Todo {
+            if state[d - base] == Visit::Todo {
                 self.inline_visit(DeclId(d as u32), &mut state, &mut stack);
             }
         }
@@ -1290,7 +1296,7 @@ impl Program<'_> {
                     if let TyKind::Region(Root::Parameter(i)) = self.types.kind(root) {
                         let fd = self
                             .fns
-                            .iter()
+                            .own_iter()
                             .find(|f| f.at == at)
                             .expect("parameter root belongs to a function");
                         let p = &fd.params[*i as usize];
@@ -1342,7 +1348,7 @@ impl Program<'_> {
     /// Kind and inline parameters, reading only fields held inline (OWN-2). Re-entering
     /// an open declaration is an inline containment cycle.
     fn inline_visit(&mut self, d: DeclId, state: &mut [Visit], stack: &mut Vec<(DeclId, usize)>) {
-        state[d.index()] = Visit::Open;
+        state[d.index() - self.decls.base_len()] = Visit::Open;
         let decl = &self.decls[d.index()];
         let mut kind_fixed = match decl.role {
             Some(r) => Some(r.kind()),
@@ -1377,7 +1383,7 @@ impl Program<'_> {
         let s = &mut self.decls[d.index()].summary;
         s.kind_fixed = kind_fixed;
         s.inline_params = inline;
-        state[d.index()] = Visit::Done;
+        state[d.index() - self.decls.base_len()] = Visit::Done;
     }
 
     /// The kind (parameters as plain) of an inline field type and the parameters it holds inline.
@@ -1407,7 +1413,11 @@ impl Program<'_> {
                     // An indirection: fixed size, its payload is not read (OWN-2).
                     return (r.kind(), 0);
                 }
-                match state[e.index()] {
+                match if e.index() < self.decls.base_len() {
+                    Visit::Done
+                } else {
+                    state[e.index() - self.decls.base_len()]
+                } {
                     Visit::Open => {
                         self.cycle(e, stack);
                         return (Kind::Own, 0);
@@ -1570,10 +1580,11 @@ impl Program<'_> {
     /// Holds sets: types that name each other through any field form a group, and each
     /// member holds the group's union (OWN-2). One Tarjan pass, no iteration.
     fn holds(&mut self) {
-        let n = self.decls.len();
+        let base = self.decls.base_len();
+        let n = self.decls.len() - base;
         let mut direct = vec![0u8; n];
         let mut refs: Vec<Vec<usize>> = vec![vec![]; n];
-        for d in self.decls.base_len()..n {
+        for d in base..self.decls.len() {
             let decl = &self.decls[d];
             let mut params = 0u64;
             let mut h = match decl.role {
@@ -1605,15 +1616,21 @@ impl Program<'_> {
                         f.ty,
                         &mut h,
                         &mut params,
-                        &mut refs[d],
+                        &mut refs[d - base],
                     );
                 }
             }
-            direct[d] = h;
+            refs[d - base].retain_mut(|other| {
+                if *other < base {
+                    h |= self.decls[*other].summary.holds;
+                    false
+                } else {
+                    *other -= base;
+                    true
+                }
+            });
+            direct[d - base] = h;
             self.decls[d].summary.holds_params = params;
-        }
-        for (d, slot) in direct.iter_mut().enumerate().take(self.decls.base_len()) {
-            *slot = self.decls[d].summary.holds;
         }
         let mut t = Tarjan {
             index: vec![u32::MAX; n],
@@ -1630,8 +1647,8 @@ impl Program<'_> {
                 t.visit(d);
             }
         }
-        for d in self.decls.base_len()..n {
-            self.decls[d].summary.holds = t.out[d];
+        for d in base..self.decls.len() {
+            self.decls[d].summary.holds = t.out[d - base];
         }
     }
 

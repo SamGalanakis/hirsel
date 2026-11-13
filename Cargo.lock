@@ -734,6 +734,7 @@ dependencies = [
 name = "hirsel-core-ids"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "hirsel-guard",
  "hirsel-intern",
  "serde",

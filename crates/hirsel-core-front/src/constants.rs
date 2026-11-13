@@ -67,8 +67,8 @@ impl Program<'_> {
         if base == len {
             return;
         }
-        let mut left = vec![0usize; len];
-        let mut heads = vec![None; len];
+        let mut left = vec![0usize; len - base];
+        let mut heads = vec![None; len - base];
         let mut reverse = vec![];
         for i in base..len {
             let at = self.constants[i].at;
@@ -81,17 +81,16 @@ impl Program<'_> {
                     && dep as usize >= base
                 {
                     let dep = dep as usize;
-                    left[i] += 1;
-                    reverse.push((i, heads[dep]));
-                    heads[dep] = Some(reverse.len() - 1);
+                    left[i - base] += 1;
+                    reverse.push((i, heads[dep - base]));
+                    heads[dep - base] = Some(reverse.len() - 1);
                 }
             }
         }
         let mut ready = (base..len)
-            .filter(|&i| left[i] == 0)
+            .filter(|&i| left[i - base] == 0)
             .collect::<VecDeque<_>>();
-        let mut done = vec![false; len];
-        done[..base].fill(true);
+        let mut done = vec![false; len - base];
         while let Some(i) = ready.pop_front() {
             let c = &self.constants[i];
             let (at, expr, ty) = (c.at, c.expr, c.ty);
@@ -109,12 +108,12 @@ impl Program<'_> {
                 .expr(expr, Some(ty), true)
             };
             self.constants[i].value = value;
-            done[i] = true;
-            let mut next = heads[i];
+            done[i - base] = true;
+            let mut next = heads[i - base];
             while let Some(edge) = next {
                 let (reader, tail) = reverse[edge];
-                left[reader] -= 1;
-                if left[reader] == 0 {
+                left[reader - base] -= 1;
+                if left[reader - base] == 0 {
                     ready.push_back(reader);
                 }
                 next = tail;
@@ -122,16 +121,16 @@ impl Program<'_> {
         }
         // Remaining vertices depend on a cycle. Follow dependency edges until a
         // repeated vertex identifies the actual cycle, without recursive DFS.
-        let mut active = vec![false; len];
+        let mut active = vec![false; len - base];
         let mut path = vec![];
         for start in base..len {
-            if done[start] {
+            if done[start - base] {
                 continue;
             }
             path.clear();
             let mut i = start;
-            while !done[i] && !active[i] {
-                active[i] = true;
+            while !done[i - base] && !active[i - base] {
+                active[i - base] = true;
                 path.push(i);
                 let at = self.constants[i].at;
                 i = self.items[at.module as usize][at.item as usize]
@@ -143,17 +142,17 @@ impl Program<'_> {
                             return None;
                         };
                         let dep = self.constant_ids[id.0 as usize]? as usize;
-                        (!done[dep]).then_some(dep)
+                        (dep >= base && !done[dep - base]).then_some(dep)
                     })
                     .unwrap();
             }
-            if active[i] {
+            if active[i - base] {
                 let c = &self.constants[i];
                 self.const_refuse(c.at, c.expr, "constant dependencies form a cycle");
             }
             for &i in &path {
-                done[i] = true;
-                active[i] = false;
+                done[i - base] = true;
+                active[i - base] = false;
             }
         }
     }

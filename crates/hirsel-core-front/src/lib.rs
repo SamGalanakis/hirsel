@@ -84,10 +84,11 @@ pub struct Program<'a> {
     pub fns: Rows<FnDecl>,
     pub constants: Rows<Constant>,
     pub constant_parts: Rows<ConstValue>,
-    pub(crate) constant_ids: Vec<Option<u32>>,
+    pub(crate) constant_ids: Rows<Option<u32>>,
     pub by_path: HashMap<DefPath, Def>,
-    pub by_definition: Vec<Option<Def>>,
-    pub(crate) core_operations: Vec<Option<body::core_ops::Kernel>>,
+    pub by_definition: Rows<Option<Def>>,
+    pub(crate) core_operations: Rows<Option<u16>>,
+    pub(crate) library_paths: Option<std::sync::Arc<hirsel_core_ids::published::Map<DefPath, Def>>>,
     /// Refusals of declarations and signatures, and the resolver's.
     pub refusals: Vec<Refusal>,
     pub gaps: Vec<Gap>,
@@ -104,10 +105,24 @@ pub struct Program<'a> {
 impl<'a> Program<'a> {
     /// The core prelude type named `name`, when the program has core.
     pub(crate) fn core_decl(&self, name: &str) -> Option<DeclId> {
-        self.decls
-            .iter()
-            .position(|d| decls::is_core_prelude(&d.path, &[name]))
-            .map(|i| DeclId(i as u32))
+        let key = self.index.core?;
+        let package = &self.index.packages[key.0 as usize];
+        let path = DefPath(hirsel_core_ids::ItemPath {
+            package: hirsel_core_ids::PackageId {
+                name: self.index.symbols.text(package.name).into(),
+                version: self.index.symbols.text(package.version).into(),
+            },
+            modules: vec!["core".into()],
+            name: name.into(),
+        });
+        match self
+            .by_path
+            .get(&path)
+            .or_else(|| self.library_paths.as_ref().and_then(|p| p.get(&path)))?
+        {
+            Def::Type(d) => Some(*d),
+            Def::Fn(_) => None,
+        }
     }
 
     /// Resolve every item, then publish summaries and signatures (slice a).
@@ -185,23 +200,28 @@ impl<'a> Program<'a> {
                 Rows::overlay(std::sync::Arc::clone(&l.constant_parts))
             }),
             constant_ids: {
-                let mut ids = library.map_or_else(Vec::new, |l| l.constant_ids.to_vec());
+                let mut ids = library.map_or_else(Rows::default, |l| {
+                    Rows::overlay(std::sync::Arc::clone(&l.constant_ids))
+                });
                 ids.resize(index.definitions.len(), None);
                 ids
             },
-            by_path: library.map_or_else(HashMap::new, |l| {
-                l.paths.iter().map(|(p, d)| (p.clone(), *d)).collect()
-            }),
+            by_path: HashMap::new(),
+            library_paths: library.map(|l| std::sync::Arc::new(l.paths.clone())),
             by_definition: {
-                let mut rows = library.map_or_else(Vec::new, |l| l.definitions.to_vec());
+                let mut rows = library.map_or_else(Rows::default, |l| {
+                    Rows::overlay(std::sync::Arc::clone(&l.definitions))
+                });
                 rows.resize(index.definitions.len(), None);
                 rows
             },
-            core_operations: vec![],
+            core_operations: library.map_or_else(Rows::default, |l| {
+                Rows::overlay(std::sync::Arc::clone(&l.core_operations))
+            }),
             refusals,
             gaps: vec![],
             entry: None,
-            library_modules: library.map_or(0, |l| l.modules),
+            library_modules: 0,
             pending: vec![],
             alias_state: vec![],
             alias_stack: vec![],
@@ -212,7 +232,9 @@ impl<'a> Program<'a> {
         p.summarize();
         p.evaluate_constants();
 
-        p.core_operations = body::core_ops::bind(&p.fns);
+        for f in p.fns.base_len()..p.fns.len() {
+            p.core_operations.push(body::core_ops::binding(&p.fns[f]));
+        }
         p
     }
 
@@ -252,13 +274,21 @@ impl<'a> Program<'a> {
                 .any(|n| self.index.symbols.find(n) == Some(d.name))
     }
     pub fn decl(&self, path: &DefPath) -> Option<&TypeDecl> {
-        match self.by_path.get(path)? {
+        match self
+            .by_path
+            .get(path)
+            .or_else(|| self.library_paths.as_ref().and_then(|p| p.get(path)))?
+        {
             Def::Type(d) => Some(&self.decls[d.index()]),
             Def::Fn(_) => None,
         }
     }
     pub fn function(&self, path: &DefPath) -> Option<&FnDecl> {
-        match self.by_path.get(path)? {
+        match self
+            .by_path
+            .get(path)
+            .or_else(|| self.library_paths.as_ref().and_then(|p| p.get(path)))?
+        {
             Def::Fn(f) => Some(&self.fns[*f as usize]),
             Def::Type(_) => None,
         }

@@ -46,6 +46,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let mut image_path = None;
     let mut core_product = None;
     let mut source_core = false;
+    let mut product_name = None;
     let mut entry = None;
     let native_command = command == "build" || command == "run";
     let mut backend = None;
@@ -65,6 +66,12 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
         match arg.as_str() {
             "--json" => json = true,
             "--source-core" => source_core = true,
+            "--name" => {
+                product_name = Some(
+                    hirsel_core_ids::DefPath::from_full(&args.next().ok_or("missing --name")?)
+                        .ok_or("invalid --name definition path")?,
+                )
+            }
             "--core-product" => {
                 core_product = Some(PathBuf::from(
                     args.next().ok_or("missing core product cache")?,
@@ -126,12 +133,35 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     });
     if command == "core-product" {
         meter.finish("startup/discovery");
-        let package = hirsel_core_driver::PackageProduct::bundled(&store, &mut meter)?;
+        let (image, rebuilt) = if let Some(path) = image_path {
+            (
+                CoreImage::open(&path)?.ok_or("core image cache miss; rebuild the image")?,
+                false,
+            )
+        } else {
+            let package = hirsel_core_driver::PackageProduct::bundled(&store, &mut meter)?;
+            (package.image, package.rebuilt)
+        };
+        let name = if let Some(name) = product_name {
+            let found = image.resolve_name(&name)?.is_some();
+            meter.finish("package name resolution");
+            let declaration = if found {
+                image.demand_declaration(&name)?
+            } else {
+                false
+            };
+            meter.finish("package signature demand");
+            Some(
+                serde_json::json!({"path":name.to_string(),"found":found,"declaration":declaration}),
+            )
+        } else {
+            None
+        };
         println!(
             "{}",
-            serde_json::json!({"image": hex(package.image.identity), "rebuilt": package.rebuilt})
+            serde_json::json!({"image":hex(image.identity),"rebuilt":rebuilt,"name":name,"index_nodes":image.decoded_index_nodes(),"index_rows":image.decoded_index_rows()})
         );
-        drop(package);
+        drop(image);
         meter.finish("package handle teardown");
         if let Some(path) = metrics {
             std::fs::write(path, serde_json::to_vec_pretty(&meter.result)?)?;
@@ -172,11 +202,13 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     } else {
         (
             if !source_core && (native_command || core_product.is_some()) {
-                driver.check_with_product(
-                    request,
-                    &core_product.unwrap_or_else(hirsel_core_driver::PackageProduct::default_cache),
-                    &mut meter,
-                )?
+                let root =
+                    core_product.unwrap_or_else(hirsel_core_driver::PackageProduct::default_cache);
+                if native_command {
+                    driver.check_reachable_with_product(request, &root, &mut meter)?
+                } else {
+                    driver.check_with_product(request, &root, &mut meter)?
+                }
             } else {
                 driver.check(request, &mut meter)?
             },

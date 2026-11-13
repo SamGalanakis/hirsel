@@ -31,9 +31,10 @@ incomplete source never produces an image. `//:hirsel-core-image` is the Buck ta
 it invokes this new producer, independently of old precompute. Its success depends
 on the canonical signatures being supported by the checker. Check an application
 with `--image <image-dir>` to bind shared declaration/type rows and a request overlay.
-Image open reads only a fixed compiler/directory root. The directory and complete
-declaration section decode on their first respective demands, and file/text/body
-rows decode on individual demand. Signature
+Image open reads a fixed compiler/source/directory root. Name, signature, type,
+summary, anchor and body demands follow content-addressed hash indexes; their
+bounded leaves decode only the requested rows. Missing names are represented by
+those immutable indexes, so a damaged index is an IO cache miss. Signature
 imports neither read library sources nor decode callee bodies. Image byte damage
 is reported as a cache miss requiring an image rebuild.
 
@@ -56,12 +57,24 @@ incomplete bodies still refuse native assembly. This reusable package is not a
 claim that the strict canonical `image` has been accepted. The same producer and
 format support core+std; automatic std-package selection is not enabled yet.
 
-Package opening reads a fixed-size root without scanning the package. The first
-semantic demand still decodes its complete name index and declaration prefix.
-That remaining cost scales with package size. Individual syntax/body records are
-content-addressed separately, so demanding one body does not decode the others.
-`--metrics` exposes root load separately from package-index demand; declaration
-loading remains in the resolve stage. No constant semantic-load claim is made.
+Package opening allocates no slot per library row. Immutable prefixes use sparse
+fixed-height caches and request-owned suffixes; request snapshots store prefix
+references rather than copying their rows. Each indexed key lookup walks at most
+two fixed eight-page arrays and a bucket of at most 32 keys, with no package-wide scan. Body and
+source-file records remain separately addressed. Diagnostics use indexed item
+byte offsets, so naming a library site does not decode its whole source file.
+`core-product --name core@1/string/byte_len --store <cache> --metrics <file>`
+measures opening, one name, its signature and teardown separately; `--image`
+selects an already-produced image for the same command. Metadata/index rows,
+files and bodies have independent demand counters in the JSON result.
+
+The root also records the package source stamp. A valid image from a different
+source revision is a miss even if copied into the expected cache directory.
+External record failures cross the infallible table APIs as a private typed
+unwind and become ordinary IO errors at driver/image boundaries; compiler
+panics are not caught as cache misses. These compiler APIs require unwinding;
+the native program runtime is unaffected. All disk records retain the existing
+version, exact-length and content-digest boundary.
 
 `collect_instances` collects reachable distinct instances without source rechecking,
 with an explicit compiler-resource stop for growing instance families. The checked
@@ -107,7 +120,9 @@ calls, cache reuse and callee edits. There is no test-only C Result bridge.
 `check` and `image` require every supplied body and declaration to check.
 `build` and `run` require the entry's reachable native instances and the types
 and signatures they name. Unreached body/declaration diagnostics remain visible
-to package check but do not block native assembly. Resolved signature/body reads
+to package check but do not block native assembly. Reachable-image checking loads
+cached library outcomes per demanded body; package checking explicitly enumerates
+all supplied outcomes. Resolved signature/body reads
 are cached separately from invalidation reads, which also include shadowed and
 absent names. The driver reports reached diagnostics and a first-stop census in
 build/run JSON. Behind incomplete bodies the census follows resolved source
@@ -158,3 +173,16 @@ amortize emitter setup, but reduce codegen parallelism and incremental reuse.
 No compile-time, runtime or memory benefit is measured yet. Grouping must preserve
 reachable-only acceptance. Dev keeps its per-body granularity; no larger release
 unit policy is implemented here.
+
+A unit's type finalizers are native dependencies alongside calls and function
+references. The same dependency walker serves instance collection and diagnostic
+reachability, including finalizers imported during generic materialization. The
+producer's complete type table makes finalizers behind record/variant, Option,
+List and Box recipes visible without source calls to the drop block.
+
+The package format and producer also accept core+std together, including existing
+module extensions and checked constants/templates. A combined-image regression
+adds an application extension and reaches the core, std and application bodies.
+Automatic std-package selection is the remaining driver integration step; std's
+constant/declaration acceptance and all body completion are still required for
+the standing canonical-image rows to turn green.

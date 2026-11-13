@@ -1,7 +1,7 @@
-//! New-driver immutable images. Opening reads only the directory; declarations,
-//! source/name rows and checked bodies decode on their first respective demand.
+//! Immutable packages with a fixed root and content-addressed, indexed rows.
 use super::*;
 use hirsel_core_front::Library;
+use hirsel_core_ids::published::{Map, Publisher, Sparse, Table};
 use std::sync::OnceLock;
 
 #[derive(Clone, Default)]
@@ -9,6 +9,7 @@ pub enum LibraryInput {
     #[default]
     Sources,
     Image(Arc<CoreImage>),
+    ReachableImage(Arc<CoreImage>),
     Produce,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -23,26 +24,32 @@ pub(crate) struct ImageDirectory {
     pub compiler: ContentHash,
     pub inputs: CorpusManifest,
     pub index: Arc<NameIndex>,
-    pub files: Vec<ImageFile>,
-    pub headers: Arc<BTreeMap<DefPath, reuse::Header>>,
+    pub files: Table<ImageFile>,
+    pub headers: Arc<Map<DefPath, reuse::Header>>,
+    pub anchors: Map<(ModuleId, u32), DefPath>,
+    pub offsets: Map<(ModuleId, u32), u32>,
     pub declarations: ContentHash,
-    pub definitions: BTreeMap<DefPath, ContentHash>,
-    pub diagnostics: Vec<Refusal>,
-    pub incomplete: Vec<Incomplete>,
+    pub definitions: Map<DefPath, ContentHash>,
+    pub diagnostics: Table<Refusal>,
+    pub incomplete: Table<Incomplete>,
 }
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ImageRoot {
     pub compiler: ContentHash,
     pub directory: ContentHash,
+    pub namespace: ContentHash,
+    pub source_stamp: ContentHash,
 }
 pub struct CoreImage {
     pub(crate) store: Store,
     pub identity: ContentHash,
+    pub(crate) source_stamp: ContentHash,
     directory_hash: ContentHash,
     directory: OnceLock<Arc<ImageDirectory>>,
     declarations: OnceLock<Arc<Library>>,
     files: std::sync::Mutex<BTreeMap<usize, Arc<FileProduct>>>,
-    bodies: std::sync::Mutex<BTreeMap<DefPath, Arc<DefinitionProduct>>>,
+    bodies: Sparse<Arc<DefinitionProduct>>,
+    indexed: Arc<crate::image_index::DiskIndex>,
 }
 impl CoreImage {
     pub(crate) fn store_root(&self) -> PathBuf {
@@ -67,14 +74,18 @@ impl CoreImage {
         if root.compiler != compiler_identity()? {
             return Ok(None);
         }
+        let indexed = Arc::new(crate::image_index::DiskIndex::new(path)?);
+        hirsel_core_ids::published::bind_source(root.namespace, indexed.clone());
         Ok(Some(Arc::new(Self {
             store,
             identity,
+            source_stamp: root.source_stamp,
             directory_hash: root.directory,
             directory: OnceLock::new(),
             declarations: OnceLock::new(),
             files: std::sync::Mutex::default(),
-            bodies: std::sync::Mutex::default(),
+            bodies: Sparse::default(),
+            indexed,
         })))
     }
     pub(crate) fn directory(&self) -> io::Result<Arc<ImageDirectory>> {
@@ -85,13 +96,48 @@ impl CoreImage {
         let _ = self.directory.set(Arc::clone(&directory));
         Ok(directory)
     }
+    /// Resolve one fully qualified name through the package's immutable indexes.
+    pub fn resolve_name(&self, path: &DefPath) -> io::Result<Option<Definition>> {
+        hirsel_core_ids::published::catch_io(|| {
+            let directory = self.directory()?;
+            let index = &directory.index;
+            let module = index.module(&ModulePath {
+                package: path.0.package.clone(),
+                modules: path.0.modules.clone(),
+            });
+            Ok(module
+                .zip(index.symbols.find(&path.0.name))
+                .and_then(|(m, n)| index.definition(m, n))
+                .map(|id| *index.get(id)))
+        })
+    }
+    /// Demand the named signature/summary row, without loading other declarations.
+    pub fn demand_declaration(&self, path: &DefPath) -> io::Result<bool> {
+        hirsel_core_ids::published::catch_io(|| {
+            let library = self.declarations()?;
+            Ok(match library.paths.get(path) {
+                Some(hirsel_core_front::Def::Fn(f)) => {
+                    let _ = &library.fns[*f as usize];
+                    true
+                }
+                Some(hirsel_core_front::Def::Type(d)) => {
+                    let _ = &library.decls[d.index()];
+                    true
+                }
+                None => false,
+            })
+        })
+    }
     pub fn decoded_files(&self) -> usize {
         self.files.lock().unwrap().len()
     }
     pub fn decoded_bodies(&self) -> usize {
-        self.bodies.lock().unwrap().len()
+        self.bodies.len()
     }
     pub fn file(&self, index: usize) -> io::Result<Arc<FileProduct>> {
+        hirsel_core_ids::published::catch_io(|| self.file_inner(index))
+    }
+    fn file_inner(&self, index: usize) -> io::Result<Arc<FileProduct>> {
         if let Some(file) = self.files.lock().unwrap().get(&index) {
             return Ok(Arc::clone(file));
         }
@@ -106,25 +152,45 @@ impl CoreImage {
         Ok(file)
     }
     pub(crate) fn has_body(&self, path: &DefPath) -> io::Result<bool> {
-        Ok(self.directory()?.definitions.contains_key(path))
+        hirsel_core_ids::published::catch_io(|| {
+            Ok(self.directory()?.definitions.contains_key(path))
+        })
+    }
+    pub fn decoded_index_rows(&self) -> usize {
+        self.indexed.decoded_rows()
+    }
+    pub fn decoded_index_nodes(&self) -> usize {
+        self.indexed.decoded_nodes()
+    }
+    pub(crate) fn file_offset(&self, module: ModuleId, item: u32) -> io::Result<u32> {
+        hirsel_core_ids::published::catch_io(|| {
+            Ok(self
+                .directory()?
+                .offsets
+                .get(&(module, item))
+                .copied()
+                .unwrap_or(0))
+        })
     }
     pub fn demand(&self, path: &DefPath) -> io::Result<Arc<DefinitionProduct>> {
-        if let Some(body) = self.bodies.lock().unwrap().get(path) {
-            return Ok(Arc::clone(body));
-        }
-        let directory = self.directory()?;
-        let hash = directory.definitions.get(path).ok_or_else(|| {
-            io::Error::other(format!(
-                "core image body demand outside reached definitions: {path}"
-            ))
-        })?;
-        let disk = self.read::<DiskCheck>(*hash)?;
-        let row = Arc::new(from_disk(disk));
-        self.bodies
-            .lock()
-            .unwrap()
-            .insert(path.clone(), Arc::clone(&row));
-        Ok(row)
+        Ok(Arc::clone(self.demand_arc(path)?))
+    }
+    pub(crate) fn demand_ref(&self, path: &DefPath) -> io::Result<&DefinitionProduct> {
+        Ok(self.demand_arc(path)?.as_ref())
+    }
+    fn demand_arc(&self, path: &DefPath) -> io::Result<&Arc<DefinitionProduct>> {
+        hirsel_core_ids::published::catch_io(|| {
+            let directory = self.directory()?;
+            let id = directory.definitions.index_of(path).ok_or_else(|| {
+                io::Error::other(format!(
+                    "core image body demand outside reached definitions: {path}"
+                ))
+            })?;
+            self.bodies.get_or_try_init(id as u64, || {
+                let disk = self.read::<DiskCheck>(directory.definitions[path])?;
+                Ok(Arc::new(from_disk(disk)))
+            })
+        })
     }
     pub(crate) fn declarations(&self) -> io::Result<Arc<Library>> {
         if let Some(rows) = self.declarations.get() {
@@ -149,13 +215,14 @@ impl Driver {
         request: CheckRequest,
         meter: &mut Meter,
     ) -> io::Result<(Arc<CheckProduct>, Option<Arc<CoreImage>>)> {
-        self.produce_package(request, meter, true)
+        self.produce_package(request, meter, true, ContentHash::default())
     }
     pub(crate) fn produce_package(
         &mut self,
         mut request: CheckRequest,
         meter: &mut Meter,
         require_complete: bool,
+        source_stamp: ContentHash,
     ) -> io::Result<(Arc<CheckProduct>, Option<Arc<CoreImage>>)> {
         if request.entry.is_some() {
             return Err(io::Error::other(
@@ -188,7 +255,6 @@ impl Driver {
                 decode::<Library>(record.bytes(&cache.bytes).ok_or_else(miss)?).ok_or_else(miss)?,
             )
         };
-        let declarations = store.put(&encode(library.as_ref())?)?;
         let mut files = Vec::new();
         for file in &product.files {
             files.push(ImageFile {
@@ -198,7 +264,7 @@ impl Driver {
                 row: store.put(&encode(file.as_ref())?)?,
             });
         }
-        let mut definitions = BTreeMap::new();
+        let mut definitions = Map::default();
         for (path, body) in &product.definitions {
             let c = body.check.counts;
             let disk = DiskCheckRef {
@@ -219,42 +285,58 @@ impl Driver {
             })?;
             definitions.insert(path.clone(), hash);
         }
+        let mut anchors = Map::default();
+        for (path, header) in product.headers.iter() {
+            anchors.insert(header.anchor, path.clone());
+        }
+        let mut offsets = Map::default();
+        for file in &product.files {
+            for (i, item) in file.syntax.items.iter().enumerate() {
+                offsets.insert((file.module, i as u32), item.file_offset);
+            }
+        }
+        for package in &mut inputs.packages {
+            package.sources.clear();
+        }
+        let namespace = product.snapshot;
+        let indexed = Arc::new(crate::image_index::DiskIndex::new(&store_path)?);
+        hirsel_core_ids::published::bind_source(namespace, indexed.clone());
+        let mut writer = crate::image_index::Writer::new(&store, namespace);
         let directory = ImageDirectory {
             compiler: compiler_identity()?,
             inputs,
-            index: Arc::clone(&product.index),
-            files,
-            headers: Arc::clone(&product.headers),
-            declarations,
-            definitions,
-            diagnostics: product.diagnostics.clone(),
-            incomplete: product.incomplete.clone(),
+            index: Arc::new(product.index.publish(&mut writer)?),
+            files: writer.table(&files.into())?,
+            headers: Arc::new(writer.map(&product.headers)?),
+            anchors: writer.map(&anchors)?,
+            offsets: writer.map(&offsets)?,
+            declarations: store.put(&encode(&library.publish(&mut writer)?)?)?,
+            definitions: writer.map(&definitions)?,
+            diagnostics: writer.table(&product.diagnostics.clone().into())?,
+            incomplete: writer.table(&product.incomplete.clone().into())?,
         };
         let directory_hash = store.put(&encode(&directory)?)?;
         let identity = store.put(&encode(&ImageRoot {
             compiler: compiler_identity()?,
             directory: directory_hash,
+            namespace,
+            source_stamp,
         })?)?;
         store.select("image-root", identity)?;
         let image = Arc::new(CoreImage {
             store,
             identity,
+            source_stamp,
             directory_hash,
             directory: OnceLock::new(),
             declarations: OnceLock::new(),
             files: std::sync::Mutex::default(),
-            bodies: std::sync::Mutex::default(),
+            bodies: Sparse::default(),
+            indexed,
         });
         let _ = image.directory.set(Arc::new(directory));
         for (i, file) in product.files.iter().enumerate() {
             image.files.lock().unwrap().insert(i, Arc::clone(file));
-        }
-        for (path, body) in &product.definitions {
-            image
-                .bodies
-                .lock()
-                .unwrap()
-                .insert(path.clone(), Arc::clone(body));
         }
         let _ = image.declarations.set(library);
         meter.finish("image publication");

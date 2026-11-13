@@ -23,23 +23,19 @@ pub struct IncompleteDiagnostic<'a> {
 }
 impl CheckProduct {
     pub(crate) fn source_site(&self, site: &Site) -> io::Result<SourceSite> {
-        let file = if let Some(file) = self.files.iter().find(|f| f.module == site.module) {
-            Some(Arc::clone(file))
+        hirsel_core_ids::published::catch_io(|| self.source_site_inner(site))
+    }
+    fn source_site_inner(&self, site: &Site) -> io::Result<SourceSite> {
+        let base = if let Some(file) = self.files.iter().find(|f| f.module == site.module) {
+            file.syntax
+                .items
+                .get(site.item as usize)
+                .map_or(0, |i| i.file_offset)
         } else if let Some(image) = &self.image {
-            image
-                .directory()?
-                .files
-                .iter()
-                .position(|f| f.module == site.module)
-                .map(|i| image.file(i))
-                .transpose()?
+            image.file_offset(site.module, site.item)?
         } else {
-            None
+            0
         };
-        let base = file
-            .as_ref()
-            .and_then(|f| f.syntax.items.get(site.item as usize))
-            .map_or(0, |i| i.file_offset);
         let id = self.index.module_path(site.module);
         Ok(SourceSite {
             module: format!(

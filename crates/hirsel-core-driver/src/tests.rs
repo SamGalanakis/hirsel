@@ -1245,3 +1245,150 @@ fn aggregate_constants_in_an_image_need_no_source_or_body_decode() {
     );
     assert_eq!((opened.decoded_files(), opened.decoded_bodies()), (0, 0));
 }
+
+#[test]
+fn indexed_combined_libraries_keep_existing_module_extensions() {
+    let dir = tempfile::tempdir().unwrap();
+    fn input(
+        dir: &Path,
+        name: &str,
+        module: &str,
+        body: &str,
+        deps: Vec<PackageId>,
+    ) -> PackageManifest {
+        let file = dir.join(format!("{name}-{module}.hirsel"));
+        std::fs::write(&file, body).unwrap();
+        PackageManifest {
+            package: package(name),
+            dependencies: deps,
+            sources: vec![hirsel_core_resolve::ModuleSource {
+                file,
+                modules: vec![module.into()],
+                signatures: name != "app",
+            }],
+        }
+    }
+    let core = input(
+        dir.path(),
+        "core",
+        "ops",
+        "pub fn base() -> u64 { 7u64 }",
+        vec![],
+    );
+    let std = input(
+        dir.path(),
+        "std",
+        "ops",
+        "pub fn extra() -> u64 { 11u64 }",
+        vec![package("core")],
+    );
+    let (_, image) = Driver::default()
+        .produce_image(
+            CheckRequest {
+                inputs: CorpusManifest {
+                    core: package("core"),
+                    packages: vec![core, std],
+                },
+                store: dir.path().join("image"),
+                entry: None,
+                library: LibraryInput::Sources,
+            },
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    let opened = CoreImage::open(&image.unwrap().store_root())
+        .unwrap()
+        .unwrap();
+    let mut app = input(
+        dir.path(),
+        "app",
+        "ops",
+        "pub fn other() -> u64 { 13u64 }",
+        vec![package("core"), package("std")],
+    );
+    let mut main = input(
+        dir.path(),
+        "app",
+        "main",
+        "pub fn f() -> u64 { ops.base() + ops.extra() + ops.other() }",
+        vec![],
+    );
+    app.sources.append(&mut main.sources);
+    let product = Driver::default()
+        .check(
+            CheckRequest {
+                inputs: CorpusManifest {
+                    core: package("core"),
+                    packages: vec![app],
+                },
+                store: dir.path().join("app"),
+                entry: None,
+                library: LibraryInput::Image(opened),
+            },
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{}",
+        serde_json::to_string(&(
+            product.machine_diagnostics().unwrap(),
+            product.machine_incomplete().unwrap()
+        ))
+        .unwrap()
+    );
+    let reached = product
+        .instances(
+            [hirsel_core_ir::InstanceKey {
+                definition: DefPath::from_full("app@1/main/f").unwrap(),
+                types: vec![],
+                dictionaries: vec![],
+            }],
+            16,
+        )
+        .unwrap();
+    let paths: std::collections::BTreeSet<_> =
+        reached.iter().map(|k| k.definition.to_string()).collect();
+    assert_eq!(
+        paths,
+        std::collections::BTreeSet::from([
+            "app@1/main/f".into(),
+            "app@1/ops/other".into(),
+            "core@1/ops/base".into(),
+            "std@1/ops/extra".into()
+        ])
+    );
+}
+
+#[test]
+fn copied_indexed_image_reads_its_live_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, image) = Driver::default()
+        .produce_image(
+            library_request("pub fn answer() -> u64 { 7u64 }", dir.path()),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    let original = image.unwrap();
+    let copied = dir.path().join("copied");
+    std::fs::create_dir(&copied).unwrap();
+    for entry in std::fs::read_dir(original.store_root()).unwrap() {
+        let entry = entry.unwrap();
+        if entry.path().is_file() {
+            std::fs::copy(entry.path(), copied.join(entry.file_name())).unwrap();
+        }
+    }
+    let reopened = CoreImage::open(&copied).unwrap().unwrap();
+    std::fs::remove_dir_all(original.store_root()).unwrap();
+    assert!(
+        reopened
+            .resolve_name(&DefPath::from_full("core@1/lib/answer").unwrap())
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        reopened
+            .demand_declaration(&DefPath::from_full("core@1/lib/answer").unwrap())
+            .unwrap()
+    );
+}

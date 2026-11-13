@@ -1,7 +1,7 @@
 //! Checked library rows are immutable. A request appends its own rows and types.
 use crate::*;
+use hirsel_core_ids::published::{Map, Publisher, Table};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::ops::{Index, IndexMut};
 use std::sync::Arc;
 
@@ -9,19 +9,19 @@ use std::sync::Arc;
 /// unchanged when a request adds declarations; no library graph is cloned per body.
 #[derive(Clone, Debug)]
 pub struct Rows<T> {
-    base: Arc<Vec<T>>,
+    base: Arc<Table<T>>,
     own: Vec<T>,
 }
 impl<T> Default for Rows<T> {
     fn default() -> Self {
         Self {
-            base: Arc::new(vec![]),
+            base: Arc::new(Table::default()),
             own: vec![],
         }
     }
 }
 impl<T> Rows<T> {
-    pub fn overlay(base: Arc<Vec<T>>) -> Self {
+    pub fn overlay(base: Arc<Table<T>>) -> Self {
         Self { base, own: vec![] }
     }
     pub fn base_len(&self) -> usize {
@@ -33,6 +33,9 @@ impl<T> Rows<T> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    pub fn own_iter(&self) -> impl Iterator<Item = &T> {
+        self.own.iter()
+    }
     pub fn push(&mut self, row: T) {
         self.own.push(row);
     }
@@ -41,16 +44,21 @@ impl<T> Rows<T> {
     }
 }
 impl<T: Clone> Rows<T> {
-    fn freeze(self) -> Arc<Vec<T>> {
+    pub fn resize(&mut self, len: usize, value: T) {
+        self.own.resize(len - self.base.len(), value);
+    }
+
+    fn freeze(self) -> Arc<Table<T>> {
         if self.base.is_empty() {
-            return Arc::new(self.own);
+            return Arc::new(self.own.into());
         }
         Arc::new(
             self.base
                 .iter()
                 .cloned()
                 .chain(self.own)
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>()
+                .into(),
         )
     }
 }
@@ -75,14 +83,31 @@ impl<T> IndexMut<usize> for Rows<T> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Library {
     pub types: Arc<Types>,
-    pub decls: Arc<Vec<TypeDecl>>,
-    pub fns: Arc<Vec<FnDecl>>,
-    pub constants: Arc<Vec<Constant>>,
-    pub constant_parts: Arc<Vec<ConstValue>>,
-    pub constant_ids: Arc<Vec<Option<u32>>>,
-    pub paths: BTreeMap<hirsel_core_ids::DefPath, Def>,
+    pub decls: Arc<Table<TypeDecl>>,
+    pub fns: Arc<Table<FnDecl>>,
+    pub constants: Arc<Table<Constant>>,
+    pub constant_parts: Arc<Table<ConstValue>>,
+    pub constant_ids: Arc<Table<Option<u32>>>,
+    pub paths: Map<hirsel_core_ids::DefPath, Def>,
     pub modules: usize,
-    pub definitions: Arc<Vec<Option<Def>>>,
+    pub(crate) core_operations: Arc<Table<Option<u16>>>,
+    pub definitions: Arc<Table<Option<Def>>>,
+}
+impl Library {
+    pub fn publish(&self, writer: &mut impl Publisher) -> std::io::Result<Self> {
+        Ok(Self {
+            types: Arc::new(self.types.publish(writer)?),
+            decls: Arc::new(writer.table(&self.decls)?),
+            fns: Arc::new(writer.table(&self.fns)?),
+            constants: Arc::new(writer.table(&self.constants)?),
+            constant_parts: Arc::new(writer.table(&self.constant_parts)?),
+            constant_ids: Arc::new(writer.table(&self.constant_ids)?),
+            paths: writer.map(&self.paths)?,
+            modules: self.modules,
+            definitions: Arc::new(writer.table(&self.definitions)?),
+            core_operations: Arc::new(writer.table(&self.core_operations)?),
+        })
+    }
 }
 impl Program<'_> {
     pub fn into_library(self) -> Library {
@@ -92,10 +117,17 @@ impl Program<'_> {
             fns: self.fns.freeze(),
             constants: self.constants.freeze(),
             constant_parts: self.constant_parts.freeze(),
-            constant_ids: Arc::new(self.constant_ids),
-            paths: self.by_path.into_iter().collect(),
+            constant_ids: self.constant_ids.freeze(),
+            paths: {
+                let mut paths = self.library_paths.as_deref().cloned().unwrap_or_default();
+                for (p, d) in self.by_path {
+                    paths.insert(p, d);
+                }
+                paths
+            },
             modules: self.modules.len(),
-            definitions: Arc::new(self.by_definition),
+            definitions: self.by_definition.freeze(),
+            core_operations: self.core_operations.freeze(),
         }
     }
 }

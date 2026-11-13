@@ -2,6 +2,7 @@
 //! Sources and signatures are explicit inputs; no old compiler or std image is loaded.
 mod diagnostics;
 mod image;
+mod image_index;
 mod product;
 pub use product::PackageProduct;
 mod instances;
@@ -157,7 +158,7 @@ pub struct CheckProduct {
     pub image: Option<Arc<CoreImage>>,
     pub(crate) library: Option<Arc<hirsel_core_front::Library>>,
     native_entry: Option<native::EntryBinding>,
-    headers: Arc<BTreeMap<DefPath, reuse::Header>>,
+    headers: Arc<hirsel_core_ids::published::Map<DefPath, reuse::Header>>,
     records: Option<Root>,
 }
 impl CheckProduct {
@@ -243,7 +244,7 @@ struct Root {
     snapshot: ContentHash,
     bytes: usize,
     identities: Record,
-    headers: Arc<BTreeMap<DefPath, reuse::Header>>,
+    headers: Arc<hirsel_core_ids::published::Map<DefPath, reuse::Header>>,
     declarations: Option<Record>,
     files: Vec<Record>,
     definitions: BTreeMap<DefPath, Record>,
@@ -309,6 +310,13 @@ impl Cache {
 impl Driver {
     pub fn check(
         &mut self,
+        request: CheckRequest,
+        meter: &mut Meter,
+    ) -> io::Result<Arc<CheckProduct>> {
+        hirsel_core_ids::published::catch_io(|| self.check_inner(request, meter))
+    }
+    fn check_inner(
+        &mut self,
         mut request: CheckRequest,
         meter: &mut Meter,
     ) -> io::Result<Arc<CheckProduct>> {
@@ -352,10 +360,11 @@ impl Driver {
         let compiler = compiler_identity()?;
         meter.finish("load/compiler identity");
         let image = match &request.library {
-            LibraryInput::Image(i) => Some(Arc::clone(i)),
+            LibraryInput::Image(i) | LibraryInput::ReachableImage(i) => Some(Arc::clone(i)),
             _ => None,
         };
         let produce = matches!(request.library, LibraryInput::Produce);
+        let reachable_only = matches!(request.library, LibraryInput::ReachableImage(_));
         let source_stamps: Vec<_> = sources.iter().map(|s| s.4).collect();
         let snapshot = ContentHash::of_bytes(&encode(&(
             compiler,
@@ -363,6 +372,7 @@ impl Driver {
             source_stamps,
             image.as_ref().map(|i| i.identity),
             produce,
+            reachable_only,
             &request.entry,
         ))?);
         let store = Store::new(&request.store)?;
@@ -399,7 +409,7 @@ impl Driver {
         }
         let image_directory = image.as_ref().map(|i| i.directory()).transpose()?;
         meter.finish("package index demand");
-        let library_modules = image_directory.as_ref().map_or(0, |i| i.files.len());
+
         let mut resolution_inputs = request.inputs.clone();
         if let Some(directory) = &image_directory {
             for package in &directory.inputs.packages {
@@ -447,25 +457,13 @@ impl Driver {
         );
         index.symbols = symbols;
         index.add_manifests(&resolution_inputs.packages);
-        let mut modules: Vec<_> = modules
+        let modules: Vec<_> = modules
             .into_iter()
             .map(|(path, syntax)| ModuleInput {
                 id: index.module(path).unwrap(),
                 syntax,
             })
             .collect();
-        if let Some(directory) = &image_directory {
-            let mut all: Vec<_> = directory
-                .files
-                .iter()
-                .map(|f| ModuleInput {
-                    id: f.module,
-                    syntax: SyntaxFile::default(),
-                })
-                .collect();
-            all.append(&mut modules);
-            modules = all;
-        }
         for m in &modules {
             for (i, item) in m.syntax.items().enumerate() {
                 index.index_item(m.id, i as u32, item);
@@ -483,7 +481,9 @@ impl Driver {
         let mut result = CheckProduct::empty(Arc::clone(&index));
         result.bytes = bytes_total;
         result.image = image.clone();
-        if let Some(directory) = &image_directory {
+        if let Some(directory) = &image_directory
+            && !reachable_only
+        {
             result
                 .diagnostics
                 .extend(directory.diagnostics.iter().cloned());
@@ -529,37 +529,32 @@ impl Driver {
             }
         }
         let reads_library = image_directory.as_ref().is_some_and(|image| {
-            modules
-                .iter()
-                .zip(&resolutions)
-                .skip(library_modules)
-                .any(|(m, rows)| {
-                    // Region/limit scopes and string carriers name core types
-                    // implicitly; they need the same published declarations.
-                    m.syntax.tree.nodes.iter().any(|n| {
+            modules.iter().zip(&resolutions).any(|(m, rows)| {
+                // Region/limit scopes and string carriers name core types
+                // implicitly; they need the same published declarations.
+                m.syntax.tree.nodes.iter().any(|n| {
+                    matches!(
+                        n.kind,
+                        hirsel_core_syntax::NodeKind::Region | hirsel_core_syntax::NodeKind::Bound
+                    ) || n.token.is_some_and(|t| {
                         matches!(
-                            n.kind,
-                            hirsel_core_syntax::NodeKind::Region
-                                | hirsel_core_syntax::NodeKind::Bound
-                        ) || n.token.is_some_and(|t| {
-                            matches!(
-                                m.syntax.tree.tokens[t.0 as usize].kind,
-                                hirsel_core_syntax::TokenKind::String
-                                    | hirsel_core_syntax::TokenKind::Bytes
-                            )
-                        })
-                    }) || rows.iter().any(|r| {
-                        r.names.iter().any(|n| match n.target {
-                            hirsel_core_resolve::Target::Definition(d) => {
-                                (d.0 as usize) < image.index.definitions.len()
-                            }
-                            hirsel_core_resolve::Target::ContextualConstructor { name } => index
-                                .constructor_candidates(m.id, name)
-                                .any(|d| (d.0 as usize) < image.index.definitions.len()),
-                            _ => false,
-                        })
+                            m.syntax.tree.tokens[t.0 as usize].kind,
+                            hirsel_core_syntax::TokenKind::String
+                                | hirsel_core_syntax::TokenKind::Bytes
+                        )
+                    })
+                }) || rows.iter().any(|r| {
+                    r.names.iter().any(|n| match n.target {
+                        hirsel_core_resolve::Target::Definition(d) => {
+                            (d.0 as usize) < image.index.definitions.len()
+                        }
+                        hirsel_core_resolve::Target::ContextualConstructor { name } => index
+                            .constructor_candidates(m.id, name)
+                            .any(|d| (d.0 as usize) < image.index.definitions.len()),
+                        _ => false,
                     })
                 })
+            })
         });
         meter.finish("resolve");
         let library = if reads_library {
@@ -575,6 +570,7 @@ impl Driver {
             &resolution_inputs,
             compiler_identity()?,
             image_directory.as_ref().map(|i| &*i.headers),
+            image_directory.as_ref().map(|i| &i.anchors),
             request.entry.as_ref(),
         )?;
         {
@@ -592,8 +588,8 @@ impl Driver {
             }));
             meter.finish("declarations/layout");
             let declarations_accepted = result.accepted();
-            for (f, fd) in p.fns.iter().enumerate() {
-                if f < p.fns.base_len() || fd.body.is_none() {
+            for (f, fd) in p.fns.iter().enumerate().skip(p.fns.base_len()) {
+                if fd.body.is_none() {
                     continue;
                 }
                 let resolution =
@@ -682,7 +678,7 @@ impl Driver {
         for (_, d) in index.definitions() {
             names.entry(d.site.module).or_default().push(*d);
         }
-        for (m, (_, path, _, _, source)) in modules.into_iter().skip(library_modules).zip(sources) {
+        for (m, (_, path, _, _, source)) in modules.into_iter().zip(sources) {
             let module_names = names.remove(&m.id).unwrap_or_default();
             result.files.push(Arc::new(FileProduct {
                 module: m.id,

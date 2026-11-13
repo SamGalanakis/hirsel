@@ -130,15 +130,41 @@ pub mod sym {
     pub const OK_VARIANT: Symbol = Symbol(107);
     pub const ERROR_VARIANT: Symbol = Symbol(108);
 }
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct Symbols {
-    strings: Vec<Arc<str>>,
+    strings: hirsel_core_ids::published::Table<Arc<str>>,
+    #[serde(skip)]
     index: FxHashMap<Arc<str>, Symbol>,
-    #[serde(skip, default = "empty_single")]
+    published_index: hirsel_core_ids::published::Map<Arc<str>, Symbol>,
+    #[serde(skip)]
     single: [Symbol; 128],
 }
 fn empty_single() -> [Symbol; 128] {
     [sym::NONE; 128]
+}
+impl<'de> serde::Deserialize<'de> for Symbols {
+    fn deserialize<D: serde::Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Wire {
+            strings: hirsel_core_ids::published::Table<Arc<str>>,
+            published_index: hirsel_core_ids::published::Map<Arc<str>, Symbol>,
+        }
+        let wire = Wire::deserialize(decoder)?;
+        let base = wire.strings.base_len();
+        let index = wire
+            .strings
+            .own_iter()
+            .enumerate()
+            .filter(|(i, _)| base + *i != 0)
+            .map(|(i, s)| (s.clone(), Symbol((base + i) as u32)))
+            .collect();
+        Ok(Self {
+            strings: wire.strings,
+            index,
+            published_index: wire.published_index,
+            single: Self::default().single,
+        })
+    }
 }
 impl Default for Symbols {
     fn default() -> Self {
@@ -271,11 +297,30 @@ impl Default for Symbols {
                 .skip(1)
                 .map(|(i, s)| (s.clone(), Symbol(i as u32)))
                 .collect(),
-            strings,
+            strings: strings.into(),
+            published_index: Default::default(),
         }
     }
 }
 impl Symbols {
+    pub fn publish(
+        &self,
+        writer: &mut impl hirsel_core_ids::published::Publisher,
+    ) -> std::io::Result<Self> {
+        use hirsel_core_ids::published::Map;
+        let names: Map<Arc<str>, Symbol> = self
+            .strings
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (Arc::clone(s), Symbol(i as u32)))
+            .collect();
+        Ok(Self {
+            strings: writer.table(&self.strings)?,
+            index: FxHashMap::default(),
+            published_index: writer.map(&names)?,
+            single: Self::default().single,
+        })
+    }
     pub fn intern(&mut self, text: &str) -> Symbol {
         let single = match text.as_bytes() {
             [b] if b.is_ascii() => Some(*b as usize),
@@ -286,7 +331,7 @@ impl Symbols {
                 return self.single[b];
             }
         }
-        let id = if let Some(&id) = self.index.get(text) {
+        let id = if let Some(id) = self.find(text) {
             id
         } else {
             let id = Symbol(
@@ -306,7 +351,10 @@ impl Symbols {
         id
     }
     pub fn find(&self, text: &str) -> Option<Symbol> {
-        self.index.get(text).copied()
+        self.index
+            .get(text)
+            .copied()
+            .or_else(|| self.published_index.get(text).copied())
     }
     pub fn text(&self, id: Symbol) -> &str {
         &self.strings[id.0 as usize]

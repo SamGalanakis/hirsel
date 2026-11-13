@@ -42,7 +42,9 @@ impl PackageProduct {
     pub fn bundled(root: &Path, meter: &mut Meter) -> io::Result<Self> {
         let digest = Self::bundled_digest();
         let directory = cache_path(root, digest)?;
-        if let Some(image) = CoreImage::open(&directory)? {
+        if let Some(image) = CoreImage::open(&directory)?
+            && image.source_stamp == digest
+        {
             meter.finish("package product load");
             return Ok(Self {
                 image,
@@ -65,7 +67,7 @@ impl PackageProduct {
             core: package("core"),
             packages: vec![Self::bundled_manifest(&sources)],
         };
-        Self::produce(inputs, directory, meter)
+        Self::produce(inputs, directory, meter, digest)
     }
     /// Source-owned package producers use this explicit identity once per package
     /// revision. The installed consumer passes only the resulting cache key/image.
@@ -93,7 +95,9 @@ impl PackageProduct {
             .collect();
         let digest = ContentHash::of_bytes(&encode(&(&inputs.core, dependencies, stamps))?);
         let directory = cache_path(root, digest)?;
-        if let Some(image) = CoreImage::open(&directory)? {
+        if let Some(image) = CoreImage::open(&directory)?
+            && image.source_stamp == digest
+        {
             meter.finish("package product load");
             return Ok(Self {
                 image,
@@ -101,9 +105,14 @@ impl PackageProduct {
             });
         }
         meter.finish("package product lookup");
-        Self::produce(inputs, directory, meter)
+        Self::produce(inputs, directory, meter, digest)
     }
-    fn produce(inputs: CorpusManifest, directory: PathBuf, meter: &mut Meter) -> io::Result<Self> {
+    fn produce(
+        inputs: CorpusManifest,
+        directory: PathBuf,
+        meter: &mut Meter,
+        source_stamp: ContentHash,
+    ) -> io::Result<Self> {
         let (checked, image) = Driver::default().produce_package(
             CheckRequest {
                 inputs,
@@ -113,6 +122,7 @@ impl PackageProduct {
             },
             meter,
             false,
+            source_stamp,
         )?;
         let image = image.ok_or_else(|| {
             io::Error::other(format!(
@@ -149,10 +159,30 @@ fn cache_path(root: &Path, sources: ContentHash) -> io::Result<PathBuf> {
 impl Driver {
     pub fn check_with_product(
         &mut self,
-        mut request: CheckRequest,
+        request: CheckRequest,
         root: &Path,
         meter: &mut Meter,
     ) -> io::Result<Arc<CheckProduct>> {
+        self.check_package_product(request, root, meter, false)
+    }
+    pub fn check_reachable_with_product(
+        &mut self,
+        request: CheckRequest,
+        root: &Path,
+        meter: &mut Meter,
+    ) -> io::Result<Arc<CheckProduct>> {
+        self.check_package_product(request, root, meter, true)
+    }
+    fn check_package_product(
+        &mut self,
+        mut request: CheckRequest,
+        root: &Path,
+        meter: &mut Meter,
+        reachable: bool,
+    ) -> io::Result<Arc<CheckProduct>> {
+        if reachable && let LibraryInput::Image(image) = &request.library {
+            request.library = LibraryInput::ReachableImage(Arc::clone(image));
+        }
         if !matches!(request.library, LibraryInput::Sources) {
             return self.check(request, meter);
         }
@@ -198,7 +228,11 @@ impl Driver {
             .inputs
             .packages
             .retain(|p| p.package != request.inputs.core);
-        request.library = LibraryInput::Image(product.image);
+        request.library = if reachable {
+            LibraryInput::ReachableImage(product.image)
+        } else {
+            LibraryInput::Image(product.image)
+        };
         self.check(request, meter)
     }
 }
@@ -293,6 +327,22 @@ mod tests {
         assert!(changed.rebuilt);
         assert_ne!(changed.image.identity, first.image.identity);
         let answer = DefPath::from_full("core@1/core/answer").unwrap();
+        // A valid image from a different source revision in this cache location
+        // is also a miss, even if its compiler and record digests are valid.
+        for file in std::fs::read_dir(changed.image.store_root()).unwrap() {
+            let file = file.unwrap();
+            if file.path().is_file() {
+                std::fs::copy(file.path(), first.image.store_root().join(file.file_name()))
+                    .unwrap();
+            }
+        }
+        let original = library(
+            "pub fn identity[T](take x: T) -> T { x }\npub fn answer() -> u64 { 7 }\n",
+            dir.path(),
+        );
+        let repaired = PackageProduct::sources(original, &cache, &mut Meter::new(false)).unwrap();
+        assert!(repaired.rebuilt);
+        assert_eq!(repaired.image.identity, first.image.identity);
         let body = changed.image.demand(&answer).unwrap();
         assert_eq!(
             hirsel_core_ir::eval::run(&body.ir, body.check.function.unwrap(), &[], 1_000_000)
@@ -467,7 +517,7 @@ mod open_tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(encode(&root).unwrap().len(), 64);
+        assert_eq!(encode(&root).unwrap().len(), 128);
         std::fs::write(
             product.image.store.path(root.directory),
             b"damaged unused directory",
@@ -477,5 +527,67 @@ mod open_tests {
         assert_eq!(opened.decoded_files(), 0);
         assert_eq!(opened.decoded_bodies(), 0);
         assert!(opened.directory().is_err());
+    }
+}
+
+#[cfg(test)]
+mod indexed_tests {
+    use super::*;
+    #[test]
+    fn one_name_does_not_walk_unrelated_library_rows() {
+        let mut demanded = vec![];
+        for count in [8, 2048] {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("core.hirsel");
+            let mut source = "pub fn answer() -> u64 { 7u64 }\n".to_owned();
+            for i in 0..count {
+                source.push_str(&format!("pub fn unused{i}() -> u64 {{ {i}u64 }}\n"));
+            }
+            std::fs::write(&file, source).unwrap();
+            let inputs = CorpusManifest {
+                core: package("core"),
+                packages: vec![PackageManifest {
+                    package: package("core"),
+                    dependencies: vec![],
+                    sources: vec![hirsel_core_resolve::ModuleSource {
+                        file,
+                        modules: vec!["core".into()],
+                        signatures: true,
+                    }],
+                }],
+            };
+            let product = PackageProduct::sources(
+                inputs,
+                &dir.path().join("products"),
+                &mut Meter::new(false),
+            )
+            .unwrap();
+            let path = product.image.store_root();
+            drop(product);
+            let image = CoreImage::open(&path).unwrap().unwrap();
+            assert_eq!(
+                (image.decoded_index_nodes(), image.decoded_index_rows()),
+                (0, 0)
+            );
+            let name = DefPath::from_full("core@1/core/answer").unwrap();
+            assert!(image.resolve_name(&name).unwrap().is_some());
+            assert!(image.demand_declaration(&name).unwrap());
+            let rows = image.decoded_index_rows();
+            assert!(
+                rows < 16,
+                "{count} unrelated bodies demanded {rows} index rows"
+            );
+            // Each keyed row follows at most two fixed 8-page arrays, a names header and a bounded bucket.
+            assert!(image.decoded_index_nodes() <= rows * 18);
+            assert_eq!((image.decoded_bodies(), image.decoded_files()), (0, 0));
+            assert!(
+                image
+                    .resolve_name(&DefPath::from_full("core@1/core/missing").unwrap())
+                    .unwrap()
+                    .is_none()
+            );
+            demanded.push(rows);
+        }
+        assert_eq!(demanded[0], demanded[1]);
     }
 }

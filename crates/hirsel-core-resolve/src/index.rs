@@ -1,6 +1,6 @@
+use hirsel_core_ids::published::{Map, Publisher, Table};
 use hirsel_core_ids::{DefPath, ItemPath, PackageId};
 use hirsel_core_syntax::{Diagnostic, Item, NodeId, NodeKind, Span, Symbol, Symbols};
-use rustc_hash::FxHashMap;
 use std::sync::Arc;
 macro_rules! ids { ($($name:ident),*) => {$(
     #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize)]
@@ -13,8 +13,8 @@ pub struct Rows {
     pub end: u32,
 }
 impl Rows {
-    pub fn slice<T>(self, rows: &[T]) -> &[T] {
-        &rows[self.start as usize..self.end as usize]
+    pub fn slice<T: Clone>(self, rows: &Table<T>) -> &[T] {
+        rows.slice(self.start as usize..self.end as usize)
     }
 }
 /// External discovery input. Strings stop at the compilation's symbol table.
@@ -106,35 +106,62 @@ pub struct Package {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NameIndex {
     pub symbols: Arc<Symbols>,
-    pub modules: Vec<Module>,
-    pub packages: Vec<Package>,
-    pub definitions: Vec<Definition>,
-    members: FxHashMap<(ModuleId, Symbol), DefinitionId>,
-    children: FxHashMap<(ModuleId, Symbol), ModuleId>,
-    package_ids: FxHashMap<(Symbol, Symbol), PackageKey>,
-    dependencies: Vec<PackageKey>,
-    member_names: Vec<Symbol>,
+    pub modules: Table<Module>,
+    pub packages: Table<Package>,
+    pub definitions: Table<Definition>,
+    members: Map<(ModuleId, Symbol), DefinitionId>,
+    children: Map<(ModuleId, Symbol), ModuleId>,
+    package_ids: Map<(Symbol, Symbol), PackageKey>,
+    dependencies: Table<PackageKey>,
+    member_names: Table<Symbol>,
     variants: Vec<(Symbol, DefinitionId)>,
-    extensions: Vec<ModuleId>,
-    prelude: FxHashMap<Symbol, DefinitionId>,
+    published_variants: Map<Symbol, Vec<DefinitionId>>,
+    extensions: Table<ModuleId>,
+    prelude: Map<Symbol, DefinitionId>,
     pub core: Option<PackageKey>,
     pub diagnostics: Vec<Refusal>,
 }
 impl NameIndex {
+    pub fn publish(&self, writer: &mut impl Publisher) -> std::io::Result<Self> {
+        let mut result = self.clone();
+        result.symbols = Arc::new(self.symbols.publish(writer)?);
+        result.modules = writer.table(&self.modules)?;
+        result.packages = writer.table(&self.packages)?;
+        result.definitions = writer.table(&self.definitions)?;
+        result.members = writer.map(&self.members)?;
+        result.children = writer.map(&self.children)?;
+        result.package_ids = writer.map(&self.package_ids)?;
+        result.dependencies = writer.table(&self.dependencies)?;
+        result.member_names = writer.table(&self.member_names)?;
+        result.extensions = writer.table(&self.extensions)?;
+        result.prelude = writer.map(&self.prelude)?;
+        let mut variants: std::collections::BTreeMap<Symbol, Vec<DefinitionId>> = self
+            .published_variants
+            .iter()
+            .map(|(&s, v)| (s, v.clone()))
+            .collect();
+        for &(s, d) in &self.variants {
+            variants.entry(s).or_default().push(d);
+        }
+        result.published_variants = writer.map(&variants.into_iter().collect())?;
+        result.variants.clear();
+        Ok(result)
+    }
     pub fn new(symbols: Arc<Symbols>) -> Self {
         Self {
             symbols,
-            modules: vec![],
-            packages: vec![],
-            definitions: vec![],
-            members: FxHashMap::default(),
-            children: FxHashMap::default(),
-            package_ids: FxHashMap::default(),
-            dependencies: vec![],
-            member_names: vec![],
+            modules: Table::default(),
+            packages: Table::default(),
+            definitions: Table::default(),
+            members: Map::default(),
+            children: Map::default(),
+            package_ids: Map::default(),
+            dependencies: Table::default(),
+            member_names: Table::default(),
             variants: vec![],
-            extensions: vec![],
-            prelude: FxHashMap::default(),
+            published_variants: Map::default(),
+            extensions: Table::default(),
+            prelude: Map::default(),
             core: None,
             diagnostics: vec![],
         }
@@ -278,10 +305,17 @@ impl NameIndex {
     }
     pub fn variants(&self, name: Symbol) -> impl Iterator<Item = DefinitionId> + '_ {
         let start = self.variants.partition_point(|&(s, _)| s < name);
-        self.variants[start..]
-            .iter()
-            .take_while(move |&&(s, _)| s == name)
-            .map(|&(_, d)| d)
+        self.published_variants
+            .get(&name)
+            .into_iter()
+            .flatten()
+            .copied()
+            .chain(
+                self.variants[start..]
+                    .iter()
+                    .take_while(move |&&(s, _)| s == name)
+                    .map(|&(_, d)| d),
+            )
     }
     pub fn constructor_candidates(
         &self,
@@ -326,7 +360,12 @@ impl NameIndex {
         self.core = Some(package);
         let name = self.symbols.find("core").unwrap();
         if let Some(module) = self.child(self.packages[package.0 as usize].root, name) {
-            for (i, d) in self.definitions.iter().enumerate() {
+            for (i, d) in self
+                .definitions
+                .iter()
+                .enumerate()
+                .skip(self.definitions.base_len())
+            {
                 if d.site.module == module && d.public {
                     self.prelude.insert(d.name, DefinitionId(i as u32));
                 }
@@ -337,10 +376,31 @@ impl NameIndex {
             .modules
             .iter()
             .enumerate()
+            .skip(self.modules.base_len())
             .filter(|(_, m)| m.depth == 1)
             .map(|(i, m)| (m.name, ModuleId(i as u32)))
             .collect();
         heads.sort_unstable();
+        let core_heads: Vec<_> = heads
+            .iter()
+            .filter_map(|&(name, _)| self.core_module(name).map(|m| (name, m)))
+            .collect();
+        for (name, core) in core_heads {
+            let merge = self.modules[core.0 as usize].merge;
+            if merge.start == merge.end {
+                heads.push((name, core));
+            } else {
+                heads.extend(
+                    merge
+                        .slice(&self.extensions)
+                        .iter()
+                        .copied()
+                        .map(|m| (name, m)),
+                );
+            }
+        }
+        heads.sort_unstable();
+        heads.dedup();
         for &(name, _) in &heads {
             if self.core_module(name).is_none() {
                 continue;
@@ -356,7 +416,7 @@ impl NameIndex {
                 self.modules[m.0 as usize].merge = range;
             }
         }
-        for d in &self.definitions {
+        for d in self.definitions.own_iter() {
             let m = &self.modules[d.site.module.0 as usize];
             if m.depth != 1 || m.package == package {
                 continue;

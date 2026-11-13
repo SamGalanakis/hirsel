@@ -22,18 +22,12 @@ pub(crate) struct Header {
     pub(crate) anchor: (ModuleId, u32),
 }
 pub(crate) struct Keys {
-    pub(crate) headers: BTreeMap<DefPath, Header>,
+    pub(crate) headers: hirsel_core_ids::published::Map<DefPath, Header>,
     environment: ContentHash,
-    paths: Vec<DefPath>,
-    signature_paths: Vec<Arc<DefPath>>,
-    modules: Vec<ModulePath>,
-    packages: Vec<PackageId>,
-    dependencies: Vec<Option<HeaderRow>>,
-    anchors: BTreeMap<(ModuleId, u32), DefPath>,
-}
-struct HeaderRow {
-    digest: ContentHash,
-    reads: Vec<Result<usize, DefPath>>,
+    paths: hirsel_core_ids::published::Sparse<Arc<DefPath>>,
+    modules: hirsel_core_ids::published::Sparse<ModulePath>,
+    packages: hirsel_core_ids::published::Sparse<PackageId>,
+    anchors: hirsel_core_ids::published::Map<(ModuleId, u32), DefPath>,
 }
 impl Keys {
     pub fn new(
@@ -42,14 +36,12 @@ impl Keys {
         resolutions: &[Vec<Arc<Resolution>>],
         inputs: &CorpusManifest,
         compiler: ContentHash,
-        image_headers: Option<&BTreeMap<DefPath, Header>>,
+        image_headers: Option<&hirsel_core_ids::published::Map<DefPath, Header>>,
+        image_anchors: Option<&hirsel_core_ids::published::Map<(ModuleId, u32), DefPath>>,
         entry: Option<&DefPath>,
     ) -> io::Result<Self> {
-        let paths: Vec<_> = index
-            .definitions()
-            .map(|(id, _)| index.definition_path(id))
-            .collect();
         let mut headers = image_headers.cloned().unwrap_or_default();
+        let mut anchors = image_anchors.cloned().unwrap_or_default();
         let mut namespaces: Vec<_> = inputs
             .packages
             .iter()
@@ -65,19 +57,19 @@ impl Keys {
                 let Some(t) = item.tree.node(item.root).token else {
                     continue;
                 };
-                let path =
-                    paths[index.definition(m.id, item.symbol(t)).unwrap().0 as usize].clone();
+                let path = index.definition_path(index.definition(m.id, item.symbol(t)).unwrap());
                 let end = header_end(item);
                 let digest = ContentHash::of_bytes(&item.source_text().as_bytes()[..end]);
                 let mut reads = BTreeSet::new();
                 let mut body_reads = BTreeSet::new();
                 for name in &resolution.names {
                     if (item.tree.node(name.node).origin.span.start as usize) < end {
-                        targets(index, &paths, m.id, name.target, &mut reads);
+                        targets(index, m.id, name.target, &mut reads);
                     } else {
-                        targets(index, &paths, m.id, name.target, &mut body_reads);
+                        targets(index, m.id, name.target, &mut body_reads);
                     }
                 }
+                anchors.insert((m.id, ordinal as u32), path.clone());
                 headers.insert(
                     path,
                     Header {
@@ -94,40 +86,35 @@ impl Keys {
                 );
             }
         }
-        let ids: BTreeMap<_, _> = paths.iter().enumerate().map(|(i, p)| (p, i)).collect();
-        let dependencies = paths
-            .iter()
-            .map(|path| {
-                headers.get(path).map(|h| HeaderRow {
-                    digest: h.digest,
-                    reads: h
-                        .reads
-                        .iter()
-                        .map(|p| ids.get(p).copied().ok_or_else(|| p.clone()))
-                        .collect(),
-                })
-            })
-            .collect();
-        let anchors = headers.iter().map(|(p, h)| (h.anchor, p.clone())).collect();
         Ok(Self {
-            dependencies,
-            anchors,
             headers,
             environment,
-            signature_paths: paths.iter().cloned().map(Arc::new).collect(),
-            paths,
-            modules: (0..index.modules.len())
-                .map(|i| index.module_path(ModuleId(i as u32)))
-                .collect(),
-            packages: index
-                .packages
-                .iter()
-                .map(|p| PackageId {
+            anchors,
+            paths: Default::default(),
+            modules: Default::default(),
+            packages: Default::default(),
+        })
+    }
+    fn path(&self, index: &NameIndex, id: hirsel_core_resolve::DefinitionId) -> &Arc<DefPath> {
+        self.paths
+            .get_or_try_init(id.0 as u64, || Ok(Arc::new(index.definition_path(id))))
+            .unwrap()
+    }
+    fn module(&self, index: &NameIndex, id: ModuleId) -> &ModulePath {
+        self.modules
+            .get_or_try_init(id.0 as u64, || Ok(index.module_path(id)))
+            .unwrap()
+    }
+    fn package(&self, index: &NameIndex, id: hirsel_core_resolve::PackageKey) -> &PackageId {
+        self.packages
+            .get_or_try_init(id.0 as u64, || {
+                let p = &index.packages[id.0 as usize];
+                Ok(PackageId {
                     name: index.symbols.text(p.name).into(),
                     version: index.symbols.text(p.version).into(),
                 })
-                .collect(),
-        })
+            })
+            .unwrap()
     }
     pub fn capture_anchors(
         &self,
@@ -188,28 +175,35 @@ impl Keys {
                 LookupResult::Ambiguous | LookupResult::Missing => {}
             }
         }
+        let mut pending: Vec<Arc<DefPath>> = pending
+            .into_iter()
+            .map(|id| Arc::clone(self.path(index, hirsel_core_resolve::DefinitionId(id as u32))))
+            .collect();
         let mut signatures = BTreeMap::new();
-        let mut seen = vec![false; self.paths.len()];
-        while let Some(id) = pending.pop() {
-            if std::mem::replace(&mut seen[id], true) {
+        while let Some(path) = pending.pop() {
+            if signatures.contains_key(&path) {
                 continue;
             }
-            let h = self.dependencies[id].as_ref().ok_or_else(|| {
+            let h = self.headers.get(path.as_ref()).ok_or_else(|| {
                 io::Error::other(format!(
-                    "core signature demand outside reached definitions: {}",
-                    self.paths[id]
+                    "core signature demand outside reached definitions: {path}"
                 ))
             })?;
-            signatures.insert(Arc::clone(&self.signature_paths[id]), h.digest);
+            signatures.insert(Arc::clone(&path), h.digest);
             for read in &h.reads {
-                match read {
-                    Ok(id) => pending.push(*id),
-                    Err(path) => {
-                        return Err(io::Error::other(format!(
-                            "core signature demand outside reached definitions: {path}"
-                        )));
-                    }
-                }
+                let module = index.module(&ModulePath {
+                    package: read.0.package.clone(),
+                    modules: read.0.modules.clone(),
+                });
+                let id = module
+                    .zip(index.symbols.find(&read.0.name))
+                    .and_then(|(m, n)| index.definition(m, n))
+                    .ok_or_else(|| {
+                        io::Error::other(format!(
+                            "core signature demand outside reached definitions: {read}"
+                        ))
+                    })?;
+                pending.push(Arc::clone(self.path(index, id)));
             }
         }
         let lookups: Vec<_> = resolution
@@ -220,11 +214,11 @@ impl Keys {
                     LookupScope::Local(n) => (0, n, None, None),
                     LookupScope::Bind(n) => (1, n, None, None),
                     LookupScope::Label(n) => (2, n, None, None),
-                    LookupScope::Module(m) => (3, 0, Some(&self.modules[m.0 as usize]), None),
-                    LookupScope::Prelude(p) => (4, 0, None, Some(&self.packages[p.0 as usize])),
-                    LookupScope::Modules(p) => (5, 0, None, Some(&self.packages[p.0 as usize])),
-                    LookupScope::Children(m) => (6, 0, Some(&self.modules[m.0 as usize]), None),
-                    LookupScope::Variants(m) => (7, 0, Some(&self.modules[m.0 as usize]), None),
+                    LookupScope::Module(m) => (3, 0, Some(self.module(index, m)), None),
+                    LookupScope::Prelude(p) => (4, 0, None, Some(self.package(index, p))),
+                    LookupScope::Modules(p) => (5, 0, None, Some(self.package(index, p))),
+                    LookupScope::Children(m) => (6, 0, Some(self.module(index, m)), None),
+                    LookupScope::Variants(m) => (7, 0, Some(self.module(index, m)), None),
                 };
                 let result = match r.result {
                     LookupResult::Found(t) => (0, Some(self.target_key(index, module, t))),
@@ -277,15 +271,15 @@ impl Keys {
         target: Target,
     ) -> TargetKey<'a> {
         match target {
-            Target::Definition(d) => TargetKey::Definition(&self.paths[d.0 as usize]),
-            Target::Module(m) => TargetKey::Module(&self.modules[m.0 as usize]),
+            Target::Definition(d) => TargetKey::Definition(self.path(index, d).as_ref()),
+            Target::Module(m) => TargetKey::Module(self.module(index, m)),
             Target::Binder(b) => TargetKey::Binder(b),
             Target::Builtin(s) => TargetKey::Builtin(index.symbols.text(s)),
             Target::ContextualConstructor { name } => TargetKey::Constructor(
                 index.symbols.text(name),
                 index
                     .constructor_candidates(module, name)
-                    .map(|d| &self.paths[d.0 as usize])
+                    .map(|d| self.path(index, d).as_ref())
                     .collect(),
             ),
             Target::Missing => TargetKey::Missing,
@@ -305,21 +299,15 @@ fn target_ids(index: &NameIndex, module: ModuleId, target: Target, out: &mut Vec
         _ => {}
     }
 }
-fn targets(
-    index: &NameIndex,
-    paths: &[DefPath],
-    module: ModuleId,
-    target: Target,
-    out: &mut BTreeSet<DefPath>,
-) {
+fn targets(index: &NameIndex, module: ModuleId, target: Target, out: &mut BTreeSet<DefPath>) {
     match target {
         Target::Definition(d) => {
-            out.insert(paths[d.0 as usize].clone());
+            out.insert(index.definition_path(d));
         }
         Target::ContextualConstructor { name } => out.extend(
             index
                 .constructor_candidates(module, name)
-                .map(|d| paths[d.0 as usize].clone()),
+                .map(|d| index.definition_path(d)),
         ),
         _ => {}
     }

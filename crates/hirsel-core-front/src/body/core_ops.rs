@@ -207,22 +207,18 @@ operations! {
     ("writer", "last_completed", Lane::Language, "A", "core-check-895", false),
 }
 
-pub(crate) fn bind(fns: &crate::Rows<FnDecl>) -> Vec<Option<Kernel>> {
-    fns.iter()
-        .map(|f| {
-            if !f.path.package_is("core", "1") || f.body.is_some() {
-                return None;
-            }
-            OPERATIONS.iter().find_map(|entry| {
-                (f.path.0.modules == [entry.module] && f.path.0.name == entry.name)
-                    .then_some(entry.lane)
-                    .and_then(|lane| match lane {
-                        Lane::Runtime(kernel) => Some(kernel),
-                        _ => None,
-                    })
-            })
+pub(crate) fn binding(f: &FnDecl) -> Option<u16> {
+    if !f.path.package_is("core", "1") || f.body.is_some() {
+        return None;
+    }
+    OPERATIONS
+        .iter()
+        .position(|entry| {
+            f.path.0.modules == [entry.module]
+                && f.path.0.name == entry.name
+                && matches!(entry.lane, Lane::Runtime(_))
         })
-        .collect()
+        .map(|i| i as u16)
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
@@ -234,7 +230,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<Option<ValueId>> {
-        let kernel = self.p.core_operations[f]?;
+        let Lane::Runtime(kernel) = OPERATIONS[self.p.core_operations[f]? as usize].lane else {
+            unreachable!()
+        };
         Some(self.runtime_kernel(kernel, f, types, vals, result, n))
     }
 

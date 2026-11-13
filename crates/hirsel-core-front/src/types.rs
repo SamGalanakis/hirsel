@@ -3,6 +3,7 @@
 //! A type parameter is `Param(i)`, the i-th generic of the definition being read; it
 //! is rigid (OWN-23) and means nothing outside that definition.
 
+use hirsel_core_ids::published::{Map, Publisher, Table};
 use hirsel_core_layout::Scalar;
 use rustc_hash::FxHashMap as HashMap;
 
@@ -23,7 +24,9 @@ impl DeclId {
 }
 
 /// A parameter mode (OWN-7).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum Mode {
     View,
     Mut,
@@ -31,7 +34,9 @@ pub enum Mode {
 }
 
 /// A root in a published signature or a body. Identities are local to the definition.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum Root {
     Generic(u32),
     Parameter(u32),
@@ -41,7 +46,9 @@ pub enum Root {
 }
 
 /// Callable representation and the owning environment's send promise (LANG-13).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum Callable {
     Plain,
     Own,
@@ -49,7 +56,9 @@ pub enum Callable {
     Scoped,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum TyKind {
     /// A type that already produced a refusal; it satisfies every check silently.
     Error,
@@ -78,22 +87,24 @@ pub enum TyKind {
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Types {
     base: Option<std::sync::Arc<Types>>,
-    kinds: Vec<TyKind>,
+    kinds: Table<TyKind>,
     #[serde(skip)]
     map: HashMap<TyKind, TyId>,
+    published_map: Map<TyKind, TyId>,
 }
 impl<'de> serde::Deserialize<'de> for Types {
     fn deserialize<D: serde::Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
         #[derive(serde::Deserialize)]
         struct Wire {
             base: Option<std::sync::Arc<Types>>,
-            kinds: Vec<TyKind>,
+            kinds: Table<TyKind>,
+            published_map: Map<TyKind, TyId>,
         }
         let wire: Wire = serde::Deserialize::deserialize(decoder)?;
-        let offset = wire.base.as_ref().map_or(0, |b| b.len());
+        let offset = wire.base.as_ref().map_or(0, |b| b.len()) + wire.kinds.base_len();
         let map = wire
             .kinds
-            .iter()
+            .own_iter()
             .enumerate()
             .map(|(i, k)| (k.clone(), TyId((offset + i) as u32)))
             .collect();
@@ -101,10 +112,28 @@ impl<'de> serde::Deserialize<'de> for Types {
             base: wire.base,
             kinds: wire.kinds,
             map,
+            published_map: wire.published_map,
         })
     }
 }
 impl Types {
+    pub fn publish(&self, writer: &mut impl Publisher) -> std::io::Result<Self> {
+        let rows: Table<TyKind> = (0..self.len())
+            .map(|i| self.kind(TyId(i as u32)).clone())
+            .collect::<Vec<_>>()
+            .into();
+        let map: Map<TyKind, TyId> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k.clone(), TyId(i as u32)))
+            .collect();
+        Ok(Self {
+            base: None,
+            kinds: writer.table(&rows)?,
+            map: HashMap::default(),
+            published_map: writer.map(&map)?,
+        })
+    }
     pub fn new() -> Self {
         let mut t = Self::default();
         for k in [TyKind::Error, TyKind::Never, TyKind::Unit] {
@@ -119,8 +148,9 @@ impl Types {
     pub fn overlay(base: std::sync::Arc<Types>) -> Self {
         Self {
             base: Some(base),
-            kinds: vec![],
+            kinds: Table::default(),
             map: HashMap::default(),
+            published_map: Map::default(),
         }
     }
     fn find(&self, k: &TyKind) -> Option<TyId> {
@@ -128,6 +158,7 @@ impl Types {
             .as_ref()
             .and_then(|b| b.find(k))
             .or_else(|| self.map.get(k).copied())
+            .or_else(|| self.published_map.get(k).copied())
     }
     pub fn intern(&mut self, k: TyKind) -> TyId {
         crate::cost_scope!("phase", "type interning/hashing");

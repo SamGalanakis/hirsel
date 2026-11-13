@@ -918,7 +918,7 @@ b0:
             .append(true)
             .open(dir.path().join("core.hirsel"))
             .unwrap()
-            .write_all(b"pub fn answer() -> u8 { 7u8 }\npub fn identity[T](take x: T) -> T { x }\n")
+            .write_all(b"pub fn answer() -> u8 { 7u8 }\npub fn identity[T](take x: T) -> T { x }\npub fn unused_bad() -> u64 { true }\n")
             .unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let checked = Driver::default()
@@ -927,8 +927,27 @@ b0:
         let native = checked.build(&entry, &options).unwrap();
         run_clean(&native.executable, 7);
         request.store = dir.path().join("image-request");
+        let cache = dir.path().join("products");
+        let core = request
+            .inputs
+            .packages
+            .iter()
+            .find(|p| p.package == package("core"))
+            .unwrap()
+            .clone();
+        drop(
+            PackageProduct::sources(
+                CorpusManifest {
+                    core: package("core"),
+                    packages: vec![core],
+                },
+                &cache,
+                &mut Meter::new(false),
+            )
+            .unwrap(),
+        );
         let installed = Driver::default()
-            .check_with_product(
+            .check_reachable_with_product(
                 request,
                 &dir.path().join("products"),
                 &mut Meter::new(false),
@@ -949,6 +968,20 @@ b0:
         assert_eq!(core.len(), 2);
         assert!(core.iter().all(|o| !o.compiled));
         assert_eq!(objects.iter().filter(|o| o.compiled).count(), 1);
+        // A cached negative body is refused only when this entry reaches it.
+        let mut request = source_request(
+            "pub fn main()->Result[(),Exit] { let _=unused_bad(); Ok(()) }",
+            dir.path(),
+        );
+        // source_request refreshes its small core fixture; restore the same package.
+        std::fs::OpenOptions::new().append(true).open(dir.path().join("core.hirsel")).unwrap().write_all(b"pub fn answer() -> u8 { 7u8 }\npub fn identity[T](take x: T) -> T { x }\npub fn unused_bad() -> u64 { true }\n").unwrap();
+        request.store = dir.path().join("reached-negative");
+        let refused = Driver::default()
+            .check_reachable_with_product(request, &cache, &mut Meter::new(false))
+            .unwrap();
+        assert!(
+            matches!(refused.build(&entry,&options),Err(NativeStop::Check(message)) if message.contains("unused_bad"))
+        );
     }
     #[test]
     #[ignore = "explicit native integration target"]

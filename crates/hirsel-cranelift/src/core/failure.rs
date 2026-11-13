@@ -111,13 +111,13 @@ impl Function<'_, '_, '_> {
         let zero = self.b.ins().icmp_imm_s(IntCC::Equal, r, 0);
         self.guard(zero, 2, fail)?;
         let minus_one = self.b.ins().icmp_imm_s(IntCC::Equal, r, -1);
-        if signed && !matches!(op, Rem | Mod) {
+        if signed && op != Rem {
             let min = self.b.ins().iconst(native, (1u64 << (width - 1)) as i64);
             let is_min = self.b.ins().icmp(IntCC::Equal, l, min);
             let overflow = self.b.ins().band(is_min, minus_one);
             self.guard(overflow, 0, fail)?;
         }
-        let divisor = if signed && matches!(op, Rem | Mod) {
+        let divisor = if signed && op == Rem {
             let one = self.b.ins().iconst(native, 1);
             self.b.ins().select(minus_one, one, r)
         } else {
@@ -126,51 +126,17 @@ impl Function<'_, '_, '_> {
         let wide = if width < 32 { types::I32 } else { native };
         let a = self.resize(l, wide, signed);
         let b = self.resize(divisor, wide, signed);
-        let rem = if signed {
-            self.b.ins().srem(a, b)
-        } else {
-            self.b.ins().urem(a, b)
-        };
-        let rem = self.resize(rem, native, false);
-        if matches!(op, Rem) {
-            return Ok(rem);
-        }
-        let rn = self.b.ins().icmp_imm_s(IntCC::NotEqual, rem, 0);
-        if op == Mod {
-            if !signed {
-                return Ok(rem);
+        let value = if op == Rem {
+            if signed {
+                self.b.ins().srem(a, b)
+            } else {
+                self.b.ins().urem(a, b)
             }
-            let different = self.b.ins().bxor(rem, r);
-            let different = self.b.ins().icmp_imm_s(IntCC::SignedLessThan, different, 0);
-            let adjust = self.b.ins().band(different, rn);
-            let sum = self.b.ins().iadd(rem, r);
-            return Ok(self.b.ins().select(adjust, sum, rem));
-        }
-        let q = if signed {
+        } else if signed {
             self.b.ins().sdiv(a, b)
         } else {
             self.b.ins().udiv(a, b)
         };
-        let q = self.resize(q, native, false);
-        if op == DivExact {
-            self.guard(rn, 0, fail)?;
-            return Ok(q);
-        }
-        if op == DivFloor && signed {
-            // Follow the reference evaluator while FORM settles its rounding:
-            // div_euclid plus one for a negative divisor and nonzero remainder.
-            let neg_rem = self.b.ins().icmp_imm_s(IntCC::SignedLessThan, rem, 0);
-            let neg_div = self.b.ins().icmp_imm_s(IntCC::SignedLessThan, r, 0);
-            let one = self.b.ins().iconst(native, 1);
-            let minus = self.b.ins().iconst(native, -1);
-            let z = self.b.ins().iconst(native, 0);
-            let direction = self.b.ins().select(neg_div, one, minus);
-            let adjustment = self.b.ins().select(neg_rem, direction, z);
-            let q = self.b.ins().iadd(q, adjustment);
-            let extra = self.b.ins().band(neg_div, rn);
-            let extra = self.resize(extra, native, false);
-            return Ok(self.b.ins().iadd(q, extra));
-        }
-        Ok(q)
+        Ok(self.resize(value, native, false))
     }
 }

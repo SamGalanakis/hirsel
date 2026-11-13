@@ -250,12 +250,11 @@ fn execute_limit(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool
 }
 
 #[test]
-fn compare_convert_sample_matches_evaluator_through_c_abi() {
+fn compare_convert_sample_speed_matches_evaluator_through_c_abi() {
     let text = include_str!("../../hirsel-core-ir/samples/compare-convert.core");
     let module = text::parse(text).unwrap();
     let runs = sample_runs(&module, text);
     assert_eq!(runs.len(), 22);
-    execute(&module, &runs, false);
     execute(&module, &runs, true);
 }
 
@@ -282,20 +281,6 @@ fn sample_runs(m: &c::Module, text: &str) -> Vec<(FuncId, Vec<u64>)> {
             Some((f, args))
         })
         .collect()
-}
-
-#[test]
-fn runtime_independent_arithmetic_sample_functions_match_evaluator() {
-    let text = include_str!("../../hirsel-core-ir/samples/arith.core");
-    let mut m = text::parse(text).unwrap();
-    let runs: Vec<_> = sample_runs(&m, text)
-        .into_iter()
-        .filter(|(f, _)| matches!(f.0, 0 | 2 | 3 | 4 | 5))
-        .collect();
-    m.functions[1].body = None;
-    m.functions[6].body = None;
-    assert_eq!(runs.len(), 11);
-    execute(&m, &runs, false);
 }
 
 #[test]

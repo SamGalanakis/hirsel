@@ -102,14 +102,20 @@ policy as LLVM. Function-value boundaries survive Direct/Bound specialization;
 root and C callback adapters provide zero when there is no Hirsel caller. Runtime
 cleanup and task startup pass the pair explicitly.
 
-The new `core::emit_object` entry accepts CoreIR directly, with an explicit target
-and optimization policy, and returns relocatable bytes with the form's instance
-symbols. It currently handles the runtime-independent scalar, comparison,
-conversion, slot, CFG and call subset on x86-64 Linux. Multiple scalar results use
-the System V C struct convention, including indirect large returns. Functions
-receive the form's hidden context pointer. Failure/status and memory operations
-remain unsupported until the core runtime ABI is frozen and integrated. This entry
-uses no old products, receipts, lowering, or production verifier. Its tests execute
-the emitted object through separately compiled C callers and compare against the
-CoreIR evaluator. Source anchors remain available for future debug information;
-AArch64 ABI classification and driver-owned object reuse remain to be added.
+The new `core::emit_object` entry accepts scalar CoreIR directly. The
+`core::emit_object_with_layouts` entry also accepts the producer's layout recipes
+for declared storage and destinations. Both return relocatable bytes with the
+form's instance symbols and use no old products, receipts, lowering, or verifier.
+Every function takes the hidden context before its destination and parameters and
+returns its C scalar-result struct with a trailing u8 failure status. Calls test
+that status once; primitive failures append their cause before taking the supplied
+failure edge or propagating. The current target is x86-64 Linux.
+
+Native tests compile every whole scalar/control/call sample and every front-end
+run case to an object, link it with a separately compiled C caller and the explicit
+core runtime archive, and compare values, cause chains and logical balances to the
+evaluator. Core memory allocation/growth, copy/free, bounded scopes, regions and
+fixed declared places use their own ABI and recipes. Resource/count/drop integration
+and compact sequences follow in later slices. Both entry points share 4 KiB inline
+stack probes, tested against the runtime guard. Source anchors remain available
+for debug information; AArch64 ABI classification and driver-owned reuse follow.

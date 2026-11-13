@@ -1,8 +1,8 @@
 //! CoreIR emission, independent of the old LIR pipeline.
 //!
-//! This first entry implements the runtime-independent scalar subset. Operations
-//! needing the task's failure chain or storage runtime return `Unsupported` until
-//! the core runtime ABI is available. It never translates CoreIR into old LIR.
+//! Scalars, checked failure and explicit cleanup edges use the frozen CoreIR
+//! function ABI. Native memory calls use the separately declared core runtime C
+//! ABI. This entry never translates CoreIR into old LIR.
 
 use cranelift_codegen::ir::{self, AbiParam, InstBuilder, types};
 use cranelift_codegen::settings::{self, Configurable};

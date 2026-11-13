@@ -16,7 +16,6 @@ use hirsel_lir::emission::{
     EmitInputs, GlueInputs, Manifested, OptLevel, artifact, function_thunk_name, register_result,
     symbol_name,
 };
-use hirsel_lir::ir::UnitOrigin;
 use hirsel_lir::layout_types::{LayoutId, LayoutTable, ScalarKind, TargetSpec};
 use hirsel_lir::object::ObjectFile;
 use hirsel_lir::runtime_abi::{CName, CType, RuntimeEntry};

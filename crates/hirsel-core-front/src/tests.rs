@@ -2294,6 +2294,6 @@ fn rows_publish_the_closed_signature_carriage() {
 fn generic_order_reads_typed_locator_recipes() {
     let failures = run_case(&root().join("cases/body/ordered-stable.hirsel"));
     assert!(failures.is_empty(), "{failures:#?}");
-    let failures = run_case(&root().join("cases/body/ordered-compact-gap.hirsel"));
+    let failures = run_case(&root().join("cases/body/ordered-compact.hirsel"));
     assert!(failures.is_empty(), "{failures:#?}");
 }

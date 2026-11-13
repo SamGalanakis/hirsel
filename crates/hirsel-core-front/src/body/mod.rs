@@ -427,18 +427,6 @@ impl Emitter {
     fn rep(&mut self, p: &Program, t: &mut impl TyRead, ty: TyId) -> Result<Rep, &'static str> {
         crate::cost_scope!("phase", "layout/drop recipes");
         match t.kind(ty) {
-            // A compact value is its locator, a view of its bytes in a blob (MEM-5, MEM-9):
-            // held as a `Text` is, `{blob, offset}`.
-            TyKind::Adt(d, _)
-                if p.decls[d.index()].repr == crate::decls::Repr::Stable
-                    && p.decls[d.index()].compact.is_some() =>
-            {
-                let text = p
-                    .core_decl("Text")
-                    .ok_or("values of this type are not built")?;
-                let ty = t.mk(TyKind::Adt(text, vec![]));
-                return self.rep(p, t, ty);
-            }
             TyKind::Anchored(x, _) | TyKind::View(x) => {
                 let x = *x;
                 return self.rep(p, t, x);

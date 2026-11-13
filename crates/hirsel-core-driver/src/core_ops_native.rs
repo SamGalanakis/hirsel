@@ -690,9 +690,21 @@ fn region_recursive_instance_cranelift() { region_recursive_instance(Backend::Cr
 #[ignore = "explicit native integration target"]
 fn region_recursive_instance_llvm() { region_recursive_instance(Backend::Llvm); }
 fn ordered_stable(backend: Backend) {
+    ordered_case(backend, include_str!("../../../core/front/cases/body/ordered-stable.hirsel"));
+}
+/// FORM #65: compact values cross generic order and equality by their value row.
+fn ordered_compact(backend: Backend) {
+    ordered_case(backend, include_str!("../../../core/front/cases/body/ordered-compact.hirsel"));
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn ordered_compact_cranelift(){ordered_compact(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn ordered_compact_llvm(){ordered_compact(Backend::Llvm);}
+fn ordered_case(backend: Backend, source: &str) {
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir=tempfile::tempdir().unwrap();
-    let source=include_str!("../../../core/front/cases/body/ordered-stable.hirsel");
     let mut request=source_request(source,dir.path());
     request.inputs.packages[1]=PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
     let product=Driver::default().check(request,&mut Meter::new(false)).unwrap();

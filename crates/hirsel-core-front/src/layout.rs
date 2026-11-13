@@ -196,6 +196,12 @@ impl<T: TyRead> Shapes<'_, T> {
                 if decl.summary.cycle {
                     return None;
                 }
+                // A compact stable value is held like `Text`: its locator of the
+                // compact row (FORM #65), which every compact context names instead.
+                if decl.repr == Repr::Stable && decl.compact.is_some() {
+                    let at = FieldTy::Locator(Box::new(FieldTy::Inline(self.compact(ty)?)));
+                    return self.fill(r, LRepr::Own, record(vec![("at", at)]), None);
+                }
                 let repr = match decl.repr {
                     // Option and Result follow their arguments' kind (OWN-3): over a
                     // view they are scoped, and hold the view as a borrow.
@@ -211,33 +217,9 @@ impl<T: TyRead> Shapes<'_, T> {
                     Repr::Own => LRepr::Own,
                     Repr::Resource => LRepr::Resource,
                     Repr::Scoped => LRepr::Scoped,
-                    Repr::Stable => decl.compact.map_or(LRepr::Stable, LRepr::Compact),
+                    Repr::Stable => LRepr::Stable,
                 };
-                let map = |fs: &[crate::decls::FieldDecl], s: &mut Self| {
-                    let mut out = vec![];
-                    for f in fs {
-                        let fty = subst(s.types, f.ty, &args);
-                        out.push(Field {
-                            name: f.name.clone(),
-                            ty: s.field_in(fty, decl.compact.is_some())?,
-                        });
-                    }
-                    Some(out)
-                };
-                let body = match &decl.body {
-                    DeclBody::Record(fs) => Body::Record(map(fs, self)?),
-                    DeclBody::Variant(cs) => {
-                        let mut cases = vec![];
-                        for c in cs {
-                            cases.push(Case {
-                                name: c.name.clone(),
-                                fields: map(&c.fields, self)?,
-                            });
-                        }
-                        Body::Variant(cases)
-                    }
-                    DeclBody::Alias(_) => return None,
-                };
+                let body = self.body(decl, &args, false)?;
                 let finalizer = match decl.finalizer {
                     // A body module names the function row once the emitter has one.
                     Some(f) if self.module => {
@@ -253,6 +235,81 @@ impl<T: TyRead> Shapes<'_, T> {
             _ => return None,
         };
         self.fill(r, repr, body, finalizer)
+    }
+    /// The compact row of the compact stable type `ty` (FORM #65), named
+    /// `compact <canonical>`: its fields encoded in the blob (MEM-9).
+    fn compact(&mut self, ty: TyId) -> Option<TypeRef> {
+        let name = format!(
+            "compact {}",
+            crate::decls::canonical(self.decls, &*self.types, ty)
+        );
+        if let Some(&r) = self.of.get(&name) {
+            return Some(r);
+        }
+        let TyKind::Adt(d, args) = self.types.kind(ty).clone() else {
+            return None;
+        };
+        let decls = self.decls;
+        let decl = &decls[d.index()];
+        let r = TypeRef(self.shapes.len() as u32);
+        self.shapes.push(Shape {
+            name: name.clone(),
+            repr: LRepr::Compact(decl.compact?),
+            carried: Carried::Address,
+            body: Body::Record(vec![]),
+            finalizer: None,
+            grant: 0,
+        });
+        self.of.insert(name, r);
+        let body = self.body(decl, &args, true)?;
+        self.shapes[r.index()].body = body;
+        Some(r)
+    }
+    /// The row a compact context names for `ty`: a compact stable type's compact row.
+    fn compact_or_shape(&mut self, ty: TyId) -> Option<TypeRef> {
+        match *self.types.kind(ty) {
+            TyKind::Adt(d, _)
+                if self.decls[d.index()].repr == Repr::Stable
+                    && self.decls[d.index()].compact.is_some() =>
+            {
+                self.compact(ty)
+            }
+            TyKind::Anchored(x, _) | TyKind::View(x) => self.compact_or_shape(x),
+            _ => self.shape(ty),
+        }
+    }
+    /// A declaration's fields at `args`, each as a compact context when `compact`.
+    fn body(
+        &mut self,
+        decl: &crate::decls::TypeDecl,
+        args: &[TyId],
+        compact: bool,
+    ) -> Option<Body> {
+        let map = |fs: &[crate::decls::FieldDecl], s: &mut Self| {
+            let mut out = vec![];
+            for f in fs {
+                let fty = subst(s.types, f.ty, args);
+                out.push(Field {
+                    name: f.name.clone(),
+                    ty: s.field_in(fty, compact)?,
+                });
+            }
+            Some(out)
+        };
+        Some(match &decl.body {
+            DeclBody::Record(fs) => Body::Record(map(fs, self)?),
+            DeclBody::Variant(cs) => {
+                let mut cases = vec![];
+                for c in cs {
+                    cases.push(Case {
+                        name: c.name.clone(),
+                        fields: map(&c.fields, self)?,
+                    });
+                }
+                Body::Variant(cases)
+            }
+            DeclBody::Alias(_) => return None,
+        })
     }
     fn fill(
         &mut self,
@@ -335,7 +392,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 Some(Role::SeqIndex) => FieldTy::Locator(Box::new(FieldTy::SeqSpan(Box::new(
                     self.field_in(args[0], true)?,
                 )))),
-                Some(Role::Link) if compact => FieldTy::Link(self.shape(args[0])?),
+                Some(Role::Link) if compact => FieldTy::Link(self.compact_or_shape(args[0])?),
                 // A view field is the viewed type's own bytes, cleaned by nobody (FORM #56).
                 Some(Role::View) => view_field(self.field_in(args[0], compact)?),
                 Some(Role::Dest | Role::Writer) => FieldTy::Borrow,
@@ -350,7 +407,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 {
                     if let TyKind::Adt(link, payload) = self.types.kind(args[0]).clone() {
                         if self.decls[link.index()].role == Some(Role::Link) {
-                            FieldTy::OptLink(self.shape(payload[0])?)
+                            FieldTy::OptLink(self.compact_or_shape(payload[0])?)
                         } else {
                             FieldTy::Inline(self.shape(ty)?)
                         }
@@ -358,12 +415,18 @@ impl<T: TyRead> Shapes<'_, T> {
                         FieldTy::Inline(self.shape(ty)?)
                     }
                 }
-                None if !compact && self.decls[d.index()].repr == Repr::Stable => {
-                    if self.decls[d.index()].compact.is_some() {
-                        FieldTy::Locator(Box::new(FieldTy::Inline(self.shape(ty)?)))
+                None if self.decls[d.index()].repr == Repr::Stable
+                    && self.decls[d.index()].compact.is_some() =>
+                {
+                    let k = FieldTy::Inline(self.compact(ty)?);
+                    if compact {
+                        k
                     } else {
-                        FieldTy::Stable(self.shape(ty)?)
+                        FieldTy::Locator(Box::new(k))
                     }
+                }
+                None if !compact && self.decls[d.index()].repr == Repr::Stable => {
+                    FieldTy::Stable(self.shape(ty)?)
                 }
                 None => FieldTy::Inline(self.shape(ty)?),
             },
@@ -476,7 +539,13 @@ pub(crate) fn recipes(p: &mut Program) {
         }
         let ty = s.types.intern(TyKind::Adt(crate::DeclId(d as u32), vec![]));
         let mark = s.shapes.len();
-        match s.shape(ty) {
+        // A compact declaration's recipe is its compact row's (FORM #65).
+        let row = if decl.repr == Repr::Stable && decl.compact.is_some() {
+            s.shape(ty).and_then(|_| s.compact(ty))
+        } else {
+            s.shape(ty)
+        };
+        match row {
             Some(r) => roots.push((d, r)),
             None => s.truncate(mark),
         }
@@ -495,7 +564,10 @@ pub(crate) fn recipes(p: &mut Program) {
                 LayoutError::Empty { ty } => (ty, None, "compact encoding has zero size"),
                 LayoutError::Carried { ty } => (ty, None, "row carried unlike its body"),
             };
-            let declaration = s.decls.iter().find(|d| d.path.to_string() == *name);
+            let declaration = s.decls.iter().find(|d| {
+                let path = d.path.to_string();
+                path == *name || format!("compact {path}") == *name
+            });
             if let Some(decl) = declaration {
                 let site = field
                     .and_then(|name| decl.all_fields().find(|f| f.name == name))

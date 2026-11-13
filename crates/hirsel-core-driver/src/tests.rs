@@ -1076,3 +1076,70 @@ fn closure_instances_include_calls_inside_the_generated_body() {
         ["leaf", "root"]
     );
 }
+
+#[test]
+fn scalar_constants_survive_installed_images_and_invalidate_body_reuse() {
+    let lib = tempfile::tempdir().unwrap();
+    let (_, image) = Driver::default()
+        .produce_image(
+            library_request(
+                "pub const ANSWER: u64 = BASE + 2\nconst BASE: u64 = 40\n",
+                lib.path(),
+            ),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    assert!(image.is_some());
+    let image = CoreImage::open(&lib.path().join("store")).unwrap().unwrap();
+    std::fs::remove_file(lib.path().join("main.hirsel")).unwrap();
+    let app = tempfile::tempdir().unwrap();
+    let mut req = request("fn answer() -> u64 { lib.ANSWER }\n", app.path());
+    req.library = LibraryInput::Image(image);
+    let product = Driver::default()
+        .check(req, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let body = product.definitions.values().next().unwrap();
+    assert_eq!(
+        eval::run(&body.ir, body.check.function.unwrap(), &[], 1000).outcome,
+        eval::Outcome::Returned(vec![42])
+    );
+
+    let local = tempfile::tempdir().unwrap();
+    let before = "const N: u8 = 7\nfn answer() -> u8 { N }\n";
+    Driver::default()
+        .check(request(before, local.path()), &mut Meter::new(false))
+        .unwrap();
+    let after = Driver::default()
+        .check(
+            request(&before.replace("= 7", "= 9"), local.path()),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    assert_eq!(names(&after), ["answer"]);
+    let body = after.definitions.values().next().unwrap();
+    assert_eq!(
+        eval::run(&body.ir, body.check.function.unwrap(), &[], 1000).outcome,
+        eval::Outcome::Returned(vec![9])
+    );
+}
+
+#[test]
+fn unused_failed_constants_block_entry_build_acceptance_after_disk_reuse() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "const OVERFLOW: u8 = 200 + 100\nfn answer() -> u8 { 42 }\n";
+    let root = DefPath::from_full("app@1/main/answer").unwrap();
+    for _ in 0..2 {
+        let product = Driver::default()
+            .check(request(source, dir.path()), &mut Meter::new(false))
+            .unwrap();
+        let reached = product.reachable(&root, 16).unwrap();
+        assert!(!reached.accepted());
+        assert!(reached.diagnostics.iter().any(|d| d.rule == "LANG-20"));
+    }
+}

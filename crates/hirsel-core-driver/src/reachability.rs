@@ -62,6 +62,22 @@ impl CheckProduct {
         let mut unavailable = BTreeSet::new();
         let mut declarations = BTreeSet::new();
         let mut pending = BTreeSet::from([(entry.clone(), true)]);
+        // LANG-20 evaluates every source constant before a body, including unused
+        // ones. Installed constants already carry their published value.
+        for (id, definition) in self.index.definitions.iter().enumerate() {
+            if definition.kind == hirsel_core_resolve::DefinitionKind::Constant {
+                let path = self
+                    .index
+                    .definition_path(hirsel_core_resolve::DefinitionId(id as u32));
+                if !self
+                    .image
+                    .as_ref()
+                    .is_some_and(|i| i.directory.headers.contains_key(&path))
+                {
+                    pending.insert((path, false));
+                }
+            }
+        }
         while let Some((path, body)) = pending.pop_first() {
             if body {
                 if !bodies.insert(path.clone()) {

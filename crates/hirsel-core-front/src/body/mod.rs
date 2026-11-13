@@ -54,6 +54,7 @@ use templates::{CopySize, GenericCall, NameRecipe};
 pub use templates::{GenericTemplate, materialize};
 mod values;
 use types::*;
+pub(crate) use types::{float_bits, float_suffix, int_magnitude, int_suffix};
 
 /// Work one body check did, for the cost measurements (core/MEASURE.md).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

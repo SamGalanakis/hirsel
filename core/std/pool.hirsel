@@ -128,8 +128,8 @@ pub fn contains[T](p: Pool[T], h: Id[T]) -> bool {
 pub fn update[T, R](mut p: Pool[T], h: Id[T], f: scoped fn(mut T) -> R) -> Result[R, Stale] {
     check(p, h)?
     // An occupied slot's generation is below NONE (a slot retires on reaching it).
-    let placeholder = Vacant(h.generation + 1, NONE)
-    let slot = list.set(mut p.slots, h.index, placeholder)
+    let placeholder: Slot[T] = Vacant(h.generation + 1, NONE)
+    let slot = list.set(mut p.slots, h.index, take placeholder)
     let mut value = match slot {
         Occupied(_, take v) => take v,
         Vacant(_, _) => fail("pool.update: a checked slot was vacant"),

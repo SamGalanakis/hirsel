@@ -535,6 +535,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.halt();
                 (ERROR, None)
             }
+            &Target::Definition(id) if self.p.constant_ids[id.0 as usize].is_some() => {
+                let constant = self.p.constant_ids[id.0 as usize].unwrap();
+                let Some(value) = self.p.constants[constant as usize].value else {
+                    self.halt();
+                    return (ERROR, None);
+                };
+                if !u.projections.is_empty() {
+                    return self.gap_ty(n, "constant field projections are not built");
+                }
+                match value.data {
+                    crate::ConstData::Bits(bits) => {
+                        let ty = self.ir_ty(value.ty);
+                        (value.ty, ty.and_then(|ty| self.konst(ty, bits, n)))
+                    }
+                    crate::ConstData::Unit => (UNIT, None),
+                    _ => self.gap_ty(n, "aggregate constants are not built"),
+                }
+            }
             &Target::ContextualConstructor { name } => self.construct_variant(n, name, &[], want),
             &Target::Definition(id) if u.projections.is_empty() => {
                 match self.p.by_definition[id.0 as usize] {

@@ -1,0 +1,6 @@
+// A processed dependency before the cyclic one cannot conceal the cycle.
+// expect: refuse LANG-20 at 5:15
+const GOOD: u8 = 1
+const READER: u8 = GOOD + A
+const A: u8 = B
+const B: u8 = A

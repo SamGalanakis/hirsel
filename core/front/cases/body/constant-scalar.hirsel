@@ -1,0 +1,7 @@
+// Constants are checked even when unused, in dependency order before bodies.
+// expect: accept
+// expect: run answer() = 42
+const BYTES: u64 = WORDS * 8
+const WORDS: u64 = 5
+const TWO: u64 = 2
+fn answer() -> u64 { BYTES + TWO }

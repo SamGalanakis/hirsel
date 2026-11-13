@@ -11,6 +11,8 @@
 hirsel_guard::install!();
 
 mod body;
+mod constants;
+pub use constants::{ConstData, ConstValue, Constant};
 mod decls;
 mod layout;
 mod library;
@@ -80,6 +82,9 @@ pub struct Program<'a> {
     pub types: Types,
     pub decls: Rows<TypeDecl>,
     pub fns: Rows<FnDecl>,
+    pub constants: Rows<Constant>,
+    pub constant_parts: Rows<ConstValue>,
+    pub(crate) constant_ids: Vec<Option<u32>>,
     pub by_path: HashMap<DefPath, Def>,
     pub by_definition: Vec<Option<Def>>,
     /// Refusals of declarations and signatures, and the resolver's.
@@ -171,6 +176,17 @@ impl<'a> Program<'a> {
             fns: library.map_or_else(Rows::default, |l| {
                 Rows::overlay(std::sync::Arc::clone(&l.fns))
             }),
+            constants: library.map_or_else(Rows::default, |l| {
+                Rows::overlay(std::sync::Arc::clone(&l.constants))
+            }),
+            constant_parts: library.map_or_else(Rows::default, |l| {
+                Rows::overlay(std::sync::Arc::clone(&l.constant_parts))
+            }),
+            constant_ids: {
+                let mut ids = library.map_or_else(Vec::new, |l| l.constant_ids.to_vec());
+                ids.resize(index.definitions.len(), None);
+                ids
+            },
             by_path: library.map_or_else(HashMap::new, |l| {
                 l.paths.iter().map(|(p, d)| (p.clone(), *d)).collect()
             }),
@@ -189,7 +205,9 @@ impl<'a> Program<'a> {
         };
         p.register();
         p.lower_headers();
+        p.register_constants();
         p.summarize();
+        p.evaluate_constants();
         p
     }
 

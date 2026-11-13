@@ -316,7 +316,7 @@ pub(super) fn numeric(s: Scalar) -> bool {
 }
 
 /// An integer token's digits (with prefix) and its suffix (LANG-3).
-pub(super) fn int_suffix(text: &str) -> (&str, Option<Scalar>) {
+pub(crate) fn int_suffix(text: &str) -> (&str, Option<Scalar>) {
     for s in [
         Scalar::U8,
         Scalar::U16,
@@ -333,7 +333,7 @@ pub(super) fn int_suffix(text: &str) -> (&str, Option<Scalar>) {
     }
     (text, None)
 }
-pub(super) fn float_suffix(text: &str) -> (&str, Option<Scalar>) {
+pub(crate) fn float_suffix(text: &str) -> (&str, Option<Scalar>) {
     for s in [Scalar::F32, Scalar::F64] {
         if let Some(d) = text.strip_suffix(s.name()) {
             return (d, Some(s));
@@ -342,17 +342,24 @@ pub(super) fn float_suffix(text: &str) -> (&str, Option<Scalar>) {
     (text, None)
 }
 /// The magnitude an integer token's digits spell, or None past u128.
-pub(super) fn int_magnitude(digits: &str) -> Option<u128> {
-    let d: String = digits.chars().filter(|&c| c != '_').collect();
-    let (radix, body) = match d.get(..2) {
-        Some("0x") => (16, &d[2..]),
-        Some("0o") => (8, &d[2..]),
-        Some("0b") => (2, &d[2..]),
-        _ => (10, &d[..]),
+pub(crate) fn int_magnitude(digits: &str) -> Option<u128> {
+    let (radix, digits) = match digits.get(..2) {
+        Some("0x") => (16, &digits[2..]),
+        Some("0o") => (8, &digits[2..]),
+        Some("0b") => (2, &digits[2..]),
+        _ => (10, digits),
     };
-    u128::from_str_radix(body, radix).ok()
+    let mut value = 0u128;
+    let mut any = false;
+    for digit in digits.chars().filter(|&c| c != '_') {
+        value = value
+            .checked_mul(radix as u128)?
+            .checked_add(digit.to_digit(radix)? as u128)?;
+        any = true;
+    }
+    any.then_some(value)
 }
-pub(super) fn float_bits(s: Scalar, x: f64) -> u64 {
+pub(crate) fn float_bits(s: Scalar, x: f64) -> u64 {
     match s {
         Scalar::F32 => u64::from((x as f32).to_bits()),
         _ => x.to_bits(),

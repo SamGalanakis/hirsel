@@ -21,6 +21,21 @@ class ProcessCeiling(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'does not cover'):
             check(metrics, 1000, ceiling, 9999)
 
+    def test_finished_budget_is_independent_of_current_work_ceiling(self):
+        forecast = GUARD['finished_forecast']
+        projection = {'missing_check_lower_per_line': 1000,
+                      'additional_publication_per_line': 500}
+        value, failures = forecast(58_500_000, 1000, projection, 60000)
+        self.assertEqual(value, 60000)
+        self.assertEqual(failures, [])
+        # One instruction of additional startup work must reach the forecast too.
+        _, failures = forecast(58_500_001, 1000, projection, 60000)
+        self.assertEqual(len(failures), 1)
+        self.assertIn('budget 60000', failures[0])
+        projection['additional_publication_per_line'] = -1
+        with self.assertRaisesRegex(ValueError, 'negative missing work'):
+            forecast(1, 1000, projection, 60000)
+
     def test_process_counter_requires_one_complete_event(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'perf.txt'

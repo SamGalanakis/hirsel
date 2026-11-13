@@ -47,9 +47,23 @@ changed inlining remain diagnostic overhead. Use the ordinary driver for savings
 Omit `--profile` to export CoreIR, outcomes and definition keys for comparison.
 The feature and all scopes are absent from production compiler units.
 
-Each cost-saving land lowers both recorded ceilings to its ordinary-driver sample
-plus 2%, rounded up to 100 instructions per line. The finished-checker forecast for
-this lane must stay under 50,000 on both corpora; a cheap incomplete check is not
-that proof. Relevant compiler/source lands run the guard and retain its observations
-in their land log. A failed guard remains a failed test; under host-rules, budget
-or counter findings are reported without blocking the otherwise qualified push.
+Each cost-saving land lowers the observed-work ceilings to its ordinary-driver
+sample plus 2%, rounded up to 100 instructions per line. When newly supported
+constructs complete more bodies, re-baseline any expected overrun with the
+before/after completed-body counts, reason and commit range recorded in
+`cost-ceilings.json`. Every lane must explain a red guard in its land message:
+new bodies checked, with the count, or a regression to fix. A permanently red
+baseline is not useful regression coverage.
+
+The fixed language budget is a separate 60,000 instructions per line for the
+finished whole process. The guard prints and checks a completion forecast using
+its current process counter plus recorded missing checker/emission and publication
+terms. Refresh these terms when support changes: project live construct self
+costs over the written source population, calibrate to ordinary checker counters,
+and charge completed IR/template bytes per completed definition line for all
+unfinished lines at measured encode/write rates. The ceiling file records the
+profile revision and completed-body counts. The 50,000 forecast goal of the cost
+lane leaves 10,000 headroom below the fixed budget; it does not replace that budget.
+Relevant compiler/source lands run the guard and retain both observations and
+forecast in their land log. Host-rules permit budget reds to land, but the owning
+lane must explain each red or repair the regression.

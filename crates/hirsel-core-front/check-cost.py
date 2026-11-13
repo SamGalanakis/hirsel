@@ -45,6 +45,22 @@ def check_ceiling(metrics, lines, ceiling, process):
     return lower / lines, total / lines, failures
 
 
+
+def finished_forecast(process, lines, projection, budget):
+    # Keep the fixed language budget independent of the current-work ceilings.
+    # The missing-work terms come from the recorded construct/payload profile;
+    # startup and all current work always use this invocation's process counter.
+    body = projection['missing_check_lower_per_line']
+    publication = projection['additional_publication_per_line']
+    if body < 0 or publication < 0:
+        raise ValueError('completion forecast has negative missing work')
+    forecast = process / lines + body + publication
+    failures = []
+    if forecast > budget:
+        failures.append(f'finished whole process forecast: {forecast:.2f} instructions/line exceeds budget {budget}')
+    return forecast, failures
+
+
 def run(compiler, output, ceilings):
     manifest = json.loads((ROOT / 'core/programs/m1/manifest.json').read_text())
     manifest.pop('entries', None)
@@ -80,9 +96,16 @@ def run(compiler, output, ceilings):
         process = process_instructions(directory / 'process-perf.txt')
         lower, total, errors = check_ceiling(metrics, lines, ceilings['corpora'][name], process)
         print(f'{name}: {lines} code lines; check/lower {lower:.2f}; driver request {total:.2f}; whole process {process / lines:.2f} instructions/line')
-        failures.extend(f'{name}: {e}' for e in errors)
+        projection = ceilings['completion_forecast'][name]
+        forecast, budget_errors = finished_forecast(
+            process, lines, projection, ceilings['finished_budget_per_line'])
+        print(f"{name}: finished whole process forecast {forecast:.2f}; "
+              f"budget {ceilings['finished_budget_per_line']} instructions/line; "
+              f"recorded completion {projection['complete_bodies']}/{projection['bodies']} bodies "
+              f"at {ceilings['forecast_revision']}")
+        failures.extend(f'{name}: {e}' for e in errors + budget_errors)
     if failures:
-        raise ValueError('\n'.join(failures))
+        raise ValueError('\n'.join(failures) + '\n' + ceilings['regression_policy'])
 
 
 def main():

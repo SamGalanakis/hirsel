@@ -188,6 +188,7 @@ pub(crate) struct Resource {
     grant: Option<Funding>,
     previous: Option<Funding>,
     previous_resource: *mut Resource,
+    previous_grant_depth: usize,
 }
 
 /// Admit the complete container before moving fields into it.
@@ -208,6 +209,7 @@ pub unsafe fn resource_new(
         grant: Some(payer.prepaid(grant)),
         previous: None,
         previous_resource: ptr::null_mut(),
+        previous_grant_depth: usize::MAX,
     });
     // SAFETY: fresh resource storage receives its single prepaid metadata record.
     unsafe {
@@ -223,6 +225,8 @@ pub unsafe fn finalizer_begin(context: &mut Context, pointer: std::ptr::NonNull<
     // SAFETY: the emitter supplies the live resource's uniquely owned metadata.
     let resource = unsafe { &mut *block::resource(pointer) };
     resource.previous_resource = context.active_resource;
+    resource.previous_grant_depth = context.grant_depth;
+    context.grant_depth = context.stack.len();
     resource.previous = Some(std::mem::replace(
         &mut context.current,
         resource.grant.take().unwrap(),
@@ -241,6 +245,7 @@ pub unsafe fn finalizer_end(context: &mut Context, pointer: std::ptr::NonNull<u8
     context.current.end();
     context.current = resource.previous.take().unwrap();
     context.active_resource = resource.previous_resource;
+    context.grant_depth = resource.previous_grant_depth;
     context.finalizing -= 1;
 }
 

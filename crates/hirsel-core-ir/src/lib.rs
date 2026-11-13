@@ -53,6 +53,9 @@
 //!   its signature row, a cancellation point when it `waits` (so it can fail),
 //!   admitting nothing. `HostFile` is a handle (`hostfile`) of a mechanical
 //!   resource: no cause cell, cleaned by closing it and ignoring the outcome.
+//! - Cleanup of `List`, `String` and `Map` storage, the `Map` entry slot, and the
+//!   step order a counted release resumes by, dynamic sequences and maps
+//!   included, are stated in `hirsel-core-layout` (`DropRecipe`, `map_entry`).
 //!
 //! Brands, `SlotOwner` and `uses` lists are not in FORM v1 at all: a pool handle
 //! is plain data checked at run time.
@@ -100,6 +103,25 @@
 //!   `copy`. An unmarked `T` parameter also takes a `View[T]` (OWN-7): the
 //!   producer passes the locator.
 //!
+//! # Capabilities and the entry (FORM v1b)
+//!
+//! A capability value (`Dir`, `Net`, `Clock`, `Random`, `Stdout`, `Stderr`,
+//! `Stdin`, `Env`, `Process`, `Tasks`) and `Args` is a `u64` provider handle
+//! (field type `cap`, logically 8). It is plain (CAP-2): copying it copies the
+//! handle, and nothing in the program cleans it. The provider makes every handle
+//! (entry grants, attenuation) and keeps what it designates in host memory,
+//! outside every limit, until the run ends; provider operations take the handle.
+//! `Args` designates the run's argument table, read by its runtime operations.
+//!
+//! `main`'s row is the context, its result destination, then one `u64` per
+//! parameter in declaration order. The process entry passes the configuration's
+//! `grants[i]` for parameter `i` (`Args` included); the driver maps each parameter
+//! type to the configuration's grant and refuses a run whose configuration does
+//! not grant one before calling `hirsel_core_run` (CAP-4). After `main` returns and
+//! its cleanup is done, the run ends its grants: the provider closes what they
+//! designate. That is not program cleanup: it admits nothing, runs no finalizer
+//! and cannot fail, and no copy of a handle is live by then.
+//!
 //! # Failure (FORM v1a)
 //!
 //! An instruction that can fail ([`Inst::can_fail`]) may name a failure successor:
@@ -125,7 +147,11 @@
 //! current; `limit_exit` returns its unused part and forwards its record to the
 //! parent, so blocks made inside stay charged (MEM-25). `alloc .. like v` admits
 //! against the limit `v` was charged to (MEM-26), except inside a finalizer, where
-//! the grant takes precedence. A resource value is a pointer to its block, charged
+//! it admits from the current limit (MEM-27): the grant, or a bound scope entered
+//! within the finalizer, which is then current (MEM-19). A refusal is the failure
+//! `Capacity` only when the refusing limit is the grant itself; a bound scope's
+//! refusal, inside a finalizer too, is a value (MEM-25), and `limit_enter`'s always
+//! is. A resource value is a pointer to its block, charged
 //! storage + cause cell + grant; its finalizer runs under a limit of its grant,
 //! whose used part is handed over at the end. A whole destructure moves the fields
 //! out with `copy` and `free`s the block, refunding that complete charge (MEM-23). A counted node is a u64 count at

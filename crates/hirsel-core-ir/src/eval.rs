@@ -1066,8 +1066,9 @@ impl Machine<'_> {
             } => {
                 let top = *t.limits.last().unwrap();
                 let l = match place {
-                    // N03: inside a finalizer the grant takes precedence.
-                    AllocPlace::Like(_) if self.limits[top].grant => top,
+                    // N03, MEM-27: inside a finalizer growth admits from the current
+                    // limit, the grant or a bound scope entered within it (MEM-25).
+                    AllocPlace::Like(_) if t.limits.iter().any(|&l| self.limits[l].grant) => top,
                     AllocPlace::Like(v) => {
                         let (blk, _) = split(vals[v.index()]);
                         self.find(self.mem[blk].limit.expect("a charged block"))

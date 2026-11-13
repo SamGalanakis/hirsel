@@ -21,8 +21,8 @@ mod shape;
 
 pub use recipe::{
     CField, CLOSURE_CARRIER, Compact, CompactSet, DropRecipe, FieldDrop, Fixed, Layout,
-    LayoutError, POINTER, Pos, Recipe, SEQ_CARRIER, Size, Tag, compact_extent, compact_starts,
-    compute, field_size, tag_width,
+    LayoutError, MapEntry, POINTER, Pos, Recipe, SEQ_CARRIER, Size, Tag, compact_extent,
+    compact_starts, compute, field_size, map_entry, tag_width,
 };
 pub use shape::{Body, Case, Field, FieldTy, FuncRef, Handle, Repr, Scalar, Shape, TypeRef, Width};
 

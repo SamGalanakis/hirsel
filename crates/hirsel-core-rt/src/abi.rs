@@ -1,9 +1,12 @@
 //! Native memory ABI, FORM v1. Every symbol and failure convention lives here.
 //!
 //! `alloc` and `limit_enter` return null plus Capacity on refusal; on success
-//! `capacity` is zero. Allocation inside a finalizer must branch to the emitter's
-//! Capacity failure path on null. `free`, limit exit and mechanical release never
-//! fail. `alloc like` follows the original payer except within finalizers.
+//! `capacity` is zero. An allocation refused while a finalizer's grant is the
+//! current limit branches to the emitter's Capacity failure path
+//! (`allocation_status`); one refused by a bound scope entered inside the
+//! finalizer is a value. `free`, limit exit and mechanical release never fail.
+//! `alloc like` follows the original payer except within finalizers, where it
+//! admits from the current limit.
 //!
 //! `region_alloc`, `resource_alloc` and `task_start` use the same Allocation
 //! convention. Success pointers from `limit_enter` and `task_start` equal the
@@ -408,7 +411,8 @@ pub unsafe extern "C" fn hirsel_core_limit_exit(context: *mut Context) {
     unsafe { &mut *context }.limit_exit();
 }
 
-/// FORM allocation refusal becomes failure only under a finalizer's grant.
+/// FORM allocation refusal becomes failure only when a finalizer's grant is the
+/// current limit, not a bound scope entered inside the finalizer.
 /// # Safety
 /// Context is live and exclusively held by its task.
 #[unsafe(no_mangle)]
@@ -417,7 +421,8 @@ pub unsafe extern "C" fn hirsel_core_allocation_status(
     pointer: *mut u8,
 ) -> u8 {
     // SAFETY: the emitter passes its live hidden task context.
-    u8::from(pointer.is_null() && unsafe { &*context }.finalizing != 0)
+    let context = unsafe { &*context };
+    u8::from(pointer.is_null() && context.grant_depth == context.stack.len())
 }
 
 /// Free a wholly destructured own value or resource.

@@ -7,6 +7,11 @@
 ;       fn grow(x: u64) -> (u64, u64)              ; an owner made outside a bound grows inside
 ;       resource Big { k: u64 } grant 32 drop { Box.new(self.k bytes) }
 ;       fn finish(k: u64) { let b = Big { k } }
+;       resource Fin { k: u64 } grant 32 drop {
+;         let r = bound bytes 16 { Box.new(self.k bytes) };   // growth `like` self, in effect
+;         if r is Error(_) { fail Bounds }                        // marks a refusal seen as a value
+;       }
+;       fn finish_fin(k: u64) { let b = Fin { k } }
 ;
 ; A refused allocation is an error value, never a failure (FAIL-2): `alloc` yields a
 ; null pointer and the room left in the limit it tried (MEM-22 `available`); a
@@ -31,9 +36,15 @@
 ; run limit 100: f2(7) -> 7, 0 | used 0               ; 32 > the bound's 16: admitted by the root
 ; run: f3(16) -> | used 0                             ; the finalizer's 16 fits its 32
 ; run: f3(48) -> fail Capacity | used 32              ; 48 > 32 although the root has room
+; A bound scope entered inside a finalizer is the current limit there (MEM-19): growth
+; admits from it, not from the owner's limit (MEM-27), and its refusal is a value
+; (MEM-25), not the grant's Capacity failure.
+; run: f5(16) -> | used 0                             ; 16 fits the bound's 16
+; run: f5(24) -> fail Bounds | used 32                ; the bound refuses 24 as a value
 core v1
 item i0 = samples@0/admission/bound
 type t0 = resource "Big" drop f4 grant 32 { k: u64 }
+type t1 = resource "Fin" drop f6 grant 32 { k: u64 }
 sig g0 = (u64) -> (bool, u64)
 sig g1 = (u64, u64) -> (bool, u64, u64)
 sig g2 = (u64) -> (u64, u64)
@@ -44,6 +55,8 @@ inst n1 = samples@0/admission/bound [] []
 inst n2 = samples@0/admission/grow [] []
 inst n3 = samples@0/admission/finish [] []
 inst n4 = samples@0/admission/Big.drop [] []
+inst n5 = samples@0/admission/finish_fin [] []
+inst n6 = samples@0/admission/Fin.drop [] []
 fn f0 = n0 g0 {
 b0(v0: u64):
   v8: u64 = const 8
@@ -143,4 +156,49 @@ b0(v0: ptr):
   v2: ptr, v3: u64 = alloc own v4 align 8 charge v1 like v0
   free v2 charge v1
   return
+}
+fn f5 = n5 g3 {
+  slot s0 = t1
+  addr a0 = v2 : t1
+  addr a1 = a0 field 0 : u64
+  addr a2 = s0 : ptr
+  addr a3 = s0 : t1
+b0(v0: u64):
+  live s0
+  address a2
+  address a3
+  v1: u64 = const 72
+  v4: u64 = const 8
+  v2: ptr, v3: u64 = alloc resource grant 32 v4 align 8 charge v1
+  address a0
+  address a1
+  store a1, v0
+  store a2, v2
+  drop a3 t1 fail b1
+  dead s0
+  return
+b1:
+  propagate
+}
+fn f6 = n6 g4 {
+  addr a0 = v0 : t1
+  addr a1 = a0 field 0 : u64
+b0(v0: ptr):
+  address a0
+  address a1
+  v1: u64 = read a1
+  v2: u64 = const 16
+  v3: bool, v4: u64 = limit_enter v2
+  v5: u64 = const 8
+  v6: ptr, v7: u64 = alloc own v5 align 8 charge v1 like v0
+  v8: ptr = const 0x0
+  v9: bool = ne v6, v8
+  branch v9, b1, b2
+b1:
+  free v6 charge v1
+  limit_exit
+  return
+b2:
+  limit_exit
+  raise bounds
 }

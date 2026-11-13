@@ -124,8 +124,23 @@ pub struct FieldDrop {
 /// then the block is freed and refunded. A `List` (`Seq`) and an inline array
 /// (`FieldTy::Array`, at the stride `field_size` gives) clean their completed
 /// elements from index 0 up (SEM-9, core.md); a `Map` cleans entry by entry in
-/// insertion order, each key before its value. Those loops are in the glue built
-/// from this recipe.
+/// insertion order, each key before its value ([`map_entry`]). Those loops are in
+/// the glue built from this recipe. A `Seq` or `Map` with storage then frees it,
+/// refunding round8(capacity × element logical size), resp. round8(capacity ×
+/// (key + value + 16)) (MEM-24), to its own record; capacity 0 has no storage.
+///
+/// **Counted cleanup** visits the same order, one step at a time, so a release
+/// yields one descendant at a time and resumes by a cursor of steps taken. Steps,
+/// counted over the visit order: a `Box`, `Rc` or `Arc` field is one step (it
+/// yields its node); a record or `Inline` is its fields' steps in order; a variant
+/// is its active case's; an inline array of n is n times its element's. A `Seq`
+/// or `Map` whose element (key and value) takes c steps is `slots × c + 1` steps,
+/// slot i's steps at `i × c` within it and the last step freeing the storage;
+/// `slots` is its length, read from the carrier, which cleanup does not change
+/// until that last step; a `Seq` of plain elements, `String` included, is so one
+/// step. Any other field that needs cleanup (a `Causes`, an `own fn`, a handle)
+/// is cleaned whole as one step. So a cursor names the same point whichever
+/// engine built the glue.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DropRecipe {
     pub finalizer: Option<FuncRef>,
@@ -395,6 +410,38 @@ fn array_element(shapes: &[Shape], ty: &FieldTy) -> bool {
             false
         }
         _ => true,
+    }
+}
+
+/// One `Map[K, V]` entry slot. The carrier is {entries, slots, capacity} (u64
+/// each): `slots` entries were inserted since the storage was made, in insertion
+/// order, at `entries + i × stride`. An entry is a u64 hash at 0, a u64 state at 8
+/// (1 live, 0 removed: `map.remove` cleans nothing there later and keeps the
+/// order of the rest, SEM-5), then the key and the value at their natural
+/// alignment. Growth copies the live entries in order, so `slots` restarts at the
+/// live count. The live count and the lookup index follow the `capacity` entries
+/// in the same block, private to the map operations; cleanup reads only entries
+/// and charges never count them (MEM-24: an entry is charged key + value + 16).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MapEntry {
+    pub stride: u64,
+    pub align: u64,
+    pub key: u64,
+    pub value: u64,
+}
+
+pub fn map_entry(shapes: &[Shape], recipes: &[Recipe], k: &FieldTy, v: &FieldTy) -> MapEntry {
+    let up = |n: u64, a: u64| n.div_ceil(a) * a;
+    let (ks, ka, _) = field_size(shapes, recipes, k);
+    let (vs, va, _) = field_size(shapes, recipes, v);
+    let key = up(16, ka);
+    let value = up(key + ks, va);
+    let align = 8.max(ka).max(va);
+    MapEntry {
+        stride: up(value + vs, align),
+        align,
+        key,
+        value,
     }
 }
 

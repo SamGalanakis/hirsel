@@ -30,8 +30,12 @@ pub struct Capacity {
 pub struct Context {
     pub(crate) cancel_requested: bool,
     pub(crate) current: Funding,
-    stack: Vec<Funding>,
+    pub(crate) stack: Vec<Funding>,
     pub(crate) finalizing: usize,
+    /// The bound depth at which the running finalizer's grant is current, or MAX.
+    /// A refusal is a failure only while the grant itself is current (MEM-27): a
+    /// bound scope entered inside a finalizer refuses with a value (MEM-25).
+    pub(crate) grant_depth: usize,
     pub(crate) primary: Option<Box<causes::Cell>>,
     pub(crate) causes: causes::Causes,
     pub(crate) task_record: Option<block::Block>,
@@ -46,6 +50,7 @@ impl Context {
             current: Funding::root(bytes),
             stack: Vec::new(),
             finalizing: 0,
+            grant_depth: usize::MAX,
             primary: None,
             causes: causes::Causes::default(),
             task_record: None,

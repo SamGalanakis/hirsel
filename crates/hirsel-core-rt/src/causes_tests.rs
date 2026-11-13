@@ -433,3 +433,27 @@ fn causes_and_resources_c_abi_preserve_complete_chain_and_container_refunds() {
         assert_eq!(payer.available(), 1024);
     }
 }
+
+/// Bug: a refusal by a bound scope entered inside a finalizer is taken for the grant's
+/// Capacity failure, though the bound is the current limit and refuses with a value
+/// (MEM-19, MEM-25); only the grant itself refuses with a failure (MEM-27).
+#[test]
+fn inside_a_finalizer_only_the_grant_refuses_with_failure() {
+    use crate::abi::{hirsel_core_alloc, hirsel_core_allocation_status};
+    let mut ctx = Context::new(4096);
+    // SAFETY: one resource, finalized and freed once; every allocation is refused.
+    unsafe {
+        let p = causes::resource_new(&ctx, 8, 32, 8, 8).unwrap();
+        causes::finalizer_begin(&mut ctx, p);
+        ctx.limit_enter(16).unwrap();
+        let a = hirsel_core_alloc(&ctx, ptr::null_mut(), 8, 8, 24, false);
+        assert!(a.pointer.is_null());
+        assert_eq!(hirsel_core_allocation_status(&ctx, a.pointer), 0);
+        ctx.limit_exit();
+        let b = hirsel_core_alloc(&ctx, ptr::null_mut(), 8, 8, 48, false);
+        assert!(b.pointer.is_null());
+        assert_eq!(hirsel_core_allocation_status(&ctx, b.pointer), 1);
+        causes::finalizer_end(&mut ctx, p);
+        causes::resource_free(p, 8);
+    }
+}

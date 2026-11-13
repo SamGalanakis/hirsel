@@ -511,3 +511,24 @@ fn inline_arrays_hold_n_elements_without_a_block() {
     );
     assert!(matches!(compute(&[bad]), Err(LayoutError::Field { .. })));
 }
+
+/// Bug: the two engines' Map glue disagree on where a key or value sits in an entry
+/// slot, or on the stride, so cleanup frees through the wrong word. Entry: hash @0,
+/// state @8, key at its alignment from 16, value at its alignment after the key,
+/// stride rounded to max(8, key align, value align).
+/// `Map[u8, u64]`: key 16, value 24, stride 32. `Map[String, u16]`: key 16 (24
+/// bytes), value 40, 42 -> stride 48. `Map[u16, u8]`: key 16, value 18, 19 -> 24.
+#[test]
+fn map_entries_place_key_then_value_after_hash_and_state() {
+    let s = || FieldTy::Seq(Box::new(u(Scalar::U8)));
+    let e = |k, v| map_entry(&[], &[], &k, &v);
+    let want = |stride, key, value| MapEntry {
+        stride,
+        align: 8,
+        key,
+        value,
+    };
+    assert_eq!(e(u(Scalar::U8), u(Scalar::U64)), want(32, 16, 24));
+    assert_eq!(e(s(), u(Scalar::U16)), want(48, 16, 40));
+    assert_eq!(e(u(Scalar::U16), u(Scalar::U8)), want(24, 16, 18));
+}

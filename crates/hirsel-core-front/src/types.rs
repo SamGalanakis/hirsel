@@ -91,12 +91,43 @@ pub enum TyKind {
     Hole,
 }
 
+/// Syntactic properties of an immutable interned type, including its arguments.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct TypeFlags(u8);
+impl TypeFlags {
+    const PARAM: u8 = 1;
+    const HOLE: u8 = 2;
+    fn of(t: &impl TyRead, kind: &TyKind) -> Self {
+        let flags = match kind {
+            TyKind::Param(_) | TyKind::Region(Root::Generic(_)) => Self::PARAM,
+            TyKind::Hole => Self::HOLE,
+            TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().fold(0, |f, &x| f | t.flags(x).0),
+            TyKind::Anchored(x, r) => t.flags(*x).0 | t.flags(*r).0,
+            TyKind::View(x) | TyKind::Array(x, _) => t.flags(*x).0,
+            TyKind::Fn(ps, r, _, _) => ps.iter().fold(t.flags(*r).0, |f, &(_, x)| f | t.flags(x).0),
+            _ => 0,
+        };
+        Self(flags)
+    }
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct TypeEntry {
+    kind: TyKind,
+    flags: TypeFlags,
+}
+impl TypeEntry {
+    fn new(t: &impl TyRead, kind: TyKind) -> Self {
+        let flags = TypeFlags::of(t, &kind);
+        Self { kind, flags }
+    }
+}
+
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Types {
     base: Option<std::sync::Arc<Types>>,
     #[serde(skip)]
     base_len: usize,
-    kinds: Table<TyKind>,
+    kinds: Table<TypeEntry>,
     #[serde(skip)]
     map: HashMap<TyKind, TyId>,
     published_map: Map<TyKind, TyId>,
@@ -106,7 +137,7 @@ impl<'de> serde::Deserialize<'de> for Types {
         #[derive(serde::Deserialize)]
         struct Wire {
             base: Option<std::sync::Arc<Types>>,
-            kinds: Table<TyKind>,
+            kinds: Table<TypeEntry>,
             published_map: Map<TyKind, TyId>,
         }
         let wire: Wire = serde::Deserialize::deserialize(decoder)?;
@@ -116,7 +147,7 @@ impl<'de> serde::Deserialize<'de> for Types {
             .kinds
             .own_iter()
             .enumerate()
-            .map(|(i, k)| (k.clone(), TyId((offset + i) as u32)))
+            .map(|(i, k)| (k.kind.clone(), TyId((offset + i) as u32)))
             .collect();
         Ok(Self {
             base: wire.base,
@@ -129,14 +160,14 @@ impl<'de> serde::Deserialize<'de> for Types {
 }
 impl Types {
     pub fn publish(&self, writer: &mut impl Publisher) -> std::io::Result<Self> {
-        let rows: Table<TyKind> = (0..self.len())
-            .map(|i| self.kind(TyId(i as u32)).clone())
+        let rows: Table<TypeEntry> = (0..self.len())
+            .map(|i| self.entry(TyId(i as u32)).clone())
             .collect::<Vec<_>>()
             .into();
         let map: Map<TyKind, TyId> = rows
             .iter()
             .enumerate()
-            .map(|(i, k)| (k.clone(), TyId(i as u32)))
+            .map(|(i, k)| (k.kind.clone(), TyId(i as u32)))
             .collect();
         Ok(Self {
             base: None,
@@ -180,17 +211,21 @@ impl Types {
             return id;
         }
         let id = TyId(self.len() as u32);
-        self.kinds.push(k.clone());
+        self.kinds.push(TypeEntry::new(self, k.clone()));
         self.map.insert(k, id);
         id
     }
     #[inline(always)]
-    pub fn kind(&self, t: TyId) -> &TyKind {
+    fn entry(&self, t: TyId) -> &TypeEntry {
         if (t.0 as usize) < self.base_len {
-            self.base.as_ref().unwrap().kind(t)
+            self.base.as_ref().unwrap().entry(t)
         } else {
             &self.kinds[t.0 as usize - self.base_len]
         }
+    }
+    #[inline(always)]
+    pub fn kind(&self, t: TyId) -> &TyKind {
+        &self.entry(t).kind
     }
     #[inline(always)]
     pub fn len(&self) -> usize {
@@ -213,7 +248,7 @@ pub const HOLE: TyId = TyId(3 + Scalar::ALL.len() as u32);
 /// The program's types plus the types one body makes.
 pub struct Local<'a> {
     pub base: &'a Types,
-    kinds: Vec<TyKind>,
+    kinds: Vec<TypeEntry>,
     map: HashMap<TyKind, TyId>,
     layout_names: Option<LayoutNames<'a>>,
 }
@@ -253,7 +288,7 @@ impl<'a> Local<'a> {
             return id;
         }
         let id = TyId((self.base.len() + self.kinds.len()) as u32);
-        self.kinds.push(k.clone());
+        self.kinds.push(TypeEntry::new(self, k.clone()));
         self.map.insert(k, id);
         id
     }
@@ -270,6 +305,12 @@ impl<'a> Local<'a> {
 pub trait TyRead {
     fn kind(&self, t: TyId) -> &TyKind;
     fn mk(&mut self, k: TyKind) -> TyId;
+    fn flags(&self, ty: TyId) -> TypeFlags
+    where
+        Self: Sized,
+    {
+        TypeFlags::of(self, self.kind(ty))
+    }
     fn layout_name(&self, decls: &crate::Rows<crate::decls::TypeDecl>, ty: TyId) -> String
     where
         Self: Sized,
@@ -278,6 +319,10 @@ pub trait TyRead {
     }
 }
 impl TyRead for Types {
+    #[inline(always)]
+    fn flags(&self, ty: TyId) -> TypeFlags {
+        self.entry(ty).flags
+    }
     #[inline(always)]
     fn kind(&self, t: TyId) -> &TyKind {
         Types::kind(self, t)
@@ -288,12 +333,21 @@ impl TyRead for Types {
 }
 impl TyRead for Local<'_> {
     #[inline(always)]
+    fn flags(&self, ty: TyId) -> TypeFlags {
+        let i = ty.0 as usize;
+        if i < self.base.len() {
+            self.base.flags(ty)
+        } else {
+            self.kinds[i - self.base.len()].flags
+        }
+    }
+    #[inline(always)]
     fn kind(&self, t: TyId) -> &TyKind {
         let i = t.0 as usize;
         if i < self.base.len() {
             self.base.kind(t)
         } else {
-            &self.kinds[i - self.base.len()]
+            &self.kinds[i - self.base.len()].kind
         }
     }
     fn mk(&mut self, k: TyKind) -> TyId {
@@ -501,30 +555,95 @@ fn callable_roots(
 /// Whether `ty` names a type parameter anywhere.
 pub fn has_hole(t: &impl TyRead, ty: TyId) -> bool {
     crate::cost_scope!("query", "has hole");
-    match t.kind(ty) {
-        TyKind::Hole => true,
-        TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().any(|&x| has_hole(t, x)),
-        TyKind::Anchored(x, root) => has_hole(t, *x) || has_hole(t, *root),
-        TyKind::View(x) | TyKind::Array(x, _) => has_hole(t, *x),
-        TyKind::Fn(ps, r, _, _) => ps.iter().any(|&(_, p)| has_hole(t, p)) || has_hole(t, *r),
-        _ => false,
-    }
+    t.flags(ty).0 & TypeFlags::HOLE != 0
 }
 pub fn has_param(t: &impl TyRead, ty: TyId) -> bool {
     crate::cost_scope!("query", "has parameter");
-    match t.kind(ty) {
-        TyKind::Param(_) | TyKind::Region(Root::Generic(_)) => true,
-        TyKind::Anchored(x, r) => has_param(t, *x) || has_param(t, *r),
-        TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().any(|&x| has_param(t, x)),
-        TyKind::View(x) | TyKind::Array(x, _) => has_param(t, *x),
-        TyKind::Fn(ps, r, _, _) => ps.iter().any(|&(_, p)| has_param(t, p)) || has_param(t, *r),
-        _ => false,
-    }
+    t.flags(ty).0 & TypeFlags::PARAM != 0
 }
 
 #[cfg(test)]
 mod interner_tests {
     use super::*;
+
+    #[test]
+    fn type_flags_follow_arguments_roots_and_local_arenas() {
+        let mut t = Types::new();
+        let param = t.intern(TyKind::Param(0));
+        let generic = t.intern(TyKind::Region(Root::Generic(0)));
+        let lexical = t.intern(TyKind::Region(Root::Parameter(0)));
+        let anchored = t.intern(TyKind::Anchored(UNIT, generic));
+        let concrete = t.intern(TyKind::Anchored(UNIT, lexical));
+        let pair = t.intern(TyKind::Tuple(vec![param, HOLE]));
+        let nominal = t.intern(TyKind::Adt(DeclId(0), vec![pair]));
+        let callable = t.intern(TyKind::Fn(
+            vec![(Mode::View, nominal)],
+            UNIT,
+            false,
+            Callable::Scoped,
+        ));
+        for ty in [param, generic, anchored, pair, nominal, callable] {
+            assert!(has_param(&t, ty));
+        }
+        for ty in [UNIT, lexical, concrete, HOLE] {
+            assert!(!has_param(&t, ty));
+        }
+        for ty in [HOLE, pair, nominal, callable] {
+            assert!(has_hole(&t, ty));
+        }
+        for ty in [UNIT, param, generic, lexical, anchored, concrete] {
+            assert!(!has_hole(&t, ty));
+        }
+        let mut a = Local::new(&t);
+        let mut b = Local::new(&t);
+        let x = a.intern(TyKind::Array(pair, 2));
+        let y = b.intern(TyKind::Array(UNIT, 2));
+        assert_eq!(x, y);
+        assert!(has_param(&a, x) && has_hole(&a, x));
+        assert!(!has_param(&b, y) && !has_hole(&b, y));
+        let decoded: Types = serde_json::from_value(serde_json::to_value(&t).unwrap()).unwrap();
+        for i in 0..t.len() {
+            let ty = TyId(i as u32);
+            assert_eq!(has_param(&t, ty), has_param(&decoded, ty));
+            assert_eq!(has_hole(&t, ty), has_hole(&decoded, ty));
+        }
+    }
+
+    #[test]
+    fn querying_type_flags_does_not_walk_the_type_graph() {
+        struct Counted<'a> {
+            types: &'a Types,
+            reads: std::cell::Cell<usize>,
+        }
+        impl TyRead for Counted<'_> {
+            fn kind(&self, ty: TyId) -> &TyKind {
+                self.reads.set(self.reads.get() + 1);
+                self.types.kind(ty)
+            }
+            fn mk(&mut self, _: TyKind) -> TyId {
+                unreachable!()
+            }
+            fn flags(&self, ty: TyId) -> TypeFlags {
+                self.types.flags(ty)
+            }
+        }
+        let mut t = Types::new();
+        let mut ty = t.intern(TyKind::Param(0));
+        for _ in 0..64 {
+            ty = t.intern(TyKind::View(ty));
+        }
+        let counted = Counted {
+            types: &t,
+            reads: Default::default(),
+        };
+        assert!(has_param(&counted, ty));
+        assert!(!has_hole(&counted, ty));
+        assert_eq!(
+            counted.reads.get(),
+            0,
+            "a predicate re-walked the type graph"
+        );
+    }
 
     #[test]
     fn layout_names_are_local_to_the_arena_and_declarations() {

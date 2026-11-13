@@ -100,6 +100,31 @@ fn leading_zero() -> u64 {
     syntax_at("01")
 }
 
+// The boundary scan may skip digit words, but float.parse64 still checks the whole
+// token. "0." +n zeros +"125" has n+5 spelling bytes, so its Num takes n+10.
+// x is trailing syntax; e999 overflows even after24 fractional zeros. A delimiter
+// mistaken for a digit, or a scanner that skips grammar/range validation, is red.
+// expect: run number_words_keep_grammar_and_range() = true
+fn number_words_keep_grammar_and_range() -> bool {
+    for n in 0u64 .. 24 {
+        let mut s = result.unwrap(string.from("0."))
+        for _ in 0u64 .. n { result.unwrap(string.push(mut s, "0")) }
+        result.unwrap(string.push(mut s, "125"))
+        if size_of(s) != n + 10 { return false }
+        let mut bad = result.unwrap(string.from(s))
+        result.unwrap(string.push(mut bad, "x"))
+        if syntax_at(bad) != n + 5 { return false }
+        result.unwrap(string.push(mut s, "e999"))
+        if not_finite_at(s) != 0 { return false }
+    }
+    // Array: 9 header +10 and13 Num bytes +8 offset bytes =40. Skipping a
+    // non-digit word would swallow the comma or close instead of ending a token.
+    size_of("[0.125,12345678]") == 40 &&
+    not_finite_at("[12345678e999x,0]") == 1 &&
+    size_of("-12345678.125e+2") == 21 && syntax_at("12345678+1") == 8 &&
+    syntax_at("000000000000000000001") == 1
+}
+
 // expect: run lone_low_surrogate() = 1
 fn lone_low_surrogate() -> u64 {
     syntax_at("\"\\udc00\"")

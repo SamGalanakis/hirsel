@@ -379,7 +379,24 @@ fn string_size(s: String, mut i: u64) -> Result[u64, Error] {
 /// grammar, which is JSON's, and the range.
 fn number_size(s: String, mut i: u64) -> Result[u64, Error] {
     let start = i
-    while is_number_byte(at(s, i)) {
+    let b = string.as_bytes(s)
+    let end = list.len(b)
+    loop {
+        if i + 8 <= end {
+            // fast-float2 common.rs::is_8digits. A valid digit prefix cannot carry
+            // or borrow into the first non-digit, so its lowest mark is exact.
+            let v = list.word_le(b, i)
+            let high = int.wrapping_add(v, 0x4646464646464646)
+            let low = int.wrapping_sub(v, 0x3030303030303030)
+            let mark = (high | low) & 0x8080808080808080
+            if mark == 0 {
+                i += 8
+                continue
+            }
+            let bit: u64 = int.widen(int.trailing_zeros(mark))
+            i += bit >> 3
+        }
+        if !is_number_byte(at(s, i)) { break }
         i += 1
     }
     match float.parse64(string.slice(s, start, i)) {

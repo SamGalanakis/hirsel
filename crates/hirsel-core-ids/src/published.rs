@@ -108,6 +108,14 @@ impl<T> Sparse<T> {
     }
 }
 
+// Lookup keys use the existing fixed-width codec, written once into their owned
+// memo key. serialize() would walk the value once to size it and again to write.
+fn encode_lookup_key(key: &(impl Serialize + ?Sized)) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(64);
+    bincode::serialize_into(&mut bytes, key).expect("published lookup key encoding");
+    bytes
+}
+
 pub struct Published<T> {
     descriptor: Descriptor,
     provider: Arc<dyn Provider<T>>,
@@ -121,12 +129,12 @@ impl<T> Published<T> {
             .get_or_try_init(index as u64, || self.provider.row(index as u32))
             .unwrap_or_else(|e| miss(e))
     }
-    fn find(&self, key: &[u8]) -> Option<u32> {
-        if let Some(index) = self.lookups.lock().unwrap().get(key) {
+    fn find(&self, key: Vec<u8>) -> Option<u32> {
+        if let Some(index) = self.lookups.lock().unwrap().get(key.as_slice()) {
             return *index;
         }
-        let index = self.provider.find(key).unwrap_or_else(|e| miss(e));
-        self.lookups.lock().unwrap().insert(key.to_vec(), index);
+        let index = self.provider.find(&key).unwrap_or_else(|e| miss(e));
+        self.lookups.lock().unwrap().insert(key, index);
         index
     }
 }
@@ -436,7 +444,7 @@ impl<K: Ord + std::hash::Hash, V> Map<K, V> {
         }
         self.prefix
             .as_ref()?
-            .find(&bincode::serialize(key).expect("lookup encoding"))
+            .find(encode_lookup_key(key))
             .map(|i| i as usize)
     }
     pub fn published(prefix: Arc<Published<(K, V)>>) -> Self {
@@ -468,8 +476,7 @@ impl<K: Ord + std::hash::Hash, V> Map<K, V> {
         if let Some(i) = hit {
             return Some(&prefix.row(i as usize).1);
         }
-        let bytes = bincode::serialize(key).expect("published lookup key encoding");
-        let i = prefix.find(&bytes)?;
+        let i = prefix.find(encode_lookup_key(key))?;
         let row = prefix.row(i as usize);
         if row.0.borrow() == key {
             cached.lock().unwrap().insert(row.0.clone(), i);
@@ -592,6 +599,28 @@ pub trait Publisher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn lookup_key_encoding_visits_once_and_keeps_the_fixed_bytes() {
+        struct Counted<'a>(&'a std::cell::Cell<u32>);
+        impl Serialize for Counted<'_> {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                self.0.set(self.0.get() + 1);
+                42u32.serialize(s)
+            }
+        }
+        let count = std::cell::Cell::new(0);
+        assert_eq!(encode_lookup_key(&Counted(&count)), [42, 0, 0, 0]);
+        assert_eq!(count.get(), 1);
+        let path = crate::DefPath::from_full("library@1/parent/child/answer").unwrap();
+        let long = "long\0borrowed\u{00e9}".repeat(64);
+        let key = (&path, long.as_str(), vec![0u32, 42, u32::MAX]);
+        assert_eq!(encode_lookup_key(&key), bincode::serialize(&key).unwrap());
+        assert_eq!(
+            encode_lookup_key("borrowed"),
+            bincode::serialize("borrowed").unwrap()
+        );
+    }
+
     #[test]
     fn sparse_cells_cover_all_key_widths_and_keep_references() {
         let rows = Sparse::default();

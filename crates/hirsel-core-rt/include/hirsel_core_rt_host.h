@@ -105,6 +105,13 @@ typedef struct { HirselCoreOsProcess *process; HirselCoreIoError error; } Hirsel
 /* Copies argv, pins directories, duplicates stream descriptors. A failed
    constructor closes every acquired descriptor. No process owner on error. */
 HirselCoreOpenProcess hirsel_core_os_process_new(const HirselCoreOsConfig *);
+/* Named OS entry. parameter_names has one borrowed UTF-8 view per requirement.
+   First Dir requires one successful confined openat2 probe before main; no Dir
+   never probes. Setup refusal: status 103 and exactly one "not started: " stderr
+   line naming the parameter. The raw constructor reports IoError without text.
+   No syscall probe or extra work is added to an open operation. */
+#define HIRSEL_CORE_NOT_STARTED 103
+uint8_t hirsel_core_os_run(const HirselCoreOsConfig *, const HirselCoreView *parameter_names, HirselCoreEntry);
 const HirselCoreProcessConfig *hirsel_core_os_process_config(const HirselCoreOsProcess *);
 /* Run closes grants after main cleanup, without admission/failure. After run
    and every borrowed view ends, free releases argv/metadata and unused setup. */

@@ -2,6 +2,7 @@ use crate::{Context, entry::*, process::*, provider::*};
 use std::{fs::File, os::fd::AsRawFd, ptr};
 #[test]
 fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
+    crate::openat2_required::require();
     let out = File::options().write(true).open("/dev/null").unwrap();
     let mut argument = b"copied".to_vec();
     let argv = [View {

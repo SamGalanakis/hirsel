@@ -10,6 +10,7 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Copy)]
 enum Scenario {
     Exercise,
+    Unavailable,
     Echo(u64),
     SmallAllocation,
     Temp(usize),
@@ -63,6 +64,12 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request) -> Outcome {
             return (provider.issue)(provider.state, r);
         }
         let mut out = Outcome::default();
+        if matches!(s.scenario, Scenario::Unavailable) && r.operation == OPEN {
+            return Outcome {
+                error: IoError::from_errno(libc::ENOSYS),
+                ..out
+            };
+        }
         match r.operation {
             OPEN => {
                 assert_eq!(r.handle, 7);
@@ -344,6 +351,7 @@ unsafe extern "C" fn entry(ctx: *mut Context, cfg: *const Config, _: *mut MainRe
                 assert_eq!(call(ctx, MONO_NS, 2, None, 0).status, 0);
                 1
             }
+            Scenario::Unavailable => files(ctx, state, false),
             Scenario::Exercise => {
                 assert_eq!(echo(ctx, 1), (2, 5));
                 assert!(hirsel_core_args_get(ctx, 5, 2).is_null());
@@ -489,6 +497,13 @@ fn fixture(scripted: bool, scenario: Scenario, args: &[&[u8]]) -> (u8, Box<State
 }
 #[test]
 fn every_host_op_routes_to_the_host_and_records_delivery() {
+    crate::openat2_required::require();
+    assert_child_passes("host_ops_tests::real_host_operations_child");
+}
+#[test]
+#[ignore = "isolated ffi assertion fixture, invoked by parent"]
+fn real_host_operations_child() {
+    crate::openat2_required::require();
     let (status, state) = fixture(false, Scenario::Exercise, &[b"prog", b"hello"]);
     assert_eq!(status, 0, "{}", String::from_utf8_lossy(&state.diagnostics));
     for op in 0..14 {
@@ -550,4 +565,66 @@ fn waiting_rows_cancel_before_issue_but_clocks_do_not_cancel() {
         assert_eq!(state.issued, [WALL_MS, MONO_NS]);
         assert!(state.stdout.is_empty());
     }
+}
+
+fn child_case(name: &str) -> std::process::Output {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            name,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .output()
+        .unwrap()
+}
+fn assert_child_passes(name: &str) {
+    let output = child_case(name);
+    assert!(
+        output.status.success(),
+        "{name}: {}\n{}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+#[test]
+#[ignore = "intentional ENOSYS ffi abort, invoked by reporting regression"]
+fn unavailable_host_operations_child() {
+    fixture(true, Scenario::Unavailable, &[]);
+}
+#[test]
+#[ignore = "intentional parent failure, invoked by reporting regression"]
+fn reports_unavailable_host_child_failure() {
+    assert_child_passes("host_ops_tests::unavailable_host_operations_child");
+}
+#[test]
+#[ignore = "continuation witness, invoked by reporting regression"]
+fn z_later_host_body_child() {
+    println!("later host body executed");
+}
+#[test]
+fn ffi_abort_is_a_reported_failure_and_later_bodies_continue() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "host_ops_tests::reports_unavailable_host_child_failure",
+            "host_ops_tests::z_later_host_body_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(101),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("1 passed; 1 failed"), "{stdout}");
+    assert!(stdout.contains("later host body executed"), "{stdout}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("code: 38"));
 }

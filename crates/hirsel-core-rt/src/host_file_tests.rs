@@ -149,6 +149,7 @@ unsafe extern "C" fn entry(ctx: *mut Context, cfg: *const Config, _: *mut MainRe
 #[test]
 #[ignore = "isolated descriptor-ownership fixture, invoked by parent tests"]
 fn native_host_file_child() {
+    crate::openat2_required::require();
     let root = std::env::var_os("HIRSEL_HOST_FILE_ROOT").unwrap();
     let root = std::path::Path::new(&root);
     use std::os::unix::ffi::OsStrExt;
@@ -219,6 +220,7 @@ fn child(root: &std::path::Path, mode: &str) -> std::process::Output {
 }
 #[test]
 fn native_host_file_exit_paths_close_once_and_open_admits_nothing() {
+    crate::openat2_required::require();
     for mode in [
         "normal",
         "failure",
@@ -245,6 +247,7 @@ fn native_host_file_exit_paths_close_once_and_open_admits_nothing() {
 }
 #[test]
 fn run_stop_skips_host_file_cleanup_and_kernel_releases_the_descriptor() {
+    crate::openat2_required::require();
     let root = std::env::temp_dir().join(format!("hirsel-hostfile-{}-stop", std::process::id()));
     std::fs::create_dir(&root).unwrap();
     let out = child(&root, "stop");

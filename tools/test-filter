@@ -28,7 +28,7 @@ def family(label):
 
 
 def graph_for(binaries, config):
-    pattern = '^(' + '|'.join(re.escape(b) for b in binaries) + ')((-cpus-[0-9]+)?-shard-[0-9]+|-inventory)?$'
+    pattern = '^(' + '|'.join(re.escape(b) for b in binaries) + ')((-cpus-[0-9]+)?-shard-[0-9]+|-inventory|-openat2-[0-9]+)?$'
     query_config = []
     options = iter(config)
     for option in options:
@@ -39,7 +39,8 @@ def graph_for(binaries, config):
     command = [str(ROOT / '.buck2/bin/buck2'), 'uquery', *query_config,
                f'kind("_rust_test", attrregexfilter(name, "{pattern}", //:))',
                '--output-attribute', '^test_binary$', '--output-attribute', '^shard',
-               '--output-attribute', '^costs$', '--output-attribute', '^exact_cpus$']
+               '--output-attribute', '^costs$', '--output-attribute', '^exact_cpus$',
+               '--output-attribute', '^extra_env$', '--output-attribute', '^labels$']
     result = subprocess.run(command, cwd=ROOT, stdout=subprocess.PIPE, text=True, check=True)
     graph = json.loads(result.stdout)
     for binary in binaries:
@@ -87,7 +88,15 @@ def listing(binary, graph, config, arguments):
 
 
 def owners(graph, inventories, widths=None):
-    return CONSUMERS['assignments'](ROOT, graph, inventories, widths, overrides=False)
+    result = CONSUMERS['assignments'](ROOT, graph, inventories, widths, overrides=False)
+    # Host requirements are physical ownership, not optional proof overrides.
+    for target, attrs in graph.items():
+        if 'requires-openat2' in attrs.get('labels', []):
+            binary = attrs.get('test_binary')
+            case = attrs.get('extra_env', {}).get('HIRSEL_TEST_DEDICATED_CASE')
+            if case in inventories.get(binary, set()):
+                result[binary, case] = target
+    return result
 
 
 def has_positive_filter(arguments):

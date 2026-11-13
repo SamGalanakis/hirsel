@@ -41,6 +41,19 @@ class FilterOwners(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'matched no runnable test bodies'):
                 self.tool['plan'](['suite'], [], ['x', '--include-ignored'])
 
+    def test_host_required_body_has_one_host_owner_even_under_a_positive_filter(self):
+        host = 'root//:suite-openat2-1'
+        self.graph[host] = dict(test_binary='suite', labels=['requires-openat2'],
+                                extra_env={'HIRSEL_TEST_DEDICATED_CASE': 'x'})
+        with patch.dict(self.globals, graph_for=lambda *_: self.graph,
+                        listing=lambda _b, _g, _c, args: set() if '--ignored' in args else {'x'}):
+            targets, cases = self.tool['plan'](['suite'], [], ['x'])
+        self.assertEqual(targets, [host])
+        self.assertEqual(cases, {'suite': {'x'}})
+        homes = self.tool['owners'](self.graph, {'suite': {'x', 'z'}})
+        self.assertEqual(homes[('suite', 'x')], host)
+        self.assertNotEqual(homes[('suite', 'z')], host)
+
     def test_width_owner_and_substring_selection_cover_each_live_case_once(self):
         self.graph['root//:suite-cpus-4-shard-1'] = dict(test_binary='suite', shard_index=0,
                                                        shards=1, costs='root//:costs.tsv', exact_cpus=4)

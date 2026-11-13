@@ -84,6 +84,7 @@ impl Drop for Fixture {
 }
 #[test]
 fn files_deliver_committed_prefixes_and_all_open_modes() {
+    crate::openat2_required::require();
     let mut f = Fixture::new();
     assert_eq!(f.simple(OPEN, f.dir, b"absent", 0).error.tag, 1);
     let h = f.open(b"file", 3);
@@ -122,6 +123,7 @@ fn files_deliver_committed_prefixes_and_all_open_modes() {
 }
 #[test]
 fn locks_are_exclusive_idempotent_and_end_at_close() {
+    crate::openat2_required::require();
     let mut f = Fixture::new();
     let a = f.open(b"lock", 1);
     let b = f.open(b"lock", 1);
@@ -139,6 +141,7 @@ fn locks_are_exclusive_idempotent_and_end_at_close() {
 }
 #[test]
 fn paths_cannot_escape_grants_and_tree_drop_never_follows_links() {
+    crate::openat2_required::require();
     use std::os::unix::fs::symlink;
     let mut f = Fixture::new();
     for p in [b"../escape".as_slice(), b"/tmp/escape"] {
@@ -239,6 +242,7 @@ fn clocks_and_argv_are_borrowed_inputs() {
 }
 #[test]
 fn temp_basename_matches_the_completed_carrier_and_invalid_prefixes_do_not_create() {
+    crate::openat2_required::require();
     for prefix in [b"t-".as_slice(), b"", b"prefix--", b".", b".."] {
         let mut f = Fixture::new();
         let mut name = vec![0xa5; prefix.len() + 32];
@@ -284,6 +288,7 @@ fn temp_basename_matches_the_completed_carrier_and_invalid_prefixes_do_not_creat
 }
 #[test]
 fn temp_collisions_retry_inside_issue_and_exhaustion_preserves_the_carrier() {
+    crate::openat2_required::require();
     let mut f = Fixture::new();
     // Host fixture occupies the provider's deterministic first candidate. The
     // oracle is freshness/preservation, not which suffix the next attempt uses.
@@ -603,6 +608,7 @@ fn scripted_host_errors_preserve_the_named_partial_effect_contracts() {
 }
 #[test]
 fn guarded_root_routes_real_os_calls_through_the_separate_host_stack() {
+    crate::openat2_required::require();
     unsafe extern "C" fn main(
         context: *mut crate::Context,
         config: *const Config,

@@ -13,7 +13,7 @@ CARGO_TARGET_TMPDIR and CARGO_BIN_EXE_<name>.
 """
 
 load(":platforms.bzl", "CLIPPY_REQUEST", "PRECHECK_REQUEST", "PROBE_CPUS", "budget_constraint", "compile_request", "doctest_properties", "dist_compile_request", "pool_budget_name", "test_budget_name", "test_executor", "test_request", "test_memory_limit")
-load(":test_requirements.bzl", "EXACT_CASE_CPUS", "EXACT_TEST_CPUS", "ISOLATED_TEST_CASES")
+load(":test_requirements.bzl", "EXACT_CASE_CPUS", "EXACT_TEST_CPUS", "ISOLATED_TEST_CASES", "OPENAT2_TEST_CASES")
 load(":exec_sizes.bzl", "COMPILE_CLASSES", "COMPILE_REQUESTS")
 load(":profile.bzl", "OPTIMIZED_RUNTIME_VARIANTS", "TEST_RUNTIME_FLAGS", "runtime_profile_flags", "workspace_profile_flags")
 load("@prelude//linking:link_info.bzl", "ArchiveLinkable", "LinkStrategy", "ObjectsLinkable")
@@ -303,12 +303,13 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
         args = [] if FULL_GATE else [argument for case in skips for argument in ("--skip", case)],
         visibility = ["PUBLIC"],
     )
-    isolated = ISOLATED_TEST_CASES.get(name, [])
+    host_cases = OPENAT2_TEST_CASES.get(name, [])
+    isolated = ISOLATED_TEST_CASES.get(name, []) + host_cases
     case_cpus = EXACT_CASE_CPUS.get(name, {})
     widths = sorted({width: True for width in case_cpus.values()}.keys())
     if sorted(case_shards.keys()) != widths:
         fail("{}: case_shards {} do not cover the EXACT_CASE_CPUS widths {}; run tools/buck2/sync.py".format(name, case_shards, widths))
-    sharded = shards > 1 or bool(case_cpus)
+    sharded = shards > 1 or bool(case_cpus) or bool(host_cases)
     # Measured shards, then one exact shard set per declared width.
     groups = [(0, shards, name)] + [(width, case_shards[width], "{}-cpus-{}".format(name, width)) for width in widths]
     common = {key: value for key, value in common.items() if key != "request"}
@@ -339,7 +340,7 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
             # --list cannot run a body or assert a physical CPU width.
             **{key: value for key, value in isolated_common.items() if key != "test_binary"}
         )
-    for index, case in enumerate(isolated):
+    for index, case in enumerate(ISOLATED_TEST_CASES.get(name, [])):
         _rust_test(
             name = "{}-isolated-{}".format(name, index + 1),
             args = common["args"] + ["--exact", case],
@@ -352,6 +353,26 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
             extra_env = {"HIRSEL_TEST_DEDICATED_CASE": case},
             **isolated_common
         )
+    host_targets = []
+    for index, case in enumerate(host_cases):
+        target = "{}-openat2-{}".format(name, index + 1)
+        host_targets.append(":" + target)
+        _rust_test(
+            name = target,
+            args = common["args"] + ["--exact", case],
+            labels = ["local-execution", "requires-openat2"],
+            exec_compatible_with = [budget_constraint("host")],
+            request = _request(name),
+            pool = False,
+            extra_env = {"HIRSEL_TEST_DEDICATED_CASE": case},
+            **isolated_common
+        )
+    if host_cases:
+        _test_suite(name = name + "-openat2", tests = host_targets, labels = ["local-execution", "requires-openat2"])
+        _test_suite(name = name, tests = host_targets + [
+            ":{}-shard-{}".format(prefix, shard + 1)
+            for _, count, prefix in groups for shard in range(count)
+        ])
     # Fixed nonempty slices of the named old-source component witnesses.
     for index in range(min(4, len(retained_cases))):
         _rust_test(
@@ -1248,21 +1269,40 @@ _runtime_archives = rule(
 )
 
 def hirsel_core_driver_native_test(name, data):
-    _rust_test(
-        name = name,
+    cases = OPENAT2_TEST_CASES["hirsel-core-driver-unittest"]
+    common = dict(
         harness = "//:hirsel-core-driver-unittest-harness",
         data = data,
         files_env = {"HIRSEL_CORE_RT_ARCHIVE": "//:hirsel-core-rt[staticlib]"},
-        args = ["native::tests::", "--ignored"],
         cwd = "crates/hirsel-core-driver",
         test_binary = "hirsel-core-driver-native",
         llvm = "root//tools/buck2/native-toolchain:llvm",
         llvm_libraries = "toolchains//:llvm-libraries",
         request = _request("hirsel-core-driver-unittest"),
-        exec_compatible_with = _test_platform("hirsel-core-driver-unittest"),
-        pool = not TESTS_ON_HOST,
         visibility = ["PUBLIC"],
     )
+    _rust_test(
+        name = name + "-pool",
+        args = ["native::tests::", "--ignored"] + [arg for case in cases for arg in ["--skip", case]],
+        exec_compatible_with = _test_platform("hirsel-core-driver-unittest"),
+        pool = not TESTS_ON_HOST,
+        **common
+    )
+    host_targets = []
+    for index, case in enumerate(cases):
+        target = "{}-openat2-{}".format(name, index + 1)
+        host_targets.append(":" + target)
+        _rust_test(
+            name = target,
+            args = ["--ignored", "--exact", case],
+            labels = ["local-execution", "requires-openat2"],
+            exec_compatible_with = [budget_constraint("host")],
+            pool = False,
+            extra_env = {"HIRSEL_TEST_DEDICATED_CASE": case},
+            **common
+        )
+    _test_suite(name = name + "-openat2", tests = host_targets, labels = ["local-execution", "requires-openat2"])
+    _test_suite(name = name, tests = [":" + name + "-pool"] + host_targets)
 
 def hirsel_core_llvm_native_test(name, data):
     """CoreIR executable agreement uses the core runtime, with no old std products."""

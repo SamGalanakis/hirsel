@@ -21,7 +21,7 @@ pub struct MainResult {
 }
 pub type Entry = unsafe extern "C" fn(*mut Context, *const Config, *mut MainResult) -> u8;
 /// Host configuration and grant operands, all pinned for the run. Missing
-/// required grants are refused by the driver before calling run (CAP-4).
+/// required grants are refused by the named OS entry before calling run (CAP-4).
 #[repr(C)]
 pub struct Config {
     pub root_limit: u64,
@@ -42,6 +42,8 @@ pub struct Config {
     pub close_grants: Option<unsafe extern "C" fn(*mut u8)>,
 }
 
+pub const NOT_STARTED: u8 = 103;
+
 /// # Safety
 /// Config, entry and all borrowed grants/arguments remain live through the run.
 /// The generated entry thunk returns only after cleanup on every exit edge.
@@ -55,12 +57,19 @@ pub unsafe extern "C" fn hirsel_core_run(config: *const Config, entry: Entry) ->
         context.run = config;
         let mut files = crate::host_file::Files::default();
         context.host_files = &mut files;
-        if causes::task_start(&mut context).is_err() {
-            diagnostic(config, b"Capacity at 0\n");
+        if let Err(capacity) = causes::task_start(&mut context) {
+            diagnostic(
+                config,
+                format!(
+                    "not started: the root limit is below main's startup charge of {} bytes\n",
+                    capacity.requested
+                )
+                .as_bytes(),
+            );
             if let Some(close) = config.close_grants {
                 close(config.state);
             }
-            return 101;
+            return NOT_STARTED;
         }
         let mut result = MainResult::default();
         struct Call {

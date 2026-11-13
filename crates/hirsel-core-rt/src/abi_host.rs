@@ -27,7 +27,7 @@
 pub use crate::entry::{
     hirsel_core_capability_handle, hirsel_core_capability_provider, hirsel_core_entry_grant,
     hirsel_core_entry_grants_present, hirsel_core_os_process_config, hirsel_core_os_process_free,
-    hirsel_core_os_process_new,
+    hirsel_core_os_process_new, hirsel_core_os_run,
 };
 
 /// FORM #50: closed provider rows resolve the capability or HostFile provider.
@@ -80,3 +80,10 @@ pub(crate) unsafe fn format_cause(cause: &crate::causes::Cause) -> String {
         }
     }
 }
+
+/// PROG-3 not-started boundary: os_run takes (OsConfig*, parameter-name View*, Entry).
+/// It probes the Linux openat2 confinement once for the first declared Dir, before
+/// main, emits the named one-line refusal to stderr and returns 103 on setup refusal.
+/// No Dir parameter means no probe. Raw os_process_new retains the lower-level owner
+/// API and reports the same refusal as IoError; generated entries use os_run.
+pub use crate::process::NOT_STARTED;

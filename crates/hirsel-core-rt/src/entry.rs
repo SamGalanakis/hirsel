@@ -161,8 +161,29 @@ unsafe fn bytes<'a>(view: View) -> &'a [u8] {
         unsafe { std::slice::from_raw_parts(view.data, view.len) }
     }
 }
+enum StartupError {
+    Io(io::Error),
+    MissingGrant(usize),
+    UnsupportedHostOpenat2(usize, io::Error),
+}
+impl From<io::Error> for StartupError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+impl StartupError {
+    fn into_io(self) -> io::Error {
+        match self {
+            Self::Io(error) | Self::UnsupportedHostOpenat2(_, error) => error,
+            Self::MissingGrant(_) => io::Error::from_raw_os_error(libc::EACCES),
+        }
+    }
+}
 impl OsProcess {
-    unsafe fn new(input: &OsConfig) -> io::Result<Box<Self>> {
+    unsafe fn new(
+        input: &OsConfig,
+        probe: impl FnOnce(&OsProvider, u64) -> io::Result<()>,
+    ) -> Result<Box<Self>, StartupError> {
         let mut os = Box::new(OsProvider::new(
             duplicate(if input.grant_mask & (1 << STDOUT) != 0 {
                 input.stdout_fd
@@ -245,12 +266,20 @@ impl OsProcess {
                 diagnostic: vec![],
                 config,
             });
+            let mut probe = Some(probe);
             for n in 0..input.parameters_len {
                 let requirement = &*input.parameters.add(n);
                 let handle =
                     hirsel_core_entry_grant(&process.config, requirement.kind, requirement.index);
                 if handle == 0 {
-                    return Err(io::Error::from_raw_os_error(libc::EACCES));
+                    return Err(StartupError::MissingGrant(n));
+                }
+                if requirement.kind == DIR {
+                    if let Some(probe) = probe.take() {
+                        let designation = process._metadata[(handle - 1) as usize].handle;
+                        probe(process.os.as_ref().unwrap(), designation)
+                            .map_err(|error| StartupError::UnsupportedHostOpenat2(n, error))?;
+                    }
                 }
                 process.grants.push(handle);
             }
@@ -268,14 +297,14 @@ impl OsProcess {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_os_process_new(config: *const OsConfig) -> OpenProcess {
     // SAFETY: constructor copies/pins all configuration before returning its owner.
-    match unsafe { OsProcess::new(&*config) } {
+    match unsafe { OsProcess::new(&*config, OsProvider::probe_directory) } {
         Ok(process) => OpenProcess {
             process: Box::into_raw(process),
             error: IoError::OK,
         },
         Err(error) => OpenProcess {
             process: std::ptr::null_mut(),
-            error: IoError::from_errno(error.raw_os_error().unwrap_or(libc::EIO)),
+            error: IoError::from_errno(error.into_io().raw_os_error().unwrap_or(libc::EIO)),
         },
     }
 }
@@ -322,3 +351,58 @@ unsafe extern "C" fn describe(state: *mut u8, cause: *const crate::causes::Cause
         }
     }
 }
+
+/// Create the OS process and run a named main, or report one PROG-3 not-started
+/// line with status 103. Parameter names correspond to OsConfig.parameters.
+/// # Safety
+/// All input/name views remain borrowed for this call; entry follows the run ABI.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_os_run(
+    input: *const OsConfig,
+    parameter_names: *const View,
+    entry: crate::process::Entry,
+) -> u8 {
+    // SAFETY: constructor copies all configuration; entry and names are pinned by caller.
+    unsafe { run_with_probe(&*input, parameter_names, entry, OsProvider::probe_directory) }
+}
+unsafe fn run_with_probe(
+    input: &OsConfig,
+    names: *const View,
+    entry: crate::process::Entry,
+    probe: impl FnOnce(&OsProvider, u64) -> io::Result<()>,
+) -> u8 {
+    // SAFETY: input tables are borrowed from the OS entry's configuration.
+    match unsafe { OsProcess::new(input, probe) } {
+        Ok(process) => {
+            // SAFETY: the Box pins Config and all grants through run and cleanup.
+            unsafe { crate::process::hirsel_core_run(&process.config, entry) }
+        }
+        Err(error) => {
+            let mut line = b"not started: ".to_vec();
+            match error {
+                StartupError::MissingGrant(index)
+                | StartupError::UnsupportedHostOpenat2(index, _) => {
+                    line.extend_from_slice(b"grant `");
+                    // SAFETY: emitter supplies one valid UTF-8 name per main parameter.
+                    line.extend_from_slice(unsafe { bytes(*names.add(index)) });
+                    line.extend_from_slice(match error {
+                        StartupError::MissingGrant(_) => b"` is not in the run's configuration\n",
+                        _ => b"`: this host does not permit openat2, which a Dir needs (Linux 5.6 or later, allowed by every sandbox in force)\n",
+                    });
+                }
+                StartupError::Io(error) => {
+                    line.extend_from_slice(
+                        format!("host grants could not be configured: {error}\n").as_bytes(),
+                    );
+                }
+            }
+            // SAFETY: the configured diagnostic fd and line live through this write.
+            unsafe { crate::os::diagnostic(input.stderr_fd, line.as_ptr(), line.len()) };
+            crate::process::NOT_STARTED
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "startup_host_tests.rs"]
+mod startup_host_tests;

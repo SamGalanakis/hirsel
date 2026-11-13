@@ -832,3 +832,7 @@ fn from_disk(disk: DiskCheck) -> DefinitionProduct {
         },
     }
 }
+
+#[cfg(test)]
+#[path = "../../hirsel-core-rt/src/openat2_required.rs"]
+mod openat2_required;

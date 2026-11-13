@@ -48,6 +48,15 @@ impl OsProvider {
         self.directories.insert(id, file.into());
         Ok(id)
     }
+    /// Startup-only capability probe. The per-operation confined open is unchanged.
+    pub(crate) fn probe_directory(&self, handle: u64) -> io::Result<()> {
+        drop(beneath(
+            self.directories[&handle].as_raw_fd(),
+            b".",
+            libc::O_PATH | libc::O_DIRECTORY,
+        )?);
+        Ok(())
+    }
     fn id(&mut self) -> u64 {
         let id = self.next;
         self.next = self

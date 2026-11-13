@@ -176,3 +176,6 @@ mod host_ops_tests;
 
 #[cfg(test)]
 mod retry_tests;
+
+#[cfg(test)]
+mod openat2_required;

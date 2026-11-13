@@ -909,6 +909,9 @@ b0:
         run_clean(&built.executable, 0);
     }
     fn capability_entry(backend: Backend, kind: &str, expected_kind: u8) {
+        if expected_kind == 0 {
+            crate::openat2_required::require();
+        }
         let dir = tempfile::tempdir().unwrap();
         let mut options = native_options(backend, dir.path());
         let source = format!("pub fn main(cap: {kind}) -> Result[(), Exit] {{ Ok(()) }}\n");

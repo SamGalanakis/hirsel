@@ -1,0 +1,38 @@
+// MEM-6 / OWN-20: an enclosing formal Region keeps its resolver identity inside
+// a closure, independently of that closure's own invocation parameter indices.
+// Type-only mentions do not create runtime captures; expression uses do.
+// expect: run checked() = 65
+@compact(u16) stable type Doc {value:u64}
+fn make(r:Region,n:u64)->Doc in r {
+ let b=result.unwrap(build_stream_in(r,bytes 64,fn(take w:Writer[Doc,in r])->Result[Child[Doc],BuildError] {
+  emit(take w,Doc(value:n))
+ }))
+ finish(take b)
+}
+fn read(d:Doc)->u64 {d.value}
+fn parse(r:Region)->Result[Doc in r,Capacity] {Error(Capacity(requested:1,available:0))}
+fn original(r:Region)->u64 {
+ let invoke=scoped fn()->u64 {let f=parse;match f(r) {Error(c)=>c.requested,Ok(_)=>0}}
+ invoke()
+}
+fn outer(r:Region,seed:u64)->u64 {
+ let invoke=scoped fn(x:u64)->u64 {let f=make;let d=f(r,seed+x);read(d)}
+ invoke(7)
+}
+fn nested(r:Region)->u64 {
+ let invoke=scoped fn()->u64 {
+  let inner=scoped fn()->u64 {let f=make;let d=f(r,19u64);read(d)}
+  inner()
+ }
+ invoke()
+}
+fn type_only(r:Region)->u64 {
+ let invoke=fn()->u64 {let x:Option[u64 in r]=None;match x {None=>5u64,Some(_)=>0u64}}
+ invoke()
+}
+fn dual(a:Region,b:Region)->u64 {
+ let invoke=scoped fn(z:u64)->u64 {let f=make;let d=f(b,z);read(d)}
+ invoke(23)
+}
+fn checked()->u64 {region a {region b {original(a)+outer(a,10u64)+nested(b)+type_only(a)+dual(a,b)}}}
+pub fn main()->Result[(),Exit] {if checked()==65u64 {Ok(())}else{Error(Exit(status:1))}}

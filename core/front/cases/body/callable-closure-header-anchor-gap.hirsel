@@ -1,0 +1,4 @@
+// A closure's own header parameter is distinct from an enclosing captured root.
+// Its header currently lowers before that parameter context exists.
+// expect: gap closure header parameter anchors are not built
+fn f() {let g=fn(r:Region)->Option[u64 in r] {None}}

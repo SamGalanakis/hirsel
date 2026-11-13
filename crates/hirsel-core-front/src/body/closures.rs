@@ -763,6 +763,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         }
     }
+    /// Type-only root mentions need the enclosing declaration's type, without a
+    /// runtime capture. An expression use still discovers its capture normally.
+    pub(super) fn captured_root_ty(&self, slot: u32) -> Option<TyId> {
+        self.capture_frame
+            .as_ref()?
+            .outer
+            .get(slot as usize)?
+            .map(|v| v.ty)
+    }
     /// Discover an outer slot exactly when its first source use is visited.
     pub(super) fn capture_slot(&mut self, slot: u32, n: NodeId) {
         let Some(frame) = &self.capture_frame else {

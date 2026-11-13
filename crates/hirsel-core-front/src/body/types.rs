@@ -24,18 +24,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let parameter = binder.kind == hirsel_core_resolve::BinderKind::Parameter;
         let parameter_index = if parameter {
-            let Some(i) = self.fd.params.iter().position(|p| p.name == binder.name) else {
-                self.gap(n, "captured formal Region anchors are not built");
-                return ERROR;
-            };
-            Some(i)
+            self.fd.params.iter().position(|p| {
+                p.name == binder.name
+                    && p.site.span.start <= binder.site.span.start
+                    && binder.site.span.end <= p.site.span.end
+            })
         } else {
             None
         };
         let ty = match parameter_index {
             Some(i) => Some(self.fd.params[i].ty),
-            None => self.vars[b as usize].map(|v| v.ty),
+            None => self.vars[b as usize]
+                .map(|v| v.ty)
+                .or_else(|| self.captured_root_ty(b)),
         };
+        if parameter && parameter_index.is_none() && ty.is_none() {
+            // A closure header may name its own parameter before its body context
+            // exists. Enclosing formals instead have a resolver slot in the frame.
+            self.gap(n, "closure header parameter anchors are not built");
+            return ERROR;
+        }
         if region_only && binder.kind != hirsel_core_resolve::BinderKind::Region
             && !ty.is_some_and(|ty| matches!(self.t.kind(ty), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Region))) {
             self.refuse("MEM-6", n, "a region argument names a Region value");
@@ -44,7 +52,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let Some(i) = parameter_index {
             return self.t.mk(TyKind::Region(Root::Parameter(i as u32)));
         }
-        // Local roots are indexed by resolver identity, like body places.
+        // Local and captured roots use resolver identity, like body places. An
+        // enclosing formal is never reinterpreted as this closure's parameter.
         self.t.mk(TyKind::Region(Root::Local(b)))
     }
 

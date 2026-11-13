@@ -689,6 +689,7 @@ b0:
     include!("list_native.rs");
     include!("numeric_native.rs");
     include!("instance_native.rs");
+    include!("callable_native.rs");
     include!("finalizer_native.rs");
 
     fn run_clean(binary: &Path, exit: i32) {

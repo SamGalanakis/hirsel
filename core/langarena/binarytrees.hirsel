@@ -1,0 +1,59 @@
+// kostya/LangArena 3c9f84d benchmarks/binarytrees.rs.
+type Node {left:Option[Box[Node]],right:Option[Box[Node]],item:i32}
+fn tree(item:i32,depth:i32)->Result[Box[Node],helper.Error] {
+    let mut node=match box.new(Node(left:None,right:None,item:item)) {Ok(take n)=>take n,Error((c,take unused))=>return Error(Capacity(c))}
+    if depth>0 {
+        let shift:i32=int.narrow(depth-1)
+        let offset=1i32<<shift
+        node.left=Some(tree(item-offset,depth-1)?)
+        node.right=Some(tree(item+offset,depth-1)?)
+    }
+    Ok(take node)
+}
+fn sum(node:Box[Node])->u32 {
+    let item:u32=int.truncate(node.item)
+    let mut total=int.wrapping_add(item,1u32)
+    if let Some(left)=node.left {total=int.wrapping_add(total,sum(left))}
+    if let Some(right)=node.right {total=int.wrapping_add(total,sum(right))}
+    total
+}
+type ArenaNode {item:i32,left:Option[std.pool.Id[ArenaNode]],right:Option[std.pool.Id[ArenaNode]]}
+fn build_arena(mut p:std.pool.Pool[ArenaNode],item:i32,depth:i32)->Result[std.pool.Id[ArenaNode],helper.Error] {
+    let node=ArenaNode(item:item,left:None,right:None)
+    let id=match std.pool.insert(mut p,take node) {Ok(x)=>x,Error((c,take unused))=>return Error(Capacity(c))}
+    if depth>0 {
+        let offset=1i32<<(depth-1)
+        let left=build_arena(mut p,item-offset,depth-1)?
+        let right=build_arena(mut p,item+offset,depth-1)?
+        let _=result.unwrap(std.pool.update(mut p,id,fn(mut n:ArenaNode) {n.left=Some(left);n.right=Some(right)}))
+    }
+    Ok(id)
+}
+fn sum_arena(p:std.pool.Pool[ArenaNode],id:std.pool.Id[ArenaNode])->u32 {
+    let node=result.unwrap(std.pool.get(p,id))
+    let item:u32=int.truncate(node.item)
+    let mut total=int.wrapping_add(item,1u32)
+    if let Some(left)=node.left {total=int.wrapping_add(total,sum_arena(p,left))}
+    if let Some(right)=node.right {total=int.wrapping_add(total,sum_arena(p,right))}
+    total
+}
+pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
+    if name!="Binarytrees::Obj" && name!="Binarytrees::Arena" {return Error(UnknownTask)}
+    let depth=helper.config_i64(config,name,"depth")?
+    if depth<0 {return Error(Config)}
+    let mut total:u32=0
+    for _ in 0 .. warmup+iterations {
+        if name=="Binarytrees::Arena" {
+            let mut p:std.pool.Pool[ArenaNode]=std.pool.new()
+            let root=build_arena(mut p,0,int.narrow(depth))?
+            total=int.wrapping_add(total,sum_arena(p,root))
+        } else {
+            let root=tree(0,int.narrow(depth))?
+            total=int.wrapping_add(total,sum(root))
+        }
+    }
+    Ok(total)
+}
+pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
+    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+}

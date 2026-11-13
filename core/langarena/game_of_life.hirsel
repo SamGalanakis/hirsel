@@ -1,0 +1,53 @@
+// kostya/LangArena 3c9f84d benchmarks/game_of_life.rs: toroidal grid.
+// The matched twin uses the same flat cells and eight explicit neighbor indices.
+type Cell {alive:bool,next_state:bool,neighbors:Inline[u64,8]}
+pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
+    if name!="Etc::GameOfLife" {return Error(UnknownTask)}
+    let wi=helper.config_i64(config,name,"w")?
+    let he=helper.config_i64(config,name,"h")?
+    if wi<=0 || he<=0 {return Error(Config)}
+    let w:u64=int.narrow(wi)
+    let h:u64=int.narrow(he)
+    let mut cells:List[Cell]=helper.mem(list.with_capacity(w*h))?
+    let mut g=helper.lcg()
+    for y in 0 .. h {
+        for x in 0 .. w {
+            let mut neighbors:Inline[u64,8]=[0u64;8]
+            let mut k:u64=0
+            let xi:i64=int.narrow(x)
+            let yi:i64=int.narrow(y)
+            for dy in -1i64 .. 2i64 {
+                for dx in -1i64 .. 2i64 {
+                    if dx!=0 || dy!=0 {
+                        let xx:u64=int.narrow((xi+dx+wi)%wi)
+                        let yy:u64=int.narrow((yi+dy+he)%he)
+                        neighbors[k]=yy*w+xx
+                        k+=1
+                    }
+                }
+            }
+            let alive=match float.total_order(helper.next_float(mut g,1.0),0.1) {Less=>true,_=>false}
+            let cell=Cell(alive:alive,next_state:false,neighbors:neighbors)
+            let _=list.push(mut cells,take cell)
+        }
+    }
+    for _ in 0 .. warmup+iterations {
+        for i in 0 .. w*h {
+            let mut count:u32=0
+            for j in 0u64 .. 8u64 {if cells[cells[i].neighbors[j]].alive {count+=1}}
+            cells[i].next_state=count==3 || cells[i].alive && count==2
+        }
+        for i in 0 .. w*h {cells[i].alive=cells[i].next_state}
+    }
+    let mut hash:u32=2166136261
+    let mut alive:u32=0
+    for c in cells {
+        let bit:u32=if c.alive {1} else {0}
+        alive+=bit
+        hash=int.wrapping_mul(hash^bit,16777619)
+    }
+    Ok(hash+alive)
+}
+pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
+    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+}

@@ -1,0 +1,109 @@
+// kostya/LangArena 3c9f84d benchmarks/fannkuchredux.rs.
+fn fannkuch(n:u64)->(i32,i32) {
+    let mut perm1:Inline[i32,32]=[0i32;32]
+    let mut perm:Inline[i32,32]=[0i32;32]
+    let mut count:Inline[i32,32]=[0i32;32]
+    for i in 0u64 .. 32u64 {perm1[i]=int.narrow(i)}
+    let mut max_flips:i32=0
+    let mut perm_count:i32=0
+    let mut checksum:i32=0
+    let mut r=n
+    loop {
+        while r>1 {count[r-1]=int.narrow(r);r-=1}
+        for i in 0 .. n {perm[i]=perm1[i]}
+        let mut flips:i32=0
+        let mut k=perm[0]
+        while k!=0 {
+            let half:u64=int.narrow((k+1)>>1i32)
+            for i in 0 .. half {
+                let j:u64=int.narrow(k)
+                let x=perm[i]
+                perm[i]=perm[j-i]
+                perm[j-i]=x
+            }
+            flips+=1
+            k=perm[0]
+        }
+        if flips>max_flips {max_flips=flips}
+        if perm_count%2==0 {checksum+=flips} else {checksum-=flips}
+        loop {
+            if r==n {return (checksum,max_flips)}
+            let p0=perm1[0]
+            for i in 0 .. r {
+                let x=perm1[i]
+                perm1[i]=perm1[i+1]
+                perm1[i+1]=x
+            }
+            perm1[r]=p0
+            count[r]-=1
+            if count[r]>0 {break}
+            r+=1
+        }
+        perm_count+=1
+    }
+}
+fn mandelbrot(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
+    let wi=helper.config_i64(config,name,"w")?
+    let hi=helper.config_i64(config,name,"h")?
+    if wi<=0 || hi<=0 {return Error(Config)}
+    let w:u64=int.narrow(wi)
+    let h:u64=int.narrow(hi)
+    let wf:f64=float.from_int(w)
+    let hf:f64=float.from_int(h)
+    let mut result:Bytes=list.new()
+    for _ in 0 .. warmup+iterations {
+        let mut header=helper.mem(string.from("P4\n"))?
+        helper.mem(string.push_u64(mut header,w))?
+        helper.mem(string.push(mut header," "))?
+        helper.mem(string.push_u64(mut header,h))?
+        helper.mem(string.push(mut header,"\n"))?
+        helper.mem(list.append(mut result,string.as_bytes(header)))?
+        let mut bit:u8=0
+        let mut byte:u8=0
+        for y in 0 .. h {
+            let yf:f64=float.from_int(y)
+            let ci=2.0*yf/hf-1.0
+            for x in 0 .. w {
+                let xf:f64=float.from_int(x)
+                let cr=2.0*xf/wf-1.5
+                let mut zr:f64=0.0
+                let mut zi:f64=0.0
+                let mut tr:f64=0.0
+                let mut ti:f64=0.0
+                let mut i:u32=0
+                while i<50 && (match float.total_order(tr+ti,4.0) {Greater=>false,_=>true}) {
+                    zi=2.0*zr*zi+ci
+                    zr=tr-ti+cr
+                    tr=zr*zr
+                    ti=zi*zi
+                    i+=1
+                }
+                byte=byte<<1u8
+                if (match float.total_order(tr+ti,4.0) {Greater=>false,_=>true}) {byte=byte|1u8}
+                bit+=1
+                if bit==8 || x==w-1 {
+                    if bit!=8 {let shift:u8=int.narrow(8-w%8);byte=byte<<shift}
+                    match list.push(mut result,byte) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
+                    byte=0
+                    bit=0
+                }
+            }
+        }
+    }
+    Ok(helper.checksum_bytes(result))
+}
+pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
+    if name=="CLBG::Mandelbrot" {return mandelbrot(config,name,warmup,iterations)}
+    if name!="CLBG::Fannkuchredux" {return Error(UnknownTask)}
+    let size=helper.config_i64(config,name,"n")?
+    if size<1 || size>32 {return Error(Config)}
+    let mut total:u32=0
+    for _ in 0 .. warmup+iterations {
+        let (checksum,flips)=fannkuch(int.narrow(size))
+        total=int.wrapping_add(total,int.wrapping_add(int.wrapping_mul(int.truncate(checksum),100),int.truncate(flips)))
+    }
+    Ok(total)
+}
+pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
+    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+}

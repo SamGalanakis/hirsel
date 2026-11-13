@@ -99,16 +99,16 @@
   "forecast_revision": "core-collections-918-deque-clone",
   "completion_forecast": {
     "m1": {
-      "complete_bodies": 379,
-      "bodies": 379,
+      "complete_bodies": 380,
+      "bodies": 380,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
       "measured_process_per_line": 46837.031228216925,
       "finished_process_per_line": 46837.031228216925
     },
     "std": {
-      "complete_bodies": 201,
-      "bodies": 201,
+      "complete_bodies": 202,
+      "bodies": 202,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
       "measured_process_per_line": 35752.158910629296,
@@ -1999,7 +1999,7 @@
     {
       "from_revision": "4edfc66f2cea86127a77122249f2122fa4f62860",
       "to_revision": "core-collections-918-deque-clone",
-      "reason": "Completed core slot/Deque source and declared live-range clone. Reuse the fresher inherited all-source observation in6115b33e history (supersedes my older c23e5ad1), no repeated campaign. Canonical source-body census201 accepted plus unchanged178 M1 bodies; core Deque9->10. M1 margin2percent/std5percent. Retain915 product savings and fixed60000 budget.",
+      "reason": "Completed core slot/Deque source and declared live-range clone. Reuse the fresher inherited all-source observation in6115b33e history (supersedes my older c23e5ad1), no repeated campaign. Canonical source-body census202 accepted plus unchanged178 M1 bodies; core Deque9->10. M1 margin2percent/std5percent. Retain915 product savings and fixed60000 budget.",
       "completed_bodies_before": {
         "m1": [
           362,
@@ -2016,12 +2016,12 @@
       },
       "completed_bodies_after": {
         "m1": [
-          379,
-          379
+          380,
+          380
         ],
         "std": [
-          201,
-          201
+          202,
+          202
         ],
         "core.deque": [
           10,

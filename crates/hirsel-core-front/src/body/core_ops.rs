@@ -137,6 +137,7 @@ operations! {
     ("int", "try_narrow", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "truncate", Lane::Numeric, "A", "core-check-index-912", false),
     ("deque", "Deque", Lane::PendingCode, "C", "core-collections-918", false),
+    ("deque", "Deque.$clone", Lane::PendingCode, "C", "core-collections-918", true),
     ("deque", "new", Lane::PendingCode, "C", "core-collections-918", false),
     ("deque", "len", Lane::PendingCode, "C", "core-collections-918", false),
     ("deque", "push_back", Lane::PendingCode, "C", "core-collections-918", false),

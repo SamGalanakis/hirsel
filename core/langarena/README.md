@@ -89,6 +89,12 @@ Runtime comparisons use each task's unchanged upstream `run` configuration on
 Cranelift dev versus Rust opt-level 0 and LLVM release versus Rust opt-level 3.
 Report upstream and independently reviewed matched twins separately, with one
 sample per side, instructions and peak RSS, following `core/MEASURE.md`.
+Both the compiler and runtime archive come from the release Buck configuration:
+`--target-platforms //tools/buck2:release`. Record their build configuration and
+artifact identities. The generated program's `--release` flag alone does not
+select a release compiler or runtime. Checked or unverified artifact counters and
+profiles are diagnostics; they produce no result ratio. Recollection replaces only
+the invalid Hirsel samples and reuses valid Rust samples.
 A missing counter, wrong checksum, Capacity or incomplete run produces a blocked
 row and no ratio. Ratios above 2 include a period-50003 instruction profile.
 

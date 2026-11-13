@@ -1,5 +1,20 @@
 # Memory cost samples
 
+## Optional Arc recording gate
+
+Source314d049a plus C boolean-extension repair. Same LLVM lane arc-v1 function/seed, Rust1.99 checked opt3/x86-64/no LTO, CPU16/jobs1/2GiB; one sample/configuration. Allocation, initialization, final release and startup stay outside the per-thread instructions:u window. Each of one million iterations shares/releases a retained Arc, reads its runtime payload and mixes the same checksum. Both paths run on the real cooperative scheduler.
+
+| pair | previous | context-gated | Rust Arc | current/Rust |
+|---|---:|---:|---:|---:|
+| no recorder |61.001|19.000057|13.000054|1.462x|
+| checking/counting recorder |113.000|98.000150|13.000054|7.538x|
+
+No-sink meets1.5x. The gated taken path adds79 instructions/pair over untaken, including both context-first calls, event materialization, the checking/counting callback and call-preserved loop state. This is not an isolated hook-body cost. The callback records exactly1,000,000 shares and1,000,000 nonlast releases; all three samples return10158283133157267006. Events and count overflow behavior are unchanged. Disassembly confirms the hook path reads context.events, then task/run/provider directly, with no TLS lookup. LLVM can hoist its invariant context-word load out of the loop. Both LLVM and Cranelift emit the conditional cold call for init/share/release/unwrap.
+
+CONTEXT_EVENTS=8 is a new frozen word, zero without an event sink, otherwise the task's pinned pointer. Root sets it before execution, child inherits recording and installs its own pointer before publication, and it stays immutable during execution. After inline atomic count/test: if context.events !=0, call hirsel_core_arc_initialized(context), hirsel_core_arc_shared(context,node), hirsel_core_arc_released(context,last) or hirsel_core_arc_unwrapped(context,unique). Release records before final cleanup/refund. These hooks have no status, admission, allocation or count mutation. Existing runtime task/channel dispatch remains unchanged. Native runtime count helpers keep their existing internal event route. The C hooks now require nonzero context.events, as generated code proves.
+
+Evidence `/workspace/code/hirsel-briefs/core-memory-900/arc-dispatch-cost/`: copied LLVM function/twin/caller sources, results.tsv, per-configuration stdout/stderr, source environment and disassembly. The archived previous61/113 rows are the LLVM lane's measured source3337b72a, not a fresh resample. Root/child inheritance, actual zero hook-entry count with no sink, recorded stream and schedule tests execute in the runtime suite. Cranelift's stream exposed missing C bool zero-extension after adding the context argument; declaring those C parameters uext preserves the exact0/1 event values.
+
 ## Frozen inline regions and matched own pairs
 
 Own source `448174a3`; region source806ecb3f plus the measurement-only frozen-offset shim, unchanged by the later own edits. Same CPU16/jobs1/2GiB/Rust1.99 checked opt3/no LTO method. One million operations per first-run sample, all checksums correct. The own Rust baseline calls the identical backend malloc(N+8)/free, aligns to8 and zeroes the same N payload bytes at offset8. This controls allocator, native size class, alignment and zeroing. Runtime adds admission, the payer prefix and refund. The ordinary Rust Box rows remain historical API comparisons, not accounting overhead estimates.

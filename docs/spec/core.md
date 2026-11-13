@@ -1,9 +1,14 @@
 # Core library
 
-The core library is source: one signature file per core module under
-[`core/core/`](../../core/core/), 25 files. Each file is a module ([LANG-7](language.md#lang-7-names));
-its functions end at their headers, and a type declared there with no body is built in, so
-its summary is the one the table below gives it.
+The core library is source: one file per core module under
+[`core/core/`](../../core/core/), 25 files. Each file is a module ([LANG-7](language.md#lang-7-names))
+of the package `core`, which differs from any other package in one power: a function there
+may end at its header, and is then provided by the implementation. A core function with a
+body is ordinary code under the ordinary rules. Either way its contract is its header and
+this page, and nothing is inferred from its body ([LANG-8](language.md#lang-8-signatures)).
+A bodiless function that is not `pub` is visible only in its module
+([PROG-2](programs.md#prog-2-visibility)) and is not part of the contract. A type declared
+there with no body is built in, so its summary is the one the table below gives it.
 
 | module | file | rules |
 |---|---|---|

@@ -99,7 +99,7 @@ type gives it.
 
 `waits` says that a call may wait and may observe cancellation
 ([CONC-7](tasks.md#conc-7-cancellation-points)). `main` is always `waits`
-([PROG-3](programs.md#prog-3-entry)), and a core declaration's `waits` is as written.
+([PROG-3](programs.md#prog-3-entry)), and a bodiless core function's `waits` is as written.
 Every other function or closure is declared `waits`
 exactly when its body calls a function, or invokes a callable, whose type is `waits`; one
 declared `waits` without such a call is refused too. Cleanup never counts: finalizers and the

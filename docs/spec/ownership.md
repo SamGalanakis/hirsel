@@ -154,8 +154,8 @@ The bounds are:
 - `key`: equality and hashing ([SEM-7](semantics.md#sem-7-equality-and-order)).
 - `ordered`: total order (SEM-7).
 - `integer`: exactly the integer types; `float`: exactly `f32` and `f64`. They are written
-  only on the type parameters of core declarations ([core](core.md)), which have no body, and
-  are refused anywhere else: numeric generics are not in v1
+  only on the type parameters of core declarations ([core](core.md)), and are refused
+  anywhere else: numeric generics are not in v1
   ([reserved](reserved.md#not-in-v1)).
 - `packed`, `streamable`: compact encodings
   ([MEM-12](memory.md#mem-12-stable-sequences)), computed like `plain`.

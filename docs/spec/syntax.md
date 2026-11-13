@@ -276,9 +276,9 @@ without `else`, and `let`-condition patterns are checked for refutability after 
 attribute, an attribute on another item, a representation keyword on an alias,
 and `drop` on a declaration that is not `resource` are refused. A parameter marked `bytes`
 is a byte count of type `u64`, and its argument is written `bytes e`; the mark is part of the
-signature, as `take` is. In a core declaration file ([core](core.md)) a function may end at
-its header, with no body, and a type with no body is built in; everywhere else a function
-needs a body. Malformed syntax with no
+signature, as `take` is. In a file of the package `core` ([core](core.md)) a function may end at
+its header, with no body, and a type with no body is built in; in any other package a
+function without a body is refused here, at the end of its header. Malformed syntax with no
 more specific rule is LANG-5.
 
 ```hirsel
@@ -286,4 +286,7 @@ fn f(xs: List[u64]) -> u64 { if list.len(xs) > 0 { xs[0] } else { 0 } }
 ```
 ```hirsel
 fn f(a: u64, b: u64, c: u64) -> bool { a < b < c }        // refused: LANG-5, comparisons do not chain
+```
+```hirsel
+fn width() -> u64                                         // refused: LANG-5, a function outside core needs a body
 ```

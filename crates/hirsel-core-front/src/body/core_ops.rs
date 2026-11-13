@@ -1028,7 +1028,9 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                         "of_bytes" | "to_bytes" | "view_string" | "shorten" | "push_scalar"
                     )
                     || entry.module == "map"
-                    || entry.module == "list" && entry.name.starts_with("slots_")
+                    || entry.module == "list"
+                        && (entry.name.starts_with("slots_")
+                            || matches!(entry.name, "Hole" | "sort_view" | "sort_move"))
                     || matches!(entry.module, "deque" | "heap")
             );
         }

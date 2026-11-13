@@ -130,7 +130,7 @@ fn zero_size_sort() -> u64 {
         let cap = list.capacity(xs)
         let mut calls: u64 = 0
         result.unwrap(list.sort_stable(mut xs, fn(a:(),b:())->Order { calls += 1; Equal }))
-        if list.capacity(xs) != cap { 99 } else { list.len(xs) * 10 + calls }
+        if list.capacity(xs) != cap { 99u64 } else { list.len(xs) * 10 + calls }
     }
     result.unwrap(r)
 }

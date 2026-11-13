@@ -1,0 +1,11 @@
+// MEM-17: twins have the same field names in the same order (spec example), the same arm
+// names in the same order, and paired field types; `List[T]` pairs only with `FixedSpan[T]`.
+// expect: refuse MEM-17 at 7:1
+// expect: refuse MEM-17 at 9:1
+// expect: refuse MEM-17 at 11:1
+type Row { name: String, n: u64 }
+@twin(Row) stable type RowN { label: Text, n: u64 }
+type Shape = Dot(u64) | Name(String)
+@twin(Shape) stable type ShapeS = Name(Text) | Dot(u64)
+type Wide { name: String, n: u64 }
+@twin(Wide) stable type Narrow { name: Text, n: u32 }

@@ -288,6 +288,8 @@ pub struct TypeDecl {
     /// `grant bytes n` (MEM-27): the limit its finalizer runs under; 0 if undeclared.
     pub grant: u64,
     pub compact: Option<Width>,
+    /// `@twin(P)` (MEM-17): the paired type as written, and the attribute's site.
+    pub twin: Option<(TyId, Site)>,
     pub summary: Summary,
 }
 impl TypeDecl {
@@ -548,6 +550,7 @@ impl Program<'_> {
                     finalizer,
                     grant,
                     compact,
+                    twin: None,
                     summary: Summary::default(),
                 });
                 self.by_path.entry(path).or_insert(Def::Type(id));
@@ -673,6 +676,14 @@ impl Program<'_> {
                         });
                     }
                     body = DeclBody::Variant(cases);
+                }
+                NodeKind::Attribute
+                    if item.tree.token_text(item.text, n.token.unwrap()) == "twin" =>
+                {
+                    let path = item.tree.children(c)[0];
+                    let ty = self.lower_ty(at, path, &[]);
+                    let site = self.site(at, c);
+                    self.decls[d.index()].twin = Some((ty, site));
                 }
                 NodeKind::TypePath
                 | NodeKind::TypeArguments
@@ -1268,6 +1279,7 @@ impl Program<'_> {
         self.encodings();
         self.holds();
         self.check_declared_bounds();
+        self.check_twins();
         let pending = std::mem::take(&mut self.pending);
         for p in pending {
             match p {
@@ -1596,10 +1608,12 @@ impl Program<'_> {
                     | Role::FixedSpan
                     | Role::SeqSpan
                     | Role::IndexedSpan
-                    | Role::SeqIndex
-                    | Role::SpanBuilder
-                    | Role::Builder,
+                    | Role::SeqIndex,
                 ) => H_STABLE,
+                // A builder and `Causes` are owners with no copy contract (OWN-2); a
+                // builder also holds its region's stable blob.
+                Some(Role::SpanBuilder | Role::Builder) => H_STABLE | H_OPAQUE,
+                Some(Role::Causes) => H_OPAQUE,
                 Some(_) => 0,
                 None => match decl.repr {
                     Repr::Resource => H_RESOURCE,
@@ -1733,6 +1747,39 @@ impl Program<'_> {
         }
     }
 
+    /// `@twin(P)` (MEM-17): a non-generic declaration pairs with the non-generic `P`,
+    /// symmetrically, when their fields (or arms and payloads) have the same names in
+    /// the same order and each pair of types pairs.
+    fn check_twins(&mut self) {
+        for d in self.decls.base_len()..self.decls.len() {
+            let Some((ty, site)) = self.decls[d].twin.clone() else {
+                continue;
+            };
+            let why = match self.types.kind(ty) {
+                TyKind::Error => continue,
+                TyKind::Adt(e, xs) if xs.is_empty() && self.decls[e.index()].role.is_none() => {
+                    let e = *e;
+                    let other = self.decls[e.index()].twin.as_ref().map(|(t, _)| *t);
+                    if !self.decls[d].generics.is_empty() {
+                        Some("a twin declaration is not generic".to_owned())
+                    } else if e.index() == d {
+                        Some("a type is not its own twin".to_owned())
+                    } else if other.is_some_and(
+                        |t| !matches!(self.types.kind(t), TyKind::Adt(x, _) if x.index() == d),
+                    ) {
+                        Some("the twin names another twin".to_owned())
+                    } else {
+                        twin_decls(&self.decls, &self.types, DeclId(d as u32), e).err()
+                    }
+                }
+                _ => Some("a twin is a declared non-generic type".to_owned()),
+            };
+            if let Some(why) = why {
+                self.refusals.push(refusal("MEM-17", site, why));
+            }
+        }
+    }
+
     fn check_signatures(&mut self) {
         for f in self.fns.base_len()..self.fns.len() {
             let fd = &self.fns[f];
@@ -1818,6 +1865,120 @@ impl Tarjan<'_> {
                 self.out[m] = h;
             }
         }
+    }
+}
+
+/// The declared twin of `d`, either way round (MEM-17: the pair is symmetric).
+pub fn twin_of(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, d: DeclId) -> Option<DeclId> {
+    let named = |x: DeclId| match decls[x.index()].twin.as_ref().map(|(ty, _)| t.kind(*ty)) {
+        Some(TyKind::Adt(e, xs)) if xs.is_empty() => Some(*e),
+        _ => None,
+    };
+    named(d).or_else(|| {
+        (0..decls.len())
+            .map(|i| DeclId(i as u32))
+            .find(|&x| named(x) == Some(d))
+    })
+}
+
+fn unanchored(t: &impl TyRead, ty: TyId) -> TyId {
+    match t.kind(ty) {
+        TyKind::Anchored(x, _) => *x,
+        _ => ty,
+    }
+}
+
+/// Whether declarations `a` and `b` pair as twins, assuming they do while their own
+/// fields are checked (so recursive twins check); `Err` names the first mismatch.
+fn twin_decls(
+    decls: &crate::Rows<TypeDecl>,
+    t: &impl TyRead,
+    a: DeclId,
+    b: DeclId,
+) -> Result<(), String> {
+    let pair_fields = |x: &[FieldDecl], y: &[FieldDecl]| -> Result<(), String> {
+        if x.len() != y.len() || x.iter().zip(y).any(|(f, g)| f.name != g.name) {
+            return Err("twins have the same field names in the same order".to_owned());
+        }
+        for (f, g) in x.iter().zip(y) {
+            if !twin_tys(decls, t, (a, b), f.ty, g.ty) {
+                return Err(format!("field `{}` has no paired type", f.name));
+            }
+        }
+        Ok(())
+    };
+    match (&decls[a.index()].body, &decls[b.index()].body) {
+        (DeclBody::Record(x), DeclBody::Record(y)) => pair_fields(x, y),
+        (DeclBody::Variant(x), DeclBody::Variant(y)) => {
+            if x.len() != y.len() || x.iter().zip(y).any(|(c, k)| c.name != k.name) {
+                return Err("twins have the same arm names in the same order".to_owned());
+            }
+            x.iter()
+                .zip(y)
+                .try_for_each(|(c, k)| pair_fields(&c.fields, &k.fields))
+        }
+        _ => Err("twins are both records or both variant types".to_owned()),
+    }
+}
+
+/// MEM-17's pairing of two field types: identical, a built-in pair, a declared (or
+/// assumed) twin pair, or `Option`, `Result` or a tuple of pairs, component by component.
+fn twin_tys(
+    decls: &crate::Rows<TypeDecl>,
+    t: &impl TyRead,
+    assumed: (DeclId, DeclId),
+    x: TyId,
+    y: TyId,
+) -> bool {
+    let (x, y) = (unanchored(t, x), unanchored(t, y));
+    if x == y {
+        return true;
+    }
+    let twins = |p: DeclId, q: DeclId| {
+        assumed == (p, q) || assumed == (q, p) || twin_of(decls, t, p) == Some(q)
+    };
+    match (t.kind(x), t.kind(y)) {
+        (TyKind::Tuple(xs), TyKind::Tuple(ys)) => {
+            xs.len() == ys.len()
+                && xs
+                    .iter()
+                    .zip(ys)
+                    .all(|(&p, &q)| twin_tys(decls, t, assumed, p, q))
+        }
+        (TyKind::Adt(p, xs), TyKind::Adt(q, ys)) => {
+            let (dp, dq) = (&decls[p.index()], &decls[q.index()]);
+            let pair = |r: Role, s: Role| {
+                (dp.role == Some(r) && dq.role == Some(s))
+                    || (dp.role == Some(s) && dq.role == Some(r))
+            };
+            if pair(Role::String, Role::Text) {
+                return true;
+            }
+            if pair(Role::List, Role::FixedSpan) {
+                return unanchored(t, xs[0]) == unanchored(t, ys[0]);
+            }
+            if p == q && dp.structural {
+                return xs
+                    .iter()
+                    .zip(ys)
+                    .all(|(&a, &b)| twin_tys(decls, t, assumed, a, b));
+            }
+            // `Box[X]` and a stable reference to `Y`, where `X` and `Y` are twins.
+            let boxed = |r: &TypeDecl, args: &[TyId], s: DeclId| {
+                r.role == Some(Role::Box)
+                    && decls[s.index()].repr == Repr::Stable
+                    && matches!(t.kind(unanchored(t, args[0])), TyKind::Adt(b, _) if twins(*b, s))
+            };
+            if boxed(dp, xs, *q) || boxed(dq, ys, *p) {
+                return true;
+            }
+            xs.is_empty()
+                && ys.is_empty()
+                && dp.role.is_none()
+                && dq.role.is_none()
+                && twins(*p, *q)
+        }
+        _ => false,
     }
 }
 

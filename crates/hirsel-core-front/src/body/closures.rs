@@ -926,7 +926,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         true
     }
-    fn capture_holds(&self, ty: TyId) -> u8 {
+    pub(super) fn capture_holds(&self, ty: TyId) -> u8 {
         match self.t.kind(ty) {
             TyKind::Param(i) => crate::param_holds(self.params[*i as usize]),
             TyKind::View(_) => crate::H_SCOPED,

@@ -1,0 +1,17 @@
+// MEM-17: the expected type selects what `clone` and `clone_in` copy: `x`'s own type or
+// its declared twin, else the payloads through `Box`, `Rc` and `Arc`, outermost first.
+// No match is refused at the form, and so is a value holding a resource, a scoped value
+// or an opaque owner (spec example: a builder). Plain values copy.
+// expect: refuse MEM-17 at 15:48
+// expect: refuse MEM-17 at 16:90
+// expect: refuse MEM-17 at 17:51
+// expect: gap this generic core operation is not built
+type Row { name: String, n: u64 }
+@twin(Row) stable type RowS { name: Text, n: u64 }
+type P: shareable { s: String }
+fn freeze(r: Region, x: Row) -> Result[RowS in r, Capacity] { clone_in(r, x) }
+fn inner(b: Box[Rc[P]]) -> Result[P, Capacity] { clone(b) }
+fn same(p: P) -> Result[P, Capacity] { clone(p) }
+fn wrong(x: u64) -> Result[String, Capacity] { clone(x) }
+fn dup(r: Region, b: SpanBuilder[u8, in r]) -> Result[SpanBuilder[u8, in r], Capacity] { clone(b) }
+fn chain(c: Causes) -> Result[Causes, Capacity] { clone(c) }

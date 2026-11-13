@@ -296,6 +296,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if result == NEVER {
             self.dead = true;
         }
+        if !undetermined
+            && g.path.package_is("core", "1")
+            && g.path.0.modules == ["core"]
+            && matches!(g.path.0.name.as_str(), "clone" | "clone_in")
+            && let Some(why) = self.clone_refusal(tys[0], tys[1])
+        {
+            self.refuse("MEM-17", n, why);
+            return (result, None);
+        }
         let builtin = g.path.package_is("core", "1")
             && g.body.is_none()
             && (g.path.0.modules == ["int"]
@@ -799,6 +808,46 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 Some(p)
             }
             None => first,
+        }
+    }
+
+    /// MEM-17: why `clone` or `clone_in` of an `x: T` expecting `U` is refused, if it is.
+    /// A value holding a resource, a scoped value or an opaque owner is never cloned;
+    /// otherwise `U` (or its twin) is `T` or a payload through `Box`, `Rc` and `Arc`,
+    /// outermost first.
+    fn clone_refusal(&self, x: TyId, u: TyId) -> Option<&'static str> {
+        let unanchored = |t: TyId| match self.t.kind(t) {
+            TyKind::Anchored(x, _) => *x,
+            _ => t,
+        };
+        if self.capture_holds(x) & (crate::H_RESOURCE | crate::H_SCOPED | crate::H_OPAQUE) != 0 {
+            return Some(
+                "a value holding a resource, a scoped value or an opaque owner is never cloned",
+            );
+        }
+        let u = unanchored(u);
+        let twin = match self.t.kind(u) {
+            TyKind::Adt(d, xs) if xs.is_empty() => {
+                crate::decls::twin_of(&self.p.decls, &self.t, *d)
+            }
+            _ => None,
+        };
+        let mut part = unanchored(x);
+        loop {
+            match self.t.kind(part) {
+                TyKind::Error | TyKind::Hole => return None,
+                _ if part == u => return None,
+                TyKind::Adt(d, xs) if Some(*d) == twin && xs.is_empty() => return None,
+                TyKind::Adt(d, xs)
+                    if matches!(
+                        self.p.decls[d.index()].role,
+                        Some(crate::Role::Box | crate::Role::Rc | crate::Role::Arc)
+                    ) =>
+                {
+                    part = unanchored(xs[0]);
+                }
+                _ => return Some("no part of this value is the expected type or its twin"),
+            }
         }
     }
 

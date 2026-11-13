@@ -2863,6 +2863,8 @@ fn aggregate_callback_cases() {
         "callable-aggregate-viewed",
         "callable-aggregate-captured-store-gap",
         "callable-aggregate-mut-argument-gap",
+        "callable-aggregate-owned-projection",
+        "callable-aggregate-owned-projection-alias",
     ] {
         failures.extend(
             run_case(&root().join("cases/body").join(format!("{name}.hirsel")))

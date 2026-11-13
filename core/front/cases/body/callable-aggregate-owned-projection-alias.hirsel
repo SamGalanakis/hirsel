@@ -1,0 +1,9 @@
+// A sibling payload update must preserve the callback's mut-capture loan.
+// expect: refuse OWN-9 at 8:6
+fn f()->u64 {
+ let mut n:u64=1
+ let mut p:(scoped fn(u64)->u64,List[u64])=(scoped fn(x:u64)->u64 {n+=x;n},list.new())
+ let _=result.unwrap(list.push(mut p.1,10u64))
+ p.1[0]=20
+ p.0(n)
+}

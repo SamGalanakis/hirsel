@@ -1507,14 +1507,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
     pub(super) fn descriptor_store(&mut self, at: At, value: Option<ValueId>, n: NodeId) {
-        if self.contains_callback(at.ty)
-            && (matches!(
-                self.var(at.place.slot).origin,
-                Origin::MutParam | Origin::ViewParam | Origin::PatternView
-            ) || self
-                .capture_frame
-                .as_ref()
-                .is_some_and(|f| f.outer[at.place.slot as usize].is_some()))
+        // A sibling may hold a callback, but this place cannot change its descriptor.
+        // In particular a list, array or Box payload cannot contain scoped values.
+        if !self.contains_callback(at.ty) {
+            return;
+        }
+        if matches!(
+            self.var(at.place.slot).origin,
+            Origin::MutParam | Origin::ViewParam | Origin::PatternView
+        ) || self
+            .capture_frame
+            .as_ref()
+            .is_some_and(|f| f.outer[at.place.slot as usize].is_some())
         {
             self.gap(
                 n,

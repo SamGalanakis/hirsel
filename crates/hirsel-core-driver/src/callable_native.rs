@@ -86,6 +86,16 @@ fn aggregate_callback_cranelift(){aggregate_callback(Backend::Cranelift);}
 #[ignore="explicit native integration target"]
 fn aggregate_callback_llvm(){aggregate_callback(Backend::Llvm);}
 
+fn aggregate_owned_projection(backend: Backend) {
+    ordered_case(backend, include_str!("../../../core/front/cases/body/callable-aggregate-owned-projection.hirsel"));
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn aggregate_owned_projection_cranelift(){aggregate_owned_projection(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn aggregate_owned_projection_llvm(){aggregate_owned_projection(Backend::Llvm);}
+
 fn slots_needs_drop(backend: Backend) {
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir=tempfile::tempdir().unwrap();

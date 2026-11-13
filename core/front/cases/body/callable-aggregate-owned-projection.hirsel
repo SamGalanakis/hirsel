@@ -1,0 +1,19 @@
+// OWN-21: a callback descriptor on one field does not describe a sibling's data.
+// Updating list/array/Box payloads must retain the callback's original descriptor.
+// expect: run checked() = 57
+type Data {value:u64}
+fn checked()->u64 {
+ let mut n:u64=1
+ let mut p:(scoped fn(u64)->u64,List[u64])=(scoped fn(x:u64)->u64 {n+=x;n},list.new())
+ let _=result.unwrap(list.push(mut p.1,10u64))
+ p.1[0]=20
+ let a=p.0(2)
+ let mut q=(scoped fn(x:u64)->u64 {n+=x;n},[4u64,5u64])
+ q.1[1]=7
+ let b=q.0(3)
+ let mut r=(scoped fn(x:u64)->u64 {n+=x;n},result.unwrap(box.new(Data(value:9u64))))
+ r.1.value=11
+ let c=r.0(4)
+ a+b+c+p.1[0]+q.1[1]+r.1.value
+}
+pub fn main()->Result[(),Exit] {if checked()==57u64 {Ok(())}else{Error(Exit(status:1))}}

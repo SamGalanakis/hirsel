@@ -852,3 +852,37 @@ b2:
     wf::module(&module).unwrap();
     agree(&module, &[(FuncId(0), vec![123]), (FuncId(0), vec![0])]);
 }
+
+#[test]
+fn every_memory_sample_admission_refusal_matches_the_evaluator() {
+    let mut executions = 0;
+    for source in [
+        include_str!("../../../hirsel-core-ir/samples/admission.core"),
+        include_str!("../../../hirsel-core-ir/samples/cleanup.core"),
+        include_str!("../../../hirsel-core-ir/samples/counted.core"),
+        include_str!("../../../hirsel-core-ir/samples/failure.core"),
+        include_str!("../../../hirsel-core-ir/samples/variants.core"),
+    ] {
+        let module = text::parse(source).unwrap();
+        wf::module(&module).unwrap();
+        let mut cases = Vec::new();
+        for case in sample_cases(&module, source) {
+            let baseline = eval::run(&module, case.function, &case.args, case.limit);
+            for nth in 1..=baseline.admissions {
+                for later in [false, true] {
+                    cases.push(Case {
+                        function: case.function,
+                        args: case.args.clone(),
+                        limit: case.limit,
+                        injection: Some((nth, later)),
+                    });
+                }
+            }
+            cases.push(case);
+        }
+        executions += cases.len();
+        agree_cases(&module, &cases, true);
+    }
+    assert_eq!(executions, 130);
+    println!("whole memory sample executions including every admission refusal: {executions}");
+}

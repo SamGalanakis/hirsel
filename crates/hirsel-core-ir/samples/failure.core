@@ -1,3 +1,4 @@
+; Constructor refusals are explicitly unwrapped; failure edges clean the live prefix.
 ; CoreIR sample, family: failure (failure successors, raise, propagate, the cause
 ; chain, a pending result, a finalizer's failure). FORM v1a, FAIL-2..14.
 ;
@@ -51,18 +52,24 @@ b0(v0: u64):
   v1: u64 = const 40
   v5: u64 = const 8
   v2: ptr, v3: u64 = alloc resource grant 0 v5 align 8 charge v1
+  v6: ptr = const 0x0
+  v7: bool = ne v2, v6
+  branch v7, b1, b4
+b1:
   address a2
   address a3
   store a3, v0
   store a1, v2
-  v4: u64 = call f0 g0 (v0) fail b1
-  drop a0 t0 fail b2                   ; normal exit: v4 is pending
+  v4: u64 = call f0 g0 (v0) fail b2
+  drop a0 t0 fail b3                   ; normal exit: v4 is pending
   return v4
-b1:
-  drop a0 t0 fail b2                   ; failure exit: clean `t`, keep the chain
-  propagate
 b2:
+  drop a0 t0 fail b3                   ; failure exit: clean `t`, keep the chain
   propagate
+b3:
+  propagate
+b4:
+  raise unwrap
 }
 fn f2 = n2 g1 {
   addr a0 = v0 : t0

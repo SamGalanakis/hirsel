@@ -352,6 +352,7 @@ impl<T: TyRead> Shapes<'_, T> {
         shape.repr = repr;
         shape.body = body;
         shape.finalizer = finalizer;
+        word_carriage(self.shapes, r.index());
         Some(r)
     }
     /// Forget the rows from `mark` on: a type whose parts do not all map leaves no
@@ -509,6 +510,17 @@ impl<T: TyRead> Shapes<'_, T> {
             },
             _ => return None,
         })
+    }
+}
+
+/// A variant row whose bytes are one scalar word is carried as that word (FORM #78);
+/// layout's `word` decides. Every other row keeps the type rule's [`carried`]. A
+/// substituted generic row is decided again once its payload is known.
+pub(crate) fn word_carriage(shapes: &mut [Shape], row: usize) {
+    crate::cost_scope!("phase", "layout/word carriage");
+    if matches!(shapes[row].body, Body::Variant(_)) {
+        shapes[row].carried = hirsel_core_layout::word(shapes, &shapes[row])
+            .map_or(Carried::Address, |s| Carried::Value(Ty::Scalar(s)));
     }
 }
 

@@ -750,6 +750,14 @@ fn a_row_carried_unlike_its_body_is_refused() {
         compute(&[s])
     };
     let u64v = Carried::Value(Ty::Scalar(Scalar::U64));
+    let word = |s: Scalar| Carried::Value(Ty::Scalar(s));
+    let enum3 = || {
+        variant(
+            "D",
+            Repr::Own,
+            vec![("A", vec![]), ("B", vec![]), ("C", vec![])],
+        )
+    };
     let one = |t: FieldTy| record("R", Repr::Own, vec![field("x", t)]);
     for (c, s) in [
         (u64v, one(u(Scalar::U64))),
@@ -760,6 +768,10 @@ fn a_row_carried_unlike_its_body_is_refused() {
         ),
         (Carried::Nothing, record("()", Repr::Own, vec![])),
         (Carried::Address, one(u(Scalar::U64))),
+        // FORM #78: a variant whose bytes are one word is that word.
+        (word(Scalar::U8), enum3()),
+        (word(Scalar::U8), option("Option[bool]", u(Scalar::Bool))),
+        (word(Scalar::U32), option("Option[char]", u(Scalar::Char))),
     ] {
         assert!(carried(c, s).is_ok(), "{c:?}");
     }
@@ -783,6 +795,18 @@ fn a_row_carried_unlike_its_body_is_refused() {
         ),
         (Carried::Value(Ty::Ptr), one(u(Scalar::U64))),
         (Carried::Nothing, one(u(Scalar::U64))),
+        // Not its word: a three-case tag is a u8; `Option[char]` needs all 32 bits; a
+        // u32 payload or a `fn` leaves no spare value for `None`.
+        (word(Scalar::U32), enum3()),
+        (word(Scalar::U8), option("Option[char]", u(Scalar::Char))),
+        (word(Scalar::U32), option("Option[u32]", u(Scalar::U32))),
+        (Carried::Value(Ty::Ptr), option("Option[fn]", FieldTy::Fn)),
+        (word(Scalar::U64), option("Option[fn]", FieldTy::Fn)),
+        // Its null niche fills a u64 with the tag at 0, yet a Box is no word field.
+        (
+            word(Scalar::U64),
+            option("Option[Box]", FieldTy::Box(TypeRef(0))),
+        ),
     ];
     for (c, s) in refused {
         assert!(

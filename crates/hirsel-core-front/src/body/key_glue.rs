@@ -126,11 +126,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 continue;
             }
             let signature = self.e.module.functions[function.index()].signature;
-            if matches!(
-                self.e.module.signatures[signature.index()].params[i],
-                Param::Value(_)
-            ) {
-                self.key_args.push(Arg::Value(value?));
+            if let Param::Value(word) = self.e.module.signatures[signature.index()].params[i] {
+                // A place-held value carried as its word (FORM #78) is loaded whole.
+                let value = if let Rep::Place(_) = rep {
+                    let at = self.address(AddressBase::Value(value?), &[], PlaceTy::Value(word), n);
+                    self.read_bits(at, word, n)
+                } else {
+                    value?
+                };
+                self.key_args.push(Arg::Value(value));
                 continue;
             }
             let pointer = if matches!(rep, Rep::Place(_)) {
@@ -257,10 +261,13 @@ pub(super) fn ensure(module: &mut Module, ty: TypeId, op: KeyOp) -> Result<FuncI
 
 fn scalar_row(module: &Module, ty: TypeId) -> Option<Scalar> {
     // The row's published carriage (FORM #64), never its field structure: a one-field
-    // record or tuple of a scalar is carried by address.
-    match module.types[ty.index()].carried {
+    // record or tuple of a scalar is carried by address. A variant carried as its word
+    // (FORM #78) is no scalar: `Option[char]`'s `None` is 0x110000, above every `Some`.
+    let row = &module.types[ty.index()];
+    match row.carried {
         hirsel_core_layout::Carried::Value(Ty::Scalar(s))
-            if !matches!(s, Scalar::F32 | Scalar::F64) =>
+            if !matches!(s, Scalar::F32 | Scalar::F64)
+                && matches!(row.body, hirsel_core_layout::Body::Record(_)) =>
         {
             Some(s)
         }
@@ -274,6 +281,18 @@ pub(super) fn inline_scalar(module: &Module, ty: TypeId, op: KeyOp) -> bool {
         KeyOp::Hash => scalar == Scalar::U64,
         KeyOp::Equal | KeyOp::Ordered(_) => true,
         _ => false,
+    })
+}
+
+/// Whether the key operation `key` works on a variant row with a field: its word does
+/// not order as its value does.
+fn word_with_field(module: &Module, key: &InstanceKey) -> bool {
+    key.types.first().is_some_and(|name| {
+        module.types.iter().any(|row| {
+            &row.name == name
+                && matches!(&row.body, ShapeBody::Variant(cases)
+                    if cases.iter().any(|c| !c.fields.is_empty()))
+        })
     })
 }
 
@@ -330,7 +349,14 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) -> bool {
                     return None;
                 };
                 let scalar = match *module.signatures[call.signature.index()].params.first()? {
-                    Param::Value(Ty::Scalar(s)) => s,
+                    // A variant carried as its word (FORM #78) is equal exactly when its
+                    // words are, and a fieldless one orders by its tag; one holding a field
+                    // does not (`Option[char]`'s `None` is 0x110000).
+                    Param::Value(Ty::Scalar(s))
+                        if op == Some(CompareOp::Eq) || !word_with_field(module, key) =>
+                    {
+                        s
+                    }
                     Param::Address { ty, .. } => scalar_row(module, ty)?,
                     _ => return None,
                 };

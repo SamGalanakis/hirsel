@@ -657,6 +657,7 @@ impl Driver {
                     } else {
                         p.check_lower(f, &mut emitter)
                     };
+                    emitter.seal();
                     let incomplete: Vec<Incomplete> = check
                         .gaps
                         .iter()

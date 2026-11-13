@@ -7,7 +7,7 @@
 //! MEM-9..12: positions are either constant or "after variable field j, plus k".
 
 use crate::shape::{
-    Body, Carried, Field, FieldTy, FuncRef, Handle, Repr, Shape, Ty, TypeRef, Width,
+    Body, Carried, Field, FieldTy, FuncRef, Handle, Repr, Scalar, Shape, Ty, TypeRef, Width,
 };
 
 /// Native size and alignment of a field slot of this type in a fixed layout.
@@ -430,24 +430,44 @@ fn done<'a>(out: &'a Computed<'_>, t: TypeRef) -> &'a Recipe {
 }
 
 fn recipe(shapes: &[Shape], shape: &Shape, out: &Computed<'_>) -> Result<Recipe, LayoutError> {
-    if !carries(shape) {
-        return Err(LayoutError::Carried {
-            ty: shape.name.clone(),
-        });
+    let refused = || LayoutError::Carried {
+        ty: shape.name.clone(),
+    };
+    if !carries(shapes, shape) {
+        return Err(refused());
     }
-    match shape.repr {
+    let recipe = match shape.repr {
         Repr::Compact(w) => compact(shapes, shape, w, out),
         _ => fixed(shapes, shape, out),
+    }?;
+    // A variant carried as a word is laid out as exactly that word: its tag.
+    if let (Body::Variant(_), Carried::Value(t)) = (&shape.body, shape.carried) {
+        let word = |f: &Fixed| {
+            f.tag
+                .is_some_and(|tag| tag.offset == 0 && tag.width == f.size)
+                && matches!(t, Ty::Scalar(s) if s.size() == f.size)
+        };
+        if !matches!(&recipe.layout, Layout::Fixed(f) if word(f)) {
+            return Err(refused());
+        }
     }
+    Ok(recipe)
 }
 
-/// A row's published [`Carried`] agrees with its body: a value row is exactly one
+/// A row's published [`Carried`] agrees with its body: a value record is exactly one
 /// field holding that value (a `ptr` is a plain `fn` or a borrow), a row carried as
-/// nothing has no fields, and an address row may be anything.
-fn carries(shape: &Shape) -> bool {
+/// nothing has no fields, a value variant is the word [`word`] gives, and an address
+/// row may be anything.
+fn carries(shapes: &[Shape], shape: &Shape) -> bool {
     let fields = match &shape.body {
         Body::Record(fields) => fields.as_slice(),
-        Body::Variant(_) => return shape.carried == Carried::Address,
+        Body::Variant(_) => {
+            return match shape.carried {
+                Carried::Address => true,
+                Carried::Value(Ty::Scalar(s)) => word(shapes, shape) == Some(s),
+                _ => false,
+            };
+        }
     };
     match (shape.carried, fields) {
         (Carried::Address, _) => true,
@@ -455,6 +475,77 @@ fn carries(shape: &Shape) -> bool {
         (Carried::Value(Ty::Scalar(s)), [f]) => f.ty == FieldTy::Scalar(s),
         (Carried::Value(Ty::Ptr), [f]) => matches!(f.ty, FieldTy::Fn | FieldTy::Borrow),
         _ => false,
+    }
+}
+
+/// The one scalar word a variant row's bytes are, when they are exactly one (FORM
+/// #78): such a row is carried as that word. Own and stable variants only.
+///
+/// - Every case fieldless: the direct tag, `u8`, `u16` or `u32` by case count.
+/// - One case holding one field and every other case fieldless, where that field is a
+///   `bool` (the word `u8`), a `char` (`u32`), a one-field record of one, or an inline
+///   row that is itself such a variant, with spare values left for the other cases: the niche encoding stores
+///   the tag in that word (`Option[char]`'s `None` is 0x110000).
+///
+/// Everything else is None, including a plain `fn` payload (no niche) and a record.
+pub fn word(shapes: &[Shape], shape: &Shape) -> Option<Scalar> {
+    spare_word(shapes, shape).map(|(s, _)| s)
+}
+
+/// [`word`] and the spare values its word still has.
+fn spare_word(shapes: &[Shape], shape: &Shape) -> Option<(Scalar, u64)> {
+    use Scalar::{U8, U16, U32};
+    if !matches!(shape.repr, Repr::Own | Repr::Stable) {
+        return None;
+    }
+    let Body::Variant(cases) = &shape.body else {
+        return None;
+    };
+    let n = cases.len() as u64;
+    let mut dataful = cases.iter().filter(|c| !c.fields.is_empty());
+    match (dataful.next(), dataful.next()) {
+        (None, _) if n > 0 => {
+            let width = tag_width(cases.len());
+            let s = match width {
+                1 => U8,
+                2 => U16,
+                _ => U32,
+            };
+            Some((s, (1u64 << (8 * width)) - n))
+        }
+        (Some(case), None) if n >= 2 => {
+            let [field] = case.fields.as_slice() else {
+                return None;
+            };
+            let (s, spare) = field_word(shapes, &field.ty)?;
+            Some((s, spare.checked_sub(n - 1)?))
+        }
+        _ => None,
+    }
+}
+
+/// The word a variant's one payload field gives, and its spare values: a `bool` or a
+/// `char`, a one-field record of one (the scalar row `char` is `{ 0: char }`), or a
+/// word variant.
+fn field_word(shapes: &[Shape], ty: &FieldTy) -> Option<(Scalar, u64)> {
+    use Scalar::{Bool, Char, U8, U32};
+    match ty {
+        FieldTy::Scalar(Bool) => Some((U8, 254)),
+        FieldTy::Scalar(Char) => Some((U32, (1u64 << 32) - 0x11_0000)),
+        FieldTy::Inline(t) => {
+            let shape = &shapes[t.index()];
+            match &shape.body {
+                Body::Record(fields) if matches!(shape.repr, Repr::Own | Repr::Stable) => {
+                    match fields.as_slice() {
+                        [f] => field_word(shapes, &f.ty),
+                        _ => None,
+                    }
+                }
+                Body::Record(_) => None,
+                Body::Variant(_) => spare_word(shapes, shape),
+            }
+        }
+        _ => None,
     }
 }
 

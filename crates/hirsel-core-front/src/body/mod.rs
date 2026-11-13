@@ -123,6 +123,9 @@ pub struct Emitter {
     pub(crate) callable_signature_builds: usize,
     sigs: HashMap<(Signature, scalar_abi::SignatureAbi), SigId>,
     signature_abis: std::collections::BTreeMap<SigId, scalar_abi::SignatureAbi>,
+    /// Rows of generic templates (nested ones included): [`Emitter::seal`] leaves them
+    /// to the instances that fill them.
+    generic_rows: std::collections::BTreeSet<FuncId>,
     items: HashMap<DefPath, ItemId>,
     /// Per non-generic definition of the program, its function row once mentioned.
     rows: Vec<Option<(FuncId, SigId)>>,
@@ -204,6 +207,17 @@ fn generic_arg(fd: &crate::decls::FnDecl, i: usize) -> TyKind {
 impl Emitter {
     pub fn new() -> Self {
         Self::default()
+    }
+    /// Convert every concrete signature to its rows' carriage at the boundary (FORM
+    /// #78), once all of a module's bodies are emitted: before the module is published
+    /// or its instances are filled.
+    pub fn seal(&mut self) {
+        scalar_abi::seal(
+            &mut self.module,
+            &self.signature_abis,
+            &self.generic_rows,
+            &self.generic_names,
+        );
     }
     fn sig(&mut self, s: Signature) -> SigId {
         self.sig_abi(s, scalar_abi::SignatureAbi::default())
@@ -1904,6 +1918,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             self.e.module.functions[f.index()].body = Some(std::mem::take(&mut self.b));
             self.out.function = Some(f);
             if !self.fd.generics.is_empty() {
+                self.e.generic_rows.insert(f);
                 let mut parameters = vec![];
                 for i in 0..self.fd.generics.len() {
                     let ty = self.t.mk(TyKind::Param(i as u32));

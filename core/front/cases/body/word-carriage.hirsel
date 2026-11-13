@@ -1,0 +1,58 @@
+// FORM #78: a variant whose bytes are one word (a fieldless enum; an Option over bool or
+// char, nested) is passed and returned as that word, while a body still holds it in a
+// place. Each concrete, generic and indirect boundary below has to agree on that word:
+// a callee reading an address the caller passed as a value (or the reverse) changes the
+// answer or faults. Ordering reads the variant (None before Some), never its word, in
+// which None (0x110000) sits above every Some.
+// expect: accept
+// expect: run spin(5) = 1
+// expect: run spin(7) = 3
+// expect: run code(97,2) = 99
+// expect: run code(1114110,1) = 1114111
+// expect: run code(1114110,2) = 0
+// expect: run code(55295,1) = 0
+// expect: run flag(0) = 5
+// expect: run flag(1) = 6
+// expect: run flag(2) = 8
+// expect: run flag(3) = 7
+// expect: run order() = 312
+// expect: run dirs() = 310
+// expect: run indirect() = 65
+// expect: run mutated() = 66
+type Dir: ordered = North | East | South | West
+fn turn(d: Dir) -> Dir { match d { North => East, East => South, South => West, West => North } }
+fn ordinal(d: Dir) -> u64 { match d { North => 0, East => 1, South => 2, West => 3 } }
+fn turns(d: Dir, n: u64) -> Dir { if n == 0 { d } else { turns(turn(d), n - 1u64) } }
+fn spin(n: u64) -> u64 { ordinal(turns(North, n)) }
+fn next(c: Option[char]) -> Option[char] {
+  match c { None => None, Some(x) => char.from_u32(char.to_u32(x) + 1) }
+}
+fn steps(c: Option[char], n: u64) -> Option[char] { if n == 0 { c } else { steps(next(c), n - 1u64) } }
+fn code(start: u32, n: u64) -> u32 {
+  match steps(char.from_u32(start), n) { None => 0, Some(x) => char.to_u32(x) }
+}
+fn id[T](take x: T) -> T { x }
+fn flag(k: u64) -> u64 {
+  let o: Option[Option[bool]] = if k == 0 { None } else if k == 1 { Some(None) } else { Some(Some(k == 2)) }
+  match id(take o) { None => 5, Some(None) => 6, Some(Some(false)) => 7, Some(Some(true)) => 8 }
+}
+fn rank[T:ordered](a:T,b:T)->u64 {
+  let l=if a<b {1u64} else {0}
+  let le=if a<=b {2u64} else {0}
+  let g=if a>b {4u64} else {0}
+  let ge=if a>=b {8u64} else {0}
+  l+le+g+ge
+}
+fn order() -> u64 {
+  let none: Option[char] = None
+  rank(none, char.from_u32(0)) * 100 + rank(char.from_u32(1114111), none) }
+fn dirs() -> u64 { rank(North, West) * 100 + rank(West, West) }
+fn apply(h: fn(Option[char]) -> Option[char], c: Option[char]) -> Option[char] { h(c) }
+fn indirect() -> u32 { match apply(next, char.from_u32(64)) { None => 0, Some(x) => char.to_u32(x) } }
+// A `mut` parameter keeps its address: the callee's write reaches the caller.
+fn bump(mut c: Option[char]) { c = next(c) }
+fn mutated() -> u32 {
+  let mut c = char.from_u32(65)
+  bump(mut c)
+  match c { None => 0, Some(x) => char.to_u32(x) }
+}

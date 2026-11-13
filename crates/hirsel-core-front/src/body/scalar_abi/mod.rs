@@ -136,33 +136,151 @@ pub(super) fn rewrite(
     old_calls: &[SigId],
     numeric_sites: &[NumericSite],
 ) {
-    let own = &plans[&old_signature];
-    let changed = |p: &Plan| {
-        !matches!(p.result, Change::Keep) || p.params.iter().any(|p| !matches!(p, Change::Keep))
-    };
-    if !changed(own) && old_calls.iter().all(|s| !changed(&plans[s])) {
-        numeric::inline(module, body, numeric_sites);
-        key_glue::inline_ordered(module, body);
-        // A carrier-only body, such as Map's index installation, has no rigid
-        // scalar places to rewrite. Substituting its rows/constants is complete.
-        let scalar_place =
-            |p| matches!(p, PlaceTy::Declared(_)) && place_scalar(module, p).is_some();
-        let needs_places = body.slots.iter().any(|&p| scalar_place(p))
-            || body.insts.iter().any(|inst| match inst {
-                Inst::Drop { ty, .. } => recipes[ty.index()].drop.is_none(),
-                Inst::Copy { to, from, .. } => {
-                    scalar_place(body.addresses[to.index()].ty)
-                        || scalar_place(body.addresses[from.index()].ty)
-                }
-                Inst::Pointer { address, .. } => scalar_place(body.addresses[address.index()].ty),
-                _ => false,
-            });
-        if !needs_places {
-            remap::calls(body);
-            return;
-        }
-        promote(module, recipes, body, None);
+    let unchanged =
+        !plans[&old_signature].changed() && old_calls.iter().all(|s| !plans[s].changed());
+    let dest = convert(module, body, old_signature, plans, old_calls);
+    numeric::inline(module, body, numeric_sites);
+    key_glue::inline_ordered(module, body);
+    // A carrier-only body, such as Map's index installation, has no rigid scalar
+    // places to rewrite. Substituting its rows/constants is complete.
+    let scalar_place = |p| matches!(p, PlaceTy::Declared(_)) && place_scalar(module, p).is_some();
+    let needs_places = body.slots.iter().any(|&p| scalar_place(p))
+        || body.insts.iter().any(|inst| match inst {
+            Inst::Drop { ty, .. } => recipes[ty.index()].drop.is_none(),
+            Inst::Copy { to, from, .. } => {
+                scalar_place(body.addresses[to.index()].ty)
+                    || scalar_place(body.addresses[from.index()].ty)
+            }
+            Inst::Pointer { address, .. } => scalar_place(body.addresses[address.index()].ty),
+            _ => false,
+        });
+    if unchanged && !needs_places {
+        remap::calls(body);
         return;
+    }
+    promote(module, recipes, body, dest);
+}
+
+impl Plan {
+    fn changed(&self) -> bool {
+        !matches!(self.result, Change::Keep)
+            || self.params.iter().any(|p| !matches!(p, Change::Keep))
+    }
+    fn keep(sig: &Signature) -> Self {
+        Self {
+            params: vec![Change::Keep; sig.params.len()],
+            result: Change::Keep,
+        }
+    }
+}
+
+/// Concrete signatures follow their rows' carriage at the boundary, exactly as an
+/// instance's do (FORM #78): each signature with a recorded ABI is converted by its
+/// [`Plan`]; each function row takes the converted signature; each body spills its
+/// new value parameters into slots at entry, returns its result from the dest slot
+/// and converts its call sites. The body's own representation is unchanged. `skip`
+/// holds generic template rows, which an instance converts when it is filled, and a
+/// signature naming a symbolic row (`rigid`) is left whole for the instance too; a
+/// row already sealed has no recorded ABI, so sealing twice changes nothing.
+pub(super) fn seal<T>(
+    module: &mut Module,
+    abis: &std::collections::BTreeMap<SigId, SignatureAbi>,
+    skip: &std::collections::BTreeSet<FuncId>,
+    rigid: &std::collections::BTreeMap<TypeId, T>,
+) {
+    crate::cost_scope!("phase", "body seal");
+    let mut plans: HashMap<SigId, Plan> = HashMap::default();
+    let mut sealed = HashMap::default();
+    let by_address = |t: TypeId| matches!(module.types[t.index()].carried, Carried::Address);
+    for (&id, abi) in abis {
+        let sig = &module.signatures[id.index()];
+        let moves = |(i, p): (usize, &Param)| match p {
+            Param::Address { ty, .. } => abi.params.get(i) == Some(&true) && !by_address(*ty),
+            Param::Value(_) => false,
+        };
+        if !sig.params.iter().enumerate().any(moves)
+            && !sig.dest.is_some_and(|t| abi.result && !by_address(t))
+        {
+            continue;
+        }
+        let mut rows = sig.params.iter().filter_map(|p| match p {
+            Param::Address { ty, .. } => Some(*ty),
+            Param::Value(_) => None,
+        });
+        if rows.any(|t| rigid.contains_key(&t)) || sig.dest.is_some_and(|t| rigid.contains_key(&t))
+        {
+            continue;
+        }
+        let mut sig = sig.clone();
+        let plan = Plan::signature(module, &mut sig, abi);
+        if plan.changed() {
+            plans.insert(id, plan);
+            sealed.insert(id, sig);
+        }
+    }
+    if plans.is_empty() {
+        return;
+    }
+    let renamed: HashMap<SigId, SigId> = sealed
+        .into_iter()
+        .map(|(old, sig)| {
+            let id = match module.signatures.iter().position(|s| *s == sig) {
+                Some(i) => SigId(i as u32),
+                None => {
+                    module.signatures.push(sig);
+                    SigId(module.signatures.len() as u32 - 1)
+                }
+            };
+            (old, id)
+        })
+        .collect();
+    for f in 0..module.functions.len() {
+        if skip.contains(&FuncId(f as u32)) {
+            continue;
+        }
+        let own = module.functions[f].signature;
+        if let Some(mut body) = module.functions[f].body.take() {
+            let old_calls = body.calls.iter().map(|c| c.signature).collect::<Vec<_>>();
+            if plans.contains_key(&own) || old_calls.iter().any(|s| plans.contains_key(s)) {
+                // This body's signatures: the sealed ones by their plans, the rest kept.
+                let local = old_calls
+                    .iter()
+                    .chain([&own])
+                    .map(|&id| {
+                        let plan = plans.get(&id).cloned();
+                        (
+                            id,
+                            plan.unwrap_or_else(|| Plan::keep(&module.signatures[id.index()])),
+                        )
+                    })
+                    .collect();
+                convert(module, &mut body, own, &local, &old_calls);
+                for call in &mut body.calls {
+                    if let Some(&id) = renamed.get(&call.signature) {
+                        call.signature = id;
+                    }
+                }
+            }
+            module.functions[f].body = Some(body);
+        }
+        if let Some(&id) = renamed.get(&own) {
+            module.functions[f].signature = id;
+        }
+    }
+}
+
+/// Convert `body`'s entry, returns and call sites from the signatures it was emitted
+/// against to their plans; the dest slot a value result is returned from, if any.
+fn convert(
+    module: &Module,
+    body: &mut Body,
+    old_signature: SigId,
+    plans: &HashMap<SigId, Plan>,
+    old_calls: &[SigId],
+) -> Option<SlotId> {
+    let own = &plans[&old_signature];
+    if !own.changed() && old_calls.iter().all(|s| !plans[s].changed()) {
+        return None;
     }
     let old = std::mem::take(&mut body.insts);
     let old_anchors = std::mem::take(&mut body.inst_anchors);
@@ -287,16 +405,21 @@ pub(super) fn rewrite(
     );
     c.body.insts = c.insts;
     c.body.inst_anchors = c.anchors;
-    numeric::inline(module, body, numeric_sites);
-    key_glue::inline_ordered(module, body);
-    promote(module, recipes, body, dest);
+    dest
 }
 
+/// A place whose whole value is one scalar a body reads by field 0 or whole: a value
+/// place, or a scalar record row. A variant carried as its word (FORM #78) is not one:
+/// its body reaches it by case.
 fn place_scalar(module: &Module, place: PlaceTy) -> Option<Ty> {
     match place {
         PlaceTy::Value(t) => Some(t),
-        PlaceTy::Declared(row) => match module.types[row.index()].carried {
-            Carried::Value(t) => Some(t),
+        PlaceTy::Declared(row) => match &module.types[row.index()] {
+            hirsel_core_layout::Shape {
+                carried: Carried::Value(t),
+                body: hirsel_core_layout::Body::Record(_),
+                ..
+            } => Some(*t),
             _ => None,
         },
     }

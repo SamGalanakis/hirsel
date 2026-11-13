@@ -361,6 +361,7 @@ impl Substitution<'_> {
             .map(|f| FuncRef(self.function(FuncId(f.0)).0));
         shape.clone = shape.clone.map(|f| FuncRef(self.function(FuncId(f.0)).0));
         self.module.types[row.index()] = shape;
+        crate::layout::word_carriage(&mut self.module.types, row.index());
         row
     }
     fn place(&mut self, ty: &mut PlaceTy) {
@@ -666,6 +667,7 @@ impl Emitter {
     /// product at a time, using the same `materialize` transformation.
     pub fn materialize_instances(&mut self) -> Result<(), String> {
         use std::collections::HashSet;
+        self.seal();
         // A row may carry a clone hook even when this program never clones it.
         // Only a derived clone's call demands that hook's instance. In particular,
         // storing opaque/resource values does not instantiate an inadmissible clone.

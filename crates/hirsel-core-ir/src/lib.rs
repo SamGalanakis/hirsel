@@ -585,14 +585,21 @@
 //! `{ 0: u64 }`, and only the first is `value u64`. By value: every scalar type
 //! (integers, `bool`, `char`, `f32`, `f64`) as itself; a plain function, `Region` and
 //! `Writer` as `ptr`; a capability, `Args`, `Unique` and `Site` as a `u64` word; a
-//! `View[T]` as `T`. `()`, `Never` and the error type carry nothing (the parameter is
-//! dropped). Everything else, tuples, arrays, records, variants, handles to runtime
-//! data (strings, lists, maps, boxes, tasks, channels, host files, causes) and
-//! closures, is passed by address and returned through `dest`. Layout refuses a row
-//! carried unlike its body: `value s` needs exactly one field of scalar `s`, `value
-//! ptr` one `fn` or `borrow` field, `nothing` no field, and a variant row is by
-//! address. `samples/scalar-rows.core` shows less[u64] by value beside less[W] by
-//! address.
+//! `View[T]` as `T`; and an own or stable variant whose bytes are one word (FORM #78)
+//! as that word. A variant is one word when all its cases are fieldless (the tag, `u8`,
+//! `u16` or `u32`), or when one case holds one field, every other case is fieldless and
+//! the field leaves spare values for them: a `bool` (`u8`), a `char` (`u32`), a
+//! one-field record of either, or such a variant, so `Option[char]` is `value u32` with
+//! `None` as 0x110000 and `Option[Option[bool]]` is `value u8`. `()`, `Never` and the
+//! error type carry nothing (the parameter is dropped). Everything else, tuples,
+//! arrays, records, other variants, handles to runtime data (strings, lists, maps,
+//! boxes, tasks, channels, host files, causes) and closures, is passed by address and
+//! returned through `dest`. A body holds a word variant in a place as any variant; the
+//! boundary loads and stores its word. Layout refuses a row carried unlike its body:
+//! on a record `value s` needs exactly one field of scalar `s`, `value ptr` one `fn` or
+//! `borrow` field, `nothing` no field; on a variant `value s` needs the word rule's `s`
+//! and a layout whose tag fills the word. `samples/scalar-rows.core` shows less[u64] by
+//! value beside less[W] by address.
 
 #[cfg(test)]
 hirsel_guard::install!();

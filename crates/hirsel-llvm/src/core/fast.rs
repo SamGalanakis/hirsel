@@ -164,10 +164,8 @@ impl FunctionEmitter<'_> {
             },
         );
         let exact = self.calc(format!("xor i1 {overflow}, true"));
-        let positive = self.calc(format!("icmp ne i64 {charge}, 0"));
         let sized = self.calc(format!("icmp ule i64 {bytes}, {maximum}"));
-        let eligible = self.calc(format!("and i1 {positive}, {sized}"));
-        let eligible = self.calc(format!("and i1 {eligible}, {exact}"));
+        let eligible = self.calc(format!("and i1 {sized}, {exact}"));
         self.likely(
             &eligible,
             &format!("allocation_payer{n}"),
@@ -195,7 +193,10 @@ impl FunctionEmitter<'_> {
         }
         writeln!(self.code, "admit{n}:").unwrap();
         let available = self.load_native(&payer, LIMIT_AVAILABLE, "i64");
-        let fits = self.calc(format!("icmp ule i64 {charge}, {available}"));
+        // Unsigned charge-1 < room is exactly charge != 0 && charge <= room,
+        // including room=MAX. Zero retains the runtime's payer pinning path.
+        let last = self.calc(format!("sub i64 {charge}, 1"));
+        let fits = self.calc(format!("icmp ult i64 {last}, {available}"));
         // Real refusal uses the one runtime fallback, retaining Capacity events.
         // Probe only a fitting admission, so tests never count an attempt twice.
         self.likely(
@@ -211,15 +212,29 @@ impl FunctionEmitter<'_> {
         let zero = self.calc(format!("icmp eq i64 {bytes}, 0"));
         let nonzero = self.calc(format!("select i1 {zero}, i64 1, i64 {bytes}"));
         let native_bytes = self.calc(format!("add i64 {nonzero}, {offset}"));
-        let base = self.intrinsic(
-            "hirsel_core_native_alloc",
-            "ptr",
-            &[
-                ("i64".into(), native_bytes),
-                ("i64".into(), alignment.to_string()),
-            ],
-        );
-        let payload = self.calc(format!("getelementptr i8, ptr {base}, i64 {offset}"));
+        let pointer_type = if self.facts { "nonnull ptr" } else { "ptr" };
+        let base = if alignment <= 16 {
+            self.intrinsic(
+                "hirsel_core_native_alloc_ordinary",
+                pointer_type,
+                &[("i64".into(), native_bytes)],
+            )
+        } else {
+            self.intrinsic(
+                "hirsel_core_native_alloc",
+                pointer_type,
+                &[
+                    ("i64".into(), native_bytes),
+                    ("i64".into(), alignment.to_string()),
+                ],
+            )
+        };
+        // The native allocator returns a base or stops. The admitted native
+        // extent contains this payload offset; it cannot yield a null payload.
+        let inbounds = if self.facts { " inbounds" } else { "" };
+        let payload = self.calc(format!(
+            "getelementptr{inbounds} i8, ptr {base}, i64 {offset}"
+        ));
         let tag = ((alignment.trailing_zeros() - 3) << 2) | u32::from(graph);
         let tagged = self.calc(format!("getelementptr i8, ptr {payer}, i64 {tag}"));
         let header = self.calc(format!(

@@ -151,6 +151,8 @@ fn own_fast_paths_and_zero_charge_and_large_alignment_fallbacks_agree() {
     for (i, (kind, align)) in [
         ("plain", 8),
         ("own", 8),
+        ("plain", 16),
+        ("own", 16),
         ("plain", 512),
         ("own", 512),
         ("plain", 1024),
@@ -163,7 +165,14 @@ fn own_fast_paths_and_zero_charge_and_large_alignment_fallbacks_agree() {
     let module = text::parse(&source).unwrap();
     wf::module(&module).unwrap();
     let mut cases = Vec::new();
-    for function in 0..5 {
+    let on = emit_ir_with_facts(&module, false, true).unwrap();
+    assert!(on.contains("call nonnull ptr @hirsel_core_native_alloc_ordinary"));
+    assert!(on.contains("getelementptr inbounds i8"));
+    let off = emit_ir_with_facts(&module, false, false).unwrap();
+    assert!(off.contains("call ptr @hirsel_core_native_alloc_ordinary"));
+    assert!(!off.contains("nonnull"));
+    assert!(!off.contains("inbounds"));
+    for function in 0..7 {
         for charge in [0, 16, 101] {
             cases.push(Case {
                 function: FuncId(function),
@@ -178,6 +187,14 @@ fn own_fast_paths_and_zero_charge_and_large_alignment_fallbacks_agree() {
             limit: 100,
             injection: Some((1, false)),
         });
+        for charge in [0, 1, u64::MAX] {
+            cases.push(Case {
+                function: FuncId(function),
+                args: vec![charge],
+                limit: u64::MAX,
+                injection: None,
+            });
+        }
     }
     agree_cases(&module, &cases, true);
 }

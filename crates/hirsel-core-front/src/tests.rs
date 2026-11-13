@@ -2055,3 +2055,15 @@ fn packed_composite_views_escape_through_caller_destinations() {
     let failures = run_case(&root().join("cases/body/packed-escaping.hirsel"));
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+#[test]
+fn generic_order_follows_each_shape_and_signedness() {
+    let failures = run_case(&root().join("cases/body/ordered-generic.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn borrowed_generic_order_selection() {
+    let failures = run_case(&root().join("cases/body/ordered-cost.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+}

@@ -8,6 +8,8 @@ pub enum KeyOp {
     Hash,
     Fold,
     Equal,
+    Order,
+    Ordered(CompareOp),
 }
 impl KeyOp {
     fn definition(self) -> DefPath {
@@ -15,6 +17,12 @@ impl KeyOp {
             Self::Hash => "map.$key_hash",
             Self::Fold => "map.$key_fold",
             Self::Equal => "map.$key_equal",
+            Self::Order => "order.$compare",
+            Self::Ordered(CompareOp::Lt) => "order.$lt",
+            Self::Ordered(CompareOp::Le) => "order.$le",
+            Self::Ordered(CompareOp::Gt) => "order.$gt",
+            Self::Ordered(CompareOp::Ge) => "order.$ge",
+            Self::Ordered(_) => unreachable!("ordered predicates"),
         })
     }
     fn signature(self, ty: TypeId) -> Signature {
@@ -22,14 +30,14 @@ impl KeyOp {
         match self {
             Self::Hash => {}
             Self::Fold => params.push(Param::Value(Ty::Scalar(Scalar::U64))),
-            Self::Equal => params.push(Param::Address(ty)),
+            Self::Equal | Self::Order | Self::Ordered(_) => params.push(Param::Address(ty)),
         }
         Signature {
             params,
-            results: vec![Ty::Scalar(if self == Self::Equal {
-                Scalar::Bool
-            } else {
-                Scalar::U64
+            results: vec![Ty::Scalar(match self {
+                Self::Equal | Self::Ordered(_) => Scalar::Bool,
+                Self::Order => Scalar::I8,
+                _ => Scalar::U64,
             })],
             dest: None,
             never: false,
@@ -137,6 +145,110 @@ pub(super) fn ensure(module: &mut Module, ty: TypeId, op: KeyOp) -> Result<FuncI
     .function(ty, op)
 }
 
+fn scalar_row(module: &Module, ty: TypeId) -> Option<Scalar> {
+    let ShapeBody::Record(fields) = &module.types[ty.index()].body else {
+        return None;
+    };
+    match fields.as_slice() {
+        [
+            hirsel_core_layout::Field {
+                ty: FieldTy::Scalar(s),
+                ..
+            },
+        ] if !matches!(s, Scalar::F32 | Scalar::F64) => Some(*s),
+        _ => None,
+    }
+}
+
+/// A scalar predicate needs no generated call after substitution. Preserve its
+/// two typed loads and replace the call by the same scalar Compare as closed code.
+pub(super) fn inline_ordered(module: &Module, body: &mut Body) {
+    let old = std::mem::take(&mut body.insts);
+    let anchors = std::mem::take(&mut body.inst_anchors);
+    body.insts = Vec::with_capacity(old.len());
+    body.inst_anchors = Vec::with_capacity(anchors.len());
+    for block in 0..body.blocks.len() {
+        let range = body.blocks[block].insts;
+        let start = body.insts.len() as u32;
+        for index in range.start as usize..(range.start + range.len) as usize {
+            let inst = &old[index];
+            let scalar_call = (|| {
+                let Inst::Call { call } = inst else {
+                    return None;
+                };
+                let call = &body.calls[call.index()];
+                let Callee::Direct(f) = call.callee else {
+                    return None;
+                };
+                let key = &module.instances[module.functions[f.index()].instance.index()];
+                if key.definition.0.package.name != "core" || key.definition.0.modules != ["order"]
+                {
+                    return None;
+                }
+                let op = match key.definition.0.name.as_str() {
+                    "$lt" => CompareOp::Lt,
+                    "$le" => CompareOp::Le,
+                    "$gt" => CompareOp::Gt,
+                    "$ge" => CompareOp::Ge,
+                    _ => return None,
+                };
+                let Param::Address(ty) = module.signatures[call.signature.index()].params[0] else {
+                    return None;
+                };
+                let scalar = scalar_row(module, ty)?;
+                let args = call.args.get(&body.pools.args).unwrap();
+                let [Arg::Address(a), Arg::Address(b)] = args else {
+                    return None;
+                };
+                Some((
+                    op,
+                    scalar,
+                    [*a, *b],
+                    call.results.get(&body.pools.values).unwrap()[0],
+                ))
+            })();
+            if let Some((op, scalar, args, result)) = scalar_call {
+                let mut values = [ValueId(0); 2];
+                for (i, arg) in args.into_iter().enumerate() {
+                    let steps = PoolRange::push(&mut body.pools.steps, [Step::Field(0)]);
+                    let address = AddressId(body.addresses.len() as u32);
+                    body.addresses.push(AddressInfo {
+                        base: AddressBase::Address(arg),
+                        steps,
+                        ty: PlaceTy::Value(Ty::Scalar(scalar)),
+                    });
+                    let value = ValueId(body.values.len() as u32);
+                    body.values.push(Ty::Scalar(scalar));
+                    body.insts.extend([
+                        Inst::Address {
+                            address,
+                            fail: None,
+                        },
+                        Inst::Read {
+                            result: value,
+                            address,
+                            mode: ReadMode::Bits,
+                        },
+                    ]);
+                    body.inst_anchors.extend([anchors[index]; 2]);
+                    values[i] = value;
+                }
+                body.insts.push(Inst::Compare {
+                    result,
+                    op,
+                    left: values[0],
+                    right: values[1],
+                });
+                body.inst_anchors.push(anchors[index]);
+            } else {
+                body.insts.push(inst.clone());
+                body.inst_anchors.push(anchors[index]);
+            }
+        }
+        body.blocks[block].insts = PoolRange::new(start, body.insts.len() as u32 - start);
+    }
+}
+
 struct Derive<'a> {
     module: &'a mut Module,
     recipes: Vec<Recipe>,
@@ -208,6 +320,26 @@ impl Derive<'_> {
                 c.start(no);
                 c.boolean(false)
             }
+            KeyOp::Ordered(op) if scalar_row(self.module, ty).is_some() => {
+                let scalar = scalar_row(self.module, ty).unwrap();
+                let a = c.read(ps[0], Ty::Scalar(scalar));
+                let b = c.read(ps[1], Ty::Scalar(scalar));
+                c.compare(op, a, b)
+            }
+            KeyOp::Order | KeyOp::Ordered(_) => {
+                let different = c.block(&[Ty::Scalar(Scalar::I8)]);
+                self.order_type(&mut c, ty, ps[0], ps[1], different)?;
+                let zero = c.typed_constant(Scalar::I8, 0);
+                c.jump(different, &[zero]);
+                c.start(different);
+                let order = c.params(different)[0];
+                if let KeyOp::Ordered(op) = op {
+                    let zero = c.typed_constant(Scalar::I8, 0);
+                    c.compare(op, order, zero)
+                } else {
+                    order
+                }
+            }
         };
         let returns = PoolRange::push(&mut c.body.pools.values, [result]);
         c.end(Terminator::Return(returns));
@@ -254,6 +386,196 @@ impl Derive<'_> {
         });
         c.inst(Inst::Call { call });
         result
+    }
+    fn order_type(
+        &mut self,
+        c: &mut Code,
+        ty: TypeId,
+        a: ValueId,
+        b: ValueId,
+        different: BlockId,
+    ) -> Result<(), &'static str> {
+        let Layout::Fixed(layout) = self.recipes[ty.index()].layout.clone() else {
+            return Err("ordering a compact recipe is not built (form883 queue item6)");
+        };
+        match self.module.types[ty.index()].body.clone() {
+            ShapeBody::Record(fs) => {
+                for (i, f) in fs.iter().enumerate() {
+                    let x = c.offset(a, layout.offsets[0][i]);
+                    let y = c.offset(b, layout.offsets[0][i]);
+                    self.order_field(c, &f.ty, x, y, different)?;
+                }
+            }
+            ShapeBody::Variant(cs) => {
+                let mut tags = [ValueId(0); 2];
+                for (i, p) in [a, b].into_iter().enumerate() {
+                    let at = c.address(p, PlaceTy::Declared(ty));
+                    let tag = c.value(Ty::Scalar(Scalar::U32));
+                    c.inst(Inst::Case {
+                        result: tag,
+                        address: at,
+                    });
+                    tags[i] = tag;
+                }
+                self.order_scalars(c, tags[0], tags[1], different);
+                let done = c.block(&[]);
+                let mut arms = vec![];
+                for i in 0..cs.len() {
+                    let block = c.block(&[]);
+                    arms.push(hirsel_core_ir::SwitchArm {
+                        value: i as u64,
+                        edge: c.edge(block, &[]),
+                    });
+                }
+                let otherwise = arms.last().unwrap().edge;
+                let range = PoolRange::push(
+                    &mut c.body.pools.arms,
+                    arms[..arms.len() - 1].iter().copied(),
+                );
+                c.end(Terminator::Switch {
+                    value: tags[0],
+                    arms: range,
+                    otherwise,
+                });
+                for (i, case) in cs.iter().enumerate() {
+                    c.start(c.body.edges[arms[i].edge.index()].target);
+                    for (j, f) in case.fields.iter().enumerate() {
+                        let x = c.offset(a, layout.offsets[i][j]);
+                        let y = c.offset(b, layout.offsets[i][j]);
+                        self.order_field(c, &f.ty, x, y, different)?;
+                    }
+                    c.jump(done, &[]);
+                }
+                c.start(done);
+            }
+        }
+        Ok(())
+    }
+    fn order_scalars(&mut self, c: &mut Code, a: ValueId, b: ValueId, different: BlockId) {
+        for (op, bits) in [(CompareOp::Lt, 255), (CompareOp::Gt, 1)] {
+            let value = c.typed_constant(Scalar::I8, bits);
+            let on = c.compare(op, a, b);
+            let same = c.block(&[]);
+            let yes = c.edge(different, &[value]);
+            let no = c.edge(same, &[]);
+            c.end(Terminator::Branch {
+                condition: on,
+                yes,
+                no,
+            });
+            c.start(same);
+        }
+    }
+    fn order_result(&mut self, c: &mut Code, result: ValueId, different: BlockId) {
+        let zero = c.typed_constant(Scalar::I8, 0);
+        let on = c.compare(CompareOp::Ne, result, zero);
+        let same = c.block(&[]);
+        let yes = c.edge(different, &[result]);
+        let no = c.edge(same, &[]);
+        c.end(Terminator::Branch {
+            condition: on,
+            yes,
+            no,
+        });
+        c.start(same);
+    }
+    fn order_field(
+        &mut self,
+        c: &mut Code,
+        field: &FieldTy,
+        a: ValueId,
+        b: ValueId,
+        different: BlockId,
+    ) -> Result<(), &'static str> {
+        match field {
+            FieldTy::Scalar(s) if !matches!(s, Scalar::F32 | Scalar::F64) => {
+                let x = c.read(a, Ty::Scalar(*s));
+                let y = c.read(b, Ty::Scalar(*s));
+                self.order_scalars(c, x, y, different);
+            }
+            FieldTy::Inline(t) => {
+                let f = self.function(TypeId(t.0), KeyOp::Order)?;
+                let x = c.address(a, PlaceTy::Declared(TypeId(t.0)));
+                let y = c.address(b, PlaceTy::Declared(TypeId(t.0)));
+                let order = self.call(c, f, &[Arg::Address(x), Arg::Address(y)]);
+                self.order_result(c, order, different);
+            }
+            FieldTy::View(inner) => self.order_field(c, inner, a, b, different)?,
+            FieldTy::Seq(item) if **item == FieldTy::Scalar(Scalar::U8) => {
+                let mut args = [ValueId(0); 4];
+                for (i, p) in [a, b].into_iter().enumerate() {
+                    args[2 * i] = c.read(p, Ty::Ptr);
+                    let at = c.offset(p, 8);
+                    args[2 * i + 1] = c.read(at, Ty::Scalar(Scalar::U64));
+                }
+                let order = self.runtime(c, hirsel_core_ir::RtOp::CompareBytes, &args);
+                self.order_result(c, order, different);
+            }
+            FieldTy::Seq(item) => {
+                let mut ps = [ValueId(0); 2];
+                let mut ns = [ValueId(0); 2];
+                for (i, p) in [a, b].into_iter().enumerate() {
+                    ps[i] = c.read(p, Ty::Ptr);
+                    let at = c.offset(p, 8);
+                    ns[i] = c.read(at, Ty::Scalar(Scalar::U64));
+                }
+                self.order_sequence(c, item, ps, ns, different)?;
+            }
+            FieldTy::Array(item, len) => {
+                let n = c.constant(*len);
+                self.order_sequence(c, item, [a, b], [n, n], different)?;
+            }
+            FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
+                let mut x = c.read(a, Ty::Ptr);
+                let mut y = c.read(b, Ty::Ptr);
+                if !matches!(field, FieldTy::Box(_)) {
+                    x = c.offset(x, 8);
+                    y = c.offset(y, 8);
+                }
+                let f = self.function(TypeId(t.0), KeyOp::Order)?;
+                let x = c.address(x, PlaceTy::Declared(TypeId(t.0)));
+                let y = c.address(y, PlaceTy::Declared(TypeId(t.0)));
+                let order = self.call(c, f, &[Arg::Address(x), Arg::Address(y)]);
+                self.order_result(c, order, different);
+            }
+            _ => return Err("ordering this recipe field is not built (form883 queue item6)"),
+        }
+        Ok(())
+    }
+    fn order_sequence(
+        &mut self,
+        c: &mut Code,
+        item: &FieldTy,
+        data: [ValueId; 2],
+        len: [ValueId; 2],
+        different: BlockId,
+    ) -> Result<(), &'static str> {
+        let stride = hirsel_core_layout::field_size(&self.module.types, &self.recipes, item).0;
+        let zero = c.constant(0);
+        let head = c.block(&[Ty::Scalar(Scalar::U64)]);
+        let check = c.block(&[]);
+        let body = c.block(&[]);
+        let done = c.block(&[]);
+        c.jump(head, &[zero]);
+        c.start(head);
+        let i = c.params(head)[0];
+        let more = c.compare(CompareOp::Lt, i, len[0]);
+        c.branch(more, check, done);
+        c.start(check);
+        let more = c.compare(CompareOp::Lt, i, len[1]);
+        c.branch(more, body, done);
+        c.start(body);
+        let stride = c.constant(stride);
+        let offset = c.mul(i, stride);
+        let a = c.offset_value(data[0], offset);
+        let b = c.offset_value(data[1], offset);
+        self.order_field(c, item, a, b, different)?;
+        let one = c.constant(1);
+        let next = c.binary(BinaryOp::Add, i, one);
+        c.jump(head, &[next]);
+        c.start(done);
+        self.order_scalars(c, len[0], len[1], different);
+        Ok(())
     }
     fn fold_type(
         &mut self,
@@ -638,6 +960,11 @@ impl Code {
         self.branch(on, yes, no);
         self.start(yes);
     }
+    fn typed_constant(&mut self, ty: Scalar, bits: u64) -> ValueId {
+        let result = self.value(Ty::Scalar(ty));
+        self.inst(Inst::Const { result, bits });
+        result
+    }
     fn constant(&mut self, bits: u64) -> ValueId {
         let result = self.value(Ty::Scalar(Scalar::U64));
         self.inst(Inst::Const { result, bits });
@@ -907,5 +1234,78 @@ mod tests {
             assert_eq!(run.outcome, eval::Outcome::Returned(vec![want]), "{types}");
             assert_eq!(run.used, 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod ordered_cost_tests {
+    use super::*;
+    #[test]
+    fn scalar_order_instances_are_direct_predicates() {
+        let source = r#"
+fn less[T:ordered](a:View[T],b:View[T])->bool { a < b }
+fn closed(a:View[u64],b:View[u64])->bool { a < b }
+fn closed_text(a:View[String],b:View[String])->bool { a < b }
+fn closed_min(a:u64,b:u64)->u64 { if b<a {b} else {a} }
+fn min[T:ordered+plain](a:T,b:T)->T { if b<a {b} else {a} }
+fn min_scalar()->u64 { min(7u64,9u64) }
+fn scalar()->bool { let a=7u64; let b=9u64; less(view a,view b) }
+fn text()->bool { let a="a"; let b="b"; less(view a,view b) }
+"#;
+        let (index, inputs) = crate::tests::program_inputs(source);
+        let p = Program::declare(&index, &inputs);
+        assert!(p.refusals.is_empty(), "{:?}", p.refusals);
+        let mut e = Emitter::new();
+        for (f, fd) in p
+            .fns
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.path.package_is("app", "1") && f.body.is_some())
+        {
+            let c = p.check_lower(f, &mut e);
+            assert!(
+                c.refusals.is_empty() && c.gaps.is_empty(),
+                "{}: {:?} {:?}",
+                fd.path,
+                c.refusals,
+                c.gaps
+            );
+        }
+        e.materialize_instances().unwrap();
+        hirsel_core_ir::wf::module(&e.module).unwrap();
+        for f in &e.module.functions {
+            let key = &e.module.instances[f.instance.index()];
+            if key.definition.0.modules == ["order"]
+                || key.definition.0.name == "closed"
+                || key.definition.0.name == "closed_text"
+                || matches!(
+                    key.definition.0.name.as_str(),
+                    "less" | "min" | "borrowed_min" | "closed_min" | "closed_borrowed"
+                )
+            {
+                if let Some(body) = &f.body {
+                    let calls = body
+                        .insts
+                        .iter()
+                        .filter(|i| matches!(i, Inst::Call { .. }))
+                        .count();
+                    let comparisons = body
+                        .insts
+                        .iter()
+                        .filter(|i| matches!(i, Inst::Compare { .. }))
+                        .count();
+                    eprintln!(
+                        "ORDER COST {:?}: {} insts, {comparisons} compares, {calls} calls",
+                        key,
+                        body.insts.len()
+                    );
+                    if key.types == ["u64"] && key.definition.0.name == "less" {
+                        assert_eq!(calls, 0);
+                        assert_eq!(comparisons, 1);
+                    }
+                }
+            }
+        }
+        eprintln!("{}", hirsel_core_ir::text::print(&e.module));
     }
 }

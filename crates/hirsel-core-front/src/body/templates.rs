@@ -561,6 +561,7 @@ fn fill(
     if let Some(error) = s.error {
         return Err(error);
     }
+    key_glue::inline_ordered(s.module, &mut body);
     s.module.functions[target.index()].body = Some(body);
     Ok(())
 }

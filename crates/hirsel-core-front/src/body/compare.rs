@@ -42,6 +42,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 value
             });
         }
+        if has_param(&self.t, t) {
+            return Ok(self.key_operation(key_glue::KeyOp::Ordered(op), t, &[l, r], n));
+        }
         self.comparable(t, 0)?;
         let (Some(l), Some(r)) = (l, r) else {
             return Ok(None);

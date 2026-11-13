@@ -1,0 +1,77 @@
+// SEM-7: the four predicate bits are3 for Less,10 for Equal,12 for Greater.
+// expect: accept
+// expect: run scalar() = 31210
+// expect: run signed() = 312
+// expect: run characters() = 312
+// expect: run booleans() = 31012
+// expect: run unit() = 10
+// expect: run tuple() = 312
+// expect: run record() = 31210
+// expect: run variant() = 31210
+// expect: run arrays() = 31210
+// expect: run text() = 31210
+// expect: run lists() = 31210
+// expect: run octets() = 31210
+// expect: run pointers() = 30303
+// expect: run nested() = 31210
+fn code[T:ordered](a:T,b:T)->u64 {
+  let l=if a<b {1u64} else {0}
+  let le=if a<=b {2u64} else {0}
+  let g=if a>b {4u64} else {0}
+  let ge=if a>=b {8u64} else {0}
+  l+le+g+ge
+}
+fn scalar()->u64 { code(0u64,18446744073709551615u64)*10000+code(9u64,1u64)*100+code(7u64,7u64) }
+fn signed()->u64 { code(-128i8,127i8)*100+code(127i8,-128i8) }
+fn characters()->u64 { code('a','z')*100+code('z','a') }
+fn booleans()->u64 { code(false,true)*10000+code(false,false)*100+code(true,false) }
+fn unit()->u64 { code((),()) }
+fn tuple()->u64 { code((1u8,9i16),(2u8,-1i16))*100+code((2u8,-1i16),(1u8,9i16)) }
+type P:ordered { first:i8, second:u64 }
+fn record()->u64 {
+ let a=P(first:-1,second:99)
+ let b=P(first:1,second:0)
+ code(a,b)*10000+code(b,a)*100+code(a,a)
+}
+type Choice:ordered = Empty | One(i8) | Pair(u8,u64)
+fn variant()->u64 {
+ let a:Choice=Empty
+ let b:Choice=One(-7)
+ code(a,b)*10000+code(b,a)*100+code(One(7i8),One(7i8))
+}
+fn arrays()->u64 { code([1u8,9u8],[2u8,0u8])*10000+code([2u8,0u8],[1u8,9u8])*100+code([1u8,9u8],[1u8,9u8]) }
+fn text()->u64 { code("a","aa")*10000+code("b","aa")*100+code("abc","abc") }
+fn lists()->u64 {
+ let mut a:List[i16]=list.new()
+ let mut b:List[i16]=list.new()
+ let _=list.push(mut a,-2i16)
+ let _=list.push(mut b,-2i16)
+ let _=list.push(mut b,7i16)
+ code(a,b)*10000+code(b,a)*100+code(a,a)
+}
+fn octets()->u64 {
+ let a=result.unwrap(b"a")
+ let b=result.unwrap(b"aa")
+ code(a,b)*10000+code(b,a)*100+code(a,a)
+}
+type Owned:shareable+send+ordered { key:i16 }
+fn pointers()->u64 {
+ let a=result.unwrap(box.new(Owned(key:-2)))
+ let b=result.unwrap(box.new(Owned(key:1)))
+ let c=result.unwrap(rc.new(Owned(key:-2)))
+ let d=result.unwrap(rc.new(Owned(key:1)))
+ let e=result.unwrap(arc.new(Owned(key:-2)))
+ let f=result.unwrap(arc.new(Owned(key:1)))
+ code(a,b)*10000+code(c,d)*100+code(e,f)
+}
+type Node:shareable+send+ordered { value:i8, next:Option[Arc[Node]] }
+fn nested()->u64 {
+ let a=result.unwrap(arc.new(Node(value:-1,next:None)))
+ let b=result.unwrap(arc.new(Node(value:1,next:None)))
+ let l=Node(value:0,next:Some(take a))
+ let r=Node(value:0,next:Some(take b))
+ code(l,r)*10000+code(r,l)*100+code(l,l)
+}
+pub fn main()->Result[(),Exit] {
+ if scalar()==31210u64 && signed()==312u64 && record()==31210u64 && text()==31210u64 && arrays()==31210u64 && lists()==31210u64 && variant()==31210u64 && characters()==312u64 && booleans()==31012u64 && unit()==10u64 && octets()==31210u64 && pointers()==30303u64 && nested()==31210u64 { Ok(()) } else { Error(Exit(status:1)) }
+}

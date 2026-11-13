@@ -1,6 +1,6 @@
 {
   "measurement": "Buck release, CPU 16, jobs 1, instructions:u, fresh private store, complete driver interval including publication and teardown",
-  "basis": "0f347e69 plus terminal CLI exit and shared immutable signature paths. Current source grows to 6132/2741 lines; ordinary check/lower 26614.97/14901.59 and whole 46350.52/32505.36. Keep all four stricter previous ceilings despite sibling emission growth; no ceiling is raised. Rebase retains the newer source denominators 6208/2817.",
+  "basis": "aa160086 plus shared signature paths and FxHashMap for private structural type interning: 6208/2817 lines. Paired ordinary check/lower 26873.88 -> 26436.00 /15068.21 -> 14822.50; whole 46687.85 -> 46005.68 /32533.38 -> 32011.03. Finished-work forecasts 49669.56/33296.70 meet the 50000 goal. All four previous ceilings are stricter than new observations plus 2 percent, so retain them without raising a ceiling.",
   "corpora": {
     "m1": {
       "code_lines": 6208,

@@ -10,6 +10,7 @@ test-assembly = []
 cost-profile = []
 
 [dependencies]
+rustc-hash = "2"
 serde = { version = "1", features = ["derive", "rc"] }
 hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-core-ir = { path = "../hirsel-core-ir" }

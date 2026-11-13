@@ -4,7 +4,7 @@
 //! is rigid (OWN-23) and means nothing outside that definition.
 
 use hirsel_core_layout::Scalar;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 #[derive(
     Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
@@ -120,7 +120,7 @@ impl Types {
         Self {
             base: Some(base),
             kinds: vec![],
-            map: HashMap::new(),
+            map: HashMap::default(),
         }
     }
     fn find(&self, k: &TyKind) -> Option<TyId> {
@@ -175,7 +175,7 @@ impl<'a> Local<'a> {
         Self {
             base,
             kinds: vec![],
-            map: HashMap::new(),
+            map: HashMap::default(),
         }
     }
     pub fn intern(&mut self, k: TyKind) -> TyId {

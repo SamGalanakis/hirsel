@@ -725,6 +725,7 @@ dependencies = [
  "hirsel-core-resolve",
  "hirsel-core-syntax",
  "hirsel-guard",
+ "rustc-hash",
  "serde",
  "serde_json",
 ]

@@ -1,4 +1,5 @@
 // Reviewed-by: langs-text-921 2026-11-13; CRC32/SimpleSHA256 byte loops, fixed inline lanes/digest, LCG and wrapping totals match; compile with overflow checks.
+// Conversion parity delta reviewed by langs-text-921 2026-11-13: truncate then half-open float bounds, unsigned Fannkuch/matching checked index sites, u32 Mandelbrot counter; approval scoped to this delta.
 // Matches hash.hirsel, including upstream SimpleSHA256 (not cryptographic SHA256).
 #[allow(dead_code)]
 mod support;

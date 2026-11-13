@@ -34,7 +34,18 @@ class BuildDenominatorTests(unittest.TestCase):
             self.assertEqual(edit['source_lines']['matched'], result['source_lines']['matched'] + 1)
             self.assertEqual(edit['samples']['matched']['instructions'], 1000)
             self.assertEqual(edit['samples']['matched']['k_instructions_per_source_line'],
-                             1 / edit['source_lines']['matched'])
+                             1000 / edit['source_lines']['matched'] / 1000)
+
+
+class ReviewTests(unittest.TestCase):
+    def test_authorized_third_lane_review_and_no_self_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'json.rs'
+            source.write_text('// Reviewed-by: core-regions-pools-922 scope Json3\n')
+            self.assertTrue(run.reviewed(source, 'langs-text-921'))
+            self.assertFalse(run.reviewed(source, 'core-regions-pools-922'))
+            source.write_text('// Reviewed-by: unassigned-lane\n')
+            self.assertFalse(run.reviewed(source, 'langs-text-921'))
 
 
 if __name__ == '__main__':

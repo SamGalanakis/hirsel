@@ -1,11 +1,12 @@
 // Reviewed-by: langs-text-921 2026-11-13; all four tasks match inline arrays/planets, PBM retained bytes, spectral vector phases and float/checksum order; compile with overflow checks.
+// Conversion parity delta reviewed by langs-text-921 2026-11-13: truncate then half-open float bounds, unsigned Fannkuch/matching checked index sites, u32 Mandelbrot counter; approval scoped to this delta.
 // Matches clbg.hirsel Fannkuchredux: inline arrays, identical permutation/flip order.
 #[allow(dead_code)]
 mod support;
-fn fannkuchredux(n: i32) -> (i32, i32) {
+fn fannkuchredux(n: usize) -> (i32, i32) {
     let mut perm1 = [0; 32];
     for i in 0..32 {
-        perm1[i] = i as i32;
+        perm1[i] = i32::try_from(i).unwrap();
     }
 
     let mut perm = [0; 32];
@@ -13,23 +14,23 @@ fn fannkuchredux(n: i32) -> (i32, i32) {
     let mut max_flips_count = 0;
     let mut perm_count = 0;
     let mut checksum = 0;
-    let mut r = n as usize;
+    let mut r = n;
 
     loop {
         while r > 1 {
-            count[r - 1] = r as i32;
+            count[r - 1] = i32::try_from(r).unwrap();
             r -= 1;
         }
 
-        perm[..n as usize].copy_from_slice(&perm1[..n as usize]);
+        perm[..n].copy_from_slice(&perm1[..n]);
 
         let mut flips_count = 0;
         let mut k = perm[0];
 
         while k != 0 {
             let k2 = (k + 1) >> 1;
-            for i in 0..k2 as usize {
-                let j = k as usize - i;
+            for i in 0..usize::try_from(k2).unwrap() {
+                let j = usize::try_from(k).unwrap() - i;
                 perm.swap(i, j);
             }
             flips_count += 1;
@@ -47,7 +48,7 @@ fn fannkuchredux(n: i32) -> (i32, i32) {
         }
 
         loop {
-            if r == n as usize {
+            if r == n {
                 return (checksum, max_flips_count);
             }
 
@@ -91,7 +92,7 @@ fn mandelbrot(c: &support::Config) -> u32 {
                 let mut zi = 0.0;
                 let mut tr = 0.0f64;
                 let mut ti = 0.0f64;
-                let mut i = 0;
+                let mut i = 0u32;
                 while i < 50 && (tr + ti).total_cmp(&4.0).is_le() {
                     zi = 2.0 * zr * zi + ci;
                     zr = tr - ti + cr;
@@ -317,7 +318,8 @@ fn run(c: &support::Config) -> u32 {
         return mandelbrot(c);
     }
     assert_eq!(c.name, "CLBG::Fannkuchredux");
-    let n = i32::try_from(c.number("n")).unwrap();
+    let n = c.number("n");
+    assert!((1..=32).contains(&n));
     let mut total = 0u32;
     for _ in 0..c.warmup + c.iterations {
         let (checksum, flips) = fannkuchredux(n);

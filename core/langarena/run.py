@@ -125,7 +125,7 @@ def reviewed(source, author):
     if not source.is_file():
         return False
     match = re.search(r'^// Reviewed-by: (\S+)', source.read_text(), re.M)
-    return bool(match and match[1] in {'langs-numeric-920', 'langs-text-921'} and match[1] != author)
+    return bool(match and match[1] in {'langs-numeric-920', 'langs-text-921', 'core-regions-pools-922'} and match[1] != author)
 
 
 def suite_source():

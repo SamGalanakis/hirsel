@@ -1,4 +1,5 @@
 // Reviewed-by: langs-text-921 2026-11-13; byte flags, sqrt bound, checked multiples and u64 odd-prime count/last scan match; compile with overflow checks.
+// Conversion parity delta reviewed by langs-text-921 2026-11-13: truncate then half-open float bounds, unsigned Fannkuch/matching checked index sites, u32 Mandelbrot counter; approval scoped to this delta.
 // Matches sieve.hirsel: byte flags, sqrt limit, odd count scan, checked indexing.
 #[allow(dead_code)]
 mod support;
@@ -11,7 +12,7 @@ fn run(c: &support::Config) -> u32 {
         let mut primes = vec![1u8; n + 1];
         primes[0] = 0;
         primes[1] = 0;
-        let bound = (n as f64).sqrt() as usize;
+        let bound = usize::try_from(support::float_u64((n as f64).sqrt())).unwrap();
         for p in 2..bound + 1 {
             if primes[p] == 1 {
                 let mut multiple = p * p;

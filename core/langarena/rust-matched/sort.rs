@@ -1,4 +1,5 @@
 // Reviewed-by: langs-text-921 2026-11-13; Quick/Merge and source introsort Self match pivots, cutoffs, heap fallback, scratch arrays, retained LCG resets; compile with overflow checks.
+// Conversion parity delta reviewed by langs-text-921 2026-11-13: truncate then half-open float bounds, unsigned Fannkuch/matching checked index sites, u32 Mandelbrot counter; approval scoped to this delta.
 // Matches sort.hirsel, including std.list introsort for Sort::Self.
 #[allow(dead_code)]
 mod support;

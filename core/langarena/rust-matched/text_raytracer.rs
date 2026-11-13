@@ -1,4 +1,5 @@
 // Reviewed-by: langs-text-921 2026-11-13; inline scene/LUT, Vec3 arithmetic, total-order branches, sphere order and pixel sum match valid positive dimensions; compile with overflow checks.
+// Conversion parity delta reviewed by langs-text-921 2026-11-13: truncate then half-open float bounds, unsigned Fannkuch/matching checked index sites, u32 Mandelbrot counter; approval scoped to this delta.
 // Matches text_raytracer.hirsel: inline three-sphere scene and f64 triple arithmetic.
 #[allow(dead_code)]
 mod support;
@@ -68,7 +69,7 @@ fn shade(dir: Vec3, obj: Sphere, t: f64) -> usize {
         scale(obj.color, 0.3),
     );
     let col = (color.x + color.y + color.z) / 3.0;
-    (col * 6.0).floor() as usize
+    usize::try_from(support::float_u64((col * 6.0).floor())).unwrap()
 }
 fn run(c: &support::Config) -> u32 {
     assert_eq!(c.name, "Etc::TextRaytracer");

@@ -247,7 +247,11 @@ impl FunctionEmitter<'_> {
                 self.release_node(&node, *t, matches!(field, FieldTy::Arc(_)))?;
                 None
             }
-            FieldTy::Scalar(_) | FieldTy::Stable(_) | FieldTy::Fn | FieldTy::Borrow => None,
+            FieldTy::Scalar(_)
+            | FieldTy::Stable(_)
+            | FieldTy::Fn
+            | FieldTy::Borrow
+            | FieldTy::View(_) => None,
             FieldTy::Handle(hirsel_core_layout::Handle::HostFile) => {
                 let handle = self.calc(format!("load i64, ptr {p}, align 1"));
                 self.runtime_void(

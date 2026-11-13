@@ -155,6 +155,7 @@ fn field_ty(f: &FieldTy) -> String {
         FieldTy::Fn => "fn".into(),
         FieldTy::OwnFn => "ownfn".into(),
         FieldTy::Borrow => "borrow".into(),
+        FieldTy::View(e) => format!("view {}", field_ty(e)),
         FieldTy::Handle(Handle::Task) => "task".into(),
         FieldTy::Handle(Handle::Sender) => "sender".into(),
         FieldTy::Handle(Handle::Receiver) => "receiver".into(),
@@ -837,6 +838,10 @@ impl<'a> Line<'a> {
                     "link" => FieldTy::Link(t),
                     _ => FieldTy::OptLink(t),
                 }
+            }
+            "view" => {
+                self.next()?;
+                FieldTy::View(boxed(self)?)
             }
             "seq" | "fixed" | "seqspan" | "indexed" => {
                 let w = self.next()?;

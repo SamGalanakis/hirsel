@@ -642,3 +642,25 @@ fn appended_layouts_keep_prefix_dependencies_and_refuse_atomically() {
     assert_eq!(fixed(&recipes[3]).size, 2);
     assert_eq!(recipes, compute(&shapes).unwrap());
 }
+
+/// Bug: a `View[String]` field is laid out as a pointer (8) instead of the String's
+/// own carrier, or is cleaned (a double free of the owner's block), or is allowed in
+/// a type that outlives its owner. `scoped Parser {s: View[String], n: u8}`: s@0 is a
+/// carrier {data, len, cap} of 24 bytes, n@24, size 32 (align 8), and nothing to
+/// clean; the same field in an own record is refused (core.md: scoped values are
+/// never stored in own fields).
+#[test]
+fn a_view_field_is_its_types_bytes_and_is_never_cleaned() {
+    let view = || FieldTy::View(Box::new(FieldTy::Seq(Box::new(u(Scalar::U8)))));
+    let p = record(
+        "Parser",
+        Repr::Scoped,
+        vec![field("s", view()), field("n", u(Scalar::U8))],
+    );
+    let r = compute(&[p]).unwrap();
+    let f = fixed(&r[0]);
+    assert_eq!((f.size, f.align, &f.offsets[0][..]), (32, 8, &[0, 24][..]));
+    assert!(r[0].drop.is_none(), "a view is cleaned by nobody");
+    let own = record("Keep", Repr::Own, vec![field("s", view())]);
+    assert!(compute(&[own]).is_err());
+}

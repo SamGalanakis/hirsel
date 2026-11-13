@@ -285,7 +285,7 @@ fn inline_target(ty: &FieldTy) -> Option<TypeRef> {
     match ty {
         FieldTy::Inline(t) => Some(*t),
         FieldTy::Array(e, _) => inline_target(e),
-        FieldTy::FixedSpan(e) => inline_target(e),
+        FieldTy::FixedSpan(e) | FieldTy::View(e) => inline_target(e),
         _ => None,
     }
 }
@@ -434,6 +434,10 @@ fn measure<'r>(
             return Err("views and scoped callables live only in scoped types");
         }
         FieldTy::Borrow => (CLOSURE_CARRIER, POINTER, 16),
+        FieldTy::View(_) if holder != Repr::Scoped => {
+            return Err("views and scoped callables live only in scoped types");
+        }
+        FieldTy::View(t) => measure(shapes, Repr::Own, t, get)?,
         _ if stable => return Err("a stable type's fields are plain or stable (MEM-2)"),
         FieldTy::Box(_)
         | FieldTy::Rc(_)
@@ -459,6 +463,7 @@ fn array_element(shapes: &[Shape], ty: &FieldTy) -> bool {
         FieldTy::Inline(t) => matches!(shapes[t.index()].repr, Repr::Own | Repr::Stable),
         FieldTy::Array(e, _) => array_element(shapes, e),
         FieldTy::Borrow
+        | FieldTy::View(_)
         | FieldTy::Handle(Handle::Task | Handle::Sender | Handle::Receiver | Handle::HostFile) => {
             false
         }

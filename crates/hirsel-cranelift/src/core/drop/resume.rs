@@ -53,6 +53,7 @@ fn plan_field(tables: &Tables<'_>, t: &FieldTy) -> Result<Plan> {
         | FieldTy::Stable(_)
         | FieldTy::Fn
         | FieldTy::Borrow
+        | FieldTy::View(_)
         | FieldTy::Locator => Plan::Empty,
         FieldTy::Array(e, n) => Plan::Array(
             *n,

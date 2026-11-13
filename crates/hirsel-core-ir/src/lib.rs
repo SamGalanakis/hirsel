@@ -111,18 +111,50 @@
 //!   into a new blob, as a new root, charged round8(length); any other compact
 //!   value copies its whole blob. `copy_closed_in` does not exist.
 //!   `seq.index_in` allocates round8(24 + 8 count) (`charge::seq_index`).
-//! - `text.as_string(t)` is a `String` view `{pointer of the bytes, length}`;
-//!   `emit` of a `String` view or a `Text` into a `Text` is one fit check and one
-//!   `copy`. An unmarked `T` parameter also takes a `View[T]` (OWN-7): the
+//! - `text.as_string(t)` is a `View[String]` (Views): the carrier
+//!   `{blob + at + W, count, 0}` written into the caller's `dest`; `emit` of a
+//!   `String` view or a `Text` into a `Text` is one fit check and one `copy`. An
+//!   unmarked `T` parameter of a compact `T` also takes a `View[T]` (OWN-7): the
 //!   producer passes the locator.
-//! - **A view of a plain type** is that type's own representation (a scalar, or a
-//!   place of the type), copied when the view is made: plain values have no identity
-//!   and viewed storage is frozen, so the copy cannot be told apart. A view of a
+//! - **A view of a plain type** follows the general rule (Views). A view of a
 //!   plain packed element decodes it field after field into a native place (a compact
 //!   field becomes its locator); a view of a compact element is its locator.
 //!   Iterating a span advances by the element's packed size, constant for a plain
 //!   element and `compact_extent` at the holder's W otherwise. A `FixedSpan` element
 //!   MEM-9 does not fix uses the same packed encoding.
+//!
+//! # Views (FORM v1b)
+//!
+//! A `View[T]` is carried exactly as a `T` is carried: it is `T`'s own bytes, a
+//! non-owning copy that nobody cleans (OWN-8). A view of a scalar is the scalar.
+//! Any other view is a place of `T`: passed as the address of a place holding
+//! those bytes (the owner itself or a frame copy) and returned by writing them
+//! into the caller's `dest`, like any non-scalar result. One rule, whatever made
+//! the view: viewed storage is frozen while the view lives, so the copy cannot be
+//! told apart from the owner.
+//! - **`View[String]`, `View[Bytes]`, `View[List[T]]`** are therefore a carrier
+//!   `{data, length, capacity}`. A view of a whole value copies the owner's
+//!   capacity, so `list.capacity` and `string.into_bytes` read the truth through
+//!   an unmarked parameter (OWN-7); it frees nothing because nobody cleans a view.
+//!   A view of a range that a function makes is a new carrier of capacity 0
+//!   written into that function's `dest`: `list.slice(xs, lo, hi)` and
+//!   `string.slice` write `{data + lo * stride, hi - lo, 0}` after the bounds check
+//!   `lo <= hi <= length` (`Bounds`); `text.as_string(t)` writes
+//!   `{blob + at + W, count, 0}`. A literal passed to a view parameter is its
+//!   carrier in a frame slot (Strings and literals).
+//! - **Kernels that only retype** are the carrier bytes themselves: the views
+//!   `string.as_bytes` and `string.view_string` copy the 24 bytes into `dest` (or
+//!   pass the same address on), and the moves `string.of_bytes` and
+//!   `string.to_bytes` hand the same carrier over. No other instruction.
+//! - **Cost**: a call passes one pointer; reading an element is two loads (the
+//!   data pointer from the place, then the element), as for an owned `T`; a
+//!   returned view copies `T`'s size (24 bytes for a carrier). `Option[View[T]]`
+//!   has `Option[T]`'s layout and no cleanup.
+//! - **A view field** of a scoped type is `FieldTy::View(T's field type)`: `T`'s
+//!   size, alignment and logical size, cleaned by nobody, refused outside scoped
+//!   holders (core.md: scoped values are never stored in own, stable or resource
+//!   fields or collections). A view of a view-typed field is those same bytes
+//!   again. A view of compact data is its locator (Compact data).
 //!
 //! # Strings and literals (FORM v1b)
 //!
@@ -163,19 +195,19 @@
 //! `rt.stderr_write` ([`HostOp`], one row per core operation; signatures at
 //! [`RtOp::signature`]). Their operands are scalars and pointers only: the
 //! capability, `Args` or `HostFile` handle, and each `String` or `Bytes` as a
-//! pointer to its carrier `{data, length, capacity}` (a view is already that
-//! pointer). Every `host`, `stdout` and `stderr` row returns the outcome
-//! `value: u64, error: u8, code: u32, written: u64`, from which the producer
-//! builds the `Result`; the rows that `wait` add the failure status (Native ABI)
-//! and fail with `Cancelled` when cancellation is pending, `host_mkdtemp` also with
+//! pointer to its carrier `{data, length, capacity}` (for a view, the address
+//! of the place holding its carrier, Views). Every `host`, `stdout` and `stderr`
+//! row returns the outcome `value: u64, error: u8, code: u32, written: u64`,
+//! from which the producer builds the `Result`; the rows that `wait` add the
+//! failure status (Native ABI) and fail with `Cancelled` when cancellation is pending, `host_mkdtemp` also with
 //! `Bounds` when the name has fewer than 32 spare bytes. `host_wall_ms` and
 //! `host_mono_ns` return the `u64` alone and cannot fail; neither can the `args`
 //! rows. The run time reads and writes the carrier: `host_read` fills spare
 //! capacity and `host_mkdtemp` appends the directory's name, each storing the new
 //! length; neither changes the data pointer or the capacity (no provider
 //! operation admits). `rt.args_get` returns a run-owned `String` carrier of
-//! capacity 0, or null past the end: it is the `View[String]` of `Some`, valid
-//! until the run ends.
+//! capacity 0, or null past the end; the producer copies its 24 bytes into the
+//! payload of `Some`, a `View[String]` valid until the run ends.
 //!
 //! Engines map the rows to the run time's entries, the context first:
 //! - `rt.args_len` → `uint64_t hirsel_core_args_len(const HirselCoreContext *,

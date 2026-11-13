@@ -656,6 +656,7 @@ impl Machine<'_> {
             | FieldTy::Stable(_)
             | FieldTy::Locator
             | FieldTy::Borrow
+            | FieldTy::View(_)
             | FieldTy::Handle(Handle::Capability) => false,
             FieldTy::Inline(x) => self.drop_value(t, at, *x),
             // SEM-9: an inline array is cleaned from index 0 up.

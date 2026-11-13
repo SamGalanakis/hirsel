@@ -168,8 +168,12 @@ pub enum FieldTy {
     Fn,
     /// An `own fn`: code pointer and an owned environment block.
     OwnFn,
-    /// A `scoped fn` or a `View`: borrowed, cleaned by nobody, only in scoped types.
+    /// A `scoped fn`, a `Dest` or a `Writer`: borrowed, cleaned by nobody, only in
+    /// scoped types.
     Borrow,
+    /// `View[T]`: T's own bytes, laid out exactly as a field of type T, cleaned by
+    /// nobody, only in scoped types (crate `hirsel-core-ir`, "Views").
+    View(Box<FieldTy>),
     Handle(Handle),
     /// `Map[K, V]`: a header like a `List`'s over its entry storage.
     Map(Box<FieldTy>, Box<FieldTy>),

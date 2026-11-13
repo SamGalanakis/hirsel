@@ -60,6 +60,32 @@ class ProcessCeiling(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'invalid fixed/marginal'):
                 check(process, fixed, lines, 60000, 60000)
 
+    def test_named_anchor_residual_does_not_hide_a_new_regression_or_budget_miss(self):
+        metrics = {'instructions': 11000, 'stages': [{'name': 'check/lower', 'instructions': 6000}]}
+        ceiling = {'check_lower_per_line': 5, 'whole_request_per_line': 10,
+                   'whole_process_per_line': 30}
+        check = GUARD['check_ceiling']
+        self.assertEqual(check(metrics, 1000, ceiling, 31000, 1000)[2], [])
+        # The allowance is an absolute frozen-corpus count, not a growing per-line exemption.
+        metrics['stages'][0]['instructions'] += 1
+        self.assertIn('check/lower', check(metrics, 1000, ceiling, 31000, 1000)[2][0])
+        metrics['stages'][0]['instructions'] -= 1
+        self.assertIn('whole process', check(metrics, 1000, ceiling, 31001, 1000)[2][0])
+        with self.assertRaisesRegex(ValueError, 'negative recorded'):
+            check(metrics, 1000, ceiling, 31000, -1)
+        projection = {'missing_check_lower_per_line': 0, 'additional_publication_per_line': 0}
+        self.assertEqual(len(GUARD['finished_forecast'](60000001, 1000, projection, 60000)[1]), 1)
+
+    def test_a_new_partial_body_cannot_qualify_as_a_cheaper_finished_check(self):
+        check = GUARD['completion_errors']
+        complete = {'complete_bodies': 10, 'bodies': 10}
+        self.assertEqual(check({'diagnostics': [], 'incomplete': []}, complete), [])
+        for result in [{'diagnostics': ['refused'], 'incomplete': []},
+                       {'diagnostics': [], 'incomplete': ['gap']}]:
+            self.assertIn('every body', check(result, complete)[0])
+        self.assertEqual(check({'diagnostics': [], 'incomplete': ['gap']},
+                               {'complete_bodies': 9, 'bodies': 10}), [])
+
     def test_process_counter_requires_one_complete_event(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'perf.txt'

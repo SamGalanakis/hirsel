@@ -23,7 +23,7 @@ def process_instructions(path):
     return int(values[0])
 
 
-def check_ceiling(metrics, lines, ceiling, process):
+def check_ceiling(metrics, lines, ceiling, process, anchor_residual=0):
     if metrics.get('counter_refusal'):
         raise ValueError(metrics['counter_refusal'])
     stages = {s['name']: s['instructions'] for s in metrics['stages']}
@@ -35,16 +35,27 @@ def check_ceiling(metrics, lines, ceiling, process):
         raise ValueError('corpus contains no code lines')
     if process < total:
         raise ValueError('process counter does not cover the driver interval')
+    if anchor_residual < 0:
+        raise ValueError('negative recorded anchor residual')
     failures = []
     for name, instructions, maximum in [
         ('check/lower', lower, ceiling['check_lower_per_line']),
         ('driver request', total, ceiling['whole_request_per_line']),
         ('whole process', process, ceiling['whole_process_per_line']),
     ]:
-        if instructions > maximum * lines:
-            failures.append(f'{name}: {instructions / lines:.2f} instructions/line exceeds {maximum}')
+        adjusted = instructions - anchor_residual
+        if adjusted > maximum * lines:
+            context = ' beyond the named anchor residual' if anchor_residual else ''
+            failures.append(f'{name}: {adjusted / lines:.2f} instructions/line{context} exceeds {maximum}')
     return lower / lines, total / lines, failures
 
+
+
+def completion_errors(product, projection):
+    if (projection['complete_bodies'] == projection['bodies']
+            and (product['diagnostics'] or product['incomplete'])):
+        return ['recorded finished corpus no longer checks every body to the end']
+    return []
 
 
 def finished_forecast(process, lines, projection, budget):
@@ -78,6 +89,7 @@ def run(compiler, output, ceilings, request_compiler=None):
         (directory / 'inputs.json').write_text(json.dumps(inputs))
         files = {Path(s['file']) for p in inputs['packages'] for s in p['sources']}
         lines = sum(source_lines(p) for p in sorted(files))
+        (directory / 'code-lines.txt').write_text(str(lines) + '\n')
         env = os.environ | {'HIRSEL_MEMORY_LIMIT': '2G', 'HIRSEL_JOBS': '1'}
         admit()
         command = ['taskset', '-c', '16', str(ROOT / 'tools/capped'),
@@ -100,9 +112,16 @@ def run(compiler, output, ceilings, request_compiler=None):
         if lines != ceiling['code_lines']:
             print(f"{name}: baseline {ceiling['code_lines']} code lines; current {lines}; "
                   "costs use the deterministic current count")
-        lower, total, errors = check_ceiling(metrics, lines, ceiling, process)
+        anchor = ceilings.get('known_anchor_residual', {}).get(name)
+        residual = anchor['check_lower_instructions'] if anchor else 0
+        lower, total, errors = check_ceiling(metrics, lines, ceiling, process, residual)
+        if anchor:
+            print(f"{name}: KNOWN EXCESS {anchor['owner']}: {residual} anchor instructions "
+                  f"({residual / lines:.2f}/current line), recorded separately from growth; "
+                  "observation ceilings compare the remaining work; budget uses the full process")
         print(f'{name}: {lines} code lines; check/lower {lower:.2f}; driver request {total:.2f}; whole process {process / lines:.2f} instructions/line')
         projection = ceilings['completion_forecast'][name]
+        failures.extend(f'{name}: {error}' for error in completion_errors(product, projection))
         forecast, budget_errors = finished_forecast(
             process, lines, projection, ceilings['finished_budget_per_line'])
         print(f"{name}: finished whole process forecast {forecast:.2f}; "

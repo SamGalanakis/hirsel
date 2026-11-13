@@ -39,3 +39,33 @@ fn new_is_empty() -> u64 {
     let s: set.Set[u64] = set.new()
     set.len(s)
 }
+
+// [5,2,9] minus 2, then reinsert 2 -> [5,9,2]. A sorted or slot-reuse view fails.
+// expect: run insertion_order() = 592
+fn insertion_order() -> u64 {
+    let mut s: set.Set[u64] = set.new()
+    let _ = added(set.insert(mut s, 5))
+    let _ = added(set.insert(mut s, 2))
+    let _ = added(set.insert(mut s, 9))
+    let _ = set.remove(mut s, 2)
+    let _ = added(set.insert(mut s, 2))
+    let mut n: u64 = 0
+    for (k, _) in set.entries(s) { n = n * 10 + k }
+    n
+}
+
+// expect: run empty_iteration() = 0
+fn empty_iteration() -> u64 {
+    let s: set.Set[u64] = set.new()
+    let mut n: u64 = 0
+    for (_, _) in set.entries(s) { n += 1 }
+    n
+}
+
+// expect: run capacity_returns_key() = 3
+fn capacity_returns_key() -> u64 {
+    let mut s: set.Set[String] = set.new()
+    let k = result.unwrap(string.from("abc"))
+    let r = bound bytes 0 { set.insert(mut s, take k) }
+    match r { Ok(Error((_, take original))) => list.len(string.as_bytes(original)) + set.len(s), _ => 99 }
+}

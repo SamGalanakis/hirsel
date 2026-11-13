@@ -1,7 +1,7 @@
 // Module `set`: Set[K: key], own, insertion-ordered: a Map[K, ()] in source. Outside
 // this module the type is written `set.Set` (LANG-7). Charges are the map's with
-// size(V) = 0: capacity x (size(K) + 16). There is no `for k in s`: SEM-6 makes only
-// built-in sources iterable, so a set is not; a program that iterates keeps the Map.
+// size(V) = 0: capacity x (size(K) + 16). Iterate the map view from entries;
+// SEM-6 makes built-in sources iterable, so Set itself is not a loop source.
 // Field legend: API.md.
 pub opaque type Set[K: key] {
     m: Map[K, ()]
@@ -42,4 +42,10 @@ pub fn remove[K: key](mut s: Set[K], k: K) -> bool {
         Some(_) => true,
         None => false,
     }
+}
+
+/// A view of the backing map in insertion order, for `for (k, _) in set.entries(s)`.
+/// View: anchored to s; FREEZE s. Alloc: nothing. Cost: O(1).
+pub fn entries[K: key](s: Set[K]) -> View[Map[K, ()]] in s {
+    view s.m
 }

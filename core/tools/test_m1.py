@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from m1 import inputs_for, run, table
+from m1 import census_table, inputs_for, run, table
 
 
 class Milestone(unittest.TestCase):
@@ -74,6 +74,7 @@ print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnos
             row = self.rows()[0]
             self.assertEqual(row['passed'], 1)
             self.assertEqual(row['first_failure'], 'first')
+            self.assertIn('no checker stops | 0 |', census_table([row]))
             self.assertIn({'exit': 'exit status'}.get(suffix, suffix), row['stopped'])
             expected.write_bytes(original)
         (self.corpus / 'EXPECTED/first.files/result').write_bytes(b'wrong')

@@ -170,9 +170,11 @@ def census_table(rows):
     lines = ['| program | variant | engine | reachable bodies / declarations | first-stop construct | count |',
              '|---|---|---|---|---|---|']
     for row in rows:
-        if row['variant'] == 'libraries' or row['built']:
+        if row['variant'] == 'libraries' or row['built'] and row['passed'] == row['cases']:
             continue
         counts = row.get('census', {})
+        if not counts and row['checked']:
+            counts = {'no checker stops': 0}
         for construct, count in sorted(counts.items()):
             construct = construct.replace('|', r'\|').replace('\n', ' ')
             lines.append(f"| {row['program']} | {row['variant']} | {row['engine']} | "

@@ -539,7 +539,6 @@ impl Driver {
                 library.as_deref(),
             );
             p.entry = request.entry.clone();
-            result.native_entry = request.entry.as_ref().map(|e| native::bind_entry(&p, e));
             result.diagnostics.extend(p.refusals.iter().cloned());
             result.incomplete.extend(p.gaps.iter().map(|g| Incomplete {
                 primary: g.site,
@@ -621,6 +620,10 @@ impl Driver {
                 }
                 result.definitions.insert(fd.path.clone(), product);
             }
+            result.native_entry = request
+                .entry
+                .as_ref()
+                .map(|e| native::bind_entry(&p, e, result.definitions.get(e).map(Arc::as_ref)));
             if produce && result.accepted() {
                 result.library = Some(Arc::new(p.into_library()));
             } else {

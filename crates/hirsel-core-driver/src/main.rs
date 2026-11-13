@@ -157,6 +157,15 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         .map_or_else(|| product.accepted(), |r| r.accepted());
     let mut stopped = None;
     let native = if native_command && accepted {
+        let headers = tempfile::tempdir()?;
+        std::fs::write(
+            headers.path().join("hirsel_core_rt.h"),
+            include_bytes!("../../hirsel-core-rt/include/hirsel_core_rt.h"),
+        )?;
+        std::fs::write(
+            headers.path().join("hirsel_core_process.h"),
+            include_bytes!("../../hirsel-core-rt/include/hirsel_core_process.h"),
+        )?;
         let options = NativeOptions {
             backend: backend.unwrap_or(if release {
                 Backend::Llvm
@@ -166,7 +175,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             optimize: release,
             target,
             runtime: runtime.ok_or("build/run requires --runtime <core runtime archive>")?,
-            include: Path::new(env!("CARGO_MANIFEST_DIR")).join("../hirsel-core-rt/include"),
+            include: headers.path().to_owned(),
             cc,
             store: native_store,
             output: output_path.unwrap_or_else(|| PathBuf::from("program")),

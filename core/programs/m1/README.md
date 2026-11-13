@@ -31,9 +31,10 @@ A checker refusal/gap, unsupported emission, link error or missing native produc
 produces a failing row. Empty entry/case selections fail. JSON reports retain
 all checker diagnostics and the table is written beside them as Markdown.
 
-The native assembly fixture target `//:core-driver-native` is separate from M1.
-It exercises scalar checked bodies and a test-only C Result carrier. It does
-not establish source-language entry, capability or corpus acceptance.
+The native assembly target `//:core-driver-native` is separate from M1.
+It builds real source Result/Exit entries on both engines and tests success,
+failure and cache behavior. The source Exit-7 smoke is acceptance for that
+program; the M1 program rows and OS grant integration remain separate.
 
 Build/run acceptance belongs to the driver and covers the entry's reachable
 instances and the declarations they name. Unreached library gaps do not block a

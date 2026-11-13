@@ -63,13 +63,16 @@ Object keys include compiler, checked-body/read identity, emitted module, target
 backend, optimization and runtime bytes. Executables additionally key the entry
 thunk, headers and linker version. A warm build reads integrity-checked products
 and compiles/links nothing; an implementation edit rebuilds its object and relinks.
-The real `hirsel_core_run` boundary maps PROG-3 outcomes after cleanup. There is no
-temporary process runtime or scalar-main product path. Entry destination/layout,
-capability bindings and owned error cleanup currently stop explicitly where the
-checker has not supplied the necessary products. `//:core-driver-native` exercises
-scalar calls, Exit mapping and checked failure on both engines with a C fixture
-that supplies the still-missing Result carrier. This is partial native proof,
-not acceptance of source-language main or M1.
+The real `hirsel_core_run` boundary maps PROG-3 outcomes after cleanup. Entry
+binding reads the emitted main's `Signature.dest` and derives its instantiated
+layout from the emitted type table. Exit's status uses the result payload offset
+plus the inline Exit field offset. Cranelift receives those computed module
+layouts; LLVM derives the same layouts in its emitter. A generic declaration's
+summary recipe is not the layout of an instantiated result.
+
+`//:core-driver-native` checks and builds real source main functions on both
+engines, including `Error(Exit(status: 7u8))`, success, checked overflow, reachable
+calls, cache reuse and callee edits. There is no test-only C Result bridge.
 
 `check` and `image` require every supplied body and declaration to check.
 `build` and `run` require the entry's reachable native instances and the types
@@ -81,9 +84,9 @@ build/run JSON. Behind incomplete bodies the census follows resolved source
 names; completed bodies follow emitted calls/function references.
 
 FORM decision 44 gives each main capability/Args parameter one plain `u64`
-operand, filled from `Config.grants[i]` in declaration order. The generated thunk
-uses that convention. Standalone parameterized entry still needs the provider's
-C process/grant constructor and close exports; grants must outlive main cleanup
-and then close without admission or failure. Source Result destinations remain a
-checker dependency. The native fixture tests two ordered handle operands without
-claiming real OS grant construction.
+operand, filled from `Config.grants[i]` in declaration order. These parameters
+build through the normal source path. The standalone bootstrap refuses missing
+external grants before calling the run boundary. The provider's C constructor
+and close exports are still needed to supply real grants; they must outlive main
+cleanup and close without admission or failure. Owned error results still need
+the checker's cleanup support.

@@ -98,6 +98,9 @@ fn publish(store: &Store, key: ContentHash, bytes: &[u8]) -> io::Result<ContentH
     store.select(&selection(key), hash)?;
     Ok(hash)
 }
+fn read_input(path: &Path) -> io::Result<Vec<u8>> {
+    std::fs::read(path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
+}
 impl CheckProduct {
     /// Each checked body is already an emitter module, with signature-only imports.
     /// A callee implementation edit therefore recompiles its object alone.
@@ -121,7 +124,7 @@ impl CheckProduct {
         }
         let runtime = ContentHash::of_parts(
             "hirsel.core-runtime.v1",
-            [&std::fs::read(&options.runtime)?[..]],
+            [&read_input(&options.runtime)?[..]],
         );
         let store = Store::new(&options.store)?;
         let mut objects = Vec::new();
@@ -140,45 +143,37 @@ impl CheckProduct {
                     &body.ir,
                 ),
             )?;
-            let (identity, bytes, compiled) = if let Some((hash, bytes)) =
-                cached(&store, object_key)?
-            {
-                (hash, bytes, false)
-            } else {
-                // The front currently publishes scalar bodies only. Memory emission
-                // needs its indexed recipes, not a second layout computation here.
-                if !body.ir.types.is_empty() {
-                    return Err(NativeStop::Emit {
+            let (identity, bytes, compiled) =
+                if let Some((hash, bytes)) = cached(&store, object_key)? {
+                    (hash, bytes, false)
+                } else {
+                    let bytes = match options.backend {
+                        Backend::Cranelift => hirsel_cranelift::core::emit_object_with_layouts(
+                            &body.ir,
+                            &hirsel_core_layout::compute(&body.ir.types).expect("producer layouts"),
+                            &hirsel_cranelift::core::Options {
+                                target: &options.target,
+                                optimize: options.optimize,
+                            },
+                        )
+                        .map(|o| o.bytes)
+                        .map_err(|e| e.to_string()),
+                        Backend::Llvm => hirsel_llvm::core::emit_object(
+                            &body.ir,
+                            if options.optimize {
+                                hirsel_llvm::core::Optimization::Speed
+                            } else {
+                                hirsel_llvm::core::Optimization::None
+                            },
+                        )
+                        .map_err(|e| e.to_string()),
+                    }
+                    .map_err(|message| NativeStop::Emit {
                         definition: instance.definition.clone(),
-                        message: "checker has not published emitter-indexed layout recipes".into(),
-                    });
-                }
-                let bytes = match options.backend {
-                    Backend::Cranelift => hirsel_cranelift::core::emit_object(
-                        &body.ir,
-                        &hirsel_cranelift::core::Options {
-                            target: &options.target,
-                            optimize: options.optimize,
-                        },
-                    )
-                    .map(|o| o.bytes)
-                    .map_err(|e| e.to_string()),
-                    Backend::Llvm => hirsel_llvm::core::emit_object(
-                        &body.ir,
-                        if options.optimize {
-                            hirsel_llvm::core::Optimization::Speed
-                        } else {
-                            hirsel_llvm::core::Optimization::None
-                        },
-                    )
-                    .map_err(|e| e.to_string()),
-                }
-                .map_err(|message| NativeStop::Emit {
-                    definition: instance.definition.clone(),
-                    message,
-                })?;
-                (publish(&store, object_key, &bytes)?, bytes, true)
-            };
+                        message,
+                    })?;
+                    (publish(&store, object_key, &bytes)?, bytes, true)
+                };
             objects.push(ObjectProduct {
                 instance: instance.clone(),
                 identity,
@@ -228,11 +223,6 @@ impl CheckProduct {
             types: vec![],
             dictionaries: vec![],
         };
-        if !parameters.is_empty() {
-            return Err(NativeStop::Entry(
-                "provider grant creation and close C exports are not available yet".into(),
-            ));
-        }
         entry_source(
             &hirsel_cranelift::core::symbol(&instance),
             recipe,
@@ -251,7 +241,11 @@ pub(crate) struct EntryAbi {
     parameters: Vec<String>,
 }
 pub(crate) type EntryBinding = (DefPath, Result<EntryAbi, String>);
-pub(crate) fn bind_entry(p: &Program<'_>, entry: &DefPath) -> EntryBinding {
+pub(crate) fn bind_entry(
+    p: &Program<'_>,
+    entry: &DefPath,
+    product: Option<&DefinitionProduct>,
+) -> EntryBinding {
     use hirsel_core_front::TyKind;
     let binding = (|| {
         let fd = p.function(entry).ok_or("entry declaration unavailable")?;
@@ -265,25 +259,38 @@ pub(crate) fn bind_entry(p: &Program<'_>, entry: &DefPath) -> EntryBinding {
         {
             return Err("PROG-3 requires Result[(), E]");
         }
-        let recipe = result
-            .summary
-            .recipe
-            .clone()
-            .ok_or("checker has not published the instantiated Result destination/layout")?;
+        let product = product.ok_or("entry has no checked body product")?;
+        let function = product
+            .check
+            .function
+            .ok_or("entry body is not fully lowered")?;
+        let module = &product.ir;
+        let signature = &module.signatures[module.functions[function.index()].signature.index()];
+        let dest = signature
+            .dest
+            .ok_or("entry result has no emitted destination")?;
+        let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
+        let recipe = recipes[dest.index()].clone();
         let exit_offset = match p.types.kind(args[1]) {
             TyKind::Adt(d, a)
                 if a.is_empty()
                     && p.decls[d.index()].path
                         == DefPath::from_full("core@1/core/Exit").unwrap() =>
             {
-                let Some(Recipe {
-                    layout: Layout::Fixed(layout),
-                    ..
-                }) = &p.decls[d.index()].summary.recipe
+                let hirsel_core_layout::Body::Variant(cases) = &module.types[dest.index()].body
                 else {
-                    return Err("checker has not published Exit layout");
+                    unreachable!("checked Result has variant shape")
                 };
-                Some(layout.offsets[0][0])
+                let hirsel_core_layout::FieldTy::Inline(exit) = cases[1].fields[0].ty else {
+                    unreachable!("checked Exit is an inline result payload")
+                };
+                let Layout::Fixed(result) = &recipe.layout else {
+                    unreachable!("entry result is fixed")
+                };
+                let Layout::Fixed(exit) = &recipes[exit.index()].layout else {
+                    unreachable!("Exit is fixed")
+                };
+                Some(result.offsets[1][0] + exit.offsets[0][0])
             }
             _ => None,
         };
@@ -324,10 +331,7 @@ fn entry_source(
     }
     let tag = layout.tag.expect("checked Result is a variant");
     let error = if let Some(offset) = exit_offset {
-        format!(
-            "out->kind=2; out->exit=result[{}];",
-            layout.offsets[1][0] + offset
-        )
+        format!("out->kind=2; out->exit=result[{}];", offset)
     } else {
         "out->kind=1;".into()
     };
@@ -335,6 +339,13 @@ fn entry_source(
     let grants = (0..parameters)
         .map(|i| format!(",cfg->grants[{i}]"))
         .collect::<String>();
+    let grant_check = if parameters == 0 {
+        String::new()
+    } else {
+        format!(
+            "if(cfg.grants_len < {parameters}) {{ fputs(\"missing entry grants\\n\",stderr); free(args); return 2; }}"
+        )
+    };
     Ok(format!(
         r#"#include "hirsel_core_process.h"
 #include <stdio.h>
@@ -357,6 +368,7 @@ int main(int argc, char **argv) {{
     if(!args) {{ fputs("host argument allocation failed\n",stderr); return 102; }}
     for(size_t i=0;i<n;i++) {{ args[i].data=(const uint8_t *)argv[i+1]; args[i].len=strlen(argv[i+1]); }}
     HirselCoreProcessConfig cfg={{0}}; cfg.root_limit=UINT64_C({limit}); cfg.args=args; cfg.args_len=n; cfg.diagnostic=diagnostic;
+    {grant_check}
     uint8_t status=hirsel_core_run(&cfg,entry); free(args); return status;
 }}
 "#,
@@ -367,7 +379,9 @@ int main(int argc, char **argv) {{
     ))
 }
 fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
-    let result = command.output()?;
+    let result = command
+        .output()
+        .map_err(|e| NativeStop::Link(format!("launch {command:?}: {e}")))?;
     if !result.status.success() {
         return Err(NativeStop::Link(format!(
             "{command:?}: {}\n{}",
@@ -382,9 +396,9 @@ fn link(
     objects: &[ObjectProduct],
     options: &NativeOptions,
 ) -> Result<BuildProduct, NativeStop> {
-    let runtime = std::fs::read(&options.runtime)?;
+    let runtime = read_input(&options.runtime)?;
     let headers = ["hirsel_core_process.h", "hirsel_core_rt.h"]
-        .map(|n| std::fs::read(options.include.join(n)))
+        .map(|n| read_input(&options.include.join(n)))
         .into_iter()
         .collect::<io::Result<Vec<_>>>()?;
     let cc = command(Command::new(&options.cc).arg("--version"))?;
@@ -474,7 +488,31 @@ fn link(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hirsel_core_layout::{Fixed, Tag};
+    fn source_request(source: &str, dir: &Path) -> CheckRequest {
+        let mut request = crate::tests::request(source, dir);
+        let core = dir.join("core.hirsel");
+        std::fs::write(&core, "pub type Result[T, E] = Ok(T) | Error(E)\npub type Exit: key { status: u8 }\npub opaque type Args\npub opaque type Stdout\n").unwrap();
+        request.inputs.packages[0]
+            .dependencies
+            .push(package("core"));
+        request.inputs.packages.push(PackageManifest {
+            package: package("core"),
+            sources: vec![hirsel_core_resolve::ModuleSource {
+                file: core,
+                modules: vec!["core".into()],
+                signatures: true,
+            }],
+            dependencies: vec![],
+        });
+        request.entry = Some(DefPath::from_full("app@1/main/main").unwrap());
+        request
+    }
+    fn run_clean(binary: &Path, exit: i32) {
+        let result = Command::new(binary).output().unwrap();
+        assert_eq!(result.status.code(), Some(exit));
+        assert!(result.stdout.is_empty());
+        assert!(result.stderr.is_empty());
+    }
     fn exercise(backend: Backend) {
         let dir = tempfile::tempdir().unwrap();
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -482,9 +520,8 @@ mod tests {
             backend,
             optimize: false,
             target: TARGET.into(),
-            runtime: root.join(
-                std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native target runtime archive"),
-            ),
+            runtime: root
+                .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
             include: root.join("crates/hirsel-core-rt/include"),
             cc: PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
             store: dir.path().join("native"),
@@ -492,90 +529,78 @@ mod tests {
             root_limit: 1_048_576,
             instance_limit: 64,
         };
-        let source = "fn answer() -> u8 { add(3u8, 4u8) }\nfn add(a: u8, b: u8) -> u8 { a + b }\nfn unused[T](take x: T) -> T { x }\ntype Broken = Missing\n";
-        let entry = DefPath::from_full("app@1/main/answer").unwrap();
+        let entry = DefPath::from_full("app@1/main/main").unwrap();
+        let literal = "pub fn main() -> Result[(), Exit] { Error(Exit(status: 7u8)) }\n";
         let mut driver = Driver::default();
         let product = driver
-            .check(
-                crate::tests::request(source, dir.path()),
-                &mut Meter::new(false),
-            )
+            .check(source_request(literal, dir.path()), &mut Meter::new(false))
+            .unwrap();
+        assert!(
+            product.accepted(),
+            "{}",
+            serde_json::to_string(&(
+                product.machine_diagnostics().unwrap(),
+                product.machine_incomplete().unwrap()
+            ))
+            .unwrap()
+        );
+        let built = product.build(&entry, &options).unwrap();
+        assert_eq!(built.compiled, 1);
+        assert!(built.linked);
+        run_clean(&built.executable, 7);
+        let cached = Driver::default()
+            .check(source_request(literal, dir.path()), &mut Meter::new(false))
+            .unwrap();
+        assert!(cached.rechecked.is_empty());
+        let warm = cached.build(&entry, &options).unwrap();
+        assert_eq!(warm.compiled, 0);
+        assert!(!warm.linked);
+        std::fs::write(&warm.executable, b"damaged executable").unwrap();
+        let restored = cached.build(&entry, &options).unwrap();
+        assert_eq!(restored.compiled, 0);
+        assert!(!restored.linked);
+        run_clean(&restored.executable, 7);
+
+        let source = "pub fn main() -> Result[(), Exit] { Error(Exit(status: answer())) }\nfn answer() -> u8 { add(3u8, 4u8) }\nfn add(a: u8, b: u8) -> u8 { a + b }\nfn unused[T](take x: T) -> T { x }\ntype Broken = Missing\n";
+        let product = driver
+            .check(source_request(source, dir.path()), &mut Meter::new(false))
             .unwrap();
         assert!(
             !product.accepted(),
-            "unreached library errors keep package check red"
+            "unreached body/declaration errors still refuse package check"
         );
-        assert!(product.reachable(&entry, 64).unwrap().accepted());
-        let objects = product.emit_reachable(&entry, &options).unwrap();
-        assert_eq!(objects.iter().filter(|o| o.compiled).count(), 2);
-        let warm = product.emit_reachable(&entry, &options).unwrap();
-        assert!(warm.iter().all(|o| !o.compiled));
-        // A hand-written C bridge supplies the Result carrier the checker cannot
-        // emit yet. It is a native fixture only, never a product entry alternative.
-        let recipe = Recipe {
-            layout: Layout::Fixed(Fixed {
-                size: 2,
-                align: 1,
-                tag: Some(Tag {
-                    offset: 0,
-                    width: 1,
-                }),
-                offsets: vec![vec![], vec![1]],
-            }),
-            logical_size: Some(9),
-            plain: true,
-            drop: None,
-        };
-        let symbol = hirsel_cranelift::core::symbol(&InstanceKey {
-            definition: entry.clone(),
-            types: vec![],
-            dictionaries: vec![],
-        });
-        let mut c = entry_source("bridge", &recipe, Some(0), 2, options.root_limit).unwrap();
-        c.push_str(&format!("\ntypedef struct {{ uint8_t value, failed; }} R;\nextern R {symbol}(void *);\nuint8_t bridge(HirselCoreContext *ctx, void *dest, uint64_t a, uint64_t b) {{ R r={symbol}(ctx); ((uint8_t *)dest)[0]=1; ((uint8_t *)dest)[1]=r.value+(a!=21 || b!=34); return r.failed; }}\n"));
-        // Provider handles are plain u64 operands in declaration order, FORM #44.
-        c = c.replace(
-            "cfg.root_limit=",
-            "uint64_t grants[]={21,34}; cfg.grants=grants; cfg.grants_len=2; cfg.root_limit=",
-        );
-        let built = link(&c, &objects, &options).unwrap();
-        assert!(built.linked);
-        let result = Command::new(&built.executable).output().unwrap();
-        assert_eq!(result.status.code(), Some(7));
-        assert!(result.stdout.is_empty());
-        assert!(result.stderr.is_empty());
-        std::fs::write(&built.executable, b"damaged executable").unwrap();
-        let rebuilt = link(&c, &warm, &options).unwrap();
-        assert!(!rebuilt.linked);
-        assert_eq!(
-            Command::new(&rebuilt.executable).status().unwrap().code(),
-            Some(7)
-        );
-        let edited = source.replace("a + b", "a - b");
+        let built = product.build(&entry, &options).unwrap();
+        assert_eq!(built.compiled, 3);
+        run_clean(&built.executable, 7);
+        let warm = product.build(&entry, &options).unwrap();
+        assert_eq!(warm.compiled, 0);
+        assert!(!warm.linked);
+        let edited = source.replace("a + b", "a + b + 1u8");
         let product = driver
-            .check(
-                crate::tests::request(&edited, dir.path()),
-                &mut Meter::new(false),
-            )
+            .check(source_request(&edited, dir.path()), &mut Meter::new(false))
             .unwrap();
-        let changed = product.emit_reachable(&entry, &options).unwrap();
-        assert_eq!(changed.iter().filter(|o| o.compiled).count(), 1);
-        // Corrupt a stored object. Envelope length/digest rejection must cause
-        // precisely that object to compile, rather than link the bad bytes.
+        let changed = product.build(&entry, &options).unwrap();
+        assert_eq!(changed.compiled, 1);
+        assert!(changed.linked);
+        run_clean(&changed.executable, 8);
+        let objects = product.emit_reachable(&entry, &options).unwrap();
+        let callee = objects
+            .iter()
+            .find(|o| o.instance.definition.0.name == "add")
+            .unwrap();
         let store = Store::new(&options.store).unwrap();
-        let object = &changed[0];
-        std::fs::write(store.path(object.identity), b"bad object").unwrap();
+        std::fs::write(store.path(callee.identity), b"bad object").unwrap();
         let repaired = product.emit_reachable(&entry, &options).unwrap();
         assert_eq!(repaired.iter().filter(|o| o.compiled).count(), 1);
+
         let overflowing = source.replace("add(3u8, 4u8)", "add(255u8, 1u8)");
         let product = driver
             .check(
-                crate::tests::request(&overflowing, dir.path()),
+                source_request(&overflowing, dir.path()),
                 &mut Meter::new(false),
             )
             .unwrap();
-        let failing = product.emit_reachable(&entry, &options).unwrap();
-        let built = link(&c, &failing, &options).unwrap();
+        let built = product.build(&entry, &options).unwrap();
         let result = Command::new(built.executable).output().unwrap();
         assert_eq!(result.status.code(), Some(101));
         assert!(result.stdout.is_empty());
@@ -584,15 +609,32 @@ mod tests {
                 .unwrap()
                 .starts_with("Overflow at ")
         );
+
+        let source =
+            "pub fn main(a: Args, out: Stdout) -> Result[(), Exit] { Error(Exit(status: 7u8)) }\n";
+        let product = driver
+            .check(source_request(source, dir.path()), &mut Meter::new(false))
+            .unwrap();
+        let built = product.build(&entry, &options).unwrap();
+        let result = Command::new(built.executable).output().unwrap();
+        assert_eq!(result.status.code(), Some(2));
+        assert!(result.stdout.is_empty());
+        assert_eq!(result.stderr, b"missing entry grants\n");
+        let source = "pub fn main() -> Result[(), Exit] { Ok(()) }\n";
+        let product = driver
+            .check(source_request(source, dir.path()), &mut Meter::new(false))
+            .unwrap();
+        let built = product.build(&entry, &options).unwrap();
+        run_clean(&built.executable, 0);
     }
     #[test]
     #[ignore = "explicit native integration target"]
-    fn cranelift_objects_link_run_and_reuse() {
+    fn cranelift_source_entries_link_run_and_reuse() {
         exercise(Backend::Cranelift)
     }
     #[test]
     #[ignore = "explicit native integration target"]
-    fn llvm_objects_link_run_and_reuse() {
+    fn llvm_source_entries_link_run_and_reuse() {
         exercise(Backend::Llvm)
     }
 }

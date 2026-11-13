@@ -565,8 +565,14 @@ fn at(s: String, i: u64) -> u8 {
 
 /// Whether w is in s at byte i.
 fn is(s: String, i: u64, w: String) -> bool {
-    let n = string.byte_len(w)
-    i + n <= string.byte_len(s) && string.slice(s, i, i + n) == w
+    let b = string.as_bytes(s)
+    let word = string.as_bytes(w)
+    let n = list.len(word)
+    if i + n > list.len(b) { return false }
+    for j in 0 .. n {
+        if b[i + j] != word[j] { return false }
+    }
+    true
 }
 
 /// Skips JSON whitespace: space, tab, line feed, carriage return.

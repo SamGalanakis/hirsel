@@ -130,6 +130,16 @@ fn keyword_dispatch_and_bad_heads() -> bool {
     not_finite_at("1e999x") == 0 && syntax_at("€€") == 0 && syntax_at(" [€€]") == 2
 }
 
+// JSON keywords are ASCII byte sequences. A malformed UTF-8-containing token is
+// Syntax at its start, even when a four/five-byte candidate ends inside a scalar.
+// A String-slice prefix probe faults instead; accepting just n/t/f also fails these.
+// expect: run literal_keywords_compare_bytes() = true
+fn literal_keywords_compare_bytes() -> bool {
+    syntax_at("nu€") == 0 && syntax_at("tr€") == 0 && syntax_at("fal€") == 0 &&
+    syntax_at("n🙂") == 0 && syntax_at("[tr€]") == 1 && syntax_at("falset") == 5 &&
+    size_of("null") == 1 && size_of("true") == 1 && size_of("false") == 1
+}
+
 /// Whether v is a number spelled w.
 fn spelled(v: json.Json, w: String) -> bool {
     match v {

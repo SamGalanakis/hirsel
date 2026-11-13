@@ -1,0 +1,8 @@
+// Static capacity-0 storage is preserved when either growth operation refuses.
+pub fn main()->Result[(),Exit] {
+    let mut s="keep"
+    match string.reserve(mut s,1) { Error(c) => if c.available!=0u64 || c.requested!=8u64 { return Error(Exit(status:1)) }, _ => return Error(Exit(status:2)) }
+    match string.push(mut s,"x") { Error(c) => if c.available!=0u64 || c.requested!=8u64 { return Error(Exit(status:3)) }, _ => return Error(Exit(status:4)) }
+    if s!="keep" || string.byte_len(s)!=4u64 || list.capacity(string.as_bytes(s))!=0u64 { return Error(Exit(status:5)) }
+    Ok(())
+}

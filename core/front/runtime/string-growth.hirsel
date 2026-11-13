@@ -1,0 +1,18 @@
+// Two peak eight-byte allocations fit in 16 bytes beyond main startup.
+pub fn main()->Result[(),Exit] {
+    let mut s=string.new()
+    result.unwrap(string.reserve(mut s,3))
+    result.unwrap(string.push(mut s,"abc"))
+    result.unwrap(string.push(mut s,""))
+    result.unwrap(string.push(mut s,"é"))
+    if s!="abcé" || string.byte_len(s)!=5u64 { return Error(Exit(status:1)) }
+    {
+        let b=string.as_bytes(s)
+        if list.capacity(b)<5u64 || b[3]!=0xC3u8 || b[4]!=0xA9u8 { return Error(Exit(status:2)) }
+    }
+    // MEM-26: existing storage grows against its parent limit, which has 8 left.
+    let refused=bound bytes 0 { string.reserve(mut s,100) }
+    match refused { Ok(Error(c)) => if c.available!=8u64 || c.requested!=112u64 { return Error(Exit(status:3)) }, _ => return Error(Exit(status:4)) }
+    if s!="abcé" { return Error(Exit(status:5)) }
+    Ok(())
+}

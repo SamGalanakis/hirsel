@@ -250,7 +250,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::Unique => self
                 .runtime_row(RtOp::DestId, &[], n)
                 .map(|values| values[0]),
-            Kernel::CarrierView => vals[0],
+            Kernel::CarrierView => self.runtime_carrier_view(vals[0]?, result, n),
             Kernel::CarrierMove => {
                 self.consume(vals[0], n);
                 self.temp(result, vals[0]);
@@ -1177,6 +1177,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    fn runtime_carrier_view(&mut self, value: ValueId, result: TyId, n: NodeId) -> Option<ValueId> {
+        let id = match self.rep(result) {
+            Ok(Rep::Place(id)) => id,
+            Ok(_) => {
+                self.gap(n, "a carrier view needs its value place");
+                return None;
+            }
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+        };
+        let to = self.new_slot(PlaceTy::Declared(id), n);
+        // FORM #56: copy data, length and the owner's capacity, without an owner.
+        self.install_view(to, self.bare(result), value, n)?;
+        Some(self.pointer(to, n))
+    }
+
     fn runtime_args_get(
         &mut self,
         vals: &[Option<ValueId>],
@@ -1200,7 +1218,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let join = self.new_block(&[]);
         self.runtime_branch(none, no, yes, n);
         self.start(yes);
-        self.runtime_case_payload(to, 1, payload, Some(value), n);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 1,
+            },
+            n,
+        );
+        let at = self.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], payload, n)?;
+        // The provider pointer pins a capacity-0 carrier. The Some payload is its
+        // 24-byte non-owning value, not the address of that run-owned carrier.
+        self.install_view(at, self.bare(payload), value, n)?;
         self.jump(join, &[], n);
         self.start(no);
         self.inst(

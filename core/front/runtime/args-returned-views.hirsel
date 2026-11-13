@@ -1,0 +1,20 @@
+// Views cross two return destinations and a scoped record, with capacity 0.
+scoped type Argument { s:View[String] }
+fn fetch(a:Args,i:u64)->Option[Argument] in a {
+    match args.get(a,i) {
+        None => None,
+        Some(s) => Some(Argument(s:s))
+    }
+}
+fn forwarded(a:Args,i:u64)->Option[Argument] in a { fetch(a,i) }
+pub fn main(a:Args,out:Stdout)->Result[(),Exit] {
+    let first=option.unwrap(forwarded(a,0))
+    let second=option.unwrap(forwarded(a,1))
+    let empty=option.unwrap(forwarded(a,2))
+    if first.s!="alpha" || second.s!="beta" || empty.s!="" { return Error(Exit(status:1)) }
+    if list.capacity(string.as_bytes(first.s))!=0u64 { return Error(Exit(status:2)) }
+    match forwarded(a,3) { None => {}, Some(_) => return Error(Exit(status:3)) }
+    result.unwrap(stdout.write(out,first.s))
+    result.unwrap(stdout.write(out,second.s))
+    Ok(())
+}

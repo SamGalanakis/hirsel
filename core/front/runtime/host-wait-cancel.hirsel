@@ -7,8 +7,8 @@ fn child_mkdir(take input:DirInput) -> u64 waits { let mut x = take input; let _
 fn child_remove(take input:DirInput) -> u64 waits { let mut x = take input; let _ = result.unwrap(host.remove(x.d, "input")); 7u64 }
 fn child_remove_tree(take input:DirInput) -> u64 waits { let mut x = take input; let _ = result.unwrap(host.remove_tree(x.d, "tree")); 7u64 }
 fn child_mkdtemp(take input:NameInput) -> u64 waits { let mut x = take input; let _ = result.unwrap(host.mkdtemp(x.d, mut x.name)); 7u64 }
-fn child_read(take input:FileInput) -> u64 waits { let mut x = take input; let _ = { let mut buf:Bytes = b""; result.unwrap(host.read(mut x.file, mut buf)); }; 7u64 }
-fn child_write(take input:FileInput) -> u64 waits { let mut x = take input; let _ = result.unwrap(host.write(mut x.file, b"bad")); 7u64 }
+fn child_read(take input:FileInput) -> u64 waits { let mut x = take input; let _ = { let mut buf:Bytes = list.new(); result.unwrap(host.read(mut x.file, mut buf)); }; 7u64 }
+fn child_write(take input:FileInput) -> u64 waits { let mut x = take input; let _ = result.unwrap(host.write(mut x.file, string.as_bytes("bad"))); 7u64 }
 fn child_try_lock(take input:FileInput) -> u64 waits { let mut x = take input; let _ = result.unwrap(host.try_lock(mut x.file)); 7u64 }
 fn child_unlock(take input:FileInput) -> u64 waits { let mut x = take input; let _ = result.unwrap(host.unlock(mut x.file)); 7u64 }
 fn child_close(take input:FileInput) -> u64 waits { let FileInput(file:take f) = take input; result.unwrap(host.close(take f)); 7u64 }

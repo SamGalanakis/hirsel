@@ -284,7 +284,7 @@ fn host_rows_preserve_handles_result_tags_and_mutated_carriers() {
         match host.open(d,"missing",Read) { Error(NotFound) => {}, _ => return 1u64 }
         let mut file = result.unwrap(host.open(d,"file",CreateNew));
         match host.open(d,"file",CreateNew) { Error(Exists) => {}, _ => return 2u64 }
-        result.unwrap(host.write(mut file,result.unwrap(b"data")));
+        result.unwrap(host.write(mut file,string.as_bytes("data")));
         if result.unwrap(host.try_lock(mut file)) == false { return 3u64 }
         let mut other = result.unwrap(host.open(d,"file",Append));
         if result.unwrap(host.try_lock(mut other)) { return 4u64 }

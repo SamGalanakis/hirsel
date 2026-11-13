@@ -5,7 +5,7 @@ pub fn main(d: Dir) -> Result[(), Exit] {
     let child = result.unwrap(host.mkdtemp(d, mut name))
     if string.byte_len(name) == 0u64 || string.byte_len(name) > 32u64 { return Error(Exit(status: 1)) }
     let mut file = result.unwrap(host.open(child, "inside", Write))
-    result.unwrap(host.write(mut file, b"data"))
+    result.unwrap(host.write(mut file, string.as_bytes("data")))
     result.unwrap(host.close(take file))
     result.unwrap(host.remove_tree(d, name))
     Ok(())

@@ -230,14 +230,20 @@ fn host_operations_llvm() { host_operations(Backend::Llvm); }
 fn string_carrier_operations(backend: Backend) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir = tempfile::tempdir().unwrap();
-    let source = r#"pub fn main() -> Result[(),Exit] {
+    let source = r#"scoped type BytesHolder { value:View[Bytes] }
+fn stored(b:Bytes)->BytesHolder in b { BytesHolder(value:string.as_bytes(string.proof_view(b))) }
+fn forwarded(b:Bytes)->BytesHolder in b { stored(b) }
+pub fn main() -> Result[(),Exit] {
         let empty = string.new()
         if string.byte_len(empty)!=0u64 { return Error(Exit(status:1)) }
-        let borrowed = string.proof_view(b"abc")
+        let borrowed = string.proof_view(string.as_bytes("abc"))
         if string.byte_len(borrowed)!=3u64 { return Error(Exit(status:2)) }
         let bs = string.as_bytes(borrowed)
         if list.len(bs)!=3u64 || bs[1]!=b'b' { return Error(Exit(status:3)) }
         if string.proof_moves()!=4u64 { return Error(Exit(status:4)) }
+        let buffer:Bytes = result.unwrap(list.with_capacity(4))
+        let holder = forwarded(buffer)
+        if list.capacity(holder.value)!=4u64 || list.len(holder.value)!=0u64 { return Error(Exit(status:6)) }
         let a = unique.new()
         let b = unique.new()
         if a==b { return Error(Exit(status:5)) }
@@ -500,3 +506,51 @@ fn generic_counted_operations_cranelift() {generic_counted_operations(Backend::C
 #[test]
 #[ignore = "explicit native integration target"]
 fn generic_counted_operations_llvm() {generic_counted_operations(Backend::Llvm);}
+
+fn returned_argument_views(backend:Backend) {
+    let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir=tempfile::tempdir().unwrap();
+    let source=std::fs::read_to_string(root.join("core/front/runtime/args-returned-views.hirsel")).unwrap();
+    let mut request=source_request(&source,dir.path());
+    request.inputs.packages[1]=PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
+    let product=Driver::default().check(request,&mut Meter::new(false)).unwrap();
+    let entry=DefPath::from_full("app@1/main/main").unwrap();
+    let mut options=native_options(backend,dir.path());
+    options.root_limit=288;
+    options.grant_mask=1<<4;
+    let built=product.build(&entry,&options).unwrap();
+    let output=Command::new(built.executable).args(["alpha","beta",""]).output().unwrap();
+    assert_eq!(output.status.code(),Some(0),"{:?}",String::from_utf8_lossy(&output.stderr));
+    assert_eq!(output.stdout,b"alphabeta");
+    assert!(output.stderr.is_empty());
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn returned_argument_views_cranelift(){returned_argument_views(Backend::Cranelift);}
+#[test]
+#[ignore = "explicit native integration target"]
+fn returned_argument_views_llvm(){returned_argument_views(Backend::Llvm);}
+
+fn string_growth_operations(backend:Backend) {
+    let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (name,room) in [("string-growth",16),("string-growth-refusal",0)] {
+        let dir=tempfile::tempdir().unwrap();
+        let source=std::fs::read_to_string(root.join(format!("core/front/runtime/{name}.hirsel"))).unwrap();
+        let mut request=source_request(&source,dir.path());
+        request.inputs.packages[1]=PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
+        let product=Driver::default().check(request,&mut Meter::new(false)).unwrap();
+        let entry=DefPath::from_full("app@1/main/main").unwrap();
+        let mut options=native_options(backend,dir.path());
+        options.root_limit=288+room;
+        let built=product.build(&entry,&options).unwrap();
+        let output=Command::new(built.executable).output().unwrap();
+        assert_eq!(output.status.code(),Some(0),"{name}: {:?}",String::from_utf8_lossy(&output.stderr));
+        assert!(output.stdout.is_empty() && output.stderr.is_empty(),"{name}");
+    }
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn string_growth_operations_cranelift(){string_growth_operations(Backend::Cranelift);}
+#[test]
+#[ignore = "explicit native integration target"]
+fn string_growth_operations_llvm(){string_growth_operations(Backend::Llvm);}

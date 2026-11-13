@@ -117,9 +117,20 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
         for j in 0..sig.results.len() {
             writeln!(source, "values[{j}]=(uint64_t)value.v{j};").unwrap();
         }
+        source.push_str("}\n");
+        if let Some((op, _)) = run.matrix
+            && sig.params.len() >= 2
+        {
+            let len = if matches!(op, HostOp::Read | HostOp::Mkdtemp) {
+                4
+            } else {
+                3
+            };
+            writeln!(source, "require(operand.data==operand_bytes && operand.capacity==64 && operand.len=={len});").unwrap();
+        }
         writeln!(
             source,
-            "}} emit(ctx,value.status,values,{}); return 0; }}",
+            "emit(ctx,value.status,values,{}); return 0; }}",
             sig.results.len()
         )
         .unwrap();

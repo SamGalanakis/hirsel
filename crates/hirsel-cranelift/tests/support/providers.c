@@ -43,6 +43,9 @@ static HirselCoreHostOutcome issue(void *state,HirselCoreHostRequest *r) {
         require(r->buffer.capacity==(has_operand(op) ? 64 : 0));
         require(r->path==(has_path(op) ? operand_bytes : NULL));
         require(r->path_len==(has_path(op) ? 3 : 0));
+        if(op==1 || op==7) {
+            r->buffer.data[r->buffer.len++]='X';
+        }
         uint8_t status=(op==10 || op==11 || w->failing) ? 1 : 0;
         if(w->failing && op!=10 && op!=11)
             hirsel_core_raise(w->ctx,(HirselCoreCause){.kind=5});
